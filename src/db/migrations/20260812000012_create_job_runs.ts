@@ -6,7 +6,7 @@ export async function up(knex: Knex): Promise<void> {
     table.text("job_name").notNullable();
     table.timestamp("started_at", { useTz: true }).notNullable();
     table.timestamp("finished_at", { useTz: true });
-    table.enu("status", ["running", "success", "failure"], { useNative: false }).notNullable();
+    table.enu("status", ["running", "success", "failure"], { useNative: false, enumName: "job_run_status" }).notNullable();
     table.text("error_message");
     table.jsonb("details");
 

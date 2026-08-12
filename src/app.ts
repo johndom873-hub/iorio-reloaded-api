@@ -7,6 +7,11 @@ import { healthRouter } from "./routes/health.js";
 
 export const app = express();
 
+// Heroku terminates TLS in front of the dyno and forwards over HTTP; without
+// this, Express can't tell the connection was actually HTTPS, and the
+// session cookie's `secure` flag would silently fail to be set.
+app.set("trust proxy", 1);
+
 app.use(
   cors({
     origin: environment.frontendOrigin,

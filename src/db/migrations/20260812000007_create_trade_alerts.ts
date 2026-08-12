@@ -16,7 +16,10 @@ export async function up(knex: Knex): Promise<void> {
     table.jsonb("suggested_structure").notNullable();
     table.text("rationale");
     table
-      .enu("status", ["pending", "approved", "rejected", "modified", "expired"], { useNative: false })
+      .enu("status", ["pending", "approved", "rejected", "modified", "expired"], {
+        useNative: false,
+        enumName: "trade_alert_status",
+      })
       .notNullable()
       .defaultTo("pending");
     table.uuid("reviewed_by_user_id").references("id").inTable("users");

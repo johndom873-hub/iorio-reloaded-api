@@ -8,7 +8,7 @@ export async function up(knex: Knex): Promise<void> {
     // Unique per IBKR execution — lets the daily sync job safely re-run
     // without creating duplicate trade records.
     table.text("ibkr_exec_id").unique();
-    table.enu("side", ["buy", "sell"], { useNative: false }).notNullable();
+    table.enu("side", ["buy", "sell"], { useNative: false, enumName: "trade_side" }).notNullable();
     table.integer("quantity").notNullable();
     table.decimal("price", 12, 4).notNullable();
     table.decimal("commission", 12, 4);

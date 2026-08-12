@@ -5,7 +5,7 @@ export async function up(knex: Knex): Promise<void> {
     table.uuid("id", { primaryKey: true }).defaultTo(knex.raw("gen_random_uuid()"));
     table.text("strategy_key").notNullable();
     table.uuid("ticker_id").notNullable().references("id").inTable("tickers");
-    table.enu("status", ["open", "closed"], { useNative: false }).notNullable();
+    table.enu("status", ["open", "closed"], { useNative: false, enumName: "position_status" }).notNullable();
     table.text("ibkr_account_id");
     table.timestamp("opened_at", { useTz: true }).notNullable().defaultTo(knex.fn.now());
     table.timestamp("closed_at", { useTz: true });
