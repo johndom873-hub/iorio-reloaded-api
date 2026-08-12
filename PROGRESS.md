@@ -1,20 +1,35 @@
 # Iorio Reloaded — Progress Tracker
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 ## Vision
 Multi-strategy options trading system. Business user checks in daily, reviews suggested opportunities and open positions, approves/rejects/modifies trades. Trades execute (semi-automated) via IBKR once confirmed. Node.js + React + Postgres, hosted on Heroku.
 
-## Status: Pre-architecture — no code written yet
+## Status: Core platform skeleton built and tested locally — no IBKR integration or real screen logic yet (see Built section)
 
 ## Open decisions (blocking further design)
-- [ ] Local dev environment: mostly done (see below), but backend/frontend `npm install` + run steps still need adding to SETUP.md once there's actual code to install.
 - [ ] Cloudflare + DNS setup for ioriore.com not yet done (add site to Cloudflare, point nameservers, add Heroku custom domains, configure Bot Fight Mode + firewall rules).
 - [ ] Telegram bot/channel creation — parked by user, notification rules already designed (see Scheduled jobs section).
 - [ ] Screener candidate universe (tickers not yet shortlisted) needs a data source — live IBKR query over a defined universe (e.g. S&P 500) vs. a lightweight "latest values only, no history" cache refreshed daily. Decide when building Screener logic.
 - [ ] Whether IBKR's `reqFundamentalData` requires its own paid subscription add-on — not confirmed via research, need to test directly once we have API access.
 - [ ] IBKR historical backfill coverage (OHLCV bars, and especially `OPTION_IMPLIED_VOLATILITY` history) needs empirical per-symbol testing once the IBKR interface is working — not guaranteed to have full coverage for every ticker (community reports of "no historical data" errors for some symbols on the IV endpoint specifically).
 - [ ] Exact numeric values for strategy risk/sizing settings (delta targets, DTE targets, position sizing %, concentration limits) — candidate fields identified (see strategy_settings table), but actual thresholds are the user's call and count as "formulas" requiring explicit sign-off before implementation.
+- [ ] Assignment preference / risk tolerance varies **per ticker**, not just per strategy (e.g. OK holding SMH long-term, not OK holding SNDK) — per strategy_domain notes below. Whether this needs a structured field on `shortlist_entries` or can stay in its free-text `notes` field is undecided — decide when building Screener/Shortlist.
+- [ ] Live Greeks (delta/gamma/theta/vega) display not yet in the screen plan — needed on Positions/Trade Alerts per strategy_domain notes below. Live IBKR values, not stored historically, so no schema change — just needs adding to those screens' feature list when built.
+- [ ] Trade Alerts screen needs to show multiple ranked candidate strikes side-by-side for comparison (not just one suggestion per ticker), and the payoff diagram needs to render there too ("a priori", before execution), not just in the Position Detail modal. Design note for when that screen is built.
+
+## Strategy domain notes (from Juan Dominguez, developer friend with trading domain knowledge, via WhatsApp 2026-08-12)
+
+Captured for the eventual trade-alert-generation algorithm design — not yet built, no code depends on this yet, but don't lose it.
+
+- **Trade timing**: avoid executing right at market open (chaotic); wait ~30 min. Anecdotal heuristic Juan mentioned: Nasdaq direction after the first 30-min candle often predicts the day's trend — worth investigating with real data before trusting it. A sharp opening drop may mean CSP premiums pay more that day (and vice versa for calls). This is operator guidance for *when the user executes* an approved trade, not something the EOD-based Trade Alert generation job needs to change.
+- **Leg counts confirmed** (matches existing schema exactly): covered call = 2 trades/legs (buy stock, sell call); CSP = 1 trade/leg (sell put).
+- **Covered calls**: sell calls against *anything* held, always — "the strategy IS selling calls against your holdings." Ideally buy the underlying on a dip first. Works best as a repeatable income engine ("infinite printing machine") on high-IV names. Generally *want* assignment (premium + price appreciation to strike = max profit) — but this preference varies per ticker based on how comfortable you are holding it long-term if not assigned (e.g. comfortable holding SMH — a diversified semiconductor ETF — longer than a single volatile name like SNDK). Trade-off: a higher/further strike = less premium now but keeps the stock for continued call-selling if you don't want assignment yet.
+- **Cash-secured puts**: assignment is usually *not* wanted (unlike covered calls) — don't want to get "stuck" holding a stock that's fallen. Worth checking moving averages/trend direction as a screening filter to avoid downtrending names (computed from existing `daily_price_bars`, no new storage needed). Worst-case defense if assigned and stock drops: sell covered calls against the now-assigned shares to work back to breakeven (not ideal, but a known fallback — effectively converts into the covered-call flow).
+- **Rolling** (reinforces the `alert_type: 'roll'` addition already in the `trade_alerts` schema): when a short option has decayed to near-worthless, it's often worth buying it back even at a small cost to free up the stock/collateral, then immediately selling a new option (further out in time and/or different strike) for fresh premium. Also mentioned as a related calculation: buy back now vs. wait for more theta decay first — a timing sub-decision within the roll evaluation.
+- **Scenario comparison need**: when choosing between candidate strikes (Juan's example: covered call on NVDA bought at 218 — sell the 220 strike for more premium/more assignment risk, or the 222 strike for less premium but likely keeps the stock for further rolling), want to calculate P&L outcomes under each choice to compare which is objectively better given a price scenario. This is the "profit calculator, a priori" concept — same payoff-diagram component already planned, but needs to (a) work before execution on the Trade Alerts screen, not just after on Position Detail, and (b) support comparing multiple candidate structures side by side, not just one.
+- **Greeks**: IBKR provides delta/gamma/theta/vega live. Not currently in our screen plan for *display* (we only use delta as a *selection filter* in `strategy_settings`). Should be shown live on Positions/Trade Alerts — no storage needed, fetched from IBKR at display time.
+- **Overall objective and risk framing**: covered calls are considered comparatively lower-risk (especially on ETFs, under a bullish-market assumption) — "hard to lose money." CSPs need more risk scrutiny since assignment means acquiring stock at the strike price — framed positively as "buying the dip while getting paid to wait," but the risk is real if the stock keeps falling after assignment. Overall system objective: maximize $ via premium income, plus a rotational cycle — get assigned on a covered call (selling stock at a profit), then redeploy that cash into another currently-low-priced candidate and repeat (the classic "wheel" pattern). No schema/feature implication — this is operational philosophy the human executes via the Screener/Shortlist workflow already planned, not something to encode specially.
 
 ## Decisions made
 - Stack: Node.js backend, React frontend, PostgreSQL via Heroku Postgres Essential-1, Heroku hosting.
@@ -74,7 +89,28 @@ Multi-strategy options trading system. Business user checks in daily, reviews su
 - **strategy_settings** — `id, strategy_key, delta_target_min, delta_target_max, dte_target_min, dte_target_max, max_position_pct_of_portfolio, max_aggregate_collateral_pct, max_concentration_per_ticker_pct, max_concentration_per_sector_pct, min_cash_reserve_pct, updated_at`. Backs the Risk & Limits screen's per-strategy configuration and constrains what Trade Alerts is allowed to suggest. Candidate fields sourced from cross-checked practitioner guidance (Schwab, options-education sources, CBOE's BXM/PUT systematic index rules) — **actual numeric values are the user's call and require explicit sign-off before implementation**, same as any other formula.
 
 ## Built
-(nothing yet)
+
+Everything below is real, working code, verified end-to-end (not just "compiles") — migrations run against real databases, auth tested via real HTTP requests, frontend tested in a real browser via Playwright with screenshots.
+
+**Backend (`iorio-reloaded-api`)** — Node.js + TypeScript (ESM) + Express 5 + Knex/pg.
+- All 14 tables migrated (13 schema tables + `session` for `connect-pg-simple`), against both `iorio_reloaded_development` and `iorio_reloaded_test`. Verified directly via `psql \d` — constraints, foreign keys, and the `shortlist_entries` partial unique index all confirmed correct, not just "migration exited 0."
+- Auth: Argon2id hashing (genuinely verified: hashed a password, verified it, confirmed a wrong password fails), `express-session` + `connect-pg-simple` for sessions (own dedicated pg pool — Knex's tarn-based pool isn't compatible with what connect-pg-simple expects, worth remembering if touching this again). Login/logout/session-check routes. Full flow tested via curl: wrong password → 401, correct password → session cookie + row in the `session` table, session persists across requests, logout destroys it.
+- `scripts/manage-user.ts` — create/set-password/list, via `npm run manage-user`. No self-service reset by design.
+- `src/db/schema.test.ts` — Vitest round-trip test per table (insert → read back → assert), plus constraint tests (duplicate keys rejected, invalid status rejected). All 13 pass; cleanup verified to leave zero residual rows.
+- Known env quirk: Knex changes its working directory to the knexfile's folder before running, so `dotenv`'s default CWD-relative `.env` lookup fails — `src/db/knexfile.ts` resolves an absolute path instead. Worth remembering if this trips up again.
+
+**Frontend (`iorio-reloaded-app`)** — React 19 + TypeScript + Vite + Tabler + ApexCharts + lightweight-charts.
+- Full app shell: session-aware routing (`ProtectedRoute` redirects to `/login` when logged out), sidebar nav for all 7 screens, login page wired to the real backend.
+- Two real Tabler integration bugs found and fixed by actually testing in a browser, not just reading docs — both worth remembering:
+  1. `navbar-dark` sets light text but no dark background of its own — the sidebar was rendering white-text-on-white, completely invisible, until the class was removed.
+  2. Only Tabler's CSS was imported, not its JS bundle (`@tabler/core/dist/js/tabler.esm.min.js`) — without it, Bootstrap's `data-bs-toggle="dropdown"`/`"collapse"` behavior silently does nothing. Broke both the column-visibility gear-icon dropdown and, more seriously, meant there was **no way to open the sidebar nav on mobile at all** (no toggler button existed either — added one, since `navbar-expand-lg` collapses the menu below that breakpoint by design and needs a toggler to reopen it).
+- Column-visibility gear-icon table component (`DataTable` + `ColumnVisibilityPopover` + `useColumnVisibility`): all columns visible by default, toggling a checkbox hides/shows a column immediately and persists to localStorage per-table — verified by toggling, reloading the page, and confirming the hidden column stayed hidden.
+- Chart wrapper components: `ApexChart` (shared baseline config) and `CandlestickChart` (lightweight-charts v5 API — note it changed from v4: `chart.addSeries(CandlestickSeries, options)`, not `chart.addCandlestickSeries()` — supports drawing horizontal marker lines for entry/strike price, the whole reason we're not using TradingView's embed).
+- Dark/light theme toggle in the header, persisted in localStorage (`iorio-theme` key), applied via Bootstrap's `data-bs-theme` attribute. A small inline script in `index.html` applies the stored theme before React mounts, avoiding a flash of the wrong theme on load. Verified working in both directions, and persisting across reload.
+- Mobile responsiveness verified at 390×844 (iPhone-sized): table adapts, sidebar collapses behind a working toggler, all 7 screens reachable.
+- Shared formatting helpers in `src/lib/formatters.ts` (currency, percentage, date, signed P&L) — not yet used anywhere real since no screen has live data yet, but the one shared place any new formatting logic should go.
+
+**Not yet done**: no actual screen logic (all 7 pages are placeholder stubs), no IBKR integration, no scheduled jobs, no Telegram, no Cloudflare/DNS, no VPS. All of that is still ahead.
 
 ## Screen list (finalized, 7 screens + shared modals)
 

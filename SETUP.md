@@ -86,5 +86,33 @@ Needed later for checking config vars/logs on the deployed apps (not for deployi
 brew tap heroku/brew && brew install heroku
 ```
 
+## 5. Backend (this repo)
+
+```sh
+npm install
+cp .env.example .env   # fill in your Mac username if not already done in step 3
+npm run migrate:latest              # migrates iorio_reloaded_development
+NODE_ENV=test npm run migrate:latest  # migrates iorio_reloaded_test
+npm test                            # runs the schema round-trip smoke tests
+npm run dev                         # starts the API on http://localhost:3001
+```
+
+Create a user to log in with (there's no self-service signup or password reset by design — see PROGRESS.md):
+
+```sh
+npm run manage-user -- create you@example.com "Your Name" "your-password"
+```
+
+## 6. Frontend (`iorio-reloaded-app`, sibling repo)
+
+```sh
+cd ../iorio-reloaded-app
+npm install
+cp .env.example .env   # points at http://localhost:3001 by default
+npm run dev             # starts the app on http://localhost:5173
+```
+
+Both dev servers need to be running at once (backend on 3001, frontend on 5173) for login/auth to work — the frontend calls the backend directly via `VITE_API_BASE_URL`.
+
 ## Status
-This document reflects setup as of 2026-08-11. Still to be added here once decided: backend `npm install` + run instructions (no backend code exists yet), frontend setup, any Redis/local caching setup if we add it.
+This document reflects setup as of 2026-08-12. Both repos have a working local dev setup: backend (Express + TypeScript + Knex/Postgres + session auth) and frontend (React + Vite + TypeScript + Tabler + ApexCharts + lightweight-charts), tested end-to-end including a real login flow. No Redis/caching setup yet — not needed at this stage.
