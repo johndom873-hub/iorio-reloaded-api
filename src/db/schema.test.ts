@@ -21,7 +21,7 @@ let positionLegId: string;
 beforeAll(async () => {
   const [user] = await db("users")
     .insert({
-      email: `schema-test-${Date.now()}@example.com`,
+      username: `schema-test-${Date.now()}`,
       display_name: "Schema Test User",
       password_hash: "not-a-real-hash",
     })
@@ -54,7 +54,7 @@ afterAll(async () => {
 describe("database schema round-trips", () => {
   it("users: stores and retrieves a row matching what was inserted", async () => {
     const row = await db("users").where({ id: userId }).first();
-    expect(row.email).toContain("schema-test-");
+    expect(row.username).toContain("schema-test-");
     expect(row.display_name).toBe("Schema Test User");
   });
 

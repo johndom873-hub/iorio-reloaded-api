@@ -5,20 +5,20 @@ import { verifyPassword } from "../lib/auth.js";
 export const authRouter = Router();
 
 authRouter.post("/login", async (request, response) => {
-  const { email, password } = request.body as { email?: string; password?: string };
-  if (!email || !password) {
-    response.status(400).json({ error: "Email and password are required." });
+  const { username, password } = request.body as { username?: string; password?: string };
+  if (!username || !password) {
+    response.status(400).json({ error: "Username and password are required." });
     return;
   }
 
-  const user = await db("users").where({ email }).first();
+  const user = await db("users").whereRaw("lower(username) = lower(?)", [username]).first();
   if (!user || !(await verifyPassword(user.password_hash, password))) {
-    response.status(401).json({ error: "Invalid email or password." });
+    response.status(401).json({ error: "Invalid username or password." });
     return;
   }
 
   request.session.userId = user.id;
-  response.json({ id: user.id, email: user.email, displayName: user.display_name });
+  response.json({ id: user.id, username: user.username, displayName: user.display_name });
 });
 
 authRouter.post("/logout", (request, response) => {
@@ -44,5 +44,5 @@ authRouter.get("/session", async (request, response) => {
     return;
   }
 
-  response.json({ id: user.id, email: user.email, displayName: user.display_name });
+  response.json({ id: user.id, username: user.username, displayName: user.display_name });
 });

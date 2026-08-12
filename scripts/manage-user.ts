@@ -4,34 +4,36 @@
 // created and how a forgotten password gets changed.
 //
 // Usage:
-//   npm run manage-user -- create <email> <displayName> <password>
-//   npm run manage-user -- set-password <email> <newPassword>
+//   npm run manage-user -- create <username> <displayName> <password>
+//   npm run manage-user -- set-password <username> <newPassword>
 //   npm run manage-user -- list
 
 import { db } from "../src/db/connection.js";
 import { hashPassword } from "../src/lib/auth.js";
 
-async function createUser(email: string, displayName: string, password: string): Promise<void> {
+async function createUser(username: string, displayName: string, password: string): Promise<void> {
   const passwordHash = await hashPassword(password);
   const [user] = await db("users")
-    .insert({ email, display_name: displayName, password_hash: passwordHash })
-    .returning(["id", "email", "display_name"]);
-  console.log(`Created user ${user.email} (${user.id})`);
+    .insert({ username, display_name: displayName, password_hash: passwordHash })
+    .returning(["id", "username", "display_name"]);
+  console.log(`Created user ${user.username} (${user.id})`);
 }
 
-async function setPassword(email: string, newPassword: string): Promise<void> {
+async function setPassword(username: string, newPassword: string): Promise<void> {
   const passwordHash = await hashPassword(newPassword);
-  const updatedCount = await db("users").where({ email }).update({ password_hash: passwordHash });
+  const updatedCount = await db("users")
+    .whereRaw("lower(username) = lower(?)", [username])
+    .update({ password_hash: passwordHash });
   if (updatedCount === 0) {
-    console.error(`No user found with email ${email}`);
+    console.error(`No user found with username ${username}`);
     process.exitCode = 1;
     return;
   }
-  console.log(`Password updated for ${email}`);
+  console.log(`Password updated for ${username}`);
 }
 
 async function listUsers(): Promise<void> {
-  const users = await db("users").select("id", "email", "display_name", "created_at").orderBy("created_at");
+  const users = await db("users").select("id", "username", "display_name", "created_at").orderBy("created_at");
   console.table(users);
 }
 
@@ -40,19 +42,19 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "create": {
-      const [email, displayName, password] = args;
-      if (!email || !displayName || !password) {
-        throw new Error("Usage: manage-user create <email> <displayName> <password>");
+      const [username, displayName, password] = args;
+      if (!username || !displayName || !password) {
+        throw new Error("Usage: manage-user create <username> <displayName> <password>");
       }
-      await createUser(email, displayName, password);
+      await createUser(username, displayName, password);
       break;
     }
     case "set-password": {
-      const [email, newPassword] = args;
-      if (!email || !newPassword) {
-        throw new Error("Usage: manage-user set-password <email> <newPassword>");
+      const [username, newPassword] = args;
+      if (!username || !newPassword) {
+        throw new Error("Usage: manage-user set-password <username> <newPassword>");
       }
-      await setPassword(email, newPassword);
+      await setPassword(username, newPassword);
       break;
     }
     case "list":
