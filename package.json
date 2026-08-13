@@ -10,8 +10,9 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server.js",
+    "start": "node dist/src/server.js",
     "migrate:latest": "tsx node_modules/.bin/knex migrate:latest --knexfile src/db/knexfile.ts",
+    "migrate:latest:prod": "node node_modules/.bin/knex migrate:latest --knexfile dist/src/db/knexfile.js",
     "migrate:rollback": "tsx node_modules/.bin/knex migrate:rollback --knexfile src/db/knexfile.ts",
     "migrate:status": "tsx node_modules/.bin/knex migrate:status --knexfile src/db/knexfile.ts",
     "migrate:make": "tsx node_modules/.bin/knex migrate:make --knexfile src/db/knexfile.ts -x ts",

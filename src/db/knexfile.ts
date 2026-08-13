@@ -12,7 +12,11 @@ const sharedConfig: Partial<Knex.Config> = {
   client: "pg",
   migrations: {
     directory: "./migrations",
-    extension: "ts",
+    // Locally this file runs as TS via tsx, resolving .ts migration files
+    // directly. In production it runs compiled, as dist/src/db/knexfile.js
+    // (tsx is a devDependency and gets pruned from the production slug), so
+    // it needs to resolve the compiled .js migrations sitting next to it.
+    extension: process.env.NODE_ENV === "production" ? "js" : "ts",
   },
 };
 
