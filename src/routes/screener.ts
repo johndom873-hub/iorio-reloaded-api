@@ -143,6 +143,22 @@ screenerRouter.post("/", async (request, response) => {
   }
 });
 
+screenerRouter.patch("/:id", async (request, response) => {
+  const { notes } = request.body as { notes?: string | null };
+
+  const [entry] = await db("shortlist_entries")
+    .where({ id: request.params.id })
+    .whereNull("removed_at")
+    .update({ notes: notes ?? null })
+    .returning("*");
+
+  if (!entry) {
+    response.status(404).json({ error: "Entry not found or already removed." });
+    return;
+  }
+  response.json({ notes: entry.notes });
+});
+
 screenerRouter.delete("/:id", async (request, response) => {
   const updatedCount = await db("shortlist_entries")
     .where({ id: request.params.id })
