@@ -1,14 +1,14 @@
 # Iorio Reloaded — Progress Tracker
 
-Last updated: 2026-08-12
+Last updated: 2026-08-13
 
 ## Vision
 Multi-strategy options trading system. Business user checks in daily, reviews suggested opportunities and open positions, approves/rejects/modifies trades. Trades execute (semi-automated) via IBKR once confirmed. Node.js + React + Postgres, hosted on Heroku.
 
-## Status: Core platform skeleton built and tested locally — no IBKR integration or real screen logic yet (see Built section)
+## Status: Both apps deployed and live on Heroku at app.ioriore.com / api.ioriore.com — no IBKR integration or real screen logic yet (see Built section)
 
 ## Open decisions (blocking further design)
-- [ ] Cloudflare + DNS setup for ioriore.com not yet done (add site to Cloudflare, point nameservers, add Heroku custom domains, configure Bot Fight Mode + firewall rules).
+- [ ] Cloudflare custom firewall rules beyond Bot Fight Mode — no specific rules identified yet (e.g. rate-limiting the login endpoint); treat as optional hardening, revisit if a concrete need comes up rather than designing speculatively.
 - [ ] Telegram bot/channel creation — parked by user, notification rules already designed (see Scheduled jobs section).
 - [ ] Screener candidate universe (tickers not yet shortlisted) needs a data source — live IBKR query over a defined universe (e.g. S&P 500) vs. a lightweight "latest values only, no history" cache refreshed daily. Decide when building Screener logic.
 - [ ] Whether IBKR's `reqFundamentalData` requires its own paid subscription add-on — not confirmed via research, need to test directly once we have API access.
@@ -52,11 +52,13 @@ Captured for the eventual trade-alert-generation algorithm design — not yet bu
   - **VPS provider: Hetzner**, ~€8/month for 2 vCPU/4GB RAM (2GB minimum recommended; Gateway's default Java heap is ~768MB). EU-based; latency to IBKR's US servers is irrelevant for a low-frequency options strategy.
   - Division of labor: user creates the Hetzner account/billing (Claude cannot create billing accounts); Claude configures everything on the box once given SSH access.
 - **IBKR paper (demo) trading account must be supported, switchable via env var — required, not optional.** The whole trading system (order placement, position tracking, P&L) must be fully testable against IBKR's paper account before any real-money trading happens. Switch is an env var (e.g. `IBKR_TRADING_MODE=paper|live`) read by the backend, not a UI toggle — prevents accidentally flipping to live from the app itself. Relevant technical detail: IB Gateway listens on different default ports for paper vs. live (4002 paper / 4001 live; TWS uses 7497/7496) — the env var should drive which port the backend connects to. Exact mechanism (one Gateway container reconfigured per mode vs. two separate containers/ports running side by side) not yet decided — see Open decisions.
-- **Domain: ioriore.com** (already owned by user). Likely subdomain split: `app.ioriore.com` (frontend), `api.ioriore.com` (backend) — to confirm when we do the Cloudflare/DNS setup.
-- **Heroku topology: two separate Heroku apps** (matches the existing `iorio-reloaded-api` / `iorio-reloaded-app` repo split), both on Eco dynos.
+- **Domain: ioriore.com** (already owned by user) — **live**, subdomain split confirmed: `app.ioriore.com` (frontend), `api.ioriore.com` (backend).
+- **Heroku topology: two separate Heroku apps** (matches the existing `iorio-reloaded-api` / `iorio-reloaded-app` repo split), both on Eco dynos — **deployed and live**.
   - Eco hours are pooled per account: 1,000 hrs/month for $5/mo flat. One always-on dyno alone uses ~720 hrs/month; sleeping dynos consume ~0. Given daily-check-in usage, both apps sleeping between visits should fit comfortably in the pool.
-  - **Both apps proxied through Cloudflare's free plan** (Bot Fight Mode + custom firewall rules) to stop scanner/bot traffic from waking sleeping dynos and burning hours. Requires a custom domain (Cloudflare can't proxy Heroku's default `*.herokuapp.com`).
-  - Note: this protects against *bot-driven* wake-ups, not the user's own daily cold start — opening the app after a dyno's been asleep will still take several seconds to ~30s to respond. Not solved yet; revisit if it proves annoying in practice.
+  - **Cloudflare + DNS setup complete (2026-08-13).** ioriore.com added to Cloudflare (free plan), nameservers moved from GoDaddy to Cloudflare, CNAME records for `app`/`api` added pointing at their Heroku DNS targets (proxied, orange-cloud), SSL/TLS mode set to Full (strict). Heroku's automatic certificate management (ACM) issues/renews Let's Encrypt certs on both apps — no manual cert handling needed.
+  - **Bot Fight Mode enabled** after real scanner/bot traffic was observed hitting the live domain within minutes of going public (`.env` probes, WordPress user enumeration, etc. — background internet noise, nothing targeted, no secrets exposed since the SPA fallback just serves `index.html` for every unmatched path). Custom firewall rules beyond this are optional/unscoped — see Open decisions.
+  - Two Heroku accounts involved, kept deliberately separate to avoid mixing with unrelated projects: Juan (johndom873@gmail.com) owns both apps; Marcelo's account is a collaborator. Heroku CLI commands run via `HEROKU_API_KEY` env var pointed at a locally-saved key file, never via `heroku login` (which would touch the global CLI session shared with other projects).
+  - Note: Cloudflare protects against *bot-driven* wake-ups, not the user's own daily cold start — opening the app after a dyno's been asleep will still take several seconds to ~30s to respond. Not solved yet; revisit if it proves annoying in practice.
 - **Database schema (conceptual, finalized) — see below.** Design principle: positions are legs-based (a covered call = 2 legs, CSP = 1 leg) so future multi-leg strategies don't need a schema rewrite. All IBKR-facing field names were checked against actual TWS API docs, not assumed from general domain knowledge — this caught several real gaps (see corrections noted per table).
 - **Strategy breakdown visualization**: a colored strategy badge (e.g. "CC"/"CSP") on every row in mixed lists (Positions, Blotter, Trade Alerts) + a strategy filter dropdown (All / Covered Calls / Cash-Secured Puts) at the top of those screens. Dashboard P&L shows a grand total row, then per-strategy subtotal rows underneath.
 - **Backtesting: lightweight forward simulation only, no purchased historical data.** Once `daily_price_bars`/`market_data_snapshots` accumulate going forward, build a "what if I'd entered this trade N days ago" tool using only self-accumulated data. Starts limited, grows over time. Full historical backtesting with purchased data remains shelved (see below).
@@ -119,7 +121,17 @@ Everything below is real, working code, verified end-to-end (not just "compiles"
   - Real logo SVG saved as `public/icon-mark.svg` and used as both the sidebar brand mark and the favicon (replacing Tabler's placeholder).
   - Verified in browser: light mode, dark mode, Positions page (button contrast visibly improved), and mobile (390×844) — all correct.
 
-**Not yet done**: no actual screen logic (all 7 pages are placeholder stubs), no IBKR integration, no scheduled jobs, no Telegram, no Cloudflare/DNS, no VPS. All of that is still ahead.
+**Deployment (2026-08-13)** — both apps live on Heroku, verified end-to-end (real HTTPS requests against the live domains, not just "deploy succeeded"), auto-deploying from GitHub on push to `main`.
+- Heroku Postgres Essential-1 provisioned and attached to `iorio-reloaded-api`; migrations run automatically via a `release:` Procfile phase on every deploy, so schema never drifts from what's deployed.
+- Five real bugs found only once actually deployed (each invisible in local dev, since local dev never exercises the compiled/production code paths) — worth remembering if touching deploy config again:
+  1. Release-phase migration used `tsx` (a devDependency, pruned from the production slug after build) — added a separate `migrate:latest:prod` script that runs the compiled JS migrations directly with plain `node`.
+  2. `start` script pointed at `dist/server.js`; actual `tsc` output (with `rootDir: "."`) is `dist/src/server.js`.
+  3. Frontend's SPA fallback used `app.get("*", ...)`, which throws at startup under Express 5's newer `path-to-regexp` (no longer accepts a bare `"*"` wildcard) — crash-looped the dyno on every boot. Fixed with path-less `app.use((req, res) => ...)` middleware instead.
+  4. Two of three raw Postgres connections (the runtime query builder, and connect-pg-simple's dedicated session pool) had no SSL config and were rejected by Heroku Postgres ("no pg_hba.conf entry ... no encryption") — only the migration knexfile had it. All three now share the same `ssl: { rejectUnauthorized: false }` pattern in production.
+  5. Session cookie `sameSite` needed to be `"none"` (plus `app.set("trust proxy", 1)`) while app/api lived on separate `*.herokuapp.com` hostnames — cross-site for cookie purposes, so `"lax"` silently dropped the cookie on API calls. Reverted back to `"lax"` once both moved to `app.ioriore.com`/`api.ioriore.com` (same registrable domain, same-site again — stronger CSRF protection than `"none"`).
+- Frontend production server: small Express static server (`server.js`, mirrors the pattern already used in `menaris-admin-app`) serving `dist/` with an SPA fallback, wired via `npm start` — Vite's dev/preview servers aren't meant for production.
+
+**Not yet done**: no actual screen logic (all 7 pages are placeholder stubs), no IBKR integration, no scheduled jobs, no Telegram, no VPS. All of that is still ahead.
 
 ## Screen list (finalized, 7 screens + shared modals)
 
