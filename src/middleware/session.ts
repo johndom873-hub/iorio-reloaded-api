@@ -8,8 +8,12 @@ export const sessionMiddleware = session({
   store: new PgSessionStore({
     // Knex pools via tarn, which isn't compatible with the raw pg.Pool
     // connect-pg-simple expects — give it its own small dedicated pool
-    // via connection string instead of trying to share Knex's.
-    conString: environment.databaseUrl,
+    // via connection string instead of trying to share Knex's. Heroku
+    // Postgres rejects unencrypted connections, so production needs an
+    // explicit ssl option (conObject), not just a bare connection string.
+    ...(environment.nodeEnvironment === "production"
+      ? { conObject: { connectionString: environment.databaseUrl, ssl: { rejectUnauthorized: false } } }
+      : { conString: environment.databaseUrl }),
     tableName: "session",
     createTableIfMissing: false,
   }),
