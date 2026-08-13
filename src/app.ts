@@ -4,6 +4,9 @@ import { environment } from "./config/env.js";
 import { sessionMiddleware } from "./middleware/session.js";
 import { authRouter } from "./routes/auth.js";
 import { healthRouter } from "./routes/health.js";
+import { tickersRouter } from "./routes/tickers.js";
+import { shortlistRouter } from "./routes/shortlist.js";
+import { screenerRouter } from "./routes/screener.js";
 
 export const app = express();
 
@@ -23,3 +26,6 @@ app.use(sessionMiddleware);
 
 app.use(healthRouter);
 app.use("/auth", authRouter);
+app.use("/tickers", tickersRouter);
+app.use("/shortlist", shortlistRouter);
+app.use("/screener", screenerRouter);

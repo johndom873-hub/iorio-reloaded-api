@@ -17,7 +17,8 @@
     "migrate:status": "tsx node_modules/.bin/knex migrate:status --knexfile src/db/knexfile.ts",
     "migrate:make": "tsx node_modules/.bin/knex migrate:make --knexfile src/db/knexfile.ts -x ts",
     "test": "vitest run",
-    "manage-user": "tsx scripts/manage-user.ts"
+    "manage-user": "tsx scripts/manage-user.ts",
+    "capture-screener-snapshot": "tsx scripts/capture-screener-snapshot.ts"
   },
   "dependencies": {
     "@stoqey/ib": "^1.6.6",
