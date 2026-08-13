@@ -94,7 +94,7 @@ cp .env.example .env   # fill in your Mac username if not already done in step 3
 npm run migrate:latest              # migrates iorio_reloaded_development
 NODE_ENV=test npm run migrate:latest  # migrates iorio_reloaded_test
 npm test                            # runs the schema round-trip smoke tests
-npm run dev                         # starts the API on http://localhost:3001
+npm run dev                         # starts the API on http://localhost:3030
 ```
 
 Create a user to log in with (there's no self-service signup or password reset by design — see PROGRESS.md):
@@ -109,10 +109,10 @@ npm run manage-user -- create you@example.com "Your Name" "your-password"
 cd ../iorio-reloaded-app
 npm install
 cp .env.example .env   # points at http://localhost:3001 by default
-npm run dev             # starts the app on http://localhost:5173
+npm run dev             # starts the app on http://localhost:3031
 ```
 
-Both dev servers need to be running at once (backend on 3001, frontend on 5173) for login/auth to work — the frontend calls the backend directly via `VITE_API_BASE_URL`.
+Both dev servers need to be running at once (backend on 3030, frontend on 3031) for login/auth to work — the frontend calls the backend directly via `VITE_API_BASE_URL`.
 
 ## Status
 This document reflects setup as of 2026-08-12. Both repos have a working local dev setup: backend (Express + TypeScript + Knex/Postgres + session auth) and frontend (React + Vite + TypeScript + Tabler + ApexCharts + lightweight-charts), tested end-to-end including a real login flow. No Redis/caching setup yet — not needed at this stage.
