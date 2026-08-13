@@ -8,64 +8,14 @@
 // Usage:
 //   npm run capture-screener-snapshot
 
-import { EventName, MarketDataType, Stock, type TickType } from "@stoqey/ib";
+import { EventName, MarketDataType } from "@stoqey/ib";
 import { db } from "../src/db/connection.js";
-import { connectToIbkrGateway, type IbkrConnection } from "../src/ibkr/connectIbkr.js";
-
-const snapshotTimeoutMs = 15_000;
-
-// TickType is exported as a type only, not a runtime enum, so these mirror
-// its fixed protocol values directly (interactivebrokers.github.io/tws-api/tick_types.html).
-const OPTION_IMPLIED_VOL_TICK = 24;
-const AVG_OPT_VOLUME_TICK = 87;
+import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
+import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
 
 interface TickerRow {
   id: string;
   symbol: string;
-}
-
-interface CapturedSnapshot {
-  impliedVolatility: number | null;
-  avgOptionVolume: number | null;
-}
-
-function captureOneTicker(connection: IbkrConnection, reqId: number, symbol: string): Promise<CapturedSnapshot> {
-  return new Promise((resolve) => {
-    const snapshot: CapturedSnapshot = { impliedVolatility: null, avgOptionVolume: null };
-    let settled = false;
-
-    const haveBoth = () => snapshot.impliedVolatility !== null && snapshot.avgOptionVolume !== null;
-
-    const onTick = (tickReqId: number, field: TickType | undefined, value: number | undefined) => {
-      if (tickReqId !== reqId || value === undefined) return;
-      if ((field as unknown as number) === OPTION_IMPLIED_VOL_TICK) snapshot.impliedVolatility = value;
-      if ((field as unknown as number) === AVG_OPT_VOLUME_TICK) snapshot.avgOptionVolume = value;
-      if (haveBoth()) finish();
-    };
-
-    const timer = setTimeout(finish, snapshotTimeoutMs);
-
-    function finish() {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      connection.ib.off(EventName.tickGeneric, onTick);
-      connection.ib.off(EventName.tickSize, onTick);
-      connection.ib.cancelMktData(reqId);
-      resolve(snapshot);
-    }
-
-    connection.ib.on(EventName.tickGeneric, onTick);
-    connection.ib.on(EventName.tickSize, onTick);
-
-    // Generic ticks 105 (Average Option Volume) + 106 (Option Implied
-    // Volatility) only work as a streaming subscription — IBKR rejects them
-    // under snapshot=true with error 321 ("Snapshot market data subscription
-    // is not applicable to generic ticks"), confirmed by testing against the
-    // real paper Gateway. So this opens a stream and explicitly cancels it
-    // once both values arrive (or the timeout fires) instead.
-    connection.ib.reqMktData(reqId, new Stock(symbol, "SMART", "USD"), "105,106", false, false);
-  });
 }
 
 async function main(): Promise<void> {
@@ -94,7 +44,7 @@ async function main(): Promise<void> {
   try {
     for (const ticker of tickers) {
       const currentReqId = reqId++;
-      const snapshot = await captureOneTicker(connection, currentReqId, ticker.symbol);
+      const snapshot = await captureMarketDataSnapshot(connection, currentReqId, ticker.symbol);
 
       await db("market_data_snapshots")
         .insert({
