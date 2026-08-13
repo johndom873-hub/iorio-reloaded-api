@@ -23,12 +23,11 @@ export const sessionMiddleware = session({
   cookie: {
     httpOnly: true,
     secure: environment.nodeEnvironment === "production",
-    // App and API are on separate Heroku hostnames (no shared parent domain
-    // yet), which browsers treat as cross-site — "lax" cookies are withheld
-    // on cross-site fetch/XHR, so login would appear to work but every
-    // following request would look logged-out. Revisit once both apps share
-    // a parent domain (app.ioriore.com / api.ioriore.com).
-    sameSite: environment.nodeEnvironment === "production" ? "none" : "lax",
+    // app.ioriore.com and api.ioriore.com share a parent domain, so this
+    // counts as same-site for cookie purposes — "lax" works and is
+    // stronger CSRF protection than "none". (Was "none" in production
+    // while both apps lived on separate *.herokuapp.com hostnames.)
+    sameSite: "lax",
     maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
   },
 });
