@@ -6,7 +6,7 @@ import { fetchPriceBars, type ChartRange } from "../ibkr/fetchTickerOverview.js"
 export const tickerDetailRouter = Router();
 tickerDetailRouter.use(requireAuth);
 
-const validChartRanges: ChartRange[] = ["1M", "3M", "6M", "1Y", "All"];
+const validChartRanges: ChartRange[] = ["1D", "5D", "1M", "3M", "6M", "1Y", "5Y", "All"];
 
 // Platform-wide: any screen showing a ticker symbol opens the same modal
 // backed by this route, not a Screener-specific endpoint.

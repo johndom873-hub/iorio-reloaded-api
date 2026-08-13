@@ -13,7 +13,7 @@ export interface TickerPricing {
 }
 
 export interface PriceBar {
-  date: string; // YYYY-MM-DD
+  time: number; // Unix epoch seconds
   open: number;
   high: number;
   low: number;
@@ -21,17 +21,35 @@ export interface PriceBar {
   volume: number;
 }
 
-export type ChartRange = "1M" | "3M" | "6M" | "1Y" | "All";
+export type ChartRange = "1D" | "5D" | "1M" | "3M" | "6M" | "1Y" | "5Y" | "All";
 
-// EOD/daily-check-in platform, not an intraday trading tool — every range
-// uses daily bars, no minute/hourly granularity.
-const rangeToDuration: Record<ChartRange, string> = {
-  "1M": "1 M",
-  "3M": "3 M",
-  "6M": "6 M",
-  "1Y": "1 Y",
-  All: "10 Y",
+// Matches menaris-admin-app's per-range bar granularity (services/chart-service.js
+// RANGE_CONFIG), verified against real IBKR data (tmp/test-intraday-bars.ts,
+// tmp/test-remaining-bars.ts) rather than assumed — every combo below returned
+// hundreds of real bars.
+const rangeConfig: Record<ChartRange, { barSize: BarSizeSetting; duration: string }> = {
+  "1D": { barSize: BarSizeSetting.MINUTES_ONE, duration: "2 D" },
+  "5D": { barSize: BarSizeSetting.MINUTES_FIVE, duration: "7 D" },
+  "1M": { barSize: BarSizeSetting.MINUTES_THIRTY, duration: "1 M" },
+  "3M": { barSize: BarSizeSetting.HOURS_ONE, duration: "3 M" },
+  "6M": { barSize: BarSizeSetting.HOURS_TWO, duration: "6 M" },
+  "1Y": { barSize: BarSizeSetting.DAYS_ONE, duration: "1 Y" },
+  "5Y": { barSize: BarSizeSetting.WEEKS_ONE, duration: "5 Y" },
+  All: { barSize: BarSizeSetting.WEEKS_ONE, duration: "20 Y" },
 };
+
+// IBKR's historicalData date field is only a Unix-epoch-seconds string (with
+// formatDate=2) for bars smaller than 1 day — daily/weekly bars always come
+// back as a plain YYYYMMDD string regardless of formatDate. Verified
+// empirically (tmp/test-bar-date-format.ts), not assumed from docs.
+function parseIbkrBarTime(raw: string): number {
+  const trimmed = raw.trim();
+  if (/^\d{8}$/.test(trimmed)) {
+    const iso = `${trimmed.slice(0, 4)}-${trimmed.slice(4, 6)}-${trimmed.slice(6, 8)}T00:00:00Z`;
+    return Math.floor(new Date(iso).getTime() / 1000);
+  }
+  return Number(trimmed);
+}
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
@@ -101,7 +119,7 @@ export async function lookupHistoricalBars(
 
   return new Promise((resolve, reject) => {
     const bars: PriceBar[] = [];
-    const timer = setTimeout(() => reject(new Error(`Historical data timeout for ${symbol}`)), 15_000);
+    const timer = setTimeout(() => reject(new Error(`Historical data timeout for ${symbol}`)), 20_000);
 
     function onHistoricalData(
       id: number,
@@ -119,28 +137,12 @@ export async function lookupHistoricalBars(
         resolve(bars);
         return;
       }
-      bars.push({
-        date: `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`,
-        open,
-        high,
-        low,
-        close,
-        volume,
-      });
+      bars.push({ time: parseIbkrBarTime(date), open, high, low, close, volume });
     }
 
+    const { barSize, duration } = rangeConfig[range];
     ib.on(EventName.historicalData, onHistoricalData);
-    ib.reqHistoricalData(
-      reqId,
-      new Stock(symbol, "SMART", "USD"),
-      "",
-      rangeToDuration[range],
-      BarSizeSetting.DAYS_ONE,
-      WhatToShow.TRADES,
-      1,
-      1,
-      false,
-    );
+    ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), "", duration, barSize, WhatToShow.TRADES, 1, 2, false);
   });
 }
 
