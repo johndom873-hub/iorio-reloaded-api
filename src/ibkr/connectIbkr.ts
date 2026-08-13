@@ -31,6 +31,13 @@ export async function connectToIbkrGateway(): Promise<IbkrConnection> {
   });
 
   return new Promise((resolve, reject) => {
+    // Concurrent requests each open their own connection (see
+    // fetchNewTickerData.ts, fetchTickerDetail.ts, etc.) — every connect
+    // needs its own clientId, or IBKR silently ignores the second connection
+    // attempt using an already-connected id (default is 0) and this promise
+    // would hang forever with neither nextValidId nor an error ever firing.
+    const clientId = Math.floor(Math.random() * 1_000_000);
+
     const onError = (error: Error, _code: ErrorCode, reqId: number) => {
       // reqId -1 carries connection-status notices (e.g. "market data farm
       // connection is OK"), not real errors — IBKR's API overloads the error
@@ -52,7 +59,18 @@ export async function connectToIbkrGateway(): Promise<IbkrConnection> {
       });
     };
 
+    // Safety net: IBKR should always either signal nextValidId or fire an
+    // error, but a hung Gateway/tunnel with neither happening would
+    // otherwise leave this promise — and every caller awaiting it — stuck
+    // forever with no way to recover short of restarting the process.
+    const timer = setTimeout(() => {
+      cleanup();
+      tunnel.close();
+      reject(new Error("Timed out connecting to IBKR Gateway."));
+    }, 15_000);
+
     function cleanup() {
+      clearTimeout(timer);
       ib.off(EventName.error, onError);
       ib.off(EventName.nextValidId, onConnected);
     }
@@ -60,6 +78,6 @@ export async function connectToIbkrGateway(): Promise<IbkrConnection> {
     ib.on(EventName.error, onError);
     ib.once(EventName.nextValidId, onConnected);
 
-    ib.connect();
+    ib.connect(clientId);
   });
 }

@@ -19,25 +19,26 @@ const interactiveMarketDataTimeoutMs = 5_000;
 const contractDetailsReqId = 1;
 const marketDataReqId = 2;
 
-function lookupContractDetails(
+export function lookupContractDetails(
   connection: Awaited<ReturnType<typeof connectToIbkrGateway>>,
+  reqId: number = contractDetailsReqId,
 ): Promise<{ companyName: string | null; sector: string | null }> {
   return new Promise((resolve) => {
     let settled = false;
 
-    const onContractDetails = (reqId: number, details: { longName?: string; industry?: string }) => {
-      if (reqId !== contractDetailsReqId) return;
+    const onContractDetails = (id: number, details: { longName?: string; industry?: string }) => {
+      if (id !== reqId) return;
       finish({ companyName: details.longName ?? null, sector: details.industry ?? null });
     };
 
-    const onEnd = (reqId: number) => {
-      if (reqId === contractDetailsReqId) finish({ companyName: null, sector: null });
+    const onEnd = (id: number) => {
+      if (id === reqId) finish({ companyName: null, sector: null });
     };
 
     // e.g. an invalid/unrecognized symbol — fail fast instead of waiting out
     // the full timeout for something that will never arrive.
-    const onError = (_error: Error, _code: number, reqId: number) => {
-      if (reqId === contractDetailsReqId) finish({ companyName: null, sector: null });
+    const onError = (_error: Error, _code: number, id: number) => {
+      if (id === reqId) finish({ companyName: null, sector: null });
     };
 
     const timer = setTimeout(() => finish({ companyName: null, sector: null }), contractDetailsTimeoutMs);

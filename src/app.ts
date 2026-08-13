@@ -1,10 +1,11 @@
-import express from "express";
+import express, { type ErrorRequestHandler } from "express";
 import cors from "cors";
 import { environment } from "./config/env.js";
 import { sessionMiddleware } from "./middleware/session.js";
 import { authRouter } from "./routes/auth.js";
 import { healthRouter } from "./routes/health.js";
 import { screenerRouter } from "./routes/screener.js";
+import { tickerDetailRouter } from "./routes/tickerDetail.js";
 
 export const app = express();
 
@@ -25,3 +26,14 @@ app.use(sessionMiddleware);
 app.use(healthRouter);
 app.use("/auth", authRouter);
 app.use("/screener", screenerRouter);
+app.use("/tickers", tickerDetailRouter);
+
+// Without this, an uncaught route error (e.g. an IBKR request that rejects)
+// falls through to Express's default handler, which returns plain text
+// ("Internal Server Error") instead of the { error: "..." } JSON shape
+// every route and the frontend's apiRequest client otherwise expect.
+const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+  console.error(error);
+  response.status(500).json({ error: "Something went wrong. Please try again." });
+};
+app.use(errorHandler);
