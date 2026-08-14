@@ -32,7 +32,7 @@ export async function connectToIbkrGateway(): Promise<IbkrConnection> {
 
   return new Promise((resolve, reject) => {
     // Concurrent requests each open their own connection (see
-    // fetchNewTickerData.ts, fetchTickerDetail.ts, etc.) — every connect
+    // fetchNewTickerData.ts, streamTickerDetail.ts, etc.) — every connect
     // needs its own clientId, or IBKR silently ignores the second connection
     // attempt using an already-connected id (default is 0) and this promise
     // would hang forever with neither nextValidId nor an error ever firing.

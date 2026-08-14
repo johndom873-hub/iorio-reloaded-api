@@ -53,14 +53,18 @@ function parseIbkrBarTime(raw: string): number {
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
-/** Shares an already-open connection — see fetchTickerDetail.ts. */
-export async function lookupPricingSnapshot(
-  connection: IbkrConnection,
-  symbol: string,
-  reqId = 1,
-): Promise<TickerPricing> {
+/**
+ * Shares an already-open connection — see streamTickerDetail.ts, which
+ * calls `reqMarketDataType` itself, once, before starting this alongside
+ * lookupHistoricalBars/prepareOptionChainStrikes on the same connection.
+ * Do not call reqMarketDataType here too: it's connection-wide, and a
+ * second call while this snapshot subscription is still outstanding was
+ * found to silently prevent tickSnapshotEnd from ever firing — reproduced
+ * as a "Pricing snapshot timeout" once optionChain's metadata prep started
+ * running concurrently with this instead of strictly after it.
+ */
+export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: string, reqId = 1): Promise<TickerPricing> {
   const { ib } = connection;
-  ib.reqMarketDataType(MarketDataType.DELAYED);
 
   return new Promise((resolve, reject) => {
     const pricing: TickerPricing = {
@@ -107,7 +111,7 @@ export async function lookupPricingSnapshot(
   });
 }
 
-/** Shares an already-open connection — see fetchTickerDetail.ts. */
+/** Shares an already-open connection — see the reqMarketDataType note on lookupPricingSnapshot above. */
 export async function lookupHistoricalBars(
   connection: IbkrConnection,
   symbol: string,
@@ -115,7 +119,6 @@ export async function lookupHistoricalBars(
   reqId = 1,
 ): Promise<PriceBar[]> {
   const { ib } = connection;
-  ib.reqMarketDataType(MarketDataType.DELAYED);
 
   return new Promise((resolve, reject) => {
     const bars: PriceBar[] = [];
@@ -146,18 +149,10 @@ export async function lookupHistoricalBars(
   });
 }
 
-export async function fetchTickerPricing(symbol: string): Promise<TickerPricing> {
-  const connection = await connectToIbkrGateway();
-  try {
-    return await lookupPricingSnapshot(connection, symbol);
-  } finally {
-    connection.disconnect();
-  }
-}
-
 export async function fetchPriceBars(symbol: string, range: ChartRange): Promise<PriceBar[]> {
   const connection = await connectToIbkrGateway();
   try {
+    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
     return await lookupHistoricalBars(connection, symbol, range);
   } finally {
     connection.disconnect();

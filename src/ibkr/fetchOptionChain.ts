@@ -1,4 +1,4 @@
-import { EventName, MarketDataType, Option, OptionType, SecType, Stock } from "@stoqey/ib";
+import { EventName, Option, OptionType, SecType } from "@stoqey/ib";
 import type { Contract, IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 
@@ -44,19 +44,6 @@ function daysBetween(from: Date, to: Date): number {
 // (contractDetailsReqId=1, pricingReqId=2, etc.) used by sibling callers
 // sharing the same connection.
 let nextLookupReqId = 5_000;
-
-async function lookupConId(ib: IBApi, symbol: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const reqId = nextLookupReqId++;
-    const timer = setTimeout(() => reject(new Error(`contractDetails timeout for ${symbol}`)), 10_000);
-    ib.once(EventName.contractDetails, (id, details) => {
-      if (id !== reqId) return;
-      clearTimeout(timer);
-      resolve(details.contract.conId!);
-    });
-    ib.reqContractDetails(reqId, new Stock(symbol, "SMART", "USD"));
-  });
-}
 
 async function lookupOptionParams(
   ib: IBApi,
@@ -245,25 +232,62 @@ async function fetchQuotesForContracts(
   return Array.from(quotes.values());
 }
 
-/** Shares an already-open connection — see fetchTickerDetail.ts, which fetches
- * pricing (for spotPrice) and the option chain off one tunnel/socket. */
-export async function lookupOptionChain(
+export interface ExpiryStrikes {
+  expiry: string;
+  strikes: number[];
+}
+
+// The metadata half of an option chain lookup — every valid strike per
+// chosen expiry — needs only the symbol's conId, never the spot price (only
+// the final near-the-money narrowing in quoteOptionChain does). Split out
+// so callers (see streamTickerDetail.ts) can kick this off as soon as
+// conId is known, without waiting for the (often slower) pricing snapshot.
+// Takes conId as a parameter rather than looking it up itself — the caller
+// already has it from its own contractDetails lookup (needed anyway for
+// companyName/sector), and firing a second, redundant reqContractDetails
+// call for the same underlying concurrently with the first was found to
+// trigger real request-pacing contention on IBKR's side (a genuine
+// "Pricing snapshot timeout" was reproduced from this, not just the
+// already-documented per-expiry strikes slowdown below).
+//
+// The two expiries are looked up concurrently, not sequentially — the
+// second expiry's lookup has been observed taking 4-5x longer than the
+// first when done sequentially in a loop, for reasons not fully
+// understood; running them via Promise.all avoids paying that cost twice
+// in serial.
+// Does not call reqMarketDataType itself — see the note on
+// lookupPricingSnapshot in fetchTickerOverview.ts. The caller (currently
+// only streamTickerDetail.ts) sets it once for the whole shared connection.
+export async function prepareOptionChainStrikes(connection: IbkrConnection, symbol: string, conId: number): Promise<ExpiryStrikes[]> {
+  const { ib } = connection;
+
+  const { expirations } = await lookupOptionParams(ib, symbol, conId);
+  const chosenExpiries = pickExpiries(expirations);
+
+  return Promise.all(
+    chosenExpiries.map(async (expiry) => ({
+      expiry,
+      strikes: await lookupValidStrikesForExpiry(ib, symbol, expiry),
+    })),
+  );
+}
+
+// The pricing half — narrows each expiry's valid strikes to the
+// near-the-money window using spotPrice, then subscribes and collects
+// quotes. Shares the connection's reqId space with prepareOptionChainStrikes
+// (both draw from nextLookupReqId/nextReqId), so it's safe to call after
+// prepareOptionChainStrikes has resolved even though they ran concurrently.
+export async function quoteOptionChain(
   connection: IbkrConnection,
   symbol: string,
   spotPrice: number,
+  expiryStrikes: ExpiryStrikes[],
 ): Promise<OptionQuote[]> {
   const { ib } = connection;
-  ib.reqMarketDataType(MarketDataType.DELAYED);
-
-  const conId = await lookupConId(ib, symbol);
-  const { expirations } = await lookupOptionParams(ib, symbol, conId);
-
-  const chosenExpiries = pickExpiries(expirations);
 
   const contracts: { expiry: string; strike: number; right: OptionType }[] = [];
-  for (const expiry of chosenExpiries) {
-    const validStrikes = await lookupValidStrikesForExpiry(ib, symbol, expiry);
-    const chosenStrikes = pickStrikes(validStrikes, spotPrice);
+  for (const { expiry, strikes } of expiryStrikes) {
+    const chosenStrikes = pickStrikes(strikes, spotPrice);
     for (const strike of chosenStrikes) {
       contracts.push({ expiry, strike, right: OptionType.Call });
       contracts.push({ expiry, strike, right: OptionType.Put });
@@ -273,11 +297,3 @@ export async function lookupOptionChain(
   return fetchQuotesForContracts(ib, symbol, contracts);
 }
 
-export async function fetchOptionChain(symbol: string, spotPrice: number): Promise<OptionQuote[]> {
-  const connection = await connectToIbkrGateway();
-  try {
-    return await lookupOptionChain(connection, symbol, spotPrice);
-  } finally {
-    connection.disconnect();
-  }
-}

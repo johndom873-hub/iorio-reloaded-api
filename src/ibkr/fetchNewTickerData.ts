@@ -19,31 +19,44 @@ const interactiveMarketDataTimeoutMs = 5_000;
 const contractDetailsReqId = 1;
 const marketDataReqId = 2;
 
+export interface ContractDetails {
+  companyName: string | null;
+  sector: string | null;
+  // Null only if the lookup failed/timed out (e.g. unrecognized symbol) —
+  // otherwise always present. streamTickerDetail.ts reuses this instead of
+  // making its own separate reqContractDetails call for the option chain's
+  // conId lookup: two concurrent reqContractDetails calls for the same
+  // underlying stock, fired at connection start, were found to trigger the
+  // same IBKR pacing/contention issue documented for fetchOptionChain.ts's
+  // per-expiry strike lookups — see PROGRESS.md.
+  conId: number | null;
+}
+
 export function lookupContractDetails(
   connection: Awaited<ReturnType<typeof connectToIbkrGateway>>,
   reqId: number = contractDetailsReqId,
-): Promise<{ companyName: string | null; sector: string | null }> {
+): Promise<ContractDetails> {
   return new Promise((resolve) => {
     let settled = false;
 
-    const onContractDetails = (id: number, details: { longName?: string; industry?: string }) => {
+    const onContractDetails = (id: number, details: { longName?: string; industry?: string; contract: { conId?: number } }) => {
       if (id !== reqId) return;
-      finish({ companyName: details.longName ?? null, sector: details.industry ?? null });
+      finish({ companyName: details.longName ?? null, sector: details.industry ?? null, conId: details.contract.conId ?? null });
     };
 
     const onEnd = (id: number) => {
-      if (id === reqId) finish({ companyName: null, sector: null });
+      if (id === reqId) finish({ companyName: null, sector: null, conId: null });
     };
 
     // e.g. an invalid/unrecognized symbol — fail fast instead of waiting out
     // the full timeout for something that will never arrive.
     const onError = (_error: Error, _code: number, id: number) => {
-      if (id === reqId) finish({ companyName: null, sector: null });
+      if (id === reqId) finish({ companyName: null, sector: null, conId: null });
     };
 
-    const timer = setTimeout(() => finish({ companyName: null, sector: null }), contractDetailsTimeoutMs);
+    const timer = setTimeout(() => finish({ companyName: null, sector: null, conId: null }), contractDetailsTimeoutMs);
 
-    function finish(result: { companyName: string | null; sector: string | null }) {
+    function finish(result: ContractDetails) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
