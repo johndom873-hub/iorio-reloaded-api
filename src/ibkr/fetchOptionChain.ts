@@ -83,63 +83,95 @@ function pickExpiries(expirations: string[]): string[] {
     .slice(0, maxExpiries);
 }
 
-function pickStrikes(strikes: number[], spotPrice: number): number[] {
+function pickStrikes(strikes: number[], spotPrice: number, countPerSide: number = strikesPerSide): number[] {
   const sorted = [...strikes].sort((a, b) => a - b);
-  const below = sorted.filter((s) => s <= spotPrice).slice(-strikesPerSide);
-  const above = sorted.filter((s) => s > spotPrice).slice(0, strikesPerSide);
+  const below = sorted.filter((s) => s <= spotPrice).slice(-countPerSide);
+  const above = sorted.filter((s) => s > spotPrice).slice(0, countPerSide);
   return [...below, ...above];
 }
 
+// Extra raw candidates pulled per side before validation, since some will
+// turn out not to exist for the specific expiry being checked (see
+// checkStrikeExists) — this buffer keeps the odds high of still landing on
+// strikesPerSide real strikes per side after filtering.
+const candidateBufferPerSide = 3;
+const strikeCheckTimeoutMs = 5_000;
+
 // reqSecDefOptParams's strikes array is a union across every expiry/exchange
 // combination, not per-expiry — most of those strike x expiry pairs don't
-// actually exist as real contracts (verified empirically: requesting a
-// blindly-picked near-money strike for a real expiry returned IBKR error 200
-// "No security definition has been found" for most of them). A wildcard
-// contractDetails lookup (expiry set, strike/right unset) returns every
-// contract IBKR actually lists for that specific expiry, which we then
-// narrow to the near-the-money window.
-function requestValidStrikesForExpiry(ib: IBApi, symbol: string, expiry: string, timeoutMs: number): Promise<number[]> {
-  return new Promise((resolve, reject) => {
+// actually exist as real contracts for a given expiry. We used to discover
+// the real per-expiry set with a wildcard contractDetails lookup (expiry
+// set, strike/right unset), but IBKR's own docs say that's the wrong tool:
+// "It is not recommended to use reqContractDetails to receive complete
+// option chains... the return will be throttled and take longer the more
+// ambiguous the contract definition" (this was the actual cause of AMAT's
+// 25s prod timeout on 2026-08-14 — not network latency, not connection
+// setup, measured at ~0.6-1.4s — see PROGRESS.md). A fully-qualified request
+// (strike AND right both specified) isn't ambiguous and isn't throttled, so
+// checking one candidate strike at a time in parallel replaces one slow
+// throttled scan with many fast, unthrottled ones. Right=Call only — calls
+// and puts always share the same listed strike grid.
+function checkStrikeExists(ib: IBApi, symbol: string, expiry: string, strike: number): Promise<boolean> {
+  return new Promise((resolve) => {
     const reqId = nextLookupReqId++;
-    const strikes = new Set<number>();
-    const timer = setTimeout(() => reject(new Error(`contractDetails (option) timeout for ${symbol} ${expiry}`)), timeoutMs);
+    let found = false;
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, strikeCheckTimeoutMs);
 
-    function onDetails(id: number, details: { contract: { strike?: number } }) {
+    function onDetails(id: number) {
       if (id !== reqId) return;
-      if (details.contract.strike) strikes.add(details.contract.strike);
+      found = true;
     }
     function onEnd(id: number) {
       if (id !== reqId) return;
+      cleanup();
+      resolve(found);
+    }
+    function onError(_error: Error, _code: number, id: number) {
+      if (id !== reqId) return;
+      cleanup();
+      resolve(false);
+    }
+    function cleanup() {
       clearTimeout(timer);
       ib.removeListener(EventName.contractDetails, onDetails);
       ib.removeListener(EventName.contractDetailsEnd, onEnd);
-      resolve(Array.from(strikes));
+      ib.removeListener(EventName.error, onError);
     }
 
-    const wildcardOptionContract: Contract = {
+    const qualifiedOptionContract: Contract = {
       symbol,
       secType: SecType.OPT,
       lastTradeDateOrContractMonth: expiry,
+      strike,
+      right: OptionType.Call,
       exchange: "SMART",
       currency: "USD",
     };
 
+    // .on(), not .once() — with many of these checks in flight concurrently
+    // on one shared connection, EventEmitter.once() fires (and self-removes)
+    // *every* currently-registered once-listener on the first
+    // contractDetailsEnd for *any* reqId, not just the one whose id matches.
+    // That orphans every other in-flight check, which then just times out.
+    // Manual removeListener() inside onEnd (via cleanup(), gated on the id
+    // check) is what actually scopes removal to this one request.
     ib.on(EventName.contractDetails, onDetails);
-    ib.once(EventName.contractDetailsEnd, onEnd);
-    ib.reqContractDetails(reqId, wildcardOptionContract);
+    ib.on(EventName.contractDetailsEnd, onEnd);
+    ib.on(EventName.error, onError);
+    ib.reqContractDetails(reqId, qualifiedOptionContract);
   });
 }
 
-// One retry — this lookup has been observed to occasionally time out when
-// IBKR is already servicing another concurrent contractDetails request on
-// the same account (e.g. the daily capture job running, or a user quickly
-// reopening the modal), even though a solo request reliably succeeds.
-async function lookupValidStrikesForExpiry(ib: IBApi, symbol: string, expiry: string): Promise<number[]> {
-  try {
-    return await requestValidStrikesForExpiry(ib, symbol, expiry, 10_000);
-  } catch {
-    return requestValidStrikesForExpiry(ib, symbol, expiry, 10_000);
-  }
+async function lookupValidStrikesForExpiry(ib: IBApi, symbol: string, expiry: string, rawStrikes: number[], spotPrice: number): Promise<number[]> {
+  const candidates = pickStrikes(rawStrikes, spotPrice, strikesPerSide + candidateBufferPerSide);
+  const results = await Promise.all(
+    candidates.map(async (strike) => ({ strike, exists: await checkStrikeExists(ib, symbol, expiry, strike) })),
+  );
+  const validStrikes = results.filter((r) => r.exists).map((r) => r.strike);
+  return pickStrikes(validStrikes, spotPrice);
 }
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -237,18 +269,20 @@ export interface ExpiryStrikes {
   strikes: number[];
 }
 
-// The metadata half of an option chain lookup — every valid strike per
-// chosen expiry — needs only the symbol's conId, never the spot price (only
-// the final near-the-money narrowing in quoteOptionChain does). Split out
-// so callers (see streamTickerDetail.ts) can kick this off as soon as
-// conId is known, without waiting for the (often slower) pricing snapshot.
+// Needs spotPrice up front now (unlike the old wildcard-scan version) to
+// narrow reqSecDefOptParams's cross-expiry strike union to near-the-money
+// candidates *before* validating them one at a time — see
+// lookupValidStrikesForExpiry/checkStrikeExists above. That means this can
+// no longer start until the pricing snapshot resolves, giving up the old
+// "start as soon as conId is known" overlap with pricing — an acceptable
+// trade since the per-strike checks below replace what used to be a 10-20s+
+// throttled wildcard call per expiry.
 // Takes conId as a parameter rather than looking it up itself — the caller
 // already has it from its own contractDetails lookup (needed anyway for
 // companyName/sector), and firing a second, redundant reqContractDetails
 // call for the same underlying concurrently with the first was found to
 // trigger real request-pacing contention on IBKR's side (a genuine
-// "Pricing snapshot timeout" was reproduced from this, not just the
-// already-documented per-expiry strikes slowdown below).
+// "Pricing snapshot timeout" was reproduced from this).
 //
 // The two expiries are looked up concurrently, not sequentially — the
 // second expiry's lookup has been observed taking 4-5x longer than the
@@ -258,37 +292,33 @@ export interface ExpiryStrikes {
 // Does not call reqMarketDataType itself — see the note on
 // lookupPricingSnapshot in fetchTickerOverview.ts. The caller (currently
 // only streamTickerDetail.ts) sets it once for the whole shared connection.
-export async function prepareOptionChainStrikes(connection: IbkrConnection, symbol: string, conId: number): Promise<ExpiryStrikes[]> {
+export async function prepareOptionChainStrikes(
+  connection: IbkrConnection,
+  symbol: string,
+  conId: number,
+  spotPrice: number,
+): Promise<ExpiryStrikes[]> {
   const { ib } = connection;
 
-  const { expirations } = await lookupOptionParams(ib, symbol, conId);
+  const { expirations, strikes } = await lookupOptionParams(ib, symbol, conId);
   const chosenExpiries = pickExpiries(expirations);
 
   return Promise.all(
     chosenExpiries.map(async (expiry) => ({
       expiry,
-      strikes: await lookupValidStrikesForExpiry(ib, symbol, expiry),
+      strikes: await lookupValidStrikesForExpiry(ib, symbol, expiry, strikes, spotPrice),
     })),
   );
 }
 
-// The pricing half — narrows each expiry's valid strikes to the
-// near-the-money window using spotPrice, then subscribes and collects
-// quotes. Shares the connection's reqId space with prepareOptionChainStrikes
-// (both draw from nextLookupReqId/nextReqId), so it's safe to call after
-// prepareOptionChainStrikes has resolved even though they ran concurrently.
-export async function quoteOptionChain(
-  connection: IbkrConnection,
-  symbol: string,
-  spotPrice: number,
-  expiryStrikes: ExpiryStrikes[],
-): Promise<OptionQuote[]> {
+// Strikes arriving here are already the final near-the-money, validated set
+// from prepareOptionChainStrikes — just subscribe and collect quotes.
+export async function quoteOptionChain(connection: IbkrConnection, symbol: string, expiryStrikes: ExpiryStrikes[]): Promise<OptionQuote[]> {
   const { ib } = connection;
 
   const contracts: { expiry: string; strike: number; right: OptionType }[] = [];
   for (const { expiry, strikes } of expiryStrikes) {
-    const chosenStrikes = pickStrikes(strikes, spotPrice);
-    for (const strike of chosenStrikes) {
+    for (const strike of strikes) {
       contracts.push({ expiry, strike, right: OptionType.Call });
       contracts.push({ expiry, strike, right: OptionType.Put });
     }

@@ -38,21 +38,23 @@ function errorMessage(error: unknown): string {
  * all three before returning anything (the old fetchTickerDetail did this,
  * taking ~20-25s end to end; see PROGRESS.md for the measured breakdown).
  *
- * All three run concurrently, but optionChain has one real dependency: it
- * needs the underlying's conId before it can look up expirations/strikes.
- * That conId comes from the *same* contractDetails lookup overview already
+ * All three run concurrently, but optionChain has real dependencies: it
+ * needs the underlying's conId (shared with overview's contractDetails
+ * lookup — see below) and, since fetchOptionChain.ts started validating
+ * candidate strikes one at a time instead of via a wildcard scan, it now
+ * also needs the spot price up front to know which strikes are worth
+ * checking. So optionChain waits on overviewTask before starting its own
+ * IBKR calls — a smaller overlap than before, traded for eliminating the
+ * 10-20s+ throttled wildcard contractDetails call that used to be the
+ * dominant cost (see fetchOptionChain.ts for why that call was throttled).
+ *
+ * conId comes from the *same* contractDetails lookup overview already
  * needs for companyName/sector — the two share one promise/one
  * reqContractDetails call, not two. An earlier version had optionChain do
  * its own separate reqContractDetails call for conId; firing two identical
  * contractDetails lookups for the same underlying concurrently at
  * connection start reproduced real IBKR request-pacing contention (a
- * "Pricing snapshot timeout", not just the per-expiry strikes slowdown
- * already documented in fetchOptionChain.ts).
- *
- * Only the final near-the-money strike selection needs the spot price, so
- * optionChain's metadata prep (expirations, valid strikes per expiry)
- * starts as soon as contractDetails resolves — it doesn't wait for
- * pricing, which is often the slower of the two.
+ * "Pricing snapshot timeout").
  *
  * Each task catches its own errors and reports them as a section-specific
  * `error` event rather than failing the whole stream — IBKR's per-account
@@ -102,24 +104,12 @@ export async function streamTickerDetail(symbol: string, onEvent: (event: Ticker
         const contractDetails = await contractDetailsPromise;
         if (!contractDetails.conId) throw new Error("No contract found to look up the option chain.");
 
-        const expiryStrikesPromise = prepareOptionChainStrikes(connection, symbol, contractDetails.conId);
-        // Node treats a promise rejecting with no handler attached yet as an
-        // unhandled rejection and kills the process by default. We don't
-        // await expiryStrikesPromise until after overviewTask below (real
-        // concurrency, not a sequential chain), so a fast rejection here
-        // (e.g. the strikes lookup timing out) would otherwise crash the
-        // whole server before the try/catch below gets a chance to run.
-        // This no-op catch just marks it "handled" for that purpose; the
-        // real error handling still happens at the `await
-        // expiryStrikesPromise` line.
-        expiryStrikesPromise.catch(() => {});
-
         const pricing = await overviewTask;
         const spotPrice = pricing?.last ?? pricing?.previousClose;
         if (!spotPrice) throw new Error("No spot price available to select option strikes.");
 
-        const expiryStrikes = await expiryStrikesPromise;
-        const optionChain = await quoteOptionChain(connection, symbol, spotPrice, expiryStrikes);
+        const expiryStrikes = await prepareOptionChainStrikes(connection, symbol, contractDetails.conId, spotPrice);
+        const optionChain = await quoteOptionChain(connection, symbol, expiryStrikes);
         onEvent({ type: "optionChain", data: optionChain });
       } catch (error) {
         onEvent({ type: "error", section: "optionChain", message: errorMessage(error) });
