@@ -10,7 +10,7 @@
 // with a console warning rather than failing this job.
 //
 // Usage (dev):
-//   npm run check-ibkr-health
+//   npm run ibkr:health-check
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/check-ibkr-health.js
 
