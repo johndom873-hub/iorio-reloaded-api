@@ -163,12 +163,16 @@ positionsRouter.get("/:id", async (request, response) => {
 });
 
 positionsRouter.post("/", async (request, response) => {
-  const { symbol, strategyKey, notes, priceTarget, legs } = request.body as {
+  const { symbol, strategyKey, notes, priceTarget, legs, sourceAlertId } = request.body as {
     symbol?: string;
     strategyKey?: string;
     notes?: string | null;
     priceTarget?: number | null;
     legs?: LegInput[];
+    // If this position originated from a Trade Alert (approved, with or
+    // without edits — see tradeAlerts.ts for why there's no separate
+    // "modified" path), links the alert back to the resulting position.
+    sourceAlertId?: string;
   };
 
   if (!symbol || !symbol.trim()) {
@@ -201,50 +205,77 @@ positionsRouter.post("/", async (request, response) => {
       .returning("*");
   }
 
-  const position = await db.transaction(async (trx) => {
-    const [newPosition] = await trx("positions")
-      .insert({
-        strategy_key: strategyKey,
-        ticker_id: ticker.id,
-        status: "open",
-        notes: notes ?? null,
-        price_target: priceTarget ?? null,
-      })
-      .returning("*");
+  let position: { id: string };
+  try {
+    position = await db.transaction(async (trx) => {
+      if (sourceAlertId) {
+        const alert = await trx("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
+        if (!alert) throw Object.assign(new Error("Pending trade alert not found for sourceAlertId."), { statusCode: 404 });
+        if (alert.ticker_id !== ticker.id || alert.strategy_key !== strategyKey) {
+          throw Object.assign(new Error("sourceAlertId does not match this symbol/strategy."), { statusCode: 400 });
+        }
+      }
 
-    const insertedLegs = await trx("position_legs")
-      .insert(
-        legs.map((leg) => ({
-          position_id: newPosition.id,
-          leg_type: leg.legType,
-          side: leg.side,
+      const [newPosition] = await trx("positions")
+        .insert({
+          strategy_key: strategyKey,
+          ticker_id: ticker.id,
+          status: "open",
+          notes: notes ?? null,
+          price_target: priceTarget ?? null,
+        })
+        .returning("*");
+
+      const insertedLegs = await trx("position_legs")
+        .insert(
+          legs.map((leg) => ({
+            position_id: newPosition.id,
+            leg_type: leg.legType,
+            side: leg.side,
+            quantity: leg.quantity,
+            option_type: leg.optionType ?? null,
+            strike_price: leg.strikePrice ?? null,
+            expiry_date: leg.expiryDate ?? null,
+            multiplier: leg.multiplier,
+            entry_price: leg.entryPrice,
+            entry_at: leg.entryAt,
+          })),
+        )
+        .returning(["id", "side", "quantity", "entry_price", "entry_at"]);
+
+      // Manually-entered positions have no real IBKR fill behind them, so
+      // ibkr_order_id/ibkr_exec_id/commission/raw_ibkr_payload stay null —
+      // see the Trade Blotter data-source decision (2026-08-20).
+      await trx("trades").insert(
+        insertedLegs.map((leg) => ({
+          position_leg_id: leg.id,
+          side: openingTradeSide(leg.side),
           quantity: leg.quantity,
-          option_type: leg.optionType ?? null,
-          strike_price: leg.strikePrice ?? null,
-          expiry_date: leg.expiryDate ?? null,
-          multiplier: leg.multiplier,
-          entry_price: leg.entryPrice,
-          entry_at: leg.entryAt,
+          price: leg.entry_price,
+          executed_at: leg.entry_at,
+          is_closing_trade: false,
         })),
-      )
-      .returning(["id", "side", "quantity", "entry_price", "entry_at"]);
+      );
 
-    // Manually-entered positions have no real IBKR fill behind them, so
-    // ibkr_order_id/ibkr_exec_id/commission/raw_ibkr_payload stay null —
-    // see the Trade Blotter data-source decision (2026-08-20).
-    await trx("trades").insert(
-      insertedLegs.map((leg) => ({
-        position_leg_id: leg.id,
-        side: openingTradeSide(leg.side),
-        quantity: leg.quantity,
-        price: leg.entry_price,
-        executed_at: leg.entry_at,
-        is_closing_trade: false,
-      })),
-    );
+      if (sourceAlertId) {
+        await trx("trade_alerts").where({ id: sourceAlertId }).update({
+          status: "approved",
+          resulting_position_id: newPosition.id,
+          reviewed_by_user_id: request.session.userId,
+          reviewed_at: trx.fn.now(),
+        });
+      }
 
-    return newPosition;
-  });
+      return newPosition;
+    });
+  } catch (error) {
+    const statusCode = (error as { statusCode?: number }).statusCode;
+    if (statusCode) {
+      response.status(statusCode).json({ error: (error as Error).message });
+      return;
+    }
+    throw error;
+  }
 
   const result = await db.raw(`${positionSelect} WHERE p.id = ?`, [position.id]);
   response.status(201).json(result.rows[0]);
