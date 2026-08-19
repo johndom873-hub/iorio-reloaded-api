@@ -24,6 +24,15 @@ interface LegInput {
   entryAt: string;
 }
 
+// A "long" leg was bought to open (buy) and must be sold to close (sell); a
+// "short" leg was sold to open (sell) and must be bought back to close (buy).
+function openingTradeSide(legSide: "long" | "short"): "buy" | "sell" {
+  return legSide === "long" ? "buy" : "sell";
+}
+function closingTradeSide(legSide: "long" | "short"): "buy" | "sell" {
+  return legSide === "long" ? "sell" : "buy";
+}
+
 function validateLegInput(leg: LegInput): string | null {
   if (leg.legType !== "stock" && leg.legType !== "option") return "Invalid legType.";
   if (leg.side !== "long" && leg.side !== "short") return "Invalid side.";
@@ -203,18 +212,34 @@ positionsRouter.post("/", async (request, response) => {
       })
       .returning("*");
 
-    await trx("position_legs").insert(
-      legs.map((leg) => ({
-        position_id: newPosition.id,
-        leg_type: leg.legType,
-        side: leg.side,
+    const insertedLegs = await trx("position_legs")
+      .insert(
+        legs.map((leg) => ({
+          position_id: newPosition.id,
+          leg_type: leg.legType,
+          side: leg.side,
+          quantity: leg.quantity,
+          option_type: leg.optionType ?? null,
+          strike_price: leg.strikePrice ?? null,
+          expiry_date: leg.expiryDate ?? null,
+          multiplier: leg.multiplier,
+          entry_price: leg.entryPrice,
+          entry_at: leg.entryAt,
+        })),
+      )
+      .returning(["id", "side", "quantity", "entry_price", "entry_at"]);
+
+    // Manually-entered positions have no real IBKR fill behind them, so
+    // ibkr_order_id/ibkr_exec_id/commission/raw_ibkr_payload stay null —
+    // see the Trade Blotter data-source decision (2026-08-20).
+    await trx("trades").insert(
+      insertedLegs.map((leg) => ({
+        position_leg_id: leg.id,
+        side: openingTradeSide(leg.side),
         quantity: leg.quantity,
-        option_type: leg.optionType ?? null,
-        strike_price: leg.strikePrice ?? null,
-        expiry_date: leg.expiryDate ?? null,
-        multiplier: leg.multiplier,
-        entry_price: leg.entryPrice,
-        entry_at: leg.entryAt,
+        price: leg.entry_price,
+        executed_at: leg.entry_at,
+        is_closing_trade: false,
       })),
     );
 
@@ -276,10 +301,22 @@ positionsRouter.post("/:id/close", async (request, response) => {
         throw Object.assign(new Error("All legs of this position must be included when closing it."), { statusCode: 400 });
       }
 
+      const existingLegById = new Map(existingLegs.map((leg) => [leg.id, leg]));
+
       for (const leg of legs) {
         await trx("position_legs")
           .where({ id: leg.legId, position_id: position.id })
           .update({ exit_price: leg.exitPrice, exit_at: leg.exitAt });
+
+        const existingLeg = existingLegById.get(leg.legId);
+        await trx("trades").insert({
+          position_leg_id: leg.legId,
+          side: closingTradeSide(existingLeg.side),
+          quantity: existingLeg.quantity,
+          price: leg.exitPrice,
+          executed_at: leg.exitAt,
+          is_closing_trade: true,
+        });
       }
 
       await trx("positions").where({ id: position.id }).update({ status: "closed", closed_at: trx.fn.now() });

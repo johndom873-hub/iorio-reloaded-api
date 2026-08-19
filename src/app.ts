@@ -8,6 +8,7 @@ import { positionsRouter } from "./routes/positions.js";
 import { riskLimitsRouter } from "./routes/riskLimits.js";
 import { screenerRouter } from "./routes/screener.js";
 import { tickerDetailRouter } from "./routes/tickerDetail.js";
+import { tradeBlotterRouter } from "./routes/tradeBlotter.js";
 
 export const app = express();
 
@@ -31,6 +32,7 @@ app.use("/screener", screenerRouter);
 app.use("/tickers", tickerDetailRouter);
 app.use("/risk-limits", riskLimitsRouter);
 app.use("/positions", positionsRouter);
+app.use("/trade-blotter", tradeBlotterRouter);
 
 // Without this, an uncaught route error (e.g. an IBKR request that rejects)
 // falls through to Express's default handler, which returns plain text
