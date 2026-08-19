@@ -31,11 +31,13 @@ const maxExpiries = 6;
 const strikesPerSide = 4;
 const quoteTimeoutMs = 8_000;
 
-function parseExpiry(expiry: string): Date {
+// Exported for reuse by the trade-alert candidate generator, which needs
+// its own per-strategy DTE window instead of this file's fixed one.
+export function parseExpiry(expiry: string): Date {
   return new Date(`${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}T00:00:00Z`);
 }
 
-function daysBetween(from: Date, to: Date): number {
+export function daysBetween(from: Date, to: Date): number {
   return Math.round((to.getTime() - from.getTime()) / 86_400_000);
 }
 
@@ -47,7 +49,7 @@ function daysBetween(from: Date, to: Date): number {
 // sharing the same connection.
 let nextLookupReqId = 5_000;
 
-async function lookupOptionParams(
+export async function lookupOptionParams(
   ib: IBApi,
   symbol: string,
   conId: number,
@@ -113,7 +115,7 @@ const strikeCheckTimeoutMs = 5_000;
 // checking one candidate strike at a time in parallel replaces one slow
 // throttled scan with many fast, unthrottled ones. Right=Call only — calls
 // and puts always share the same listed strike grid.
-function checkStrikeExists(ib: IBApi, symbol: string, expiry: string, strike: number): Promise<boolean> {
+export function checkStrikeExists(ib: IBApi, symbol: string, expiry: string, strike: number): Promise<boolean> {
   return new Promise((resolve) => {
     const reqId = nextLookupReqId++;
     let found = false;
