@@ -297,3 +297,9 @@ Shared modals (not standalone screens):
 ## Optional / future ideas (not being built unless requested)
 - Full historical backtesting engine using purchased historical options data (10 years) — cost/ToS permitting. Lightweight forward-simulation backtesting (self-accumulated data only) is now planned, not optional — see Decisions made.
 - IBKR chart embedding for open positions — superseded by the decision to build our own via lightweight-charts.
+- **Telegram bot "Genosuke" — requested 2026-08-20, not yet scoped.** A conversational bot (distinct from the existing one-way `notifyTelegram()` alerts) that can reply to messages in the Telegram group, with tool access and "access to all data." Real open questions before this can be designed, let alone built:
+  - What counts as "all data" in practice — read-only across positions/trades/screener/risk-limits/trade-alerts, or does it also need write access (e.g. approving a trade alert, closing a position, from chat)? Write access from a chat interface is a materially bigger scope than a read-only Q&A bot.
+  - Which "tools" — a fixed set of query functions against this app's own data, or broader (web search, IBKR live lookups beyond what's already cached)?
+  - Auth/access control: the Telegram group currently has whoever's in it (Marce, Juan); does everyone in the group get the same access to the bot, or does it need to distinguish who's asking?
+  - Likely built on the Claude API (Messages API + tool use) given this project's existing Claude Code tooling context, but not decided — could also be a simpler rules-based command bot if the actual need turns out to be narrower than "conversational."
+  - Relationship to the existing `notifyTelegram()` one-way alerts: same bot/token, or a separate bot identity, given the existing one is purely outbound and this one needs inbound message handling (a webhook or long-polling loop, neither of which exists yet).
