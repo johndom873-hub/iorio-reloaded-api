@@ -18,7 +18,7 @@
     "migrate:make": "tsx node_modules/.bin/knex migrate:make --knexfile src/db/knexfile.ts -x ts",
     "test": "vitest run",
     "manage-user": "tsx scripts/manage-user.ts",
-    "capture-screener-snapshot": "tsx scripts/capture-screener-snapshot.ts",
+    "job:daily-market-data": "tsx scripts/run-daily-market-data-job.ts",
     "ibkr:health-check": "tsx scripts/check-ibkr-health.ts"
   },
   "dependencies": {

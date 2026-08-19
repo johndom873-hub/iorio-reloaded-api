@@ -158,3 +158,35 @@ export async function fetchPriceBars(symbol: string, range: ChartRange): Promise
     connection.disconnect();
   }
 }
+
+/**
+ * Shares an already-open connection — see the reqMarketDataType note on
+ * lookupPricingSnapshot above. Daily-bar sibling of lookupHistoricalBars,
+ * used by the daily price/IV capture job: "2 D" duration (not "1 D") so a
+ * completed daily bar exists even right after a weekend/holiday, since
+ * IBKR only returns *completed* daily bars, not the still-forming one for
+ * today. Returns the most recent bar, or null if none came back (e.g. the
+ * job runs before the first daily bar of a newly-added ticker exists).
+ */
+export async function lookupLatestDailyBar(connection: IbkrConnection, symbol: string, reqId = 1): Promise<PriceBar | null> {
+  const { ib } = connection;
+
+  return new Promise((resolve, reject) => {
+    const bars: PriceBar[] = [];
+    const timer = setTimeout(() => reject(new Error(`Historical data timeout for ${symbol}`)), 20_000);
+
+    function onHistoricalData(id: number, date: string, open: number, high: number, low: number, close: number, volume: number) {
+      if (id !== reqId) return;
+      if (date.startsWith("finished")) {
+        clearTimeout(timer);
+        ib.removeListener(EventName.historicalData, onHistoricalData);
+        resolve(bars.at(-1) ?? null);
+        return;
+      }
+      bars.push({ time: parseIbkrBarTime(date), open, high, low, close, volume });
+    }
+
+    ib.on(EventName.historicalData, onHistoricalData);
+    ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), "", "2 D", BarSizeSetting.DAYS_ONE, WhatToShow.TRADES, 1, 2, false);
+  });
+}
