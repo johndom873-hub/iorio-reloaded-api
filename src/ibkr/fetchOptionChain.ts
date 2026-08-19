@@ -16,16 +16,18 @@ export interface OptionQuote {
   theta: number | null;
 }
 
-// Strategy-relevant window, not the full chain: covered calls / CSPs both
-// trade in the ~15-60 DTE range at strikes near the money. Capping expiries
-// and strikes-per-side keeps the number of concurrent IBKR market data
-// subscriptions well under the default 100-line-per-connection limit —
-// verified empirically (tmp/test-option-chain.ts) that per-contract Greeks
-// stream fine on delayed data, but a full chain (every strike x every
-// expiry) was never tested and risks hitting that limit.
-const minDaysToExpiry = 15;
+// 0-60 DTE covers everything from same-week/intra-weekly expiries through
+// the covered-call/CSP monthly range. maxExpiries=6 is a hard ceiling, not a
+// tuned guess: each expiry uses at most strikesPerSide(4) x 2 sides x 2
+// rights = 16 reqMktData lines (the only lines this connection opens — the
+// pricing lookup is a snapshot and doesn't count), so 6 expiries is
+// guaranteed to stay at or under 96 of IBKR's 100-line-per-connection cap.
+// pickExpiries sorts ascending and takes the first N, so the nearest
+// (weekly/intra-weekly) expiries are always the ones kept if more than 6
+// exist in the window.
+const minDaysToExpiry = 0;
 const maxDaysToExpiry = 60;
-const maxExpiries = 2;
+const maxExpiries = 6;
 const strikesPerSide = 4;
 const quoteTimeoutMs = 8_000;
 
