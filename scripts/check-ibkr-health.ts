@@ -14,8 +14,11 @@
 //   node dist/scripts/check-ibkr-health.js
 
 import { runIbkrHealthCheckJob } from "../src/ibkr/checkIbkrHealthJob.js";
+import { db } from "../src/db/connection.js";
 
-runIbkrHealthCheckJob().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+runIbkrHealthCheckJob()
+  .catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  })
+  .finally(() => db.destroy());
