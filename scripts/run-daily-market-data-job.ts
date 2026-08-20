@@ -15,6 +15,7 @@
 //   node dist/scripts/run-daily-market-data-job.js
 
 import { EventName, MarketDataType } from "@stoqey/ib";
+import type { IbkrConnection } from "../src/ibkr/connectIbkr.js";
 import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
@@ -24,6 +25,55 @@ import { runJob } from "../src/lib/runJob.js";
 interface TickerRow {
   id: string;
   symbol: string;
+}
+
+let nextReqId = 1;
+
+// One ticker's failure (e.g. lookupLatestDailyBar's historical-data
+// timeout — reproduced in prod 2026-08-20 on AAOI, which killed the whole
+// batch and lost every ticker after it alphabetically, before this
+// try/catch existed) must not take down the rest of the batch, matching
+// the per-ticker resilience already used elsewhere (captureMarketDataSnapshot
+// itself never throws). Returns true/false rather than throwing so the
+// caller can track and retry failures.
+async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snapshotDate: string): Promise<boolean> {
+  try {
+    const snapshot = await captureMarketDataSnapshot(connection, nextReqId++, ticker.symbol);
+    await db("market_data_snapshots")
+      .insert({
+        ticker_id: ticker.id,
+        snapshot_date: snapshotDate,
+        implied_volatility: snapshot.impliedVolatility,
+        avg_option_volume: snapshot.avgOptionVolume,
+      })
+      .onConflict(["ticker_id", "snapshot_date"])
+      .merge();
+
+    const bar = await lookupLatestDailyBar(connection, ticker.symbol, nextReqId++);
+    if (bar) {
+      const tradingDate = new Date(bar.time * 1000).toISOString().slice(0, 10);
+      await db("daily_price_bars")
+        .insert({
+          ticker_id: ticker.id,
+          trading_date: tradingDate,
+          open_price: bar.open,
+          high_price: bar.high,
+          low_price: bar.low,
+          close_price: bar.close,
+          volume: bar.volume,
+        })
+        .onConflict(["ticker_id", "trading_date"])
+        .merge();
+    }
+
+    console.log(
+      `${ticker.symbol}: IV=${snapshot.impliedVolatility ?? "n/a"} avgOptVolume=${snapshot.avgOptionVolume ?? "n/a"} bar=${bar ? `${bar.close}` : "n/a"}`,
+    );
+    return true;
+  } catch (error) {
+    console.warn(`${ticker.symbol}: capture failed — ${error instanceof Error ? error.message : error}`);
+    return false;
+  }
 }
 
 async function main(): Promise<void> {
@@ -56,50 +106,47 @@ async function main(): Promise<void> {
     });
 
     const snapshotDate = new Date().toISOString().slice(0, 10);
-    let reqId = 1;
     let succeeded = 0;
+    let failedTickers: TickerRow[] = [];
 
     try {
       for (const ticker of tickers) {
-        const snapshot = await captureMarketDataSnapshot(connection, reqId++, ticker.symbol);
-        await db("market_data_snapshots")
-          .insert({
-            ticker_id: ticker.id,
-            snapshot_date: snapshotDate,
-            implied_volatility: snapshot.impliedVolatility,
-            avg_option_volume: snapshot.avgOptionVolume,
-          })
-          .onConflict(["ticker_id", "snapshot_date"])
-          .merge();
+        const ok = await captureTicker(connection, ticker, snapshotDate);
+        if (ok) succeeded++;
+        else failedTickers.push(ticker);
+      }
 
-        const bar = await lookupLatestDailyBar(connection, ticker.symbol, reqId++);
-        if (bar) {
-          const tradingDate = new Date(bar.time * 1000).toISOString().slice(0, 10);
-          await db("daily_price_bars")
-            .insert({
-              ticker_id: ticker.id,
-              trading_date: tradingDate,
-              open_price: bar.open,
-              high_price: bar.high,
-              low_price: bar.low,
-              close_price: bar.close,
-              volume: bar.volume,
-            })
-            .onConflict(["ticker_id", "trading_date"])
-            .merge();
+      // End-of-batch retry pass, approved 2026-08-20 after both a prod
+      // failure (AAOI) and an all-tickers-timed-out run locally on the same
+      // day showed this specific IBKR call (historical daily bar) fails
+      // often enough to be worth one retry, not just skip-and-move-on. Runs
+      // after the full first pass (not immediately per-ticker), since a
+      // broader IBKR-side moment affecting every ticker at once — which is
+      // what happened locally — needs the pass itself to finish first
+      // before retrying has any chance of hitting a clear window.
+      if (failedTickers.length > 0) {
+        console.log(`Retrying ${failedTickers.length} failed ticker(s)...`);
+        const stillFailed: TickerRow[] = [];
+        for (const ticker of failedTickers) {
+          const ok = await captureTicker(connection, ticker, snapshotDate);
+          if (ok) succeeded++;
+          else stillFailed.push(ticker);
         }
-
-        console.log(
-          `${ticker.symbol}: IV=${snapshot.impliedVolatility ?? "n/a"} avgOptVolume=${snapshot.avgOptionVolume ?? "n/a"} bar=${bar ? `${bar.close}` : "n/a"}`,
-        );
-        succeeded++;
+        failedTickers = stillFailed;
       }
     } finally {
       connection.disconnect();
     }
 
-    console.log(`Captured ${succeeded}/${tickers.length} ticker(s) for ${snapshotDate}.`);
-    return { details: { tickerCount: tickers.length, succeeded } };
+    const failed = failedTickers.length;
+    console.log(`Captured ${succeeded}/${tickers.length} ticker(s) for ${snapshotDate} (${failed} failed after retry).`);
+    return {
+      details: { tickerCount: tickers.length, succeeded, failed, failedSymbols: failedTickers.map((t) => t.symbol) },
+      notify:
+        failed > 0
+          ? `⚠️ Daily market data capture: ${failed}/${tickers.length} ticker(s) failed even after retry (${failedTickers.map((t) => t.symbol).join(", ")}).`
+          : undefined,
+    };
   });
 }
 
