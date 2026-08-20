@@ -21,6 +21,7 @@
     "job:daily-market-data": "tsx scripts/run-daily-market-data-job.ts",
     "job:daily-pnl-snapshot": "tsx scripts/run-daily-pnl-snapshot-job.ts",
     "job:trade-alerts": "tsx scripts/run-trade-alert-generation-job.ts",
+    "job:watchdog": "tsx scripts/run-watchdog-job.ts",
     "ibkr:health-check": "tsx scripts/check-ibkr-health.ts"
   },
   "dependencies": {
