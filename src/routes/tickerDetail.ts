@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { streamTickerDetail } from "../ibkr/streamTickerDetail.js";
+import { streamPositionQuote } from "../ibkr/streamPositionQuote.js";
 import { fetchPriceBars, type ChartRange } from "../ibkr/fetchTickerOverview.js";
 
 export const tickerDetailRouter = Router();
@@ -48,6 +49,37 @@ tickerDetailRouter.get("/:symbol/detail/stream", async (request, response) => {
 
   try {
     await streamTickerDetail(symbol, send);
+    send({ type: "done" });
+  } catch (error) {
+    send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });
+  } finally {
+    clearInterval(heartbeat);
+    response.end();
+  }
+});
+
+// New Position form's live-quote lookup: pricing + option chain only, no
+// chart. See streamPositionQuote.ts for why this isn't just streamTickerDetail
+// with the chart event ignored client-side.
+tickerDetailRouter.get("/:symbol/position-quote/stream", async (request, response) => {
+  const symbol = request.params.symbol.toUpperCase();
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.on("error", () => {});
+
+  const send = (data: unknown) => {
+    if (response.writableEnded) return;
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(": ping\n\n");
+  }, heartbeatIntervalMs);
+
+  try {
+    await streamPositionQuote(symbol, send);
     send({ type: "done" });
   } catch (error) {
     send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });

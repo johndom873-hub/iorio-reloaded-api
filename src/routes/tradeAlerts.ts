@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { runTradeAlertGeneration } from "../ibkr/runTradeAlertGeneration.js";
+import { runJob } from "../lib/runJob.js";
 
 export const tradeAlertsRouter = Router();
 tradeAlertsRouter.use(requireAuth);
@@ -8,6 +10,7 @@ tradeAlertsRouter.use(requireAuth);
 // v1 strategy scope — matches positions.ts/screener.ts.
 const validStrategyKeys = ["covered_call", "cash_secured_put"];
 const validStatuses = ["pending", "approved", "rejected", "modified", "expired"];
+const heartbeatIntervalMs = 20_000;
 
 tradeAlertsRouter.get("/", async (request, response) => {
   const status = (request.query.status as string | undefined) ?? "pending";
@@ -54,6 +57,51 @@ tradeAlertsRouter.get("/", async (request, response) => {
     params,
   );
   response.json(result.rows);
+});
+
+// Manual "Run Now" trigger for the same scan as run-trade-alert-generation-job.ts
+// (Heroku Scheduler). SSE rather than a blocking POST — the scan makes
+// multiple sequential IBKR calls per shortlisted ticker per strategy (same
+// shape as tickerDetail.ts's option-chain lookup) and can easily run past
+// Heroku's ~30s router timeout once there's more than a handful of tickers.
+// GET (not POST) because EventSource only supports GET — same tradeoff
+// tickerDetail.ts's stream route made; the button click is still an
+// explicit, user-initiated action, not something that could fire twice by
+// accident (browsers don't prefetch EventSource requests).
+//
+// Wrapped in the same runJob() the scheduled script uses, so a manual run
+// shows up in System Health's job history/status exactly like a scheduled
+// one, and still notifies Telegram when it finds something.
+tradeAlertsRouter.get("/run-stream", async (_request, response) => {
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.on("error", () => {});
+
+  const send = (data: unknown) => {
+    if (response.writableEnded) return;
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(": ping\n\n");
+  }, heartbeatIntervalMs);
+
+  try {
+    await runJob("trade_alert_generation", async () => {
+      const { tickersScanned, totalNewAlerts } = await runTradeAlertGeneration((event) => send(event));
+      return {
+        details: { tickersScanned, totalNewAlerts },
+        notify: totalNewAlerts > 0 ? `📋 Trade Alerts: ${totalNewAlerts} new alert(s) ready for review.` : undefined,
+      };
+    });
+    send({ type: "done" });
+  } catch (error) {
+    send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });
+  } finally {
+    clearInterval(heartbeat);
+    response.end();
+  }
 });
 
 // Only rejection happens directly through this route — approving (with or
