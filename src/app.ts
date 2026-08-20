@@ -3,6 +3,7 @@ import cors from "cors";
 import { environment } from "./config/env.js";
 import { sessionMiddleware } from "./middleware/session.js";
 import { authRouter } from "./routes/auth.js";
+import { dashboardRouter } from "./routes/dashboard.js";
 import { healthRouter } from "./routes/health.js";
 import { positionsRouter } from "./routes/positions.js";
 import { riskLimitsRouter } from "./routes/riskLimits.js";
@@ -37,6 +38,7 @@ app.use("/positions", positionsRouter);
 app.use("/trade-blotter", tradeBlotterRouter);
 app.use("/trade-alerts", tradeAlertsRouter);
 app.use("/system-health", systemHealthRouter);
+app.use("/dashboard", dashboardRouter);
 
 // Without this, an uncaught route error (e.g. an IBKR request that rejects)
 // falls through to Express's default handler, which returns plain text
