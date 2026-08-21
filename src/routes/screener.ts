@@ -49,7 +49,10 @@ screenerRouter.get("/", async (request, response) => {
       m.snapshot_date AS "snapshotDate",
       m.implied_volatility AS "impliedVolatility",
       m.avg_option_volume AS "avgOptionVolume",
-      m.captured_at AS "capturedAt"
+      m.captured_at AS "capturedAt",
+      iv_window.window_days AS "ivRankWindowDays",
+      iv_window.min_iv AS "ivRankMinIv",
+      iv_window.max_iv AS "ivRankMaxIv"
     FROM shortlist_entries se
     JOIN tickers t ON t.id = se.ticker_id
     LEFT JOIN LATERAL (
@@ -59,14 +62,52 @@ screenerRouter.get("/", async (request, response) => {
       ORDER BY snapshot_date DESC
       LIMIT 1
     ) m ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS window_days, MIN(implied_volatility) AS min_iv, MAX(implied_volatility) AS max_iv
+      FROM (
+        SELECT implied_volatility
+        FROM market_data_snapshots
+        WHERE ticker_id = t.id AND implied_volatility IS NOT NULL
+        ORDER BY snapshot_date DESC
+        LIMIT 252
+      ) recent
+    ) iv_window ON true
     WHERE se.strategy_key = ? AND se.removed_at IS NULL
     ORDER BY t.symbol
     `,
     [strategyKey],
   );
 
-  response.json(result.rows);
+  response.json(result.rows.map(withIvRank));
 });
+
+interface RawScreenerRow {
+  impliedVolatility: string | null;
+  ivRankWindowDays: string | null;
+  ivRankMinIv: string | null;
+  ivRankMaxIv: string | null;
+  [key: string]: unknown;
+}
+
+// IV Rank = (current IV − min IV) / (max IV − min IV) × 100 over whatever
+// history exists, up to a trailing 252-trading-day window (approved formula,
+// see PROGRESS.md "Decisions made"). Needs at least 2 distinct-IV data points
+// to be meaningful — returns null otherwise (e.g. a single day of history, or
+// IV unchanged across the whole window).
+function withIvRank(row: RawScreenerRow) {
+  const { impliedVolatility, ivRankWindowDays, ivRankMinIv, ivRankMaxIv, ...rest } = row;
+  const windowDays = ivRankWindowDays === null ? 0 : Number(ivRankWindowDays);
+  const minIv = ivRankMinIv === null ? null : Number(ivRankMinIv);
+  const maxIv = ivRankMaxIv === null ? null : Number(ivRankMaxIv);
+  const currentIv = impliedVolatility === null ? null : Number(impliedVolatility);
+
+  let ivRank: number | null = null;
+  if (windowDays >= 2 && currentIv !== null && minIv !== null && maxIv !== null && maxIv > minIv) {
+    ivRank = ((currentIv - minIv) / (maxIv - minIv)) * 100;
+  }
+
+  return { ...rest, impliedVolatility, ivRank, ivRankWindowDays: windowDays };
+}
 
 screenerRouter.post("/", async (request, response) => {
   const { symbol, strategyKey, notes } = request.body as {
