@@ -5,3 +5,9 @@ dist/
 .playwright-mcp/
 
 tmp/
+
+# Playwright screenshots default to the cwd when no path is given —
+# stray verification screenshots land here, not in tmp/.
+/*.png
+/*.jpg
+/*.jpeg

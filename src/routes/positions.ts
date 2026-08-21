@@ -303,6 +303,128 @@ positionsRouter.patch("/:id", async (request, response) => {
   response.json(result.rows[0]);
 });
 
+// Rolls one short option leg on an open position: closes it (exit_price/exit_at
+// on that leg only, position stays open) and opens a new option leg on the
+// same position — matches the schema comment on trade_alerts.related_position_id
+// ("close the existing short option leg and open a new one, same position"),
+// not a new-position creation like the sourceAlertId flow above. Deliberately
+// narrower than a general partial-leg-close endpoint (still an open gap for
+// other use cases, see PROGRESS.md) — this only ever closes exactly one
+// existing option leg and opens exactly one new option leg, both validated
+// against the same roll alert.
+positionsRouter.post("/:id/roll", async (request, response) => {
+  const { sourceAlertId, closeLegId, exitPrice, exitAt, newLeg } = request.body as {
+    sourceAlertId?: string;
+    closeLegId?: string;
+    exitPrice?: number;
+    exitAt?: string;
+    newLeg?: {
+      strikePrice: number;
+      expiryDate: string;
+      quantity: number;
+      multiplier: number;
+      entryPrice: number;
+      entryAt: string;
+    };
+  };
+
+  if (!sourceAlertId) {
+    response.status(400).json({ error: "sourceAlertId is required." });
+    return;
+  }
+  if (!closeLegId || typeof exitPrice !== "number" || exitPrice < 0 || !exitAt) {
+    response.status(400).json({ error: "closeLegId, a non-negative exitPrice, and exitAt are required." });
+    return;
+  }
+  if (
+    !newLeg ||
+    typeof newLeg.strikePrice !== "number" ||
+    newLeg.strikePrice <= 0 ||
+    !newLeg.expiryDate ||
+    typeof newLeg.quantity !== "number" ||
+    newLeg.quantity <= 0 ||
+    typeof newLeg.multiplier !== "number" ||
+    newLeg.multiplier <= 0 ||
+    typeof newLeg.entryPrice !== "number" ||
+    newLeg.entryPrice < 0 ||
+    !newLeg.entryAt
+  ) {
+    response.status(400).json({ error: "newLeg requires strikePrice, expiryDate, quantity, multiplier, entryPrice, and entryAt." });
+    return;
+  }
+
+  try {
+    await db.transaction(async (trx) => {
+      const position = await trx("positions").where({ id: request.params.id }).first();
+      if (!position) throw Object.assign(new Error("Position not found."), { statusCode: 404 });
+      if (position.status !== "open") throw Object.assign(new Error("Position is already closed."), { statusCode: 409 });
+
+      const alert = await trx("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
+      if (!alert) throw Object.assign(new Error("Pending trade alert not found for sourceAlertId."), { statusCode: 404 });
+      if (alert.alert_type !== "roll") throw Object.assign(new Error("sourceAlertId is not a roll alert."), { statusCode: 400 });
+      if (alert.related_position_id !== position.id) {
+        throw Object.assign(new Error("sourceAlertId does not match this position."), { statusCode: 400 });
+      }
+
+      const closingLeg = await trx("position_legs").where({ id: closeLegId, position_id: position.id }).first();
+      if (!closingLeg) throw Object.assign(new Error("Leg not found on this position."), { statusCode: 404 });
+      if (closingLeg.leg_type !== "option") throw Object.assign(new Error("Only option legs can be rolled."), { statusCode: 400 });
+      if (closingLeg.exit_at) throw Object.assign(new Error("Leg is already closed."), { statusCode: 409 });
+
+      await trx("position_legs").where({ id: closeLegId }).update({ exit_price: exitPrice, exit_at: exitAt });
+      await trx("trades").insert({
+        position_leg_id: closeLegId,
+        side: closingTradeSide(closingLeg.side),
+        quantity: closingLeg.quantity,
+        price: exitPrice,
+        executed_at: exitAt,
+        is_closing_trade: true,
+      });
+
+      const [insertedLeg] = await trx("position_legs")
+        .insert({
+          position_id: position.id,
+          leg_type: "option",
+          side: closingLeg.side,
+          quantity: newLeg.quantity,
+          option_type: closingLeg.option_type,
+          strike_price: newLeg.strikePrice,
+          expiry_date: newLeg.expiryDate,
+          multiplier: newLeg.multiplier,
+          entry_price: newLeg.entryPrice,
+          entry_at: newLeg.entryAt,
+        })
+        .returning(["id", "side", "quantity", "entry_price", "entry_at"]);
+
+      await trx("trades").insert({
+        position_leg_id: insertedLeg.id,
+        side: openingTradeSide(insertedLeg.side),
+        quantity: insertedLeg.quantity,
+        price: insertedLeg.entry_price,
+        executed_at: insertedLeg.entry_at,
+        is_closing_trade: false,
+      });
+
+      await trx("trade_alerts").where({ id: sourceAlertId }).update({
+        status: "approved",
+        resulting_position_id: position.id,
+        reviewed_by_user_id: request.session.userId,
+        reviewed_at: trx.fn.now(),
+      });
+    });
+  } catch (error) {
+    const statusCode = (error as { statusCode?: number }).statusCode;
+    if (statusCode) {
+      response.status(statusCode).json({ error: (error as Error).message });
+      return;
+    }
+    throw error;
+  }
+
+  const result = await db.raw(`${positionSelect} WHERE p.id = ?`, [request.params.id]);
+  response.json(result.rows[0]);
+});
+
 positionsRouter.post("/:id/close", async (request, response) => {
   const { legs } = request.body as { legs?: { legId: string; exitPrice: number; exitAt: string }[] };
 
