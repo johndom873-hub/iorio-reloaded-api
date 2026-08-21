@@ -4,6 +4,7 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchNewTickerData } from "../ibkr/fetchNewTickerData.js";
 import { fetchLiveGreeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -49,6 +50,14 @@ function validateLegInput(leg: LegInput): string | null {
 }
 
 // Aggregates legs as JSON per position — same raw-query style as screener.ts.
+// realizedPnl/capitalAtRisk formulas approved 2026-08-21:
+//   realizedPnl = sum over all exited legs of (exit - entry) * qty * multiplier
+//     * (short ? -1 : 1) — same shape as the Trade Blotter's approved formula
+//     (2026-08-20), aggregated per position. Includes a rolled-away leg's
+//     locked-in gain even while the position is still open.
+//   capitalAtRisk = entry-time capital committed, same definition as Trade
+//     Alerts' approved capitalAtRisk (spot for covered calls, strike for
+//     CSPs) but from entry actuals rather than a scan-time estimate.
 const positionSelect = `
   SELECT
     p.id,
@@ -86,7 +95,34 @@ const positionSelect = `
         WHERE pl.position_id = p.id
       ),
       '[]'
-    ) AS legs
+    ) AS legs,
+    COALESCE(
+      (
+        SELECT SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.exit_price IS NOT NULL
+      ),
+      0
+    ) AS "realizedPnl",
+    CASE
+      WHEN p.strategy_key = 'covered_call' THEN (
+        SELECT pl.entry_price * pl.quantity
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'stock'
+        LIMIT 1
+      )
+      ELSE (
+        -- Cash-secured puts have no stock leg — collateral is the option
+        -- leg's strike. Prefers the currently-open leg (still-live
+        -- collateral) over an already-rolled-away one, falling back to the
+        -- most recent by entry date for closed positions.
+        SELECT pl.strike_price * pl.multiplier * pl.quantity
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'option'
+        ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
+        LIMIT 1
+      )
+    END AS "capitalAtRisk"
   FROM positions p
   JOIN tickers t ON t.id = p.ticker_id
 `;
@@ -150,6 +186,70 @@ positionsRouter.get("/greeks", async (request, response) => {
 
   const greeks = await fetchLiveGreeks(contracts);
   response.json(greeks);
+});
+
+// On-demand unrealized P&L for open positions — mirrors /greeks's shape
+// (batch lookup by id, live IBKR round-trip). Unrealized-only: the SQL in
+// positionSelect above already covers realizedPnl/capitalAtRisk from
+// stored data with no live call needed. unrealizedPnl only marks
+// currently-open legs (exit_at IS NULL) to market — an already-rolled-away
+// leg's gain is locked in and already counted in realizedPnl, so it isn't
+// re-priced live here.
+positionsRouter.get("/pnl", async (request, response) => {
+  const positionIdsParam = request.query.positionIds as string | undefined;
+  if (!positionIdsParam) {
+    response.json({});
+    return;
+  }
+  const positionIds = positionIdsParam.split(",").filter(Boolean);
+
+  const legRows = await db("position_legs as pl")
+    .join("positions as p", "p.id", "pl.position_id")
+    .join("tickers as t", "t.id", "p.ticker_id")
+    .whereIn("pl.position_id", positionIds)
+    .andWhere("p.status", "open")
+    .andWhere("pl.exit_at", null)
+    .select(
+      "pl.id",
+      "pl.position_id as positionId",
+      "pl.leg_type as legType",
+      "pl.side",
+      "pl.quantity",
+      "pl.multiplier",
+      "pl.entry_price as entryPrice",
+      "pl.option_type as optionType",
+      "pl.strike_price as strikePrice",
+      db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as \"expiryDate\""),
+      "t.symbol",
+    );
+
+  const priceContracts: PriceContract[] = legRows.map((leg) => ({
+    key: leg.id,
+    legType: leg.legType,
+    symbol: leg.symbol,
+    expiry: leg.expiryDate ?? undefined,
+    strike: leg.strikePrice ? Number(leg.strikePrice) : undefined,
+    right: leg.optionType === "call" ? OptionType.Call : leg.optionType === "put" ? OptionType.Put : undefined,
+  }));
+  const pricesByLegId = await fetchLivePrices(priceContracts);
+
+  const unrealizedByPositionId: Record<string, number | null> = {};
+  for (const positionId of positionIds) unrealizedByPositionId[positionId] = 0;
+
+  for (const leg of legRows) {
+    if (unrealizedByPositionId[leg.positionId] === null) continue;
+    const currentPrice = pricesByLegId[leg.id];
+    if (currentPrice === null || currentPrice === undefined) {
+      unrealizedByPositionId[leg.positionId] = null;
+      continue;
+    }
+    const sign = leg.side === "short" ? -1 : 1;
+    const entryPrice = Number(leg.entryPrice);
+    unrealizedByPositionId[leg.positionId] =
+      (unrealizedByPositionId[leg.positionId] ?? 0) + (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
+  }
+
+  response.json(unrealizedByPositionId);
 });
 
 positionsRouter.get("/:id", async (request, response) => {
