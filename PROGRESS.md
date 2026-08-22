@@ -1,6 +1,6 @@
 # Iorio Reloaded — Progress Tracker
 
-Last updated: 2026-08-21
+Last updated: 2026-08-22
 
 ## Vision
 Multi-strategy options trading system. Business user checks in daily, reviews suggested opportunities and open positions, approves/rejects/modifies trades. Trades execute (semi-automated) via IBKR once confirmed. Node.js + React + Postgres, hosted on Heroku.
