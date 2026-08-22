@@ -18,6 +18,7 @@
     "migrate:make": "tsx node_modules/.bin/knex migrate:make --knexfile src/db/knexfile.ts -x ts",
     "test": "vitest run",
     "manage-user": "tsx scripts/manage-user.ts",
+    "sync-dev-db": "bash scripts/sync-dev-db.sh",
     "job:daily-market-data": "tsx scripts/run-daily-market-data-job.ts",
     "job:daily-pnl-snapshot": "tsx scripts/run-daily-pnl-snapshot-job.ts",
     "job:trade-alerts": "tsx scripts/run-trade-alert-generation-job.ts",
