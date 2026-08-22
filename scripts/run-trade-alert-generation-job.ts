@@ -32,7 +32,7 @@ import { runJob } from "../src/lib/runJob.js";
 
 async function main(): Promise<void> {
   await runJob("trade_alert_generation", async () => {
-    const { tickersScanned, totalNewAlerts } = await runTradeAlertGeneration((event) => {
+    const { tickersScanned, totalNewAlerts, newAlertLines, rollAlertLines } = await runTradeAlertGeneration((event) => {
       if (event.type === "ticker") {
         console.log(`${event.symbol} (${event.strategyKey}): ${event.candidateCount} candidate(s) within delta/DTE window.`);
       } else if (event.type === "tickerError") {
@@ -41,9 +41,20 @@ async function main(): Promise<void> {
     });
 
     console.log(`Generated ${totalNewAlerts} new trade alert(s) across ${tickersScanned} ticker-strategy scan(s).`);
+
+    // Per-trade detail, not just a count — Telegram's 4096-char cap is
+    // handled by notifyTelegram's truncation, so a very large batch just
+    // gets cut off rather than failing to send.
+    const messageBlocks: string[] = [];
+    if (totalNewAlerts > 0) {
+      messageBlocks.push(`📋 ${totalNewAlerts} new trade alert(s) ready for review`);
+      if (newAlertLines.length > 0) messageBlocks.push(newAlertLines.join("\n\n"));
+      if (rollAlertLines.length > 0) messageBlocks.push(rollAlertLines.join("\n\n"));
+    }
+
     return {
       details: { tickersScanned, totalNewAlerts },
-      notify: totalNewAlerts > 0 ? `📋 Trade Alerts: ${totalNewAlerts} new alert(s) ready for review.` : undefined,
+      notify: messageBlocks.length > 0 ? messageBlocks.join("\n\n") : undefined,
     };
   });
 }

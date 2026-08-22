@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { generateTradeAlertCandidates, type AlertStrategyKey } from "./generateTradeAlertCandidates.js";
 import { evaluateRollCandidate, type OpenShortLeg, type RollSuggestion } from "./generateRollCandidates.js";
+import { formatNewTradeAlertLine, formatRollAlertLine } from "../lib/formatTradeAlertMessage.js";
 
 export const tradeAlertStrategies: AlertStrategyKey[] = ["covered_call", "cash_secured_put"];
 const maxAlertsPerTicker = 3;
@@ -29,6 +30,8 @@ export type TradeAlertGenerationEvent =
 export interface TradeAlertGenerationResult {
   tickersScanned: number;
   totalNewAlerts: number;
+  newAlertLines: string[];
+  rollAlertLines: string[];
 }
 
 function rationaleFor(strategyKey: AlertStrategyKey, symbol: string, candidate: { strike: number; expiry: string; dte: number; delta: number; premium: number; annualizedYield: number }): string {
@@ -75,6 +78,8 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
 
   let totalNewAlerts = 0;
   let tickersScanned = 0;
+  const newAlertLines: string[] = [];
+  const rollAlertLines: string[] = [];
   const settingsByStrategy = new Map<AlertStrategyKey, ReturnType<typeof toSettings>>();
 
   try {
@@ -118,6 +123,7 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
             rationale: rationaleFor(strategyKey, ticker.symbol, candidate),
             status: "pending",
           });
+          newAlertLines.push(formatNewTradeAlertLine(ticker.symbol, strategyKey, candidate));
         }
         onEvent({ type: "ticker", strategyKey, symbol: ticker.symbol, candidateCount: topCandidates.length });
         totalNewAlerts += topCandidates.length;
@@ -209,6 +215,9 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
         rationale: rationaleForRoll(leg.symbol, leg, suggestion),
         status: "pending",
       });
+      rollAlertLines.push(
+        formatRollAlertLine(leg.symbol, { strike: leg.strike, expiryIso: toIsoDate(leg.expiry), right: leg.right, entryPrice: leg.entryPrice }, suggestion),
+      );
       onEvent({ type: "rollCandidate", symbol: leg.symbol, triggered: true });
       totalNewAlerts += 1;
     }
@@ -216,5 +225,5 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
     connection.disconnect();
   }
 
-  return { tickersScanned, totalNewAlerts };
+  return { tickersScanned, totalNewAlerts, newAlertLines, rollAlertLines };
 }
