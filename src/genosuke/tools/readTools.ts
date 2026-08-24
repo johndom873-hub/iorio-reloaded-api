@@ -94,7 +94,8 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "list_trades",
-    description: "Execution history (the Trade Blotter) — every recorded fill, with computed P&L on closing trades. Filterable by strategy, symbol, and date range.",
+    description:
+      "The Trade Blotter — real fills (`trades`, with computed P&L on closing trades) AND any order that hasn't reached a terminal state yet (`pendingOrders`: pending_confirmation/confirmed/submitted/cancel_requested, one row per leg, includes ibkrOrderId and errorMessage). This is the tool to check the status of an order that was just placed/confirmed — a submitted order won't show up anywhere else (not in list_positions, not in get_position) until it fills. Filterable by strategy, symbol, and date range.",
     tier: "read",
     parameters: {
       type: "object",

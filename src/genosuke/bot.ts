@@ -124,7 +124,13 @@ async function handleMessage(
     const { text } = await chatOnce({ messages: history.messages, userMessage, chatId, adapter, api, telegram });
     history.lastActivity = Date.now();
     trimHistory(history);
-    await telegram.sendMessage(chatId, text, { replyToMessageId: msg.message_id });
+    // A financial-write tool call sends its own Yes/Cancel confirmation
+    // card directly (see chat.ts) and the model is told to reply with
+    // nothing further — text can legitimately be empty here, and Telegram
+    // rejects an empty sendMessage outright.
+    if (text.trim()) {
+      await telegram.sendMessage(chatId, text, { replyToMessageId: msg.message_id });
+    }
   } catch (error) {
     console.error("Genosuke: chatOnce error", error);
     await telegram.sendMessage(chatId, "Sorry, hit an error answering that.", { replyToMessageId: msg.message_id });

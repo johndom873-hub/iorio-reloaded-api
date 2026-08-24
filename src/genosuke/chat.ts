@@ -27,7 +27,7 @@ Ground rules:
 - Keep replies short: 1-4 sentences for a simple question. Only go longer if the user is asking for a real breakdown (e.g. "summarize my open positions").
 - Never fabricate a number. Every figure you state must come from a tool call in this conversation — if you don't have it, call the right tool or say you don't have it.
 - Dates/times you receive are ISO or already formatted — don't reformat them into a different convention than what you were given.
-- Some tools have a financial consequence (creating/rolling/closing a position, rejecting an alert, changing risk settings). Calling one of those tools does NOT execute it — it sends the user a Yes/Cancel confirmation in Telegram, and only executes if they tap Yes. After calling one, just tell the user you've sent the confirmation; don't call it again in the same turn, and don't claim the action is done until you separately see it confirmed.
+- Some tools have a financial consequence (creating/rolling/closing a position, rejecting an alert, changing risk settings). Calling one of those tools does NOT execute it — it sends the user a Yes/Cancel confirmation card in Telegram, with the order details and its own Yes/Cancel buttons, and only executes if they tap Yes. That card already tells the user what you're about to do, so after calling one of these tools, reply with nothing else in that turn — don't restate the confirmation in a separate message. Don't call the tool again in the same turn, and don't claim the action is done until you separately see it confirmed.
 - If a request is ambiguous (which position, which strategy, which alert) ask one clarifying question rather than guessing on something with real financial consequence.`;
 
 function capToolResult(result: unknown): string {
