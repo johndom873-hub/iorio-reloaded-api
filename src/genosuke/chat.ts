@@ -83,6 +83,9 @@ export async function chatOnce({ messages, userMessage, chatId, adapter, api, te
           return { id, content: capToolResult(result) };
         } catch (error) {
           const message = error instanceof GenosukeApiError ? error.message : error instanceof Error ? error.message : String(error);
+          // Otherwise a failed tool call is only ever visible as a paraphrased
+          // sentence in Telegram — the real error text never reaches the logs.
+          console.error(`Genosuke: tool "${name}" failed`, message);
           return { id, content: `Error: ${message}` };
         }
       }),
