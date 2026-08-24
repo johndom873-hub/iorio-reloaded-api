@@ -33,7 +33,7 @@ export async function fetchLivePrices(contracts: PriceContract[]): Promise<Recor
 
     function onTickPrice(reqId: number, tickType: number, price: number) {
       const contract = reqIdToContract.get(reqId);
-      if (!contract || price < 0) return;
+      if (!contract || price <= 0) return;
       // Delayed tick types: last=68.
       if (tickType === 68) priceByKey.set(contract.key, price);
     }

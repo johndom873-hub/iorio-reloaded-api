@@ -80,7 +80,7 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
     const timer = setTimeout(() => reject(new Error(`Pricing snapshot timeout for ${symbol}`)), 10_000);
 
     function onTickPrice(id: number, tickType: number, price: number) {
-      if (id !== reqId || price < 0) return;
+      if (id !== reqId || price <= 0) return;
       // Delayed tick types: bid=66, ask=67, last=68, high=72, low=73, close=75, open=76.
       if (tickType === 66) pricing.bid = price;
       if (tickType === 67) pricing.ask = price;
@@ -124,6 +124,12 @@ export async function lookupHistoricalBars(
     const bars: PriceBar[] = [];
     const timer = setTimeout(() => reject(new Error(`Historical data timeout for ${symbol}`)), 20_000);
 
+    function cleanup() {
+      clearTimeout(timer);
+      ib.removeListener(EventName.historicalData, onHistoricalData);
+      ib.removeListener(EventName.error, onError);
+    }
+
     function onHistoricalData(
       id: number,
       date: string,
@@ -135,16 +141,22 @@ export async function lookupHistoricalBars(
     ) {
       if (id !== reqId) return;
       if (date.startsWith("finished")) {
-        clearTimeout(timer);
-        ib.removeListener(EventName.historicalData, onHistoricalData);
+        cleanup();
         resolve(bars);
         return;
       }
       bars.push({ time: parseIbkrBarTime(date), open, high, low, close, volume });
     }
 
+    function onError(error: Error, code: number, errorReqId: number) {
+      if (errorReqId !== reqId) return;
+      cleanup();
+      reject(new Error(`Historical data error for ${symbol} (code ${code}): ${error.message}`));
+    }
+
     const { barSize, duration } = rangeConfig[range];
     ib.on(EventName.historicalData, onHistoricalData);
+    ib.on(EventName.error, onError);
     ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), "", duration, barSize, WhatToShow.TRADES, 1, 2, false);
   });
 }
