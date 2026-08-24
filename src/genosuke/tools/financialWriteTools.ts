@@ -48,7 +48,8 @@ export const financialWriteTools: GenosukeTool[] = [
         strategyKey: strategyKeyEnum,
         stock: {
           type: "object",
-          description: "Required for covered_call. Buy-write stock leg.",
+          description:
+            "Buy-write stock leg — required for covered_call, unused for cash_secured_put. Never ask the human how many shares or what stock price to use: for a standard buy-write, compute quantity yourself as option.quantity * 100 and limitPrice as the current stock price (from get_ticker_quote or the source alert's spot price, rounded to the nearest cent) — pass it here so the human sees the real stock leg on the Yes/Cancel confirmation before it's sent to IBKR. If omitted, the server will auto-fill the same 100-shares-per-contract default using its own live quote, but the human then won't see the stock leg in the confirmation text, so only rely on that fallback if no price source is available. Only ask the human explicitly if they want deliberate over-coverage (more shares than the calls need) or a stock limit different from market.",
           properties: { quantity: { type: "number" }, limitPrice: { type: "number" } },
           required: ["quantity", "limitPrice"],
         },

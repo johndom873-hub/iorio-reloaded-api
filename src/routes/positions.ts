@@ -28,6 +28,31 @@ function validateCoveredCallCoverage(stockShares: number, shortCallCoveredShares
   return null;
 }
 
+// IBKR's minimum price variation is a penny for both US equities and
+// equity options priced under $3 (nickels above that, but this codebase
+// hasn't needed to special-case it yet). A combo/BAG order's net limit
+// price is the sum of its legs' unitPrices (computeNetLimitPrice), so a
+// leg with a stray third decimal (e.g. a $0.375 option premium) silently
+// produces an invalid net price even when each leg looks fine on its own.
+// Real bug found 2026-08-24: a DRAM buy-write was rejected with IBKR error
+// 110 because the option leg's model-picked mid-price (0.375) pushed the
+// combo's net price to 52.885.
+function roundToCents(price: number): number {
+  return Math.round(price * 100) / 100;
+}
+
+// Real bug found 2026-08-24: a manual AAOI order was submitted with
+// expiryDate "2026-08-28" (dashes) instead of the "YYYYMMDD" the IBKR
+// contract lookup requires — resolveLegContractIds silently failed to
+// resolve the contract and the order died with a generic "could not
+// resolve one or more contract ids" error, well after the human had
+// already confirmed it. Normalize (strip separators) and validate up
+// front so a malformed date is rejected immediately with a clear message.
+function normalizeExpiryDate(raw: string): string | null {
+  const digitsOnly = raw.replace(/[^0-9]/g, "");
+  return /^\d{8}$/.test(digitsOnly) ? digitsOnly : null;
+}
+
 // Aggregates legs as JSON per position — same raw-query style as screener.ts.
 // realizedPnl/capitalAtRisk formulas approved 2026-08-21:
 //   realizedPnl = sum over all exited legs of (exit - entry) * qty * multiplier
@@ -336,18 +361,18 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(400).json({ error: "option.strikePrice and option.expiryDate are required." });
     return;
   }
-  if (strategyKey === "covered_call") {
-    if (!stock || typeof stock.quantity !== "number" || stock.quantity <= 0) {
-      response.status(400).json({ error: "A positive stock quantity is required for a covered call." });
+  const normalizedExpiry = normalizeExpiryDate(option.expiryDate);
+  if (!normalizedExpiry) {
+    response.status(400).json({ error: `option.expiryDate must be a YYYYMMDD date, got "${option.expiryDate}".` });
+    return;
+  }
+  if (stock !== undefined) {
+    if (typeof stock.quantity !== "number" || stock.quantity <= 0) {
+      response.status(400).json({ error: "stock.quantity must be a positive number when stock is provided." });
       return;
     }
     if (typeof stock.limitPrice !== "number" || stock.limitPrice < 0) {
       response.status(400).json({ error: "stock.limitPrice must be a non-negative number." });
-      return;
-    }
-    const coverageError = validateCoveredCallCoverage(stock.quantity, option.quantity * 100);
-    if (coverageError) {
-      response.status(400).json({ error: coverageError });
       return;
     }
   }
@@ -358,18 +383,50 @@ positionsRouter.post("/orders", async (request, response) => {
     return;
   }
 
+  // A covered call's stock leg is a standard 100-shares-per-contract
+  // buy-write unless the caller explicitly overrides it (e.g. deliberate
+  // over-coverage or a specific stock limit) — approved 2026-08-24 so
+  // Genosuke stops asking "how many shares?" for the common case. Only
+  // covered_call needs a stock leg at all; cash_secured_put never does.
+  let resolvedStock = stock;
+  if (strategyKey === "covered_call" && !resolvedStock) {
+    const livePrices = await fetchLivePrices([{ key: "stock", legType: "stock", symbol: ticker.symbol }]);
+    const price = livePrices["stock"];
+    if (price === null || price === undefined) {
+      response.status(400).json({
+        error: "Could not fetch a live stock price to auto-fill the stock leg (markets may be closed) — pass stock.quantity/stock.limitPrice explicitly.",
+      });
+      return;
+    }
+    resolvedStock = { quantity: option.quantity * 100, limitPrice: roundToCents(price) };
+  }
+
+  if (strategyKey === "covered_call") {
+    const coverageError = validateCoveredCallCoverage(resolvedStock!.quantity, option.quantity * 100);
+    if (coverageError) {
+      response.status(400).json({ error: coverageError });
+      return;
+    }
+  }
+
   const legs: OrderLegPayload[] = [];
   if (strategyKey === "covered_call") {
-    legs.push({ role: "stock", action: OrderAction.BUY, symbol: ticker.symbol, quantity: stock!.quantity, unitPrice: stock!.limitPrice });
+    legs.push({
+      role: "stock",
+      action: OrderAction.BUY,
+      symbol: ticker.symbol,
+      quantity: resolvedStock!.quantity,
+      unitPrice: roundToCents(resolvedStock!.limitPrice),
+    });
   }
   legs.push({
     role: "option",
     action: OrderAction.SELL,
     symbol: ticker.symbol,
     quantity: option.quantity,
-    unitPrice: option.limitPrice,
+    unitPrice: roundToCents(option.limitPrice),
     strike: option.strikePrice,
-    expiry: option.expiryDate,
+    expiry: normalizedExpiry,
     right: strategyKey === "covered_call" ? "C" : "P",
   });
 
@@ -564,6 +621,11 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     response.status(400).json({ error: "newLeg requires strikePrice, expiryDate, quantity, and limitPrice." });
     return;
   }
+  const normalizedNewLegExpiry = normalizeExpiryDate(newLeg.expiryDate);
+  if (!normalizedNewLegExpiry) {
+    response.status(400).json({ error: `newLeg.expiryDate must be a YYYYMMDD date, got "${newLeg.expiryDate}".` });
+    return;
+  }
 
   const position = await db("positions").where({ id: request.params.id }).first();
   if (!position) {
@@ -633,7 +695,7 @@ positionsRouter.post("/:id/roll", async (request, response) => {
       action: closeAction,
       symbol: ticker.symbol,
       quantity: closingLeg.quantity,
-      unitPrice: closeLimitPrice,
+      unitPrice: roundToCents(closeLimitPrice),
       strike: Number(closingLeg.strike_price),
       expiry: closingLeg.expiry_date,
       right,
@@ -645,9 +707,9 @@ positionsRouter.post("/:id/roll", async (request, response) => {
       action: openAction,
       symbol: ticker.symbol,
       quantity: newLeg.quantity,
-      unitPrice: newLeg.limitPrice,
+      unitPrice: roundToCents(newLeg.limitPrice),
       strike: newLeg.strikePrice,
-      expiry: newLeg.expiryDate,
+      expiry: normalizedNewLegExpiry,
       right,
     },
   ];
@@ -713,7 +775,7 @@ positionsRouter.post("/:id/close", async (request, response) => {
     action: leg.side === "long" ? OrderAction.SELL : OrderAction.BUY, // closing action is the inverse of how it was opened
     symbol: ticker.symbol,
     quantity: leg.quantity,
-    unitPrice: limitPriceByLegId.get(leg.id)!,
+    unitPrice: roundToCents(limitPriceByLegId.get(leg.id)!),
     strike: leg.strike_price ? Number(leg.strike_price) : undefined,
     expiry: leg.expiry_date ?? undefined,
     right: leg.option_type === "call" ? "C" : leg.option_type === "put" ? "P" : undefined,
