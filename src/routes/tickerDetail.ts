@@ -3,6 +3,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { streamTickerDetail } from "../ibkr/streamTickerDetail.js";
 import { streamPositionQuote } from "../ibkr/streamPositionQuote.js";
 import { fetchPriceBars, type ChartRange } from "../ibkr/fetchTickerOverview.js";
+import { fetchTickerQuoteSnapshot } from "../ibkr/fetchTickerQuoteSnapshot.js";
 
 export const tickerDetailRouter = Router();
 tickerDetailRouter.use(requireAuth);
@@ -87,6 +88,17 @@ tickerDetailRouter.get("/:symbol/position-quote/stream", async (request, respons
     clearInterval(heartbeat);
     response.end();
   }
+});
+
+// Blocking (not SSE) quote lookup — built for Genosuke's get_ticker_quote
+// tool call (a plain request/response, not a UI that can consume a stream),
+// but usable by anything else that wants a one-shot quote. See
+// fetchTickerQuoteSnapshot.ts for why this always returns a last-known
+// price but only best-effort live pricing/option chain.
+tickerDetailRouter.get("/:symbol/quote", async (request, response) => {
+  const symbol = request.params.symbol.toUpperCase();
+  const snapshot = await fetchTickerQuoteSnapshot(symbol);
+  response.json(snapshot);
 });
 
 tickerDetailRouter.get("/:symbol/chart", async (request, response) => {

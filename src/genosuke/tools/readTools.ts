@@ -2,13 +2,13 @@
 // Each maps to an existing GET route; Genosuke is just another authenticated
 // client of the same API the frontend uses (see apiClient.ts).
 //
-// Two live-data routes are deliberately NOT exposed here: GET
-// /tickers/:symbol/detail/stream and /tickers/:symbol/position-quote/stream
-// are SSE, not a simple request/response — they don't fit a tool call
-// without extra streaming plumbing. get_position_live_pnl_and_greeks below
-// covers live pricing/greeks for actual positions, which is the case that
-// matters most; live quotes for a ticker not yet held are a gap worth
-// revisiting later if it comes up in practice.
+// The two SSE live-data routes (GET /tickers/:symbol/detail/stream and
+// /tickers/:symbol/position-quote/stream) still aren't exposed directly —
+// SSE doesn't fit a simple request/response tool call. get_ticker_quote
+// below closes the gap this used to leave (a ticker with no open position
+// had no price data source at all, hit in practice 2026-08-24) via a
+// dedicated blocking route, GET /tickers/:symbol/quote, rather than the SSE
+// ones — see fetchTickerQuoteSnapshot.ts.
 import type { GenosukeTool } from "./types.js";
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
@@ -64,6 +64,14 @@ export const readTools: GenosukeTool[] = [
       ]);
       return { greeksByLegId: greeks, unrealizedPnl: (pnl as Record<string, unknown>)[String(input.positionId)] };
     },
+  },
+  {
+    name: "get_ticker_quote",
+    description:
+      "Stock price and option chain for a symbol — including one with no open position and no trade alert (e.g. picking parameters for a manual order). Always returns lastKnownClose (yesterday's-or-earlier daily close, works anytime). live.pricing/live.optionChain (bid/ask/strikes/premiums) are only populated during US market hours — check liveUnavailableReason before assuming live data exists, and never invent a bid/ask/premium if live is null.",
+    tier: "read",
+    parameters: { type: "object", properties: { symbol: { type: "string" } }, required: ["symbol"] },
+    execute: (input, api) => api.get(`/tickers/${String(input.symbol).toUpperCase()}/quote`),
   },
   {
     name: "list_trade_alerts",
