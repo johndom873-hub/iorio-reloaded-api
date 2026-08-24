@@ -49,6 +49,20 @@ function validateLegInput(leg: LegInput): string | null {
   return null;
 }
 
+// Guards against a naked covered call — a short call leg must never cover
+// more shares than the position actually holds long. Approved 2026-08-24
+// after a real prod position (AAOI) was entered with a short call quantity
+// of 100 (contracts) against only 100 shares of stock — 99 contracts naked.
+// Over-coverage (more stock than the short calls need) is allowed; it's
+// conservative, not risky. Only applies to covered_call — cash_secured_put
+// has no stock leg to cover against.
+function validateCoveredCallCoverage(stockShares: number, shortCallCoveredShares: number): string | null {
+  if (shortCallCoveredShares > stockShares) {
+    return `Short call coverage (${shortCallCoveredShares} shares) exceeds stock held (${stockShares} shares) — this would leave the position naked.`;
+  }
+  return null;
+}
+
 // Aggregates legs as JSON per position — same raw-query style as screener.ts.
 // realizedPnl/capitalAtRisk formulas approved 2026-08-21:
 //   realizedPnl = sum over all exited legs of (exit - entry) * qty * multiplier
@@ -349,6 +363,19 @@ positionsRouter.post("/", async (request, response) => {
       return;
     }
   }
+  if (strategyKey === "covered_call") {
+    const stockShares = legs
+      .filter((leg) => leg.legType === "stock" && leg.side === "long")
+      .reduce((sum, leg) => sum + leg.quantity, 0);
+    const shortCallCoveredShares = legs
+      .filter((leg) => leg.legType === "option" && leg.optionType === "call" && leg.side === "short")
+      .reduce((sum, leg) => sum + leg.quantity * leg.multiplier, 0);
+    const coverageError = validateCoveredCallCoverage(stockShares, shortCallCoveredShares);
+    if (coverageError) {
+      response.status(400).json({ error: coverageError });
+      return;
+    }
+  }
 
   const normalizedSymbol = symbol.trim().toUpperCase();
 
@@ -525,6 +552,23 @@ positionsRouter.post("/:id/roll", async (request, response) => {
       if (!closingLeg) throw Object.assign(new Error("Leg not found on this position."), { statusCode: 404 });
       if (closingLeg.leg_type !== "option") throw Object.assign(new Error("Only option legs can be rolled."), { statusCode: 400 });
       if (closingLeg.exit_at) throw Object.assign(new Error("Leg is already closed."), { statusCode: 409 });
+
+      // Same naked-coverage guard as position creation (see
+      // validateCoveredCallCoverage) — a roll must not leave a covered call
+      // under-covered either. Recomputed against the position's other
+      // still-open legs, since a roll only ever touches one option leg.
+      if (position.strategy_key === "covered_call" && closingLeg.option_type === "call" && closingLeg.side === "short") {
+        const openLegs = await trx("position_legs").where({ position_id: position.id, exit_at: null });
+        const stockShares = openLegs
+          .filter((leg) => leg.leg_type === "stock" && leg.side === "long")
+          .reduce((sum, leg) => sum + Number(leg.quantity), 0);
+        const otherOpenShortCallShares = openLegs
+          .filter((leg) => leg.id !== closingLeg.id && leg.leg_type === "option" && leg.option_type === "call" && leg.side === "short")
+          .reduce((sum, leg) => sum + Number(leg.quantity) * Number(leg.multiplier), 0);
+        const shortCallCoveredShares = otherOpenShortCallShares + newLeg.quantity * newLeg.multiplier;
+        const coverageError = validateCoveredCallCoverage(stockShares, shortCallCoveredShares);
+        if (coverageError) throw Object.assign(new Error(coverageError), { statusCode: 400 });
+      }
 
       await trx("position_legs").where({ id: closeLegId }).update({ exit_price: exitPrice, exit_at: exitAt });
       await trx("trades").insert({
