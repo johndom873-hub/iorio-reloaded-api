@@ -2,7 +2,29 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { runTradeAlertGeneration } from "../ibkr/runTradeAlertGeneration.js";
+import { refreshTradeAlert } from "../ibkr/refreshTradeAlert.js";
 import { runJob } from "../lib/runJob.js";
+
+const tradeAlertSelect = `
+  SELECT
+    ta.id,
+    ta.strategy_key AS "strategyKey",
+    ta.alert_type AS "alertType",
+    ta.related_position_id AS "relatedPositionId",
+    ta.suggested_structure AS "suggestedStructure",
+    ta.rationale,
+    ta.status,
+    ta.reviewed_at AS "reviewedAt",
+    ta.resulting_position_id AS "resultingPositionId",
+    ta.created_at AS "createdAt",
+    ta.last_refreshed_at AS "lastRefreshedAt",
+    t.id AS "tickerId",
+    t.symbol,
+    t.company_name AS "companyName",
+    NULLIF(t.sector, '') AS sector
+  FROM trade_alerts ta
+  JOIN tickers t ON t.id = ta.ticker_id
+`;
 
 export const tradeAlertsRouter = Router();
 tradeAlertsRouter.use(requireAuth);
@@ -34,23 +56,7 @@ tradeAlertsRouter.get("/", async (request, response) => {
 
   const result = await db.raw(
     `
-    SELECT
-      ta.id,
-      ta.strategy_key AS "strategyKey",
-      ta.alert_type AS "alertType",
-      ta.related_position_id AS "relatedPositionId",
-      ta.suggested_structure AS "suggestedStructure",
-      ta.rationale,
-      ta.status,
-      ta.reviewed_at AS "reviewedAt",
-      ta.resulting_position_id AS "resultingPositionId",
-      ta.created_at AS "createdAt",
-      t.id AS "tickerId",
-      t.symbol,
-      t.company_name AS "companyName",
-      NULLIF(t.sector, '') AS sector
-    FROM trade_alerts ta
-    JOIN tickers t ON t.id = ta.ticker_id
+    ${tradeAlertSelect}
     WHERE ${conditions.join(" AND ")}
     ORDER BY t.symbol, (ta.suggested_structure->>'annualizedYield')::numeric DESC
     `,
@@ -102,6 +108,25 @@ tradeAlertsRouter.get("/run-stream", async (_request, response) => {
     clearInterval(heartbeat);
     response.end();
   }
+});
+
+// Re-quotes one pending alert's exact contract(s) against live IBKR data —
+// built 2026-08-24 so Juan (EU timezone, reviewing the 10pm UTC nightly
+// scan the next morning) can validate a specific alert right as the US
+// market opens without re-running the whole shortlist scan. See
+// refreshTradeAlert.ts for why this is a couple of small IBKR calls, not
+// the multi-strike scan "Run Alerts Now" does. Blocking POST, not SSE —
+// one contract (or two, for a roll) is fast enough not to risk Heroku's
+// router timeout the way the full scan can.
+tradeAlertsRouter.post("/:id/refresh", async (request, response) => {
+  const result = await refreshTradeAlert(request.params.id);
+  if (!result.ok) {
+    response.status(result.error === "Trade alert not found." ? 404 : 422).json({ error: result.error });
+    return;
+  }
+
+  const updated = await db.raw(`${tradeAlertSelect} WHERE ta.id = ?`, [request.params.id]);
+  response.json(updated.rows[0]);
 });
 
 // Only rejection happens directly through this route — approving (with or

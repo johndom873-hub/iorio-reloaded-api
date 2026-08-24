@@ -37,8 +37,11 @@ export interface RollSuggestion {
 // "avoid assignment" trigger was deliberately not added — no rigorous
 // backing found for a specific number, and it cuts against covered calls
 // generally *wanting* assignment per Juan's domain notes.
-const decayThresholdFraction = 0.5;
-const dteThreshold = 21;
+// Exported so refreshTradeAlert.ts's single-alert refresh recomputes a
+// roll's trigger against the exact same approved thresholds, rather than a
+// second hardcoded copy that could silently drift if these ever change.
+export const decayThresholdFraction = 0.5;
+export const dteThreshold = 21;
 
 /**
  * Evaluates one open short option leg for a roll trigger and, if triggered,

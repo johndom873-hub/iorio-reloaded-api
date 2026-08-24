@@ -53,6 +53,14 @@ export const lowStakesWriteTools: GenosukeTool[] = [
     },
   },
   {
+    name: "refresh_trade_alert",
+    description:
+      "Re-quotes a pending trade alert's exact contract(s) against live IBKR data (not a re-run of the ranked candidate scan) — use this to validate a specific alert from the overnight scan is still accurate before recommending it. Only works on a pending alert; fails if IBKR has no live quote right now (e.g. outside market hours).",
+    tier: "low-stakes-write",
+    parameters: { type: "object", properties: { alertId: { type: "string" } }, required: ["alertId"] },
+    execute: (input, api) => api.post(`/trade-alerts/${input.alertId}/refresh`, {}),
+  },
+  {
     name: "trigger_ibkr_health_check",
     description: "Runs a real IBKR Gateway health check right now (same check the hourly scheduled job runs) and returns the result.",
     tier: "low-stakes-write",
