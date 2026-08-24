@@ -1,8 +1,8 @@
 // Thin wrapper over the Telegram Bot API endpoints Genosuke needs beyond
-// notifyTelegram.ts's plain sendMessage (getUpdates polling, inline-keyboard
-// confirmations, answering callback queries). Uses fetch, not axios —
-// matches this project's existing convention (notifyTelegram.ts), unlike
-// menaris-admin-api's Jack which uses axios.
+// notifyTelegram.ts's plain sendMessage (webhook registration, inline-
+// keyboard confirmations, answering callback queries). Uses fetch, not
+// axios — matches this project's existing convention (notifyTelegram.ts),
+// unlike menaris-admin-api's Jack which uses axios.
 const MESSAGE_LIMIT = 4096;
 const TRUNCATED_SUFFIX = "... (message truncated)";
 
@@ -47,26 +47,13 @@ export class TelegramApi {
     return json.result;
   }
 
-  async deleteWebhook(): Promise<void> {
-    await fetch(`${this.base}/deleteWebhook`, { method: "POST" }).catch(() => {});
-  }
-
-  async getUpdates(offset: number, timeoutSeconds: number, signal: AbortSignal): Promise<TelegramUpdate[]> {
-    const params = new URLSearchParams({
-      offset: String(offset),
-      timeout: String(timeoutSeconds),
-      allowed_updates: JSON.stringify(["message", "callback_query"]),
+  async setWebhook(url: string, secretToken: string): Promise<void> {
+    const response = await fetch(`${this.base}/setWebhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, secret_token: secretToken, allowed_updates: ["message", "callback_query"] }),
     });
-    const response = await fetch(`${this.base}/getUpdates?${params.toString()}`, { signal });
-    const json = (await response.json()) as { result: TelegramUpdate[] };
-    return json.result ?? [];
-  }
-
-  async peekLatestUpdateId(): Promise<number | null> {
-    const params = new URLSearchParams({ offset: "-1", limit: "1" });
-    const response = await fetch(`${this.base}/getUpdates?${params.toString()}`);
-    const json = (await response.json()) as { result: TelegramUpdate[] };
-    return json.result?.[0]?.update_id ?? null;
+    if (!response.ok) throw new Error(`setWebhook failed (${response.status}): ${await response.text()}`);
   }
 
   async sendMessage(chatId: string, text: string, options: { replyToMessageId?: number; buttons?: TelegramInlineButton[][] } = {}): Promise<void> {

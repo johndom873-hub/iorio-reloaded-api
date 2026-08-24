@@ -1,6 +1,7 @@
 import express, { type ErrorRequestHandler } from "express";
 import cors from "cors";
 import { environment } from "./config/env.js";
+import { handleGenosukeWebhook } from "./genosuke/bot.js";
 import { sessionMiddleware } from "./middleware/session.js";
 import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
@@ -30,6 +31,9 @@ app.use(express.json());
 app.use(sessionMiddleware);
 
 app.use(healthRouter);
+// Telegram calls this directly (no session) — authenticated by the shared
+// secret header checked inside the handler instead.
+app.post("/genosuke/webhook", handleGenosukeWebhook);
 app.use("/auth", authRouter);
 app.use("/screener", screenerRouter);
 app.use("/tickers", tickerDetailRouter);

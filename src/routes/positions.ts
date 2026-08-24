@@ -1,10 +1,10 @@
 import { Router } from "express";
-import { OptionType } from "@stoqey/ib";
+import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { fetchNewTickerData } from "../ibkr/fetchNewTickerData.js";
 import { fetchLiveGreeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/orderPayload.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -12,42 +12,7 @@ positionsRouter.use(requireAuth);
 // v1 strategy scope — matches screener.ts.
 const validStrategyKeys = ["covered_call", "cash_secured_put"];
 const validStatuses = ["open", "closed"];
-
-interface LegInput {
-  legType: "stock" | "option";
-  side: "long" | "short";
-  quantity: number;
-  optionType?: "call" | "put";
-  strikePrice?: number;
-  expiryDate?: string;
-  multiplier: number;
-  entryPrice: number;
-  entryAt: string;
-}
-
-// A "long" leg was bought to open (buy) and must be sold to close (sell); a
-// "short" leg was sold to open (sell) and must be bought back to close (buy).
-function openingTradeSide(legSide: "long" | "short"): "buy" | "sell" {
-  return legSide === "long" ? "buy" : "sell";
-}
-function closingTradeSide(legSide: "long" | "short"): "buy" | "sell" {
-  return legSide === "long" ? "sell" : "buy";
-}
-
-function validateLegInput(leg: LegInput): string | null {
-  if (leg.legType !== "stock" && leg.legType !== "option") return "Invalid legType.";
-  if (leg.side !== "long" && leg.side !== "short") return "Invalid side.";
-  if (typeof leg.quantity !== "number" || leg.quantity <= 0) return "quantity must be a positive number.";
-  if (typeof leg.multiplier !== "number" || leg.multiplier <= 0) return "multiplier must be a positive number.";
-  if (typeof leg.entryPrice !== "number" || leg.entryPrice < 0) return "entryPrice must be a non-negative number.";
-  if (!leg.entryAt) return "entryAt is required.";
-  if (leg.legType === "option") {
-    if (leg.optionType !== "call" && leg.optionType !== "put") return "optionType must be call or put for an option leg.";
-    if (typeof leg.strikePrice !== "number" || leg.strikePrice <= 0) return "strikePrice must be a positive number for an option leg.";
-    if (!leg.expiryDate) return "expiryDate is required for an option leg.";
-  }
-  return null;
-}
+const orderRequestsChannel = "order_requests_channel";
 
 // Guards against a naked covered call — a short call leg must never cover
 // more shares than the position actually holds long. Approved 2026-08-24
@@ -321,28 +286,35 @@ positionsRouter.get("/pnl", async (request, response) => {
   response.json(result);
 });
 
-positionsRouter.get("/:id", async (request, response) => {
-  const result = await db.raw(`${positionSelect} WHERE p.id = ?`, [request.params.id]);
-  const position = result.rows[0];
-  if (!position) {
-    response.status(404).json({ error: "Position not found." });
-    return;
-  }
-  response.json(position);
-});
+// --- Order placement (approved 2026-08-24 — see the plan doc) ---
+// The web dyno never writes positions/position_legs/trades directly for a
+// new/closed/rolled leg anymore. It only ever builds an order_requests row
+// and, on confirm, NOTIFYs the worker (src/worker.ts) to actually place the
+// order with IBKR. Only the worker writes those three tables now, and only
+// from data IBKR itself reported (a real fill, a real position) — see
+// "IBKR is the source of truth" in PROGRESS.md.
+//
+// Registered here, before GET /:id, so Express's registration-order route
+// matching doesn't let GET /:id's wildcard segment swallow "/orders" as an
+// id value.
 
-positionsRouter.post("/", async (request, response) => {
-  const { symbol, strategyKey, notes, priceTarget, legs, sourceAlertId } = request.body as {
-    symbol?: string;
-    strategyKey?: string;
-    notes?: string | null;
-    priceTarget?: number | null;
-    legs?: LegInput[];
-    // If this position originated from a Trade Alert (approved, with or
-    // without edits — see tradeAlerts.ts for why there's no separate
-    // "modified" path), links the alert back to the resulting position.
-    sourceAlertId?: string;
-  };
+async function requireExistingTicker(symbolInput: string): Promise<{ id: string; symbol: string } | null> {
+  const normalizedSymbol = symbolInput.trim().toUpperCase();
+  return (await db("tickers").where({ symbol: normalizedSymbol }).first()) ?? null;
+}
+
+interface OpenOrderRequestBody {
+  symbol?: string;
+  strategyKey?: string;
+  stock?: { quantity: number; limitPrice: number };
+  option?: { quantity: number; limitPrice: number; strikePrice: number; expiryDate: string };
+  notes?: string | null;
+  priceTarget?: number | null;
+  sourceAlertId?: string;
+}
+
+positionsRouter.post("/orders", async (request, response) => {
+  const { symbol, strategyKey, stock, option, sourceAlertId } = request.body as OpenOrderRequestBody;
 
   if (!symbol || !symbol.trim()) {
     response.status(400).json({ error: "Symbol is required." });
@@ -352,115 +324,163 @@ positionsRouter.post("/", async (request, response) => {
     response.status(400).json({ error: "A valid strategyKey is required." });
     return;
   }
-  if (!legs || legs.length === 0) {
-    response.status(400).json({ error: "At least one leg is required." });
+  if (!option || typeof option.quantity !== "number" || option.quantity <= 0) {
+    response.status(400).json({ error: "A positive option contract quantity is required." });
     return;
   }
-  for (const leg of legs) {
-    const legError = validateLegInput(leg);
-    if (legError) {
-      response.status(400).json({ error: legError });
-      return;
-    }
+  if (typeof option.limitPrice !== "number" || option.limitPrice < 0) {
+    response.status(400).json({ error: "option.limitPrice must be a non-negative number." });
+    return;
+  }
+  if (typeof option.strikePrice !== "number" || option.strikePrice <= 0 || !option.expiryDate) {
+    response.status(400).json({ error: "option.strikePrice and option.expiryDate are required." });
+    return;
   }
   if (strategyKey === "covered_call") {
-    const stockShares = legs
-      .filter((leg) => leg.legType === "stock" && leg.side === "long")
-      .reduce((sum, leg) => sum + leg.quantity, 0);
-    const shortCallCoveredShares = legs
-      .filter((leg) => leg.legType === "option" && leg.optionType === "call" && leg.side === "short")
-      .reduce((sum, leg) => sum + leg.quantity * leg.multiplier, 0);
-    const coverageError = validateCoveredCallCoverage(stockShares, shortCallCoveredShares);
+    if (!stock || typeof stock.quantity !== "number" || stock.quantity <= 0) {
+      response.status(400).json({ error: "A positive stock quantity is required for a covered call." });
+      return;
+    }
+    if (typeof stock.limitPrice !== "number" || stock.limitPrice < 0) {
+      response.status(400).json({ error: "stock.limitPrice must be a non-negative number." });
+      return;
+    }
+    const coverageError = validateCoveredCallCoverage(stock.quantity, option.quantity * 100);
     if (coverageError) {
       response.status(400).json({ error: coverageError });
       return;
     }
   }
 
-  const normalizedSymbol = symbol.trim().toUpperCase();
-
-  let ticker = await db("tickers").where({ symbol: normalizedSymbol }).first();
+  const ticker = await requireExistingTicker(symbol);
   if (!ticker) {
-    const tickerData = await fetchNewTickerData(normalizedSymbol);
-    [ticker] = await db("tickers")
-      .insert({ symbol: normalizedSymbol, company_name: tickerData.companyName, sector: tickerData.sector })
-      .returning("*");
+    response.status(400).json({ error: "Unknown symbol — add it via the Screener first." });
+    return;
   }
 
-  let position: { id: string };
-  try {
-    position = await db.transaction(async (trx) => {
-      if (sourceAlertId) {
-        const alert = await trx("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
-        if (!alert) throw Object.assign(new Error("Pending trade alert not found for sourceAlertId."), { statusCode: 404 });
-        if (alert.ticker_id !== ticker.id || alert.strategy_key !== strategyKey) {
-          throw Object.assign(new Error("sourceAlertId does not match this symbol/strategy."), { statusCode: 400 });
-        }
-      }
+  const legs: OrderLegPayload[] = [];
+  if (strategyKey === "covered_call") {
+    legs.push({ role: "stock", action: OrderAction.BUY, symbol: ticker.symbol, quantity: stock!.quantity, unitPrice: stock!.limitPrice });
+  }
+  legs.push({
+    role: "option",
+    action: OrderAction.SELL,
+    symbol: ticker.symbol,
+    quantity: option.quantity,
+    unitPrice: option.limitPrice,
+    strike: option.strikePrice,
+    expiry: option.expiryDate,
+    right: strategyKey === "covered_call" ? "C" : "P",
+  });
 
-      const [newPosition] = await trx("positions")
-        .insert({
-          strategy_key: strategyKey,
-          ticker_id: ticker.id,
-          status: "open",
-          notes: notes ?? null,
-          price_target: priceTarget ?? null,
-        })
-        .returning("*");
+  const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey, legs };
 
-      const insertedLegs = await trx("position_legs")
-        .insert(
-          legs.map((leg) => ({
-            position_id: newPosition.id,
-            leg_type: leg.legType,
-            side: leg.side,
-            quantity: leg.quantity,
-            option_type: leg.optionType ?? null,
-            strike_price: leg.strikePrice ?? null,
-            expiry_date: leg.expiryDate ?? null,
-            multiplier: leg.multiplier,
-            entry_price: leg.entryPrice,
-            entry_at: leg.entryAt,
-          })),
-        )
-        .returning(["id", "side", "quantity", "entry_price", "entry_at"]);
+  if (sourceAlertId) {
+    const alert = await db("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
+    if (!alert) {
+      response.status(404).json({ error: "Pending trade alert not found for sourceAlertId." });
+      return;
+    }
+    if (alert.ticker_id !== ticker.id || alert.strategy_key !== strategyKey) {
+      response.status(400).json({ error: "sourceAlertId does not match this symbol/strategy." });
+      return;
+    }
+  }
 
-      // Manually-entered positions have no real IBKR fill behind them, so
-      // ibkr_order_id/ibkr_exec_id/commission/raw_ibkr_payload stay null —
-      // see the Trade Blotter data-source decision (2026-08-20).
-      await trx("trades").insert(
-        insertedLegs.map((leg) => ({
-          position_leg_id: leg.id,
-          side: openingTradeSide(leg.side),
-          quantity: leg.quantity,
-          price: leg.entry_price,
-          executed_at: leg.entry_at,
-          is_closing_trade: false,
-        })),
-      );
+  const [orderRequest] = await db("order_requests")
+    .insert({
+      requested_by_user_id: request.session.userId,
+      request_type: strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put",
+      payload: JSON.stringify(payload),
+      source_alert_id: sourceAlertId ?? null,
+    })
+    .returning("*");
 
-      if (sourceAlertId) {
-        await trx("trade_alerts").where({ id: sourceAlertId }).update({
+  response.status(201).json(orderRequest);
+});
+
+positionsRouter.get("/orders", async (request, response) => {
+  const status = request.query.status as string | undefined;
+  const query = db("order_requests").orderBy("created_at", "desc");
+  if (status) query.where({ status });
+  response.json(await query);
+});
+
+positionsRouter.get("/orders/:id", async (request, response) => {
+  const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
+  if (!orderRequest) {
+    response.status(404).json({ error: "Order not found." });
+    return;
+  }
+  response.json(orderRequest);
+});
+
+// The explicit confirmation gate (approved 2026-08-24) — building an order
+// above never transmits it; only this endpoint does, by NOTIFYing the
+// worker. Every order-placing UI flow (New Position, Roll, Close, and the
+// Genosuke financial-write tools) must call this as a separate step after
+// showing the user exactly what will be submitted.
+positionsRouter.post("/orders/:id/confirm", async (request, response) => {
+  const orderRequest = await db("order_requests").where({ id: request.params.id, status: "pending_confirmation" }).first();
+  if (!orderRequest) {
+    response.status(404).json({ error: "No pending order found with that id." });
+    return;
+  }
+
+  await db.transaction(async (trx) => {
+    await trx("order_requests").where({ id: orderRequest.id }).update({ status: "confirmed", updated_at: trx.fn.now() });
+
+    if (orderRequest.source_alert_id) {
+      // resulting_position_id for a brand-new position isn't known yet at
+      // confirm time (the worker creates/matches it once IBKR actually
+      // fills the order) — left null here for a new_trade alert. For a
+      // roll, related_position_id is already the right answer since a roll
+      // never creates a new position.
+      await trx("trade_alerts")
+        .where({ id: orderRequest.source_alert_id })
+        .update({
           status: "approved",
-          resulting_position_id: newPosition.id,
+          resulting_position_id: orderRequest.related_position_id ?? null,
           reviewed_by_user_id: request.session.userId,
           reviewed_at: trx.fn.now(),
         });
-      }
-
-      return newPosition;
-    });
-  } catch (error) {
-    const statusCode = (error as { statusCode?: number }).statusCode;
-    if (statusCode) {
-      response.status(statusCode).json({ error: (error as Error).message });
-      return;
     }
-    throw error;
+
+    await trx.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
+  });
+
+  const updated = await db("order_requests").where({ id: orderRequest.id }).first();
+  response.json(updated);
+});
+
+positionsRouter.post("/orders/:id/cancel", async (request, response) => {
+  const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
+  if (!orderRequest) {
+    response.status(404).json({ error: "Order not found." });
+    return;
+  }
+  if (orderRequest.status !== "pending_confirmation" && orderRequest.status !== "confirmed") {
+    response.status(409).json({
+      error: "This order has already been submitted to IBKR — cancel it directly in TWS/IBKR for now.",
+    });
+    return;
   }
 
-  const result = await db.raw(`${positionSelect} WHERE p.id = ?`, [position.id]);
-  response.status(201).json(result.rows[0]);
+  const [updated] = await db("order_requests")
+    .where({ id: orderRequest.id })
+    .update({ status: "cancelled", updated_at: db.fn.now() })
+    .returning("*");
+  response.json(updated);
+});
+
+positionsRouter.get("/:id", async (request, response) => {
+  const result = await db.raw(`${positionSelect} WHERE p.id = ?`, [request.params.id]);
+  const position = result.rows[0];
+  if (!position) {
+    response.status(404).json({ error: "Position not found." });
+    return;
+  }
+  response.json(position);
 });
 
 positionsRouter.patch("/:id", async (request, response) => {
@@ -485,37 +505,25 @@ positionsRouter.patch("/:id", async (request, response) => {
   response.json(result.rows[0]);
 });
 
-// Rolls one short option leg on an open position: closes it (exit_price/exit_at
-// on that leg only, position stays open) and opens a new option leg on the
-// same position — matches the schema comment on trade_alerts.related_position_id
-// ("close the existing short option leg and open a new one, same position"),
-// not a new-position creation like the sourceAlertId flow above. Deliberately
-// narrower than a general partial-leg-close endpoint (still an open gap for
-// other use cases, see PROGRESS.md) — this only ever closes exactly one
-// existing option leg and opens exactly one new option leg, both validated
-// against the same roll alert.
+// Rolls one short option leg on an open position: builds an order_requests
+// row (request_type "roll_leg") for a combo order — BUY back the existing
+// leg, SELL the new one, as one atomic order — rather than writing
+// position_legs/trades directly. Same idea as POST /orders above; only the
+// worker writes those tables now, once IBKR actually fills the order.
 positionsRouter.post("/:id/roll", async (request, response) => {
-  const { sourceAlertId, closeLegId, exitPrice, exitAt, newLeg } = request.body as {
+  const { sourceAlertId, closeLegId, closeLimitPrice, newLeg } = request.body as {
     sourceAlertId?: string;
     closeLegId?: string;
-    exitPrice?: number;
-    exitAt?: string;
-    newLeg?: {
-      strikePrice: number;
-      expiryDate: string;
-      quantity: number;
-      multiplier: number;
-      entryPrice: number;
-      entryAt: string;
-    };
+    closeLimitPrice?: number;
+    newLeg?: { strikePrice: number; expiryDate: string; quantity: number; limitPrice: number };
   };
 
   if (!sourceAlertId) {
     response.status(400).json({ error: "sourceAlertId is required." });
     return;
   }
-  if (!closeLegId || typeof exitPrice !== "number" || exitPrice < 0 || !exitAt) {
-    response.status(400).json({ error: "closeLegId, a non-negative exitPrice, and exitAt are required." });
+  if (!closeLegId || typeof closeLimitPrice !== "number" || closeLimitPrice < 0) {
+    response.status(400).json({ error: "closeLegId and a non-negative closeLimitPrice are required." });
     return;
   }
   if (
@@ -525,163 +533,178 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     !newLeg.expiryDate ||
     typeof newLeg.quantity !== "number" ||
     newLeg.quantity <= 0 ||
-    typeof newLeg.multiplier !== "number" ||
-    newLeg.multiplier <= 0 ||
-    typeof newLeg.entryPrice !== "number" ||
-    newLeg.entryPrice < 0 ||
-    !newLeg.entryAt
+    typeof newLeg.limitPrice !== "number" ||
+    newLeg.limitPrice < 0
   ) {
-    response.status(400).json({ error: "newLeg requires strikePrice, expiryDate, quantity, multiplier, entryPrice, and entryAt." });
+    response.status(400).json({ error: "newLeg requires strikePrice, expiryDate, quantity, and limitPrice." });
     return;
   }
 
-  try {
-    await db.transaction(async (trx) => {
-      const position = await trx("positions").where({ id: request.params.id }).first();
-      if (!position) throw Object.assign(new Error("Position not found."), { statusCode: 404 });
-      if (position.status !== "open") throw Object.assign(new Error("Position is already closed."), { statusCode: 409 });
-
-      const alert = await trx("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
-      if (!alert) throw Object.assign(new Error("Pending trade alert not found for sourceAlertId."), { statusCode: 404 });
-      if (alert.alert_type !== "roll") throw Object.assign(new Error("sourceAlertId is not a roll alert."), { statusCode: 400 });
-      if (alert.related_position_id !== position.id) {
-        throw Object.assign(new Error("sourceAlertId does not match this position."), { statusCode: 400 });
-      }
-
-      const closingLeg = await trx("position_legs").where({ id: closeLegId, position_id: position.id }).first();
-      if (!closingLeg) throw Object.assign(new Error("Leg not found on this position."), { statusCode: 404 });
-      if (closingLeg.leg_type !== "option") throw Object.assign(new Error("Only option legs can be rolled."), { statusCode: 400 });
-      if (closingLeg.exit_at) throw Object.assign(new Error("Leg is already closed."), { statusCode: 409 });
-
-      // Same naked-coverage guard as position creation (see
-      // validateCoveredCallCoverage) — a roll must not leave a covered call
-      // under-covered either. Recomputed against the position's other
-      // still-open legs, since a roll only ever touches one option leg.
-      if (position.strategy_key === "covered_call" && closingLeg.option_type === "call" && closingLeg.side === "short") {
-        const openLegs = await trx("position_legs").where({ position_id: position.id, exit_at: null });
-        const stockShares = openLegs
-          .filter((leg) => leg.leg_type === "stock" && leg.side === "long")
-          .reduce((sum, leg) => sum + Number(leg.quantity), 0);
-        const otherOpenShortCallShares = openLegs
-          .filter((leg) => leg.id !== closingLeg.id && leg.leg_type === "option" && leg.option_type === "call" && leg.side === "short")
-          .reduce((sum, leg) => sum + Number(leg.quantity) * Number(leg.multiplier), 0);
-        const shortCallCoveredShares = otherOpenShortCallShares + newLeg.quantity * newLeg.multiplier;
-        const coverageError = validateCoveredCallCoverage(stockShares, shortCallCoveredShares);
-        if (coverageError) throw Object.assign(new Error(coverageError), { statusCode: 400 });
-      }
-
-      await trx("position_legs").where({ id: closeLegId }).update({ exit_price: exitPrice, exit_at: exitAt });
-      await trx("trades").insert({
-        position_leg_id: closeLegId,
-        side: closingTradeSide(closingLeg.side),
-        quantity: closingLeg.quantity,
-        price: exitPrice,
-        executed_at: exitAt,
-        is_closing_trade: true,
-      });
-
-      const [insertedLeg] = await trx("position_legs")
-        .insert({
-          position_id: position.id,
-          leg_type: "option",
-          side: closingLeg.side,
-          quantity: newLeg.quantity,
-          option_type: closingLeg.option_type,
-          strike_price: newLeg.strikePrice,
-          expiry_date: newLeg.expiryDate,
-          multiplier: newLeg.multiplier,
-          entry_price: newLeg.entryPrice,
-          entry_at: newLeg.entryAt,
-        })
-        .returning(["id", "side", "quantity", "entry_price", "entry_at"]);
-
-      await trx("trades").insert({
-        position_leg_id: insertedLeg.id,
-        side: openingTradeSide(insertedLeg.side),
-        quantity: insertedLeg.quantity,
-        price: insertedLeg.entry_price,
-        executed_at: insertedLeg.entry_at,
-        is_closing_trade: false,
-      });
-
-      await trx("trade_alerts").where({ id: sourceAlertId }).update({
-        status: "approved",
-        resulting_position_id: position.id,
-        reviewed_by_user_id: request.session.userId,
-        reviewed_at: trx.fn.now(),
-      });
-    });
-  } catch (error) {
-    const statusCode = (error as { statusCode?: number }).statusCode;
-    if (statusCode) {
-      response.status(statusCode).json({ error: (error as Error).message });
-      return;
-    }
-    throw error;
+  const position = await db("positions").where({ id: request.params.id }).first();
+  if (!position) {
+    response.status(404).json({ error: "Position not found." });
+    return;
+  }
+  if (position.status !== "open") {
+    response.status(409).json({ error: "Position is already closed." });
+    return;
   }
 
-  const result = await db.raw(`${positionSelect} WHERE p.id = ?`, [request.params.id]);
-  response.json(result.rows[0]);
+  const alert = await db("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
+  if (!alert) {
+    response.status(404).json({ error: "Pending trade alert not found for sourceAlertId." });
+    return;
+  }
+  if (alert.alert_type !== "roll") {
+    response.status(400).json({ error: "sourceAlertId is not a roll alert." });
+    return;
+  }
+  if (alert.related_position_id !== position.id) {
+    response.status(400).json({ error: "sourceAlertId does not match this position." });
+    return;
+  }
+
+  const closingLeg = await db("position_legs").where({ id: closeLegId, position_id: position.id }).first();
+  if (!closingLeg) {
+    response.status(404).json({ error: "Leg not found on this position." });
+    return;
+  }
+  if (closingLeg.leg_type !== "option") {
+    response.status(400).json({ error: "Only option legs can be rolled." });
+    return;
+  }
+  if (closingLeg.exit_at) {
+    response.status(409).json({ error: "Leg is already closed." });
+    return;
+  }
+
+  // Same naked-coverage guard as POST /orders — a roll must not leave a
+  // covered call under-covered either.
+  if (position.strategy_key === "covered_call" && closingLeg.option_type === "call" && closingLeg.side === "short") {
+    const openLegs = await db("position_legs").where({ position_id: position.id, exit_at: null });
+    const stockShares = openLegs
+      .filter((leg) => leg.leg_type === "stock" && leg.side === "long")
+      .reduce((sum, leg) => sum + Number(leg.quantity), 0);
+    const otherOpenShortCallShares = openLegs
+      .filter((leg) => leg.id !== closingLeg.id && leg.leg_type === "option" && leg.option_type === "call" && leg.side === "short")
+      .reduce((sum, leg) => sum + Number(leg.quantity) * Number(leg.multiplier), 0);
+    const coverageError = validateCoveredCallCoverage(stockShares, otherOpenShortCallShares + newLeg.quantity * 100);
+    if (coverageError) {
+      response.status(400).json({ error: coverageError });
+      return;
+    }
+  }
+
+  const ticker = await db("tickers").where({ id: position.ticker_id }).first();
+  // A roll always reopens the same side it closed — short call rolls to a
+  // new short call, short put rolls to a new short put.
+  const closeAction = closingLeg.side === "short" ? OrderAction.BUY : OrderAction.SELL;
+  const openAction = closingLeg.side === "short" ? OrderAction.SELL : OrderAction.BUY;
+  const right = closingLeg.option_type === "call" ? "C" : "P";
+
+  const legs: OrderLegPayload[] = [
+    {
+      role: "option",
+      action: closeAction,
+      symbol: ticker.symbol,
+      quantity: closingLeg.quantity,
+      unitPrice: closeLimitPrice,
+      strike: Number(closingLeg.strike_price),
+      expiry: closingLeg.expiry_date,
+      right,
+      ibkrContractId: closingLeg.ibkr_contract_id ?? undefined,
+      positionLegId: closingLeg.id,
+    },
+    {
+      role: "option",
+      action: openAction,
+      symbol: ticker.symbol,
+      quantity: newLeg.quantity,
+      unitPrice: newLeg.limitPrice,
+      strike: newLeg.strikePrice,
+      expiry: newLeg.expiryDate,
+      right,
+    },
+  ];
+  const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey: position.strategy_key, legs };
+
+  const [orderRequest] = await db("order_requests")
+    .insert({
+      requested_by_user_id: request.session.userId,
+      request_type: "roll_leg",
+      payload: JSON.stringify(payload),
+      related_position_id: position.id,
+      source_alert_id: sourceAlertId,
+    })
+    .returning("*");
+
+  response.status(201).json(orderRequest);
 });
 
+// Builds an order_requests row (request_type "close_position") for a combo
+// order closing every currently-open leg at once — same "only the worker
+// writes position_legs/trades" rule as everywhere else above. Every open
+// leg needs a limit price (what you're willing to pay/receive to close it),
+// same all-legs-at-once restriction as before (still no partial-quantity
+// closes — see PROGRESS.md's open gap).
 positionsRouter.post("/:id/close", async (request, response) => {
-  const { legs } = request.body as { legs?: { legId: string; exitPrice: number; exitAt: string }[] };
+  const { legs } = request.body as { legs?: { legId: string; limitPrice: number }[] };
 
   if (!legs || legs.length === 0) {
-    response.status(400).json({ error: "At least one leg exit is required." });
+    response.status(400).json({ error: "At least one leg is required." });
     return;
   }
   for (const leg of legs) {
-    if (!leg.legId || typeof leg.exitPrice !== "number" || !leg.exitAt) {
-      response.status(400).json({ error: "Each leg requires legId, exitPrice, and exitAt." });
+    if (!leg.legId || typeof leg.limitPrice !== "number" || leg.limitPrice < 0) {
+      response.status(400).json({ error: "Each leg requires legId and a non-negative limitPrice." });
       return;
     }
   }
 
-  try {
-    await db.transaction(async (trx) => {
-      const position = await trx("positions").where({ id: request.params.id }).first();
-      if (!position) throw Object.assign(new Error("Position not found."), { statusCode: 404 });
-      if (position.status !== "open") throw Object.assign(new Error("Position is already closed."), { statusCode: 409 });
-
-      const existingLegs = await trx("position_legs").where({ position_id: position.id });
-      const existingLegIds = new Set(existingLegs.map((leg) => leg.id));
-      const providedLegIds = new Set(legs.map((leg) => leg.legId));
-      const allLegsCovered =
-        existingLegIds.size === providedLegIds.size && [...existingLegIds].every((id) => providedLegIds.has(id));
-      if (!allLegsCovered) {
-        throw Object.assign(new Error("All legs of this position must be included when closing it."), { statusCode: 400 });
-      }
-
-      const existingLegById = new Map(existingLegs.map((leg) => [leg.id, leg]));
-
-      for (const leg of legs) {
-        await trx("position_legs")
-          .where({ id: leg.legId, position_id: position.id })
-          .update({ exit_price: leg.exitPrice, exit_at: leg.exitAt });
-
-        const existingLeg = existingLegById.get(leg.legId);
-        await trx("trades").insert({
-          position_leg_id: leg.legId,
-          side: closingTradeSide(existingLeg.side),
-          quantity: existingLeg.quantity,
-          price: leg.exitPrice,
-          executed_at: leg.exitAt,
-          is_closing_trade: true,
-        });
-      }
-
-      await trx("positions").where({ id: position.id }).update({ status: "closed", closed_at: trx.fn.now() });
-    });
-  } catch (error) {
-    const statusCode = (error as { statusCode?: number }).statusCode;
-    if (statusCode) {
-      response.status(statusCode).json({ error: (error as Error).message });
-      return;
-    }
-    throw error;
+  const position = await db("positions").where({ id: request.params.id }).first();
+  if (!position) {
+    response.status(404).json({ error: "Position not found." });
+    return;
+  }
+  if (position.status !== "open") {
+    response.status(409).json({ error: "Position is already closed." });
+    return;
   }
 
-  const result = await db.raw(`${positionSelect} WHERE p.id = ?`, [request.params.id]);
-  response.json(result.rows[0]);
+  const existingLegs = await db("position_legs").where({ position_id: position.id, exit_at: null });
+  const existingLegIds = new Set(existingLegs.map((leg) => leg.id));
+  const providedLegIds = new Set(legs.map((leg) => leg.legId));
+  const allLegsCovered = existingLegIds.size === providedLegIds.size && [...existingLegIds].every((id) => providedLegIds.has(id));
+  if (!allLegsCovered) {
+    response.status(400).json({ error: "All open legs of this position must be included when closing it." });
+    return;
+  }
+
+  const ticker = await db("tickers").where({ id: position.ticker_id }).first();
+  const limitPriceByLegId = new Map(legs.map((leg) => [leg.legId, leg.limitPrice]));
+
+  const orderLegs: OrderLegPayload[] = existingLegs.map((leg) => ({
+    role: leg.leg_type,
+    action: leg.side === "long" ? OrderAction.SELL : OrderAction.BUY, // closing action is the inverse of how it was opened
+    symbol: ticker.symbol,
+    quantity: leg.quantity,
+    unitPrice: limitPriceByLegId.get(leg.id)!,
+    strike: leg.strike_price ? Number(leg.strike_price) : undefined,
+    expiry: leg.expiry_date ?? undefined,
+    right: leg.option_type === "call" ? "C" : leg.option_type === "put" ? "P" : undefined,
+    ibkrContractId: leg.ibkr_contract_id ?? undefined,
+    positionLegId: leg.id,
+  }));
+  const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey: position.strategy_key, legs: orderLegs };
+
+  const [orderRequest] = await db("order_requests")
+    .insert({
+      requested_by_user_id: request.session.userId,
+      request_type: "close_position",
+      payload: JSON.stringify(payload),
+      related_position_id: position.id,
+    })
+    .returning("*");
+
+  response.status(201).json(orderRequest);
 });

@@ -1,6 +1,6 @@
-// Two-way Telegram bot — long-polls the shared bot token and answers
+// Two-way Telegram bot — receives updates via Telegram webhook and answers
 // questions via chatOnce()'s LLM/tool loop. Ported from menaris-admin-api's
-// Jack (telegram-bot-service.js): polling loop shape, chat-ID allowlist
+// Jack (telegram-bot-service.js): webhook handler shape, chat-ID allowlist
 // gate, addressing detection, and per-chat in-memory history all carry over
 // close to as-is. See PROGRESS.md's Genosuke entry for what was
 // deliberately NOT ported (Jack's prompt-only confirm flow) and why.
@@ -11,8 +11,9 @@
 //
 // Privacy mode (BotFather, /setprivacy → Enable) is the real first line of
 // defense — it stops Telegram from delivering ordinary unaddressed group
-// messages to getUpdates at all. The chat-id/is_bot filtering below is
+// messages to the webhook at all. The chat-id/is_bot filtering below is
 // defense-in-depth on top of that, not the primary guard.
+import type { Request, Response } from "express";
 import { loadGenosukeConfig, type GenosukeConfig } from "./config.js";
 import { TelegramApi, type TelegramUpdate } from "./telegramApi.js";
 import { GenosukeApiClient } from "./apiClient.js";
@@ -21,8 +22,6 @@ import { chatOnce } from "./chat.js";
 import { takeConfirmation } from "./confirmations.js";
 import { TOOLS_BY_NAME } from "./tools/index.js";
 
-const POLL_TIMEOUT_SECONDS = 30;
-const MAX_BACKOFF_MS = 30_000;
 const HISTORY_MAX_MESSAGES = 20;
 // Stale chat context shouldn't leak into an unrelated new question hours later.
 const HISTORY_MAX_AGE_MS = 6 * 60 * 60 * 1000;
@@ -33,9 +32,7 @@ interface HistoryEntry {
 }
 
 let started = false;
-let stopping = false;
-let inFlightAbort: AbortController | null = null;
-let offset = 0;
+let runtime: { config: GenosukeConfig; telegram: TelegramApi; api: GenosukeApiClient; adapter: OpenRouterAdapter } | null = null;
 let botId: number | null = null;
 let botUsername: string | null = null;
 const chatHistories = new Map<string, HistoryEntry>();
@@ -172,31 +169,6 @@ async function handleCallbackQuery(
   }
 }
 
-async function pollLoop(config: GenosukeConfig, telegram: TelegramApi, api: GenosukeApiClient, adapter: OpenRouterAdapter): Promise<void> {
-  let backoffMs = 1000;
-  while (!stopping) {
-    inFlightAbort = new AbortController();
-    try {
-      const updates = await telegram.getUpdates(offset, POLL_TIMEOUT_SECONDS, inFlightAbort.signal);
-      for (const update of updates) {
-        offset = update.update_id + 1;
-        if (update.message) {
-          handleMessage(update.message, config, telegram, api, adapter).catch((error) => console.error("Genosuke: message handler error", error));
-        } else if (update.callback_query) {
-          handleCallbackQuery(update.callback_query, config, telegram, api).catch((error) => console.error("Genosuke: callback handler error", error));
-        }
-      }
-      backoffMs = 1000;
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") continue; // deliberate shutdown, not a real failure
-      console.warn("Genosuke: getUpdates failed, backing off", error instanceof Error ? error.message : error);
-      await new Promise((resolve) => setTimeout(resolve, backoffMs));
-      backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
-    }
-  }
-  inFlightAbort = null;
-}
-
 export function startGenosuke(): void {
   if (started) return;
   const config = loadGenosukeConfig();
@@ -206,6 +178,7 @@ export function startGenosuke(): void {
   const telegram = new TelegramApi(config.telegramBotToken);
   const api = new GenosukeApiClient(config);
   const adapter = new OpenRouterAdapter(config.openRouterModel, config.openRouterApiKey);
+  runtime = { config, telegram, api, adapter };
 
   // Fire-and-forget: a Telegram-side startup failure must never crash the
   // web server. This project has no global unhandledRejection handler
@@ -219,20 +192,33 @@ export function startGenosuke(): void {
       botUsername = me.username;
       console.info(`Genosuke: logged in as @${botUsername} (id=${botId})`);
 
-      await telegram.deleteWebhook();
-
-      // Skip any backlog accumulated while the dyno was down.
-      const latestUpdateId = await telegram.peekLatestUpdateId();
-      if (latestUpdateId !== null) offset = latestUpdateId + 1;
-
-      await pollLoop(config, telegram, api, adapter);
+      await telegram.setWebhook(config.webhookUrl, config.webhookSecret);
+      console.info(`Genosuke: webhook registered at ${config.webhookUrl}`);
     } catch (error) {
       console.error("Genosuke: failed to start", error instanceof Error ? error.message : error);
     }
   })();
 }
 
-export function stopGenosuke(): void {
-  stopping = true;
-  inFlightAbort?.abort();
+// Express handler for POST /genosuke/webhook. Acks fast (Telegram retries on
+// non-2xx or timeout, which would otherwise redeliver the same update
+// repeatedly) and processes the update after responding.
+export function handleGenosukeWebhook(request: Request, response: Response): void {
+  if (!runtime) {
+    response.sendStatus(404);
+    return;
+  }
+  if (request.get("X-Telegram-Bot-Api-Secret-Token") !== runtime.config.webhookSecret) {
+    response.sendStatus(401);
+    return;
+  }
+  response.sendStatus(200);
+
+  const update = request.body as TelegramUpdate | undefined;
+  const { config, telegram, api, adapter } = runtime;
+  if (update?.message) {
+    handleMessage(update.message, config, telegram, api, adapter).catch((error) => console.error("Genosuke: message handler error", error));
+  } else if (update?.callback_query) {
+    handleCallbackQuery(update.callback_query, config, telegram, api).catch((error) => console.error("Genosuke: callback handler error", error));
+  }
 }

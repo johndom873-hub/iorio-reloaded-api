@@ -9,65 +9,78 @@
 // rules) rely purely on a system-prompt instruction to ask before acting —
 // approved 2026-08-21 as too weak a guarantee for real trading data.
 //
-// iorio never places a live broker order anywhere in the app — every write
-// below is a manually-recorded fill in Postgres, not an IBKR order
-// execution (see PROGRESS.md's Genosuke entry). Still real — it's what a
-// human trader acts on — but the blast radius of a mistake is a bad
-// database record, not an actual fill.
+// Since 2026-08-24, iorio places REAL orders against IBKR (still the paper
+// account) — see PROGRESS.md's "IBKR is the source of truth" decision. The
+// old claim here ("blast radius of a mistake is a bad database record, not
+// an actual fill") is no longer true: create_position/roll_position/
+// close_position now build an order via POST /positions/orders (or
+// /:id/roll, /:id/close) and immediately confirm it via
+// POST /positions/orders/:id/confirm, which transmits the order to IBKR.
+// The Telegram Yes/Cancel tap IS the human confirmation gate for that
+// transmit step — there's no second in-app confirmation for the bot path,
+// unlike the web UI's OrderReviewPanel (which shows the built order and
+// waits for an explicit Confirm click before calling the same endpoint).
+import type { GenosukeApiClient } from "../apiClient.js";
 import type { GenosukeTool } from "./types.js";
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
 
-const legInputSchema = {
-  type: "object",
-  properties: {
-    legType: { type: "string", enum: ["stock", "option"] },
-    side: { type: "string", enum: ["long", "short"] },
-    quantity: { type: "number" },
-    optionType: { type: "string", enum: ["call", "put"], description: "Required if legType is option." },
-    strikePrice: { type: "number", description: "Required if legType is option." },
-    expiryDate: { type: "string", description: "YYYY-MM-DD, required if legType is option." },
-    multiplier: { type: "number", description: "Shares per contract — 100 for standard options, 1 for stock." },
-    entryPrice: { type: "number" },
-    entryAt: { type: "string", description: "ISO timestamp of the actual fill." },
-  },
-  required: ["legType", "side", "quantity", "multiplier", "entryPrice", "entryAt"],
-};
+interface OrderRequestResult {
+  id: string;
+  status: string;
+}
 
-function legSummary(leg: { legType: string; side: string; quantity: unknown; strikePrice?: unknown; optionType?: unknown }): string {
-  if (leg.legType === "stock") return `${leg.side} ${leg.quantity} sh`;
-  const right = leg.optionType === "call" ? "C" : "P";
-  return `${leg.side} ${leg.quantity}x $${leg.strikePrice}${right}`;
+async function buildAndConfirmOrder(api: GenosukeApiClient, path: string, body: unknown) {
+  const order = await api.post<OrderRequestResult>(path, body);
+  return api.post<OrderRequestResult>(`/positions/orders/${order.id}/confirm`, {});
 }
 
 export const financialWriteTools: GenosukeTool[] = [
   {
     name: "create_position",
     description:
-      "Create a new position — either approving a pending Trade Alert (pass sourceAlertId; strongly preferred when one exists, since the alert's suggested strike/expiry/premium is already validated against the live option chain) or a fully manual entry (freeform legs, higher risk of a typo'd strike/price — the human confirmation step is the safety net here).",
+      "Open a new position by placing a real order with IBKR — either approving a pending Trade Alert (pass sourceAlertId; strongly preferred when one exists, since the alert's suggested strike/expiry/premium is already validated against the live option chain) or a fully manual entry (higher risk of a typo'd strike/price — the human confirmation step is the safety net here). Builds and immediately confirms the order — nothing further is needed after the human taps Yes.",
     tier: "financial-write",
     parameters: {
       type: "object",
       properties: {
         symbol: { type: "string" },
         strategyKey: strategyKeyEnum,
+        stock: {
+          type: "object",
+          description: "Required for covered_call. Buy-write stock leg.",
+          properties: { quantity: { type: "number" }, limitPrice: { type: "number" } },
+          required: ["quantity", "limitPrice"],
+        },
+        option: {
+          type: "object",
+          description: "The short call (covered_call) or short put (cash_secured_put) leg.",
+          properties: {
+            quantity: { type: "number", description: "Contracts." },
+            limitPrice: { type: "number" },
+            strikePrice: { type: "number" },
+            expiryDate: { type: "string", description: "YYYYMMDD." },
+          },
+          required: ["quantity", "limitPrice", "strikePrice", "expiryDate"],
+        },
         notes: { type: "string" },
         priceTarget: { type: "number" },
-        legs: { type: "array", items: legInputSchema, description: "1 leg for a CSP (short put), 2 legs for a covered call (long stock + short call)." },
         sourceAlertId: { type: "string", description: "If approving a pending Trade Alert, its id — links the alert and marks it approved." },
       },
-      required: ["symbol", "strategyKey", "legs"],
+      required: ["symbol", "strategyKey", "option"],
     },
     describeForConfirmation: (input) => {
-      const legs = (input.legs as { legType: string; side: string; quantity: unknown; strikePrice?: unknown; optionType?: unknown }[]) ?? [];
-      return `Create ${input.strategyKey} position on ${input.symbol}: ${legs.map(legSummary).join(" / ")}${input.sourceAlertId ? " (approving pending alert)" : " (manual entry)"}`;
+      const option = input.option as { quantity: unknown; strikePrice: unknown; expiryDate: unknown; limitPrice: unknown };
+      const stock = input.stock as { quantity: unknown; limitPrice: unknown } | undefined;
+      const stockPart = stock ? `BUY ${stock.quantity} sh @ ${stock.limitPrice} + ` : "";
+      return `Place order for ${input.symbol} (${input.strategyKey}): ${stockPart}SELL ${option.quantity}x $${option.strikePrice} exp ${option.expiryDate} @ ${option.limitPrice}${input.sourceAlertId ? " (approving pending alert)" : " (manual entry)"} — will be sent to IBKR immediately on confirm.`;
     },
-    execute: (input, api) => api.post("/positions", input),
+    execute: (input, api) => buildAndConfirmOrder(api, "/positions/orders", input),
   },
   {
     name: "roll_position",
     description:
-      "Roll one short option leg on an open position: closes the existing leg at a given exit price and opens a new leg at a new strike/expiry, both tied to a pending roll-type Trade Alert. Only valid for a pending alert of alertType 'roll' — get its details from list_trade_alerts/get_position first.",
+      "Roll one short option leg on an open position by placing a real atomic combo order with IBKR (buy back the existing leg, sell the new one, in one order) — tied to a pending roll-type Trade Alert. Only valid for a pending alert of alertType 'roll' — get its details from list_trade_alerts/get_position first. Builds and immediately confirms the order.",
     tier: "financial-write",
     parameters: {
       type: "object",
@@ -75,35 +88,33 @@ export const financialWriteTools: GenosukeTool[] = [
         positionId: { type: "string" },
         sourceAlertId: { type: "string" },
         closeLegId: { type: "string", description: "The existing option leg being closed." },
-        exitPrice: { type: "number", description: "Buy-back price for the closing leg." },
-        exitAt: { type: "string", description: "ISO timestamp of the actual fill." },
+        closeLimitPrice: { type: "number", description: "Max price willing to pay to buy back the closing leg." },
         newLeg: {
           type: "object",
           properties: {
             strikePrice: { type: "number" },
             expiryDate: { type: "string" },
             quantity: { type: "number" },
-            multiplier: { type: "number" },
-            entryPrice: { type: "number", description: "Premium received for the new leg." },
-            entryAt: { type: "string" },
+            limitPrice: { type: "number", description: "Min premium willing to accept for the new leg." },
           },
-          required: ["strikePrice", "expiryDate", "quantity", "multiplier", "entryPrice", "entryAt"],
+          required: ["strikePrice", "expiryDate", "quantity", "limitPrice"],
         },
       },
-      required: ["positionId", "sourceAlertId", "closeLegId", "exitPrice", "exitAt", "newLeg"],
+      required: ["positionId", "sourceAlertId", "closeLegId", "closeLimitPrice", "newLeg"],
     },
     describeForConfirmation: (input) => {
-      const newLeg = input.newLeg as { strikePrice: unknown; expiryDate: unknown; entryPrice: unknown };
-      return `Roll position ${input.positionId}: buy back closing leg at $${input.exitPrice}, open new leg at $${newLeg.strikePrice} exp ${newLeg.expiryDate} for $${newLeg.entryPrice} premium`;
+      const newLeg = input.newLeg as { strikePrice: unknown; expiryDate: unknown; limitPrice: unknown };
+      return `Roll position ${input.positionId}: buy back closing leg @ ${input.closeLimitPrice}, sell new leg $${newLeg.strikePrice} exp ${newLeg.expiryDate} @ ${newLeg.limitPrice} — one atomic combo order sent to IBKR immediately on confirm.`;
     },
     execute: (input, api) => {
       const { positionId, ...body } = input;
-      return api.post(`/positions/${positionId}/roll`, body);
+      return buildAndConfirmOrder(api, `/positions/${positionId}/roll`, body);
     },
   },
   {
     name: "close_position",
-    description: "Close a position — every leg must be closed together with its exit price and time (partial-leg closes aren't supported).",
+    description:
+      "Close a position by placing a real combo order with IBKR — every currently-open leg must be included together with a limit price (partial-leg closes aren't supported). Builds and immediately confirms the order.",
     tier: "financial-write",
     parameters: {
       type: "object",
@@ -113,25 +124,25 @@ export const financialWriteTools: GenosukeTool[] = [
           type: "array",
           items: {
             type: "object",
-            properties: { legId: { type: "string" }, exitPrice: { type: "number" }, exitAt: { type: "string" } },
-            required: ["legId", "exitPrice", "exitAt"],
+            properties: { legId: { type: "string" }, limitPrice: { type: "number" } },
+            required: ["legId", "limitPrice"],
           },
         },
       },
       required: ["positionId", "legs"],
     },
     describeForConfirmation: (input) => {
-      const legs = (input.legs as { legId: string; exitPrice: unknown }[]) ?? [];
-      return `Close position ${input.positionId}: ${legs.map((l) => `leg ${l.legId} at $${l.exitPrice}`).join(", ")}`;
+      const legs = (input.legs as { legId: string; limitPrice: unknown }[]) ?? [];
+      return `Close position ${input.positionId}: ${legs.map((l) => `leg ${l.legId} @ ${l.limitPrice}`).join(", ")} — combo order sent to IBKR immediately on confirm.`;
     },
     execute: (input, api) => {
       const { positionId, legs } = input;
-      return api.post(`/positions/${positionId}/close`, { legs });
+      return buildAndConfirmOrder(api, `/positions/${positionId}/close`, { legs });
     },
   },
   {
     name: "reject_trade_alert",
-    description: "Reject a pending Trade Alert. This is the only status change this tool supports — approving happens via create_position/roll_position with sourceAlertId instead, so the actual fill price is always confirmed first.",
+    description: "Reject a pending Trade Alert. This is the only status change this tool supports — approving happens via create_position/roll_position with sourceAlertId instead, so the actual order terms are always confirmed first.",
     tier: "financial-write",
     parameters: { type: "object", properties: { alertId: { type: "string" } }, required: ["alertId"] },
     describeForConfirmation: (input) => `Reject trade alert ${input.alertId}`,

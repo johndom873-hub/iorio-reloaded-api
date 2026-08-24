@@ -105,11 +105,12 @@ tradeAlertsRouter.get("/run-stream", async (_request, response) => {
 });
 
 // Only rejection happens directly through this route — approving (with or
-// without edits) goes through the normal position-creation flow instead
+// without edits) goes through the normal order-placement flow instead
 // (Positions' "+ New Position" form, pre-filled the same way Screener's
-// "Trade" button pre-fills it), so the user always confirms/can adjust the
-// actual fill price before a position is created from a suggestion. See
-// positions.ts's sourceAlertId handling for the other half of that flow.
+// "Trade" button pre-fills it), so the user always reviews/can adjust the
+// order before it's ever confirmed and sent to IBKR. Since 2026-08-24, the
+// alert actually flips to "approved" at POST /positions/orders/:id/confirm
+// time, not at order-build time — see that route in positions.ts.
 tradeAlertsRouter.patch("/:id", async (request, response) => {
   const { status } = request.body as { status?: string };
   if (status !== "rejected") {
