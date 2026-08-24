@@ -188,6 +188,15 @@ positionsRouter.get("/greeks", async (request, response) => {
   response.json(greeks);
 });
 
+export interface UnrealizedPnlResult {
+  unrealizedPnl: number | null;
+  // Set only when unrealizedPnl came from position_pnl_snapshots instead of
+  // a live IBKR quote (see the fallback note below) — the date that
+  // snapshot was captured, so the UI can label it "as of <date>" rather
+  // than implying a live number.
+  asOfDate: string | null;
+}
+
 // On-demand unrealized P&L for open positions — mirrors /greeks's shape
 // (batch lookup by id, live IBKR round-trip). Unrealized-only: the SQL in
 // positionSelect above already covers realizedPnl/capitalAtRisk from
@@ -195,6 +204,19 @@ positionsRouter.get("/greeks", async (request, response) => {
 // currently-open legs (exit_at IS NULL) to market — an already-rolled-away
 // leg's gain is locked in and already counted in realizedPnl, so it isn't
 // re-priced live here.
+//
+// Fallback (approved 2026-08-24): when live IBKR pricing is unavailable
+// for a position (e.g. outside market hours), fall back to that
+// position's most recent row in position_pnl_snapshots — written nightly
+// by the daily P&L snapshot job (9:30 PM UTC, ~5:30 PM ET, after close) —
+// rather than reusing reqHistoricalData at request time. reqHistoricalData
+// has its own strict IBKR pacing limiter shared with the nightly capture
+// jobs; calling it per-request from this route risks locking out those
+// jobs under normal page-view traffic. position_pnl_snapshots already
+// stores the correctly-computed whole-position figure (both legs,
+// multiplier/quantity/sign already applied) as a plain DB read. A position
+// opened after that night's job already ran has no snapshot yet and stays
+// unavailable until the next run.
 positionsRouter.get("/pnl", async (request, response) => {
   const positionIdsParam = request.query.positionIds as string | undefined;
   if (!positionIdsParam) {
@@ -249,7 +271,40 @@ positionsRouter.get("/pnl", async (request, response) => {
       (unrealizedByPositionId[leg.positionId] ?? 0) + (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
   }
 
-  response.json(unrealizedByPositionId);
+  const positionIdsMissingLive = positionIds.filter((id) => unrealizedByPositionId[id] === null);
+  const fallbackByPositionId = new Map<string, { unrealizedPnl: string; snapshotDate: string }>();
+  if (positionIdsMissingLive.length > 0) {
+    const latestSnapshotRows = await db.raw(
+      `
+      SELECT DISTINCT ON (position_id)
+        position_id AS "positionId",
+        unrealized_pnl AS "unrealizedPnl",
+        to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate"
+      FROM position_pnl_snapshots
+      WHERE position_id = ANY(?)
+      ORDER BY position_id, snapshot_date DESC
+      `,
+      [positionIdsMissingLive],
+    );
+    for (const row of latestSnapshotRows.rows) {
+      fallbackByPositionId.set(row.positionId, { unrealizedPnl: row.unrealizedPnl, snapshotDate: row.snapshotDate });
+    }
+  }
+
+  const result: Record<string, UnrealizedPnlResult> = {};
+  for (const positionId of positionIds) {
+    const unrealizedPnl = unrealizedByPositionId[positionId] ?? null;
+    if (unrealizedPnl !== null) {
+      result[positionId] = { unrealizedPnl, asOfDate: null };
+      continue;
+    }
+    const fallback = fallbackByPositionId.get(positionId);
+    result[positionId] = fallback
+      ? { unrealizedPnl: Number(fallback.unrealizedPnl), asOfDate: fallback.snapshotDate }
+      : { unrealizedPnl: null, asOfDate: null };
+  }
+
+  response.json(result);
 });
 
 positionsRouter.get("/:id", async (request, response) => {
