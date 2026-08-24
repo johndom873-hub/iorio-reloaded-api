@@ -84,6 +84,28 @@ export class TelegramApi {
     }
   }
 
+  /**
+   * Strips the inline keyboard off a confirmation message once it's been
+   * resolved (Yes/Cancel tapped, or expired). Telegram doesn't disable
+   * inline buttons after a tap on its own — the buttons stay visible and
+   * tappable indefinitely unless the message is edited — so without this a
+   * second tap on an already-resolved confirmation still looks actionable
+   * even though takeConfirmation()'s single-use map already prevents it
+   * from executing twice. Best-effort: a failure here has no financial
+   * consequence, just a stale-looking button.
+   */
+  async clearInlineKeyboard(chatId: string, messageId: number): Promise<void> {
+    try {
+      await fetch(`${this.base}/editMessageReplyMarkup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }),
+      });
+    } catch (error) {
+      console.warn("Genosuke: clearInlineKeyboard failed", error instanceof Error ? error.message : error);
+    }
+  }
+
   async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
     try {
       await fetch(`${this.base}/answerCallbackQuery`, {

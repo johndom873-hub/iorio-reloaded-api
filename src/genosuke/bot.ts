@@ -195,6 +195,14 @@ async function handleCallbackQuery(
     return;
   }
 
+  // Belt-and-suspenders on top of takeConfirmation()'s single-use map (which
+  // already makes a second tap a no-op at the execution level): strip the
+  // buttons so a second tap doesn't even look actionable. Telegram leaves
+  // inline buttons tappable indefinitely unless the message is edited.
+  if (callbackQuery.message) {
+    telegram.clearInlineKeyboard(chatId, callbackQuery.message.message_id);
+  }
+
   if (action === "cancel") {
     await telegram.answerCallbackQuery(callbackQuery.id, "Cancelled.");
     await telegram.sendMessage(chatId, "Cancelled — no action taken.");

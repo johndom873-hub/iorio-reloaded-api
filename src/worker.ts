@@ -103,6 +103,34 @@ async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Con
   return { contract, order };
 }
 
+/**
+ * Cancels an order already submitted to IBKR (route: POST
+ * /orders/:id/cancel, which flips status to "cancel_requested" and NOTIFYs
+ * this same channel). Only this process holds the persistent IBKR
+ * connection, so only it can call ib.cancelOrder() — the existing
+ * orderStatus listener (see setupOrderTrackingListeners) flips the row to
+ * "cancelled" once IBKR confirms, same as every other terminal status.
+ */
+async function processCancelRequest(orderRequestId: string): Promise<void> {
+  const ib = persistentIbkrConnection.getIb();
+  if (!ib) return;
+
+  const orderRequest = await db("order_requests").where({ id: orderRequestId, status: "cancel_requested" }).first();
+  if (!orderRequest) return; // already processed (cancelled/filled) or not actually requested
+
+  if (!orderRequest.ibkr_order_id) {
+    // Shouldn't happen — cancel_requested is only reachable from
+    // submitted/partially_filled, both of which have an ibkr_order_id — but
+    // fail safe rather than leaving the row stuck.
+    await db("order_requests")
+      .where({ id: orderRequestId })
+      .update({ status: "error", error_message: "cancel_requested with no ibkr_order_id.", updated_at: db.fn.now() });
+    return;
+  }
+
+  ib.cancelOrder(orderRequest.ibkr_order_id);
+}
+
 async function processOrderRequest(orderRequestId: string): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
   if (!ib) return;
@@ -137,6 +165,20 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
   }
 }
 
+/**
+ * The web dyno NOTIFYs the same channel for both a fresh confirm and a
+ * cancel request, distinguished by the row's current status — dispatches to
+ * whichever this row actually needs.
+ */
+async function handleOrderRequestNotification(orderRequestId: string, knownStatus?: string): Promise<void> {
+  const status = knownStatus ?? (await db("order_requests").where({ id: orderRequestId }).first())?.status;
+  if (status === "cancel_requested") {
+    await processCancelRequest(orderRequestId);
+  } else {
+    await processOrderRequest(orderRequestId);
+  }
+}
+
 /** Postgres LISTEN/NOTIFY — the web dyno NOTIFYs this channel with the order_requests.id on confirm. */
 async function listenForOrderRequests(): Promise<void> {
   const client = new PgClient({
@@ -147,15 +189,16 @@ async function listenForOrderRequests(): Promise<void> {
   await client.query(`LISTEN ${orderRequestsChannel}`);
   client.on("notification", (message) => {
     if (message.channel !== orderRequestsChannel || !message.payload) return;
-    processOrderRequest(message.payload).catch((error) => console.error(`Order request processing failed: ${error}`));
+    handleOrderRequestNotification(message.payload).catch((error) => console.error(`Order request processing failed: ${error}`));
   });
   client.on("error", (error) => console.error(`order_requests LISTEN connection error: ${error.message}`));
 
   // A missed NOTIFY (e.g. a reconnect window) shouldn't leave a confirmed
-  // order stuck forever — this short poll is the fallback safety net.
+  // order, or a cancel request, stuck forever — this short poll is the
+  // fallback safety net for both.
   setInterval(async () => {
-    const stuck = await db("order_requests").where({ status: "confirmed" }).select("id");
-    for (const row of stuck) await processOrderRequest(row.id);
+    const stuck = await db("order_requests").whereIn("status", ["confirmed", "cancel_requested"]).select("id", "status");
+    for (const row of stuck) await handleOrderRequestNotification(row.id, row.status);
   }, 30_000);
 }
 
@@ -358,6 +401,33 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
   }
 }
 
+/**
+ * Fills in trade_alerts.resulting_position_id for a brand-new position
+ * (known gap flagged 2026-08-24: a `roll` already knows related_position_id
+ * at confirm time, but a new_trade alert's position doesn't exist until
+ * this reconciliation pass creates it — nothing wrote the link back until
+ * now). Matches on symbol + still-unlinked alert rather than a contract id,
+ * since the order_requests payload for a brand-new open never has a conId
+ * (it isn't resolved until the worker places the order) — safe because this
+ * only matches request_types that never set related_position_id (an
+ * open_covered_call/open_cash_secured_put, never a roll/close), and only
+ * order_requests that came from a trade alert in the first place (a
+ * manually-entered new position has no source_alert_id, so nothing to link).
+ */
+async function backfillAlertResultingPositionId(symbol: string, positionId: string): Promise<void> {
+  const orderRequest = await db("order_requests as orq")
+    .join("trade_alerts as ta", "ta.id", "orq.source_alert_id")
+    .whereIn("orq.request_type", ["open_covered_call", "open_cash_secured_put"])
+    .whereIn("orq.status", ["filled", "partially_filled"])
+    .whereRaw("orq.payload->>'symbol' = ?", [symbol])
+    .whereNull("ta.resulting_position_id")
+    .orderBy("orq.created_at", "asc")
+    .first({ alertId: "ta.id" });
+  if (!orderRequest) return;
+
+  await db("trade_alerts").where({ id: orderRequest.alertId }).update({ resulting_position_id: positionId });
+}
+
 async function upsertSyncedPosition(
   symbol: string,
   strategyKey: string,
@@ -377,6 +447,7 @@ async function upsertSyncedPosition(
       .insert({ strategy_key: strategyKey, ticker_id: ticker.id, status: "open" })
       .returning(["id"]);
     positionId = newPosition.id;
+    await backfillAlertResultingPositionId(symbol, positionId!);
   } else {
     await db("positions").where({ id: positionId }).update({ strategy_key: strategyKey });
   }

@@ -462,18 +462,40 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
     response.status(404).json({ error: "Order not found." });
     return;
   }
-  if (orderRequest.status !== "pending_confirmation" && orderRequest.status !== "confirmed") {
-    response.status(409).json({
-      error: "This order has already been submitted to IBKR — cancel it directly in TWS/IBKR for now.",
-    });
+
+  if (orderRequest.status === "pending_confirmation" || orderRequest.status === "confirmed") {
+    // Never reached IBKR — cancelling here is a pure local status flip.
+    const [updated] = await db("order_requests")
+      .where({ id: orderRequest.id })
+      .update({ status: "cancelled", updated_at: db.fn.now() })
+      .returning("*");
+    response.json(updated);
     return;
   }
 
-  const [updated] = await db("order_requests")
-    .where({ id: orderRequest.id })
-    .update({ status: "cancelled", updated_at: db.fn.now() })
-    .returning("*");
-  response.json(updated);
+  if (orderRequest.status === "submitted" || orderRequest.status === "partially_filled") {
+    // Already at IBKR — the worker (the only process holding the IBKR
+    // connection) has to call ib.cancelOrder() itself. This flips to a
+    // transient status and NOTIFYs the worker; the existing orderStatus
+    // listener flips it to "cancelled" once IBKR confirms, same as every
+    // other terminal status. The frontend already polls GET
+    // /positions/orders/:id until a terminal status, so this responds
+    // immediately with the transient row rather than waiting.
+    const [updated] = await db("order_requests")
+      .where({ id: orderRequest.id })
+      .update({ status: "cancel_requested", updated_at: db.fn.now() })
+      .returning("*");
+    await db.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
+    response.json(updated);
+    return;
+  }
+
+  response.status(409).json({
+    error:
+      orderRequest.status === "cancel_requested"
+        ? "Cancellation already requested for this order."
+        : "This order has already reached a final status and can't be cancelled.",
+  });
 });
 
 positionsRouter.get("/:id", async (request, response) => {
