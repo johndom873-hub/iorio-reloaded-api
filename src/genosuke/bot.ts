@@ -25,6 +25,15 @@ import { TOOLS_BY_NAME } from "./tools/index.js";
 const HISTORY_MAX_MESSAGES = 20;
 // Stale chat context shouldn't leak into an unrelated new question hours later.
 const HISTORY_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const ORDER_POLL_INTERVAL_MS = 5000;
+const ORDER_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+const ORDER_TERMINAL_STATUSES = new Set(["filled", "partially_filled", "cancelled", "error"]);
+
+interface OrderRequestRow {
+  id: string;
+  status: string;
+  error_message: string | null;
+}
 
 interface HistoryEntry {
   messages: ChatMessage[];
@@ -122,6 +131,45 @@ async function handleMessage(
   }
 }
 
+function describeOrderOutcome(order: OrderRequestRow): string {
+  switch (order.status) {
+    case "filled":
+      return "✅ Order filled — IBKR confirmed the trade.";
+    case "partially_filled":
+      return "⚠️ Order partially filled — check the Trade Blotter for the remaining quantity.";
+    case "cancelled":
+      return "Order was cancelled at IBKR — nothing was filled.";
+    case "error":
+      return `❌ Order failed: ${order.error_message ?? "unknown error"}.`;
+    default:
+      return `Order status: ${order.status}.`;
+  }
+}
+
+// create_position/roll_position/close_position only confirm synchronously —
+// the actual IBKR transmission happens async in worker.ts via Postgres
+// LISTEN/NOTIFY (see positions.ts's /orders/:id/confirm), so the
+// "confirmed" status right after Yes isn't the real outcome; contract
+// resolution or IBKR itself can still reject it seconds later. Polls until
+// a terminal status and sends a second message with what actually happened.
+async function pollOrderAndFollowUp(chatId: string, orderId: string, telegram: TelegramApi, api: GenosukeApiClient): Promise<void> {
+  const deadline = Date.now() + ORDER_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, ORDER_POLL_INTERVAL_MS));
+    let order: OrderRequestRow;
+    try {
+      order = await api.get<OrderRequestRow>(`/positions/orders/${orderId}`);
+    } catch {
+      continue; // transient API hiccup — keep polling until the timeout
+    }
+    if (ORDER_TERMINAL_STATUSES.has(order.status)) {
+      await telegram.sendMessage(chatId, describeOrderOutcome(order));
+      return;
+    }
+  }
+  await telegram.sendMessage(chatId, "Still haven't heard back from IBKR on that order after 5 minutes — check the Trade Blotter, or ask me again shortly.");
+}
+
 async function handleCallbackQuery(
   callbackQuery: NonNullable<TelegramUpdate["callback_query"]>,
   config: GenosukeConfig,
@@ -162,7 +210,13 @@ async function handleCallbackQuery(
 
   try {
     const result = await tool.execute(confirmation.input, api);
-    await telegram.sendMessage(chatId, `Done — ${tool.describeForConfirmation?.(confirmation.input) ?? tool.name}.\n\n${JSON.stringify(result).slice(0, 1500)}`);
+    const description = tool.describeForConfirmation?.(confirmation.input) ?? tool.name;
+    if (tool.tracksOrderStatus && typeof (result as { id?: unknown })?.id === "string") {
+      await telegram.sendMessage(chatId, `Sent to IBKR — ${description} I'll follow up once it's placed or if anything fails.`);
+      pollOrderAndFollowUp(chatId, (result as { id: string }).id, telegram, api).catch((error) => console.error("Genosuke: order poll failed", error));
+    } else {
+      await telegram.sendMessage(chatId, `Done — ${description}.`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await telegram.sendMessage(chatId, `That failed: ${message}`);

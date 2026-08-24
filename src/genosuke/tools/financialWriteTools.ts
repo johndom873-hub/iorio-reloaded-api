@@ -75,6 +75,7 @@ export const financialWriteTools: GenosukeTool[] = [
       const stockPart = stock ? `BUY ${stock.quantity} sh @ ${stock.limitPrice} + ` : "";
       return `Place order for ${input.symbol} (${input.strategyKey}): ${stockPart}SELL ${option.quantity}x $${option.strikePrice} exp ${option.expiryDate} @ ${option.limitPrice}${input.sourceAlertId ? " (approving pending alert)" : " (manual entry)"} — will be sent to IBKR immediately on confirm.`;
     },
+    tracksOrderStatus: true,
     execute: (input, api) => buildAndConfirmOrder(api, "/positions/orders", input),
   },
   {
@@ -106,6 +107,7 @@ export const financialWriteTools: GenosukeTool[] = [
       const newLeg = input.newLeg as { strikePrice: unknown; expiryDate: unknown; limitPrice: unknown };
       return `Roll position ${input.positionId}: buy back closing leg @ ${input.closeLimitPrice}, sell new leg $${newLeg.strikePrice} exp ${newLeg.expiryDate} @ ${newLeg.limitPrice} — one atomic combo order sent to IBKR immediately on confirm.`;
     },
+    tracksOrderStatus: true,
     execute: (input, api) => {
       const { positionId, ...body } = input;
       return buildAndConfirmOrder(api, `/positions/${positionId}/roll`, body);
@@ -135,6 +137,7 @@ export const financialWriteTools: GenosukeTool[] = [
       const legs = (input.legs as { legId: string; limitPrice: unknown }[]) ?? [];
       return `Close position ${input.positionId}: ${legs.map((l) => `leg ${l.legId} @ ${l.limitPrice}`).join(", ")} — combo order sent to IBKR immediately on confirm.`;
     },
+    tracksOrderStatus: true,
     execute: (input, api) => {
       const { positionId, legs } = input;
       return buildAndConfirmOrder(api, `/positions/${positionId}/close`, { legs });
