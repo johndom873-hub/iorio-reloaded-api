@@ -392,7 +392,10 @@ positionsRouter.post("/orders", async (request, response) => {
       requested_by_user_id: request.session.userId,
       request_type: strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put",
       payload: JSON.stringify(payload),
-      source_alert_id: sourceAlertId ?? null,
+      // sourceAlertId can arrive as "" (e.g. Genosuke's manual-entry path,
+      // not omitted) rather than undefined — ?? only catches null/undefined,
+      // and an empty string fails Postgres's uuid parser outright.
+      source_alert_id: sourceAlertId || null,
     })
     .returning("*");
 
