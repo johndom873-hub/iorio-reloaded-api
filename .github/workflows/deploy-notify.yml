@@ -1,0 +1,136 @@
+name: Deploy Notification
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for Heroku build to start
+        run: sleep 30
+
+      - name: Poll Heroku releases until deploy complete
+        id: heroku
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+          COMMITS_JSON: ${{ toJson(github.event.commits) }}
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          APP="iorio-reloaded-api"
+          COMMIT_SHA="${{ github.sha }}"
+          SHORT_SHA="${COMMIT_SHA:0:8}"
+
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "heroku_app=$APP" >> $GITHUB_OUTPUT
+
+          COUNT=$(echo "$COMMITS_JSON" | jq 'length')
+          if [ "$COUNT" = "0" ]; then
+            COMMIT_SUMMARY="$HEAD_COMMIT_MSG"
+          elif [ "$COUNT" = "1" ]; then
+            COMMIT_SUMMARY=$(echo "$COMMITS_JSON" | jq -r '.[0].message')
+          else
+            COMMIT_SUMMARY=$(echo "$COMMITS_JSON" | jq -r 'map("• " + .message) | join("\n")')
+          fi
+          {
+            echo "commit_msg<<EOF_DELIM"
+            echo "$COMMIT_SUMMARY"
+            echo "EOF_DELIM"
+          } >> $GITHUB_OUTPUT
+
+          STATUS=""
+          RELEASE_VERSION=""
+
+          for i in $(seq 1 60); do
+            RESPONSE=$(curl -s \
+              -H "Accept: application/vnd.heroku+json; version=3" \
+              -H "Authorization: Bearer $HEROKU_API_KEY" \
+              -H "Range: version ..; max=20, order=desc" \
+              "https://api.heroku.com/apps/${APP}/releases" \
+            )
+
+            RELEASE=$(echo "$RESPONSE" | jq -c --arg desc "Deploy $SHORT_SHA" \
+              '[.[] | select(.description == $desc)] | .[0] // empty')
+
+            if [ -n "$RELEASE" ] && [ "$RELEASE" != "null" ]; then
+              STATUS=$(echo "$RELEASE" | jq -r '.status')
+              RELEASE_VERSION=$(echo "$RELEASE" | jq -r '.version')
+              echo "Poll $i: found release v${RELEASE_VERSION}, status = $STATUS"
+              if [ "$STATUS" = "succeeded" ] || [ "$STATUS" = "failed" ]; then
+                break
+              fi
+            else
+              echo "Poll $i: no release found for SHA $SHORT_SHA yet"
+            fi
+
+            sleep 10
+          done
+
+          if [ -z "$STATUS" ] || [ "$STATUS" = "pending" ]; then
+            echo "build_status=timeout" >> $GITHUB_OUTPUT
+            echo "release_version=?" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "build_status=$STATUS" >> $GITHUB_OUTPUT
+          echo "release_version=${RELEASE_VERSION:-?}" >> $GITHUB_OUTPUT
+
+      - name: Run npm audit
+        id: audit
+        if: always()
+        run: |
+          npm audit --json 2>/dev/null > /tmp/audit.json || true
+
+          VULN_COUNT=$(jq '(.metadata.vulnerabilities.critical // 0) + (.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.moderate // 0)' /tmp/audit.json 2>/dev/null || echo 0)
+          echo "vuln_count=$VULN_COUNT" >> $GITHUB_OUTPUT
+
+          if [ "${VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            DETAILS=$(jq -r '
+              .vulnerabilities
+              | to_entries[]
+              | select(.value.severity == "critical" or .value.severity == "high" or .value.severity == "moderate")
+              | "• \(.key) (\(.value.severity))"
+            ' /tmp/audit.json | head -10)
+            {
+              echo "details<<EOF_DELIM"
+              echo "$DETAILS"
+              echo "EOF_DELIM"
+            } >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Telegram notification
+        if: always()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS: ${{ steps.heroku.outputs.build_status }}
+          RELEASE: ${{ steps.heroku.outputs.release_version }}
+          SHORT_SHA: ${{ steps.heroku.outputs.short_sha }}
+          COMMIT_MSG: ${{ steps.heroku.outputs.commit_msg }}
+          APP: ${{ steps.heroku.outputs.heroku_app }}
+          VULN_COUNT: ${{ steps.audit.outputs.vuln_count }}
+          DETAILS: ${{ steps.audit.outputs.details }}
+        run: |
+          NL=$'\n'
+
+          if [ "$STATUS" = "succeeded" ]; then
+            TEXT="✅ ${APP} deployed${NL}${NL}v${RELEASE} (${SHORT_SHA}) - ${COMMIT_MSG}"
+          elif [ "$STATUS" = "failed" ]; then
+            TEXT="❌ ${APP} build failed — not deployed${NL}${NL}(${SHORT_SHA}) - ${COMMIT_MSG}${NL}${NL}Check Heroku build logs for details."
+          else
+            TEXT="⏱️ ${APP} deploy timed out${NL}${NL}(${SHORT_SHA}) - ${COMMIT_MSG}"
+          fi
+
+          if [ "${VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            TEXT="${TEXT}${NL}${NL}⚠️ ${VULN_COUNT} known vulnerabilities${NL}${DETAILS}"
+          fi
+
+          PAYLOAD=$(jq -n --arg chat_id "$CHAT_ID" --arg text "$TEXT" \
+            '{chat_id: $chat_id, text: $text}')
+
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
