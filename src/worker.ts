@@ -29,6 +29,10 @@ const orderRequestsChannel = "order_requests_channel";
 const reconciliationIntervalMs = 60_000;
 const positionReqId = 1;
 
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
 /** Resolves every leg's conId (reusing a pre-resolved one where the payload already has it). */
 async function resolveLegContractIds(
   ib: ReturnType<typeof persistentIbkrConnection.getIb>,
@@ -76,9 +80,18 @@ async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Con
     return { contract, order };
   }
 
+  // Real bug found 2026-08-24 closing a real 3-contract covered call: using
+  // each leg's raw quantity as its ratio (300 shares : 3 contracts) isn't a
+  // valid IBKR combo ratio — IBKR rejected it outright ("error 321: Invalid
+  // leg ratio"). It only happened to work before because every order tested
+  // so far was exactly 1 contract (100 shares : 1 contract, already in
+  // lowest terms). IBKR combo ratios must be reduced to their smallest
+  // integer terms, with totalQuantity carrying the reduced-out common
+  // factor (the number of combo "units") — not always 1.
+  const legRatioGcd = payload.legs.map((leg) => leg.quantity).reduce((a, b) => gcd(a, b));
   const comboLegs: ComboLeg[] = payload.legs.map((leg, index) => ({
     conId: conIds[index]!,
-    ratio: leg.quantity,
+    ratio: leg.quantity / legRatioGcd,
     action: leg.action,
     exchange: "SMART",
   }));
@@ -90,14 +103,14 @@ async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Con
     comboLegs,
   };
   // Convention for combo/BAG orders: the top-level order action is BUY, and
-  // each ComboLeg's own action + ratio (set above) is what actually encodes
-  // which legs are bought vs. sold and in what proportion. totalQuantity is
-  // the number of combo "units" (1 = exactly the leg ratios specified).
+  // each ComboLeg's own action + reduced ratio (set above) is what actually
+  // encodes which legs are bought vs. sold and in what proportion.
+  // totalQuantity is the number of combo "units" — legRatioGcd, not always 1.
   const order: IbkrOrder = {
     action: OrderAction.BUY,
     orderType: OrderType.LMT,
     lmtPrice: computeNetLimitPrice(payload.legs),
-    totalQuantity: 1,
+    totalQuantity: legRatioGcd,
     tif: TimeInForce.DAY,
     transmit: true,
   };
@@ -521,7 +534,12 @@ async function upsertSyncedPosition(
         // outright and crashed reconciliation mid-loop before any legs (or
         // subsequent positions in the same pass) could be written.
         expiry_date: contract.lastTradeDateOrContractMonth || null,
-        multiplier: contract.multiplier ?? 1,
+        // Third instance of the same bug: IBKR reports a stock contract's
+        // multiplier as "" (falsy but not nullish), not the conceptually
+        // correct 1 — found 2026-08-24 when it silently zeroed out a real
+        // stock leg's entire contribution to unrealized P&L (positions.ts's
+        // formula multiplies every leg's price move by leg.multiplier).
+        multiplier: contract.secType === SecType.STK ? 1 : (contract.multiplier ?? 1),
         ibkr_contract_id: conId,
         entry_price: entryPrice,
         entry_at: db.fn.now(),
