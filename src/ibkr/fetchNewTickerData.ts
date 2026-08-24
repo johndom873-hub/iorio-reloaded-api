@@ -41,7 +41,7 @@ export function lookupContractDetails(
 
     const onContractDetails = (id: number, details: { longName?: string; industry?: string; contract: { conId?: number } }) => {
       if (id !== reqId) return;
-      finish({ companyName: details.longName ?? null, sector: details.industry ?? null, conId: details.contract.conId ?? null });
+      finish({ companyName: details.longName || null, sector: details.industry || null, conId: details.contract.conId ?? null });
     };
 
     const onEnd = (id: number) => {

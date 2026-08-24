@@ -48,7 +48,7 @@ tradeAlertsRouter.get("/", async (request, response) => {
       t.id AS "tickerId",
       t.symbol,
       t.company_name AS "companyName",
-      t.sector
+      NULLIF(t.sector, '') AS sector
     FROM trade_alerts ta
     JOIN tickers t ON t.id = ta.ticker_id
     WHERE ${conditions.join(" AND ")}

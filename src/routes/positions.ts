@@ -71,7 +71,7 @@ const positionSelect = `
     t.id AS "tickerId",
     t.symbol,
     t.company_name AS "companyName",
-    t.sector,
+    NULLIF(t.sector, '') AS sector,
     COALESCE(
       (
         SELECT json_agg(

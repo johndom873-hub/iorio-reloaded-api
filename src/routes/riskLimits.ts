@@ -103,13 +103,13 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
 
   const concentrationBySector = await db.raw(`
     SELECT
-      COALESCE(t.sector, 'Unknown') AS sector,
+      COALESCE(NULLIF(t.sector, ''), 'Unknown') AS sector,
       SUM(ABS(pl.quantity) * pl.entry_price * pl.multiplier) AS "notionalValue"
     FROM position_legs pl
     JOIN positions p ON p.id = pl.position_id
     JOIN tickers t ON t.id = p.ticker_id
     WHERE p.status = 'open'
-    GROUP BY COALESCE(t.sector, 'Unknown')
+    GROUP BY COALESCE(NULLIF(t.sector, ''), 'Unknown')
     ORDER BY "notionalValue" DESC
   `);
 
