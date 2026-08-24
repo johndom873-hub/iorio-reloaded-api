@@ -34,30 +34,6 @@ app.use(healthRouter);
 // Telegram calls this directly (no session) — authenticated by the shared
 // secret header checked inside the handler instead.
 app.post("/genosuke/webhook", handleGenosukeWebhook);
-// TEMPORARY diagnostic — replays apiClient.ts's exact internal self-call to
-// /auth/login and reports what actually came back, to root-cause Genosuke's
-// "no session cookie was returned" failure without guessing further.
-// Remove once that's fixed. Gated on the webhook secret so it isn't a public
-// login-status oracle.
-app.get("/genosuke/debug-login", async (request, response) => {
-  if (request.get("X-Debug-Secret") !== process.env.GENOSUKE_WEBHOOK_SECRET) {
-    response.sendStatus(404);
-    return;
-  }
-  const loginResponse = await fetch(`http://127.0.0.1:${process.env.PORT}/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: process.env.GENOSUKE_SERVICE_USERNAME, password: process.env.GENOSUKE_SERVICE_USER_PASSWORD }),
-  });
-  response.json({
-    status: loginResponse.status,
-    ok: loginResponse.ok,
-    headerNames: [...loginResponse.headers.keys()],
-    getSetCookie: loginResponse.headers.getSetCookie(),
-    getHeader: loginResponse.headers.get("set-cookie"),
-    bodyPreview: (await loginResponse.text()).slice(0, 300),
-  });
-});
 app.use("/auth", authRouter);
 app.use("/screener", screenerRouter);
 app.use("/tickers", tickerDetailRouter);

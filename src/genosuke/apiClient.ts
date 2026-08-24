@@ -30,16 +30,24 @@ export class GenosukeApiClient {
   private async login(): Promise<void> {
     const response = await fetch(`${this.config.apiBaseUrl}/auth/login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // middleware/session.ts sets cookie.secure=true in production, and
+      // express-session silently refuses to issue a Secure-flagged cookie
+      // over what it sees as a plain-HTTP connection. Real browser traffic
+      // gets marked secure via Heroku's router adding X-Forwarded-Proto,
+      // which app.ts's trust-proxy setting honors — but this is a direct
+      // loopback call that bypasses the router, so without this header
+      // Express sees it as insecure and drops the Set-Cookie entirely (no
+      // error, just a 200 with no cookie). Safe to claim here: this never
+      // leaves the dyno's own container.
+      headers: { "Content-Type": "application/json", "X-Forwarded-Proto": "https" },
       body: JSON.stringify({ username: this.config.serviceUsername, password: this.config.serviceUserPassword }),
     });
     if (!response.ok) {
       throw new GenosukeApiError(response.status, `Genosuke service-user login failed: ${await response.text()}`);
     }
-    // Set-Cookie is a "forbidden" response header under the Fetch spec —
-    // response.headers.get("set-cookie") always returns null for it, even
-    // though the browser devtools/curl show it fine. getSetCookie() is
-    // undici's dedicated escape hatch for exactly this (Node 18.14+).
+    // getSetCookie() is undici's dedicated accessor for the Set-Cookie
+    // header — response.headers.get("set-cookie") always returns null for
+    // it, even when it's genuinely present (Node 18.14+).
     const [setCookie] = response.headers.getSetCookie();
     if (!setCookie) {
       throw new GenosukeApiError(500, "Genosuke login succeeded but no session cookie was returned.");
