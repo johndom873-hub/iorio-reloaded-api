@@ -36,7 +36,11 @@ export class GenosukeApiClient {
     if (!response.ok) {
       throw new GenosukeApiError(response.status, `Genosuke service-user login failed: ${await response.text()}`);
     }
-    const setCookie = response.headers.get("set-cookie");
+    // Set-Cookie is a "forbidden" response header under the Fetch spec —
+    // response.headers.get("set-cookie") always returns null for it, even
+    // though the browser devtools/curl show it fine. getSetCookie() is
+    // undici's dedicated escape hatch for exactly this (Node 18.14+).
+    const [setCookie] = response.headers.getSetCookie();
     if (!setCookie) {
       throw new GenosukeApiError(500, "Genosuke login succeeded but no session cookie was returned.");
     }
