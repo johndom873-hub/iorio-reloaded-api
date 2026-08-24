@@ -1,6 +1,6 @@
 # Iorio Reloaded — Progress Tracker
 
-Last updated: 2026-08-22
+Last updated: 2026-08-24
 
 ## Vision
 Multi-strategy options trading system. Business user checks in daily, reviews suggested opportunities and open positions, approves/rejects/modifies trades. Trades execute (semi-automated) via IBKR once confirmed. Node.js + React + Postgres, hosted on Heroku.
@@ -117,6 +117,7 @@ Everything below is real, working code, verified end-to-end (migrations against 
 - Auth: Argon2id + `express-session`/`connect-pg-simple` (own dedicated pg pool — Knex's tarn pool isn't compatible). Full flow tested via curl (wrong password → 401, correct → session cookie + DB row, logout destroys it).
 - `scripts/manage-user.ts` — create/set-password/list. `src/db/schema.test.ts` — Vitest round-trip + constraint tests, all passing.
 - Knex changes CWD before running, breaking `dotenv`'s default relative lookup — `knexfile.ts` resolves an absolute path instead.
+- **`npm run sync-dev-db` (2026-08-22)** — refreshes the local dev DB from prod via `heroku pg:pull`. Stops/restarts the local dev server around the drop (an active connection blocks it); tolerates the 5 benign `_heroku`-schema event-trigger errors `pg:pull` always emits locally while still failing on real errors; preserves local `users` rows across every sync via a post-pull upsert matched on `lower(username)` (id excluded from the update, so a pre-existing prod row keeps its id and other tables' FKs into it stay valid). Verified end-to-end including the users-preservation behavior.
 
 **Frontend (`iorio-reloaded-app`)** — React 19 + TypeScript + Vite + Tabler + ApexCharts + lightweight-charts.
 - Full app shell: session-aware routing, sidebar nav for all 7 screens, login wired to the real backend.
