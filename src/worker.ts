@@ -7,6 +7,7 @@ import { environment } from "./config/env.js";
 import { persistentIbkrConnection } from "./ibkr/persistentConnection.js";
 import { resolveContractId } from "./ibkr/resolveContractId.js";
 import { buildLegContract, computeNetLimitPrice, type OrderLegPayload, type OrderRequestPayload } from "./ibkr/orderPayload.js";
+import { parseIbkrExecutionTime } from "./ibkr/parseIbkrExecutionTime.js";
 
 /**
  * The persistent worker process — see PROGRESS.md's "IBKR is the source of
@@ -257,6 +258,35 @@ function setupOrderTrackingListeners(): void {
 }
 
 /**
+ * Real bug found 2026-08-24 testing against 3 genuine paper fills: an
+ * opening execution (no position_leg exists yet — reconcilePositionsFromIbkr
+ * hasn't created it) was silently dropped instead of ever being recorded,
+ * leaving the Trade Blotter permanently empty for every opening trade. This
+ * buffers that raw execution, keyed by conId, so upsertSyncedPosition can
+ * drain it into a real trades row the moment it creates the matching leg —
+ * using the actual per-fill execution data (execId, price, quantity), not a
+ * synthesized one from IBKR's aggregate avgCost.
+ */
+const pendingOpeningExecutions = new Map<string, { contract: Contract; execution: Execution }[]>();
+
+async function insertOpeningTradeRow(positionLegId: string, contract: Contract, execution: Execution): Promise<void> {
+  if (!execution.execId) return;
+  await db("trades")
+    .insert({
+      position_leg_id: positionLegId,
+      ibkr_order_id: String(execution.orderId ?? ""),
+      ibkr_exec_id: execution.execId,
+      side: execution.side === "BOT" ? "buy" : "sell",
+      quantity: execution.shares ?? 0,
+      price: execution.price ?? 0,
+      executed_at: parseIbkrExecutionTime(execution.time) ?? new Date(),
+      is_closing_trade: false,
+    })
+    .onConflict("ibkr_exec_id")
+    .ignore();
+}
+
+/**
  * Idempotent by construction — trades.ibkr_exec_id is UNIQUE, and each
  * partial fill has its own distinct execId (see @stoqey/ib's Execution type
  * doc comment), so re-processing the same execDetails event (e.g. after a
@@ -268,44 +298,50 @@ async function recordExecution(contract: Contract, execution: Execution): Promis
   const existing = await db("trades").where({ ibkr_exec_id: execution.execId }).first();
   if (existing) return;
 
-  const leg = await db("position_legs").where({ ibkr_contract_id: String(contract.conId) }).whereNull("exit_at").first();
-  const isClosing = execution.side === "BOT" ? leg?.side === "short" : leg?.side === "long";
+  const conId = String(contract.conId);
+  const leg = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").first();
 
-  if (leg) {
-    if (isClosing) {
-      await db("position_legs")
-        .where({ id: leg.id })
-        .update({ exit_price: execution.price, exit_at: execution.time ? new Date(execution.time) : new Date() });
-      await db("trades").insert({
-        position_leg_id: leg.id,
-        ibkr_order_id: String(execution.orderId ?? ""),
-        ibkr_exec_id: execution.execId,
-        side: execution.side === "BOT" ? "buy" : "sell",
-        quantity: execution.shares ?? 0,
-        price: execution.price ?? 0,
-        executed_at: execution.time ? new Date(execution.time) : new Date(),
-        is_closing_trade: true,
-      });
-
-      const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
-      if (remainingOpenLegs.length === 0) {
-        await db("positions").where({ id: leg.position_id }).update({ status: "closed", closed_at: db.fn.now() });
-      }
-      return;
-    }
+  if (!leg) {
+    // Brand-new position-opening fill (or one placed outside the app
+    // entirely) — the leg doesn't exist yet because reconcilePositionsFromIbkr
+    // hasn't run since this fill. Buffer it; upsertSyncedPosition drains this
+    // once it creates the leg. (Real new-position creation/pairing itself
+    // still only happens there, since that pass has the full current-holdings
+    // picture needed to pair a stock leg with an option leg correctly.)
+    const buffered = pendingOpeningExecutions.get(conId) ?? [];
+    buffered.push({ contract, execution });
+    pendingOpeningExecutions.set(conId, buffered);
+    console.log(`Execution ${execution.execId} for conId ${conId} has no matching open leg yet — buffered for the next reconciliation pass.`);
+    return;
   }
 
-  // No matching open leg — this is either a brand-new position-opening fill
-  // (from an order this worker just placed, or one placed outside the app
-  // entirely) or an add-to-an-existing-holding fill. Full new-position
-  // creation/pairing from a bare execution (matching it to an
-  // order_requests row for strategyKey context, or falling back to
-  // "unstructured" per the pairing-heuristic decision) is handled by
-  // reconcilePositionsFromIbkr's periodic reqPositions() pass rather than
-  // here, since that pass has the full current-holdings picture needed to
-  // pair a stock leg with an option leg correctly — this handler's job is
-  // just to record the raw execution/trade row idempotently.
-  console.log(`Execution ${execution.execId} for conId ${contract.conId} has no matching open leg — awaiting next reconciliation pass.`);
+  const isClosing = execution.side === "BOT" ? leg.side === "short" : leg.side === "long";
+  if (!isClosing) {
+    // An add-on fill to an already-tracked leg (e.g. bought more of an
+    // existing covered call's stock leg) — not a close, but still a real
+    // execution the Trade Blotter should show.
+    await insertOpeningTradeRow(leg.id, contract, execution);
+    return;
+  }
+
+  await db("position_legs")
+    .where({ id: leg.id })
+    .update({ exit_price: execution.price, exit_at: parseIbkrExecutionTime(execution.time) ?? new Date() });
+  await db("trades").insert({
+    position_leg_id: leg.id,
+    ibkr_order_id: String(execution.orderId ?? ""),
+    ibkr_exec_id: execution.execId,
+    side: execution.side === "BOT" ? "buy" : "sell",
+    quantity: execution.shares ?? 0,
+    price: execution.price ?? 0,
+    executed_at: parseIbkrExecutionTime(execution.time) ?? new Date(),
+    is_closing_trade: true,
+  });
+
+  const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
+  if (remainingOpenLegs.length === 0) {
+    await db("positions").where({ id: leg.position_id }).update({ status: "closed", closed_at: db.fn.now() });
+  }
 }
 
 interface IbkrHeldPosition {
@@ -465,19 +501,44 @@ async function upsertSyncedPosition(
     // verification step 3). Flagging rather than asserting confidently.
     const entryPrice = contract.secType === SecType.STK ? leg.held.avgCost : leg.held.avgCost / (contract.multiplier ?? 100);
 
-    await db("position_legs").insert({
-      position_id: positionId,
-      leg_type: contract.secType === SecType.STK ? "stock" : "option",
-      side: leg.side,
-      quantity: Math.abs(leg.held.quantity),
-      option_type: contract.right === OptionType.Call ? "call" : contract.right === OptionType.Put ? "put" : null,
-      strike_price: contract.strike ?? null,
-      expiry_date: contract.lastTradeDateOrContractMonth ?? null,
-      multiplier: contract.multiplier ?? 1,
-      ibkr_contract_id: conId,
-      entry_price: entryPrice,
-      entry_at: db.fn.now(),
-    });
+    const [newLeg] = await db("position_legs")
+      .insert({
+        position_id: positionId,
+        leg_type: contract.secType === SecType.STK ? "stock" : "option",
+        side: leg.side,
+        quantity: Math.abs(leg.held.quantity),
+        option_type: contract.right === OptionType.Call ? "call" : contract.right === OptionType.Put ? "put" : null,
+        // Same story as expiry_date below: IBKR reports strike as 0 (not
+        // undefined) for a stock contract, and 0 ?? null still evaluates to 0
+        // — stored as a truthy string ("0.0000") by the time it round-trips
+        // through Postgres, which could mislead any caller checking
+        // `if (leg.strikePrice)` to assume this stock leg is an option.
+        strike_price: contract.secType === SecType.STK ? null : (contract.strike ?? null),
+        // A stock leg's contract has no expiry — IBKR reports it as "", not
+        // undefined/null, for that field. `??` doesn't catch an empty string
+        // (same recurring bug class as reqContractDetails elsewhere in this
+        // codebase, see PROGRESS.md) — the Postgres `date` column rejected it
+        // outright and crashed reconciliation mid-loop before any legs (or
+        // subsequent positions in the same pass) could be written.
+        expiry_date: contract.lastTradeDateOrContractMonth || null,
+        multiplier: contract.multiplier ?? 1,
+        ibkr_contract_id: conId,
+        entry_price: entryPrice,
+        entry_at: db.fn.now(),
+      })
+      .returning(["id"]);
+
+    // Drain any opening execution(s) recordExecution buffered before this
+    // leg existed (see pendingOpeningExecutions) — one trades row per real
+    // fill, not a single synthesized one, so partial fills still show
+    // individually in the Trade Blotter.
+    const buffered = pendingOpeningExecutions.get(conId);
+    if (buffered) {
+      pendingOpeningExecutions.delete(conId);
+      for (const { contract: bufferedContract, execution } of buffered) {
+        await insertOpeningTradeRow(newLeg!.id, bufferedContract, execution);
+      }
+    }
   }
 }
 

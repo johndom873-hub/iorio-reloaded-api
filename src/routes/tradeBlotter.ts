@@ -78,5 +78,69 @@ tradeBlotterRouter.get("/", async (request, response) => {
     `,
     params,
   );
-  response.json(result.rows);
+
+  // Real fills (above) only ever exist for a `filled`/`partially_filled`
+  // order_requests row — everything else (still pending confirmation,
+  // confirmed and awaiting the worker, submitted and awaiting a fill,
+  // cancelling, cancelled, rejected, errored) has no trades row at all, so
+  // the Trade Blotter previously showed nothing for an order until it fully
+  // filled. Built 2026-08-24 after real testing: 3 real orders sat
+  // "submitted" for hours with zero visibility here. Every request_type
+  // (open/roll/close) shares the same payload shape (see orderPayload.ts),
+  // so this expands payload.legs the same way regardless of which built it.
+  const orderConditions = [`orq.status != 'filled'`];
+  const orderParams: string[] = [];
+  if (strategyKey) {
+    orderConditions.push("orq.payload->>'strategyKey' = ?");
+    orderParams.push(strategyKey);
+  }
+  if (symbol) {
+    orderConditions.push("orq.payload->>'symbol' = ?");
+    orderParams.push(symbol);
+  }
+  if (from) {
+    orderConditions.push("orq.created_at >= ?");
+    orderParams.push(from);
+  }
+  if (to) {
+    orderConditions.push("orq.created_at <= ?");
+    orderParams.push(to);
+  }
+
+  const pendingOrdersResult = await db.raw(
+    `
+    SELECT
+      orq.id,
+      orq.status,
+      orq.ibkr_order_id AS "ibkrOrderId",
+      orq.error_message AS "errorMessage",
+      orq.request_type AS "requestType",
+      orq.created_at AS "createdAt",
+      orq.payload->>'symbol' AS symbol,
+      orq.payload->>'strategyKey' AS "strategyKey",
+      leg->>'role' AS "legRole",
+      leg->>'action' AS action,
+      (leg->>'quantity')::numeric AS quantity,
+      (leg->>'unitPrice')::numeric AS "unitPrice",
+      NULLIF(leg->>'strike', '') AS strike,
+      NULLIF(leg->>'expiry', '') AS expiry,
+      NULLIF(leg->>'right', '') AS "optionType"
+    FROM order_requests orq
+    CROSS JOIN LATERAL jsonb_array_elements(orq.payload->'legs') AS leg
+    WHERE ${orderConditions.join(" AND ")}
+    ORDER BY orq.created_at DESC
+    `,
+    orderParams,
+  );
+  const pendingOrders = pendingOrdersResult.rows.map((row: Record<string, unknown>) => ({
+    ...row,
+    // YYYYMMDD (IBKR's own convention, see OrderLegPayload) -> YYYY-MM-DD,
+    // matching the trades query's to_char format so the frontend can share
+    // one date formatter across both row kinds.
+    expiry: typeof row.expiry === "string" && row.expiry.length === 8
+      ? `${row.expiry.slice(0, 4)}-${row.expiry.slice(4, 6)}-${row.expiry.slice(6, 8)}`
+      : row.expiry,
+  }));
+
+  response.json({ trades: result.rows, pendingOrders });
 });
