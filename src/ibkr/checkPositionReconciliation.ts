@@ -33,27 +33,45 @@ export async function checkPositionReconciliation(ib: IBApi): Promise<string[]> 
     .whereNull("pl.exit_at")
     .whereNotNull("pl.ibkr_contract_id")
     .select("pl.id", "pl.ibkr_contract_id", "pl.quantity", "pl.leg_type", "t.symbol as symbol");
-  const openLegsByConId = new Map(openLegs.map((leg) => [leg.ibkr_contract_id, leg]));
+
+  // Grouped by conId, not a 1:1 map — a covered call's stock conId can be
+  // legitimately split across several sibling positions (added 2026-08-25,
+  // see ibkrWorker.ts's upsertSplitCoveredCallPosition), so IBKR's one real
+  // holding for that conId has to be compared against the SUM of every
+  // local leg sharing it, not an arbitrary single one (a naive Map.get
+  // here reported a false-positive drift the first time this was tested
+  // against a real split position).
+  const openLegsByConId = new Map<string, OpenLegRow[]>();
+  for (const leg of openLegs) {
+    const group = openLegsByConId.get(leg.ibkr_contract_id) ?? [];
+    group.push(leg);
+    openLegsByConId.set(leg.ibkr_contract_id, group);
+  }
 
   const problems: string[] = [];
 
   for (const [conId, position] of heldByConId) {
-    const leg = openLegsByConId.get(conId);
-    if (!leg) {
+    const legs = openLegsByConId.get(conId);
+    if (!legs || legs.length === 0) {
       problems.push(
         `IBKR holds ${Math.abs(position.quantity)} of ${position.contract.symbol ?? "?"} (conId ${conId}) with no matching open position_legs row.`,
       );
       continue;
     }
     const trueQuantity = Math.abs(position.quantity);
-    if (trueQuantity !== leg.quantity) {
-      problems.push(`${leg.symbol} ${leg.leg_type} leg ${leg.id}: position_legs.quantity=${leg.quantity} but IBKR reports ${trueQuantity}.`);
+    const localTotal = legs.reduce((sum, leg) => sum + leg.quantity, 0);
+    if (trueQuantity !== localTotal) {
+      const legDescription = legs.length === 1 ? `leg ${legs[0]!.id}` : `${legs.length} split legs (${legs.map((l) => l.id).join(", ")})`;
+      problems.push(`${legs[0]!.symbol} ${legs[0]!.leg_type} ${legDescription}: local total quantity=${localTotal} but IBKR reports ${trueQuantity}.`);
     }
   }
 
-  for (const [conId, leg] of openLegsByConId) {
+  for (const [conId, legs] of openLegsByConId) {
     if (!heldByConId.has(conId)) {
-      problems.push(`${leg.symbol} ${leg.leg_type} leg ${leg.id} is marked open (quantity ${leg.quantity}) but IBKR reports no holding for conId ${conId}.`);
+      const localTotal = legs.reduce((sum, leg) => sum + leg.quantity, 0);
+      problems.push(
+        `${legs[0]!.symbol} ${legs[0]!.leg_type} leg(s) marked open (total quantity ${localTotal}) but IBKR reports no holding for conId ${conId}.`,
+      );
     }
   }
 
