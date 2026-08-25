@@ -85,33 +85,87 @@ riskLimitsRouter.put("/settings/:strategyKey", async (request, response) => {
   response.json(row);
 });
 
-// Notional-value proxy from entry price × quantity × multiplier — not
-// live-repriced. Good enough for a concentration cap (relative weighting
-// across the book), revisit if precise live valuation is ever needed here.
-riskLimitsRouter.get("/exposure", async (_request, response) => {
-  const concentrationByTicker = await db.raw(`
+// Per-open-position exposure — same "capital actually committed" concept
+// as positions.ts's capitalAtRisk (stock leg's entry cost for covered
+// calls; the option leg's strike × multiplier × quantity for cash-secured
+// puts, since that's the cash reserved to cover assignment), not a raw
+// sum-of-all-legs notional. Kept as one CTE and reused for every grouping
+// below so ticker/sector/strategy/top-position figures are always
+// mutually consistent with each other and with what Positions shows.
+const positionExposureCte = `
+  WITH position_exposure AS (
     SELECT
+      p.id AS position_id,
+      p.strategy_key,
       t.symbol,
-      SUM(ABS(pl.quantity) * pl.entry_price * pl.multiplier) AS "notionalValue"
-    FROM position_legs pl
-    JOIN positions p ON p.id = pl.position_id
-    JOIN tickers t ON t.id = p.ticker_id
-    WHERE p.status = 'open'
-    GROUP BY t.symbol
-    ORDER BY "notionalValue" DESC
-  `);
-
-  const concentrationBySector = await db.raw(`
-    SELECT
       COALESCE(NULLIF(t.sector, ''), 'Unknown') AS sector,
-      SUM(ABS(pl.quantity) * pl.entry_price * pl.multiplier) AS "notionalValue"
-    FROM position_legs pl
-    JOIN positions p ON p.id = pl.position_id
+      CASE
+        WHEN p.strategy_key = 'covered_call' THEN (
+          SELECT pl.entry_price * pl.quantity
+          FROM position_legs pl
+          WHERE pl.position_id = p.id AND pl.leg_type = 'stock'
+          LIMIT 1
+        )
+        ELSE (
+          SELECT pl.strike_price * pl.multiplier * pl.quantity
+          FROM position_legs pl
+          WHERE pl.position_id = p.id AND pl.leg_type = 'option'
+          ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
+          LIMIT 1
+        )
+      END AS exposure
+    FROM positions p
     JOIN tickers t ON t.id = p.ticker_id
     WHERE p.status = 'open'
-    GROUP BY COALESCE(NULLIF(t.sector, ''), 'Unknown')
-    ORDER BY "notionalValue" DESC
-  `);
+  )
+`;
+
+// Approved 2026-08-25: every concentration/allocation % on this page and
+// on the Dashboard is against total account value (net liquidation value,
+// i.e. positions + cash), not against the sum of open positions — so an
+// under-deployed account doesn't read as "concentrated" just because
+// whatever's invested happens to cluster. Sector/strategy groupings get an
+// explicit "Unallocated" row for whatever isn't in any open position,
+// rather than silently omitting cash from the picture.
+function withUnallocated<T extends { notionalValue: string }>(
+  rows: T[],
+  totalAccountValue: number | null,
+  unallocatedRow: T,
+): T[] {
+  if (totalAccountValue === null || totalAccountValue === undefined) return rows;
+  const allocated = rows.reduce((sum, row) => sum + Number(row.notionalValue), 0);
+  const unallocated = totalAccountValue - allocated;
+  if (unallocated <= 0) return rows;
+  return [...rows, { ...unallocatedRow, notionalValue: String(unallocated) }];
+}
+
+riskLimitsRouter.get("/exposure", async (_request, response) => {
+  const [concentrationByTicker, concentrationBySector, strategyAllocation, topPositions] = await Promise.all([
+    db.raw(`${positionExposureCte}
+      SELECT symbol, SUM(exposure) AS "notionalValue"
+      FROM position_exposure
+      GROUP BY symbol
+      ORDER BY "notionalValue" DESC
+    `),
+    db.raw(`${positionExposureCte}
+      SELECT sector, SUM(exposure) AS "notionalValue"
+      FROM position_exposure
+      GROUP BY sector
+      ORDER BY "notionalValue" DESC
+    `),
+    db.raw(`${positionExposureCte}
+      SELECT strategy_key AS "strategyKey", SUM(exposure) AS "notionalValue"
+      FROM position_exposure
+      GROUP BY strategy_key
+      ORDER BY "notionalValue" DESC
+    `),
+    db.raw(`${positionExposureCte}
+      SELECT position_id AS "positionId", symbol, strategy_key AS "strategyKey", exposure AS "notionalValue"
+      FROM position_exposure
+      ORDER BY exposure DESC
+      LIMIT 5
+    `),
+  ]);
 
   let account: Awaited<ReturnType<typeof fetchAccountSummary>> | null = null;
   let accountDataError: string | null = null;
@@ -121,10 +175,21 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
     accountDataError = error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.";
   }
 
+  const totalAccountValue = account?.netLiquidationValue ?? null;
+
   response.json({
     account,
     accountDataError,
+    totalAccountValue,
     concentrationByTicker: concentrationByTicker.rows,
-    concentrationBySector: concentrationBySector.rows,
+    concentrationBySector: withUnallocated(concentrationBySector.rows, totalAccountValue, {
+      sector: "Unallocated",
+      notionalValue: "0",
+    }),
+    strategyAllocation: withUnallocated(strategyAllocation.rows, totalAccountValue, {
+      strategyKey: "unallocated",
+      notionalValue: "0",
+    }),
+    topPositions: topPositions.rows,
   });
 });

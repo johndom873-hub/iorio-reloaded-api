@@ -26,22 +26,50 @@ dashboardRouter.get("/summary", async (_request, response) => {
   const latestAccountSnapshot = await db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first();
   const periods = await loadPeriodPnl();
 
-  // Latest position_pnl_snapshots row per position, joined to strategy_key,
-  // summed — current-state breakdown (no per-strategy daily-delta column
-  // to bucket by period).
+  // Realized P&L must come straight from position_legs (every closed leg,
+  // both open and closed positions) rather than position_pnl_snapshots —
+  // that snapshot table is a running mark-to-market of *open* positions
+  // only (written nightly for the P&L-over-time chart) and never gets a
+  // row once a position closes. Sourcing realized P&L from it silently
+  // dropped any gain/loss from a position that had already closed (found
+  // 2026-08-25: a closed HOOD position with +$419.19 realized was missing
+  // entirely from this breakdown while the account-level cumulative
+  // figure, sourced differently, included it — the two numbers disagreed
+  // on the Dashboard). Unrealized P&L is legitimately snapshot-sourced,
+  // since only open positions have any unrealized P&L to report.
   const strategyBreakdown = await db.raw(`
     SELECT
-      p.strategy_key AS "strategyKey",
-      SUM(latest.realized_pnl) AS "realizedPnl",
-      SUM(latest.unrealized_pnl) AS "unrealizedPnl",
-      SUM(latest.market_value) AS "marketValue"
+      strategy_key AS "strategyKey",
+      COALESCE(SUM(realized_pnl), 0) AS "realizedPnl",
+      COALESCE(SUM(unrealized_pnl), 0) AS "unrealizedPnl"
     FROM (
-      SELECT DISTINCT ON (position_id) *
-      FROM position_pnl_snapshots
-      ORDER BY position_id, snapshot_date DESC
-    ) latest
-    JOIN positions p ON p.id = latest.position_id
-    GROUP BY p.strategy_key
+      SELECT
+        p.strategy_key,
+        p.id AS position_id,
+        (
+          SELECT SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
+          FROM position_legs pl
+          WHERE pl.position_id = p.id AND pl.exit_price IS NOT NULL
+        ) AS realized_pnl,
+        0 AS unrealized_pnl
+      FROM positions p
+
+      UNION ALL
+
+      SELECT
+        p.strategy_key,
+        p.id AS position_id,
+        0 AS realized_pnl,
+        latest.unrealized_pnl
+      FROM (
+        SELECT DISTINCT ON (position_id) *
+        FROM position_pnl_snapshots
+        ORDER BY position_id, snapshot_date DESC
+      ) latest
+      JOIN positions p ON p.id = latest.position_id
+      WHERE p.status = 'open'
+    ) per_position
+    GROUP BY strategy_key
   `);
 
   response.json({
@@ -56,6 +84,22 @@ dashboardRouter.get("/summary", async (_request, response) => {
       year: periods.year ?? null,
     },
     strategyBreakdown: strategyBreakdown.rows,
+  });
+});
+
+// Lightweight shared source for "total account value" used by EXP%
+// calculations outside Risk & Limits (Positions table, order-confirmation
+// preview) — reads last night's snapshot rather than a live IBKR round
+// trip, since those call sites fetch far more often than Risk & Limits
+// and IBKR's pacing limits make a live call per positions-list load or
+// per contract-count keystroke a bad trade. Risk & Limits itself still
+// uses live data via /risk-limits/exposure, since that page is
+// specifically about current live exposure.
+dashboardRouter.get("/account-value", async (_request, response) => {
+  const latestAccountSnapshot = await db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first();
+  response.json({
+    netLiquidationValue: latestAccountSnapshot?.net_liquidation_value ?? null,
+    asOf: latestAccountSnapshot?.snapshot_date ?? null,
   });
 });
 
