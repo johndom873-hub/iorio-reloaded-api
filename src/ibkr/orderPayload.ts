@@ -2,9 +2,9 @@ import { OptionType, OrderAction, SecType } from "@stoqey/ib";
 import type { Contract } from "@stoqey/ib";
 
 // Shared between src/routes/positions.ts (builds these payloads into
-// order_requests rows) and src/worker.ts (consumes them to place real IBKR
-// orders). Deliberately its own module, not exported from worker.ts —
-// worker.ts's top-level main() starts a persistent IBKR connection as a
+// order_requests rows) and src/ibkrWorker.ts (consumes them to place real IBKR
+// orders). Deliberately its own module, not exported from ibkrWorker.ts —
+// ibkrWorker.ts's top-level main() starts a persistent IBKR connection as a
 // side effect of being imported, which must never happen inside the web
 // process.
 
@@ -49,7 +49,7 @@ export function buildLegContract(leg: OrderLegPayload): Contract {
 
 /**
  * Canonical net-limit-price convention for a combo (BAG) order placed with
- * top-level `order.action = OrderAction.BUY` (see worker.ts's buildOrder):
+ * top-level `order.action = OrderAction.BUY` (see ibkrWorker.ts's buildOrder):
  * sum each leg's unitPrice, positive for a BUY leg (money you pay) and
  * negative for a SELL leg (money you receive). A large negative result
  * means the combo is a net credit (you require IBKR to pay you at least

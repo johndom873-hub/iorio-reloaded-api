@@ -314,7 +314,7 @@ positionsRouter.get("/pnl", async (request, response) => {
 // --- Order placement (approved 2026-08-24 — see the plan doc) ---
 // The web dyno never writes positions/position_legs/trades directly for a
 // new/closed/rolled leg anymore. It only ever builds an order_requests row
-// and, on confirm, NOTIFYs the worker (src/worker.ts) to actually place the
+// and, on confirm, NOTIFYs the worker (src/ibkrWorker.ts) to actually place the
 // order with IBKR. Only the worker writes those three tables now, and only
 // from data IBKR itself reported (a real fill, a real position) — see
 // "IBKR is the source of truth" in PROGRESS.md.

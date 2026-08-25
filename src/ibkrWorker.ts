@@ -366,6 +366,38 @@ async function recordExecution(contract: Contract, execution: Execution): Promis
   reconcilePositionsFromIbkr().catch((error) => console.error(`Post-execution reconciliation failed: ${error}`));
 }
 
+// Real bug found 2026-08-25 in a full-repo review: reconcilePositionsFromIbkr
+// is fired-and-forgotten from three places (post-execution twice, plus a 60s
+// setInterval) with nothing preventing two passes from running concurrently.
+// IBKR's reqPositions() has no per-request id, so two in-flight calls to
+// fetchIbkrHeldPositions would cross wires on the same position/positionEnd
+// events — and even without that, two concurrent passes could both read
+// "no existing leg yet" for a brand-new contract and both insert one,
+// double-counting quantity and P&L. This mutex ensures only one pass's body
+// ever runs at a time; a call that arrives mid-pass doesn't run a second
+// reqPositions() — it just queues exactly one rerun for right after the
+// current pass finishes, so nothing triggering a reconciliation is ever
+// silently dropped.
+let reconciliationInFlight = false;
+let reconciliationRerunQueued = false;
+
+async function reconcilePositionsFromIbkr(): Promise<void> {
+  if (reconciliationInFlight) {
+    reconciliationRerunQueued = true;
+    return;
+  }
+  reconciliationInFlight = true;
+  try {
+    await runReconciliationPass();
+  } finally {
+    reconciliationInFlight = false;
+    if (reconciliationRerunQueued) {
+      reconciliationRerunQueued = false;
+      reconcilePositionsFromIbkr().catch((error) => console.error(`Queued reconciliation rerun failed: ${error}`));
+    }
+  }
+}
+
 /**
  * Pulls IBKR's actual current holdings and reconciles them into
  * positions/position_legs — the core of "the interface matches IBKR
@@ -376,7 +408,7 @@ async function recordExecution(contract: Contract, execution: Execution): Promis
  * cash_secured_put; anything left over is surfaced as strategy_key
  * "unstructured" rather than hidden.
  */
-async function reconcilePositionsFromIbkr(): Promise<void> {
+async function runReconciliationPass(): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
   if (!ib) return;
 
@@ -512,7 +544,14 @@ async function upsertSyncedPosition(
     // multiplier (total $ per contract, not per-share) — NEEDS VERIFICATION
     // against a real paper position before this is trusted (plan doc's
     // verification step 3). Flagging rather than asserting confidently.
-    const entryPrice = contract.secType === SecType.STK ? leg.held.avgCost : leg.held.avgCost / (contract.multiplier ?? 100);
+    // `||`, not `??` — IBKR reports a stock contract's multiplier as "" (see
+    // the comment a few lines below), and while that's been confirmed for
+    // stock legs specifically, this codebase has hit the same "empty string,
+    // not undefined" shape from IBKR for enough different fields (strike,
+    // expiry, multiplier) that an option leg reporting "" here too can't be
+    // ruled out — `?? 100` wouldn't catch it (`"" ?? 100` is `""`, not 100),
+    // silently producing `avgCost / 0` = Infinity.
+    const entryPrice = contract.secType === SecType.STK ? leg.held.avgCost : leg.held.avgCost / (contract.multiplier || 100);
     const trueQuantity = Math.abs(leg.held.quantity);
 
     const existing = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").first();

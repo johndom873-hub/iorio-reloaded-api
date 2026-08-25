@@ -1,3 +1,3 @@
 web: npm start
-worker: node dist/src/worker.js
+worker: node dist/src/ibkrWorker.js
 release: npm run migrate:latest:prod

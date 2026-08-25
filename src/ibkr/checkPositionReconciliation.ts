@@ -14,10 +14,10 @@ interface OpenLegRow {
  * Compares IBKR's actual current holdings against every open position_legs
  * row and reports any discrepancy — detection only, fixes nothing. Built
  * 2026-08-25 after two real bugs surfaced the same day (both since fixed in
- * worker.ts): a repeat opening fill for an already-tracked contract left
+ * ibkrWorker.ts): a repeat opening fill for an already-tracked contract left
  * `quantity` stuck at its original value instead of accumulating, and a
  * partial closing fill marked an entire multi-lot leg closed instead of
- * just the filled portion. worker.ts's continuous reconciliation
+ * just the filled portion. ibkrWorker.ts's continuous reconciliation
  * (reconcilePositionsFromIbkr, every 60s) already self-heals most drift —
  * but self-healing silently isn't the same as anyone being told it
  * happened, and it can't help at all if the worker itself is down. This is

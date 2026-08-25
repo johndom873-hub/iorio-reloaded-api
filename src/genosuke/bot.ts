@@ -153,7 +153,7 @@ function describeOrderOutcome(order: OrderRequestRow): string {
 }
 
 // create_position/roll_position/close_position only confirm synchronously —
-// the actual IBKR transmission happens async in worker.ts via Postgres
+// the actual IBKR transmission happens async in ibkrWorker.ts via Postgres
 // LISTEN/NOTIFY (see positions.ts's /orders/:id/confirm), so the
 // "confirmed" status right after Yes isn't the real outcome; contract
 // resolution or IBKR itself can still reject it seconds later. Polls until

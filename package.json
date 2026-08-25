@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "dev:worker": "tsx watch src/worker.ts",
+    "dev:worker": "tsx watch src/ibkrWorker.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "migrate:latest": "tsx node_modules/.bin/knex migrate:latest --knexfile src/db/knexfile.ts",

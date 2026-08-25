@@ -3,7 +3,7 @@
 // (found 2026-08-24 backfilling real HOOD executions: `new Date(execution.time)`
 // silently produced an Invalid Date, which then crashed the trades insert
 // with "invalid input syntax for type timestamp"). This affects every real
-// execution, not just historical ones — recordExecution in worker.ts hits
+// execution, not just historical ones — recordExecution in ibkrWorker.ts hits
 // the exact same string shape live.
 //
 // Standard "guess and correct" technique: build a UTC instant using the

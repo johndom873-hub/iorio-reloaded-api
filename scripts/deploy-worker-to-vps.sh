@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Deploys the latest pushed `main` to the persistent worker process
-# (src/worker.ts) running on the VPS — see PROGRESS.md's "Worker deploy
+# (src/ibkrWorker.ts) running on the VPS — see PROGRESS.md's "Worker deploy
 # location decided 2026-08-24" entry. Unlike the web/app repos, this does
-# NOT auto-deploy from a GitHub push: worker.ts changes need this script run
+# NOT auto-deploy from a GitHub push: ibkrWorker.ts changes need this script run
 # by hand afterward.
 #
 # Assumes the one-time bootstrap from that PROGRESS.md entry is already
