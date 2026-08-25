@@ -1,7 +1,7 @@
 import { MarketDataType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { generateTradeAlertCandidates, type AlertStrategyKey } from "./generateTradeAlertCandidates.js";
+import { generateTradeAlertCandidatesForTicker, type AlertStrategyKey } from "./generateTradeAlertCandidates.js";
 import { evaluateRollCandidate, type OpenShortLeg, type RollSuggestion } from "./generateRollCandidates.js";
 import { formatNewTradeAlertLine, formatRollAlertLine } from "../lib/formatTradeAlertMessage.js";
 
@@ -90,25 +90,34 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
     .select("t.id as tickerId", "t.symbol");
 
   try {
+    // Settings loaded for both strategies up front — each ticker's scan below
+    // fetches contractDetails/pricing/secDefOptParams once and quotes both
+    // strategies' strikes in a single call, instead of each strategy paying
+    // for its own round trip (see generateTradeAlertCandidatesForTicker).
     for (const strategyKey of tradeAlertStrategies) {
       const settingsRow = await db("strategy_settings").where({ strategy_key: strategyKey }).first();
-      if (!settingsRow) {
+      if (settingsRow) settingsByStrategy.set(strategyKey, toSettings(settingsRow));
+    }
+    for (const strategyKey of tradeAlertStrategies) {
+      if (settingsByStrategy.has(strategyKey)) onEvent({ type: "strategyStart", strategyKey, tickerCount: tickers.length });
+    }
+
+    for (const ticker of tickers) {
+      tickersScanned++;
+      let candidatesByStrategy: Awaited<ReturnType<typeof generateTradeAlertCandidatesForTicker>>;
+      try {
+        candidatesByStrategy = await generateTradeAlertCandidatesForTicker(connection, ticker.symbol, settingsByStrategy);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        for (const strategyKey of settingsByStrategy.keys()) {
+          onEvent({ type: "tickerError", strategyKey, symbol: ticker.symbol, message });
+        }
         continue;
       }
-      const settings = toSettings(settingsRow);
-      settingsByStrategy.set(strategyKey, settings);
 
-      onEvent({ type: "strategyStart", strategyKey, tickerCount: tickers.length });
-
-      for (const ticker of tickers) {
-        tickersScanned++;
-        let candidates: Awaited<ReturnType<typeof generateTradeAlertCandidates>> = [];
-        try {
-          candidates = await generateTradeAlertCandidates(connection, ticker.symbol, strategyKey, settings);
-        } catch (error) {
-          onEvent({ type: "tickerError", strategyKey, symbol: ticker.symbol, message: error instanceof Error ? error.message : String(error) });
-          continue;
-        }
+      for (const strategyKey of tradeAlertStrategies) {
+        if (!settingsByStrategy.has(strategyKey)) continue;
+        const candidates = candidatesByStrategy.get(strategyKey) ?? [];
 
         await db("trade_alerts")
           .where({ ticker_id: ticker.tickerId, strategy_key: strategyKey, status: "pending" })

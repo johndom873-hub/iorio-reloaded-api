@@ -95,10 +95,21 @@ tradeAlertsRouter.get("/run-stream", async (_request, response) => {
 
   try {
     await runJob("trade_alert_generation", async () => {
-      const { tickersScanned, totalNewAlerts } = await runTradeAlertGeneration((event) => send(event));
+      const { tickersScanned, totalNewAlerts, newAlertLines, rollAlertLines } = await runTradeAlertGeneration((event) => send(event));
+
+      // Same per-trade detail format as the scheduled job's script
+      // (run-trade-alert-generation-job.ts) — a manual "Run Now" should
+      // notify with the same level of detail as the daily scheduled run.
+      const messageBlocks: string[] = [];
+      if (totalNewAlerts > 0) {
+        messageBlocks.push(`📋 ${totalNewAlerts} new trade alert(s) ready for review`);
+        if (newAlertLines.length > 0) messageBlocks.push(newAlertLines.join("\n\n"));
+        if (rollAlertLines.length > 0) messageBlocks.push(rollAlertLines.join("\n\n"));
+      }
+
       return {
         details: { tickersScanned, totalNewAlerts },
-        notify: totalNewAlerts > 0 ? `📋 Trade Alerts: ${totalNewAlerts} new alert(s) ready for review.` : undefined,
+        notify: messageBlocks.length > 0 ? messageBlocks.join("\n\n") : undefined,
       };
     });
     send({ type: "done" });

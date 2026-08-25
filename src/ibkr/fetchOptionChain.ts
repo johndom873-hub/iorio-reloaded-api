@@ -184,6 +184,11 @@ type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 // bid/ask/Greeks/IV for a not-yet-confirmed order's option leg) — same
 // underlying subscribe/collect/cancel logic, just a single contract instead
 // of a whole chain.
+function isQuoteReady(quote: OptionQuote): boolean {
+  const hasPrice = (quote.bid !== null && quote.ask !== null) || quote.last !== null;
+  return hasPrice && quote.delta !== null;
+}
+
 export async function fetchQuotesForContracts(
   ib: IBApi,
   symbol: string,
@@ -191,7 +196,32 @@ export async function fetchQuotesForContracts(
 ): Promise<OptionQuote[]> {
   const quotes = new Map<number, OptionQuote>();
   const reqIdToContract = new Map<number, { expiry: string; strike: number; right: "C" | "P" }>();
+  const readyReqIds = new Set<number>();
   let nextReqId = 10_000;
+  let onAllReady: (() => void) | null = null;
+
+  // Streaming reqMktData subscriptions have no IBKR-side "done" event (unlike
+  // snapshot mode's tickSnapshotEnd) — the fixed quoteTimeoutMs wait below is
+  // a safety ceiling, not the expected path. Most contracts get both a price
+  // and a modeled delta well before that, so this resolves as soon as every
+  // contract is ready rather than always paying the full wait. Illiquid
+  // strikes that never produce a delta tick still fall through to the
+  // ceiling, same as before this change.
+  //
+  // Snapshot mode (reqMktData's snapshot=true, with tickSnapshotEnd as the
+  // completion signal) was tried and measured worse on both axes: it never
+  // resolved before the ceiling across a full 14-ticker test run, and
+  // averaged ~54% price+delta completeness vs. ~83% for this streaming
+  // approach — delayed-data snapshot requests for options are unreliable on
+  // this account, consistent with the account's general delayed-data
+  // limitations (see other IBKR notes in this codebase).
+  function checkReady(reqId: number) {
+    if (readyReqIds.has(reqId)) return;
+    const quote = quotes.get(reqId);
+    if (!quote || !isQuoteReady(quote)) return;
+    readyReqIds.add(reqId);
+    if (readyReqIds.size === reqIdToContract.size) onAllReady?.();
+  }
 
   function onTickPrice(reqId: number, tickType: number, price: number) {
     const quote = quotes.get(reqId);
@@ -200,6 +230,7 @@ export async function fetchQuotesForContracts(
     if (tickType === 66) quote.bid = price;
     if (tickType === 67) quote.ask = price;
     if (tickType === 68) quote.last = price;
+    checkReady(reqId);
   }
 
   function onTickOptionComputation(
@@ -224,6 +255,7 @@ export async function fetchQuotesForContracts(
     quote.gamma = gamma ?? null;
     quote.vega = vega ?? null;
     quote.theta = theta ?? null;
+    checkReady(reqId);
   }
 
   function onError(error: Error, code: number, reqId: number) {
@@ -260,7 +292,21 @@ export async function fetchQuotesForContracts(
     ib.reqMktData(reqId, new Option(symbol, contract.expiry, contract.strike, contract.right, "SMART"), "", false, false);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, quoteTimeoutMs));
+  const startedAt = Date.now();
+  await new Promise<void>((resolve) => {
+    if (reqIdToContract.size === 0) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, quoteTimeoutMs);
+    onAllReady = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+  });
+  console.log(
+    `${symbol}: quotes ready in ${Date.now() - startedAt}ms (${readyReqIds.size}/${reqIdToContract.size} contracts had price+delta)`,
+  );
 
   for (const reqId of reqIdToContract.keys()) {
     ib.cancelMktData(reqId);
