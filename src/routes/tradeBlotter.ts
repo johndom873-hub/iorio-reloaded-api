@@ -110,7 +110,13 @@ tradeBlotterRouter.get("/", async (request, response) => {
   const pendingOrdersResult = await db.raw(
     `
     SELECT
-      orq.id,
+      -- orq.id alone isn't unique per expanded row (a multi-leg order, e.g.
+      -- a covered call's stock+option legs or a roll's two option legs,
+      -- produces one row per leg here) -- WITH ORDINALITY appends each
+      -- leg's position in the array so every row gets a distinct id, since
+      -- this is the frontend DataTable's rowKey and duplicates there cause
+      -- a real React key collision (rows silently dropped/duplicated).
+      orq.id || ':' || leg_ordinality AS id,
       orq.status,
       orq.ibkr_order_id AS "ibkrOrderId",
       orq.error_message AS "errorMessage",
@@ -126,7 +132,7 @@ tradeBlotterRouter.get("/", async (request, response) => {
       NULLIF(leg->>'expiry', '') AS expiry,
       NULLIF(leg->>'right', '') AS "optionType"
     FROM order_requests orq
-    CROSS JOIN LATERAL jsonb_array_elements(orq.payload->'legs') AS leg
+    CROSS JOIN LATERAL jsonb_array_elements(orq.payload->'legs') WITH ORDINALITY AS t(leg, leg_ordinality)
     WHERE ${orderConditions.join(" AND ")}
     ORDER BY orq.created_at DESC
     `,
