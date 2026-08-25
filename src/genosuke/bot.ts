@@ -32,7 +32,7 @@ const ORDER_TERMINAL_STATUSES = new Set(["filled", "partially_filled", "cancelle
 interface OrderRequestRow {
   id: string;
   status: string;
-  error_message: string | null;
+  errorMessage: string | null;
 }
 
 interface HistoryEntry {
@@ -146,7 +146,7 @@ function describeOrderOutcome(order: OrderRequestRow): string {
     case "cancelled":
       return "Order was cancelled at IBKR — nothing was filled.";
     case "error":
-      return `❌ Order failed: ${order.error_message ?? "unknown error"}.`;
+      return `❌ Order failed: ${order.errorMessage ?? "unknown error"}.`;
     default:
       return `Order status: ${order.status}.`;
   }

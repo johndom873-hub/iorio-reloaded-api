@@ -15,6 +15,29 @@ const validStrategyKeys = ["covered_call", "cash_secured_put"];
 const validStatuses = ["open", "closed"];
 const orderRequestsChannel = "order_requests_channel";
 
+// Knex's `.returning("*")`/`.first()` return the raw order_requests row
+// (snake_case columns) — the frontend's OrderRequest type is camelCase, so
+// every response site below must go through this rather than
+// `response.json(row)` directly. Found 2026-08-25: every response site
+// WAS returning the raw row, meaning order.errorMessage/requestType/
+// ibkrOrderId/etc. have always been undefined on the frontend — most
+// visibly, a real IBKR rejection's error message never actually displayed
+// in OrderReviewPanel, it just silently wasn't there.
+function serializeOrderRequest(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    requestType: row.request_type,
+    payload: row.payload,
+    relatedPositionId: row.related_position_id,
+    sourceAlertId: row.source_alert_id,
+    status: row.status,
+    ibkrOrderId: row.ibkr_order_id,
+    errorMessage: row.error_message,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 // Guards against a naked covered call — a short call leg must never cover
 // more shares than the position actually holds long. Approved 2026-08-24
 // after a real prod position (AAOI) was entered with a short call quantity
@@ -457,14 +480,14 @@ positionsRouter.post("/orders", async (request, response) => {
     })
     .returning("*");
 
-  response.status(201).json(orderRequest);
+  response.status(201).json(serializeOrderRequest(orderRequest));
 });
 
 positionsRouter.get("/orders", async (request, response) => {
   const status = request.query.status as string | undefined;
   const query = db("order_requests").orderBy("created_at", "desc");
   if (status) query.where({ status });
-  response.json(await query);
+  response.json((await query).map(serializeOrderRequest));
 });
 
 positionsRouter.get("/orders/:id", async (request, response) => {
@@ -473,7 +496,7 @@ positionsRouter.get("/orders/:id", async (request, response) => {
     response.status(404).json({ error: "Order not found." });
     return;
   }
-  response.json(orderRequest);
+  response.json(serializeOrderRequest(orderRequest));
 });
 
 // Order Review panel's live bid/ask/IV/Greeks (added 2026-08-25, see
@@ -540,7 +563,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   });
 
   const updated = await db("order_requests").where({ id: orderRequest.id }).first();
-  response.json(updated);
+  response.json(serializeOrderRequest(updated));
 });
 
 positionsRouter.post("/orders/:id/cancel", async (request, response) => {
@@ -556,7 +579,7 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
       .where({ id: orderRequest.id })
       .update({ status: "cancelled", updated_at: db.fn.now() })
       .returning("*");
-    response.json(updated);
+    response.json(serializeOrderRequest(updated));
     return;
   }
 
@@ -573,7 +596,7 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
       .update({ status: "cancel_requested", updated_at: db.fn.now() })
       .returning("*");
     await db.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
-    response.json(updated);
+    response.json(serializeOrderRequest(updated));
     return;
   }
 
@@ -755,7 +778,7 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     })
     .returning("*");
 
-  response.status(201).json(orderRequest);
+  response.status(201).json(serializeOrderRequest(orderRequest));
 });
 
 // Builds an order_requests row (request_type "close_position") for a combo
@@ -866,5 +889,5 @@ positionsRouter.post("/:id/close", async (request, response) => {
     })
     .returning("*");
 
-  response.status(201).json(orderRequest);
+  response.status(201).json(serializeOrderRequest(orderRequest));
 });
