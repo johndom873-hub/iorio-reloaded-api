@@ -1,6 +1,9 @@
 import { app } from "./app.js";
 import { environment, requireEnvironmentVariable } from "./config/env.js";
 import { startGenosuke } from "./genosuke/bot.js";
+import { installCrashHandlers } from "./lib/installCrashHandlers.js";
+
+installCrashHandlers("web");
 
 // Only the web dyno gets a $PORT from Heroku — read lazily here rather than
 // eagerly in the shared `environment` object, so the worker dyno (which

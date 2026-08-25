@@ -9,6 +9,9 @@ import { resolveContractId } from "./ibkr/resolveContractId.js";
 import { buildLegContract, computeNetLimitPrice, type OrderLegPayload, type OrderRequestPayload } from "./ibkr/orderPayload.js";
 import { parseIbkrExecutionTime } from "./ibkr/parseIbkrExecutionTime.js";
 import { fetchIbkrHeldPositions, type IbkrHeldPosition } from "./ibkr/fetchIbkrHeldPositions.js";
+import { installCrashHandlers } from "./lib/installCrashHandlers.js";
+
+installCrashHandlers("worker");
 
 /**
  * The persistent worker process — see PROGRESS.md's "IBKR is the source of
