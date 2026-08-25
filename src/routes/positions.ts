@@ -4,6 +4,7 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchLiveGreeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { fetchOrderLegQuote } from "../ibkr/fetchOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/orderPayload.js";
 
 export const positionsRouter = Router();
@@ -473,6 +474,35 @@ positionsRouter.get("/orders/:id", async (request, response) => {
     return;
   }
   response.json(orderRequest);
+});
+
+// Order Review panel's live bid/ask/IV/Greeks (added 2026-08-25, see
+// PROGRESS.md) -- looks up the order's option leg and quotes it fresh from
+// IBKR. Breakeven/max-gain/max-loss/capital-at-risk are pure math on the
+// order's own proposed entry price/strike (no live data needed for those),
+// so they're computed client-side instead -- this endpoint only covers the
+// data that actually requires a live IBKR round-trip.
+positionsRouter.get("/orders/:id/quote", async (request, response) => {
+  const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
+  if (!orderRequest) {
+    response.status(404).json({ error: "Order not found." });
+    return;
+  }
+
+  const payload = orderRequest.payload as OrderRequestPayload;
+  const optionLeg = payload.legs.find((leg) => leg.role === "option");
+  if (!optionLeg || !optionLeg.strike || !optionLeg.expiry || !optionLeg.right) {
+    response.status(400).json({ error: "This order has no option leg to quote." });
+    return;
+  }
+
+  const quote = await fetchOrderLegQuote(
+    payload.symbol,
+    optionLeg.expiry,
+    optionLeg.strike,
+    optionLeg.right === "C" ? OptionType.Call : OptionType.Put,
+  );
+  response.json(quote);
 });
 
 // The explicit confirmation gate (approved 2026-08-24) — building an order

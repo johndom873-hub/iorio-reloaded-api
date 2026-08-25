@@ -180,7 +180,11 @@ async function lookupValidStrikesForExpiry(ib: IBApi, symbol: string, expiry: st
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
-async function fetchQuotesForContracts(
+// Exported for reuse by fetchOrderLegQuote.ts (Order Review panel's live
+// bid/ask/Greeks/IV for a not-yet-confirmed order's option leg) — same
+// underlying subscribe/collect/cancel logic, just a single contract instead
+// of a whole chain.
+export async function fetchQuotesForContracts(
   ib: IBApi,
   symbol: string,
   contracts: { expiry: string; strike: number; right: OptionType }[],
