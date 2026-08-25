@@ -28,9 +28,17 @@
 
 import { db } from "../src/db/connection.js";
 import { runTradeAlertGeneration } from "../src/ibkr/runTradeAlertGeneration.js";
+import { isWeekend } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 
 async function main(): Promise<void> {
+  // Guard lives here, not in runTradeAlertGeneration.ts, so the manual
+  // "Run Now" button (routes/tradeAlerts.ts) still works on weekends if
+  // someone deliberately wants to trigger it.
+  if (isWeekend()) {
+    console.log("Skipping trade_alert_generation — weekend, US market closed.");
+    return;
+  }
   await runJob("trade_alert_generation", async () => {
     const { tickersScanned, totalNewAlerts, newAlertLines, rollAlertLines } = await runTradeAlertGeneration((event) => {
       if (event.type === "ticker") {

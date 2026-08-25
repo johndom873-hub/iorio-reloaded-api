@@ -20,6 +20,7 @@ import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
 import { lookupLatestDailyBar } from "../src/ibkr/fetchTickerOverview.js";
+import { isWeekend } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 
 interface TickerRow {
@@ -28,6 +29,23 @@ interface TickerRow {
 }
 
 let nextReqId = 1;
+
+// Up to 5 total attempts (1 initial pass + 4 retries), with escalating
+// backoff between retries — approved 2026-08-25 after a run where all 14
+// tickers failed identically (a suspected transient IBKR historical-data
+// outage around market close), and a single immediate retry wasn't enough
+// to clear it. Job #3 (Trade Alert generation) starts at 22:00 UTC and
+// needs this job's fresh data, and this job starts ~21:00 UTC — so retries
+// are capped by wall-clock budget, not just attempt count, to guarantee
+// this job finishes with time to spare rather than risk job #3 running on
+// yesterday's data while this one is still retrying.
+const MAX_ATTEMPTS = 5;
+const RETRY_BACKOFF_MS = [60_000, 120_000, 240_000, 480_000];
+const RETRY_BUDGET_MS = 50 * 60 * 1000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // One ticker's failure (e.g. lookupLatestDailyBar's historical-data
 // timeout — reproduced in prod 2026-08-20 on AAOI, which killed the whole
@@ -77,6 +95,10 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
 }
 
 async function main(): Promise<void> {
+  if (isWeekend()) {
+    console.log("Skipping daily_market_data_capture — weekend, US market closed.");
+    return;
+  }
   await runJob("daily_market_data_capture", async () => {
     const tickers: TickerRow[] = await db.raw(
       `
@@ -106,45 +128,49 @@ async function main(): Promise<void> {
     });
 
     const snapshotDate = new Date().toISOString().slice(0, 10);
+    const jobStart = Date.now();
     let succeeded = 0;
-    let failedTickers: TickerRow[] = [];
+    let remaining = tickers;
+    let attempt = 0;
+    let bailedOnBudget = false;
 
     try {
-      for (const ticker of tickers) {
-        const ok = await captureTicker(connection, ticker, snapshotDate);
-        if (ok) succeeded++;
-        else failedTickers.push(ticker);
-      }
+      while (remaining.length > 0 && attempt < MAX_ATTEMPTS) {
+        if (attempt > 0) {
+          const backoff = RETRY_BACKOFF_MS[attempt - 1]!;
+          if (Date.now() - jobStart + backoff > RETRY_BUDGET_MS) {
+            console.log(
+              `Stopping retries — waiting ${backoff / 1000}s would exceed the ${RETRY_BUDGET_MS / 60_000}min retry budget before Trade Alert generation runs.`,
+            );
+            bailedOnBudget = true;
+            break;
+          }
+          console.log(`Waiting ${backoff / 1000}s before retry ${attempt}/${MAX_ATTEMPTS - 1} of ${remaining.length} failed ticker(s)...`);
+          await sleep(backoff);
+        }
 
-      // End-of-batch retry pass, approved 2026-08-20 after both a prod
-      // failure (AAOI) and an all-tickers-timed-out run locally on the same
-      // day showed this specific IBKR call (historical daily bar) fails
-      // often enough to be worth one retry, not just skip-and-move-on. Runs
-      // after the full first pass (not immediately per-ticker), since a
-      // broader IBKR-side moment affecting every ticker at once — which is
-      // what happened locally — needs the pass itself to finish first
-      // before retrying has any chance of hitting a clear window.
-      if (failedTickers.length > 0) {
-        console.log(`Retrying ${failedTickers.length} failed ticker(s)...`);
         const stillFailed: TickerRow[] = [];
-        for (const ticker of failedTickers) {
+        for (const ticker of remaining) {
           const ok = await captureTicker(connection, ticker, snapshotDate);
           if (ok) succeeded++;
           else stillFailed.push(ticker);
         }
-        failedTickers = stillFailed;
+        remaining = stillFailed;
+        attempt++;
       }
     } finally {
       connection.disconnect();
     }
 
-    const failed = failedTickers.length;
-    console.log(`Captured ${succeeded}/${tickers.length} ticker(s) for ${snapshotDate} (${failed} failed after retry).`);
+    const failed = remaining.length;
+    console.log(
+      `Captured ${succeeded}/${tickers.length} ticker(s) for ${snapshotDate} after ${attempt} attempt(s) (${failed} still failed${bailedOnBudget ? ", retries stopped early on time budget" : ""}).`,
+    );
     return {
-      details: { tickerCount: tickers.length, succeeded, failed, failedSymbols: failedTickers.map((t) => t.symbol) },
+      details: { tickerCount: tickers.length, succeeded, failed, attempts: attempt, bailedOnBudget, failedSymbols: remaining.map((t) => t.symbol) },
       notify:
         failed > 0
-          ? `⚠️ Daily market data capture: ${failed}/${tickers.length} ticker(s) failed even after retry (${failedTickers.map((t) => t.symbol).join(", ")}).`
+          ? `⚠️ Daily market data capture: ${failed}/${tickers.length} ticker(s) failed after ${attempt} attempt(s) (${remaining.map((t) => t.symbol).join(", ")}).`
           : undefined,
     };
   });

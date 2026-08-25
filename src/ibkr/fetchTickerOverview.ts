@@ -187,18 +187,30 @@ export async function lookupLatestDailyBar(connection: IbkrConnection, symbol: s
     const bars: PriceBar[] = [];
     const timer = setTimeout(() => reject(new Error(`Historical data timeout for ${symbol}`)), 20_000);
 
+    function cleanup() {
+      clearTimeout(timer);
+      ib.removeListener(EventName.historicalData, onHistoricalData);
+      ib.removeListener(EventName.error, onError);
+    }
+
     function onHistoricalData(id: number, date: string, open: number, high: number, low: number, close: number, volume: number) {
       if (id !== reqId) return;
       if (date.startsWith("finished")) {
-        clearTimeout(timer);
-        ib.removeListener(EventName.historicalData, onHistoricalData);
+        cleanup();
         resolve(bars.at(-1) ?? null);
         return;
       }
       bars.push({ time: parseIbkrBarTime(date), open, high, low, close, volume });
     }
 
+    function onError(error: Error, code: number, errorReqId: number) {
+      if (errorReqId !== reqId) return;
+      cleanup();
+      reject(new Error(`Historical data error for ${symbol} (code ${code}): ${error.message}`));
+    }
+
     ib.on(EventName.historicalData, onHistoricalData);
+    ib.on(EventName.error, onError);
     ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), "", "2 D", BarSizeSetting.DAYS_ONE, WhatToShow.TRADES, 1, 2, false);
   });
 }

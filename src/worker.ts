@@ -8,6 +8,7 @@ import { persistentIbkrConnection } from "./ibkr/persistentConnection.js";
 import { resolveContractId } from "./ibkr/resolveContractId.js";
 import { buildLegContract, computeNetLimitPrice, type OrderLegPayload, type OrderRequestPayload } from "./ibkr/orderPayload.js";
 import { parseIbkrExecutionTime } from "./ibkr/parseIbkrExecutionTime.js";
+import { fetchIbkrHeldPositions, type IbkrHeldPosition } from "./ibkr/fetchIbkrHeldPositions.js";
 
 /**
  * The persistent worker process — see PROGRESS.md's "IBKR is the source of
@@ -332,14 +333,25 @@ async function recordExecution(contract: Contract, execution: Execution): Promis
   if (!isClosing) {
     // An add-on fill to an already-tracked leg (e.g. bought more of an
     // existing covered call's stock leg) — not a close, but still a real
-    // execution the Trade Blotter should show.
+    // execution the Trade Blotter should show. The leg's own `quantity`
+    // doesn't get updated here (see upsertSyncedPosition for why) —
+    // trigger reconciliation now so that sync reflects promptly rather
+    // than waiting for the periodic 60s pass.
     await insertOpeningTradeRow(leg.id, contract, execution);
+    reconcilePositionsFromIbkr().catch((error) => console.error(`Post-execution reconciliation failed: ${error}`));
     return;
   }
 
-  await db("position_legs")
-    .where({ id: leg.id })
-    .update({ exit_price: execution.price, exit_at: parseIbkrExecutionTime(execution.time) ?? new Date() });
+  // Record the trade only — do NOT flip position_legs.exit_at/exit_price
+  // here. Real bug found 2026-08-25 on a same-day HOOD test position: a
+  // single closing execution may only be a *partial* close (a 1-lot
+  // closing fill on a 3-lot leg previously marked the WHOLE leg closed,
+  // hiding the still-open 2-lot remainder — IBKR itself still held it).
+  // reconcilePositionsFromIbkr is now the sole place a leg gets closed,
+  // gated on IBKR reporting zero remaining holding for this conId — the
+  // only unambiguous "genuinely fully closed" signal, regardless of how
+  // many partial fills got there. Trigger it now so closing still reflects
+  // near-instantly rather than waiting for the periodic 60s pass.
   await db("trades").insert({
     position_leg_id: leg.id,
     ibkr_order_id: String(execution.orderId ?? ""),
@@ -351,16 +363,7 @@ async function recordExecution(contract: Contract, execution: Execution): Promis
     is_closing_trade: true,
   });
 
-  const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
-  if (remainingOpenLegs.length === 0) {
-    await db("positions").where({ id: leg.position_id }).update({ status: "closed", closed_at: db.fn.now() });
-  }
-}
-
-interface IbkrHeldPosition {
-  contract: Contract;
-  quantity: number;
-  avgCost: number;
+  reconcilePositionsFromIbkr().catch((error) => console.error(`Post-execution reconciliation failed: ${error}`));
 }
 
 /**
@@ -377,20 +380,7 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
   if (!ib) return;
 
-  const held = await new Promise<IbkrHeldPosition[]>((resolve) => {
-    const rows: IbkrHeldPosition[] = [];
-    const onPosition = (_account: string, contract: Contract, pos: number, avgCost?: number) => {
-      if (pos !== 0) rows.push({ contract, quantity: pos, avgCost: avgCost ?? 0 });
-    };
-    const onEnd = () => {
-      ib.off(EventName.position, onPosition);
-      ib.off(EventName.positionEnd, onEnd);
-      resolve(rows);
-    };
-    ib.on(EventName.position, onPosition);
-    ib.once(EventName.positionEnd, onEnd);
-    ib.reqPositions();
-  });
+  const held = await fetchIbkrHeldPositions(ib);
 
   const bySymbol = new Map<string, IbkrHeldPosition[]>();
   for (const position of held) {
@@ -434,18 +424,31 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
   }
 
   // Anything tracked as open in our DB but no longer reported by IBKR at
-  // all (fully closed) — mark it closed. Per-leg exit_price ideally comes
-  // from execDetails (recordExecution above); this is the backstop for
-  // when a close happened before this worker was running to see the fill.
+  // all — this is the sole place a leg is ever marked closed (see
+  // recordExecution above for why a single closing execution can't decide
+  // this on its own: a partial close previously flipped an entire
+  // multi-lot leg to closed and hid the still-open remainder). exit_price
+  // comes from the most recent closing trade already recorded for this
+  // leg by recordExecution, if any — falls back to "now"/null for a close
+  // that happened before this worker ever saw the fill (e.g. placed
+  // directly in TWS, or before the worker was deployed).
   const heldConIds = new Set(held.map((p) => p.contract.conId).filter((id): id is number => id !== undefined));
   const openLegs = await db("position_legs").whereNull("exit_at").whereNotNull("ibkr_contract_id");
   for (const leg of openLegs) {
-    if (!heldConIds.has(Number(leg.ibkr_contract_id))) {
-      await db("position_legs").where({ id: leg.id }).update({ exit_at: db.fn.now() });
-      const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
-      if (remainingOpenLegs.length === 0) {
-        await db("positions").where({ id: leg.position_id }).update({ status: "closed", closed_at: db.fn.now() });
-      }
+    if (heldConIds.has(Number(leg.ibkr_contract_id))) continue;
+
+    const lastClosingTrade = await db("trades")
+      .where({ position_leg_id: leg.id, is_closing_trade: true })
+      .orderBy("executed_at", "desc")
+      .first();
+
+    await db("position_legs")
+      .where({ id: leg.id })
+      .update({ exit_price: lastClosingTrade?.price ?? null, exit_at: lastClosingTrade?.executed_at ?? db.fn.now() });
+
+    const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
+    if (remainingOpenLegs.length === 0) {
+      await db("positions").where({ id: leg.position_id }).update({ status: "closed", closed_at: db.fn.now() });
     }
   }
 }
@@ -503,9 +506,6 @@ async function upsertSyncedPosition(
 
   for (const leg of legs) {
     const conId = String(leg.held.contract.conId);
-    const existing = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").first();
-    if (existing) continue; // already tracked, nothing to insert
-
     const contract = leg.held.contract;
     // avgCost from IBKR's `position` event: for stock, cost per share; for
     // options, per @stoqey/ib's convention this already includes the
@@ -513,13 +513,30 @@ async function upsertSyncedPosition(
     // against a real paper position before this is trusted (plan doc's
     // verification step 3). Flagging rather than asserting confidently.
     const entryPrice = contract.secType === SecType.STK ? leg.held.avgCost : leg.held.avgCost / (contract.multiplier ?? 100);
+    const trueQuantity = Math.abs(leg.held.quantity);
+
+    const existing = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").first();
+    if (existing) {
+      // Sync to IBKR's current truth on every pass, not just at creation.
+      // Real bug found 2026-08-25 on a real MU position: two separate
+      // 100-share opening orders for the same contract, 5 min apart, left
+      // `quantity` stuck at 100 (whatever it was when this leg was first
+      // created) even though `trades` correctly recorded both fills.
+      // IBKR's `position` event always reports the CURRENT total holding +
+      // blended average cost for this conId, never an increment, so it's
+      // always safe to overwrite while the leg is still open.
+      if (Number(existing.quantity) !== trueQuantity || Number(existing.entry_price) !== entryPrice) {
+        await db("position_legs").where({ id: existing.id }).update({ quantity: trueQuantity, entry_price: entryPrice });
+      }
+      continue;
+    }
 
     const [newLeg] = await db("position_legs")
       .insert({
         position_id: positionId,
         leg_type: contract.secType === SecType.STK ? "stock" : "option",
         side: leg.side,
-        quantity: Math.abs(leg.held.quantity),
+        quantity: trueQuantity,
         option_type: contract.right === OptionType.Call ? "call" : contract.right === OptionType.Put ? "put" : null,
         // Same story as expiry_date below: IBKR reports strike as 0 (not
         // undefined) for a stock contract, and 0 ?? null still evaluates to 0

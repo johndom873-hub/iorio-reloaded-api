@@ -15,8 +15,19 @@
 
 import { runIbkrHealthCheckJob } from "../src/ibkr/checkIbkrHealthJob.js";
 import { db } from "../src/db/connection.js";
+import { isWeekend } from "../src/lib/isWeekend.js";
 
-runIbkrHealthCheckJob()
+async function main(): Promise<void> {
+  // Guard lives here, not in checkIbkrHealthJob.ts, so System Health's
+  // manual "Run Health Check Now" button still works on weekends.
+  if (isWeekend()) {
+    console.log("Skipping ibkr_health_check — weekend, US market closed.");
+    return;
+  }
+  await runIbkrHealthCheckJob();
+}
+
+main()
   .catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
