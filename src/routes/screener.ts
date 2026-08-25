@@ -7,9 +7,6 @@ import { searchTickers } from "../ibkr/searchTickers.js";
 export const screenerRouter = Router();
 screenerRouter.use(requireAuth);
 
-// v1 strategy scope — see PROGRESS.md "Decisions made".
-const validStrategyKeys = ["covered_call", "cash_secured_put"];
-
 // Live IBKR search-as-you-type — matches symbol or company name, US-listed
 // optionable stocks only. Registered before "/" so it doesn't collide with
 // the strategy-list route.
@@ -24,22 +21,15 @@ screenerRouter.get("/search", async (request, response) => {
   response.json(results);
 });
 
-// One row per ticker currently monitored under this strategy, carrying its
-// latest market_data_snapshots row if one exists (LEFT JOIN LATERAL, not a
-// plain join) — a just-added ticker with no capture yet still shows up,
-// just with null IV/volume, filling in once the daily capture job runs.
-screenerRouter.get("/", async (request, response) => {
-  const strategyKey = request.query.strategy as string | undefined;
-  if (!strategyKey || !validStrategyKeys.includes(strategyKey)) {
-    response.status(400).json({ error: "A valid strategy query parameter is required." });
-    return;
-  }
-
+// One row per ticker currently monitored, carrying its latest
+// market_data_snapshots row if one exists (LEFT JOIN LATERAL, not a plain
+// join) — a just-added ticker with no capture yet still shows up, just with
+// null IV/volume, filling in once the daily capture job runs.
+screenerRouter.get("/", async (_request, response) => {
   const result = await db.raw(
     `
     SELECT
       se.id,
-      se.strategy_key AS "strategyKey",
       se.added_at AS "addedAt",
       se.notes,
       t.id AS "tickerId",
@@ -72,10 +62,9 @@ screenerRouter.get("/", async (request, response) => {
         LIMIT 252
       ) recent
     ) iv_window ON true
-    WHERE se.strategy_key = ? AND se.removed_at IS NULL
+    WHERE se.removed_at IS NULL
     ORDER BY t.symbol
     `,
-    [strategyKey],
   );
 
   response.json(result.rows.map(withIvRank));
@@ -110,18 +99,13 @@ function withIvRank(row: RawScreenerRow) {
 }
 
 screenerRouter.post("/", async (request, response) => {
-  const { symbol, strategyKey, notes } = request.body as {
+  const { symbol, notes } = request.body as {
     symbol?: string;
-    strategyKey?: string;
     notes?: string;
   };
 
   if (!symbol || !symbol.trim()) {
     response.status(400).json({ error: "Symbol is required." });
-    return;
-  }
-  if (!strategyKey || !validStrategyKeys.includes(strategyKey)) {
-    response.status(400).json({ error: "A valid strategyKey is required." });
     return;
   }
 
@@ -154,7 +138,6 @@ screenerRouter.post("/", async (request, response) => {
     const [entry] = await db("shortlist_entries")
       .insert({
         ticker_id: ticker.id,
-        strategy_key: strategyKey,
         added_by_user_id: request.session.userId,
         notes: notes ?? null,
       })
@@ -162,7 +145,6 @@ screenerRouter.post("/", async (request, response) => {
 
     response.status(201).json({
       id: entry.id,
-      strategyKey: entry.strategy_key,
       addedAt: entry.added_at,
       notes: entry.notes,
       tickerId: ticker.id,
@@ -175,9 +157,9 @@ screenerRouter.post("/", async (request, response) => {
       capturedAt: latestSnapshot?.captured_at ?? null,
     });
   } catch (error) {
-    // Partial unique index on (ticker_id, strategy_key) WHERE removed_at IS NULL.
+    // Partial unique index on (ticker_id) WHERE removed_at IS NULL.
     if ((error as { code?: string }).code === "23505") {
-      response.status(409).json({ error: `${normalizedSymbol} is already being monitored for this strategy.` });
+      response.status(409).json({ error: `${normalizedSymbol} is already being monitored.` });
       return;
     }
     throw error;

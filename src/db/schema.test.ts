@@ -64,16 +64,15 @@ describe("database schema round-trips", () => {
     expect(row.sector).toBe("Technology");
   });
 
-  it("shortlist_entries: stores and retrieves, enforces one active entry per ticker+strategy", async () => {
+  it("shortlist_entries: stores and retrieves, enforces one active entry per ticker", async () => {
     const [entry] = await db("shortlist_entries")
-      .insert({ ticker_id: tickerId, strategy_key: "covered_call", added_by_user_id: userId })
+      .insert({ ticker_id: tickerId, added_by_user_id: userId })
       .returning("*");
     expect(entry.removed_at).toBeNull();
 
     await expect(
       db("shortlist_entries").insert({
         ticker_id: tickerId,
-        strategy_key: "covered_call",
         added_by_user_id: userId,
       }),
     ).rejects.toThrow(/duplicate key/i);

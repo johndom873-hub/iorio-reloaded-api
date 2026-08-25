@@ -82,6 +82,13 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
   const rollAlertLines: string[] = [];
   const settingsByStrategy = new Map<AlertStrategyKey, ReturnType<typeof toSettings>>();
 
+  // The shortlist is no longer strategy-scoped — every shortlisted ticker is
+  // scanned by every strategy's trade-alert job, so this is queried once.
+  const tickers: ShortlistedTickerRow[] = await db("shortlist_entries as se")
+    .join("tickers as t", "t.id", "se.ticker_id")
+    .whereNull("se.removed_at")
+    .select("t.id as tickerId", "t.symbol");
+
   try {
     for (const strategyKey of tradeAlertStrategies) {
       const settingsRow = await db("strategy_settings").where({ strategy_key: strategyKey }).first();
@@ -90,12 +97,6 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
       }
       const settings = toSettings(settingsRow);
       settingsByStrategy.set(strategyKey, settings);
-
-      const tickers: ShortlistedTickerRow[] = await db("shortlist_entries as se")
-        .join("tickers as t", "t.id", "se.ticker_id")
-        .where("se.strategy_key", strategyKey)
-        .whereNull("se.removed_at")
-        .select("t.id as tickerId", "t.symbol");
 
       onEvent({ type: "strategyStart", strategyKey, tickerCount: tickers.length });
 

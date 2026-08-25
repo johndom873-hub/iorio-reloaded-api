@@ -177,7 +177,8 @@ Captured for the trade-alert-generation algorithm design — not fully built yet
   - Ticker universe is the existing `tickers` table, seeded manually — no separate index-constituent feed.
   - Uses IBKR **delayed** market data — irrelevant staleness difference for a post-close snapshot, sidesteps the still-blocked real-time subscription.
   - Generic ticks 105/106 (avg option volume / IV) can't be requested as a one-time snapshot — IBKR rejects with error 321; must be a cancelled streaming subscription instead.
-- **Shortlist eliminated as a separate concept (2026-08-13)** — Screener is the only list; its two tabs are the two strategies, not Screener-vs-Shortlist. `shortlist_entries` table name kept as-is (prod has real data, additive-migrations-only convention) even though it now just means "per-strategy ticker list" — worth remembering if touching this table again.
+- **Shortlist eliminated as a separate concept (2026-08-13)** — Screener is the only list. `shortlist_entries` table name kept as-is.
+- **Screener made strategy-agnostic (2026-08-25)** — root cause of "CC alerts fire daily, CSP never does": zero tickers were ever shortlisted under `cash_secured_put` (the two-tab design meant shortlisting only ever happened per-strategy, and no one had used the CSP tab). Rather than just backfilling those 14 tickers, `strategy_key` was dropped from `shortlist_entries` entirely (migration `20260825000000`, partial unique index now `(ticker_id) WHERE removed_at IS NULL`) — a shortlisted ticker is now scanned by every strategy's trade-alert job (`runTradeAlertGeneration.ts` queries the shortlist once, outside the per-strategy loop). The screener UI's two strategy tabs are gone; the "Trade" button still opens the New Position form defaulted to Covered Call, with the form's own strategy dropdown as the point where CC vs. CSP is chosen — trade alerts and positions remain fully per-strategy, only the screener/shortlist concept changed.
 - **Live market data fetched immediately on ticker add**, not just via the daily batch job — shorter 5s timeout than the batch job's 15s since it's an interactive path with a spinner, not an unattended run.
 - **Shared `Spinner` component**, standardized per explicit instruction: every non-immediate operation shows it, not an ad-hoc inline spinner. See [[feedback_ui_loading_and_modal_dismiss_conventions]] memory for the paired modal-dismiss convention.
 - **Database schema (conceptual, finalized)** — see below. Legs-based positions (covered call = 2 legs, CSP = 1) so future multi-leg strategies don't need a rewrite. All IBKR field names checked against real TWS API docs, not assumed.
@@ -231,7 +232,7 @@ Everything below is real, working code, verified end-to-end (migrations against 
 
 **Backend — IBKR client** — `src/ibkr/tunnel.ts` (SSH tunnel via `ssh2`), `connectIbkr.ts` (connects `@stoqey/ib`, resolves on `nextValidId`, filters benign status-only error events), `constants.ts` (paper/live port mapping). Required env vars follow the explicit-required pattern (throws on missing, no silent `??` fallback). Verified via a real round-trip (`reqManagedAccts()` → real paper account ID `DUR854038`).
 
-**Screener** — `/screener` route (GET per-strategy list via `LEFT JOIN LATERAL` on latest snapshot, POST add w/ live IBKR fetch, DELETE soft-delete). `scripts/run-daily-market-data-job.ts` captures IV/volume nightly (`avg_option_volume` still never arrives, see Open decisions). Frontend: two strategy tabs, inline add/remove, search-as-you-type. Verified end-to-end via Playwright including per-strategy scoping, mobile, dark mode.
+**Screener** — `/screener` route (GET single cross-strategy list via `LEFT JOIN LATERAL` on latest snapshot, POST add w/ live IBKR fetch, DELETE soft-delete; made strategy-agnostic 2026-08-25, see "Decisions made"). `scripts/run-daily-market-data-job.ts` captures IV/volume nightly (`avg_option_volume` still never arrives, see Open decisions). Frontend: single list (no strategy tabs), inline add/remove, search-as-you-type. Verified end-to-end via Playwright, mobile, dark mode.
 - **IV Rank (2026-08-21)** — new "IV Rank" column, formula approved before implementation (see Decisions made). Computed server-side per ticker via a second `LEFT JOIN LATERAL` pulling up to 252 most recent non-null `implied_volatility` rows; displayed as e.g. "0% (3d)", the window-days suffix making the still-growing sample size visible rather than implying a full trailing-year calculation. Verified against real dev data (NVDA, 3 days of IV history) via direct SQL, curl against the live API, and Playwright (desktop, mobile 390px, dark mode, gear-icon column visibility).
 
 **Ticker Detail modal (2026-08-14)** — platform-wide shared modal, SSE-streamed (`GET /tickers/:symbol/detail/stream`) after measuring a ~24.5s blocking load and cutting it via progressive per-section rendering (overview/chart/optionChain pushed independently). Verified end-to-end via Playwright (desktop + mobile, real IBKR data).
@@ -312,9 +313,9 @@ General (cross-strategy):
 3. **Trade Blotter** — execution history, realized P&L, filterable by strategy/ticker/date.
 4. **System Health** — job run history, per-module status, Telegram-alert mirror (via job history itself).
 5. **Risk & Limits** — current exposure + per-strategy threshold settings that constrain Trade Alerts.
+6. **Screener** — single cross-strategy list of monitored tickers with live-refreshed IV/volume, add/remove (changed 2026-08-25 — was previously one list per strategy via tabs; every strategy's trade-alert job now scans the same shortlist).
 
 Strategy-specific (tabs within the screen):
-6. **Screener** — one list per strategy, monitored tickers with live-refreshed IV/volume, add/remove.
 7. **Trade Alerts** — ranked trade suggestions from Screener's monitored tickers, inline approve/reject. "Modify" collapsed into "approve" since the pre-filled form is already editable.
 
 Shared modals:
