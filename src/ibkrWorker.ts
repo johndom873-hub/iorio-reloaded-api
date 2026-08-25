@@ -404,12 +404,18 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
 /**
  * Pulls IBKR's actual current holdings and reconciles them into
  * positions/position_legs — the core of "the interface matches IBKR
- * exactly." Pairing heuristic (approved 2026-08-24): group by underlying
- * symbol; long stock + short call on the same symbol pairs into
- * covered_call (respecting the same coverage-must-not-exceed-stock rule as
- * validateCoveredCallCoverage); a lone short put pairs into
- * cash_secured_put; anything left over is surfaced as strategy_key
- * "unstructured" rather than hidden.
+ * exactly." Pairing heuristic (approved 2026-08-24, revised 2026-08-25):
+ * group by underlying symbol. Each distinct short call contract (its own
+ * conId — a different strike/expiry is a different contract) pairs with
+ * its own proportional slice of the stock (quantity * 100) into its own
+ * covered_call position — every position opened through this app is
+ * exactly 1 option + 100 shares/contract, so multiple short calls on one
+ * symbol are always separate bets, never one blended position (see
+ * PROGRESS.md, prompted by a real MU position that had wrongly merged two
+ * different strikes under the old symbol-only grouping). A lone short put
+ * pairs into cash_secured_put; anything left over (including any stock
+ * beyond what the sold calls need — see upsertLeftoverStockPosition) is
+ * surfaced as strategy_key "unstructured" rather than hidden.
  */
 async function runReconciliationPass(): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
@@ -438,10 +444,19 @@ async function runReconciliationPass(): Promise<void> {
     const isCoveredCall = stockLeg && shortCallLegs.length > 0 && totalShortCallShares <= stockLeg.quantity;
 
     if (isCoveredCall) {
-      await upsertSyncedPosition(symbol, "covered_call", [
-        { held: stockLeg, side: "long" },
-        ...shortCallLegs.map((leg) => ({ held: leg, side: "short" as const })),
-      ]);
+      // Sorted for a stable, deterministic split across reconciliation runs
+      // (every 60s) -- otherwise which conId's stock slice goes where could
+      // reshuffle from one pass to the next with no real change underneath.
+      const sortedCallLegs = [...shortCallLegs].sort((a, b) => (a.contract.conId ?? 0) - (b.contract.conId ?? 0));
+      for (const callLeg of sortedCallLegs) {
+        await upsertSplitCoveredCallPosition(symbol, stockLeg, callLeg, Math.abs(callLeg.quantity) * 100);
+      }
+      // Should never happen -- every position this app opens is exactly 1
+      // option + 100 shares/contract, so leftover stock beyond what the
+      // sold calls need means something went wrong (a bug, or a manual
+      // trade outside the app). Surfaced as its own flagged position
+      // rather than silently absorbed into one of the covered calls above.
+      await upsertLeftoverStockPosition(symbol, stockLeg, stockLeg.quantity - totalShortCallShares);
     } else if (!stockLeg && shortCallLegs.length === 0 && shortPutLegs.length > 0) {
       await upsertSyncedPosition(
         symbol,
@@ -515,6 +530,107 @@ async function backfillAlertResultingPositionId(symbol: string, positionId: stri
   await db("trade_alerts").where({ id: orderRequest.alertId }).update({ resulting_position_id: positionId });
 }
 
+// Insert-or-update for a single position_legs row against one IBKR-held
+// contract. Shared by upsertSyncedPosition (CSP / unstructured-fallback —
+// looks up an existing leg by conId alone, which stays safe there since
+// those paths never split one conId across multiple positions) and
+// upsertSplitCoveredCallPosition/upsertLeftoverStockPosition below (which
+// pass scopeLookupToPosition=true, since a covered call's *stock* conId can
+// now be shared across several sibling positions and needs position_id in
+// the lookup to disambiguate which slice belongs to which).
+async function upsertPositionLeg(
+  positionId: string,
+  held: IbkrHeldPosition,
+  side: "long" | "short",
+  quantityOverride?: number,
+  scopeLookupToPosition = false,
+): Promise<void> {
+  const conId = String(held.contract.conId);
+  const contract = held.contract;
+  // avgCost from IBKR's `position` event: for stock, cost per share; for
+  // options, per @stoqey/ib's convention this already includes the
+  // multiplier (total $ per contract, not per-share) — NEEDS VERIFICATION
+  // against a real paper position before this is trusted (plan doc's
+  // verification step 3). Flagging rather than asserting confidently.
+  // `||`, not `??` — IBKR reports a stock contract's multiplier as "" (see
+  // the comment a few lines below), and while that's been confirmed for
+  // stock legs specifically, this codebase has hit the same "empty string,
+  // not undefined" shape from IBKR for enough different fields (strike,
+  // expiry, multiplier) that an option leg reporting "" here too can't be
+  // ruled out — `?? 100` wouldn't catch it (`"" ?? 100` is `""`, not 100),
+  // silently producing `avgCost / 0` = Infinity.
+  const entryPrice = contract.secType === SecType.STK ? held.avgCost : held.avgCost / (contract.multiplier || 100);
+  const trueQuantity = quantityOverride ?? Math.abs(held.quantity);
+
+  const lookupQuery = db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at");
+  if (scopeLookupToPosition) lookupQuery.where({ position_id: positionId });
+  const existing = await lookupQuery.first();
+
+  if (existing) {
+    // Sync to IBKR's current truth on every pass, not just at creation.
+    // Real bug found 2026-08-25 on a real MU position: two separate
+    // 100-share opening orders for the same contract, 5 min apart, left
+    // `quantity` stuck at 100 (whatever it was when this leg was first
+    // created) even though `trades` correctly recorded both fills.
+    // IBKR's `position` event always reports the CURRENT total holding +
+    // blended average cost for this conId, never an increment, so it's
+    // always safe to overwrite while the leg is still open.
+    if (Number(existing.quantity) !== trueQuantity || Number(existing.entry_price) !== entryPrice) {
+      await db("position_legs").where({ id: existing.id }).update({ quantity: trueQuantity, entry_price: entryPrice });
+    }
+    return;
+  }
+
+  const [newLeg] = await db("position_legs")
+    .insert({
+      position_id: positionId,
+      leg_type: contract.secType === SecType.STK ? "stock" : "option",
+      side,
+      quantity: trueQuantity,
+      option_type: contract.right === OptionType.Call ? "call" : contract.right === OptionType.Put ? "put" : null,
+      // Same story as expiry_date below: IBKR reports strike as 0 (not
+      // undefined) for a stock contract, and 0 ?? null still evaluates to 0
+      // — stored as a truthy string ("0.0000") by the time it round-trips
+      // through Postgres, which could mislead any caller checking
+      // `if (leg.strikePrice)` to assume this stock leg is an option.
+      strike_price: contract.secType === SecType.STK ? null : (contract.strike ?? null),
+      // A stock leg's contract has no expiry — IBKR reports it as "", not
+      // undefined/null, for that field. `??` doesn't catch an empty string
+      // (same recurring bug class as reqContractDetails elsewhere in this
+      // codebase, see PROGRESS.md) — the Postgres `date` column rejected it
+      // outright and crashed reconciliation mid-loop before any legs (or
+      // subsequent positions in the same pass) could be written.
+      expiry_date: contract.lastTradeDateOrContractMonth || null,
+      // Third instance of the same bug: IBKR reports a stock contract's
+      // multiplier as "" (falsy but not nullish), not the conceptually
+      // correct 1 — found 2026-08-24 when it silently zeroed out a real
+      // stock leg's entire contribution to unrealized P&L (positions.ts's
+      // formula multiplies every leg's price move by leg.multiplier).
+      multiplier: contract.secType === SecType.STK ? 1 : (contract.multiplier ?? 1),
+      ibkr_contract_id: conId,
+      entry_price: entryPrice,
+      entry_at: db.fn.now(),
+    })
+    .returning(["id"]);
+
+  // Drain any opening execution(s) recordExecution buffered before this
+  // leg existed (see pendingOpeningExecutions) — one trades row per real
+  // fill, not a single synthesized one, so partial fills still show
+  // individually in the Trade Blotter. Note: if two sibling covered-call
+  // positions both create their stock leg from the same never-before-seen
+  // conId in the same pass, whichever runs first drains the whole buffer —
+  // an extremely unlikely race (this app only ever opens 1 option + 100
+  // shares at a time; splitting only matters for pre-existing multi-strike
+  // data), not fully solved here.
+  const buffered = pendingOpeningExecutions.get(conId);
+  if (buffered) {
+    pendingOpeningExecutions.delete(conId);
+    for (const { contract: bufferedContract, execution } of buffered) {
+      await insertOpeningTradeRow(newLeg!.id, bufferedContract, execution);
+    }
+  }
+}
+
 async function upsertSyncedPosition(
   symbol: string,
   strategyKey: string,
@@ -540,83 +656,112 @@ async function upsertSyncedPosition(
   }
 
   for (const leg of legs) {
-    const conId = String(leg.held.contract.conId);
-    const contract = leg.held.contract;
-    // avgCost from IBKR's `position` event: for stock, cost per share; for
-    // options, per @stoqey/ib's convention this already includes the
-    // multiplier (total $ per contract, not per-share) — NEEDS VERIFICATION
-    // against a real paper position before this is trusted (plan doc's
-    // verification step 3). Flagging rather than asserting confidently.
-    // `||`, not `??` — IBKR reports a stock contract's multiplier as "" (see
-    // the comment a few lines below), and while that's been confirmed for
-    // stock legs specifically, this codebase has hit the same "empty string,
-    // not undefined" shape from IBKR for enough different fields (strike,
-    // expiry, multiplier) that an option leg reporting "" here too can't be
-    // ruled out — `?? 100` wouldn't catch it (`"" ?? 100` is `""`, not 100),
-    // silently producing `avgCost / 0` = Infinity.
-    const entryPrice = contract.secType === SecType.STK ? leg.held.avgCost : leg.held.avgCost / (contract.multiplier || 100);
-    const trueQuantity = Math.abs(leg.held.quantity);
+    await upsertPositionLeg(positionId!, leg.held, leg.side);
+  }
+}
 
-    const existing = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").first();
-    if (existing) {
-      // Sync to IBKR's current truth on every pass, not just at creation.
-      // Real bug found 2026-08-25 on a real MU position: two separate
-      // 100-share opening orders for the same contract, 5 min apart, left
-      // `quantity` stuck at 100 (whatever it was when this leg was first
-      // created) even though `trades` correctly recorded both fills.
-      // IBKR's `position` event always reports the CURRENT total holding +
-      // blended average cost for this conId, never an increment, so it's
-      // always safe to overwrite while the leg is still open.
-      if (Number(existing.quantity) !== trueQuantity || Number(existing.entry_price) !== entryPrice) {
-        await db("position_legs").where({ id: existing.id }).update({ quantity: trueQuantity, entry_price: entryPrice });
-      }
-      continue;
-    }
+// One covered-call position per distinct short call contract (added
+// 2026-08-25 — see runReconciliationPass's header comment for why). Found
+// via the call leg's own conId, which is always globally unique to exactly
+// one position under this design — unlike the stock leg's conId, which can
+// now be shared across several sibling positions and needs
+// scopeLookupToPosition=true to disambiguate.
+async function upsertSplitCoveredCallPosition(
+  symbol: string,
+  stockLeg: IbkrHeldPosition,
+  callLeg: IbkrHeldPosition,
+  sharesForThisLeg: number,
+): Promise<void> {
+  const callConId = String(callLeg.contract.conId);
+  const existingCallLeg = await db("position_legs").where({ ibkr_contract_id: callConId }).whereNull("exit_at").first();
 
-    const [newLeg] = await db("position_legs")
-      .insert({
-        position_id: positionId,
-        leg_type: contract.secType === SecType.STK ? "stock" : "option",
-        side: leg.side,
-        quantity: trueQuantity,
-        option_type: contract.right === OptionType.Call ? "call" : contract.right === OptionType.Put ? "put" : null,
-        // Same story as expiry_date below: IBKR reports strike as 0 (not
-        // undefined) for a stock contract, and 0 ?? null still evaluates to 0
-        // — stored as a truthy string ("0.0000") by the time it round-trips
-        // through Postgres, which could mislead any caller checking
-        // `if (leg.strikePrice)` to assume this stock leg is an option.
-        strike_price: contract.secType === SecType.STK ? null : (contract.strike ?? null),
-        // A stock leg's contract has no expiry — IBKR reports it as "", not
-        // undefined/null, for that field. `??` doesn't catch an empty string
-        // (same recurring bug class as reqContractDetails elsewhere in this
-        // codebase, see PROGRESS.md) — the Postgres `date` column rejected it
-        // outright and crashed reconciliation mid-loop before any legs (or
-        // subsequent positions in the same pass) could be written.
-        expiry_date: contract.lastTradeDateOrContractMonth || null,
-        // Third instance of the same bug: IBKR reports a stock contract's
-        // multiplier as "" (falsy but not nullish), not the conceptually
-        // correct 1 — found 2026-08-24 when it silently zeroed out a real
-        // stock leg's entire contribution to unrealized P&L (positions.ts's
-        // formula multiplies every leg's price move by leg.multiplier).
-        multiplier: contract.secType === SecType.STK ? 1 : (contract.multiplier ?? 1),
-        ibkr_contract_id: conId,
-        entry_price: entryPrice,
-        entry_at: db.fn.now(),
-      })
-      .returning(["id"]);
+  let positionId = existingCallLeg?.position_id as string | undefined;
 
-    // Drain any opening execution(s) recordExecution buffered before this
-    // leg existed (see pendingOpeningExecutions) — one trades row per real
-    // fill, not a single synthesized one, so partial fills still show
-    // individually in the Trade Blotter.
-    const buffered = pendingOpeningExecutions.get(conId);
-    if (buffered) {
-      pendingOpeningExecutions.delete(conId);
-      for (const { contract: bufferedContract, execution } of buffered) {
-        await insertOpeningTradeRow(newLeg!.id, bufferedContract, execution);
-      }
+  // One-time migration for pre-existing merged positions (the exact MU bug
+  // this fix is for): if this call leg's position still has ANOTHER open
+  // option leg on it (a different conId), the old symbol-only grouping
+  // bundled two distinct covered calls together — split this leg out into
+  // its own new position rather than reusing the shared one. Re-checked
+  // fresh on every call so processing each sibling call leg in turn
+  // (runReconciliationPass's sorted loop) correctly peels them apart one at
+  // a time instead of only fixing the first.
+  if (positionId) {
+    const siblingOptionLegs = await db("position_legs")
+      .where({ position_id: positionId, leg_type: "option" })
+      .whereNot({ ibkr_contract_id: callConId })
+      .whereNull("exit_at");
+    if (siblingOptionLegs.length > 0) {
+      const oldPosition = await db("positions").where({ id: positionId }).first();
+      const [newPosition] = await db("positions")
+        .insert({ strategy_key: "covered_call", ticker_id: oldPosition!.ticker_id, status: "open" })
+        .returning(["id"]);
+      await db("position_legs").where({ id: existingCallLeg!.id }).update({ position_id: newPosition.id });
+      positionId = newPosition.id;
     }
   }
+
+  if (!positionId) {
+    const ticker = await db("tickers").where({ symbol }).first();
+    if (!ticker) {
+      console.warn(`reconcilePositionsFromIbkr: no tickers row for ${symbol} — skipping sync until it's added via the Screener.`);
+      return;
+    }
+    const [newPosition] = await db("positions")
+      .insert({ strategy_key: "covered_call", ticker_id: ticker.id, status: "open" })
+      .returning(["id"]);
+    positionId = newPosition.id;
+    await backfillAlertResultingPositionId(symbol, positionId!);
+  } else {
+    await db("positions").where({ id: positionId }).update({ strategy_key: "covered_call" });
+  }
+
+  await upsertPositionLeg(positionId!, callLeg, "short");
+  await upsertPositionLeg(positionId!, stockLeg, "long", sharesForThisLeg, true);
+}
+
+// Stock beyond what the sold calls for this symbol actually need — should
+// never happen (every position this app opens is exactly 1 option + 100
+// shares/contract, in lockstep), so this is a data-integrity anomaly, not a
+// normal state, and is deliberately kept as its own always-flagged
+// "unstructured" position (renders with the existing "Needs Review" badge)
+// rather than silently folded into one of the covered-call positions above.
+// Matched structurally (this ticker's unstructured stock-only leg), not by
+// ibkr_contract_id — the stock's conId is shared with every split
+// covered-call position for this symbol too, so a bare conId lookup can't
+// tell this one apart from those.
+async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPosition, leftoverShares: number): Promise<void> {
+  const ticker = await db("tickers").where({ symbol }).first();
+  if (!ticker) return;
+
+  const existingLeftoverLeg = await db("position_legs as pl")
+    .join("positions as p", "p.id", "pl.position_id")
+    .where({ "p.ticker_id": ticker.id, "p.strategy_key": "unstructured", "pl.leg_type": "stock" })
+    .whereNull("pl.exit_at")
+    .select("pl.*")
+    .first();
+
+  if (leftoverShares <= 0) {
+    // Any shortfall has resolved (e.g. another call got sold against it) —
+    // close out a previously-flagged leftover leg rather than leaving a
+    // stale warning position visible.
+    if (existingLeftoverLeg) {
+      await db("position_legs").where({ id: existingLeftoverLeg.id }).update({ exit_at: db.fn.now() });
+      const remaining = await db("position_legs").where({ position_id: existingLeftoverLeg.position_id }).whereNull("exit_at");
+      if (remaining.length === 0) {
+        await db("positions").where({ id: existingLeftoverLeg.position_id }).update({ status: "closed", closed_at: db.fn.now() });
+      }
+    }
+    return;
+  }
+
+  let positionId = existingLeftoverLeg?.position_id as string | undefined;
+  if (!positionId) {
+    const [newPosition] = await db("positions")
+      .insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open" })
+      .returning(["id"]);
+    positionId = newPosition.id;
+  }
+  await upsertPositionLeg(positionId!, stockLeg, "long", leftoverShares, true);
 }
 
 async function main(): Promise<void> {

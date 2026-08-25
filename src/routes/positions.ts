@@ -761,11 +761,16 @@ positionsRouter.post("/:id/roll", async (request, response) => {
 // Builds an order_requests row (request_type "close_position") for a combo
 // order closing every currently-open leg at once — same "only the worker
 // writes position_legs/trades" rule as everywhere else above. Every open
-// leg needs a limit price (what you're willing to pay/receive to close it),
-// same all-legs-at-once restriction as before (still no partial-quantity
-// closes — see PROGRESS.md's open gap).
+// leg needs a limit price (what you're willing to pay/receive to close it).
+//
+// contractsToClose (added 2026-08-25 for downsizing, see PROGRESS.md)
+// drives a partial close entirely off the option leg's contract count —
+// the stock leg's quantity is always derived from it (contractsToClose *
+// multiplier), never independently settable, so a partial close can't
+// unbalance a covered call's coverage ratio. Omitting it closes every leg
+// at full quantity, same as before.
 positionsRouter.post("/:id/close", async (request, response) => {
-  const { legs } = request.body as { legs?: { legId: string; limitPrice: number }[] };
+  const { legs, contractsToClose } = request.body as { legs?: { legId: string; limitPrice: number }[]; contractsToClose?: number };
 
   if (!legs || legs.length === 0) {
     response.status(400).json({ error: "At least one leg is required." });
@@ -776,6 +781,10 @@ positionsRouter.post("/:id/close", async (request, response) => {
       response.status(400).json({ error: "Each leg requires legId and a non-negative limitPrice." });
       return;
     }
+  }
+  if (contractsToClose !== undefined && (!Number.isInteger(contractsToClose) || contractsToClose <= 0)) {
+    response.status(400).json({ error: "contractsToClose must be a positive integer." });
+    return;
   }
 
   const position = await db("positions").where({ id: request.params.id }).first();
@@ -797,6 +806,40 @@ positionsRouter.post("/:id/close", async (request, response) => {
     return;
   }
 
+  const optionLegs = existingLegs.filter((leg) => leg.leg_type === "option");
+  if (contractsToClose !== undefined) {
+    if (optionLegs.length !== 1) {
+      response.status(400).json({ error: "Downsizing only supports positions with exactly one option leg." });
+      return;
+    }
+    const [optionLeg] = optionLegs;
+    if (contractsToClose > optionLeg!.quantity) {
+      response.status(400).json({ error: `Cannot close ${contractsToClose} contracts — only ${optionLeg!.quantity} held.` });
+      return;
+    }
+  }
+  const optionLeg = optionLegs[0];
+
+  function quantityForLeg(leg: (typeof existingLegs)[number]): number {
+    if (contractsToClose === undefined) return leg.quantity;
+    if (leg.id === optionLeg!.id) return contractsToClose;
+    return contractsToClose * optionLeg!.multiplier; // stock leg — derived, never independently set
+  }
+
+  // Defensive check: should always divide evenly for a well-formed covered
+  // call, but a mismatch means the position's data is inconsistent, and
+  // closing anyway risks leaving it unbalanced — a hard stop, not a clamp.
+  if (contractsToClose !== undefined) {
+    for (const leg of existingLegs) {
+      if (leg.leg_type === "stock" && quantityForLeg(leg) > leg.quantity) {
+        response.status(400).json({
+          error: `Derived stock quantity (${quantityForLeg(leg)} shares) exceeds what's held (${leg.quantity} shares) — position data may be inconsistent.`,
+        });
+        return;
+      }
+    }
+  }
+
   const ticker = await db("tickers").where({ id: position.ticker_id }).first();
   const limitPriceByLegId = new Map(legs.map((leg) => [leg.legId, leg.limitPrice]));
 
@@ -804,7 +847,7 @@ positionsRouter.post("/:id/close", async (request, response) => {
     role: leg.leg_type,
     action: leg.side === "long" ? OrderAction.SELL : OrderAction.BUY, // closing action is the inverse of how it was opened
     symbol: ticker.symbol,
-    quantity: leg.quantity,
+    quantity: quantityForLeg(leg),
     unitPrice: roundToCents(limitPriceByLegId.get(leg.id)!),
     strike: leg.strike_price ? Number(leg.strike_price) : undefined,
     expiry: leg.expiry_date ?? undefined,
