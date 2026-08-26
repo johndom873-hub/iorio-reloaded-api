@@ -390,7 +390,11 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(400).json({ error: `option.expiryDate must be a YYYYMMDD date, got "${option.expiryDate}".` });
     return;
   }
-  if (stock !== undefined) {
+  // Only covered_call ever uses a stock leg (see comment below) — a stock
+  // object sent alongside cash_secured_put is ignored rather than validated,
+  // so a caller that includes a zeroed-out/placeholder stock leg for a
+  // strategy that doesn't need one isn't rejected for it.
+  if (strategyKey === "covered_call" && stock !== undefined) {
     if (typeof stock.quantity !== "number" || stock.quantity <= 0) {
       response.status(400).json({ error: "stock.quantity must be a positive number when stock is provided." });
       return;
