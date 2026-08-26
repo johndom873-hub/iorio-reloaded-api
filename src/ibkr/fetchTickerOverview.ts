@@ -101,12 +101,27 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
       ib.removeListener(EventName.tickPrice, onTickPrice);
       ib.removeListener(EventName.tickSize, onTickSize);
       ib.removeListener(EventName.tickSnapshotEnd, onSnapshotEnd);
+      ib.removeListener(EventName.error, onError);
       resolve(pricing);
+    }
+
+    // Logged, not rejected on: IBKR sends routine warnings (e.g. "Requested
+    // market data is not subscribed. Displaying delayed market data.")
+    // through this same error event for reqIds that still go on to receive
+    // ticks and succeed. Rejecting here would break those. This listener
+    // exists so that when a symbol comes back with no last/previousClose at
+    // all (the "No spot price available" case downstream), the real IBKR
+    // reason — permissions, unrecognized symbol, etc. — is visible in logs
+    // instead of just the generic empty-pricing symptom.
+    function onError(error: Error, code: number, errorReqId: number) {
+      if (errorReqId !== reqId) return;
+      console.warn(`IBKR pricing snapshot warning for ${symbol} (code ${code}): ${error.message}`);
     }
 
     ib.on(EventName.tickPrice, onTickPrice);
     ib.on(EventName.tickSize, onTickSize);
     ib.once(EventName.tickSnapshotEnd, onSnapshotEnd);
+    ib.on(EventName.error, onError);
     ib.reqMktData(reqId, new Stock(symbol, "SMART", "USD"), "", true, false);
   });
 }
