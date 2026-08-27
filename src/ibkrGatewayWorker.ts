@@ -14,6 +14,7 @@ import { fetchPositionById, type PositionLegRow } from "./lib/positionQueries.js
 import { formatPositionExpiredMessage } from "./lib/formatPositionExpiredMessage.js";
 import { notifyTelegram } from "./lib/notifyTelegram.js";
 import { revertSourceAlertToPending } from "./lib/revertSourceAlertToPending.js";
+import { publishNotification } from "./lib/notificationChannel.js";
 
 installCrashHandlers("worker");
 
@@ -241,9 +242,11 @@ function setupOrderTrackingListeners(): void {
     db("order_requests")
       .where({ ibkr_order_id: orderId })
       .update({ status: requestStatus, updated_at: db.fn.now() })
-      .returning("source_alert_id")
-      .then((rows) => {
-        if (requestStatus === "cancelled") return revertSourceAlertToPending(rows[0]?.source_alert_id);
+      .returning(["id", "source_alert_id"])
+      .then(async (rows) => {
+        if (!rows[0]) return;
+        await publishNotification({ type: "order_status", orderId: rows[0].id });
+        if (requestStatus === "cancelled") await revertSourceAlertToPending(rows[0].source_alert_id);
       })
       .catch((error) => console.error(`Failed to update order_requests for order ${orderId}: ${error}`));
   });
@@ -275,10 +278,12 @@ function setupOrderTrackingListeners(): void {
     db("order_requests")
       .where({ ibkr_order_id: reqId, status: "submitted" })
       .update({ status: "error", error_message: `IBKR error ${code}: ${error.message}`, updated_at: db.fn.now() })
-      .returning("source_alert_id")
-      .then((rows) => {
-        if (rows.length > 0) console.error(`Order ${reqId} errored: ${code} ${error.message}`);
-        return revertSourceAlertToPending(rows[0]?.source_alert_id);
+      .returning(["id", "source_alert_id"])
+      .then(async (rows) => {
+        if (!rows[0]) return;
+        console.error(`Order ${reqId} errored: ${code} ${error.message}`);
+        await publishNotification({ type: "order_status", orderId: rows[0].id });
+        await revertSourceAlertToPending(rows[0].source_alert_id);
       })
       .catch((dbError) => console.error(`Failed to record order error for ${reqId}: ${dbError}`));
   });
@@ -557,8 +562,11 @@ async function runReconciliationPass(): Promise<void> {
 
 // Fires only for a position that closed via reconcilePositionsFromIbkr's
 // "option past expiry, no closing trade" path above — a manual close
-// through the app already has its own confirmation UI, so it doesn't need
-// a Telegram ping too.
+// through the app already has its own confirmation UI (and its own
+// "Filled" order toast), so it doesn't need a Telegram ping or a second
+// toast too. Sends both the Telegram message and the in-app toast
+// notification (routes/notifications.ts's SSE stream) off the same
+// message text, so they never drift apart.
 async function notifyPositionExpired(positionId: string): Promise<void> {
   const position = await fetchPositionById(positionId);
   if (!position) return;
@@ -604,6 +612,7 @@ async function notifyPositionExpired(positionId: string): Promise<void> {
     assigned,
   });
   await notifyTelegram(message);
+  await publishNotification({ type: "position_closed", positionId: position.id, symbol: position.symbol, message });
 }
 
 /**

@@ -2,6 +2,7 @@ import { app } from "./app.js";
 import { environment, requireEnvironmentVariable } from "./config/env.js";
 import { startGenosuke } from "./genosuke/bot.js";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
+import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 
 installCrashHandlers("web");
 
@@ -13,6 +14,7 @@ const port = Number(requireEnvironmentVariable("PORT"));
 
 app.listen(port, () => {
   console.log(`Iorio Reloaded API listening on port ${port} (${environment.nodeEnvironment})`);
+  startNotificationBroadcaster();
   // No-ops until GENOSUKE_ENABLED + the rest of its config is set —
   // see genosuke/config.ts. Fire-and-forget, started after listen() so the
   // self-authenticating API client (genosuke/apiClient.ts) has a live

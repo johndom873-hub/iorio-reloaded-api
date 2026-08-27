@@ -4,6 +4,7 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { positionSelect } from "../lib/positionQueries.js";
 import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
+import { publishNotification } from "../lib/notificationChannel.js";
 import { fetchLiveGreeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
@@ -420,6 +421,7 @@ positionsRouter.post("/orders", async (request, response) => {
     })
     .returning("*");
 
+  await publishNotification({ type: "order_status", orderId: orderRequest.id });
   response.status(201).json(serializeOrderRequest(orderRequest));
 });
 
@@ -608,6 +610,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   });
 
   const updated = await db("order_requests").where({ id: orderRequest.id }).first();
+  await publishNotification({ type: "order_status", orderId: orderRequest.id });
   response.json(serializeOrderRequest(updated));
 });
 
@@ -625,6 +628,7 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
       .update({ status: "cancelled", updated_at: db.fn.now() })
       .returning("*");
     await revertSourceAlertToPending(orderRequest.source_alert_id);
+    await publishNotification({ type: "order_status", orderId: orderRequest.id });
     response.json(serializeOrderRequest(updated));
     return;
   }
@@ -647,6 +651,7 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
       .update({ status: "cancel_requested", updated_at: db.fn.now() })
       .returning("*");
     await db.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
+    await publishNotification({ type: "order_status", orderId: orderRequest.id });
     response.json(serializeOrderRequest(updated));
     return;
   }
@@ -829,6 +834,7 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     })
     .returning("*");
 
+  await publishNotification({ type: "order_status", orderId: orderRequest.id });
   response.status(201).json(serializeOrderRequest(orderRequest));
 });
 
@@ -940,5 +946,6 @@ positionsRouter.post("/:id/close", async (request, response) => {
     })
     .returning("*");
 
+  await publishNotification({ type: "order_status", orderId: orderRequest.id });
   response.status(201).json(serializeOrderRequest(orderRequest));
 });
