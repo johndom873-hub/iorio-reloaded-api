@@ -9,6 +9,7 @@ import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
 import { buildLegContract, computeNetLimitPrice, type OrderLegPayload, type OrderRequestPayload } from "./ibkr/ibkrGatewayOrderPayload.js";
 import { parseIbkrExecutionTime } from "./ibkr/ibkrGatewayParseExecutionTime.js";
 import { fetchIbkrHeldPositions, type IbkrHeldPosition } from "./ibkr/ibkrGatewayFetchHeldPositions.js";
+import { fetchIbkrOpenOrders } from "./ibkr/ibkrGatewayFetchOpenOrders.js";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { fetchPositionById, type PositionLegRow } from "./lib/positionQueries.js";
 import { formatPositionExpiredMessage } from "./lib/formatPositionExpiredMessage.js";
@@ -236,12 +237,27 @@ function setupOrderTrackingListeners(): void {
   const ib = persistentIbkrConnection.getIb();
   if (!ib) return;
 
-  ib.on(EventName.orderStatus, (orderId, status, filled, remaining) => {
+  ib.on(EventName.orderStatus, (orderId, status, filled, remaining, _avgFillPrice, permId) => {
     const requestStatus = filled > 0 && remaining > 0 ? "partially_filled" : orderStatusToRequestStatus(status);
     if (!requestStatus) return;
+    // permId is globally unique forever, unlike ibkr_order_id, which resets
+    // and gets reused after every Gateway/worker restart — found 2026-08-27
+    // when a fill for reused id 5 matched both a stale two-day-old row and
+    // today's real order, flipping both to "filled". order_requests already
+    // had an ibkr_perm_id column (2026-08-24) for exactly this, just never
+    // wired up. Once a row has captured its permId, only let a further
+    // update through if this callback's permId still matches it, so a
+    // reused ibkr_order_id from a genuinely different order can't flip the
+    // wrong row. reconcileStaleOrderRequests (run on every connect) is the
+    // primary defense — this is a second layer for whatever it doesn't catch.
     db("order_requests")
       .where({ ibkr_order_id: orderId })
-      .update({ status: requestStatus, updated_at: db.fn.now() })
+      .andWhere((builder) => (permId ? builder.whereNull("ibkr_perm_id").orWhere("ibkr_perm_id", permId) : builder))
+      .update({
+        status: requestStatus,
+        updated_at: db.fn.now(),
+        ...(permId ? { ibkr_perm_id: permId } : {}),
+      })
       .returning(["id", "source_alert_id"])
       .then(async (rows) => {
         if (!rows[0]) return;
@@ -876,10 +892,55 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
   await upsertPositionLeg(positionId!, stockLeg, "long", leftoverShares, true);
 }
 
+/**
+ * Closes the window that let a fill for reused ibkr_order_id 5 match two
+ * different order_requests rows (see the orderStatus listener's permId
+ * comment above): any local row still
+ * non-terminal (submitted/partially_filled/cancel_requested) that IBKR's own
+ * reqAllOpenOrders() no longer reports as open almost certainly belongs to a
+ * prior Gateway/worker session — its order id is free for IBKR to hand to a
+ * genuinely different order next. Flags it for manual review and clears its
+ * ibkr_order_id so it can never again be matched by a future reused id.
+ * Run once at startup (awaited, before order-request processing begins) and
+ * again on every reconnect, since a reused-id collision is only possible
+ * right after a fresh session starts.
+ */
+async function reconcileStaleOrderRequests(): Promise<void> {
+  const ib = persistentIbkrConnection.getIb();
+  if (!ib) return;
+
+  const staleCandidates = await db("order_requests")
+    .whereIn("status", ["submitted", "partially_filled", "cancel_requested"])
+    .whereNotNull("ibkr_order_id")
+    .select("id", "ibkr_order_id", "source_alert_id");
+  if (staleCandidates.length === 0) return;
+
+  const openOrders = await fetchIbkrOpenOrders(ib);
+  const liveOrderIds = new Set(openOrders.map((order) => order.orderId));
+
+  for (const row of staleCandidates) {
+    if (liveOrderIds.has(row.ibkr_order_id)) continue;
+    await db("order_requests")
+      .where({ id: row.id })
+      .update({
+        status: "error",
+        error_message:
+          "IBKR no longer reports this order as open (likely orphaned by a Gateway/worker restart) — its real status could not be confirmed. Check IBKR directly if this was a real order.",
+        ibkr_order_id: null,
+        updated_at: db.fn.now(),
+      });
+    console.warn(`reconcileStaleOrderRequests: flagged orphaned order_requests row ${row.id} (was ibkr_order_id ${row.ibkr_order_id}).`);
+    await publishNotification({ type: "order_status", orderId: row.id });
+    await revertSourceAlertToPending(row.source_alert_id);
+  }
+}
+
 async function main(): Promise<void> {
   await persistentIbkrConnection.start();
+  await reconcileStaleOrderRequests().catch((error) => console.error(`Initial stale-order reconciliation failed: ${error}`));
   persistentIbkrConnection.onConnect(() => {
     setupOrderTrackingListeners();
+    reconcileStaleOrderRequests().catch((error) => console.error(`Stale-order reconciliation failed: ${error}`));
     reconcilePositionsFromIbkr().catch((error) => console.error(`Initial reconciliation failed: ${error}`));
   });
 
