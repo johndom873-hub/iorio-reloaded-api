@@ -1,6 +1,7 @@
 import { EventName, Option, OptionType, SecType } from "@stoqey/ib";
 import type { Contract, IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { db } from "../db/connection.js";
 
 export interface OptionQuote {
   expiry: string; // YYYYMMDD
@@ -92,6 +93,38 @@ export async function lookupOptionParams(
     ib.on(EventName.error, onError);
     ib.reqSecDefOptParams(reqId, symbol, "", "STK", conId);
   });
+}
+
+async function resolveTickerId(symbol: string): Promise<string | null> {
+  const row = await db("tickers").where({ symbol }).first();
+  return row?.id ?? null;
+}
+
+// 24h refresh, approved 2026-08-27 (see PROGRESS.md "Option chain cache") —
+// this raw cross-expiry/cross-exchange union barely changes day to day (new
+// weekly expiries roll forward periodically, existing ones don't change),
+// but was being re-fetched live on every chain open/scan. Fails open (no
+// caching, straight to lookupOptionParams) for a symbol with no tickers row.
+export async function getCachedOptionParams(
+  ib: IBApi,
+  symbol: string,
+  conId: number,
+): Promise<{ expirations: string[]; strikes: number[] }> {
+  const tickerId = await resolveTickerId(symbol);
+  if (!tickerId) return lookupOptionParams(ib, symbol, conId);
+
+  const optionParamsRefreshMs = 24 * 60 * 60 * 1000;
+  const cached = await db("option_chain_params").where({ ticker_id: tickerId }).first();
+  if (cached && Date.now() - new Date(cached.fetched_at).getTime() < optionParamsRefreshMs) {
+    return { expirations: cached.expirations, strikes: cached.strikes.map(Number) };
+  }
+
+  const fresh = await lookupOptionParams(ib, symbol, conId);
+  await db("option_chain_params")
+    .insert({ ticker_id: tickerId, expirations: fresh.expirations, strikes: fresh.strikes, fetched_at: new Date() })
+    .onConflict("ticker_id")
+    .merge();
+  return fresh;
 }
 
 function pickExpiries(expirations: string[], dteRange: { min: number; max: number }): string[] {
@@ -187,6 +220,58 @@ export function checkStrikeExists(ib: IBApi, symbol: string, expiry: string, str
   });
 }
 
+// Cached wrapper around checkStrikeExists, approved 2026-08-27 (see
+// PROGRESS.md "Option chain cache") — this is the flagship caching win here:
+// it's the exact call chain that caused the 2026-08-14 AMAT throttling
+// outage (see checkStrikeExists' own doc comment), and fires dozens of times
+// per chain open. Batches the whole candidate set for one expiry into a
+// single Postgres read, then only fires IBKR checks for whatever wasn't
+// already cached, instead of one DB round trip per candidate.
+//
+// exists=true is cached forever (a listed contract doesn't get delisted
+// mid-life). exists=false gets a 24h re-check window instead, since
+// exchanges do occasionally add new strikes to an already-listed expiry
+// after a large price move — caching "doesn't exist" forever risks
+// permanently hiding a strike that gets added later. Fails open for a
+// symbol with no tickers row.
+export async function getCachedValidStrikes(ib: IBApi, symbol: string, expiry: string, candidates: number[]): Promise<number[]> {
+  if (candidates.length === 0) return [];
+  const tickerId = await resolveTickerId(symbol);
+  if (!tickerId) {
+    const results = await Promise.all(
+      candidates.map(async (strike) => ({ strike, exists: await checkStrikeExists(ib, symbol, expiry, strike) })),
+    );
+    return results.filter((r) => r.exists).map((r) => r.strike);
+  }
+
+  const negativeCheckRefreshMs = 24 * 60 * 60 * 1000;
+  const cachedRows: { strike: string; exists: boolean; checked_at: Date }[] = await db("option_chain_strike_checks")
+    .where({ ticker_id: tickerId, expiry })
+    .whereIn("strike", candidates);
+  const cachedByStrike = new Map(cachedRows.map((row) => [Number(row.strike), row]));
+
+  const needsLiveCheck = candidates.filter((strike) => {
+    const row = cachedByStrike.get(strike);
+    if (!row) return true;
+    if (row.exists) return false;
+    return Date.now() - new Date(row.checked_at).getTime() >= negativeCheckRefreshMs;
+  });
+
+  const liveResults = await Promise.all(
+    needsLiveCheck.map(async (strike) => ({ strike, exists: await checkStrikeExists(ib, symbol, expiry, strike) })),
+  );
+
+  if (liveResults.length > 0) {
+    await db("option_chain_strike_checks")
+      .insert(liveResults.map(({ strike, exists }) => ({ ticker_id: tickerId, expiry, strike, exists, checked_at: new Date() })))
+      .onConflict(["ticker_id", "expiry", "strike"])
+      .merge();
+  }
+
+  const liveByStrike = new Map(liveResults.map((r) => [r.strike, r.exists]));
+  return candidates.filter((strike) => (liveByStrike.has(strike) ? liveByStrike.get(strike) : (cachedByStrike.get(strike)?.exists ?? false)));
+}
+
 // mustIncludeStrikes (approved 2026-08-26): a pending trade alert's strike
 // has to show up in the chain even when it's well outside the plain
 // near-the-money window — a covered-call alert can sit 20+ points OTM on a
@@ -204,10 +289,7 @@ async function lookupValidStrikesForExpiry(
 ): Promise<number[]> {
   const nearTheMoneyCandidates = pickStrikes(rawStrikes, spotPrice, strikesPerSide + candidateBufferPerSide);
   const candidates = Array.from(new Set([...nearTheMoneyCandidates, ...mustIncludeStrikes]));
-  const results = await Promise.all(
-    candidates.map(async (strike) => ({ strike, exists: await checkStrikeExists(ib, symbol, expiry, strike) })),
-  );
-  const validStrikes = results.filter((r) => r.exists).map((r) => r.strike);
+  const validStrikes = await getCachedValidStrikes(ib, symbol, expiry, candidates);
   const nearTheMoney = pickStrikes(validStrikes, spotPrice);
   const validMustInclude = validStrikes.filter((s) => mustIncludeStrikes.includes(s));
   return Array.from(new Set([...nearTheMoney, ...validMustInclude])).sort((a, b) => a - b);
@@ -446,7 +528,7 @@ export async function prepareOptionChainStrikes(
 ): Promise<ExpiryStrikes[]> {
   const { ib } = connection;
 
-  const { expirations, strikes } = await lookupOptionParams(ib, symbol, conId);
+  const { expirations, strikes } = await getCachedOptionParams(ib, symbol, conId);
   // A pending alert's expiry has to be browsable even if maxExpiries' trim
   // would otherwise cut it — same "every alert must be visible" requirement
   // as mustIncludeStrikes above, one level up (expiries, not just strikes

@@ -3,10 +3,10 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import {
-  checkStrikeExists,
   daysBetween,
   fetchQuotesForContracts,
-  lookupOptionParams,
+  getCachedOptionParams,
+  getCachedValidStrikes,
   parseExpiry,
   quoteOptionChain,
   type ExpiryStrikes,
@@ -108,7 +108,7 @@ async function fetchTickerPrepData(connection: IbkrConnection, symbol: string): 
     return { conId: contractDetails.conId, spotPrice: null, expirations: [], strikes: [] };
   }
 
-  const { expirations, strikes } = await lookupOptionParams(ib, symbol, contractDetails.conId);
+  const { expirations, strikes } = await getCachedOptionParams(ib, symbol, contractDetails.conId);
   return { conId: contractDetails.conId, spotPrice, expirations, strikes };
 }
 
@@ -131,10 +131,7 @@ async function buildValidatedExpiryStrikes(
   const results = await Promise.all(
     qualifyingExpiries.map(async (expiry): Promise<ExpiryStrikes | null> => {
       const candidates = pickCandidateStrikes(rawStrikes, spotPrice, right);
-      const validated = await Promise.all(
-        candidates.map(async (strike) => ({ strike, exists: await checkStrikeExists(ib, symbol, expiry, strike) })),
-      );
-      const validStrikes = validated.filter((v) => v.exists).map((v) => v.strike);
+      const validStrikes = await getCachedValidStrikes(ib, symbol, expiry, candidates);
       return validStrikes.length > 0 ? { expiry, strikes: validStrikes } : null;
     }),
   );
