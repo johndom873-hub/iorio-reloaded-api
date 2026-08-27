@@ -54,14 +54,14 @@ function parseIbkrBarTime(raw: string): number {
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
 /**
- * Shares an already-open connection — see streamTickerDetail.ts, which
- * calls `reqMarketDataType` itself, once, before starting this alongside
- * lookupHistoricalBars/prepareOptionChainStrikes on the same connection.
- * Do not call reqMarketDataType here too: it's connection-wide, and a
- * second call while this snapshot subscription is still outstanding was
- * found to silently prevent tickSnapshotEnd from ever firing — reproduced
- * as a "Pricing snapshot timeout" once optionChain's metadata prep started
- * running concurrently with this instead of strictly after it.
+ * One-shot pricing snapshot — for callers that need a single point-in-time
+ * price and move on programmatically (trade alert generation/refresh, the
+ * New Position live-quote stream), not a long-lived UI screen. See
+ * streamPricingUpdates below for the continuous version the Ticker Detail
+ * modal uses instead.
+ *
+ * Shares an already-open connection — see the reqMarketDataType note on
+ * streamPricingUpdates below; the same constraint applies here.
  */
 export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: string, reqId = 1): Promise<TickerPricing> {
   const { ib } = connection;
@@ -77,7 +77,8 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
       previousClose: null,
       volume: null,
     };
-    const timer = setTimeout(() => reject(new Error(`Pricing snapshot timeout for ${symbol}`)), 10_000);
+    let lastError: string | null = null;
+    const timer = setTimeout(() => reject(new Error(lastError ?? `Pricing snapshot timeout for ${symbol}`)), 10_000);
 
     function onTickPrice(id: number, tickType: number, price: number) {
       if (id !== reqId || price <= 0) return;
@@ -105,17 +106,18 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
       resolve(pricing);
     }
 
-    // Logged, not rejected on: IBKR sends routine warnings (e.g. "Requested
+    // Captured, not rejected on: IBKR sends routine warnings (e.g. "Requested
     // market data is not subscribed. Displaying delayed market data.")
     // through this same error event for reqIds that still go on to receive
-    // ticks and succeed. Rejecting here would break those. This listener
-    // exists so that when a symbol comes back with no last/previousClose at
-    // all (the "No spot price available" case downstream), the real IBKR
-    // reason — permissions, unrecognized symbol, etc. — is visible in logs
-    // instead of just the generic empty-pricing symptom.
+    // ticks and succeed. Rejecting here would break those. Logged AND
+    // captured so that when a symbol comes back with no last/previousClose
+    // at all and the timeout above fires, the real IBKR reason — permissions,
+    // unrecognized symbol, etc. — reaches the caller instead of just the
+    // generic timeout string.
     function onError(error: Error, code: number, errorReqId: number) {
       if (errorReqId !== reqId) return;
       console.warn(`IBKR pricing snapshot warning for ${symbol} (code ${code}): ${error.message}`);
+      lastError = `Pricing snapshot error for ${symbol} (code ${code}): ${error.message}`;
     }
 
     ib.on(EventName.tickPrice, onTickPrice);
@@ -124,6 +126,152 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
     ib.on(EventName.error, onError);
     ib.reqMktData(reqId, new Stock(symbol, "SMART", "USD"), "", true, false);
   });
+}
+
+
+/**
+ * Continuous streaming version of a pricing lookup (approved 2026-08-26 —
+ * the modal should show live-updating prices, not a one-time snapshot).
+ * Resolves once with the first usable reading (same readiness bar as the
+ * old snapshot version: at least one price tick in), then keeps calling
+ * onUpdate with the accumulated pricing on a fixed interval until `signal`
+ * aborts — the caller (streamTickerDetail.ts) aborts when the SSE client
+ * disconnects. Cancels the market data subscription and cleans up its
+ * listeners on abort, same as any other IBKR call site.
+ *
+ * Shares an already-open connection — see streamTickerDetail.ts, which
+ * calls `reqMarketDataType` itself, once, before starting this alongside
+ * lookupHistoricalBars/prepareOptionChainStrikes on the same connection.
+ * Do not call reqMarketDataType here too: it's connection-wide, and a
+ * second call while this subscription is still outstanding was found to
+ * silently prevent it from ever producing a first tick — reproduced as a
+ * "Pricing snapshot timeout" once optionChain's metadata prep started
+ * running concurrently with this instead of strictly after it.
+ */
+export async function streamPricingUpdates(
+  connection: IbkrConnection,
+  symbol: string,
+  onUpdate: (pricing: TickerPricing) => void,
+  signal: AbortSignal,
+  reqId = 1,
+): Promise<TickerPricing> {
+  const { ib } = connection;
+
+  const pricing: TickerPricing = {
+    last: null,
+    bid: null,
+    ask: null,
+    open: null,
+    high: null,
+    low: null,
+    previousClose: null,
+    volume: null,
+  };
+
+  // True real-time push (approved 2026-08-27, replacing a fixed 1.5s
+  // interval): every tick calls onUpdate, coalesced only within the same
+  // event-loop turn via setImmediate — IBKR often delivers several tick
+  // types (bid, ask, last, size) back to back from one network read, and
+  // without this a single incoming update would fan out into several
+  // separate SSE writes of the same-ish snapshot. This still pushes on
+  // every genuinely new tick, just not once-per-field when they arrive
+  // microseconds apart.
+  let pushScheduled = false;
+  function schedulePush() {
+    if (pushScheduled || !liveModeStarted) return;
+    pushScheduled = true;
+    setImmediate(() => {
+      pushScheduled = false;
+      onUpdate({ ...pricing });
+    });
+  }
+  let liveModeStarted = false;
+
+  function onTickPrice(id: number, tickType: number, price: number) {
+    if (id !== reqId || price <= 0) return;
+    // Delayed tick types: bid=66, ask=67, last=68, high=72, low=73, close=75, open=76.
+    if (tickType === 66) pricing.bid = price;
+    if (tickType === 67) pricing.ask = price;
+    if (tickType === 68) pricing.last = price;
+    if (tickType === 72) pricing.high = price;
+    if (tickType === 73) pricing.low = price;
+    if (tickType === 75) pricing.previousClose = price;
+    if (tickType === 76) pricing.open = price;
+    schedulePush();
+  }
+  function onTickSize(id: number, tickType?: number, size?: number) {
+    if (id !== reqId || size === undefined) return;
+    // Delayed volume = 74.
+    if (tickType === 74) pricing.volume = size;
+    schedulePush();
+  }
+
+  let lastError: string | null = null;
+  // Captured, not rejected on: IBKR sends routine warnings (e.g. "Requested
+  // market data is not subscribed. Displaying delayed market data.")
+  // through this same error event for reqIds that still go on to receive
+  // ticks and succeed. Rejecting here would break those. Logged AND
+  // captured so that when a symbol comes back with no price at all and the
+  // initial-readiness timeout below fires, the real IBKR reason —
+  // permissions, a competing session, etc. — reaches the caller instead of
+  // just a generic timeout string.
+  function onError(error: Error, code: number, errorReqId: number) {
+    if (errorReqId !== reqId) return;
+    console.warn(`IBKR pricing stream warning for ${symbol} (code ${code}): ${error.message}`);
+    lastError = `Pricing stream error for ${symbol} (code ${code}): ${error.message}`;
+  }
+
+  ib.on(EventName.tickPrice, onTickPrice);
+  ib.on(EventName.tickSize, onTickSize);
+  ib.on(EventName.error, onError);
+  // snapshot=false: a genuine streaming subscription, not a one-shot
+  // snapshot — ticks keep arriving for as long as this stays subscribed,
+  // which is what lets onUpdate below report a live-updating price instead
+  // of a value frozen at whatever it was the moment the modal opened.
+  ib.reqMktData(reqId, new Stock(symbol, "SMART", "USD"), "", false, false);
+
+  function cleanup() {
+    ib.cancelMktData(reqId);
+    ib.removeListener(EventName.tickPrice, onTickPrice);
+    ib.removeListener(EventName.tickSize, onTickSize);
+    ib.removeListener(EventName.error, onError);
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(lastError ?? `Pricing snapshot timeout for ${symbol}`));
+    }, 10_000);
+    const readyCheck = setInterval(() => {
+      if (pricing.last === null && pricing.previousClose === null) return;
+      clearInterval(readyCheck);
+      clearTimeout(timer);
+      resolve();
+    }, 200);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearInterval(readyCheck);
+        clearTimeout(timer);
+        cleanup();
+        resolve();
+      },
+      { once: true },
+    );
+  });
+
+  // liveModeStarted gates schedulePush above so nothing pushes during the
+  // ready-wait: the initial reading already satisfies this function's own
+  // promise (callers like streamTickerDetail.ts's optionChainTask need that
+  // first spot price right away, not once the whole streaming session
+  // eventually ends) — real-time pushing of every subsequent tick starts
+  // only once that's resolved, and keeps going until `signal` aborts.
+  if (!signal.aborted) {
+    liveModeStarted = true;
+    signal.addEventListener("abort", cleanup, { once: true });
+  }
+
+  return pricing;
 }
 
 /** Shares an already-open connection — see the reqMarketDataType note on lookupPricingSnapshot above. */

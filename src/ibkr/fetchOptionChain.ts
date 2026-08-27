@@ -25,8 +25,8 @@ export interface OptionQuote {
 // pickExpiries sorts ascending and takes the first N, so the nearest
 // (weekly/intra-weekly) expiries are always the ones kept if more than 6
 // exist in the window.
-const minDaysToExpiry = 0;
-const maxDaysToExpiry = 60;
+const defaultMinDaysToExpiry = 0;
+const defaultMaxDaysToExpiry = 60;
 const maxExpiries = 6;
 const strikesPerSide = 4;
 const quoteTimeoutMs = 8_000;
@@ -56,7 +56,16 @@ export async function lookupOptionParams(
 ): Promise<{ expirations: string[]; strikes: number[] }> {
   return new Promise((resolve, reject) => {
     const reqId = nextLookupReqId++;
-    const timer = setTimeout(() => reject(new Error(`secDefOptParams timeout for ${symbol}`)), 10_000);
+    let lastError: string | null = null;
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(lastError ?? `secDefOptParams timeout for ${symbol}`));
+    }, 10_000);
+    function cleanup() {
+      clearTimeout(timer);
+      ib.removeListener(EventName.securityDefinitionOptionParameter, onParams);
+      ib.removeListener(EventName.error, onError);
+    }
     function onParams(
       id: number,
       exchange: string,
@@ -67,21 +76,30 @@ export async function lookupOptionParams(
       strikes: number[],
     ) {
       if (id !== reqId || exchange !== "SMART") return;
-      clearTimeout(timer);
-      ib.removeListener(EventName.securityDefinitionOptionParameter, onParams);
+      cleanup();
       resolve({ expirations: Array.from(expirations), strikes: Array.from(strikes) });
     }
+    // Captured, not rejected on immediately — IBKR sends routine informational
+    // notices through this same event for reqIds that still go on to succeed
+    // (same pattern as lookupPricingSnapshot). Only surfaced if the timeout
+    // above actually fires, so a real permissions/pacing error explains the
+    // timeout instead of the generic message masking it.
+    function onError(error: Error, code: number, errorReqId: number) {
+      if (errorReqId !== reqId) return;
+      lastError = `secDefOptParams error for ${symbol} (code ${code}): ${error.message}`;
+    }
     ib.on(EventName.securityDefinitionOptionParameter, onParams);
+    ib.on(EventName.error, onError);
     ib.reqSecDefOptParams(reqId, symbol, "", "STK", conId);
   });
 }
 
-function pickExpiries(expirations: string[]): string[] {
+function pickExpiries(expirations: string[], dteRange: { min: number; max: number }): string[] {
   const today = new Date();
   return expirations
     .filter((expiry) => {
       const dte = daysBetween(today, parseExpiry(expiry));
-      return dte >= minDaysToExpiry && dte <= maxDaysToExpiry;
+      return dte >= dteRange.min && dte <= dteRange.max;
     })
     .sort()
     .slice(0, maxExpiries);
@@ -169,13 +187,30 @@ export function checkStrikeExists(ib: IBApi, symbol: string, expiry: string, str
   });
 }
 
-async function lookupValidStrikesForExpiry(ib: IBApi, symbol: string, expiry: string, rawStrikes: number[], spotPrice: number): Promise<number[]> {
-  const candidates = pickStrikes(rawStrikes, spotPrice, strikesPerSide + candidateBufferPerSide);
+// mustIncludeStrikes (approved 2026-08-26): a pending trade alert's strike
+// has to show up in the chain even when it's well outside the plain
+// near-the-money window — a covered-call alert can sit 20+ points OTM on a
+// low-delta strike, which the standard ±strikesPerSide trim below would
+// otherwise silently drop. Validated the same way as every other candidate
+// (checkStrikeExists), then unioned back in AFTER the near-the-money trim
+// so it survives regardless of how far it sits from spot.
+async function lookupValidStrikesForExpiry(
+  ib: IBApi,
+  symbol: string,
+  expiry: string,
+  rawStrikes: number[],
+  spotPrice: number,
+  mustIncludeStrikes: number[] = [],
+): Promise<number[]> {
+  const nearTheMoneyCandidates = pickStrikes(rawStrikes, spotPrice, strikesPerSide + candidateBufferPerSide);
+  const candidates = Array.from(new Set([...nearTheMoneyCandidates, ...mustIncludeStrikes]));
   const results = await Promise.all(
     candidates.map(async (strike) => ({ strike, exists: await checkStrikeExists(ib, symbol, expiry, strike) })),
   );
   const validStrikes = results.filter((r) => r.exists).map((r) => r.strike);
-  return pickStrikes(validStrikes, spotPrice);
+  const nearTheMoney = pickStrikes(validStrikes, spotPrice);
+  const validMustInclude = validStrikes.filter((s) => mustIncludeStrikes.includes(s));
+  return Array.from(new Set([...nearTheMoney, ...validMustInclude])).sort((a, b) => a - b);
 }
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -189,10 +224,19 @@ function isQuoteReady(quote: OptionQuote): boolean {
   return hasPrice && quote.delta !== null;
 }
 
+
 export async function fetchQuotesForContracts(
   ib: IBApi,
   symbol: string,
   contracts: { expiry: string; strike: number; right: OptionType }[],
+  // Optional continuous mode (approved 2026-08-26, for the Ticker Detail
+  // modal): when provided, this function keeps every contract's streaming
+  // subscription open past the initial resolve and calls onUpdate with the
+  // latest full quote list on a fixed interval, until `signal` aborts —
+  // instead of cancelling and returning once. Every other caller (Order
+  // Review's live quote, trade-alert generation/refresh, Greeks lookups)
+  // omits this and keeps the original one-shot behavior unchanged.
+  live?: { onUpdate: (quotes: OptionQuote[]) => void; signal: AbortSignal },
 ): Promise<OptionQuote[]> {
   const quotes = new Map<number, OptionQuote>();
   const reqIdToContract = new Map<number, { expiry: string; strike: number; right: "C" | "P" }>();
@@ -223,6 +267,23 @@ export async function fetchQuotesForContracts(
     if (readyReqIds.size === reqIdToContract.size) onAllReady?.();
   }
 
+  // True real-time push (approved 2026-08-27, replacing a fixed 1.5s
+  // interval) once live mode is active — see the matching note in
+  // fetchTickerOverview.ts's streamPricingUpdates. Coalesced only within
+  // the same event-loop turn: a chain of 30+ contracts can have several
+  // land back to back from one network read, and this still pushes on
+  // every genuinely new batch of ticks, just not once per individual field.
+  let liveMode: { onUpdate: (quotes: OptionQuote[]) => void; signal: AbortSignal } | null = null;
+  let pushScheduled = false;
+  function schedulePush() {
+    if (!liveMode || pushScheduled) return;
+    pushScheduled = true;
+    setImmediate(() => {
+      pushScheduled = false;
+      liveMode?.onUpdate(Array.from(quotes.values()));
+    });
+  }
+
   function onTickPrice(reqId: number, tickType: number, price: number) {
     const quote = quotes.get(reqId);
     if (!quote || price < 0) return;
@@ -231,6 +292,7 @@ export async function fetchQuotesForContracts(
     if (tickType === 67) quote.ask = price;
     if (tickType === 68) quote.last = price;
     checkReady(reqId);
+    schedulePush();
   }
 
   function onTickOptionComputation(
@@ -256,6 +318,7 @@ export async function fetchQuotesForContracts(
     quote.vega = vega ?? null;
     quote.theta = theta ?? null;
     checkReady(reqId);
+    schedulePush();
   }
 
   function onError(error: Error, code: number, reqId: number) {
@@ -308,12 +371,28 @@ export async function fetchQuotesForContracts(
     `${symbol}: quotes ready in ${Date.now() - startedAt}ms (${readyReqIds.size}/${reqIdToContract.size} contracts had price+delta)`,
   );
 
-  for (const reqId of reqIdToContract.keys()) {
-    ib.cancelMktData(reqId);
+  function cleanup() {
+    for (const reqId of reqIdToContract.keys()) {
+      ib.cancelMktData(reqId);
+    }
+    ib.removeListener(EventName.tickPrice, onTickPrice);
+    ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
+    ib.removeListener(EventName.error, onError);
   }
-  ib.removeListener(EventName.tickPrice, onTickPrice);
-  ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
-  ib.removeListener(EventName.error, onError);
+
+  if (!live || live.signal.aborted) {
+    cleanup();
+    return Array.from(quotes.values());
+  }
+
+  // Deliberately NOT awaited: the initial ready/timeout wait above already
+  // satisfies this function's promise (the caller — streamTickerDetail.ts —
+  // needs that first chain painted right away, not once the whole streaming
+  // session eventually ends). Arming liveMode makes schedulePush (above)
+  // start pushing on every real-time tick for the rest of the connection's
+  // life, cleaning itself up once `live.signal` aborts.
+  liveMode = live;
+  live.signal.addEventListener("abort", cleanup, { once: true });
 
   return Array.from(quotes.values());
 }
@@ -351,23 +430,39 @@ export async function prepareOptionChainStrikes(
   symbol: string,
   conId: number,
   spotPrice: number,
+  dteRange: { min: number; max: number } = { min: defaultMinDaysToExpiry, max: defaultMaxDaysToExpiry },
+  // Approved 2026-08-26: every pending trade alert's strike must show up in
+  // the chain, even ones the near-the-money window alone would trim away
+  // (see lookupValidStrikesForExpiry). Keyed by expiry in the same YYYYMMDD
+  // shape used everywhere else in this file.
+  alertStrikesByExpiry: Map<string, number[]> = new Map(),
 ): Promise<ExpiryStrikes[]> {
   const { ib } = connection;
 
   const { expirations, strikes } = await lookupOptionParams(ib, symbol, conId);
-  const chosenExpiries = pickExpiries(expirations);
+  // A pending alert's expiry has to be browsable even if maxExpiries' trim
+  // would otherwise cut it — same "every alert must be visible" requirement
+  // as mustIncludeStrikes above, one level up (expiries, not just strikes
+  // within an already-kept expiry).
+  const chosenExpiries = Array.from(new Set([...pickExpiries(expirations, dteRange), ...alertStrikesByExpiry.keys()])).sort();
 
   return Promise.all(
     chosenExpiries.map(async (expiry) => ({
       expiry,
-      strikes: await lookupValidStrikesForExpiry(ib, symbol, expiry, strikes, spotPrice),
+      strikes: await lookupValidStrikesForExpiry(ib, symbol, expiry, strikes, spotPrice, alertStrikesByExpiry.get(expiry) ?? []),
     })),
   );
 }
 
 // Strikes arriving here are already the final near-the-money, validated set
-// from prepareOptionChainStrikes — just subscribe and collect quotes.
-export async function quoteOptionChain(connection: IbkrConnection, symbol: string, expiryStrikes: ExpiryStrikes[]): Promise<OptionQuote[]> {
+// from prepareOptionChainStrikes — just subscribe and collect quotes. `live`
+// passes straight through to fetchQuotesForContracts — see its doc comment.
+export async function quoteOptionChain(
+  connection: IbkrConnection,
+  symbol: string,
+  expiryStrikes: ExpiryStrikes[],
+  live?: { onUpdate: (quotes: OptionQuote[]) => void; signal: AbortSignal },
+): Promise<OptionQuote[]> {
   const { ib } = connection;
 
   const contracts: { expiry: string; strike: number; right: OptionType }[] = [];
@@ -378,6 +473,6 @@ export async function quoteOptionChain(connection: IbkrConnection, symbol: strin
     }
   }
 
-  return fetchQuotesForContracts(ib, symbol, contracts);
+  return fetchQuotesForContracts(ib, symbol, contracts, live);
 }
 

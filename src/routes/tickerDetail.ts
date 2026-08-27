@@ -40,6 +40,13 @@ tickerDetailRouter.get("/:symbol/detail/stream", async (request, response) => {
   // what makes that a normal, silent no-op instead.
   response.on("error", () => {});
 
+  // Prices now stream continuously (approved 2026-08-26) instead of
+  // resolving once, so streamTickerDetail only returns once this aborts —
+  // i.e. once the client actually disconnects (modal closed, tab
+  // navigated away, EventSource.close() called client-side).
+  const abortController = new AbortController();
+  request.on("close", () => abortController.abort());
+
   const send = (data: unknown) => {
     if (response.writableEnded) return;
     response.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -49,7 +56,7 @@ tickerDetailRouter.get("/:symbol/detail/stream", async (request, response) => {
   }, heartbeatIntervalMs);
 
   try {
-    await streamTickerDetail(symbol, send);
+    await streamTickerDetail(symbol, send, abortController.signal);
     send({ type: "done" });
   } catch (error) {
     send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });

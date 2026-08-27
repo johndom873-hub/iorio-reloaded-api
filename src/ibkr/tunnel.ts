@@ -37,6 +37,21 @@ export function openIbkrTunnel(options: OpenIbkrTunnelOptions): Promise<IbkrTunn
               localSocket.destroy();
               return;
             }
+            // Root cause of a real crash (2026-08-27): neither side of this
+            // pipe had an 'error' listener. A Node stream that emits 'error'
+            // with no listener throws, which crashes the whole process
+            // (uncaughtException, "read ECONNRESET") rather than just
+            // failing this one IBKR connection. Long-lived streaming
+            // connections (prices/option chain now stay subscribed for as
+            // long as a modal is open, not ~20s one-shot calls) sit exposed
+            // to a transient network blip for much longer, so this got much
+            // more likely to actually hit. Destroying the other side on
+            // either socket's error is standard proxy-pipe cleanup — it
+            // surfaces as this one IBKR connection dying (which
+            // connectIbkr.ts's callers already handle as a normal
+            // section-level error), not a process-wide crash.
+            stream.on("error", () => localSocket.destroy());
+            localSocket.on("error", () => stream.destroy());
             localSocket.pipe(stream).pipe(localSocket);
           },
         );

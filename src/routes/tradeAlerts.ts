@@ -37,6 +37,7 @@ const heartbeatIntervalMs = 20_000;
 tradeAlertsRouter.get("/", async (request, response) => {
   const status = (request.query.status as string | undefined) ?? "pending";
   const strategyKey = request.query.strategy as string | undefined;
+  const symbol = request.query.symbol as string | undefined;
 
   if (!validStatuses.includes(status)) {
     response.status(400).json({ error: "Unknown status." });
@@ -52,6 +53,10 @@ tradeAlertsRouter.get("/", async (request, response) => {
   if (strategyKey) {
     conditions.push("ta.strategy_key = ?");
     params.push(strategyKey);
+  }
+  if (symbol) {
+    conditions.push("t.symbol = ?");
+    params.push(symbol.toUpperCase());
   }
 
   const result = await db.raw(
