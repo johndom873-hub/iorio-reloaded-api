@@ -1,8 +1,8 @@
 // In-memory pending-confirmation store for financial-write tool calls.
-// Deliberately not persisted (matches the bot's own conversation history —
-// see bot.ts's chatHistories) — a confirmation that's still unanswered
-// across a dyno restart should just expire, not silently execute later
-// against possibly-stale context.
+// Deliberately not persisted — unlike chat history (see chatHistoryStore.ts,
+// DB-backed as of 2026-08-27), a confirmation that's still unanswered across
+// a dyno restart should just expire, not silently execute later against
+// possibly-stale context.
 import { randomUUID } from "node:crypto";
 
 export interface PendingConfirmation {

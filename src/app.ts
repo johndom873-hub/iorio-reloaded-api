@@ -5,6 +5,7 @@ import { handleGenosukeWebhook } from "./genosuke/bot.js";
 import { sessionMiddleware } from "./middleware/session.js";
 import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
+import { genosukePreferencesRouter } from "./routes/genosukePreferences.js";
 import { healthRouter } from "./routes/health.js";
 import { positionsRouter } from "./routes/positions.js";
 import { pricePerformanceRouter } from "./routes/pricePerformance.js";
@@ -35,6 +36,7 @@ app.use(healthRouter);
 // Telegram calls this directly (no session) — authenticated by the shared
 // secret header checked inside the handler instead.
 app.post("/genosuke/webhook", handleGenosukeWebhook);
+app.use("/genosuke/preferences", genosukePreferencesRouter);
 app.use("/auth", authRouter);
 app.use("/screener", screenerRouter);
 app.use("/price-performance", pricePerformanceRouter);

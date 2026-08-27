@@ -67,4 +67,20 @@ export const lowStakesWriteTools: GenosukeTool[] = [
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.post("/system-health/check-ibkr", {}),
   },
+  {
+    name: "save_preference",
+    description:
+      "Save a standing instruction Marce or Juan explicitly confirmed they want you to remember across future conversations. Only call this after they've said yes to your 'do you want me to remember that?' question — never on your own initiative.",
+    tier: "low-stakes-write",
+    parameters: { type: "object", properties: { content: { type: "string" } }, required: ["content"] },
+    execute: (input, api) => api.post("/genosuke/preferences", { content: input.content }),
+  },
+  {
+    name: "forget_preference",
+    description:
+      "Remove a previously saved preference. Pass the bracketed id shown next to it in the Preferences section of your system prompt, not the text itself.",
+    tier: "low-stakes-write",
+    parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    execute: (input, api) => api.delete(`/genosuke/preferences/${input.id}`),
+  },
 ];

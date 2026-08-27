@@ -1,7 +1,8 @@
 // The stateless, tool-calling single-exchange loop — ported from
 // menaris-admin-api's chatOnce() (analyst-agent-service.js), which Jack
 // itself is built on. Same shape: caller owns and resends `messages` across
-// turns (bot.ts's per-chat history Map), no S3/DB persistence here.
+// turns (bot.ts's DB-backed history store as of 2026-08-27, previously an
+// in-memory Map), no persistence happens inside this function itself.
 //
 // Diverges from Jack in exactly one place: a financial-write tool call
 // never reaches execute() from inside this loop. It's intercepted, turned
@@ -32,10 +33,36 @@ Ground rules:
 - Only two strategies are supported, and every order needs a specific set of fields — never guess a missing one or fill it with a placeholder:
   - covered_call: a stock leg (100 shares/contract by default, computed by you, not the human) + a short call (contracts, limit price, strike, expiry).
   - cash_secured_put: a short put only (contracts, limit price, strike, expiry) — no stock leg. Never send a stock leg, zeroed or otherwise, for this strategy.
-  - From the human's wording you can usually tell which strategy they mean ("put" → cash_secured_put, "call"/"covered call" → covered_call) and proceed. But if the wording is genuinely ambiguous about the strategy, or any required field for that strategy is missing (strike, expiry, quantity, or price), ask a single clarifying question and confirm before calling create_position — don't guess on order terms.`;
+  - From the human's wording you can usually tell which strategy they mean ("put" → cash_secured_put, "call"/"covered call" → covered_call) and proceed. But if the wording is genuinely ambiguous about the strategy, or any required field for that strategy is missing (strike, expiry, quantity, or price), ask a single clarifying question and confirm before calling create_position — don't guess on order terms.
+- Some things Marce or Juan say are durable instructions about how you should behave in future conversations, not just this one — e.g. "ask me before rolling short-dated puts", "don't suggest cash_secured_put on earnings week", or a correction of something you just did that generalizes beyond this turn. When you see one of these, ask "Do you want me to remember that?" once, right after that message, and wait for a yes/no before doing anything else with it.
+- Don't offer to remember: a one-off request scoped to right now ("roll this put", "what's my delta on AAPL"), anything you could instead just look up with a tool call (positions, pricing, risk settings — a memorized fact that can drift out of date is worse than no memory at all), or ordinary conversation with no instruction in it. If you're not sure it's a durable instruction, don't ask — asking on every message is worse than occasionally missing one worth saving.
+- If they say yes, call save_preference with a short, self-contained statement of the rule — it gets shown back to you in every future conversation verbatim, so phrase it as a standalone instruction ("ask before rolling short-dated puts"), not as a fragment referring back to earlier text. If they say no, drop it.
+- If they later say to stop, forget, or ignore a standing preference, call forget_preference right away — that request is already the confirmation, don't ask again first.
+- If asked what preferences you're following, just list the ones in the Preferences section below in plain language — no tool call needed for that.`;
+
+async function buildSystemText(api: GenosukeApiClient): Promise<string> {
+  try {
+    const preferences = await api.get<{ id: string; content: string }[]>("/genosuke/preferences");
+    const body =
+      preferences.length > 0
+        ? preferences.map((p) => `- [${p.id}] ${p.content}`).join("\n")
+        : "(none yet)";
+    return `${SYSTEM_PROMPT}\n\nPreferences Marce and Juan have asked you to remember, to follow the same as the ground rules above unless the current conversation explicitly says otherwise:\n${body}`;
+  } catch (error) {
+    // Preferences are a nice-to-have layered on top of the core ground
+    // rules above — a failed fetch shouldn't take down the whole
+    // conversation, just mean this turn runs without them.
+    console.error("Genosuke: failed to load preferences", error);
+    return SYSTEM_PROMPT;
+  }
+}
 
 function capToolResult(result: unknown): string {
-  const json = JSON.stringify(result);
+  // JSON.stringify(undefined) returns undefined, not the string "undefined"
+  // — a bare tool result crashes here without the fallback. Hits any tool
+  // whose execute() resolves void, e.g. a 204 No Content DELETE response
+  // (GenosukeApiClient.delete never parses a body on 204).
+  const json = JSON.stringify(result) ?? "null";
   if (json.length <= TOOL_RESULT_SIZE_LIMIT) return json;
   return `${json.slice(0, TOOL_RESULT_SIZE_LIMIT)}… [truncated: result exceeded context limit]`;
 }
@@ -52,11 +79,12 @@ export interface ChatOnceParams {
 export async function chatOnce({ messages, userMessage, chatId, adapter, api, telegram }: ChatOnceParams): Promise<{ text: string }> {
   const toolDefinitions = [...TOOLS_BY_NAME.values()];
   messages.push({ role: "user", content: userMessage });
+  const systemText = await buildSystemText(api);
 
   let iteration = 0;
   while (iteration < MAX_ITERATIONS) {
     iteration++;
-    const turn = await adapter.call({ systemText: SYSTEM_PROMPT, messages, tools: toolDefinitions, maxTokens: 1024 });
+    const turn = await adapter.call({ systemText, messages, tools: toolDefinitions, maxTokens: 1024 });
     adapter.appendAssistantMessage(messages, turn);
 
     if (turn.isDone || turn.toolCalls.length === 0) {

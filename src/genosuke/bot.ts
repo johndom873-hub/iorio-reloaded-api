@@ -1,8 +1,9 @@
 // Two-way Telegram bot — receives updates via Telegram webhook and answers
 // questions via chatOnce()'s LLM/tool loop. Ported from menaris-admin-api's
 // Jack (telegram-bot-service.js): webhook handler shape, chat-ID allowlist
-// gate, addressing detection, and per-chat in-memory history all carry over
-// close to as-is. See PROGRESS.md's Genosuke entry for what was
+// gate, and addressing detection all carry over close to as-is. Per-chat
+// history is DB-backed (chatHistoryStore.ts) rather than Jack's in-memory
+// approach — see PROGRESS.md's Genosuke entry for what else was
 // deliberately NOT ported (Jack's prompt-only confirm flow) and why.
 //
 // Auth model (approved 2026-08-21): chat-level only, same as Jack — anyone
@@ -17,14 +18,12 @@ import type { Request, Response } from "express";
 import { loadGenosukeConfig, type GenosukeConfig } from "./config.js";
 import { TelegramApi, type TelegramUpdate } from "./telegramApi.js";
 import { GenosukeApiClient } from "./apiClient.js";
-import { OpenRouterAdapter, type ChatMessage } from "./openRouterAdapter.js";
+import { OpenRouterAdapter } from "./openRouterAdapter.js";
 import { chatOnce } from "./chat.js";
+import { loadRecentHistory, appendHistory } from "./chatHistoryStore.js";
 import { takeConfirmation } from "./confirmations.js";
 import { TOOLS_BY_NAME } from "./tools/index.js";
 
-const HISTORY_MAX_MESSAGES = 20;
-// Stale chat context shouldn't leak into an unrelated new question hours later.
-const HISTORY_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const ORDER_POLL_INTERVAL_MS = 5000;
 const ORDER_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const ORDER_TERMINAL_STATUSES = new Set(["filled", "partially_filled", "cancelled", "error"]);
@@ -35,35 +34,10 @@ interface OrderRequestRow {
   errorMessage: string | null;
 }
 
-interface HistoryEntry {
-  messages: ChatMessage[];
-  lastActivity: number;
-}
-
 let started = false;
 let runtime: { config: GenosukeConfig; telegram: TelegramApi; api: GenosukeApiClient; adapter: OpenRouterAdapter } | null = null;
 let botId: number | null = null;
 let botUsername: string | null = null;
-const chatHistories = new Map<string, HistoryEntry>();
-
-function getHistory(chatId: string): HistoryEntry {
-  const entry = chatHistories.get(chatId);
-  if (entry && Date.now() - entry.lastActivity < HISTORY_MAX_AGE_MS) return entry;
-  const fresh: HistoryEntry = { messages: [], lastActivity: Date.now() };
-  chatHistories.set(chatId, fresh);
-  return fresh;
-}
-
-// Trims at a role:'user' boundary, never mid-turn — a naive length-based
-// splice can orphan a tool-result message from its tool-call, which the
-// LLM API rejects outright on the next call.
-function trimHistory(entry: HistoryEntry): void {
-  if (entry.messages.length <= HISTORY_MAX_MESSAGES) return;
-  const cutFrom = entry.messages.length - HISTORY_MAX_MESSAGES;
-  let boundary = entry.messages.findIndex((m, i) => i >= cutFrom && m.role === "user");
-  if (boundary === -1) boundary = cutFrom;
-  entry.messages.splice(0, boundary);
-}
 
 // Returns the addressed question text (trigger stripped), or null if the
 // message isn't addressed to Genosuke at all.
@@ -119,11 +93,10 @@ async function handleMessage(
   const quotedText = msg.reply_to_message?.from?.id !== botId ? msg.reply_to_message?.text : null;
   const userMessage = quotedText ? `[Replying to this message: "${quotedText.slice(0, 2000)}"]\n\n${question}` : question;
 
-  const history = getHistory(chatId);
+  const messages = await loadRecentHistory(chatId);
+  const fromIndex = messages.length;
   try {
-    const { text } = await chatOnce({ messages: history.messages, userMessage, chatId, adapter, api, telegram });
-    history.lastActivity = Date.now();
-    trimHistory(history);
+    const { text } = await chatOnce({ messages, userMessage, chatId, adapter, api, telegram });
     // A financial-write tool call sends its own Yes/Cancel confirmation
     // card directly (see chat.ts) and the model is told to reply with
     // nothing further — text can legitimately be empty here, and Telegram
@@ -134,6 +107,11 @@ async function handleMessage(
   } catch (error) {
     console.error("Genosuke: chatOnce error", error);
     await telegram.sendMessage(chatId, "Sorry, hit an error answering that.", { replyToMessageId: msg.message_id });
+  } finally {
+    // Persist whatever chatOnce appended even on failure — e.g. the user's
+    // own message should still be there for the next turn even if the LLM
+    // call itself errored out.
+    await appendHistory(chatId, messages, fromIndex).catch((error) => console.error("Genosuke: failed to persist chat history", error));
   }
 }
 
