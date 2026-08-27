@@ -25,15 +25,23 @@ export type TradeAlertGenerationEvent =
   | { type: "strategyStart"; strategyKey: AlertStrategyKey; tickerCount: number }
   | { type: "ticker"; strategyKey: AlertStrategyKey; symbol: string; candidateCount: number }
   | { type: "tickerError"; strategyKey: AlertStrategyKey; symbol: string; message: string }
+  // Fired once, right after the roll scan finishes and before the per-ticker
+  // new-trade scan starts — callers that notify (e.g. the scheduled job) send
+  // this as a single batch message ahead of the per-ticker ones below, per
+  // Marcelo's 2026-08-27 notification-redesign request ("push roll alerts
+  // first, all at once").
+  | { type: "rollBatchReady"; lines: string[] }
   | { type: "rollScanStart"; positionCount: number }
   | { type: "rollCandidate"; symbol: string; triggered: boolean }
-  | { type: "rollError"; symbol: string; message: string };
+  | { type: "rollError"; symbol: string; message: string }
+  // Fired once per ticker, after both strategies have been scanned for it —
+  // callers that notify send one Telegram message per ticker as soon as this
+  // fires, instead of batching until the whole shortlist finishes.
+  | { type: "tickerAlertsReady"; symbol: string; lines: string[] };
 
 export interface TradeAlertGenerationResult {
   tickersScanned: number;
   totalNewAlerts: number;
-  newAlertLines: string[];
-  rollAlertLines: string[];
 }
 
 // Exported for refreshTickerTradeAlerts.ts (single-ticker refresh) to reuse
@@ -77,13 +85,14 @@ export function toSettings(settingsRow: Record<string, unknown>): AlertStrategyS
  * callers via an onEvent callback instead of each caller reimplementing the
  * scan.
  */
-export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerationEvent) => void): Promise<TradeAlertGenerationResult> {
+export async function runTradeAlertGeneration(
+  onEvent: (event: TradeAlertGenerationEvent) => void | Promise<void>,
+): Promise<TradeAlertGenerationResult> {
   const connection = await connectToIbkrGateway();
   connection.ib.reqMarketDataType(MarketDataType.DELAYED);
 
   let totalNewAlerts = 0;
   let tickersScanned = 0;
-  const newAlertLines: string[] = [];
   const rollAlertLines: string[] = [];
   const settingsByStrategy = new Map<AlertStrategyKey, ReturnType<typeof toSettings>>();
 
@@ -98,53 +107,18 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
     // Settings loaded for both strategies up front — each ticker's scan below
     // fetches contractDetails/pricing/secDefOptParams once and quotes both
     // strategies' strikes in a single call, instead of each strategy paying
-    // for its own round trip (see generateTradeAlertCandidatesForTicker).
+    // for its own round trip (see generateTradeAlertCandidatesForTicker). Also
+    // needed by the roll scan below, which now runs first.
     for (const strategyKey of tradeAlertStrategies) {
       const settingsRow = await db("strategy_settings").where({ strategy_key: strategyKey }).first();
       if (settingsRow) settingsByStrategy.set(strategyKey, toSettings(settingsRow));
     }
-    for (const strategyKey of tradeAlertStrategies) {
-      if (settingsByStrategy.has(strategyKey)) onEvent({ type: "strategyStart", strategyKey, tickerCount: tickers.length });
-    }
 
-    for (const ticker of tickers) {
-      tickersScanned++;
-      let candidatesByStrategy: Awaited<ReturnType<typeof generateTradeAlertCandidatesForTicker>>;
-      try {
-        candidatesByStrategy = await generateTradeAlertCandidatesForTicker(connection, ticker.symbol, settingsByStrategy);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        for (const strategyKey of settingsByStrategy.keys()) {
-          onEvent({ type: "tickerError", strategyKey, symbol: ticker.symbol, message });
-        }
-        continue;
-      }
-
-      for (const strategyKey of tradeAlertStrategies) {
-        if (!settingsByStrategy.has(strategyKey)) continue;
-        const candidates = candidatesByStrategy.get(strategyKey) ?? [];
-
-        await db("trade_alerts")
-          .where({ ticker_id: ticker.tickerId, strategy_key: strategyKey, status: "pending" })
-          .update({ status: "expired" });
-
-        const topCandidates = candidates.slice(0, maxAlertsPerTicker);
-        for (const candidate of topCandidates) {
-          await db("trade_alerts").insert({
-            strategy_key: strategyKey,
-            ticker_id: ticker.tickerId,
-            alert_type: "new_trade",
-            suggested_structure: JSON.stringify(candidate),
-            rationale: rationaleFor(strategyKey, ticker.symbol, candidate),
-            status: "pending",
-          });
-          newAlertLines.push(formatNewTradeAlertLine(ticker.symbol, strategyKey, candidate));
-        }
-        onEvent({ type: "ticker", strategyKey, symbol: ticker.symbol, candidateCount: topCandidates.length });
-        totalNewAlerts += topCandidates.length;
-      }
-    }
-
+    // Roll scan runs before the per-ticker new-trade scan (reordered
+    // 2026-08-27 per Marcelo's notification-redesign request): it's a single
+    // batch of alerts on existing open positions, unrelated to the shortlist
+    // loop below, and callers that notify send it as one message before the
+    // per-ticker messages start streaming.
     const openShortLegsResult = await db.raw(
       `
       SELECT
@@ -184,7 +158,7 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
       strategyKey: row.strategyKey as AlertStrategyKey,
     }));
 
-    onEvent({ type: "rollScanStart", positionCount: openShortLegs.length });
+    await onEvent({ type: "rollScanStart", positionCount: openShortLegs.length });
 
     for (const leg of openShortLegs) {
       const settings = settingsByStrategy.get(leg.strategyKey as AlertStrategyKey);
@@ -194,7 +168,7 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
       try {
         suggestion = await evaluateRollCandidate(connection, leg, leg.strategyKey as AlertStrategyKey, settings);
       } catch (error) {
-        onEvent({ type: "rollError", symbol: leg.symbol, message: error instanceof Error ? error.message : String(error) });
+        await onEvent({ type: "rollError", symbol: leg.symbol, message: error instanceof Error ? error.message : String(error) });
         continue;
       }
 
@@ -203,7 +177,7 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
         .update({ status: "expired" });
 
       if (!suggestion) {
-        onEvent({ type: "rollCandidate", symbol: leg.symbol, triggered: false });
+        await onEvent({ type: "rollCandidate", symbol: leg.symbol, triggered: false });
         continue;
       }
 
@@ -233,12 +207,62 @@ export async function runTradeAlertGeneration(onEvent: (event: TradeAlertGenerat
       rollAlertLines.push(
         formatRollAlertLine(leg.symbol, { strike: leg.strike, expiryIso: toIsoDate(leg.expiry), right: leg.right, entryPrice: leg.entryPrice }, suggestion),
       );
-      onEvent({ type: "rollCandidate", symbol: leg.symbol, triggered: true });
+      await onEvent({ type: "rollCandidate", symbol: leg.symbol, triggered: true });
       totalNewAlerts += 1;
+    }
+
+    await onEvent({ type: "rollBatchReady", lines: rollAlertLines });
+
+    for (const strategyKey of tradeAlertStrategies) {
+      if (settingsByStrategy.has(strategyKey)) await onEvent({ type: "strategyStart", strategyKey, tickerCount: tickers.length });
+    }
+
+    for (const ticker of tickers) {
+      tickersScanned++;
+      let candidatesByStrategy: Awaited<ReturnType<typeof generateTradeAlertCandidatesForTicker>>;
+      try {
+        candidatesByStrategy = await generateTradeAlertCandidatesForTicker(connection, ticker.symbol, settingsByStrategy);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        for (const strategyKey of settingsByStrategy.keys()) {
+          await onEvent({ type: "tickerError", strategyKey, symbol: ticker.symbol, message });
+        }
+        continue;
+      }
+
+      const tickerAlertLines: string[] = [];
+      for (const strategyKey of tradeAlertStrategies) {
+        if (!settingsByStrategy.has(strategyKey)) continue;
+        const candidates = candidatesByStrategy.get(strategyKey) ?? [];
+
+        await db("trade_alerts")
+          .where({ ticker_id: ticker.tickerId, strategy_key: strategyKey, status: "pending" })
+          .update({ status: "expired" });
+
+        const topCandidates = candidates.slice(0, maxAlertsPerTicker);
+        for (const candidate of topCandidates) {
+          await db("trade_alerts").insert({
+            strategy_key: strategyKey,
+            ticker_id: ticker.tickerId,
+            alert_type: "new_trade",
+            suggested_structure: JSON.stringify(candidate),
+            rationale: rationaleFor(strategyKey, ticker.symbol, candidate),
+            status: "pending",
+          });
+          tickerAlertLines.push(formatNewTradeAlertLine(ticker.symbol, strategyKey, candidate));
+        }
+        await onEvent({ type: "ticker", strategyKey, symbol: ticker.symbol, candidateCount: topCandidates.length });
+        totalNewAlerts += topCandidates.length;
+      }
+
+      // Fired once per ticker (both strategies done) rather than per
+      // strategy — this is what lets a notifying caller send one bundled
+      // Telegram message per ticker instead of one per ticker-strategy pair.
+      await onEvent({ type: "tickerAlertsReady", symbol: ticker.symbol, lines: tickerAlertLines });
     }
   } finally {
     connection.disconnect();
   }
 
-  return { tickersScanned, totalNewAlerts, newAlertLines, rollAlertLines };
+  return { tickersScanned, totalNewAlerts };
 }
