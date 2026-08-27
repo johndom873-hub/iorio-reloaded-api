@@ -414,18 +414,31 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
 /**
  * Pulls IBKR's actual current holdings and reconciles them into
  * positions/position_legs — the core of "the interface matches IBKR
- * exactly." Pairing heuristic (approved 2026-08-24, revised 2026-08-25):
- * group by underlying symbol. Each distinct short call contract (its own
- * conId — a different strike/expiry is a different contract) pairs with
- * its own proportional slice of the stock (quantity * 100) into its own
- * covered_call position — every position opened through this app is
- * exactly 1 option + 100 shares/contract, so multiple short calls on one
- * symbol are always separate bets, never one blended position (see
- * PROGRESS.md, prompted by a real MU position that had wrongly merged two
- * different strikes under the old symbol-only grouping). A lone short put
- * pairs into cash_secured_put; anything left over (including any stock
- * beyond what the sold calls need — see upsertLeftoverStockPosition) is
- * surfaced as strategy_key "unstructured" rather than hidden.
+ * exactly." Pairing heuristic (approved 2026-08-24, revised 2026-08-25,
+ * 2026-08-27): group by underlying symbol. Each distinct short call
+ * contract (its own conId — a different strike/expiry is a different
+ * contract) pairs with its own proportional slice of the stock (quantity *
+ * 100) into its own covered_call position — every position opened through
+ * this app is exactly 1 option + 100 shares/contract, so multiple short
+ * calls on one symbol are always separate bets, never one blended position
+ * (see PROGRESS.md, prompted by a real MU position that had wrongly merged
+ * two different strikes under the old symbol-only grouping).
+ *
+ * Short puts are handled unconditionally, independent of any covered-call
+ * pairing on the same symbol — a covered call and a cash-secured put can
+ * legitimately coexist on one underlying (e.g. a wheel), and a put must
+ * never be silently stranded when its sibling stock/call legs get split off
+ * into their own covered_call position by upsertSplitCoveredCallPosition
+ * below. Real bug found 2026-08-27 on a real prod AAOI position: after a
+ * covered call was rolled, the old shared position kept the still-open
+ * short put but was left permanently mislabeled "unstructured" because the
+ * put was never revisited once the call/stock pairing claimed the
+ * isCoveredCall branch for that symbol.
+ *
+ * Anything left over that isn't a short put and doesn't cleanly pair as a
+ * covered call (including any stock beyond what the sold calls need — see
+ * upsertLeftoverStockPosition) is surfaced as strategy_key "unstructured"
+ * rather than hidden.
  */
 async function runReconciliationPass(): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
@@ -450,6 +463,14 @@ async function runReconciliationPass(): Promise<void> {
       (p) => p.contract.secType === SecType.OPT && p.contract.right === OptionType.Put && p.quantity < 0,
     );
 
+    if (shortPutLegs.length > 0) {
+      await upsertSyncedPosition(
+        symbol,
+        "cash_secured_put",
+        shortPutLegs.map((leg) => ({ held: leg, side: "short" as const })),
+      );
+    }
+
     const totalShortCallShares = shortCallLegs.reduce((sum, leg) => sum + Math.abs(leg.quantity) * 100, 0);
     const isCoveredCall = stockLeg && shortCallLegs.length > 0 && totalShortCallShares <= stockLeg.quantity;
 
@@ -467,19 +488,16 @@ async function runReconciliationPass(): Promise<void> {
       // trade outside the app). Surfaced as its own flagged position
       // rather than silently absorbed into one of the covered calls above.
       await upsertLeftoverStockPosition(symbol, stockLeg, stockLeg.quantity - totalShortCallShares);
-    } else if (!stockLeg && shortCallLegs.length === 0 && shortPutLegs.length > 0) {
-      await upsertSyncedPosition(
-        symbol,
-        "cash_secured_put",
-        shortPutLegs.map((leg) => ({ held: leg, side: "short" as const })),
-      );
     } else {
-      // Doesn't cleanly pair — surfaced, not hidden (approved 2026-08-24).
-      await upsertSyncedPosition(
-        symbol,
-        "unstructured",
-        positionsForSymbol.map((leg) => ({ held: leg, side: leg.quantity > 0 ? ("long" as const) : ("short" as const) })),
-      );
+      const nonPutLegs = positionsForSymbol.filter((p) => !shortPutLegs.includes(p));
+      if (nonPutLegs.length > 0) {
+        // Doesn't cleanly pair — surfaced, not hidden (approved 2026-08-24).
+        await upsertSyncedPosition(
+          symbol,
+          "unstructured",
+          nonPutLegs.map((leg) => ({ held: leg, side: leg.quantity > 0 ? ("long" as const) : ("short" as const) })),
+        );
+      }
     }
   }
 
