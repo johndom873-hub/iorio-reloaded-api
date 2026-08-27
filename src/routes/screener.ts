@@ -115,7 +115,12 @@ screenerRouter.post("/", async (request, response) => {
   if (!ticker) {
     const tickerData = await fetchNewTickerData(normalizedSymbol);
     [ticker] = await db("tickers")
-      .insert({ symbol: normalizedSymbol, company_name: tickerData.companyName, sector: tickerData.sector })
+      .insert({
+        symbol: normalizedSymbol,
+        company_name: tickerData.companyName,
+        sector: tickerData.sector,
+        ibkr_contract_id: tickerData.conId,
+      })
       .returning("*");
 
     await db("market_data_snapshots")

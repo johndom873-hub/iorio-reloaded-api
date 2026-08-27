@@ -1,6 +1,6 @@
-import { MarketDataType, Stock } from "@stoqey/ib";
+import { MarketDataType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { lookupContractDetails } from "./fetchNewTickerData.js";
+import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot, type TickerPricing } from "./fetchTickerOverview.js";
 import { prepareOptionChainStrikes, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
 
@@ -30,8 +30,7 @@ export async function streamPositionQuote(symbol: string, onEvent: (event: Posit
   try {
     connection.ib.reqMarketDataType(MarketDataType.DELAYED);
 
-    const contractDetailsPromise = lookupContractDetails(connection, overviewReqId);
-    connection.ib.reqContractDetails(overviewReqId, new Stock(symbol, "SMART", "USD"));
+    const contractDetailsPromise = getCachedContractDetails(connection, symbol, overviewReqId);
     const pricingPromise = lookupPricingSnapshot(connection, symbol, pricingReqId);
 
     const overviewTask: Promise<TickerPricing | null> = (async () => {

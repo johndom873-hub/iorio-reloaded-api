@@ -1,7 +1,8 @@
-import { MarketDataType, Stock } from "@stoqey/ib";
+import { MarketDataType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { lookupContractDetails } from "./fetchNewTickerData.js";
-import { streamPricingUpdates, lookupHistoricalBars, type TickerPricing, type PriceBar } from "./fetchTickerOverview.js";
+import { getCachedContractDetails } from "./fetchNewTickerData.js";
+import { streamPricingUpdates, type TickerPricing, type PriceBar } from "./fetchTickerOverview.js";
+import { getCachedChartBars } from "./priceBarCache.js";
 import { prepareOptionChainStrikes, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
 import { db } from "../db/connection.js";
 
@@ -115,15 +116,14 @@ export async function streamTickerDetail(
   const connection = await connectToIbkrGateway();
   try {
     // Connection-wide setting, called exactly once here — not inside any of
-    // streamPricingUpdates/lookupHistoricalBars/prepareOptionChainStrikes,
+    // streamPricingUpdates/getCachedChartBars/prepareOptionChainStrikes,
     // which all run concurrently on this connection below. A second call
     // while a market-data subscription is still outstanding was found to
     // silently prevent it from ever producing a first tick (see the note on
     // streamPricingUpdates).
     connection.ib.reqMarketDataType(MarketDataType.DELAYED);
 
-    const contractDetailsPromise = lookupContractDetails(connection, overviewReqId);
-    connection.ib.reqContractDetails(overviewReqId, new Stock(symbol, "SMART", "USD"));
+    const contractDetailsPromise = getCachedContractDetails(connection, symbol, overviewReqId);
 
     const overviewReadyTask: Promise<TickerPricing | null> = (async () => {
       try {
@@ -153,7 +153,7 @@ export async function streamTickerDetail(
 
     const chartTask: Promise<void> = (async () => {
       try {
-        const bars = await lookupHistoricalBars(connection, symbol, defaultChartRange, chartReqId);
+        const bars = await getCachedChartBars(connection, symbol, defaultChartRange, chartReqId);
         onEvent({ type: "chart", data: bars });
       } catch (error) {
         onEvent({ type: "error", section: "chart", message: errorMessage(error) });

@@ -287,11 +287,19 @@ export async function streamPricingUpdates(
   return pricing;
 }
 
-/** Shares an already-open connection — see the reqMarketDataType note on lookupPricingSnapshot above. */
-export async function lookupHistoricalBars(
+/**
+ * Low-level historical-bars fetch, parameterized directly by IBKR bar
+ * size/duration rather than a ChartRange — extracted so priceBarCache.ts can
+ * also request short "top-up" windows (e.g. "5 D" of daily bars to refresh a
+ * warm cache) that don't correspond to any of the fixed ChartRange presets
+ * below. lookupHistoricalBars (the ChartRange-based version everything else
+ * still uses) is now a thin wrapper around this.
+ */
+export async function fetchHistoricalBarsRaw(
   connection: IbkrConnection,
   symbol: string,
-  range: ChartRange,
+  barSize: BarSizeSetting,
+  duration: string,
   reqId = 1,
 ): Promise<PriceBar[]> {
   const { ib } = connection;
@@ -330,11 +338,21 @@ export async function lookupHistoricalBars(
       reject(new Error(`Historical data error for ${symbol} (code ${code}): ${error.message}`));
     }
 
-    const { barSize, duration } = rangeConfig[range];
     ib.on(EventName.historicalData, onHistoricalData);
     ib.on(EventName.error, onError);
     ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), "", duration, barSize, WhatToShow.TRADES, 1, 2, false);
   });
+}
+
+/** Shares an already-open connection — see the reqMarketDataType note on lookupPricingSnapshot above. */
+export async function lookupHistoricalBars(
+  connection: IbkrConnection,
+  symbol: string,
+  range: ChartRange,
+  reqId = 1,
+): Promise<PriceBar[]> {
+  const { barSize, duration } = rangeConfig[range];
+  return fetchHistoricalBarsRaw(connection, symbol, barSize, duration, reqId);
 }
 
 export async function fetchPriceBars(symbol: string, range: ChartRange): Promise<PriceBar[]> {

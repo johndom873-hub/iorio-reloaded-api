@@ -1,6 +1,6 @@
-import { EventName, OptionType, Stock } from "@stoqey/ib";
+import { EventName, OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { lookupContractDetails } from "./fetchNewTickerData.js";
+import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import {
   checkStrikeExists,
@@ -99,8 +99,7 @@ interface TickerPrepData {
 async function fetchTickerPrepData(connection: IbkrConnection, symbol: string): Promise<TickerPrepData> {
   const { ib } = connection;
 
-  const contractDetailsPromise = lookupContractDetails(connection, contractDetailsReqId);
-  ib.reqContractDetails(contractDetailsReqId, new Stock(symbol, "SMART", "USD"));
+  const contractDetailsPromise = getCachedContractDetails(connection, symbol, contractDetailsReqId);
   const pricingPromise = lookupPricingSnapshot(connection, symbol, pricingReqId);
 
   const [contractDetails, pricing] = await Promise.all([contractDetailsPromise, pricingPromise]);

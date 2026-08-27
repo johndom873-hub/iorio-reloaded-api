@@ -1,10 +1,12 @@
 import { EventName, MarketDataType, Stock } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { captureMarketDataSnapshot } from "./captureMarketDataSnapshot.js";
+import { db } from "../db/connection.js";
 
 export interface NewTickerData {
   companyName: string | null;
   sector: string | null;
+  conId: number | null;
   impliedVolatility: number | null;
   avgOptionVolume: number | null;
 }
@@ -70,6 +72,51 @@ export function lookupContractDetails(
     connection.ib.once(EventName.contractDetailsEnd, onEnd);
     connection.ib.on(EventName.error, onError);
   });
+}
+
+/**
+ * Cached wrapper around lookupContractDetails, approved 2026-08-27 (see
+ * PROGRESS.md "Contract details cache"). conId/company name/sector are
+ * effectively immutable for a given symbol, but every call site below used
+ * to re-fetch them live from IBKR on every single call — the exact call
+ * this codebase has already hit real pacing/contention bugs on twice (the
+ * AMAT 25s timeout, and firing this concurrently with a second lookup
+ * silently starving both). company_name/sector were already persisted to
+ * `tickers` at ticker-creation time (screener.ts); this adds `ibkr_contract_id`
+ * to that same row and reads all three from there first.
+ *
+ * Fails open: a symbol with no `tickers` row (shouldn't happen for any of
+ * today's call sites, which all operate on an already-tracked ticker, but
+ * not guaranteed forever) just fetches live and returns without persisting
+ * — this function never inserts a new `tickers` row itself, only updates
+ * an existing one, so an arbitrary quote lookup can't silently expand the
+ * tracked-ticker universe.
+ *
+ * Does both steps lookupContractDetails' callers used to do by hand
+ * (register the promise, then fire reqContractDetails) — cache-hit callers
+ * skip both entirely.
+ */
+export async function getCachedContractDetails(
+  connection: Awaited<ReturnType<typeof connectToIbkrGateway>>,
+  symbol: string,
+  reqId: number = contractDetailsReqId,
+): Promise<ContractDetails> {
+  const ticker = await db("tickers").where({ symbol }).first();
+  if (ticker?.ibkr_contract_id != null) {
+    return { companyName: ticker.company_name || null, sector: ticker.sector || null, conId: ticker.ibkr_contract_id };
+  }
+
+  const detailsPromise = lookupContractDetails(connection, reqId);
+  connection.ib.reqContractDetails(reqId, new Stock(symbol, "SMART", "USD"));
+  const details = await detailsPromise;
+
+  if (ticker && details.conId != null) {
+    await db("tickers")
+      .where({ symbol })
+      .update({ ibkr_contract_id: details.conId, company_name: details.companyName, sector: details.sector });
+  }
+
+  return details;
 }
 
 /**

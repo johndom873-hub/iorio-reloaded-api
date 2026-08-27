@@ -2,7 +2,8 @@ import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { streamTickerDetail } from "../ibkr/streamTickerDetail.js";
 import { streamPositionQuote } from "../ibkr/streamPositionQuote.js";
-import { fetchPriceBars, type ChartRange } from "../ibkr/fetchTickerOverview.js";
+import type { ChartRange } from "../ibkr/fetchTickerOverview.js";
+import { fetchCachedPriceBars } from "../ibkr/priceBarCache.js";
 import { fetchTickerQuoteSnapshot } from "../ibkr/fetchTickerQuoteSnapshot.js";
 
 export const tickerDetailRouter = Router();
@@ -116,6 +117,6 @@ tickerDetailRouter.get("/:symbol/chart", async (request, response) => {
     return;
   }
 
-  const bars = await fetchPriceBars(symbol, range as ChartRange);
+  const bars = await fetchCachedPriceBars(symbol, range as ChartRange);
   response.json(bars);
 });

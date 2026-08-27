@@ -1,6 +1,6 @@
-import { MarketDataType, Stock } from "@stoqey/ib";
+import { MarketDataType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { lookupContractDetails } from "./fetchNewTickerData.js";
+import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot, lookupHistoricalBars, type TickerPricing } from "./fetchTickerOverview.js";
 import { prepareOptionChainStrikes, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
 
@@ -55,8 +55,7 @@ export async function fetchTickerQuoteSnapshot(symbol: string): Promise<TickerQu
     const lastKnownClose = lastBar ? { price: lastBar.close, asOf: new Date(lastBar.time * 1000).toISOString().slice(0, 10) } : null;
 
     try {
-      const contractDetailsPromise = lookupContractDetails(connection, contractDetailsReqId);
-      connection.ib.reqContractDetails(contractDetailsReqId, new Stock(symbol, "SMART", "USD"));
+      const contractDetailsPromise = getCachedContractDetails(connection, symbol, contractDetailsReqId);
       const pricing = await lookupPricingSnapshot(connection, symbol, pricingReqId);
       const contractDetails = await contractDetailsPromise;
 
