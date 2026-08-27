@@ -226,6 +226,10 @@ async function listenForOrderRequests(): Promise<void> {
   }, 30_000);
 }
 
+// Truly final statuses only — partially_filled deliberately excluded, since
+// that order can still receive further fills or a cancellation.
+const finalOrderRequestStatuses = ["filled", "cancelled", "rejected", "error"];
+
 function orderStatusToRequestStatus(status: string): string | null {
   if (status === "Filled") return "filled";
   if (status === "Cancelled" || status === "ApiCancelled") return "cancelled";
@@ -250,8 +254,13 @@ function setupOrderTrackingListeners(): void {
     // reused ibkr_order_id from a genuinely different order can't flip the
     // wrong row. reconcileStaleOrderRequests (run on every connect) is the
     // primary defense — this is a second layer for whatever it doesn't catch.
+    // Also excludes rows already in a final status: once a row is filled,
+    // cancelled, rejected, or errored, it should never change again, so a
+    // status event that still names its (by-then-reused) ibkr_order_id must
+    // belong to a different order.
     db("order_requests")
       .where({ ibkr_order_id: orderId })
+      .whereNotIn("status", finalOrderRequestStatuses)
       .andWhere((builder) => (permId ? builder.whereNull("ibkr_perm_id").orWhere("ibkr_perm_id", permId) : builder))
       .update({
         status: requestStatus,
