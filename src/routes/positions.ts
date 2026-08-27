@@ -2,6 +2,8 @@ import { Router } from "express";
 import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { positionSelect } from "../lib/positionQueries.js";
+import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { fetchLiveGreeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
@@ -77,7 +79,6 @@ function normalizeExpiryDate(raw: string): string | null {
   return /^\d{8}$/.test(digitsOnly) ? digitsOnly : null;
 }
 
-// Aggregates legs as JSON per position — same raw-query style as screener.ts.
 // realizedPnl/capitalAtRisk formulas approved 2026-08-21:
 //   realizedPnl = sum over all exited legs of (exit - entry) * qty * multiplier
 //     * (short ? -1 : 1) — same shape as the Trade Blotter's approved formula
@@ -86,74 +87,9 @@ function normalizeExpiryDate(raw: string): string | null {
 //   capitalAtRisk = entry-time capital committed, same definition as Trade
 //     Alerts' approved capitalAtRisk (spot for covered calls, strike for
 //     CSPs) but from entry actuals rather than a scan-time estimate.
-const positionSelect = `
-  SELECT
-    p.id,
-    p.strategy_key AS "strategyKey",
-    p.status,
-    p.opened_at AS "openedAt",
-    p.closed_at AS "closedAt",
-    p.notes,
-    p.price_target AS "priceTarget",
-    p.close_trigger_notes AS "closeTriggerNotes",
-    t.id AS "tickerId",
-    t.symbol,
-    t.company_name AS "companyName",
-    NULLIF(t.sector, '') AS sector,
-    COALESCE(
-      (
-        SELECT json_agg(
-          json_build_object(
-            'id', pl.id,
-            'legType', pl.leg_type,
-            'side', pl.side,
-            'quantity', pl.quantity,
-            'optionType', pl.option_type,
-            'strikePrice', pl.strike_price,
-            'expiryDate', pl.expiry_date,
-            'multiplier', pl.multiplier,
-            'ibkrContractId', pl.ibkr_contract_id,
-            'entryPrice', pl.entry_price,
-            'entryAt', pl.entry_at,
-            'exitPrice', pl.exit_price,
-            'exitAt', pl.exit_at
-          ) ORDER BY pl.leg_type, pl.strike_price
-        )
-        FROM position_legs pl
-        WHERE pl.position_id = p.id
-      ),
-      '[]'
-    ) AS legs,
-    COALESCE(
-      (
-        SELECT SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
-        FROM position_legs pl
-        WHERE pl.position_id = p.id AND pl.exit_price IS NOT NULL
-      ),
-      0
-    ) AS "realizedPnl",
-    CASE
-      WHEN p.strategy_key = 'covered_call' THEN (
-        SELECT pl.entry_price * pl.quantity
-        FROM position_legs pl
-        WHERE pl.position_id = p.id AND pl.leg_type = 'stock'
-        LIMIT 1
-      )
-      ELSE (
-        -- Cash-secured puts have no stock leg — collateral is the option
-        -- leg's strike. Prefers the currently-open leg (still-live
-        -- collateral) over an already-rolled-away one, falling back to the
-        -- most recent by entry date for closed positions.
-        SELECT pl.strike_price * pl.multiplier * pl.quantity
-        FROM position_legs pl
-        WHERE pl.position_id = p.id AND pl.leg_type = 'option'
-        ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
-        LIMIT 1
-      )
-    END AS "capitalAtRisk"
-  FROM positions p
-  JOIN tickers t ON t.id = p.ticker_id
-`;
+// Shared with ibkrGatewayWorker.ts's post-close Telegram notification, so
+// both agree on the same realizedPnl/capitalAtRisk numbers — see
+// lib/positionQueries.ts.
 
 positionsRouter.get("/", async (request, response) => {
   const status = (request.query.status as string | undefined) ?? "open";
@@ -688,6 +624,7 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
       .where({ id: orderRequest.id })
       .update({ status: "cancelled", updated_at: db.fn.now() })
       .returning("*");
+    await revertSourceAlertToPending(orderRequest.source_alert_id);
     response.json(serializeOrderRequest(updated));
     return;
   }
@@ -700,6 +637,11 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
     // other terminal status. The frontend already polls GET
     // /positions/orders/:id until a terminal status, so this responds
     // immediately with the transient row rather than waiting.
+    // Not reverting the linked alert here yet — the order hasn't actually
+    // been cancelled at IBKR at this point (only requested), and it could
+    // still fill before IBKR processes the cancel. Reverted from the
+    // worker's orderStatus listener instead, once IBKR confirms the terminal
+    // "cancelled" status — see revertSourceAlertToPending's doc comment.
     const [updated] = await db("order_requests")
       .where({ id: orderRequest.id })
       .update({ status: "cancel_requested", updated_at: db.fn.now() })

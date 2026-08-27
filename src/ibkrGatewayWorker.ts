@@ -10,6 +10,10 @@ import { buildLegContract, computeNetLimitPrice, type OrderLegPayload, type Orde
 import { parseIbkrExecutionTime } from "./ibkr/ibkrGatewayParseExecutionTime.js";
 import { fetchIbkrHeldPositions, type IbkrHeldPosition } from "./ibkr/ibkrGatewayFetchHeldPositions.js";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
+import { fetchPositionById, type PositionLegRow } from "./lib/positionQueries.js";
+import { formatPositionExpiredMessage } from "./lib/formatPositionExpiredMessage.js";
+import { notifyTelegram } from "./lib/notifyTelegram.js";
+import { revertSourceAlertToPending } from "./lib/revertSourceAlertToPending.js";
 
 installCrashHandlers("worker");
 
@@ -237,6 +241,10 @@ function setupOrderTrackingListeners(): void {
     db("order_requests")
       .where({ ibkr_order_id: orderId })
       .update({ status: requestStatus, updated_at: db.fn.now() })
+      .returning("source_alert_id")
+      .then((rows) => {
+        if (requestStatus === "cancelled") return revertSourceAlertToPending(rows[0]?.source_alert_id);
+      })
       .catch((error) => console.error(`Failed to update order_requests for order ${orderId}: ${error}`));
   });
 
@@ -267,8 +275,10 @@ function setupOrderTrackingListeners(): void {
     db("order_requests")
       .where({ ibkr_order_id: reqId, status: "submitted" })
       .update({ status: "error", error_message: `IBKR error ${code}: ${error.message}`, updated_at: db.fn.now() })
-      .then((updatedRowCount) => {
-        if (updatedRowCount > 0) console.error(`Order ${reqId} errored: ${code} ${error.message}`);
+      .returning("source_alert_id")
+      .then((rows) => {
+        if (rows.length > 0) console.error(`Order ${reqId} errored: ${code} ${error.message}`);
+        return revertSourceAlertToPending(rows[0]?.source_alert_id);
       })
       .catch((dbError) => console.error(`Failed to record order error for ${reqId}: ${dbError}`));
   });
@@ -479,11 +489,24 @@ async function runReconciliationPass(): Promise<void> {
   // this on its own: a partial close previously flipped an entire
   // multi-lot leg to closed and hid the still-open remainder). exit_price
   // comes from the most recent closing trade already recorded for this
-  // leg by recordExecution, if any — falls back to "now"/null for a close
-  // that happened before this worker ever saw the fill (e.g. placed
-  // directly in TWS, or before the worker was deployed).
+  // leg by recordExecution, if any.
+  //
+  // An option leg past its own expiry with no closing trade is the
+  // "expired worthless" (or exercised/assigned, which also never generates
+  // a trade for the option side itself) case, not an unknown close — bug
+  // found 2026-08-27: this used to fall back to exit_price=null here too,
+  // which silently dropped the leg out of realizedPnl's SUM (it requires
+  // exit_price IS NOT NULL) and reported $0 P&L for every expired short
+  // option instead of the full premium collected. Only a genuinely
+  // ambiguous close (no trade, not past expiry — e.g. closed directly in
+  // TWS, or before this worker was deployed) still falls back to null.
   const heldConIds = new Set(held.map((p) => p.contract.conId).filter((id): id is number => id !== undefined));
-  const openLegs = await db("position_legs").whereNull("exit_at").whereNotNull("ibkr_contract_id");
+  const openLegs = await db("position_legs")
+    .whereNull("exit_at")
+    .whereNotNull("ibkr_contract_id")
+    .select("*", db.raw("(leg_type = 'option' AND expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE) AS is_expired_option"));
+
+  const positionIdsWithExpiredLeg = new Set<string>();
   for (const leg of openLegs) {
     if (heldConIds.has(Number(leg.ibkr_contract_id))) continue;
 
@@ -492,15 +515,77 @@ async function runReconciliationPass(): Promise<void> {
       .orderBy("executed_at", "desc")
       .first();
 
+    const expiredWithoutTrade = !lastClosingTrade && leg.is_expired_option;
+    if (expiredWithoutTrade) positionIdsWithExpiredLeg.add(leg.position_id);
+
     await db("position_legs")
       .where({ id: leg.id })
-      .update({ exit_price: lastClosingTrade?.price ?? null, exit_at: lastClosingTrade?.executed_at ?? db.fn.now() });
+      .update({
+        exit_price: lastClosingTrade?.price ?? (expiredWithoutTrade ? 0 : null),
+        exit_at: lastClosingTrade?.executed_at ?? db.fn.now(),
+      });
 
     const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
     if (remainingOpenLegs.length === 0) {
       await db("positions").where({ id: leg.position_id }).update({ status: "closed", closed_at: db.fn.now() });
+      if (positionIdsWithExpiredLeg.has(leg.position_id)) {
+        await notifyPositionExpired(leg.position_id).catch((error) =>
+          console.error(`Expiry notification failed for position ${leg.position_id}: ${error}`),
+        );
+      }
     }
   }
+}
+
+// Fires only for a position that closed via reconcilePositionsFromIbkr's
+// "option past expiry, no closing trade" path above — a manual close
+// through the app already has its own confirmation UI, so it doesn't need
+// a Telegram ping too.
+async function notifyPositionExpired(positionId: string): Promise<void> {
+  const position = await fetchPositionById(positionId);
+  if (!position) return;
+
+  const stockLeg = position.legs.find((leg: PositionLegRow) => leg.legType === "stock");
+  const realizedPnl = Number(position.realizedPnl);
+  const capitalAtRisk = position.capitalAtRisk === null ? null : Number(position.capitalAtRisk);
+  const realizedPnlPercent = capitalAtRisk && capitalAtRisk !== 0 ? (realizedPnl / capitalAtRisk) * 100 : null;
+
+  // Covered call: assigned iff the paired stock leg actually sold (a real
+  // trade set its exit_price) rather than just rolling over into a fresh
+  // position under a new option (see upsertSplitCoveredCallPosition — the
+  // stock leg's "close" there is an accounting re-slice, not a real sale,
+  // and never has a trade behind it). Cash-secured put: assigned iff a
+  // fresh stock leg for the same ticker appeared just now — the only way
+  // shares show up for a strategy with no stock leg of its own.
+  let assigned = false;
+  if (position.strategyKey === "covered_call") {
+    assigned = stockLeg !== undefined && stockLeg.exitPrice !== null;
+  } else if (position.strategyKey === "cash_secured_put") {
+    const recentStockLeg = await db("position_legs as pl")
+      .join("positions as p", "p.id", "pl.position_id")
+      .where({ "p.ticker_id": (await db("tickers").where({ symbol: position.symbol }).first())?.id, "pl.leg_type": "stock" })
+      .andWhere("pl.entry_at", ">=", db.raw("now() - interval '5 minutes'"))
+      .first();
+    assigned = recentStockLeg !== undefined;
+  } else {
+    return;
+  }
+
+  const message = formatPositionExpiredMessage({
+    symbol: position.symbol,
+    strategyKey: position.strategyKey as "covered_call" | "cash_secured_put",
+    legs: position.legs.map((leg: PositionLegRow) => ({
+      legType: leg.legType,
+      side: leg.side,
+      quantity: leg.quantity,
+      optionType: leg.optionType,
+      strikePrice: leg.strikePrice === null ? null : Number(leg.strikePrice),
+    })),
+    realizedPnl,
+    realizedPnlPercent,
+    assigned,
+  });
+  await notifyTelegram(message);
 }
 
 /**
