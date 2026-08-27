@@ -2,8 +2,27 @@ import { restartIbkrGatewayOnVps } from "./restartIbkrGatewayOnVps.js";
 import { checkWorkerOnVps } from "./checkWorkerOnVps.js";
 import { connectToIbkrGateway, type IbkrConnection } from "./connectIbkr.js";
 import { checkPositionReconciliation } from "./checkPositionReconciliation.js";
+import { lookupLatestDailyBar } from "./fetchTickerOverview.js";
 import { runJob } from "../lib/runJob.js";
 import { environment } from "../config/env.js";
+
+// Confirmed 2026-08-27: reqHistoricalData can silently hang (no data, no
+// error event — just a timeout) while the connection handshake itself and
+// every other IBKR call stay healthy. This is exactly what let the 9PM UTC
+// daily-market-data job fail 100% of tickers for 4+ straight days without
+// this health check ever noticing, since it only checked the handshake.
+// SPY is used as a fixed, always-listed probe symbol independent of
+// whatever's on the shortlist.
+const HISTORICAL_DATA_PROBE_SYMBOL = "SPY";
+
+async function historicalDataIsHealthy(connection: IbkrConnection): Promise<boolean> {
+  try {
+    await lookupLatestDailyBar(connection, HISTORICAL_DATA_PROBE_SYMBOL, 999_001);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function requireEnvironmentVariable(variableName: string): string {
   const value = process.env[variableName];
@@ -71,7 +90,7 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
     let connection = await tryConnect();
     let gatewayOutput = "healthy";
 
-    if (!connection) {
+    async function restartAndReconnect(problemDescription: string): Promise<IbkrConnection> {
       const sshPrivateKey = Buffer.from(requireEnvironmentVariable("IBKR_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64"), "base64");
 
       const result = await restartIbkrGatewayOnVps({
@@ -81,12 +100,20 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
         sshPrivateKey,
       });
 
-      connection = await tryConnect();
-      if (!connection) {
-        throw new Error(`IBKR Gateway unreachable and restart didn't recover it (script exit ${result.exitCode}): ${result.output.trim()}`);
+      const reconnected = await tryConnect();
+      if (!reconnected) {
+        throw new Error(`IBKR Gateway ${problemDescription} and restart didn't recover it (script exit ${result.exitCode}): ${result.output.trim()}`);
       }
-      gatewayOutput = `unhealthy, restarted, recovered — restart script output: ${result.output.trim()}`;
-      notifications.push(`⚠️ IBKR Gateway was unreachable — restarted, recovery confirmed via a real handshake.`);
+      gatewayOutput = `unhealthy (${problemDescription}), restarted, recovered — restart script output: ${result.output.trim()}`;
+      notifications.push(`⚠️ IBKR Gateway ${problemDescription} — restarted, recovery confirmed via a real handshake.`);
+      return reconnected;
+    }
+
+    if (!connection) {
+      connection = await restartAndReconnect("was unreachable");
+    } else if (!(await historicalDataIsHealthy(connection))) {
+      connection.disconnect();
+      connection = await restartAndReconnect("handshake succeeded but reqHistoricalData was silently hung");
     }
 
     const workerSshPrivateKey = Buffer.from(requireEnvironmentVariable("IORIO_WORKER_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64"), "base64");
