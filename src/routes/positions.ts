@@ -4,7 +4,7 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchLiveGreeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
-import { fetchOrderLegQuote } from "../ibkr/fetchOrderLegQuote.js";
+import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/orderPayload.js";
 
 export const positionsRouter = Router();
@@ -503,13 +503,18 @@ positionsRouter.get("/orders/:id", async (request, response) => {
   response.json(serializeOrderRequest(orderRequest));
 });
 
-// Order Review panel's live bid/ask/IV/Greeks (added 2026-08-25, see
-// PROGRESS.md) -- looks up the order's option leg and quotes it fresh from
-// IBKR. Breakeven/max-gain/max-loss/capital-at-risk are pure math on the
-// order's own proposed entry price/strike (no live data needed for those),
-// so they're computed client-side instead -- this endpoint only covers the
-// data that actually requires a live IBKR round-trip.
-positionsRouter.get("/orders/:id/quote", async (request, response) => {
+// Order Review panel's live bid/ask/IV/Greeks (streaming since 2026-08-27,
+// replacing a one-shot fetch -- see PROGRESS.md and streamOrderLegQuote.ts).
+// Breakeven/max-gain/max-loss/capital-at-risk are pure math on the order's
+// own proposed entry price/strike (no live data needed for those), so
+// they're computed client-side instead -- this endpoint only covers the data
+// that actually requires a live IBKR round-trip. For an opening order, each
+// pushed quote also carries a live delta-vs-strategy-band compliance verdict
+// so the frontend can gate "Confirm & Submit to IBKR" the moment a trade
+// drifts out of the strategy's screening criteria. Same SSE shape as
+// tickerDetail.ts's streams: headers + send() + heartbeat + finally cleanup,
+// aborted the moment the client disconnects.
+positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
   const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
   if (!orderRequest) {
     response.status(404).json({ error: "Order not found." });
@@ -523,13 +528,57 @@ positionsRouter.get("/orders/:id/quote", async (request, response) => {
     return;
   }
 
-  const quote = await fetchOrderLegQuote(
-    payload.symbol,
-    optionLeg.expiry,
-    optionLeg.strike,
-    optionLeg.right === "C" ? OptionType.Call : OptionType.Put,
-  );
-  response.json(quote);
+  const isOpeningOrder = Boolean(payload.strategyKey) && (orderRequest.request_type as string).startsWith("open_");
+  const strategySettings = isOpeningOrder
+    ? await db("strategy_settings").where({ strategy_key: payload.strategyKey }).first()
+    : null;
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.on("error", () => {});
+
+  const abortController = new AbortController();
+  request.on("close", () => abortController.abort());
+
+  const send = (data: unknown) => {
+    if (response.writableEnded) return;
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(": ping\n\n");
+  }, 20_000);
+
+  try {
+    await streamOrderLegQuote(
+      payload.symbol,
+      optionLeg.expiry,
+      optionLeg.strike,
+      optionLeg.right === "C" ? OptionType.Call : OptionType.Put,
+      (quote) => {
+        const compliance = isOpeningOrder
+          ? checkDeltaCompliance(
+              quote.delta,
+              strategySettings?.delta_target_min !== undefined && strategySettings?.delta_target_min !== null
+                ? Number(strategySettings.delta_target_min)
+                : null,
+              strategySettings?.delta_target_max !== undefined && strategySettings?.delta_target_max !== null
+                ? Number(strategySettings.delta_target_max)
+                : null,
+            )
+          : null;
+        send({ type: "quote", data: { ...quote, compliance } });
+      },
+      abortController.signal,
+    );
+    send({ type: "done" });
+  } catch (error) {
+    send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });
+  } finally {
+    clearInterval(heartbeat);
+    response.end();
+  }
 });
 
 // The explicit confirmation gate (approved 2026-08-24) — building an order

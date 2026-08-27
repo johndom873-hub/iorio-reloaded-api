@@ -81,15 +81,21 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
     const timer = setTimeout(() => reject(new Error(lastError ?? `Pricing snapshot timeout for ${symbol}`)), 10_000);
 
     function onTickPrice(id: number, tickType: number, price: number) {
-      if (id !== reqId || price <= 0) return;
+      if (id !== reqId) return;
+      // IBKR sends -1 as an explicit "no data for this field right now" tick
+      // (found 2026-08-27 investigating stale post-close bid/ask that never
+      // cleared) -- normalized to null here rather than silently dropped, so
+      // a field that genuinely stops being quoted goes back to "no data"
+      // instead of freezing on the last real value it ever held.
+      const value = price > 0 ? price : null;
       // Delayed tick types: bid=66, ask=67, last=68, high=72, low=73, close=75, open=76.
-      if (tickType === 66) pricing.bid = price;
-      if (tickType === 67) pricing.ask = price;
-      if (tickType === 68) pricing.last = price;
-      if (tickType === 72) pricing.high = price;
-      if (tickType === 73) pricing.low = price;
-      if (tickType === 75) pricing.previousClose = price;
-      if (tickType === 76) pricing.open = price;
+      if (tickType === 66) pricing.bid = value;
+      if (tickType === 67) pricing.ask = value;
+      if (tickType === 68) pricing.last = value;
+      if (tickType === 72) pricing.high = value;
+      if (tickType === 73) pricing.low = value;
+      if (tickType === 75) pricing.previousClose = value;
+      if (tickType === 76) pricing.open = value;
     }
     function onTickSize(id: number, tickType?: number, size?: number) {
       if (id !== reqId || size === undefined) return;
@@ -188,15 +194,22 @@ export async function streamPricingUpdates(
   let liveModeStarted = false;
 
   function onTickPrice(id: number, tickType: number, price: number) {
-    if (id !== reqId || price <= 0) return;
+    if (id !== reqId) return;
+    // IBKR sends -1 as an explicit "no data for this field right now" tick
+    // (found 2026-08-27 investigating stale post-close bid/ask that never
+    // cleared) -- normalized to null here rather than silently dropped, so a
+    // field that genuinely stops being quoted goes back to "no data" instead
+    // of freezing on the last real value it ever held for the rest of this
+    // streaming session.
+    const value = price > 0 ? price : null;
     // Delayed tick types: bid=66, ask=67, last=68, high=72, low=73, close=75, open=76.
-    if (tickType === 66) pricing.bid = price;
-    if (tickType === 67) pricing.ask = price;
-    if (tickType === 68) pricing.last = price;
-    if (tickType === 72) pricing.high = price;
-    if (tickType === 73) pricing.low = price;
-    if (tickType === 75) pricing.previousClose = price;
-    if (tickType === 76) pricing.open = price;
+    if (tickType === 66) pricing.bid = value;
+    if (tickType === 67) pricing.ask = value;
+    if (tickType === 68) pricing.last = value;
+    if (tickType === 72) pricing.high = value;
+    if (tickType === 73) pricing.low = value;
+    if (tickType === 75) pricing.previousClose = value;
+    if (tickType === 76) pricing.open = value;
     schedulePush();
   }
   function onTickSize(id: number, tickType?: number, size?: number) {

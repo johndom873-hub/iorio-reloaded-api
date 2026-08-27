@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
@@ -101,6 +102,44 @@ dashboardRouter.get("/account-value", async (_request, response) => {
     netLiquidationValue: latestAccountSnapshot?.net_liquidation_value ?? null,
     asOf: latestAccountSnapshot?.snapshot_date ?? null,
   });
+});
+
+// Live "available cash to trade" breakdown (approved 2026-08-27) -- shown on
+// both Order Review (can this specific order be afforded right now) and the
+// Dashboard. A genuine live IBKR round trip, unlike /account-value above --
+// both call sites are low-frequency (a panel open, a dashboard load), not
+// per-keystroke, so the pacing cost is acceptable here the same way it is
+// for Risk & Limits' /exposure.
+//
+// IBKR's TotalCashValue doesn't reflect cash committed to open cash-secured
+// puts -- selling a CSP doesn't move any cash out of the account, it just
+// requires enough of it to exist to cover assignment, so the raw balance
+// alone overstates what's genuinely free to commit to a new trade. Covered
+// calls need no such adjustment: buying the stock leg already spent real
+// cash, so TotalCashValue already reflects that correctly. Same per-position
+// "current option leg" subquery shape as riskLimits.ts's position_exposure
+// CTE (handles a rolled CSP's leg history the same way), just summed over
+// cash_secured_put positions only instead of grouped by every strategy.
+dashboardRouter.get("/available-cash", async (_request, response) => {
+  const [account, cspReserved] = await Promise.all([
+    fetchAccountSummary(),
+    db.raw(`
+      SELECT COALESCE(SUM(
+        (SELECT pl.strike_price * pl.multiplier * pl.quantity
+         FROM position_legs pl
+         WHERE pl.position_id = p.id AND pl.leg_type = 'option'
+         ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
+         LIMIT 1)
+      ), 0) AS reserved
+      FROM positions p
+      WHERE p.status = 'open' AND p.strategy_key = 'cash_secured_put'
+    `),
+  ]);
+
+  const totalCashValue = account.totalCashValue;
+  const cashLockedInCsps = Number(cspReserved.rows[0]?.reserved ?? 0);
+  const availableCashToTrade = totalCashValue !== null ? totalCashValue - cashLockedInCsps : null;
+  response.json({ totalCashValue, cashLockedInCsps, availableCashToTrade });
 });
 
 dashboardRouter.get("/history", async (request, response) => {

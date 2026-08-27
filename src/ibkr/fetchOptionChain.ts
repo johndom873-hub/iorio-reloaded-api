@@ -286,11 +286,18 @@ export async function fetchQuotesForContracts(
 
   function onTickPrice(reqId: number, tickType: number, price: number) {
     const quote = quotes.get(reqId);
-    if (!quote || price < 0) return;
+    if (!quote) return;
+    // IBKR sends -1 as an explicit "no data for this field right now" tick
+    // (found 2026-08-27 investigating stale post-close option bid/ask that
+    // never cleared) -- normalized to null here rather than silently
+    // dropped, so a field that genuinely stops being quoted goes back to "no
+    // data" instead of freezing on the last real value it ever held for the
+    // rest of this streaming session.
+    const value = price > 0 ? price : null;
     // Delayed tick types: bid=66, ask=67, last=68.
-    if (tickType === 66) quote.bid = price;
-    if (tickType === 67) quote.ask = price;
-    if (tickType === 68) quote.last = price;
+    if (tickType === 66) quote.bid = value;
+    if (tickType === 67) quote.ask = value;
+    if (tickType === 68) quote.last = value;
     checkReady(reqId);
     schedulePush();
   }
