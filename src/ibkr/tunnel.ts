@@ -25,7 +25,21 @@ export function openIbkrTunnel(options: OpenIbkrTunnelOptions): Promise<IbkrTunn
   return new Promise((resolve, reject) => {
     const sshClient = new SshClient();
 
+    // Real incident (2026-08-27): an sshClient.connect() call that neither
+    // fires 'ready' nor 'error' left this promise pending forever with no
+    // way to recover. Every caller (connectIbkr.ts's one-shot connections,
+    // and persistentConnection.ts's reconnect loop) awaits this before its
+    // own timeout logic even starts, so a hang here is invisible to those —
+    // the persistent worker's reconnect loop in particular has nothing else
+    // guarding this step and would freeze silently until the process was
+    // restarted by hand.
+    const timer = setTimeout(() => {
+      sshClient.end();
+      reject(new Error("Timed out opening SSH tunnel to IBKR Gateway."));
+    }, 15_000);
+
     sshClient.on("ready", () => {
+      clearTimeout(timer);
       const localServer = net.createServer((localSocket) => {
         sshClient.forwardOut(
           localSocket.remoteAddress ?? "127.0.0.1",
@@ -78,6 +92,7 @@ export function openIbkrTunnel(options: OpenIbkrTunnelOptions): Promise<IbkrTunn
     });
 
     sshClient.on("error", (error) => {
+      clearTimeout(timer);
       reject(error);
     });
 
