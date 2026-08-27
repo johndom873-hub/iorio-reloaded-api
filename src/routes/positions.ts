@@ -581,6 +581,62 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
   }
 });
 
+// Generic live quote stream for a single option contract, not tied to any
+// order_requests row — used by RollPositionModal (added 2026-08-27), which
+// needs live pricing for both the closing leg and the replacement leg
+// *before* a roll order is ever built (buildRollOrder only runs once the
+// user submits). streamOrderLegQuote itself already takes symbol/expiry/
+// strike/right directly with no order dependency, so this is a thin route
+// wrapper, not new IBKR logic. Never compliance-gated (same as a Close/Roll
+// order's quote block on the order-scoped stream above) — rolling isn't
+// subject to the opening-order delta-band check.
+positionsRouter.get("/quote/stream", async (request, response) => {
+  const symbol = request.query.symbol as string | undefined;
+  const expiry = request.query.expiry as string | undefined;
+  const strikeRaw = request.query.strike as string | undefined;
+  const rightRaw = request.query.right as string | undefined;
+  const strike = strikeRaw !== undefined ? Number(strikeRaw) : NaN;
+
+  if (!symbol || !expiry || !strikeRaw || Number.isNaN(strike) || (rightRaw !== "C" && rightRaw !== "P")) {
+    response.status(400).json({ error: "symbol, expiry, strike, and right (C or P) are all required." });
+    return;
+  }
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.on("error", () => {});
+
+  const abortController = new AbortController();
+  request.on("close", () => abortController.abort());
+
+  const send = (data: unknown) => {
+    if (response.writableEnded) return;
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(": ping\n\n");
+  }, 20_000);
+
+  try {
+    await streamOrderLegQuote(
+      symbol,
+      expiry,
+      strike,
+      rightRaw === "C" ? OptionType.Call : OptionType.Put,
+      (quote) => send({ type: "quote", data: { ...quote, compliance: null } }),
+      abortController.signal,
+    );
+    send({ type: "done" });
+  } catch (error) {
+    send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });
+  } finally {
+    clearInterval(heartbeat);
+    response.end();
+  }
+});
+
 // The explicit confirmation gate (approved 2026-08-24) — building an order
 // above never transmits it; only this endpoint does, by NOTIFYing the
 // worker. Every order-placing UI flow (New Position, Roll, Close, and the

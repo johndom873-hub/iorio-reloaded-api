@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { runTradeAlertGeneration } from "../ibkr/runTradeAlertGeneration.js";
 import { refreshTradeAlert } from "../ibkr/refreshTradeAlert.js";
+import { refreshTickerTradeAlerts } from "../ibkr/refreshTickerTradeAlerts.js";
 import { runJob } from "../lib/runJob.js";
 
 const tradeAlertSelect = `
@@ -145,28 +146,40 @@ tradeAlertsRouter.post("/:id/refresh", async (request, response) => {
   response.json(updated.rows[0]);
 });
 
-// Only rejection happens directly through this route — approving (with or
-// without edits) goes through the normal order-placement flow instead
-// (Positions' "+ New Position" form, pre-filled the same way Screener's
-// "Trade" button pre-fills it), so the user always reviews/can adjust the
-// order before it's ever confirmed and sent to IBKR. Since 2026-08-24, the
-// alert actually flips to "approved" at POST /positions/orders/:id/confirm
-// time, not at order-build time — see that route in positions.ts.
-tradeAlertsRouter.patch("/:id", async (request, response) => {
-  const { status } = request.body as { status?: string };
-  if (status !== "rejected") {
-    response.status(400).json({ error: "Only status: 'rejected' is supported here." });
+// Per-ticker equivalent of "Run Alerts Now" for new_trade alerts only (roll
+// alerts are refreshed independently via their own per-alert refresh) —
+// backs the Trade Alerts page's per-ticker "Refresh" button and the Ticker
+// Detail modal's "Scan for Alerts"/"Refresh" button, both calling this same
+// endpoint. Blocking POST, not SSE: a single ticker's two-strategy scan is
+// fast enough not to risk Heroku's router timeout the way the full
+// shortlist scan can (same reasoning as /:id/refresh above).
+tradeAlertsRouter.post("/refresh-ticker", async (request, response) => {
+  const { symbol } = request.body as { symbol?: string };
+  if (!symbol) {
+    response.status(400).json({ error: "symbol is required." });
     return;
   }
 
-  const [updated] = await db("trade_alerts")
-    .where({ id: request.params.id, status: "pending" })
-    .update({ status: "rejected", reviewed_by_user_id: request.session.userId, reviewed_at: db.fn.now() })
-    .returning("*");
-
-  if (!updated) {
-    response.status(404).json({ error: "Pending trade alert not found." });
+  const ticker = await db("tickers").where({ symbol: symbol.toUpperCase() }).first();
+  if (!ticker) {
+    response.status(404).json({ error: "Ticker not found." });
     return;
   }
-  response.json(updated);
+
+  try {
+    await refreshTickerTradeAlerts(ticker.id, ticker.symbol);
+  } catch (error) {
+    response.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+
+  const updated = await db.raw(
+    `
+    ${tradeAlertSelect}
+    WHERE ta.ticker_id = ? AND ta.alert_type = 'new_trade' AND ta.status = 'pending'
+    ORDER BY (ta.suggested_structure->>'annualizedYield')::numeric DESC
+    `,
+    [ticker.id],
+  );
+  response.json(updated.rows);
 });

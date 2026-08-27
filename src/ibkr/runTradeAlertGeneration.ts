@@ -1,12 +1,14 @@
 import { MarketDataType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { generateTradeAlertCandidatesForTicker, type AlertStrategyKey } from "./generateTradeAlertCandidates.js";
+import { generateTradeAlertCandidatesForTicker, type AlertStrategyKey, type AlertStrategySettings } from "./generateTradeAlertCandidates.js";
 import { evaluateRollCandidate, type OpenShortLeg, type RollSuggestion } from "./generateRollCandidates.js";
 import { formatNewTradeAlertLine, formatRollAlertLine } from "../lib/formatTradeAlertMessage.js";
 
 export const tradeAlertStrategies: AlertStrategyKey[] = ["covered_call", "cash_secured_put"];
-const maxAlertsPerTicker = 3;
+// Exported for refreshTickerTradeAlerts.ts, which needs the identical
+// per-strategy insertion cap for its single-ticker refresh.
+export const maxAlertsPerTicker = 3;
 
 interface ShortlistedTickerRow {
   tickerId: string;
@@ -34,7 +36,9 @@ export interface TradeAlertGenerationResult {
   rollAlertLines: string[];
 }
 
-function rationaleFor(strategyKey: AlertStrategyKey, symbol: string, candidate: { strike: number; expiry: string; dte: number; delta: number; premium: number; annualizedYield: number }): string {
+// Exported for refreshTickerTradeAlerts.ts (single-ticker refresh) to reuse
+// verbatim rather than duplicating this formatting logic.
+export function rationaleFor(strategyKey: AlertStrategyKey, symbol: string, candidate: { strike: number; expiry: string; dte: number; delta: number; premium: number; annualizedYield: number }): string {
   const action = strategyKey === "covered_call" ? "Sell 1x call" : "Sell 1x put";
   const pct = (candidate.annualizedYield * 100).toFixed(1);
   return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.`;
@@ -55,7 +59,8 @@ function toIsoDate(expiryYyyymmdd: string): string {
   return `${expiryYyyymmdd.slice(0, 4)}-${expiryYyyymmdd.slice(4, 6)}-${expiryYyyymmdd.slice(6, 8)}`;
 }
 
-function toSettings(settingsRow: Record<string, unknown>) {
+// Exported for refreshTickerTradeAlerts.ts.
+export function toSettings(settingsRow: Record<string, unknown>): AlertStrategySettings {
   return {
     deltaTargetMin: Number(settingsRow.delta_target_min),
     deltaTargetMax: Number(settingsRow.delta_target_max),
