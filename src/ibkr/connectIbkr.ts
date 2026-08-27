@@ -1,6 +1,6 @@
 import { IBApi, EventName, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
-import { openIbkrTunnel } from "./tunnel.js";
+import { openIbkrTunnel } from "./ibkrGatewayTunnel.js";
 import { ibkrGatewayPortByTradingMode } from "./constants.js";
 
 export interface IbkrConnection {

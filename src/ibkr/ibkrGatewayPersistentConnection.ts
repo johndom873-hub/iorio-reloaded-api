@@ -1,6 +1,6 @@
 import { IBApi, EventName, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
-import { openIbkrTunnel, type IbkrTunnel } from "./tunnel.js";
+import { openIbkrTunnel, type IbkrTunnel } from "./ibkrGatewayTunnel.js";
 import { ibkrGatewayPortByTradingMode } from "./constants.js";
 
 // Every other IBKR call site (connectIbkr.ts) opens a connection per request

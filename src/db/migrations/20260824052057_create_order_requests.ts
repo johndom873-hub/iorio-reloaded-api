@@ -3,7 +3,7 @@ import type { Knex } from "knex";
 // The web-to-worker order queue. The web dyno only ever writes a row here
 // (build → pending_confirmation, then confirm → confirmed) — it never
 // writes positions/position_legs/trades directly anymore. Only the
-// persistent worker process (src/ibkrWorker.ts), acting on IBKR's own
+// persistent worker process (src/ibkrGatewayWorker.ts), acting on IBKR's own
 // orderStatus/execDetails events, writes those tables — see PROGRESS.md's
 // "IBKR is the source of truth" decision, 2026-08-24.
 export async function up(knex: Knex): Promise<void> {

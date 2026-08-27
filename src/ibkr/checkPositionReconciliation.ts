@@ -1,6 +1,6 @@
 import type { IBApi } from "@stoqey/ib";
 import { db } from "../db/connection.js";
-import { fetchIbkrHeldPositions } from "./fetchIbkrHeldPositions.js";
+import { fetchIbkrHeldPositions } from "./ibkrGatewayFetchHeldPositions.js";
 
 interface OpenLegRow {
   id: string;
@@ -14,10 +14,10 @@ interface OpenLegRow {
  * Compares IBKR's actual current holdings against every open position_legs
  * row and reports any discrepancy — detection only, fixes nothing. Built
  * 2026-08-25 after two real bugs surfaced the same day (both since fixed in
- * ibkrWorker.ts): a repeat opening fill for an already-tracked contract left
+ * ibkrGatewayWorker.ts): a repeat opening fill for an already-tracked contract left
  * `quantity` stuck at its original value instead of accumulating, and a
  * partial closing fill marked an entire multi-lot leg closed instead of
- * just the filled portion. ibkrWorker.ts's continuous reconciliation
+ * just the filled portion. ibkrGatewayWorker.ts's continuous reconciliation
  * (reconcilePositionsFromIbkr, every 60s) already self-heals most drift —
  * but self-healing silently isn't the same as anyone being told it
  * happened, and it can't help at all if the worker itself is down. This is
@@ -36,7 +36,7 @@ export async function checkPositionReconciliation(ib: IBApi): Promise<string[]> 
 
   // Grouped by conId, not a 1:1 map — a covered call's stock conId can be
   // legitimately split across several sibling positions (added 2026-08-25,
-  // see ibkrWorker.ts's upsertSplitCoveredCallPosition), so IBKR's one real
+  // see ibkrGatewayWorker.ts's upsertSplitCoveredCallPosition), so IBKR's one real
   // holding for that conId has to be compared against the SUM of every
   // local leg sharing it, not an arbitrary single one (a naive Map.get
   // here reported a false-positive drift the first time this was tested

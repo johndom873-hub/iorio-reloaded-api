@@ -5,7 +5,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchLiveGreeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
-import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/orderPayload.js";
+import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -338,7 +338,7 @@ positionsRouter.get("/pnl", async (request, response) => {
 // --- Order placement (approved 2026-08-24 — see the plan doc) ---
 // The web dyno never writes positions/position_legs/trades directly for a
 // new/closed/rolled leg anymore. It only ever builds an order_requests row
-// and, on confirm, NOTIFYs the worker (src/ibkrWorker.ts) to actually place the
+// and, on confirm, NOTIFYs the worker (src/ibkrGatewayWorker.ts) to actually place the
 // order with IBKR. Only the worker writes those three tables now, and only
 // from data IBKR itself reported (a real fill, a real position) — see
 // "IBKR is the source of truth" in PROGRESS.md.

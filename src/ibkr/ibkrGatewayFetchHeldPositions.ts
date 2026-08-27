@@ -11,7 +11,7 @@ const positionsTimeoutMs = 15_000;
 
 /**
  * Pulls IBKR's actual current holdings via reqPositions(). Shared by
- * ibkrWorker.ts's continuous position sync and checkPositionReconciliation.ts's
+ * ibkrGatewayWorker.ts's continuous position sync and checkPositionReconciliation.ts's
  * detection-only check — both need the exact same "what does IBKR say we
  * hold right now" snapshot.
  *
@@ -19,7 +19,7 @@ const positionsTimeoutMs = 15_000;
  * positionEnd never arrives (dropped connection, API hiccup) — found
  * 2026-08-25 in a full-repo review: without this, a stalled snapshot
  * previously hung forever (no timeout existed at all) or, worse, could
- * have resolved with too few positions, which ibkrWorker.ts's
+ * have resolved with too few positions, which ibkrGatewayWorker.ts's
  * reconcilePositionsFromIbkr would have read as "IBKR no longer holds
  * this" and closed every genuinely-still-open leg. Rejecting lets that
  * function's existing (unwrapped) await naturally abort the whole pass

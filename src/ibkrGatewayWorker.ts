@@ -4,11 +4,11 @@ import { EventName, OptionType, OrderAction, OrderType, SecType, TimeInForce } f
 import type { Contract, ComboLeg, Execution, Order as IbkrOrder } from "@stoqey/ib";
 import { db } from "./db/connection.js";
 import { environment } from "./config/env.js";
-import { persistentIbkrConnection } from "./ibkr/persistentConnection.js";
-import { resolveContractId } from "./ibkr/resolveContractId.js";
-import { buildLegContract, computeNetLimitPrice, type OrderLegPayload, type OrderRequestPayload } from "./ibkr/orderPayload.js";
-import { parseIbkrExecutionTime } from "./ibkr/parseIbkrExecutionTime.js";
-import { fetchIbkrHeldPositions, type IbkrHeldPosition } from "./ibkr/fetchIbkrHeldPositions.js";
+import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
+import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
+import { buildLegContract, computeNetLimitPrice, type OrderLegPayload, type OrderRequestPayload } from "./ibkr/ibkrGatewayOrderPayload.js";
+import { parseIbkrExecutionTime } from "./ibkr/ibkrGatewayParseExecutionTime.js";
+import { fetchIbkrHeldPositions, type IbkrHeldPosition } from "./ibkr/ibkrGatewayFetchHeldPositions.js";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 
 installCrashHandlers("worker");
