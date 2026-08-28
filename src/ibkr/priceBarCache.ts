@@ -32,6 +32,26 @@ type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
  * is an acceptable fix when it happens.
  */
 
+// Found 2026-08-28: the cache below was write-through but not actually
+// skipping the live IBKR call on a hot repeat view — every getCachedChartBars
+// call unconditionally re-fetched a "top up" window from IBKR before reading
+// from the DB, so reopening the same symbol/range seconds later paid for a
+// full IBKR round-trip again even though nothing could have changed that
+// fast. Tracked in-process (not a DB column) since it's a perf optimization,
+// not a correctness concern — worst case after a dyno restart is one extra
+// live fetch, same as today's behavior everywhere.
+const lastLiveFetchAtByKey = new Map<string, number>();
+const liveFetchFreshnessMs = 30_000;
+
+function isFreshEnoughToSkipLiveFetch(symbol: string, range: ChartRange): boolean {
+  const lastFetchedAt = lastLiveFetchAtByKey.get(`${symbol}:${range}`);
+  return lastFetchedAt !== undefined && Date.now() - lastFetchedAt < liveFetchFreshnessMs;
+}
+
+function markLiveFetched(symbol: string, range: ChartRange): void {
+  lastLiveFetchAtByKey.set(`${symbol}:${range}`, Date.now());
+}
+
 type IntradayRange = Exclude<ChartRange, "1Y" | "5Y" | "All">;
 
 const intradayConfig: Record<IntradayRange, { barSize: BarSizeSetting; fullDuration: string; topUpDuration: string }> = {
@@ -201,9 +221,12 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
     }
 
     const latestCached = await getLatestDailyBarDate(tickerId);
-    const fetchDuration = latestCached ? dailyTopUpDuration : dailyBackfillDuration;
-    const freshBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, fetchDuration, reqId);
-    await upsertDailyBars(tickerId, freshBars);
+    if (!latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range)) {
+      const fetchDuration = latestCached ? dailyTopUpDuration : dailyBackfillDuration;
+      const freshBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, fetchDuration, reqId);
+      await upsertDailyBars(tickerId, freshBars);
+      markLiveFetched(symbol, range);
+    }
 
     if (range === "1Y") return readDailyBars(tickerId, subtractDuration(new Date(), "1 Y"));
     if (range === "5Y") return readWeeklyResampledBars(tickerId, subtractDuration(new Date(), "5 Y"));
@@ -216,9 +239,12 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
   }
 
   const latestCached = await getLatestIntradayBarTime(tickerId, cfg.barSize);
-  const fetchDuration = latestCached ? cfg.topUpDuration : cfg.fullDuration;
-  const freshBars = await fetchHistoricalBarsRaw(connection, symbol, cfg.barSize, fetchDuration, reqId);
-  await upsertIntradayBars(tickerId, cfg.barSize, freshBars);
+  if (!latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range)) {
+    const fetchDuration = latestCached ? cfg.topUpDuration : cfg.fullDuration;
+    const freshBars = await fetchHistoricalBarsRaw(connection, symbol, cfg.barSize, fetchDuration, reqId);
+    await upsertIntradayBars(tickerId, cfg.barSize, freshBars);
+    markLiveFetched(symbol, range);
+  }
 
   return readIntradayBars(tickerId, cfg.barSize, subtractDuration(new Date(), cfg.fullDuration));
 }

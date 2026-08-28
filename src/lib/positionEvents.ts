@@ -10,6 +10,13 @@ export interface PositionEvent {
   positionId: string;
   eventType: "opened" | "closed" | "unstructured";
   eventAt: string;
+  // The position's own open date, always — distinct from eventAt for a
+  // "closed" event (eventAt there is the close date). Legs' DTE is shown
+  // as of this date rather than "now" (approved 2026-08-28): a leg's
+  // expiry doesn't change, but "now" does, so a live DTE on a historical
+  // event just goes stale/negative as time passes instead of showing what
+  // was actually true when the position was opened.
+  openedAt: string;
   symbol: string;
   strategyKey: string;
   closeReason: string | null;
@@ -78,9 +85,14 @@ interface LegRow {
   exitAt: string | null;
 }
 
-export async function fetchPositionEvents(limit = 40): Promise<PositionEvent[]> {
+// sinceDays scopes the feed to recent activity (approved 2026-08-28,
+// default 7) — limit stays as a safety cap on top of that, not the
+// primary way this narrows down, so a quiet week doesn't return 40 days
+// of history just to fill the row count.
+export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<PositionEvent[]> {
   const positions: PositionRow[] = await db("positions as p")
     .join("tickers as t", "t.id", "p.ticker_id")
+    .whereRaw("GREATEST(p.opened_at, COALESCE(p.closed_at, p.opened_at)) >= now() - (? || ' days')::interval", [sinceDays])
     .orderBy(db.raw("GREATEST(p.opened_at, COALESCE(p.closed_at, p.opened_at))"), "desc")
     .limit(limit)
     .select(
@@ -210,6 +222,7 @@ export async function fetchPositionEvents(limit = 40): Promise<PositionEvent[]> 
       positionId: position.id,
       eventType: isUnstructured ? "unstructured" : "opened",
       eventAt: position.openedAt,
+      openedAt: position.openedAt,
       symbol: position.symbol,
       strategyKey: position.strategyKey,
       closeReason: null,
@@ -226,6 +239,7 @@ export async function fetchPositionEvents(limit = 40): Promise<PositionEvent[]> 
         positionId: position.id,
         eventType: "closed",
         eventAt: position.closedAt,
+        openedAt: position.openedAt,
         symbol: position.symbol,
         strategyKey: position.strategyKey,
         closeReason: position.closeReason,
