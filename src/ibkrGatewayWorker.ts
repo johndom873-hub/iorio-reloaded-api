@@ -874,10 +874,17 @@ async function upsertSyncedPosition(
       .insert({ strategy_key: strategyKey, ticker_id: ticker.id, status: "open", unstructured_reason: unstructuredReason })
       .returning(["id"]);
     positionId = newPosition.id;
-    await backfillAlertResultingPositionId(symbol, positionId!);
   } else {
     await db("positions").where({ id: positionId }).update({ strategy_key: strategyKey, unstructured_reason: unstructuredReason });
   }
+  // Retried on every pass, not just at creation (found 2026-08-28): a real
+  // race with the order's own fill-status callback — reconciliation can
+  // detect and create the position from IBKR's held-positions report before
+  // that order's order_requests row has actually flipped to "filled", so a
+  // creation-time-only call sometimes found nothing to link and never got
+  // a second chance. Safe to call repeatedly — the query only ever matches
+  // an alert with resulting_position_id still NULL.
+  await backfillAlertResultingPositionId(symbol, positionId!);
 
   for (const leg of legs) {
     await upsertPositionLeg(positionId!, leg.held, leg.side);
@@ -934,10 +941,12 @@ async function upsertSplitCoveredCallPosition(
       .insert({ strategy_key: "covered_call", ticker_id: ticker.id, status: "open" })
       .returning(["id"]);
     positionId = newPosition.id;
-    await backfillAlertResultingPositionId(symbol, positionId!);
   } else {
     await db("positions").where({ id: positionId }).update({ strategy_key: "covered_call" });
   }
+  // Retried on every pass, not just at creation — see upsertSyncedPosition's
+  // matching comment for why (2026-08-28).
+  await backfillAlertResultingPositionId(symbol, positionId!);
 
   await upsertPositionLeg(positionId!, callLeg, "short");
   await upsertPositionLeg(positionId!, stockLeg, "long", sharesForThisLeg, true);
