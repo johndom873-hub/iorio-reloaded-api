@@ -50,7 +50,10 @@ function validateSettingsPayload(payload: Record<string, unknown>): string | nul
 }
 
 riskLimitsRouter.get("/settings", async (_request, response) => {
-  const rows = await db("strategy_settings").select("*").orderBy("strategy_key");
+  const rows = await db("strategy_settings as ss")
+    .leftJoin("users as u", "u.id", "ss.updated_by_user_id")
+    .select("ss.*", "u.display_name as updated_by_display_name")
+    .orderBy("ss.strategy_key");
   response.json(rows);
 });
 
@@ -75,7 +78,7 @@ riskLimitsRouter.put("/settings/:strategyKey", async (request, response) => {
 
   const [row] = await db("strategy_settings")
     .where({ strategy_key: strategyKey })
-    .update({ ...updatePayload, updated_at: db.fn.now() })
+    .update({ ...updatePayload, updated_at: db.fn.now(), updated_by_user_id: request.session.userId })
     .returning("*");
 
   if (!row) {

@@ -19,12 +19,14 @@ const tradeAlertSelect = `
     ta.resulting_position_id AS "resultingPositionId",
     ta.created_at AS "createdAt",
     ta.last_refreshed_at AS "lastRefreshedAt",
+    u.display_name AS "reviewedByDisplayName",
     t.id AS "tickerId",
     t.symbol,
     t.company_name AS "companyName",
     NULLIF(t.sector, '') AS sector
   FROM trade_alerts ta
   JOIN tickers t ON t.id = ta.ticker_id
+  LEFT JOIN users u ON u.id = ta.reviewed_by_user_id
 `;
 
 export const tradeAlertsRouter = Router();
@@ -69,6 +71,32 @@ tradeAlertsRouter.get("/", async (request, response) => {
     params,
   );
   response.json(result.rows);
+});
+
+// Rejects a pending alert with no order ever placed for it (approving an
+// alert always goes through order confirm instead — see
+// positions.ts:/orders/:id/confirm — so this is genuinely the only status
+// change this route needs to support). Backs Genosuke's reject_trade_alert
+// tool, which called this exact path before it existed — found dead (404 on
+// every call) during the 2026-08-28 user-attribution audit.
+tradeAlertsRouter.patch("/:id", async (request, response) => {
+  const { status } = request.body as { status?: string };
+  if (status !== "rejected") {
+    response.status(400).json({ error: "Only status: 'rejected' is supported." });
+    return;
+  }
+
+  const [updated] = await db("trade_alerts")
+    .where({ id: request.params.id, status: "pending" })
+    .update({ status: "rejected", reviewed_by_user_id: request.session.userId, reviewed_at: db.fn.now() })
+    .returning("id");
+  if (!updated) {
+    response.status(404).json({ error: "No pending trade alert found with that id." });
+    return;
+  }
+
+  const result = await db.raw(`${tradeAlertSelect} WHERE ta.id = ?`, [request.params.id]);
+  response.json(result.rows[0]);
 });
 
 // Manual "Run Now" trigger for the same scan as run-trade-alert-generation-job.ts

@@ -38,7 +38,21 @@ function serializeOrderRequest(row: Record<string, unknown>) {
     errorMessage: row.error_message,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    requestedByUserId: row.requested_by_user_id,
+    requestedByDisplayName: row.requested_by_display_name,
+    cancelledByUserId: row.cancelled_by_user_id,
+    cancelledByDisplayName: row.cancelled_by_display_name,
   };
+}
+
+// Joins in the requester/canceller's display name (e.g. "Marce", "Genosuke")
+// so the frontend never has to resolve a raw user id itself — see
+// PROGRESS.md's user-attribution audit, 2026-08-28.
+function orderRequestsWithNames() {
+  return db("order_requests as orq")
+    .leftJoin("users as ru", "ru.id", "orq.requested_by_user_id")
+    .leftJoin("users as cu", "cu.id", "orq.cancelled_by_user_id")
+    .select("orq.*", "ru.display_name as requested_by_display_name", "cu.display_name as cancelled_by_display_name");
 }
 
 // Guards against a naked covered call — a short call leg must never cover
@@ -427,13 +441,13 @@ positionsRouter.post("/orders", async (request, response) => {
 
 positionsRouter.get("/orders", async (request, response) => {
   const status = request.query.status as string | undefined;
-  const query = db("order_requests").orderBy("created_at", "desc");
+  const query = orderRequestsWithNames().orderBy("orq.created_at", "desc");
   if (status) query.where({ status });
   response.json((await query).map(serializeOrderRequest));
 });
 
 positionsRouter.get("/orders/:id", async (request, response) => {
-  const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
+  const orderRequest = await orderRequestsWithNames().where("orq.id", request.params.id).first();
   if (!orderRequest) {
     response.status(404).json({ error: "Order not found." });
     return;
@@ -609,7 +623,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     await trx.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
   });
 
-  const updated = await db("order_requests").where({ id: orderRequest.id }).first();
+  const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
   await publishNotification({ type: "order_status", orderId: orderRequest.id });
   response.json(serializeOrderRequest(updated));
 });
@@ -623,10 +637,10 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
 
   if (orderRequest.status === "pending_confirmation" || orderRequest.status === "confirmed") {
     // Never reached IBKR — cancelling here is a pure local status flip.
-    const [updated] = await db("order_requests")
+    await db("order_requests")
       .where({ id: orderRequest.id })
-      .update({ status: "cancelled", updated_at: db.fn.now() })
-      .returning("*");
+      .update({ status: "cancelled", updated_at: db.fn.now(), cancelled_by_user_id: request.session.userId });
+    const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
     await revertSourceAlertToPending(orderRequest.source_alert_id);
     await publishNotification({ type: "order_status", orderId: orderRequest.id });
     response.json(serializeOrderRequest(updated));
@@ -646,10 +660,10 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
     // still fill before IBKR processes the cancel. Reverted from the
     // worker's orderStatus listener instead, once IBKR confirms the terminal
     // "cancelled" status — see revertSourceAlertToPending's doc comment.
-    const [updated] = await db("order_requests")
+    await db("order_requests")
       .where({ id: orderRequest.id })
-      .update({ status: "cancel_requested", updated_at: db.fn.now() })
-      .returning("*");
+      .update({ status: "cancel_requested", updated_at: db.fn.now(), cancelled_by_user_id: request.session.userId });
+    const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
     await db.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
     await publishNotification({ type: "order_status", orderId: orderRequest.id });
     response.json(serializeOrderRequest(updated));

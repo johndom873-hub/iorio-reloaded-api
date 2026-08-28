@@ -124,6 +124,8 @@ tradeBlotterRouter.get("/", async (request, response) => {
       orq.created_at AS "createdAt",
       orq.payload->>'symbol' AS symbol,
       orq.payload->>'strategyKey' AS "strategyKey",
+      ru.display_name AS "requestedByDisplayName",
+      cu.display_name AS "cancelledByDisplayName",
       leg->>'role' AS "legRole",
       leg->>'action' AS action,
       (leg->>'quantity')::numeric AS quantity,
@@ -133,6 +135,8 @@ tradeBlotterRouter.get("/", async (request, response) => {
       NULLIF(leg->>'right', '') AS "optionType"
     FROM order_requests orq
     CROSS JOIN LATERAL jsonb_array_elements(orq.payload->'legs') WITH ORDINALITY AS t(leg, leg_ordinality)
+    LEFT JOIN users ru ON ru.id = orq.requested_by_user_id
+    LEFT JOIN users cu ON cu.id = orq.cancelled_by_user_id
     WHERE ${orderConditions.join(" AND ")}
     ORDER BY orq.created_at DESC
     `,
