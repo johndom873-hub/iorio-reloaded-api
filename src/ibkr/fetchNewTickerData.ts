@@ -34,6 +34,17 @@ export interface ContractDetails {
   conId: number | null;
 }
 
+// IBKR's `industry` field (GICS-style classification) is populated for
+// individual stocks but consistently blank for ETFs — an ETF holds many
+// companies across industries, so IBKR doesn't assign it one. `category`
+// (e.g. "InvestmentSvc") is the closer analog IBKR does populate for funds;
+// falling back to the literal "ETF" (from `stockType`) only when even that's
+// blank, rather than leaving the sector null (found 2026-08-28: every ETF
+// position was landing in the Dashboard/Risk & Limits "Unknown" bucket).
+function resolveSector(details: { industry?: string; category?: string; stockType?: string }): string | null {
+  return details.industry || details.category || (details.stockType === "ETF" ? "ETF" : null);
+}
+
 export function lookupContractDetails(
   connection: Awaited<ReturnType<typeof connectToIbkrGateway>>,
   reqId: number = contractDetailsReqId,
@@ -41,9 +52,12 @@ export function lookupContractDetails(
   return new Promise((resolve) => {
     let settled = false;
 
-    const onContractDetails = (id: number, details: { longName?: string; industry?: string; contract: { conId?: number } }) => {
+    const onContractDetails = (
+      id: number,
+      details: { longName?: string; industry?: string; category?: string; stockType?: string; contract: { conId?: number } },
+    ) => {
       if (id !== reqId) return;
-      finish({ companyName: details.longName || null, sector: details.industry || null, conId: details.contract.conId ?? null });
+      finish({ companyName: details.longName || null, sector: resolveSector(details), conId: details.contract.conId ?? null });
     };
 
     const onEnd = (id: number) => {
