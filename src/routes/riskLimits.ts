@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
+import { computePositionExposures, type PositionExposureRow } from "../lib/positionExposure.js";
 
 export const riskLimitsRouter = Router();
 riskLimitsRouter.use(requireAuth);
@@ -88,41 +89,6 @@ riskLimitsRouter.put("/settings/:strategyKey", async (request, response) => {
   response.json(row);
 });
 
-// Per-open-position exposure — same "capital actually committed" concept
-// as positions.ts's capitalAtRisk (stock leg's entry cost for covered
-// calls; the option leg's strike × multiplier × quantity for cash-secured
-// puts, since that's the cash reserved to cover assignment), not a raw
-// sum-of-all-legs notional. Kept as one CTE and reused for every grouping
-// below so ticker/sector/strategy/top-position figures are always
-// mutually consistent with each other and with what Positions shows.
-const positionExposureCte = `
-  WITH position_exposure AS (
-    SELECT
-      p.id AS position_id,
-      p.strategy_key,
-      t.symbol,
-      COALESCE(NULLIF(t.sector, ''), 'Unknown') AS sector,
-      CASE
-        WHEN p.strategy_key = 'covered_call' THEN (
-          SELECT pl.entry_price * pl.quantity
-          FROM position_legs pl
-          WHERE pl.position_id = p.id AND pl.leg_type = 'stock'
-          LIMIT 1
-        )
-        ELSE (
-          SELECT pl.strike_price * pl.multiplier * pl.quantity
-          FROM position_legs pl
-          WHERE pl.position_id = p.id AND pl.leg_type = 'option'
-          ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
-          LIMIT 1
-        )
-      END AS exposure
-    FROM positions p
-    JOIN tickers t ON t.id = p.ticker_id
-    WHERE p.status = 'open'
-  )
-`;
-
 // Approved 2026-08-25: every concentration/allocation % on this page and
 // on the Dashboard is against total account value (net liquidation value,
 // i.e. positions + cash), not against the sum of open positions — so an
@@ -142,57 +108,64 @@ function withUnallocated<T extends { notionalValue: string }>(
   return [...rows, { ...unallocatedRow, notionalValue: String(unallocated) }];
 }
 
+function groupByKey<K extends string>(
+  rows: PositionExposureRow[],
+  keyOf: (row: PositionExposureRow) => K,
+): { key: K; notionalValue: string }[] {
+  const totals = new Map<K, number>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    totals.set(key, (totals.get(key) ?? 0) + row.exposure);
+  }
+  return [...totals.entries()]
+    .map(([key, notionalValue]) => ({ key, notionalValue: String(notionalValue) }))
+    .sort((a, b) => Number(b.notionalValue) - Number(a.notionalValue));
+}
+
 riskLimitsRouter.get("/exposure", async (_request, response) => {
-  const [concentrationByTicker, concentrationBySector, strategyAllocation, topPositions] = await Promise.all([
-    db.raw(`${positionExposureCte}
-      SELECT symbol, SUM(exposure) AS "notionalValue"
-      FROM position_exposure
-      GROUP BY symbol
-      ORDER BY "notionalValue" DESC
-    `),
-    db.raw(`${positionExposureCte}
-      SELECT sector, SUM(exposure) AS "notionalValue"
-      FROM position_exposure
-      GROUP BY sector
-      ORDER BY "notionalValue" DESC
-    `),
-    db.raw(`${positionExposureCte}
-      SELECT strategy_key AS "strategyKey", SUM(exposure) AS "notionalValue"
-      FROM position_exposure
-      GROUP BY strategy_key
-      ORDER BY "notionalValue" DESC
-    `),
-    db.raw(`${positionExposureCte}
-      SELECT position_id AS "positionId", symbol, strategy_key AS "strategyKey", exposure AS "notionalValue"
-      FROM position_exposure
-      ORDER BY exposure DESC
-      LIMIT 5
-    `),
+  const [exposures, accountResult] = await Promise.all([
+    computePositionExposures(),
+    fetchAccountSummary()
+      .then((account) => ({ account, accountDataError: null as string | null }))
+      .catch((error) => ({
+        account: null,
+        accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.",
+      })),
   ]);
 
-  let account: Awaited<ReturnType<typeof fetchAccountSummary>> | null = null;
-  let accountDataError: string | null = null;
-  try {
-    account = await fetchAccountSummary();
-  } catch (error) {
-    accountDataError = error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.";
-  }
-
+  const { account, accountDataError } = accountResult;
   const totalAccountValue = account?.netLiquidationValue ?? null;
+
+  const concentrationByTicker = groupByKey(exposures, (row) => row.symbol).map((row) => ({
+    symbol: row.key,
+    notionalValue: row.notionalValue,
+  }));
+  const concentrationBySector = groupByKey(exposures, (row) => row.sector).map((row) => ({
+    sector: row.key,
+    notionalValue: row.notionalValue,
+  }));
+  const strategyAllocation = groupByKey(exposures, (row) => row.strategyKey).map((row) => ({
+    strategyKey: row.key,
+    notionalValue: row.notionalValue,
+  }));
+  const topPositions = [...exposures]
+    .sort((a, b) => b.exposure - a.exposure)
+    .slice(0, 5)
+    .map((row) => ({ positionId: row.positionId, symbol: row.symbol, strategyKey: row.strategyKey, notionalValue: String(row.exposure) }));
 
   response.json({
     account,
     accountDataError,
     totalAccountValue,
-    concentrationByTicker: concentrationByTicker.rows,
-    concentrationBySector: withUnallocated(concentrationBySector.rows, totalAccountValue, {
+    concentrationByTicker,
+    concentrationBySector: withUnallocated(concentrationBySector, totalAccountValue, {
       sector: "Unallocated",
       notionalValue: "0",
     }),
-    strategyAllocation: withUnallocated(strategyAllocation.rows, totalAccountValue, {
+    strategyAllocation: withUnallocated(strategyAllocation, totalAccountValue, {
       strategyKey: "unallocated",
       notionalValue: "0",
     }),
-    topPositions: topPositions.rows,
+    topPositions,
   });
 });

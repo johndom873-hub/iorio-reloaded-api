@@ -2,6 +2,17 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
+import { computeCashLockedInCsps, computePositionExposures } from "../lib/positionExposure.js";
+import { computeStrategyDailyPnlSeries, computeStrategyPeriodPnl } from "../lib/strategyPeriodPnl.js";
+import { fetchPositionEvents } from "../lib/positionEvents.js";
+
+// The known strategy buckets the Dashboard breaks P&L/allocation down by —
+// "unstructured" folds leftover legs that didn't cleanly resolve into a CC
+// or CSP, "residual" is whatever's left after subtracting all three known
+// buckets from the trusted account-level total (interest, dividends, fees
+// not tied to a specific trade, cash deposits/withdrawals — none of which
+// this platform captures individually yet, decided 2026-08-28).
+const knownStrategyKeys = ["covered_call", "cash_secured_put", "unstructured"] as const;
 
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
@@ -73,11 +84,21 @@ dashboardRouter.get("/summary", async (_request, response) => {
     GROUP BY strategy_key
   `);
 
+  const netLiquidationValue = latestAccountSnapshot?.net_liquidation_value ?? null;
+  const dayPnl = periods.day !== null ? Number(periods.day) : null;
+  // Prior day's net liq = today's minus today's delta — % is against that
+  // baseline, not today's own (already-moved) value.
+  const dayPnlPercent =
+    netLiquidationValue !== null && dayPnl !== null && Number(netLiquidationValue) - dayPnl !== 0
+      ? (dayPnl / (Number(netLiquidationValue) - dayPnl)) * 100
+      : null;
+
   response.json({
     asOf: latestAccountSnapshot?.snapshot_date ?? null,
-    netLiquidationValue: latestAccountSnapshot?.net_liquidation_value ?? null,
+    netLiquidationValue,
     cumulativeRealizedPnl: latestAccountSnapshot?.realized_pnl ?? null,
     cumulativeUnrealizedPnl: latestAccountSnapshot?.unrealized_pnl ?? null,
+    dayPnlPercent,
     periods: {
       day: periods.day ?? null,
       week: periods.week ?? null,
@@ -121,39 +142,133 @@ dashboardRouter.get("/account-value", async (_request, response) => {
 // CTE (handles a rolled CSP's leg history the same way), just summed over
 // cash_secured_put positions only instead of grouped by every strategy.
 dashboardRouter.get("/available-cash", async (_request, response) => {
-  const [account, cspReserved] = await Promise.all([
-    fetchAccountSummary(),
-    db.raw(`
-      SELECT COALESCE(SUM(
-        (SELECT pl.strike_price * pl.multiplier * pl.quantity
-         FROM position_legs pl
-         WHERE pl.position_id = p.id AND pl.leg_type = 'option'
-         ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
-         LIMIT 1)
-      ), 0) AS reserved
-      FROM positions p
-      WHERE p.status = 'open' AND p.strategy_key = 'cash_secured_put'
-    `),
-  ]);
+  const [account, cashLockedInCsps] = await Promise.all([fetchAccountSummary(), computeCashLockedInCsps()]);
 
   const totalCashValue = account.totalCashValue;
-  const cashLockedInCsps = Number(cspReserved.rows[0]?.reserved ?? 0);
   const availableCashToTrade = totalCashValue !== null ? totalCashValue - cashLockedInCsps : null;
   response.json({ totalCashValue, cashLockedInCsps, availableCashToTrade });
+});
+
+// Portfolio section (2026-08-28): CC / CSP / Unstructured at full market
+// value (see project_position_valuation_full_market_value), plus available
+// cash. CSP's exposure figure already has the cash-locked collateral baked
+// in (positionExposure.ts), so "csp" here already reflects "cash locked in
+// CSPs" the way Marcelo asked for.
+dashboardRouter.get("/portfolio", async (_request, response) => {
+  const [exposures, account, cashLockedInCsps] = await Promise.all([
+    computePositionExposures(),
+    fetchAccountSummary().catch(() => null),
+    computeCashLockedInCsps(),
+  ]);
+
+  const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0 };
+  for (const row of exposures) {
+    if (row.strategyKey in byStrategy) byStrategy[row.strategyKey] = (byStrategy[row.strategyKey] ?? 0) + row.exposure;
+  }
+
+  const totalCashValue = account?.totalCashValue ?? null;
+  const availableCash = totalCashValue !== null ? totalCashValue - cashLockedInCsps : null;
+
+  response.json({
+    coveredCalls: byStrategy.covered_call,
+    cashSecuredPuts: byStrategy.cash_secured_put,
+    unstructured: byStrategy.unstructured,
+    availableCash,
+  });
+});
+
+// Per-strategy Day/WTD/MTD/YTD P&L table (2026-08-28) — realized+unrealized
+// combined, computed live (see strategyPeriodPnl.ts for why: more
+// resilient to a missed snapshot night than a hard nightly delta table).
+// "residual" is the trusted account-level total minus the three known
+// buckets — see knownStrategyKeys comment above.
+dashboardRouter.get("/period-pnl-by-strategy", async (_request, response) => {
+  const [byStrategy, accountPeriods] = await Promise.all([computeStrategyPeriodPnl(), loadPeriodPnl()]);
+
+  const totals = { day: 0, week: 0, month: 0, year: 0 };
+  const rows: Record<string, { day: number; week: number; month: number; year: number }> = {};
+  for (const key of knownStrategyKeys) rows[key] = { day: 0, week: 0, month: 0, year: 0 };
+  for (const row of byStrategy) {
+    if (row.strategyKey in rows) {
+      rows[row.strategyKey] = { day: row.day, week: row.week, month: row.month, year: row.year };
+    }
+    totals.day += row.day;
+    totals.week += row.week;
+    totals.month += row.month;
+    totals.year += row.year;
+  }
+
+  const accountTotal = {
+    day: Number(accountPeriods.day ?? 0),
+    week: Number(accountPeriods.week ?? 0),
+    month: Number(accountPeriods.month ?? 0),
+    year: Number(accountPeriods.year ?? 0),
+  };
+  const residual = {
+    day: accountTotal.day - totals.day,
+    week: accountTotal.week - totals.week,
+    month: accountTotal.month - totals.month,
+    year: accountTotal.year - totals.year,
+  };
+
+  response.json({
+    coveredCalls: rows.covered_call,
+    cashSecuredPuts: rows.cash_secured_put,
+    unstructured: rows.unstructured,
+    residual,
+    total: accountTotal,
+  });
+});
+
+// Powers the P&L Over Time chart — account-level daily_pnl/net-liq series
+// (unchanged) plus, per day, the CC/CSP/Unstructured/Residual breakdown for
+// the multi-series view (2026-08-28). Residual per day = that day's trusted
+// account total minus the three known buckets, same plug-figure logic as
+// /period-pnl-by-strategy.
+dashboardRouter.get("/events", async (request, response) => {
+  const limit = Math.min(Number(request.query.limit) || 40, 200);
+  const events = await fetchPositionEvents(limit);
+  response.json(events);
 });
 
 dashboardRouter.get("/history", async (request, response) => {
   const days = Math.min(Number(request.query.days) || defaultHistoryDays, 365);
 
-  const result = await db.raw(
-    `
-    SELECT snapshot_date AS "snapshotDate", daily_pnl AS "dailyPnl", net_liquidation_value AS "netLiquidationValue"
-    FROM account_pnl_snapshots
-    ORDER BY snapshot_date DESC
-    LIMIT ?
-    `,
-    [days],
-  );
+  const [accountResult, strategySeries] = await Promise.all([
+    db.raw(
+      `
+      SELECT snapshot_date AS "snapshotDate", daily_pnl AS "dailyPnl", net_liquidation_value AS "netLiquidationValue"
+      FROM account_pnl_snapshots
+      ORDER BY snapshot_date DESC
+      LIMIT ?
+      `,
+      [days],
+    ),
+    computeStrategyDailyPnlSeries(days),
+  ]);
 
-  response.json(result.rows.reverse());
+  const byDateAndStrategy = new Map<string, Record<string, number>>();
+  for (const row of strategySeries) {
+    const dateKey = new Date(row.snapshotDate).toISOString().slice(0, 10);
+    if (!byDateAndStrategy.has(dateKey)) byDateAndStrategy.set(dateKey, {});
+    byDateAndStrategy.get(dateKey)![row.strategyKey] = row.dailyPnl;
+  }
+
+  const rows = accountResult.rows.reverse().map((row: { snapshotDate: string; dailyPnl: string | null; netLiquidationValue: string | null }) => {
+    const dateKey = new Date(row.snapshotDate).toISOString().slice(0, 10);
+    const strategiesForDay = byDateAndStrategy.get(dateKey) ?? {};
+    const coveredCalls = strategiesForDay.covered_call ?? 0;
+    const cashSecuredPuts = strategiesForDay.cash_secured_put ?? 0;
+    const unstructured = strategiesForDay.unstructured ?? 0;
+    const dailyPnl = row.dailyPnl === null ? null : Number(row.dailyPnl);
+    return {
+      ...row,
+      coveredCalls,
+      cashSecuredPuts,
+      unstructured,
+      residual: dailyPnl === null ? null : dailyPnl - coveredCalls - cashSecuredPuts - unstructured,
+    };
+  });
+
+  response.json(rows);
 });

@@ -15,6 +15,8 @@ export const positionSelect = `
     p.notes,
     p.price_target AS "priceTarget",
     p.close_trigger_notes AS "closeTriggerNotes",
+    p.close_reason AS "closeReason",
+    p.unstructured_reason AS "unstructuredReason",
     t.id AS "tickerId",
     t.symbol,
     t.company_name AS "companyName",
@@ -94,6 +96,8 @@ export interface PositionRow {
   legs: PositionLegRow[];
   realizedPnl: string;
   capitalAtRisk: string | null;
+  closeReason: string | null;
+  unstructuredReason: string | null;
 }
 
 export async function fetchPositionById(positionId: string): Promise<PositionRow | undefined> {

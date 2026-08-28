@@ -470,6 +470,90 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
  * upsertLeftoverStockPosition) is surfaced as strategy_key "unstructured"
  * rather than hidden.
  */
+async function logPlatformAnomaly(
+  anomalyType: string,
+  detail: string,
+  ids: { positionId?: string; orderRequestId?: string } = {},
+): Promise<void> {
+  await db("platform_anomalies").insert({
+    anomaly_type: anomalyType,
+    position_id: ids.positionId ?? null,
+    order_request_id: ids.orderRequestId ?? null,
+    detail,
+  });
+}
+
+// Stock-only leftover (no calls sold against it at all) traces back to
+// exactly one of two known causes: a covered call's short call expired
+// worthless (its own close_reason already recorded that), or a
+// cash-secured put got assigned (same). Looked up by the most recently
+// closed covered_call/cash_secured_put position on this ticker — if
+// neither matches, this is a genuinely unexplained appearance of stock and
+// gets logged as a platform anomaly rather than silently labeled.
+async function determineLeftoverStockReason(symbol: string): Promise<string> {
+  const ticker = await db("tickers").where({ symbol }).first();
+  if (!ticker) return "unknown";
+
+  const recentClosed = await db("positions")
+    .where({ ticker_id: ticker.id })
+    .whereIn("strategy_key", ["covered_call", "cash_secured_put"])
+    .whereNotNull("closed_at")
+    .orderBy("closed_at", "desc")
+    .first();
+
+  if (recentClosed?.strategy_key === "covered_call" && recentClosed.close_reason === "expired_worthless") {
+    return "cc_expired_leftover_stock";
+  }
+  if (recentClosed?.strategy_key === "cash_secured_put" && recentClosed.close_reason === "assigned") {
+    return "csp_assigned_stock";
+  }
+  return "unknown";
+}
+
+// Determines why a position closed, for the events feed and for
+// notifyPositionExpired — computed once here instead of re-derived by
+// every future reader. "assigned" reuses the exact heuristics already
+// proven out in this file's history: a covered call is assigned iff its
+// stock leg's exit_price got set by a real trade; a cash-secured put is
+// assigned iff a fresh stock leg for the same ticker appeared within the
+// last 5 minutes (the only way shares show up for a strategy with no stock
+// leg of its own).
+async function determineCloseReason(positionId: string): Promise<string> {
+  const position = await fetchPositionById(positionId);
+  if (!position) return "unknown";
+
+  const stockLeg = position.legs.find((leg: PositionLegRow) => leg.legType === "stock");
+  if (position.strategyKey === "covered_call") {
+    if (stockLeg && stockLeg.exitPrice !== null) return "assigned";
+  } else if (position.strategyKey === "cash_secured_put") {
+    const ticker = await db("tickers").where({ symbol: position.symbol }).first();
+    const recentStockLeg = ticker
+      ? await db("position_legs as pl")
+          .join("positions as p", "p.id", "pl.position_id")
+          .where({ "p.ticker_id": ticker.id, "pl.leg_type": "stock" })
+          .andWhere("pl.entry_at", ">=", db.raw("now() - interval '5 minutes'"))
+          .first()
+      : undefined;
+    if (recentStockLeg) return "assigned";
+  }
+
+  const closingTrade = await db("trades as t")
+    .join("position_legs as pl", "pl.id", "t.position_leg_id")
+    .where({ "pl.position_id": positionId, "t.is_closing_trade": true })
+    .first();
+  if (closingTrade) {
+    const orderRequest = await db("order_requests").where({ related_position_id: positionId, status: "filled" }).first();
+    return orderRequest ? "closed_via_app" : "closed_via_external_trade";
+  }
+
+  const hasExpiredOptionLeg = position.legs.some(
+    (leg: PositionLegRow) => leg.legType === "option" && leg.exitAt !== null,
+  );
+  if (hasExpiredOptionLeg) return "expired_worthless";
+
+  return "unknown";
+}
+
 async function runReconciliationPass(): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
   if (!ib) return;
@@ -522,11 +606,24 @@ async function runReconciliationPass(): Promise<void> {
       const nonPutLegs = positionsForSymbol.filter((p) => !shortPutLegs.includes(p));
       if (nonPutLegs.length > 0) {
         // Doesn't cleanly pair — surfaced, not hidden (approved 2026-08-24).
+        // Stock-only leftover has two known causes (see
+        // determineLeftoverStockReason); any short call present alongside it
+        // is a naked/uncovered call, which nothing in this app should ever
+        // produce — always an unknown-cause anomaly.
+        const hasCallLeg = nonPutLegs.some((p) => p.contract.secType === SecType.OPT);
+        const reason = hasCallLeg ? "unknown" : await determineLeftoverStockReason(symbol);
         await upsertSyncedPosition(
           symbol,
           "unstructured",
           nonPutLegs.map((leg) => ({ held: leg, side: leg.quantity > 0 ? ("long" as const) : ("short" as const) })),
+          reason,
         );
+        if (reason === "unknown") {
+          await logPlatformAnomaly(
+            hasCallLeg ? "naked_call_detected" : "unexplained_leftover_stock",
+            `${symbol}: reconciliation flagged unstructured with no known cause`,
+          );
+        }
       }
     }
   }
@@ -576,8 +673,17 @@ async function runReconciliationPass(): Promise<void> {
     const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
     if (remainingOpenLegs.length === 0) {
       await db("positions").where({ id: leg.position_id }).update({ status: "closed", closed_at: db.fn.now() });
+      const closeReason = await determineCloseReason(leg.position_id);
+      await db("positions").where({ id: leg.position_id }).update({ close_reason: closeReason });
+      if (closeReason === "unknown" || closeReason === "closed_via_external_trade") {
+        await logPlatformAnomaly(
+          closeReason === "unknown" ? "unexplained_position_close" : "position_closed_outside_app",
+          `Position ${leg.position_id} closed with reason "${closeReason}"`,
+          { positionId: leg.position_id },
+        );
+      }
       if (positionIdsWithExpiredLeg.has(leg.position_id)) {
-        await notifyPositionExpired(leg.position_id).catch((error) =>
+        await notifyPositionExpired(leg.position_id, closeReason).catch((error) =>
           console.error(`Expiry notification failed for position ${leg.position_id}: ${error}`),
         );
       }
@@ -592,35 +698,15 @@ async function runReconciliationPass(): Promise<void> {
 // toast too. Sends both the Telegram message and the in-app toast
 // notification (routes/notifications.ts's SSE stream) off the same
 // message text, so they never drift apart.
-async function notifyPositionExpired(positionId: string): Promise<void> {
+async function notifyPositionExpired(positionId: string, closeReason: string): Promise<void> {
   const position = await fetchPositionById(positionId);
   if (!position) return;
+  if (position.strategyKey !== "covered_call" && position.strategyKey !== "cash_secured_put") return;
 
-  const stockLeg = position.legs.find((leg: PositionLegRow) => leg.legType === "stock");
   const realizedPnl = Number(position.realizedPnl);
   const capitalAtRisk = position.capitalAtRisk === null ? null : Number(position.capitalAtRisk);
   const realizedPnlPercent = capitalAtRisk && capitalAtRisk !== 0 ? (realizedPnl / capitalAtRisk) * 100 : null;
-
-  // Covered call: assigned iff the paired stock leg actually sold (a real
-  // trade set its exit_price) rather than just rolling over into a fresh
-  // position under a new option (see upsertSplitCoveredCallPosition — the
-  // stock leg's "close" there is an accounting re-slice, not a real sale,
-  // and never has a trade behind it). Cash-secured put: assigned iff a
-  // fresh stock leg for the same ticker appeared just now — the only way
-  // shares show up for a strategy with no stock leg of its own.
-  let assigned = false;
-  if (position.strategyKey === "covered_call") {
-    assigned = stockLeg !== undefined && stockLeg.exitPrice !== null;
-  } else if (position.strategyKey === "cash_secured_put") {
-    const recentStockLeg = await db("position_legs as pl")
-      .join("positions as p", "p.id", "pl.position_id")
-      .where({ "p.ticker_id": (await db("tickers").where({ symbol: position.symbol }).first())?.id, "pl.leg_type": "stock" })
-      .andWhere("pl.entry_at", ">=", db.raw("now() - interval '5 minutes'"))
-      .first();
-    assigned = recentStockLeg !== undefined;
-  } else {
-    return;
-  }
+  const assigned = closeReason === "assigned";
 
   const message = formatPositionExpiredMessage({
     symbol: position.symbol,
@@ -772,6 +858,7 @@ async function upsertSyncedPosition(
   symbol: string,
   strategyKey: string,
   legs: { held: IbkrHeldPosition; side: "long" | "short" }[],
+  unstructuredReason: string | null = null,
 ): Promise<void> {
   const conIds = legs.map((leg) => String(leg.held.contract.conId));
   const existingLegs = await db("position_legs").whereIn("ibkr_contract_id", conIds).whereNull("exit_at");
@@ -784,12 +871,12 @@ async function upsertSyncedPosition(
       return;
     }
     const [newPosition] = await db("positions")
-      .insert({ strategy_key: strategyKey, ticker_id: ticker.id, status: "open" })
+      .insert({ strategy_key: strategyKey, ticker_id: ticker.id, status: "open", unstructured_reason: unstructuredReason })
       .returning(["id"]);
     positionId = newPosition.id;
     await backfillAlertResultingPositionId(symbol, positionId!);
   } else {
-    await db("positions").where({ id: positionId }).update({ strategy_key: strategyKey });
+    await db("positions").where({ id: positionId }).update({ strategy_key: strategyKey, unstructured_reason: unstructuredReason });
   }
 
   for (const leg of legs) {
