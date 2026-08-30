@@ -128,3 +128,20 @@ export async function fetchPositionById(positionId: string): Promise<PositionRow
   const result = await db.raw(`${positionSelect} WHERE p.id = ?`, [positionId]);
   return result.rows[0];
 }
+
+// Shares of a symbol already held that aren't spoken for by an existing
+// paired covered_call (that stock is already covering its own short call) —
+// i.e. long-stock legs sitting on that symbol's open `unstructured`
+// positions, most commonly leftover shares from a covered call whose short
+// call expired worthless or a cash-secured put that got assigned. Used by
+// POST /orders' covered-call auto-fill so opening a new call against a
+// symbol that already has bare stock doesn't double-buy a fresh lot.
+export async function fetchAvailableUncoveredShares(tickerId: string): Promise<number> {
+  const result = await db("position_legs as pl")
+    .join("positions as p", "p.id", "pl.position_id")
+    .where({ "p.ticker_id": tickerId, "p.status": "open", "p.strategy_key": "unstructured", "pl.leg_type": "stock", "pl.side": "long" })
+    .whereNull("pl.exit_at")
+    .sum({ total: "pl.quantity" })
+    .first();
+  return Number(result?.total ?? 0);
+}

@@ -2,7 +2,7 @@ import { Router } from "express";
 import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { positionSelect } from "../lib/positionQueries.js";
+import { positionSelect, fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 import { fetchLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
@@ -422,20 +422,40 @@ positionsRouter.post("/orders", async (request, response) => {
   // over-coverage or a specific stock limit) — approved 2026-08-24 so
   // Genosuke stops asking "how many shares?" for the common case. Only
   // covered_call needs a stock leg at all; cash_secured_put never does.
+  //
+  // Auto-fill nets against shares already sitting uncovered on this symbol
+  // (e.g. leftover stock from a covered call whose short call expired
+  // worthless, or a cash-secured put assignment) rather than always buying a
+  // fresh full lot — approved 2026-08-31, see PROGRESS.md's "re-write a
+  // covered call after non-assignment" note. Only the auto-fill path nets;
+  // an explicit `stock` override is used exactly as given (unchanged from
+  // 2026-08-24 — the whole point of an override is caller-controlled
+  // quantity, e.g. deliberate over-coverage).
   let resolvedStock = stock;
+  let excessUncoveredShares = 0;
   if (strategyKey === "covered_call" && !resolvedStock) {
-    const livePrices = await fetchLivePrices([{ key: "stock", legType: "stock", symbol: ticker.symbol }]);
-    const price = livePrices["stock"];
-    if (price === null || price === undefined) {
-      response.status(400).json({
-        error: "Could not fetch a live stock price to auto-fill the stock leg (markets may be closed) — pass stock.quantity/stock.limitPrice explicitly.",
-      });
-      return;
+    const requiredShares = option.quantity * 100;
+    const availableUncovered = await fetchAvailableUncoveredShares(ticker.id);
+    const shortfall = Math.max(0, requiredShares - availableUncovered);
+    excessUncoveredShares = Math.max(0, availableUncovered - requiredShares);
+
+    if (shortfall > 0) {
+      const livePrices = await fetchLivePrices([{ key: "stock", legType: "stock", symbol: ticker.symbol }]);
+      const price = livePrices["stock"];
+      if (price === null || price === undefined) {
+        response.status(400).json({
+          error: "Could not fetch a live stock price to auto-fill the stock leg (markets may be closed) — pass stock.quantity/stock.limitPrice explicitly.",
+        });
+        return;
+      }
+      resolvedStock = { quantity: shortfall, limitPrice: roundToCents(price) };
     }
-    resolvedStock = { quantity: option.quantity * 100, limitPrice: roundToCents(price) };
+    // else: already-held uncovered shares fully cover this contract count — no stock leg needed at all.
   }
 
-  if (strategyKey === "covered_call") {
+  if (strategyKey === "covered_call" && stock) {
+    // Explicit-override path only — auto-fill above is correct by
+    // construction (shortfall is exactly requiredShares - availableUncovered).
     const coverageError = validateCoveredCallCoverage(resolvedStock!.quantity, option.quantity * 100);
     if (coverageError) {
       response.status(400).json({ error: coverageError });
@@ -444,13 +464,13 @@ positionsRouter.post("/orders", async (request, response) => {
   }
 
   const legs: OrderLegPayload[] = [];
-  if (strategyKey === "covered_call") {
+  if (strategyKey === "covered_call" && resolvedStock) {
     legs.push({
       role: "stock",
       action: OrderAction.BUY,
       symbol: ticker.symbol,
-      quantity: resolvedStock!.quantity,
-      unitPrice: roundToCents(resolvedStock!.limitPrice),
+      quantity: resolvedStock.quantity,
+      unitPrice: roundToCents(resolvedStock.limitPrice),
     });
   }
   legs.push({
@@ -491,7 +511,11 @@ positionsRouter.post("/orders", async (request, response) => {
     .returning("*");
 
   await publishNotification({ type: "order_status", orderId: orderRequest.id });
-  response.status(201).json(serializeOrderRequest(orderRequest));
+  const note =
+    excessUncoveredShares > 0
+      ? `${excessUncoveredShares} uncovered share(s) of ${ticker.symbol} remain beyond what this order uses — worth checking whether an additional contract is worth selling.`
+      : null;
+  response.status(201).json({ ...serializeOrderRequest(orderRequest), note });
 });
 
 positionsRouter.get("/orders", async (request, response) => {
