@@ -9,6 +9,7 @@ import { fetchLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetch
 import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
+import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning } from "../ibkr/calendarConflict.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -515,7 +516,8 @@ positionsRouter.post("/orders", async (request, response) => {
     excessUncoveredShares > 0
       ? `${excessUncoveredShares} uncovered share(s) of ${ticker.symbol} remain beyond what this order uses — worth checking whether an additional contract is worth selling.`
       : null;
-  response.status(201).json({ ...serializeOrderRequest(orderRequest), note });
+  const calendarWarning = formatEconomicCalendarWarning(await fetchEconomicCalendarWarningEvents(normalizedExpiry));
+  response.status(201).json({ ...serializeOrderRequest(orderRequest), note, calendarWarning });
 });
 
 positionsRouter.get("/orders", async (request, response) => {
@@ -928,7 +930,8 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     .returning("*");
 
   await publishNotification({ type: "order_status", orderId: orderRequest.id });
-  response.status(201).json(serializeOrderRequest(orderRequest));
+  const calendarWarning = formatEconomicCalendarWarning(await fetchEconomicCalendarWarningEvents(normalizedNewLegExpiry));
+  response.status(201).json({ ...serializeOrderRequest(orderRequest), calendarWarning });
 });
 
 // Builds an order_requests row (request_type "close_position") for a combo

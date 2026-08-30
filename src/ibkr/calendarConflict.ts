@@ -54,3 +54,33 @@ export function findCalendarConflict(
   }
   return null;
 }
+
+export interface EconomicCalendarWarningEvent {
+  title: string;
+  eventDate: string; // YYYY-MM-DD
+  importance: number;
+}
+
+/**
+ * Non-blocking economic-calendar warning (CPI, FOMC, etc.) for the window
+ * between today and an order's expiry — advisory-only per Marcelo's
+ * 2026-08-31 decision, unlike earnings/ex-dividend which hard-exclude via
+ * findCalendarConflict above. Medium/High importance only (>= 1), matching
+ * the Calendar screen's own display filter (economic_calendar_events is a
+ * standalone US macro feed, not ticker-scoped).
+ */
+export async function fetchEconomicCalendarWarningEvents(expiryYyyymmdd: string): Promise<EconomicCalendarWarningEvent[]> {
+  const rows: EconomicCalendarWarningEvent[] = await db("economic_calendar_events")
+    .whereRaw("event_at::date >= CURRENT_DATE")
+    .andWhereRaw("event_at::date <= to_date(?, 'YYYYMMDD')", [expiryYyyymmdd])
+    .andWhere("importance", ">=", 1)
+    .orderBy("event_at", "asc")
+    .select("title", db.raw(`event_at::date::text as "eventDate"`), "importance");
+  return rows;
+}
+
+export function formatEconomicCalendarWarning(events: EconomicCalendarWarningEvent[]): string | null {
+  if (events.length === 0) return null;
+  const list = events.map((event) => `${event.title} (${event.eventDate})`).join("; ");
+  return `${events.length} economic event${events.length === 1 ? "" : "s"} before expiry: ${list}`;
+}
