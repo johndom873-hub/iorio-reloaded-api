@@ -1,6 +1,7 @@
 import { EventName, OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
+import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import {
@@ -36,6 +37,11 @@ export interface AlertCandidate {
   // blackScholesPop.ts's header for why, and its "pending validation" note.
   // Null when the underlying quote had no usable IV.
   probabilityOfProfit: number | null;
+  // True when this ticker has never resolved to a TradingView symbol, so its
+  // earnings/ex-dividend calendar couldn't be checked — the candidate was
+  // NOT excluded on that basis (absence of data isn't evidence of absence of
+  // an event), but the caller should say so rather than imply a clean check.
+  calendarUnverified: boolean;
 }
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -149,6 +155,7 @@ function rankCandidates(
   strategyKey: AlertStrategyKey,
   settings: AlertStrategySettings,
   spotPrice: number,
+  calendarContext: CalendarConflictContext,
 ): AlertCandidate[] {
   const optionType = right === "call" ? OptionType.Call : OptionType.Put;
   const today = new Date();
@@ -164,6 +171,8 @@ function rankCandidates(
 
     const dte = daysBetween(today, parseExpiry(quote.expiry));
     if (dte <= 0) continue;
+    const expiryIso = toIsoDate(quote.expiry);
+    if (findCalendarConflict(calendarContext, strategyKey, expiryIso)) continue;
     const capitalAtRisk = strategyKey === "covered_call" ? spotPrice : quote.strike;
     const annualizedYield = (premium / capitalAtRisk) * (365 / dte);
     const probabilityOfProfit =
@@ -179,7 +188,7 @@ function rankCandidates(
         : null;
 
     candidates.push({
-      expiry: toIsoDate(quote.expiry),
+      expiry: expiryIso,
       strike: quote.strike,
       right,
       delta: quote.delta,
@@ -188,6 +197,7 @@ function rankCandidates(
       annualizedYield,
       spotPrice,
       probabilityOfProfit,
+      calendarUnverified: !calendarContext.resolved,
     });
   }
 
@@ -202,6 +212,10 @@ function rankCandidates(
  * capitalAtRisk = spot price for a covered call (the stock you'd hold),
  * strike price for a cash-secured put (the cash you'd reserve). Returns
  * candidates sorted descending by yield — caller decides how many to keep.
+ * Also silently drops any candidate whose expiry would leave it open across
+ * a known earnings date (either strategy) or ex-dividend date (covered calls
+ * only) — see calendarConflict.ts. A ticker with no calendar data at all
+ * isn't excluded on that basis (see AlertCandidate.calendarUnverified).
  *
  * Single-strategy, single-ticker: used by the roll scan (generateRollCandidates.ts),
  * which only ever needs one strategy's replacement for one leg at a time. The
@@ -212,6 +226,7 @@ function rankCandidates(
 export async function generateTradeAlertCandidates(
   connection: IbkrConnection,
   symbol: string,
+  tickerId: string,
   strategyKey: AlertStrategyKey,
   settings: AlertStrategySettings,
 ): Promise<AlertCandidate[]> {
@@ -236,8 +251,11 @@ export async function generateTradeAlertCandidates(
   );
   if (expiryStrikes.length === 0) return [];
 
-  const quotes = await quoteOptionChain(connection, symbol, expiryStrikes);
-  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice);
+  const [quotes, calendarContext] = await Promise.all([
+    quoteOptionChain(connection, symbol, expiryStrikes),
+    fetchCalendarConflictContext(tickerId),
+  ]);
+  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice, calendarContext);
 }
 
 /**
@@ -254,6 +272,7 @@ export async function generateTradeAlertCandidates(
 export async function generateTradeAlertCandidatesForTicker(
   connection: IbkrConnection,
   symbol: string,
+  tickerId: string,
   settingsByStrategy: Map<AlertStrategyKey, AlertStrategySettings>,
 ): Promise<Map<AlertStrategyKey, AlertCandidate[]>> {
   const { ib } = connection;
@@ -296,9 +315,12 @@ export async function generateTradeAlertCandidatesForTicker(
   }
   if (contracts.length === 0) return results;
 
-  const quotes = await fetchQuotesForContracts(ib, symbol, contracts);
+  const [quotes, calendarContext] = await Promise.all([
+    fetchQuotesForContracts(ib, symbol, contracts),
+    fetchCalendarConflictContext(tickerId),
+  ]);
   for (const { strategyKey, settings, right } of preps) {
-    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice));
+    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice, calendarContext));
   }
   return results;
 }

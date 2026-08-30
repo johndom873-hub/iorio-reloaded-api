@@ -6,6 +6,7 @@ import { daysBetween, parseExpiry, quoteOptionChain, type OptionQuote } from "./
 import { decayThresholdFraction, dteThreshold } from "./generateRollCandidates.js";
 import type { AlertCandidate, AlertStrategyKey } from "./generateTradeAlertCandidates.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
+import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
@@ -39,6 +40,7 @@ async function refreshNewTradeCandidate(
   symbol: string,
   strategyKey: AlertStrategyKey,
   candidate: AlertCandidate,
+  calendarContext: CalendarConflictContext,
 ): Promise<AlertCandidate | string> {
   const [pricing, quote] = await Promise.all([
     lookupPricingSnapshot(connection, symbol, 2),
@@ -75,22 +77,41 @@ async function refreshNewTradeCandidate(
     annualizedYield: (premium / capitalAtRisk) * (365 / dte),
     spotPrice,
     probabilityOfProfit,
+    calendarUnverified: !calendarContext.resolved,
   };
 }
 
-function rationaleForRefreshedNewTrade(strategyKey: AlertStrategyKey, symbol: string, candidate: AlertCandidate): string {
+// Unlike generation (rankCandidates), refresh never drops a candidate for a
+// calendar conflict — it's re-quoting a single already-chosen contract, and
+// per this file's header comment the whole point of refresh is to surface
+// drift, not hide it. A confirmed conflict here just becomes a visible
+// warning in the rationale text instead.
+function calendarNote(strategyKey: AlertStrategyKey, calendarContext: CalendarConflictContext, expiryIso: string, unverified: boolean): string {
+  const conflict = findCalendarConflict(calendarContext, strategyKey, expiryIso);
+  if (conflict) {
+    const label = conflict.eventType === "earnings" ? "an earnings release" : "an ex-dividend date";
+    return ` ⚠ Calendar conflict: ${label} on ${conflict.eventDate} falls before this expiry — position would remain open across the event.`;
+  }
+  if (unverified) return " (earnings/ex-div calendar unverified for this ticker — not yet resolved on TradingView)";
+  return "";
+}
+
+function rationaleForRefreshedNewTrade(strategyKey: AlertStrategyKey, symbol: string, candidate: AlertCandidate, calendarContext: CalendarConflictContext): string {
   const action = strategyKey === "covered_call" ? "Sell 1x call" : "Sell 1x put";
   const pct = (candidate.annualizedYield * 100).toFixed(1);
-  return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.`;
+  const note = calendarNote(strategyKey, calendarContext, candidate.expiry, candidate.calendarUnverified);
+  return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
 }
 
 function rationaleForRefreshedRoll(
   symbol: string,
+  strategyKey: AlertStrategyKey,
   closeLeg: { strike: number; expiry: string; right: "call" | "put"; entryPrice: number; currentPrice: number },
   trigger: "decay" | "dte",
   stillTriggered: boolean,
   dte: number,
   replacement: AlertCandidate,
+  calendarContext: CalendarConflictContext,
 ): string {
   const rightLabel = closeLeg.right === "call" ? "call" : "put";
   const triggerLabel =
@@ -99,7 +120,8 @@ function rationaleForRefreshedRoll(
       : `${dte} DTE remaining (≤21)`;
   const pct = (replacement.annualizedYield * 100).toFixed(1);
   const staleness = stillTriggered ? "" : " (no longer meets a roll trigger as of this refresh — re-check before acting)";
-  return `Roll ${symbol} $${closeLeg.strike.toFixed(2)}${closeLeg.right === "call" ? "C" : "P"} exp ${closeLeg.expiry} — ${triggerLabel}${staleness}. Suggested replacement: sell 1x ${rightLabel} $${replacement.strike.toFixed(2)} strike exp ${replacement.expiry} (${replacement.dte} DTE, Δ${replacement.delta.toFixed(2)}) for $${replacement.premium.toFixed(2)} premium — ${pct}% annualized yield.`;
+  const note = calendarNote(strategyKey, calendarContext, replacement.expiry, replacement.calendarUnverified);
+  return `Roll ${symbol} $${closeLeg.strike.toFixed(2)}${closeLeg.right === "call" ? "C" : "P"} exp ${closeLeg.expiry} — ${triggerLabel}${staleness}. Suggested replacement: sell 1x ${rightLabel} $${replacement.strike.toFixed(2)} strike exp ${replacement.expiry} (${replacement.dte} DTE, Δ${replacement.delta.toFixed(2)}) for $${replacement.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
 }
 
 /**
@@ -129,18 +151,19 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
   }
 
   const strategyKey = alert.strategy_key as AlertStrategyKey;
+  const calendarContext = await fetchCalendarConflictContext(alert.ticker_id as string);
   const connection = await connectToIbkrGateway();
   try {
     connection.ib.reqMarketDataType(MarketDataType.DELAYED);
 
     if (alert.alert_type === "new_trade") {
       const candidate = alert.suggested_structure as AlertCandidate;
-      const refreshed = await refreshNewTradeCandidate(connection, alert.symbol, strategyKey, candidate);
+      const refreshed = await refreshNewTradeCandidate(connection, alert.symbol, strategyKey, candidate, calendarContext);
       if (typeof refreshed === "string") return { ok: false, error: refreshed };
 
       await db("trade_alerts").where({ id: alertId }).update({
         suggested_structure: JSON.stringify(refreshed),
-        rationale: rationaleForRefreshedNewTrade(strategyKey, alert.symbol, refreshed),
+        rationale: rationaleForRefreshedNewTrade(strategyKey, alert.symbol, refreshed, calendarContext),
         last_refreshed_at: db.fn.now(),
       });
       return { ok: true };
@@ -166,7 +189,7 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
     const stillTriggered = decayed || nearExpiry;
     const trigger: "decay" | "dte" = decayed ? "decay" : "dte";
 
-    const refreshedReplacement = await refreshNewTradeCandidate(connection, alert.symbol, strategyKey, structure.replacement);
+    const refreshedReplacement = await refreshNewTradeCandidate(connection, alert.symbol, strategyKey, structure.replacement, calendarContext);
     if (typeof refreshedReplacement === "string") return { ok: false, error: refreshedReplacement };
 
     const refreshedCloseLeg = { ...structure.closeLeg, currentPrice };
@@ -180,7 +203,7 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
           replacement: refreshedReplacement,
           stillTriggered,
         }),
-        rationale: rationaleForRefreshedRoll(alert.symbol, refreshedCloseLeg, trigger, stillTriggered, closeDte, refreshedReplacement),
+        rationale: rationaleForRefreshedRoll(alert.symbol, strategyKey, refreshedCloseLeg, trigger, stillTriggered, closeDte, refreshedReplacement, calendarContext),
         last_refreshed_at: db.fn.now(),
       });
     return { ok: true };

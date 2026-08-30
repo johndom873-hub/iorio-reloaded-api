@@ -13,6 +13,7 @@ type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 export interface OpenShortLeg {
   legId: string;
   symbol: string;
+  tickerId: string;
   strike: number;
   expiry: string; // YYYYMMDD
   right: "call" | "put";
@@ -72,7 +73,7 @@ export async function evaluateRollCandidate(
   if (!decayed && !nearExpiry) return null;
   const trigger: "decay" | "dte" = decayed ? "decay" : "dte";
 
-  const candidates = await generateTradeAlertCandidates(connection, leg.symbol, strategyKey, settings);
+  const candidates = await generateTradeAlertCandidates(connection, leg.symbol, leg.tickerId, strategyKey, settings);
   const replacement = candidates.find((c) => !(c.strike === leg.strike && c.expiry === toIsoDate(leg.expiry)));
   if (!replacement) return null;
 

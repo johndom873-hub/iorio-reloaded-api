@@ -17,7 +17,6 @@ interface ShortlistedTickerRow {
 
 interface OpenShortLegRow extends OpenShortLeg {
   positionId: string;
-  tickerId: string;
   strategyKey: AlertStrategyKey;
 }
 
@@ -44,12 +43,22 @@ export interface TradeAlertGenerationResult {
   totalNewAlerts: number;
 }
 
+// Appended to a rationale whenever the candidate's calendar check couldn't
+// run (ticker never resolved to a TradingView symbol) — distinguishes "no
+// conflict found" from "not actually checked." See calendarConflict.ts.
+const calendarUnverifiedNote = " (earnings/ex-div calendar unverified for this ticker — not yet resolved on TradingView)";
+
 // Exported for refreshTickerTradeAlerts.ts (single-ticker refresh) to reuse
 // verbatim rather than duplicating this formatting logic.
-export function rationaleFor(strategyKey: AlertStrategyKey, symbol: string, candidate: { strike: number; expiry: string; dte: number; delta: number; premium: number; annualizedYield: number }): string {
+export function rationaleFor(
+  strategyKey: AlertStrategyKey,
+  symbol: string,
+  candidate: { strike: number; expiry: string; dte: number; delta: number; premium: number; annualizedYield: number; calendarUnverified?: boolean },
+): string {
   const action = strategyKey === "covered_call" ? "Sell 1x call" : "Sell 1x put";
   const pct = (candidate.annualizedYield * 100).toFixed(1);
-  return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.`;
+  const note = candidate.calendarUnverified ? calendarUnverifiedNote : "";
+  return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
 }
 
 function rationaleForRoll(symbol: string, leg: OpenShortLeg, suggestion: RollSuggestion): string {
@@ -60,7 +69,8 @@ function rationaleForRoll(symbol: string, leg: OpenShortLeg, suggestion: RollSug
       : `${suggestion.dte} DTE remaining (≤21)`;
   const r = suggestion.replacement;
   const pct = (r.annualizedYield * 100).toFixed(1);
-  return `Roll ${symbol} $${leg.strike.toFixed(2)}${leg.right === "call" ? "C" : "P"} exp ${toIsoDate(leg.expiry)} — ${triggerLabel}. Suggested replacement: sell 1x ${rightLabel} $${r.strike.toFixed(2)} strike exp ${r.expiry} (${r.dte} DTE, Δ${r.delta.toFixed(2)}) for $${r.premium.toFixed(2)} premium — ${pct}% annualized yield.`;
+  const note = r.calendarUnverified ? calendarUnverifiedNote : "";
+  return `Roll ${symbol} $${leg.strike.toFixed(2)}${leg.right === "call" ? "C" : "P"} exp ${toIsoDate(leg.expiry)} — ${triggerLabel}. Suggested replacement: sell 1x ${rightLabel} $${r.strike.toFixed(2)} strike exp ${r.expiry} (${r.dte} DTE, Δ${r.delta.toFixed(2)}) for $${r.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
 }
 
 function toIsoDate(expiryYyyymmdd: string): string {
@@ -221,7 +231,7 @@ export async function runTradeAlertGeneration(
       tickersScanned++;
       let candidatesByStrategy: Awaited<ReturnType<typeof generateTradeAlertCandidatesForTicker>>;
       try {
-        candidatesByStrategy = await generateTradeAlertCandidatesForTicker(connection, ticker.symbol, settingsByStrategy);
+        candidatesByStrategy = await generateTradeAlertCandidatesForTicker(connection, ticker.symbol, ticker.tickerId, settingsByStrategy);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         for (const strategyKey of settingsByStrategy.keys()) {

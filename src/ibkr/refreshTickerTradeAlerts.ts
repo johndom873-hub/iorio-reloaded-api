@@ -39,7 +39,7 @@ export async function refreshTickerTradeAlerts(tickerId: string, symbol: string)
       if (settingsRow) settingsByStrategy.set(strategyKey, toSettings(settingsRow));
     }
 
-    const candidatesByStrategy = await generateTradeAlertCandidatesForTicker(connection, symbol, settingsByStrategy);
+    const candidatesByStrategy = await generateTradeAlertCandidatesForTicker(connection, symbol, tickerId, settingsByStrategy);
 
     const results: RefreshTickerTradeAlertsResult[] = [];
     for (const strategyKey of tradeAlertStrategies) {
