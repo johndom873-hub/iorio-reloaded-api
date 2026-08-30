@@ -935,18 +935,30 @@ positionsRouter.post("/:id/roll", async (request, response) => {
 });
 
 // Builds an order_requests row (request_type "close_position") for a combo
-// order closing every currently-open leg at once — same "only the worker
-// writes position_legs/trades" rule as everywhere else above. Every open
-// leg needs a limit price (what you're willing to pay/receive to close it).
+// order closing currently-open legs at once — same "only the worker writes
+// position_legs/trades" rule as everywhere else above. Every included leg
+// needs a limit price (what you're willing to pay/receive to close it).
 //
 // contractsToClose (added 2026-08-25 for downsizing, see PROGRESS.md)
 // drives a partial close entirely off the option leg's contract count —
 // the stock leg's quantity is always derived from it (contractsToClose *
 // multiplier), never independently settable, so a partial close can't
 // unbalance a covered call's coverage ratio. Omitting it closes every leg
-// at full quantity, same as before.
+// at full quantity, same as before. Only applies to structured positions
+// (exactly one option leg) — see the "unstructured" branch below.
+//
+// Unstructured positions (2026-08-31, see PROGRESS.md "close an
+// unstructured position") skip both of the above: their leg mix isn't a
+// known strategy shape, so contractsToClose has nothing sensible to derive
+// from. Instead each leg in `legs[]` carries its own explicit `quantity`,
+// any subset of the position's open legs may be included (partial close),
+// and the worker's existing reconciliation pass (not this route) is what
+// decides whether the position is fully closed afterward.
 positionsRouter.post("/:id/close", async (request, response) => {
-  const { legs, contractsToClose } = request.body as { legs?: { legId: string; limitPrice: number }[]; contractsToClose?: number };
+  const { legs, contractsToClose } = request.body as {
+    legs?: { legId: string; limitPrice: number; quantity?: number }[];
+    contractsToClose?: number;
+  };
 
   if (!legs || legs.length === 0) {
     response.status(400).json({ error: "At least one leg is required." });
@@ -955,6 +967,10 @@ positionsRouter.post("/:id/close", async (request, response) => {
   for (const leg of legs) {
     if (!leg.legId || typeof leg.limitPrice !== "number" || leg.limitPrice < 0) {
       response.status(400).json({ error: "Each leg requires legId and a non-negative limitPrice." });
+      return;
+    }
+    if (leg.quantity !== undefined && (!Number.isInteger(leg.quantity) || leg.quantity <= 0)) {
+      response.status(400).json({ error: "Each leg's quantity, if provided, must be a positive integer." });
       return;
     }
   }
@@ -976,14 +992,29 @@ positionsRouter.post("/:id/close", async (request, response) => {
   const existingLegs = await db("position_legs").where({ position_id: position.id, exit_at: null });
   const existingLegIds = new Set(existingLegs.map((leg) => leg.id));
   const providedLegIds = new Set(legs.map((leg) => leg.legId));
-  const allLegsCovered = existingLegIds.size === providedLegIds.size && [...existingLegIds].every((id) => providedLegIds.has(id));
-  if (!allLegsCovered) {
-    response.status(400).json({ error: "All open legs of this position must be included when closing it." });
-    return;
+  const isUnstructured = position.strategy_key === "unstructured";
+
+  for (const legId of providedLegIds) {
+    if (!existingLegIds.has(legId)) {
+      response.status(400).json({ error: `Leg ${legId} is not an open leg of this position.` });
+      return;
+    }
+  }
+  if (!isUnstructured) {
+    const allLegsCovered = existingLegIds.size === providedLegIds.size && [...existingLegIds].every((id) => providedLegIds.has(id));
+    if (!allLegsCovered) {
+      response.status(400).json({ error: "All open legs of this position must be included when closing it." });
+      return;
+    }
   }
 
-  const optionLegs = existingLegs.filter((leg) => leg.leg_type === "option");
+  const legsToClose = existingLegs.filter((leg) => providedLegIds.has(leg.id));
+  const optionLegs = legsToClose.filter((leg) => leg.leg_type === "option");
   if (contractsToClose !== undefined) {
+    if (isUnstructured) {
+      response.status(400).json({ error: "contractsToClose is not supported for unstructured positions — provide a quantity per leg instead." });
+      return;
+    }
     if (optionLegs.length !== 1) {
       response.status(400).json({ error: "Downsizing only supports positions with exactly one option leg." });
       return;
@@ -995,18 +1026,34 @@ positionsRouter.post("/:id/close", async (request, response) => {
     }
   }
   const optionLeg = optionLegs[0];
+  const quantityByLegId = new Map(legs.map((leg) => [leg.legId, leg.quantity]));
 
   function quantityForLeg(leg: (typeof existingLegs)[number]): number {
+    if (isUnstructured) {
+      const requestedQuantity = quantityByLegId.get(leg.id);
+      return requestedQuantity ?? leg.quantity;
+    }
     if (contractsToClose === undefined) return leg.quantity;
     if (leg.id === optionLeg!.id) return contractsToClose;
     return contractsToClose * optionLeg!.multiplier; // stock leg — derived, never independently set
+  }
+
+  if (isUnstructured) {
+    for (const leg of legsToClose) {
+      if (quantityForLeg(leg) > leg.quantity) {
+        response.status(400).json({
+          error: `Cannot close ${quantityForLeg(leg)} units of leg ${leg.id} — only ${leg.quantity} held.`,
+        });
+        return;
+      }
+    }
   }
 
   // Defensive check: should always divide evenly for a well-formed covered
   // call, but a mismatch means the position's data is inconsistent, and
   // closing anyway risks leaving it unbalanced — a hard stop, not a clamp.
   if (contractsToClose !== undefined) {
-    for (const leg of existingLegs) {
+    for (const leg of legsToClose) {
       if (leg.leg_type === "stock" && quantityForLeg(leg) > leg.quantity) {
         response.status(400).json({
           error: `Derived stock quantity (${quantityForLeg(leg)} shares) exceeds what's held (${leg.quantity} shares) — position data may be inconsistent.`,
@@ -1019,7 +1066,7 @@ positionsRouter.post("/:id/close", async (request, response) => {
   const ticker = await db("tickers").where({ id: position.ticker_id }).first();
   const limitPriceByLegId = new Map(legs.map((leg) => [leg.legId, leg.limitPrice]));
 
-  const orderLegs: OrderLegPayload[] = existingLegs.map((leg) => ({
+  const orderLegs: OrderLegPayload[] = legsToClose.map((leg) => ({
     role: leg.leg_type,
     action: leg.side === "long" ? OrderAction.SELL : OrderAction.BUY, // closing action is the inverse of how it was opened
     symbol: ticker.symbol,
