@@ -4,6 +4,7 @@ import { environment } from "./config/env.js";
 import { handleGenosukeWebhook } from "./genosuke/bot.js";
 import { sessionMiddleware } from "./middleware/session.js";
 import { authRouter } from "./routes/auth.js";
+import { calendarEventsRouter } from "./routes/calendarEvents.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { genosukePreferencesRouter } from "./routes/genosukePreferences.js";
 import { healthRouter } from "./routes/health.js";
@@ -48,6 +49,7 @@ app.use("/notifications", notificationsRouter);
 app.use("/trade-blotter", tradeBlotterRouter);
 app.use("/trade-alerts", tradeAlertsRouter);
 app.use("/system-health", systemHealthRouter);
+app.use("/calendar-events", calendarEventsRouter);
 app.use("/dashboard", dashboardRouter);
 
 // Without this, an uncaught route error (e.g. an IBKR request that rejects)
