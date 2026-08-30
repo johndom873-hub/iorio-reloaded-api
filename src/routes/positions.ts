@@ -5,7 +5,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { positionSelect } from "../lib/positionQueries.js";
 import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { publishNotification } from "../lib/notificationChannel.js";
-import { fetchLiveGreeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import { fetchLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
@@ -163,12 +163,33 @@ positionsRouter.get("/greeks", async (request, response) => {
     right: row.optionType === "call" ? OptionType.Call : OptionType.Put,
   }));
 
-  const greeks = await fetchLiveGreeks(contracts);
-  response.json(greeks);
+  // Same fix as /positions/pnl and /price-performance/current-prices
+  // (2026-08-30): a total connection failure (Gateway unreachable) must
+  // degrade to null greeks per contract, not 500 the whole route or leave
+  // the frontend's per-leg "loading" spinner stuck forever waiting for a
+  // key that will never arrive.
+  let greeks: Record<string, Greeks> = {};
+  try {
+    greeks = await fetchLiveGreeks(contracts);
+  } catch (error) {
+    console.error("positions/greeks: fetchLiveGreeks failed, returning null greeks for every contract", error);
+  }
+  const result: Record<string, Greeks> = {};
+  for (const contract of contracts) {
+    result[contract.key] = greeks[contract.key] ?? { delta: null, gamma: null, vega: null, theta: null };
+  }
+  response.json(result);
 });
 
 export interface UnrealizedPnlResult {
   unrealizedPnl: number | null;
+  // Premium P/L: sum of open option leg(s) only. Stock P/L: the open stock leg
+  // only (covered calls only — always 0 for CSP, which has no stock leg).
+  // Both null together whenever unrealizedPnl itself is null (live pricing
+  // unavailable) or came from the position_pnl_snapshots fallback below,
+  // since that snapshot only stores the blended whole-position figure.
+  unrealizedPremiumPnl: number | null;
+  unrealizedStockPnl: number | null;
   // Set only when unrealizedPnl came from position_pnl_snapshots instead of
   // a live IBKR quote (see the fallback note below) — the date that
   // snapshot was captured, so the UI can label it "as of <date>" rather
@@ -232,22 +253,45 @@ positionsRouter.get("/pnl", async (request, response) => {
     strike: leg.strikePrice ? Number(leg.strikePrice) : undefined,
     right: leg.optionType === "call" ? OptionType.Call : leg.optionType === "put" ? OptionType.Put : undefined,
   }));
-  const pricesByLegId = await fetchLivePrices(priceContracts);
+  // A total connection failure (Gateway unreachable) must fall through to
+  // the position_pnl_snapshots fallback below, same as a per-contract null
+  // price does -- not 500 the whole route. fetchLivePrices throws instead
+  // of returning per-key nulls when connectToIbkrGateway itself can't
+  // connect, so that failure mode has to be caught explicitly here.
+  let pricesByLegId: Record<string, number | null> = {};
+  try {
+    pricesByLegId = await fetchLivePrices(priceContracts);
+  } catch (error) {
+    console.error("positions/pnl: fetchLivePrices failed, falling back to position_pnl_snapshots", error);
+  }
 
   const unrealizedByPositionId: Record<string, number | null> = {};
-  for (const positionId of positionIds) unrealizedByPositionId[positionId] = 0;
+  const premiumByPositionId: Record<string, number | null> = {};
+  const stockByPositionId: Record<string, number | null> = {};
+  for (const positionId of positionIds) {
+    unrealizedByPositionId[positionId] = 0;
+    premiumByPositionId[positionId] = 0;
+    stockByPositionId[positionId] = 0;
+  }
 
   for (const leg of legRows) {
     if (unrealizedByPositionId[leg.positionId] === null) continue;
     const currentPrice = pricesByLegId[leg.id];
     if (currentPrice === null || currentPrice === undefined) {
       unrealizedByPositionId[leg.positionId] = null;
+      premiumByPositionId[leg.positionId] = null;
+      stockByPositionId[leg.positionId] = null;
       continue;
     }
     const sign = leg.side === "short" ? -1 : 1;
     const entryPrice = Number(leg.entryPrice);
-    unrealizedByPositionId[leg.positionId] =
-      (unrealizedByPositionId[leg.positionId] ?? 0) + (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
+    const legPnl = (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
+    unrealizedByPositionId[leg.positionId] = (unrealizedByPositionId[leg.positionId] ?? 0) + legPnl;
+    if (leg.legType === "option") {
+      premiumByPositionId[leg.positionId] = (premiumByPositionId[leg.positionId] ?? 0) + legPnl;
+    } else {
+      stockByPositionId[leg.positionId] = (stockByPositionId[leg.positionId] ?? 0) + legPnl;
+    }
   }
 
   const positionIdsMissingLive = positionIds.filter((id) => unrealizedByPositionId[id] === null);
@@ -274,13 +318,24 @@ positionsRouter.get("/pnl", async (request, response) => {
   for (const positionId of positionIds) {
     const unrealizedPnl = unrealizedByPositionId[positionId] ?? null;
     if (unrealizedPnl !== null) {
-      result[positionId] = { unrealizedPnl, asOfDate: null };
+      result[positionId] = {
+        unrealizedPnl,
+        unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null,
+        unrealizedStockPnl: stockByPositionId[positionId] ?? null,
+        asOfDate: null,
+      };
       continue;
     }
     const fallback = fallbackByPositionId.get(positionId);
     result[positionId] = fallback
-      ? { unrealizedPnl: Number(fallback.unrealizedPnl), asOfDate: fallback.snapshotDate }
-      : { unrealizedPnl: null, asOfDate: null };
+      ? {
+          unrealizedPnl: Number(fallback.unrealizedPnl),
+          // position_pnl_snapshots only stores the blended whole-position figure.
+          unrealizedPremiumPnl: null,
+          unrealizedStockPnl: null,
+          asOfDate: fallback.snapshotDate,
+        }
+      : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, asOfDate: null };
   }
 
   response.json(result);

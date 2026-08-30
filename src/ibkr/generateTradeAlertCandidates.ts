@@ -1,5 +1,6 @@
 import { EventName, OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import {
@@ -31,6 +32,10 @@ export interface AlertCandidate {
   dte: number;
   annualizedYield: number;
   spotPrice: number;
+  // Black-Scholes N(d2)-based estimate, breakeven-adjusted -- see
+  // blackScholesPop.ts's header for why, and its "pending validation" note.
+  // Null when the underlying quote had no usable IV.
+  probabilityOfProfit: number | null;
 }
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -161,6 +166,17 @@ function rankCandidates(
     if (dte <= 0) continue;
     const capitalAtRisk = strategyKey === "covered_call" ? spotPrice : quote.strike;
     const annualizedYield = (premium / capitalAtRisk) * (365 / dte);
+    const probabilityOfProfit =
+      quote.impliedVolatility !== null
+        ? computeProbabilityOfProfit({
+            spotPrice,
+            strike: quote.strike,
+            premium,
+            impliedVolatility: quote.impliedVolatility,
+            daysToExpiry: dte,
+            right,
+          })
+        : null;
 
     candidates.push({
       expiry: toIsoDate(quote.expiry),
@@ -171,6 +187,7 @@ function rankCandidates(
       dte,
       annualizedYield,
       spotPrice,
+      probabilityOfProfit,
     });
   }
 

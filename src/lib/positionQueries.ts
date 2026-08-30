@@ -53,6 +53,28 @@ export const positionSelect = `
       ),
       0
     ) AS "realizedPnl",
+    -- Premium P/L: the option leg(s) only — what a short option decayed/appreciated by.
+    -- Split out 2026-08-30 per Juan's request so premium P/L and stock-movement P/L can be
+    -- read separately instead of only as one blended figure. See "P/L Split & Roll
+    -- Intelligence" proposal.
+    COALESCE(
+      (
+        SELECT SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.exit_price IS NOT NULL AND pl.leg_type = 'option'
+      ),
+      0
+    ) AS "realizedPremiumPnl",
+    -- Stock-movement P/L: the stock leg only — meaningful for covered calls, always 0 for CSP
+    -- (no stock leg exists to sum).
+    COALESCE(
+      (
+        SELECT SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.exit_price IS NOT NULL AND pl.leg_type = 'stock'
+      ),
+      0
+    ) AS "realizedStockPnl",
     CASE
       WHEN p.strategy_key = 'covered_call' THEN (
         SELECT pl.entry_price * pl.quantity
@@ -95,6 +117,8 @@ export interface PositionRow {
   symbol: string;
   legs: PositionLegRow[];
   realizedPnl: string;
+  realizedPremiumPnl: string;
+  realizedStockPnl: string;
   capitalAtRisk: string | null;
   closeReason: string | null;
   unstructuredReason: string | null;

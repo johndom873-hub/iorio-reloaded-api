@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { fetchLivePrices } from "../ibkr/fetchLivePrices.js";
 
 export const pricePerformanceRouter = Router();
 pricePerformanceRouter.use(requireAuth);
@@ -121,4 +122,39 @@ pricePerformanceRouter.get("/", async (_request, response) => {
   }));
 
   response.json({ tickers: rows });
+});
+
+// Current price, added 2026-08-30 per Juan's request to see it alongside
+// last close rather than only the prior trading day's number. Deliberately
+// a separate endpoint from GET / above, not folded into it: that route's
+// whole point (per its header comment) is loading instantly from
+// daily_price_bars regardless of IBKR Gateway state, and fetchLivePrices
+// has an inherent ~5s wait even when the Gateway is healthy (up to IBKR's
+// own connect timeout, currently 15s, when it isn't) -- inlining it there
+// would make every page load wait on IBKR. Frontend calls this
+// second/async, same instant-table-then-fill-in-live-data pattern as
+// PositionsPage's fetchUnrealizedPnl. Best-effort: null per symbol when
+// live pricing is unavailable (outside market hours, IBKR pacing, Gateway
+// unreachable), never an error for the caller.
+pricePerformanceRouter.get("/current-prices", async (_request, response) => {
+  const tickerRows = await db("tickers as t")
+    .select("t.symbol")
+    .whereExists(function () {
+      this.select(1).from("shortlist_entries as se").whereRaw("se.ticker_id = t.id").andWhere("se.removed_at", null);
+    });
+
+  let pricesBySymbol: Record<string, number | null> = {};
+  try {
+    pricesBySymbol = await fetchLivePrices(
+      tickerRows.map((row: { symbol: string }) => ({ key: row.symbol, legType: "stock" as const, symbol: row.symbol })),
+    );
+  } catch (error) {
+    console.error("price-performance/current-prices: fetchLivePrices failed", error);
+  }
+
+  const result: Record<string, number | null> = {};
+  for (const row of tickerRows as { symbol: string }[]) {
+    result[row.symbol] = pricesBySymbol[row.symbol] ?? null;
+  }
+  response.json(result);
 });

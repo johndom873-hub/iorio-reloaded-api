@@ -5,6 +5,7 @@ import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import { daysBetween, parseExpiry, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
 import { decayThresholdFraction, dteThreshold } from "./generateRollCandidates.js";
 import type { AlertCandidate, AlertStrategyKey } from "./generateTradeAlertCandidates.js";
+import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
@@ -52,6 +53,17 @@ async function refreshNewTradeCandidate(
   const dte = daysBetween(new Date(), parseExpiry(toYyyymmdd(candidate.expiry)));
   if (dte <= 0) return "This contract has already expired.";
   const capitalAtRisk = strategyKey === "covered_call" ? spotPrice : candidate.strike;
+  const probabilityOfProfit =
+    quote.impliedVolatility !== null
+      ? computeProbabilityOfProfit({
+          spotPrice,
+          strike: candidate.strike,
+          premium,
+          impliedVolatility: quote.impliedVolatility,
+          daysToExpiry: dte,
+          right: candidate.right,
+        })
+      : null;
 
   return {
     expiry: candidate.expiry,
@@ -62,6 +74,7 @@ async function refreshNewTradeCandidate(
     dte,
     annualizedYield: (premium / capitalAtRisk) * (365 / dte),
     spotPrice,
+    probabilityOfProfit,
   };
 }
 
