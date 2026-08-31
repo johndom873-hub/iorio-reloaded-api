@@ -22,7 +22,13 @@ const settingsFields = [
   "min_cash_reserve_pct",
 ] as const;
 
-function validateSettingsPayload(payload: Record<string, unknown>): string | null {
+// Only meaningful for covered_call — governs delta selection when the
+// account already owns enough shares of the ticker to write against (see
+// fetchAvailableUncoveredShares). cash_secured_put has no "existing
+// position" concept and leaves these columns null.
+const existingPositionDeltaFields = ["delta_target_min_existing_position", "delta_target_max_existing_position"] as const;
+
+function validateSettingsPayload(strategyKey: string, payload: Record<string, unknown>): string | null {
   for (const field of settingsFields) {
     const value = payload[field];
     if (typeof value !== "number" || Number.isNaN(value)) {
@@ -35,6 +41,22 @@ function validateSettingsPayload(payload: Record<string, unknown>): string | nul
   if (p.delta_target_min > p.delta_target_max) return "delta_target_min cannot exceed delta_target_max.";
   if (p.dte_target_min < 0) return "dte_target_min cannot be negative.";
   if (p.dte_target_min > p.dte_target_max) return "dte_target_min cannot exceed dte_target_max.";
+
+  if (strategyKey === "covered_call") {
+    for (const field of existingPositionDeltaFields) {
+      const value = payload[field];
+      if (typeof value !== "number" || Number.isNaN(value)) {
+        return `${field} must be a number.`;
+      }
+    }
+    const pe = payload as Record<(typeof existingPositionDeltaFields)[number], number>;
+    if (pe.delta_target_min_existing_position < 0 || pe.delta_target_max_existing_position > 1) {
+      return "Existing-position delta targets must be between 0 and 1.";
+    }
+    if (pe.delta_target_min_existing_position > pe.delta_target_max_existing_position) {
+      return "delta_target_min_existing_position cannot exceed delta_target_max_existing_position.";
+    }
+  }
 
   const percentageFields = [
     "max_position_pct_of_portfolio",
@@ -65,7 +87,7 @@ riskLimitsRouter.put("/settings/:strategyKey", async (request, response) => {
     return;
   }
 
-  const validationError = validateSettingsPayload(request.body ?? {});
+  const validationError = validateSettingsPayload(strategyKey, request.body ?? {});
   if (validationError) {
     response.status(400).json({ error: validationError });
     return;
@@ -75,6 +97,11 @@ riskLimitsRouter.put("/settings/:strategyKey", async (request, response) => {
   const updatePayload: Record<string, number> = {};
   for (const field of settingsFields) {
     updatePayload[field] = body[field] as number;
+  }
+  if (strategyKey === "covered_call") {
+    for (const field of existingPositionDeltaFields) {
+      updatePayload[field] = body[field] as number;
+    }
   }
 
   const [row] = await db("strategy_settings")

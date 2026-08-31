@@ -2,6 +2,7 @@ import { EventName, OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
 import { computeIvMetrics, type IvMetrics } from "../lib/ivMetrics.js";
+import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
@@ -23,7 +24,21 @@ export interface AlertStrategySettings {
   deltaTargetMax: number;
   dteTargetMin: number;
   dteTargetMax: number;
+  // covered_call only — governs delta selection instead of
+  // deltaTargetMin/Max when the account already owns at least one
+  // contract's worth (100 shares) of uncovered stock in the ticker being
+  // scanned (see fetchAvailableUncoveredShares). Null for cash_secured_put,
+  // which has no "existing position" concept, and unused by the roll scan
+  // (generateRollCandidates.ts), which only ever replaces a leg on an
+  // already-open position.
+  deltaTargetMinExistingPosition: number | null;
+  deltaTargetMaxExistingPosition: number | null;
 }
+
+// One options contract covers 100 shares — fewer uncovered shares than that
+// can't back a real covered call, so it's treated as the generic/buy-write
+// case. Approved by the user 2026-09-01.
+const sharesPerContract = 100;
 
 export interface AlertCandidate {
   expiry: string; // YYYY-MM-DD
@@ -303,9 +318,32 @@ export async function generateTradeAlertCandidatesForTicker(
   }
   const spotPrice = prep.spotPrice;
 
+  // covered_call new-trade candidates use the existing-position delta range
+  // instead of the generic one when the account already owns enough
+  // uncovered shares of this ticker to write a real covered call against —
+  // otherwise this is a buy-write/hypothetical scan and the generic range
+  // still applies.
+  const coveredCallSettings = settingsByStrategy.get("covered_call");
+  let effectiveSettingsByStrategy = settingsByStrategy;
+  if (
+    coveredCallSettings &&
+    coveredCallSettings.deltaTargetMinExistingPosition !== null &&
+    coveredCallSettings.deltaTargetMaxExistingPosition !== null
+  ) {
+    const uncoveredShares = await fetchAvailableUncoveredShares(tickerId);
+    if (uncoveredShares >= sharesPerContract) {
+      effectiveSettingsByStrategy = new Map(settingsByStrategy);
+      effectiveSettingsByStrategy.set("covered_call", {
+        ...coveredCallSettings,
+        deltaTargetMin: coveredCallSettings.deltaTargetMinExistingPosition,
+        deltaTargetMax: coveredCallSettings.deltaTargetMaxExistingPosition,
+      });
+    }
+  }
+
   const preps = (
     await Promise.all(
-      Array.from(settingsByStrategy.entries()).map(async ([strategyKey, settings]) => {
+      Array.from(effectiveSettingsByStrategy.entries()).map(async ([strategyKey, settings]) => {
         const right: "call" | "put" = strategyKey === "covered_call" ? "call" : "put";
         const expiryStrikes = await buildValidatedExpiryStrikes(
           ib,

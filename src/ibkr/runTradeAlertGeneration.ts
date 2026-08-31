@@ -81,11 +81,14 @@ export function toIsoDate(expiryYyyymmdd: string): string {
 
 // Exported for refreshTickerTradeAlerts.ts.
 export function toSettings(settingsRow: Record<string, unknown>): AlertStrategySettings {
+  const { delta_target_min_existing_position, delta_target_max_existing_position } = settingsRow;
   return {
     deltaTargetMin: Number(settingsRow.delta_target_min),
     deltaTargetMax: Number(settingsRow.delta_target_max),
     dteTargetMin: Number(settingsRow.dte_target_min),
     dteTargetMax: Number(settingsRow.dte_target_max),
+    deltaTargetMinExistingPosition: delta_target_min_existing_position == null ? null : Number(delta_target_min_existing_position),
+    deltaTargetMaxExistingPosition: delta_target_max_existing_position == null ? null : Number(delta_target_max_existing_position),
   };
 }
 
