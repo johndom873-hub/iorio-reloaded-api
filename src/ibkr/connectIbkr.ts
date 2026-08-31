@@ -50,6 +50,19 @@ export async function connectToIbkrGateway(): Promise<IbkrConnection> {
 
     const onConnected = () => {
       cleanup();
+      // Logged for the lifetime of the connection, not just the handshake —
+      // reqId -1 carries broadcast connection-status notices (market data
+      // farm up/down, HMDS farm status, etc.) that no other listener in the
+      // codebase catches, since every other error handler filters to its own
+      // specific reqId and silently drops anything else. Found 2026-08-31
+      // diagnosing a trade-alert outage where every quote request timed out
+      // with zero ticks and nothing in the logs explained why — this handler
+      // existed only during the initial connect and was torn down right
+      // after, so whatever IBKR was saying about the farm connections for
+      // the rest of the session was never seen by anyone.
+      ib.on(EventName.error, (error, code, reqId) => {
+        console.log(`IBKR connection event (reqId=${reqId}, code=${code}): ${error.message}`);
+      });
       resolve({
         ib,
         disconnect: () => {
