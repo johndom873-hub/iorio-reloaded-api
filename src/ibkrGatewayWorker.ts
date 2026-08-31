@@ -154,7 +154,10 @@ async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Con
  */
 async function processCancelRequest(orderRequestId: string): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
-  if (!ib) return;
+  if (!ib) {
+    console.error(`processCancelRequest(${orderRequestId}): no IBKR connection — cancel not sent, will retry on the next LISTEN/poll cycle.`);
+    return;
+  }
 
   const orderRequest = await db("order_requests").where({ id: orderRequestId, status: "cancel_requested" }).first();
   if (!orderRequest) return; // already processed (cancelled/filled) or not actually requested
@@ -174,15 +177,20 @@ async function processCancelRequest(orderRequestId: string): Promise<void> {
 
 async function processOrderRequest(orderRequestId: string): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
-  if (!ib) return;
+  if (!ib) {
+    console.error(`processOrderRequest(${orderRequestId}): no IBKR connection — order not sent, will retry on the next LISTEN/poll cycle.`);
+    return;
+  }
 
   const orderRequest = await db("order_requests").where({ id: orderRequestId, status: "confirmed" }).first();
   if (!orderRequest) return; // already processed, cancelled, or not actually confirmed
 
   const payload = orderRequest.payload as OrderRequestPayload;
+  console.log(`processOrderRequest(${orderRequestId}): building order for ${payload.symbol}, ${payload.legs.length} leg(s).`);
   try {
     const built = await buildOrder(payload);
     if (!built) {
+      console.error(`processOrderRequest(${orderRequestId}): buildOrder returned null — could not resolve one or more contract ids.`);
       await db("order_requests")
         .where({ id: orderRequestId })
         .update({ status: "error", error_message: "Could not resolve one or more contract ids.", updated_at: db.fn.now() });
@@ -194,6 +202,7 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
       .where({ id: orderRequestId })
       .update({ status: "submitted", ibkr_order_id: ibkrOrderId, updated_at: db.fn.now() });
 
+    console.log(`processOrderRequest(${orderRequestId}): placing IBKR order ${ibkrOrderId} (${payload.symbol}, lmtPrice=${built.order.lmtPrice}).`);
     ib.placeOrder(ibkrOrderId, built.contract, built.order);
   } catch (error) {
     await db("order_requests")
@@ -440,19 +449,28 @@ async function recordExecution(contract: Contract, execution: Execution): Promis
 // silently dropped.
 let reconciliationInFlight = false;
 let reconciliationRerunQueued = false;
+let reconciliationPassCounter = 0;
 
 async function reconcilePositionsFromIbkr(): Promise<void> {
   if (reconciliationInFlight) {
     reconciliationRerunQueued = true;
+    console.log("Reconciliation: a pass is already in flight — queuing exactly one rerun after it finishes.");
     return;
   }
   reconciliationInFlight = true;
+  const passId = ++reconciliationPassCounter;
+  const startedAt = Date.now();
   try {
-    await runReconciliationPass();
+    await runReconciliationPass(passId);
+    console.log(`Reconciliation #${passId}: pass completed in ${Date.now() - startedAt}ms.`);
+  } catch (error) {
+    console.error(`Reconciliation #${passId}: pass threw after ${Date.now() - startedAt}ms: ${error instanceof Error ? error.stack ?? error.message : error}`);
+    throw error;
   } finally {
     reconciliationInFlight = false;
     if (reconciliationRerunQueued) {
       reconciliationRerunQueued = false;
+      console.log(`Reconciliation #${passId}: running the queued rerun now.`);
       reconcilePositionsFromIbkr().catch((error) => console.error(`Queued reconciliation rerun failed: ${error}`));
     }
   }
@@ -571,11 +589,16 @@ async function determineCloseReason(positionId: string): Promise<string> {
   return "unknown";
 }
 
-async function runReconciliationPass(): Promise<void> {
+async function runReconciliationPass(passId: number): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
-  if (!ib) return;
+  if (!ib) {
+    console.log(`Reconciliation #${passId}: no IBKR connection — skipping this pass.`);
+    return;
+  }
 
+  const reqPositionsStartedAt = Date.now();
   const held = await fetchIbkrHeldPositions(ib);
+  console.log(`Reconciliation #${passId}: reqPositions returned ${held.length} held contract(s) in ${Date.now() - reqPositionsStartedAt}ms.`);
 
   const bySymbol = new Map<string, IbkrHeldPosition[]>();
   for (const position of held) {
@@ -604,6 +627,11 @@ async function runReconciliationPass(): Promise<void> {
 
     const totalShortCallShares = shortCallLegs.reduce((sum, leg) => sum + Math.abs(leg.quantity) * 100, 0);
     const isCoveredCall = stockLeg && shortCallLegs.length > 0 && totalShortCallShares <= stockLeg.quantity;
+
+    console.log(
+      `Reconciliation #${passId}: ${symbol} — stockQty=${stockLeg?.quantity ?? "none"}, shortCallLegs=${shortCallLegs.length} (totalShortCallShares=${totalShortCallShares}), shortPutLegs=${shortPutLegs.length}, isCoveredCall=${isCoveredCall}` +
+        (isCoveredCall ? `, leftoverShares=${stockLeg!.quantity - totalShortCallShares}` : ""),
+    );
 
     if (isCoveredCall) {
       // Sorted for a stable, deterministic split across reconciliation runs
@@ -668,6 +696,11 @@ async function runReconciliationPass(): Promise<void> {
     .whereNotNull("ibkr_contract_id")
     .select("*", db.raw("(leg_type = 'option' AND expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE) AS is_expired_option"));
 
+  const legsNoLongerHeld = openLegs.filter((leg) => !heldConIds.has(Number(leg.ibkr_contract_id)));
+  console.log(
+    `Reconciliation #${passId}: ${openLegs.length} open leg(s) tracked in DB, ${legsNoLongerHeld.length} no longer reported by IBKR (will be closed this pass).`,
+  );
+
   const positionIdsWithExpiredLeg = new Set<string>();
   for (const leg of openLegs) {
     if (heldConIds.has(Number(leg.ibkr_contract_id))) continue;
@@ -686,6 +719,9 @@ async function runReconciliationPass(): Promise<void> {
         exit_price: lastClosingTrade?.price ?? (expiredWithoutTrade ? 0 : null),
         exit_at: lastClosingTrade?.executed_at ?? db.fn.now(),
       });
+    console.log(
+      `Reconciliation #${passId}: closed leg ${leg.id} (position ${leg.position_id}, conId ${leg.ibkr_contract_id}) — ${lastClosingTrade ? `matched closing trade @ ${lastClosingTrade.price}` : expiredWithoutTrade ? "expired worthless, no trade" : "no trade, not past expiry (ambiguous close)"}.`,
+    );
 
     const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
     if (remainingOpenLegs.length === 0) {
@@ -922,6 +958,9 @@ async function upsertSplitCoveredCallPosition(
 ): Promise<void> {
   const callConId = String(callLeg.contract.conId);
   const existingCallLeg = await db("position_legs").where({ ibkr_contract_id: callConId }).whereNull("exit_at").first();
+  console.log(
+    `upsertSplitCoveredCallPosition(${symbol}): callConId=${callConId}, sharesForThisLeg=${sharesForThisLeg}, existingCallLeg=${existingCallLeg ? `${existingCallLeg.id} (position ${existingCallLeg.position_id})` : "none — will create a new position"}.`,
+  );
 
   let positionId = existingCallLeg?.position_id as string | undefined;
 
@@ -981,7 +1020,10 @@ async function upsertSplitCoveredCallPosition(
 // tell this one apart from those.
 async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPosition, leftoverShares: number): Promise<void> {
   const ticker = await db("tickers").where({ symbol }).first();
-  if (!ticker) return;
+  if (!ticker) {
+    console.log(`upsertLeftoverStockPosition(${symbol}): no tickers row — skipping.`);
+    return;
+  }
 
   const existingLeftoverLeg = await db("position_legs as pl")
     .join("positions as p", "p.id", "pl.position_id")
@@ -990,6 +1032,10 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
     .select("pl.*")
     .first();
 
+  console.log(
+    `upsertLeftoverStockPosition(${symbol}): leftoverShares=${leftoverShares}, existingLeftoverLeg=${existingLeftoverLeg ? `${existingLeftoverLeg.id} (position ${existingLeftoverLeg.position_id})` : "none"}.`,
+  );
+
   if (leftoverShares <= 0) {
     // Any shortfall has resolved (e.g. another call got sold against it) —
     // close out a previously-flagged leftover leg rather than leaving a
@@ -997,9 +1043,15 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
     if (existingLeftoverLeg) {
       await db("position_legs").where({ id: existingLeftoverLeg.id }).update({ exit_at: db.fn.now() });
       const remaining = await db("position_legs").where({ position_id: existingLeftoverLeg.position_id }).whereNull("exit_at");
+      console.log(
+        `upsertLeftoverStockPosition(${symbol}): leftoverShares<=0 — closed leg ${existingLeftoverLeg.id}. ${remaining.length} leg(s) still open on position ${existingLeftoverLeg.position_id}.`,
+      );
       if (remaining.length === 0) {
         await db("positions").where({ id: existingLeftoverLeg.position_id }).update({ status: "closed", closed_at: db.fn.now() });
+        console.log(`upsertLeftoverStockPosition(${symbol}): closed position ${existingLeftoverLeg.position_id} (no legs remain open).`);
       }
+    } else {
+      console.log(`upsertLeftoverStockPosition(${symbol}): leftoverShares<=0 and nothing to close — no-op.`);
     }
     return;
   }
@@ -1010,6 +1062,7 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
       .insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open" })
       .returning(["id"]);
     positionId = newPosition.id;
+    console.log(`upsertLeftoverStockPosition(${symbol}): created new unstructured position ${positionId} for ${leftoverShares} leftover shares.`);
   }
   await upsertPositionLeg(positionId!, stockLeg, "long", leftoverShares, true);
 }
@@ -1071,6 +1124,21 @@ async function main(): Promise<void> {
   setInterval(() => {
     reconcilePositionsFromIbkr().catch((error) => console.error(`Periodic reconciliation failed: ${error}`));
   }, reconciliationIntervalMs);
+
+  // Proves the event loop is still alive and reports connection health even
+  // when nothing else is logging — added because the worker has needed
+  // several unexplained restarts/day and, before this, total silence was
+  // indistinguishable from a healthy-but-quiet period vs. a genuinely hung
+  // process (e.g. a reconciliation pass stuck mid-await with nothing left
+  // to log). If this stops appearing every 5 minutes, the process itself is
+  // stuck, not just quiet.
+  const heartbeatIntervalMs = 5 * 60_000;
+  setInterval(() => {
+    const health = persistentIbkrConnection.getHealthSnapshot();
+    console.log(
+      `Heartbeat: connected=${health.connected}, uptime=${health.uptimeMs !== null ? `${Math.round(health.uptimeMs / 1000)}s` : "n/a"}, lifetime reconnects=${health.totalReconnects}, lastSystemStatusCode=${health.lastSystemStatusCode ?? "none"}, reconciliation passes so far=${reconciliationPassCounter}, reconciliationInFlight=${reconciliationInFlight}.`,
+    );
+  }, heartbeatIntervalMs);
 
   console.log("Iorio worker started — persistent IBKR connection, order placement, position sync.");
 }
