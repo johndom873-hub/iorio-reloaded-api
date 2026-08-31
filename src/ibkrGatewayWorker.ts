@@ -43,6 +43,21 @@ function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
 }
 
+/**
+ * IBKR's Adaptive algo, applied to every order (single-leg and BAG combo
+ * alike). Confirmed via whatIf orders against the paper Gateway
+ * (tmp/checkOrderTypeSupport.ts, 2026-08-31) that IBKR accepts this on both
+ * shapes. It wraps the existing LMT order rather than replacing it — the
+ * order type and lmtPrice are unchanged, so the worst-case fill price is
+ * identical to today; Adaptive only affects how IBKR works the order to try
+ * for a better/faster fill within that limit. adaptivePriority: "Normal"
+ * (not "Patient") per Marcelo's call, to keep same-day DAY-TIF fills likely.
+ */
+const adaptiveAlgoFields: Pick<IbkrOrder, "algoStrategy" | "algoParams"> = {
+  algoStrategy: "Adaptive",
+  algoParams: [{ tag: "adaptivePriority", value: "Normal" }],
+};
+
 /** Resolves every leg's conId (reusing a pre-resolved one where the payload already has it). */
 async function resolveLegContractIds(
   ib: ReturnType<typeof persistentIbkrConnection.getIb>,
@@ -86,6 +101,7 @@ async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Con
       totalQuantity: leg.quantity,
       tif: TimeInForce.DAY,
       transmit: true,
+      ...adaptiveAlgoFields,
     };
     return { contract, order };
   }
@@ -123,6 +139,7 @@ async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Con
     totalQuantity: legRatioGcd,
     tif: TimeInForce.DAY,
     transmit: true,
+    ...adaptiveAlgoFields,
   };
   return { contract, order };
 }
