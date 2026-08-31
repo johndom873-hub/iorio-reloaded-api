@@ -111,9 +111,13 @@ function normalizeExpiryDate(raw: string): string | null {
 positionsRouter.get("/", async (request, response) => {
   const status = (request.query.status as string | undefined) ?? "open";
   const strategyKey = request.query.strategy as string | undefined;
+  const symbol = request.query.symbol as string | undefined;
 
-  if (!validStatuses.includes(status)) {
-    response.status(400).json({ error: "status must be open or closed." });
+  // "all" added 2026-08-31 for the consolidated ticker/position modal, which
+  // needs both open positions (actionable) and closed ones (history) for a
+  // symbol in one call rather than two requests to stitch together.
+  if (!validStatuses.includes(status) && status !== "all") {
+    response.status(400).json({ error: "status must be open, closed, or all." });
     return;
   }
   if (strategyKey && !validStrategyKeys.includes(strategyKey)) {
@@ -121,17 +125,23 @@ positionsRouter.get("/", async (request, response) => {
     return;
   }
 
-  const conditions = ["p.status = ?"];
-  const params: string[] = [status];
+  const conditions: string[] = [];
+  const params: string[] = [];
+  if (status !== "all") {
+    conditions.push("p.status = ?");
+    params.push(status);
+  }
   if (strategyKey) {
     conditions.push("p.strategy_key = ?");
     params.push(strategyKey);
   }
+  if (symbol) {
+    conditions.push("t.symbol = ?");
+    params.push(symbol.trim().toUpperCase());
+  }
 
-  const result = await db.raw(
-    `${positionSelect} WHERE ${conditions.join(" AND ")} ORDER BY p.opened_at DESC`,
-    params,
-  );
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const result = await db.raw(`${positionSelect} ${whereClause} ORDER BY p.opened_at DESC`, params);
   response.json(result.rows);
 });
 
