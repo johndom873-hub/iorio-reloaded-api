@@ -88,19 +88,25 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
       // a field that genuinely stops being quoted goes back to "no data"
       // instead of freezing on the last real value it ever held.
       const value = price > 0 ? price : null;
-      // Delayed tick types: bid=66, ask=67, last=68, high=72, low=73, close=75, open=76.
-      if (tickType === 66) pricing.bid = value;
-      if (tickType === 67) pricing.ask = value;
-      if (tickType === 68) pricing.last = value;
-      if (tickType === 72) pricing.high = value;
-      if (tickType === 73) pricing.low = value;
-      if (tickType === 75) pricing.previousClose = value;
-      if (tickType === 76) pricing.open = value;
+      // Real-time tick types: bid=1, ask=2, last=4, high=6, low=7, close=9, open=14.
+      // Delayed: bid=66, ask=67, last=68, high=72, low=73, close=75, open=76.
+      // Accepts both — real-time entitlement enabled 2026-08-31 sends
+      // real-time tick types regardless of reqMarketDataType(DELAYED); an
+      // accept-delayed-only filter here silently produced null spot prices
+      // for every ticker from that point on (see fetchOptionChain.ts's
+      // matching comment on the trade-alert outage this caused).
+      if (tickType === 1 || tickType === 66) pricing.bid = value;
+      if (tickType === 2 || tickType === 67) pricing.ask = value;
+      if (tickType === 4 || tickType === 68) pricing.last = value;
+      if (tickType === 6 || tickType === 72) pricing.high = value;
+      if (tickType === 7 || tickType === 73) pricing.low = value;
+      if (tickType === 9 || tickType === 75) pricing.previousClose = value;
+      if (tickType === 14 || tickType === 76) pricing.open = value;
     }
     function onTickSize(id: number, tickType?: number, size?: number) {
       if (id !== reqId || size === undefined) return;
-      // Delayed volume = 74.
-      if (tickType === 74) pricing.volume = size;
+      // Real-time volume = 8, delayed = 74.
+      if (tickType === 8 || tickType === 74) pricing.volume = size;
     }
     function onSnapshotEnd(id: number) {
       if (id !== reqId) return;
@@ -202,20 +208,22 @@ export async function streamPricingUpdates(
     // of freezing on the last real value it ever held for the rest of this
     // streaming session.
     const value = price > 0 ? price : null;
-    // Delayed tick types: bid=66, ask=67, last=68, high=72, low=73, close=75, open=76.
-    if (tickType === 66) pricing.bid = value;
-    if (tickType === 67) pricing.ask = value;
-    if (tickType === 68) pricing.last = value;
-    if (tickType === 72) pricing.high = value;
-    if (tickType === 73) pricing.low = value;
-    if (tickType === 75) pricing.previousClose = value;
-    if (tickType === 76) pricing.open = value;
+    // Real-time (1/2/4/6/7/9/14) and delayed (66/67/68/72/73/75/76) tick
+    // types both accepted — see the matching comment on lookupPricingSnapshot
+    // above.
+    if (tickType === 1 || tickType === 66) pricing.bid = value;
+    if (tickType === 2 || tickType === 67) pricing.ask = value;
+    if (tickType === 4 || tickType === 68) pricing.last = value;
+    if (tickType === 6 || tickType === 72) pricing.high = value;
+    if (tickType === 7 || tickType === 73) pricing.low = value;
+    if (tickType === 9 || tickType === 75) pricing.previousClose = value;
+    if (tickType === 14 || tickType === 76) pricing.open = value;
     schedulePush();
   }
   function onTickSize(id: number, tickType?: number, size?: number) {
     if (id !== reqId || size === undefined) return;
-    // Delayed volume = 74.
-    if (tickType === 74) pricing.volume = size;
+    // Real-time volume = 8, delayed = 74.
+    if (tickType === 8 || tickType === 74) pricing.volume = size;
     schedulePush();
   }
 

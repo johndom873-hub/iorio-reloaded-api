@@ -376,10 +376,13 @@ export async function fetchQuotesForContracts(
     // data" instead of freezing on the last real value it ever held for the
     // rest of this streaming session.
     const value = price > 0 ? price : null;
-    // Delayed tick types: bid=66, ask=67, last=68.
-    if (tickType === 66) quote.bid = value;
-    if (tickType === 67) quote.ask = value;
-    if (tickType === 68) quote.last = value;
+    // Real-time tick types: bid=1, ask=2, last=4. Delayed: bid=66, ask=67,
+    // last=68. Accepts both — see the tickOptionComputation comment below
+    // for why (real-time entitlement enabled 2026-08-31 sends real-time
+    // tick types regardless of reqMarketDataType(DELAYED)).
+    if (tickType === 1 || tickType === 66) quote.bid = value;
+    if (tickType === 2 || tickType === 67) quote.ask = value;
+    if (tickType === 4 || tickType === 68) quote.last = value;
     checkReady(reqId);
     schedulePush();
   }
@@ -398,9 +401,16 @@ export async function fetchQuotesForContracts(
     _undPrice?: number,
   ) {
     const quote = quotes.get(reqId);
-    // Prefer the model computation (delayed model = 83) — doesn't depend on
-    // a stale last trade the way the last-computation tick (82) does.
-    if (!quote || tickType !== 83) return;
+    // Model computation only — doesn't depend on a stale last trade the way
+    // the last-computation tick (12/82) does. Accepts both the real-time
+    // (13) and delayed (83) variants: this account held delayed-only
+    // entitlements when 83-only was written, but real-time market data was
+    // enabled 2026-08-31, and IBKR sends real-time-labeled ticks (13) once
+    // that's active regardless of the DELAYED reqMarketDataType() call —
+    // an 83-only filter silently discarded every tick from that point on,
+    // which is exactly what caused that day's trade-alert outage (see
+    // runTradeAlertGeneration.ts's history around 2026-08-31).
+    if (!quote || (tickType !== 83 && tickType !== 13)) return;
     quote.impliedVolatility = impliedVol ?? null;
     quote.delta = delta ?? null;
     quote.gamma = gamma ?? null;

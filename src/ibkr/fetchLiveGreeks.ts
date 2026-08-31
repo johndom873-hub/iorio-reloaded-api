@@ -49,9 +49,9 @@ export async function fetchLiveGreeks(contracts: GreeksContract[]): Promise<Reco
       theta?: number,
     ) {
       const contract = reqIdToContract.get(reqId);
-      // Prefer the model computation (delayed model = 83) — see the same
-      // comment in fetchOptionChain.ts's fetchQuotesForContracts.
-      if (!contract || tickType !== 83) return;
+      // Model computation only, real-time (13) or delayed (83) — see the
+      // same comment in fetchOptionChain.ts's fetchQuotesForContracts.
+      if (!contract || (tickType !== 83 && tickType !== 13)) return;
       greeksByKey.set(contract.key, {
         delta: delta ?? null,
         gamma: gamma ?? null,
