@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchNewTickerData } from "../ibkr/fetchNewTickerData.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
+import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
 
 export const screenerRouter = Router();
 screenerRouter.use(requireAuth);
@@ -147,6 +148,12 @@ screenerRouter.post("/", async (request, response) => {
         notes: notes ?? null,
       })
       .returning("*");
+
+    try {
+      await captureTickerCalendarEvents(ticker.id, ticker.symbol);
+    } catch (error) {
+      console.error(`screener POST /: calendar capture failed for ${ticker.symbol}`, error);
+    }
 
     response.status(201).json({
       id: entry.id,

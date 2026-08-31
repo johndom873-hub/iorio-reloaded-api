@@ -17,6 +17,8 @@ import {
   fetchEarningsEvents,
   fetchEconomicCalendarEvents,
   resolveTradingViewTicker,
+  upsertDividendEvents,
+  upsertEarningsEvents,
 } from "../src/lib/tradingviewCalendarService.js";
 
 interface TickerRow {
@@ -64,57 +66,14 @@ async function main(): Promise<void> {
     let dividendsWritten = 0;
     try {
       const earningsRows = await fetchEarningsEvents(tvTickers, fromSec, toSec);
-      for (const row of earningsRows) {
-        const tickerId = tickerIdByTvTicker.get(row.tvTicker as string);
-        if (!tickerId) continue;
-        for (const dateField of ["earnings_release_date", "earnings_release_next_date"] as const) {
-          const raw = row[dateField];
-          if (raw === null || raw === undefined) continue;
-          const eventDate = new Date((raw as number) * 1000).toISOString().slice(0, 10);
-          const eventTime = row[dateField === "earnings_release_date" ? "earnings_release_time" : "earnings_release_next_time"];
-          await db("ticker_calendar_events")
-            .insert({
-              ticker_id: tickerId,
-              event_type: "earnings",
-              event_date: eventDate,
-              event_time: eventTime === null || eventTime === undefined ? null : String(eventTime),
-              raw: JSON.stringify(row),
-            })
-            .onConflict(["ticker_id", "event_type", "event_date"])
-            .merge(["event_time", "raw", "captured_at"]);
-          earningsWritten++;
-        }
-      }
+      earningsWritten = await upsertEarningsEvents(earningsRows, tickerIdByTvTicker);
     } catch (error) {
       console.error("daily_calendar_capture: earnings fetch failed", error);
     }
 
     try {
       const dividendRows = await fetchDividendEvents(tvTickers, fromSec, toSec);
-      for (const row of dividendRows) {
-        const tickerId = tickerIdByTvTicker.get(row.tvTicker as string);
-        if (!tickerId) continue;
-        for (const [dateField, amountField] of [
-          ["dividend_ex_date_recent", "dividend_amount_recent"],
-          ["dividend_ex_date_upcoming", "dividend_amount_upcoming"],
-        ] as const) {
-          const raw = row[dateField];
-          if (raw === null || raw === undefined) continue;
-          const eventDate = new Date((raw as number) * 1000).toISOString().slice(0, 10);
-          const amount = row[amountField];
-          await db("ticker_calendar_events")
-            .insert({
-              ticker_id: tickerId,
-              event_type: "ex_dividend",
-              event_date: eventDate,
-              amount: amount === null || amount === undefined ? null : Number(amount),
-              raw: JSON.stringify(row),
-            })
-            .onConflict(["ticker_id", "event_type", "event_date"])
-            .merge(["amount", "raw", "captured_at"]);
-          dividendsWritten++;
-        }
-      }
+      dividendsWritten = await upsertDividendEvents(dividendRows, tickerIdByTvTicker);
     } catch (error) {
       console.error("daily_calendar_capture: dividends fetch failed", error);
     }

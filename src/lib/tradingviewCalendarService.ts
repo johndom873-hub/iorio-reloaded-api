@@ -44,11 +44,16 @@ export async function resolveTradingViewTicker(tickerId: string, symbol: string)
     if (!response.ok) throw new Error(`symbol-search HTTP ${response.status}`);
     const data = (await response.json()) as { symbols?: SymbolSearchResult[] };
     const results = data.symbols ?? [];
-    // Prefer the primary US common-stock listing; strip TradingView's
-    // "<em>...</em>" match-highlighting from the symbol field.
+    // Strip TradingView's "<em>...</em>" match-highlighting before comparing —
+    // the API returns fuzzy substring matches (e.g. searching "SMH" also
+    // matches "SMHI"), so an exact symbol match is required here. Without it,
+    // an ETF/foreign-listing-only ticker like SMH (which never appears as a
+    // "stock"/US row) silently fell through to an unrelated company (SMHI —
+    // SEACOR Marine Holdings) instead of correctly resolving to null.
+    const exactMatches = results.filter((r) => r.symbol.replace(/<\/?em>/g, "").toUpperCase() === symbol.toUpperCase());
     const best =
-      results.find((r) => r.type === "stock" && r.country === "US" && r.is_primary_listing) ??
-      results.find((r) => r.type === "stock" && r.country === "US");
+      exactMatches.find((r) => r.type === "stock" && r.country === "US" && r.is_primary_listing) ??
+      exactMatches.find((r) => r.type === "stock" && r.country === "US");
     if (!best) return null;
 
     const cleanSymbol = best.symbol.replace(/<\/?em>/g, "");
@@ -123,6 +128,99 @@ export function fetchEarningsEvents(tvTickers: string[], fromSec: number, toSec:
 /** Ex-dividend/payment dates for the given TradingView tickers within [fromSec, toSec] (unix seconds). */
 export function fetchDividendEvents(tvTickers: string[], fromSec: number, toSec: number) {
   return scanTradingView(tvTickers, DIVIDEND_COLUMNS, "dividend_ex_date_recent,dividend_ex_date_upcoming", fromSec, toSec);
+}
+
+/** Writes earnings rows (from fetchEarningsEvents) to ticker_calendar_events. Returns rows written. */
+export async function upsertEarningsEvents(rows: Record<string, unknown>[], tickerIdByTvTicker: Map<string, string>): Promise<number> {
+  let written = 0;
+  for (const row of rows) {
+    const tickerId = tickerIdByTvTicker.get(row.tvTicker as string);
+    if (!tickerId) continue;
+    for (const dateField of ["earnings_release_date", "earnings_release_next_date"] as const) {
+      const raw = row[dateField];
+      if (raw === null || raw === undefined) continue;
+      const eventDate = new Date((raw as number) * 1000).toISOString().slice(0, 10);
+      const eventTime = row[dateField === "earnings_release_date" ? "earnings_release_time" : "earnings_release_next_time"];
+      await db("ticker_calendar_events")
+        .insert({
+          ticker_id: tickerId,
+          event_type: "earnings",
+          event_date: eventDate,
+          event_time: eventTime === null || eventTime === undefined ? null : String(eventTime),
+          raw: JSON.stringify(row),
+        })
+        .onConflict(["ticker_id", "event_type", "event_date"])
+        .merge(["event_time", "raw", "captured_at"]);
+      written++;
+    }
+  }
+  return written;
+}
+
+/** Writes dividend rows (from fetchDividendEvents) to ticker_calendar_events. Returns rows written. */
+export async function upsertDividendEvents(rows: Record<string, unknown>[], tickerIdByTvTicker: Map<string, string>): Promise<number> {
+  let written = 0;
+  for (const row of rows) {
+    const tickerId = tickerIdByTvTicker.get(row.tvTicker as string);
+    if (!tickerId) continue;
+    for (const [dateField, amountField] of [
+      ["dividend_ex_date_recent", "dividend_amount_recent"],
+      ["dividend_ex_date_upcoming", "dividend_amount_upcoming"],
+    ] as const) {
+      const raw = row[dateField];
+      if (raw === null || raw === undefined) continue;
+      const eventDate = new Date((raw as number) * 1000).toISOString().slice(0, 10);
+      const amount = row[amountField];
+      await db("ticker_calendar_events")
+        .insert({
+          ticker_id: tickerId,
+          event_type: "ex_dividend",
+          event_date: eventDate,
+          amount: amount === null || amount === undefined ? null : Number(amount),
+          raw: JSON.stringify(row),
+        })
+        .onConflict(["ticker_id", "event_type", "event_date"])
+        .merge(["amount", "raw", "captured_at"]);
+      written++;
+    }
+  }
+  return written;
+}
+
+const CALENDAR_LOOKAHEAD_DAYS = 90;
+
+export interface TickerCalendarCaptureResult {
+  resolved: boolean;
+  tvTicker: string | null;
+  earningsWritten: number;
+  dividendsWritten: number;
+}
+
+/**
+ * Resolves and captures earnings/ex-dividend events for a single ticker —
+ * same logic as the daily batch job, scoped to one symbol. Used when a
+ * ticker is newly added to the screener so its calendar data doesn't wait
+ * for the next scheduled run.
+ */
+export async function captureTickerCalendarEvents(tickerId: string, symbol: string): Promise<TickerCalendarCaptureResult> {
+  const tvTicker = await resolveTradingViewTicker(tickerId, symbol);
+  if (!tvTicker) {
+    return { resolved: false, tvTicker: null, earningsWritten: 0, dividendsWritten: 0 };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const fromSec = nowSec - 30 * 24 * 60 * 60;
+  const toSec = nowSec + CALENDAR_LOOKAHEAD_DAYS * 24 * 60 * 60;
+  const tickerIdByTvTicker = new Map([[tvTicker, tickerId]]);
+
+  const [earningsRows, dividendRows] = await Promise.all([
+    fetchEarningsEvents([tvTicker], fromSec, toSec),
+    fetchDividendEvents([tvTicker], fromSec, toSec),
+  ]);
+  const earningsWritten = await upsertEarningsEvents(earningsRows, tickerIdByTvTicker);
+  const dividendsWritten = await upsertDividendEvents(dividendRows, tickerIdByTvTicker);
+
+  return { resolved: true, tvTicker, earningsWritten, dividendsWritten };
 }
 
 export interface EconomicCalendarEvent {
