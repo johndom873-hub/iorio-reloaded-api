@@ -4,7 +4,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { runTradeAlertGeneration } from "../ibkr/runTradeAlertGeneration.js";
 import { refreshTradeAlert } from "../ibkr/refreshTradeAlert.js";
 import { refreshTickerTradeAlerts } from "../ibkr/refreshTickerTradeAlerts.js";
-import { runJob } from "../lib/runJob.js";
+import { runJob, JobAlreadyRunningError } from "../lib/runJob.js";
 
 const tradeAlertSelect = `
   SELECT
@@ -34,7 +34,13 @@ tradeAlertsRouter.use(requireAuth);
 
 // v1 strategy scope — matches positions.ts/screener.ts.
 const validStrategyKeys = ["covered_call", "cash_secured_put"];
-const validStatuses = ["pending", "approved", "rejected", "modified", "expired"];
+const validStatuses = [
+  "pending",
+  "approved",
+  "rejected",
+  "modified",
+  "expired",
+];
 const heartbeatIntervalMs = 20_000;
 
 tradeAlertsRouter.get("/", async (request, response) => {
@@ -82,20 +88,30 @@ tradeAlertsRouter.get("/", async (request, response) => {
 tradeAlertsRouter.patch("/:id", async (request, response) => {
   const { status } = request.body as { status?: string };
   if (status !== "rejected") {
-    response.status(400).json({ error: "Only status: 'rejected' is supported." });
+    response
+      .status(400)
+      .json({ error: "Only status: 'rejected' is supported." });
     return;
   }
 
   const [updated] = await db("trade_alerts")
     .where({ id: request.params.id, status: "pending" })
-    .update({ status: "rejected", reviewed_by_user_id: request.session.userId, reviewed_at: db.fn.now() })
+    .update({
+      status: "rejected",
+      reviewed_by_user_id: request.session.userId,
+      reviewed_at: db.fn.now(),
+    })
     .returning("id");
   if (!updated) {
-    response.status(404).json({ error: "No pending trade alert found with that id." });
+    response
+      .status(404)
+      .json({ error: "No pending trade alert found with that id." });
     return;
   }
 
-  const result = await db.raw(`${tradeAlertSelect} WHERE ta.id = ?`, [request.params.id]);
+  const result = await db.raw(`${tradeAlertSelect} WHERE ta.id = ?`, [
+    request.params.id,
+  ]);
   response.json(result.rows[0]);
 });
 
@@ -116,7 +132,7 @@ tradeAlertsRouter.patch("/:id", async (request, response) => {
 // browser via the SSE stream below, so a Telegram ping would just be noise.
 // The scheduled job (run-trade-alert-generation-job.ts) is the one that
 // notifies.
-tradeAlertsRouter.get("/run-stream", async (_request, response) => {
+tradeAlertsRouter.get("/run-stream", async (request, response) => {
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
   response.setHeader("Connection", "keep-alive");
@@ -132,13 +148,29 @@ tradeAlertsRouter.get("/run-stream", async (_request, response) => {
   }, heartbeatIntervalMs);
 
   try {
-    await runJob("trade_alert_generation", async () => {
-      const { tickersScanned, totalNewAlerts } = await runTradeAlertGeneration((event) => send(event));
-      return { details: { tickersScanned, totalNewAlerts } };
-    });
+    await runJob(
+      "trade_alert_generation",
+      async () => {
+        const { tickersScanned, totalNewAlerts } =
+          await runTradeAlertGeneration((event) => send(event));
+        return { details: { tickersScanned, totalNewAlerts } };
+      },
+      { triggeredBy: "manual", triggeredByUserId: request.session.userId },
+    );
     send({ type: "done" });
   } catch (error) {
-    send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });
+    if (error instanceof JobAlreadyRunningError) {
+      send({
+        type: "alreadyRunning",
+        message:
+          "A trade alert scan is already in progress — check back shortly instead of running another.",
+      });
+    } else {
+      send({
+        type: "streamError",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   } finally {
     clearInterval(heartbeat);
     response.end();
@@ -156,11 +188,15 @@ tradeAlertsRouter.get("/run-stream", async (_request, response) => {
 tradeAlertsRouter.post("/:id/refresh", async (request, response) => {
   const result = await refreshTradeAlert(request.params.id);
   if (!result.ok) {
-    response.status(result.error === "Trade alert not found." ? 404 : 422).json({ error: result.error });
+    response
+      .status(result.error === "Trade alert not found." ? 404 : 422)
+      .json({ error: result.error });
     return;
   }
 
-  const updated = await db.raw(`${tradeAlertSelect} WHERE ta.id = ?`, [request.params.id]);
+  const updated = await db.raw(`${tradeAlertSelect} WHERE ta.id = ?`, [
+    request.params.id,
+  ]);
   response.json(updated.rows[0]);
 });
 
@@ -178,7 +214,9 @@ tradeAlertsRouter.post("/refresh-ticker", async (request, response) => {
     return;
   }
 
-  const ticker = await db("tickers").where({ symbol: symbol.toUpperCase() }).first();
+  const ticker = await db("tickers")
+    .where({ symbol: symbol.toUpperCase() })
+    .first();
   if (!ticker) {
     response.status(404).json({ error: "Ticker not found." });
     return;
@@ -187,7 +225,9 @@ tradeAlertsRouter.post("/refresh-ticker", async (request, response) => {
   try {
     await refreshTickerTradeAlerts(ticker.id, ticker.symbol);
   } catch (error) {
-    response.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    response
+      .status(502)
+      .json({ error: error instanceof Error ? error.message : String(error) });
     return;
   }
 
