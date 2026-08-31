@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchNewTickerData } from "../ibkr/fetchNewTickerData.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
 import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
+import { computeIvMetrics } from "../lib/ivMetrics.js";
 
 export const screenerRouter = Router();
 screenerRouter.use(requireAuth);
@@ -25,7 +26,14 @@ screenerRouter.get("/search", async (request, response) => {
 // One row per ticker currently monitored, carrying its latest
 // market_data_snapshots row if one exists (LEFT JOIN LATERAL, not a plain
 // join) — a just-added ticker with no capture yet still shows up, just with
-// null IV/volume, filling in once the daily capture job runs.
+// null IV/volume, filling in once the daily capture job runs. IV Rank/IV
+// Percentile are computed separately (computeIvMetrics, daily_price_bars) —
+// migrated off market_data_snapshots 2026-08-31 so both metrics, and both
+// screens that show them (this one and Trade Alerts), read the same history
+// and can't silently disagree with each other. impliedVolatility itself
+// (the raw "as of" number, not the rank/percentile) stays on
+// market_data_snapshots — it's the more frequently updated live capture,
+// unrelated to which table backs the two history-based metrics.
 screenerRouter.get("/", async (_request, response) => {
   const result = await db.raw(
     `
@@ -40,10 +48,7 @@ screenerRouter.get("/", async (_request, response) => {
       m.snapshot_date AS "snapshotDate",
       m.implied_volatility AS "impliedVolatility",
       m.avg_option_volume AS "avgOptionVolume",
-      m.captured_at AS "capturedAt",
-      iv_window.window_days AS "ivRankWindowDays",
-      iv_window.min_iv AS "ivRankMinIv",
-      iv_window.max_iv AS "ivRankMaxIv"
+      m.captured_at AS "capturedAt"
     FROM shortlist_entries se
     JOIN tickers t ON t.id = se.ticker_id
     LEFT JOIN LATERAL (
@@ -53,51 +58,19 @@ screenerRouter.get("/", async (_request, response) => {
       ORDER BY snapshot_date DESC
       LIMIT 1
     ) m ON true
-    LEFT JOIN LATERAL (
-      SELECT COUNT(*) AS window_days, MIN(implied_volatility) AS min_iv, MAX(implied_volatility) AS max_iv
-      FROM (
-        SELECT implied_volatility
-        FROM market_data_snapshots
-        WHERE ticker_id = t.id AND implied_volatility IS NOT NULL
-        ORDER BY snapshot_date DESC
-        LIMIT 252
-      ) recent
-    ) iv_window ON true
     WHERE se.removed_at IS NULL
     ORDER BY t.symbol
     `,
   );
 
-  response.json(result.rows.map(withIvRank));
+  const rows = await Promise.all(
+    result.rows.map(async (row: { tickerId: string; [key: string]: unknown }) => ({
+      ...row,
+      ...(await computeIvMetrics(row.tickerId)),
+    })),
+  );
+  response.json(rows);
 });
-
-interface RawScreenerRow {
-  impliedVolatility: string | null;
-  ivRankWindowDays: string | null;
-  ivRankMinIv: string | null;
-  ivRankMaxIv: string | null;
-  [key: string]: unknown;
-}
-
-// IV Rank = (current IV − min IV) / (max IV − min IV) × 100 over whatever
-// history exists, up to a trailing 252-trading-day window (approved formula,
-// see PROGRESS.md "Decisions made"). Needs at least 2 distinct-IV data points
-// to be meaningful — returns null otherwise (e.g. a single day of history, or
-// IV unchanged across the whole window).
-function withIvRank(row: RawScreenerRow) {
-  const { impliedVolatility, ivRankWindowDays, ivRankMinIv, ivRankMaxIv, ...rest } = row;
-  const windowDays = ivRankWindowDays === null ? 0 : Number(ivRankWindowDays);
-  const minIv = ivRankMinIv === null ? null : Number(ivRankMinIv);
-  const maxIv = ivRankMaxIv === null ? null : Number(ivRankMaxIv);
-  const currentIv = impliedVolatility === null ? null : Number(impliedVolatility);
-
-  let ivRank: number | null = null;
-  if (windowDays >= 2 && currentIv !== null && minIv !== null && maxIv !== null && maxIv > minIv) {
-    ivRank = ((currentIv - minIv) / (maxIv - minIv)) * 100;
-  }
-
-  return { ...rest, impliedVolatility, ivRank, ivRankWindowDays: windowDays };
-}
 
 screenerRouter.post("/", async (request, response) => {
   const { symbol, notes } = request.body as {

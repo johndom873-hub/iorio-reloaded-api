@@ -14,7 +14,7 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-daily-market-data-job.js
 
-import { EventName, MarketDataType } from "@stoqey/ib";
+import { EventName, MarketDataType, WhatToShow } from "@stoqey/ib";
 import type { IbkrConnection } from "../src/ibkr/connectIbkr.js";
 import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
@@ -68,6 +68,11 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
       .merge();
 
     const bar = await lookupLatestDailyBar(connection, ticker.symbol, nextReqId++);
+    // Best-effort — the daily IV bar isn't guaranteed the same day the price
+    // bar is (e.g. a brand-new ticker with no IV history yet), and a miss
+    // here shouldn't fail the whole ticker capture since price data is the
+    // higher-priority half of this job.
+    const ivBar = await lookupLatestDailyBar(connection, ticker.symbol, nextReqId++, WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(() => null);
     if (bar) {
       const tradingDate = new Date(bar.time * 1000).toISOString().slice(0, 10);
       await db("daily_price_bars")
@@ -79,9 +84,17 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
           low_price: bar.low,
           close_price: bar.close,
           volume: bar.volume,
+          implied_volatility: ivBar?.close ?? null,
         })
         .onConflict(["ticker_id", "trading_date"])
-        .merge();
+        .merge({
+          open_price: db.raw("excluded.open_price"),
+          high_price: db.raw("excluded.high_price"),
+          low_price: db.raw("excluded.low_price"),
+          close_price: db.raw("excluded.close_price"),
+          volume: db.raw("excluded.volume"),
+          implied_volatility: db.raw("COALESCE(excluded.implied_volatility, daily_price_bars.implied_volatility)"),
+        });
     }
 
     console.log(

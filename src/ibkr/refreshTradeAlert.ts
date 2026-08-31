@@ -3,9 +3,11 @@ import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import { daysBetween, parseExpiry, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
-import { decayThresholdFraction, dteThreshold } from "./generateRollCandidates.js";
+import { decayThresholdFraction, dteThreshold, ivRankThresholdForDecayRoll } from "./generateRollCandidates.js";
 import type { AlertCandidate, AlertStrategyKey } from "./generateTradeAlertCandidates.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
+import { computeIvMetrics } from "../lib/ivMetrics.js";
+import { estimateRollCommissionComponent, halfSpread } from "../lib/rollEconomics.js";
 import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -73,10 +75,16 @@ async function refreshNewTradeCandidate(
     right: candidate.right,
     delta: quote.delta,
     premium,
+    bid: quote.bid,
+    ask: quote.ask,
     dte,
     annualizedYield: (premium / capitalAtRisk) * (365 / dte),
     spotPrice,
     probabilityOfProfit,
+    // Carried forward unchanged — ticker-level 252-day stats, not something
+    // that needs recomputing to re-quote one already-chosen contract.
+    ivRank: candidate.ivRank,
+    ivPercentile: candidate.ivPercentile,
     calendarUnverified: !calendarContext.resolved,
   };
 }
@@ -111,6 +119,8 @@ function rationaleForRefreshedRoll(
   stillTriggered: boolean,
   dte: number,
   replacement: AlertCandidate,
+  netCredit: number,
+  stillNetCredit: boolean,
   calendarContext: CalendarConflictContext,
 ): string {
   const rightLabel = closeLeg.right === "call" ? "call" : "put";
@@ -120,8 +130,11 @@ function rationaleForRefreshedRoll(
       : `${dte} DTE remaining (≤21)`;
   const pct = (replacement.annualizedYield * 100).toFixed(1);
   const staleness = stillTriggered ? "" : " (no longer meets a roll trigger as of this refresh — re-check before acting)";
+  const creditStaleness = stillNetCredit
+    ? ""
+    : " (no longer a net credit after commission/spread as of this refresh — re-check before acting)";
   const note = calendarNote(strategyKey, calendarContext, replacement.expiry, replacement.calendarUnverified);
-  return `Roll ${symbol} $${closeLeg.strike.toFixed(2)}${closeLeg.right === "call" ? "C" : "P"} exp ${closeLeg.expiry} — ${triggerLabel}${staleness}. Suggested replacement: sell 1x ${rightLabel} $${replacement.strike.toFixed(2)} strike exp ${replacement.expiry} (${replacement.dte} DTE, Δ${replacement.delta.toFixed(2)}) for $${replacement.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
+  return `Roll ${symbol} $${closeLeg.strike.toFixed(2)}${closeLeg.right === "call" ? "C" : "P"} exp ${closeLeg.expiry} — ${triggerLabel}${staleness}. Suggested replacement: sell 1x ${rightLabel} $${replacement.strike.toFixed(2)} strike exp ${replacement.expiry} (${replacement.dte} DTE, Δ${replacement.delta.toFixed(2)}) for $${replacement.premium.toFixed(2)} premium — ${pct}% annualized yield, $${netCredit.toFixed(2)} net credit after commission/spread${creditStaleness}.${note}`;
 }
 
 /**
@@ -186,11 +199,22 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
     const closeDte = daysBetween(new Date(), parseExpiry(toYyyymmdd(structure.closeLeg.expiry)));
     const decayed = currentPrice <= structure.closeLeg.entryPrice * decayThresholdFraction;
     const nearExpiry = closeDte <= dteThreshold;
-    const stillTriggered = decayed || nearExpiry;
-    const trigger: "decay" | "dte" = decayed ? "decay" : "dte";
+    const trigger: "decay" | "dte" = nearExpiry ? "dte" : "decay";
+
+    let stillTriggered = nearExpiry;
+    if (!nearExpiry && decayed) {
+      const ivMetrics = await computeIvMetrics(alert.ticker_id as string);
+      if (ivMetrics.ivRank === null || ivMetrics.ivRank >= ivRankThresholdForDecayRoll) stillTriggered = true;
+    }
 
     const refreshedReplacement = await refreshNewTradeCandidate(connection, alert.symbol, strategyKey, structure.replacement, calendarContext);
     if (typeof refreshedReplacement === "string") return { ok: false, error: refreshedReplacement };
+
+    const commissionComponent = await estimateRollCommissionComponent();
+    const closeSpread = halfSpread(closeQuote?.bid ?? null, closeQuote?.ask ?? null);
+    const requiredMinimumCredit = commissionComponent + closeSpread + halfSpread(refreshedReplacement.bid, refreshedReplacement.ask);
+    const netCredit = refreshedReplacement.premium - currentPrice;
+    const stillNetCredit = netCredit > requiredMinimumCredit;
 
     const refreshedCloseLeg = { ...structure.closeLeg, currentPrice };
     await db("trade_alerts")
@@ -201,9 +225,23 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
           trigger,
           dte: closeDte,
           replacement: refreshedReplacement,
+          netCredit,
+          requiredMinimumCredit,
           stillTriggered,
+          stillNetCredit,
         }),
-        rationale: rationaleForRefreshedRoll(alert.symbol, strategyKey, refreshedCloseLeg, trigger, stillTriggered, closeDte, refreshedReplacement, calendarContext),
+        rationale: rationaleForRefreshedRoll(
+          alert.symbol,
+          strategyKey,
+          refreshedCloseLeg,
+          trigger,
+          stillTriggered,
+          closeDte,
+          refreshedReplacement,
+          netCredit,
+          stillNetCredit,
+          calendarContext,
+        ),
         last_refreshed_at: db.fn.now(),
       });
     return { ok: true };

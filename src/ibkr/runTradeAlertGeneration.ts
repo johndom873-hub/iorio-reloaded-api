@@ -71,7 +71,7 @@ export function rationaleForRoll(symbol: string, leg: OpenShortLeg, suggestion: 
   const r = suggestion.replacement;
   const pct = (r.annualizedYield * 100).toFixed(1);
   const note = r.calendarUnverified ? calendarUnverifiedNote : "";
-  return `Roll ${symbol} $${leg.strike.toFixed(2)}${leg.right === "call" ? "C" : "P"} exp ${toIsoDate(leg.expiry)} — ${triggerLabel}. Suggested replacement: sell 1x ${rightLabel} $${r.strike.toFixed(2)} strike exp ${r.expiry} (${r.dte} DTE, Δ${r.delta.toFixed(2)}) for $${r.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
+  return `Roll ${symbol} $${leg.strike.toFixed(2)}${leg.right === "call" ? "C" : "P"} exp ${toIsoDate(leg.expiry)} — ${triggerLabel}. Suggested replacement: sell 1x ${rightLabel} $${r.strike.toFixed(2)} strike exp ${r.expiry} (${r.dte} DTE, Δ${r.delta.toFixed(2)}) for $${r.premium.toFixed(2)} premium — ${pct}% annualized yield, $${suggestion.netCredit.toFixed(2)} net credit after commission/spread.${note}`;
 }
 
 // Exported for evaluateRollForPosition.ts.
@@ -212,6 +212,8 @@ export async function runTradeAlertGeneration(
           trigger: suggestion.trigger,
           dte: suggestion.dte,
           replacement: suggestion.replacement,
+          netCredit: suggestion.netCredit,
+          requiredMinimumCredit: suggestion.requiredMinimumCredit,
         }),
         rationale: rationaleForRoll(leg.symbol, leg, suggestion),
         status: "pending",

@@ -301,6 +301,7 @@ export async function fetchHistoricalBarsRaw(
   barSize: BarSizeSetting,
   duration: string,
   reqId = 1,
+  whatToShow: WhatToShow = WhatToShow.TRADES,
 ): Promise<PriceBar[]> {
   const { ib } = connection;
 
@@ -340,7 +341,7 @@ export async function fetchHistoricalBarsRaw(
 
     ib.on(EventName.historicalData, onHistoricalData);
     ib.on(EventName.error, onError);
-    ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), "", duration, barSize, WhatToShow.TRADES, 1, 2, false);
+    ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), "", duration, barSize, whatToShow, 1, 2, false);
   });
 }
 
@@ -374,7 +375,12 @@ export async function fetchPriceBars(symbol: string, range: ChartRange): Promise
  * today. Returns the most recent bar, or null if none came back (e.g. the
  * job runs before the first daily bar of a newly-added ticker exists).
  */
-export async function lookupLatestDailyBar(connection: IbkrConnection, symbol: string, reqId = 1): Promise<PriceBar | null> {
+export async function lookupLatestDailyBar(
+  connection: IbkrConnection,
+  symbol: string,
+  reqId = 1,
+  whatToShow: WhatToShow = WhatToShow.TRADES,
+): Promise<PriceBar | null> {
   const { ib } = connection;
 
   return new Promise((resolve, reject) => {
@@ -405,6 +411,6 @@ export async function lookupLatestDailyBar(connection: IbkrConnection, symbol: s
 
     ib.on(EventName.historicalData, onHistoricalData);
     ib.on(EventName.error, onError);
-    ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), "", "2 D", BarSizeSetting.DAYS_ONE, WhatToShow.TRADES, 1, 2, false);
+    ib.reqHistoricalData(reqId, new Stock(symbol, "SMART", "USD"), "", "2 D", BarSizeSetting.DAYS_ONE, whatToShow, 1, 2, false);
   });
 }

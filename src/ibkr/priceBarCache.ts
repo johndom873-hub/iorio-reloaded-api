@@ -1,4 +1,4 @@
-import { BarSizeSetting, MarketDataType } from "@stoqey/ib";
+import { BarSizeSetting, MarketDataType, WhatToShow } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { fetchHistoricalBarsRaw, type ChartRange, type PriceBar } from "./fetchTickerOverview.js";
@@ -133,18 +133,45 @@ async function getLatestDailyBarDate(tickerId: string): Promise<Date | null> {
 // Matches the daily job's own insert shape (run-daily-market-data-job.ts) —
 // same trading_date derivation, same onConflict target, so a backfill here
 // and that job's nightly top-up coexist on the same rows without conflict.
-async function upsertDailyBars(tickerId: string, bars: PriceBar[]): Promise<void> {
+// ivByDate is keyed by the same YYYY-MM-DD derivation as trading_date —
+// IBKR's OPTION_IMPLIED_VOLATILITY series doesn't necessarily have a bar on
+// every date TRADES does (e.g. a brand-new ticker), so a missing entry
+// merges as null rather than dropping the price bar.
+async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDate: Map<string, number> = new Map()): Promise<void> {
   if (bars.length === 0) return;
-  const rows = bars.map((bar) => ({
-    ticker_id: tickerId,
-    trading_date: new Date(bar.time * 1000).toISOString().slice(0, 10),
-    open_price: bar.open,
-    high_price: bar.high,
-    low_price: bar.low,
-    close_price: bar.close,
-    volume: bar.volume,
-  }));
-  await db("daily_price_bars").insert(rows).onConflict(["ticker_id", "trading_date"]).merge();
+  const rows = bars.map((bar) => {
+    const tradingDate = new Date(bar.time * 1000).toISOString().slice(0, 10);
+    return {
+      ticker_id: tickerId,
+      trading_date: tradingDate,
+      open_price: bar.open,
+      high_price: bar.high,
+      low_price: bar.low,
+      close_price: bar.close,
+      volume: bar.volume,
+      implied_volatility: ivByDate.get(tradingDate) ?? null,
+    };
+  });
+  // implied_volatility merges via COALESCE rather than a straight overwrite:
+  // a top-up only re-fetches a short recent window, and if that window's IV
+  // request comes back with a gap for one date (the two series aren't
+  // guaranteed to share every date), a plain merge would null out an
+  // already-cached value instead of just leaving it alone.
+  await db("daily_price_bars")
+    .insert(rows)
+    .onConflict(["ticker_id", "trading_date"])
+    .merge({
+      open_price: db.raw("excluded.open_price"),
+      high_price: db.raw("excluded.high_price"),
+      low_price: db.raw("excluded.low_price"),
+      close_price: db.raw("excluded.close_price"),
+      volume: db.raw("excluded.volume"),
+      implied_volatility: db.raw("COALESCE(excluded.implied_volatility, daily_price_bars.implied_volatility)"),
+    });
+}
+
+function ivBarsToDateMap(ivBars: PriceBar[]): Map<string, number> {
+  return new Map(ivBars.map((bar) => [new Date(bar.time * 1000).toISOString().slice(0, 10), bar.close]));
 }
 
 async function readDailyBars(tickerId: string, since: Date): Promise<PriceBar[]> {
@@ -224,7 +251,19 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
     if (!latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range)) {
       const fetchDuration = latestCached ? dailyTopUpDuration : dailyBackfillDuration;
       const freshBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, fetchDuration, reqId);
-      await upsertDailyBars(tickerId, freshBars);
+      // Best-effort — a failed IV fetch shouldn't block the price bars this
+      // chart actually needs; falls back to no IV data for this pass rather
+      // than throwing, same COALESCE-on-merge protection as the daily job
+      // covers a partial/failed fetch not clobbering already-cached values.
+      const freshIvBars = await fetchHistoricalBarsRaw(
+        connection,
+        symbol,
+        BarSizeSetting.DAYS_ONE,
+        fetchDuration,
+        reqId + 1000,
+        WhatToShow.OPTION_IMPLIED_VOLATILITY,
+      ).catch(() => []);
+      await upsertDailyBars(tickerId, freshBars, ivBarsToDateMap(freshIvBars));
       markLiveFetched(symbol, range);
     }
 
@@ -258,4 +297,50 @@ export async function fetchCachedPriceBars(symbol: string, range: ChartRange): P
   } finally {
     connection.disconnect();
   }
+}
+
+export type IvChartRange = "1Y" | "5Y" | "All";
+export interface IvChartPoint {
+  time: number;
+  value: number;
+}
+
+/**
+ * IV history for the TickerDetailModal chart (approved 2026-08-31 — see
+ * PROGRESS.md and lib/ivMetrics.ts). Daily-only, unlike the price chart's
+ * six intraday ranges: IBKR's OPTION_IMPLIED_VOLATILITY historical series is
+ * one blended value per day, so there's no intraday IV to show — 1Y/5Y/All
+ * are the only ranges that make sense. Reuses getCachedChartBars purely for
+ * its warm-the-cache side effect (both price and IV bars, same 1Y/5Y/All
+ * backfill/top-up as the price chart already triggers), then reads
+ * implied_volatility straight back out rather than resampling it — a line
+ * series handles a few thousand points fine, no need for the price chart's
+ * weekly-resample dance which exists to make OHLC candles readable, not
+ * relevant to a single value per day.
+ */
+export async function fetchCachedIvBars(symbol: string, range: IvChartRange): Promise<IvChartPoint[]> {
+  const connection = await connectToIbkrGateway();
+  try {
+    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    await getCachedChartBars(connection, symbol, range);
+  } finally {
+    connection.disconnect();
+  }
+
+  const tickerId = await resolveTickerId(symbol);
+  if (!tickerId) return [];
+
+  const since = range === "All" ? null : subtractDuration(new Date(), range === "1Y" ? "1 Y" : "5 Y");
+  const rows: { trading_date: string | Date; implied_volatility: string }[] = await db("daily_price_bars")
+    .where({ ticker_id: tickerId })
+    .whereNotNull("implied_volatility")
+    .modify((query) => {
+      if (since) query.andWhere("trading_date", ">=", toDateOnlyString(since));
+    })
+    .orderBy("trading_date", "asc");
+
+  return rows.map((row) => ({
+    time: Math.floor(new Date(`${toDateOnlyString(row.trading_date)}T00:00:00Z`).getTime() / 1000),
+    value: Number(row.implied_volatility),
+  }));
 }

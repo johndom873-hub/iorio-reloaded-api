@@ -44,6 +44,7 @@ export function formatRollAlertLine(
     currentPrice: number;
     dte: number;
     replacement: { strike: number; expiry: string; premium: number; annualizedYield: number };
+    netCredit: number;
   },
 ): string {
   const rightAbbrev = leg.right === "call" ? "C" : "P";
@@ -56,6 +57,6 @@ export function formatRollAlertLine(
   return [
     `🔄 ${symbol} — Roll suggested (${triggerLabel})`,
     `Current: $${leg.strike.toFixed(2)}${rightAbbrev} exp ${formatShortDate(leg.expiryIso)} → New: $${replacement.strike.toFixed(2)}${rightAbbrev} exp ${formatShortDate(replacement.expiry)}`,
-    `Entry $${leg.entryPrice.toFixed(2)} → New premium $${replacement.premium.toFixed(2)} (${annualizedYieldPct}% ann.)`,
+    `Entry $${leg.entryPrice.toFixed(2)} → New premium $${replacement.premium.toFixed(2)} (${annualizedYieldPct}% ann.) · $${suggestion.netCredit.toFixed(2)} net credit`,
   ].join("\n");
 }

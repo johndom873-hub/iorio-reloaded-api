@@ -1,6 +1,7 @@
 import { EventName, OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
+import { computeIvMetrics, type IvMetrics } from "../lib/ivMetrics.js";
 import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
@@ -30,6 +31,13 @@ export interface AlertCandidate {
   right: "call" | "put";
   delta: number;
   premium: number;
+  // Raw bid/ask behind `premium` (their midpoint) -- kept so a roll's net
+  // credit can be checked against the real cost of crossing the spread
+  // rather than just comparing two already-blended midpoints. Null when the
+  // quote fell back to last price (see fetchOptionChain.ts). See
+  // lib/rollEconomics.ts's halfSpread.
+  bid: number | null;
+  ask: number | null;
   dte: number;
   annualizedYield: number;
   spotPrice: number;
@@ -37,6 +45,10 @@ export interface AlertCandidate {
   // blackScholesPop.ts's header for why, and its "pending validation" note.
   // Null when the underlying quote had no usable IV.
   probabilityOfProfit: number | null;
+  // See lib/ivMetrics.ts — both null with too little IV history (e.g. a
+  // newly-added ticker).
+  ivRank: number | null;
+  ivPercentile: number | null;
   // True when this ticker has never resolved to a TradingView symbol, so its
   // earnings/ex-dividend calendar couldn't be checked — the candidate was
   // NOT excluded on that basis (absence of data isn't evidence of absence of
@@ -156,6 +168,7 @@ function rankCandidates(
   settings: AlertStrategySettings,
   spotPrice: number,
   calendarContext: CalendarConflictContext,
+  ivMetrics: IvMetrics,
 ): AlertCandidate[] {
   const optionType = right === "call" ? OptionType.Call : OptionType.Put;
   const today = new Date();
@@ -193,10 +206,14 @@ function rankCandidates(
       right,
       delta: quote.delta,
       premium,
+      bid: quote.bid,
+      ask: quote.ask,
       dte,
       annualizedYield,
       spotPrice,
       probabilityOfProfit,
+      ivRank: ivMetrics.ivRank,
+      ivPercentile: ivMetrics.ivPercentile,
       calendarUnverified: !calendarContext.resolved,
     });
   }
@@ -251,11 +268,12 @@ export async function generateTradeAlertCandidates(
   );
   if (expiryStrikes.length === 0) return [];
 
-  const [quotes, calendarContext] = await Promise.all([
+  const [quotes, calendarContext, ivMetrics] = await Promise.all([
     quoteOptionChain(connection, symbol, expiryStrikes),
     fetchCalendarConflictContext(tickerId),
+    computeIvMetrics(tickerId),
   ]);
-  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice, calendarContext);
+  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice, calendarContext, ivMetrics);
 }
 
 /**
@@ -315,12 +333,13 @@ export async function generateTradeAlertCandidatesForTicker(
   }
   if (contracts.length === 0) return results;
 
-  const [quotes, calendarContext] = await Promise.all([
+  const [quotes, calendarContext, ivMetrics] = await Promise.all([
     fetchQuotesForContracts(ib, symbol, contracts),
     fetchCalendarConflictContext(tickerId),
+    computeIvMetrics(tickerId),
   ]);
   for (const { strategyKey, settings, right } of preps) {
-    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice, calendarContext));
+    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice, calendarContext, ivMetrics));
   }
   return results;
 }

@@ -29,6 +29,8 @@ export type RollCandidateEvaluation =
         trigger: "decay" | "dte";
         dte: number;
         replacement: unknown;
+        netCredit: number;
+        requiredMinimumCredit: number;
         stillTriggered: boolean;
       };
     };
@@ -117,6 +119,8 @@ export async function evaluateRollForPosition(positionId: string, legId: string)
         trigger: suggestion.trigger,
         dte: suggestion.dte,
         replacement: suggestion.replacement,
+        netCredit: suggestion.netCredit,
+        requiredMinimumCredit: suggestion.requiredMinimumCredit,
         stillTriggered: suggestion.stillTriggered,
       },
     };

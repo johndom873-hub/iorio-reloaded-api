@@ -1,6 +1,8 @@
 import { OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { daysBetween, parseExpiry, quoteOptionChain } from "./fetchOptionChain.js";
+import { computeIvMetrics } from "../lib/ivMetrics.js";
+import { estimateRollCommissionComponent, halfSpread } from "../lib/rollEconomics.js";
 import {
   generateTradeAlertCandidates,
   type AlertCandidate,
@@ -27,6 +29,14 @@ export interface RollSuggestion {
   currentPrice: number;
   dte: number;
   replacement: AlertCandidate;
+  // Credit actually collected by this specific roll (replacement.premium -
+  // currentPrice) versus the real, measured cost of executing it
+  // (commission + both legs' bid/ask spread — see lib/rollEconomics.ts).
+  // netCredit > requiredMinimumCredit is guaranteed by construction: this is
+  // the first replacement candidate that clears the floor, not a post-hoc
+  // check.
+  netCredit: number;
+  requiredMinimumCredit: number;
   // False only when force-evaluated (see options.force below) for a leg that
   // hasn't actually hit either threshold — the batch job never sees false
   // here since it only calls this for legs it's already screened as
@@ -49,6 +59,16 @@ export interface RollSuggestion {
 // second hardcoded copy that could silently drift if these ever change.
 export const decayThresholdFraction = 0.5;
 export const dteThreshold = 21;
+
+// Approved 2026-08-31: the DTE trigger is a gamma/pin-risk control and fires
+// unconditionally. The decay trigger is a discretionary profit-take —
+// rolling early only makes sense when the ticker's IV is rich enough that
+// re-selling premium is actually attractive, so it's gated on ivRank >= 30
+// (top ~70% of the ticker's own 252-day IV range). A ticker with too little
+// IV history for a rank (null) isn't gated — same "absence of data isn't
+// evidence against" convention as calendarUnverified. Exported for
+// refreshTradeAlert.ts to recheck against the same threshold.
+export const ivRankThresholdForDecayRoll = 30;
 
 /**
  * Evaluates one open short option leg for a roll trigger and, if triggered,
@@ -82,15 +102,40 @@ export async function evaluateRollCandidate(
 
   const decayed = currentPrice <= leg.entryPrice * decayThresholdFraction;
   const nearExpiry = dte <= dteThreshold;
-  const triggered = decayed || nearExpiry;
+  const trigger: "decay" | "dte" = nearExpiry ? "dte" : "decay";
+
+  let triggered = nearExpiry;
+  if (!nearExpiry && decayed) {
+    const ivMetrics = await computeIvMetrics(leg.tickerId);
+    if (ivMetrics.ivRank === null || ivMetrics.ivRank >= ivRankThresholdForDecayRoll) triggered = true;
+  }
   if (!triggered && !options?.force) return null;
-  const trigger: "decay" | "dte" = decayed ? "decay" : "dte";
 
   const candidates = await generateTradeAlertCandidates(connection, leg.symbol, leg.tickerId, strategyKey, settings);
-  const replacement = candidates.find((c) => !(c.strike === leg.strike && c.expiry === toIsoDate(leg.expiry)));
+  const closeSpread = halfSpread(quote?.bid ?? null, quote?.ask ?? null);
+  const commissionComponent = await estimateRollCommissionComponent();
+
+  let replacement: AlertCandidate | undefined;
+  let netCredit = 0;
+  let requiredMinimumCredit = 0;
+  for (const candidate of candidates) {
+    if (candidate.strike === leg.strike && candidate.expiry === toIsoDate(leg.expiry)) continue;
+    const candidateNetCredit = candidate.premium - currentPrice;
+    const minimumCredit = commissionComponent + closeSpread + halfSpread(candidate.bid, candidate.ask);
+    if (candidateNetCredit > minimumCredit) {
+      replacement = candidate;
+      netCredit = candidateNetCredit;
+      requiredMinimumCredit = minimumCredit;
+      break;
+    }
+  }
+  // No candidate in the strategy's delta/DTE band clears the real cost of
+  // executing the roll — per Juan's 2026-08-31 call, this is an acceptable
+  // outcome, not an error: the leg simply isn't suggested for a roll, and
+  // Juan can choose to hold it to expiry/assignment or act manually.
   if (!replacement) return null;
 
-  return { trigger, currentPrice, dte, replacement, stillTriggered: triggered };
+  return { trigger, currentPrice, dte, replacement, netCredit, requiredMinimumCredit, stillTriggered: triggered };
 }
 
 function toIsoDate(expiryYyyymmdd: string): string {

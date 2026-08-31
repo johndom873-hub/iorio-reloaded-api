@@ -3,7 +3,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { streamTickerDetail } from "../ibkr/streamTickerDetail.js";
 import { streamPositionQuote } from "../ibkr/streamPositionQuote.js";
 import type { ChartRange } from "../ibkr/fetchTickerOverview.js";
-import { fetchCachedPriceBars } from "../ibkr/priceBarCache.js";
+import { fetchCachedPriceBars, fetchCachedIvBars, type IvChartRange } from "../ibkr/priceBarCache.js";
 import { fetchTickerQuoteSnapshot } from "../ibkr/fetchTickerQuoteSnapshot.js";
 
 export const tickerDetailRouter = Router();
@@ -119,4 +119,20 @@ tickerDetailRouter.get("/:symbol/chart", async (request, response) => {
 
   const bars = await fetchCachedPriceBars(symbol, range as ChartRange);
   response.json(bars);
+});
+
+const validIvChartRanges: IvChartRange[] = ["1Y", "5Y", "All"];
+
+// Daily-only (see fetchCachedIvBars's header comment) — the price chart's
+// four intraday ranges don't apply, IBKR's IV history is one value per day.
+tickerDetailRouter.get("/:symbol/iv-chart", async (request, response) => {
+  const symbol = request.params.symbol.toUpperCase();
+  const range = request.query.range as string | undefined;
+  if (!range || !validIvChartRanges.includes(range as IvChartRange)) {
+    response.status(400).json({ error: "A valid range query parameter (1Y, 5Y, or All) is required." });
+    return;
+  }
+
+  const points = await fetchCachedIvBars(symbol, range as IvChartRange);
+  response.json(points);
 });
