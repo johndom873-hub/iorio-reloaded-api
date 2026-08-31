@@ -11,6 +11,7 @@ import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLe
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning } from "../ibkr/calendarConflict.js";
 import { evaluateRollForPosition } from "../ibkr/evaluateRollForPosition.js";
+import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -987,6 +988,48 @@ positionsRouter.post("/:id/roll-candidate", async (request, response) => {
         relatedPositionId: result.relatedPositionId,
         rationale: result.rationale,
         suggestedStructure: result.suggestedStructure,
+      });
+      return;
+  }
+});
+
+// Read-only recovery-path projection for an unstructured bare-stock
+// position — "Recovery Path Formula" proposal, approved by Marcelo
+// 2026-08-31. See evaluateRecoveryPathForPosition.ts for the formula.
+// Writes nothing; opens its own short-lived IBKR connection per call.
+positionsRouter.post("/:id/recovery-path", async (request, response) => {
+  let result: Awaited<ReturnType<typeof evaluateRecoveryPathForPosition>>;
+  try {
+    result = await evaluateRecoveryPathForPosition(request.params.id!);
+  } catch (error) {
+    response.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+  switch (result.status) {
+    case "not_found":
+      response.status(404).json({ error: "Position not found." });
+      return;
+    case "not_unstructured":
+      response.status(400).json({ error: result.reason });
+      return;
+    case "no_shares":
+      response.status(422).json({ error: "No open stock shares held on this position." });
+      return;
+    case "no_settings":
+      response.status(409).json({ error: "No strategy settings configured for covered calls." });
+      return;
+    case "ok":
+      response.json({
+        symbol: result.symbol,
+        shares: result.shares,
+        entryPrice: result.entryPrice,
+        currentPrice: result.currentPrice,
+        unrealizedLoss: result.unrealizedLoss,
+        contractsAvailable: result.contractsAvailable,
+        candidate: result.candidate,
+        monthlyPremium: result.monthlyPremium,
+        monthsToRecover: result.monthsToRecover,
+        rationale: result.rationale,
       });
       return;
   }
