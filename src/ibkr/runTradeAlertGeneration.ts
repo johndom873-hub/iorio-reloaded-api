@@ -61,7 +61,8 @@ export function rationaleFor(
   return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
 }
 
-function rationaleForRoll(symbol: string, leg: OpenShortLeg, suggestion: RollSuggestion): string {
+// Exported for evaluateRollForPosition.ts's on-demand single-leg roll evaluation.
+export function rationaleForRoll(symbol: string, leg: OpenShortLeg, suggestion: RollSuggestion): string {
   const rightLabel = leg.right === "call" ? "call" : "put";
   const triggerLabel =
     suggestion.trigger === "decay"
@@ -73,7 +74,8 @@ function rationaleForRoll(symbol: string, leg: OpenShortLeg, suggestion: RollSug
   return `Roll ${symbol} $${leg.strike.toFixed(2)}${leg.right === "call" ? "C" : "P"} exp ${toIsoDate(leg.expiry)} — ${triggerLabel}. Suggested replacement: sell 1x ${rightLabel} $${r.strike.toFixed(2)} strike exp ${r.expiry} (${r.dte} DTE, Δ${r.delta.toFixed(2)}) for $${r.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
 }
 
-function toIsoDate(expiryYyyymmdd: string): string {
+// Exported for evaluateRollForPosition.ts.
+export function toIsoDate(expiryYyyymmdd: string): string {
   return `${expiryYyyymmdd.slice(0, 4)}-${expiryYyyymmdd.slice(4, 6)}-${expiryYyyymmdd.slice(6, 8)}`;
 }
 

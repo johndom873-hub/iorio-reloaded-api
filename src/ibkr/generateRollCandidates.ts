@@ -27,6 +27,12 @@ export interface RollSuggestion {
   currentPrice: number;
   dte: number;
   replacement: AlertCandidate;
+  // False only when force-evaluated (see options.force below) for a leg that
+  // hasn't actually hit either threshold — the batch job never sees false
+  // here since it only calls this for legs it's already screened as
+  // triggered. Lets the UI distinguish "you're rolling early" from a real
+  // trigger, same badge pattern refreshTradeAlert.ts's stillTriggered uses.
+  stillTriggered: boolean;
 }
 
 // Thresholds approved 2026-08-21 (see PROGRESS.md's roll-alert design note):
@@ -57,6 +63,12 @@ export async function evaluateRollCandidate(
   leg: OpenShortLeg,
   strategyKey: AlertStrategyKey,
   settings: AlertStrategySettings,
+  // force: compute a replacement candidate even when neither threshold has
+  // actually been hit — added 2026-08-31 for a user-initiated "Roll" click
+  // on an arbitrary position (see evaluateRollForPosition.ts), which should
+  // work regardless of whether the batch job would have flagged this leg.
+  // The batch job never passes this, so its behavior is unchanged.
+  options?: { force?: boolean },
 ): Promise<RollSuggestion | null> {
   const today = new Date();
   const dte = daysBetween(today, parseExpiry(leg.expiry));
@@ -70,14 +82,15 @@ export async function evaluateRollCandidate(
 
   const decayed = currentPrice <= leg.entryPrice * decayThresholdFraction;
   const nearExpiry = dte <= dteThreshold;
-  if (!decayed && !nearExpiry) return null;
+  const triggered = decayed || nearExpiry;
+  if (!triggered && !options?.force) return null;
   const trigger: "decay" | "dte" = decayed ? "decay" : "dte";
 
   const candidates = await generateTradeAlertCandidates(connection, leg.symbol, leg.tickerId, strategyKey, settings);
   const replacement = candidates.find((c) => !(c.strike === leg.strike && c.expiry === toIsoDate(leg.expiry)));
   if (!replacement) return null;
 
-  return { trigger, currentPrice, dte, replacement };
+  return { trigger, currentPrice, dte, replacement, stillTriggered: triggered };
 }
 
 function toIsoDate(expiryYyyymmdd: string): string {

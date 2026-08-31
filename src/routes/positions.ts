@@ -10,6 +10,7 @@ import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js"
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning } from "../ibkr/calendarConflict.js";
+import { evaluateRollForPosition } from "../ibkr/evaluateRollForPosition.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -804,10 +805,6 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     newLeg?: { strikePrice: number; expiryDate: string; quantity: number; limitPrice: number };
   };
 
-  if (!sourceAlertId) {
-    response.status(400).json({ error: "sourceAlertId is required." });
-    return;
-  }
   if (!closeLegId || typeof closeLimitPrice !== "number" || closeLimitPrice < 0) {
     response.status(400).json({ error: "closeLegId and a non-negative closeLimitPrice are required." });
     return;
@@ -841,18 +838,24 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     return;
   }
 
-  const alert = await db("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
-  if (!alert) {
-    response.status(404).json({ error: "Pending trade alert not found for sourceAlertId." });
-    return;
-  }
-  if (alert.alert_type !== "roll") {
-    response.status(400).json({ error: "sourceAlertId is not a roll alert." });
-    return;
-  }
-  if (alert.related_position_id !== position.id) {
-    response.status(400).json({ error: "sourceAlertId does not match this position." });
-    return;
+  // Optional — a user-initiated roll built via the on-demand roll-candidate
+  // endpoint (evaluateRollForPosition.ts) has no backing trade_alerts row.
+  // When present, validated the same way POST /orders validates its own
+  // sourceAlertId.
+  if (sourceAlertId) {
+    const alert = await db("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
+    if (!alert) {
+      response.status(404).json({ error: "Pending trade alert not found for sourceAlertId." });
+      return;
+    }
+    if (alert.alert_type !== "roll") {
+      response.status(400).json({ error: "sourceAlertId is not a roll alert." });
+      return;
+    }
+    if (alert.related_position_id !== position.id) {
+      response.status(400).json({ error: "sourceAlertId does not match this position." });
+      return;
+    }
   }
 
   const closingLeg = await db("position_legs").where({ id: closeLegId, position_id: position.id }).first();
@@ -925,13 +928,58 @@ positionsRouter.post("/:id/roll", async (request, response) => {
       request_type: "roll_leg",
       payload: JSON.stringify(payload),
       related_position_id: position.id,
-      source_alert_id: sourceAlertId,
+      source_alert_id: sourceAlertId || null,
     })
     .returning("*");
 
   await publishNotification({ type: "order_status", orderId: orderRequest.id });
   const calendarWarning = formatEconomicCalendarWarning(await fetchEconomicCalendarWarningEvents(normalizedNewLegExpiry));
   response.status(201).json({ ...serializeOrderRequest(orderRequest), calendarWarning });
+});
+
+// Read-only preview: computes a roll candidate for one specific leg on
+// demand (live IBKR quotes, no order/alert written) — added 2026-08-31 so
+// a user-initiated "Roll" click works even when the scheduled trade-alert
+// job hasn't (or never would) flag this leg as triggered. See
+// evaluateRollForPosition.ts. The response shape mirrors a roll trade
+// alert's suggestedStructure so the frontend can feed it straight into the
+// same RollPositionModal used for real roll alerts.
+positionsRouter.post("/:id/roll-candidate", async (request, response) => {
+  const { legId } = request.body as { legId?: string };
+  if (!legId) {
+    response.status(400).json({ error: "legId is required." });
+    return;
+  }
+
+  let result: Awaited<ReturnType<typeof evaluateRollForPosition>>;
+  try {
+    result = await evaluateRollForPosition(request.params.id!, legId);
+  } catch (error) {
+    response.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+  switch (result.status) {
+    case "not_found":
+      response.status(404).json({ error: "Leg not found on this position." });
+      return;
+    case "not_rollable":
+      response.status(400).json({ error: result.reason });
+      return;
+    case "no_settings":
+      response.status(409).json({ error: "No strategy settings configured for this position's strategy." });
+      return;
+    case "no_candidate":
+      response.status(422).json({ error: "No viable replacement contract found for this leg right now." });
+      return;
+    case "ok":
+      response.json({
+        symbol: result.symbol,
+        relatedPositionId: result.relatedPositionId,
+        rationale: result.rationale,
+        suggestedStructure: result.suggestedStructure,
+      });
+      return;
+  }
 });
 
 // Builds an order_requests row (request_type "close_position") for a combo
