@@ -104,6 +104,16 @@ if [[ "$PULL_EXIT" -ne 0 && "$UNEXPECTED_ERRORS" -gt 0 ]]; then
   exit 1
 fi
 
+# Prod runs compiled migrations (dist/src/db/migrations/*.js), so its
+# knex_migrations rows are recorded with a .js suffix. Local dev runs the
+# TS sources directly via tsx (see knexfile.ts's `extension` setting), so
+# without this, every pull leaves knex_migrations pointing at filenames that
+# don't exist on disk locally, and knex refuses to run ANY further migration
+# ("migration directory is corrupt") until this is fixed by hand.
+echo "Normalizing knex_migrations filenames for local dev (prod records .js, local runs .ts)..."
+psql "$LOCAL_DATABASE_URL" -v ON_ERROR_STOP=1 -c \
+  "UPDATE knex_migrations SET name = regexp_replace(name, '\.js\$', '.ts') WHERE name LIKE '%.js';" >/dev/null
+
 if [[ "$HAVE_USERS_BACKUP" -eq 1 && -s "$USERS_BACKUP_FILE" ]]; then
   echo "Restoring local 'users' rows over prod's (upsert by id — doesn't delete any row)..."
   UPSERT_SQL=$(mktemp)
