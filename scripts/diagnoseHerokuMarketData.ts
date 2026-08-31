@@ -1,54 +1,39 @@
-// ONE-OFF diagnostic (2026-08-31 trade-alert outage investigation): runs the
-// exact same option-chain request the real scan makes, on Heroku's own
-// infrastructure, to compare against identical local test results. Delete
-// once the investigation is closed.
+// ONE-OFF diagnostic (2026-08-31 trade-alert outage investigation): fully
+// hardcoded, zero dynamic lookups -- same exact symbol/expiry/strikes run
+// locally and via `heroku run`, to isolate whether Heroku's connection to
+// the Gateway behaves differently from a local connection through the same
+// SSH tunnel code. Strikes below were confirmed valid, listed DRAM calls
+// (verified locally: all 20 got a tick within 8s; half-dollar and far-OTM
+// strikes around them did not, consistent with those simply not existing
+// as contracts -- not a data problem). Delete once investigation is closed.
 //
 // Usage (prod, via heroku run):
-//   node dist/scripts/diagnoseHerokuMarketData.js [SYMBOL] [SPOT_PRICE]
+//   node dist/scripts/diagnoseHerokuMarketData.js
 
 import "dotenv/config";
 import { EventName, MarketDataType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
-import { getCachedContractDetails } from "../src/ibkr/fetchNewTickerData.js";
-import { getCachedOptionParams } from "../src/ibkr/fetchOptionChain.js";
+
+const SYMBOL = "DRAM";
+const EXPIRY = "20260902";
+const STRIKES = [57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76];
 
 async function main(): Promise<void> {
-  const symbol = process.argv[2] ?? "DRAM";
+  console.log(`Environment: ${process.env.DYNO ? "heroku dyno " + process.env.DYNO : "local"}`);
   const connection = await connectToIbkrGateway();
   connection.ib.reqMarketDataType(MarketDataType.DELAYED);
   connection.ib.on(EventName.error, (error: Error, code: number, reqId: number) => {
     if (code !== 10091 && code !== 10167) console.log(`[error] reqId=${reqId} code=${code} ${error.message}`);
   });
 
-  const { conId } = await getCachedContractDetails(connection, symbol, 1);
-  console.log("conId=" + conId);
-  const { strikes, expirations } = await getCachedOptionParams(connection.ib, symbol, conId!);
-
-  const today = new Date();
-  const inWindow = expirations
-    .filter((e) => {
-      const d = new Date(`${e.slice(0, 4)}-${e.slice(4, 6)}-${e.slice(6, 8)}`);
-      const dte = Math.round((d.getTime() - today.getTime()) / 86_400_000);
-      return dte >= 1 && dte <= 14;
-    })
-    .sort();
-  const expiry = inWindow[0];
-  console.log("expiry=" + expiry);
-
-  const spotPrice = Number(process.argv[3] ?? "56.5");
-  const uniqueStrikes = [...new Set(strikes)]
-    .filter((s) => s > spotPrice && s <= spotPrice * 1.4)
-    .sort((a, b) => a - b);
-  console.log(`Requesting ${uniqueStrikes.length} distinct near-money strikes...`);
-
   const ready = new Set<number>();
   connection.ib.on(EventName.tickPrice, (reqId: number) => ready.add(reqId));
   connection.ib.on(EventName.tickOptionComputation, (reqId: number) => ready.add(reqId));
 
-  uniqueStrikes.forEach((strike, i) => {
+  STRIKES.forEach((strike, i) => {
     connection.ib.reqMktData(
       200 + i,
-      { symbol, secType: "OPT", exchange: "SMART", currency: "USD", lastTradeDateOrContractMonth: expiry, strike, right: "C" } as any,
+      { symbol: SYMBOL, secType: "OPT", exchange: "SMART", currency: "USD", lastTradeDateOrContractMonth: EXPIRY, strike, right: "C" } as any,
       "",
       false,
       false,
@@ -56,8 +41,11 @@ async function main(): Promise<void> {
   });
 
   await new Promise((r) => setTimeout(r, 8_000));
-  console.log(`RESULT: ${ready.size}/${uniqueStrikes.length} contracts got data (from heroku run dyno)`);
-  uniqueStrikes.forEach((_, i) => connection.ib.cancelMktData(200 + i));
+  console.log(`RESULT: ${ready.size}/${STRIKES.length} contracts got data`);
+  console.log(`Got data: ${STRIKES.filter((_, i) => ready.has(200 + i)).join(", ")}`);
+  console.log(`No data: ${STRIKES.filter((_, i) => !ready.has(200 + i)).join(", ")}`);
+
+  STRIKES.forEach((_, i) => connection.ib.cancelMktData(200 + i));
   await new Promise((r) => setTimeout(r, 500));
   connection.disconnect();
 }
