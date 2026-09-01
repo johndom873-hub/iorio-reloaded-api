@@ -50,6 +50,7 @@ tradeBlotterRouter.get("/", async (request, response) => {
     `
     SELECT
       tr.id,
+      tr.ibkr_order_id AS "ibkrOrderId",
       tr.side,
       tr.quantity,
       tr.price,
@@ -68,11 +69,14 @@ tradeBlotterRouter.get("/", async (request, response) => {
       pl.option_type AS "optionType",
       pl.strike_price AS "strikePrice",
       to_char(pl.expiry_date, 'YYYY-MM-DD') AS "expiryDate",
-      t.symbol
+      t.symbol,
+      ru.display_name AS "requestedByDisplayName"
     FROM trades tr
     JOIN position_legs pl ON pl.id = tr.position_leg_id
     JOIN positions p ON p.id = pl.position_id
     JOIN tickers t ON t.id = p.ticker_id
+    LEFT JOIN order_requests orq ON orq.id = tr.source_order_request_id
+    LEFT JOIN users ru ON ru.id = orq.requested_by_user_id
     ${whereClause}
     ORDER BY tr.executed_at DESC
     `,

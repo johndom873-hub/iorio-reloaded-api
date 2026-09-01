@@ -75,5 +75,19 @@ export async function checkPositionReconciliation(ib: IBApi): Promise<string[]> 
     }
   }
 
+  // Diagnostic dump for the next time this fires — 2026-09-01 saw a run
+  // flag 8 "no matching row" problems for legs that, on direct inspection
+  // moments later, had existed correctly in the DB for up to 21 hours (not
+  // freshly created around the alert). The likely explanation is a bad
+  // read on this function's own one-off IBKR connection or DB query, not
+  // real data drift, but that couldn't be confirmed after the fact — this
+  // gives a raw snapshot to compare against if it recurs.
+  if (problems.length > 0) {
+    console.log(
+      `checkPositionReconciliation: held conIds = [${[...heldByConId.keys()].sort().join(", ")}], ` +
+        `open leg conIds = [${[...openLegsByConId.keys()].sort().join(", ")}]`,
+    );
+  }
+
   return problems;
 }

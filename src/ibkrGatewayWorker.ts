@@ -352,6 +352,19 @@ function setupOrderTrackingListeners(): void {
  */
 const pendingOpeningExecutions = new Map<string, { contract: Contract; execution: Execution }[]>();
 
+// Looked up by permId, not ibkr_order_id — ibkr_order_id resets and gets
+// reused after every Gateway/worker restart (see setupOrderTrackingListeners's
+// own comment on this), so matching a trade to its requester by order id
+// could attribute an old trade to whichever unrelated request later reused
+// that same id. permId is globally unique forever. Null if this execution's
+// order was placed outside the app (no order_requests row to find), which
+// is expected, not an error.
+async function lookupSourceOrderRequestId(execution: Execution): Promise<string | null> {
+  if (!execution.permId) return null;
+  const orderRequest = await db("order_requests").where({ ibkr_perm_id: execution.permId }).first("id");
+  return orderRequest?.id ?? null;
+}
+
 async function insertOpeningTradeRow(positionLegId: string, contract: Contract, execution: Execution): Promise<void> {
   if (!execution.execId) return;
   await db("trades")
@@ -364,6 +377,7 @@ async function insertOpeningTradeRow(positionLegId: string, contract: Contract, 
       price: execution.price ?? 0,
       executed_at: parseIbkrExecutionTime(execution.time) ?? new Date(),
       is_closing_trade: false,
+      source_order_request_id: await lookupSourceOrderRequestId(execution),
     })
     .onConflict("ibkr_exec_id")
     .ignore();
@@ -430,6 +444,7 @@ async function recordExecution(contract: Contract, execution: Execution): Promis
     price: execution.price ?? 0,
     executed_at: parseIbkrExecutionTime(execution.time) ?? new Date(),
     is_closing_trade: true,
+    source_order_request_id: await lookupSourceOrderRequestId(execution),
   });
 
   reconcilePositionsFromIbkr().catch((error) => console.error(`Post-execution reconciliation failed: ${error}`));
