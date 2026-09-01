@@ -53,12 +53,22 @@ const calendarUnverifiedNote = " (earnings/ex-div calendar unverified for this t
 export function rationaleFor(
   strategyKey: AlertStrategyKey,
   symbol: string,
-  candidate: { strike: number; expiry: string; dte: number; delta: number; premium: number; annualizedYield: number; calendarUnverified?: boolean },
+  candidate: {
+    strike: number;
+    expiry: string;
+    dte: number;
+    delta: number;
+    premium: number;
+    annualizedYield: number;
+    calendarUnverified?: boolean;
+    technicalNote?: string | null;
+  },
 ): string {
   const action = strategyKey === "covered_call" ? "Sell 1x call" : "Sell 1x put";
   const pct = (candidate.annualizedYield * 100).toFixed(1);
   const note = candidate.calendarUnverified ? calendarUnverifiedNote : "";
-  return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
+  const technicalNote = candidate.technicalNote ? ` ${candidate.technicalNote}` : "";
+  return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}${technicalNote}`;
 }
 
 // Exported for evaluateRollForPosition.ts's on-demand single-leg roll evaluation.

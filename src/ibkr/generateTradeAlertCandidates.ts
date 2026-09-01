@@ -3,9 +3,11 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
 import { computeIvMetrics, type IvMetrics } from "../lib/ivMetrics.js";
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
+import { computeSupportResistance, type SupportResistanceResult, type SupportResistanceZone } from "../lib/technicalIndicators.js";
 import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
+import { getCachedChartBars } from "./priceBarCache.js";
 import {
   daysBetween,
   fetchQuotesForContracts,
@@ -69,6 +71,43 @@ export interface AlertCandidate {
   // NOT excluded on that basis (absence of data isn't evidence of absence of
   // an event), but the caller should say so rather than imply a clean check.
   calendarUnverified: boolean;
+  // Support/resistance proximity context, informational only (Slice 2A,
+  // approved 2026-09-01 — see PROGRESS.md and technicalIndicators.ts's
+  // header) — describes the strike's location relative to a detected zone,
+  // never reorders or excludes candidates. Null when no qualifying zone sits
+  // within 1.0x ATR of the strike, or when support/resistance couldn't be
+  // computed (e.g. too little hourly bar history).
+  technicalNote: string | null;
+}
+
+// 1.0x ATR trigger and quality>=40 gate, both approved 2026-09-01 after
+// reviewing the academic evidence on support/resistance predictive power
+// (Zapranis & Tsinaslanidis 2012, Osler 2000, arXiv:2101.07410) — see
+// PROGRESS.md's Slice 2A discussion. Deliberately descriptive, not
+// prescriptive: states touches/quality/distance as facts, never a
+// buy/avoid recommendation, since the research supports the zones as real
+// context but not as a standalone directional edge.
+const technicalNoteAtrMultiple = 1.0;
+
+// Covered calls care about the strike's distance from resistance (assignment
+// risk if price breaks through); cash-secured puts care about distance from
+// support (elevated breakout-through risk if the strike sits inside a weak
+// support zone). Same zone-quality gate either side.
+// Exported for a focused unit test (generateTradeAlertCandidates.test.ts) —
+// decouples verifying this pure formatting/threshold logic from IBKR's live
+// pricing pacing, which flakes independently of this code being correct.
+export function buildTechnicalNote(strike: number, right: "call" | "put", supportResistance: SupportResistanceResult | null): string | null {
+  if (!supportResistance) return null;
+  const zone: SupportResistanceZone | null = right === "call" ? supportResistance.resistance : supportResistance.support;
+  if (!zone || zone.qualityPct < 40) return null;
+
+  const distance = Math.abs(strike - zone.price);
+  if (distance > technicalNoteAtrMultiple * zone.atr) return null;
+
+  const distancePct = (distance / zone.price) * 100;
+  const label = right === "call" ? "resistance" : "support";
+  const direction = strike >= zone.price ? "above" : "below";
+  return `Strike is ${distancePct.toFixed(1)}% ${direction} a detected ${label} zone at $${zone.price.toFixed(2)} (${zone.touches} touches, ${zone.qualityPct.toFixed(1)}% quality).`;
 }
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -89,6 +128,11 @@ const otmBandFraction = 0.4;
 const maxStrikeCandidatesPerExpiry = 50;
 const contractDetailsReqId = 1;
 const pricingReqId = 2;
+const hourlyBarsReqId = 3;
+// Hourly bars are keyed by bar-start time; a bar is still forming if it
+// started within the last hour — mirrors streamTickerDetail.ts's identical
+// check.
+const oneHourInSeconds = 3600;
 
 function pickExpiriesInWindow(expirations: string[], dteMin: number, dteMax: number): string[] {
   const today = new Date();
@@ -150,6 +194,25 @@ async function fetchTickerPrepData(connection: IbkrConnection, symbol: string): 
   return { conId: contractDetails.conId, spotPrice, expirations, strikes };
 }
 
+// Best-effort, ticker-level (not per-strategy) — reuses the same "3M"/hourly
+// cache Ticker Detail's chart already warms (priceBarCache.ts), so this is
+// usually a cache hit rather than a fresh IBKR historical-data call. Failure
+// (e.g. brand-new ticker with too little hourly history) degrades to no
+// technicalNote on any candidate rather than failing the ticker scan, same
+// fail-open treatment as calendarUnverified above.
+async function fetchTickerSupportResistance(connection: IbkrConnection, symbol: string, spotPrice: number): Promise<SupportResistanceResult | null> {
+  try {
+    const hourlyBars = await getCachedChartBars(connection, symbol, "3M", hourlyBarsReqId);
+    if (hourlyBars.length === 0) return null;
+    const lastBar = hourlyBars[hourlyBars.length - 1]!;
+    const currentCandleIsOpen = Date.now() / 1000 - lastBar.time < oneHourInSeconds;
+    return computeSupportResistance(hourlyBars, spotPrice, currentCandleIsOpen);
+  } catch (error) {
+    console.warn(`fetchTickerSupportResistance: failed for ${symbol} — ${error instanceof Error ? error.message : error}`);
+    return null;
+  }
+}
+
 // Validated (expiry, strike) pairs within a strategy's DTE window, one side
 // only (calls above spot / puts below) — the per-expiry checkStrikeExists
 // scans run in parallel across expiries, not sequentially, matching the
@@ -184,6 +247,7 @@ function rankCandidates(
   spotPrice: number,
   calendarContext: CalendarConflictContext,
   ivMetrics: IvMetrics,
+  supportResistance: SupportResistanceResult | null,
 ): AlertCandidate[] {
   const optionType = right === "call" ? OptionType.Call : OptionType.Put;
   const today = new Date();
@@ -230,6 +294,7 @@ function rankCandidates(
       ivRank: ivMetrics.ivRank,
       ivPercentile: ivMetrics.ivPercentile,
       calendarUnverified: !calendarContext.resolved,
+      technicalNote: buildTechnicalNote(quote.strike, right, supportResistance),
     });
   }
 
@@ -283,12 +348,13 @@ export async function generateTradeAlertCandidates(
   );
   if (expiryStrikes.length === 0) return [];
 
-  const [quotes, calendarContext, ivMetrics] = await Promise.all([
+  const [quotes, calendarContext, ivMetrics, supportResistance] = await Promise.all([
     quoteOptionChain(connection, symbol, expiryStrikes),
     fetchCalendarConflictContext(tickerId),
     computeIvMetrics(tickerId),
+    fetchTickerSupportResistance(connection, symbol, prep.spotPrice),
   ]);
-  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice, calendarContext, ivMetrics);
+  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice, calendarContext, ivMetrics, supportResistance);
 }
 
 /**
@@ -371,13 +437,14 @@ export async function generateTradeAlertCandidatesForTicker(
   }
   if (contracts.length === 0) return results;
 
-  const [quotes, calendarContext, ivMetrics] = await Promise.all([
+  const [quotes, calendarContext, ivMetrics, supportResistance] = await Promise.all([
     fetchQuotesForContracts(ib, symbol, contracts),
     fetchCalendarConflictContext(tickerId),
     computeIvMetrics(tickerId),
+    fetchTickerSupportResistance(connection, symbol, spotPrice),
   ]);
   for (const { strategyKey, settings, right } of preps) {
-    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice, calendarContext, ivMetrics));
+    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice, calendarContext, ivMetrics, supportResistance));
   }
   return results;
 }

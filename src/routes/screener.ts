@@ -3,6 +3,8 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchNewTickerData } from "../ibkr/fetchNewTickerData.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
+import { connectToIbkrGateway } from "../ibkr/connectIbkr.js";
+import { backfillOneYearOfDailyBars } from "../ibkr/priceBarCache.js";
 import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
 
@@ -106,6 +108,26 @@ screenerRouter.post("/", async (request, response) => {
       })
       .onConflict(["ticker_id", "snapshot_date"])
       .merge();
+
+    // Fire-and-forget: a year of daily bars gets this ticker's MA99/RSI/MACD
+    // usable immediately instead of waiting ~99 days for the nightly job's
+    // one-row-a-day capture to accumulate it (see backfillOneYearOfDailyBars
+    // in priceBarCache.ts for why the existing lazy chart-open backfill
+    // doesn't already cover this). Not awaited — a second IBKR connect plus
+    // historical-data fetch on top of fetchNewTickerData's own connect above
+    // risks the Heroku router timeout on this interactive request, and
+    // nothing shown to the user right now depends on it.
+    void (async () => {
+      const backfillConnection = await connectToIbkrGateway();
+      try {
+        const count = await backfillOneYearOfDailyBars(backfillConnection, ticker.id, ticker.symbol);
+        console.log(`screener POST /: backfilled ${count} daily bar(s) for ${ticker.symbol}.`);
+      } catch (error) {
+        console.error(`screener POST /: daily bar backfill failed for ${ticker.symbol}`, error);
+      } finally {
+        backfillConnection.disconnect();
+      }
+    })();
   }
 
   const latestSnapshot = await db("market_data_snapshots")

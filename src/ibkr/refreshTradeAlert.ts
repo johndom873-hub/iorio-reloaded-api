@@ -86,6 +86,10 @@ async function refreshNewTradeCandidate(
     ivRank: candidate.ivRank,
     ivPercentile: candidate.ivPercentile,
     calendarUnverified: !calendarContext.resolved,
+    // Carried forward unchanged, same reasoning as ivRank/ivPercentile above
+    // — a same-day re-quote of one already-chosen contract doesn't warrant
+    // re-running the support/resistance scan.
+    technicalNote: candidate.technicalNote,
   };
 }
 
@@ -108,7 +112,8 @@ function rationaleForRefreshedNewTrade(strategyKey: AlertStrategyKey, symbol: st
   const action = strategyKey === "covered_call" ? "Sell 1x call" : "Sell 1x put";
   const pct = (candidate.annualizedYield * 100).toFixed(1);
   const note = calendarNote(strategyKey, calendarContext, candidate.expiry, candidate.calendarUnverified);
-  return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}`;
+  const technicalNote = candidate.technicalNote ? ` ${candidate.technicalNote}` : "";
+  return `${action} on ${symbol}: $${candidate.strike.toFixed(2)} strike exp ${candidate.expiry} (${candidate.dte} DTE, Δ${candidate.delta.toFixed(2)}) for $${candidate.premium.toFixed(2)} premium — ${pct}% annualized yield.${note}${technicalNote}`;
 }
 
 function rationaleForRefreshedRoll(

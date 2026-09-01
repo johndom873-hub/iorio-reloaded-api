@@ -137,7 +137,7 @@ async function getLatestDailyBarDate(tickerId: string): Promise<Date | null> {
 // IBKR's OPTION_IMPLIED_VOLATILITY series doesn't necessarily have a bar on
 // every date TRADES does (e.g. a brand-new ticker), so a missing entry
 // merges as null rather than dropping the price bar.
-async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDate: Map<string, number> = new Map()): Promise<void> {
+export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDate: Map<string, number> = new Map()): Promise<void> {
   if (bars.length === 0) return;
   const rows = bars.map((bar) => {
     const tradingDate = new Date(bar.time * 1000).toISOString().slice(0, 10);
@@ -168,6 +168,23 @@ async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDate: Map
       volume: db.raw("excluded.volume"),
       implied_volatility: db.raw("COALESCE(excluded.implied_volatility, daily_price_bars.implied_volatility)"),
     });
+}
+
+// Explicit backfill for indicator work (MA99/RSI/MACD, 2026-09-01) — unlike
+// getCachedChartBars' lazy 20Y backfill above, that path only fires the
+// first time a ticker's 1Y/5Y/All chart is opened with zero cached daily
+// rows; a ticker whose first daily_price_bars row instead came from the
+// nightly job (run-daily-market-data-job.ts, one row/day) has `latestCached`
+// already non-null by the time anyone opens its chart, so it silently takes
+// the 5-day top-up path forever and never gets real history. This is called
+// explicitly instead — once from tmp/backfillDailyPriceBars.ts for existing
+// tickers, and fire-and-forget from screener.ts on every new ticker — so
+// depth doesn't depend on chart-opening order. 1Y is enough margin over
+// MA99's 99-close requirement without paying for the lazy path's full 20Y.
+export async function backfillOneYearOfDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<number> {
+  const bars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, "1 Y", reqId);
+  await upsertDailyBars(tickerId, bars);
+  return bars.length;
 }
 
 function ivBarsToDateMap(ivBars: PriceBar[]): Map<string, number> {

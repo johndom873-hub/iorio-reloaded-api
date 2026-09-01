@@ -5,8 +5,9 @@ import { streamPricingUpdates, type TickerPricing, type PriceBar } from "./fetch
 import { getCachedChartBars } from "./priceBarCache.js";
 import { prepareOptionChainStrikes, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
 import { db } from "../db/connection.js";
+import { computeMacd, computeMovingAverages, computeRsi, computeSupportResistance, type MacdSignal, type MovingAverages, type SupportResistanceResult } from "../lib/technicalIndicators.js";
 
-export type TickerDetailSection = "overview" | "chart" | "optionChain";
+export type TickerDetailSection = "overview" | "chart" | "optionChain" | "technicals";
 
 export interface TickerOverview {
   companyName: string | null;
@@ -14,15 +15,29 @@ export interface TickerOverview {
   pricing: TickerPricing;
 }
 
+export interface TickerTechnicals {
+  movingAverages: MovingAverages;
+  rsi: number;
+  macdSignal: MacdSignal;
+  supportResistance: SupportResistanceResult;
+}
+
 export type TickerDetailStreamEvent =
   | { type: "overview"; data: TickerOverview }
   | { type: "chart"; data: PriceBar[] }
   | { type: "optionChain"; data: OptionQuote[] }
+  | { type: "technicals"; data: TickerTechnicals }
   | { type: "error"; section: TickerDetailSection; message: string };
 
 const overviewReqId = 1;
 const pricingReqId = 2;
 const chartReqId = 3;
+const technicalsDailyReqId = 4;
+// A hovering-open hourly bar is one whose start time is within the current
+// hour — mirrors IBKR's own bar semantics (bar_time = bar start), used to
+// decide whether the latest 1h candle must be excluded from pivot discovery
+// (see computeSupportResistance's currentCandleIsOpen parameter).
+const oneHourInSeconds = 3600;
 
 // The default range shown when the modal first opens — matches
 // TickerPriceChart's own initial range. Switching ranges afterward goes
@@ -151,12 +166,50 @@ export async function streamTickerDetail(
       }
     })();
 
-    const chartTask: Promise<void> = (async () => {
+    const chartTask: Promise<PriceBar[]> = (async () => {
       try {
         const bars = await getCachedChartBars(connection, symbol, defaultChartRange, chartReqId);
         onEvent({ type: "chart", data: bars });
+        return bars;
       } catch (error) {
         onEvent({ type: "error", section: "chart", message: errorMessage(error) });
+        return [];
+      }
+    })();
+
+    // MA7/25/99, RSI, and MACD read daily closes (1Y, plenty of margin over
+    // MA99's 99-close requirement); support/resistance reuses chartTask's
+    // hourly bars rather than fetching them a second time. Waits on
+    // overviewReadyTask for a current price the same way optionChainTask
+    // does below — support/resistance's distance-from-price scoring and the
+    // open-candle check both need it.
+    const technicalsTask: Promise<void> = (async () => {
+      try {
+        const [hourlyBars, dailyBars, pricing] = await Promise.all([
+          chartTask,
+          getCachedChartBars(connection, symbol, "1Y", technicalsDailyReqId),
+          overviewReadyTask,
+        ]);
+        const currentPrice = pricing?.last ?? pricing?.previousClose ?? dailyBars[dailyBars.length - 1]?.close ?? null;
+        if (!currentPrice || hourlyBars.length === 0) {
+          throw new Error("No market data available to compute technicals.");
+        }
+
+        const closes = dailyBars.map((bar) => bar.close);
+        const lastHourlyBar = hourlyBars[hourlyBars.length - 1]!;
+        const currentCandleIsOpen = Date.now() / 1000 - lastHourlyBar.time < oneHourInSeconds;
+
+        onEvent({
+          type: "technicals",
+          data: {
+            movingAverages: computeMovingAverages(closes),
+            rsi: computeRsi(closes),
+            macdSignal: computeMacd(closes),
+            supportResistance: computeSupportResistance(hourlyBars, currentPrice, currentCandleIsOpen),
+          },
+        });
+      } catch (error) {
+        onEvent({ type: "error", section: "technicals", message: errorMessage(error) });
       }
     })();
 
@@ -199,7 +252,7 @@ export async function streamTickerDetail(
     // past that point. So this function itself doesn't return — and the
     // `finally` below doesn't disconnect from IBKR — until `signal` aborts,
     // which the route does the moment the SSE client actually disconnects.
-    await Promise.all([overviewReadyTask, chartTask, optionChainTask]);
+    await Promise.all([overviewReadyTask, chartTask, optionChainTask, technicalsTask]);
     if (!signal.aborted) {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     }
