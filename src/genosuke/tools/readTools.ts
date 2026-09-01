@@ -9,6 +9,8 @@
 // had no price data source at all, hit in practice 2026-08-24) via a
 // dedicated blocking route, GET /tickers/:symbol/quote, rather than the SSE
 // ones — see fetchTickerQuoteSnapshot.ts.
+import { listWafRules } from "../../lib/cloudflareService.js";
+import { fetchLogsFromBetterStack, type LogSourceApp } from "../../lib/betterstackService.js";
 import type { GenosukeTool } from "./types.js";
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
@@ -157,5 +159,35 @@ export const readTools: GenosukeTool[] = [
     tier: "read",
     parameters: { type: "object", properties: { limit: { type: "number", description: "Max rows, defaults to a reasonable window, capped at 200." } } },
     execute: (input, api) => api.get(`/system-health/jobs${input.limit ? `?limit=${input.limit}` : ""}`),
+  },
+  {
+    name: "list_waf_rules",
+    description: "List all current Cloudflare WAF custom rules on the ioriore.com zone, including blocked IPs/paths and their rule IDs (needed for remove_waf_rule).",
+    tier: "read",
+    parameters: { type: "object", properties: {} },
+    execute: () => listWafRules(),
+  },
+  {
+    name: "fetch_logs",
+    description:
+      "Raw application logs from Heroku (via Better Stack), for iorio-reloaded-api (web/worker backend) or iorio-reloaded-app (frontend static/SSR host) — use this to investigate an error, crash, or unexpected behavior report. Pass either `minutes` (a relative recent window) or `startTime`+`endTime` (ISO 8601, to investigate a specific past incident). Covers the last 8 days; returns up to 5000 lines, most relevant (closest to now, or closest to endTime) kept if the window has more than that.",
+    tier: "read",
+    parameters: {
+      type: "object",
+      properties: {
+        sourceApp: { type: "string", enum: ["api", "app"], description: "'api' for iorio-reloaded-api (backend/worker), 'app' for iorio-reloaded-app (frontend host)." },
+        minutes: { type: "number", description: "Minutes back from now. Defaults to 30 if none of minutes/startTime/endTime are given." },
+        startTime: { type: "string", description: "ISO 8601. Use with endTime instead of minutes." },
+        endTime: { type: "string", description: "ISO 8601. Use with startTime instead of minutes." },
+      },
+      required: ["sourceApp"],
+    },
+    execute: (input) =>
+      fetchLogsFromBetterStack({
+        sourceApp: input.sourceApp as LogSourceApp,
+        minutes: input.minutes as number | undefined,
+        startTime: input.startTime as string | undefined,
+        endTime: input.endTime as string | undefined,
+      }),
   },
 ];

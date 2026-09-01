@@ -4,11 +4,14 @@
 // turns (bot.ts's DB-backed history store as of 2026-08-27, previously an
 // in-memory Map), no persistence happens inside this function itself.
 //
-// Diverges from Jack in exactly one place: a financial-write tool call
-// never reaches execute() from inside this loop. It's intercepted, turned
-// into a pending Telegram confirmation, and the loop tells the model to
-// stop rather than retry — see requestConfirmation.ts's header comment for
-// why Jack's prompt-only "ask before acting" wasn't reused as-is.
+// Diverges from Jack in exactly one place: a financial-write or infra-write
+// tool call never reaches execute() from inside this loop. It's
+// intercepted, turned into a pending Telegram confirmation, and the loop
+// tells the model to stop rather than retry — see financialWriteTools.ts's
+// header comment for why Jack's prompt-only "ask before acting" wasn't
+// reused as-is (infra-write, added 2026-09-01 for Cloudflare WAF rule
+// changes, applies the same reasoning to a different kind of high-blast-
+// radius action).
 import { OpenRouterAdapter, type ChatMessage } from "./openRouterAdapter.js";
 import { TOOLS_BY_NAME } from "./tools/index.js";
 import { createConfirmation } from "./confirmations.js";
@@ -96,7 +99,7 @@ export async function chatOnce({ messages, userMessage, chatId, adapter, api, te
         const tool = TOOLS_BY_NAME.get(name);
         if (!tool) return { id, content: `Error: unknown tool "${name}".` };
 
-        if (tool.tier === "financial-write") {
+        if (tool.tier === "financial-write" || tool.tier === "infra-write") {
           const confirmation = createConfirmation(chatId, name, input);
           const description = tool.describeForConfirmation?.(input) ?? name;
           await telegram.sendMessage(chatId, `Confirm: ${description}`, {
