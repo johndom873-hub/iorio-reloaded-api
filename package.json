@@ -26,7 +26,8 @@
     "job:daily-pnl-snapshot": "tsx scripts/run-daily-pnl-snapshot-job.ts",
     "job:trade-alerts": "tsx scripts/run-trade-alert-generation-job.ts",
     "job:watchdog": "tsx scripts/run-watchdog-job.ts",
-    "ibkr:health-check": "tsx scripts/check-ibkr-health.ts"
+    "ibkr:health-check": "tsx scripts/check-ibkr-health.ts",
+    "sync-market-calendar": "tsx scripts/sync-market-calendar.ts"
   },
   "dependencies": {
     "@stoqey/ib": "^1.6.6",

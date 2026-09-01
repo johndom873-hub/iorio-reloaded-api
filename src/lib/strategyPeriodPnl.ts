@@ -12,6 +12,11 @@ import { db } from "../db/connection.js";
 // position_pnl_snapshots row on or before the period start date (rows
 // persist after a position closes, and a position opened after the period
 // start simply has no prior row, correctly defaulting to a 0 baseline).
+// Week/Month/Year's "start" is the beginning of the current calendar
+// period (this Monday, the 1st, Jan 1st) — Day's "start" is the *end* of
+// the last trading day instead (there's no "beginning of today" that means
+// anything before the market opens), so its realized/asof comparisons
+// below use the opposite boundary (> / <=) from the other three (>= / <).
 export interface StrategyPeriodPnl {
   strategyKey: string;
   day: number;
@@ -23,17 +28,24 @@ export interface StrategyPeriodPnl {
 export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
   const result = await db.raw(`
     WITH period_starts AS (
-      -- "day_start" anchors on the most recent snapshot actually captured,
-      -- not literal CURRENT_DATE — the nightly job runs once after market
-      -- close, so mid-day (before tonight's run) "today" has no snapshot
-      -- yet and "yesterday" IS the latest available row. Pinning to
-      -- CURRENT_DATE made "unrealized now" and "unrealized as of day start"
-      -- resolve to that same latest row, making Day always exactly 0
-      -- (found 2026-08-28) even on days with a real move — unlike the
-      -- account-level Day figure, which stores each day's delta directly
-      -- rather than deriving it from two point-in-time lookups.
+      -- "day_start" anchors on the last actual trading day (from
+      -- market_calendar, synced from MarketData.app — see
+      -- scripts/sync-market-calendar.ts), not on whatever snapshot happens
+      -- to exist. It used to be MAX(snapshot_date) (fixed 2026-08-28 for a
+      -- different bug — see git history), but that ties Day's boundary to
+      -- the snapshot job's own health: on a normal Monday, before that
+      -- day's snapshot has run, MAX(snapshot_date) is last Friday, which
+      -- falls *before* week_start (this Monday) — an inverted, wider-than-
+      -- the-week Day window that also silently balloons for every day the
+      -- job has been failing. Falls back to a plain weekday check (Mon -> 3
+      -- days back, else 1 day back) if market_calendar hasn't been synced
+      -- for the relevant range, which ignores holidays but never inverts
+      -- past the week boundary.
       SELECT
-        COALESCE((SELECT MAX(snapshot_date) FROM position_pnl_snapshots), CURRENT_DATE) AS day_start,
+        COALESCE(
+          (SELECT MAX(calendar_date) FROM market_calendar WHERE calendar_date < CURRENT_DATE AND is_open = true),
+          (CASE EXTRACT(ISODOW FROM CURRENT_DATE) WHEN 1 THEN CURRENT_DATE - 3 ELSE CURRENT_DATE - 1 END)
+        ) AS day_start,
         date_trunc('week', CURRENT_DATE)::date AS week_start,
         date_trunc('month', CURRENT_DATE)::date AS month_start,
         date_trunc('year', CURRENT_DATE)::date AS year_start
@@ -41,8 +53,13 @@ export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
     realized AS (
       SELECT
         p.strategy_key,
+        -- Strictly AFTER day_start, unlike week/month/year (>=): day_start
+        -- is now the last *completed* trading day itself (see period_starts
+        -- above), not the start of the current one, so a trade that exited
+        -- ON day_start was already fully reported as that day's own "Day"
+        -- figure and must not be re-counted into the next session's.
         COALESCE(SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
-          FILTER (WHERE pl.exit_at >= (SELECT day_start FROM period_starts)), 0) AS realized_day,
+          FILTER (WHERE pl.exit_at > (SELECT day_start FROM period_starts)), 0) AS realized_day,
         COALESCE(SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
           FILTER (WHERE pl.exit_at >= (SELECT week_start FROM period_starts)), 0) AS realized_week,
         COALESCE(SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
@@ -59,19 +76,17 @@ export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
       FROM position_pnl_snapshots
       ORDER BY position_id, snapshot_date DESC
     ),
-    -- Strictly BEFORE each period's start date, not on-or-before: the
-    -- baseline has to be the prior day's close, not today's own snapshot.
-    -- Using <= here was a real bug (found 2026-08-28) — day_start is
-    -- CURRENT_DATE, so once tonight's snapshot job has run for today,
-    -- "latest_snapshot" and "asof day_start" resolved to the exact same
-    -- row, making the Day column's unrealized component always exactly 0
-    -- regardless of any real intraday move, even though the account-level
-    -- Day total (sourced independently from account_pnl_snapshots) showed
-    -- the real nonzero delta.
+    -- ON OR BEFORE day_start here, unlike week/month/year (strictly
+    -- before): day_start is the last *completed* trading day's own date
+    -- (see period_starts above), so its own snapshot IS the correct
+    -- baseline close, not the day before it. "latest_snapshot" (unbounded,
+    -- always the freshest row per position) naturally resolves to the same
+    -- row when nothing newer has been captured yet, correctly showing $0
+    -- rather than misattributing older data as today's move.
     snapshot_asof_day AS (
       SELECT DISTINCT ON (s.position_id) s.position_id, s.unrealized_pnl
       FROM position_pnl_snapshots s, period_starts ps
-      WHERE s.snapshot_date < ps.day_start
+      WHERE s.snapshot_date <= ps.day_start
       ORDER BY s.position_id, s.snapshot_date DESC
     ),
     snapshot_asof_week AS (
