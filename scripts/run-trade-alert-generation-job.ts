@@ -70,6 +70,13 @@ async function main(): Promise<void> {
               `🔄 ${event.lines.length} roll alert(s) ready for review\n\n${event.lines.join("\n\n")}`,
             );
           } else if (
+            event.type === "assignmentRiskBatchReady" &&
+            event.lines.length > 0
+          ) {
+            await notifyTelegram(
+              `⚠️ ${event.lines.length} position(s) crossed into assignment risk\n\n${event.lines.join("\n\n")}`,
+            );
+          } else if (
             event.type === "tickerAlertsReady" &&
             event.lines.length > 0
           ) {

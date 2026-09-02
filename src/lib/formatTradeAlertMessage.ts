@@ -36,6 +36,19 @@ export function formatNewTradeAlertLine(
   ].join("\n");
 }
 
+export function formatAssignmentRiskAlertLine(
+  symbol: string,
+  leg: { strike: number; expiryIso: string; right: "call" | "put" },
+  delta: number,
+): string {
+  const rightAbbrev = leg.right === "call" ? "C" : "P";
+  const direction = leg.right === "call" ? "above" : "below";
+  return [
+    `⚠️ ${symbol} — Assignment risk (spot ${direction} strike)`,
+    `$${leg.strike.toFixed(2)}${rightAbbrev} exp ${formatShortDate(leg.expiryIso)} · Δ${delta.toFixed(2)}`,
+  ].join("\n");
+}
+
 export function formatRollAlertLine(
   symbol: string,
   leg: { strike: number; expiryIso: string; right: "call" | "put"; entryPrice: number },

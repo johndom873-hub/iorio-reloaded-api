@@ -687,6 +687,8 @@ positionsRouter.get("/quote/stream", async (request, response) => {
 // worker. Every order-placing UI flow (New Position, Roll, Close, and the
 // Genosuke financial-write tools) must call this as a separate step after
 // showing the user exactly what will be submitted.
+const adaptivePriorities = new Set(["Urgent", "Normal", "Patient"]);
+
 positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   const orderRequest = await db("order_requests").where({ id: request.params.id, status: "pending_confirmation" }).first();
   if (!orderRequest) {
@@ -694,8 +696,20 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     return;
   }
 
+  // Adaptive priority is picked on the Order Review screen, at confirm time
+  // — not at order-build time — so the same picker works for every order
+  // type (open/close/roll) without threading it through three separate
+  // build endpoints. Undefined/omitted leaves the payload as built, which
+  // ibkrGatewayWorker.ts's buildOrder() already defaults to "Normal".
+  const requestedPriority = request.body?.adaptivePriority;
+  if (requestedPriority !== undefined && !adaptivePriorities.has(requestedPriority)) {
+    response.status(400).json({ error: "adaptivePriority must be Urgent, Normal, or Patient." });
+    return;
+  }
+
   await db.transaction(async (trx) => {
-    await trx("order_requests").where({ id: orderRequest.id }).update({ status: "confirmed", updated_at: trx.fn.now() });
+    const payload = requestedPriority ? { ...orderRequest.payload, adaptivePriority: requestedPriority } : orderRequest.payload;
+    await trx("order_requests").where({ id: orderRequest.id }).update({ status: "confirmed", payload, updated_at: trx.fn.now() });
 
     if (orderRequest.source_alert_id) {
       // resulting_position_id for a brand-new position isn't known yet at

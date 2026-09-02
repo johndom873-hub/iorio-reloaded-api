@@ -25,10 +25,17 @@ export interface OrderLegPayload {
   positionLegId?: string; // ties a closing leg back to its position_legs row
 }
 
+export type AdaptivePriority = "Urgent" | "Normal" | "Patient";
+
 export interface OrderRequestPayload {
   symbol: string;
   strategyKey: string;
   legs: OrderLegPayload[];
+  /** IBKR Adaptive algo priority (Juan's 2026-09-02 ask for a picker instead
+   * of the always-"Normal" default set 2026-08-31). Optional/undefined on
+   * older rows and anywhere it isn't set explicitly — buildOrder in
+   * ibkrGatewayWorker.ts falls back to "Normal" in that case. */
+  adaptivePriority?: AdaptivePriority;
 }
 
 export function buildLegContract(leg: OrderLegPayload): Contract {

@@ -3,7 +3,8 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { generateTradeAlertCandidatesForTicker, type AlertStrategyKey, type AlertStrategySettings } from "./generateTradeAlertCandidates.js";
 import { evaluateRollCandidate, type OpenShortLeg, type RollSuggestion } from "./generateRollCandidates.js";
-import { formatNewTradeAlertLine, formatRollAlertLine } from "../lib/formatTradeAlertMessage.js";
+import { checkAssignmentRisk } from "./checkAssignmentRisk.js";
+import { formatNewTradeAlertLine, formatRollAlertLine, formatAssignmentRiskAlertLine } from "../lib/formatTradeAlertMessage.js";
 
 export const tradeAlertStrategies: AlertStrategyKey[] = ["covered_call", "cash_secured_put"];
 // Exported for refreshTickerTradeAlerts.ts, which needs the identical
@@ -18,6 +19,7 @@ interface ShortlistedTickerRow {
 interface OpenShortLegRow extends OpenShortLeg {
   positionId: string;
   strategyKey: AlertStrategyKey;
+  assignmentRiskNotifiedAt: string | null;
 }
 
 export type TradeAlertGenerationEvent =
@@ -33,6 +35,9 @@ export type TradeAlertGenerationEvent =
   | { type: "rollScanStart"; positionCount: number }
   | { type: "rollCandidate"; symbol: string; triggered: boolean }
   | { type: "rollError"; symbol: string; message: string }
+  // Fired once, alongside rollBatchReady — assignment-risk is checked in the
+  // same per-leg loop as the roll scan (approved 2026-09-02, Juan's item 7).
+  | { type: "assignmentRiskBatchReady"; lines: string[] }
   // Fired once per ticker, after both strategies have been scanned for it —
   // callers that notify send one Telegram message per ticker as soon as this
   // fires, instead of batching until the whole shortlist finishes.
@@ -157,7 +162,8 @@ export async function runTradeAlertGeneration(
         pl.multiplier,
         p.id AS "positionId",
         p.strategy_key AS "strategyKey",
-        t.id AS "tickerId"
+        t.id AS "tickerId",
+        pl.assignment_risk_notified_at AS "assignmentRiskNotifiedAt"
       FROM position_legs pl
       JOIN positions p ON p.id = pl.position_id
       JOIN tickers t ON t.id = p.ticker_id
@@ -181,13 +187,31 @@ export async function runTradeAlertGeneration(
       positionId: row.positionId as string,
       tickerId: row.tickerId as string,
       strategyKey: row.strategyKey as AlertStrategyKey,
+      assignmentRiskNotifiedAt: row.assignmentRiskNotifiedAt as string | null,
     }));
 
     await onEvent({ type: "rollScanStart", positionCount: openShortLegs.length });
+    const assignmentRiskLines: string[] = [];
 
     for (const leg of openShortLegs) {
       const settings = settingsByStrategy.get(leg.strategyKey as AlertStrategyKey);
       if (!settings) continue;
+
+      // Assignment-risk check (approved 2026-09-02) — independent of the
+      // roll trigger below, so it still fires even when the leg isn't near
+      // expiry/decayed enough to suggest a roll. Only notifies once per
+      // crossing: assignment_risk_notified_at gates re-sending while delta
+      // stays in the zone, and clears the moment it's confirmed back out so
+      // a future crossing notifies again.
+      const assignmentRisk = await checkAssignmentRisk(connection, leg);
+      if (assignmentRisk?.atRisk && !leg.assignmentRiskNotifiedAt) {
+        await db("position_legs").where({ id: leg.legId }).update({ assignment_risk_notified_at: db.fn.now() });
+        assignmentRiskLines.push(
+          formatAssignmentRiskAlertLine(leg.symbol, { strike: leg.strike, expiryIso: toIsoDate(leg.expiry), right: leg.right }, assignmentRisk.delta),
+        );
+      } else if (assignmentRisk?.atRisk === false && leg.assignmentRiskNotifiedAt) {
+        await db("position_legs").where({ id: leg.legId }).update({ assignment_risk_notified_at: null });
+      }
 
       let suggestion: Awaited<ReturnType<typeof evaluateRollCandidate>>;
       try {
@@ -239,6 +263,7 @@ export async function runTradeAlertGeneration(
     }
 
     await onEvent({ type: "rollBatchReady", lines: rollAlertLines });
+    await onEvent({ type: "assignmentRiskBatchReady", lines: assignmentRiskLines });
 
     for (const strategyKey of tradeAlertStrategies) {
       if (settingsByStrategy.has(strategyKey)) await onEvent({ type: "strategyStart", strategyKey, tickerCount: tickers.length });

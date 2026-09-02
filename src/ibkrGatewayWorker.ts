@@ -6,7 +6,13 @@ import { db } from "./db/connection.js";
 import { environment } from "./config/env.js";
 import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
 import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
-import { buildLegContract, computeNetLimitPrice, type OrderLegPayload, type OrderRequestPayload } from "./ibkr/ibkrGatewayOrderPayload.js";
+import {
+  buildLegContract,
+  computeNetLimitPrice,
+  type AdaptivePriority,
+  type OrderLegPayload,
+  type OrderRequestPayload,
+} from "./ibkr/ibkrGatewayOrderPayload.js";
 import { parseIbkrExecutionTime } from "./ibkr/ibkrGatewayParseExecutionTime.js";
 import { fetchIbkrHeldPositions, type IbkrHeldPosition } from "./ibkr/ibkrGatewayFetchHeldPositions.js";
 import { fetchIbkrOpenOrders } from "./ibkr/ibkrGatewayFetchOpenOrders.js";
@@ -50,13 +56,14 @@ function gcd(a: number, b: number): number {
  * shapes. It wraps the existing LMT order rather than replacing it — the
  * order type and lmtPrice are unchanged, so the worst-case fill price is
  * identical to today; Adaptive only affects how IBKR works the order to try
- * for a better/faster fill within that limit. adaptivePriority: "Normal"
- * (not "Patient") per Marcelo's call, to keep same-day DAY-TIF fills likely.
+ * for a better/faster fill within that limit. Priority defaults to "Normal"
+ * (Marcelo's original 2026-08-31 call, to keep same-day DAY-TIF fills
+ * likely) but is now picked per-order from the Order Review screen
+ * (Juan's 2026-09-02 ask) via payload.adaptivePriority.
  */
-const adaptiveAlgoFields: Pick<IbkrOrder, "algoStrategy" | "algoParams"> = {
-  algoStrategy: "Adaptive",
-  algoParams: [{ tag: "adaptivePriority", value: "Normal" }],
-};
+function buildAdaptiveAlgoFields(priority: AdaptivePriority = "Normal"): Pick<IbkrOrder, "algoStrategy" | "algoParams"> {
+  return { algoStrategy: "Adaptive", algoParams: [{ tag: "adaptivePriority", value: priority }] };
+}
 
 /** Resolves every leg's conId (reusing a pre-resolved one where the payload already has it). */
 async function resolveLegContractIds(
@@ -101,7 +108,7 @@ async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Con
       totalQuantity: leg.quantity,
       tif: TimeInForce.DAY,
       transmit: true,
-      ...adaptiveAlgoFields,
+      ...buildAdaptiveAlgoFields(payload.adaptivePriority),
     };
     return { contract, order };
   }
@@ -139,7 +146,7 @@ async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Con
     totalQuantity: legRatioGcd,
     tif: TimeInForce.DAY,
     transmit: true,
-    ...adaptiveAlgoFields,
+    ...buildAdaptiveAlgoFields(payload.adaptivePriority),
   };
   return { contract, order };
 }
