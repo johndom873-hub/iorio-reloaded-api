@@ -1,6 +1,6 @@
-import { MarketDataType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { generateTradeAlertCandidatesForTicker, type AlertStrategyKey, type AlertStrategySettings } from "./generateTradeAlertCandidates.js";
 import { evaluateRollCandidate, type OpenShortLeg, type RollSuggestion } from "./generateRollCandidates.js";
 import { formatNewTradeAlertLine, formatRollAlertLine } from "../lib/formatTradeAlertMessage.js";
@@ -114,7 +114,7 @@ export async function runTradeAlertGeneration(
   onEvent: (event: TradeAlertGenerationEvent) => void | Promise<void>,
 ): Promise<TradeAlertGenerationResult> {
   const connection = await connectToIbkrGateway();
-  connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+  requestRealtimeMarketData(connection.ib);
 
   let totalNewAlerts = 0;
   let tickersScanned = 0;

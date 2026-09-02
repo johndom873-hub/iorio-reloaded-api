@@ -1,6 +1,7 @@
 import { EventName, Option, OptionType, SecType } from "@stoqey/ib";
 import type { Contract, IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 import { db } from "../db/connection.js";
 
 export interface OptionQuote {
@@ -379,7 +380,7 @@ export async function fetchQuotesForContracts(
     // Real-time tick types: bid=1, ask=2, last=4. Delayed: bid=66, ask=67,
     // last=68. Accepts both — see the tickOptionComputation comment below
     // for why (real-time entitlement enabled 2026-08-31 sends real-time
-    // tick types regardless of reqMarketDataType(DELAYED)).
+    // tick types regardless of what reqMarketDataType() requests).
     if (tickType === 1 || tickType === 66) quote.bid = value;
     if (tickType === 2 || tickType === 67) quote.ask = value;
     if (tickType === 4 || tickType === 68) quote.last = value;
@@ -406,7 +407,7 @@ export async function fetchQuotesForContracts(
     // (13) and delayed (83) variants: this account held delayed-only
     // entitlements when 83-only was written, but real-time market data was
     // enabled 2026-08-31, and IBKR sends real-time-labeled ticks (13) once
-    // that's active regardless of the DELAYED reqMarketDataType() call —
+    // that's active regardless of what reqMarketDataType() requests —
     // an 83-only filter silently discarded every tick from that point on,
     // which is exactly what caused that day's trade-alert outage (see
     // runTradeAlertGeneration.ts's history around 2026-08-31).
@@ -422,9 +423,9 @@ export async function fetchQuotesForContracts(
 
   function onError(error: Error, code: number, reqId: number) {
     if (!quotes.has(reqId)) return;
-    // 10167/10091: informational "using delayed data" notices, expected —
-    // this account isn't subscribed to real-time data by design.
-    if (code === 10167 || code === 10091) return;
+    // Informational "using delayed data" notices, expected wherever this
+    // account isn't entitled for real-time on a given symbol.
+    if (isDelayedDataFallbackNotice(code)) return;
     const contract = reqIdToContract.get(reqId);
     console.error(
       `Option quote error for ${symbol} ${contract?.expiry} ${contract?.strike}${contract?.right} (code ${code}): ${error.message}`,

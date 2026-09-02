@@ -1,5 +1,6 @@
-import { BarSizeSetting, EventName, MarketDataType, Stock, WhatToShow } from "@stoqey/ib";
+import { BarSizeSetting, EventName, Stock, WhatToShow } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
 
 export interface TickerPricing {
   last: number | null;
@@ -91,7 +92,7 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
       // Real-time tick types: bid=1, ask=2, last=4, high=6, low=7, close=9, open=14.
       // Delayed: bid=66, ask=67, last=68, high=72, low=73, close=75, open=76.
       // Accepts both — real-time entitlement enabled 2026-08-31 sends
-      // real-time tick types regardless of reqMarketDataType(DELAYED); an
+      // real-time tick types regardless of what reqMarketDataType() requests; an
       // accept-delayed-only filter here silently produced null spot prices
       // for every ticker from that point on (see fetchOptionChain.ts's
       // matching comment on the trade-alert outage this caused).
@@ -128,6 +129,7 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
     // generic timeout string.
     function onError(error: Error, code: number, errorReqId: number) {
       if (errorReqId !== reqId) return;
+      if (isDelayedDataFallbackNotice(code)) return;
       console.warn(`IBKR pricing snapshot warning for ${symbol} (code ${code}): ${error.message}`);
       lastError = `Pricing snapshot error for ${symbol} (code ${code}): ${error.message}`;
     }
@@ -238,6 +240,7 @@ export async function streamPricingUpdates(
   // just a generic timeout string.
   function onError(error: Error, code: number, errorReqId: number) {
     if (errorReqId !== reqId) return;
+    if (isDelayedDataFallbackNotice(code)) return;
     console.warn(`IBKR pricing stream warning for ${symbol} (code ${code}): ${error.message}`);
     lastError = `Pricing stream error for ${symbol} (code ${code}): ${error.message}`;
   }
@@ -367,7 +370,7 @@ export async function lookupHistoricalBars(
 export async function fetchPriceBars(symbol: string, range: ChartRange): Promise<PriceBar[]> {
   const connection = await connectToIbkrGateway();
   try {
-    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(connection.ib);
     return await lookupHistoricalBars(connection, symbol, range);
   } finally {
     connection.disconnect();

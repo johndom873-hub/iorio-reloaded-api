@@ -1,6 +1,7 @@
-import { MarketDataType, OptionType } from "@stoqey/ib";
+import { OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import { daysBetween, parseExpiry, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
 import { decayThresholdFraction, dteThreshold, ivRankThresholdForDecayRoll } from "./generateRollCandidates.js";
@@ -172,7 +173,7 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
   const calendarContext = await fetchCalendarConflictContext(alert.ticker_id as string);
   const connection = await connectToIbkrGateway();
   try {
-    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(connection.ib);
 
     if (alert.alert_type === "new_trade") {
       const candidate = alert.suggested_structure as AlertCandidate;

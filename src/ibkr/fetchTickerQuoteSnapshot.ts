@@ -1,5 +1,5 @@
-import { MarketDataType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot, lookupHistoricalBars, type TickerPricing } from "./fetchTickerOverview.js";
 import { prepareOptionChainStrikes, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
@@ -48,7 +48,7 @@ function errorMessage(error: unknown): string {
 export async function fetchTickerQuoteSnapshot(symbol: string): Promise<TickerQuoteSnapshot> {
   const connection = await connectToIbkrGateway();
   try {
-    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(connection.ib);
 
     const bars = await lookupHistoricalBars(connection, symbol, "1Y", historicalReqId);
     const lastBar = bars.at(-1);

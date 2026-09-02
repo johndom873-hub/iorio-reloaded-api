@@ -1,5 +1,5 @@
-import { MarketDataType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { streamPricingUpdates, type TickerPricing, type PriceBar } from "./fetchTickerOverview.js";
 import { getCachedChartBars } from "./priceBarCache.js";
@@ -136,7 +136,7 @@ export async function streamTickerDetail(
     // while a market-data subscription is still outstanding was found to
     // silently prevent it from ever producing a first tick (see the note on
     // streamPricingUpdates).
-    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(connection.ib);
 
     const contractDetailsPromise = getCachedContractDetails(connection, symbol, overviewReqId);
 

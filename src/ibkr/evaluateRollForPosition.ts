@@ -1,6 +1,6 @@
-import { MarketDataType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { evaluateRollCandidate, type OpenShortLeg } from "./generateRollCandidates.js";
 import { rationaleForRoll, toIsoDate, toSettings } from "./runTradeAlertGeneration.js";
 import type { AlertStrategyKey } from "./generateTradeAlertCandidates.js";
@@ -95,7 +95,7 @@ export async function evaluateRollForPosition(positionId: string, legId: string)
   const settings = toSettings(settingsRow);
 
   const connection = await connectToIbkrGateway();
-  connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+  requestRealtimeMarketData(connection.ib);
   try {
     const suggestion = await evaluateRollCandidate(connection, leg, strategyKey, settings, { force: true });
     if (!suggestion) return { status: "no_candidate" };

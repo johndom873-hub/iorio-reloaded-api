@@ -1,6 +1,6 @@
-import { MarketDataType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { generateTradeAlertCandidatesForTicker, type AlertStrategyKey, type AlertStrategySettings } from "./generateTradeAlertCandidates.js";
 import { maxAlertsPerTicker, rationaleFor, toSettings, tradeAlertStrategies } from "./runTradeAlertGeneration.js";
 
@@ -30,7 +30,7 @@ export interface RefreshTickerTradeAlertsResult {
  */
 export async function refreshTickerTradeAlerts(tickerId: string, symbol: string): Promise<RefreshTickerTradeAlertsResult[]> {
   const connection = await connectToIbkrGateway();
-  connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+  requestRealtimeMarketData(connection.ib);
 
   try {
     const settingsByStrategy = new Map<AlertStrategyKey, AlertStrategySettings>();

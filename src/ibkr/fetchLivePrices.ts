@@ -1,6 +1,7 @@
-import { EventName, MarketDataType, Option, OptionType, Stock } from "@stoqey/ib";
+import { EventName, Option, OptionType, Stock } from "@stoqey/ib";
 import type { Contract } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
 
 export interface PriceContract {
   key: string;
@@ -25,7 +26,7 @@ export async function fetchLivePrices(contracts: PriceContract[]): Promise<Recor
   const { ib } = connection;
 
   try {
-    ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(ib);
 
     const priceByKey = new Map<string, number | null>();
     const reqIdToContract = new Map<number, PriceContract>();
@@ -42,8 +43,8 @@ export async function fetchLivePrices(contracts: PriceContract[]): Promise<Recor
     function onError(error: Error, code: number, reqId: number) {
       const contract = reqIdToContract.get(reqId);
       if (!contract) return;
-      // 10167/10091: informational "using delayed data" notices, expected.
-      if (code === 10167 || code === 10091) return;
+      // Informational "using delayed data" notices, expected.
+      if (isDelayedDataFallbackNotice(code)) return;
       console.error(`Live price error for ${contract.symbol} (${contract.legType}, code ${code}): ${error.message}`);
     }
 

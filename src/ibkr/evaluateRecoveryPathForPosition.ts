@@ -1,6 +1,6 @@
-import { MarketDataType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import { generateTradeAlertCandidates, type AlertCandidate } from "./generateTradeAlertCandidates.js";
 import { toSettings } from "./runTradeAlertGeneration.js";
@@ -65,7 +65,7 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
   const settings = toSettings(settingsRow);
 
   const connection = await connectToIbkrGateway();
-  connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+  requestRealtimeMarketData(connection.ib);
   try {
     const pricing = await lookupPricingSnapshot(connection, positionRow.symbol);
     const currentPrice = pricing.last ?? pricing.previousClose;

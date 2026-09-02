@@ -1,5 +1,6 @@
-import { EventName, MarketDataType, Option, OptionType } from "@stoqey/ib";
+import { EventName, Option, OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
 
 export interface GreeksContract {
   key: string;
@@ -30,7 +31,7 @@ export async function fetchLiveGreeks(contracts: GreeksContract[]): Promise<Reco
   const { ib } = connection;
 
   try {
-    ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(ib);
 
     const greeksByKey = new Map<string, Greeks>();
     const reqIdToContract = new Map<number, GreeksContract>();
@@ -63,10 +64,10 @@ export async function fetchLiveGreeks(contracts: GreeksContract[]): Promise<Reco
     function onError(error: Error, code: number, reqId: number) {
       const contract = reqIdToContract.get(reqId);
       if (!contract) return;
-      // 10167/10091: informational "using delayed data" notices, expected —
-      // this account isn't subscribed to real-time data by design. See the
+      // Informational "using delayed data" notices, expected wherever this
+      // account isn't entitled for real-time on a given symbol. See the
       // same handling in fetchOptionChain.ts's fetchQuotesForContracts.
-      if (code === 10167 || code === 10091) return;
+      if (isDelayedDataFallbackNotice(code)) return;
       console.error(
         `Live greeks error for ${contract.symbol} ${contract.expiry} ${contract.strike}${contract.right} (code ${code}): ${error.message}`,
       );

@@ -1,5 +1,6 @@
-import { MarketDataType, type OptionType } from "@stoqey/ib";
+import type { OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { fetchQuotesForContracts, type OptionQuote } from "./fetchOptionChain.js";
 
 export interface DeltaComplianceResult {
@@ -62,7 +63,7 @@ export async function streamOrderLegQuote(
 ): Promise<void> {
   const connection = await connectToIbkrGateway();
   try {
-    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(connection.ib);
     const [quote] = await fetchQuotesForContracts(connection.ib, symbol, [{ expiry, strike, right }], {
       onUpdate: (quotes) => onQuote(quotes[0]!),
       signal,

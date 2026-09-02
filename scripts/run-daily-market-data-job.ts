@@ -14,10 +14,11 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-daily-market-data-job.js
 
-import { EventName, MarketDataType, WhatToShow } from "@stoqey/ib";
+import { EventName, WhatToShow } from "@stoqey/ib";
 import type { IbkrConnection } from "../src/ibkr/connectIbkr.js";
 import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
+import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "../src/ibkr/requestMarketData.js";
 import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
 import { lookupLatestDailyBar } from "../src/ibkr/fetchTickerOverview.js";
 import { isWeekend } from "../src/lib/isWeekend.js";
@@ -130,13 +131,13 @@ async function main(): Promise<void> {
 
     console.log(`Connecting to IBKR Gateway to capture ${tickers.length} ticker(s)...`);
     const connection = await connectToIbkrGateway();
-    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(connection.ib);
 
     // reqId -1 is the connection-status channel already filtered in
     // connectIbkr.ts; per-ticker errors (e.g. "symbol not found") land here
     // instead and shouldn't crash the whole batch.
-    connection.ib.on(EventName.error, (error, _code, reqId) => {
-      if (reqId === -1) return;
+    connection.ib.on(EventName.error, (error, code, reqId) => {
+      if (reqId === -1 || isDelayedDataFallbackNotice(code)) return;
       console.warn(`IBKR warning on reqId ${reqId}: ${error.message}`);
     });
 

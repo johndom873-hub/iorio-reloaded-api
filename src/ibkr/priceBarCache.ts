@@ -1,6 +1,7 @@
-import { BarSizeSetting, MarketDataType, WhatToShow } from "@stoqey/ib";
+import { BarSizeSetting, WhatToShow } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { fetchHistoricalBarsRaw, type ChartRange, type PriceBar } from "./fetchTickerOverview.js";
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -309,7 +310,7 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
 export async function fetchCachedPriceBars(symbol: string, range: ChartRange): Promise<PriceBar[]> {
   const connection = await connectToIbkrGateway();
   try {
-    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(connection.ib);
     return await getCachedChartBars(connection, symbol, range);
   } finally {
     connection.disconnect();
@@ -338,7 +339,7 @@ export interface IvChartPoint {
 export async function fetchCachedIvBars(symbol: string, range: IvChartRange): Promise<IvChartPoint[]> {
   const connection = await connectToIbkrGateway();
   try {
-    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(connection.ib);
     await getCachedChartBars(connection, symbol, range);
   } finally {
     connection.disconnect();

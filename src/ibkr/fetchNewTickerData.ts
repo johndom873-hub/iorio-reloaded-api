@@ -1,5 +1,6 @@
-import { EventName, MarketDataType, Stock } from "@stoqey/ib";
+import { EventName, Stock } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { captureMarketDataSnapshot } from "./captureMarketDataSnapshot.js";
 import { db } from "../db/connection.js";
 
@@ -146,7 +147,7 @@ export async function getCachedContractDetails(
 export async function fetchNewTickerData(symbol: string): Promise<NewTickerData> {
   const connection = await connectToIbkrGateway();
   try {
-    connection.ib.reqMarketDataType(MarketDataType.DELAYED);
+    requestRealtimeMarketData(connection.ib);
 
     const contractDetailsPromise = lookupContractDetails(connection);
     connection.ib.reqContractDetails(contractDetailsReqId, new Stock(symbol, "SMART", "USD"));
