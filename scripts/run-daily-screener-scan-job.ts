@@ -94,6 +94,20 @@ async function main(): Promise<void> {
         });
         scanCounts[ScanCode[scanCode] ?? String(scanCode)] = candidates.length;
         scanResults.push(candidates);
+
+        // benchmark/projection's real format is undocumented by IBKR (see
+        // fetchScannerCandidates.ts's parseNumericField comment) and gets
+        // dropped once pooled below — log a small raw sample per scan code
+        // so a wrong-looking ivVsHistRatio can actually be diagnosed after
+        // this job's first live runs, instead of needing another manual
+        // live re-test.
+        for (const sample of candidates.slice(0, 3)) {
+          console.log(
+            `  sample ${sample.symbol} (${ScanCode[scanCode] ?? scanCode}): ` +
+              `rawBenchmark=${JSON.stringify(sample.rawBenchmark)} rawProjection=${JSON.stringify(sample.rawProjection)} ` +
+              `parsedIvVsHistRatio=${sample.ivVsHistRatio}`,
+          );
+        }
       }
 
       const pooled = poolCandidates(scanResults);

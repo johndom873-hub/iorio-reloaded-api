@@ -11,9 +11,20 @@ const defaultEnrichmentTimeoutMs = 15_000;
 // individually re-verified against this account's entitlements the way
 // 24/87 were — flagged for the same Monday market-hours check as
 // fetchScannerCandidates.ts's ratio parsing.
+//
+// Both real-time and delayed tick IDs are accepted for bid/ask/last —
+// requestRealtimeMarketData always *requests* REALTIME, but IBKR can still
+// substitute delayed data per-symbol on its own (see
+// [[project_ibkr_realtime_autofallback_to_delayed]] and the 2026-08-31
+// trade-alert outage this exact gap caused elsewhere); same pattern as
+// fetchLivePrices.ts/fetchTickerOverview.ts. The generic ticks below
+// (avg volume, option IV, open interest) have no separate delayed IDs.
 const BID_TICK = 1;
+const DELAYED_BID_TICK = 66;
 const ASK_TICK = 2;
+const DELAYED_ASK_TICK = 67;
 const LAST_TICK = 4;
+const DELAYED_LAST_TICK = 68;
 const VOLUME_TICK = 8;
 const OPTION_IMPLIED_VOL_TICK = 24;
 const AVG_VOLUME_TICK = 21;
@@ -62,9 +73,9 @@ export function enrichCandidate(
     const onTick = (tickReqId: number, field: TickType | undefined, value: number | undefined) => {
       if (tickReqId !== reqId || value === undefined) return;
       const fieldId = field as unknown as number;
-      if (fieldId === BID_TICK) bid = value;
-      if (fieldId === ASK_TICK) ask = value;
-      if (fieldId === LAST_TICK) result.lastPrice = value;
+      if (fieldId === BID_TICK || fieldId === DELAYED_BID_TICK) bid = value;
+      if (fieldId === ASK_TICK || fieldId === DELAYED_ASK_TICK) ask = value;
+      if (fieldId === LAST_TICK || fieldId === DELAYED_LAST_TICK) result.lastPrice = value;
       if (fieldId === AVG_VOLUME_TICK) result.avgShareVolume = value;
       if (fieldId === AVG_OPT_VOLUME_TICK) result.avgOptionVolume = value;
       if (fieldId === OPTION_IMPLIED_VOL_TICK) result.impliedVolatility = value;
