@@ -40,8 +40,12 @@ export type TradeAlertGenerationEvent =
   | { type: "assignmentRiskBatchReady"; lines: string[] }
   // Fired once per ticker, after both strategies have been scanned for it —
   // callers that notify send one Telegram message per ticker as soon as this
-  // fires, instead of batching until the whole shortlist finishes.
-  | { type: "tickerAlertsReady"; symbol: string; lines: string[] };
+  // fires, instead of batching until the whole shortlist finishes. Carries
+  // annualizedYield alongside each line (rather than pre-joined strings) so a
+  // notifying caller can pick the single highest-yield candidate to show in
+  // full and summarize the rest (2026-09-05, per Marcelo — one alert per
+  // ticker was still too noisy).
+  | { type: "tickerAlertsReady"; symbol: string; entries: { strategyKey: AlertStrategyKey; line: string; annualizedYield: number }[] };
 
 export interface TradeAlertGenerationResult {
   tickersScanned: number;
@@ -282,7 +286,7 @@ export async function runTradeAlertGeneration(
         continue;
       }
 
-      const tickerAlertLines: string[] = [];
+      const tickerAlertEntries: { strategyKey: AlertStrategyKey; line: string; annualizedYield: number }[] = [];
       for (const strategyKey of tradeAlertStrategies) {
         if (!settingsByStrategy.has(strategyKey)) continue;
         const candidates = candidatesByStrategy.get(strategyKey) ?? [];
@@ -301,7 +305,11 @@ export async function runTradeAlertGeneration(
             rationale: rationaleFor(strategyKey, ticker.symbol, candidate),
             status: "pending",
           });
-          tickerAlertLines.push(formatNewTradeAlertLine(ticker.symbol, strategyKey, candidate));
+          tickerAlertEntries.push({
+            strategyKey,
+            line: formatNewTradeAlertLine(ticker.symbol, strategyKey, candidate),
+            annualizedYield: candidate.annualizedYield,
+          });
         }
         await onEvent({ type: "ticker", strategyKey, symbol: ticker.symbol, candidateCount: topCandidates.length });
         totalNewAlerts += topCandidates.length;
@@ -310,7 +318,7 @@ export async function runTradeAlertGeneration(
       // Fired once per ticker (both strategies done) rather than per
       // strategy — this is what lets a notifying caller send one bundled
       // Telegram message per ticker instead of one per ticker-strategy pair.
-      await onEvent({ type: "tickerAlertsReady", symbol: ticker.symbol, lines: tickerAlertLines });
+      await onEvent({ type: "tickerAlertsReady", symbol: ticker.symbol, entries: tickerAlertEntries });
     }
   } finally {
     connection.disconnect();

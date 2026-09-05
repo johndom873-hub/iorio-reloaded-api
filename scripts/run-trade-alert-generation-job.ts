@@ -30,6 +30,7 @@ import { db } from "../src/db/connection.js";
 import { runTradeAlertGeneration } from "../src/ibkr/runTradeAlertGeneration.js";
 import { isWeekend } from "../src/lib/isWeekend.js";
 import { notifyTelegram } from "../src/lib/notifyTelegram.js";
+import { formatTickerAlertsMessage } from "../src/lib/formatTradeAlertMessage.js";
 import { runJob } from "../src/lib/runJob.js";
 
 async function main(): Promise<void> {
@@ -78,11 +79,9 @@ async function main(): Promise<void> {
             );
           } else if (
             event.type === "tickerAlertsReady" &&
-            event.lines.length > 0
+            event.entries.length > 0
           ) {
-            await notifyTelegram(
-              `📋 ${event.lines.length} alert(s) found for ${event.symbol}\n\n${event.lines.join("\n\n")}`,
-            );
+            await notifyTelegram(formatTickerAlertsMessage(event.symbol, event.entries));
           }
         },
       );

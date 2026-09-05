@@ -36,6 +36,29 @@ export function formatNewTradeAlertLine(
   ].join("\n");
 }
 
+// Trims a ticker's alert batch down to its single highest-yield candidate
+// (across strategies) plus a one-line summary of the rest — a full Telegram
+// message per candidate per ticker was too noisy (2026-09-05, per Marcelo).
+export function formatTickerAlertsMessage(
+  symbol: string,
+  entries: { strategyKey: keyof typeof strategyLabels; line: string; annualizedYield: number }[],
+): string {
+  const [top, ...rest] = [...entries].sort((a, b) => b.annualizedYield - a.annualizedYield);
+  if (!top) return "";
+  const header = `📋 ${entries.length} alert(s) found for ${symbol}`;
+  if (rest.length === 0) return `${header}\n\n${top.line}`;
+
+  const remainingCountByStrategy = new Map<keyof typeof strategyLabels, number>();
+  for (const entry of rest) {
+    remainingCountByStrategy.set(entry.strategyKey, (remainingCountByStrategy.get(entry.strategyKey) ?? 0) + 1);
+  }
+  const breakdown = [...remainingCountByStrategy.entries()]
+    .map(([strategyKey, count]) => `${count} ${strategyLabels[strategyKey]}`)
+    .join(", ");
+
+  return `${header}\n\n${top.line}\n\n...and ${rest.length} more (${breakdown}) — see Trade Alerts screen`;
+}
+
 export function formatAssignmentRiskAlertLine(
   symbol: string,
   leg: { strike: number; expiryIso: string; right: "call" | "put" },
