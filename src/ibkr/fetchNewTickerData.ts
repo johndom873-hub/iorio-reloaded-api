@@ -97,7 +97,7 @@ export function lookupContractDetails(
  * this codebase has already hit real pacing/contention bugs on twice (the
  * AMAT 25s timeout, and firing this concurrently with a second lookup
  * silently starving both). company_name/sector were already persisted to
- * `tickers` at ticker-creation time (screener.ts); this adds `ibkr_contract_id`
+ * `tickers` at ticker-creation time (findOrCreateTicker.ts); this adds `ibkr_contract_id`
  * to that same row and reads all three from there first.
  *
  * Fails open: a symbol with no `tickers` row (shouldn't happen for any of
@@ -135,7 +135,7 @@ export async function getCachedContractDetails(
 }
 
 /**
- * Everything needed to show a freshly-added ticker in the Screener
+ * Everything needed to show a freshly-added ticker in the Shortlist tab
  * immediately, rather than waiting for the next daily capture job run:
  * company name/sector (reqContractDetails) + implied volatility/avg option
  * volume (same delayed-data capture the daily job uses). One IBKR

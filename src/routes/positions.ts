@@ -16,7 +16,7 @@ import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathFor
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
 
-// v1 strategy scope — matches screener.ts.
+// v1 strategy scope — matches shortlist.ts.
 const validStrategyKeys = ["covered_call", "cash_secured_put"];
 const validStatuses = ["open", "closed"];
 const orderRequestsChannel = "order_requests_channel";
@@ -426,7 +426,7 @@ positionsRouter.post("/orders", async (request, response) => {
 
   const ticker = await requireExistingTicker(symbol);
   if (!ticker) {
-    response.status(400).json({ error: "Unknown symbol — add it via the Screener first." });
+    response.status(400).json({ error: "Unknown symbol — add it via the Shortlist first." });
     return;
   }
 

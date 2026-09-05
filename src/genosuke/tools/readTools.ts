@@ -133,18 +133,18 @@ export const readTools: GenosukeTool[] = [
     execute: (_input, api) => api.get("/risk-limits/exposure"),
   },
   {
-    name: "list_screener",
+    name: "list_shortlist",
     description: "The monitored-ticker shortlist for one strategy, with each ticker's latest IV, IV Rank, and avg option volume snapshot.",
     tier: "read",
     parameters: { type: "object", properties: { strategyKey: strategyKeyEnum }, required: ["strategyKey"] },
-    execute: (input, api) => api.get(`/screener?strategy=${input.strategyKey}`),
+    execute: (input, api) => api.get(`/shortlist?strategy=${input.strategyKey}`),
   },
   {
     name: "search_tickers",
     description: "Live IBKR search-as-you-type for US-listed optionable tickers, by symbol or company name.",
     tier: "read",
     parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-    execute: (input, api) => api.get(`/screener/search?q=${encodeURIComponent(String(input.query))}`),
+    execute: (input, api) => api.get(`/shortlist/search?q=${encodeURIComponent(String(input.query))}`),
   },
   {
     name: "get_system_health_status",

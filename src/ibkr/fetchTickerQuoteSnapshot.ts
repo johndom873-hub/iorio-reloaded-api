@@ -27,7 +27,7 @@ function errorMessage(error: unknown): string {
 /**
  * Blocking (not SSE) quote lookup for Genosuke's get_ticker_quote tool — a
  * ticker with no open position and no trade alert has no cached data
- * anywhere (market_data_snapshots only covers the screener shortlist's
+ * anywhere (market_data_snapshots only covers the shortlist.s
  * IV/volume), so a Telegram request for "what's MU trading at" had no data
  * source at all until this (see PROGRESS.md's readTools.ts gap, closed
  * 2026-08-24). Reuses the exact functions streamPositionQuote.ts uses for

@@ -179,7 +179,7 @@ export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDa
 // already non-null by the time anyone opens its chart, so it silently takes
 // the 5-day top-up path forever and never gets real history. This is called
 // explicitly instead — once from tmp/backfillDailyPriceBars.ts for existing
-// tickers, and fire-and-forget from screener.ts on every new ticker — so
+// tickers, and fire-and-forget from findOrCreateTicker.ts on every new ticker — so
 // depth doesn't depend on chart-opening order. 1Y is enough margin over
 // MA99's 99-close requirement without paying for the lazy path's full 20Y.
 export async function backfillOneYearOfDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<number> {

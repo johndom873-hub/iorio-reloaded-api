@@ -8,7 +8,7 @@ pricePerformanceRouter.use(requireAuth);
 
 // All figures are computed purely from daily_price_bars (already captured
 // nightly by job:daily-market-data) -- no live IBKR calls, same instant-load
-// pattern as the rest of Screener. "Latest" means each ticker's own most
+// pattern as the rest of the Shortlist tab. "Latest" means each ticker's own most
 // recent trading_date, not literal calendar today, so this stays correct
 // even before today's bar has landed.
 //

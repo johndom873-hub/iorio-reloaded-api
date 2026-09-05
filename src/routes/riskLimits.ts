@@ -7,7 +7,7 @@ import { computePositionExposures, type PositionExposureRow } from "../lib/posit
 export const riskLimitsRouter = Router();
 riskLimitsRouter.use(requireAuth);
 
-// v1 strategy scope — matches screener.ts.
+// v1 strategy scope — matches shortlist.ts.
 const validStrategyKeys = ["covered_call", "cash_secured_put"];
 
 const settingsFields = [

@@ -9,7 +9,7 @@ const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_p
 
 export const lowStakesWriteTools: GenosukeTool[] = [
   {
-    name: "add_screener_ticker",
+    name: "add_shortlist_ticker",
     description: "Add a ticker to a strategy's monitored shortlist. Fetches live market data from IBKR if the ticker isn't already tracked.",
     tier: "low-stakes-write",
     parameters: {
@@ -17,21 +17,21 @@ export const lowStakesWriteTools: GenosukeTool[] = [
       properties: { symbol: { type: "string" }, strategyKey: strategyKeyEnum, notes: { type: "string" } },
       required: ["symbol", "strategyKey"],
     },
-    execute: (input, api) => api.post("/screener", input),
+    execute: (input, api) => api.post("/shortlist", input),
   },
   {
-    name: "remove_screener_ticker",
-    description: "Remove a ticker from a strategy's shortlist (soft-delete). Use the shortlist entry id from list_screener, not the ticker id.",
+    name: "remove_shortlist_ticker",
+    description: "Remove a ticker from a strategy's shortlist (soft-delete). Use the shortlist entry id from list_shortlist, not the ticker id.",
     tier: "low-stakes-write",
     parameters: { type: "object", properties: { entryId: { type: "string" } }, required: ["entryId"] },
-    execute: (input, api) => api.delete(`/screener/${input.entryId}`),
+    execute: (input, api) => api.delete(`/shortlist/${input.entryId}`),
   },
   {
-    name: "update_screener_notes",
+    name: "update_shortlist_notes",
     description: "Update the free-text notes on a shortlist entry.",
     tier: "low-stakes-write",
     parameters: { type: "object", properties: { entryId: { type: "string" }, notes: { type: "string" } }, required: ["entryId", "notes"] },
-    execute: (input, api) => api.patch(`/screener/${input.entryId}`, { notes: input.notes }),
+    execute: (input, api) => api.patch(`/shortlist/${input.entryId}`, { notes: input.notes }),
   },
   {
     name: "update_position_notes",

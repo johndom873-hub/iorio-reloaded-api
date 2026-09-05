@@ -5,7 +5,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 export const tradeBlotterRouter = Router();
 tradeBlotterRouter.use(requireAuth);
 
-// v1 strategy scope — matches positions.ts/screener.ts.
+// v1 strategy scope — matches positions.ts/shortlist.ts.
 const validStrategyKeys = ["covered_call", "cash_secured_put"];
 
 // P&L is computed here at read time, not stored on trades.realized_pnl —

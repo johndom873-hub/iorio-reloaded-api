@@ -13,6 +13,7 @@ export interface TickerOverview {
   companyName: string | null;
   sector: string | null;
   pricing: TickerPricing;
+  isShortlisted: boolean;
 }
 
 export interface TickerTechnicals {
@@ -139,17 +140,26 @@ export async function streamTickerDetail(
     requestRealtimeMarketData(connection.ib);
 
     const contractDetailsPromise = getCachedContractDetails(connection, symbol, overviewReqId);
+    // One check at stream start, not re-queried per pricing tick — shortlist
+    // membership doesn't change mid-modal-open, and this only needs to be
+    // fresh enough to gate the modal's own "Add to Shortlist" button.
+    const isShortlistedPromise: Promise<boolean> = db("tickers as t")
+      .join("shortlist_entries as se", "se.ticker_id", "t.id")
+      .where({ "t.symbol": symbol })
+      .whereNull("se.removed_at")
+      .first()
+      .then((row) => row !== undefined);
 
     const overviewReadyTask: Promise<TickerPricing | null> = (async () => {
       try {
-        const contractDetails = await contractDetailsPromise;
+        const [contractDetails, isShortlisted] = await Promise.all([contractDetailsPromise, isShortlistedPromise]);
         const pricing = await streamPricingUpdates(
           connection,
           symbol,
           (updatedPricing) => {
             onEvent({
               type: "overview",
-              data: { companyName: contractDetails.companyName, sector: contractDetails.sector, pricing: updatedPricing },
+              data: { companyName: contractDetails.companyName, sector: contractDetails.sector, pricing: updatedPricing, isShortlisted },
             });
           },
           signal,
@@ -157,7 +167,7 @@ export async function streamTickerDetail(
         );
         onEvent({
           type: "overview",
-          data: { companyName: contractDetails.companyName, sector: contractDetails.sector, pricing },
+          data: { companyName: contractDetails.companyName, sector: contractDetails.sector, pricing, isShortlisted },
         });
         return pricing;
       } catch (error) {

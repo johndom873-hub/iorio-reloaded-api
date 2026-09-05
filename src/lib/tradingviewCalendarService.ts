@@ -199,7 +199,7 @@ export interface TickerCalendarCaptureResult {
 /**
  * Resolves and captures earnings/ex-dividend events for a single ticker —
  * same logic as the daily batch job, scoped to one symbol. Used when a
- * ticker is newly added to the screener so its calendar data doesn't wait
+ * ticker is newly added to the shortlist so its calendar data doesn't wait
  * for the next scheduled run.
  */
 export async function captureTickerCalendarEvents(tickerId: string, symbol: string): Promise<TickerCalendarCaptureResult> {
