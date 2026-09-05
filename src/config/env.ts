@@ -20,7 +20,7 @@ export const environment = {
   nodeEnvironment: process.env.NODE_ENV ?? "development",
   databaseUrl: requireEnvironmentVariable("DATABASE_URL"),
   testDatabaseUrl: process.env.TEST_DATABASE_URL,
-  sessionSecret: process.env.SESSION_SECRET ?? "dev-only-insecure-secret-change-in-production",
+  sessionSecret: requireEnvironmentVariable("SESSION_SECRET"),
   frontendOrigin: requireEnvironmentVariable("FRONTEND_ORIGIN"),
   ibkrTradingMode: requireIbkrTradingMode(),
   ibkrTunnelSshHost: requireEnvironmentVariable("IBKR_TUNNEL_SSH_HOST"),

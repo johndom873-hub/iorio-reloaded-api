@@ -9,7 +9,7 @@
 // doesn't persist cookies across calls like a browser does, so the session
 // cookie from login is captured and replayed manually; a 401 on any
 // authenticated call triggers exactly one re-login-and-retry (handles
-// session expiry — express-session's cookie maxAge is 7 days — without
+// session expiry — express-session's cookie maxAge is 30 days — without
 // looping forever on a genuinely bad credential).
 import type { GenosukeConfig } from "./config.js";
 

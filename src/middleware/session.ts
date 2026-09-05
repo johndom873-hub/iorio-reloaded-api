@@ -28,7 +28,7 @@ export const sessionMiddleware = session({
     // stronger CSRF protection than "none". (Was "none" in production
     // while both apps lived on separate *.herokuapp.com hostnames.)
     sameSite: "lax",
-    maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+    maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
   },
 });
 
