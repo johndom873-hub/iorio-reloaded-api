@@ -58,6 +58,7 @@ async function refreshNewTradeCandidate(
   const dte = daysBetween(new Date(), parseExpiry(toYyyymmdd(candidate.expiry)));
   if (dte <= 0) return "This contract has already expired.";
   const capitalAtRisk = strategyKey === "covered_call" ? spotPrice : candidate.strike;
+  const bidAskSpreadPct = quote.bid !== null && quote.ask !== null ? ((quote.ask - quote.bid) / premium) * 100 : null;
   const probabilityOfProfit =
     quote.impliedVolatility !== null
       ? computeProbabilityOfProfit({
@@ -91,6 +92,9 @@ async function refreshNewTradeCandidate(
     // — a same-day re-quote of one already-chosen contract doesn't warrant
     // re-running the support/resistance scan.
     technicalNote: candidate.technicalNote,
+    bidAskSpreadPct,
+    // Carried forward unchanged, same reasoning as technicalNote above.
+    trendLabel: candidate.trendLabel,
   };
 }
 

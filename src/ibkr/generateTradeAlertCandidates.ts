@@ -3,7 +3,13 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
 import { computeIvMetrics, type IvMetrics } from "../lib/ivMetrics.js";
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
-import { computeSupportResistance, type SupportResistanceResult, type SupportResistanceZone } from "../lib/technicalIndicators.js";
+import {
+  computeMovingAverages,
+  computeSupportResistance,
+  type MovingAverages,
+  type SupportResistanceResult,
+  type SupportResistanceZone,
+} from "../lib/technicalIndicators.js";
 import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
@@ -78,6 +84,17 @@ export interface AlertCandidate {
   // within 1.0x ATR of the strike, or when support/resistance couldn't be
   // computed (e.g. too little hourly bar history).
   technicalNote: string | null;
+  // (ask - bid) / premium * 100 -- how much of the quoted mid premium is
+  // "spread risk" if the real fill lands away from the mid. Informational
+  // only, same as technicalNote/ivRank -- never affects ranking. Null when
+  // bid/ask aren't both available (see `bid`/`ask` above).
+  bidAskSpreadPct: number | null;
+  // Ticker-level daily-MA trend context (technicalIndicators.ts's
+  // computeMovingAverages, same math already shown on Ticker Detail),
+  // computed once per ticker scan rather than per candidate. Null when
+  // there's under 99 days of daily bar history yet. Informational only,
+  // approved 2026-09-05 -- see buildTrendLabel.
+  trendLabel: "uptrend" | "downtrend" | "mixed" | null;
 }
 
 // 1.0x ATR trigger and quality>=40 gate, both approved 2026-09-01 after
@@ -110,6 +127,18 @@ export function buildTechnicalNote(strike: number, right: "call" | "put", suppor
   return `Strike is ${distancePct.toFixed(1)}% ${direction} a detected ${label} zone at $${zone.price.toFixed(2)} (${zone.touches} touches, ${zone.qualityPct.toFixed(1)}% quality).`;
 }
 
+// Uptrend/downtrend require spot and both MAs to agree on direction;
+// anything else (a MA crossover, or price sitting between them) is "mixed"
+// rather than forced into one bucket. Approved 2026-09-05 alongside
+// bidAskSpreadPct -- both informational-only additions, no ranking change.
+// Exported for a focused unit test, same reasoning as buildTechnicalNote.
+export function buildTrendLabel(spotPrice: number, movingAverages: MovingAverages): "uptrend" | "downtrend" | "mixed" | null {
+  if (movingAverages.ma25 === null || movingAverages.ma99 === null) return null;
+  if (spotPrice > movingAverages.ma25 && movingAverages.ma25 > movingAverages.ma99) return "uptrend";
+  if (spotPrice < movingAverages.ma25 && movingAverages.ma25 < movingAverages.ma99) return "downtrend";
+  return "mixed";
+}
+
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
 // Bounded to keep IBKR call volume per ticker predictable — see the
@@ -129,6 +158,7 @@ const maxStrikeCandidatesPerExpiry = 50;
 const contractDetailsReqId = 1;
 const pricingReqId = 2;
 const hourlyBarsReqId = 3;
+const dailyBarsReqId = 4;
 // Hourly bars are keyed by bar-start time; a bar is still forming if it
 // started within the last hour — mirrors streamTickerDetail.ts's identical
 // check.
@@ -213,6 +243,27 @@ async function fetchTickerSupportResistance(connection: IbkrConnection, symbol: 
   }
 }
 
+// Best-effort, ticker-level, same fail-open treatment as
+// fetchTickerSupportResistance above -- reuses the same "1Y" daily-bar cache
+// streamTickerDetail.ts's technicals panel already warms, so this is usually
+// a cache hit. Failure or too little history (<99 days) degrades to no
+// trendLabel on any candidate rather than failing the ticker scan.
+async function fetchTickerTrendLabel(
+  connection: IbkrConnection,
+  symbol: string,
+  spotPrice: number,
+): Promise<"uptrend" | "downtrend" | "mixed" | null> {
+  try {
+    const dailyBars = await getCachedChartBars(connection, symbol, "1Y", dailyBarsReqId);
+    if (dailyBars.length === 0) return null;
+    const closes = dailyBars.map((bar) => bar.close);
+    return buildTrendLabel(spotPrice, computeMovingAverages(closes));
+  } catch (error) {
+    console.warn(`fetchTickerTrendLabel: failed for ${symbol} — ${error instanceof Error ? error.message : error}`);
+    return null;
+  }
+}
+
 // Validated (expiry, strike) pairs within a strategy's DTE window, one side
 // only (calls above spot / puts below) — the per-expiry checkStrikeExists
 // scans run in parallel across expiries, not sequentially, matching the
@@ -248,6 +299,7 @@ function rankCandidates(
   calendarContext: CalendarConflictContext,
   ivMetrics: IvMetrics,
   supportResistance: SupportResistanceResult | null,
+  trendLabel: "uptrend" | "downtrend" | "mixed" | null,
 ): AlertCandidate[] {
   const optionType = right === "call" ? OptionType.Call : OptionType.Put;
   const today = new Date();
@@ -267,6 +319,7 @@ function rankCandidates(
     if (findCalendarConflict(calendarContext, strategyKey, expiryIso)) continue;
     const capitalAtRisk = strategyKey === "covered_call" ? spotPrice : quote.strike;
     const annualizedYield = (premium / capitalAtRisk) * (365 / dte);
+    const bidAskSpreadPct = quote.bid !== null && quote.ask !== null ? ((quote.ask - quote.bid) / premium) * 100 : null;
     const probabilityOfProfit =
       quote.impliedVolatility !== null
         ? computeProbabilityOfProfit({
@@ -295,6 +348,8 @@ function rankCandidates(
       ivPercentile: ivMetrics.ivPercentile,
       calendarUnverified: !calendarContext.resolved,
       technicalNote: buildTechnicalNote(quote.strike, right, supportResistance),
+      bidAskSpreadPct,
+      trendLabel,
     });
   }
 
@@ -348,13 +403,14 @@ export async function generateTradeAlertCandidates(
   );
   if (expiryStrikes.length === 0) return [];
 
-  const [quotes, calendarContext, ivMetrics, supportResistance] = await Promise.all([
+  const [quotes, calendarContext, ivMetrics, supportResistance, trendLabel] = await Promise.all([
     quoteOptionChain(connection, symbol, expiryStrikes),
     fetchCalendarConflictContext(tickerId),
     computeIvMetrics(tickerId),
     fetchTickerSupportResistance(connection, symbol, prep.spotPrice),
+    fetchTickerTrendLabel(connection, symbol, prep.spotPrice),
   ]);
-  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice, calendarContext, ivMetrics, supportResistance);
+  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice, calendarContext, ivMetrics, supportResistance, trendLabel);
 }
 
 /**
@@ -437,14 +493,15 @@ export async function generateTradeAlertCandidatesForTicker(
   }
   if (contracts.length === 0) return results;
 
-  const [quotes, calendarContext, ivMetrics, supportResistance] = await Promise.all([
+  const [quotes, calendarContext, ivMetrics, supportResistance, trendLabel] = await Promise.all([
     fetchQuotesForContracts(ib, symbol, contracts),
     fetchCalendarConflictContext(tickerId),
     computeIvMetrics(tickerId),
     fetchTickerSupportResistance(connection, symbol, spotPrice),
+    fetchTickerTrendLabel(connection, symbol, spotPrice),
   ]);
   for (const { strategyKey, settings, right } of preps) {
-    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice, calendarContext, ivMetrics, supportResistance));
+    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice, calendarContext, ivMetrics, supportResistance, trendLabel));
   }
   return results;
 }
