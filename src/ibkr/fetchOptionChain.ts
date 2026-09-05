@@ -40,7 +40,9 @@ export function parseExpiry(expiry: string): Date {
 }
 
 export function daysBetween(from: Date, to: Date): number {
-  return Math.round((to.getTime() - from.getTime()) / 86_400_000);
+  const fromMidnightUtc = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
+  const toMidnightUtc = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
+  return Math.round((toMidnightUtc - fromMidnightUtc) / 86_400_000);
 }
 
 // Monotonic, not Date.now()-based — two lookups issued within the same
