@@ -846,14 +846,36 @@ async function runReconciliationPass(passId: number): Promise<void> {
     const expiredWithoutTrade = !lastClosingTrade && leg.is_expired_option;
     if (expiredWithoutTrade) positionIdsWithExpiredLeg.add(leg.position_id);
 
+    // A covered call's stock leg is never actually sold just because its
+    // short call expired worthless -- the shares are simply carried
+    // forward (to a fresh covered call, or an unstructured leftover
+    // position). IBKR's held-positions report has been observed to have a
+    // gap right around that option's own expiry/settlement, which used to
+    // make this stock leg fall into the same "no trade, ambiguous" branch
+    // as a genuinely-unknown close and null out this covered call's whole
+    // realized P&L (bug found 2026-09-08, iorio dashboard's Latest Events
+    // widget). Recorded as "closed at its own entry price" instead --
+    // correctly zero P&L for a leg that was never disposed of -- whenever
+    // no real closing trade exists and a sibling option leg on the same
+    // position has already expired.
+    let isRetainedCoveredCallStock = false;
+    if (leg.leg_type === "stock" && !lastClosingTrade) {
+      const expiredSiblingOptionLeg = await db("position_legs")
+        .where({ position_id: leg.position_id, leg_type: "option" })
+        .whereNotNull("expiry_date")
+        .andWhere("expiry_date", "<=", db.raw("CURRENT_DATE"))
+        .first();
+      isRetainedCoveredCallStock = expiredSiblingOptionLeg !== undefined;
+    }
+
     await db("position_legs")
       .where({ id: leg.id })
       .update({
-        exit_price: lastClosingTrade?.price ?? (expiredWithoutTrade ? 0 : null),
+        exit_price: lastClosingTrade?.price ?? (expiredWithoutTrade ? 0 : isRetainedCoveredCallStock ? leg.entry_price : null),
         exit_at: lastClosingTrade?.executed_at ?? db.fn.now(),
       });
     console.log(
-      `Reconciliation #${passId}: closed leg ${leg.id} (position ${leg.position_id}, conId ${leg.ibkr_contract_id}) — ${lastClosingTrade ? `matched closing trade @ ${lastClosingTrade.price}` : expiredWithoutTrade ? "expired worthless, no trade" : "no trade, not past expiry (ambiguous close)"}.`,
+      `Reconciliation #${passId}: closed leg ${leg.id} (position ${leg.position_id}, conId ${leg.ibkr_contract_id}) — ${lastClosingTrade ? `matched closing trade @ ${lastClosingTrade.price}` : expiredWithoutTrade ? "expired worthless, no trade" : isRetainedCoveredCallStock ? "stock retained past sibling option's expiry, no trade -- closed at entry price" : "no trade, not past expiry (ambiguous close)"}.`,
     );
 
     const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
@@ -1174,7 +1196,15 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
     // close out a previously-flagged leftover leg rather than leaving a
     // stale warning position visible.
     if (existingLeftoverLeg) {
-      await db("position_legs").where({ id: existingLeftoverLeg.id }).update({ exit_at: db.fn.now() });
+      // Closed at its own entry price, not left null -- these shares
+      // weren't sold, a new call simply now covers all of them, so this
+      // leg's own realized P&L is genuinely zero, not unknown (bug found
+      // 2026-09-08: this used to leave exit_price null, which fed into
+      // realizedPnlFor's "ambiguous exit" guard and silently blanked the
+      // whole position's P&L in the dashboard's Latest Events widget).
+      await db("position_legs")
+        .where({ id: existingLeftoverLeg.id })
+        .update({ exit_at: db.fn.now(), exit_price: existingLeftoverLeg.entry_price });
       const remaining = await db("position_legs").where({ position_id: existingLeftoverLeg.position_id }).whereNull("exit_at");
       console.log(
         `upsertLeftoverStockPosition(${symbol}): leftoverShares<=0 — closed leg ${existingLeftoverLeg.id}. ${remaining.length} leg(s) still open on position ${existingLeftoverLeg.position_id}.`,

@@ -29,15 +29,15 @@ export interface PositionEvent {
   // Net cash effect for an "opened" event (premium collected minus stock
   // bought) — not meaningful for "closed"/"unstructured" events, null there.
   netCashEffect: number | null;
-  // Full market value across both legs for covered_call/cash_secured_put
-  // (same standard as Portfolio/Allocation — see
-  // project_position_valuation_full_market_value), priced at entry for an
-  // "opened" event and at exit for a "closed" event. Requested 2026-08-28
-  // to replace netCashEffect/realizedPnl in the events feed's Value column
-  // — those two remain above for their own distinct meanings. Null for
-  // "unstructured" (no clean cash-lock rule to apply) and for a "closed"
-  // event with an ambiguous exit (same null-not-zero reasoning as
-  // realizedPnl above).
+  // Full market value across all legs (same standard as Portfolio/
+  // Allocation — see project_position_valuation_full_market_value), priced
+  // at entry for an "opened"/"unstructured" event and at exit for a
+  // "closed" event. Requested 2026-08-28 to replace netCashEffect/
+  // realizedPnl in the events feed's Value column — those two remain above
+  // for their own distinct meanings. Covers "unstructured" too as of
+  // 2026-09-08 (quantity × price, same generic formula). Null only for a
+  // "closed" event with a genuinely ambiguous exit (same null-not-zero
+  // reasoning as realizedPnl above).
   fullMarketValue: number | null;
   // Best-effort, not exhaustive — the full user-attribution audit flagged
   // in PROGRESS.md (2026-08-28) hasn't happened yet. Determinable today:
@@ -197,9 +197,12 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
   // priced at entry (open) or exit (close) instead of a live quote — a
   // CSP's collateral (strike × multiplier × qty) is never its own
   // position_legs row, so it's added explicitly alongside the option leg's
-  // own value.
+  // own value. Also covers "unstructured" (approved 2026-09-08) — the same
+  // sum-across-legs formula already handles a stock-only leftover position
+  // (quantity × price) and the rare naked-call anomaly without any extra
+  // cases; it was excluded before only because no one had asked for it yet.
   function fullMarketValueFor(positionLegs: LegRow[], strategyKey: string, atClose: boolean): number | null {
-    if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put") return null;
+    if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put" && strategyKey !== "unstructured") return null;
     if (atClose && positionLegs.some((leg) => leg.exitPrice === null)) return null;
 
     return positionLegs.reduce((sum, leg) => {
