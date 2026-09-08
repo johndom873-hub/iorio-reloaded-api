@@ -12,14 +12,14 @@
 //   node dist/scripts/run-watchdog-job.js
 
 import { db } from "../src/db/connection.js";
-import { isWeekend } from "../src/lib/isWeekend.js";
+import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runWatchdogCheck } from "../src/lib/runWatchdogCheck.js";
 
 async function main(): Promise<void> {
   // The daily jobs it checks are themselves skipped on weekends, so there's
   // nothing to watch for.
-  if (isWeekend()) {
-    console.log("Skipping watchdog — weekend, US market closed.");
+  if (await isMarketClosedToday()) {
+    console.log("Skipping watchdog — market closed today.");
     return;
   }
   await runWatchdogCheck();

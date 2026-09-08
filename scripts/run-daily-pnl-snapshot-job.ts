@@ -39,7 +39,7 @@ import { fetchAccountLedgerPnl } from "../src/ibkr/fetchAccountLedgerPnl.js";
 import { fetchAccountSummary } from "../src/ibkr/fetchAccountSummary.js";
 import { fetchFlexCashTransactions } from "../src/ibkr/fetchFlexCashTransactions.js";
 import { fetchLivePrices, type PriceContract } from "../src/ibkr/fetchLivePrices.js";
-import { isWeekend } from "../src/lib/isWeekend.js";
+import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 
 interface OpenPositionLegRow {
@@ -103,8 +103,8 @@ async function reconcileCashFlows(snapshotDate: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  if (isWeekend()) {
-    console.log("Skipping daily_pnl_snapshot — weekend, US market closed.");
+  if (await isMarketClosedToday()) {
+    console.log("Skipping daily_pnl_snapshot — market closed today.");
     return;
   }
   await runJob("daily_pnl_snapshot", async () => {

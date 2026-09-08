@@ -21,7 +21,7 @@ import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { runScannerSubscription, type ScannerCandidate } from "../src/ibkr/fetchScannerCandidates.js";
 import { enrichCandidate } from "../src/ibkr/enrichScannerCandidates.js";
-import { isWeekend } from "../src/lib/isWeekend.js";
+import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 
 const scanCodes = [ScanCode.HIGH_OPT_IMP_VOLAT_OVER_HIST, ScanCode.HOT_BY_OPT_VOLUME, ScanCode.HIGH_OPT_IMP_VOLAT];
@@ -68,8 +68,8 @@ function poolCandidates(scanResults: ScannerCandidate[][]): PooledCandidate[] {
 }
 
 async function main(): Promise<void> {
-  if (isWeekend()) {
-    console.log("Skipping daily_screener_scan — weekend, US market closed.");
+  if (await isMarketClosedToday()) {
+    console.log("Skipping daily_screener_scan — market closed today.");
     return;
   }
 

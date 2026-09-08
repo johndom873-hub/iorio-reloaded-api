@@ -21,7 +21,7 @@ import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "../src/ibkr/requestMarketData.js";
 import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
 import { lookupLatestDailyBar } from "../src/ibkr/fetchTickerOverview.js";
-import { isWeekend } from "../src/lib/isWeekend.js";
+import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 
 interface TickerRow {
@@ -110,8 +110,8 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
 }
 
 async function main(): Promise<void> {
-  if (isWeekend()) {
-    console.log("Skipping daily_market_data_capture — weekend, US market closed.");
+  if (await isMarketClosedToday()) {
+    console.log("Skipping daily_market_data_capture — market closed today.");
     return;
   }
   await runJob("daily_market_data_capture", async () => {
