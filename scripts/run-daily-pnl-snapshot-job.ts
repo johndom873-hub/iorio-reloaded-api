@@ -38,6 +38,7 @@ import { db } from "../src/db/connection.js";
 import { fetchAccountLedgerPnl } from "../src/ibkr/fetchAccountLedgerPnl.js";
 import { fetchAccountSummary } from "../src/ibkr/fetchAccountSummary.js";
 import { fetchFlexCashTransactions } from "../src/ibkr/fetchFlexCashTransactions.js";
+import { fetchLiveGreeks, type GreeksContract } from "../src/ibkr/fetchLiveGreeks.js";
 import { fetchLivePrices, type PriceContract } from "../src/ibkr/fetchLivePrices.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
@@ -216,6 +217,8 @@ async function main(): Promise<void> {
     let skipped = 0;
     for (const [positionId, legs] of legsByPositionId) {
       let unrealizedPnl = 0;
+      let premiumPnl = 0;
+      let stockPnl = 0;
       let marketValue = 0;
       let hasAllPrices = true;
 
@@ -227,7 +230,13 @@ async function main(): Promise<void> {
         }
         const sign = leg.side === "short" ? -1 : 1;
         const entryPrice = Number(leg.entryPrice);
-        unrealizedPnl += (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
+        const legPnl = (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
+        unrealizedPnl += legPnl;
+        if (leg.legType === "option") {
+          premiumPnl += legPnl;
+        } else {
+          stockPnl += legPnl;
+        }
         marketValue += currentPrice * leg.quantity * leg.multiplier * sign;
       }
 
@@ -243,6 +252,8 @@ async function main(): Promise<void> {
           snapshot_date: snapshotDate,
           realized_pnl: 0,
           unrealized_pnl: unrealizedPnl,
+          premium_pnl: premiumPnl,
+          stock_pnl: stockPnl,
           market_value: marketValue,
         })
         .onConflict(["position_id", "snapshot_date"])
@@ -251,6 +262,44 @@ async function main(): Promise<void> {
     }
 
     console.log(`Snapshotted ${snapshotted}/${legsByPositionId.size} open position(s) for ${snapshotDate} (${skipped} skipped).`);
+
+    // Greeks, same nightly cadence as the P&L snapshot above — piggybacks on
+    // this job rather than a second scheduled IBKR round-trip. Only option
+    // legs have greeks; a gateway failure here must not cost the P&L
+    // snapshot already written above, so it's isolated in its own try/catch.
+    const optionLegRows = legRows.filter((leg) => leg.legType === "option" && leg.optionType && leg.strikePrice && leg.expiryDate);
+    let greeksSnapshotted = 0;
+    if (optionLegRows.length > 0) {
+      try {
+        const greeksContracts: GreeksContract[] = optionLegRows.map((leg) => ({
+          key: leg.legId,
+          symbol: leg.symbol,
+          expiry: leg.expiryDate!,
+          strike: Number(leg.strikePrice),
+          right: leg.optionType === "call" ? OptionType.Call : OptionType.Put,
+        }));
+        const greeksByLegId = await fetchLiveGreeks(greeksContracts);
+        for (const leg of optionLegRows) {
+          const greeks = greeksByLegId[leg.legId];
+          if (!greeks || (greeks.delta === null && greeks.gamma === null && greeks.vega === null && greeks.theta === null)) continue;
+          await db("position_leg_greeks_snapshots")
+            .insert({
+              position_leg_id: leg.legId,
+              snapshot_date: snapshotDate,
+              delta: greeks.delta,
+              gamma: greeks.gamma,
+              vega: greeks.vega,
+              theta: greeks.theta,
+            })
+            .onConflict(["position_leg_id", "snapshot_date"])
+            .merge();
+          greeksSnapshotted++;
+        }
+        console.log(`Snapshotted greeks for ${greeksSnapshotted}/${optionLegRows.length} open option leg(s) for ${snapshotDate}.`);
+      } catch (error) {
+        console.error(`Greeks snapshot failed for ${snapshotDate}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
     return {
       details: {
         accountSnapshot: accountSnapshotWritten,

@@ -146,6 +146,13 @@ positionsRouter.get("/", async (request, response) => {
   response.json(result.rows);
 });
 
+// Set only when the greeks came from position_leg_greeks_snapshots instead
+// of a live IBKR quote — see the fallback note below — the date that
+// snapshot was captured, mirroring UnrealizedPnlResult.asOfDate.
+export interface GreeksResult extends Greeks {
+  asOfDate: string | null;
+}
+
 positionsRouter.get("/greeks", async (request, response) => {
   const legIdsParam = request.query.legIds as string | undefined;
   if (!legIdsParam) {
@@ -187,9 +194,56 @@ positionsRouter.get("/greeks", async (request, response) => {
   } catch (error) {
     console.error("positions/greeks: fetchLiveGreeks failed, returning null greeks for every contract", error);
   }
-  const result: Record<string, Greeks> = {};
+
+  // Same fallback shape as /positions/pnl (added 2026-09-08): a leg with no
+  // live greeks (Gateway down, or up but never got a tickOptionComputation
+  // for this contract — e.g. outside market hours, per fetchLiveGreeks's
+  // placeholder-then-fill pattern) falls back to its most recent row in
+  // position_leg_greeks_snapshots, written nightly by the daily P&L
+  // snapshot job.
+  function isLiveGreeksEmpty(value: Greeks | undefined): boolean {
+    return !value || (value.delta === null && value.gamma === null && value.vega === null && value.theta === null);
+  }
+  const legIdsMissingLive = contracts.filter((contract) => isLiveGreeksEmpty(greeks[contract.key])).map((contract) => contract.key);
+  const fallbackByLegId = new Map<string, { delta: string | null; gamma: string | null; vega: string | null; theta: string | null; snapshotDate: string }>();
+  if (legIdsMissingLive.length > 0) {
+    const latestSnapshotRows = await db.raw(
+      `
+      SELECT DISTINCT ON (position_leg_id)
+        position_leg_id AS "positionLegId",
+        delta,
+        gamma,
+        vega,
+        theta,
+        to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate"
+      FROM position_leg_greeks_snapshots
+      WHERE position_leg_id = ANY(?)
+      ORDER BY position_leg_id, snapshot_date DESC
+      `,
+      [legIdsMissingLive],
+    );
+    for (const row of latestSnapshotRows.rows) {
+      fallbackByLegId.set(row.positionLegId, row);
+    }
+  }
+
+  const result: Record<string, GreeksResult> = {};
   for (const contract of contracts) {
-    result[contract.key] = greeks[contract.key] ?? { delta: null, gamma: null, vega: null, theta: null };
+    const live = greeks[contract.key];
+    if (!isLiveGreeksEmpty(live)) {
+      result[contract.key] = { ...live!, asOfDate: null };
+      continue;
+    }
+    const fallback = fallbackByLegId.get(contract.key);
+    result[contract.key] = fallback
+      ? {
+          delta: fallback.delta === null ? null : Number(fallback.delta),
+          gamma: fallback.gamma === null ? null : Number(fallback.gamma),
+          vega: fallback.vega === null ? null : Number(fallback.vega),
+          theta: fallback.theta === null ? null : Number(fallback.theta),
+          asOfDate: fallback.snapshotDate,
+        }
+      : { delta: null, gamma: null, vega: null, theta: null, asOfDate: null };
   }
   response.json(result);
 });
@@ -198,9 +252,9 @@ export interface UnrealizedPnlResult {
   unrealizedPnl: number | null;
   // Premium P/L: sum of open option leg(s) only. Stock P/L: the open stock leg
   // only (covered calls only — always 0 for CSP, which has no stock leg).
-  // Both null together whenever unrealizedPnl itself is null (live pricing
-  // unavailable) or came from the position_pnl_snapshots fallback below,
-  // since that snapshot only stores the blended whole-position figure.
+  // Both null when unrealizedPnl itself is null (live pricing unavailable and
+  // no snapshot), or when the position_pnl_snapshots fallback below is used
+  // and predates the split being captured (added 2026-09-08).
   unrealizedPremiumPnl: number | null;
   unrealizedStockPnl: number | null;
   // Set only when unrealizedPnl came from position_pnl_snapshots instead of
@@ -308,13 +362,18 @@ positionsRouter.get("/pnl", async (request, response) => {
   }
 
   const positionIdsMissingLive = positionIds.filter((id) => unrealizedByPositionId[id] === null);
-  const fallbackByPositionId = new Map<string, { unrealizedPnl: string; snapshotDate: string }>();
+  const fallbackByPositionId = new Map<
+    string,
+    { unrealizedPnl: string; premiumPnl: string | null; stockPnl: string | null; snapshotDate: string }
+  >();
   if (positionIdsMissingLive.length > 0) {
     const latestSnapshotRows = await db.raw(
       `
       SELECT DISTINCT ON (position_id)
         position_id AS "positionId",
         unrealized_pnl AS "unrealizedPnl",
+        premium_pnl AS "premiumPnl",
+        stock_pnl AS "stockPnl",
         to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate"
       FROM position_pnl_snapshots
       WHERE position_id = ANY(?)
@@ -323,7 +382,12 @@ positionsRouter.get("/pnl", async (request, response) => {
       [positionIdsMissingLive],
     );
     for (const row of latestSnapshotRows.rows) {
-      fallbackByPositionId.set(row.positionId, { unrealizedPnl: row.unrealizedPnl, snapshotDate: row.snapshotDate });
+      fallbackByPositionId.set(row.positionId, {
+        unrealizedPnl: row.unrealizedPnl,
+        premiumPnl: row.premiumPnl,
+        stockPnl: row.stockPnl,
+        snapshotDate: row.snapshotDate,
+      });
     }
   }
 
@@ -343,9 +407,11 @@ positionsRouter.get("/pnl", async (request, response) => {
     result[positionId] = fallback
       ? {
           unrealizedPnl: Number(fallback.unrealizedPnl),
-          // position_pnl_snapshots only stores the blended whole-position figure.
-          unrealizedPremiumPnl: null,
-          unrealizedStockPnl: null,
+          // Older snapshots (written before 2026-09-08) never captured this
+          // split — null here just means "no split available for this
+          // snapshot", same as the whole-position figure being unavailable.
+          unrealizedPremiumPnl: fallback.premiumPnl === null ? null : Number(fallback.premiumPnl),
+          unrealizedStockPnl: fallback.stockPnl === null ? null : Number(fallback.stockPnl),
           asOfDate: fallback.snapshotDate,
         }
       : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, asOfDate: null };
