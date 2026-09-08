@@ -45,6 +45,20 @@ const orderRequestsChannel = "order_requests_channel";
 const reconciliationIntervalMs = 60_000;
 const positionReqId = 1;
 
+// A row sitting in "confirmed"/"cancel_requested" this long without the
+// worker picking it up is never normal (processing is near-instant once
+// connected) -- treated as an incident, not a queue backlog. Chosen to be
+// comfortably longer than the 30s poll fallback plus a few IBKR reconnect
+// cycles, so a routine reconnect blip doesn't false-alarm.
+const staleOrderAlertThresholdMs = 5 * 60_000;
+
+const telegramNotifyTimeoutMs = 5_000;
+
+/** Never lets a hung Telegram call block startup/shutdown paths that must proceed regardless. */
+function notifyTelegramWithTimeout(message: string): Promise<void> {
+  return Promise.race([notifyTelegram(message), new Promise<void>((resolve) => setTimeout(resolve, telegramNotifyTimeoutMs))]);
+}
+
 function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
 }
@@ -212,13 +226,11 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
     console.log(`processOrderRequest(${orderRequestId}): placing IBKR order ${ibkrOrderId} (${payload.symbol}, lmtPrice=${built.order.lmtPrice}).`);
     ib.placeOrder(ibkrOrderId, built.contract, built.order);
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     await db("order_requests")
       .where({ id: orderRequestId })
-      .update({
-        status: "error",
-        error_message: error instanceof Error ? error.message : String(error),
-        updated_at: db.fn.now(),
-      });
+      .update({ status: "error", error_message: message, updated_at: db.fn.now() });
+    await notifyTelegramWithTimeout(`🔥 Order request errored while placing with IBKR: ${payload.symbol} (id ${orderRequestId}).\n${message}`);
   }
 }
 
@@ -236,27 +248,126 @@ async function handleOrderRequestNotification(orderRequestId: string, knownStatu
   }
 }
 
-/** Postgres LISTEN/NOTIFY — the web dyno NOTIFYs this channel with the order_requests.id on confirm. */
-async function listenForOrderRequests(): Promise<void> {
-  const client = new PgClient({
-    connectionString: environment.databaseUrl,
-    ssl: environment.nodeEnvironment === "production" ? { rejectUnauthorized: false } : undefined,
-  });
-  await client.connect();
-  await client.query(`LISTEN ${orderRequestsChannel}`);
+// Root-caused 2026-09-08: a startup DB blip made the old single unguarded
+// `await client.connect()` throw, which crashed main()'s promise chain but
+// left the process alive (see main()'s comment below) with NO LISTEN, NO
+// poll fallback, and NO periodic reconciliation ever registered — 3 days of
+// confirmed orders silently never processed, with a healthy-looking IBKR
+// connection the whole time. This retries the LISTEN connection forever with
+// backoff instead of ever giving up, and alerts once the outage has gone on
+// long enough to matter (rather than on every routine retry).
+const listenConnectDelaysMs = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
+const listenOutageAlertThresholdMs = 3 * 60_000;
+
+async function connectOrderRequestsListener(): Promise<PgClient> {
+  const outageStartedAt = Date.now();
+  let attempt = 0;
+  let alertedThisOutage = false;
+
+  for (;;) {
+    const client = new PgClient({
+      connectionString: environment.databaseUrl,
+      ssl: environment.nodeEnvironment === "production" ? { rejectUnauthorized: false } : undefined,
+    });
+    try {
+      await client.connect();
+      await client.query(`LISTEN ${orderRequestsChannel}`);
+      const downForMs = Date.now() - outageStartedAt;
+      if (attempt > 0) console.log(`order_requests LISTEN: reconnected after ${attempt} failed attempt(s), ${Math.round(downForMs / 1000)}s down.`);
+      if (alertedThisOutage) {
+        await notifyTelegramWithTimeout(`✅ order_requests LISTEN reconnected after being down for ${Math.round(downForMs / 60_000)}+ minute(s). Order processing (via NOTIFY) has resumed — the 30s poll fallback covered orders during the outage.`);
+      }
+      return client;
+    } catch (error) {
+      await client.end().catch(() => {});
+      const downForMs = Date.now() - outageStartedAt;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`order_requests LISTEN: connect attempt ${attempt + 1} failed (${message}), ${Math.round(downForMs / 1000)}s down so far.`);
+      if (!alertedThisOutage && downForMs >= listenOutageAlertThresholdMs) {
+        alertedThisOutage = true;
+        await notifyTelegramWithTimeout(`⚠️ order_requests LISTEN has been down for ${Math.round(downForMs / 60_000)}+ minute(s) (${message}). Worker is retrying automatically; the 30s poll fallback is still processing confirmed orders in the meantime.`);
+      }
+      const delay = listenConnectDelaysMs[Math.min(attempt, listenConnectDelaysMs.length - 1)]!;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      attempt++;
+    }
+  }
+}
+
+let listenerReattaching = false;
+
+/** Establishes the LISTEN client and rewires it in place on drop — a dead LISTEN connection no longer takes down the whole worker (and its live IBKR session) to recover. */
+async function attachOrderRequestsListener(): Promise<void> {
+  const client = await connectOrderRequestsListener();
   client.on("notification", (message) => {
     if (message.channel !== orderRequestsChannel || !message.payload) return;
     handleOrderRequestNotification(message.payload).catch((error) => console.error(`Order request processing failed: ${error}`));
   });
-  client.on("error", (error) => console.error(`order_requests LISTEN connection error: ${error.message}`));
+  client.on("error", (error) => {
+    console.error(`order_requests LISTEN connection error: ${error.message} — reattaching (worker itself stays up; 30s poll covers orders meanwhile).`);
+    if (listenerReattaching) return;
+    listenerReattaching = true;
+    client.removeAllListeners();
+    client.end().catch(() => {});
+    attachOrderRequestsListener().finally(() => {
+      listenerReattaching = false;
+    });
+  });
+  console.log("order_requests LISTEN: connected and subscribed.");
+}
 
-  // A missed NOTIFY (e.g. a reconnect window) shouldn't leave a confirmed
-  // order, or a cancel request, stuck forever — this short poll is the
-  // fallback safety net for both.
+async function alertOnStaleOrderRequests(): Promise<void> {
+  const thresholdCutoff = new Date(Date.now() - staleOrderAlertThresholdMs);
+
+  const newlyStale = await db("order_requests")
+    .whereIn("status", ["confirmed", "cancel_requested"])
+    .andWhere("created_at", "<", thresholdCutoff)
+    .whereNull("stale_alert_sent_at")
+    .select("id", "status", "created_at", "payload");
+  for (const row of newlyStale) {
+    const symbol = (row.payload as OrderRequestPayload | null)?.symbol ?? "unknown symbol";
+    const stuckMinutes = Math.round((Date.now() - new Date(row.created_at).getTime()) / 60_000);
+    await db("order_requests").where({ id: row.id }).update({ stale_alert_sent_at: db.fn.now() });
+    await notifyTelegramWithTimeout(
+      `⚠️ Order request stuck: ${symbol} (${row.status}) has not been picked up by the worker for ${stuckMinutes}+ minute(s) (id ${row.id}). Check the iorio-worker service on the VPS.`,
+    );
+  }
+
+  const nowResolved = await db("order_requests")
+    .whereNotIn("status", ["confirmed", "cancel_requested"])
+    .whereNotNull("stale_alert_sent_at")
+    .select("id", "status", "payload");
+  for (const row of nowResolved) {
+    const symbol = (row.payload as OrderRequestPayload | null)?.symbol ?? "unknown symbol";
+    await db("order_requests").where({ id: row.id }).update({ stale_alert_sent_at: null });
+    await notifyTelegramWithTimeout(`✅ Previously stuck order request resolved: ${symbol} is now "${row.status}" (id ${row.id}).`);
+  }
+}
+
+/** Postgres LISTEN/NOTIFY — the web dyno NOTIFYs this channel with the order_requests.id on confirm. */
+async function listenForOrderRequests(): Promise<void> {
+  // Registered synchronously, independent of whether the LISTEN client below
+  // ever manages to connect — this is the durable safety net (a missed
+  // NOTIFY, a reconnect window, or a LISTEN outage of any length all still
+  // get swept within 30s) and must never itself depend on the thing it's a
+  // fallback for.
   setInterval(async () => {
-    const stuck = await db("order_requests").whereIn("status", ["confirmed", "cancel_requested"]).select("id", "status");
-    for (const row of stuck) await handleOrderRequestNotification(row.id, row.status);
+    try {
+      const stuck = await db("order_requests").whereIn("status", ["confirmed", "cancel_requested"]).select("id", "status");
+      for (const row of stuck) await handleOrderRequestNotification(row.id, row.status);
+      await alertOnStaleOrderRequests();
+    } catch (error) {
+      console.error(`order_requests poll fallback failed: ${error instanceof Error ? error.message : error}`);
+    }
   }, 30_000);
+
+  // Deliberately not awaited to completion here — connectOrderRequestsListener
+  // retries forever on failure, and main() must not block startup (or the
+  // periodic reconciliation/heartbeat intervals registered after this call)
+  // on a LISTEN connection that may take a while to come up.
+  attachOrderRequestsListener().catch((error) =>
+    console.error(`order_requests LISTEN: attach failed unexpectedly: ${error instanceof Error ? error.message : error}`),
+  );
 }
 
 // Truly final statuses only — partially_filled deliberately excluded, since
@@ -1165,7 +1276,23 @@ async function main(): Promise<void> {
   console.log("Iorio worker started — persistent IBKR connection, order placement, position sync.");
 }
 
+// Root-caused 2026-09-08: `process.exitCode = 1` alone doesn't terminate the
+// process — it only sets the code Node exits with once the event loop empties
+// on its own. If persistentIbkrConnection.start() had already succeeded
+// before some later step in main() threw (its socket/reconnect timers keep
+// the event loop alive indefinitely), the process never actually exited: it
+// sat there for 3 days looking "active (running)" to systemd, quietly
+// missing every order-processing/reconciliation loop main() never got to
+// register. installCrashHandlers.ts already established the correct policy
+// for this app (an error leaves the process in an unknown state — let
+// Heroku/systemd restart it cleanly rather than trying to limp on) but only
+// covers uncaughtException/unhandledRejection; main()'s own explicit .catch
+// intercepts its rejection before that global handler ever sees it, so it
+// needs the same "always actually exit" ending applied here directly.
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[FATAL] worker main() failed to start: ${message}`);
+  notifyTelegramWithTimeout(`🔥 iorio-worker failed to start: ${message}\n\nProcess is exiting — systemd will restart it.`).finally(() => {
+    process.exit(1);
+  });
 });
