@@ -1,6 +1,6 @@
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
-import { environment } from "../config/env.js";
+import { environment, requireEnvironmentVariable } from "../config/env.js";
 
 const PgSessionStore = connectPgSimple(session);
 
@@ -17,7 +17,14 @@ export const sessionMiddleware = session({
     tableName: "session",
     createTableIfMissing: false,
   }),
-  secret: environment.sessionSecret,
+  // Validated here, not in the shared environment object -- session.ts is
+  // web-dyno-only (never imported by the worker), and SESSION_SECRET means
+  // nothing to a process that never opens an express-session. Root-caused
+  // 2026-09-08: SESSION_SECRET used to be required eagerly in env.ts, which
+  // every process importing that shared config module pays for even if it
+  // never uses sessions -- crash-looped the VPS worker on deploy once the
+  // fallback was removed, since its .env has never had this var set.
+  secret: requireEnvironmentVariable("SESSION_SECRET"),
   resave: false,
   saveUninitialized: false,
   cookie: {
