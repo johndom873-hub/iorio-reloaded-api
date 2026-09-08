@@ -56,7 +56,7 @@ export function formatTickerAlertsMessage(
     .map(([strategyKey, count]) => `${count} ${strategyLabels[strategyKey]}`)
     .join(", ");
 
-  return `${header}\n\n${top.line}\n\n...and ${rest.length} more (${breakdown}) — see Trade Alerts screen`;
+  return `${header}\n\n${top.line}\n\n...and ${rest.length} more (${breakdown})`;
 }
 
 export function formatAssignmentRiskAlertLine(
