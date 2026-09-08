@@ -35,54 +35,57 @@ async function loadPeriodPnl() {
 }
 
 dashboardRouter.get("/summary", async (_request, response) => {
-  const latestAccountSnapshot = await db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first();
-  const periods = await loadPeriodPnl();
+  const [latestAccountSnapshot, periods, strategyPeriodPnl] = await Promise.all([
+    db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first(),
+    loadPeriodPnl(),
+    computeStrategyPeriodPnl(),
+  ]);
 
-  // Realized P&L must come straight from position_legs (every closed leg,
-  // both open and closed positions) rather than position_pnl_snapshots —
-  // that snapshot table is a running mark-to-market of *open* positions
-  // only (written nightly for the P&L-over-time chart) and never gets a
-  // row once a position closes. Sourcing realized P&L from it silently
-  // dropped any gain/loss from a position that had already closed (found
-  // 2026-08-25: a closed HOOD position with +$419.19 realized was missing
-  // entirely from this breakdown while the account-level cumulative
-  // figure, sourced differently, included it — the two numbers disagreed
-  // on the Dashboard). Unrealized P&L is legitimately snapshot-sourced,
-  // since only open positions have any unrealized P&L to report.
-  const strategyBreakdown = await db.raw(`
-    SELECT
-      strategy_key AS "strategyKey",
-      COALESCE(SUM(realized_pnl), 0) AS "realizedPnl",
-      COALESCE(SUM(unrealized_pnl), 0) AS "unrealizedPnl"
-    FROM (
-      SELECT
-        p.strategy_key,
-        p.id AS position_id,
-        (
-          SELECT SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
-          FROM position_legs pl
-          WHERE pl.position_id = p.id AND pl.exit_price IS NOT NULL
-        ) AS realized_pnl,
-        0 AS unrealized_pnl
-      FROM positions p
+  // "P&L by Strategy" is YTD-scoped (matches "P&L by Period"'s YTD column
+  // — rescoped 2026-09-08, was previously all-time realized/all-time-open
+  // unrealized, which made its Residual figure incomparable to the Period
+  // card's and left Total's REALIZED column disagreeing wildly with the
+  // sum of the visible strategy rows). Sourced from the same
+  // computeStrategyPeriodPnl() query as the Period card rather than
+  // separate SQL, so the two can't drift apart again.
+  const strategyBreakdown = strategyPeriodPnl.map((row) => ({
+    strategyKey: row.strategyKey,
+    realizedPnl: row.realizedYear,
+    unrealizedPnl: row.unrealizedYear,
+  }));
 
-      UNION ALL
-
-      SELECT
-        p.strategy_key,
-        p.id AS position_id,
-        0 AS realized_pnl,
-        latest.unrealized_pnl
-      FROM (
-        SELECT DISTINCT ON (position_id) *
-        FROM position_pnl_snapshots
-        ORDER BY position_id, snapshot_date DESC
-      ) latest
-      JOIN positions p ON p.id = latest.position_id
-      WHERE p.status = 'open'
-    ) per_position
-    GROUP BY strategy_key
-  `);
+  // Account-level YTD unrealized: IBKR's $LEDGER-UnrealizedPnL is a live
+  // mark-to-market on currently-open positions (a point-in-time *stock*,
+  // like this app's own position_pnl_snapshots), so "current minus the
+  // snapshot as of Dec 31 last year" is the correct way to isolate this
+  // year's move — same pattern computeStrategyPeriodPnl.ts already uses
+  // per-position for its own "year" column. Confirmed reliable: it
+  // reconciles with this app's own known-strategy unrealized total to
+  // within cents.
+  //
+  // Account-level YTD realized is NOT sourced from $LEDGER-RealizedPnL at
+  // all (found 2026-09-08: this account's P&L is ~90% option
+  // expirations/assignments, not closing trades, and $LEDGER-RealizedPnL
+  // only reflects a *closing trade's* execution same-day -- an expiring
+  // short option's gain was already fully captured days earlier via its
+  // eroding unrealized mark-to-market, so its expiry-day
+  // unrealized-to-realized *reclassification* posts to IBKR's ledger on
+  // whatever schedule IBKR's own overnight settlement uses, not
+  // same-day, silently starving any daily-reset-based sum of this
+  // account's dominant P&L driver -- e.g. four CSPs expired worthless
+  // worth $5,169 on 2026-09-03 alone while that day's $LEDGER-RealizedPnL
+  // read $0). Deriving it as a plug against the already-correct,
+  // lag-free `periods.year` (SUM(daily_pnl), net-liq-based, same trusted
+  // total "P&L by Period" uses) instead avoids that gap entirely and
+  // guarantees this card's Total ties out to Period's YTD Total exactly.
+  const snapshotBeforeYearStart = await db("account_pnl_snapshots")
+    .where("snapshot_date", "<", db.raw("date_trunc('year', CURRENT_DATE)"))
+    .orderBy("snapshot_date", "desc")
+    .first();
+  const accountTotalYtd = Number(periods.year ?? 0);
+  const accountUnrealizedYtd =
+    Number(latestAccountSnapshot?.unrealized_pnl ?? 0) - Number(snapshotBeforeYearStart?.unrealized_pnl ?? 0);
+  const accountRealizedYtd = accountTotalYtd - accountUnrealizedYtd;
 
   const netLiquidationValue = latestAccountSnapshot?.net_liquidation_value ?? null;
   const dayPnl = periods.day !== null ? Number(periods.day) : null;
@@ -96,8 +99,8 @@ dashboardRouter.get("/summary", async (_request, response) => {
   response.json({
     asOf: latestAccountSnapshot?.snapshot_date ?? null,
     netLiquidationValue,
-    cumulativeRealizedPnl: latestAccountSnapshot?.realized_pnl ?? null,
-    cumulativeUnrealizedPnl: latestAccountSnapshot?.unrealized_pnl ?? null,
+    accountRealizedYtd,
+    accountUnrealizedYtd,
     dayPnlPercent,
     periods: {
       day: periods.day ?? null,
@@ -105,7 +108,7 @@ dashboardRouter.get("/summary", async (_request, response) => {
       month: periods.month ?? null,
       year: periods.year ?? null,
     },
-    strategyBreakdown: strategyBreakdown.rows,
+    strategyBreakdown,
   });
 });
 

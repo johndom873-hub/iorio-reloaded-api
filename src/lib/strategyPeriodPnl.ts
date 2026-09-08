@@ -23,6 +23,11 @@ export interface StrategyPeriodPnl {
   week: number;
   month: number;
   year: number;
+  // Split-out YTD figures, added for /summary's "P&L by Strategy (YTD)"
+  // card (2026-09-08) so it can share this query instead of re-deriving
+  // YTD realized/unrealized with separate, driftable SQL.
+  realizedYear: number;
+  unrealizedYear: number;
 }
 
 export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
@@ -128,7 +133,9 @@ export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
       COALESCE(r.realized_day, 0) + COALESCE(u.unrealized_day, 0) AS day,
       COALESCE(r.realized_week, 0) + COALESCE(u.unrealized_week, 0) AS week,
       COALESCE(r.realized_month, 0) + COALESCE(u.unrealized_month, 0) AS month,
-      COALESCE(r.realized_year, 0) + COALESCE(u.unrealized_year, 0) AS year
+      COALESCE(r.realized_year, 0) + COALESCE(u.unrealized_year, 0) AS year,
+      COALESCE(r.realized_year, 0) AS "realizedYear",
+      COALESCE(u.unrealized_year, 0) AS "unrealizedYear"
     FROM realized r
     FULL OUTER JOIN unrealized u ON u.strategy_key = r.strategy_key
   `);
@@ -139,6 +146,8 @@ export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
     week: Number(row.week),
     month: Number(row.month),
     year: Number(row.year),
+    realizedYear: Number(row.realizedYear),
+    unrealizedYear: Number(row.unrealizedYear),
   }));
 }
 
