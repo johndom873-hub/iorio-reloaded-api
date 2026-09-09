@@ -750,12 +750,12 @@ async function runReconciliationPass(passId: number): Promise<void> {
       (p) => p.contract.secType === SecType.OPT && p.contract.right === OptionType.Put && p.quantity < 0,
     );
 
-    if (shortPutLegs.length > 0) {
-      await upsertSyncedPosition(
-        symbol,
-        "cash_secured_put",
-        shortPutLegs.map((leg) => ({ held: leg, side: "short" as const })),
-      );
+    // One position per distinct short put contract (mirrors
+    // upsertSplitCoveredCallPosition's covered-call fix below) -- sorted for
+    // a stable, deterministic split across reconciliation runs.
+    const sortedPutLegs = [...shortPutLegs].sort((a, b) => (a.contract.conId ?? 0) - (b.contract.conId ?? 0));
+    for (const putLeg of sortedPutLegs) {
+      await upsertSplitCashSecuredPutPosition(symbol, putLeg);
     }
 
     const totalShortCallShares = shortCallLegs.reduce((sum, leg) => sum + Math.abs(leg.quantity) * 100, 0);
@@ -1161,6 +1161,66 @@ async function upsertSplitCoveredCallPosition(
 
   await upsertPositionLeg(positionId!, callLeg, "short");
   await upsertPositionLeg(positionId!, stockLeg, "long", sharesForThisLeg, true);
+}
+
+// One cash-secured-put position per distinct short put contract — the same
+// symbol-only-grouping bug upsertSplitCoveredCallPosition was fixed for
+// above (2026-08-25) also applied to CSPs, just undiscovered until now:
+// two unrelated CSPs on one ticker (different strikes/expiries, opened
+// days apart) collapsed into a single position the moment IBKR reported
+// both as held, blending their Structure column and losing the later
+// expiry behind the earlier one. Found 2026-09-09 on a real prod MU
+// position.
+async function upsertSplitCashSecuredPutPosition(symbol: string, putLeg: IbkrHeldPosition): Promise<void> {
+  const putConId = String(putLeg.contract.conId);
+  const existingPutLeg = await db("position_legs").where({ ibkr_contract_id: putConId }).whereNull("exit_at").first();
+  console.log(
+    `upsertSplitCashSecuredPutPosition(${symbol}): putConId=${putConId}, existingPutLeg=${existingPutLeg ? `${existingPutLeg.id} (position ${existingPutLeg.position_id})` : "none — will create a new position"}.`,
+  );
+
+  let positionId = existingPutLeg?.position_id as string | undefined;
+
+  // One-time migration for pre-existing merged positions (same pattern as
+  // upsertSplitCoveredCallPosition): if this put leg's position still has
+  // ANOTHER open option leg on it (a different conId), the old symbol-only
+  // grouping bundled two distinct CSPs together — split this leg out into
+  // its own new position rather than reusing the shared one. Re-checked
+  // fresh on every call so processing each sibling put leg in turn
+  // (runReconciliationPass's sorted loop) correctly peels them apart one at
+  // a time instead of only fixing the first.
+  if (positionId) {
+    const siblingOptionLegs = await db("position_legs")
+      .where({ position_id: positionId, leg_type: "option" })
+      .whereNot({ ibkr_contract_id: putConId })
+      .whereNull("exit_at");
+    if (siblingOptionLegs.length > 0) {
+      const oldPosition = await db("positions").where({ id: positionId }).first();
+      const [newPosition] = await db("positions")
+        .insert({ strategy_key: "cash_secured_put", ticker_id: oldPosition!.ticker_id, status: "open" })
+        .returning(["id"]);
+      await db("position_legs").where({ id: existingPutLeg!.id }).update({ position_id: newPosition.id });
+      positionId = newPosition.id;
+    }
+  }
+
+  if (!positionId) {
+    const ticker = await db("tickers").where({ symbol }).first();
+    if (!ticker) {
+      console.warn(`reconcilePositionsFromIbkr: no tickers row for ${symbol} — skipping sync until it's added via the Screener.`);
+      return;
+    }
+    const [newPosition] = await db("positions")
+      .insert({ strategy_key: "cash_secured_put", ticker_id: ticker.id, status: "open" })
+      .returning(["id"]);
+    positionId = newPosition.id;
+  } else {
+    await db("positions").where({ id: positionId }).update({ strategy_key: "cash_secured_put" });
+  }
+  // Retried on every pass, not just at creation — see upsertSyncedPosition's
+  // matching comment for why (2026-08-28).
+  await backfillAlertResultingPositionId(symbol, positionId!);
+
+  await upsertPositionLeg(positionId!, putLeg, "short");
 }
 
 // Stock beyond what the sold calls for this symbol actually need — should
