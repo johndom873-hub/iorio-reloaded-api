@@ -87,6 +87,19 @@ screenerRouter.get("/", async (request, response) => {
   );
 });
 
+// Distinct sectors across today's full candidate pool — independent of the
+// current filter selection, so the dropdown doesn't shrink to whatever
+// sectors happen to survive the active filters (self-referential bug fixed
+// 2026-09-09).
+screenerRouter.get("/sectors", async (_request, response) => {
+  const rows = await db("screener_scan_results")
+    .distinct("sector")
+    .whereNotNull("sector")
+    .orderBy("sector", "asc");
+
+  response.json(rows.map((row) => row.sector as string));
+});
+
 // Adds a scan candidate to the shortlist — same idempotent find-or-create +
 // shortlist-insert path the Shortlist tab's manual "+ Add Ticker" uses
 // (shortlist.ts), reused here rather than duplicated.
