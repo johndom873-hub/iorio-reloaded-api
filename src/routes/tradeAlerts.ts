@@ -59,6 +59,11 @@ tradeAlertsRouter.get("/", async (request, response) => {
 
   const conditions = ["ta.status = ?"];
   const params: string[] = [status];
+  if (status === "pending") {
+    // Pending alerts vanish from the screen 24h after being generated —
+    // they're not marked expired in the DB, just no longer surfaced.
+    conditions.push("ta.created_at > now() - interval '24 hours'");
+  }
   if (strategyKey) {
     conditions.push("ta.strategy_key = ?");
     params.push(strategyKey);
@@ -72,7 +77,10 @@ tradeAlertsRouter.get("/", async (request, response) => {
     `
     ${tradeAlertSelect}
     WHERE ${conditions.join(" AND ")}
-    ORDER BY t.symbol, (ta.suggested_structure->>'annualizedYield')::numeric DESC
+    ORDER BY
+      MAX(ta.created_at) OVER (PARTITION BY t.id) DESC,
+      t.symbol,
+      (ta.suggested_structure->>'annualizedYield')::numeric DESC
     `,
     params,
   );
