@@ -73,6 +73,31 @@ function requireEnvironmentVariable(variableName: string): string {
   return value;
 }
 
+// Investigated 2026-09-09 (weeks-long recurrence of the reqHistoricalData
+// hang below): IBKR broadcasts market-data-farm connectivity state (e.g.
+// "HMDS data farm connection is broken/OK") as informational error events on
+// reqId -1, which connectToIbkrGateway already logs via console.log — but
+// Heroku's log buffer is too short-lived to have this by the time anyone
+// looks. Captured here into job_runs.details instead, on every connection
+// this job opens (initial + any post-restart reconnect), so the next
+// recurrence gives a real farm-status trail instead of another guess. Ruled
+// out 2026-09-09: the "settings may be corrupted, recovering from backup"
+// dialog every restart's captured logs show is NOT diagnostic — it appears
+// identically on the routine scheduled daily auto-restart too, unrelated to
+// any hang.
+interface FarmStatusMessage {
+  at: string;
+  code: number;
+  message: string;
+}
+
+function captureFarmStatusMessages(connection: IbkrConnection, into: FarmStatusMessage[]): void {
+  connection.ib.on(EventName.error, (error: Error, code: number, reqId: number) => {
+    if (reqId !== -1) return;
+    into.push({ at: new Date().toISOString(), code, message: error.message });
+  });
+}
+
 // Checks Gateway health by actually completing an IBKR API handshake
 // (connectToIbkrGateway's nextValidId round-trip), not just a TCP probe.
 // A container can be "Up" with its process logged into the UI while the
@@ -83,9 +108,16 @@ function requireEnvironmentVariable(variableName: string): string {
 // open on success (rather than immediately disconnecting) so the caller can
 // reuse it for the position-reconciliation check below without a second
 // connect/disconnect round-trip.
-async function tryConnect(): Promise<IbkrConnection | null> {
+//
+// farmStatusMessages is caller-owned, not module-level — this job also runs
+// on-demand from System Health's button on the long-lived web dyno, where a
+// module-level buffer would leak across invocations and mix one run's farm
+// events into another's job_runs row.
+async function tryConnect(farmStatusMessages: FarmStatusMessage[]): Promise<IbkrConnection | null> {
   try {
-    return await connectToIbkrGateway();
+    const connection = await connectToIbkrGateway();
+    captureFarmStatusMessages(connection, farmStatusMessages);
+    return connection;
   } catch {
     return null;
   }
@@ -127,8 +159,9 @@ async function runReconciliationSafely(connection: IbkrConnection): Promise<stri
 export async function runIbkrHealthCheckJob(): Promise<void> {
   await runJob("ibkr_health_check", async () => {
     const notifications: string[] = [];
+    const farmStatusMessages: FarmStatusMessage[] = [];
 
-    let connection = await tryConnect();
+    let connection = await tryConnect(farmStatusMessages);
     let gatewayOutput = "healthy";
 
     async function restartAndReconnect(problemDescription: string): Promise<IbkrConnection> {
@@ -141,12 +174,26 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
         sshPrivateKey,
       });
 
-      const reconnected = await tryConnect();
+      const reconnected = await tryConnect(farmStatusMessages);
       if (!reconnected) {
         throw new Error(`IBKR Gateway ${problemDescription} and restart didn't recover it (script exit ${result.exitCode}): ${result.output.trim()}`);
       }
+
+      // Previously this declared victory on the handshake alone — but the
+      // handshake was never what broke in the reqHistoricalData-hang case, so
+      // that "recovery confirmed" claim was never actually checked against
+      // the thing that failed. Re-probing here means a restart that doesn't
+      // actually fix reqHistoricalData now surfaces as a real job failure
+      // instead of a false all-clear.
+      if (!(await historicalDataIsHealthy(reconnected))) {
+        reconnected.disconnect();
+        throw new Error(
+          `IBKR Gateway ${problemDescription} and restart didn't recover reqHistoricalData either (script exit ${result.exitCode}): ${result.output.trim()}`,
+        );
+      }
+
       gatewayOutput = `unhealthy (${problemDescription}), restarted, recovered — restart script output: ${result.output.trim()}`;
-      notifications.push(`⚠️ IBKR Gateway ${problemDescription} — restarted, recovery confirmed via a real handshake.`);
+      notifications.push(`⚠️ IBKR Gateway ${problemDescription} — restarted, recovery confirmed via a real handshake and a reqHistoricalData probe.`);
       return reconnected;
     }
 
@@ -195,6 +242,7 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
         worker: { active: workerCheck.active, restarted: workerCheck.restarted },
         reconciliationProblems: problems,
         competingLiveSession,
+        farmStatusMessages,
       },
       notify: notifications.length > 0 ? notifications.join("\n\n") : undefined,
     };
