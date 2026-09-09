@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
-import { computePositionExposures, type PositionExposureRow } from "../lib/positionExposure.js";
+import { computeCashLockedInCsps, computePositionExposures, type PositionExposureRow } from "../lib/positionExposure.js";
 
 export const riskLimitsRouter = Router();
 riskLimitsRouter.use(requireAuth);
@@ -150,7 +150,7 @@ function groupByKey<K extends string>(
 }
 
 riskLimitsRouter.get("/exposure", async (_request, response) => {
-  const [exposures, accountResult] = await Promise.all([
+  const [exposures, accountResult, cashLockedInCsps] = await Promise.all([
     computePositionExposures(),
     fetchAccountSummary()
       .then((account) => ({ account, accountDataError: null as string | null }))
@@ -158,10 +158,14 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
         account: null,
         accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.",
       })),
+    computeCashLockedInCsps(),
   ]);
 
   const { account, accountDataError } = accountResult;
   const totalAccountValue = account?.netLiquidationValue ?? null;
+  const availableCash = account?.totalCashValue !== null && account?.totalCashValue !== undefined
+    ? account.totalCashValue - cashLockedInCsps
+    : null;
 
   const concentrationByTicker = groupByKey(exposures, (row) => row.symbol).map((row) => ({
     symbol: row.key,
@@ -184,6 +188,7 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
     account,
     accountDataError,
     totalAccountValue,
+    availableCash,
     concentrationByTicker,
     concentrationBySector: withUnallocated(concentrationBySector, totalAccountValue, {
       sector: "Unallocated",
