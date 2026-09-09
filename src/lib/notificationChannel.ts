@@ -10,7 +10,8 @@ export const appNotificationsChannel = "app_notifications_channel";
 
 export type AppNotification =
   | { type: "order_status"; orderId: string }
-  | { type: "position_closed"; positionId: string; symbol: string; message: string };
+  | { type: "position_closed"; positionId: string; symbol: string; message: string }
+  | { type: "position_opened"; positionId: string; symbol: string };
 
 export async function publishNotification(notification: AppNotification): Promise<void> {
   await db.raw("SELECT pg_notify(?, ?)", [appNotificationsChannel, JSON.stringify(notification)]);

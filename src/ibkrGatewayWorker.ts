@@ -1082,6 +1082,7 @@ async function upsertSyncedPosition(
       .insert({ strategy_key: strategyKey, ticker_id: ticker.id, status: "open", unstructured_reason: unstructuredReason })
       .returning(["id"]);
     positionId = newPosition.id;
+    await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
   } else {
     await db("positions").where({ id: positionId }).update({ strategy_key: strategyKey, unstructured_reason: unstructuredReason });
   }
@@ -1146,6 +1147,7 @@ async function upsertSplitCoveredCallPosition(
         .returning(["id"]);
       await db("position_legs").where({ id: existingCallLeg!.id }).update({ position_id: newPosition.id });
       positionId = newPosition.id;
+      await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
     }
   }
 
@@ -1159,6 +1161,7 @@ async function upsertSplitCoveredCallPosition(
       .insert({ strategy_key: "covered_call", ticker_id: ticker.id, status: "open" })
       .returning(["id"]);
     positionId = newPosition.id;
+    await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
   } else {
     await db("positions").where({ id: positionId }).update({ strategy_key: "covered_call" });
   }
@@ -1211,6 +1214,7 @@ async function upsertSplitCashSecuredPutPosition(symbol: string, putLeg: IbkrHel
         .returning(["id"]);
       await db("position_legs").where({ id: existingPutLeg!.id }).update({ position_id: newPosition.id });
       positionId = newPosition.id;
+      await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
     }
   }
 
@@ -1224,6 +1228,7 @@ async function upsertSplitCashSecuredPutPosition(symbol: string, putLeg: IbkrHel
       .insert({ strategy_key: "cash_secured_put", ticker_id: ticker.id, status: "open" })
       .returning(["id"]);
     positionId = newPosition.id;
+    await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
   } else {
     await db("positions").where({ id: positionId }).update({ strategy_key: "cash_secured_put" });
   }
@@ -1296,6 +1301,7 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
       .insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open" })
       .returning(["id"]);
     positionId = newPosition.id;
+    await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
     console.log(`upsertLeftoverStockPosition(${symbol}): created new unstructured position ${positionId} for ${leftoverShares} leftover shares.`);
   }
   await upsertPositionLeg(positionId!, stockLeg, "long", leftoverShares, true);
