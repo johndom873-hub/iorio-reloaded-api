@@ -15,6 +15,7 @@ import {
 } from "./ibkr/ibkrGatewayOrderPayload.js";
 import { parseIbkrExecutionTime } from "./ibkr/ibkrGatewayParseExecutionTime.js";
 import { fetchIbkrHeldPositions, type IbkrHeldPosition } from "./ibkr/ibkrGatewayFetchHeldPositions.js";
+import { replayRecentIbkrExecutions } from "./ibkr/ibkrGatewayReplayRecentExecutions.js";
 import { fetchIbkrOpenOrders } from "./ibkr/ibkrGatewayFetchOpenOrders.js";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { fetchPositionById, type PositionLegRow } from "./lib/positionQueries.js";
@@ -1353,8 +1354,12 @@ async function reconcileStaleOrderRequests(): Promise<void> {
 async function main(): Promise<void> {
   await persistentIbkrConnection.start();
   await reconcileStaleOrderRequests().catch((error) => console.error(`Initial stale-order reconciliation failed: ${error}`));
-  persistentIbkrConnection.onConnect(() => {
+  persistentIbkrConnection.onConnect((ib) => {
     setupOrderTrackingListeners();
+    // Attached above, before this fires, so replayed executions flow through
+    // the same recordExecution path as live ones — see
+    // ibkrGatewayReplayRecentExecutions.ts for why this exists.
+    replayRecentIbkrExecutions(ib).catch((error) => console.error(`Execution replay failed: ${error}`));
     reconcileStaleOrderRequests().catch((error) => console.error(`Stale-order reconciliation failed: ${error}`));
     reconcilePositionsFromIbkr().catch((error) => console.error(`Initial reconciliation failed: ${error}`));
   });

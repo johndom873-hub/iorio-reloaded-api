@@ -756,9 +756,9 @@ positionsRouter.get("/quote/stream", async (request, response) => {
 const adaptivePriorities = new Set(["Urgent", "Normal", "Patient"]);
 
 positionsRouter.post("/orders/:id/confirm", async (request, response) => {
-  const orderRequest = await db("order_requests").where({ id: request.params.id, status: "pending_confirmation" }).first();
+  const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
   if (!orderRequest) {
-    response.status(404).json({ error: "No pending order found with that id." });
+    response.status(404).json({ error: "Order not found." });
     return;
   }
 
@@ -773,9 +773,33 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     return;
   }
 
-  await db.transaction(async (trx) => {
+  // Idempotency guard: if this row already moved past pending_confirmation —
+  // either because an earlier call to this same endpoint committed but its
+  // HTTP response never made it back to the client (e.g. the web dyno
+  // restarted between the transaction commit and response.json below), or
+  // because a second near-simultaneous call already won the race just below
+  // — return the order's current state instead of erroring. Without this, a
+  // client retry after a dropped response looks like "the confirm failed"
+  // and can lead the user to build and confirm a second, duplicate order for
+  // the same intent, when the first one is actually already on its way to
+  // (or already at) IBKR.
+  if (orderRequest.status !== "pending_confirmation") {
+    const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
+    response.json(serializeOrderRequest(updated));
+    return;
+  }
+
+  const wonRace = await db.transaction(async (trx) => {
     const payload = requestedPriority ? { ...orderRequest.payload, adaptivePriority: requestedPriority } : orderRequest.payload;
-    await trx("order_requests").where({ id: orderRequest.id }).update({ status: "confirmed", payload, updated_at: trx.fn.now() });
+    // Conditioned on status still being pending_confirmation, and read back
+    // via .returning, so two near-simultaneous confirm calls for the same
+    // order can't both fall through to the NOTIFY below — only the one that
+    // actually flips the row does.
+    const updatedRows = await trx("order_requests")
+      .where({ id: orderRequest.id, status: "pending_confirmation" })
+      .update({ status: "confirmed", payload, updated_at: trx.fn.now() })
+      .returning(["id"]);
+    if (updatedRows.length === 0) return false;
 
     if (orderRequest.source_alert_id) {
       // resulting_position_id for a brand-new position isn't known yet at
@@ -794,10 +818,11 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     }
 
     await trx.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
+    return true;
   });
 
   const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
-  await publishNotification({ type: "order_status", orderId: orderRequest.id });
+  if (wonRace) await publishNotification({ type: "order_status", orderId: orderRequest.id });
   response.json(serializeOrderRequest(updated));
 });
 
