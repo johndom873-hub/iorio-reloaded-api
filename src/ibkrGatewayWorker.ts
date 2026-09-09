@@ -1134,8 +1134,15 @@ async function upsertSplitCoveredCallPosition(
       .whereNull("exit_at");
     if (siblingOptionLegs.length > 0) {
       const oldPosition = await db("positions").where({ id: positionId }).first();
+      // opened_at explicitly set from this call leg's own entry_at, not left
+      // to its CURRENT_TIMESTAMP default -- the old merged position's
+      // opened_at reflects whichever leg it was originally created for
+      // (possibly the sibling being left behind, not this one), and this
+      // leg was genuinely opened whenever it was actually entered, not
+      // "just now" (bug found 2026-09-09 alongside the same-shaped CSP
+      // split below: the split-off position's Opened column showed "today").
       const [newPosition] = await db("positions")
-        .insert({ strategy_key: "covered_call", ticker_id: oldPosition!.ticker_id, status: "open" })
+        .insert({ strategy_key: "covered_call", ticker_id: oldPosition!.ticker_id, status: "open", opened_at: existingCallLeg!.entry_at })
         .returning(["id"]);
       await db("position_legs").where({ id: existingCallLeg!.id }).update({ position_id: newPosition.id });
       positionId = newPosition.id;
@@ -1195,8 +1202,12 @@ async function upsertSplitCashSecuredPutPosition(symbol: string, putLeg: IbkrHel
       .whereNull("exit_at");
     if (siblingOptionLegs.length > 0) {
       const oldPosition = await db("positions").where({ id: positionId }).first();
+      // opened_at explicitly set from this put leg's own entry_at -- see
+      // upsertSplitCoveredCallPosition's matching comment for why (found
+      // 2026-09-09 on this exact function's first real split, the MU
+      // position from the screenshot that started this fix).
       const [newPosition] = await db("positions")
-        .insert({ strategy_key: "cash_secured_put", ticker_id: oldPosition!.ticker_id, status: "open" })
+        .insert({ strategy_key: "cash_secured_put", ticker_id: oldPosition!.ticker_id, status: "open", opened_at: existingPutLeg!.entry_at })
         .returning(["id"]);
       await db("position_legs").where({ id: existingPutLeg!.id }).update({ position_id: newPosition.id });
       positionId = newPosition.id;
