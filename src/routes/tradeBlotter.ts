@@ -51,6 +51,7 @@ tradeBlotterRouter.get("/", async (request, response) => {
     SELECT
       tr.id,
       tr.ibkr_order_id AS "ibkrOrderId",
+      orq.ibkr_perm_id AS "ibkrPermId",
       tr.side,
       tr.quantity,
       tr.price,
@@ -123,6 +124,7 @@ tradeBlotterRouter.get("/", async (request, response) => {
       orq.id || ':' || leg_ordinality AS id,
       orq.status,
       orq.ibkr_order_id AS "ibkrOrderId",
+      orq.ibkr_perm_id AS "ibkrPermId",
       orq.error_message AS "errorMessage",
       orq.request_type AS "requestType",
       orq.created_at AS "createdAt",
