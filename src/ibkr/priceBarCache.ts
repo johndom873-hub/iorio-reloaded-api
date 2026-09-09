@@ -1,6 +1,7 @@
 import { BarSizeSetting, WhatToShow } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { sharedReadConnection } from "./sharedReadConnection.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { fetchHistoricalBarsRaw, type ChartRange, type PriceBar } from "./fetchTickerOverview.js";
 import { minDaysForIvPercentile } from "../lib/ivMetrics.js";
@@ -277,6 +278,34 @@ async function readWeeklyResampledBars(tickerId: string, since: Date | null): Pr
   }));
 }
 
+// Mirrors the freshness check embedded in getCachedChartBars below, without
+// needing an open IBKR connection to evaluate it — lets fetchCachedPriceBars
+// and fetchCachedIvBars decide whether a live fetch is needed at all *before*
+// paying for the connect. A tickerId-less symbol always needs a live fetch
+// (no cache to read from).
+async function needsLiveFetch(tickerId: string | null, symbol: string, range: ChartRange): Promise<boolean> {
+  if (!tickerId) return true;
+  if (range === "1Y" || range === "5Y" || range === "All") {
+    const latestCached = await getLatestDailyBarDate(tickerId);
+    return !latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range);
+  }
+  const cfg = intradayConfig[range];
+  const latestCached = await getLatestIntradayBarTime(tickerId, cfg.barSize);
+  return !latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range);
+}
+
+// Same read-from-cache tail as getCachedChartBars below, factored out so a
+// confirmed cache hit (needsLiveFetch === false) can read straight from the
+// DB without ever touching IBKR. Only valid to call once needsLiveFetch has
+// already confirmed the cache is warm and fresh for this tickerId/range.
+async function readCachedBarsOnly(tickerId: string, range: ChartRange): Promise<PriceBar[]> {
+  if (range === "1Y") return readDailyBars(tickerId, subtractDuration(new Date(), "1 Y"));
+  if (range === "5Y") return readWeeklyResampledBars(tickerId, subtractDuration(new Date(), "5 Y"));
+  if (range === "All") return readWeeklyResampledBars(tickerId, null);
+  const cfg = intradayConfig[range];
+  return readIntradayBars(tickerId, cfg.barSize, subtractDuration(new Date(), cfg.fullDuration));
+}
+
 /**
  * Chart bars for one range, cached — call on an already-open connection
  * (the Ticker Detail SSE stream's shared connection). See
@@ -337,8 +366,44 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
   return readIntradayBars(tickerId, cfg.barSize, subtractDuration(new Date(), cfg.fullDuration));
 }
 
-/** Open-own-connection variant — mirrors fetchTickerOverview.ts's fetchPriceBars, cached. */
+/**
+ * Open-own-connection variant — mirrors fetchTickerOverview.ts's fetchPriceBars, cached.
+ *
+ * Found 2026-09-09 (see project_ibkr_priceBarCache_connect_regardless_of_cache_hit
+ * memory): this used to open the IBKR connection unconditionally before ever
+ * checking the cache, defeating the whole point of the caching layer above —
+ * a guaranteed cache hit still paid the full ~4-5s SSH-tunnel-plus-handshake
+ * cost. Checking needsLiveFetch first lets a warm cache hit skip connecting
+ * to IBKR entirely.
+ */
 export async function fetchCachedPriceBars(symbol: string, range: ChartRange): Promise<PriceBar[]> {
+  const tickerId = await resolveTickerId(symbol);
+  if (tickerId && !(await needsLiveFetch(tickerId, symbol, range))) {
+    return readCachedBarsOnly(tickerId, range);
+  }
+
+  // Tries the shared read connection first (sharedReadConnection.ts — reused
+  // across requests, no per-call connect cost) and falls back to a one-shot
+  // connection only when the shared one isn't available.
+  let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
+  try {
+    borrowed = await sharedReadConnection.borrow();
+  } catch (error) {
+    console.log(
+      `fetchCachedPriceBars: shared read connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`,
+    );
+  }
+
+  if (borrowed) {
+    const { ib, release } = borrowed;
+    try {
+      requestRealtimeMarketData(ib);
+      return await getCachedChartBars({ ib, disconnect: () => {} }, symbol, range, sharedReadConnection.allocateReqId());
+    } finally {
+      release();
+    }
+  }
+
   const connection = await connectToIbkrGateway();
   try {
     requestRealtimeMarketData(connection.ib);
@@ -368,15 +433,41 @@ export interface IvChartPoint {
  * relevant to a single value per day.
  */
 export async function fetchCachedIvBars(symbol: string, range: IvChartRange): Promise<IvChartPoint[]> {
-  const connection = await connectToIbkrGateway();
-  try {
-    requestRealtimeMarketData(connection.ib);
-    await getCachedChartBars(connection, symbol, range);
-  } finally {
-    connection.disconnect();
+  const tickerId = await resolveTickerId(symbol);
+
+  // Same fix as fetchCachedPriceBars above — only pay for the IBKR connect
+  // (used here purely to warm the shared price/IV cache) when the cache
+  // actually needs topping up. Same shared-connection-first, one-shot-fallback
+  // pattern too.
+  if (!tickerId || (await needsLiveFetch(tickerId, symbol, range))) {
+    let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
+    try {
+      borrowed = await sharedReadConnection.borrow();
+    } catch (error) {
+      console.log(
+        `fetchCachedIvBars: shared read connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`,
+      );
+    }
+
+    if (borrowed) {
+      const { ib, release } = borrowed;
+      try {
+        requestRealtimeMarketData(ib);
+        await getCachedChartBars({ ib, disconnect: () => {} }, symbol, range, sharedReadConnection.allocateReqId());
+      } finally {
+        release();
+      }
+    } else {
+      const connection = await connectToIbkrGateway();
+      try {
+        requestRealtimeMarketData(connection.ib);
+        await getCachedChartBars(connection, symbol, range);
+      } finally {
+        connection.disconnect();
+      }
+    }
   }
 
-  const tickerId = await resolveTickerId(symbol);
   if (!tickerId) return [];
 
   const since = range === "All" ? null : subtractDuration(new Date(), range === "1Y" ? "1 Y" : "5 Y");

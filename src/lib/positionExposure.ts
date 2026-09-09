@@ -1,6 +1,7 @@
 import { OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { dedupeInFlight } from "./dedupeInFlight.js";
 
 // Position "exposure"/"value" = full market value across every open leg
 // (stock + option together), option legs priced as a liability — the
@@ -52,7 +53,12 @@ export async function computeCashLockedInCsps(): Promise<number> {
   return Number(result.rows[0]?.reserved ?? 0);
 }
 
-export async function computePositionExposures(): Promise<PositionExposureRow[]> {
+// Deduplicated (see dedupeInFlight.ts) — /dashboard/portfolio and
+// /risk-limits/exposure both call this with no arguments, and load together
+// on the Dashboard.
+export const computePositionExposures = dedupeInFlight(computePositionExposuresUncached);
+
+async function computePositionExposuresUncached(): Promise<PositionExposureRow[]> {
   const positions = await db("positions as p")
     .join("tickers as t", "t.id", "p.ticker_id")
     .where("p.status", "open")
