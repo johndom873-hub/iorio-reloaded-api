@@ -83,13 +83,28 @@ if psql -Atqc "SELECT 1" "$LOCAL_DATABASE_URL" >/dev/null 2>&1 \
   HAVE_USERS_BACKUP=1
 fi
 
+# Keep the local login session alive across syncs too: session has no FK
+# dependents (unlike users), so it's simpler -- just restore the local rows
+# verbatim after the pull rather than upserting. Pulling with
+# --exclude-table-data=public.session skips copying prod's own (unrelated,
+# unusable locally) live session rows down at all.
+SESSION_BACKUP_FILE=$(mktemp)
+HAVE_SESSION_BACKUP=0
+if psql -Atqc "SELECT 1" "$LOCAL_DATABASE_URL" >/dev/null 2>&1 \
+  && psql -Atqc "SELECT to_regclass('public.session')" "$LOCAL_DATABASE_URL" 2>/dev/null | grep -q .; then
+  echo "Backing up local 'session' table..."
+  pg_dump "$LOCAL_DATABASE_URL" --data-only --table=public.session --no-owner --no-privileges -f "$SESSION_BACKUP_FILE"
+  HAVE_SESSION_BACKUP=1
+fi
+
 echo "Dropping local database '$LOCAL_DB_NAME' if it exists..."
 dropdb --if-exists "$LOCAL_DB_NAME"
 
 echo "Pulling prod database from $HEROKU_APP..."
 PULL_LOG=$(mktemp)
 set +e
-HEROKU_API_KEY=$(cat "$HEROKU_KEY_FILE") heroku pg:pull DATABASE_URL "$LOCAL_DB_NAME" --app "$HEROKU_APP" 2>&1 | tee "$PULL_LOG"
+HEROKU_API_KEY=$(cat "$HEROKU_KEY_FILE") heroku pg:pull DATABASE_URL "$LOCAL_DB_NAME" --app "$HEROKU_APP" \
+  --exclude-table-data="public.session" 2>&1 | tee "$PULL_LOG"
 PULL_EXIT=${PIPESTATUS[0]}
 set -e
 
@@ -149,4 +164,10 @@ SQL
 fi
 rm -f "$USERS_BACKUP_FILE"
 
-echo "Done. Local database '$LOCAL_DB_NAME' now mirrors prod (local 'users' rows preserved)."
+if [[ "$HAVE_SESSION_BACKUP" -eq 1 && -s "$SESSION_BACKUP_FILE" ]]; then
+  echo "Restoring local 'session' rows (excluded from the pull, so the table is empty at this point)..."
+  psql "$LOCAL_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$SESSION_BACKUP_FILE" >/dev/null
+fi
+rm -f "$SESSION_BACKUP_FILE"
+
+echo "Done. Local database '$LOCAL_DB_NAME' now mirrors prod (local 'users' and 'session' rows preserved)."
