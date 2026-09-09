@@ -83,7 +83,7 @@ shortlistRouter.post("/", async (request, response) => {
   }
 
   const normalizedSymbol = symbol.trim().toUpperCase();
-  const { ticker } = await findOrCreateTicker(normalizedSymbol);
+  const { ticker, created } = await findOrCreateTicker(normalizedSymbol);
 
   const latestSnapshot = await db("market_data_snapshots")
     .where({ ticker_id: ticker.id })
@@ -91,7 +91,7 @@ shortlistRouter.post("/", async (request, response) => {
     .first();
 
   try {
-    const entry = await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, notes);
+    const entry = await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, notes, created);
 
     response.status(201).json({
       id: entry.id,

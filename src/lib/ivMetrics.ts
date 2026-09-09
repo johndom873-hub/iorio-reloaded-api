@@ -24,7 +24,7 @@ import { db } from "../db/connection.js";
 //   which Rank can misstate for a long time after one spike.
 const lookbackTradingDays = 252;
 const minDaysForRank = 2;
-const minDaysForPercentile = 20;
+export const minDaysForIvPercentile = 20;
 
 export interface IvMetrics {
   ivRank: number | null;
@@ -56,7 +56,7 @@ export async function computeIvMetrics(tickerId: string): Promise<IvMetrics> {
 
   let ivPercentile: number | null = null;
   const history = values.slice(1);
-  if (history.length >= minDaysForPercentile) {
+  if (history.length >= minDaysForIvPercentile) {
     const belowCount = history.filter((iv) => iv < todayIv).length;
     ivPercentile = (belowCount / history.length) * 100;
   }

@@ -1,8 +1,29 @@
 import { db } from "../db/connection.js";
 import { fetchNewTickerData } from "./fetchNewTickerData.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { backfillOneYearOfDailyBars } from "./priceBarCache.js";
+import { backfillOneYearOfTickerHistory, hasSufficientTickerHistory } from "./priceBarCache.js";
 import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
+
+// Shared by both findOrCreateTicker (brand-new symbol) and
+// addTickerToShortlist (symbol already had a `tickers` row, e.g. re-added
+// after removal, or created before this fire-and-forget backfill existed) —
+// so IV Rank/Percentile and Trend don't depend on which path first touched
+// the ticker. Not awaited by either caller: a second IBKR connect here would
+// stack on top of the caller's own IBKR round-trip and risk the Heroku
+// router timeout on an interactive request.
+function backfillTickerHistoryInBackground(tickerId: string, symbol: string): void {
+  void (async () => {
+    const backfillConnection = await connectToIbkrGateway();
+    try {
+      const count = await backfillOneYearOfTickerHistory(backfillConnection, tickerId, symbol);
+      console.log(`backfillTickerHistoryInBackground: backfilled ${count} daily bar(s) for ${symbol}.`);
+    } catch (error) {
+      console.error(`backfillTickerHistoryInBackground: backfill failed for ${symbol}`, error);
+    } finally {
+      backfillConnection.disconnect();
+    }
+  })();
+}
 
 export interface FindOrCreateTickerResult {
   ticker: { id: string; symbol: string; company_name: string | null; sector: string | null };
@@ -47,21 +68,7 @@ export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTi
     .onConflict(["ticker_id", "snapshot_date"])
     .merge();
 
-  // Fire-and-forget: see priceBarCache.ts / the original inline comment in
-  // screener.ts's git history for why this isn't awaited (avoids a second
-  // IBKR connect stacking on top of fetchNewTickerData's own connect and
-  // risking the Heroku router timeout on an interactive request).
-  void (async () => {
-    const backfillConnection = await connectToIbkrGateway();
-    try {
-      const count = await backfillOneYearOfDailyBars(backfillConnection, ticker.id, ticker.symbol);
-      console.log(`findOrCreateTicker: backfilled ${count} daily bar(s) for ${ticker.symbol}.`);
-    } catch (error) {
-      console.error(`findOrCreateTicker: daily bar backfill failed for ${ticker.symbol}`, error);
-    } finally {
-      backfillConnection.disconnect();
-    }
-  })();
+  backfillTickerHistoryInBackground(ticker.id, ticker.symbol);
 
   return { ticker, created: true };
 }
@@ -77,12 +84,19 @@ export interface AddTickerToShortlistResult {
  * add-to-shortlist endpoint. Throws with `.code === "23505"` on duplicate
  * (partial unique index on shortlist_entries.ticker_id WHERE removed_at IS
  * NULL) — callers translate that into a 409, matching existing behavior.
+ *
+ * `tickerWasJustCreated` skips this function's own history-coverage check —
+ * findOrCreateTicker already fired a fire-and-forget backfill for a brand
+ * new ticker's `tickers` row a few lines up in the same request, and it has
+ * zero daily_price_bars rows at this point regardless, so checking here
+ * would just fire a second, redundant IBKR backfill on top of that one.
  */
 export async function addTickerToShortlist(
   tickerId: string,
   symbol: string,
   userId: string | undefined,
   notes?: string | null,
+  tickerWasJustCreated = false,
 ): Promise<AddTickerToShortlistResult> {
   const [entry] = await db("shortlist_entries")
     .insert({
@@ -96,6 +110,10 @@ export async function addTickerToShortlist(
     await captureTickerCalendarEvents(tickerId, symbol);
   } catch (error) {
     console.error(`addTickerToShortlist: calendar capture failed for ${symbol}`, error);
+  }
+
+  if (!tickerWasJustCreated && !(await hasSufficientTickerHistory(tickerId))) {
+    backfillTickerHistoryInBackground(tickerId, symbol);
   }
 
   return { id: entry.id, addedAt: entry.added_at, notes: entry.notes };

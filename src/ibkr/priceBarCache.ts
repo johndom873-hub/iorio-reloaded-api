@@ -3,6 +3,12 @@ import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { fetchHistoricalBarsRaw, type ChartRange, type PriceBar } from "./fetchTickerOverview.js";
+import { minDaysForIvPercentile } from "../lib/ivMetrics.js";
+
+// MA99 (technicalIndicators.ts) is the deeper of the two indicator
+// thresholds this backfill exists for — IV Percentile only needs
+// minDaysForIvPercentile.
+const minDailyBarsForIndicators = 99;
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
@@ -171,21 +177,46 @@ export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDa
     });
 }
 
-// Explicit backfill for indicator work (MA99/RSI/MACD, 2026-09-01) — unlike
-// getCachedChartBars' lazy 20Y backfill above, that path only fires the
-// first time a ticker's 1Y/5Y/All chart is opened with zero cached daily
-// rows; a ticker whose first daily_price_bars row instead came from the
-// nightly job (run-daily-market-data-job.ts, one row/day) has `latestCached`
-// already non-null by the time anyone opens its chart, so it silently takes
-// the 5-day top-up path forever and never gets real history. This is called
-// explicitly instead — once from tmp/backfillDailyPriceBars.ts for existing
-// tickers, and fire-and-forget from findOrCreateTicker.ts on every new ticker — so
-// depth doesn't depend on chart-opening order. 1Y is enough margin over
-// MA99's 99-close requirement without paying for the lazy path's full 20Y.
-export async function backfillOneYearOfDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<number> {
+// Explicit backfill for indicator work (MA99/RSI/MACD, 2026-09-01) and IV
+// history (IV Rank/Percentile, ivMetrics.ts) — unlike getCachedChartBars'
+// lazy 20Y backfill above, that path only fires the first time a ticker's
+// 1Y/5Y/All chart is opened with zero cached daily rows; a ticker whose
+// first daily_price_bars row instead came from the nightly job
+// (run-daily-market-data-job.ts, one row/day) has `latestCached` already
+// non-null by the time anyone opens its chart, so it silently takes the
+// 5-day top-up path forever and never gets real history. This is called
+// explicitly instead — from scripts/backfillTickerHistory.ts for existing
+// tickers, and fire-and-forget from findOrCreateTicker.ts on every new
+// ticker/shortlist-add — so depth doesn't depend on chart-opening order.
+// 1Y is enough margin over MA99's 99-close requirement and ivMetrics'
+// 20-day minimum without paying for the lazy path's full 20Y. A failed IV
+// fetch shouldn't block the price bars an indicator actually needs, so it
+// falls back to no IV data for this pass rather than throwing — same
+// COALESCE-on-merge protection as the daily job covers a partial/failed
+// fetch not clobbering already-cached values.
+export async function backfillOneYearOfTickerHistory(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<number> {
   const bars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, "1 Y", reqId);
-  await upsertDailyBars(tickerId, bars);
+  const ivBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, "1 Y", reqId + 1000, WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(
+    () => [],
+  );
+  await upsertDailyBars(tickerId, bars, ivBarsToDateMap(ivBars));
   return bars.length;
+}
+
+// Coverage check for the shortlist-add path: skips re-fetching from IBKR for
+// a ticker that's already past both indicator thresholds (MA99's 99 daily
+// bars, ivMetrics' 20-day minDaysForPercentile), so re-adding an
+// already-current ticker to the shortlist doesn't refire a live IBKR call
+// every time.
+export async function hasSufficientTickerHistory(tickerId: string): Promise<boolean> {
+  const row = await db("daily_price_bars")
+    .where({ ticker_id: tickerId })
+    .count({ totalBars: "*" })
+    .count({ ivBars: db.raw("implied_volatility") })
+    .first();
+  const totalBars = Number(row?.totalBars ?? 0);
+  const ivBars = Number(row?.ivBars ?? 0);
+  return totalBars >= minDailyBarsForIndicators && ivBars >= minDaysForIvPercentile;
 }
 
 function ivBarsToDateMap(ivBars: PriceBar[]): Map<string, number> {
