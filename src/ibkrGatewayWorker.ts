@@ -734,6 +734,11 @@ async function runReconciliationPass(passId: number): Promise<void> {
   const held = await fetchIbkrHeldPositions(ib);
   console.log(`Reconciliation #${passId}: reqPositions returned ${held.length} held contract(s) in ${Date.now() - reqPositionsStartedAt}ms.`);
 
+  // Computed once up front (not just where the closing pass used to compute
+  // it, further down) so upsertSplitCoveredCallPosition can also use it this
+  // same pass -- see its own comment for why.
+  const heldConIds = new Set(held.map((p) => p.contract.conId).filter((id): id is number => id !== undefined));
+
   const bySymbol = new Map<string, IbkrHeldPosition[]>();
   for (const position of held) {
     const symbol = position.contract.symbol ?? "UNKNOWN";
@@ -773,7 +778,7 @@ async function runReconciliationPass(passId: number): Promise<void> {
       // reshuffle from one pass to the next with no real change underneath.
       const sortedCallLegs = [...shortCallLegs].sort((a, b) => (a.contract.conId ?? 0) - (b.contract.conId ?? 0));
       for (const callLeg of sortedCallLegs) {
-        await upsertSplitCoveredCallPosition(symbol, stockLeg, callLeg, Math.abs(callLeg.quantity) * 100);
+        await upsertSplitCoveredCallPosition(symbol, stockLeg, callLeg, Math.abs(callLeg.quantity) * 100, heldConIds);
       }
       // Should never happen -- every position this app opens is exactly 1
       // option + 100 shares/contract, so leftover stock beyond what the
@@ -824,7 +829,6 @@ async function runReconciliationPass(passId: number): Promise<void> {
   // option instead of the full premium collected. Only a genuinely
   // ambiguous close (no trade, not past expiry — e.g. closed directly in
   // TWS, or before this worker was deployed) still falls back to null.
-  const heldConIds = new Set(held.map((p) => p.contract.conId).filter((id): id is number => id !== undefined));
   const openLegs = await db("position_legs")
     .whereNull("exit_at")
     .whereNotNull("ibkr_contract_id")
@@ -1112,6 +1116,7 @@ async function upsertSplitCoveredCallPosition(
   stockLeg: IbkrHeldPosition,
   callLeg: IbkrHeldPosition,
   sharesForThisLeg: number,
+  heldConIds: Set<number>,
 ): Promise<void> {
   const callConId = String(callLeg.contract.conId);
   const existingCallLeg = await db("position_legs").where({ ibkr_contract_id: callConId }).whereNull("exit_at").first();
@@ -1171,6 +1176,50 @@ async function upsertSplitCoveredCallPosition(
   await backfillAlertResultingPositionId(symbol, positionId!);
 
   await upsertPositionLeg(positionId!, callLeg, "short");
+
+  // A rolled call (old contract closed, new conId opened) always lands here
+  // via the "no positionId found" branch above, since a never-before-seen
+  // conId can't match existingCallLeg -- so this position is brand new and
+  // has no stock leg of its own yet. The stock itself never actually
+  // changed hands; it's the same real shares the OLD position was covering.
+  // Without this, upsertPositionLeg's lookup below (scoped to THIS new
+  // position_id) can never find that old stock leg, so it just inserts a
+  // second one -- the old leg is never closed either, since its conId is
+  // still held by IBKR (just reassigned to a different call), which is the
+  // only thing the later closing pass checks. Net effect before this fix:
+  // a silent, permanent double-count of every rolled covered call's shares
+  // (found 2026-09-10 via reconciliation drift alerts on AMAT/SPCX).
+  const stockConId = String(stockLeg.contract.conId);
+  const ownStockLeg = await db("position_legs")
+    .where({ ibkr_contract_id: stockConId, leg_type: "stock", position_id: positionId })
+    .whereNull("exit_at")
+    .first();
+  if (!ownStockLeg) {
+    const staleCandidates = await db("position_legs")
+      .where({ ibkr_contract_id: stockConId, leg_type: "stock" })
+      .whereNull("exit_at")
+      .whereNot({ position_id: positionId });
+    for (const candidate of staleCandidates) {
+      const siblingOptionLegs = await db("position_legs")
+        .where({ position_id: candidate.position_id, leg_type: "option" })
+        .whereNull("exit_at");
+      // Only steal it if that position's own option leg(s) are no longer
+      // held at all -- i.e. that position is mid-roll and about to be
+      // closed by this same pass anyway. A still-held sibling option leg
+      // means this is a genuine second concurrent covered call against the
+      // same stock (a real split, not a roll), and its stock leg must be
+      // left alone.
+      const siblingStillLive = siblingOptionLegs.some((leg) => heldConIds.has(Number(leg.ibkr_contract_id)));
+      if (!siblingStillLive) {
+        console.log(
+          `upsertSplitCoveredCallPosition(${symbol}): reassigning orphaned stock leg ${candidate.id} from rolled-away position ${candidate.position_id} to position ${positionId}.`,
+        );
+        await db("position_legs").where({ id: candidate.id }).update({ position_id: positionId });
+        break;
+      }
+    }
+  }
+
   await upsertPositionLeg(positionId!, stockLeg, "long", sharesForThisLeg, true);
 }
 
