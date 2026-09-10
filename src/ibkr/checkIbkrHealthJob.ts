@@ -16,13 +16,42 @@ import { environment } from "../config/env.js";
 // whatever's on the shortlist.
 const HISTORICAL_DATA_PROBE_SYMBOL = "SPY";
 
-async function historicalDataIsHealthy(connection: IbkrConnection): Promise<boolean> {
+interface HistoricalDataCheckResult {
+  healthy: boolean;
+  errorMessage: string | null;
+}
+
+// errorMessage is surfaced to the caller now (previously discarded via a
+// bare `catch { return false }`) — see the 2026-09-10 incident note on
+// isCompetingSessionHistoricalDataError below for why that swallowed error
+// text turned out to matter: the real IBKR reason never reached
+// job_runs.error_message or the Telegram alert, which is how "reqHistoricalData
+// was silently hung" made it into a notification even though the failure was
+// a specific, named IBKR error the whole time.
+async function checkHistoricalData(connection: IbkrConnection): Promise<HistoricalDataCheckResult> {
   try {
     await lookupLatestDailyBar(connection, HISTORICAL_DATA_PROBE_SYMBOL, 999_001);
-    return true;
-  } catch {
-    return false;
+    return { healthy: true, errorMessage: null };
+  } catch (error) {
+    return { healthy: false, errorMessage: error instanceof Error ? error.message : String(error) };
   }
+}
+
+// Confirmed live 2026-09-10 (see PROGRESS.md): IBKR's Historical Market Data
+// farm ties itself to a single session IP per account and rejects
+// reqHistoricalData with this exact code-162 message when some other
+// connection under the same paper account (johndom873 — same account as the
+// code-10197 competing-live-session check below, different subsystem) is
+// seen from a different IP. Not a Gateway problem: a restart re-establishes
+// the connection from the same VPS IP, so it fixes nothing here — two
+// consecutive restarts both hit the identical error immediately after
+// reconnecting, and it cleared on its own ~20 minutes later with no further
+// restart. Matched on the formatted error text from checkHistoricalData
+// above (`Historical data error for SPY (code 162): ...different IP
+// address`) rather than a raw IBKR error code, since IBKR reuses code 162
+// for unrelated messages too (e.g. "API scanner subscription cancelled").
+function isCompetingSessionHistoricalDataError(errorMessage: string): boolean {
+  return errorMessage.includes("(code 162)") && errorMessage.includes("different IP address");
 }
 
 // Confirmed 2026-08-31 (see PROGRESS.md): IBKR's shared-market-data paper
@@ -185,10 +214,23 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
       // the thing that failed. Re-probing here means a restart that doesn't
       // actually fix reqHistoricalData now surfaces as a real job failure
       // instead of a false all-clear.
-      if (!(await historicalDataIsHealthy(reconnected))) {
+      const reprobe = await checkHistoricalData(reconnected);
+      if (!reprobe.healthy) {
+        // Same non-restart-fixable condition as the pre-restart check below
+        // — a restart genuinely did nothing for it (that's how this branch
+        // was found), so treat it the same way: notify, don't fail the job.
+        if (reprobe.errorMessage && isCompetingSessionHistoricalDataError(reprobe.errorMessage)) {
+          gatewayOutput = `unhealthy (${problemDescription}), restarted — handshake recovered, but historical data is still blocked by a competing session (unrelated to the restart)`;
+          notifications.push(
+            `⚠️ IBKR Gateway ${problemDescription} — restarted, handshake recovered, but reqHistoricalData is still blocked: IBKR code 162, "Trading TWS session is connected from a different IP address." ` +
+              "Someone else is likely logged into johndom873 elsewhere. Not a Gateway problem and a restart won't fix it — expect it to clear on its own once that session ends.",
+          );
+          return reconnected;
+        }
+
         reconnected.disconnect();
         throw new Error(
-          `IBKR Gateway ${problemDescription} and restart didn't recover reqHistoricalData either (script exit ${result.exitCode}): ${result.output.trim()}`,
+          `IBKR Gateway ${problemDescription} and restart didn't recover reqHistoricalData either (${reprobe.errorMessage ?? "unknown error"}) (script exit ${result.exitCode}): ${result.output.trim()}`,
         );
       }
 
@@ -199,9 +241,26 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
 
     if (!connection) {
       connection = await restartAndReconnect("was unreachable");
-    } else if (!(await historicalDataIsHealthy(connection))) {
-      connection.disconnect();
-      connection = await restartAndReconnect("handshake succeeded but reqHistoricalData was silently hung");
+    } else {
+      const historicalDataCheck = await checkHistoricalData(connection);
+      if (!historicalDataCheck.healthy) {
+        // Confirmed 2026-09-10 a Gateway restart doesn't fix this specific
+        // failure (see isCompetingSessionHistoricalDataError above) — so
+        // unlike every other reqHistoricalData failure here, this one skips
+        // the restart entirely and is reported as a notify-only finding,
+        // the same pattern as the code-10197 competing-session check below.
+        if (historicalDataCheck.errorMessage && isCompetingSessionHistoricalDataError(historicalDataCheck.errorMessage)) {
+          notifications.push(
+            '⚠️ Historical data is currently blocked: IBKR code 162, "Trading TWS session is connected from a different IP address." ' +
+              "Someone else is likely logged into johndom873 elsewhere. Not a Gateway problem and a restart won't fix it — expect it to clear on its own once that session ends.",
+          );
+        } else {
+          connection.disconnect();
+          connection = await restartAndReconnect(
+            `handshake succeeded but reqHistoricalData failed (${historicalDataCheck.errorMessage ?? "unknown error"})`,
+          );
+        }
+      }
     }
 
     const workerSshPrivateKey = Buffer.from(requireEnvironmentVariable("IORIO_WORKER_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64"), "base64");
