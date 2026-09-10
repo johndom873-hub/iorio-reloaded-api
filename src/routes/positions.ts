@@ -5,13 +5,14 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { positionSelect, fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { publishNotification } from "../lib/notificationChannel.js";
-import { fetchLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
-import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { fetchLiveGreeks, streamLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import { fetchLivePrices, streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning } from "../ibkr/calendarConflict.js";
 import { evaluateRollForPosition } from "../ibkr/evaluateRollForPosition.js";
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
+import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -248,6 +249,148 @@ positionsRouter.get("/greeks", async (request, response) => {
   response.json(result);
 });
 
+// SSE live-upgrading sibling of GET /greeks (approved 2026-09-09 — see
+// streamLiveGreeks.ts's header comment). Sends a FROZEN reading immediately
+// as the first event (fast, not gated on live market activity), then keeps
+// streaming and sends again every time the greeks genuinely change, until
+// the client disconnects. Same leg-resolution query and
+// position_leg_greeks_snapshots fallback as GET /greeks, applied once to
+// the first (frozen) event only — a value already resolved from frozen/live
+// data doesn't need re-checking against the nightly snapshot on every
+// subsequent update.
+positionsRouter.get("/greeks/stream", async (request, response) => {
+  const legIdsParam = request.query.legIds as string | undefined;
+  const legIds = legIdsParam ? legIdsParam.split(",").filter(Boolean) : [];
+
+  const rows = legIds.length
+    ? await db("position_legs as pl")
+        .join("positions as p", "p.id", "pl.position_id")
+        .join("tickers as t", "t.id", "p.ticker_id")
+        .whereIn("pl.id", legIds)
+        .andWhere("pl.leg_type", "option")
+        .andWhere("p.status", "open")
+        .select(
+          "pl.id",
+          "pl.option_type as optionType",
+          "pl.strike_price as strikePrice",
+          db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as \"expiryDate\""),
+          "t.symbol",
+        )
+    : [];
+
+  const contracts: GreeksContract[] = rows.map((row) => ({
+    key: row.id,
+    symbol: row.symbol,
+    expiry: row.expiryDate,
+    strike: Number(row.strikePrice),
+    right: row.optionType === "call" ? OptionType.Call : OptionType.Put,
+  }));
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.on("error", () => {});
+
+  const abortController = new AbortController();
+  request.on("close", () => abortController.abort());
+
+  const send = (data: unknown) => {
+    if (response.writableEnded) return;
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(": ping\n\n");
+  }, 20_000);
+
+  if (contracts.length === 0) {
+    send({});
+    clearInterval(heartbeat);
+    response.end();
+    return;
+  }
+
+  function isLiveGreeksEmpty(value: Greeks | undefined): boolean {
+    return !value || (value.delta === null && value.gamma === null && value.vega === null && value.theta === null);
+  }
+
+  let isFirstEvent = true;
+
+  // Holds whatever's the best-known result per leg so far (fallback or
+  // live) — sent in full on every update, never regresses. Same bug class
+  // and fix as /pnl/stream's lastGoodResult — see its comment for the full
+  // reasoning (found live-testing 2026-09-09: a fallback-derived value
+  // shown on the first event was getting overwritten by a still-incomplete
+  // live computation on the next one).
+  const lastGoodResult: Record<string, GreeksResult> = {};
+
+  try {
+    await streamLiveGreeks(
+      contracts,
+      serializeAsyncCalls(async (greeksByKey) => {
+        if (!isFirstEvent) {
+          for (const contract of contracts) {
+            const live = greeksByKey[contract.key];
+            if (isLiveGreeksEmpty(live)) continue; // keep whatever's already in lastGoodResult
+            lastGoodResult[contract.key] = { ...live!, asOfDate: null };
+          }
+          send(lastGoodResult);
+          return;
+        }
+        isFirstEvent = false;
+
+        // Same position_leg_greeks_snapshots fallback as GET /greeks,
+        // applied only to this first event.
+        const legIdsMissingLive = contracts.filter((contract) => isLiveGreeksEmpty(greeksByKey[contract.key])).map((contract) => contract.key);
+        const fallbackByLegId = new Map<string, { delta: string | null; gamma: string | null; vega: string | null; theta: string | null; snapshotDate: string }>();
+        if (legIdsMissingLive.length > 0) {
+          const latestSnapshotRows = await db.raw(
+            `
+            SELECT DISTINCT ON (position_leg_id)
+              position_leg_id AS "positionLegId",
+              delta,
+              gamma,
+              vega,
+              theta,
+              to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate"
+            FROM position_leg_greeks_snapshots
+            WHERE position_leg_id = ANY(?)
+            ORDER BY position_leg_id, snapshot_date DESC
+            `,
+            [legIdsMissingLive],
+          );
+          for (const row of latestSnapshotRows.rows) fallbackByLegId.set(row.positionLegId, row);
+        }
+
+        for (const contract of contracts) {
+          const live = greeksByKey[contract.key];
+          if (!isLiveGreeksEmpty(live)) {
+            lastGoodResult[contract.key] = { ...live!, asOfDate: null };
+            continue;
+          }
+          const fallback = fallbackByLegId.get(contract.key);
+          lastGoodResult[contract.key] = fallback
+            ? {
+                delta: fallback.delta === null ? null : Number(fallback.delta),
+                gamma: fallback.gamma === null ? null : Number(fallback.gamma),
+                vega: fallback.vega === null ? null : Number(fallback.vega),
+                theta: fallback.theta === null ? null : Number(fallback.theta),
+                asOfDate: fallback.snapshotDate,
+              }
+            : { delta: null, gamma: null, vega: null, theta: null, asOfDate: null };
+        }
+        send(lastGoodResult);
+      }),
+      abortController.signal,
+    );
+  } catch (error) {
+    console.error("positions/greeks/stream: streamLiveGreeks failed", error);
+  } finally {
+    clearInterval(heartbeat);
+    response.end();
+  }
+});
+
 export interface UnrealizedPnlResult {
   unrealizedPnl: number | null;
   // Premium P/L: sum of open option leg(s) only. Stock P/L: the open stock leg
@@ -418,6 +561,197 @@ positionsRouter.get("/pnl", async (request, response) => {
   }
 
   response.json(result);
+});
+
+// SSE live-upgrading sibling of GET /pnl (approved 2026-09-09 — see
+// streamLivePrices.ts's header comment). Sends a FROZEN reading immediately
+// as the first event, then keeps streaming and recomputes/resends P&L every
+// time a leg's price genuinely changes, until the client disconnects. Same
+// leg-resolution query, P&L math, and position_pnl_snapshots fallback as GET
+// /pnl, with the fallback applied once to the first (frozen) event only.
+positionsRouter.get("/pnl/stream", async (request, response) => {
+  const positionIdsParam = request.query.positionIds as string | undefined;
+  const positionIds = positionIdsParam ? positionIdsParam.split(",").filter(Boolean) : [];
+
+  const legRows = positionIds.length
+    ? await db("position_legs as pl")
+        .join("positions as p", "p.id", "pl.position_id")
+        .join("tickers as t", "t.id", "p.ticker_id")
+        .whereIn("pl.position_id", positionIds)
+        .andWhere("p.status", "open")
+        .andWhere("pl.exit_at", null)
+        .select(
+          "pl.id",
+          "pl.position_id as positionId",
+          "pl.leg_type as legType",
+          "pl.side",
+          "pl.quantity",
+          "pl.multiplier",
+          "pl.entry_price as entryPrice",
+          "pl.option_type as optionType",
+          "pl.strike_price as strikePrice",
+          db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as \"expiryDate\""),
+          "t.symbol",
+        )
+    : [];
+
+  const priceContracts: PriceContract[] = legRows.map((leg) => ({
+    key: leg.id,
+    legType: leg.legType,
+    symbol: leg.symbol,
+    expiry: leg.expiryDate ?? undefined,
+    strike: leg.strikePrice ? Number(leg.strikePrice) : undefined,
+    right: leg.optionType === "call" ? OptionType.Call : leg.optionType === "put" ? OptionType.Put : undefined,
+  }));
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.on("error", () => {});
+
+  const abortController = new AbortController();
+  request.on("close", () => abortController.abort());
+
+  const send = (data: unknown) => {
+    if (response.writableEnded) return;
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(": ping\n\n");
+  }, 20_000);
+
+  if (positionIds.length === 0) {
+    send({});
+    clearInterval(heartbeat);
+    response.end();
+    return;
+  }
+
+  // Same P&L math as GET /pnl above, parameterized by whatever prices are
+  // known so far — called on every streamLivePrices update, including the
+  // frozen one.
+  function computeUnrealized(pricesByLegId: Record<string, number | null>) {
+    const unrealizedByPositionId: Record<string, number | null> = {};
+    const premiumByPositionId: Record<string, number | null> = {};
+    const stockByPositionId: Record<string, number | null> = {};
+    for (const positionId of positionIds) {
+      unrealizedByPositionId[positionId] = 0;
+      premiumByPositionId[positionId] = 0;
+      stockByPositionId[positionId] = 0;
+    }
+    for (const leg of legRows) {
+      if (unrealizedByPositionId[leg.positionId] === null) continue;
+      const currentPrice = pricesByLegId[leg.id];
+      if (currentPrice === null || currentPrice === undefined) {
+        unrealizedByPositionId[leg.positionId] = null;
+        premiumByPositionId[leg.positionId] = null;
+        stockByPositionId[leg.positionId] = null;
+        continue;
+      }
+      const sign = leg.side === "short" ? -1 : 1;
+      const entryPrice = Number(leg.entryPrice);
+      const legPnl = (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
+      unrealizedByPositionId[leg.positionId] = (unrealizedByPositionId[leg.positionId] ?? 0) + legPnl;
+      if (leg.legType === "option") {
+        premiumByPositionId[leg.positionId] = (premiumByPositionId[leg.positionId] ?? 0) + legPnl;
+      } else {
+        stockByPositionId[leg.positionId] = (stockByPositionId[leg.positionId] ?? 0) + legPnl;
+      }
+    }
+    return { unrealizedByPositionId, premiumByPositionId, stockByPositionId };
+  }
+
+  let isFirstEvent = true;
+
+  // Holds whatever's the best-known result per position so far (fallback or
+  // live) — sent in full on every update. Found 2026-09-09 live-testing:
+  // the first event correctly applied the position_pnl_snapshots fallback
+  // and showed a real (stale) number, but the very next live-price update
+  // recomputed purely from live prices — which hadn't all arrived yet — and
+  // overwrote that good fallback value with null. A position's entry here
+  // only ever gets replaced by a NEW non-null result (fallback initially,
+  // then whichever live computation first has every one of that position's
+  // legs priced); it never regresses to null once something real is shown.
+  const lastGoodResult: Record<string, UnrealizedPnlResult> = {};
+
+  try {
+    await streamLivePrices(
+      priceContracts,
+      serializeAsyncCalls(async (pricesByLegId) => {
+        const { unrealizedByPositionId, premiumByPositionId, stockByPositionId } = computeUnrealized(pricesByLegId);
+
+        if (!isFirstEvent) {
+          for (const positionId of positionIds) {
+            const unrealizedPnl = unrealizedByPositionId[positionId] ?? null;
+            if (unrealizedPnl === null) continue; // keep whatever's already in lastGoodResult
+            lastGoodResult[positionId] = {
+              unrealizedPnl,
+              unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null,
+              unrealizedStockPnl: stockByPositionId[positionId] ?? null,
+              asOfDate: null,
+            };
+          }
+          send(lastGoodResult);
+          return;
+        }
+        isFirstEvent = false;
+
+        // Same position_pnl_snapshots fallback as GET /pnl, applied only to
+        // this first event.
+        const positionIdsMissingLive = positionIds.filter((id) => unrealizedByPositionId[id] === null);
+        const fallbackByPositionId = new Map<string, { unrealizedPnl: string; premiumPnl: string | null; stockPnl: string | null; snapshotDate: string }>();
+        if (positionIdsMissingLive.length > 0) {
+          const latestSnapshotRows = await db.raw(
+            `
+            SELECT DISTINCT ON (position_id)
+              position_id AS "positionId",
+              unrealized_pnl AS "unrealizedPnl",
+              premium_pnl AS "premiumPnl",
+              stock_pnl AS "stockPnl",
+              to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate"
+            FROM position_pnl_snapshots
+            WHERE position_id = ANY(?)
+            ORDER BY position_id, snapshot_date DESC
+            `,
+            [positionIdsMissingLive],
+          );
+          for (const row of latestSnapshotRows.rows) {
+            fallbackByPositionId.set(row.positionId, {
+              unrealizedPnl: row.unrealizedPnl,
+              premiumPnl: row.premiumPnl,
+              stockPnl: row.stockPnl,
+              snapshotDate: row.snapshotDate,
+            });
+          }
+        }
+
+        for (const positionId of positionIds) {
+          const unrealizedPnl = unrealizedByPositionId[positionId] ?? null;
+          if (unrealizedPnl !== null) {
+            lastGoodResult[positionId] = { unrealizedPnl, unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null, unrealizedStockPnl: stockByPositionId[positionId] ?? null, asOfDate: null };
+            continue;
+          }
+          const fallback = fallbackByPositionId.get(positionId);
+          lastGoodResult[positionId] = fallback
+            ? {
+                unrealizedPnl: Number(fallback.unrealizedPnl),
+                unrealizedPremiumPnl: fallback.premiumPnl === null ? null : Number(fallback.premiumPnl),
+                unrealizedStockPnl: fallback.stockPnl === null ? null : Number(fallback.stockPnl),
+                asOfDate: fallback.snapshotDate,
+              }
+            : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, asOfDate: null };
+        }
+        send(lastGoodResult);
+      }),
+      abortController.signal,
+    );
+  } catch (error) {
+    console.error("positions/pnl/stream: streamLivePrices failed", error);
+  } finally {
+    clearInterval(heartbeat);
+    response.end();
+  }
 });
 
 // --- Order placement (approved 2026-08-24 — see the plan doc) ---

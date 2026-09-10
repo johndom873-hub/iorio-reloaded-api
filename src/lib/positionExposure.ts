@@ -1,6 +1,6 @@
 import { OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
-import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { fetchLivePrices, streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 import { dedupeInFlight } from "./dedupeInFlight.js";
 
 // Position "exposure"/"value" = full market value across every open leg
@@ -58,13 +58,20 @@ export async function computeCashLockedInCsps(): Promise<number> {
 // on the Dashboard.
 export const computePositionExposures = dedupeInFlight(computePositionExposuresUncached);
 
-async function computePositionExposuresUncached(): Promise<PositionExposureRow[]> {
-  const positions = await db("positions as p")
+interface OpenPositionRow {
+  positionId: string;
+  strategyKey: string;
+  symbol: string;
+  sector: string;
+}
+
+async function resolveOpenPositionsAndLegs(): Promise<{ positions: OpenPositionRow[]; legs: OpenLegRow[] }> {
+  const positions: OpenPositionRow[] = await db("positions as p")
     .join("tickers as t", "t.id", "p.ticker_id")
     .where("p.status", "open")
     .select("p.id as positionId", "p.strategy_key as strategyKey", "t.symbol", db.raw("COALESCE(NULLIF(t.sector, ''), 'Unknown') AS sector"));
 
-  if (positions.length === 0) return [];
+  if (positions.length === 0) return { positions, legs: [] };
 
   const legs: OpenLegRow[] = await db("position_legs as pl")
     .join("positions as p", "p.id", "pl.position_id")
@@ -85,7 +92,11 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
       "t.symbol",
     );
 
-  const priceContracts: PriceContract[] = legs.map((leg, index) => ({
+  return { positions, legs };
+}
+
+function legsToPriceContracts(legs: OpenLegRow[]): PriceContract[] {
+  return legs.map((leg, index) => ({
     key: String(index),
     legType: leg.legType,
     symbol: leg.symbol,
@@ -93,14 +104,17 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
     strike: leg.strikePrice ? Number(leg.strikePrice) : undefined,
     right: leg.optionType === "call" ? OptionType.Call : leg.optionType === "put" ? OptionType.Put : undefined,
   }));
+}
 
-  let pricesByKey: Record<string, number | null> = {};
-  try {
-    pricesByKey = await fetchLivePrices(priceContracts);
-  } catch {
-    // Leave pricesByKey empty — every leg falls back to entry_price below.
-  }
-
+// Pure function of whatever prices are currently known — a leg with no
+// price yet falls back to its entry_price, so this always produces a full
+// result. Used both by the one-shot computePositionExposures below and by
+// streamPositionExposures, called again on every price update; since a
+// missing price already defaults to entry_price rather than showing
+// nothing, there's no "regress to null" risk the way greeks/pnl have to
+// guard against — every update only ever gets more accurate as more real
+// prices arrive.
+function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegRow[], pricesByKey: Record<string, number | null>): PositionExposureRow[] {
   const exposureByPositionId = new Map<string, number>();
   legs.forEach((leg, index) => {
     const price = pricesByKey[String(index)] ?? Number(leg.entryPrice);
@@ -125,4 +139,35 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
     sector: p.sector,
     exposure: exposureByPositionId.get(p.positionId) ?? 0,
   }));
+}
+
+async function computePositionExposuresUncached(): Promise<PositionExposureRow[]> {
+  const { positions, legs } = await resolveOpenPositionsAndLegs();
+  if (positions.length === 0) return [];
+
+  let pricesByKey: Record<string, number | null> = {};
+  try {
+    pricesByKey = await fetchLivePrices(legsToPriceContracts(legs));
+  } catch {
+    // Leave pricesByKey empty — every leg falls back to entry_price below.
+  }
+
+  return computeExposureRows(positions, legs, pricesByKey);
+}
+
+/**
+ * Live-upgrading variant for the SSE-backed Dashboard/Risk & Limits screens
+ * (approved 2026-09-09): emits exposure rows computed from FROZEN prices
+ * first, then keeps recomputing and re-emitting as streamLivePrices reports
+ * genuinely new live prices, until `signal` aborts. See streamLivePrices.ts
+ * for the FROZEN-then-REALTIME mechanics.
+ */
+export async function streamPositionExposures(onUpdate: (rows: PositionExposureRow[]) => void, signal: AbortSignal): Promise<void> {
+  const { positions, legs } = await resolveOpenPositionsAndLegs();
+  if (positions.length === 0) {
+    onUpdate([]);
+    return;
+  }
+
+  await streamLivePrices(legsToPriceContracts(legs), (pricesByKey) => onUpdate(computeExposureRows(positions, legs, pricesByKey)), signal);
 }

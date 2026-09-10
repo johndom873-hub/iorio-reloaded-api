@@ -1,4 +1,4 @@
-import { EventName, Option, OptionType, type IBApi } from "@stoqey/ib";
+import { EventName, MarketDataType, Option, OptionType, type IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
@@ -63,11 +63,18 @@ function requestLiveGreeks(ib: IBApi, allocateReqId: () => number, contracts: Gr
     // Model computation only, real-time (13) or delayed (83) — see the same
     // comment in fetchOptionChain.ts's fetchQuotesForContracts.
     if (!contract || (tickType !== 83 && tickType !== 13)) return;
+    // Merge into the previous reading, don't replace it — IBKR doesn't
+    // necessarily send all 4 fields on every tick (found 2026-09-09
+    // live-testing streamLiveGreeks below: a tick carrying only theta was
+    // wiping out an already-known-good delta/gamma/vega back to null). A
+    // field missing from THIS tick keeps whatever was last known, it never
+    // regresses to null just because this particular tick didn't include it.
+    const previous = greeksByKey.get(contract.key)!;
     greeksByKey.set(contract.key, {
-      delta: delta ?? null,
-      gamma: gamma ?? null,
-      vega: vega ?? null,
-      theta: theta ?? null,
+      delta: delta ?? previous.delta,
+      gamma: gamma ?? previous.gamma,
+      vega: vega ?? previous.vega,
+      theta: theta ?? previous.theta,
     });
     markDone(reqId);
   }
@@ -165,6 +172,112 @@ export async function fetchLiveGreeks(contracts: GreeksContract[]): Promise<Reco
     let nextReqId = 20_000;
     return await requestLiveGreeks(ib, () => nextReqId++, contracts);
   } finally {
+    connection.disconnect();
+  }
+}
+
+// How long to wait for FROZEN greeks to land before emitting the first
+// update regardless of what's arrived — see fetchLivePrices.ts's matching
+// constant for the measurement this is based on (2.4-2.8s for all 4 real
+// option legs tested, tmp/testFrozenMarketData.ts).
+const frozenGraceMs = 3_000;
+
+/**
+ * Live-upgrading variant for the SSE-backed Positions screen (approved
+ * 2026-09-09): emits FROZEN greeks first — fast, reliable, not gated on a
+ * live trade occurring — then switches to a genuine REALTIME streaming
+ * subscription and emits again whenever greeks actually change, for as long
+ * as `signal` stays unaborted. Same shape as fetchLivePrices.ts's
+ * streamLivePrices — see its header comment for the full reasoning.
+ *
+ * Always opens its own one-shot connection, not the shared read connection
+ * — same reasoning as streamLivePrices.
+ */
+export async function streamLiveGreeks(contracts: GreeksContract[], onUpdate: (greeks: Record<string, Greeks>) => void, signal: AbortSignal): Promise<void> {
+  if (contracts.length === 0) return;
+
+  const connection = await connectToIbkrGateway();
+  const { ib } = connection;
+
+  const greeksByKey = new Map<string, Greeks>();
+  contracts.forEach((contract) => greeksByKey.set(contract.key, { delta: null, gamma: null, vega: null, theta: null }));
+  const reqIdToContract = new Map<number, GreeksContract>();
+  const allReqIds = new Set<number>();
+  let nextReqId = 1;
+
+  function greeksEqual(a: Greeks, b: Greeks): boolean {
+    return a.delta === b.delta && a.gamma === b.gamma && a.vega === b.vega && a.theta === b.theta;
+  }
+
+  function onTickOptionComputation(
+    reqId: number,
+    tickType: number,
+    _tickAttrib: number | undefined,
+    _impliedVol?: number,
+    delta?: number,
+    _optPrice?: number,
+    _pvDividend?: number,
+    gamma?: number,
+    vega?: number,
+    theta?: number,
+  ) {
+    const contract = reqIdToContract.get(reqId);
+    if (!contract || (tickType !== 83 && tickType !== 13)) return;
+    // Merge, don't replace — see requestLiveGreeks's matching comment above.
+    const previous = greeksByKey.get(contract.key)!;
+    const next: Greeks = { delta: delta ?? previous.delta, gamma: gamma ?? previous.gamma, vega: vega ?? previous.vega, theta: theta ?? previous.theta };
+    if (greeksEqual(previous, next)) return;
+    greeksByKey.set(contract.key, next);
+    onUpdate(Object.fromEntries(greeksByKey));
+  }
+
+  function onError(error: Error, code: number, reqId: number) {
+    const contract = reqIdToContract.get(reqId);
+    if (!contract) return;
+    if (isDelayedDataFallbackNotice(code)) return;
+    console.error(`streamLiveGreeks error for ${contract.symbol} ${contract.expiry} ${contract.strike}${contract.right} (code ${code}): ${error.message}`);
+  }
+
+  ib.on(EventName.tickOptionComputation, onTickOptionComputation);
+  ib.on(EventName.error, onError);
+
+  try {
+    // Phase 1: FROZEN.
+    ib.reqMarketDataType(MarketDataType.FROZEN);
+    for (const contract of contracts) {
+      const reqId = nextReqId++;
+      reqIdToContract.set(reqId, contract);
+      allReqIds.add(reqId);
+      ib.reqMktData(reqId, new Option(contract.symbol, contract.expiry, contract.strike, contract.right, "SMART"), "", true, false);
+    }
+    await new Promise((resolve) => setTimeout(resolve, frozenGraceMs));
+    onUpdate(Object.fromEntries(greeksByKey));
+
+    if (signal.aborted) return;
+
+    // Phase 2: REALTIME streaming, fresh reqIds, kept open until aborted.
+    reqIdToContract.clear();
+    ib.reqMarketDataType(MarketDataType.REALTIME);
+    for (const contract of contracts) {
+      const reqId = nextReqId++;
+      reqIdToContract.set(reqId, contract);
+      allReqIds.add(reqId);
+      ib.reqMktData(reqId, new Option(contract.symbol, contract.expiry, contract.strike, contract.right, "SMART"), "", false, false);
+    }
+
+    await new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  } finally {
+    for (const reqId of allReqIds) {
+      ib.cancelMktData(reqId);
+    }
+    ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
+    ib.removeListener(EventName.error, onError);
     connection.disconnect();
   }
 }

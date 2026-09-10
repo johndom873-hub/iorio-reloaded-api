@@ -1,4 +1,4 @@
-import { EventName, Option, OptionType, Stock, type IBApi } from "@stoqey/ib";
+import { EventName, MarketDataType, Option, OptionType, Stock, type IBApi } from "@stoqey/ib";
 import type { Contract } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
@@ -144,6 +144,119 @@ export async function fetchLivePrices(contracts: PriceContract[]): Promise<Recor
     let nextReqId = 30_000;
     return await requestLivePrices(ib, () => nextReqId++, contracts);
   } finally {
+    connection.disconnect();
+  }
+}
+
+function buildContract(contract: PriceContract): Contract {
+  return contract.legType === "stock"
+    ? new Stock(contract.symbol, "SMART", "USD")
+    : new Option(contract.symbol, contract.expiry!, contract.strike!, contract.right!, "SMART");
+}
+
+// How long to wait for FROZEN ticks to land before emitting the first
+// update regardless of what's arrived — FROZEN data isn't gated on live
+// market activity, so this is a short, fixed grace period, not a safety
+// ceiling for something that might not happen. Measured
+// (tmp/testFrozenMarketData.ts, 2026-09-09, real open option legs):
+// 2.4-2.8s for all 4 legs.
+const frozenGraceMs = 3_000;
+
+/**
+ * Live-upgrading variant for the SSE-backed screens (approved 2026-09-09):
+ * emits FROZEN prices first — fast, reliable, not gated on a live trade
+ * occurring (see fetchLivePrices' header comment on why plain REALTIME
+ * snapshots are unreliable for options) — then switches to a genuine
+ * REALTIME streaming subscription and emits again every time a price
+ * actually changes, for as long as `signal` stays unaborted. The frozen
+ * emission is clearly non-live; callers should treat it as a starting point
+ * to upgrade from, not a live figure, until a post-frozen update arrives.
+ *
+ * Always opens its own one-shot connection (not the shared read
+ * connection) — a stream is held open for the caller's whole SSE session,
+ * which is a fundamentally different lifetime than the shared connection's
+ * fast-in-fast-out reads, same reasoning as streamOrderLegQuote.ts /
+ * streamTickerDetail.ts already use for their own live subscriptions.
+ */
+export async function streamLivePrices(
+  contracts: PriceContract[],
+  onUpdate: (prices: Record<string, number | null>) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  if (contracts.length === 0) return;
+
+  const connection = await connectToIbkrGateway();
+  const { ib } = connection;
+
+  const priceByKey = new Map<string, number | null>();
+  contracts.forEach((contract) => priceByKey.set(contract.key, null));
+  const reqIdToContract = new Map<number, PriceContract>();
+  const allReqIds = new Set<number>();
+  let nextReqId = 1;
+
+  function onTickPrice(reqId: number, tickType: number, price: number) {
+    const contract = reqIdToContract.get(reqId);
+    if (!contract || price <= 0) return;
+    // Real-time last=4, delayed last=68, close=9/75 (frozen phase only — the
+    // phase-2 streaming request never asks for close and won't get it).
+    if (![4, 9, 68, 75].includes(tickType)) return;
+    if (priceByKey.get(contract.key) === price) return;
+    priceByKey.set(contract.key, price);
+    onUpdate(Object.fromEntries(priceByKey));
+  }
+
+  function onError(error: Error, code: number, reqId: number) {
+    const contract = reqIdToContract.get(reqId);
+    if (!contract) return;
+    if (isDelayedDataFallbackNotice(code)) return;
+    console.error(`streamLivePrices error for ${contract.symbol} (${contract.legType}, code ${code}): ${error.message}`);
+  }
+
+  ib.on(EventName.tickPrice, onTickPrice);
+  ib.on(EventName.error, onError);
+
+  try {
+    // Phase 1: FROZEN — fast, not gated on live activity. Snapshot mode so
+    // IBKR doesn't leave a long-lived subscription open under these reqIds
+    // (we're about to request fresh ones for phase 2 anyway).
+    ib.reqMarketDataType(MarketDataType.FROZEN);
+    for (const contract of contracts) {
+      const reqId = nextReqId++;
+      reqIdToContract.set(reqId, contract);
+      allReqIds.add(reqId);
+      ib.reqMktData(reqId, buildContract(contract), "", true, false);
+    }
+    await new Promise((resolve) => setTimeout(resolve, frozenGraceMs));
+    onUpdate(Object.fromEntries(priceByKey));
+
+    if (signal.aborted) return;
+
+    // Phase 2: switch to REALTIME, fresh reqIds, genuine streaming
+    // subscription (snapshot=false) — kept open until the caller aborts.
+    // Only a real change re-emits (the onTickPrice guard above), so this
+    // won't spam identical values.
+    reqIdToContract.clear();
+    ib.reqMarketDataType(MarketDataType.REALTIME);
+    for (const contract of contracts) {
+      const reqId = nextReqId++;
+      reqIdToContract.set(reqId, contract);
+      allReqIds.add(reqId);
+      ib.reqMktData(reqId, buildContract(contract), "", false, false);
+    }
+
+    await new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  } finally {
+    for (const reqId of allReqIds) {
+      ib.cancelMktData(reqId);
+    }
+    ib.removeListener(EventName.tickPrice, onTickPrice);
+    ib.removeListener(EventName.error, onError);
     connection.disconnect();
   }
 }

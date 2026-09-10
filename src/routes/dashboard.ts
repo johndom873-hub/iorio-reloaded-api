@@ -2,7 +2,8 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
-import { computeCashLockedInCsps, computePositionExposures } from "../lib/positionExposure.js";
+import { computeCashLockedInCsps, computePositionExposures, streamPositionExposures } from "../lib/positionExposure.js";
+import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { computeStrategyDailyPnlSeries, computeStrategyPeriodPnl } from "../lib/strategyPeriodPnl.js";
 import { fetchPositionEvents } from "../lib/positionEvents.js";
 
@@ -178,6 +179,58 @@ dashboardRouter.get("/portfolio", async (_request, response) => {
     unstructured: byStrategy.unstructured,
     availableCash,
   });
+});
+
+// SSE live-upgrading sibling of GET /portfolio (approved 2026-09-09). Fetches
+// account summary once up front (already fast/reliable on its own — no
+// FROZEN/live concept applies to reqAccountSummary the way it does to
+// reqMktData), then streams exposure rows: a FROZEN-priced reading first,
+// recomputed and re-sent every time streamPositionExposures reports newer
+// prices, until the client disconnects.
+dashboardRouter.get("/portfolio/stream", async (request, response) => {
+  const [account, cashLockedInCsps] = await Promise.all([fetchAccountSummary().catch(() => null), computeCashLockedInCsps()]);
+  const totalCashValue = account?.totalCashValue ?? null;
+  const availableCash = totalCashValue !== null ? totalCashValue - cashLockedInCsps : null;
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.on("error", () => {});
+
+  const abortController = new AbortController();
+  request.on("close", () => abortController.abort());
+
+  const send = (data: unknown) => {
+    if (response.writableEnded) return;
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(": ping\n\n");
+  }, 20_000);
+
+  try {
+    await streamPositionExposures(
+      serializeAsyncCalls(async (exposures) => {
+        const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0 };
+        for (const row of exposures) {
+          if (row.strategyKey in byStrategy) byStrategy[row.strategyKey] = (byStrategy[row.strategyKey] ?? 0) + row.exposure;
+        }
+        send({
+          coveredCalls: byStrategy.covered_call,
+          cashSecuredPuts: byStrategy.cash_secured_put,
+          unstructured: byStrategy.unstructured,
+          availableCash,
+        });
+      }),
+      abortController.signal,
+    );
+  } catch (error) {
+    console.error("dashboard/portfolio/stream: streamPositionExposures failed", error);
+  } finally {
+    clearInterval(heartbeat);
+    response.end();
+  }
 });
 
 // Per-strategy Day/WTD/MTD/YTD P&L table (2026-08-28) — realized+unrealized

@@ -2,7 +2,8 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
-import { computeCashLockedInCsps, computePositionExposures, type PositionExposureRow } from "../lib/positionExposure.js";
+import { computeCashLockedInCsps, computePositionExposures, streamPositionExposures, type PositionExposureRow } from "../lib/positionExposure.js";
+import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 
 export const riskLimitsRouter = Router();
 riskLimitsRouter.use(requireAuth);
@@ -200,4 +201,74 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
     }),
     topPositions,
   });
+});
+
+// SSE live-upgrading sibling of GET /exposure (approved 2026-09-09). Fetches
+// account summary once up front (see /dashboard/portfolio/stream's matching
+// comment for why), then streams exposure-derived aggregates: a
+// FROZEN-priced reading first, recomputed and re-sent every time
+// streamPositionExposures reports newer prices, until the client
+// disconnects.
+riskLimitsRouter.get("/exposure/stream", async (request, response) => {
+  const [accountResult, cashLockedInCsps] = await Promise.all([
+    fetchAccountSummary()
+      .then((account) => ({ account, accountDataError: null as string | null }))
+      .catch((error) => ({
+        account: null,
+        accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.",
+      })),
+    computeCashLockedInCsps(),
+  ]);
+  const { account, accountDataError } = accountResult;
+  const totalAccountValue = account?.netLiquidationValue ?? null;
+  const availableCash =
+    account?.totalCashValue !== null && account?.totalCashValue !== undefined ? account.totalCashValue - cashLockedInCsps : null;
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.on("error", () => {});
+
+  const abortController = new AbortController();
+  request.on("close", () => abortController.abort());
+
+  const send = (data: unknown) => {
+    if (response.writableEnded) return;
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(": ping\n\n");
+  }, 20_000);
+
+  try {
+    await streamPositionExposures(
+      serializeAsyncCalls(async (exposures) => {
+        const concentrationByTicker = groupByKey(exposures, (row) => row.symbol).map((row) => ({ symbol: row.key, notionalValue: row.notionalValue }));
+        const concentrationBySector = groupByKey(exposures, (row) => row.sector).map((row) => ({ sector: row.key, notionalValue: row.notionalValue }));
+        const strategyAllocation = groupByKey(exposures, (row) => row.strategyKey).map((row) => ({ strategyKey: row.key, notionalValue: row.notionalValue }));
+        const topPositions = [...exposures]
+          .sort((a, b) => b.exposure - a.exposure)
+          .slice(0, 5)
+          .map((row) => ({ positionId: row.positionId, symbol: row.symbol, strategyKey: row.strategyKey, notionalValue: String(row.exposure) }));
+
+        send({
+          account,
+          accountDataError,
+          totalAccountValue,
+          availableCash,
+          concentrationByTicker,
+          concentrationBySector: withUnallocated(concentrationBySector, totalAccountValue, { sector: "Unallocated", notionalValue: "0" }),
+          strategyAllocation: withUnallocated(strategyAllocation, totalAccountValue, { strategyKey: "unallocated", notionalValue: "0" }),
+          topPositions,
+        });
+      }),
+      abortController.signal,
+    );
+  } catch (error) {
+    console.error("risk-limits/exposure/stream: streamPositionExposures failed", error);
+  } finally {
+    clearInterval(heartbeat);
+    response.end();
+  }
 });
