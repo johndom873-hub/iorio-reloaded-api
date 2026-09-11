@@ -34,25 +34,6 @@ export const lowStakesWriteTools: GenosukeTool[] = [
     execute: (input, api) => api.patch(`/shortlist/${input.entryId}`, { notes: input.notes }),
   },
   {
-    name: "update_position_notes",
-    description: "Update a position's notes, price target, or close-trigger notes. Metadata only — does not touch legs, prices, or status.",
-    tier: "low-stakes-write",
-    parameters: {
-      type: "object",
-      properties: {
-        positionId: { type: "string" },
-        notes: { type: "string" },
-        priceTarget: { type: "number" },
-        closeTriggerNotes: { type: "string" },
-      },
-      required: ["positionId"],
-    },
-    execute: (input, api) => {
-      const { positionId, ...patch } = input;
-      return api.patch(`/positions/${positionId}`, patch);
-    },
-  },
-  {
     name: "refresh_trade_alert",
     description:
       "Re-quotes a pending trade alert's exact contract(s) against live IBKR data (not a re-run of the ranked candidate scan) — use this to validate a specific alert from the overnight scan is still accurate before recommending it. Only works on a pending alert; fails if IBKR has no live quote right now (e.g. outside market hours).",

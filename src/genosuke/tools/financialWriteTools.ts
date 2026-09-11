@@ -64,8 +64,6 @@ export const financialWriteTools: GenosukeTool[] = [
           },
           required: ["quantity", "limitPrice", "strikePrice", "expiryDate"],
         },
-        notes: { type: "string" },
-        priceTarget: { type: "number" },
         sourceAlertId: { type: "string", description: "If approving a pending Trade Alert, its id — links the alert and marks it approved." },
       },
       required: ["symbol", "strategyKey", "option"],

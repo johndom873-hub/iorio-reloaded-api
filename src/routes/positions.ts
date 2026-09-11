@@ -776,8 +776,6 @@ interface OpenOrderRequestBody {
   strategyKey?: string;
   stock?: { quantity: number; limitPrice: number };
   option?: { quantity: number; limitPrice: number; strikePrice: number; expiryDate: string };
-  notes?: string | null;
-  priceTarget?: number | null;
   sourceAlertId?: string;
 }
 
@@ -1218,28 +1216,6 @@ positionsRouter.get("/:id", async (request, response) => {
     return;
   }
   response.json(position);
-});
-
-positionsRouter.patch("/:id", async (request, response) => {
-  const { notes, priceTarget, closeTriggerNotes } = request.body as {
-    notes?: string | null;
-    priceTarget?: number | null;
-    closeTriggerNotes?: string | null;
-  };
-
-  const updatePayload: Record<string, unknown> = {};
-  if (notes !== undefined) updatePayload.notes = notes;
-  if (priceTarget !== undefined) updatePayload.price_target = priceTarget;
-  if (closeTriggerNotes !== undefined) updatePayload.close_trigger_notes = closeTriggerNotes;
-
-  const [updated] = await db("positions").where({ id: request.params.id }).update(updatePayload).returning("*");
-  if (!updated) {
-    response.status(404).json({ error: "Position not found." });
-    return;
-  }
-
-  const result = await db.raw(`${positionSelect} WHERE p.id = ?`, [request.params.id]);
-  response.json(result.rows[0]);
 });
 
 // Rolls one short option leg on an open position: builds an order_requests
