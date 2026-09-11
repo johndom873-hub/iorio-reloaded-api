@@ -28,6 +28,16 @@
 // job's scope (no longer open) and its realized figure lives in the Trade
 // Blotter instead.
 //
+// The account-level net-liq fetch and the per-position price fetch are
+// launched together (Promise.allSettled), not sequentially with Flex
+// cash-flow reconciliation in between — reconcileCashFlows can take up to
+// two minutes (IBKR Flex polling), and having it sit between the two
+// captures let real price moves during that gap show up as unexplained
+// noise in Residual (account total minus the sum of per-position marks).
+// Residual doesn't need to match IBKR's own ledger figures, only the two
+// halves of this job's own math need to reflect the same moment in the
+// market (fixed 2026-09-11).
+//
 // Usage (dev):
 //   npm run job:daily-pnl-snapshot
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
@@ -111,60 +121,6 @@ async function main(): Promise<void> {
   await runJob("daily_pnl_snapshot", async () => {
     const snapshotDate = new Date().toISOString().slice(0, 10);
 
-    // Account-level PnL/net-liq is intentionally decoupled from the
-    // per-position snapshots below: even though reqAccountSummary and
-    // reqAccountUpdates have both proven reliable in testing, a failure
-    // here (network blip, Gateway restart mid-job) must never cost us the
-    // day's per-position data, which comes from the separate
-    // fetchLivePrices/reqMktData path.
-    let accountSnapshotWritten = false;
-    let accountSnapshotError: string | undefined;
-    try {
-      const [accountSummary, ledgerPnl] = await Promise.all([fetchAccountSummary(), fetchAccountLedgerPnl()]);
-
-      // Best-effort daily_pnl assuming zero cash flow today — right most
-      // nights, since deposits/withdrawals are rare. reconcileCashFlows
-      // below corrects this (and past days) once real Flex data confirms
-      // otherwise; see this file's header comment.
-      const previousRow: { netLiquidationValue: string | null } | undefined = await db.raw(
-        `SELECT net_liquidation_value AS "netLiquidationValue" FROM account_pnl_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1`,
-        [snapshotDate],
-      ).then((result) => result.rows[0]);
-      const dailyPnl =
-        previousRow?.netLiquidationValue != null && accountSummary.netLiquidationValue != null
-          ? accountSummary.netLiquidationValue - Number(previousRow.netLiquidationValue)
-          : null;
-
-      await db("account_pnl_snapshots")
-        .insert({
-          snapshot_date: snapshotDate,
-          daily_pnl: dailyPnl,
-          net_cash_flow: 0,
-          realized_pnl: ledgerPnl.realizedPnl,
-          unrealized_pnl: ledgerPnl.unrealizedPnl,
-          net_liquidation_value: accountSummary.netLiquidationValue,
-        })
-        .onConflict(["snapshot_date"])
-        .merge();
-      accountSnapshotWritten = true;
-      console.log(
-        `Account PnL: realized=${ledgerPnl.realizedPnl} unrealized=${ledgerPnl.unrealizedPnl} netLiq=${accountSummary.netLiquidationValue}`,
-      );
-    } catch (error) {
-      accountSnapshotError = error instanceof Error ? error.message : String(error);
-      console.error(`Account-level PnL snapshot failed, skipping it for ${snapshotDate}: ${accountSnapshotError}`);
-    }
-
-    // Independent of the write above succeeding — even a day the Gateway
-    // fetch fails, we still want to catch up on any newly-arrived Flex
-    // cash-flow data for recent days. Its own failure (Flex API down,
-    // report still generating) must not fail the whole job either.
-    try {
-      await reconcileCashFlows(snapshotDate);
-    } catch (error) {
-      console.error(`Cash-flow reconciliation failed: ${error instanceof Error ? error.message : error}`);
-    }
-
     const legRows: OpenPositionLegRow[] = await db.raw(
       `
       SELECT
@@ -186,16 +142,6 @@ async function main(): Promise<void> {
       `,
     ).then((result) => result.rows);
 
-    if (legRows.length === 0) {
-      console.log("No open positions — nothing to snapshot at the position level.");
-      return {
-        details: { accountSnapshot: accountSnapshotWritten, accountSnapshotError, openPositionCount: 0 },
-        notify: accountSnapshotWritten
-          ? undefined
-          : `⚠️ daily_pnl_snapshot: account-level PnL failed for ${snapshotDate} (${accountSnapshotError}). No open positions, so nothing else to snapshot today.`,
-      };
-    }
-
     const priceContracts: PriceContract[] = legRows.map((leg) => ({
       key: leg.legId,
       legType: leg.legType,
@@ -204,7 +150,84 @@ async function main(): Promise<void> {
       strike: leg.strikePrice ? Number(leg.strikePrice) : undefined,
       right: leg.optionType === "call" ? OptionType.Call : leg.optionType === "put" ? OptionType.Put : undefined,
     }));
-    const pricesByLegId = await fetchLivePrices(priceContracts);
+
+    // Account-level net-liq and per-position marks are fetched together,
+    // launched in the same instant, rather than sequentially with Flex
+    // cash-flow reconciliation (which can take up to 120s — see
+    // reconcileCashFlows below) sitting between them. Residual (account
+    // total minus the sum of per-position marks) doesn't need to match
+    // IBKR's own numbers exactly — it only needs the two halves to reflect
+    // the same moment in the market. Previously they didn't: net-liq was
+    // captured, then up to two minutes could pass before position prices
+    // were captured, during which real price moves on volatile names
+    // showed up as unexplained Residual noise (found & fixed 2026-09-11).
+    // Promise.allSettled, not Promise.all: each source must be able to
+    // fail independently — a Gateway blip on one must never cost the
+    // other's data (same isolation guarantee as before).
+    const [accountSummaryResult, ledgerPnlResult, pricesByLegIdResult] = await Promise.allSettled([
+      fetchAccountSummary(),
+      fetchAccountLedgerPnl(),
+      priceContracts.length > 0 ? fetchLivePrices(priceContracts) : Promise.resolve({} as Record<string, number | null>),
+    ]);
+
+    let accountSnapshotWritten = false;
+    let accountSnapshotError: string | undefined;
+    if (accountSummaryResult.status === "fulfilled" && ledgerPnlResult.status === "fulfilled") {
+      const accountSummary = accountSummaryResult.value;
+      const ledgerPnl = ledgerPnlResult.value;
+      try {
+        // Best-effort daily_pnl assuming zero cash flow today — right most
+        // nights, since deposits/withdrawals are rare. reconcileCashFlows
+        // below corrects this (and past days) once real Flex data confirms
+        // otherwise; see this file's header comment.
+        const previousRow: { netLiquidationValue: string | null } | undefined = await db.raw(
+          `SELECT net_liquidation_value AS "netLiquidationValue" FROM account_pnl_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1`,
+          [snapshotDate],
+        ).then((result) => result.rows[0]);
+        const dailyPnl =
+          previousRow?.netLiquidationValue != null && accountSummary.netLiquidationValue != null
+            ? accountSummary.netLiquidationValue - Number(previousRow.netLiquidationValue)
+            : null;
+
+        await db("account_pnl_snapshots")
+          .insert({
+            snapshot_date: snapshotDate,
+            daily_pnl: dailyPnl,
+            net_cash_flow: 0,
+            realized_pnl: ledgerPnl.realizedPnl,
+            unrealized_pnl: ledgerPnl.unrealizedPnl,
+            net_liquidation_value: accountSummary.netLiquidationValue,
+          })
+          .onConflict(["snapshot_date"])
+          .merge();
+        accountSnapshotWritten = true;
+        console.log(
+          `Account PnL: realized=${ledgerPnl.realizedPnl} unrealized=${ledgerPnl.unrealizedPnl} netLiq=${accountSummary.netLiquidationValue}`,
+        );
+      } catch (error) {
+        accountSnapshotError = error instanceof Error ? error.message : String(error);
+        console.error(`Account-level PnL snapshot failed, skipping it for ${snapshotDate}: ${accountSnapshotError}`);
+      }
+    } else {
+      const failure = accountSummaryResult.status === "rejected" ? accountSummaryResult.reason : (ledgerPnlResult as PromiseRejectedResult).reason;
+      accountSnapshotError = failure instanceof Error ? failure.message : String(failure);
+      console.error(`Account-level PnL snapshot failed, skipping it for ${snapshotDate}: ${accountSnapshotError}`);
+    }
+
+    if (legRows.length === 0) {
+      console.log("No open positions — nothing to snapshot at the position level.");
+      try {
+        await reconcileCashFlows(snapshotDate);
+      } catch (error) {
+        console.error(`Cash-flow reconciliation failed: ${error instanceof Error ? error.message : error}`);
+      }
+      return {
+        details: { accountSnapshot: accountSnapshotWritten, accountSnapshotError, openPositionCount: 0 },
+        notify: accountSnapshotWritten
+          ? undefined
+          : `⚠️ daily_pnl_snapshot: account-level PnL failed for ${snapshotDate} (${accountSnapshotError}). No open positions, so nothing else to snapshot today.`,
+      };
+    }
 
     const legsByPositionId = new Map<string, OpenPositionLegRow[]>();
     for (const leg of legRows) {
@@ -215,53 +238,75 @@ async function main(): Promise<void> {
 
     let snapshotted = 0;
     let skipped = 0;
-    for (const [positionId, legs] of legsByPositionId) {
-      let unrealizedPnl = 0;
-      let premiumPnl = 0;
-      let stockPnl = 0;
-      let marketValue = 0;
-      let hasAllPrices = true;
+    if (pricesByLegIdResult.status === "rejected") {
+      const reason = pricesByLegIdResult.reason;
+      console.error(
+        `Live price fetch failed, skipping all position-level snapshots for ${snapshotDate}: ${reason instanceof Error ? reason.message : reason}`,
+      );
+      skipped = legsByPositionId.size;
+    } else {
+      const pricesByLegId = pricesByLegIdResult.value;
+      for (const [positionId, legs] of legsByPositionId) {
+        let unrealizedPnl = 0;
+        let premiumPnl = 0;
+        let stockPnl = 0;
+        let marketValue = 0;
+        let hasAllPrices = true;
 
-      for (const leg of legs) {
-        const currentPrice = pricesByLegId[leg.legId];
-        if (currentPrice === null || currentPrice === undefined) {
-          hasAllPrices = false;
-          break;
+        for (const leg of legs) {
+          const currentPrice = pricesByLegId[leg.legId];
+          if (currentPrice === null || currentPrice === undefined) {
+            hasAllPrices = false;
+            break;
+          }
+          const sign = leg.side === "short" ? -1 : 1;
+          const entryPrice = Number(leg.entryPrice);
+          const legPnl = (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
+          unrealizedPnl += legPnl;
+          if (leg.legType === "option") {
+            premiumPnl += legPnl;
+          } else {
+            stockPnl += legPnl;
+          }
+          marketValue += currentPrice * leg.quantity * leg.multiplier * sign;
         }
-        const sign = leg.side === "short" ? -1 : 1;
-        const entryPrice = Number(leg.entryPrice);
-        const legPnl = (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
-        unrealizedPnl += legPnl;
-        if (leg.legType === "option") {
-          premiumPnl += legPnl;
-        } else {
-          stockPnl += legPnl;
+
+        if (!hasAllPrices) {
+          console.warn(`Skipping position ${positionId} — missing live price for at least one leg.`);
+          skipped++;
+          continue;
         }
-        marketValue += currentPrice * leg.quantity * leg.multiplier * sign;
-      }
 
-      if (!hasAllPrices) {
-        console.warn(`Skipping position ${positionId} — missing live price for at least one leg.`);
-        skipped++;
-        continue;
+        await db("position_pnl_snapshots")
+          .insert({
+            position_id: positionId,
+            snapshot_date: snapshotDate,
+            realized_pnl: 0,
+            unrealized_pnl: unrealizedPnl,
+            premium_pnl: premiumPnl,
+            stock_pnl: stockPnl,
+            market_value: marketValue,
+          })
+          .onConflict(["position_id", "snapshot_date"])
+          .merge();
+        snapshotted++;
       }
-
-      await db("position_pnl_snapshots")
-        .insert({
-          position_id: positionId,
-          snapshot_date: snapshotDate,
-          realized_pnl: 0,
-          unrealized_pnl: unrealizedPnl,
-          premium_pnl: premiumPnl,
-          stock_pnl: stockPnl,
-          market_value: marketValue,
-        })
-        .onConflict(["position_id", "snapshot_date"])
-        .merge();
-      snapshotted++;
     }
 
     console.log(`Snapshotted ${snapshotted}/${legsByPositionId.size} open position(s) for ${snapshotDate} (${skipped} skipped).`);
+
+    // Runs after both captures above are already written — its own
+    // runtime (Flex API, up to 120s) must no longer sit between the
+    // account-level and position-level snapshots (see comment above).
+    // Independent of either capture succeeding: even a day the Gateway
+    // fetch fails, we still want to catch up on any newly-arrived Flex
+    // cash-flow data for recent days. Its own failure (Flex API down,
+    // report still generating) must not fail the whole job either.
+    try {
+      await reconcileCashFlows(snapshotDate);
+    } catch (error) {
+      console.error(`Cash-flow reconciliation failed: ${error instanceof Error ? error.message : error}`);
+    }
 
     // Greeks, same nightly cadence as the P&L snapshot above — piggybacks on
     // this job rather than a second scheduled IBKR round-trip. Only option
