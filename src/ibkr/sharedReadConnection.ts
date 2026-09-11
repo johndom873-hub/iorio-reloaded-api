@@ -2,6 +2,7 @@ import { IBApi, EventName, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
 import { openIbkrTunnel, type IbkrTunnel } from "./ibkrGatewayTunnel.js";
 import { ibkrGatewayPortByTradingMode } from "./constants.js";
+import { runIbkrHandshake } from "./ibkrHandshakeQueue.js";
 
 // Step 1 of the "Shared IBKR Read Connection" design proposal (2026-09-09,
 // see PROGRESS.md) — a single long-lived connection for the web dyno's
@@ -29,7 +30,13 @@ import { ibkrGatewayPortByTradingMode } from "./constants.js";
 // (connectIbkr.ts). A long-lived connection benefits from a stable,
 // identifiable id in IBKR's own TWS/Gateway UI, same reasoning as the
 // worker's fixed id.
-const webReadClientId = 43;
+//
+// Not 43: found 2026-09-11 that Gateway silently refuses to complete the
+// API handshake for clientId 43 specifically — reproduced with a minimal
+// standalone @stoqey/ib connection outside all app code, and it survived a
+// full Gateway container restart, so it's coming from Gateway's own
+// persisted settings, not anything in this process. 44 confirmed working.
+const webReadClientId = 44;
 
 const reconnectDelaysMs = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 
@@ -118,37 +125,40 @@ class SharedReadConnection {
 
       const ib = new IBApi({ host: "127.0.0.1", port: tunnel.localPort });
 
-      await new Promise<void>((resolve, reject) => {
-        const onError = (error: Error, code: ErrorCode, reqId: number) => {
-          if (reqId === -1) {
-            console.log(`IBKR shared read connection: informational status during connect: ${code} ${error.message}`);
-            return;
-          }
-          console.error(`IBKR shared read connection: connect failed with error ${code}: ${error.message} (after ${Date.now() - connectStartedAt}ms)`);
-          cleanup();
-          tunnel.close();
-          reject(error);
-        };
-        const onConnected = () => {
-          cleanup();
-          resolve();
-        };
-        const timer = setTimeout(() => {
-          console.error(`IBKR shared read connection: connect timed out after ${Date.now() - connectStartedAt}ms waiting for nextValidId.`);
-          cleanup();
-          tunnel.close();
-          reject(new Error("Timed out connecting to IBKR Gateway."));
-        }, 15_000);
-        function cleanup() {
-          clearTimeout(timer);
-          ib.off(EventName.error, onError);
-          ib.off(EventName.nextValidId, onConnected);
-        }
+      await runIbkrHandshake(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            const onError = (error: Error, code: ErrorCode, reqId: number) => {
+              if (reqId === -1) {
+                console.log(`IBKR shared read connection: informational status during connect: ${code} ${error.message}`);
+                return;
+              }
+              console.error(`IBKR shared read connection: connect failed with error ${code}: ${error.message} (after ${Date.now() - connectStartedAt}ms)`);
+              cleanup();
+              tunnel.close();
+              reject(error);
+            };
+            const onConnected = () => {
+              cleanup();
+              resolve();
+            };
+            const timer = setTimeout(() => {
+              console.error(`IBKR shared read connection: connect timed out after ${Date.now() - connectStartedAt}ms waiting for nextValidId.`);
+              cleanup();
+              tunnel.close();
+              reject(new Error("Timed out connecting to IBKR Gateway."));
+            }, 15_000);
+            function cleanup() {
+              clearTimeout(timer);
+              ib.off(EventName.error, onError);
+              ib.off(EventName.nextValidId, onConnected);
+            }
 
-        ib.on(EventName.error, onError);
-        ib.once(EventName.nextValidId, onConnected);
-        ib.connect(webReadClientId);
-      });
+            ib.on(EventName.error, onError);
+            ib.once(EventName.nextValidId, onConnected);
+            ib.connect(webReadClientId);
+          }),
+      );
 
       this.ib = ib;
       this.tunnel = tunnel;
