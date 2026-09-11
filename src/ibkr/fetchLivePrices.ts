@@ -2,7 +2,7 @@ import { EventName, MarketDataType, Option, OptionType, Stock, type IBApi } from
 import type { Contract } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
-import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 
 export interface PriceContract {
   key: string;
@@ -21,7 +21,13 @@ export interface PriceContract {
 const snapshotTimeoutMs = 6_000;
 
 function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: PriceContract[]): Promise<Record<string, number | null>> {
-  requestRealtimeMarketData(ib);
+  // FROZEN, not REALTIME — same reasoning as streamLivePrices' phase 1 below:
+  // FROZEN returns the last known price immediately rather than gating on a
+  // live trade occurring during the snapshot window, which a quiet option
+  // may never produce. Fixed 2026-09-11 after this caused open positions
+  // (e.g. a thinly-traded option leg) to silently lose their MV/P&L for the
+  // whole position — see fetchLivePrices' own header comment.
+  ib.reqMarketDataType(MarketDataType.FROZEN);
 
   const priceByKey = new Map<string, number | null>();
   const reqIdToContract = new Map<number, PriceContract>();
@@ -51,8 +57,10 @@ function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: Pr
     const contract = reqIdToContract.get(reqId);
     if (!contract || price <= 0) return;
     // Real-time last=4, delayed last=68 — see fetchOptionChain.ts's comment
-    // on why both are accepted.
-    if (tickType !== 4 && tickType !== 68) return;
+    // on why both are accepted. Close=9/75 covers FROZEN mode, which reports
+    // the last close instead of a last-trade tick when nothing has traded
+    // yet today (same tick types streamLivePrices' frozen phase accepts).
+    if (![4, 9, 68, 75].includes(tickType)) return;
     priceByKey.set(contract.key, price);
     markDone(reqId);
   }
@@ -110,8 +118,10 @@ function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: Pr
 
 /**
  * Sibling of fetchLiveGreeks.ts — same shape, but captures last price
- * instead of Greeks. Used by the daily P&L snapshot job to mark open
- * positions to market (see the unrealized-P&L formula sign-off, 2026-08-20).
+ * instead of Greeks. Used by the Positions table's plain (non-streaming)
+ * P&L endpoint and by the daily P&L snapshot job to mark open positions to
+ * market (see the unrealized-P&L formula sign-off, 2026-08-20). Requests
+ * FROZEN data (see requestLivePrices above) rather than REALTIME.
  *
  * Tries the shared read connection first (sharedReadConnection.ts — reused
  * across requests, no per-call connect cost) and falls back to a one-shot
