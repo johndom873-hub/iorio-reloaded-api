@@ -1189,34 +1189,56 @@ async function upsertSplitCoveredCallPosition(
   // only thing the later closing pass checks. Net effect before this fix:
   // a silent, permanent double-count of every rolled covered call's shares
   // (found 2026-09-10 via reconciliation drift alerts on AMAT/SPCX).
+  //
+  // Run this check every pass, not just while this position has no stock
+  // leg of its own -- a lot-by-lot roll fill (IBKR fills the buy-back and
+  // the new sell as separate partial executions instead of one atomic
+  // swap) can have this position already own a stock leg (sized to
+  // whatever fraction of the new call was filled a pass or two ago) by the
+  // time the OLD call's very last lot finally clears and disappears from
+  // `held` entirely. At that point the old position's stock leg is stale
+  // and orphaned exactly as below, but it can no longer be reassigned here
+  // (this position already has its own) -- it must be closed instead, or
+  // it sits stranded forever double-counting shares. Real bug found
+  // 2026-09-11 on a real prod HOOD roll that filled in three separate
+  // 1-lot pairs over ~4 seconds.
   const stockConId = String(stockLeg.contract.conId);
   const ownStockLeg = await db("position_legs")
     .where({ ibkr_contract_id: stockConId, leg_type: "stock", position_id: positionId })
     .whereNull("exit_at")
     .first();
-  if (!ownStockLeg) {
-    const staleCandidates = await db("position_legs")
-      .where({ ibkr_contract_id: stockConId, leg_type: "stock" })
-      .whereNull("exit_at")
-      .whereNot({ position_id: positionId });
-    for (const candidate of staleCandidates) {
-      const siblingOptionLegs = await db("position_legs")
-        .where({ position_id: candidate.position_id, leg_type: "option" })
-        .whereNull("exit_at");
-      // Only steal it if that position's own option leg(s) are no longer
-      // held at all -- i.e. that position is mid-roll and about to be
-      // closed by this same pass anyway. A still-held sibling option leg
-      // means this is a genuine second concurrent covered call against the
-      // same stock (a real split, not a roll), and its stock leg must be
-      // left alone.
-      const siblingStillLive = siblingOptionLegs.some((leg) => heldConIds.has(Number(leg.ibkr_contract_id)));
-      if (!siblingStillLive) {
-        console.log(
-          `upsertSplitCoveredCallPosition(${symbol}): reassigning orphaned stock leg ${candidate.id} from rolled-away position ${candidate.position_id} to position ${positionId}.`,
-        );
-        await db("position_legs").where({ id: candidate.id }).update({ position_id: positionId });
-        break;
-      }
+  const staleCandidates = await db("position_legs")
+    .where({ ibkr_contract_id: stockConId, leg_type: "stock" })
+    .whereNull("exit_at")
+    .whereNot({ position_id: positionId });
+  for (const candidate of staleCandidates) {
+    const siblingOptionLegs = await db("position_legs")
+      .where({ position_id: candidate.position_id, leg_type: "option" })
+      .whereNull("exit_at");
+    // Only touch it if that position's own option leg(s) are no longer
+    // held at all -- i.e. that position is mid-roll and about to be
+    // closed by this same pass anyway. A still-held sibling option leg
+    // means this is a genuine second concurrent covered call against the
+    // same stock (a real split, not a roll), and its stock leg must be
+    // left alone.
+    const siblingStillLive = siblingOptionLegs.some((leg) => heldConIds.has(Number(leg.ibkr_contract_id)));
+    if (siblingStillLive) continue;
+
+    if (ownStockLeg) {
+      // This position already has its own stock leg, sized off IBKR's
+      // live truth for this call (sharesForThisLeg, below) -- the stale
+      // candidate's shares are already fully accounted for there, so it's
+      // just a leftover to close, not something to fold in.
+      console.log(
+        `upsertSplitCoveredCallPosition(${symbol}): closing stale orphaned stock leg ${candidate.id} left behind by rolled-away position ${candidate.position_id} (position ${positionId} already owns its own stock leg).`,
+      );
+      await db("position_legs").where({ id: candidate.id }).update({ exit_at: db.fn.now(), exit_price: null });
+    } else {
+      console.log(
+        `upsertSplitCoveredCallPosition(${symbol}): reassigning orphaned stock leg ${candidate.id} from rolled-away position ${candidate.position_id} to position ${positionId}.`,
+      );
+      await db("position_legs").where({ id: candidate.id }).update({ position_id: positionId });
+      break;
     }
   }
 
