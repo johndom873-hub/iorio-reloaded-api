@@ -902,6 +902,34 @@ async function runReconciliationPass(passId: number): Promise<void> {
       }
     }
   }
+
+  // Defensive self-heal, not tied to this pass's own leg-closing above:
+  // catches any status='open' position with zero open legs left,
+  // regardless of how it got that way. Normally the loop above closes a
+  // leg and its now-empty position together in one step -- but a leg
+  // closed by any other means (a one-off manual SQL fix, a future bug)
+  // bypasses that and strands the position open forever with nothing left
+  // to show or close. Found 2026-09-11 firsthand: manually closing a
+  // stranded stock leg via SQL (working around a since-fixed roll-timing
+  // bug) left its position showing on the Positions screen with a blank
+  // Structure column and no Close button.
+  const openPositionsWithNoLegs = await db("positions as p")
+    .where("p.status", "open")
+    .whereNotExists(db("position_legs as pl").whereRaw("pl.position_id = p.id").whereNull("pl.exit_at"))
+    .select("p.id");
+  for (const { id: positionId } of openPositionsWithNoLegs) {
+    await db("positions").where({ id: positionId }).update({ status: "closed", closed_at: db.fn.now() });
+    const closeReason = await determineCloseReason(positionId);
+    await db("positions").where({ id: positionId }).update({ close_reason: closeReason });
+    console.log(`Reconciliation #${passId}: closed orphaned position ${positionId} (zero open legs, status was still 'open').`);
+    if (closeReason === "unknown" || closeReason === "closed_via_external_trade") {
+      await logPlatformAnomaly(
+        closeReason === "unknown" ? "unexplained_position_close" : "position_closed_outside_app",
+        `Position ${positionId} closed with reason "${closeReason}"`,
+        { positionId },
+      );
+    }
+  }
 }
 
 // Fires only for a position that closed via reconcilePositionsFromIbkr's
