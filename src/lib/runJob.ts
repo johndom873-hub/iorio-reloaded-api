@@ -37,11 +37,29 @@ export class JobAlreadyRunningError extends Error {
  * (result.notify) — most jobs are quiet unless there's something to act on.
  *
  * Refuses to start a second concurrent run of the same jobName — see
- * JobAlreadyRunningError above.
+ * JobAlreadyRunningError above. Exception: a "running" row older than
+ * staleRunningJobThresholdMs is treated as abandoned (left behind by a
+ * process that died without reaching this function's own try/catch, e.g.
+ * SIGKILL/OOM — the SIGTERM handler in installShutdownHandler.ts covers the
+ * graceful-restart case, but nothing catches a hard kill) rather than a
+ * real overlapping run, and is superseded instead of blocking the new one.
  */
+const staleRunningJobThresholdMs = 15 * 60 * 1000;
+
 export async function runJob(jobName: string, fn: () => Promise<JobResult>, options: RunJobOptions = {}): Promise<void> {
   const alreadyRunning = await db("job_runs").where({ job_name: jobName, status: "running" }).first();
-  if (alreadyRunning) throw new JobAlreadyRunningError(jobName);
+  if (alreadyRunning) {
+    const ageMs = Date.now() - new Date(alreadyRunning.started_at).getTime();
+    if (ageMs < staleRunningJobThresholdMs) throw new JobAlreadyRunningError(jobName);
+
+    await db("job_runs")
+      .where({ id: alreadyRunning.id })
+      .update({
+        status: "failure",
+        finished_at: db.fn.now(),
+        error_message: `Abandoned: still "running" after ${Math.round(ageMs / 1000)}s with no update -- likely a crashed process. Superseded by a new run.`,
+      });
+  }
 
   const startedAt = new Date();
   let run: { id: string };
