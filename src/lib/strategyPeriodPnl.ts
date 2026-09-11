@@ -5,8 +5,12 @@ import { db } from "../db/connection.js";
 // nightly delta leaves a permanent gap if that one job run fails, where
 // this degrades gracefully by falling back to the nearest prior snapshot).
 //
-// realized(period) = legs that exited within the period, grouped by the
-// parent position's strategy_key.
+// realized(period) = for each position with a leg that exited within the
+// period, its full lifetime realized P&L minus whatever unrealized P&L it
+// had already accrued (and already been counted in an earlier period) as
+// of that period's start — not the raw lifetime P&L on its own, which
+// would double-count a multi-day trade's earlier days into the period it
+// happens to close in.
 // unrealized(period) = unrealized_pnl_now − unrealized_pnl_as_of(period
 // start), per currently-open position, using the most recent
 // position_pnl_snapshots row on or before the period start date (rows
@@ -55,26 +59,22 @@ export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
         date_trunc('month', CURRENT_DATE)::date AS month_start,
         date_trunc('year', CURRENT_DATE)::date AS year_start
     ),
-    realized AS (
+    -- Per-position (not per-leg) lifetime realized P&L for every position
+    -- that has at least one closed leg. A position's legs all close
+    -- together in practice (assignment/expiration/manual close all share
+    -- one exit_at; a roll closes the position outright and opens a new
+    -- one), so grouping by position and taking that single closing moment
+    -- is safe.
+    closed_positions_pnl AS (
       SELECT
+        p.id AS position_id,
         p.strategy_key,
-        -- Strictly AFTER day_start, unlike week/month/year (>=): day_start
-        -- is now the last *completed* trading day itself (see period_starts
-        -- above), not the start of the current one, so a trade that exited
-        -- ON day_start was already fully reported as that day's own "Day"
-        -- figure and must not be re-counted into the next session's.
-        COALESCE(SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
-          FILTER (WHERE pl.exit_at > (SELECT day_start FROM period_starts)), 0) AS realized_day,
-        COALESCE(SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
-          FILTER (WHERE pl.exit_at >= (SELECT week_start FROM period_starts)), 0) AS realized_week,
-        COALESCE(SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
-          FILTER (WHERE pl.exit_at >= (SELECT month_start FROM period_starts)), 0) AS realized_month,
-        COALESCE(SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
-          FILTER (WHERE pl.exit_at >= (SELECT year_start FROM period_starts)), 0) AS realized_year
+        MAX(pl.exit_at) AS exit_at,
+        SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END)) AS lifetime_realized_pnl
       FROM position_legs pl
       JOIN positions p ON p.id = pl.position_id
       WHERE pl.exit_price IS NOT NULL
-      GROUP BY p.strategy_key
+      GROUP BY p.id, p.strategy_key
     ),
     latest_snapshot AS (
       SELECT DISTINCT ON (position_id) position_id, unrealized_pnl AS unrealized_now
@@ -111,6 +111,37 @@ export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
       FROM position_pnl_snapshots s, period_starts ps
       WHERE s.snapshot_date < ps.year_start
       ORDER BY s.position_id, s.snapshot_date DESC
+    ),
+    -- Realized P&L attributed to a period = the position's full lifetime
+    -- realized P&L minus whatever it had already accrued (and already been
+    -- counted, via "unrealized" below, in earlier periods) as of that
+    -- period's start — not the raw lifetime amount. Otherwise a multi-day
+    -- trade that closes today dumps its ENTIRE history into today's "Day"
+    -- figure, double-counting the portion already reported on earlier days
+    -- (bug found 2026-09-11 via a negative Residual: MU's covered put had
+    -- +$1,541 of already-recognized unrealized P&L as of the prior close,
+    -- then contributed its full +$1,542 lifetime gain to "Day" on exit).
+    -- Mirrors the same day/week/month/year boundary conventions as
+    -- "unrealized" below (day: exclusive >, baseline "as of or before"
+    -- day_start; week/month/year: inclusive >=, baseline strictly before
+    -- period start).
+    realized AS (
+      SELECT
+        cp.strategy_key,
+        COALESCE(SUM(cp.lifetime_realized_pnl - COALESCE(sd.unrealized_pnl, 0))
+          FILTER (WHERE cp.exit_at > (SELECT day_start FROM period_starts)), 0) AS realized_day,
+        COALESCE(SUM(cp.lifetime_realized_pnl - COALESCE(sw.unrealized_pnl, 0))
+          FILTER (WHERE cp.exit_at >= (SELECT week_start FROM period_starts)), 0) AS realized_week,
+        COALESCE(SUM(cp.lifetime_realized_pnl - COALESCE(sm.unrealized_pnl, 0))
+          FILTER (WHERE cp.exit_at >= (SELECT month_start FROM period_starts)), 0) AS realized_month,
+        COALESCE(SUM(cp.lifetime_realized_pnl - COALESCE(sy.unrealized_pnl, 0))
+          FILTER (WHERE cp.exit_at >= (SELECT year_start FROM period_starts)), 0) AS realized_year
+      FROM closed_positions_pnl cp
+      LEFT JOIN snapshot_asof_day sd ON sd.position_id = cp.position_id
+      LEFT JOIN snapshot_asof_week sw ON sw.position_id = cp.position_id
+      LEFT JOIN snapshot_asof_month sm ON sm.position_id = cp.position_id
+      LEFT JOIN snapshot_asof_year sy ON sy.position_id = cp.position_id
+      GROUP BY cp.strategy_key
     ),
     unrealized AS (
       SELECT
@@ -153,10 +184,13 @@ export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
 
 // Daily per-strategy P&L series for the multi-series chart, same live-
 // derivation approach as computeStrategyPeriodPnl but per calendar day
-// instead of per period: each day's realized delta (legs that exited that
-// day) plus each day's unrealized delta (that day's snapshot minus the
-// prior day's, per position, via LAG). A day/strategy cell with no
-// activity and no open position that day is legitimately 0, not missing.
+// instead of per period: each day's realized delta (a closing position's
+// full lifetime realized P&L minus whatever it had already accrued as of
+// the prior day's snapshot — same double-counting fix as realized(period)
+// above, not the raw lifetime P&L on the day it happens to close) plus
+// each day's unrealized delta (that day's snapshot minus the prior day's,
+// per position, via LAG). A day/strategy cell with no activity and no open
+// position that day is legitimately 0, not missing.
 export interface StrategyDailyPnl {
   snapshotDate: string;
   strategyKey: string;
@@ -172,13 +206,29 @@ export async function computeStrategyDailyPnlSeries(days: number): Promise<Strat
     strategies AS (
       SELECT DISTINCT strategy_key FROM positions
     ),
-    daily_realized AS (
-      SELECT p.strategy_key, pl.exit_at::date AS d,
-        SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END)) AS realized
+    closed_positions_pnl AS (
+      SELECT
+        p.id AS position_id,
+        p.strategy_key,
+        MAX(pl.exit_at)::date AS exit_date,
+        SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END)) AS lifetime_realized_pnl
       FROM position_legs pl
       JOIN positions p ON p.id = pl.position_id
       WHERE pl.exit_price IS NOT NULL
-      GROUP BY p.strategy_key, pl.exit_at::date
+      GROUP BY p.id, p.strategy_key
+    ),
+    prior_snapshot AS (
+      SELECT DISTINCT ON (s.position_id) s.position_id, s.unrealized_pnl
+      FROM position_pnl_snapshots s
+      JOIN closed_positions_pnl cp ON cp.position_id = s.position_id AND s.snapshot_date < cp.exit_date
+      ORDER BY s.position_id, s.snapshot_date DESC
+    ),
+    daily_realized AS (
+      SELECT cp.strategy_key, cp.exit_date AS d,
+        SUM(cp.lifetime_realized_pnl - COALESCE(ps.unrealized_pnl, 0)) AS realized
+      FROM closed_positions_pnl cp
+      LEFT JOIN prior_snapshot ps ON ps.position_id = cp.position_id
+      GROUP BY cp.strategy_key, cp.exit_date
     ),
     snapshot_with_prev AS (
       SELECT
