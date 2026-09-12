@@ -1,5 +1,6 @@
 import { db } from "../db/connection.js";
 import { notifyTelegram } from "./notifyTelegram.js";
+import { formatDurationHuman } from "./formatDurationHuman.js";
 
 export interface JobResult {
   details?: Record<string, unknown>;
@@ -33,8 +34,12 @@ export class JobAlreadyRunningError extends Error {
  * ordering: DB write always happens first, Telegram attempted after, so a
  * Telegram outage can never mask a job result or crash the job itself —
  * see PROGRESS.md's Telegram notification rules). On failure, always
- * notifies. On success, only notifies if the job explicitly asks to
- * (result.notify) — most jobs are quiet unless there's something to act on.
+ * notifies (with a short summary — see telegramFailureSummary — while the
+ * full message still lands in job_runs.error_message). On success, also
+ * notifies if this run ends a contiguous run of failures (see
+ * findPrecedingFailureStreak), so a recovery is never silent; additionally
+ * notifies if the job explicitly asks to (result.notify) — most jobs are
+ * otherwise quiet unless there's something to act on.
  *
  * Refuses to start a second concurrent run of the same jobName — see
  * JobAlreadyRunningError above. Exception: a "running" row older than
@@ -45,6 +50,49 @@ export class JobAlreadyRunningError extends Error {
  * real overlapping run, and is superseded instead of blocking the new one.
  */
 const staleRunningJobThresholdMs = 15 * 60 * 1000;
+
+// Exported (alongside findPrecedingFailureStreak below) so a one-off replay
+// script (e.g. tmp/simulateJobNotifications.ts) can reuse the exact same
+// notification logic against real job_runs history instead of a hand-copied
+// reimplementation that could silently drift from what actually ships.
+//
+// A failure message's diagnostic sentence sits before the first "): " —
+// everything after that (a restart script's raw docker-log dump, in every
+// case seen so far) is only useful for the job_runs record, not a phone
+// notification. error_message in the DB always keeps the full text; this
+// only shortens what's sent to Telegram. Falls back to the full message
+// unchanged when there's no such marker (plain error messages with no
+// appended dump), so this can never lose content, only trim noise.
+export function telegramFailureSummary(message: string): string {
+  const cutIndex = message.indexOf("): ");
+  if (cutIndex === -1) return message;
+  const summary = message.slice(0, cutIndex + 1);
+  return `${summary} (see job_runs for full output)`;
+}
+
+// Looks back through this job's run history (immediately before the run
+// that just succeeded) and counts a contiguous trailing streak of failures.
+// Used to turn a recovery into a real Telegram notification instead of
+// silence — see PROGRESS.md's Telegram notification rules, which flagged
+// state-transition alerting as blocked on job_runs existing; it now does.
+export async function findPrecedingFailureStreak(jobName: string, currentRunId: string, before: Date): Promise<{ failureCount: number; failingSince: Date } | null> {
+  const priorRuns: { status: string; started_at: Date }[] = await db("job_runs")
+    .where({ job_name: jobName })
+    .andWhere("started_at", "<", before)
+    .andWhereNot({ id: currentRunId })
+    .orderBy("started_at", "desc")
+    .limit(200);
+
+  let failureCount = 0;
+  let failingSince: Date | null = null;
+  for (const run of priorRuns) {
+    if (run.status !== "failure") break;
+    failureCount++;
+    failingSince = run.started_at;
+  }
+
+  return failureCount > 0 ? { failureCount, failingSince: failingSince! } : null;
+}
 
 export async function runJob(jobName: string, fn: () => Promise<JobResult>, options: RunJobOptions = {}): Promise<void> {
   const alreadyRunning = await db("job_runs").where({ job_name: jobName, status: "running" }).first();
@@ -88,13 +136,21 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await db("job_runs").where({ id: run.id }).update({ status: "failure", finished_at: db.fn.now(), error_message: message });
-    await notifyTelegram(`⚠️ ${jobName} failed: ${message}`);
+    await notifyTelegram(`⚠️ ${jobName} failed: ${telegramFailureSummary(message)}`);
     throw error;
   }
 
   await db("job_runs")
     .where({ id: run.id })
     .update({ status: "success", finished_at: db.fn.now(), details: result.details ?? null });
+
+  const failureStreak = await findPrecedingFailureStreak(jobName, run.id, startedAt);
+  if (failureStreak) {
+    const attempts = failureStreak.failureCount === 1 ? "1 failed attempt" : `${failureStreak.failureCount} failed attempts`;
+    const downtime = formatDurationHuman(Date.now() - failureStreak.failingSince.getTime());
+    await notifyTelegram(`✅ ${jobName} recovered after ${attempts} (was down since ${failureStreak.failingSince.toISOString()}, ~${downtime}).`);
+  }
+
   if (result.notify) {
     await notifyTelegram(result.notify);
   }
