@@ -1484,6 +1484,32 @@ async function main(): Promise<void> {
     );
   }, heartbeatIntervalMs);
 
+  // Separate, shorter-interval upsert for Iorio Pulse's Gateway node (worker
+  // health as a *readable row*, not a log line — see worker_health's
+  // migration comment for why this is a table, not a pg_notify event). 45s
+  // rather than the 5-min console.log heartbeat above: that one exists to
+  // prove the event loop is alive and was deliberately sized to avoid noise,
+  // this one just needs to not look stale on a live dashboard; a cheap
+  // upsert carries none of the "don't hammer IBKR" concern that interval was
+  // originally about.
+  const workerHealthUpsertIntervalMs = 45_000;
+  setInterval(() => {
+    const health = persistentIbkrConnection.getHealthSnapshot();
+    db("worker_health")
+      .insert({
+        process_name: "ibkr_gateway_worker",
+        connected: health.connected,
+        uptime_ms: health.uptimeMs,
+        total_reconnects: health.totalReconnects,
+        last_system_status_code: health.lastSystemStatusCode,
+        client_id: health.clientId,
+        updated_at: db.fn.now(),
+      })
+      .onConflict("process_name")
+      .merge()
+      .catch((error) => console.error(`worker_health upsert failed: ${error instanceof Error ? error.message : error}`));
+  }, workerHealthUpsertIntervalMs);
+
   console.log("Iorio worker started — persistent IBKR connection, order placement, position sync.");
 }
 

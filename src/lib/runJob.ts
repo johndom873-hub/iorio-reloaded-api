@@ -1,6 +1,7 @@
 import { db } from "../db/connection.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { formatDurationHuman } from "./formatDurationHuman.js";
+import { publishNotification } from "./notificationChannel.js";
 
 export interface JobResult {
   details?: Record<string, unknown>;
@@ -136,6 +137,7 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await db("job_runs").where({ id: run.id }).update({ status: "failure", finished_at: db.fn.now(), error_message: message });
+    await publishNotification({ type: "job_completed", jobName, status: "failure" }).catch(() => {});
     await notifyTelegram(`⚠️ ${jobName} failed: ${telegramFailureSummary(message)}`);
     throw error;
   }
@@ -143,6 +145,7 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
   await db("job_runs")
     .where({ id: run.id })
     .update({ status: "success", finished_at: db.fn.now(), details: result.details ?? null });
+  await publishNotification({ type: "job_completed", jobName, status: "success" }).catch(() => {});
 
   const failureStreak = await findPrecedingFailureStreak(jobName, run.id, startedAt);
   if (failureStreak) {

@@ -18,6 +18,7 @@ import { systemHealthRouter } from "./routes/systemHealth.js";
 import { tickerDetailRouter } from "./routes/tickerDetail.js";
 import { tradeAlertsRouter } from "./routes/tradeAlerts.js";
 import { tradeBlotterRouter } from "./routes/tradeBlotter.js";
+import { requestRateMiddleware } from "./lib/requestRateTracker.js";
 
 export const app = express();
 
@@ -34,6 +35,8 @@ app.use(
 );
 app.use(express.json());
 app.use(sessionMiddleware);
+// For Iorio Pulse's Heroku node — see requestRateTracker.ts.
+app.use(requestRateMiddleware);
 
 app.use(healthRouter);
 // Telegram calls this directly (no session) — authenticated by the shared

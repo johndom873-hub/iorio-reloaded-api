@@ -23,6 +23,7 @@ import { chatOnce } from "./chat.js";
 import { loadRecentHistory, appendHistory } from "./chatHistoryStore.js";
 import { takeConfirmation } from "./confirmations.js";
 import { TOOLS_BY_NAME } from "./tools/index.js";
+import { publishNotification } from "../lib/notificationChannel.js";
 
 const ORDER_POLL_INTERVAL_MS = 5000;
 const ORDER_POLL_TIMEOUT_MS = 5 * 60 * 1000;
@@ -103,6 +104,10 @@ async function handleMessage(
     // rejects an empty sendMessage outright.
     if (text.trim()) {
       await telegram.sendMessage(chatId, text, { replyToMessageId: msg.message_id });
+      // For Iorio Pulse's System Events feed — no per-user attribution
+      // (chat-level auth only, see this file's header comment), just that a
+      // reply went out.
+      await publishNotification({ type: "genosuke_reply", preview: text.slice(0, 120) }).catch(() => {});
     }
   } catch (error) {
     console.error("Genosuke: chatOnce error", error);

@@ -4,6 +4,7 @@
 // replies arrive as one message, not token-by-token) and OpenRouter-only
 // (menaris's version abstracts over multiple OpenAI-compatible endpoints;
 // Genosuke only ever talks to OpenRouter).
+import * as llmStats from "./llmStats.js";
 
 // Reasoning models can spend thinking tokens out of the same max_tokens
 // budget without exposing them in the response content — a complex prompt
@@ -106,11 +107,19 @@ export class OpenRouterAdapter {
       tools: params.tools.length > 0 ? toOpenAITools(params.tools) : undefined,
     };
 
-    const response = await fetch(OpenRouterAdapter.endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify(body),
-    });
+    const startedAt = Date.now();
+    let response: Response;
+    try {
+      response = await fetch(OpenRouterAdapter.endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify(body),
+      });
+    } finally {
+      // Recorded for both success and failure — Iorio Pulse's LLM node
+      // (see llmStats.ts) cares about real call volume/latency either way.
+      llmStats.record(Date.now() - startedAt);
+    }
     if (!response.ok) {
       throw new Error(`OpenRouter API ${response.status}: ${await response.text()}`);
     }

@@ -11,7 +11,14 @@ export const appNotificationsChannel = "app_notifications_channel";
 export type AppNotification =
   | { type: "order_status"; orderId: string }
   | { type: "position_closed"; positionId: string; symbol: string; message: string }
-  | { type: "position_opened"; positionId: string; symbol: string };
+  | { type: "position_opened"; positionId: string; symbol: string }
+  // Iorio Pulse's live System Events feed / topology pulses — see
+  // presenceTracker.ts (presence) and the publish call sites in runJob.ts,
+  // runTradeAlertGeneration.ts, and genosuke/bot.ts.
+  | { type: "job_completed"; jobName: string; status: "success" | "failure" }
+  | { type: "alert_generated"; strategyKey: string; symbol: string; annualizedYield: number }
+  | { type: "genosuke_reply"; preview: string }
+  | { type: "presence"; onlineUserIds: string[] };
 
 export async function publishNotification(notification: AppNotification): Promise<void> {
   await db.raw("SELECT pg_notify(?, ?)", [appNotificationsChannel, JSON.stringify(notification)]);

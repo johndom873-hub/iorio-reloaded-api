@@ -2,6 +2,9 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { runIbkrHealthCheckJob } from "../ibkr/checkIbkrHealthJob.js";
+import * as presenceTracker from "../lib/presenceTracker.js";
+import * as llmStats from "../genosuke/llmStats.js";
+import { requestRateStats, processStartedAt } from "../lib/requestRateTracker.js";
 
 export const systemHealthRouter = Router();
 systemHealthRouter.use(requireAuth);
@@ -57,4 +60,94 @@ systemHealthRouter.post("/check-ibkr", async (_request, response) => {
 
   const result = await db.raw(`${jobRunSelect} WHERE job_name = 'ibkr_health_check' ORDER BY started_at DESC LIMIT 1`);
   response.json(result.rows[0] ?? null);
+});
+
+// --- Iorio Pulse support routes (2026-09-13) ---
+
+// One-shot initial snapshot for the Front End node's presence display — the
+// live stream (a "presence" frame on /notifications/stream, see
+// presenceTracker.ts) only reports *changes* after connecting, so a fresh
+// page load needs this to know who's already online.
+systemHealthRouter.get("/presence", async (_request, response) => {
+  const onlineUserIds = presenceTracker.onlineUserIds();
+  if (onlineUserIds.length === 0) {
+    response.json({ online: [] });
+    return;
+  }
+  const users = await db("users").whereIn("id", onlineUserIds).select("id", "display_name as displayName");
+  response.json({ online: users });
+});
+
+// Database node stats — no existing pg_stat_activity/pg_database_size usage
+// anywhere else in the app; this is new but a single, cheap, self-contained
+// query (Postgres tracks all of this itself, no app-level bookkeeping).
+systemHealthRouter.get("/db", async (_request, response) => {
+  const result = await db.raw(`
+    SELECT
+      (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()) AS "activeConnections",
+      (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS "maxConnections",
+      pg_database_size(current_database()) AS "databaseSizeBytes",
+      (SELECT count(*) FROM positions WHERE status = 'open') AS "openPositionCount"
+  `);
+  response.json(result.rows[0]);
+});
+
+// Genosuke + LLM node stats. activeSessions will almost always read 0/1 in
+// practice — auth is chat-level only (one shared Telegram chat, see
+// genosuke/bot.ts's header comment), so there's genuinely only ever one
+// chat_id in this deployment; not a bug.
+systemHealthRouter.get("/genosuke", async (_request, response) => {
+  const result = await db.raw(`
+    SELECT
+      (SELECT count(*) FROM genosuke_chat_messages WHERE role = 'assistant' AND created_at >= current_date) AS "messagesToday",
+      (SELECT count(DISTINCT chat_id) FROM genosuke_chat_messages WHERE created_at >= now() - interval '24 hours') AS "activeSessions"
+  `);
+  response.json({
+    ...result.rows[0],
+    llm: { model: process.env.GENOSUKE_MODEL ?? null, ...llmStats.stats() },
+  });
+});
+
+// Heroku web-dyno node stats — request rate (requestRateTracker.ts
+// middleware, mounted in app.ts) and process uptime are real; "streams open"
+// is deliberately scoped to /notifications/stream connections only (reusing
+// presenceTracker's counter) and labeled as such below, not a true count of
+// every SSE endpoint in the app (positions/greeks/pnl, risk-limits/exposure,
+// ticker-detail streams are separate connections this doesn't see).
+systemHealthRouter.get("/web-dyno", async (_request, response) => {
+  response.json({
+    requestsPerMinute: requestRateStats().requestsPerMinute,
+    uptimeSeconds: Math.round(process.uptime()),
+    processStartedAt,
+    notificationStreamConnections: presenceTracker.totalConnectionCount(),
+  });
+});
+
+// Gateway node stats — read from worker_health, upserted every ~45s by
+// ibkrGatewayWorker.ts on the VPS (see that file and the worker_health
+// migration for why this is a table the worker writes and the web dyno
+// reads, not a pg_notify event). orderCount is NOT sourced from the worker
+// at all — it's a plain web-dyno query against order_requests, no round
+// trip needed.
+systemHealthRouter.get("/gateway", async (_request, response) => {
+  const [health, orderCountResult] = await Promise.all([
+    db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
+    db("order_requests").whereIn("status", ["confirmed", "submitted", "cancel_requested"]).count("* as count").first(),
+  ]);
+
+  if (!health) {
+    response.json({ connected: false, staleOrMissing: true, inFlightOrderCount: Number(orderCountResult?.count ?? 0) });
+    return;
+  }
+
+  response.json({
+    connected: health.connected,
+    uptimeMs: health.uptime_ms !== null ? Number(health.uptime_ms) : null,
+    totalReconnects: health.total_reconnects,
+    lastSystemStatusCode: health.last_system_status_code,
+    clientId: health.client_id,
+    updatedAt: health.updated_at,
+    inFlightOrderCount: Number(orderCountResult?.count ?? 0),
+    staleOrMissing: false,
+  });
 });

@@ -47,6 +47,13 @@ tradeAlertsRouter.get("/", async (request, response) => {
   const status = (request.query.status as string | undefined) ?? "pending";
   const strategyKey = request.query.strategy as string | undefined;
   const symbol = request.query.symbol as string | undefined;
+  // Iorio Pulse's "Top Alerts" panel: ranks purely by annualized yield
+  // instead of the default per-ticker grouping below, and caps the row
+  // count. A roll alert's yield lives one level deeper (suggested_structure
+  // .replacement.annualizedYield) than a new_trade alert's (suggested_
+  // structure.annualizedYield) — see runTradeAlertGeneration.ts.
+  const sort = request.query.sort as string | undefined;
+  const limit = request.query.limit ? Math.min(Number(request.query.limit) || 50, 50) : null;
 
   if (!validStatuses.includes(status)) {
     response.status(400).json({ error: "Unknown status." });
@@ -54,6 +61,10 @@ tradeAlertsRouter.get("/", async (request, response) => {
   }
   if (strategyKey && !validStrategyKeys.includes(strategyKey)) {
     response.status(400).json({ error: "Unknown strategy." });
+    return;
+  }
+  if (sort && sort !== "yield") {
+    response.status(400).json({ error: "Unknown sort." });
     return;
   }
 
@@ -73,14 +84,21 @@ tradeAlertsRouter.get("/", async (request, response) => {
     params.push(symbol.toUpperCase());
   }
 
+  const orderBy =
+    sort === "yield"
+      ? `COALESCE(
+           (ta.suggested_structure->>'annualizedYield')::numeric,
+           (ta.suggested_structure->'replacement'->>'annualizedYield')::numeric
+         ) DESC`
+      : `MAX(ta.created_at) OVER (PARTITION BY t.id) DESC, t.symbol, (ta.suggested_structure->>'annualizedYield')::numeric DESC`;
+  const limitClause = limit !== null ? `LIMIT ${limit}` : "";
+
   const result = await db.raw(
     `
     ${tradeAlertSelect}
     WHERE ${conditions.join(" AND ")}
-    ORDER BY
-      MAX(ta.created_at) OVER (PARTITION BY t.id) DESC,
-      t.symbol,
-      (ta.suggested_structure->>'annualizedYield')::numeric DESC
+    ORDER BY ${orderBy}
+    ${limitClause}
     `,
     params,
   );

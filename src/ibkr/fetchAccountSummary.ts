@@ -8,9 +8,13 @@ export interface AccountSummary {
   buyingPower: number | null;
   totalCashValue: number | null;
   grossPositionValue: number | null;
+  // Added for Iorio Pulse's IBKR node ("Margin excess") — IBKR's own
+  // "excess liquidity" figure, additive to the existing tags so every
+  // existing caller (dashboard.ts, riskLimits.ts) is unaffected.
+  excessLiquidity: number | null;
 }
 
-const requestedTags = "NetLiquidation,BuyingPower,TotalCashValue,GrossPositionValue";
+const requestedTags = "NetLiquidation,BuyingPower,TotalCashValue,GrossPositionValue,ExcessLiquidity";
 
 function requestAccountSummary(ib: IBApi, reqId: number): Promise<AccountSummary> {
   return new Promise<AccountSummary>((resolve, reject) => {
@@ -19,6 +23,7 @@ function requestAccountSummary(ib: IBApi, reqId: number): Promise<AccountSummary
       buyingPower: null,
       totalCashValue: null,
       grossPositionValue: null,
+      excessLiquidity: null,
     };
 
     const timer = setTimeout(() => {
@@ -34,6 +39,7 @@ function requestAccountSummary(ib: IBApi, reqId: number): Promise<AccountSummary
       if (tag === "BuyingPower") summary.buyingPower = numericValue;
       if (tag === "TotalCashValue") summary.totalCashValue = numericValue;
       if (tag === "GrossPositionValue") summary.grossPositionValue = numericValue;
+      if (tag === "ExcessLiquidity") summary.excessLiquidity = numericValue;
     }
 
     function onAccountSummaryEnd(id: number) {

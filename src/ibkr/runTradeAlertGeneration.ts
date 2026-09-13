@@ -5,6 +5,7 @@ import { generateTradeAlertCandidatesForTicker, type AlertStrategyKey, type Aler
 import { evaluateRollCandidate, type OpenShortLeg, type RollSuggestion } from "./generateRollCandidates.js";
 import { checkAssignmentRisk } from "./checkAssignmentRisk.js";
 import { formatNewTradeAlertLine, formatRollAlertLine, formatAssignmentRiskAlertLine } from "../lib/formatTradeAlertMessage.js";
+import { publishNotification } from "../lib/notificationChannel.js";
 
 export const tradeAlertStrategies: AlertStrategyKey[] = ["covered_call", "cash_secured_put"];
 // Exported for refreshTickerTradeAlerts.ts, which needs the identical
@@ -263,6 +264,12 @@ export async function runTradeAlertGeneration(
         formatRollAlertLine(leg.symbol, { strike: leg.strike, expiryIso: toIsoDate(leg.expiry), right: leg.right, entryPrice: leg.entryPrice }, suggestion),
       );
       await onEvent({ type: "rollCandidate", symbol: leg.symbol, triggered: true });
+      await publishNotification({
+        type: "alert_generated",
+        strategyKey: leg.strategyKey,
+        symbol: leg.symbol,
+        annualizedYield: suggestion.replacement.annualizedYield,
+      }).catch(() => {});
       totalNewAlerts += 1;
     }
 
@@ -319,6 +326,22 @@ export async function runTradeAlertGeneration(
       // strategy — this is what lets a notifying caller send one bundled
       // Telegram message per ticker instead of one per ticker-strategy pair.
       await onEvent({ type: "tickerAlertsReady", symbol: ticker.symbol, entries: tickerAlertEntries });
+
+      // Same "once per ticker" batching for Iorio Pulse's System Events feed
+      // (a full shortlist scan can be 60+ tickers — one notification per
+      // trade_alerts row would flood the 17-row feed and the pulse-animation
+      // queue within seconds). Picks the single highest-yield entry to
+      // represent the ticker, same "pick the best, summarize the rest"
+      // reasoning the Telegram message formatting already uses.
+      if (tickerAlertEntries.length > 0) {
+        const best = tickerAlertEntries.reduce((a, b) => (b.annualizedYield > a.annualizedYield ? b : a));
+        await publishNotification({
+          type: "alert_generated",
+          strategyKey: best.strategyKey,
+          symbol: ticker.symbol,
+          annualizedYield: best.annualizedYield,
+        }).catch(() => {});
+      }
     }
   } finally {
     connection.disconnect();

@@ -177,13 +177,18 @@ class PersistentIbkrConnection {
     }, delay);
   }
 
-  /** For the periodic heartbeat log in ibkrGatewayWorker.ts's main(). */
-  getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; totalReconnects: number; lastSystemStatusCode: number | null } {
+  /**
+   * For the periodic heartbeat log in ibkrGatewayWorker.ts's main(), and
+   * (since 2026-09-13) upserted into worker_health there too for Iorio
+   * Pulse's Gateway node — see that file's comment on the upsert interval.
+   */
+  getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; totalReconnects: number; lastSystemStatusCode: number | null; clientId: number } {
     return {
       connected: this.ib !== null,
       uptimeMs: this.connectedSince ? Date.now() - this.connectedSince : null,
       totalReconnects: this.totalReconnects,
       lastSystemStatusCode: this.lastSystemStatusCode,
+      clientId: workerClientId,
     };
   }
 }
