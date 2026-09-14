@@ -55,6 +55,7 @@ export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTi
       company_name: tickerData.companyName,
       sector: tickerData.sector,
       ibkr_contract_id: tickerData.conId,
+      primary_exchange: tickerData.primaryExchange,
     })
     .returning("*");
 

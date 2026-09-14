@@ -5,6 +5,7 @@ import { runIbkrHealthCheckJob } from "../ibkr/checkIbkrHealthJob.js";
 import * as presenceTracker from "../lib/presenceTracker.js";
 import * as llmStats from "../genosuke/llmStats.js";
 import { requestRateStats, processStartedAt } from "../lib/requestRateTracker.js";
+import { computeMarketSessionStatus } from "../lib/marketSessionStatus.js";
 
 export const systemHealthRouter = Router();
 systemHealthRouter.use(requireAuth);
@@ -84,12 +85,37 @@ systemHealthRouter.get("/presence", async (_request, response) => {
 systemHealthRouter.get("/db", async (_request, response) => {
   const result = await db.raw(`
     SELECT
-      (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()) AS "activeConnections",
-      (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS "maxConnections",
-      pg_database_size(current_database()) AS "databaseSizeBytes",
-      (SELECT count(*) FROM positions WHERE status = 'open') AS "openPositionCount"
+      (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state = 'active') AS "activeConnections",
+      pg_database_size(current_database()) AS "databaseSizeBytes"
   `);
   response.json(result.rows[0]);
+});
+
+// IBKR's primaryExch codes aren't the names traders actually say — captured
+// verbatim from IBKR (see fetchNewTickerData.ts) since that's what the
+// contract data gives us, translated to a display name here at read time.
+const exchangeDisplayNames: Record<string, string> = { ISLAND: "NASDAQ" };
+
+function displayExchangeName(primaryExchange: string | null): string {
+  if (!primaryExchange) return "US Markets";
+  return exchangeDisplayNames[primaryExchange] ?? primaryExchange;
+}
+
+// Real exchanges the current book actually trades on (via tickers.primary_exchange,
+// captured at ticker-creation time from IBKR's contract data), not a
+// hardcoded "NASDAQ · NYSE" label. One shared session-status computation
+// serves all of them since NASDAQ/NYSE run identical hours — see
+// marketSessionStatus.ts's header comment for when that would need to change.
+systemHealthRouter.get("/market-status", async (_request, response) => {
+  const rows: { primaryExchange: string | null }[] = await db("positions as p")
+    .join("tickers as t", "t.id", "p.ticker_id")
+    .where("p.status", "open")
+    .distinct("t.primary_exchange as primaryExchange");
+
+  const exchangeNames = [...new Set(rows.map((row) => displayExchangeName(row.primaryExchange)))].sort();
+  const status = await computeMarketSessionStatus();
+
+  response.json({ exchanges: exchangeNames.length > 0 ? exchangeNames : ["US Markets"], state: status.state, label: status.label });
 });
 
 // Genosuke + LLM node stats. activeSessions will almost always read 0/1 in

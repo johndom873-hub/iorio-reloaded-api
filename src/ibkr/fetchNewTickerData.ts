@@ -8,6 +8,7 @@ export interface NewTickerData {
   companyName: string | null;
   sector: string | null;
   conId: number | null;
+  primaryExchange: string | null;
   impliedVolatility: number | null;
   avgOptionVolume: number | null;
 }
@@ -33,6 +34,11 @@ export interface ContractDetails {
   // same IBKR pacing/contention issue documented for fetchOptionChain.ts's
   // per-expiry strike lookups — see PROGRESS.md.
   conId: number | null;
+  // IBKR's real listing exchange (e.g. "ISLAND" = Nasdaq, "NYSE"). Immutable
+  // per symbol — captured once here, unlike trading/liquid hours which are
+  // only valid for a day or two and are fetched live (see
+  // fetchExchangeHours.ts) rather than cached on the ticker row.
+  primaryExchange: string | null;
 }
 
 // IBKR's `industry` field (GICS-style classification) is populated for
@@ -53,25 +59,38 @@ export function lookupContractDetails(
   return new Promise((resolve) => {
     let settled = false;
 
+    const emptyResult: ContractDetails = { companyName: null, sector: null, conId: null, primaryExchange: null };
+
     const onContractDetails = (
       id: number,
-      details: { longName?: string; industry?: string; category?: string; stockType?: string; contract: { conId?: number } },
+      details: {
+        longName?: string;
+        industry?: string;
+        category?: string;
+        stockType?: string;
+        contract: { conId?: number; primaryExch?: string };
+      },
     ) => {
       if (id !== reqId) return;
-      finish({ companyName: details.longName || null, sector: resolveSector(details), conId: details.contract.conId ?? null });
+      finish({
+        companyName: details.longName || null,
+        sector: resolveSector(details),
+        conId: details.contract.conId ?? null,
+        primaryExchange: details.contract.primaryExch || null,
+      });
     };
 
     const onEnd = (id: number) => {
-      if (id === reqId) finish({ companyName: null, sector: null, conId: null });
+      if (id === reqId) finish(emptyResult);
     };
 
     // e.g. an invalid/unrecognized symbol — fail fast instead of waiting out
     // the full timeout for something that will never arrive.
     const onError = (_error: Error, _code: number, id: number) => {
-      if (id === reqId) finish({ companyName: null, sector: null, conId: null });
+      if (id === reqId) finish(emptyResult);
     };
 
-    const timer = setTimeout(() => finish({ companyName: null, sector: null, conId: null }), contractDetailsTimeoutMs);
+    const timer = setTimeout(() => finish(emptyResult), contractDetailsTimeoutMs);
 
     function finish(result: ContractDetails) {
       if (settled) return;
@@ -118,7 +137,12 @@ export async function getCachedContractDetails(
 ): Promise<ContractDetails> {
   const ticker = await db("tickers").where({ symbol }).first();
   if (ticker?.ibkr_contract_id != null) {
-    return { companyName: ticker.company_name || null, sector: ticker.sector || null, conId: ticker.ibkr_contract_id };
+    return {
+      companyName: ticker.company_name || null,
+      sector: ticker.sector || null,
+      conId: ticker.ibkr_contract_id,
+      primaryExchange: ticker.primary_exchange || null,
+    };
   }
 
   const detailsPromise = lookupContractDetails(connection, reqId);
@@ -128,7 +152,12 @@ export async function getCachedContractDetails(
   if (ticker && details.conId != null) {
     await db("tickers")
       .where({ symbol })
-      .update({ ibkr_contract_id: details.conId, company_name: details.companyName, sector: details.sector });
+      .update({
+        ibkr_contract_id: details.conId,
+        company_name: details.companyName,
+        sector: details.sector,
+        primary_exchange: details.primaryExchange,
+      });
   }
 
   return details;
