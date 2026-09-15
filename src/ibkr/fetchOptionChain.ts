@@ -19,14 +19,24 @@ export interface OptionQuote {
 }
 
 // 0-60 DTE covers everything from same-week/intra-weekly expiries through
-// the covered-call/CSP monthly range. maxExpiries=6 is a hard ceiling, not a
-// tuned guess: each expiry uses at most strikesPerSide(4) x 2 sides x 2
-// rights = 16 reqMktData lines (the only lines this connection opens — the
-// pricing lookup is a snapshot and doesn't count), so 6 expiries is
-// guaranteed to stay at or under 96 of IBKR's 100-line-per-connection cap.
+// the covered-call/CSP monthly range. maxExpiries=6 x strikesPerSide(4) x 2
+// sides x 2 rights = 96 reqMktData lines (the only lines this connection
+// opens — the pricing lookup is a snapshot and doesn't count) is the target
+// budget, kept at or under 96 of IBKR's 100-line-per-connection cap.
 // pickExpiries sorts ascending and takes the first N, so the nearest
 // (weekly/intra-weekly) expiries are always the ones kept if more than 6
 // exist in the window.
+//
+// mustIncludeStrikes/alertStrikesByExpiry (see prepareOptionChainStrikes)
+// spend from this same 96-line budget rather than adding to it — regression
+// found 2026-09-15: an earlier version of this file unioned must-include
+// expiries/strikes on top of the 96-line target, which could push a given
+// connection's subscription count past IBKR's actual 100-line cap. Contracts
+// requested past that cap never receive tickPrice/tickOptionComputation
+// ticks, so their bid/ask/delta stayed null forever and their yield
+// silently rendered blank — while the must-include strikes themselves (early
+// in subscription order) kept working, which is what made it look like only
+// "regular" strikes were affected.
 const defaultMinDaysToExpiry = 0;
 const defaultMaxDaysToExpiry = 60;
 const maxExpiries = 6;
@@ -289,11 +299,17 @@ async function lookupValidStrikesForExpiry(
   rawStrikes: number[],
   spotPrice: number,
   mustIncludeStrikes: number[] = [],
+  // Reduced below the default strikesPerSide by prepareOptionChainStrikes
+  // when must-include strikes are eating into the shared 96-line budget —
+  // see that function's comment. Defaults to the normal count for every
+  // other caller (fetchOrderLegQuote.ts etc. don't pass must-include strikes
+  // at all, so this never shrinks for them).
+  nearTheMoneyCountPerSide: number = strikesPerSide,
 ): Promise<number[]> {
-  const nearTheMoneyCandidates = pickStrikes(rawStrikes, spotPrice, strikesPerSide + candidateBufferPerSide);
+  const nearTheMoneyCandidates = pickStrikes(rawStrikes, spotPrice, nearTheMoneyCountPerSide + candidateBufferPerSide);
   const candidates = Array.from(new Set([...nearTheMoneyCandidates, ...mustIncludeStrikes]));
   const validStrikes = await getCachedValidStrikes(ib, symbol, expiry, candidates);
-  const nearTheMoney = pickStrikes(validStrikes, spotPrice);
+  const nearTheMoney = pickStrikes(validStrikes, spotPrice, nearTheMoneyCountPerSide);
   const validMustInclude = validStrikes.filter((s) => mustIncludeStrikes.includes(s));
   return Array.from(new Set([...nearTheMoney, ...validMustInclude])).sort((a, b) => a - b);
 }
@@ -542,16 +558,50 @@ export async function prepareOptionChainStrikes(
   const { ib } = connection;
 
   const { expirations, strikes } = await getCachedOptionParams(ib, symbol, conId);
-  // A pending alert's expiry has to be browsable even if maxExpiries' trim
-  // would otherwise cut it — same "every alert must be visible" requirement
-  // as mustIncludeStrikes above, one level up (expiries, not just strikes
-  // within an already-kept expiry).
-  const chosenExpiries = Array.from(new Set([...pickExpiries(expirations, dteRange), ...alertStrikesByExpiry.keys()])).sort();
+
+  // A pending alert's/held position's expiry has to be browsable even if
+  // maxExpiries' trim would otherwise cut it — same "every must-include
+  // strike must be visible" requirement as mustIncludeStrikes below, one
+  // level up (expiries, not just strikes within an already-kept expiry).
+  // Must-include expiries always survive; only the remaining slots up to
+  // maxExpiries are filled with the nearest regular expiries, so this no
+  // longer just appends on top of maxExpiries (see the file-level budget
+  // comment). The one accepted edge case: more must-include expiries than
+  // maxExpiries for a single ticker at once goes over budget rather than
+  // dropping one of them — showing every held position/alert wins over the
+  // line-count margin in that rare situation.
+  const mustExpiries = Array.from(alertStrikesByExpiry.keys()).sort();
+  const regularExpiries = pickExpiries(expirations, dteRange).filter((expiry) => !alertStrikesByExpiry.has(expiry));
+  const remainingExpirySlots = Math.max(0, maxExpiries - mustExpiries.length);
+  const chosenExpiries = Array.from(new Set([...mustExpiries, ...regularExpiries.slice(0, remainingExpirySlots)])).sort();
+
+  // Spend the shared 96-line budget: reserve slots for must-include strikes
+  // first (counted pre-validation — a couple of lines' slack either way
+  // doesn't threaten the 96/100 margin), then split whatever's left evenly
+  // across the chosen expiries for the normal near-the-money picks, never
+  // exceeding the default strikesPerSide. This is what keeps must-include
+  // strikes from just piling on top of the budget the way the regression
+  // did — see the file-level comment.
+  const totalStrikeSlots = maxExpiries * strikesPerSide * 2;
+  const mustSlotsUsed = chosenExpiries.reduce((sum, expiry) => sum + (alertStrikesByExpiry.get(expiry)?.length ?? 0), 0);
+  const remainingSlotsForNearTheMoney = Math.max(0, totalStrikeSlots - mustSlotsUsed);
+  const nearTheMoneyCountPerSide =
+    chosenExpiries.length === 0
+      ? strikesPerSide
+      : Math.min(strikesPerSide, Math.floor(remainingSlotsForNearTheMoney / (chosenExpiries.length * 2)));
 
   return Promise.all(
     chosenExpiries.map(async (expiry) => ({
       expiry,
-      strikes: await lookupValidStrikesForExpiry(ib, symbol, expiry, strikes, spotPrice, alertStrikesByExpiry.get(expiry) ?? []),
+      strikes: await lookupValidStrikesForExpiry(
+        ib,
+        symbol,
+        expiry,
+        strikes,
+        spotPrice,
+        alertStrikesByExpiry.get(expiry) ?? [],
+        nearTheMoneyCountPerSide,
+      ),
     })),
   );
 }
