@@ -20,6 +20,30 @@ export type AppNotification =
   | { type: "genosuke_reply"; preview: string }
   | { type: "presence"; onlineUserIds: string[] };
 
+// Kept small — the Pulse dashboard's Latest Events panel only ever shows the
+// most recent EVENTS_LIMIT (30) on load; no need to retain history beyond a
+// comfortable buffer for that.
+const notificationEventsRetentionCount = 200;
+
 export async function publishNotification(notification: AppNotification): Promise<void> {
   await db.raw("SELECT pg_notify(?, ?)", [appNotificationsChannel, JSON.stringify(notification)]);
+
+  // "presence" is online/offline state, not a loggable event — Latest Events
+  // has nothing to show for it.
+  if (notification.type === "presence") return;
+
+  await db("notification_events").insert({ payload: JSON.stringify(notification) });
+  await db.raw(
+    `DELETE FROM notification_events WHERE id NOT IN (
+       SELECT id FROM notification_events ORDER BY occurred_at DESC LIMIT ?
+     )`,
+    [notificationEventsRetentionCount],
+  );
+}
+
+export async function fetchRecentNotificationEvents(
+  limit: number,
+): Promise<Array<{ notification: AppNotification; occurredAt: string }>> {
+  const rows = await db("notification_events").select("payload", "occurred_at").orderBy("occurred_at", "desc").limit(limit);
+  return rows.map((row) => ({ notification: row.payload as AppNotification, occurredAt: row.occurred_at.toISOString() }));
 }

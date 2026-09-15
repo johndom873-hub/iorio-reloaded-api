@@ -1,13 +1,22 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { subscribeToNotifications } from "../lib/notificationBroadcaster.js";
-import { publishNotification } from "../lib/notificationChannel.js";
+import { publishNotification, fetchRecentNotificationEvents } from "../lib/notificationChannel.js";
 import * as presenceTracker from "../lib/presenceTracker.js";
 
 export const notificationsRouter = Router();
 notificationsRouter.use(requireAuth);
 
 const heartbeatIntervalMs = 20_000;
+const recentEventsLimit = 30;
+
+// Backs the Pulse dashboard's Latest Events panel on load — the SSE stream
+// below only ever carries events from the moment a tab connects, so without
+// this the panel is always empty on a fresh page load.
+notificationsRouter.get("/recent", async (_request, response) => {
+  const events = await fetchRecentNotificationEvents(recentEventsLimit);
+  response.json({ events });
+});
 
 // Long-lived SSE stream, one per open browser tab — stays open for the
 // lifetime of the tab (BackgroundJobsContext opens it once at app mount),
