@@ -3,6 +3,7 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { generateTradeAlertCandidatesForTicker, type AlertStrategyKey, type AlertStrategySettings } from "./generateTradeAlertCandidates.js";
 import { maxAlertsPerTicker, rationaleFor, toSettings, tradeAlertStrategies } from "./runTradeAlertGeneration.js";
+import { referencedStrikesForNewTrade } from "../lib/tradeAlertReferencedStrikes.js";
 
 export interface RefreshTickerTradeAlertsResult {
   strategyKey: AlertStrategyKey;
@@ -57,6 +58,7 @@ export async function refreshTickerTradeAlerts(tickerId: string, symbol: string)
           ticker_id: tickerId,
           alert_type: "new_trade",
           suggested_structure: JSON.stringify(candidate),
+          referenced_strikes: JSON.stringify(referencedStrikesForNewTrade(candidate)),
           rationale: rationaleFor(strategyKey, symbol, candidate),
           status: "pending",
         });

@@ -65,50 +65,52 @@ async function fetchStrategyDteRange(): Promise<{ min: number; max: number }> {
   return { min, max };
 }
 
-// Approved 2026-08-26: every pending new_trade alert's strike must appear in
-// the chain, not just whatever the near-the-money window happens to catch —
-// see the mustIncludeStrikes note on lookupValidStrikesForExpiry
-// (fetchOptionChain.ts). Roll alerts were originally excluded here — the
-// frontend didn't surface them on this screen at all — but since 2026-09-15
-// a roll alert's close/replacement strikes drive an in-place order-setup
-// panel inside this same modal (TickerDetailModal.tsx), so both legs' real
-// strikes need to survive the near-the-money trim too. Found live 2026-09-15:
-// AMAT's roll (close $437.50, replacement $435) sat between the chain's
-// $2.50-spaced $432.50/$440 rows and both were silently dropped.
-async function fetchPendingAlertStrikesByExpiry(symbol: string): Promise<Map<string, number[]>> {
+// Approved 2026-08-26: every pending alert's referenced strikes must appear
+// in the chain, not just whatever the near-the-money window happens to catch
+// — see the mustIncludeStrikes note on lookupValidStrikesForExpiry
+// (fetchOptionChain.ts). Originally hand-parsed new_trade's suggested_structure
+// shape only; a roll alert's close/replacement strikes were silently dropped
+// for weeks after roll alerts started needing chain visibility (found live
+// 2026-09-15 — AMAT's roll sat between the chain's $432.50/$440 rows and both
+// legs vanished), since nothing forced a return trip to this function when
+// that changed. Now reads the type-agnostic referenced_strikes column
+// instead (populated by every alert insert/update site via
+// referencedStrikesForNewTrade/referencedStrikesForRoll,
+// lib/tradeAlertReferencedStrikes.ts) so a future alert shape can't repeat
+// this — the write side can never forget, because it's the only source this
+// query reads from.
+async function fetchMustIncludeStrikesByExpiry(symbol: string): Promise<Map<string, number[]>> {
   const byExpiry = new Map<string, number[]>();
-  function add(expiry: string, strike: number) {
-    const expiryYyyymmdd = expiry.replaceAll("-", "");
+  function add(expiryYyyymmdd: string, strike: number) {
     const strikes = byExpiry.get(expiryYyyymmdd) ?? [];
     strikes.push(strike);
     byExpiry.set(expiryYyyymmdd, strikes);
   }
 
-  const newTradeRows = await db("trade_alerts as ta")
+  const alertRows = await db("trade_alerts as ta")
     .join("tickers as t", "t.id", "ta.ticker_id")
-    .where({ "t.symbol": symbol, "ta.status": "pending", "ta.alert_type": "new_trade" })
-    .select(db.raw("ta.suggested_structure->>'expiry' as expiry"), db.raw("(ta.suggested_structure->>'strike')::numeric as strike"));
-  for (const row of newTradeRows as { expiry: string; strike: string }[]) {
-    add(row.expiry, Number(row.strike));
+    .where({ "t.symbol": symbol, "ta.status": "pending" })
+    .select(db.raw("ta.referenced_strikes as referenced_strikes"));
+  for (const row of alertRows as { referenced_strikes: { expiry: string; strike: number }[] }[]) {
+    for (const { expiry, strike } of row.referenced_strikes ?? []) {
+      add(expiry.replaceAll("-", ""), strike);
+    }
   }
 
-  const rollRows = await db("trade_alerts as ta")
-    .join("tickers as t", "t.id", "ta.ticker_id")
-    .where({ "t.symbol": symbol, "ta.status": "pending", "ta.alert_type": "roll" })
-    .select(
-      db.raw("ta.suggested_structure->'closeLeg'->>'expiry' as close_expiry"),
-      db.raw("(ta.suggested_structure->'closeLeg'->>'strike')::numeric as close_strike"),
-      db.raw("ta.suggested_structure->'replacement'->>'expiry' as replacement_expiry"),
-      db.raw("(ta.suggested_structure->'replacement'->>'strike')::numeric as replacement_strike"),
-    );
-  for (const row of rollRows as {
-    close_expiry: string;
-    close_strike: string;
-    replacement_expiry: string;
-    replacement_strike: string;
-  }[]) {
-    add(row.close_expiry, Number(row.close_strike));
-    add(row.replacement_expiry, Number(row.replacement_strike));
+  // A currently-held option leg's own strike must always be visible in its
+  // ticker's chain — independent of whether any alert happens to reference
+  // it (an alert-only source is how the roll-alert gap above went
+  // unnoticed for weeks: the position's real strike only ever showed up by
+  // coincidence, via a roll alert pointing at it). Unioned in directly from
+  // position_legs so this holds even with zero pending alerts.
+  const legRows = await db("position_legs as pl")
+    .join("positions as p", "p.id", "pl.position_id")
+    .join("tickers as t", "t.id", "p.ticker_id")
+    .where({ "t.symbol": symbol, "p.status": "open", "pl.leg_type": "option" })
+    .whereNull("pl.exit_at")
+    .select(db.raw("pl.expiry_date::text as expiry"), db.raw("pl.strike_price::numeric as strike"));
+  for (const row of legRows as { expiry: string; strike: string }[]) {
+    add(row.expiry.replaceAll("-", ""), Number(row.strike));
   }
 
   return byExpiry;
@@ -264,14 +266,14 @@ export async function streamTickerDetail(
         const spotPrice = pricing?.last ?? pricing?.previousClose;
         if (!spotPrice) throw new Error("No spot price available to select option strikes.");
 
-        const [dteRange, alertStrikesByExpiry] = await Promise.all([fetchStrategyDteRange(), fetchPendingAlertStrikesByExpiry(symbol)]);
+        const [dteRange, mustIncludeStrikesByExpiry] = await Promise.all([fetchStrategyDteRange(), fetchMustIncludeStrikesByExpiry(symbol)]);
         const expiryStrikes = await prepareOptionChainStrikes(
           connection,
           symbol,
           contractDetails.conId,
           spotPrice,
           dteRange,
-          alertStrikesByExpiry,
+          mustIncludeStrikesByExpiry,
         );
         const optionChain = await quoteOptionChain(connection, symbol, expiryStrikes, {
           onUpdate: (updatedQuotes) => onEvent({ type: "optionChain", data: updatedQuotes }),

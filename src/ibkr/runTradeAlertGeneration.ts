@@ -6,6 +6,7 @@ import { evaluateRollCandidate, type OpenShortLeg, type RollSuggestion } from ".
 import { checkAssignmentRisk } from "./checkAssignmentRisk.js";
 import { formatNewTradeAlertLine, formatRollAlertLine, formatAssignmentRiskAlertLine } from "../lib/formatTradeAlertMessage.js";
 import { publishNotification } from "../lib/notificationChannel.js";
+import { referencedStrikesForNewTrade, referencedStrikesForRoll } from "../lib/tradeAlertReferencedStrikes.js";
 
 export const tradeAlertStrategies: AlertStrategyKey[] = ["covered_call", "cash_secured_put"];
 // Exported for refreshTickerTradeAlerts.ts, which needs the identical
@@ -235,28 +236,30 @@ export async function runTradeAlertGeneration(
         continue;
       }
 
+      const closeLeg = {
+        legId: leg.legId,
+        strike: leg.strike,
+        expiry: toIsoDate(leg.expiry),
+        right: leg.right,
+        entryPrice: leg.entryPrice,
+        currentPrice: suggestion.currentPrice,
+        quantity: leg.quantity,
+        multiplier: leg.multiplier,
+      };
       await db("trade_alerts").insert({
         strategy_key: leg.strategyKey,
         ticker_id: leg.tickerId,
         alert_type: "roll",
         related_position_id: leg.positionId,
         suggested_structure: JSON.stringify({
-          closeLeg: {
-            legId: leg.legId,
-            strike: leg.strike,
-            expiry: toIsoDate(leg.expiry),
-            right: leg.right,
-            entryPrice: leg.entryPrice,
-            currentPrice: suggestion.currentPrice,
-            quantity: leg.quantity,
-            multiplier: leg.multiplier,
-          },
+          closeLeg,
           trigger: suggestion.trigger,
           dte: suggestion.dte,
           replacement: suggestion.replacement,
           netCredit: suggestion.netCredit,
           requiredMinimumCredit: suggestion.requiredMinimumCredit,
         }),
+        referenced_strikes: JSON.stringify(referencedStrikesForRoll({ closeLeg, replacement: suggestion.replacement })),
         rationale: rationaleForRoll(leg.symbol, leg, suggestion),
         status: "pending",
       });
@@ -309,6 +312,7 @@ export async function runTradeAlertGeneration(
             ticker_id: ticker.tickerId,
             alert_type: "new_trade",
             suggested_structure: JSON.stringify(candidate),
+            referenced_strikes: JSON.stringify(referencedStrikesForNewTrade(candidate)),
             rationale: rationaleFor(strategyKey, ticker.symbol, candidate),
             status: "pending",
           });

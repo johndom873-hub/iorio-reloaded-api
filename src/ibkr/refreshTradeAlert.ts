@@ -10,6 +10,7 @@ import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
 import { estimateRollCommissionComponent, halfSpread } from "../lib/rollEconomics.js";
 import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
+import { referencedStrikesForNewTrade, referencedStrikesForRoll } from "../lib/tradeAlertReferencedStrikes.js";
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
@@ -186,6 +187,7 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
 
       await db("trade_alerts").where({ id: alertId }).update({
         suggested_structure: JSON.stringify(refreshed),
+        referenced_strikes: JSON.stringify(referencedStrikesForNewTrade(refreshed)),
         rationale: rationaleForRefreshedNewTrade(strategyKey, alert.symbol, refreshed, calendarContext),
         last_refreshed_at: db.fn.now(),
       });
@@ -240,6 +242,7 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
           stillTriggered,
           stillNetCredit,
         }),
+        referenced_strikes: JSON.stringify(referencedStrikesForRoll({ closeLeg: refreshedCloseLeg, replacement: refreshedReplacement })),
         rationale: rationaleForRefreshedRoll(
           alert.symbol,
           strategyKey,
