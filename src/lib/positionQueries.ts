@@ -142,3 +142,14 @@ export async function fetchAvailableUncoveredShares(tickerId: string): Promise<n
     .first();
   return Number(result?.total ?? 0);
 }
+
+// Which strategies already have an open position on this ticker — used to
+// suppress new-trade candidate generation for a strategy that already has
+// exposure here (the ticker's own roll scan is what should surface it
+// instead). See generateTradeAlertCandidatesForTicker.
+export async function fetchOpenPositionStrategyKeys(tickerId: string): Promise<Set<string>> {
+  const rows: { strategyKey: string }[] = await db("positions")
+    .where({ ticker_id: tickerId, status: "open" })
+    .distinct("strategy_key as strategyKey");
+  return new Set(rows.map((r) => r.strategyKey));
+}

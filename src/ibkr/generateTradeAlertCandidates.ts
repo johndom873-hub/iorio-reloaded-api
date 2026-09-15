@@ -2,7 +2,7 @@ import { EventName, OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
 import { computeIvMetrics, type IvMetrics } from "../lib/ivMetrics.js";
-import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
+import { fetchAvailableUncoveredShares, fetchOpenPositionStrategyKeys } from "../lib/positionQueries.js";
 import {
   computeMovingAverages,
   computeSupportResistance,
@@ -440,20 +440,35 @@ export async function generateTradeAlertCandidatesForTicker(
   }
   const spotPrice = prep.spotPrice;
 
-  // covered_call new-trade candidates use the existing-position delta range
-  // instead of the generic one when the account already owns enough
-  // uncovered shares of this ticker to write a real covered call against —
-  // otherwise this is a buy-write/hypothetical scan and the generic range
-  // still applies.
+  // A ticker that already has an open position for a strategy shouldn't also
+  // get new-trade alerts for that same strategy — once there's exposure, the
+  // roll scan (runTradeAlertGeneration.ts's separate per-leg pass) is what's
+  // supposed to surface actionable suggestions for it, not another "open a
+  // new position" candidate. Approved 2026-09-15.
   const coveredCallSettings = settingsByStrategy.get("covered_call");
+  const [uncoveredShares, openPositionStrategies] = await Promise.all([
+    fetchAvailableUncoveredShares(tickerId),
+    fetchOpenPositionStrategyKeys(tickerId),
+  ]);
+
   let effectiveSettingsByStrategy = settingsByStrategy;
-  if (
-    coveredCallSettings &&
-    coveredCallSettings.deltaTargetMinExistingPosition !== null &&
-    coveredCallSettings.deltaTargetMaxExistingPosition !== null
-  ) {
-    const uncoveredShares = await fetchAvailableUncoveredShares(tickerId);
-    if (uncoveredShares >= sharesPerContract) {
+
+  // covered_call is the one strategy where "already has a position" doesn't
+  // by itself mean "no room" — shares beyond what's already covered
+  // (uncoveredShares) can still back a fresh contract. Only suppress when an
+  // open covered_call position exists AND there's no uncovered capacity left;
+  // otherwise keep today's behavior of using the existing-position delta
+  // range once there's ≥1 contract's worth of uncovered shares to write
+  // against.
+  if (coveredCallSettings) {
+    if (openPositionStrategies.has("covered_call") && uncoveredShares < sharesPerContract) {
+      effectiveSettingsByStrategy = new Map(settingsByStrategy);
+      effectiveSettingsByStrategy.delete("covered_call");
+    } else if (
+      uncoveredShares >= sharesPerContract &&
+      coveredCallSettings.deltaTargetMinExistingPosition !== null &&
+      coveredCallSettings.deltaTargetMaxExistingPosition !== null
+    ) {
       effectiveSettingsByStrategy = new Map(settingsByStrategy);
       effectiveSettingsByStrategy.set("covered_call", {
         ...coveredCallSettings,
@@ -461,6 +476,13 @@ export async function generateTradeAlertCandidatesForTicker(
         deltaTargetMax: coveredCallSettings.deltaTargetMaxExistingPosition,
       });
     }
+  }
+
+  // cash_secured_put has no partial-coverage concept — any open CSP position
+  // on this ticker means "already have exposure," full stop.
+  if (openPositionStrategies.has("cash_secured_put") && effectiveSettingsByStrategy.has("cash_secured_put")) {
+    if (effectiveSettingsByStrategy === settingsByStrategy) effectiveSettingsByStrategy = new Map(settingsByStrategy);
+    effectiveSettingsByStrategy.delete("cash_secured_put");
   }
 
   const preps = (
