@@ -68,21 +68,49 @@ async function fetchStrategyDteRange(): Promise<{ min: number; max: number }> {
 // Approved 2026-08-26: every pending new_trade alert's strike must appear in
 // the chain, not just whatever the near-the-money window happens to catch —
 // see the mustIncludeStrikes note on lookupValidStrikesForExpiry
-// (fetchOptionChain.ts). Roll alerts are excluded — the frontend doesn't
-// flag them on this screen (see TickerDetailModal.tsx's newTradeAlerts()).
+// (fetchOptionChain.ts). Roll alerts were originally excluded here — the
+// frontend didn't surface them on this screen at all — but since 2026-09-15
+// a roll alert's close/replacement strikes drive an in-place order-setup
+// panel inside this same modal (TickerDetailModal.tsx), so both legs' real
+// strikes need to survive the near-the-money trim too. Found live 2026-09-15:
+// AMAT's roll (close $437.50, replacement $435) sat between the chain's
+// $2.50-spaced $432.50/$440 rows and both were silently dropped.
 async function fetchPendingAlertStrikesByExpiry(symbol: string): Promise<Map<string, number[]>> {
-  const rows = await db("trade_alerts as ta")
+  const byExpiry = new Map<string, number[]>();
+  function add(expiry: string, strike: number) {
+    const expiryYyyymmdd = expiry.replaceAll("-", "");
+    const strikes = byExpiry.get(expiryYyyymmdd) ?? [];
+    strikes.push(strike);
+    byExpiry.set(expiryYyyymmdd, strikes);
+  }
+
+  const newTradeRows = await db("trade_alerts as ta")
     .join("tickers as t", "t.id", "ta.ticker_id")
     .where({ "t.symbol": symbol, "ta.status": "pending", "ta.alert_type": "new_trade" })
     .select(db.raw("ta.suggested_structure->>'expiry' as expiry"), db.raw("(ta.suggested_structure->>'strike')::numeric as strike"));
-
-  const byExpiry = new Map<string, number[]>();
-  for (const row of rows as { expiry: string; strike: string }[]) {
-    const expiryYyyymmdd = row.expiry.replaceAll("-", "");
-    const strikes = byExpiry.get(expiryYyyymmdd) ?? [];
-    strikes.push(Number(row.strike));
-    byExpiry.set(expiryYyyymmdd, strikes);
+  for (const row of newTradeRows as { expiry: string; strike: string }[]) {
+    add(row.expiry, Number(row.strike));
   }
+
+  const rollRows = await db("trade_alerts as ta")
+    .join("tickers as t", "t.id", "ta.ticker_id")
+    .where({ "t.symbol": symbol, "ta.status": "pending", "ta.alert_type": "roll" })
+    .select(
+      db.raw("ta.suggested_structure->'closeLeg'->>'expiry' as close_expiry"),
+      db.raw("(ta.suggested_structure->'closeLeg'->>'strike')::numeric as close_strike"),
+      db.raw("ta.suggested_structure->'replacement'->>'expiry' as replacement_expiry"),
+      db.raw("(ta.suggested_structure->'replacement'->>'strike')::numeric as replacement_strike"),
+    );
+  for (const row of rollRows as {
+    close_expiry: string;
+    close_strike: string;
+    replacement_expiry: string;
+    replacement_strike: string;
+  }[]) {
+    add(row.close_expiry, Number(row.close_strike));
+    add(row.replacement_expiry, Number(row.replacement_strike));
+  }
+
   return byExpiry;
 }
 
