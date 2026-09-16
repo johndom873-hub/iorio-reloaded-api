@@ -400,6 +400,14 @@ export interface UnrealizedPnlResult {
   // and predates the split being captured (added 2026-09-08).
   unrealizedPremiumPnl: number | null;
   unrealizedStockPnl: number | null;
+  // Current market value of the open stock leg only (covered calls hold
+  // shares; CSPs have no stock leg, so this is always 0 for them) — for
+  // Iorio Pulse's "Total equity" (total value held in stocks) aggregate.
+  // Unlike the PnL fields above, this has no position_pnl_snapshots
+  // fallback (that table only stores PnL deltas, not market value), so it's
+  // null whenever live pricing is unavailable, even if unrealizedPnl itself
+  // fell back to a snapshot.
+  stockMarketValue: number | null;
   // Set only when unrealizedPnl came from position_pnl_snapshots instead of
   // a live IBKR quote (see the fallback note below) — the date that
   // snapshot was captured, so the UI can label it "as of <date>" rather
@@ -478,10 +486,12 @@ positionsRouter.get("/pnl", async (request, response) => {
   const unrealizedByPositionId: Record<string, number | null> = {};
   const premiumByPositionId: Record<string, number | null> = {};
   const stockByPositionId: Record<string, number | null> = {};
+  const stockMarketValueByPositionId: Record<string, number | null> = {};
   for (const positionId of positionIds) {
     unrealizedByPositionId[positionId] = 0;
     premiumByPositionId[positionId] = 0;
     stockByPositionId[positionId] = 0;
+    stockMarketValueByPositionId[positionId] = 0;
   }
 
   for (const leg of legRows) {
@@ -491,6 +501,7 @@ positionsRouter.get("/pnl", async (request, response) => {
       unrealizedByPositionId[leg.positionId] = null;
       premiumByPositionId[leg.positionId] = null;
       stockByPositionId[leg.positionId] = null;
+      stockMarketValueByPositionId[leg.positionId] = null;
       continue;
     }
     const sign = leg.side === "short" ? -1 : 1;
@@ -501,6 +512,7 @@ positionsRouter.get("/pnl", async (request, response) => {
       premiumByPositionId[leg.positionId] = (premiumByPositionId[leg.positionId] ?? 0) + legPnl;
     } else {
       stockByPositionId[leg.positionId] = (stockByPositionId[leg.positionId] ?? 0) + legPnl;
+      stockMarketValueByPositionId[leg.positionId] = (stockMarketValueByPositionId[leg.positionId] ?? 0) + currentPrice * leg.quantity;
     }
   }
 
@@ -542,6 +554,7 @@ positionsRouter.get("/pnl", async (request, response) => {
         unrealizedPnl,
         unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null,
         unrealizedStockPnl: stockByPositionId[positionId] ?? null,
+        stockMarketValue: stockMarketValueByPositionId[positionId] ?? null,
         asOfDate: null,
       };
       continue;
@@ -555,9 +568,11 @@ positionsRouter.get("/pnl", async (request, response) => {
           // snapshot", same as the whole-position figure being unavailable.
           unrealizedPremiumPnl: fallback.premiumPnl === null ? null : Number(fallback.premiumPnl),
           unrealizedStockPnl: fallback.stockPnl === null ? null : Number(fallback.stockPnl),
+          // position_pnl_snapshots stores PnL deltas only, never market value.
+          stockMarketValue: null,
           asOfDate: fallback.snapshotDate,
         }
-      : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, asOfDate: null };
+      : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, asOfDate: null };
   }
 
   response.json(result);
@@ -635,10 +650,12 @@ positionsRouter.get("/pnl/stream", async (request, response) => {
     const unrealizedByPositionId: Record<string, number | null> = {};
     const premiumByPositionId: Record<string, number | null> = {};
     const stockByPositionId: Record<string, number | null> = {};
+    const stockMarketValueByPositionId: Record<string, number | null> = {};
     for (const positionId of positionIds) {
       unrealizedByPositionId[positionId] = 0;
       premiumByPositionId[positionId] = 0;
       stockByPositionId[positionId] = 0;
+      stockMarketValueByPositionId[positionId] = 0;
     }
     for (const leg of legRows) {
       if (unrealizedByPositionId[leg.positionId] === null) continue;
@@ -647,6 +664,7 @@ positionsRouter.get("/pnl/stream", async (request, response) => {
         unrealizedByPositionId[leg.positionId] = null;
         premiumByPositionId[leg.positionId] = null;
         stockByPositionId[leg.positionId] = null;
+        stockMarketValueByPositionId[leg.positionId] = null;
         continue;
       }
       const sign = leg.side === "short" ? -1 : 1;
@@ -657,9 +675,10 @@ positionsRouter.get("/pnl/stream", async (request, response) => {
         premiumByPositionId[leg.positionId] = (premiumByPositionId[leg.positionId] ?? 0) + legPnl;
       } else {
         stockByPositionId[leg.positionId] = (stockByPositionId[leg.positionId] ?? 0) + legPnl;
+        stockMarketValueByPositionId[leg.positionId] = (stockMarketValueByPositionId[leg.positionId] ?? 0) + currentPrice * leg.quantity;
       }
     }
-    return { unrealizedByPositionId, premiumByPositionId, stockByPositionId };
+    return { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId };
   }
 
   let isFirstEvent = true;
@@ -679,7 +698,7 @@ positionsRouter.get("/pnl/stream", async (request, response) => {
     await streamLivePrices(
       priceContracts,
       serializeAsyncCalls(async (pricesByLegId) => {
-        const { unrealizedByPositionId, premiumByPositionId, stockByPositionId } = computeUnrealized(pricesByLegId);
+        const { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId } = computeUnrealized(pricesByLegId);
 
         if (!isFirstEvent) {
           for (const positionId of positionIds) {
@@ -689,6 +708,7 @@ positionsRouter.get("/pnl/stream", async (request, response) => {
               unrealizedPnl,
               unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null,
               unrealizedStockPnl: stockByPositionId[positionId] ?? null,
+              stockMarketValue: stockMarketValueByPositionId[positionId] ?? null,
               asOfDate: null,
             };
           }
@@ -729,7 +749,13 @@ positionsRouter.get("/pnl/stream", async (request, response) => {
         for (const positionId of positionIds) {
           const unrealizedPnl = unrealizedByPositionId[positionId] ?? null;
           if (unrealizedPnl !== null) {
-            lastGoodResult[positionId] = { unrealizedPnl, unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null, unrealizedStockPnl: stockByPositionId[positionId] ?? null, asOfDate: null };
+            lastGoodResult[positionId] = {
+              unrealizedPnl,
+              unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null,
+              unrealizedStockPnl: stockByPositionId[positionId] ?? null,
+              stockMarketValue: stockMarketValueByPositionId[positionId] ?? null,
+              asOfDate: null,
+            };
             continue;
           }
           const fallback = fallbackByPositionId.get(positionId);
@@ -738,9 +764,10 @@ positionsRouter.get("/pnl/stream", async (request, response) => {
                 unrealizedPnl: Number(fallback.unrealizedPnl),
                 unrealizedPremiumPnl: fallback.premiumPnl === null ? null : Number(fallback.premiumPnl),
                 unrealizedStockPnl: fallback.stockPnl === null ? null : Number(fallback.stockPnl),
+                stockMarketValue: null,
                 asOfDate: fallback.snapshotDate,
               }
-            : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, asOfDate: null };
+            : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, asOfDate: null };
         }
         send(lastGoodResult);
       }),
