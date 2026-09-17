@@ -5,6 +5,7 @@ import { runTradeAlertGeneration } from "../ibkr/runTradeAlertGeneration.js";
 import { refreshTradeAlert } from "../ibkr/refreshTradeAlert.js";
 import { refreshTickerTradeAlerts } from "../ibkr/refreshTickerTradeAlerts.js";
 import { runJob, JobAlreadyRunningError } from "../lib/runJob.js";
+import { streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 
 const tradeAlertSelect = `
   SELECT
@@ -200,6 +201,58 @@ tradeAlertsRouter.get("/run-stream", async (request, response) => {
   } finally {
     clearInterval(heartbeat);
     response.end();
+  }
+});
+
+// Live current price for whatever symbols the Trade Alerts page currently
+// has grouped on screen — added per Juan's 2026-09-17 ask to show current
+// price next to the ticker name. Deliberately takes `symbols` from the
+// client instead of re-deriving them from status/strategy filters here:
+// the page already computed exactly the right set (new_trade tickers +
+// roll-alert tickers, which can include a closed-out-of-the-shortlist
+// position), so duplicating that WHERE logic server-side would just be
+// another way for the two to drift. No historical-close comparison here
+// (unlike price-performance's version) — just the live price itself; the
+// frontend colors it tick-to-tick via TickColoredPrice with no seeded
+// reference. Same SSE/one-shot-connection pattern as
+// price-performance.ts's current-prices/stream.
+tradeAlertsRouter.get("/current-prices/stream", async (request, response) => {
+  const symbolsParam = (request.query.symbols as string | undefined) ?? "";
+  const symbols = Array.from(new Set(symbolsParam.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)));
+
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.on("error", () => {});
+
+  const send = (data: unknown) => {
+    if (response.writableEnded) return;
+    response.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(": ping\n\n");
+  }, heartbeatIntervalMs);
+
+  if (symbols.length === 0) {
+    send({});
+    clearInterval(heartbeat);
+    response.end();
+    return;
+  }
+
+  const abortController = new AbortController();
+  request.on("close", () => abortController.abort());
+
+  const priceContracts: PriceContract[] = symbols.map((symbol) => ({ key: symbol, legType: "stock", symbol }));
+
+  try {
+    await streamLivePrices(priceContracts, (pricesBySymbol) => send(pricesBySymbol), abortController.signal);
+  } catch (error) {
+    console.error("trade-alerts/current-prices/stream: streamLivePrices failed", error);
+  } finally {
+    clearInterval(heartbeat);
+    if (!response.writableEnded) response.end();
   }
 });
 
