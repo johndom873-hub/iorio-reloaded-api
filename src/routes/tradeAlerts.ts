@@ -90,7 +90,7 @@ tradeAlertsRouter.get("/", async (request, response) => {
            (ta.suggested_structure->>'annualizedYield')::numeric,
            (ta.suggested_structure->'replacement'->>'annualizedYield')::numeric
          ) DESC`
-      : `MAX(ta.created_at) OVER (PARTITION BY t.id) DESC, t.symbol, (ta.suggested_structure->>'annualizedYield')::numeric DESC`;
+      : `t.symbol, (ta.suggested_structure->>'annualizedYield')::numeric DESC`;
   const limitClause = limit !== null ? `LIMIT ${limit}` : "";
 
   const result = await db.raw(
