@@ -12,3 +12,4 @@ tmp/
 /*.png
 /*.jpg
 /*.jpeg
+.claude/settings.json
