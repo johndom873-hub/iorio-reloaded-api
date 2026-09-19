@@ -20,38 +20,16 @@ export interface PriceContract {
 // happened to arrive.
 const snapshotTimeoutMs = 6_000;
 
-// Two separate slots per contract instead of one overwritten number.
-// Found 2026-09-18 (tmp/probePriceModesForOpenPositions.ts): FROZEN mode
-// delivers last (tick 4/68) AND close (tick 9/75) for every contract, and
-// close is the PREVIOUS session's close, not today's. Keeping only the
-// most recent tick let the close overwrite the last, so stocks were priced
-// at yesterday's close (AAOI 98.06 shown while last was 104.90). Arrival
-// order is not reliable either (an option's close can arrive before its
-// last), so the choice is made from the slots, never from arrival order.
-interface PriceSlots {
-  last?: number;
-  close?: number;
-}
-
+// Only `last` is ever used as a price (decided 2026-09-19). IBKR also sends
+// the PREVIOUS session's close (tick 9/75) with every FROZEN reading; it was
+// once accepted as a fallback for contracts with no last, but it is
+// yesterday's number — worse than showing nothing — and, because it arrives
+// right after the last, a last-tick-wins handler priced stocks at
+// yesterday's close (AAOI 98.06 shown while last was 104.90, found
+// 2026-09-18). A contract with no last is simply null.
+// Real-time last=4, delayed last=68 — see fetchOptionChain.ts's comment on
+// why both are accepted.
 const lastTickTypes = [4, 68];
-const closeTickTypes = [9, 75];
-
-function recordPriceTick(slots: PriceSlots, tickType: number, price: number): boolean {
-  if (lastTickTypes.includes(tickType)) {
-    slots.last = price;
-    return true;
-  }
-  if (closeTickTypes.includes(tickType)) {
-    slots.close = price;
-    return true;
-  }
-  return false;
-}
-
-// last if present, otherwise the prior close, otherwise nothing.
-function pickPrice(slots: PriceSlots | undefined): number | null {
-  return slots?.last ?? slots?.close ?? null;
-}
 
 function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: PriceContract[]): Promise<Record<string, number | null>> {
   // FROZEN, not REALTIME — same reasoning as streamLivePrices' phase 1 below:
@@ -62,7 +40,7 @@ function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: Pr
   // whole position — see fetchLivePrices' own header comment.
   ib.reqMarketDataType(MarketDataType.FROZEN);
 
-  const slotsByKey = new Map<string, PriceSlots>();
+  const priceByKey = new Map<string, number | null>();
   const reqIdToContract = new Map<number, PriceContract>();
   // Tracks contracts still waiting — lets the wait below resolve as soon as
   // every requested contract is done, rather than a fixed timer. A contract
@@ -89,20 +67,9 @@ function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: Pr
   function onTickPrice(reqId: number, tickType: number, price: number) {
     const contract = reqIdToContract.get(reqId);
     if (!contract || price <= 0) return;
-    // Real-time last=4, delayed last=68 — see fetchOptionChain.ts's comment
-    // on why both are accepted. Close=9/75 covers FROZEN mode, which reports
-    // the prior close when nothing has traded yet today (same tick types
-    // streamLivePrices' frozen phase accepts).
-    const slots = slotsByKey.get(contract.key)!;
-    if (!recordPriceTick(slots, tickType, price)) return;
-    // A stock is done once it has its last (or tickSnapshotEnd, below —
-    // IBKR reliably sends that for stocks): a lone close must not end the
-    // wait, or the prior close would be returned instead of today's last.
-    // An option is done on either value — IBKR sends no completion signal
-    // for options, so waiting for a last that a thin option may never have
-    // would cost the whole ceiling. If both ticks arrive in the same burst
-    // (they normally do) last wins regardless of order.
-    if (slots.last !== undefined || contract.legType === "option") markDone(reqId);
+    if (!lastTickTypes.includes(tickType)) return;
+    priceByKey.set(contract.key, price);
+    markDone(reqId);
   }
 
   function onTickSnapshotEnd(reqId: number) {
@@ -127,7 +94,7 @@ function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: Pr
         const reqId = allocateReqId();
         reqIdToContract.set(reqId, contract);
         pendingReqIds.add(reqId);
-        slotsByKey.set(contract.key, {});
+        priceByKey.set(contract.key, null);
         const ibContract: Contract =
           contract.legType === "stock"
             ? new Stock(contract.symbol, "SMART", "USD")
@@ -144,7 +111,7 @@ function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: Pr
         };
       });
 
-      return Object.fromEntries(contracts.map((contract) => [contract.key, pickPrice(slotsByKey.get(contract.key))]));
+      return Object.fromEntries(priceByKey);
     } finally {
       for (const reqId of reqIdToContract.keys()) {
         ib.cancelMktData(reqId);
@@ -221,6 +188,9 @@ const frozenGraceMs = 3_000;
  * actually changes, for as long as `signal` stays unaborted. The frozen
  * emission is clearly non-live; callers should treat it as a starting point
  * to upgrade from, not a live figure, until a post-frozen update arrives.
+ * `status.frozenPhaseComplete` is false until the frozen phase has ended, so
+ * a caller that would rather not show a partially-priced first reading can
+ * hold back until every contract has a price or that flag turns true.
  *
  * Always opens its own one-shot connection (not the shared read
  * connection) — a stream is held open for the caller's whole SSE session,
@@ -230,7 +200,7 @@ const frozenGraceMs = 3_000;
  */
 export async function streamLivePrices(
   contracts: PriceContract[],
-  onUpdate: (prices: Record<string, number | null>) => void,
+  onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void,
   signal: AbortSignal,
 ): Promise<void> {
   if (contracts.length === 0) return;
@@ -239,35 +209,22 @@ export async function streamLivePrices(
   const { ib } = connection;
 
   const priceByKey = new Map<string, number | null>();
-  const slotsByKey = new Map<string, PriceSlots>();
-  contracts.forEach((contract) => {
-    priceByKey.set(contract.key, null);
-    slotsByKey.set(contract.key, {});
-  });
+  contracts.forEach((contract) => priceByKey.set(contract.key, null));
   const reqIdToContract = new Map<number, PriceContract>();
   const allReqIds = new Set<number>();
   let nextReqId = 1;
-  // While true (the frozen phase), a contract whose only value so far is
-  // the prior close is not emitted — its last normally lands in the same
-  // burst, and emitting the close first would flash yesterday's price on
-  // screen (and trigger the live-value flash) before correcting. Once the
-  // frozen phase ends, whatever is still close-only is emitted as the
-  // fallback (see the end of phase 1 below).
-  let holdBackCloseOnlyValues = true;
+  // False until the frozen phase has ended — reported to the caller so it
+  // can hold back a partially-priced first reading (see streamLivePrices'
+  // header comment).
+  let frozenPhaseComplete = false;
 
   function onTickPrice(reqId: number, tickType: number, price: number) {
     const contract = reqIdToContract.get(reqId);
     if (!contract || price <= 0) return;
-    // Real-time last=4, delayed last=68, close=9/75 — see PriceSlots above:
-    // a close only fills the price while no last has been seen, and never
-    // replaces one.
-    if (!recordPriceTick(slotsByKey.get(contract.key)!, tickType, price)) return;
-    const slots = slotsByKey.get(contract.key)!;
-    if (holdBackCloseOnlyValues && slots.last === undefined) return;
-    const pickedPrice = pickPrice(slots);
-    if (priceByKey.get(contract.key) === pickedPrice) return;
-    priceByKey.set(contract.key, pickedPrice);
-    onUpdate(Object.fromEntries(priceByKey));
+    if (!lastTickTypes.includes(tickType)) return;
+    if (priceByKey.get(contract.key) === price) return;
+    priceByKey.set(contract.key, price);
+    onUpdate(Object.fromEntries(priceByKey), { frozenPhaseComplete });
   }
 
   function onError(error: Error, code: number, reqId: number) {
@@ -292,9 +249,8 @@ export async function streamLivePrices(
       ib.reqMktData(reqId, buildContract(contract), "", true, false);
     }
     await new Promise((resolve) => setTimeout(resolve, frozenGraceMs));
-    holdBackCloseOnlyValues = false;
-    contracts.forEach((contract) => priceByKey.set(contract.key, pickPrice(slotsByKey.get(contract.key))));
-    onUpdate(Object.fromEntries(priceByKey));
+    frozenPhaseComplete = true;
+    onUpdate(Object.fromEntries(priceByKey), { frozenPhaseComplete });
 
     if (signal.aborted) return;
 

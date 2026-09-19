@@ -169,5 +169,20 @@ export async function streamPositionExposures(onUpdate: (rows: PositionExposureR
     return;
   }
 
-  await streamLivePrices(legsToPriceContracts(legs), (pricesByKey) => onUpdate(computeExposureRows(positions, legs, pricesByKey)), signal);
+  // Hold the first reading until every leg has a price or the frozen phase
+  // has ended (approved 2026-09-19). Without this, legs not yet priced fall
+  // back to entry_price and the first ~0.5s shows wrong totals that then
+  // jump (Dashboard covered calls read 29,443 -> 29,725). After the first
+  // reading every update goes out as before.
+  let hasEmitted = false;
+  await streamLivePrices(
+    legsToPriceContracts(legs),
+    (pricesByKey, { frozenPhaseComplete }) => {
+      const everyLegPriced = legs.every((_, index) => pricesByKey[String(index)] !== null && pricesByKey[String(index)] !== undefined);
+      if (!hasEmitted && !everyLegPriced && !frozenPhaseComplete) return;
+      hasEmitted = true;
+      onUpdate(computeExposureRows(positions, legs, pricesByKey));
+    },
+    signal,
+  );
 }
