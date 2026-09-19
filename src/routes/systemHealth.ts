@@ -101,16 +101,16 @@ function displayExchangeName(primaryExchange: string | null): string {
   return exchangeDisplayNames[primaryExchange] ?? primaryExchange;
 }
 
-// Real exchanges the current book actually trades on (via tickers.primary_exchange,
-// captured at ticker-creation time from IBKR's contract data), not a
-// hardcoded "NASDAQ · NYSE" label. One shared session-status computation
+// Every exchange any tracked ticker lists on (via tickers.primary_exchange,
+// captured at ticker-creation time from IBKR's contract data), not just the
+// ones with an open position right now, and not a hardcoded "NASDAQ · NYSE"
+// label. One shared session-status computation
 // serves all of them since NASDAQ/NYSE run identical hours — see
 // marketSessionStatus.ts's header comment for when that would need to change.
 systemHealthRouter.get("/market-status", async (_request, response) => {
-  const rows: { primaryExchange: string | null }[] = await db("positions as p")
-    .join("tickers as t", "t.id", "p.ticker_id")
-    .where("p.status", "open")
-    .distinct("t.primary_exchange as primaryExchange");
+  const rows: { primaryExchange: string | null }[] = await db("tickers")
+    .whereNotNull("primary_exchange")
+    .distinct("primary_exchange as primaryExchange");
 
   const exchangeNames = [...new Set(rows.map((row) => displayExchangeName(row.primaryExchange)))].sort();
   const status = await computeMarketSessionStatus();
