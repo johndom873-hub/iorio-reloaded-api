@@ -1,9 +1,15 @@
 import { db } from "../db/connection.js";
 import { runJob } from "./runJob.js";
 
-const DAILY_JOB_NAMES = ["daily_market_data_capture", "daily_pnl_snapshot", "trade_alert_generation"] as const;
+const DAILY_JOB_NAMES = [
+  "daily_market_data_capture",
+  "daily_pnl_snapshot",
+  "trade_alert_generation",
+  "daily_calendar_capture",
+  "daily_screener_scan",
+] as const;
 const IBKR_HEALTH_CHECK_JOB_NAME = "ibkr_health_check";
-const IBKR_HEALTH_CHECK_WINDOW_MS = 2 * 60 * 60 * 1000;
+const IBKR_HEALTH_CHECK_WINDOW_MS = 30 * 60 * 1000;
 const STUCK_RUNNING_THRESHOLD_MS = 30 * 60 * 1000;
 
 /**
@@ -42,7 +48,7 @@ export async function runWatchdogCheck(): Promise<void> {
       .where("started_at", ">=", new Date(now.getTime() - IBKR_HEALTH_CHECK_WINDOW_MS))
       .first();
     if (!recentHealthCheck) {
-      problems.push(`${IBKR_HEALTH_CHECK_JOB_NAME} has not run in the last 2 hours`);
+      problems.push(`${IBKR_HEALTH_CHECK_JOB_NAME} has not run in the last 30 minutes`);
     }
 
     const stuckRunningJobs = await db("job_runs")

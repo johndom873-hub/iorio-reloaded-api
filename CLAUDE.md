@@ -1,7 +1,7 @@
 # Iorio Reloaded — Options Trading System
 
 ## What this is
-Multi-strategy options trading platform for a business user (non-developer, has a developer friend for occasional consult). Node.js backend, React frontend, Postgres (Heroku, Essential-1 plan), hosted on Heroku (separate front-end/back-end apps, Eco dynos to start). First strategy: covered calls / cash-secured puts (scope to be confirmed).
+Multi-strategy options trading platform for a business user (non-developer, has a developer friend for occasional consult). Node.js backend, React frontend, Postgres (Heroku, Essential-1 plan), hosted on Heroku (separate front-end/back-end apps, backend on a Basic web dyno, frontend on Eco). First strategy: covered calls / cash-secured puts (scope to be confirmed).
 
 ## Working agreements (do not deviate without asking)
 - **Ask before deciding.** Never assume design, behaviour, or approach. Always present a recommendation with pros/cons/caveats and let the user choose.
