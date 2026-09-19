@@ -84,6 +84,20 @@ export interface CycleTimelineRow {
   bucket: CycleBucket;
   premium: number;
   stock: number;
+  instrument: "stock" | "option";
+  /** Shares-equivalent, always positive (1 contract = 100); the label says whether it was sold, bought or handed over. */
+  quantity: number;
+  /** Option strike; null for stock rows. */
+  strike: number | null;
+  /** Underlying price: the real fill for a stock trade, else that date's daily close (the only stock price we store for option fills). */
+  stockPrice: number | null;
+}
+
+interface RowMeta {
+  instrument: "stock" | "option";
+  quantity: number;
+  strike: number | null;
+  stockPrice: number | null;
 }
 
 export interface Cycle {
@@ -120,6 +134,7 @@ interface RawEvent {
   kind: "buy" | "sell" | "putAssigned" | "callAssigned" | "optionOpen" | "optionClose";
   shares: number;
   price: number; // per share actual cost/proceeds incl. commission for buys/sells; strike for assignments
+  fillPrice?: number; // the raw stock fill, without commission
   leg?: CycleOptionLeg;
   expiryClose?: number | null;
 }
@@ -189,7 +204,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
   const events: RawEvent[] = [];
   for (const trade of stockTrades) {
     const perShare = trade.side === "buy" ? (trade.quantity * trade.price + trade.commission) / trade.quantity : (trade.quantity * trade.price - trade.commission) / trade.quantity;
-    events.push({ at: trade.at.getTime(), kind: trade.side === "buy" ? "buy" : "sell", shares: trade.quantity, price: perShare });
+    events.push({ at: trade.at.getTime(), kind: trade.side === "buy" ? "buy" : "sell", shares: trade.quantity, price: perShare, fillPrice: trade.price });
   }
   for (const leg of optionLegs) {
     events.push({ at: leg.entryAt.getTime(), kind: "optionOpen", shares: leg.quantity * leg.multiplier, price: 0, leg });
@@ -216,10 +231,10 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
   let openCallShares = 0;
   let netPremium = 0;
 
-  const addRow = (at: number | null, label: string, bucket: CycleBucket, premium: number, stock: number) => {
+  const addRow = (at: number | null, label: string, bucket: CycleBucket, premium: number, stock: number, meta: RowMeta) => {
     buckets[bucket].premium += premium;
     buckets[bucket].stock += stock;
-    timeline.push({ at: at === null ? null : new Date(at), label, bucket, premium, stock });
+    timeline.push({ at: at === null ? null : new Date(at), label, bucket, premium, stock, ...meta });
   };
   const closeFor = (at: number): number | null => {
     // A weekend/holiday timestamp naturally values at the previous close, so that is not a data problem.
@@ -247,7 +262,16 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
         const taken = Math.min(remaining, pools[pool].shares);
         if (taken <= 0) continue;
         const stockPnl = taken * (event.price - pools[pool].ref);
-        addRow(event.at, event.kind === "sell" ? `Sold ${taken} sh @ ${event.price.toFixed(2)}` : `${taken} sh called away at $${event.price}`, pool === "cc" ? "cc" : "unstructured", 0, stockPnl);
+        addRow(
+          event.at,
+          event.kind === "sell" ? "Sold shares" : "Call assigned: shares called away at the strike",
+          pool === "cc" ? "cc" : "unstructured",
+          0,
+          stockPnl,
+          event.kind === "sell"
+            ? { instrument: "stock", quantity: taken, strike: null, stockPrice: event.fillPrice ?? event.price }
+            : { instrument: "option", quantity: taken, strike: event.price, stockPrice: event.expiryClose ?? null },
+        );
         pools[pool].shares -= taken;
         remaining -= taken;
       }
@@ -257,15 +281,17 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     // 3b. Acquisitions enter the Unstructured pool at their real cost; an assigned put charges the CSP bucket first.
     let purchasedShares = 0;
     let purchaseCostTotal = 0;
+    const groupBuys: RawEvent[] = [];
     for (const event of group.filter((e) => e.kind === "buy" || e.kind === "putAssigned")) {
       if (event.kind === "putAssigned") {
         const marketPrice = event.expiryClose!;
-        addRow(event.at, `Put $${event.price} assigned: ${event.shares} sh (close ${marketPrice.toFixed(2)})`, "csp", 0, event.shares * (marketPrice - event.price));
+        addRow(event.at, "Put assigned: shares bought at the strike", "csp", 0, event.shares * (marketPrice - event.price), { instrument: "option", quantity: event.shares, strike: event.price, stockPrice: marketPrice });
         enterPool("unstructured", event.shares, marketPrice);
       } else {
         enterPool("unstructured", event.shares, event.price);
         purchasedShares += event.shares;
         purchaseCostTotal += event.shares * event.price;
+        groupBuys.push(event);
       }
     }
 
@@ -275,17 +301,17 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       const bucket: CycleBucket = leg.optionType === "put" ? "csp" : "cc";
       const sign = leg.side === "short" ? 1 : -1;
       const contractShares = leg.quantity * leg.multiplier;
-      const name = `${leg.quantity}x $${leg.strike} ${leg.optionType}`;
+      const optionMeta: RowMeta = { instrument: "option", quantity: contractShares, strike: leg.strike, stockPrice: closeFor(event.at) };
       if (event.kind === "optionOpen") {
         const credit = sign * leg.entryPrice * contractShares;
         netPremium += credit;
-        addRow(event.at, `${sign === 1 ? "Sold" : "Bought"} ${name} @ ${leg.entryPrice.toFixed(2)}`, bucket, credit, 0);
+        addRow(event.at, `${sign === 1 ? "Sold" : "Bought"} ${leg.optionType} @ ${leg.entryPrice.toFixed(2)}`, bucket, credit, 0, optionMeta);
         if (leg.optionType === "put") buckets.csp.capital += leg.strike * contractShares;
         if (leg.optionType === "call" && leg.side === "short") openCallShares += contractShares;
       } else {
         const debit = leg.exitPrice === null ? 0 : -sign * leg.exitPrice * contractShares - leg.closingCommission;
         netPremium += debit;
-        if (leg.exitPrice !== null && (debit !== 0 || leg.closingCommission !== 0)) addRow(event.at, `Bought back ${name} @ ${leg.exitPrice.toFixed(2)}`, bucket, debit, 0);
+        if (leg.exitPrice !== null && (debit !== 0 || leg.closingCommission !== 0)) addRow(event.at, `Bought back ${leg.optionType} @ ${leg.exitPrice.toFixed(2)}`, bucket, debit, 0, optionMeta);
         if (leg.optionType === "call" && leg.side === "short") openCallShares -= contractShares;
       }
     }
@@ -302,9 +328,14 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       const useCost = delta > 0 && purchaseAverage !== null && pools.unstructured.shares - purchasedShares < moved; // moving newly bought shares
       const handoffPrice = useCost ? purchaseAverage! : closeFor(at) ?? pools[from].ref;
       const realized = moved * (handoffPrice - pools[from].ref);
-      if (realized !== 0) addRow(at, `${moved} sh handed ${from === "unstructured" ? "to CC" : "to Unstructured"} @ ${handoffPrice.toFixed(2)}`, from === "cc" ? "cc" : "unstructured", 0, realized);
+      if (realized !== 0) addRow(at, `Shares handed ${from === "unstructured" ? "to CC" : "to Unstructured"}`, from === "cc" ? "cc" : "unstructured", 0, realized, { instrument: "stock", quantity: moved, strike: null, stockPrice: handoffPrice });
       pools[from].shares -= moved;
       enterPool(to, moved, handoffPrice);
+    }
+
+    // Shares bought: a row so the acquisition shows up (P&L starts at zero); owned by CC when a call covers them right away.
+    for (const buy of groupBuys) {
+      addRow(buy.at, "Bought shares", pools.cc.shares > 0 ? "cc" : "unstructured", 0, 0, { instrument: "stock", quantity: buy.shares, strike: null, stockPrice: buy.fillPrice ?? buy.price });
     }
 
     // Capital = value of shares when they entered a bucket (net of anything that left in the same step).
@@ -321,7 +352,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     if (lastPrice === null) dataFlags.push("no price to mark the shares still held");
     else {
       for (const pool of ["cc", "unstructured"] as const) {
-        if (pools[pool].shares > 0) addRow(null, `Marked ${pools[pool].shares} sh @ ${lastPrice.price.toFixed(2)} (${lastPrice.date} close)`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref));
+        if (pools[pool].shares > 0) addRow(null, `Marked to the ${lastPrice.date} close`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref), { instrument: "stock", quantity: pools[pool].shares, strike: null, stockPrice: lastPrice.price });
       }
     }
   }
@@ -335,7 +366,12 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       const adjustment = snapshotPremiumPnl - credit;
       const bucket: CycleBucket = legs[0]!.optionType === "put" ? "csp" : "cc";
       netPremium += adjustment;
-      addRow(null, `Open ${legs.map((leg) => `${leg.quantity}x $${leg.strike} ${leg.optionType}`).join(" + ")} marked to market`, bucket, adjustment, 0);
+      addRow(null, `Open ${legs[0]!.optionType} marked to market`, bucket, adjustment, 0, {
+        instrument: "option",
+        quantity: legs.reduce((sum, leg) => sum + leg.quantity * leg.multiplier, 0),
+        strike: new Set(legs.map((leg) => leg.strike)).size === 1 ? legs[0]!.strike : null,
+        stockPrice: lastPrice?.price ?? null,
+      });
     }
   }
 
