@@ -205,14 +205,27 @@ export async function streamLivePrices(
 ): Promise<void> {
   if (contracts.length === 0) return;
 
-  const connection = await connectToIbkrGateway();
+  // Shared read connection first (no per-stream tunnel + handshake, ~5.4s
+  // measured 2026-09-19), one-shot connection only when it isn't available.
+  let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
+  try {
+    borrowed = await sharedReadConnection.borrow();
+  } catch (error) {
+    console.log(
+      `streamLivePrices: shared read connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`,
+    );
+  }
+  const connection = borrowed
+    ? { ib: borrowed.ib, disconnect: borrowed.release }
+    : await connectToIbkrGateway();
   const { ib } = connection;
 
   const priceByKey = new Map<string, number | null>();
   contracts.forEach((contract) => priceByKey.set(contract.key, null));
   const reqIdToContract = new Map<number, PriceContract>();
   const allReqIds = new Set<number>();
-  let nextReqId = 1;
+  let nextOneShotReqId = 1;
+  const allocateReqId = () => (borrowed ? sharedReadConnection.allocateReqId() : nextOneShotReqId++);
   // False until the frozen phase has ended — reported to the caller so it
   // can hold back a partially-priced first reading (see streamLivePrices'
   // header comment).
@@ -243,7 +256,7 @@ export async function streamLivePrices(
     // (we're about to request fresh ones for phase 2 anyway).
     ib.reqMarketDataType(MarketDataType.FROZEN);
     for (const contract of contracts) {
-      const reqId = nextReqId++;
+      const reqId = allocateReqId();
       reqIdToContract.set(reqId, contract);
       allReqIds.add(reqId);
       ib.reqMktData(reqId, buildContract(contract), "", true, false);
@@ -261,7 +274,7 @@ export async function streamLivePrices(
     reqIdToContract.clear();
     ib.reqMarketDataType(MarketDataType.REALTIME);
     for (const contract of contracts) {
-      const reqId = nextReqId++;
+      const reqId = allocateReqId();
       reqIdToContract.set(reqId, contract);
       allReqIds.add(reqId);
       ib.reqMktData(reqId, buildContract(contract), "", false, false);

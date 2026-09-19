@@ -1,8 +1,9 @@
-import { IBApi, EventName, type ErrorCode } from "@stoqey/ib";
+import { IBApi, EventName, MarketDataType, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
 import { openIbkrTunnel, type IbkrTunnel } from "./ibkrGatewayTunnel.js";
 import { ibkrGatewayPortByTradingMode } from "./constants.js";
 import { runIbkrHandshake } from "./ibkrHandshakeQueue.js";
+import { markMarketDataTypeManaged } from "./requestMarketData.js";
 
 // Step 1 of the "Shared IBKR Read Connection" design proposal (2026-09-09,
 // see PROGRESS.md) — a single long-lived connection for the web dyno's
@@ -22,21 +23,24 @@ import { runIbkrHandshake } from "./ibkrHandshakeQueue.js";
 // Every caller must fall back to connectIbkr.ts's one-shot
 // connectToIbkrGateway() if borrow() throws — this connection existing must
 // never make a read *less* reliable than today, only faster when it's
-// healthy. Only the first migrated caller (fetchAccountSummary.ts) is wired
-// up so far; the rest stay on the one-shot path until that's proven out.
+// healthy. Callers migrated so far: account summary, live prices and
+// greeks (one-shot and streaming), price bars and ticker search on the read
+// connection; the Ticker Detail stream on the live connection below. The rest
+// stay on the one-shot path until they are moved and tested one at a time.
 
-// Reserved, fixed — distinct from the worker's persistent connection
-// (clientId 42) and from every one-shot read connection's random id
-// (connectIbkr.ts). A long-lived connection benefits from a stable,
-// identifiable id in IBKR's own TWS/Gateway UI, same reasoning as the
-// worker's fixed id.
-//
-// Not 43: found 2026-09-11 that Gateway silently refuses to complete the
-// API handshake for clientId 43 specifically — reproduced with a minimal
-// standalone @stoqey/ib connection outside all app code, and it survived a
-// full Gateway container restart, so it's coming from Gateway's own
-// persisted settings, not anything in this process. 44 confirmed working.
-const webReadClientId = 44;
+// Random per connect attempt, not fixed (changed 2026-09-19 from a fixed 44).
+// IBKR only needs every simultaneous connection to a Gateway to have its own
+// id, and silently ignores a second connection that reuses one — with a fixed
+// id, two processes booting together (duplicate dev servers, a Heroku deploy
+// overlap) hung each other's handshake until the timeout, and a fixed id can
+// also get permanently wedged inside Gateway itself (found 2026-09-11 for
+// id 43, surviving a full Gateway restart). A fresh draw per attempt avoids
+// both. Each connection draws from its own range, all of them above the
+// one-shot connections' 0-999,999 (connectIbkr.ts) and the worker's fixed
+// 42, so none of them can ever collide with those.
+function pickClientId(rangeStart: number, rangeSize: number): number {
+  return rangeStart + Math.floor(Math.random() * rangeSize);
+}
 
 const reconnectDelaysMs = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 
@@ -52,7 +56,43 @@ export interface BorrowedConnection {
   release: () => void;
 }
 
+// Every shared connection's ib -> its own reqId allocator, so any helper that
+// is handed just an `ib` (lookupOptionParams, checkStrikeExists,
+// fetchQuotesForContracts, derived IV-bar ids, ...) takes its ids from the
+// right counter without every signature having to thread an allocator
+// through. reqIds only need to be unique per connection, and on a shared one
+// the old per-caller fixed/private counters (1-4, 5,000+, 10,000+, reqId+1000)
+// would collide across concurrent requests — or with this counter itself.
+const reqIdAllocatorByIb = new WeakMap<IBApi, () => number>();
+
+/**
+ * A fresh reqId for `ib`: from the shared connection's own counter when `ib`
+ * is one of them, otherwise from `fallback` (a one-shot connection's private
+ * socket, where the callers' own numbering is safe).
+ */
+export function nextReqIdFor(ib: IBApi, fallback: () => number): number {
+  const allocateFromSharedConnection = reqIdAllocatorByIb.get(ib);
+  return allocateFromSharedConnection ? allocateFromSharedConnection() : fallback();
+}
+
+interface SharedConnectionOptions {
+  /** Used in log lines and error messages, e.g. "read" or "live". */
+  label: string;
+  clientIdRangeStart: number;
+  clientIdRangeSize: number;
+  /**
+   * When set, sent once each time this connection (re)connects, and every
+   * requestRealtimeMarketData call on it becomes a no-op — for a connection
+   * whose concurrent borrowers must never change the connection-wide market
+   * data type under each other. Omitted on the read connection, whose
+   * borrowers each set their own type right before requesting.
+   */
+  fixedMarketDataType?: MarketDataType;
+}
+
 class SharedReadConnection {
+  constructor(private readonly options: SharedConnectionOptions) {}
+
   private ib: IBApi | null = null;
   private tunnel: IbkrTunnel | null = null;
   private reconnectAttempt = 0;
@@ -94,11 +134,11 @@ class SharedReadConnection {
     await Promise.race([
       this.connecting,
       new Promise<void>((_, reject) => {
-        setTimeout(() => reject(new Error("Shared IBKR read connection not ready within timeout.")), borrowTimeoutMs);
+        setTimeout(() => reject(new Error(`Shared IBKR ${this.options.label} connection not ready within timeout.`)), borrowTimeoutMs);
       }),
     ]);
 
-    if (!this.ib) throw new Error("Shared IBKR read connection not ready.");
+    if (!this.ib) throw new Error(`Shared IBKR ${this.options.label} connection not ready.`);
     const ib = this.ib;
     return { ib, release: () => {} };
   }
@@ -106,9 +146,11 @@ class SharedReadConnection {
   private async connect(): Promise<void> {
     const connectStartedAt = Date.now();
     console.log(
-      `IBKR shared read connection: opening SSH tunnel to ${environment.ibkrTunnelSshHost}:${environment.ibkrTunnelSshPort} → ${environment.ibkrGatewayHost}:${ibkrGatewayPortByTradingMode[environment.ibkrTradingMode]}...`,
+      `IBKR shared ${this.options.label} connection: opening SSH tunnel to ${environment.ibkrTunnelSshHost}:${environment.ibkrTunnelSshPort} → ${environment.ibkrGatewayHost}:${ibkrGatewayPortByTradingMode[environment.ibkrTradingMode]}...`,
     );
     const sshPrivateKey = Buffer.from(environment.ibkrTunnelSshPrivateKeyBase64, "base64");
+
+    const clientId = pickClientId(this.options.clientIdRangeStart, this.options.clientIdRangeSize);
 
     try {
       const tunnel = await openIbkrTunnel({
@@ -120,7 +162,7 @@ class SharedReadConnection {
         remotePort: ibkrGatewayPortByTradingMode[environment.ibkrTradingMode],
       });
       console.log(
-        `IBKR shared read connection: SSH tunnel open on local port ${tunnel.localPort} (${Date.now() - connectStartedAt}ms) — connecting to IBKR API with clientId ${webReadClientId}...`,
+        `IBKR shared ${this.options.label} connection: SSH tunnel open on local port ${tunnel.localPort} (${Date.now() - connectStartedAt}ms) — connecting to IBKR API with clientId ${clientId}...`,
       );
 
       const ib = new IBApi({ host: "127.0.0.1", port: tunnel.localPort });
@@ -130,10 +172,10 @@ class SharedReadConnection {
           new Promise<void>((resolve, reject) => {
             const onError = (error: Error, code: ErrorCode, reqId: number) => {
               if (reqId === -1) {
-                console.log(`IBKR shared read connection: informational status during connect: ${code} ${error.message}`);
+                console.log(`IBKR shared ${this.options.label} connection: informational status during connect: ${code} ${error.message}`);
                 return;
               }
-              console.error(`IBKR shared read connection: connect failed with error ${code}: ${error.message} (after ${Date.now() - connectStartedAt}ms)`);
+              console.error(`IBKR shared ${this.options.label} connection: connect failed with error ${code}: ${error.message} (after ${Date.now() - connectStartedAt}ms)`);
               cleanup();
               tunnel.close();
               reject(error);
@@ -143,7 +185,7 @@ class SharedReadConnection {
               resolve();
             };
             const timer = setTimeout(() => {
-              console.error(`IBKR shared read connection: connect timed out after ${Date.now() - connectStartedAt}ms waiting for nextValidId.`);
+              console.error(`IBKR shared ${this.options.label} connection: connect timed out after ${Date.now() - connectStartedAt}ms waiting for nextValidId.`);
               cleanup();
               tunnel.close();
               reject(new Error("Timed out connecting to IBKR Gateway."));
@@ -156,16 +198,23 @@ class SharedReadConnection {
 
             ib.on(EventName.error, onError);
             ib.once(EventName.nextValidId, onConnected);
-            ib.connect(webReadClientId);
+            ib.connect(clientId);
           }),
       );
+
+      reqIdAllocatorByIb.set(ib, () => this.allocateReqId());
+
+      if (this.options.fixedMarketDataType !== undefined) {
+        markMarketDataTypeManaged(ib);
+        ib.reqMarketDataType(this.options.fixedMarketDataType);
+      }
 
       this.ib = ib;
       this.tunnel = tunnel;
       this.reconnectAttempt = 0;
       this.connectedSince = Date.now();
       console.log(
-        `IBKR shared read connection: connected (took ${Date.now() - connectStartedAt}ms total, lifetime reconnects=${this.totalReconnects}).`,
+        `IBKR shared ${this.options.label} connection: connected (took ${Date.now() - connectStartedAt}ms total, lifetime reconnects=${this.totalReconnects}).`,
       );
 
       // Same reasoning as ibkrGatewayPersistentConnection.ts's post-connect
@@ -174,7 +223,7 @@ class SharedReadConnection {
       // catches, and this connection lives long enough for that to matter.
       ib.on(EventName.error, (error, code, reqId) => {
         if (reqId !== -1) return;
-        console.log(`IBKR shared read connection: system status ${code}: ${error.message}`);
+        console.log(`IBKR shared ${this.options.label} connection: system status ${code}: ${error.message}`);
       });
 
       ib.once(EventName.disconnected, () => this.handleDisconnect());
@@ -196,17 +245,32 @@ class SharedReadConnection {
     const delay = reconnectDelaysMs[Math.min(this.reconnectAttempt, reconnectDelaysMs.length - 1)];
     this.reconnectAttempt++;
     console.error(
-      `IBKR shared read connection dropped after ${uptimeMs !== null ? `${Math.round(uptimeMs / 1000)}s uptime` : "unknown uptime"} — reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}, lifetime reconnects=${this.totalReconnects}). Reads will fall back to one-shot connections until this recovers.`,
+      `IBKR shared ${this.options.label} connection dropped after ${uptimeMs !== null ? `${Math.round(uptimeMs / 1000)}s uptime` : "unknown uptime"} — reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}, lifetime reconnects=${this.totalReconnects}). Reads will fall back to one-shot connections until this recovers.`,
     );
 
     setTimeout(() => {
       this.reconnecting = false;
       this.connect().catch((error) => {
-        console.error(`IBKR shared read connection reconnect failed: ${error instanceof Error ? error.message : error}`);
+        console.error(`IBKR shared ${this.options.label} connection reconnect failed: ${error instanceof Error ? error.message : error}`);
         this.handleDisconnect();
       });
     }, delay);
   }
 }
 
-export const sharedReadConnection = new SharedReadConnection();
+export const sharedReadConnection = new SharedReadConnection({
+  label: "read",
+  clientIdRangeStart: 1_000_000,
+  clientIdRangeSize: 500_000,
+});
+
+// For screens that hold long-lived live subscriptions (Ticker Detail). Kept
+// apart from the read connection so its market data type is set once, to
+// REALTIME, and never changed by another borrower — the read connection's
+// borrowers flip it between FROZEN and REALTIME per request.
+export const sharedLiveConnection = new SharedReadConnection({
+  label: "live",
+  clientIdRangeStart: 1_500_000,
+  clientIdRangeSize: 500_000,
+  fixedMarketDataType: MarketDataType.REALTIME,
+});

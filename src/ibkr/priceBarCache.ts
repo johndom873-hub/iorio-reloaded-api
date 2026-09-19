@@ -1,7 +1,7 @@
 import { BarSizeSetting, WhatToShow } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { sharedReadConnection } from "./sharedReadConnection.js";
+import { nextReqIdFor, sharedReadConnection } from "./sharedReadConnection.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { fetchHistoricalBarsRaw, type ChartRange, type PriceBar } from "./fetchTickerOverview.js";
 import { minDaysForIvPercentile } from "../lib/ivMetrics.js";
@@ -197,7 +197,7 @@ export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDa
 // fetch not clobbering already-cached values.
 export async function backfillOneYearOfTickerHistory(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<number> {
   const bars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, "1 Y", reqId);
-  const ivBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, "1 Y", reqId + 1000, WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(
+  const ivBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, "1 Y", nextReqIdFor(connection.ib, () => reqId + 1000), WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(
     () => [],
   );
   await upsertDailyBars(tickerId, bars, ivBarsToDateMap(ivBars));
@@ -338,7 +338,7 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
         symbol,
         BarSizeSetting.DAYS_ONE,
         fetchDuration,
-        reqId + 1000,
+        nextReqIdFor(connection.ib, () => reqId + 1000),
         WhatToShow.OPTION_IMPLIED_VOLATILITY,
       ).catch(() => []);
       await upsertDailyBars(tickerId, freshBars, ivBarsToDateMap(freshIvBars));

@@ -103,7 +103,11 @@ export function lookupContractDetails(
     }
 
     connection.ib.on(EventName.contractDetails, onContractDetails);
-    connection.ib.once(EventName.contractDetailsEnd, onEnd);
+    // .on(), not .once() — on a connection shared with other in-flight
+    // requests, once() fires (and self-removes) on the first
+    // contractDetailsEnd for ANY reqId, orphaning this lookup. onEnd's own
+    // id check + finish() scope removal to this one request.
+    connection.ib.on(EventName.contractDetailsEnd, onEnd);
     connection.ib.on(EventName.error, onError);
   });
 }

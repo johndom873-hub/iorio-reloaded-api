@@ -196,14 +196,27 @@ const frozenGraceMs = 3_000;
 export async function streamLiveGreeks(contracts: GreeksContract[], onUpdate: (greeks: Record<string, Greeks>) => void, signal: AbortSignal): Promise<void> {
   if (contracts.length === 0) return;
 
-  const connection = await connectToIbkrGateway();
+  // Shared read connection first (no per-stream tunnel + handshake), one-shot
+  // connection only when it isn't available — same as streamLivePrices.
+  let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
+  try {
+    borrowed = await sharedReadConnection.borrow();
+  } catch (error) {
+    console.log(
+      `streamLiveGreeks: shared read connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`,
+    );
+  }
+  const connection = borrowed
+    ? { ib: borrowed.ib, disconnect: borrowed.release }
+    : await connectToIbkrGateway();
   const { ib } = connection;
 
   const greeksByKey = new Map<string, Greeks>();
   contracts.forEach((contract) => greeksByKey.set(contract.key, { delta: null, gamma: null, vega: null, theta: null }));
   const reqIdToContract = new Map<number, GreeksContract>();
   const allReqIds = new Set<number>();
-  let nextReqId = 1;
+  let nextOneShotReqId = 1;
+  const allocateReqId = () => (borrowed ? sharedReadConnection.allocateReqId() : nextOneShotReqId++);
 
   function greeksEqual(a: Greeks, b: Greeks): boolean {
     return a.delta === b.delta && a.gamma === b.gamma && a.vega === b.vega && a.theta === b.theta;
@@ -245,7 +258,7 @@ export async function streamLiveGreeks(contracts: GreeksContract[], onUpdate: (g
     // Phase 1: FROZEN.
     ib.reqMarketDataType(MarketDataType.FROZEN);
     for (const contract of contracts) {
-      const reqId = nextReqId++;
+      const reqId = allocateReqId();
       reqIdToContract.set(reqId, contract);
       allReqIds.add(reqId);
       ib.reqMktData(reqId, new Option(contract.symbol, contract.expiry, contract.strike, contract.right, "SMART"), "", true, false);
@@ -259,7 +272,7 @@ export async function streamLiveGreeks(contracts: GreeksContract[], onUpdate: (g
     reqIdToContract.clear();
     ib.reqMarketDataType(MarketDataType.REALTIME);
     for (const contract of contracts) {
-      const reqId = nextReqId++;
+      const reqId = allocateReqId();
       reqIdToContract.set(reqId, contract);
       allReqIds.add(reqId);
       ib.reqMktData(reqId, new Option(contract.symbol, contract.expiry, contract.strike, contract.right, "SMART"), "", false, false);

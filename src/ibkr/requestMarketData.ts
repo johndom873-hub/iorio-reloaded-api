@@ -7,7 +7,21 @@ import { MarketDataType, type IBApi } from "@stoqey/ib";
  * below — no app-side retry/fallback logic needed.
  */
 export function requestRealtimeMarketData(ib: IBApi): void {
+  if (marketDataTypeManagedConnections.has(ib)) return;
   ib.reqMarketDataType(MarketDataType.REALTIME);
+}
+
+// The market data type is connection-wide, and changing it while another
+// subscription is outstanding on the same connection has been seen to
+// silently stop that subscription's first tick (see streamPricingUpdates).
+// A connection shared by concurrent streams therefore sets its type exactly
+// once, when it connects (sharedReadConnection.ts's live connection), and is
+// registered here so every requestRealtimeMarketData call site becomes a
+// no-op for it instead of re-sending the type.
+const marketDataTypeManagedConnections = new WeakSet<IBApi>();
+
+export function markMarketDataTypeManaged(ib: IBApi): void {
+  marketDataTypeManagedConnections.add(ib);
 }
 
 /**

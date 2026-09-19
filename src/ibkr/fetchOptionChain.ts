@@ -1,6 +1,7 @@
 import { EventName, Option, OptionType, SecType } from "@stoqey/ib";
 import type { Contract, IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
+import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 import { db } from "../db/connection.js";
 
@@ -69,7 +70,7 @@ export async function lookupOptionParams(
   conId: number,
 ): Promise<{ expirations: string[]; strikes: number[] }> {
   return new Promise((resolve, reject) => {
-    const reqId = nextLookupReqId++;
+    const reqId = nextReqIdFor(ib, () => nextLookupReqId++);
     let lastError: string | null = null;
     const timer = setTimeout(() => {
       cleanup();
@@ -181,7 +182,7 @@ const strikeCheckTimeoutMs = 5_000;
 // and puts always share the same listed strike grid.
 export function checkStrikeExists(ib: IBApi, symbol: string, expiry: string, strike: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const reqId = nextLookupReqId++;
+    const reqId = nextReqIdFor(ib, () => nextLookupReqId++);
     let found = false;
     const timer = setTimeout(() => {
       cleanup();
@@ -455,7 +456,7 @@ export async function fetchQuotesForContracts(
   ib.on(EventName.error, onError);
 
   for (const contract of contracts) {
-    const reqId = nextReqId++;
+    const reqId = nextReqIdFor(ib, () => nextReqId++);
     reqIdToContract.set(reqId, contract);
     quotes.set(reqId, {
       expiry: contract.expiry,

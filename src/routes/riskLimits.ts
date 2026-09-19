@@ -210,7 +210,10 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
 // streamPositionExposures reports newer prices, until the client
 // disconnects.
 riskLimitsRouter.get("/exposure/stream", async (request, response) => {
-  const [accountResult, cashLockedInCsps] = await Promise.all([
+  // Account data and the price stream are independent — started together
+  // (2026-09-19) so the ~1s account fetch overlaps the stream's own setup
+  // instead of delaying it. Every reading awaits this before sending.
+  const accountContextPromise = Promise.all([
     fetchAccountSummary()
       .then((account) => ({ account, accountDataError: null as string | null }))
       .catch((error) => ({
@@ -218,11 +221,16 @@ riskLimitsRouter.get("/exposure/stream", async (request, response) => {
         accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.",
       })),
     computeCashLockedInCsps(),
-  ]);
-  const { account, accountDataError } = accountResult;
-  const totalAccountValue = account?.netLiquidationValue ?? null;
-  const availableCash =
-    account?.totalCashValue !== null && account?.totalCashValue !== undefined ? account.totalCashValue - cashLockedInCsps : null;
+  ]).then(([accountResult, cashLockedInCsps]) => {
+    const { account, accountDataError } = accountResult;
+    const totalAccountValue = account?.netLiquidationValue ?? null;
+    const availableCash =
+      account?.totalCashValue !== null && account?.totalCashValue !== undefined ? account.totalCashValue - cashLockedInCsps : null;
+    return { account, accountDataError, totalAccountValue, availableCash };
+  });
+  // Handled below inside the stream callback; this only stops a failure from
+  // being reported as unhandled if the client disconnects before any reading.
+  accountContextPromise.catch(() => {});
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -244,6 +252,7 @@ riskLimitsRouter.get("/exposure/stream", async (request, response) => {
   try {
     await streamPositionExposures(
       serializeAsyncCalls(async (exposures) => {
+        const { account, accountDataError, totalAccountValue, availableCash } = await accountContextPromise;
         const concentrationByTicker = groupByKey(exposures, (row) => row.symbol).map((row) => ({ symbol: row.key, notionalValue: row.notionalValue }));
         const concentrationBySector = groupByKey(exposures, (row) => row.sector).map((row) => ({ sector: row.key, notionalValue: row.notionalValue }));
         const strategyAllocation = groupByKey(exposures, (row) => row.strategyKey).map((row) => ({ strategyKey: row.key, notionalValue: row.notionalValue }));

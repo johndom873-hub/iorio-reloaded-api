@@ -1,5 +1,6 @@
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
+import { nextReqIdFor, sharedLiveConnection } from "./sharedReadConnection.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { streamPricingUpdates, type TickerPricing, type PriceBar } from "./fetchTickerOverview.js";
 import { getCachedChartBars } from "./priceBarCache.js";
@@ -30,6 +31,9 @@ export type TickerDetailStreamEvent =
   | { type: "technicals"; data: TickerTechnicals }
   | { type: "error"; section: TickerDetailSection; message: string };
 
+// One-shot-connection numbering only. On the shared live connection every
+// id comes from that connection's own counter instead (nextReqIdFor below):
+// these fixed values would collide across concurrent modals sharing it.
 const overviewReqId = 1;
 const pricingReqId = 2;
 const chartReqId = 3;
@@ -159,17 +163,30 @@ export async function streamTickerDetail(
   onEvent: (event: TickerDetailStreamEvent) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  const connection = await connectToIbkrGateway();
+  // Shared live connection first (no per-open tunnel + handshake, and its
+  // market data type is fixed at REALTIME for the connection's whole life),
+  // one-shot connection only when it isn't available.
+  let borrowed: Awaited<ReturnType<typeof sharedLiveConnection.borrow>> | null = null;
+  try {
+    borrowed = await sharedLiveConnection.borrow();
+  } catch (error) {
+    console.log(
+      `streamTickerDetail: shared live connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`,
+    );
+  }
+  const connection = borrowed ? { ib: borrowed.ib, disconnect: borrowed.release } : await connectToIbkrGateway();
   try {
     // Connection-wide setting, called exactly once here — not inside any of
     // streamPricingUpdates/getCachedChartBars/prepareOptionChainStrikes,
     // which all run concurrently on this connection below. A second call
     // while a market-data subscription is still outstanding was found to
     // silently prevent it from ever producing a first tick (see the note on
-    // streamPricingUpdates).
+    // streamPricingUpdates). A no-op on the shared live connection, which
+    // set REALTIME itself when it connected and must never be re-sent it by
+    // a concurrent stream.
     requestRealtimeMarketData(connection.ib);
 
-    const contractDetailsPromise = getCachedContractDetails(connection, symbol, overviewReqId);
+    const contractDetailsPromise = getCachedContractDetails(connection, symbol, nextReqIdFor(connection.ib, () => overviewReqId));
     // One check at stream start, not re-queried per pricing tick — shortlist
     // membership doesn't change mid-modal-open, and this only needs to be
     // fresh enough to gate the modal's own "Add to Shortlist" button.
@@ -193,7 +210,7 @@ export async function streamTickerDetail(
             });
           },
           signal,
-          pricingReqId,
+          nextReqIdFor(connection.ib, () => pricingReqId),
         );
         onEvent({
           type: "overview",
@@ -208,7 +225,7 @@ export async function streamTickerDetail(
 
     const chartTask: Promise<PriceBar[]> = (async () => {
       try {
-        const bars = await getCachedChartBars(connection, symbol, defaultChartRange, chartReqId);
+        const bars = await getCachedChartBars(connection, symbol, defaultChartRange, nextReqIdFor(connection.ib, () => chartReqId));
         onEvent({ type: "chart", data: bars });
         return bars;
       } catch (error) {
@@ -227,7 +244,7 @@ export async function streamTickerDetail(
       try {
         const [hourlyBars, dailyBars, pricing] = await Promise.all([
           chartTask,
-          getCachedChartBars(connection, symbol, "1Y", technicalsDailyReqId),
+          getCachedChartBars(connection, symbol, "1Y", nextReqIdFor(connection.ib, () => technicalsDailyReqId)),
           overviewReadyTask,
         ]);
         const currentPrice = pricing?.last ?? pricing?.previousClose ?? dailyBars[dailyBars.length - 1]?.close ?? null;

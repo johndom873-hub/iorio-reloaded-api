@@ -79,7 +79,21 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
       volume: null,
     };
     let lastError: string | null = null;
-    const timer = setTimeout(() => reject(new Error(lastError ?? `Pricing snapshot timeout for ${symbol}`)), 10_000);
+    // Also runs on timeout (it used to leave all four listeners and the
+    // subscription behind, harmless on a one-shot connection that gets
+    // disconnected but a leak on a shared one).
+    const timer = setTimeout(() => {
+      cleanup();
+      ib.cancelMktData(reqId);
+      reject(new Error(lastError ?? `Pricing snapshot timeout for ${symbol}`));
+    }, 10_000);
+    function cleanup() {
+      clearTimeout(timer);
+      ib.removeListener(EventName.tickPrice, onTickPrice);
+      ib.removeListener(EventName.tickSize, onTickSize);
+      ib.removeListener(EventName.tickSnapshotEnd, onSnapshotEnd);
+      ib.removeListener(EventName.error, onError);
+    }
 
     function onTickPrice(id: number, tickType: number, price: number) {
       if (id !== reqId) return;
@@ -111,11 +125,7 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
     }
     function onSnapshotEnd(id: number) {
       if (id !== reqId) return;
-      clearTimeout(timer);
-      ib.removeListener(EventName.tickPrice, onTickPrice);
-      ib.removeListener(EventName.tickSize, onTickSize);
-      ib.removeListener(EventName.tickSnapshotEnd, onSnapshotEnd);
-      ib.removeListener(EventName.error, onError);
+      cleanup();
       resolve(pricing);
     }
 
@@ -136,7 +146,12 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
 
     ib.on(EventName.tickPrice, onTickPrice);
     ib.on(EventName.tickSize, onTickSize);
-    ib.once(EventName.tickSnapshotEnd, onSnapshotEnd);
+    // .on(), not .once() — on a connection shared with other in-flight
+    // requests, once() fires (and self-removes) on the first
+    // tickSnapshotEnd for ANY reqId, orphaning this lookup until its
+    // timeout. onSnapshotEnd's own id check + cleanup() scope removal to
+    // this one request.
+    ib.on(EventName.tickSnapshotEnd, onSnapshotEnd);
     ib.on(EventName.error, onError);
     ib.reqMktData(reqId, new Stock(symbol, "SMART", "USD"), "", true, false);
   });
