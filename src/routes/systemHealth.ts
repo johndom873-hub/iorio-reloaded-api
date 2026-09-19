@@ -6,6 +6,8 @@ import * as presenceTracker from "../lib/presenceTracker.js";
 import * as llmStats from "../genosuke/llmStats.js";
 import { requestRateStats, processStartedAt } from "../lib/requestRateTracker.js";
 import { computeMarketSessionStatus } from "../lib/marketSessionStatus.js";
+import { dbQueryTimingStats } from "../lib/dbQueryTimingTracker.js";
+import { requireEnvironmentVariable } from "../config/env.js";
 
 export const systemHealthRouter = Router();
 systemHealthRouter.use(requireAuth);
@@ -82,13 +84,21 @@ systemHealthRouter.get("/presence", async (_request, response) => {
 // Database node stats — no existing pg_stat_activity/pg_database_size usage
 // anywhere else in the app; this is new but a single, cheap, self-contained
 // query (Postgres tracks all of this itself, no app-level bookkeeping).
+// Connections are the total open (not just currently-active) because that is
+// what Heroku's plan cap counts; the cap is the role's own connection limit
+// (20 on Essential-1), falling back to the server's max_connections where the
+// role is unlimited (local dev). Postgres can't report the plan's storage
+// limit, so that comes from DB_PLAN_MAX_SIZE_BYTES (see .env.example).
 systemHealthRouter.get("/db", async (_request, response) => {
+  const maxDatabaseSizeBytes = requireEnvironmentVariable("DB_PLAN_MAX_SIZE_BYTES");
   const result = await db.raw(`
     SELECT
-      (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state = 'active') AS "activeConnections",
+      (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()) AS "totalConnections",
+      (SELECT CASE WHEN rolconnlimit > 0 THEN rolconnlimit ELSE current_setting('max_connections')::int END
+         FROM pg_roles WHERE rolname = current_user) AS "maxConnections",
       pg_database_size(current_database()) AS "databaseSizeBytes"
   `);
-  response.json(result.rows[0]);
+  response.json({ ...result.rows[0], maxDatabaseSizeBytes, responseTime: dbQueryTimingStats() });
 });
 
 // IBKR's primaryExch codes aren't the names traders actually say — captured

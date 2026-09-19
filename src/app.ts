@@ -19,6 +19,8 @@ import { tickerDetailRouter } from "./routes/tickerDetail.js";
 import { tradeAlertsRouter } from "./routes/tradeAlerts.js";
 import { tradeBlotterRouter } from "./routes/tradeBlotter.js";
 import { requestRateMiddleware } from "./lib/requestRateTracker.js";
+import { installDbQueryTimingTracker } from "./lib/dbQueryTimingTracker.js";
+import { db } from "./db/connection.js";
 
 export const app = express();
 
@@ -36,6 +38,7 @@ app.use(
 app.use(express.json());
 app.use(sessionMiddleware);
 // For Iorio Pulse's Heroku node — see requestRateTracker.ts.
+installDbQueryTimingTracker(db);
 app.use(requestRateMiddleware);
 
 app.use(healthRouter);
