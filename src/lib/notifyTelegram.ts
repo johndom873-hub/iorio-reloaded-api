@@ -41,6 +41,14 @@ function truncateForTelegram(message: string): string {
 }
 
 export async function notifyTelegram(message: string): Promise<void> {
+  // Local .env sets this so dev crashes/jobs never page the ops channel.
+  // Unset in Heroku and on the VPS worker, so those keep alerting. Only the
+  // exact value "true" (any case) disables — a typo must not silence prod.
+  if (process.env.TELEGRAM_NOTIFICATIONS_DISABLED?.trim().toLowerCase() === "true") {
+    console.log("TELEGRAM_NOTIFICATIONS_DISABLED is set — skipping Telegram notification:", message);
+    return;
+  }
+
   const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
   const telegramChatId = process.env.TELEGRAM_CHAT_ID;
   if (!telegramBotToken || !telegramChatId) {
