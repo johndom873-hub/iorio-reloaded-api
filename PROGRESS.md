@@ -372,7 +372,7 @@ Strategy-specific (tabs within the screen): Trade Alerts.
 Standalone/chromeless (own tab, no sidebar/topbar): Iorio Pulse (added 2026-09-13) — real-time ops-room dashboard, see the entry at the top of this file.
 Shared modal: Ticker Detail (live pricing/chart/option chain w/ Greeks, platform-wide — not yet showing position/strike/entry markers on the chart) — consolidated 2026-08-31 to also show the symbol's open positions (legs, payoff diagram, one card per open position; the price target/close-trigger fields were removed 2026-09-11) and closed-position history in one place; the separate Position Detail modal was folded in and no longer exists.
 
-## Scheduled jobs (Heroku Scheduler) — 7 jobs, 7 entries, all skip weekends except daily calendar capture (runs 7 days/week)
+## Scheduled jobs (Heroku Scheduler) — 8 jobs (#8 `expiry_settlement_audit`, daily 10:00 PM UTC incl. weekends, added 2026-09-19 and in the watchdog's daily list; details in the 'Wheel-cycle engine' / 'Expiry-classification audit' entries above), all skip weekends except daily calendar capture (runs 7 days/week)
 All 7 entries set to Basic dyno size in the Scheduler dashboard (manual, no CLI/API access to that setting).
 1. **Daily price/IV capture** (`job:daily-market-data`, 9:00 PM UTC) — fixed and confirmed working 2026-08-28 (health check now probes `reqHistoricalData`); see "Currently open" above.
 2. **Daily P&L snapshot** (`job:daily-pnl-snapshot`, 9:30 PM UTC) — `account_pnl_snapshots`+`position_pnl_snapshots` from IBKR.

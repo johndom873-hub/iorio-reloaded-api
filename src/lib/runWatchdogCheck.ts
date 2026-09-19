@@ -7,6 +7,8 @@ const DAILY_JOB_NAMES = [
   "trade_alert_generation",
   "daily_calendar_capture",
   "daily_screener_scan",
+  // Runs 10:00 PM UTC every day (weekends too), so it has always run by the weekday 10:30 PM check.
+  "expiry_settlement_audit",
 ] as const;
 const IBKR_HEALTH_CHECK_JOB_NAME = "ibkr_health_check";
 const IBKR_HEALTH_CHECK_WINDOW_MS = 30 * 60 * 1000;
