@@ -6,6 +6,7 @@ import { positionSelect, fetchAvailableUncoveredShares } from "../lib/positionQu
 import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 import { fetchLiveGreeks, streamLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import { fetchCyclesForTickers } from "../lib/cycleQueries.js";
 import { fetchBreakEvenByPositionId, type PositionBreakEven } from "../lib/cycleBreakEvenQueries.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { computeLegSuccessProbabilities, type SuccessProbabilityLeg } from "../lib/positionSuccessProbability.js";
@@ -165,6 +166,55 @@ positionsRouter.get("/", async (request, response) => {
       return { ...row, breakEven: breakEven?.breakEven ?? null, breakEvenUnavailableReason: breakEven?.breakEvenUnavailableReason ?? null };
     }),
   );
+});
+
+// Wheel cycles (approved 2026-09-19, see cycles.ts): every cycle of one symbol, newest first — the Ticker Detail
+// "Cycle" card. Registered before GET /:id so the wildcard doesn't swallow "cycles".
+positionsRouter.get("/cycles", async (request, response) => {
+  const symbol = String(request.query.symbol ?? "").trim().toUpperCase();
+  if (!symbol) {
+    response.status(400).json({ error: "symbol is required" });
+    return;
+  }
+  const ticker = await db("tickers").where({ symbol }).first("id");
+  if (!ticker) {
+    response.json({ symbol, cycles: [] });
+    return;
+  }
+  const [symbolCycles] = await fetchCyclesForTickers([ticker.id]);
+  response.json({ symbol, cycles: [...(symbolCycles?.cycles ?? [])].reverse() });
+});
+
+// Fair strategy scoreboard (approved 2026-09-19): every cycle of every symbol attributed to the CSP / Unstructured /
+// CC buckets. Cycles whose ledger can't be trusted (dataFlags) are left out of the totals and counted instead.
+positionsRouter.get("/cycles/scoreboard", async (_request, response) => {
+  const all = await fetchCyclesForTickers("all");
+  const zero = () => ({ premium: 0, stock: 0, total: 0, capital: 0 });
+  const buckets = { csp: zero(), unstructured: zero(), cc: zero() };
+  let cyclesIncluded = 0;
+  const excluded: { symbol: string; reason: string }[] = [];
+  for (const { symbol, cycles } of all) {
+    for (const cycle of cycles) {
+      if (cycle.dataFlags.length > 0) {
+        excluded.push({ symbol, reason: cycle.dataFlags[0]! });
+        continue;
+      }
+      cyclesIncluded += 1;
+      for (const key of ["csp", "unstructured", "cc"] as const) {
+        buckets[key].premium += cycle.buckets[key].premium;
+        buckets[key].stock += cycle.buckets[key].stock;
+        buckets[key].total += cycle.buckets[key].total;
+        buckets[key].capital += cycle.buckets[key].capital;
+      }
+    }
+  }
+  const withReturn = (bucket: ReturnType<typeof zero>) => ({ ...bucket, returnOnCapital: bucket.capital > 0 ? bucket.total / bucket.capital : null });
+  response.json({
+    buckets: { csp: withReturn(buckets.csp), unstructured: withReturn(buckets.unstructured), cc: withReturn(buckets.cc) },
+    total: buckets.csp.total + buckets.unstructured.total + buckets.cc.total,
+    cyclesIncluded,
+    cyclesExcluded: excluded,
+  });
 });
 
 // Set only when the greeks came from position_leg_greeks_snapshots instead

@@ -33,7 +33,7 @@ import { db } from "../db/connection.js";
 export type ExpirySettlementMode = "dry_run" | "apply";
 
 export interface ExpirySettlementAction {
-  kind: "call_away_stock_exit" | "put_assigned_stock_entry" | "close_reason" | "skipped";
+  kind: "call_away_stock_exit" | "put_assigned_stock_entry" | "close_reason" | "option_exit_price" | "skipped";
   symbol: string;
   description: string;
   /** Realized P&L this correction adds, when it can be stated. */
@@ -66,6 +66,7 @@ interface ExpiredShortOptionLeg {
   multiplier: number;
   entryPrice: number;
   exitAt: Date;
+  exitPrice: number | null;
   closeReason: string | null;
   positionStatus: string;
   expiryClose: number | null;
@@ -89,7 +90,7 @@ async function loadExpiredShortOptionLegs(database: Knex): Promise<ExpiredShortO
   const result = await database.raw(`
     SELECT pl.id, pl.position_id AS "positionId", p.ticker_id AS "tickerId", t.symbol,
            pl.option_type AS "optionType", pl.strike_price::float AS strike, pl.quantity, pl.multiplier,
-           pl.entry_price::float AS "entryPrice", pl.exit_at AS "exitAt", p.close_reason AS "closeReason",
+           pl.entry_price::float AS "entryPrice", pl.exit_at AS "exitAt", pl.exit_price::float AS "exitPrice", p.close_reason AS "closeReason",
            p.status AS "positionStatus", b.close_price::float AS "expiryClose", pl.expiry_date::text AS "expiryDate"
     FROM position_legs pl
     JOIN positions p ON p.id = pl.position_id
@@ -245,6 +246,18 @@ async function findAndCorrect(database: Knex): Promise<Omit<ExpirySettlementResu
   const before = await realizedPnlTotal(database);
 
   for (const leg of legs) {
+    // A short option that ended with no closing trade and no exit price is an expiry/assignment: the premium is
+    // fully kept, i.e. exit_price 0. Legs closed by older worker versions (before 2026-08-27) left it NULL, which
+    // drops the whole credit out of realized P&L (MU's two 8/26 calls: $1,448.28 missing).
+    if (leg.exitPrice === null) {
+      actions.push({
+        kind: "option_exit_price",
+        symbol: leg.symbol,
+        description: `${leg.symbol} short ${leg.optionType} $${leg.strike} (expiry ${leg.expiryDate}): exit price empty -> 0 (premium kept)`,
+        pnlDelta: leg.entryPrice * leg.quantity * leg.multiplier,
+      });
+      await database("position_legs").where({ id: leg.id }).update({ exit_price: 0 });
+    }
     if (leg.expiryClose === null) continue; // no bar for the expiry date (yet) — retried on the next run
     const distanceInTheMoney = leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose;
     if (distanceInTheMoney <= 0) continue; // OTM: worthless is right
