@@ -663,6 +663,24 @@ async function determineLeftoverStockReason(symbol: string): Promise<string> {
   const ticker = await db("tickers").where({ symbol }).first();
   if (!ticker) return "unknown";
 
+  // The position that just lost its call to expiry is never itself closed —
+  // it keeps the stock and gets relabeled unstructured — so the
+  // "most recently closed position" lookup below can never see it (found
+  // 2026-09-19: AAOI/NBIS stayed "unknown" forever after their calls
+  // expired). Detect it from the leg itself: a short call on an open position
+  // that is past expiry (or already swept closed) with no closing trade.
+  // Past-expiry check covers the very pass where IBKR stops reporting the
+  // call, before the sweep below has stamped exit_at on the leg.
+  const expiredCallLeg = await db("position_legs as pl")
+    .join("positions as p", "p.id", "pl.position_id")
+    .where({ "p.ticker_id": ticker.id, "p.status": "open", "pl.leg_type": "option", "pl.option_type": "call", "pl.side": "short" })
+    .andWhere((builder) =>
+      builder.whereNotNull("pl.exit_at").orWhereRaw("pl.expiry_date <= (now() at time zone 'America/New_York')::date"),
+    )
+    .whereNotExists(db("trades as t").whereRaw("t.position_leg_id = pl.id").where("t.is_closing_trade", true))
+    .first("pl.id");
+  if (expiredCallLeg) return "cc_expired_leftover_stock";
+
   const recentClosed = await db("positions")
     .where({ ticker_id: ticker.id })
     .whereIn("strategy_key", ["covered_call", "cash_secured_put"])
