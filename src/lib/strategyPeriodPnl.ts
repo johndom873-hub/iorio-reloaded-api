@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 
 // Per-strategy Day/WTD/MTD/YTD P&L, computed live at query time rather
 // than from a new nightly snapshot table (decided 2026-08-28 — a hard
@@ -70,7 +71,7 @@ export async function computeStrategyPeriodPnl(): Promise<StrategyPeriodPnl[]> {
         p.id AS position_id,
         p.strategy_key,
         MAX(pl.exit_at) AS exit_at,
-        SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END)) AS lifetime_realized_pnl
+        SUM(${legRealizedPnlSql("pl")}) AS lifetime_realized_pnl
       FROM position_legs pl
       JOIN positions p ON p.id = pl.position_id
       WHERE pl.exit_price IS NOT NULL
@@ -211,7 +212,7 @@ export async function computeStrategyDailyPnlSeries(days: number): Promise<Strat
         p.id AS position_id,
         p.strategy_key,
         MAX(pl.exit_at)::date AS exit_date,
-        SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END)) AS lifetime_realized_pnl
+        SUM(${legRealizedPnlSql("pl")}) AS lifetime_realized_pnl
       FROM position_legs pl
       JOIN positions p ON p.id = pl.position_id
       WHERE pl.exit_price IS NOT NULL

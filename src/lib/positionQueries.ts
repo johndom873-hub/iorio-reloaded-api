@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 
 // Single source of truth for the position shape (legs, realizedPnl,
 // capitalAtRisk) shared between the positions API (routes/positions.ts) and
@@ -44,7 +45,7 @@ export const positionSelect = `
     ) AS legs,
     COALESCE(
       (
-        SELECT SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
+        SELECT SUM(${legRealizedPnlSql("pl")})
         FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.exit_price IS NOT NULL
       ),
@@ -56,7 +57,7 @@ export const positionSelect = `
     -- Intelligence" proposal.
     COALESCE(
       (
-        SELECT SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
+        SELECT SUM(${legRealizedPnlSql("pl")})
         FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.exit_price IS NOT NULL AND pl.leg_type = 'option'
       ),
@@ -66,7 +67,7 @@ export const positionSelect = `
     -- (no stock leg exists to sum).
     COALESCE(
       (
-        SELECT SUM((pl.exit_price - pl.entry_price) * pl.quantity * pl.multiplier * (CASE WHEN pl.side = 'short' THEN -1 ELSE 1 END))
+        SELECT SUM(${legRealizedPnlSql("pl")})
         FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.exit_price IS NOT NULL AND pl.leg_type = 'stock'
       ),

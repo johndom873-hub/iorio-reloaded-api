@@ -83,6 +83,7 @@ interface LegRow {
   entryPrice: string;
   exitPrice: string | null;
   exitAt: string | null;
+  closingCommission: string | number;
 }
 
 // sinceDays scopes the feed to recent activity (approved 2026-08-28,
@@ -148,6 +149,8 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
       "entry_price as entryPrice",
       "exit_price as exitPrice",
       "exit_at as exitAt",
+      // Approved 2026-09-19: realized P&L is net of closing-trade commissions (see legRealizedPnlSql.ts).
+      db.raw('COALESCE((SELECT SUM(tr.commission) FROM trades tr WHERE tr.position_leg_id = position_legs.id AND tr.is_closing_trade), 0) AS "closingCommission"'),
     );
 
   const legsByPositionId = new Map<string, LegRow[]>();
@@ -179,7 +182,7 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
     return positionLegs.reduce((sum, leg) => {
       if (leg.exitPrice === null) return sum;
       const sign = leg.side === "short" ? -1 : 1;
-      return sum + (Number(leg.exitPrice) - Number(leg.entryPrice)) * leg.quantity * leg.multiplier * sign;
+      return sum + (Number(leg.exitPrice) - Number(leg.entryPrice)) * leg.quantity * leg.multiplier * sign - Number(leg.closingCommission);
     }, 0);
   }
 
