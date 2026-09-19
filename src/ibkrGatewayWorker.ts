@@ -1526,11 +1526,13 @@ function startDisconnectedAlerting(): void {
   setInterval(() => {
     const { disconnectedSinceMs } = persistentIbkrConnection.getHealthSnapshot();
     if (disconnectedSinceMs === null) return;
-    const disconnectedForMs = Date.now() - disconnectedSinceMs;
-    if (disconnectedForMs < disconnectedAlertThresholdMs) return;
+    if (Date.now() - disconnectedSinceMs < disconnectedAlertThresholdMs) return;
     notifyDownThrottled(
       disconnectedAlertKey,
-      `🔥 iorio-worker can't reach the IBKR Gateway (disconnected ${formatDurationHuman(disconnectedForMs)}). The worker is still running and retrying automatically.`,
+      // Must be constant text: notifyDownThrottled treats a changed message as a
+      // new alert, so embedding the elapsed time here would re-alert every minute.
+      // (Reminders add the elapsed time themselves.)
+      "🔥 iorio-worker can't reach the IBKR Gateway. The worker is still running and retrying automatically.",
       disconnectedAlertReminderIntervalMs,
     ).catch((error) => console.error(`Disconnected-alert check failed: ${error instanceof Error ? error.message : error}`));
   }, 60_000);
