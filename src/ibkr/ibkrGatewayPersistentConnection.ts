@@ -37,6 +37,8 @@ class PersistentIbkrConnection {
   private totalReconnects = 0;
   private lastSystemStatusCode: number | null = null;
   private lastSystemStatusAt: number | null = null;
+  // Starts "disconnected since process start"; null while connected.
+  private disconnectedSince: number | null = Date.now();
 
   /** Fires every time a connection is (re)established, including the first. */
   onConnect(listener: IbkrConnectionListener): void {
@@ -62,8 +64,20 @@ class PersistentIbkrConnection {
     return this.nextOrderId++;
   }
 
+  /**
+   * Never rejects on a connect failure: if the Gateway is unreachable (e.g.
+   * IBKR maintenance) the worker stays up and retries with the same backoff
+   * as a mid-session drop, instead of exiting and letting systemd restart-loop
+   * it (one Telegram alert per restart). Alerting on a prolonged outage is the
+   * caller's job, driven by getHealthSnapshot().disconnectedSinceMs.
+   */
   async start(): Promise<void> {
-    await this.connect();
+    try {
+      await this.connect();
+    } catch (error) {
+      console.error(`IBKR worker: initial connect failed: ${error instanceof Error ? error.message : error} — staying up and retrying with backoff.`);
+      this.scheduleReconnect();
+    }
   }
 
   private async connect(): Promise<void> {
@@ -125,6 +139,7 @@ class PersistentIbkrConnection {
     this.tunnel = tunnel;
     this.reconnectAttempt = 0;
     this.connectedSince = Date.now();
+    this.disconnectedSince = null;
     console.log(
       `IBKR worker: connected (nextOrderId=${this.nextOrderId}, took ${Date.now() - connectStartedAt}ms total, lifetime reconnects=${this.totalReconnects}).`,
     );
@@ -150,23 +165,30 @@ class PersistentIbkrConnection {
 
   private handleDisconnect(): void {
     if (this.reconnecting) return;
-    this.reconnecting = true;
     const uptimeMs = this.connectedSince ? Date.now() - this.connectedSince : null;
     this.connectedSince = null;
+    this.disconnectedSince ??= Date.now();
     this.ib = null;
     this.tunnel?.close();
     this.tunnel = null;
     this.totalReconnects++;
 
-    const delay = reconnectDelaysMs[Math.min(this.reconnectAttempt, reconnectDelaysMs.length - 1)];
-    this.reconnectAttempt++;
     const lastStatus =
       this.lastSystemStatusCode !== null
         ? ` Last IBKR system status before drop: ${this.lastSystemStatusCode} (${Math.round((Date.now() - (this.lastSystemStatusAt ?? Date.now())) / 1000)}s ago).`
         : " No IBKR system status was logged before this drop.";
     console.error(
-      `IBKR worker connection dropped after ${uptimeMs !== null ? `${Math.round(uptimeMs / 1000)}s uptime` : "unknown uptime"} — reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}, lifetime reconnects=${this.totalReconnects}).${lastStatus}`,
+      `IBKR worker connection dropped after ${uptimeMs !== null ? `${Math.round(uptimeMs / 1000)}s uptime` : "unknown uptime"} (lifetime reconnects=${this.totalReconnects}).${lastStatus}`,
     );
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    const delay = reconnectDelaysMs[Math.min(this.reconnectAttempt, reconnectDelaysMs.length - 1)];
+    this.reconnectAttempt++;
+    console.error(`IBKR worker: reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}).`);
 
     setTimeout(() => {
       this.reconnecting = false;
@@ -182,10 +204,11 @@ class PersistentIbkrConnection {
    * (since 2026-09-13) upserted into worker_health there too for Iorio
    * Pulse's Gateway node — see that file's comment on the upsert interval.
    */
-  getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; totalReconnects: number; lastSystemStatusCode: number | null; clientId: number } {
+  getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; disconnectedSinceMs: number | null; totalReconnects: number; lastSystemStatusCode: number | null; clientId: number } {
     return {
       connected: this.ib !== null,
       uptimeMs: this.connectedSince ? Date.now() - this.connectedSince : null,
+      disconnectedSinceMs: this.disconnectedSince,
       totalReconnects: this.totalReconnects,
       lastSystemStatusCode: this.lastSystemStatusCode,
       clientId: workerClientId,

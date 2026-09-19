@@ -2,6 +2,7 @@ import { db } from "../db/connection.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { formatDurationHuman } from "./formatDurationHuman.js";
 import { publishNotification } from "./notificationChannel.js";
+import { clearDownState, notifyDownThrottled } from "./throttledAlert.js";
 
 export interface JobResult {
   details?: Record<string, unknown>;
@@ -12,6 +13,13 @@ export interface JobResult {
 export interface RunJobOptions {
   triggeredBy?: "scheduler" | "manual";
   triggeredByUserId?: string;
+  /**
+   * For jobs that can keep failing for hours (e.g. ibkr_health_check during an
+   * IBKR outage): alert on the first failure, then at most once per this many
+   * ms while it keeps failing with the same message (see throttledAlert.ts).
+   * Unset = alert on every failure (the default for once-a-day jobs).
+   */
+  failureAlertReminderIntervalMs?: number;
 }
 
 // Thrown instead of starting a second concurrent run of the same job —
@@ -138,7 +146,12 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
     const message = error instanceof Error ? error.message : String(error);
     await db("job_runs").where({ id: run.id }).update({ status: "failure", finished_at: db.fn.now(), error_message: message });
     await publishNotification({ type: "job_completed", jobName, status: "failure" }).catch(() => {});
-    await notifyTelegram(`⚠️ ${jobName} failed: ${telegramFailureSummary(message)}`);
+    const failureAlert = `⚠️ ${jobName} failed: ${telegramFailureSummary(message)}`;
+    if (options.failureAlertReminderIntervalMs !== undefined) {
+      await notifyDownThrottled(`job_failure:${jobName}`, failureAlert, options.failureAlertReminderIntervalMs);
+    } else {
+      await notifyTelegram(failureAlert);
+    }
     throw error;
   }
 
@@ -146,6 +159,8 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
     .where({ id: run.id })
     .update({ status: "success", finished_at: db.fn.now(), details: result.details ?? null });
   await publishNotification({ type: "job_completed", jobName, status: "success" }).catch(() => {});
+
+  if (options.failureAlertReminderIntervalMs !== undefined) await clearDownState(`job_failure:${jobName}`);
 
   const failureStreak = await findPrecedingFailureStreak(jobName, run.id, startedAt);
   if (failureStreak) {

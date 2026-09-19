@@ -21,6 +21,8 @@ import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { fetchPositionById, type PositionLegRow } from "./lib/positionQueries.js";
 import { formatPositionExpiredMessage } from "./lib/formatPositionExpiredMessage.js";
 import { notifyTelegram } from "./lib/notifyTelegram.js";
+import { clearDownState, notifyDownThrottled } from "./lib/throttledAlert.js";
+import { formatDurationHuman } from "./lib/formatDurationHuman.js";
 import { revertSourceAlertToPending } from "./lib/revertSourceAlertToPending.js";
 import { publishNotification } from "./lib/notificationChannel.js";
 
@@ -1511,8 +1513,38 @@ async function reconcileStaleOrderRequests(): Promise<void> {
   }
 }
 
+// A failed connect no longer crashes the worker (see start()'s comment), so a
+// Gateway outage -- IBKR maintenance, most often -- is reported here instead:
+// one alert once it has lasted disconnectedAlertThresholdMs, an hourly
+// reminder while it lasts, and one message on recovery. State is in
+// alert_state so worker restarts don't re-announce it.
+const disconnectedAlertKey = "worker_ibkr_disconnected";
+const disconnectedAlertThresholdMs = 10 * 60_000;
+const disconnectedAlertReminderIntervalMs = 60 * 60_000;
+
+function startDisconnectedAlerting(): void {
+  setInterval(() => {
+    const { disconnectedSinceMs } = persistentIbkrConnection.getHealthSnapshot();
+    if (disconnectedSinceMs === null) return;
+    const disconnectedForMs = Date.now() - disconnectedSinceMs;
+    if (disconnectedForMs < disconnectedAlertThresholdMs) return;
+    notifyDownThrottled(
+      disconnectedAlertKey,
+      `🔥 iorio-worker can't reach the IBKR Gateway (disconnected ${formatDurationHuman(disconnectedForMs)}). The worker is still running and retrying automatically.`,
+      disconnectedAlertReminderIntervalMs,
+    ).catch((error) => console.error(`Disconnected-alert check failed: ${error instanceof Error ? error.message : error}`));
+  }, 60_000);
+
+  persistentIbkrConnection.onConnect(() => {
+    clearDownState(disconnectedAlertKey)
+      .then((downForMs) => (downForMs === null ? undefined : notifyTelegram(`✅ iorio-worker reconnected to the IBKR Gateway (was down ~${formatDurationHuman(downForMs)}).`)))
+      .catch((error) => console.error(`Disconnected-alert recovery failed: ${error instanceof Error ? error.message : error}`));
+  });
+}
+
 async function main(): Promise<void> {
   await persistentIbkrConnection.start();
+  startDisconnectedAlerting();
   await reconcileStaleOrderRequests().catch((error) => console.error(`Initial stale-order reconciliation failed: ${error}`));
   persistentIbkrConnection.onConnect((ib) => {
     setupOrderTrackingListeners();

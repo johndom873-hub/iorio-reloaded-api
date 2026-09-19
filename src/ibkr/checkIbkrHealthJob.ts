@@ -171,6 +171,11 @@ async function runReconciliationSafely(connection: IbkrConnection): Promise<stri
   }
 }
 
+// Runs every ~10 min, so an IBKR outage (e.g. weekend maintenance) would
+// otherwise send a failure message every run. Alert on the first failure,
+// then remind hourly; recovery is announced by runJob's failure-streak logic.
+const healthCheckFailureReminderIntervalMs = 60 * 60_000;
+
 /**
  * Runs a real IBKR API connectivity check and, only if that fails, asks the
  * VPS to restart the Gateway container and rechecks — then, either way,
@@ -305,5 +310,5 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
       },
       notify: notifications.length > 0 ? notifications.join("\n\n") : undefined,
     };
-  });
+  }, { failureAlertReminderIntervalMs: healthCheckFailureReminderIntervalMs });
 }
