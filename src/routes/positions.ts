@@ -6,6 +6,7 @@ import { positionSelect, fetchAvailableUncoveredShares } from "../lib/positionQu
 import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 import { fetchLiveGreeks, streamLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import { fetchBreakEvenByPositionId, type PositionBreakEven } from "../lib/cycleBreakEvenQueries.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { computeLegSuccessProbabilities, type SuccessProbabilityLeg } from "../lib/positionSuccessProbability.js";
 import { fetchLivePrices, streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
@@ -146,7 +147,24 @@ positionsRouter.get("/", async (request, response) => {
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const result = await db.raw(`${positionSelect} ${whereClause} ORDER BY p.opened_at DESC`, params);
-  response.json(result.rows);
+
+  // Cycle break-even (approved 2026-09-19, see cycleBreakEven.ts) — open positions only. A failure here must
+  // never take the whole list down: rows just come back without a break-even.
+  const openRows = result.rows.filter((row: { status: string }) => row.status === "open");
+  let breakEvenByPositionId = new Map<string, PositionBreakEven>();
+  if (openRows.length > 0) {
+    try {
+      breakEvenByPositionId = await fetchBreakEvenByPositionId(openRows.map((row: { tickerId: string }) => row.tickerId));
+    } catch (error) {
+      console.error("positions: break-even computation failed, returning positions without it", error);
+    }
+  }
+  response.json(
+    result.rows.map((row: { id: string }) => {
+      const breakEven = breakEvenByPositionId.get(row.id);
+      return { ...row, breakEven: breakEven?.breakEven ?? null, breakEvenUnavailableReason: breakEven?.breakEvenUnavailableReason ?? null };
+    }),
+  );
 });
 
 // Set only when the greeks came from position_leg_greeks_snapshots instead
