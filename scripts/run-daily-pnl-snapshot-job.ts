@@ -38,6 +38,12 @@
 // halves of this job's own math need to reflect the same moment in the
 // market (fixed 2026-09-11).
 //
+// Position prices come from fetchDailyClosingPrices.ts (stocks: today's
+// daily bar incl. after-hours = last; options: IBKR's portfolio mark), not
+// fetchLivePrices — both end on real IBKR completion signals, no arrival
+// waits, and the snapshot never stores the prior session's close as
+// today's price (approved 2026-09-18).
+//
 // Usage (dev):
 //   npm run job:daily-pnl-snapshot
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
@@ -49,7 +55,9 @@ import { fetchAccountLedgerPnl } from "../src/ibkr/fetchAccountLedgerPnl.js";
 import { fetchAccountSummary } from "../src/ibkr/fetchAccountSummary.js";
 import { fetchFlexCashTransactions } from "../src/ibkr/fetchFlexCashTransactions.js";
 import { fetchLiveGreeks, type GreeksContract } from "../src/ibkr/fetchLiveGreeks.js";
-import { fetchLivePrices, type PriceContract } from "../src/ibkr/fetchLivePrices.js";
+import { fetchDailyClosingPrices } from "../src/ibkr/fetchDailyClosingPrices.js";
+import type { PriceContract } from "../src/ibkr/fetchLivePrices.js";
+import { easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 
@@ -167,7 +175,7 @@ async function main(): Promise<void> {
     const [accountSummaryResult, ledgerPnlResult, pricesByLegIdResult] = await Promise.allSettled([
       fetchAccountSummary(),
       fetchAccountLedgerPnl(),
-      priceContracts.length > 0 ? fetchLivePrices(priceContracts) : Promise.resolve({} as Record<string, number | null>),
+      priceContracts.length > 0 ? fetchDailyClosingPrices(priceContracts, easternDateIso(new Date())) : Promise.resolve({} as Record<string, number | null>),
     ]);
 
     let accountSnapshotWritten = false;
