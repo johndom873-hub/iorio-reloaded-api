@@ -1519,7 +1519,7 @@ async function reconcileStaleOrderRequests(): Promise<void> {
 // reminder while it lasts, and one message on recovery. State is in
 // alert_state so worker restarts don't re-announce it.
 const disconnectedAlertKey = "worker_ibkr_disconnected";
-const disconnectedAlertThresholdMs = 10 * 60_000;
+const disconnectedAlertThresholdMs = 5 * 60_000;
 const disconnectedAlertReminderIntervalMs = 60 * 60_000;
 
 function startDisconnectedAlerting(): void {
