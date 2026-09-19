@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { runIbkrHealthCheckJob } from "../ibkr/checkIbkrHealthJob.js";
 import * as presenceTracker from "../lib/presenceTracker.js";
+import { fetchPresenceOverview } from "../lib/userLastSeen.js";
 import * as llmStats from "../genosuke/llmStats.js";
 import { requestRateStats, processStartedAt } from "../lib/requestRateTracker.js";
 import { computeMarketSessionStatus } from "../lib/marketSessionStatus.js";
@@ -70,15 +71,10 @@ systemHealthRouter.post("/check-ibkr", async (_request, response) => {
 // One-shot initial snapshot for the Front End node's presence display — the
 // live stream (a "presence" frame on /notifications/stream, see
 // presenceTracker.ts) only reports *changes* after connecting, so a fresh
-// page load needs this to know who's already online.
+// page load needs this to know who's already online. Also carries each
+// user's last-active time (userLastSeen.ts) so offline users still show.
 systemHealthRouter.get("/presence", async (_request, response) => {
-  const onlineUserIds = presenceTracker.onlineUserIds();
-  if (onlineUserIds.length === 0) {
-    response.json({ online: [] });
-    return;
-  }
-  const users = await db("users").whereIn("id", onlineUserIds).select("id", "display_name as displayName");
-  response.json({ online: users });
+  response.json({ users: await fetchPresenceOverview() });
 });
 
 // Database node stats — no existing pg_stat_activity/pg_database_size usage

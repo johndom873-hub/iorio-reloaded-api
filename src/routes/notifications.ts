@@ -3,6 +3,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { subscribeToNotifications } from "../lib/notificationBroadcaster.js";
 import { publishNotification, fetchRecentNotificationEvents } from "../lib/notificationChannel.js";
 import * as presenceTracker from "../lib/presenceTracker.js";
+import { recordUserLastSeen } from "../lib/userLastSeen.js";
 
 export const notificationsRouter = Router();
 notificationsRouter.use(requireAuth);
@@ -52,12 +53,20 @@ notificationsRouter.get("/stream", (request, response) => {
   // separate middleware function.
   const userId = request.session.userId!;
   const onlineAfterConnect = presenceTracker.connect(userId);
-  publishNotification({ type: "presence", onlineUserIds: onlineAfterConnect }).catch(() => {});
+  // Stamp before publishing so the dashboards' refetch on the presence frame
+  // already sees the new last_seen_at.
+  recordUserLastSeen(userId)
+    .catch((error) => console.error("recordUserLastSeen (connect) failed:", error))
+    .then(() => publishNotification({ type: "presence", onlineUserIds: onlineAfterConnect }))
+    .catch(() => {});
 
   response.on("close", () => {
     clearInterval(heartbeat);
     unsubscribe();
     const onlineAfterDisconnect = presenceTracker.disconnect(userId);
-    publishNotification({ type: "presence", onlineUserIds: onlineAfterDisconnect }).catch(() => {});
+    recordUserLastSeen(userId)
+      .catch((error) => console.error("recordUserLastSeen (disconnect) failed:", error))
+      .then(() => publishNotification({ type: "presence", onlineUserIds: onlineAfterDisconnect }))
+      .catch(() => {});
   });
 });
