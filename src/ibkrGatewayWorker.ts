@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Client as PgClient } from "pg";
 import { EventName, OptionType, OrderAction, OrderType, SecType, TimeInForce } from "@stoqey/ib";
-import type { Contract, ComboLeg, Execution, Order as IbkrOrder } from "@stoqey/ib";
+import type { CommissionReport, Contract, ComboLeg, Execution, Order as IbkrOrder } from "@stoqey/ib";
 import { db } from "./db/connection.js";
 import { environment } from "./config/env.js";
 import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
@@ -425,6 +425,14 @@ function setupOrderTrackingListeners(): void {
     recordExecution(contract, execution).catch((error) => console.error(`Failed to record execution: ${error}`));
   });
 
+  // Commissions arrive on their own event, keyed by execId, usually right
+  // after execDetails (found 2026-09-19: nothing ever subscribed, so
+  // trades.commission was NULL on every trade). Also fires for replayed
+  // executions after a reconnect, which backfills whatever IBKR still returns.
+  ib.on(EventName.commissionReport, (report) => {
+    recordCommission(report).catch((error) => console.error(`Failed to record commission: ${error}`));
+  });
+
   // Found by real testing (2026-08-24): a rejected/errored order surfaces
   // only as an EventName.error keyed by the order id, not an orderStatus
   // event — without this listener a rejection vanished with zero trace
@@ -484,6 +492,39 @@ async function lookupSourceOrderRequestId(execution: Execution): Promise<string 
   return orderRequest?.id ?? null;
 }
 
+// A commission report can arrive before the trades row exists (the execution
+// is buffered until reconcilePositionsFromIbkr creates its leg). Hold it here
+// and apply it right after the row is inserted. In-memory only: a worker
+// restart in that gap loses it, but the post-reconnect execution replay
+// re-emits commission reports for recent fills, so it self-heals.
+const pendingCommissionsByExecId = new Map<string, number>();
+const maxPendingCommissions = 500;
+
+// IBKR sends Double.MAX_VALUE when a commission isn't known yet.
+function isRealCommission(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value >= 0 && value < 1e9;
+}
+
+async function recordCommission(report: CommissionReport): Promise<void> {
+  if (!report.execId || !isRealCommission(report.commission)) return;
+  const updatedRowCount = await db("trades").where({ ibkr_exec_id: report.execId }).update({ commission: report.commission });
+  if (updatedRowCount > 0) {
+    pendingCommissionsByExecId.delete(report.execId);
+    return;
+  }
+  if (pendingCommissionsByExecId.size >= maxPendingCommissions) {
+    pendingCommissionsByExecId.delete(pendingCommissionsByExecId.keys().next().value!);
+  }
+  pendingCommissionsByExecId.set(report.execId, report.commission);
+}
+
+async function applyPendingCommission(execId: string): Promise<void> {
+  const commission = pendingCommissionsByExecId.get(execId);
+  if (commission === undefined) return;
+  await db("trades").where({ ibkr_exec_id: execId }).update({ commission });
+  pendingCommissionsByExecId.delete(execId);
+}
+
 async function insertOpeningTradeRow(positionLegId: string, contract: Contract, execution: Execution): Promise<void> {
   if (!execution.execId) return;
   await db("trades")
@@ -500,6 +541,7 @@ async function insertOpeningTradeRow(positionLegId: string, contract: Contract, 
     })
     .onConflict("ibkr_exec_id")
     .ignore();
+  await applyPendingCommission(execution.execId);
 }
 
 /**
@@ -565,6 +607,7 @@ async function recordExecution(contract: Contract, execution: Execution): Promis
     is_closing_trade: true,
     source_order_request_id: await lookupSourceOrderRequestId(execution),
   });
+  await applyPendingCommission(execution.execId);
 
   reconcilePositionsFromIbkr().catch((error) => console.error(`Post-execution reconciliation failed: ${error}`));
 }
