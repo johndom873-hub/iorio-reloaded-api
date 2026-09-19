@@ -16,6 +16,11 @@ export interface Greeks {
   gamma: number | null;
   vega: number | null;
   theta: number | null;
+  // From the same option-computation tick (added 2026-09-19 for the Positions
+  // Price and P(d2) columns) — undPrice is IBKR's own underlying price at the
+  // time of the model computation, so no separate stock subscription is needed.
+  impliedVolatility?: number | null;
+  underlyingPrice?: number | null;
 }
 
 // Safety-net ceiling only, not the expected outcome — see the snapshot-mode
@@ -51,13 +56,14 @@ function requestLiveGreeks(ib: IBApi, allocateReqId: () => number, contracts: Gr
     reqId: number,
     tickType: number,
     _tickAttrib: number | undefined,
-    _impliedVol?: number,
+    impliedVol?: number,
     delta?: number,
     _optPrice?: number,
     _pvDividend?: number,
     gamma?: number,
     vega?: number,
     theta?: number,
+    underlyingPrice?: number,
   ) {
     const contract = reqIdToContract.get(reqId);
     // Model computation only, real-time (13) or delayed (83) — see the same
@@ -75,6 +81,8 @@ function requestLiveGreeks(ib: IBApi, allocateReqId: () => number, contracts: Gr
       gamma: gamma ?? previous.gamma,
       vega: vega ?? previous.vega,
       theta: theta ?? previous.theta,
+      impliedVolatility: impliedVol ?? previous.impliedVolatility ?? null,
+      underlyingPrice: underlyingPrice ?? previous.underlyingPrice ?? null,
     });
     markDone(reqId);
   }
@@ -219,26 +227,41 @@ export async function streamLiveGreeks(contracts: GreeksContract[], onUpdate: (g
   const allocateReqId = () => (borrowed ? sharedReadConnection.allocateReqId() : nextOneShotReqId++);
 
   function greeksEqual(a: Greeks, b: Greeks): boolean {
-    return a.delta === b.delta && a.gamma === b.gamma && a.vega === b.vega && a.theta === b.theta;
+    return (
+      a.delta === b.delta &&
+      a.gamma === b.gamma &&
+      a.vega === b.vega &&
+      a.theta === b.theta &&
+      a.impliedVolatility === b.impliedVolatility &&
+      a.underlyingPrice === b.underlyingPrice
+    );
   }
 
   function onTickOptionComputation(
     reqId: number,
     tickType: number,
     _tickAttrib: number | undefined,
-    _impliedVol?: number,
+    impliedVol?: number,
     delta?: number,
     _optPrice?: number,
     _pvDividend?: number,
     gamma?: number,
     vega?: number,
     theta?: number,
+    underlyingPrice?: number,
   ) {
     const contract = reqIdToContract.get(reqId);
     if (!contract || (tickType !== 83 && tickType !== 13)) return;
     // Merge, don't replace — see requestLiveGreeks's matching comment above.
     const previous = greeksByKey.get(contract.key)!;
-    const next: Greeks = { delta: delta ?? previous.delta, gamma: gamma ?? previous.gamma, vega: vega ?? previous.vega, theta: theta ?? previous.theta };
+    const next: Greeks = {
+      delta: delta ?? previous.delta,
+      gamma: gamma ?? previous.gamma,
+      vega: vega ?? previous.vega,
+      theta: theta ?? previous.theta,
+      impliedVolatility: impliedVol ?? previous.impliedVolatility ?? null,
+      underlyingPrice: underlyingPrice ?? previous.underlyingPrice ?? null,
+    };
     if (greeksEqual(previous, next)) return;
     greeksByKey.set(contract.key, next);
     onUpdate(Object.fromEntries(greeksByKey));

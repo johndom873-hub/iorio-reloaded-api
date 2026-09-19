@@ -6,6 +6,8 @@ import { positionSelect, fetchAvailableUncoveredShares } from "../lib/positionQu
 import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 import { fetchLiveGreeks, streamLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import { getRiskFreeRate } from "../lib/riskFreeRate.js";
+import { computeLegSuccessProbabilities, type SuccessProbabilityLeg } from "../lib/positionSuccessProbability.js";
 import { fetchLivePrices, streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
@@ -152,6 +154,9 @@ positionsRouter.get("/", async (request, response) => {
 // snapshot was captured, mirroring UnrealizedPnlResult.asOfDate.
 export interface GreeksResult extends Greeks {
   asOfDate: string | null;
+  // Streamed only (see positionSuccessProbability.ts); absent from GET /greeks.
+  probabilityByDelta?: number | null;
+  probabilityByD2?: number | null;
 }
 
 positionsRouter.get("/greeks", async (request, response) => {
@@ -274,9 +279,28 @@ positionsRouter.get("/greeks/stream", async (request, response) => {
           "pl.option_type as optionType",
           "pl.strike_price as strikePrice",
           db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as \"expiryDate\""),
+          db.raw("to_char(pl.expiry_date, 'YYYY-MM-DD') as \"expiryIsoDate\""),
+          "pl.side",
+          db.raw(
+            `(SELECT SUM(s.entry_price * s.quantity) / NULLIF(SUM(s.quantity), 0) FROM position_legs s
+              WHERE s.position_id = pl.position_id AND s.leg_type = 'stock' AND s.exit_at IS NULL) AS "stockCostBasisPerShare"`,
+          ),
           "t.symbol",
         )
     : [];
+
+  const successLegByKey = new Map<string, SuccessProbabilityLeg>(
+    rows.map((row) => [
+      row.id,
+      {
+        side: row.side,
+        optionType: row.optionType,
+        strike: Number(row.strikePrice),
+        expiryIsoDate: row.expiryIsoDate,
+        stockCostBasisPerShare: row.stockCostBasisPerShare === null ? null : Number(row.stockCostBasisPerShare),
+      },
+    ]),
+  );
 
   const contracts: GreeksContract[] = rows.map((row) => ({
     key: row.id,
@@ -324,6 +348,18 @@ positionsRouter.get("/greeks/stream", async (request, response) => {
   // live computation on the next one).
   const lastGoodResult: Record<string, GreeksResult> = {};
 
+  // Null when FRED has never succeeded — P(d2) then shows "—", never a
+  // silently assumed 0% rate.
+  const riskFreeRate = await getRiskFreeRate().catch(() => null);
+  const sendWithProbabilities = () => {
+    const enriched: Record<string, GreeksResult> = {};
+    for (const [legId, result] of Object.entries(lastGoodResult)) {
+      const leg = successLegByKey.get(legId);
+      enriched[legId] = leg ? { ...result, ...computeLegSuccessProbabilities(leg, result, riskFreeRate) } : result;
+    }
+    send(enriched);
+  };
+
   try {
     await streamLiveGreeks(
       contracts,
@@ -334,7 +370,7 @@ positionsRouter.get("/greeks/stream", async (request, response) => {
             if (isLiveGreeksEmpty(live)) continue; // keep whatever's already in lastGoodResult
             lastGoodResult[contract.key] = { ...live!, asOfDate: null };
           }
-          send(lastGoodResult);
+          sendWithProbabilities();
           return;
         }
         isFirstEvent = false;
@@ -379,7 +415,7 @@ positionsRouter.get("/greeks/stream", async (request, response) => {
               }
             : { delta: null, gamma: null, vega: null, theta: null, asOfDate: null };
         }
-        send(lastGoodResult);
+        sendWithProbabilities();
       }),
       abortController.signal,
     );

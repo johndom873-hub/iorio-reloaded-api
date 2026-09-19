@@ -65,3 +65,32 @@ export function computeProbabilityOfProfit(input: ProbabilityOfProfitInput): num
   // Short put profits if S_T > breakeven: P(S_T > breakeven) = N(d2).
   return right === "call" ? standardNormalCdf(-d2) : standardNormalCdf(d2);
 }
+
+export interface SuccessProbabilityInput {
+  spotPrice: number;
+  /** Threshold the stock must finish above: the strike (CSP) or max(strike, cost basis) (CC). */
+  thresholdPrice: number;
+  impliedVolatility: number;
+  daysToExpiry: number;
+  /** Annual risk-free rate as a decimal (0.04 = 4%). */
+  riskFreeRate: number;
+}
+
+/**
+ * Approved 2026-09-19 for the Positions "P(d2)" column: N(d2), the
+ * probability the stock finishes ABOVE thresholdPrice at expiry. That is
+ * "success" for both strategies — a cash-secured put is not assigned, and a
+ * covered call is assigned (at a profit when the threshold is cost basis).
+ * Unlike computeProbabilityOfProfit above, this uses a real risk-free rate
+ * and the strike/cost-basis threshold, not the premium-adjusted breakeven.
+ * Null when an input is missing or non-physical.
+ */
+export function computeSuccessProbability(input: SuccessProbabilityInput): number | null {
+  const { spotPrice, thresholdPrice, impliedVolatility, daysToExpiry, riskFreeRate } = input;
+  if (spotPrice <= 0 || thresholdPrice <= 0 || impliedVolatility <= 0 || daysToExpiry <= 0) return null;
+  const t = daysToExpiry / 365;
+  const d2 =
+    (Math.log(spotPrice / thresholdPrice) + (riskFreeRate - 0.5 * impliedVolatility * impliedVolatility) * t) /
+    (impliedVolatility * Math.sqrt(t));
+  return standardNormalCdf(d2);
+}
