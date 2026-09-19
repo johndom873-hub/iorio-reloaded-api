@@ -24,7 +24,7 @@ import { notifyTelegram } from "./lib/notifyTelegram.js";
 import { clearDownState, notifyDownThrottled } from "./lib/throttledAlert.js";
 import { formatDurationHuman } from "./lib/formatDurationHuman.js";
 import { revertSourceAlertToPending } from "./lib/revertSourceAlertToPending.js";
-import { publishNotification } from "./lib/notificationChannel.js";
+import { publishNotification, publishPulse } from "./lib/notificationChannel.js";
 
 installCrashHandlers("worker");
 
@@ -228,6 +228,8 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
 
     console.log(`processOrderRequest(${orderRequestId}): placing IBKR order ${ibkrOrderId} (${payload.symbol}, lmtPrice=${built.order.lmtPrice}).`);
     ib.placeOrder(ibkrOrderId, built.contract, built.order);
+    // Animation-only signal for Iorio Pulse's IBKR-Gateway line (never persisted).
+    publishPulse("ibkr-gateway").catch(() => {});
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await db("order_requests")
@@ -389,6 +391,7 @@ function setupOrderTrackingListeners(): void {
   if (!ib) return;
 
   ib.on(EventName.orderStatus, (orderId, status, filled, remaining, _avgFillPrice, permId) => {
+    publishPulse("ibkr-gateway").catch(() => {});
     const requestStatus = filled > 0 && remaining > 0 ? "partially_filled" : orderStatusToRequestStatus(status);
     if (!requestStatus) return;
     // permId is globally unique forever, unlike ibkr_order_id, which resets
@@ -796,6 +799,7 @@ async function runReconciliationPass(passId: number): Promise<void> {
   const reqPositionsStartedAt = Date.now();
   const held = await fetchIbkrHeldPositions(ib);
   console.log(`Reconciliation #${passId}: reqPositions returned ${held.length} held contract(s) in ${Date.now() - reqPositionsStartedAt}ms.`);
+  publishPulse("ibkr-gateway").catch(() => {});
 
   // Computed once up front (not just where the closing pass used to compute
   // it, further down) so upsertSplitCoveredCallPosition can also use it this

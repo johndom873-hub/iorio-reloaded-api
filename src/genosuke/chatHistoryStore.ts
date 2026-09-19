@@ -5,6 +5,7 @@
 // wall-clock sweep (approved 2026-08-27).
 import { db } from "../db/connection.js";
 import type { ChatMessage, ChatRole, ToolCall } from "./openRouterAdapter.js";
+import { emitPulse } from "../lib/pulseEmitter.js";
 
 interface ChatMessageRow {
   id: string;
@@ -33,6 +34,7 @@ export async function loadRecentHistory(chatId: string): Promise<ChatMessage[]> 
     .del();
 
   const rows = await db<ChatMessageRow>("genosuke_chat_messages").where({ chat_id: chatId }).orderBy("id", "asc");
+  emitPulse("genosuke-db");
   return rows.map(rowToMessage);
 }
 
@@ -50,4 +52,5 @@ export async function appendHistory(chatId: string, messages: ChatMessage[], fro
       tool_call_id: message.toolCallId ?? null,
     })),
   );
+  emitPulse("genosuke-db");
 }

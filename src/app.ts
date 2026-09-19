@@ -20,6 +20,7 @@ import { tradeAlertsRouter } from "./routes/tradeAlerts.js";
 import { tradeBlotterRouter } from "./routes/tradeBlotter.js";
 import { requestRateMiddleware } from "./lib/requestRateTracker.js";
 import { installDbQueryTimingTracker } from "./lib/dbQueryTimingTracker.js";
+import { emitPulse, pulseOnRequestMiddleware } from "./lib/pulseEmitter.js";
 import { db } from "./db/connection.js";
 
 export const app = express();
@@ -39,7 +40,9 @@ app.use(express.json());
 app.use(sessionMiddleware);
 // For Iorio Pulse's Heroku node — see requestRateTracker.ts.
 installDbQueryTimingTracker(db);
+db.on("query", () => emitPulse("heroku-db"));
 app.use(requestRateMiddleware);
+app.use(pulseOnRequestMiddleware);
 
 app.use(healthRouter);
 // Telegram calls this directly (no session) — authenticated by the shared

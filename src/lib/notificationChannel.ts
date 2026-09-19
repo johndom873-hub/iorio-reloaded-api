@@ -18,7 +18,13 @@ export type AppNotification =
   | { type: "job_completed"; jobName: string; status: "success" | "failure" }
   | { type: "alert_generated"; strategyKey: string; symbol: string; annualizedYield: number }
   | { type: "genosuke_reply"; preview: string }
-  | { type: "presence"; onlineUserIds: string[] };
+  | { type: "presence"; onlineUserIds: string[] }
+  // Animation-only signal for the Pulse topology map's otherwise-silent lines
+  // (see pulseEmitter.ts / publishPulse below) — never persisted, never shown
+  // in Latest Events.
+  | { type: "pulse"; edgeId: PulseEdgeId };
+
+export type PulseEdgeId = "ibkr-gateway" | "heroku-browser" | "heroku-db" | "genosuke-db" | "genosuke-llm";
 
 // Kept small — the Pulse dashboard's Latest Events panel only ever shows the
 // most recent EVENTS_LIMIT (30) on load; no need to retain history beyond a
@@ -30,7 +36,7 @@ export async function publishNotification(notification: AppNotification): Promis
 
   // "presence" is online/offline state, not a loggable event — Latest Events
   // has nothing to show for it.
-  if (notification.type === "presence") return;
+  if (notification.type === "presence" || notification.type === "pulse") return;
 
   // ibkr_health_check runs every ~10 minutes and is never shown in Latest
   // Events (fetchRecentNotificationEvents filters it out, and so does the
@@ -62,4 +68,22 @@ export async function fetchRecentNotificationEvents(
     .orderBy("occurred_at", "desc")
     .limit(limit);
   return rows.map((row) => ({ notification: row.payload as AppNotification, occurredAt: row.occurred_at.toISOString() }));
+}
+
+const minimumPublishIntervalMs = 500;
+const lastPulsePublishedAtByEdge = new Map<PulseEdgeId, number>();
+
+/**
+ * Cross-process pulse for an edge whose activity happens outside the web dyno
+ * (the VPS worker's IBKR traffic). Goes over the same NOTIFY channel as every
+ * other notification but skips persistence, and is throttled per edge so a
+ * burst of IBKR callbacks doesn't flood every open Pulse tab. Web-dyno-side
+ * edges use pulseEmitter.ts's in-process emitPulse instead, which needs no
+ * database round trip (and so can't itself trigger the heroku-db pulse).
+ */
+export async function publishPulse(edgeId: PulseEdgeId): Promise<void> {
+  const now = Date.now();
+  if (now - (lastPulsePublishedAtByEdge.get(edgeId) ?? 0) < minimumPublishIntervalMs) return;
+  lastPulsePublishedAtByEdge.set(edgeId, now);
+  await publishNotification({ type: "pulse", edgeId });
 }

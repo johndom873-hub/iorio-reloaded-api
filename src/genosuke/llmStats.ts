@@ -3,6 +3,8 @@
 // approximate by design (same non-persistence choice as presenceTracker.ts):
 // this is a dashboard decoration, not a billing/observability system, so a
 // dyno restart just resets the window rather than needing a table.
+import { emitPulse } from "../lib/pulseEmitter.js";
+
 const windowMs = 15 * 60_000;
 
 interface Call {
@@ -13,6 +15,7 @@ interface Call {
 let calls: Call[] = [];
 
 export function record(durationMs: number): void {
+  emitPulse("genosuke-llm");
   const now = Date.now();
   calls.push({ timestamp: now, durationMs });
   calls = calls.filter((call) => now - call.timestamp <= windowMs);

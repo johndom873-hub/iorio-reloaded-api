@@ -34,8 +34,13 @@ notificationsRouter.get("/stream", (request, response) => {
   response.flushHeaders();
   response.on("error", () => {});
 
+  // Pulse frames (topology animation only, see pulseEmitter.ts) are frequent,
+  // so only the Pulse page's own stream asks for them (?pulses=1) — every
+  // other tab would just wake up for nothing.
+  const wantsPulses = request.query.pulses === "1";
   const unsubscribe = subscribeToNotifications((notification) => {
     if (response.writableEnded) return;
+    if (notification.type === "pulse" && !wantsPulses) return;
     response.write(`data: ${JSON.stringify(notification)}\n\n`);
   });
 

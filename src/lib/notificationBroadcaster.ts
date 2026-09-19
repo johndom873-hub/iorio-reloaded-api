@@ -21,6 +21,11 @@ export function subscribeToNotifications(subscriber: Subscriber): () => void {
   return () => subscribers.delete(subscriber);
 }
 
+/** Delivers a notification to this process's connected tabs only, without a Postgres round trip. */
+export function broadcastToLocalSubscribers(notification: AppNotification): void {
+  subscribers.forEach((subscriber) => subscriber(notification));
+}
+
 async function connect(attempt = 0): Promise<void> {
   const client = new PgClient({
     connectionString: environment.databaseUrl,
