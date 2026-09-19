@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { subscribeToNotifications } from "../lib/notificationBroadcaster.js";
-import { publishNotification, fetchRecentNotificationEvents } from "../lib/notificationChannel.js";
+import { publishNotification, fetchRecentNotificationEventsWithOrders } from "../lib/notificationChannel.js";
 import * as presenceTracker from "../lib/presenceTracker.js";
 import { recordUserLastSeen } from "../lib/userLastSeen.js";
 
@@ -15,7 +15,7 @@ const recentEventsLimit = 30;
 // below only ever carries events from the moment a tab connects, so without
 // this the panel is always empty on a fresh page load.
 notificationsRouter.get("/recent", async (_request, response) => {
-  const events = await fetchRecentNotificationEvents(recentEventsLimit);
+  const events = await fetchRecentNotificationEventsWithOrders(recentEventsLimit);
   response.json({ events });
 });
 

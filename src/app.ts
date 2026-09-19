@@ -1,4 +1,4 @@
-import express, { type ErrorRequestHandler } from "express";
+import express from "express";
 import cors from "cors";
 import { environment } from "./config/env.js";
 import { handleGenosukeWebhook } from "./genosuke/bot.js";
@@ -19,6 +19,7 @@ import { tickerDetailRouter } from "./routes/tickerDetail.js";
 import { tradeAlertsRouter } from "./routes/tradeAlerts.js";
 import { tradeBlotterRouter } from "./routes/tradeBlotter.js";
 import { requestRateMiddleware } from "./lib/requestRateTracker.js";
+import { errorHandler } from "./middleware/errorHandler.js";
 import { installDbQueryTimingTracker } from "./lib/dbQueryTimingTracker.js";
 import { emitPulse, pulseOnRequestMiddleware } from "./lib/pulseEmitter.js";
 import { db } from "./db/connection.js";
@@ -67,8 +68,4 @@ app.use("/dashboard", dashboardRouter);
 // falls through to Express's default handler, which returns plain text
 // ("Internal Server Error") instead of the { error: "..." } JSON shape
 // every route and the frontend's apiRequest client otherwise expect.
-const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
-  console.error(error);
-  response.status(500).json({ error: "Something went wrong. Please try again." });
-};
 app.use(errorHandler);

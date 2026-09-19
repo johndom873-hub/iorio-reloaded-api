@@ -1,6 +1,7 @@
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { environment, requireEnvironmentVariable } from "../config/env.js";
+import { databaseConnectionBudget } from "../config/databaseConnectionBudget.js";
 
 const PgSessionStore = connectPgSimple(session);
 
@@ -11,9 +12,12 @@ export const sessionMiddleware = session({
     // via connection string instead of trying to share Knex's. Heroku
     // Postgres rejects unencrypted connections, so production needs an
     // explicit ssl option (conObject), not just a bare connection string.
-    ...(environment.nodeEnvironment === "production"
-      ? { conObject: { connectionString: environment.databaseUrl, ssl: { rejectUnauthorized: false } } }
-      : { conString: environment.databaseUrl }),
+    // Capped pool (pg's default is 10) — see databaseConnectionBudget.ts.
+    conObject: {
+      connectionString: environment.databaseUrl,
+      max: databaseConnectionBudget.sessionStorePoolMax,
+      ...(environment.nodeEnvironment === "production" ? { ssl: { rejectUnauthorized: false } } : {}),
+    },
     tableName: "session",
     createTableIfMissing: false,
   }),
