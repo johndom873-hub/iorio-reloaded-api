@@ -1,6 +1,7 @@
 import { BarSizeSetting, EventName, Stock, WhatToShow } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
+import { recordStockPrices } from "../lib/priceService.js";
 
 export interface TickerPricing {
   last: number | null;
@@ -112,7 +113,10 @@ export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: 
       // matching comment on the trade-alert outage this caused).
       if (tickType === 1 || tickType === 66) pricing.bid = value;
       if (tickType === 2 || tickType === 67) pricing.ask = value;
-      if (tickType === 4 || tickType === 68) pricing.last = value;
+      if (tickType === 4 || tickType === 68) {
+        pricing.last = value;
+        if (value !== null) void recordStockPrices([{ symbol, price: value, source: "live" }]);
+      }
       if (tickType === 6 || tickType === 72) pricing.high = value;
       if (tickType === 7 || tickType === 73) pricing.low = value;
       if (tickType === 9 || tickType === 75) pricing.previousClose = value;
@@ -230,7 +234,10 @@ export async function streamPricingUpdates(
     // above.
     if (tickType === 1 || tickType === 66) pricing.bid = value;
     if (tickType === 2 || tickType === 67) pricing.ask = value;
-    if (tickType === 4 || tickType === 68) pricing.last = value;
+    if (tickType === 4 || tickType === 68) {
+      pricing.last = value;
+      if (value !== null) void recordStockPrices([{ symbol, price: value, source: "live" }]);
+    }
     if (tickType === 6 || tickType === 72) pricing.high = value;
     if (tickType === 7 || tickType === 73) pricing.low = value;
     if (tickType === 9 || tickType === 75) pricing.previousClose = value;

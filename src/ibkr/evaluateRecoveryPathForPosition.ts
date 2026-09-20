@@ -1,3 +1,4 @@
+import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
@@ -68,7 +69,7 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
   requestRealtimeMarketData(connection.ib);
   try {
     const pricing = await lookupPricingSnapshot(connection, positionRow.symbol);
-    const currentPrice = pricing.last ?? pricing.previousClose;
+    const currentPrice = pricing.last ?? (await getBestKnownStockPrice(positionRow.symbol)) ?? pricing.previousClose;
     if (currentPrice === null) throw new Error(`No current price available for ${positionRow.symbol}`);
 
     const contractsAvailable = Math.floor(shares / SHARES_PER_CONTRACT);

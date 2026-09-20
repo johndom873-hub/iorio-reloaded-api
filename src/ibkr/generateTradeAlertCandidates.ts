@@ -1,3 +1,4 @@
+import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { EventName, OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
@@ -215,7 +216,8 @@ async function fetchTickerPrepData(connection: IbkrConnection, symbol: string): 
   const pricingPromise = lookupPricingSnapshot(connection, symbol, pricingReqId);
 
   const [contractDetails, pricing] = await Promise.all([contractDetailsPromise, pricingPromise]);
-  const spotPrice = pricing.last ?? pricing.previousClose;
+  // Shared price hierarchy (priceService.ts): a real last, else the stored last known good; the previous close only as a last resort.
+  const spotPrice = pricing.last ?? (await getBestKnownStockPrice(symbol)) ?? pricing.previousClose;
   if (!contractDetails.conId || !spotPrice) {
     return { conId: contractDetails.conId, spotPrice: null, expirations: [], strikes: [] };
   }

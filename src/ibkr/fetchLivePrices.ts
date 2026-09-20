@@ -3,6 +3,7 @@ import type { Contract } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import { loadFallbackStockPrices, recordStockPrices } from "../lib/priceService.js";
 
 export interface PriceContract {
   key: string;
@@ -134,7 +135,7 @@ function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: Pr
  * across requests, no per-call connect cost) and falls back to a one-shot
  * connection only when the shared one isn't available.
  */
-export async function fetchLivePrices(contracts: PriceContract[]): Promise<Record<string, number | null>> {
+async function fetchLivePricesFromIbkr(contracts: PriceContract[]): Promise<Record<string, number | null>> {
   if (contracts.length === 0) return {};
 
   let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
@@ -163,6 +164,38 @@ export async function fetchLivePrices(contracts: PriceContract[]): Promise<Recor
   } finally {
     connection.disconnect();
   }
+}
+
+
+/**
+ * Stock prices are shared platform-wide (src/lib/priceService.ts, approved 2026-09-19): every real last trade received
+ * here is recorded, and a stock with no last right now is filled from the stored last known good price (or the latest
+ * daily close) instead of coming back null — so every screen shows the same number. Option legs are unchanged.
+ */
+function stockSymbolsOf(contracts: PriceContract[]): string[] {
+  return contracts.filter((contract) => contract.legType === "stock").map((contract) => contract.symbol);
+}
+
+function fillStockGaps(contracts: PriceContract[], prices: Record<string, number | null>, fallback: Map<string, { price: number }>): Record<string, number | null> {
+  const filled = { ...prices };
+  for (const contract of contracts) {
+    if (contract.legType !== "stock" || (filled[contract.key] ?? null) !== null) continue;
+    filled[contract.key] = fallback.get(contract.symbol)?.price ?? null;
+  }
+  return filled;
+}
+
+function recordRealStockPrices(contracts: PriceContract[], prices: Record<string, number | null>, source: "live" | "frozen"): void {
+  const entries = contracts
+    .filter((contract) => contract.legType === "stock" && (prices[contract.key] ?? 0) > 0)
+    .map((contract) => ({ symbol: contract.symbol, price: prices[contract.key] as number, source }));
+  if (entries.length > 0) void recordStockPrices(entries);
+}
+
+export async function fetchLivePrices(contracts: PriceContract[]): Promise<Record<string, number | null>> {
+  const [prices, fallback] = await Promise.all([fetchLivePricesFromIbkr(contracts), loadFallbackStockPrices(stockSymbolsOf(contracts))]);
+  recordRealStockPrices(contracts, prices, "frozen");
+  return fillStockGaps(contracts, prices, fallback);
 }
 
 function buildContract(contract: PriceContract): Contract {
@@ -198,7 +231,7 @@ const frozenGraceMs = 3_000;
  * fast-in-fast-out reads, same reasoning as streamOrderLegQuote.ts /
  * streamTickerDetail.ts already use for their own live subscriptions.
  */
-export async function streamLivePrices(
+async function streamLivePricesFromIbkr(
   contracts: PriceContract[],
   onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void,
   signal: AbortSignal,
@@ -295,4 +328,25 @@ export async function streamLivePrices(
     ib.removeListener(EventName.error, onError);
     connection.disconnect();
   }
+}
+
+/**
+ * Public streaming entry point: the IBKR stream above plus the shared price service — real last trades are recorded as
+ * they arrive, and stocks with no last yet are filled from the stored last known good price so every screen agrees.
+ */
+export async function streamLivePrices(
+  contracts: PriceContract[],
+  onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  if (contracts.length === 0) return;
+  const fallback = await loadFallbackStockPrices(stockSymbolsOf(contracts));
+  await streamLivePricesFromIbkr(
+    contracts,
+    (prices, status) => {
+      recordRealStockPrices(contracts, prices, status.frozenPhaseComplete ? "live" : "frozen");
+      onUpdate(fillStockGaps(contracts, prices, fallback), status);
+    },
+    signal,
+  );
 }

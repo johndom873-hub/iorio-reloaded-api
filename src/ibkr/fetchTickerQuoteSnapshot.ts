@@ -1,3 +1,4 @@
+import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
@@ -59,7 +60,8 @@ export async function fetchTickerQuoteSnapshot(symbol: string): Promise<TickerQu
       const pricing = await lookupPricingSnapshot(connection, symbol, pricingReqId);
       const contractDetails = await contractDetailsPromise;
 
-      const spotPrice = pricing.last ?? pricing.previousClose ?? lastKnownClose?.price;
+      // Shared price hierarchy (priceService.ts): a real last, else the stored last known good — the previous close is a session old outside market hours.
+      const spotPrice = pricing.last ?? (await getBestKnownStockPrice(symbol)) ?? lastKnownClose?.price ?? pricing.previousClose;
       if (!contractDetails.conId || !spotPrice) {
         throw new Error("No contract or spot price available to select option strikes.");
       }

@@ -1,3 +1,4 @@
+import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
@@ -50,7 +51,7 @@ export async function streamPositionQuote(symbol: string, onEvent: (event: Posit
         if (!contractDetails.conId) throw new Error("No contract found to look up the option chain.");
 
         const pricing = await overviewTask;
-        const spotPrice = pricing?.last ?? pricing?.previousClose;
+        const spotPrice = pricing?.last ?? (await getBestKnownStockPrice(symbol)) ?? pricing?.previousClose;
         if (!spotPrice) throw new Error("No spot price available to select option strikes.");
 
         const expiryStrikes = await prepareOptionChainStrikes(connection, symbol, contractDetails.conId, spotPrice);

@@ -1,6 +1,7 @@
 import { BarSizeSetting, EventName, Stock, WhatToShow, type Contract } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import type { PriceContract } from "./fetchLivePrices.js";
+import { recordStockPrices } from "../lib/priceService.js";
 
 // Fails the whole fetch if IBKR goes silent (Gateway/tunnel problem) — a
 // liveness guard on the failure path only. Every request below finishes on
@@ -126,6 +127,10 @@ export async function fetchDailyClosingPrices(contracts: PriceContract[], sessio
       }
     }
     for (const contract of stockContracts) priceByKey[contract.key] = stockClosesBySymbol.get(contract.symbol) ?? null;
+    // The session's last trade (incl. after-hours) is a real price: keep it as the shared last known good.
+    void recordStockPrices(
+      [...stockClosesBySymbol.entries()].filter(([, close]) => close !== null).map(([symbol, close]) => ({ symbol, price: close as number, source: "daily_close" as const })),
+    );
 
     for (const contract of optionContracts) {
       const held = portfolioMarks.find(

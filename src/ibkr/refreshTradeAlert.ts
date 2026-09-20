@@ -1,3 +1,4 @@
+import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
@@ -50,7 +51,7 @@ async function refreshNewTradeCandidate(
     lookupPricingSnapshot(connection, symbol, 2),
     quoteContract(connection, symbol, candidate.expiry, candidate.strike, candidate.right),
   ]);
-  const spotPrice = pricing.last ?? pricing.previousClose ?? candidate.spotPrice;
+  const spotPrice = pricing.last ?? (await getBestKnownStockPrice(symbol)) ?? candidate.spotPrice ?? pricing.previousClose;
   const premium = midOrLast(quote);
   if (!quote || premium === null || premium <= 0 || quote.delta === null) {
     return "No live quote available for this contract right now — try again during market hours.";
