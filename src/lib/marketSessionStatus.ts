@@ -37,7 +37,7 @@ function easternOffsetMinutes(dateIso: string): number {
   return match ? Number(match[1]) * 60 : -300;
 }
 
-function easternInstant(dateIso: string, hour: number, minute: number): Date {
+export function easternInstant(dateIso: string, hour: number, minute: number): Date {
   const [year, month, day] = dateIso.split("-").map(Number) as [number, number, number];
   const utcMinutesSinceMidnight = hour * 60 + minute - easternOffsetMinutes(dateIso);
   return new Date(Date.UTC(year, month - 1, day, 0, utcMinutesSinceMidnight));
@@ -51,7 +51,7 @@ function isWeekday(dateIso: string): boolean {
 // market_calendar (synced from MarketData.app, see scripts/sync-market-calendar.ts)
 // covers ~400 days forward as of its last sync — falls back to a plain
 // weekday check for any date outside that coverage rather than failing.
-async function resolveIsOpenDay(dateIso: string): Promise<boolean> {
+export async function resolveIsOpenDay(dateIso: string): Promise<boolean> {
   const row = await db("market_calendar").where({ calendar_date: dateIso }).first();
   if (row) return row.is_open;
   return isWeekday(dateIso);
@@ -102,4 +102,29 @@ export async function computeMarketSessionStatus(now: Date = new Date()): Promis
   const nextDateIso = await nextOpenDateAfter(dateIso);
   const nextOpen = easternInstant(nextDateIso, REGULAR_OPEN.hour, REGULAR_OPEN.minute);
   return { state: "closed", label: formatCountdown(nextOpen.getTime() - now.getTime(), "opens in") };
+}
+
+function previousCalendarDate(dateIso: string): string {
+  return new Date(new Date(`${dateIso}T12:00:00Z`).getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+/**
+ * The most recent trading session whose regular close (16:00 ET) has passed at
+ * `now` — i.e. the newest date a COMPLETED daily bar can exist for. Holiday- and
+ * weekend-aware through market_calendar. Before today's close (or when today is
+ * not a trading day) it walks back to the previous open day. `isOpenDay` is
+ * injectable so the walk-back logic can be tested without a database.
+ */
+export async function lastCompletedSessionDate(
+  now: Date = new Date(),
+  isOpenDay: (dateIso: string) => Promise<boolean> = resolveIsOpenDay,
+): Promise<string> {
+  let candidate = easternDateIso(now);
+  if (now < easternInstant(candidate, REGULAR_CLOSE.hour, REGULAR_CLOSE.minute)) candidate = previousCalendarDate(candidate);
+  for (let attempt = 0; attempt < 14; attempt++) {
+    if (await isOpenDay(candidate)) return candidate;
+    candidate = previousCalendarDate(candidate);
+  }
+  // A 14-day closed streak would be extraordinary; never hang a request on it.
+  return candidate;
 }

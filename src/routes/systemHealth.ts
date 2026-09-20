@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { runIbkrHealthCheckJob } from "../ibkr/checkIbkrHealthJob.js";
 import * as presenceTracker from "../lib/presenceTracker.js";
+import { getStreamMultiplexerStats } from "../streams/streamMultiplexer.js";
 import { fetchPresenceOverview } from "../lib/userLastSeen.js";
 import * as llmStats from "../genosuke/llmStats.js";
 import { requestRateStats, processStartedAt } from "../lib/requestRateTracker.js";
@@ -152,6 +153,8 @@ systemHealthRouter.get("/web-dyno", async (_request, response) => {
     uptimeSeconds: Math.round(process.uptime()),
     processStartedAt,
     notificationStreamConnections: presenceTracker.totalConnectionCount(),
+    // Stream multiplexer (streams/streamMultiplexer.ts): open tab connections and the live subscriptions on them, by kind.
+    streamMultiplexer: getStreamMultiplexerStats(),
   });
 });
 

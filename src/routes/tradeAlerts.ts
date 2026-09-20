@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { runTradeAlertGeneration } from "../ibkr/runTradeAlertGeneration.js";
@@ -216,7 +216,7 @@ tradeAlertsRouter.get("/run-stream", async (request, response) => {
 // frontend colors it tick-to-tick via TickColoredPrice with no seeded
 // reference. Same SSE/one-shot-connection pattern as
 // price-performance.ts's current-prices/stream.
-tradeAlertsRouter.get("/current-prices/stream", async (request, response) => {
+export async function streamTradeAlertPricesHandler(request: Request, response: Response): Promise<void> {
   const symbolsParam = (request.query.symbols as string | undefined) ?? "";
   const symbols = Array.from(new Set(symbolsParam.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)));
 
@@ -254,7 +254,9 @@ tradeAlertsRouter.get("/current-prices/stream", async (request, response) => {
     clearInterval(heartbeat);
     if (!response.writableEnded) response.end();
   }
-});
+}
+
+tradeAlertsRouter.get("/current-prices/stream", streamTradeAlertPricesHandler);
 
 // Re-quotes one pending alert's exact contract(s) against live IBKR data —
 // built 2026-08-24 so Juan (EU timezone, reviewing the 10pm UTC nightly

@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
@@ -331,7 +331,7 @@ positionsRouter.get("/greeks", async (request, response) => {
 // the first (frozen) event only — a value already resolved from frozen/live
 // data doesn't need re-checking against the nightly snapshot on every
 // subsequent update.
-positionsRouter.get("/greeks/stream", async (request, response) => {
+export async function streamGreeksHandler(request: Request, response: Response): Promise<void> {
   const legIdsParam = request.query.legIds as string | undefined;
   const legIds = legIdsParam ? legIdsParam.split(",").filter(Boolean) : [];
 
@@ -493,7 +493,9 @@ positionsRouter.get("/greeks/stream", async (request, response) => {
     clearInterval(heartbeat);
     response.end();
   }
-});
+}
+
+positionsRouter.get("/greeks/stream", streamGreeksHandler);
 
 export interface UnrealizedPnlResult {
   unrealizedPnl: number | null;
@@ -688,7 +690,7 @@ positionsRouter.get("/pnl", async (request, response) => {
 // time a leg's price genuinely changes, until the client disconnects. Same
 // leg-resolution query, P&L math, and position_pnl_snapshots fallback as GET
 // /pnl, with the fallback applied once to the first (frozen) event only.
-positionsRouter.get("/pnl/stream", async (request, response) => {
+export async function streamPnlHandler(request: Request, response: Response): Promise<void> {
   const positionIdsParam = request.query.positionIds as string | undefined;
   const positionIds = positionIdsParam ? positionIdsParam.split(",").filter(Boolean) : [];
 
@@ -883,7 +885,9 @@ positionsRouter.get("/pnl/stream", async (request, response) => {
     clearInterval(heartbeat);
     response.end();
   }
-});
+}
+
+positionsRouter.get("/pnl/stream", streamPnlHandler);
 
 // --- Order placement (approved 2026-08-24 — see the plan doc) ---
 // The web dyno never writes positions/position_legs/trades directly for a

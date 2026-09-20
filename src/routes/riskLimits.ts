@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
@@ -209,7 +209,7 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
 // FROZEN-priced reading first, recomputed and re-sent every time
 // streamPositionExposures reports newer prices, until the client
 // disconnects.
-riskLimitsRouter.get("/exposure/stream", async (request, response) => {
+export async function streamExposureHandler(request: Request, response: Response): Promise<void> {
   // Account data and the price stream are independent — started together
   // (2026-09-19) so the ~1s account fetch overlaps the stream's own setup
   // instead of delaying it. Every reading awaits this before sending.
@@ -280,4 +280,6 @@ riskLimitsRouter.get("/exposure/stream", async (request, response) => {
     clearInterval(heartbeat);
     response.end();
   }
-});
+}
+
+riskLimitsRouter.get("/exposure/stream", streamExposureHandler);
