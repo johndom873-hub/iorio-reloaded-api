@@ -3,6 +3,7 @@ import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { nextReqIdFor, sharedLiveConnection } from "./sharedReadConnection.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { streamPricingUpdates, type TickerPricing, type PriceBar } from "./fetchTickerOverview.js";
+import { streamLivePrices } from "./fetchLivePrices.js";
 import { getCachedChartBars } from "./priceBarCache.js";
 import { prepareOptionChainStrikes, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
 import { db } from "../db/connection.js";
@@ -26,6 +27,8 @@ export interface TickerTechnicals {
 
 export type TickerDetailStreamEvent =
   | { type: "overview"; data: TickerOverview }
+  // The stock price shown in the header: same frozen-then-live, last-trade-only source as the Positions table (streamLivePrices).
+  | { type: "spot"; data: { last: number } }
   | { type: "chart"; data: PriceBar[] }
   | { type: "optionChain"; data: OptionQuote[] }
   | { type: "technicals"; data: TickerTechnicals }
@@ -34,6 +37,8 @@ export type TickerDetailStreamEvent =
 // One-shot-connection numbering only. On the shared live connection every
 // id comes from that connection's own counter instead (nextReqIdFor below):
 // these fixed values would collide across concurrent modals sharing it.
+// How long the option chain / technicals wait for the frozen last price before falling back to the pricing stream.
+const firstSpotWaitMs = 5_000;
 const overviewReqId = 1;
 const pricingReqId = 2;
 const chartReqId = 3;
@@ -197,6 +202,34 @@ export async function streamTickerDetail(
       .first()
       .then((row) => row !== undefined);
 
+    // Approved 2026-09-19: the header price must equal the Positions table's. This connection's own pricing stream is
+    // REALTIME-only, so on a closed market it never gets a last trade and only reports the PREVIOUS session's close
+    // (AAOI showed 98.06 while the last trade was 104.90). streamLivePrices (frozen last first, then live ticks, last
+    // trade only, on the read connection) is the one price source everything else uses, so it feeds the header and the
+    // spot price that picks the option chain's strikes.
+    let firstSpotResolved = false;
+    let resolveFirstSpot: (price: number | null) => void = () => {};
+    const firstSpotPromise = new Promise<number | null>((resolve) => {
+      resolveFirstSpot = resolve;
+    });
+    const firstSpotTimer = setTimeout(() => resolveFirstSpot(null), firstSpotWaitMs);
+    const spotTask: Promise<void> = streamLivePrices(
+      [{ key: symbol, legType: "stock", symbol }],
+      (pricesByKey) => {
+        const last = pricesByKey[symbol];
+        if (last === null || last === undefined) return;
+        onEvent({ type: "spot", data: { last } });
+        if (!firstSpotResolved) {
+          firstSpotResolved = true;
+          clearTimeout(firstSpotTimer);
+          resolveFirstSpot(last);
+        }
+      },
+      signal,
+    ).catch((error) => {
+      console.error(`streamTickerDetail: spot price stream failed for ${symbol}`, error);
+    });
+
     const overviewReadyTask: Promise<TickerPricing | null> = (async () => {
       try {
         const [contractDetails, isShortlisted] = await Promise.all([contractDetailsPromise, isShortlistedPromise]);
@@ -247,7 +280,7 @@ export async function streamTickerDetail(
           getCachedChartBars(connection, symbol, "1Y", nextReqIdFor(connection.ib, () => technicalsDailyReqId)),
           overviewReadyTask,
         ]);
-        const currentPrice = pricing?.last ?? pricing?.previousClose ?? dailyBars[dailyBars.length - 1]?.close ?? null;
+        const currentPrice = (await firstSpotPromise) ?? pricing?.last ?? pricing?.previousClose ?? dailyBars[dailyBars.length - 1]?.close ?? null;
         if (!currentPrice || hourlyBars.length === 0) {
           throw new Error("No market data available to compute technicals.");
         }
@@ -280,7 +313,8 @@ export async function streamTickerDetail(
         // wait for every subsequent live pricing tick, just an initial spot
         // price to pick near-the-money strikes.
         const pricing = await overviewReadyTask;
-        const spotPrice = pricing?.last ?? pricing?.previousClose;
+        // Same price the header shows; the previous close is only a last resort (it is a session old outside market hours).
+        const spotPrice = (await firstSpotPromise) ?? pricing?.last ?? pricing?.previousClose;
         if (!spotPrice) throw new Error("No spot price available to select option strikes.");
 
         const [dteRange, mustIncludeStrikesByExpiry] = await Promise.all([fetchStrategyDteRange(), fetchMustIncludeStrikesByExpiry(symbol)]);
@@ -310,6 +344,7 @@ export async function streamTickerDetail(
     // `finally` below doesn't disconnect from IBKR — until `signal` aborts,
     // which the route does the moment the SSE client actually disconnects.
     await Promise.all([overviewReadyTask, chartTask, optionChainTask, technicalsTask]);
+    void spotTask; // settles when `signal` aborts, alongside the wait below
     if (!signal.aborted) {
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     }
