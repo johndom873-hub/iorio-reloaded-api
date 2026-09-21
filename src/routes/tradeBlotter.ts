@@ -5,8 +5,8 @@ import { requireAuth } from "../middleware/requireAuth.js";
 export const tradeBlotterRouter = Router();
 tradeBlotterRouter.use(requireAuth);
 
-// v1 strategy scope — matches positions.ts/shortlist.ts.
-const validStrategyKeys = ["covered_call", "cash_secured_put"];
+// The two named strategies plus "unstructured" (positions not opened under a strategy; shown as "Other" in the UI filter).
+const validStrategyKeys = ["covered_call", "cash_secured_put", "unstructured"];
 
 // P&L is computed here at read time, not stored on trades.realized_pnl —
 // that column is reserved for IBKR's own CommissionReport.realizedPNL
