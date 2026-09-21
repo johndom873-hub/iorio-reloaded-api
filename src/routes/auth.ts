@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { verifyPassword } from "../lib/auth.js";
+import { sessionIdTag } from "../middleware/requireAuth.js";
 
 export const authRouter = Router();
 
@@ -18,6 +19,9 @@ authRouter.post("/login", async (request, response) => {
   }
 
   request.session.userId = user.id;
+  if (request.ip === "127.0.0.1" || request.ip === "::1" || request.ip === "::ffff:127.0.0.1") {
+    console.warn(`auth-diag: loopback login for ${user.username} sid=${sessionIdTag(request.sessionID)} secure=${request.secure}`);
+  }
   response.json({ id: user.id, username: user.username, displayName: user.display_name });
 });
 
