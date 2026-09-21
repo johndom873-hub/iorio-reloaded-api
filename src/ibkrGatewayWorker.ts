@@ -7,6 +7,7 @@ import { environment } from "./config/env.js";
 import { detectTradingModeFromAccountIds } from "./lib/detectTradingModeFromAccountIds.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
 import { readGitSha } from "./lib/readGitSha.js";
+import { readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "./lib/expirySettlementAudit.js";
 import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
 import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
 import {
@@ -636,6 +637,23 @@ let reconciliationInFlight = false;
 let reconciliationRerunQueued = false;
 let reconciliationPassCounter = 0;
 
+// Right-after-expiry correction (approved 2026-09-22, replaces waiting up to a day for the nightly
+// expiry_settlement_audit). Reuses that audit unchanged: the expiry-day bar already exists by the time
+// IBKR stops reporting the option, so the objective in-the-money test works immediately. Never lets a
+// failure break reconciliation.
+async function correctExpirySettlementsNow(passId: number): Promise<void> {
+  try {
+    const mode = readExpirySettlementMode();
+    const result = await runExpirySettlementAudit(mode);
+    const { changes, skipped, notify } = summarizeExpirySettlement(mode, result);
+    for (const action of result.actions) console.log(`Reconciliation #${passId}: expiry settlement [${mode}] ${action.kind}: ${action.description}`);
+    console.log(`Reconciliation #${passId}: expiry settlement (${mode}): ${result.legsExamined} expired short leg(s) examined, ${changes.length} correction(s), ${skipped.length} skipped.`);
+    if (notify) await notifyTelegramWithTimeout(notify);
+  } catch (error) {
+    console.error(`Reconciliation #${passId}: expiry settlement correction failed: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
 async function reconcilePositionsFromIbkr(): Promise<void> {
   if (reconciliationInFlight) {
     reconciliationRerunQueued = true;
@@ -910,8 +928,10 @@ async function runReconciliationPass(passId: number): Promise<void> {
   );
 
   const positionIdsWithExpiredLeg = new Set<string>();
+  let closedLegCount = 0;
   for (const leg of openLegs) {
     if (heldConIds.has(Number(leg.ibkr_contract_id))) continue;
+    closedLegCount += 1;
 
     const lastClosingTrade = await db("trades")
       .where({ position_leg_id: leg.id, is_closing_trade: true })
@@ -972,6 +992,12 @@ async function runReconciliationPass(passId: number): Promise<void> {
       }
     }
   }
+
+  // Legs closed this pass may include an option that finished in the money and was just recorded as
+  // "worthless" (plus its stock leg at zero P&L). Correct it now instead of waiting for the nightly
+  // audit. Runs on any closure, not just expired options, because the stock leg can close a pass later
+  // than the option. Idempotent; the nightly job stays as the safety net.
+  if (closedLegCount > 0) await correctExpirySettlementsNow(passId);
 
   // Defensive self-heal, not tied to this pass's own leg-closing above:
   // catches any status='open' position with zero open legs left,
@@ -1600,6 +1626,8 @@ async function main(): Promise<void> {
   // the worker's .env before this code is deployed.
   const workerGitSha = readGitSha();
   const workerAppEnvironment = readAppEnvironment();
+  // Fail fast if the mode is missing/invalid, rather than on the first expiry.
+  readExpirySettlementMode();
   setInterval(() => {
     const health = persistentIbkrConnection.getHealthSnapshot();
     db("worker_health")

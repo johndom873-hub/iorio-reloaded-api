@@ -1,5 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
+import { requireEnvironmentVariable } from "../config/env.js";
 
 // Approved 2026-09-19 (see PROGRESS.md, "Expiry-classification audit"): the
 // worker calls a short option that vanishes without a closing trade
@@ -38,6 +39,14 @@ export interface ExpirySettlementAction {
   description: string;
   /** Realized P&L this correction adds, when it can be stated. */
   pnlDelta?: number;
+}
+
+export function readExpirySettlementMode(): ExpirySettlementMode {
+  const value = requireEnvironmentVariable("EXPIRY_SETTLEMENT_MODE");
+  if (value !== "dry_run" && value !== "apply") {
+    throw new Error(`EXPIRY_SETTLEMENT_MODE must be "dry_run" or "apply", got: ${value}`);
+  }
+  return value;
 }
 
 export interface ExpirySettlementResult {
@@ -301,4 +310,22 @@ export async function runExpirySettlementAudit(mode: ExpirySettlementMode, datab
     throw error;
   }
   throw new Error("unreachable");
+}
+
+/**
+ * Splits a result into corrections vs. skipped items and builds the Telegram text
+ * (shared by the nightly job and the worker's right-after-expiry run). Skipped items
+ * repeat until fixed by hand, so they never trigger a message on their own.
+ */
+export function summarizeExpirySettlement(mode: ExpirySettlementMode, result: ExpirySettlementResult) {
+  const changes = result.actions.filter((action) => action.kind !== "skipped");
+  const skipped = result.actions.filter((action) => action.kind === "skipped");
+  const pnlDelta = result.realizedPnlDelta;
+  const notify =
+    changes.length === 0
+      ? undefined
+      : `Expiry settlement audit (${mode === "apply" ? "APPLIED" : "DRY RUN — nothing changed"}): ${changes.length} correction(s), realized P&L ${pnlDelta >= 0 ? "+" : "-"}$${Math.abs(pnlDelta).toFixed(2)}.\n` +
+        changes.map((action) => `• ${action.description}`).join("\n") +
+        (skipped.length > 0 ? `\n${skipped.length} item(s) need manual review (see job log).` : "");
+  return { changes, skipped, pnlDelta, notify };
 }

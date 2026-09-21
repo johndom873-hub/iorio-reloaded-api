@@ -16,35 +16,17 @@
 //   node dist/scripts/run-daily-expiry-settlement-audit-job.js
 import "dotenv/config";
 import { db } from "../src/db/connection.js";
-import { requireEnvironmentVariable } from "../src/config/env.js";
 import { runJob } from "../src/lib/runJob.js";
-import { runExpirySettlementAudit, type ExpirySettlementMode } from "../src/lib/expirySettlementAudit.js";
-
-function readMode(): ExpirySettlementMode {
-  const value = requireEnvironmentVariable("EXPIRY_SETTLEMENT_MODE");
-  if (value !== "dry_run" && value !== "apply") {
-    throw new Error(`EXPIRY_SETTLEMENT_MODE must be "dry_run" or "apply", got: ${value}`);
-  }
-  return value;
-}
+import { readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "../src/lib/expirySettlementAudit.js";
 
 async function main() {
-  const mode = readMode();
+  const mode = readExpirySettlementMode();
   await runJob("expiry_settlement_audit", async () => {
     const result = await runExpirySettlementAudit(mode);
-    const changes = result.actions.filter((action) => action.kind !== "skipped");
-    const skipped = result.actions.filter((action) => action.kind === "skipped");
+    const { changes, skipped, pnlDelta, notify } = summarizeExpirySettlement(mode, result);
     for (const action of result.actions) console.log(`[${mode}] ${action.kind}: ${action.description}`);
     console.log(`Expiry settlement audit (${mode}): ${result.legsExamined} expired short leg(s) examined, ${changes.length} correction(s), ${skipped.length} skipped.`);
 
-    const pnlDelta = result.realizedPnlDelta;
-    // Skipped items repeat every night until fixed by hand, so they never trigger a message on their own.
-    const notify =
-      changes.length === 0
-        ? undefined
-        : `Expiry settlement audit (${mode === "apply" ? "APPLIED" : "DRY RUN — nothing changed"}): ${changes.length} correction(s), realized P&L ${pnlDelta >= 0 ? "+" : "-"}$${Math.abs(pnlDelta).toFixed(2)}.\n` +
-          changes.map((action) => `• ${action.description}`).join("\n") +
-          (skipped.length > 0 ? `\n${skipped.length} item(s) need manual review (see job log).` : "");
     return {
       details: { mode, legsExamined: result.legsExamined, corrections: changes.length, skipped: skipped.map((action) => action.description), pnlDelta },
       notify,
