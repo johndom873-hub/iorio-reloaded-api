@@ -32,6 +32,7 @@ Ground rules:
 - Never fabricate a number. Every figure you state must come from a tool call in this conversation — if you don't have it, call the right tool or say you don't have it.
 - Dates/times you receive are ISO or already formatted — don't reformat them into a different convention than what you were given.
 - Some tools have a financial consequence (creating/rolling/closing a position, rejecting an alert, changing risk settings). Calling one of those tools does NOT execute it — it sends the user a Yes/Cancel confirmation card in Telegram, with the order details and its own Yes/Cancel buttons, and only executes if they tap Yes. That card already tells the user what you're about to do, so after calling one of these tools, reply with nothing else in that turn — don't restate the confirmation in a separate message. Don't call the tool again in the same turn, and don't claim the action is done until you separately see it confirmed.
+- Each leg in a position result has isOpen. Close and roll orders use ONLY legs with isOpen: true — never a leg that has already expired or been closed (exitAt set), and a close must include every open leg. For an unstructured position holding only stock, that means selling just the shares.
 - When asked what positions we hold, list every open position, including strategy "unstructured" (bare stock and anything that fits neither strategy) — call list_positions (it returns every strategy in one call). Never report only covered calls and puts as if they were everything.
 - If a request is ambiguous (which position, which strategy, which alert) ask one clarifying question rather than guessing on something with real financial consequence.
 - Only two strategies are supported, and every order needs a specific set of fields — never guess a missing one or fill it with a placeholder:
@@ -103,9 +104,24 @@ export async function chatOnce({ messages, userMessage, chatId, adapter, api, te
         if (!tool) return { id, content: `Error: unknown tool "${name}".` };
 
         if (tool.tier === "financial-write" || tool.tier === "infra-write") {
-          const confirmation = createConfirmation(chatId, name, input);
-          const description = tool.describeForConfirmation?.(input) ?? name;
-          await telegram.sendMessage(chatId, `Confirm: ${description}`, {
+          // Provably-wrong requests (e.g. closing an already-expired leg) go back to the model
+          // as an error so it can retry — no card, no wasted tap. A failed lookup never blocks
+          // the gate: the card falls back to the raw input, and the route still validates on Yes.
+          try {
+            const problem = await tool.validateBeforeConfirmation?.(input, api);
+            if (problem) return { id, content: `Error: ${problem}` };
+          } catch (error) {
+            console.error(`Genosuke: pre-confirmation check for "${name}" failed`, error);
+          }
+          let description: string;
+          try {
+            description = (await tool.describeForConfirmation?.(input, api)) ?? name;
+          } catch (error) {
+            console.error(`Genosuke: could not build the readable card for "${name}"`, error);
+            description = `${name} ${JSON.stringify(input)}`;
+          }
+          const confirmation = createConfirmation(chatId, name, input, description);
+          await telegram.sendMessage(chatId, `Confirm:\n${description}`, {
             buttons: [
               [
                 { text: "Yes", callback_data: `confirm:${confirmation.id}` },

@@ -207,12 +207,12 @@ async function handleCallbackQuery(
 
   try {
     const result = await tool.execute(confirmation.input, api);
-    const description = tool.describeForConfirmation?.(confirmation.input) ?? tool.name;
+    const description = confirmation.description;
     if (tool.tracksOrderStatus && typeof (result as { id?: unknown })?.id === "string") {
-      await telegram.sendMessage(chatId, `Sent to IBKR — ${description} I'll follow up once it's placed or if anything fails.`);
+      await telegram.sendMessage(chatId, `Sent to IBKR:\n${description}\nI'll follow up once it's placed or if anything fails.`);
       pollOrderAndFollowUp(chatId, (result as { id: string }).id, telegram, api).catch((error) => console.error("Genosuke: order poll failed", error));
     } else {
-      await telegram.sendMessage(chatId, `Done — ${description}.`);
+      await telegram.sendMessage(chatId, `Done:\n${description}`);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -10,6 +10,8 @@ export interface PendingConfirmation {
   chatId: string;
   toolName: string;
   input: Record<string, unknown>;
+  /** The card text the human approved — reused in the follow-up so it always matches what they saw. */
+  description: string;
   createdAt: number;
 }
 
@@ -23,9 +25,9 @@ function sweepExpired(): void {
   }
 }
 
-export function createConfirmation(chatId: string, toolName: string, input: Record<string, unknown>): PendingConfirmation {
+export function createConfirmation(chatId: string, toolName: string, input: Record<string, unknown>, description: string): PendingConfirmation {
   sweepExpired();
-  const confirmation: PendingConfirmation = { id: randomUUID(), chatId, toolName, input, createdAt: Date.now() };
+  const confirmation: PendingConfirmation = { id: randomUUID(), chatId, toolName, input, description, createdAt: Date.now() };
   pending.set(confirmation.id, confirmation);
   return confirmation;
 }

@@ -22,6 +22,17 @@
 // waits for an explicit Confirm click before calling the same endpoint).
 import type { GenosukeApiClient } from "../apiClient.js";
 import type { GenosukeTool } from "./types.js";
+import {
+  buildCloseCard,
+  buildRejectAlertCard,
+  buildRiskLimitsCard,
+  buildRollCard,
+  validateCloseLegs,
+  validateRollCloseLeg,
+  type PositionForCard,
+} from "../confirmationText.js";
+
+const fetchPositionForCard = (api: GenosukeApiClient, positionId: unknown) => api.get<PositionForCard>(`/positions/${positionId}`);
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
 
@@ -102,10 +113,14 @@ export const financialWriteTools: GenosukeTool[] = [
       },
       required: ["positionId", "sourceAlertId", "closeLegId", "closeLimitPrice", "newLeg"],
     },
-    describeForConfirmation: (input) => {
-      const newLeg = input.newLeg as { strikePrice: unknown; expiryDate: unknown; limitPrice: unknown };
-      return `Roll position ${input.positionId}: buy back closing leg @ ${input.closeLimitPrice}, sell new leg $${newLeg.strikePrice} exp ${newLeg.expiryDate} @ ${newLeg.limitPrice} — one atomic combo order sent to IBKR immediately on confirm.`;
-    },
+    validateBeforeConfirmation: async (input, api) => validateRollCloseLeg(await fetchPositionForCard(api, input.positionId), String(input.closeLegId)),
+    describeForConfirmation: async (input, api) =>
+      buildRollCard(
+        await fetchPositionForCard(api, input.positionId),
+        String(input.closeLegId),
+        input.closeLimitPrice,
+        input.newLeg as { strikePrice: unknown; expiryDate: unknown; quantity: unknown; limitPrice: unknown },
+      ),
     tracksOrderStatus: true,
     execute: (input, api) => {
       const { positionId, ...body } = input;
@@ -132,10 +147,10 @@ export const financialWriteTools: GenosukeTool[] = [
       },
       required: ["positionId", "legs"],
     },
-    describeForConfirmation: (input) => {
-      const legs = (input.legs as { legId: string; limitPrice: unknown }[]) ?? [];
-      return `Close position ${input.positionId}: ${legs.map((l) => `leg ${l.legId} @ ${l.limitPrice}`).join(", ")} — combo order sent to IBKR immediately on confirm.`;
-    },
+    validateBeforeConfirmation: async (input, api) =>
+      validateCloseLegs(await fetchPositionForCard(api, input.positionId), (input.legs as { legId: string }[]) ?? []),
+    describeForConfirmation: async (input, api) =>
+      buildCloseCard(await fetchPositionForCard(api, input.positionId), (input.legs as { legId: string; limitPrice: unknown }[]) ?? []),
     tracksOrderStatus: true,
     execute: (input, api) => {
       const { positionId, legs } = input;
@@ -147,7 +162,10 @@ export const financialWriteTools: GenosukeTool[] = [
     description: "Reject a pending Trade Alert. This is the only status change this tool supports — approving happens via create_position/roll_position with sourceAlertId instead, so the actual order terms are always confirmed first.",
     tier: "financial-write",
     parameters: { type: "object", properties: { alertId: { type: "string" } }, required: ["alertId"] },
-    describeForConfirmation: (input) => `Reject trade alert ${input.alertId}`,
+    describeForConfirmation: async (input, api) => {
+      const pendingAlerts = await api.get<{ id: string; symbol: string; strategyKey: string; alertType: string }[]>("/trade-alerts?status=pending");
+      return buildRejectAlertCard(pendingAlerts.find((alert) => alert.id === input.alertId), String(input.alertId));
+    },
     execute: (input, api) => api.patch(`/trade-alerts/${input.alertId}`, { status: "rejected" }),
   },
   {
@@ -181,7 +199,7 @@ export const financialWriteTools: GenosukeTool[] = [
         "min_cash_reserve_pct",
       ],
     },
-    describeForConfirmation: (input) => `Update ${input.strategyKey} risk settings: delta ${input.delta_target_min}-${input.delta_target_max}, DTE ${input.dte_target_min}-${input.dte_target_max}, and 5 other fields`,
+    describeForConfirmation: (input) => buildRiskLimitsCard(input),
     execute: (input, api) => {
       const { strategyKey, ...settings } = input;
       return api.put(`/risk-limits/settings/${strategyKey}`, settings);

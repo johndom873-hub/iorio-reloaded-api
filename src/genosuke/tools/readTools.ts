@@ -11,6 +11,7 @@
 // ones — see fetchTickerQuoteSnapshot.ts.
 import { listWafRules } from "../../lib/cloudflareService.js";
 import { fetchLogsFromBetterStack, type LogSourceApp } from "../../lib/betterstackService.js";
+import { annotateLegOpenState } from "../confirmationText.js";
 import type { GenosukeTool } from "./types.js";
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
@@ -44,14 +45,14 @@ export const readTools: GenosukeTool[] = [
       properties: { status: { type: "string", enum: ["open", "closed"] } },
       required: ["status"],
     },
-    execute: (input, api) => api.get(`/positions?status=${String(input.status)}`),
+    execute: async (input, api) => annotateLegOpenState(await api.get(`/positions?status=${String(input.status)}`)),
   },
   {
     name: "get_position",
     description: "Full detail for a single position by id, including all legs.",
     tier: "read",
     parameters: { type: "object", properties: { positionId: { type: "string" } }, required: ["positionId"] },
-    execute: (input, api) => api.get(`/positions/${input.positionId}`),
+    execute: async (input, api) => annotateLegOpenState(await api.get(`/positions/${input.positionId}`)),
   },
   {
     name: "get_position_live_pnl_and_greeks",
