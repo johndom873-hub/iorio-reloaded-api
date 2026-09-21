@@ -37,6 +37,9 @@ class PersistentIbkrConnection {
   private totalReconnects = 0;
   private lastSystemStatusCode: number | null = null;
   private lastSystemStatusAt: number | null = null;
+  // Sent by Gateway during the handshake; kept across reconnects so the last
+  // known accounts stay visible while briefly disconnected.
+  private managedAccountIds: string[] = [];
   // Starts "disconnected since process start"; null while connected.
   private disconnectedSince: number | null = Date.now();
 
@@ -132,6 +135,9 @@ class PersistentIbkrConnection {
 
       ib.on(EventName.error, onError);
       ib.once(EventName.nextValidId, onConnected);
+      ib.on(EventName.managedAccounts, (accountsList: string) => {
+        this.managedAccountIds = accountsList.split(",").map((accountId) => accountId.trim()).filter(Boolean);
+      });
       ib.connect(workerClientId);
     });
 
@@ -204,7 +210,7 @@ class PersistentIbkrConnection {
    * (since 2026-09-13) upserted into worker_health there too for Iorio
    * Pulse's Gateway node — see that file's comment on the upsert interval.
    */
-  getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; disconnectedSinceMs: number | null; totalReconnects: number; lastSystemStatusCode: number | null; clientId: number } {
+  getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; disconnectedSinceMs: number | null; totalReconnects: number; lastSystemStatusCode: number | null; clientId: number; managedAccountIds: string[] } {
     return {
       connected: this.ib !== null,
       uptimeMs: this.connectedSince ? Date.now() - this.connectedSince : null,
@@ -212,6 +218,7 @@ class PersistentIbkrConnection {
       totalReconnects: this.totalReconnects,
       lastSystemStatusCode: this.lastSystemStatusCode,
       clientId: workerClientId,
+      managedAccountIds: this.managedAccountIds,
     };
   }
 }

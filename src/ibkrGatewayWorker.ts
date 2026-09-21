@@ -4,6 +4,9 @@ import { EventName, OptionType, OrderAction, OrderType, SecType, TimeInForce } f
 import type { CommissionReport, Contract, ComboLeg, Execution, Order as IbkrOrder } from "@stoqey/ib";
 import { db } from "./db/connection.js";
 import { environment } from "./config/env.js";
+import { detectTradingModeFromAccountIds } from "./lib/detectTradingModeFromAccountIds.js";
+import { readAppEnvironment } from "./lib/appEnvironment.js";
+import { readGitSha } from "./lib/readGitSha.js";
 import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
 import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
 import {
@@ -1592,6 +1595,11 @@ async function main(): Promise<void> {
   // upsert carries none of the "don't hammer IBKR" concern that interval was
   // originally about.
   const workerHealthUpsertIntervalMs = 45_000;
+  // Identity columns (Phase B WP1, observation only): read once — code version and
+  // environment cannot change while this process runs. APP_ENVIRONMENT must be in
+  // the worker's .env before this code is deployed.
+  const workerGitSha = readGitSha();
+  const workerAppEnvironment = readAppEnvironment();
   setInterval(() => {
     const health = persistentIbkrConnection.getHealthSnapshot();
     db("worker_health")
@@ -1602,6 +1610,11 @@ async function main(): Promise<void> {
         total_reconnects: health.totalReconnects,
         last_system_status_code: health.lastSystemStatusCode,
         client_id: health.clientId,
+        git_sha: workerGitSha,
+        app_environment: workerAppEnvironment,
+        ibkr_account_ids: health.managedAccountIds,
+        detected_trading_mode: detectTradingModeFromAccountIds(health.managedAccountIds),
+        configured_trading_mode: environment.ibkrTradingMode,
         updated_at: db.fn.now(),
       })
       .onConflict("process_name")
