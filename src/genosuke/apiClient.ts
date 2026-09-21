@@ -56,6 +56,12 @@ export class GenosukeApiClient {
     if (!response.ok) {
       throw new GenosukeApiError(response.status, `Genosuke service-user login failed: ${await response.text()}`);
     }
+    // Read the whole body BEFORE using the cookie: express-session sends every byte of a
+    // login response except the last immediately, and holds that last byte until the
+    // session is saved to Postgres. fetch() resolves on headers, so skipping this made the
+    // very first request after a dyno restart race the save and get a 401 (verified on
+    // staging 2026-09-22: same cookie sid, but the store had no session yet).
+    await response.text();
     // getSetCookie() is undici's dedicated accessor for the Set-Cookie
     // header — response.headers.get("set-cookie") always returns null for
     // it, even when it's genuinely present (Node 18.14+).
