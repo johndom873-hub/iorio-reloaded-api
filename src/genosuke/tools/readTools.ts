@@ -13,11 +13,9 @@ import { listWafRules } from "../../lib/cloudflareService.js";
 import { fetchLogsFromBetterStack, type LogSourceApp } from "../../lib/betterstackService.js";
 import type { GenosukeTool } from "./types.js";
 
-// Includes "unstructured" (bare stock and anything fitting neither strategy):
-// omitting it made Genosuke report only the two named strategies as "our
-// positions" and hide real open holdings. Write tools deliberately keep the
-// narrower two-value enum — Genosuke never creates unstructured positions.
-const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "unstructured"] };
+const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
+// The blotter route (unlike alerts/shortlist) also accepts "unstructured".
+const blotterStrategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "unstructured"] };
 
 export const readTools: GenosukeTool[] = [
   {
@@ -36,18 +34,17 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "list_positions",
-    description: "List open or closed positions, optionally filtered by strategy. Each includes its legs (entry/exit prices, strike, expiry) and computed realizedPnl/capitalAtRisk.",
+    // No strategy filter on purpose: given one, the model queried only covered_call and
+    // cash_secured_put and reported "1 open position", hiding the unstructured ones
+    // (verified on staging 2026-09-21 — it ignored a prompt rule and a widened enum).
+    description: "List ALL open or closed positions across every strategy (covered_call, cash_secured_put and unstructured — bare stock and anything fitting neither strategy). Each includes its legs (entry/exit prices, strike, expiry) and computed realizedPnl/capitalAtRisk.",
     tier: "read",
     parameters: {
       type: "object",
-      properties: { status: { type: "string", enum: ["open", "closed"] }, strategyKey: strategyKeyEnum },
+      properties: { status: { type: "string", enum: ["open", "closed"] } },
       required: ["status"],
     },
-    execute: (input, api) => {
-      const params = new URLSearchParams({ status: String(input.status) });
-      if (input.strategyKey) params.set("strategy", String(input.strategyKey));
-      return api.get(`/positions?${params.toString()}`);
-    },
+    execute: (input, api) => api.get(`/positions?status=${String(input.status)}`),
   },
   {
     name: "get_position",
@@ -106,7 +103,7 @@ export const readTools: GenosukeTool[] = [
     parameters: {
       type: "object",
       properties: {
-        strategyKey: strategyKeyEnum,
+        strategyKey: blotterStrategyKeyEnum,
         symbol: { type: "string" },
         from: { type: "string", description: "ISO date, inclusive." },
         to: { type: "string", description: "ISO date, inclusive." },
