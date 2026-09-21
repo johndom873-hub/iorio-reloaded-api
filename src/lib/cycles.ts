@@ -46,6 +46,7 @@ export interface CycleOptionLeg {
 }
 
 export interface CycleStockLeg {
+  positionId?: string;
   quantity: number;
   entryAt: Date;
   exitAt: Date | null;
@@ -69,6 +70,8 @@ export interface CycleInput {
   lastPrice: { date: string; price: number } | null;
   /** Unrealized premium P&L of currently open option legs keyed by position id (from the latest snapshot); absent = at credit. */
   openPositionPremiumPnl: Map<string, number>;
+  /** Open positions whose option mark could not be established (used by "as of" runs): the cycle is flagged instead of guessed at credit. */
+  openPositionPremiumPnlUnavailable?: Set<string>;
 }
 
 export interface BucketResult {
@@ -194,7 +197,7 @@ function priceOnOrBefore(dailyCloses: Map<string, number>, isoDate: string): { p
 }
 
 function deriveOneCycle(window: { start: number; end: number | null }, input: CycleInput): Cycle {
-  const { dailyCloses, lastPrice, openPositionPremiumPnl } = input;
+  const { dailyCloses, lastPrice, openPositionPremiumPnl, openPositionPremiumPnlUnavailable } = input;
   const inWindow = (at: number) => at >= window.start && (window.end === null || at <= window.end + groupingWindowMs);
   const optionLegs = input.optionLegs.filter((leg) => inWindow(leg.entryAt.getTime()));
   const stockTrades = input.stockTrades.filter((trade) => trade.at.getTime() >= window.start - fillLookbackMs && (window.end === null || trade.at.getTime() <= window.end + groupingWindowMs));
@@ -360,6 +363,10 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     const openLegsByPosition = new Map<string, CycleOptionLeg[]>();
     for (const leg of optionLegs.filter((l) => l.exitAt === null)) openLegsByPosition.set(leg.positionId, [...(openLegsByPosition.get(leg.positionId) ?? []), leg]);
     for (const [positionId, legs] of openLegsByPosition) {
+      if (openPositionPremiumPnlUnavailable?.has(positionId)) {
+        dataFlags.push(`no option mark for the open ${legs[0]!.optionType} $${legs[0]!.strike}`);
+        continue;
+      }
       const snapshotPremiumPnl = openPositionPremiumPnl.get(positionId);
       if (snapshotPremiumPnl === undefined) continue; // stays at credit
       const credit = legs.reduce((sum, leg) => sum + (leg.side === "short" ? 1 : -1) * leg.entryPrice * leg.quantity * leg.multiplier, 0);

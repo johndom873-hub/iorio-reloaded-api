@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { deriveCycles, type Cycle, type CycleOptionLeg, type CycleStockLeg, type CycleStockTrade } from "./cycles.js";
+import { deriveCycles, type Cycle, type CycleInput, type CycleOptionLeg, type CycleStockLeg, type CycleStockTrade } from "./cycles.js";
 
 export interface SymbolCycles {
   symbol: string;
@@ -7,10 +7,27 @@ export interface SymbolCycles {
   cycles: Cycle[];
 }
 
+export interface SymbolCycleInput {
+  symbol: string;
+  tickerId: string;
+  input: CycleInput;
+}
+
 const easternDateFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" });
 
 /** Cycles per symbol (open and closed), from every option leg, stock leg and stock fill of the given tickers. */
 export async function fetchCyclesForTickers(tickerIds: string[] | "all"): Promise<SymbolCycles[]> {
+  const symbolInputs = await loadCycleInputsForTickers(tickerIds);
+  const result: SymbolCycles[] = [];
+  for (const { symbol, tickerId, input } of symbolInputs) {
+    const cycles = deriveCycles(input);
+    if (cycles.length > 0) result.push({ symbol, tickerId, cycles });
+  }
+  return result;
+}
+
+/** The raw ledger inputs per symbol, so a caller can derive cycles as of another date (see cyclePeriodPnl.ts). */
+export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Promise<SymbolCycleInput[]> {
   const filter = tickerIds === "all" ? "" : "AND p.ticker_id = ANY(?)";
   const params = tickerIds === "all" ? [] : [tickerIds];
   const idFilterForBars = tickerIds === "all" ? "" : "WHERE b.ticker_id = ANY(?)";
@@ -29,7 +46,7 @@ export async function fetchCyclesForTickers(tickerIds: string[] | "all"): Promis
       params,
     ),
     db.raw(
-      `SELECT p.ticker_id AS "tickerId", pl.quantity, pl.entry_at AS "entryAt", pl.exit_at AS "exitAt"
+      `SELECT p.ticker_id AS "tickerId", pl.position_id AS "positionId", pl.quantity, pl.entry_at AS "entryAt", pl.exit_at AS "exitAt"
        FROM position_legs pl JOIN positions p ON p.id = pl.position_id
        WHERE pl.leg_type = 'stock' AND pl.side = 'long' ${filter}`,
       params,
@@ -56,7 +73,7 @@ export async function fetchCyclesForTickers(tickerIds: string[] | "all"): Promis
   ]);
 
   const openPositionPremiumPnl = new Map<string, number>(snapshotRows.rows.map((row: any) => [row.positionId, Number(row.premiumPnl)]));
-  const result: SymbolCycles[] = [];
+  const result: SymbolCycleInput[] = [];
   for (const { tickerId, symbol } of tickerRows.rows as { tickerId: string; symbol: string }[]) {
     const dailyCloses = new Map<string, number>();
     let lastPrice: { date: string; price: number } | null = null;
@@ -69,12 +86,11 @@ export async function fetchCyclesForTickers(tickerIds: string[] | "all"): Promis
       .map((row: any) => ({ ...row, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
     const stockLegs: CycleStockLeg[] = stockLegRows.rows
       .filter((row: any) => row.tickerId === tickerId)
-      .map((row: any) => ({ quantity: row.quantity, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
+      .map((row: any) => ({ positionId: row.positionId, quantity: row.quantity, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
     const stockTrades: CycleStockTrade[] = stockTradeRows.rows
       .filter((row: any) => row.tickerId === tickerId)
       .map((row: any) => ({ at: new Date(row.at), side: row.side, quantity: row.quantity, price: row.price, commission: row.commission }));
-    const cycles = deriveCycles({ optionLegs, stockLegs, stockTrades, dailyCloses, lastPrice, openPositionPremiumPnl });
-    if (cycles.length > 0) result.push({ symbol, tickerId, cycles });
+    result.push({ symbol, tickerId, input: { optionLegs, stockLegs, stockTrades, dailyCloses, lastPrice, openPositionPremiumPnl } });
   }
   void easternDateFormatter;
   return result.sort((a, b) => a.symbol.localeCompare(b.symbol));

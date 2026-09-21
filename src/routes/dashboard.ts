@@ -4,7 +4,8 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps, computePositionExposures, streamPositionExposures } from "../lib/positionExposure.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
-import { computeStrategyDailyPnlSeries, computeStrategyPeriodPnl } from "../lib/strategyPeriodPnl.js";
+import { computeStrategyDailyPnlSeries } from "../lib/strategyPeriodPnl.js";
+import { computeCyclePeriodPnl } from "../lib/cyclePeriodPnl.js";
 import { fetchPositionEvents } from "../lib/positionEvents.js";
 
 // The known strategy buckets the Dashboard breaks P&L/allocation down by —
@@ -14,6 +15,8 @@ import { fetchPositionEvents } from "../lib/positionEvents.js";
 // not tied to a specific trade, cash deposits/withdrawals — none of which
 // this platform captures individually yet, decided 2026-08-28).
 const knownStrategyKeys = ["covered_call", "cash_secured_put", "unstructured"] as const;
+// The Dashboard's P&L cards use the fair cycle attribution (cyclePeriodPnl.ts), whose buckets are named differently.
+const cycleBucketByStrategyKey = { covered_call: "cc", cash_secured_put: "csp", unstructured: "unstructured" } as const;
 
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
@@ -39,7 +42,7 @@ dashboardRouter.get("/summary", async (_request, response) => {
   const [latestAccountSnapshot, periods, strategyPeriodPnl] = await Promise.all([
     db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first(),
     loadPeriodPnl(),
-    computeStrategyPeriodPnl(),
+    computeCyclePeriodPnl(),
   ]);
 
   // "P&L by Strategy" is YTD-scoped (matches "P&L by Period"'s YTD column
@@ -47,19 +50,19 @@ dashboardRouter.get("/summary", async (_request, response) => {
   // unrealized, which made its Residual figure incomparable to the Period
   // card's and left Total's REALIZED column disagreeing wildly with the
   // sum of the visible strategy rows). Sourced from the same
-  // computeStrategyPeriodPnl() query as the Period card rather than
+  // computeCyclePeriodPnl() query as the Period card rather than
   // separate SQL, so the two can't drift apart again.
-  const strategyBreakdown = strategyPeriodPnl.map((row) => ({
-    strategyKey: row.strategyKey,
-    realizedPnl: row.realizedYear,
-    unrealizedPnl: row.unrealizedYear,
+  const strategyBreakdown = knownStrategyKeys.map((strategyKey) => ({
+    strategyKey,
+    realizedPnl: strategyPeriodPnl.buckets[cycleBucketByStrategyKey[strategyKey]].realizedYear,
+    unrealizedPnl: strategyPeriodPnl.buckets[cycleBucketByStrategyKey[strategyKey]].unrealizedYear,
   }));
 
   // Account-level YTD unrealized: IBKR's $LEDGER-UnrealizedPnL is a live
   // mark-to-market on currently-open positions (a point-in-time *stock*,
   // like this app's own position_pnl_snapshots), so "current minus the
   // snapshot as of Dec 31 last year" is the correct way to isolate this
-  // year's move — same pattern computeStrategyPeriodPnl.ts already uses
+  // year's move — same pattern cyclePeriodPnl.ts already uses
   // per-position for its own "year" column. Confirmed reliable: it
   // reconciles with this app's own known-strategy unrealized total to
   // within cents.
@@ -234,24 +237,22 @@ dashboardRouter.get("/portfolio/stream", async (request, response) => {
 });
 
 // Per-strategy Day/WTD/MTD/YTD P&L table (2026-08-28) — realized+unrealized
-// combined, computed live (see strategyPeriodPnl.ts for why: more
-// resilient to a missed snapshot night than a hard nightly delta table).
+// combined, computed live on the fair cycle attribution (cyclePeriodPnl.ts,
+// switched 2026-09-21; the same buckets as the Positions strategy scoreboard).
 // "residual" is the trusted account-level total minus the three known
 // buckets — see knownStrategyKeys comment above.
 dashboardRouter.get("/period-pnl-by-strategy", async (_request, response) => {
-  const [byStrategy, accountPeriods] = await Promise.all([computeStrategyPeriodPnl(), loadPeriodPnl()]);
+  const [cyclePeriodPnl, accountPeriods] = await Promise.all([computeCyclePeriodPnl(), loadPeriodPnl()]);
 
   const totals = { day: 0, week: 0, month: 0, year: 0 };
   const rows: Record<string, { day: number; week: number; month: number; year: number }> = {};
-  for (const key of knownStrategyKeys) rows[key] = { day: 0, week: 0, month: 0, year: 0 };
-  for (const row of byStrategy) {
-    if (row.strategyKey in rows) {
-      rows[row.strategyKey] = { day: row.day, week: row.week, month: row.month, year: row.year };
-    }
-    totals.day += row.day;
-    totals.week += row.week;
-    totals.month += row.month;
-    totals.year += row.year;
+  for (const key of knownStrategyKeys) {
+    const { day, week, month, year } = cyclePeriodPnl.buckets[cycleBucketByStrategyKey[key]];
+    rows[key] = { day, week, month, year };
+    totals.day += day;
+    totals.week += week;
+    totals.month += month;
+    totals.year += year;
   }
 
   const accountTotal = {
