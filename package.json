@@ -30,7 +30,8 @@
     "job:expiry-settlement-audit": "tsx scripts/run-daily-expiry-settlement-audit-job.ts",
     "ibkr:health-check": "tsx scripts/check-ibkr-health.ts",
     "sync-market-calendar": "tsx scripts/sync-market-calendar.ts",
-    "backfill:ticker-history": "tsx scripts/backfillTickerHistory.ts"
+    "backfill:ticker-history": "tsx scripts/backfillTickerHistory.ts",
+    "deploy:worker:staging": "bash scripts/deploy-worker-to-vps.sh staging"
   },
   "dependencies": {
     "@stoqey/ib": "^1.6.6",

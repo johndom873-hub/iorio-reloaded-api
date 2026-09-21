@@ -14,11 +14,38 @@
 # path/unit name below may need adjusting once that setup actually happens.
 set -euo pipefail
 
+# Mandatory target — there is deliberately no default. Two workers live on this
+# VPS (staging and the old, future-prod one); guessing wrong once restarted the
+# wrong one's neighbour in the planning notes, so the caller must say which.
+#   npm run deploy:worker:staging     (or: bash scripts/deploy-worker-to-vps.sh staging)
+#   bash scripts/deploy-worker-to-vps.sh live
+TARGET="${1:-}"
+case "$TARGET" in
+  staging)
+    REMOTE_DIR="/opt/iorio-worker-staging"
+    SYSTEMD_UNIT="iorio-worker-staging"
+    ;;
+  live)
+    REMOTE_DIR="/opt/iorio-worker"
+    SYSTEMD_UNIT="iorio-worker"
+    ;;
+  *)
+    echo "Usage: $0 <staging|live>   (target is mandatory)" >&2
+    exit 2
+    ;;
+esac
+
 VPS_HOST="142.132.185.128"
 VPS_USER="root"
 VPS_SSH_KEY="$HOME/.ssh/iorio_vps_ed25519"
-REMOTE_DIR="/opt/iorio-worker"
-SYSTEMD_UNIT="iorio-worker"
+
+if [[ "$TARGET" == "live" ]]; then
+  # Restarting the live worker interrupts order handling and reconciliation, and
+  # today that unit is stopped and disabled on purpose (frozen prod). Make the
+  # human type the target back so this can never happen by autopilot.
+  read -r -p "This restarts the LIVE worker ($SYSTEMD_UNIT in $REMOTE_DIR). Type 'live' to continue: " CONFIRMATION
+  [[ "$CONFIRMATION" == "live" ]] || { echo "Aborted." >&2; exit 1; }
+fi
 
 cd "$(dirname "$0")/.."
 
@@ -40,7 +67,7 @@ if [[ ! -f "$VPS_SSH_KEY" ]]; then
   exit 1
 fi
 
-echo "Deploying origin/main to $VPS_USER@$VPS_HOST:$REMOTE_DIR..."
+echo "Deploying origin/main to $TARGET worker: $VPS_USER@$VPS_HOST:$REMOTE_DIR ($SYSTEMD_UNIT)..."
 ssh -i "$VPS_SSH_KEY" "$VPS_USER@$VPS_HOST" bash -s <<REMOTE
 set -euo pipefail
 cd "$REMOTE_DIR"
