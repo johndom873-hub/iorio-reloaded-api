@@ -23,6 +23,9 @@ positionsRouter.use(requireAuth);
 
 // v1 strategy scope — matches shortlist.ts.
 const validStrategyKeys = ["covered_call", "cash_secured_put"];
+// Reading (not creating) also covers "unstructured": bare stock and anything
+// fitting neither strategy is a real open holding (Genosuke filters by it).
+const validListStrategyKeys = [...validStrategyKeys, "unstructured"];
 const validStatuses = ["open", "closed"];
 const orderRequestsChannel = "order_requests_channel";
 
@@ -126,7 +129,7 @@ positionsRouter.get("/", async (request, response) => {
     response.status(400).json({ error: "status must be open, closed, or all." });
     return;
   }
-  if (strategyKey && !validStrategyKeys.includes(strategyKey)) {
+  if (strategyKey && !validListStrategyKeys.includes(strategyKey)) {
     response.status(400).json({ error: "Unknown strategy." });
     return;
   }
