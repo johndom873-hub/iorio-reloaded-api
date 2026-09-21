@@ -20,7 +20,7 @@ jobs:
           COMMITS_JSON: ${{ toJson(github.event.commits) }}
           HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          APP="iorio-reloaded-api"
+          APP="iorio-staging-api"
           COMMIT_SHA="${{ github.sha }}"
           SHORT_SHA="${COMMIT_SHA:0:8}"
 

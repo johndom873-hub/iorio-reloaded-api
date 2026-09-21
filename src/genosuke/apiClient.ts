@@ -24,10 +24,21 @@ export class GenosukeApiError extends Error {
 
 export class GenosukeApiClient {
   private sessionCookie: string | null = null;
+  // Tool calls run in parallel (Promise.all in chat.ts) — without this, several
+  // cold callers each log in, and a 401 on one nulls the cookie the others are
+  // about to send.
+  private loginInFlight: Promise<string> | null = null;
 
   constructor(private readonly config: GenosukeConfig) {}
 
-  private async login(): Promise<void> {
+  private login(): Promise<string> {
+    this.loginInFlight ??= this.performLogin().finally(() => {
+      this.loginInFlight = null;
+    });
+    return this.loginInFlight;
+  }
+
+  private async performLogin(): Promise<string> {
     const response = await fetch(`${this.config.apiBaseUrl}/auth/login`, {
       method: "POST",
       // middleware/session.ts sets cookie.secure=true in production, and
@@ -54,22 +65,33 @@ export class GenosukeApiClient {
     }
     // Only the cookie's name=value pair is needed on the way back out —
     // strip the Set-Cookie attributes (Path, HttpOnly, SameSite, ...).
-    this.sessionCookie = setCookie.split(";")[0] ?? null;
+    const cookie = setCookie.split(";")[0];
+    if (!cookie) {
+      throw new GenosukeApiError(500, "Genosuke login returned an empty session cookie.");
+    }
+    this.sessionCookie = cookie;
+    return cookie;
   }
 
   private async requestOnce(path: string, init: RequestInit): Promise<Response> {
-    if (!this.sessionCookie) await this.login();
+    const cookie = this.sessionCookie ?? (await this.login());
     return fetch(`${this.config.apiBaseUrl}${path}`, {
       ...init,
-      headers: { ...init.headers, Cookie: this.sessionCookie! },
+      headers: { ...init.headers, Cookie: cookie },
     });
   }
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     let response = await this.requestOnce(path, init);
     if (response.status === 401) {
+      // Logged so a recurring cold-start 401 (seen once on staging, 2026-09-21)
+      // can be told apart: a stale session vs. a login that never took effect.
+      console.warn(`Genosuke API: 401 on ${init.method ?? "GET"} ${path} (cookie ${this.sessionCookie ? "present" : "absent"}) — re-logging in`);
       this.sessionCookie = null;
       response = await this.requestOnce(path, init);
+      if (response.status === 401) {
+        console.error(`Genosuke API: 401 persisted on ${init.method ?? "GET"} ${path} after a fresh login`);
+      }
     }
     if (!response.ok) {
       const body = await response.text();

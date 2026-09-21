@@ -7,7 +7,7 @@ Multi-strategy options trading platform for a business user (non-developer, has 
 - **Ask before deciding.** Never assume design, behaviour, or approach. Always present a recommendation with pros/cons/caveats and let the user choose.
 - **Formulas require explicit sign-off.** Before implementing any financial calculation, present the formula for approval. Do not implement until approved.
 - **Test everything end-to-end, no assumptions.** DB writes/reads must be verified directly. Every API endpoint must be tested for correct store + retrieve. Every screen must be tested with the Playwright MCP, issues fixed before considered done.
-- **Never push code.** The user pushes to GitHub themselves. Commits are fine when asked; pushes are not.
+- **Pushing (updated 2026-09-21, user-authorised once staging existed).** Claude may `git push origin main` to GitHub for both repos (`iorio-reloaded-api`, `iorio-reloaded-app`): `main` auto-deploys to the *staging* apps only; the old prod apps have auto-deploy off and prod is promotion-only. Still never: force-push, push to Heroku git remotes, promote/deploy to production, or push work that isn't finished and verified. Commits when asked; announce every push and what it will deploy.
 - **CLI commands**: ask permission, then run them yourself rather than asking the user to run them (except `git push`, which is off-limits regardless).
 - **Business-user communication.** Explain technical concepts in plain terms. Flag when a decision is technical enough to warrant checking with the user's developer friend — but treat that as a last resort, not a default.
 - **Push back** on requests that would degrade the system technically or hurt scalability — this user wants pushback, not compliance.

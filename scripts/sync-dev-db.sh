@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Pulls the prod Heroku Postgres database down and replaces the local dev database with it.
-# Destructive to the LOCAL database only — never writes to prod.
+# Pulls the STAGING Heroku Postgres database down and replaces the local dev database with it.
+# Destructive to the LOCAL database only — never writes to Heroku.
+#
+# Staging is the only environment whose data may be copied to a laptop, and the
+# guard below enforces it: production (and the frozen pre-2026-09-21 apps) must
+# never be pulled from. The comments further down still say "prod" in places —
+# they mean "the source Heroku database" (now staging).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -9,7 +14,12 @@ cd "$(dirname "$0")/.."
 # (installed via Homebrew libpq or Postgres.app, neither on PATH by default) may be missing.
 export PATH="/opt/homebrew/opt/libpq/bin:/Applications/Postgres.app/Contents/Versions/latest/bin:$PATH"
 
-HEROKU_APP="iorio-reloaded-api"
+HEROKU_APP="iorio-staging-api"
+ALLOWED_HEROKU_APP="iorio-staging-api"
+if [[ "$HEROKU_APP" != "$ALLOWED_HEROKU_APP" ]]; then
+  echo "Refusing to pull from '$HEROKU_APP': only $ALLOWED_HEROKU_APP may be synced to a laptop." >&2
+  exit 1
+fi
 HEROKU_KEY_FILE="$HOME/.config/heroku/iorio-api-key"
 
 if [[ ! -f "$HEROKU_KEY_FILE" ]]; then
@@ -32,7 +42,7 @@ for bin in psql pg_dump pg_restore; do
   fi
 done
 
-echo "This will DROP and replace the local database '$LOCAL_DB_NAME' with a copy of prod ($HEROKU_APP)."
+echo "This will DROP and replace the local database '$LOCAL_DB_NAME' with a copy of staging ($HEROKU_APP)."
 read -r -p "Continue? [y/N] " CONFIRM
 if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
   echo "Aborted."
@@ -57,6 +67,9 @@ trap restart_dev_server EXIT
 DEV_SERVER_PID=$(lsof -tiTCP:"$DEV_PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [[ -n "$DEV_SERVER_PID" ]]; then
   echo "Stopping dev server on port $DEV_PORT (PID $DEV_SERVER_PID)..."
+  # tsx watch spawns the real server as a child; killing only the listener orphans
+  # that child, which keeps its DB connections open and blocks dropdb.
+  pkill -P "$DEV_SERVER_PID" 2>/dev/null || true
   kill $DEV_SERVER_PID
   RESTART_DEV_SERVER=1
   for _ in $(seq 1 20); do
@@ -98,9 +111,11 @@ if psql -Atqc "SELECT 1" "$LOCAL_DATABASE_URL" >/dev/null 2>&1 \
 fi
 
 echo "Dropping local database '$LOCAL_DB_NAME' if it exists..."
+# Safety net for any other leftover connection (orphaned dev-server children etc.).
+psql -d postgres -Atqc "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$LOCAL_DB_NAME' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
 dropdb --if-exists "$LOCAL_DB_NAME"
 
-echo "Pulling prod database from $HEROKU_APP..."
+echo "Pulling staging database from $HEROKU_APP..."
 PULL_LOG=$(mktemp)
 set +e
 HEROKU_API_KEY=$(cat "$HEROKU_KEY_FILE") heroku pg:pull DATABASE_URL "$LOCAL_DB_NAME" --app "$HEROKU_APP" \
@@ -170,4 +185,4 @@ if [[ "$HAVE_SESSION_BACKUP" -eq 1 && -s "$SESSION_BACKUP_FILE" ]]; then
 fi
 rm -f "$SESSION_BACKUP_FILE"
 
-echo "Done. Local database '$LOCAL_DB_NAME' now mirrors prod (local 'users' and 'session' rows preserved)."
+echo "Done. Local database '$LOCAL_DB_NAME' now mirrors staging (local 'users' and 'session' rows preserved)."

@@ -13,7 +13,11 @@ import { listWafRules } from "../../lib/cloudflareService.js";
 import { fetchLogsFromBetterStack, type LogSourceApp } from "../../lib/betterstackService.js";
 import type { GenosukeTool } from "./types.js";
 
-const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
+// Includes "unstructured" (bare stock and anything fitting neither strategy):
+// omitting it made Genosuke report only the two named strategies as "our
+// positions" and hide real open holdings. Write tools deliberately keep the
+// narrower two-value enum — Genosuke never creates unstructured positions.
+const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "unstructured"] };
 
 export const readTools: GenosukeTool[] = [
   {
