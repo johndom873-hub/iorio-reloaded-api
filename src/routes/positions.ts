@@ -1,3 +1,4 @@
+import { fetchTradingBlockedReason } from "../lib/tradingGate.js";
 import { Router, type Request, type Response } from "express";
 import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
@@ -1256,6 +1257,14 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   if (orderRequest.status !== "pending_confirmation") {
     const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
     response.json(serializeOrderRequest(updated));
+    return;
+  }
+
+  // Fail-closed account binding (Phase B WP2): no order is confirmed unless the trading worker recently
+  // reported that it is bound to this environment's IBKR account. The order stays pending_confirmation.
+  const tradingBlockedReason = await fetchTradingBlockedReason();
+  if (tradingBlockedReason) {
+    response.status(409).json({ error: tradingBlockedReason });
     return;
   }
 

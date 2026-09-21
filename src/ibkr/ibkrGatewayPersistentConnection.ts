@@ -98,6 +98,9 @@ class PersistentIbkrConnection {
     });
     console.log(`IBKR worker: SSH tunnel open on local port ${tunnel.localPort} (${Date.now() - connectStartedAt}ms) — connecting to IBKR API with clientId ${workerClientId}...`);
 
+    // Forget the previous session's accounts: a reconnect may land on a different Gateway login, and an old
+    // list must never make a new session look bound (see ibkrGatewayAccountBinding.ts).
+    this.managedAccountIds = [];
     const ib = new IBApi({ host: "127.0.0.1", port: tunnel.localPort });
 
     await new Promise<void>((resolve, reject) => {

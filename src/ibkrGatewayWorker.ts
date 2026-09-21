@@ -7,6 +7,7 @@ import { environment } from "./config/env.js";
 import { detectTradingModeFromAccountIds } from "./lib/detectTradingModeFromAccountIds.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
 import { readGitSha } from "./lib/readGitSha.js";
+import { getCurrentAccountBinding, getExpectedAccountId, initializeAccountBinding, startAccountBindingWatch } from "./ibkr/ibkrGatewayAccountBinding.js";
 import { readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "./lib/expirySettlementAudit.js";
 import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
 import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
@@ -214,6 +215,22 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
   if (!orderRequest) return; // already processed, cancelled, or not actually confirmed
 
   const payload = orderRequest.payload as OrderRequestPayload;
+
+  // Fail-closed account binding (Phase B WP2). "pending" (just reconnected, accounts not reported yet) leaves the
+  // order confirmed for the next poll cycle; a real mismatch errors it for good so a stale limit price can never
+  // fire later once the binding recovers.
+  const binding = getCurrentAccountBinding();
+  if (binding.status === "pending") {
+    console.log(`processOrderRequest(${orderRequestId}): account binding pending (${binding.reason}) — order left confirmed, will retry.`);
+    return;
+  }
+  if (binding.status === "mismatch") {
+    const message = `Trading blocked by account binding: ${binding.reason}`;
+    console.error(`processOrderRequest(${orderRequestId}): ${message}`);
+    await db("order_requests").where({ id: orderRequestId }).update({ status: "error", error_message: message, updated_at: db.fn.now() });
+    await notifyTelegramWithTimeout(`🛑 Order for ${payload.symbol} (id ${orderRequestId}) was NOT sent to IBKR.\n${message}`);
+    return;
+  }
   console.log(`processOrderRequest(${orderRequestId}): building order for ${payload.symbol}, ${payload.legs.length} leg(s).`);
   try {
     const built = await buildOrder(payload);
@@ -231,6 +248,8 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
       .update({ status: "submitted", ibkr_order_id: ibkrOrderId, updated_at: db.fn.now() });
 
     console.log(`processOrderRequest(${orderRequestId}): placing IBKR order ${ibkrOrderId} (${payload.symbol}, lmtPrice=${built.order.lmtPrice}).`);
+    // Name the account on the order itself: if the Gateway session does not manage it, IBKR rejects the order.
+    built.order.account = getExpectedAccountId();
     ib.placeOrder(ibkrOrderId, built.contract, built.order);
     // Animation-only signal for Iorio Pulse's IBKR-Gateway line (never persisted).
     publishPulse("ibkr-gateway").catch(() => {});
@@ -561,6 +580,10 @@ async function insertOpeningTradeRow(positionLegId: string, contract: Contract, 
  */
 async function recordExecution(contract: Contract, execution: Execution): Promise<void> {
   if (!execution.execId || !contract.conId) return;
+  if (getCurrentAccountBinding().status === "mismatch") {
+    console.log(`Execution ${execution.execId} ignored: account binding mismatch.`);
+    return;
+  }
 
   const existing = await db("trades").where({ ibkr_exec_id: execution.execId }).first();
   if (existing) return;
@@ -655,6 +678,12 @@ async function correctExpirySettlementsNow(passId: number): Promise<void> {
 }
 
 async function reconcilePositionsFromIbkr(): Promise<void> {
+  // Never sync positions from an account this environment is not bound to (Phase B WP2).
+  const binding = getCurrentAccountBinding();
+  if (binding.status !== "ok") {
+    console.log(`Reconciliation skipped: account binding ${binding.status} — ${binding.reason}`);
+    return;
+  }
   if (reconciliationInFlight) {
     reconciliationRerunQueued = true;
     console.log("Reconciliation: a pass is already in flight — queuing exactly one rerun after it finishes.");
@@ -1578,6 +1607,9 @@ function startDisconnectedAlerting(): void {
 }
 
 async function main(): Promise<void> {
+  // Before anything can connect or trade: a missing/contradictory expected account must stop the process.
+  initializeAccountBinding();
+  startAccountBindingWatch();
   await persistentIbkrConnection.start();
   startDisconnectedAlerting();
   await reconcileStaleOrderRequests().catch((error) => console.error(`Initial stale-order reconciliation failed: ${error}`));
@@ -1630,6 +1662,7 @@ async function main(): Promise<void> {
   readExpirySettlementMode();
   setInterval(() => {
     const health = persistentIbkrConnection.getHealthSnapshot();
+    const bindingNow = getCurrentAccountBinding();
     db("worker_health")
       .insert({
         process_name: "ibkr_gateway_worker",
@@ -1643,6 +1676,8 @@ async function main(): Promise<void> {
         ibkr_account_ids: health.managedAccountIds,
         detected_trading_mode: detectTradingModeFromAccountIds(health.managedAccountIds),
         configured_trading_mode: environment.ibkrTradingMode,
+        account_binding_status: bindingNow.status,
+        account_binding_reason: bindingNow.reason,
         updated_at: db.fn.now(),
       })
       .onConflict("process_name")
