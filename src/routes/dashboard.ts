@@ -153,7 +153,7 @@ dashboardRouter.get("/available-cash", async (_request, response) => {
 
   const totalCashValue = account.totalCashValue;
   const availableCashToTrade = totalCashValue !== null ? totalCashValue - cashLockedInCsps : null;
-  response.json({ totalCashValue, cashLockedInCsps, availableCashToTrade });
+  response.json({ totalCashValue, cashLockedInCsps, availableCashToTrade, netLiquidationValue: account.netLiquidationValue ?? null });
 });
 
 // Portfolio section (2026-08-28): CC / CSP / Unstructured at full market
