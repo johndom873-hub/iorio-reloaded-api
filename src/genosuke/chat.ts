@@ -97,6 +97,8 @@ export async function chatOnce({ messages, userMessage, chatId, adapter, api, te
 
     const toolResults = await Promise.all(
       turn.toolCalls.map(async ({ id, name, input }) => {
+        // Model behaviour is otherwise invisible: loopback calls never reach the router log.
+        console.log(`Genosuke: tool call ${name} ${JSON.stringify(input)}`);
         const tool = TOOLS_BY_NAME.get(name);
         if (!tool) return { id, content: `Error: unknown tool "${name}".` };
 
