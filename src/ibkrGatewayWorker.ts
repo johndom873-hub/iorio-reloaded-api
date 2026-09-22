@@ -31,6 +31,7 @@ import { formatDurationHuman } from "./lib/formatDurationHuman.js";
 import { revertSourceAlertToPending } from "./lib/revertSourceAlertToPending.js";
 import { publishNotification, publishPulse } from "./lib/notificationChannel.js";
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
+import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
 
 installCrashHandlers("worker");
 
@@ -1713,6 +1714,17 @@ async function main(): Promise<void> {
   // the worker's .env before this code is deployed.
   const workerGitSha = readGitSha();
   const workerAppEnvironment = readAppEnvironment();
+  // Phase B release-phase deploy: lets the deploy step skip redeploying the worker when the
+  // commit being released doesn't actually change anything the worker runs (e.g. an API-only
+  // route change) — see computeSourceClosureHash.ts. Never worth crashing startup over: on any
+  // failure this just means the release phase can't prove "unchanged" and deploys anyway (safe
+  // default), same as a git_sha read failure leaves that field null.
+  let workerCodeHash: string | null = null;
+  try {
+    workerCodeHash = computeSourceClosureHash(process.cwd(), "src/ibkrGatewayWorker.ts").hash;
+  } catch (error) {
+    console.warn(`Could not compute the worker's source closure hash: ${error instanceof Error ? error.message : error}`);
+  }
   // Fail fast if the mode is missing/invalid, rather than on the first expiry.
   readExpirySettlementMode();
   setInterval(() => {
@@ -1733,6 +1745,7 @@ async function main(): Promise<void> {
         configured_trading_mode: environment.ibkrTradingMode,
         account_binding_status: bindingNow.status,
         account_binding_reason: bindingNow.reason,
+        worker_code_hash: workerCodeHash,
         updated_at: db.fn.now(),
       })
       .onConflict("process_name")
