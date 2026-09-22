@@ -35,9 +35,9 @@ describe("findStaticBindingConfigProblem", () => {
   it("rejects a live account outside production", () => {
     expect(findStaticBindingConfigProblem({ ...stagingParams, expectedAccountId: "U1234567", configuredTradingMode: "live" })).toMatch(/only production may trade live/);
   });
-  it("allows production on a live account and on paper", () => {
+  it("allows production on a live account, and refuses production on paper", () => {
     expect(findStaticBindingConfigProblem({ ...stagingParams, expectedAccountId: "U1234567", configuredTradingMode: "live", appEnvironment: "production" })).toBeNull();
-    expect(findStaticBindingConfigProblem({ ...stagingParams, appEnvironment: "production" })).toBeNull();
+    expect(findStaticBindingConfigProblem({ ...stagingParams, appEnvironment: "production" })).toMatch(/production trades live only/);
   });
   it("rejects an unrecognised account id format", () => {
     expect(findStaticBindingConfigProblem({ ...stagingParams, expectedAccountId: "F999" })).toMatch(/neither a paper/);

@@ -45,6 +45,10 @@ export function findStaticBindingConfigProblem(params: {
   if (params.appEnvironment !== "production" && expectedMode === "live") {
     return `APP_ENVIRONMENT is ${params.appEnvironment} but the expected account ${params.expectedAccountId} is a LIVE account; only production may trade live.`;
   }
+  // Marcelo's rule (2026-09-22): LIVE is for production only and production is never paper; paper lives in staging and dev.
+  if (params.appEnvironment === "production" && expectedMode === "paper") {
+    return `APP_ENVIRONMENT is production but the expected account ${params.expectedAccountId} is a PAPER account; production trades live only.`;
+  }
   return null;
 }
 

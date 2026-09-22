@@ -1,3 +1,4 @@
+import { environmentRouter } from "./routes/environment.js";
 import express from "express";
 import cors from "cors";
 import { environment } from "./config/env.js";
@@ -48,6 +49,7 @@ app.use(requestRateMiddleware);
 app.use(pulseOnRequestMiddleware);
 
 app.use(healthRouter);
+app.use("/environment", environmentRouter);
 // Telegram calls this directly (no session) — authenticated by the shared
 // secret header checked inside the handler instead.
 app.post("/genosuke/webhook", handleGenosukeWebhook);

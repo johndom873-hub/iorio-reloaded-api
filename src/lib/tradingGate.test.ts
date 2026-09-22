@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findTradingBlockedReason, type WorkerHealthForTradingGate } from "./tradingGate.js";
+import { classifyTradingStatus, findTradingBlockedReason, type WorkerHealthForTradingGate } from "./tradingGate.js";
 
 const now = Date.parse("2026-09-22T10:00:00Z");
 const healthyRow: WorkerHealthForTradingGate = {
@@ -17,7 +17,7 @@ describe("findTradingBlockedReason", () => {
     expect(findTradingBlockedReason(undefined, "staging", now)).toMatch(/never reported/);
   });
   it("blocks on a stale heartbeat", () => {
-    expect(findTradingBlockedReason({ ...healthyRow, updated_at: new Date(now - 300_000) }, "staging", now)).toMatch(/offline \(last heartbeat 300s ago\)/);
+    expect(findTradingBlockedReason({ ...healthyRow, updated_at: new Date(now - 300_000) }, "staging", now)).toMatch(/offline \(last heartbeat 5m ago\)/);
   });
   it("blocks when the worker's environment differs from the API's", () => {
     expect(findTradingBlockedReason(healthyRow, "production", now)).toMatch(/"staging" but this API is "production"/);
@@ -31,5 +31,20 @@ describe("findTradingBlockedReason", () => {
   });
   it("blocks while binding is still pending", () => {
     expect(findTradingBlockedReason({ ...healthyRow, account_binding_status: "pending", account_binding_reason: "Connected; waiting for the Gateway to report its accounts." }, "staging", now)).toMatch(/waiting for the Gateway/);
+  });
+});
+
+describe("classifyTradingStatus", () => {
+  it("is ok for a fresh, matching, bound worker", () => {
+    expect(classifyTradingStatus(healthyRow, "staging", now)).toEqual({ state: "ok", reason: null });
+  });
+  it("is offline when the worker never reported or its heartbeat is stale", () => {
+    expect(classifyTradingStatus(undefined, "staging", now).state).toBe("offline");
+    expect(classifyTradingStatus({ ...healthyRow, updated_at: new Date(now - 300_000) }, "staging", now).state).toBe("offline");
+  });
+  it("is blocked, not offline, for a live worker with a wrong environment, no binding report, or a mismatch", () => {
+    expect(classifyTradingStatus(healthyRow, "production", now).state).toBe("blocked");
+    expect(classifyTradingStatus({ ...healthyRow, account_binding_status: null }, "staging", now).state).toBe("blocked");
+    expect(classifyTradingStatus({ ...healthyRow, account_binding_status: "mismatch", account_binding_reason: "x" }, "staging", now).state).toBe("blocked");
   });
 });
