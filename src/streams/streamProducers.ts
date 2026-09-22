@@ -7,6 +7,7 @@ import { streamGreeksHandler, streamPnlHandler } from "../routes/positions.js";
 import { streamPricePerformancePricesHandler } from "../routes/pricePerformance.js";
 import { streamTradeAlertPricesHandler } from "../routes/tradeAlerts.js";
 import { runStreamHandlerAsProducer, type StreamHandler } from "./legacyStreamHandlerAdapter.js";
+import { createSignalsProducers } from "./signalsProducers.js";
 import { StreamRequestError, type StreamKind } from "./streamProtocol.js";
 
 export interface StreamProducerContext {
@@ -110,6 +111,7 @@ export const streamProducers: StreamProducerRegistry = {
   tradeAlertPrices: handlerProducer(streamTradeAlertPricesHandler, (rawParameters) => ({
     symbols: parseStringList(rawParameters, "symbols", symbolPattern, maxSymbolsPerSubscription).join(","),
   })),
+  ...createSignalsProducers(),
 
   // Everything the legacy /notifications/stream sends except the
   // high-frequency topology pulses (those are the separate "pulses" kind, so

@@ -100,6 +100,7 @@ class SharedReadConnection {
   private connecting: Promise<void> | null = null;
   private connectedSince: number | null = null;
   private totalReconnects = 0;
+  private shuttingDown = false;
   // Shared across every concurrent borrower — replaces each read helper's
   // old hardcoded reqId range (9001, 20000, 30000, ...), which only avoided
   // collisions because each one-shot call had a private socket to itself.
@@ -107,6 +108,23 @@ class SharedReadConnection {
 
   allocateReqId(): number {
     return this.nextReqId++;
+  }
+
+  /**
+   * For one-shot scripts (Heroku Scheduler jobs, backfills) only: this
+   * connection is lazy and otherwise lives for the whole process, so any
+   * script that touches it (e.g. via fetchLivePrices) never exits — found
+   * 2026-09-21, when the new-ticker pipeline's test run had to be killed. Waits
+   * out an in-flight connect (it can finish after borrow() timed out), then
+   * closes the API socket and SSH tunnel and suppresses the auto-reconnect.
+   */
+  async shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    await this.connecting?.catch(() => {});
+    this.ib?.disconnect();
+    this.tunnel?.close();
+    this.ib = null;
+    this.tunnel = null;
   }
 
   getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; totalReconnects: number } {
@@ -233,7 +251,7 @@ class SharedReadConnection {
   }
 
   private handleDisconnect(): void {
-    if (this.reconnecting) return;
+    if (this.reconnecting || this.shuttingDown) return;
     this.reconnecting = true;
     const uptimeMs = this.connectedSince ? Date.now() - this.connectedSince : null;
     this.connectedSince = null;

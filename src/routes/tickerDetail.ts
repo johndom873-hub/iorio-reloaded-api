@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { streamTickerDetail } from "../ibkr/streamTickerDetail.js";
+import { allTickerDetailStreamSections, streamTickerDetail, type TickerDetailStreamSection } from "../ibkr/streamTickerDetail.js";
 import { streamPositionQuote } from "../ibkr/streamPositionQuote.js";
 import type { ChartRange } from "../ibkr/fetchTickerOverview.js";
 import { fetchCachedPriceBars, fetchCachedIvBars, type IvChartRange } from "../ibkr/priceBarCache.js";
@@ -56,8 +56,18 @@ tickerDetailRouter.get("/:symbol/detail/stream", async (request, response) => {
     if (!response.writableEnded) response.write(": ping\n\n");
   }, heartbeatIntervalMs);
 
+  // ?sections=overview,chart,technicals limits what is streamed (the Signals modal skips the option chain); absent = everything.
+  const rawSections = typeof request.query.sections === "string" ? request.query.sections.split(",").map((section) => section.trim()).filter(Boolean) : null;
+  const unknownSection = rawSections?.find((section) => !(allTickerDetailStreamSections as readonly string[]).includes(section));
+  if (unknownSection) {
+    send({ type: "streamError", message: `Unknown section "${unknownSection}".` });
+    clearInterval(heartbeat);
+    response.end();
+    return;
+  }
+
   try {
-    await streamTickerDetail(symbol, send, abortController.signal);
+    await streamTickerDetail(symbol, send, abortController.signal, (rawSections as TickerDetailStreamSection[] | null) ?? undefined);
     send({ type: "done" });
   } catch (error) {
     send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });

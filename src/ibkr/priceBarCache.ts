@@ -5,6 +5,7 @@ import { nextReqIdFor, sharedReadConnection } from "./sharedReadConnection.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { fetchHistoricalBarsRaw, type ChartRange, type PriceBar } from "./fetchTickerOverview.js";
 import { minDaysForIvPercentile } from "../lib/ivMetrics.js";
+import { normalizeBarVolume } from "../lib/normalizeBarVolume.js";
 
 // MA99 (technicalIndicators.ts) is the deeper of the two indicator
 // thresholds this backfill exists for — IV Percentile only needs
@@ -109,7 +110,7 @@ async function upsertIntradayBars(tickerId: string, barSize: string, bars: Price
     high_price: bar.high,
     low_price: bar.low,
     close_price: bar.close,
-    volume: bar.volume,
+    volume: normalizeBarVolume(bar.volume),
   }));
   await db("intraday_price_bars").insert(rows).onConflict(["ticker_id", "bar_size", "bar_time"]).merge();
 }
@@ -156,7 +157,7 @@ export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDa
       high_price: bar.high,
       low_price: bar.low,
       close_price: bar.close,
-      volume: bar.volume,
+      volume: normalizeBarVolume(bar.volume),
       implied_volatility: ivByDate.get(tradingDate) ?? null,
     };
   });
@@ -195,12 +196,25 @@ export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDa
 // falls back to no IV data for this pass rather than throwing — same
 // COALESCE-on-merge protection as the daily job covers a partial/failed
 // fetch not clobbering already-cached values.
-export async function backfillOneYearOfTickerHistory(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<number> {
-  const bars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, "1 Y", reqId);
-  const ivBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, "1 Y", nextReqIdFor(connection.ib, () => reqId + 1000), WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(
+export interface DailyHistoryFromIbkr {
+  bars: PriceBar[];
+  ivByDate: Map<string, number>;
+}
+
+// Fetch half of the backfill, split out so the Signal Engine's 5-year backfill
+// (scripts/backfillSignalEngineHistory.ts) can inspect the bars (split guard,
+// dry run) before deciding to write them.
+export async function fetchDailyHistoryFromIbkr(connection: IbkrConnection, symbol: string, duration: string, reqId = 1): Promise<DailyHistoryFromIbkr> {
+  const bars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, duration, reqId);
+  const ivBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, duration, nextReqIdFor(connection.ib, () => reqId + 1000), WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(
     () => [],
   );
-  await upsertDailyBars(tickerId, bars, ivBarsToDateMap(ivBars));
+  return { bars, ivByDate: ivBarsToDateMap(ivBars) };
+}
+
+export async function backfillOneYearOfTickerHistory(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<number> {
+  const { bars, ivByDate } = await fetchDailyHistoryFromIbkr(connection, symbol, "1 Y", reqId);
+  await upsertDailyBars(tickerId, bars, ivByDate);
   return bars.length;
 }
 

@@ -916,6 +916,17 @@ interface OpenOrderRequestBody {
   stock?: { quantity: number; limitPrice: number };
   option?: { quantity: number; limitPrice: number; strikePrice: number; expiryDate: string };
   sourceAlertId?: string;
+  /** Signals modal only: the scores at the moment the order was built (stored as-is in order_requests.signal_snapshot). */
+  signalSnapshot?: unknown;
+}
+
+// A snapshot is a plain object of modest size; the shape itself is the app's (SignalOrderSnapshot) and is not re-validated here.
+const maximumSignalSnapshotBytes = 16_384;
+function readSignalSnapshot(raw: unknown): { ok: true; value: Record<string, unknown> | null } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  if (typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "signalSnapshot must be an object." };
+  if (JSON.stringify(raw).length > maximumSignalSnapshotBytes) return { ok: false, error: "signalSnapshot is too large." };
+  return { ok: true, value: raw as Record<string, unknown> };
 }
 
 positionsRouter.post("/orders", async (request, response) => {
@@ -1048,6 +1059,12 @@ positionsRouter.post("/orders", async (request, response) => {
     }
   }
 
+  const signalSnapshot = readSignalSnapshot((request.body as OpenOrderRequestBody).signalSnapshot);
+  if (!signalSnapshot.ok) {
+    response.status(400).json({ error: signalSnapshot.error });
+    return;
+  }
+
   const [orderRequest] = await db("order_requests")
     .insert({
       requested_by_user_id: request.session.userId,
@@ -1057,6 +1074,7 @@ positionsRouter.post("/orders", async (request, response) => {
       // not omitted) rather than undefined — ?? only catches null/undefined,
       // and an empty string fails Postgres's uuid parser outright.
       source_alert_id: sourceAlertId || null,
+      signal_snapshot: signalSnapshot.value === null ? null : JSON.stringify(signalSnapshot.value),
     })
     .returning("*");
 

@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { excludeTickersBeingPrepared } from "../lib/tickersBeingPrepared.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { generateTradeAlertCandidatesForTicker, type AlertStrategyKey, type AlertStrategySettings } from "./generateTradeAlertCandidates.js";
@@ -134,10 +135,11 @@ export async function runTradeAlertGeneration(
 
   // The shortlist is no longer strategy-scoped — every shortlisted ticker is
   // scanned by every strategy's trade-alert job, so this is queried once.
-  const tickers: ShortlistedTickerRow[] = await db("shortlist_entries as se")
-    .join("tickers as t", "t.id", "se.ticker_id")
-    .whereNull("se.removed_at")
-    .select("t.id as tickerId", "t.symbol");
+  // Tickers still being prepared by the new-ticker backfill are skipped (approved 2026-09-21).
+  const tickers: ShortlistedTickerRow[] = await excludeTickersBeingPrepared(
+    db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at"),
+    "t.id",
+  ).select("t.id as tickerId", "t.symbol");
 
   try {
     // Settings loaded for both strategies up front — each ticker's scan below

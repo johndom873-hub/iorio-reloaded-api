@@ -163,11 +163,20 @@ async function fetchMustIncludeStrikesByExpiry(symbol: string): Promise<Map<stri
  * live-tick the way a price does, and range switching already goes through
  * its own separate request.
  */
+// Which parts a client wants. Ticker Detail takes everything; the Signals modal
+// (2026-09-22) skips the option chain (~96 IBKR lines) and the spot line (its own
+// stream already carries spot). Technicals need the chart's bars, so asking for
+// technicals fetches them even when "chart" itself is not requested.
+export type TickerDetailStreamSection = "overview" | "spot" | "chart" | "optionChain" | "technicals";
+export const allTickerDetailStreamSections: readonly TickerDetailStreamSection[] = ["overview", "spot", "chart", "optionChain", "technicals"];
+
 export async function streamTickerDetail(
   symbol: string,
   onEvent: (event: TickerDetailStreamEvent) => void,
   signal: AbortSignal,
+  requestedSections: readonly TickerDetailStreamSection[] = allTickerDetailStreamSections,
 ): Promise<void> {
+  const sections = new Set(requestedSections);
   // Shared live connection first (no per-open tunnel + handshake, and its
   // market data type is fixed at REALTIME for the connection's whole life),
   // one-shot connection only when it isn't available.
@@ -212,25 +221,28 @@ export async function streamTickerDetail(
     const firstSpotPromise = new Promise<number | null>((resolve) => {
       resolveFirstSpot = resolve;
     });
-    const firstSpotTimer = setTimeout(() => resolveFirstSpot(null), firstSpotWaitMs);
-    const spotTask: Promise<void> = streamLivePrices(
-      [{ key: symbol, legType: "stock", symbol }],
-      (pricesByKey) => {
-        const last = pricesByKey[symbol];
-        if (last === null || last === undefined) return;
-        onEvent({ type: "spot", data: { last } });
-        if (!firstSpotResolved) {
-          firstSpotResolved = true;
-          clearTimeout(firstSpotTimer);
-          resolveFirstSpot(last);
-        }
-      },
-      signal,
-    ).catch((error) => {
-      console.error(`streamTickerDetail: spot price stream failed for ${symbol}`, error);
-    });
+    const firstSpotTimer = setTimeout(() => resolveFirstSpot(null), sections.has("spot") ? firstSpotWaitMs : 0);
+    const spotTask: Promise<void> = sections.has("spot")
+      ? streamLivePrices(
+          [{ key: symbol, legType: "stock", symbol }],
+          (pricesByKey) => {
+            const last = pricesByKey[symbol];
+            if (last === null || last === undefined) return;
+            onEvent({ type: "spot", data: { last } });
+            if (!firstSpotResolved) {
+              firstSpotResolved = true;
+              clearTimeout(firstSpotTimer);
+              resolveFirstSpot(last);
+            }
+          },
+          signal,
+        ).catch((error) => {
+          console.error(`streamTickerDetail: spot price stream failed for ${symbol}`, error);
+        })
+      : Promise.resolve();
 
     const overviewReadyTask: Promise<TickerPricing | null> = (async () => {
+      if (!sections.has("overview")) return null;
       try {
         const [contractDetails, isShortlisted] = await Promise.all([contractDetailsPromise, isShortlistedPromise]);
         const pricing = await streamPricingUpdates(
@@ -257,12 +269,13 @@ export async function streamTickerDetail(
     })();
 
     const chartTask: Promise<PriceBar[]> = (async () => {
+      if (!sections.has("chart") && !sections.has("technicals")) return [];
       try {
         const bars = await getCachedChartBars(connection, symbol, defaultChartRange, nextReqIdFor(connection.ib, () => chartReqId));
-        onEvent({ type: "chart", data: bars });
+        if (sections.has("chart")) onEvent({ type: "chart", data: bars });
         return bars;
       } catch (error) {
-        onEvent({ type: "error", section: "chart", message: errorMessage(error) });
+        if (sections.has("chart")) onEvent({ type: "error", section: "chart", message: errorMessage(error) });
         return [];
       }
     })();
@@ -274,6 +287,7 @@ export async function streamTickerDetail(
     // does below — support/resistance's distance-from-price scoring and the
     // open-candle check both need it.
     const technicalsTask: Promise<void> = (async () => {
+      if (!sections.has("technicals")) return;
       try {
         const [hourlyBars, dailyBars, pricing] = await Promise.all([
           chartTask,
@@ -304,6 +318,7 @@ export async function streamTickerDetail(
     })();
 
     const optionChainTask: Promise<void> = (async () => {
+      if (!sections.has("optionChain")) return;
       try {
         const contractDetails = await contractDetailsPromise;
         if (!contractDetails.conId) throw new Error("No contract found to look up the option chain.");

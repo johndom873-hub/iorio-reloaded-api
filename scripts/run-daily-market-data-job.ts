@@ -16,6 +16,7 @@
 
 import { EventName, WhatToShow } from "@stoqey/ib";
 import type { IbkrConnection } from "../src/ibkr/connectIbkr.js";
+import { normalizeBarVolume } from "../src/lib/normalizeBarVolume.js";
 import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "../src/ibkr/requestMarketData.js";
@@ -85,7 +86,7 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
           high_price: bar.high,
           low_price: bar.low,
           close_price: bar.close,
-          volume: bar.volume,
+          volume: normalizeBarVolume(bar.volume),
           implied_volatility: ivBar?.close ?? null,
         })
         .onConflict(["ticker_id", "trading_date"])

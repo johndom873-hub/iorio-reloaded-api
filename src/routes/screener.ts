@@ -113,10 +113,10 @@ screenerRouter.post("/:symbol/shortlist", async (request, response) => {
     return;
   }
 
-  const { ticker, created } = await findOrCreateTicker(symbol);
+  const { ticker } = await findOrCreateTicker(symbol);
 
   try {
-    await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, notes, created);
+    await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, notes);
     response.status(204).end();
   } catch (error) {
     if ((error as { code?: string }).code === "23505") {

@@ -52,7 +52,14 @@ export const readTools: GenosukeTool[] = [
     description: "Full detail for a single position by id, including all legs.",
     tier: "read",
     parameters: { type: "object", properties: { positionId: { type: "string" } }, required: ["positionId"] },
-    execute: async (input, api) => annotateLegOpenState(await api.get(`/positions/${input.positionId}`)),
+    execute: async (input, api) => {
+      try {
+        return annotateLegOpenState(await api.get(`/positions/${input.positionId}`));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`${message} — the id may be stale or wrong; call list_positions for current position ids and retry with the right one.`);
+      }
+    },
   },
   {
     name: "get_position_live_pnl_and_greeks",
