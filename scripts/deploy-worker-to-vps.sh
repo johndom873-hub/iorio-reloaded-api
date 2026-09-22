@@ -137,18 +137,33 @@ echo "--- restarting $SYSTEMD_UNIT on the new build ---"
 systemctl restart "$SYSTEMD_UNIT"
 
 echo "--- health check: waiting up to ${HEALTH_CHECK_TIMEOUT_S}s for a clean startup ---"
+# Scoped to the exact new PID via journald's own _PID= field, not a relative --since time window --
+# a --since window observably (2026-09-22, during an unusually dense burst of restarts while
+# testing this script) can miss a line that is genuinely already in the journal, either from
+# clock/indexing lag under rapid churn or from some other --since edge case never fully pinned
+# down; querying by the specific PID sidesteps time-window ambiguity entirely.
 DEADLINE=\$((SECONDS + ${HEALTH_CHECK_TIMEOUT_S}))
 HEALTHY=0
-while [ "\$SECONDS" -lt "\$DEADLINE" ]; do
-  if ! systemctl is-active --quiet "$SYSTEMD_UNIT"; then
-    break
-  fi
-  if journalctl -u "$SYSTEMD_UNIT" --since "-$((HEALTH_CHECK_TIMEOUT_S + 10)) seconds" --no-pager 2>/dev/null | grep -qF "$STARTUP_SUCCESS_MARKER"; then
-    HEALTHY=1
-    break
-  fi
-  sleep 2
+NEW_PID=""
+while [ "\$SECONDS" -lt "\$DEADLINE" ] && [ -z "\$NEW_PID" ]; do
+  NEW_PID=\$(systemctl show -p MainPID --value "$SYSTEMD_UNIT")
+  [ "\$NEW_PID" = "0" ] && NEW_PID=""
+  [ -z "\$NEW_PID" ] && sleep 1
 done
+if [ -z "\$NEW_PID" ]; then
+  echo "Could not read a MainPID for $SYSTEMD_UNIT after restart." >&2
+else
+  while [ "\$SECONDS" -lt "\$DEADLINE" ]; do
+    if ! systemctl is-active --quiet "$SYSTEMD_UNIT"; then
+      break
+    fi
+    if journalctl "_PID=\$NEW_PID" --no-pager 2>/dev/null | grep -qF "$STARTUP_SUCCESS_MARKER"; then
+      HEALTHY=1
+      break
+    fi
+    sleep 2
+  done
+fi
 
 if [ "\$HEALTHY" != "1" ]; then
   echo "!!! \$NEW_COMMIT did not report a healthy startup within ${HEALTH_CHECK_TIMEOUT_S}s — rolling back to \$CURRENT_COMMIT !!!" >&2
