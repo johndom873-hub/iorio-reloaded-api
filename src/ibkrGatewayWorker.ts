@@ -1,5 +1,3 @@
-// WP4 failure-path test marker (2026-09-22, staging only): trivial closure-hash bump so this
-// release genuinely decides to deploy the worker, so the deploy-failure test below is real.
 import "dotenv/config";
 import { Client as PgClient } from "pg";
 import { EventName, OptionType, OrderAction, OrderType, SecType, TimeInForce } from "@stoqey/ib";
