@@ -30,8 +30,44 @@ import { clearDownState, notifyDownThrottled } from "./lib/throttledAlert.js";
 import { formatDurationHuman } from "./lib/formatDurationHuman.js";
 import { revertSourceAlertToPending } from "./lib/revertSourceAlertToPending.js";
 import { publishNotification, publishPulse } from "./lib/notificationChannel.js";
+import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 
 installCrashHandlers("worker");
+
+// Graceful shutdown for a deploy/restart (Phase B: atomic release-phase worker deploy needs this —
+// a bare SIGTERM/systemctl-restart kill mid-order-placement or mid-reconciliation is the exact risk
+// that design is meant to close). Once SIGTERM arrives: stop starting NEW order/cancel handling and
+// reconciliation passes (anything not yet started is safely picked up by the next process's own 30s
+// poll fallback / initial reconciliation — both already exist for other outage cases), wait a bounded
+// time for whatever's already running to finish, then exit. Module-scoped (not a separate lib file,
+// like reconciliationInFlight below) because it needs direct access to this file's own in-flight state.
+let shuttingDown = false;
+let activeOrderRequestHandlers = 0;
+const shutdownDrainTimeoutMs = 25_000;
+const shutdownDrainPollIntervalMs = 250;
+
+function installWorkerShutdownHandler(): void {
+  process.on("SIGTERM", () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log("SIGTERM received — no longer starting new order/cancel handling or reconciliation passes; draining in-flight work...");
+
+    waitUntilDrained(() => activeOrderRequestHandlers === 0 && !reconciliationInFlight, shutdownDrainTimeoutMs, shutdownDrainPollIntervalMs).then(
+      ({ drained, elapsedMs }) => {
+        if (drained) {
+          console.log(`SIGTERM: drained cleanly in ${elapsedMs}ms, exiting.`);
+          process.exit(0);
+          return;
+        }
+        const message = `⚠️ iorio-worker: shutting down (deploy/restart) with work still in flight after waiting ${Math.round(elapsedMs / 1000)}s (orderRequestHandlers=${activeOrderRequestHandlers}, reconciliationInFlight=${reconciliationInFlight}). Any interrupted DB write resolves itself on the next process's poll/reconcile pass — check job_runs/order_requests only if something looks stuck.`;
+        console.error(message);
+        notifyTelegramWithTimeout(message).finally(() => process.exit(0));
+      },
+    );
+  });
+}
+
+installWorkerShutdownHandler();
 
 /**
  * The persistent worker process — see PROGRESS.md's "IBKR is the source of
@@ -268,11 +304,23 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
  * whichever this row actually needs.
  */
 async function handleOrderRequestNotification(orderRequestId: string, knownStatus?: string): Promise<void> {
-  const status = knownStatus ?? (await db("order_requests").where({ id: orderRequestId }).first())?.status;
-  if (status === "cancel_requested") {
-    await processCancelRequest(orderRequestId);
-  } else {
-    await processOrderRequest(orderRequestId);
+  // Don't start new order/cancel handling once a SIGTERM is draining the process for a deploy/restart
+  // — the row stays confirmed/cancel_requested and is picked up by the next process's own 30s poll
+  // fallback, the same safety net that already covers a missed NOTIFY or a LISTEN outage.
+  if (shuttingDown) {
+    console.log(`handleOrderRequestNotification(${orderRequestId}): shutting down — deferring to the next process.`);
+    return;
+  }
+  activeOrderRequestHandlers += 1;
+  try {
+    const status = knownStatus ?? (await db("order_requests").where({ id: orderRequestId }).first())?.status;
+    if (status === "cancel_requested") {
+      await processCancelRequest(orderRequestId);
+    } else {
+      await processOrderRequest(orderRequestId);
+    }
+  } finally {
+    activeOrderRequestHandlers -= 1;
   }
 }
 
@@ -678,6 +726,13 @@ async function correctExpirySettlementsNow(passId: number): Promise<void> {
 }
 
 async function reconcilePositionsFromIbkr(): Promise<void> {
+  // Don't start a new pass while draining for a shutdown (Phase B: atomic worker deploy) — anything
+  // that would have triggered this gets a fresh reconciliation for free from the next process's own
+  // initial-reconciliation-on-connect.
+  if (shuttingDown) {
+    console.log("Reconciliation skipped: shutting down for a deploy/restart.");
+    return;
+  }
   // Never sync positions from an account this environment is not bound to (Phase B WP2).
   const binding = getCurrentAccountBinding();
   if (binding.status !== "ok") {
