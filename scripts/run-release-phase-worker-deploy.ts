@@ -18,6 +18,12 @@
 // override is the SKIP_WORKER_DEPLOY_REASON config var: set it to ship anyway (e.g. the VPS is
 // down for unrelated reasons and an urgent API fix can't wait) and the override is announced in
 // Telegram, never silent.
+//
+// Deploy guard (checked before any of the above, unless the override is set): order-flow is
+// DAY-only everywhere, so redeploying the worker while the market is open, within ~15 min after
+// close, or with anything genuinely in flight is the exact risk this guard exists to catch.
+// Production ABORTS the release on any of those; staging only WARNS and proceeds (see
+// releaseDeployGuard.ts) -- else every daytime push during active staging development would fail.
 import "dotenv/config";
 import { db } from "../src/db/connection.js";
 import { environment, requireEnvironmentVariable } from "../src/config/env.js";
@@ -25,6 +31,9 @@ import { notifyTelegram } from "../src/lib/notifyTelegram.js";
 import { runForcedCommandSsh } from "../src/ibkr/runForcedCommandSsh.js";
 import { computeSourceClosureHash } from "../src/lib/computeSourceClosureHash.js";
 import { decideWorkerDeployAction } from "../src/lib/decideWorkerDeployAction.js";
+import { evaluateReleaseDeployGuard, inFlightOrderStatuses } from "../src/lib/releaseDeployGuard.js";
+import { computeMarketSessionStatus, easternDateIso, easternInstant } from "../src/lib/marketSessionStatus.js";
+import { readAppEnvironment } from "../src/lib/appEnvironment.js";
 
 const workerEntryFile = "src/ibkrGatewayWorker.ts";
 const sshTimeoutMs = 150_000; // npm ci + tsc build + up to a 30s health check, generous margin.
@@ -34,7 +43,54 @@ interface WorkerHealthRow {
   updated_at: Date;
 }
 
+const postCloseBufferMinutes = 15;
+
+async function isWithinPostCloseBuffer(now: Date): Promise<boolean> {
+  const dateIso = easternDateIso(now);
+  const regularClose = easternInstant(dateIso, 16, 0);
+  const bufferEnd = new Date(regularClose.getTime() + postCloseBufferMinutes * 60_000);
+  return now >= regularClose && now < bufferEnd;
+}
+
 async function main(): Promise<void> {
+  // Checked first, ahead of the deploy guard: an explicit override means the worker is not going
+  // to be touched at all, so there is nothing for the guard to protect against.
+  const skipOverrideReason = process.env.SKIP_WORKER_DEPLOY_REASON;
+  if (skipOverrideReason) {
+    await notifyTelegram(`⚠️ Worker deploy step SKIPPED by override (SKIP_WORKER_DEPLOY_REASON="${skipOverrideReason}"). The worker was NOT touched by this release — it may now be behind the API.`);
+    console.log(`Worker deploy skipped by explicit override: ${skipOverrideReason}`);
+    return;
+  }
+
+  const appEnvironment = readAppEnvironment();
+  const now = new Date();
+  const [sessionStatus, withinBuffer, inFlightOrderCount] = await Promise.all([
+    computeMarketSessionStatus(now),
+    isWithinPostCloseBuffer(now),
+    db("order_requests")
+      .whereIn("status", inFlightOrderStatuses)
+      .count<{ count: string }[]>({ count: "*" })
+      .then((rows) => Number(rows[0]?.count ?? 0)),
+  ]);
+  const guardVerdict = evaluateReleaseDeployGuard({
+    appEnvironment,
+    marketSessionState: sessionStatus.state,
+    isWithinPostCloseBuffer: withinBuffer,
+    inFlightOrderCount,
+  });
+  if (guardVerdict.problems.length > 0) {
+    const problemText = guardVerdict.problems.join("; ");
+    if (guardVerdict.shouldAbort) {
+      await notifyTelegram(`🛑 Worker deploy step ABORTED by the deploy guard: ${problemText}.
+Release ABORTED — the API was NOT deployed either. This is not a failure, it's the guard doing its job; the next push will retry once the condition clears.`);
+      console.error(`Deploy guard aborted the release: ${problemText}`);
+      process.exitCode = 1;
+      return;
+    }
+    await notifyTelegram(`⚠️ Worker deploy guard would abort a production release right now (${problemText}) — proceeding anyway, staging only warns.`);
+    console.warn(`Deploy guard flagged (staging, proceeding anyway): ${problemText}`);
+  }
+
   let localHash: string | null = null;
   try {
     localHash = computeSourceClosureHash(process.cwd(), workerEntryFile).hash;
@@ -44,17 +100,8 @@ async function main(): Promise<void> {
 
   const workerHealthRow: WorkerHealthRow | undefined = await db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first();
 
-  const action = decideWorkerDeployAction({
-    skipOverrideReason: process.env.SKIP_WORKER_DEPLOY_REASON,
-    localHash,
-    storedHash: workerHealthRow?.worker_code_hash,
-  });
+  const action = decideWorkerDeployAction({ localHash, storedHash: workerHealthRow?.worker_code_hash });
 
-  if (action.kind === "skip_override") {
-    await notifyTelegram(`⚠️ Worker deploy step SKIPPED by override (SKIP_WORKER_DEPLOY_REASON="${action.reason}"). The worker was NOT touched by this release — it may now be behind the API.`);
-    console.log(`Worker deploy skipped by explicit override: ${action.reason}`);
-    return;
-  }
   if (action.kind === "skip_unchanged") {
     await notifyTelegram(`ℹ️ Worker deploy step: skipped — this release doesn't change anything the worker runs (source hash unchanged).`);
     console.log(`Worker unchanged (hash ${action.hashPrefix}...) — skipping the worker deploy.`);

@@ -1,19 +1,12 @@
 // Pure decision logic for the release-phase worker-deploy step (scripts/run-release-phase-worker-deploy.ts)
 // — kept separate from that script's DB/SSH/Telegram I/O so the actual decision (skip vs. deploy,
-// and why) is unit-testable without a live database, VPS, or Telegram.
-export type WorkerDeployAction =
-  | { kind: "skip_override"; reason: string }
-  | { kind: "skip_unchanged"; hashPrefix: string }
-  | { kind: "deploy"; reason: string };
+// and why) is unit-testable without a live database, VPS, or Telegram. The SKIP_WORKER_DEPLOY_REASON
+// override and the market/in-flight-orders deploy guard are both handled earlier in that script, as
+// unconditional early returns — by the time this runs, both have already said "go ahead and decide
+// based on the code."
+export type WorkerDeployAction = { kind: "skip_unchanged"; hashPrefix: string } | { kind: "deploy"; reason: string };
 
-export function decideWorkerDeployAction(params: {
-  skipOverrideReason: string | undefined;
-  localHash: string | null;
-  storedHash: string | null | undefined;
-}): WorkerDeployAction {
-  if (params.skipOverrideReason) {
-    return { kind: "skip_override", reason: params.skipOverrideReason };
-  }
+export function decideWorkerDeployAction(params: { localHash: string | null; storedHash: string | null | undefined }): WorkerDeployAction {
   if (params.localHash && params.storedHash && params.localHash === params.storedHash) {
     return { kind: "skip_unchanged", hashPrefix: params.localHash.slice(0, 12) };
   }
