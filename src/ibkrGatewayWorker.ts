@@ -75,6 +75,12 @@ installWorkerShutdownHandler();
  * truth" decision (2026-08-24) and the plan at
  * ~/.claude/plans/purring-tumbling-lemur.md for the full design.
  *
+ * Deployment (Phase B WP4): on staging, the Heroku release phase deploys this file's built commit
+ * to the VPS automatically whenever it (or anything it imports) changes — see
+ * scripts/run-release-phase-worker-deploy.ts and computeSourceClosureHash.ts for how "changes" is
+ * decided, and scripts/deploy-worker-to-vps.sh / /opt/ibkr/deploy-worker-staging.sh for the actual
+ * atomic build-then-swap. Manual deploys (`npm run deploy:worker:staging`) still work too.
+ *
  * Owns the one long-lived IBKR connection in this app. Does two jobs:
  *  1. Places orders queued by the web dyno (order_requests table, picked up
  *     via Postgres LISTEN/NOTIFY) and tracks their status.
