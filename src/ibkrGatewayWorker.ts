@@ -486,10 +486,25 @@ function setupOrderTrackingListeners(): void {
     // cancelled, rejected, or errored, it should never change again, so a
     // status event that still names its (by-then-reused) ibkr_order_id must
     // belong to a different order.
+    //
+    // IBKR re-fires orderStatus with an unchanged status for an order that's
+    // just sitting unfilled (e.g. a resting multi-day limit order) — found
+    // 2026-09-22 from Pulse's Latest Events panel showing the same "Sent —"
+    // line repeated many times for one order. Without a real change to
+    // record, skip the write (and so the order_status notification below)
+    // unless the status itself is moving or this callback is the one
+    // capturing a not-yet-known permId — that capture still needs to go
+    // through even on a same-status callback, or the permId collision guard
+    // above never gets wired up for an order that goes straight from
+    // "submitted" to "submitted" until it fills.
     db("order_requests")
       .where({ ibkr_order_id: orderId })
       .whereNotIn("status", finalOrderRequestStatuses)
       .andWhere((builder) => (permId ? builder.whereNull("ibkr_perm_id").orWhere("ibkr_perm_id", permId) : builder))
+      .andWhere((builder) => {
+        builder.whereNot("status", requestStatus);
+        if (permId) builder.orWhereNull("ibkr_perm_id");
+      })
       .update({
         status: requestStatus,
         updated_at: db.fn.now(),
