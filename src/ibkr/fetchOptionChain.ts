@@ -1,10 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { EventName, Option, OptionType, SecType } from "@stoqey/ib";
 import type { Contract, ContractDetails, IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import { reserveMarketDataLines, renewMarketDataLineReservation, releaseMarketDataLines } from "./marketDataLineBudget.js";
 import { db } from "../db/connection.js";
 import { calendarDaysUntilExpiry, captureMaximumDaysToExpiry, captureMinimumDaysToExpiry } from "../lib/optionChainCaptureWindow.js";
+
+// Reservation lifetimes for fetchQuotesForContracts' account-wide market-data-line budget
+// (marketDataLineBudget.ts). One-shot covers quoteTimeoutMs's wait plus margin; live is
+// renewed on liveLineReservationRenewIntervalMs, so its TTL just needs to survive one missed tick.
+const oneShotLineReservationTtlSeconds = 15;
+const liveLineReservationTtlSeconds = 45;
+const liveLineReservationRenewIntervalMs = 20_000;
 
 export interface OptionQuote {
   expiry: string; // YYYYMMDD
@@ -21,18 +30,26 @@ export interface OptionQuote {
 }
 
 // 0-60 DTE covers everything from same-week/intra-weekly expiries through
-// the covered-call/CSP monthly range. maxExpiries=6 x strikesPerSide(4) x 2
-// sides x 2 rights = 96 reqMktData lines (the only lines this connection
+// the covered-call/CSP monthly range. maxExpiries=4 x strikesPerSide(3) x 2
+// sides x 2 rights = 48 reqMktData lines (the only lines this connection
 // opens — the pricing lookup is a snapshot and doesn't count) is the target
-// budget, kept at or under 96 of IBKR's 100-line-per-connection cap.
-// pickExpiries sorts ascending and takes the first N, so the nearest
-// (weekly/intra-weekly) expiries are always the ones kept if more than 6
-// exist in the window.
+// budget. IBKR's 100-line cap is per TWS USERNAME, shared across every
+// connection on that login (verified against IBKR's docs 2026-09-21) — NOT
+// per connection, which this budget wrongly assumed at 96 until a staging
+// incident (2026-09-23) where this live chain and the nightly capture job's
+// own 60-line batches (captureOptionQuoteBatch.ts, which already accounted
+// for the shared cap correctly) ran concurrently and both starved. 48 leaves
+// real headroom instead of claiming nearly the whole shared budget for one
+// connection; marketDataLineBudget.ts's cross-process reservation is what
+// actually enforces the shared total now — this constant just keeps one
+// connection's own ask reasonable. pickExpiries sorts ascending and takes
+// the first N, so the nearest (weekly/intra-weekly) expiries are always the
+// ones kept if more than 4 exist in the window.
 //
 // mustIncludeStrikes/alertStrikesByExpiry (see prepareOptionChainStrikes)
-// spend from this same 96-line budget rather than adding to it — regression
+// spend from this same 48-line budget rather than adding to it — regression
 // found 2026-09-15: an earlier version of this file unioned must-include
-// expiries/strikes on top of the 96-line target, which could push a given
+// expiries/strikes on top of the line-count target, which could push a given
 // connection's subscription count past IBKR's actual 100-line cap. Contracts
 // requested past that cap never receive tickPrice/tickOptionComputation
 // ticks, so their bid/ask/delta stayed null forever and their yield
@@ -41,8 +58,8 @@ export interface OptionQuote {
 // "regular" strikes were affected.
 const defaultMinDaysToExpiry = 0;
 const defaultMaxDaysToExpiry = 60;
-const maxExpiries = 6;
-const strikesPerSide = 4;
+const maxExpiries = 4;
+const strikesPerSide = 3;
 const quoteTimeoutMs = 8_000;
 
 // Exported for reuse by the trade-alert candidate generator, which needs
@@ -339,11 +356,27 @@ export async function fetchQuotesForContracts(
   // omits this and keeps the original one-shot behavior unchanged.
   live?: { onUpdate: (quotes: OptionQuote[]) => void; signal: AbortSignal },
 ): Promise<OptionQuote[]> {
+  // Every reqMktData line this call is about to open must fit the account-wide
+  // shared budget (marketDataLineBudget.ts) before any subscription opens —
+  // otherwise a contended moment (the nightly capture job mid-batch) doesn't
+  // silently starve both sides, it fails this call immediately with a clear
+  // reason instead of a 8-25s hang that looks like an IBKR outage.
+  const lineHolder = `optionQuote:${symbol}:${randomUUID()}`;
+  if (contracts.length > 0) {
+    const reservation = await reserveMarketDataLines(lineHolder, contracts.length, live ? liveLineReservationTtlSeconds : oneShotLineReservationTtlSeconds);
+    if (!reservation.ok) {
+      throw new Error(
+        `IBKR market data is busy (nightly capture or another live view) — ${symbol} needs ${contracts.length} lines, only ${reservation.availableLines} available. Try again shortly.`,
+      );
+    }
+  }
+
   const quotes = new Map<number, OptionQuote>();
   const reqIdToContract = new Map<number, { expiry: string; strike: number; right: "C" | "P" }>();
   const readyReqIds = new Set<number>();
   let nextReqId = 10_000;
   let onAllReady: (() => void) | null = null;
+  let lineReservationHeartbeat: ReturnType<typeof setInterval> | null = null;
 
   // Streaming reqMktData subscriptions have no IBKR-side "done" event (unlike
   // snapshot mode's tickSnapshotEnd) — the fixed quoteTimeoutMs wait below is
@@ -496,6 +529,8 @@ export async function fetchQuotesForContracts(
     ib.removeListener(EventName.tickPrice, onTickPrice);
     ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
     ib.removeListener(EventName.error, onError);
+    if (lineReservationHeartbeat) clearInterval(lineReservationHeartbeat);
+    if (contracts.length > 0) releaseMarketDataLines(lineHolder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${lineHolder}: ${error instanceof Error ? error.message : error}`));
   }
 
   if (!live || live.signal.aborted) {
@@ -511,6 +546,16 @@ export async function fetchQuotesForContracts(
   // life, cleaning itself up once `live.signal` aborts.
   liveMode = live;
   live.signal.addEventListener("abort", cleanup, { once: true });
+  // Keeps this call's reservation alive for as long as the stream itself —
+  // otherwise a Ticker Detail modal left open past oneShot/liveLineReservationTtlSeconds
+  // would silently lose its lines back to the shared budget while still subscribed.
+  if (contracts.length > 0) {
+    lineReservationHeartbeat = setInterval(() => {
+      renewMarketDataLineReservation(lineHolder, liveLineReservationTtlSeconds).catch((error) =>
+        console.warn(`Failed to renew IBKR market data line reservation ${lineHolder}: ${error instanceof Error ? error.message : error}`),
+      );
+    }, liveLineReservationRenewIntervalMs);
+  }
 
   return Array.from(quotes.values());
 }

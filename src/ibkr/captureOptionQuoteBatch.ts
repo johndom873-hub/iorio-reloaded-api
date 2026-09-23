@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { EventName, Option, OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import { reserveMarketDataLines, releaseMarketDataLines } from "./marketDataLineBudget.js";
 
 // Quote collector for the nightly option-chain archive (IORIO Signal Engine,
 // Phase 0). Deliberately a NEW module rather than a change to
@@ -134,6 +136,20 @@ export async function captureOptionQuoteBatch(
   const isSettled = options.isSettled ?? isOptionQuoteSettledByDefault;
   if (contracts.length === 0) return [];
 
+  // Reserves this batch's lines against the account-wide shared budget
+  // (marketDataLineBudget.ts) before subscribing — this job already sized
+  // its batches (60) for the shared ~100-line cap, but without a real
+  // reservation another connection (the Ticker Detail modal's live chain)
+  // could still be holding lines at the same moment, pushing the true total
+  // past IBKR's cap silently. Failing here surfaces as this ticker's
+  // capture failing with a clear reason instead of every contract in the
+  // batch silently never ticking.
+  const lineHolder = `captureBatch:${symbol}:${randomUUID()}`;
+  const reservation = await reserveMarketDataLines(lineHolder, contracts.length, Math.ceil(ceilingMs / 1000) + 5);
+  if (!reservation.ok) {
+    throw new Error(`IBKR market data is busy — ${symbol} batch needs ${contracts.length} lines, only ${reservation.availableLines} available.`);
+  }
+
   const quotesByReqId = new Map<number, CapturedOptionQuote>();
   let onAllSettled: (() => void) | null = null;
 
@@ -259,6 +275,7 @@ export async function captureOptionQuoteBatch(
     ib.removeListener(EventName.tickSize, onTickSize);
     ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
     ib.removeListener(EventName.error, onError);
+    await releaseMarketDataLines(lineHolder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${lineHolder}: ${error instanceof Error ? error.message : error}`));
   }
 
   return Array.from(quotesByReqId.values());
