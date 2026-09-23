@@ -35,7 +35,7 @@ describe("buildSignalsRoadmap", () => {
   });
 
   it("keeps decision / build / later-phase items as text", () => {
-    expect(byId.ratio!.status).toBe("waiting_on_build");
+    expect(byId.ratio!.status).toBe("waiting_on_later_phase");
     expect(byId.ratio!.eta.kind).toBe("text");
     expect(byId.sizing!.status).toBe("waiting_on_later_phase");
   });

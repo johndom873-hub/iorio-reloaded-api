@@ -74,10 +74,10 @@ export function buildSignalsRoadmap(counts: RoadmapCounts, todayIso: string): Ro
     {
       id: "ratio",
       title: "Risk-adjusted ratio (Edge $ / dollar risk)",
-      summary: "Formula approved 2026-09-23. Would fold the UncompensatedShare risk into the ranking without weights.",
-      needs: "Wiring into the ranking, then a test on real chains",
-      status: "waiting_on_build",
-      eta: { kind: "text", text: "In progress" },
+      summary: "Formula approved and built 2026-09-23, computed on every candidate. Kept out of ranking until Phase 2 can justify a weight for it.",
+      needs: "Phase 2 backtest data, same as Composite Rank's other weights",
+      status: "waiting_on_later_phase",
+      eta: { kind: "text", text: "Built, to be wired in Phase 2" },
     },
     {
       id: "skew",
