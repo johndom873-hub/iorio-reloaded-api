@@ -18,12 +18,12 @@ import { getCachedChartBars } from "./priceBarCache.js";
 import {
   daysBetween,
   fetchQuotesForContracts,
-  getCachedOptionParams,
-  getCachedValidStrikes,
+  loadStoredOptionChain,
   parseExpiry,
   quoteOptionChain,
   type ExpiryStrikes,
   type OptionQuote,
+  type StoredOptionChain,
 } from "./fetchOptionChain.js";
 
 export type AlertStrategyKey = "covered_call" | "cash_secured_put";
@@ -200,18 +200,18 @@ function toIsoDate(expiryYyyymmdd: string): string {
 interface TickerPrepData {
   conId: number | null;
   spotPrice: number | null;
-  expirations: string[];
-  strikes: number[];
+  chain: StoredOptionChain;
 }
 
-// contractDetails + pricing snapshot + secDefOptParams for one ticker — the
-// three lookups that don't depend on which strategy is being scanned.
+const emptyChain: StoredOptionChain = { expirations: [], strikesByExpiry: new Map(), fetchedAt: null };
+
+// contractDetails + pricing snapshot (IBKR) and the stored chain structure
+// (DB, written by the nightly capture — never fetched here) for one ticker:
+// the lookups that don't depend on which strategy is being scanned.
 // Factored out so the batch scan (generateTradeAlertCandidatesForTicker) can
 // fetch this once per ticker and reuse it across both strategies, instead of
 // each strategy paying for it independently.
-async function fetchTickerPrepData(connection: IbkrConnection, symbol: string): Promise<TickerPrepData> {
-  const { ib } = connection;
-
+async function fetchTickerPrepData(connection: IbkrConnection, symbol: string, tickerId: string): Promise<TickerPrepData> {
   const contractDetailsPromise = getCachedContractDetails(connection, symbol, contractDetailsReqId);
   const pricingPromise = lookupPricingSnapshot(connection, symbol, pricingReqId);
 
@@ -219,11 +219,12 @@ async function fetchTickerPrepData(connection: IbkrConnection, symbol: string): 
   // Shared price hierarchy (priceService.ts): a real last, else the stored last known good; the previous close only as a last resort.
   const spotPrice = pricing.last ?? (await getBestKnownStockPrice(symbol)) ?? pricing.previousClose;
   if (!contractDetails.conId || !spotPrice) {
-    return { conId: contractDetails.conId, spotPrice: null, expirations: [], strikes: [] };
+    return { conId: contractDetails.conId, spotPrice: null, chain: emptyChain };
   }
 
-  const { expirations, strikes } = await getCachedOptionParams(ib, symbol, contractDetails.conId);
-  return { conId: contractDetails.conId, spotPrice, expirations, strikes };
+  const chain = await loadStoredOptionChain(tickerId);
+  if (chain.strikesByExpiry.size === 0) console.warn(`${symbol}: option chain not prepared yet (no stored strike grids) — no candidates until the nightly capture or the Shortlist backfill stores it.`);
+  return { conId: contractDetails.conId, spotPrice, chain };
 }
 
 // Best-effort, ticker-level (not per-strategy) — reuses the same "3M"/hourly
@@ -266,30 +267,13 @@ async function fetchTickerTrendLabel(
   }
 }
 
-// Validated (expiry, strike) pairs within a strategy's DTE window, one side
-// only (calls above spot / puts below) — the per-expiry checkStrikeExists
-// scans run in parallel across expiries, not sequentially, matching the
-// pattern already used by prepareOptionChainStrikes in fetchOptionChain.ts
-// (see that file's note on why sequential expiry lookups are ~4-5x slower).
-async function buildValidatedExpiryStrikes(
-  ib: IbkrConnection["ib"],
-  symbol: string,
-  expirations: string[],
-  rawStrikes: number[],
-  spotPrice: number,
-  right: "call" | "put",
-  dteMin: number,
-  dteMax: number,
-): Promise<ExpiryStrikes[]> {
-  const qualifyingExpiries = pickExpiriesInWindow(expirations, dteMin, dteMax);
-  const results = await Promise.all(
-    qualifyingExpiries.map(async (expiry): Promise<ExpiryStrikes | null> => {
-      const candidates = pickCandidateStrikes(rawStrikes, spotPrice, right);
-      const validStrikes = await getCachedValidStrikes(ib, symbol, expiry, candidates);
-      return validStrikes.length > 0 ? { expiry, strikes: validStrikes } : null;
-    }),
-  );
-  return results.filter((r): r is ExpiryStrikes => r !== null);
+// (expiry, strike) pairs within a strategy's DTE window, one side only (calls
+// above spot / puts below), picked from each expiry's stored real grid — so
+// every pair exists, with no IBKR call.
+function pickExpiryStrikesForStrategy(chain: StoredOptionChain, spotPrice: number, right: "call" | "put", dteMin: number, dteMax: number): ExpiryStrikes[] {
+  return pickExpiriesInWindow(chain.expirations, dteMin, dteMax)
+    .map((expiry) => ({ expiry, strikes: pickCandidateStrikes(chain.strikesByExpiry.get(expiry) ?? [], spotPrice, right) }))
+    .filter((expiryStrikes) => expiryStrikes.strikes.length > 0);
 }
 
 function rankCandidates(
@@ -384,25 +368,15 @@ export async function generateTradeAlertCandidates(
   strategyKey: AlertStrategyKey,
   settings: AlertStrategySettings,
 ): Promise<AlertCandidate[]> {
-  const { ib } = connection;
   const right: "call" | "put" = strategyKey === "covered_call" ? "call" : "put";
 
-  const prep = await fetchTickerPrepData(connection, symbol);
+  const prep = await fetchTickerPrepData(connection, symbol, tickerId);
   if (!prep.conId || !prep.spotPrice) {
     console.warn(`Skipping ${symbol} (${strategyKey}) — missing conId or spot price.`);
     return [];
   }
 
-  const expiryStrikes = await buildValidatedExpiryStrikes(
-    ib,
-    symbol,
-    prep.expirations,
-    prep.strikes,
-    prep.spotPrice,
-    right,
-    settings.dteTargetMin,
-    settings.dteTargetMax,
-  );
+  const expiryStrikes = pickExpiryStrikesForStrategy(prep.chain, prep.spotPrice, right, settings.dteTargetMin, settings.dteTargetMax);
   if (expiryStrikes.length === 0) return [];
 
   const [quotes, calendarContext, ivMetrics, supportResistance, trendLabel] = await Promise.all([
@@ -435,7 +409,7 @@ export async function generateTradeAlertCandidatesForTicker(
   const { ib } = connection;
   const results = new Map<AlertStrategyKey, AlertCandidate[]>();
 
-  const prep = await fetchTickerPrepData(connection, symbol);
+  const prep = await fetchTickerPrepData(connection, symbol, tickerId);
   if (!prep.conId || !prep.spotPrice) {
     console.warn(`Skipping ${symbol} — missing conId or spot price.`);
     return results;
@@ -487,24 +461,13 @@ export async function generateTradeAlertCandidatesForTicker(
     effectiveSettingsByStrategy.delete("cash_secured_put");
   }
 
-  const preps = (
-    await Promise.all(
-      Array.from(effectiveSettingsByStrategy.entries()).map(async ([strategyKey, settings]) => {
-        const right: "call" | "put" = strategyKey === "covered_call" ? "call" : "put";
-        const expiryStrikes = await buildValidatedExpiryStrikes(
-          ib,
-          symbol,
-          prep.expirations,
-          prep.strikes,
-          spotPrice,
-          right,
-          settings.dteTargetMin,
-          settings.dteTargetMax,
-        );
-        return { strategyKey, settings, right, expiryStrikes };
-      }),
-    )
-  ).filter((p) => p.expiryStrikes.length > 0);
+  const preps = Array.from(effectiveSettingsByStrategy.entries())
+    .map(([strategyKey, settings]) => {
+      const right: "call" | "put" = strategyKey === "covered_call" ? "call" : "put";
+      const expiryStrikes = pickExpiryStrikesForStrategy(prep.chain, spotPrice, right, settings.dteTargetMin, settings.dteTargetMax);
+      return { strategyKey, settings, right, expiryStrikes };
+    })
+    .filter((p) => p.expiryStrikes.length > 0);
 
   const contracts: { expiry: string; strike: number; right: OptionType }[] = [];
   for (const prep of preps) {

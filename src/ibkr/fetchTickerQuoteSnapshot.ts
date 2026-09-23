@@ -66,7 +66,7 @@ export async function fetchTickerQuoteSnapshot(symbol: string): Promise<TickerQu
         throw new Error("No contract or spot price available to select option strikes.");
       }
 
-      const expiryStrikes = await prepareOptionChainStrikes(connection, symbol, contractDetails.conId, spotPrice);
+      const expiryStrikes = await prepareOptionChainStrikes(symbol, spotPrice);
       const optionChain = await quoteOptionChain(connection, symbol, expiryStrikes);
 
       return { symbol, lastKnownClose, live: { pricing, optionChain }, liveUnavailableReason: null };

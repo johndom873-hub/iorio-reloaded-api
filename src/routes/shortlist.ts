@@ -3,9 +3,11 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
 import { findOrCreateTicker, addTickerToShortlist } from "../ibkr/findOrCreateTicker.js";
-import { computeIvMetrics } from "../lib/ivMetrics.js";
-import { getLatestBackfillRun, startTickerBackfill } from "../ibkr/tickerBackfillPipeline.js";
+import { fetchAndStoreFiveYearHistory, getLatestBackfillRun, startTickerBackfill } from "../ibkr/tickerBackfillPipeline.js";
+import { connectToIbkrGateway } from "../ibkr/connectIbkr.js";
 import { staleBackfillRunMinutes } from "../lib/tickerBackfillSteps.js";
+import { loadShortlistDataReadiness } from "../lib/shortlistDataReadiness.js";
+import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
 
 export const shortlistRouter = Router();
 shortlistRouter.use(requireAuth);
@@ -24,17 +26,11 @@ shortlistRouter.get("/search", async (request, response) => {
   response.json(results);
 });
 
-// One row per ticker currently monitored, carrying its latest
-// market_data_snapshots row if one exists (LEFT JOIN LATERAL, not a plain
-// join) — a just-added ticker with no capture yet still shows up, just with
-// null IV/volume, filling in once the daily capture job runs. IV Rank/IV
-// Percentile are computed separately (computeIvMetrics, daily_price_bars) —
-// migrated off market_data_snapshots 2026-08-31 so both metrics, and both
-// screens that show them (this one and Trade Alerts), read the same history
-// and can't silently disagree with each other. impliedVolatility itself
-// (the raw "as of" number, not the rank/percentile) stays on
-// market_data_snapshots — it's the more frequently updated live capture,
-// unrelated to which table backs the two history-based metrics.
+// One row per ticker currently monitored. Redesigned 2026-09-23 (Marcelo): the old IV/volume columns
+// (sourced from market_data_snapshots) are gone -- this is now a per-ticker Signals data-readiness check,
+// not a price/vol screen (Price Performance already covers that). Each row instead carries exactly the
+// facts loadShortlistDataReadiness computes: the same data Signals reads before it can score a candidate,
+// so a gap here is the direct explanation for why that ticker is thin or unscored there.
 shortlistRouter.get("/", async (_request, response) => {
   const result = await db.raw(
     `
@@ -46,12 +42,11 @@ shortlistRouter.get("/", async (_request, response) => {
       t.symbol,
       t.company_name AS "companyName",
       NULLIF(t.sector, '') AS sector,
-      m.snapshot_date AS "snapshotDate",
-      m.implied_volatility AS "impliedVolatility",
-      m.avg_option_volume AS "avgOptionVolume",
-      m.captured_at AS "capturedAt",
       CASE WHEN b.status = 'running' AND b.started_at > now() - make_interval(mins => ${staleBackfillRunMinutes}) THEN 'preparing' ELSE NULL END AS "backfillStatus",
       b.progress_percent AS "backfillProgressPercent",
+      -- A 'partial' run means some pipeline step (calendar/chain-strikes/snapshot) failed -- surfaced so
+      -- the Actions menu can offer a full-pipeline retry, not just the narrower price-history-only one.
+      CASE WHEN b.status = 'partial' THEN true ELSE false END AS "backfillNeedsRetry",
       hb.first_bar::text AS "historyStartDate",
       -- Flagged when there is less than ~5 years of daily bars AND no pipeline run has ever completed the
       -- history step (a ticker that IPO'd recently can never reach 5 years, so a successful run clears the flag).
@@ -65,13 +60,6 @@ shortlistRouter.get("/", async (_request, response) => {
       END AS "historyIncomplete"
     FROM shortlist_entries se
     JOIN tickers t ON t.id = se.ticker_id
-    LEFT JOIN LATERAL (
-      SELECT *
-      FROM market_data_snapshots
-      WHERE ticker_id = t.id
-      ORDER BY snapshot_date DESC
-      LIMIT 1
-    ) m ON true
     LEFT JOIN LATERAL (
       SELECT status, started_at, progress_percent
       FROM ticker_backfill_runs
@@ -90,12 +78,50 @@ shortlistRouter.get("/", async (_request, response) => {
   );
 
   const rows = await Promise.all(
-    result.rows.map(async (row: { tickerId: string; [key: string]: unknown }) => ({
+    result.rows.map(async (row: { tickerId: string; sector: string | null; [key: string]: unknown }) => ({
       ...row,
-      ...(await computeIvMetrics(row.tickerId)),
+      ...(await loadShortlistDataReadiness(row.tickerId, row.sector)),
     })),
   );
   response.json(rows);
+});
+
+// Manual re-trigger for the Shortlist Actions dropdown's "Backfill Earnings" item -- same
+// captureHistoricalEarnings the new-ticker pipeline calls automatically, exposed here for an
+// already-shortlisted ticker whose earnings history is thin. No-ops (written: 0, skippedEtf: true) for
+// an ETF; the frontend also greys the menu item out so this is a defense-in-depth check, not the only one.
+shortlistRouter.post("/:tickerId/backfill-earnings", async (request, response) => {
+  const ticker = await db("tickers").where({ id: request.params.tickerId as string }).first();
+  if (!ticker) {
+    response.status(404).json({ error: "Ticker not found." });
+    return;
+  }
+  const result = await captureHistoricalEarnings(ticker.id, ticker.symbol);
+  response.json(result);
+});
+
+// Manual re-trigger for the Shortlist Actions dropdown's "Backfill Price History" item. Scoped to just
+// the history step -- fetchAndStoreFiveYearHistory only, its own IBKR connection opened and closed here.
+// Deliberately NOT startTickerBackfill/retryTickerBackfill: that runs the full 4-step new-ticker pipeline
+// (history + calendar/dividends + chain-strike warmup + first snapshot), which is correct for onboarding
+// a brand-new ticker but was wrong here -- clicking "Backfill Price History" on an existing ticker was
+// silently also re-fetching its calendar and warming its option-chain strikes, neither of which the
+// button claims to do (Marcelo caught this live, 2026-09-23: the progress modal it opened showed all 4
+// steps running). Matches "Backfill Earnings" above in being a single-purpose action with no side effects
+// outside its own name.
+shortlistRouter.post("/:tickerId/backfill-price-history", async (request, response) => {
+  const ticker = await db("tickers").where({ id: request.params.tickerId as string }).first();
+  if (!ticker) {
+    response.status(404).json({ error: "Ticker not found." });
+    return;
+  }
+  const connection = await connectToIbkrGateway();
+  try {
+    const result = await fetchAndStoreFiveYearHistory(connection, ticker.id, ticker.symbol);
+    response.json(result);
+  } finally {
+    connection.disconnect();
+  }
 });
 
 shortlistRouter.post("/", async (request, response) => {
@@ -112,13 +138,9 @@ shortlistRouter.post("/", async (request, response) => {
   const normalizedSymbol = symbol.trim().toUpperCase();
   const { ticker } = await findOrCreateTicker(normalizedSymbol);
 
-  const latestSnapshot = await db("market_data_snapshots")
-    .where({ ticker_id: ticker.id })
-    .orderBy("snapshot_date", "desc")
-    .first();
-
   try {
     const entry = await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, notes);
+    const sector = ticker.sector || null;
 
     response.status(201).json({
       id: entry.id,
@@ -128,11 +150,8 @@ shortlistRouter.post("/", async (request, response) => {
       tickerId: ticker.id,
       symbol: ticker.symbol,
       companyName: ticker.company_name,
-      sector: ticker.sector || null,
-      snapshotDate: latestSnapshot?.snapshot_date ?? null,
-      impliedVolatility: latestSnapshot?.implied_volatility ?? null,
-      avgOptionVolume: latestSnapshot?.avg_option_volume ?? null,
-      capturedAt: latestSnapshot?.captured_at ?? null,
+      sector,
+      ...(await loadShortlistDataReadiness(ticker.id, sector)),
     });
   } catch (error) {
     // Partial unique index on (ticker_id) WHERE removed_at IS NULL.

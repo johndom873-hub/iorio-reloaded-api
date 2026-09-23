@@ -8,13 +8,29 @@ const forward = 100;
 const rate = 0.04;
 const params: RawSviParameters = { a: 0.004, b: 0.06, rho: -0.35, m: 0.01, sigma: 0.12 };
 const years = 30 / 365;
-const slices: SignalSurfaceSlice[] = [{ expiry: "2026-10-21", status: "ok", parameters: params, kMin: -0.4, kMax: 0.4, yearsToExpiry: years, forwardPrice: forward }];
+const slices: SignalSurfaceSlice[] = [
+  {
+    expiry: "2026-10-21",
+    status: "ok",
+    parameters: params,
+    kMin: -0.4,
+    kMax: 0.4,
+    yearsToExpiry: years,
+    forwardPrice: forward,
+    pointCount: 20,
+    rmseVolatility: 0.01,
+    minButterflyDensity: 0.8,
+    droppedCounts: { inTheMoney: 0, noTwoSidedQuote: 0, spreadTooWide: 0, noImpliedVolatility: 0 },
+    calendarChecks: 0,
+    calendarViolations: 0,
+  },
+];
 function quoteAt(strike: number, right: "C" | "P"): SignalQuote {
   const iv = Math.sqrt(sviTotalVariance(params, Math.log(strike / forward)) / years);
   const mid = blackScholesPriceOnForward(forward, strike, years, rate, iv, right === "C");
   return { expiry: "2026-10-21", strike, right, bid: mid * 0.98, ask: mid * 1.02 };
 }
-const candidates = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: { volatility: 0.15, windowDays: 63 }, slices, quotes: [quoteAt(90, "P"), quoteAt(95, "P"), quoteAt(105, "C"), quoteAt(110, "C")], earningsDatesIso: [], snapshotDateIso: "2026-09-21", freeShares: 0, freeCash: 1e6 }));
+const candidates = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: { volatility: 0.15, windowDays: 63 }, slices, quotes: [quoteAt(90, "P"), quoteAt(95, "P"), quoteAt(105, "C"), quoteAt(110, "C")], earningsDatesIso: [], earningsCalendarResolved: true, snapshotDateIso: "2026-09-21", freeShares: 0, freeCash: 1e6 }));
 
 afterAll(() => shutdownUncompensatedShareWorker());
 

@@ -9,7 +9,22 @@ const rate = 0.04;
 const params: RawSviParameters = { a: 0.004, b: 0.06, rho: -0.35, m: 0.01, sigma: 0.12 };
 const years30 = 30 / 365;
 const years60 = 60 / 365;
-const slice = (expiry: string, years: number, overrides: Partial<SignalSurfaceSlice> = {}): SignalSurfaceSlice => ({ expiry, status: "ok", parameters: params, kMin: -0.4, kMax: 0.4, yearsToExpiry: years, forwardPrice: forward, ...overrides });
+const slice = (expiry: string, years: number, overrides: Partial<SignalSurfaceSlice> = {}): SignalSurfaceSlice => ({
+  expiry,
+  status: "ok",
+  parameters: params,
+  kMin: -0.4,
+  kMax: 0.4,
+  yearsToExpiry: years,
+  forwardPrice: forward,
+  pointCount: 20,
+  rmseVolatility: 0.01,
+  minButterflyDensity: 0.8,
+  droppedCounts: { inTheMoney: 0, noTwoSidedQuote: 0, spreadTooWide: 0, noImpliedVolatility: 0 },
+  calendarChecks: 0,
+  calendarViolations: 0,
+  ...overrides,
+});
 
 function quoteAt(strike: number, right: "C" | "P", expiry: string, years: number, spreadFraction = 0.04): SignalQuote {
   const iv = Math.sqrt(sviTotalVariance(params, Math.log(strike / forward)) / years);
@@ -29,6 +44,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     forecast: { volatility: 0.15, windowDays: 63 },
     suspectedSplitDateIso: null,
     earningsDatesIso: [],
+    earningsCalendarResolved: true,
     momentum: 0.12,
     elevatedVolatility: null,
     skew: null,
@@ -117,7 +133,7 @@ describe("scoreTicker", () => {
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {
     const in1 = inputs();
     const scored = scoreTicker(in1, account);
-    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash }));
+    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash }));
     expect(scored.candidates).toEqual(direct);
     expect(scored.unscoredReason).toBeNull();
     expect(scored.priceSource).toBe("snapshot");

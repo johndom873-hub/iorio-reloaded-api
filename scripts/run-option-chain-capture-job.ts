@@ -36,16 +36,25 @@ async function main(): Promise<void> {
     await runJob(
       "option_chain_capture",
       async () => {
+        // Per-ticker IBKR timings for the chain-structure refresh (expiries list + one wildcard per
+        // expiry, sequential) — printed here and kept in job_runs.details so a slow night can be
+        // inspected later without digging through Heroku logs (Marcelo, 2026-09-23).
+        const chainRefreshBySymbol: Record<string, { optionParamsMs: number; totalMs: number; expiries: { expiry: string; strikeCount: number; elapsedMs: number }[] }> = {};
         const result = await runOptionChainCapture((event) => {
-          if (event.type === "tickerStart") console.log(`${event.symbol}: capturing ${event.contractCount} contracts (window from ${event.referenceVolatilitySource}).`);
-          else if (event.type === "tickerDone") console.log(`${event.symbol}: ${event.status} — ${event.coverage.contractsWithAnyTick}/${event.coverage.contractsRequested} with ticks.`);
+          if (event.type === "tickerStart") {
+            chainRefreshBySymbol[event.symbol] = event.chainRefresh;
+            const slowest = event.chainRefresh.expiries.reduce((max, expiry) => Math.max(max, expiry.elapsedMs), 0);
+            console.log(
+              `${event.symbol}: chain structure refreshed in ${(event.chainRefresh.totalMs / 1000).toFixed(1)}s (expiries ${event.chainRefresh.optionParamsMs}ms; ${event.chainRefresh.expiries.length} strike grids, slowest ${slowest}ms: ${event.chainRefresh.expiries.map((expiry) => `${expiry.expiry}=${expiry.elapsedMs}ms/${expiry.strikeCount}`).join(" ")}); capturing ${event.contractCount} contracts (window from ${event.referenceVolatilitySource}).`,
+            );
+          } else if (event.type === "tickerDone") console.log(`${event.symbol}: ${event.status} — ${event.coverage.contractsWithAnyTick}/${event.coverage.contractsRequested} with ticks.`);
           else if (event.type === "tickerError") console.warn(`${event.symbol}: capture failed — ${event.message}`);
           else console.log(`Re-capturing starved tickers: ${event.symbols.join(", ")}`);
         });
         console.log(`Chain capture: ${result.tickersComplete} complete, ${result.tickersPartial} partial, ${result.tickersFailed} failed of ${result.tickersAttempted}.`);
         // runJob's failure path handles Telegram for a thrown error; a run where
         // tickers failed is surfaced via details and the failed snapshot rows.
-        return { details: { ...result } };
+        return { details: { ...result, chainRefreshBySymbol } };
       },
       { triggeredBy: "scheduler" },
     );

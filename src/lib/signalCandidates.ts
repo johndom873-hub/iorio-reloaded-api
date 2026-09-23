@@ -15,10 +15,17 @@ import { expirySpansEarnings, type RealizedVolatilityForecast } from "./volatili
 
 export type SignalStrategyKey = "covered_call" | "cash_secured_put";
 export type SignalGrade = "strong" | "good" | "marginal" | "avoid";
-export type SignalFlag = "spans_earnings" | "outside_fitted_range" | "wide_spread" | "no_shares" | "insufficient_cash";
+export type SignalFlag = "earnings_calendar_unresolved" | "outside_fitted_range" | "wide_spread" | "no_shares" | "insufficient_cash";
 
 export const wideSpreadThreshold = 0.5; // matches the surface fit's own quote filter
 const annualDays = 365;
+
+export interface SignalSurfaceSliceDroppedCounts {
+  inTheMoney: number;
+  noTwoSidedQuote: number;
+  spreadTooWide: number;
+  noImpliedVolatility: number;
+}
 
 export interface SignalSurfaceSlice {
   expiry: string; // ISO date
@@ -28,6 +35,13 @@ export interface SignalSurfaceSlice {
   kMax: number | null;
   yearsToExpiry: number;
   forwardPrice: number;
+  /** Fit-quality diagnostics, surfaced for the volatility-surface modal; not consumed by scoring. */
+  pointCount: number;
+  rmseVolatility: number | null;
+  minButterflyDensity: number | null;
+  droppedCounts: SignalSurfaceSliceDroppedCounts;
+  calendarChecks: number;
+  calendarViolations: number;
 }
 
 export type SignalQuoteSource = "live" | "snapshot";
@@ -49,6 +63,10 @@ export interface SignalCandidatesInput {
   slices: SignalSurfaceSlice[];
   quotes: SignalQuote[];
   earningsDatesIso: string[];
+  /** False when the ticker has never resolved to a TradingView symbol, so earningsDatesIso is necessarily
+   * empty regardless of what's actually scheduled -- candidates are still produced but flagged, not excluded
+   * (Marcelo 2026-09-23: don't block on missing data, but surface that earnings risk is unchecked). */
+  earningsCalendarResolved: boolean;
   snapshotDateIso: string;
   /** Free (uncovered) shares available for a covered call. */
   freeShares: number;
@@ -133,6 +151,11 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     const isCall = quote.right === "C";
     if (isCall !== quote.strike >= slice.forwardPrice) continue; // OTM side only
     if (quote.bid === null || quote.ask === null || !(quote.bid > 0) || !(quote.ask > quote.bid)) continue; // two-sided quote
+    // Hard exclude, not a flag: don't offer a trade that spans a known earnings date (Marcelo 2026-09-23).
+    // Matches generateTradeAlertCandidates.ts's calendar-conflict exclusion. Only excludes when the calendar
+    // is actually resolved -- an unresolved ticker can't tell true "no earnings" apart from "unchecked", so
+    // it falls through to the earnings_calendar_unresolved flag below instead of being silently allowed.
+    if (input.earningsCalendarResolved && expirySpansEarnings(input.snapshotDateIso, quote.expiry, input.earningsDatesIso)) continue;
 
     const logMoneyness = Math.log(quote.strike / slice.forwardPrice);
     const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
@@ -161,7 +184,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     const spreadPercent = ((quote.ask - quote.bid) / premium) * 100;
     const insideRange = logMoneyness >= slice.kMin && logMoneyness <= slice.kMax;
     const flags: SignalFlag[] = [];
-    if (expirySpansEarnings(input.snapshotDateIso, quote.expiry, input.earningsDatesIso)) flags.push("spans_earnings");
+    if (!input.earningsCalendarResolved) flags.push("earnings_calendar_unresolved");
     if (!insideRange) flags.push("outside_fitted_range");
     if (spreadPercent / 100 > wideSpreadThreshold) flags.push("wide_spread");
     if (strategyKey === "covered_call" && input.freeShares < 100) flags.push("no_shares");

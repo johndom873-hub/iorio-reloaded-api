@@ -333,14 +333,7 @@ export async function streamTickerDetail(
         if (!spotPrice) throw new Error("No spot price available to select option strikes.");
 
         const [dteRange, mustIncludeStrikesByExpiry] = await Promise.all([fetchStrategyDteRange(), fetchMustIncludeStrikesByExpiry(symbol)]);
-        const expiryStrikes = await prepareOptionChainStrikes(
-          connection,
-          symbol,
-          contractDetails.conId,
-          spotPrice,
-          dteRange,
-          mustIncludeStrikesByExpiry,
-        );
+        const expiryStrikes = await prepareOptionChainStrikes(symbol, spotPrice, dteRange, mustIncludeStrikesByExpiry);
         const optionChain = await quoteOptionChain(connection, symbol, expiryStrikes, {
           onUpdate: (updatedQuotes) => onEvent({ type: "optionChain", data: updatedQuotes }),
           signal,

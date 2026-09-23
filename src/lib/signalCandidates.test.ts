@@ -7,7 +7,22 @@ import { computeUncompensatedShare } from "./uncompensatedShare.js";
 const forward = 100;
 const rate = 0.04;
 const params: RawSviParameters = { a: 0.004, b: 0.06, rho: -0.35, m: 0.01, sigma: 0.12 };
-const slice30 = (overrides: Partial<SignalSurfaceSlice> = {}): SignalSurfaceSlice => ({ expiry: "2026-10-21", status: "ok", parameters: params, kMin: -0.4, kMax: 0.4, yearsToExpiry: 30 / 365, forwardPrice: forward, ...overrides });
+const slice30 = (overrides: Partial<SignalSurfaceSlice> = {}): SignalSurfaceSlice => ({
+  expiry: "2026-10-21",
+  status: "ok",
+  parameters: params,
+  kMin: -0.4,
+  kMax: 0.4,
+  yearsToExpiry: 30 / 365,
+  forwardPrice: forward,
+  pointCount: 20,
+  rmseVolatility: 0.01,
+  minButterflyDensity: 0.8,
+  droppedCounts: { inTheMoney: 0, noTwoSidedQuote: 0, spreadTooWide: 0, noImpliedVolatility: 0 },
+  calendarChecks: 0,
+  calendarViolations: 0,
+  ...overrides,
+});
 
 function ivAt(k: number, years: number): number {
   return Math.sqrt(sviTotalVariance(params, k) / years);
@@ -27,6 +42,7 @@ function baseInput(overrides: Partial<SignalCandidatesInput> = {}): SignalCandid
     slices: [slice30()],
     quotes: [quoteAt(90, "P"), quoteAt(110, "C")],
     earningsDatesIso: [],
+    earningsCalendarResolved: true,
     snapshotDateIso: "2026-09-21",
     freeShares: 0,
     freeCash: 1_000_000,
@@ -165,11 +181,19 @@ describe("attachUncompensatedShare", () => {
 });
 
 describe("buildSignalCandidates: flags and executability", () => {
-  it("flags spans_earnings only when an earnings date falls strictly after the snapshot and on/before the expiry", () => {
-    const spans = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: ["2026-10-05"] }))[0]!;
-    const notSpans = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: ["2026-11-05"] }))[0]!;
-    expect(spans.flags).toContain("spans_earnings");
-    expect(notSpans.flags).not.toContain("spans_earnings");
+  it("excludes the candidate entirely when a resolved calendar's earnings date falls strictly after the snapshot and on/before the expiry", () => {
+    const spans = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: ["2026-10-05"] }));
+    const notSpans = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: ["2026-11-05"] }));
+    expect(spans).toHaveLength(0);
+    expect(notSpans).toHaveLength(1);
+  });
+
+  it("flags earnings_calendar_unresolved (does not exclude) when the ticker's calendar never resolved", () => {
+    // Same earnings date that would exclude a resolved ticker -- unresolved means "unchecked", not "clear".
+    const unresolved = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: ["2026-10-05"], earningsCalendarResolved: false }))[0]!;
+    expect(unresolved.flags).toContain("earnings_calendar_unresolved");
+    const resolved = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: [] }))[0]!;
+    expect(resolved.flags).not.toContain("earnings_calendar_unresolved");
   });
 
   it("flags outside_fitted_range when the strike's log-moneyness is beyond the slice's kMin/kMax", () => {

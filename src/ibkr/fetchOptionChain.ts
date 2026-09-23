@@ -1,9 +1,10 @@
 import { EventName, Option, OptionType, SecType } from "@stoqey/ib";
-import type { Contract, IBApi } from "@stoqey/ib";
+import type { Contract, ContractDetails, IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 import { db } from "../db/connection.js";
+import { calendarDaysUntilExpiry, captureMaximumDaysToExpiry, captureMinimumDaysToExpiry } from "../lib/optionChainCaptureWindow.js";
 
 export interface OptionQuote {
   expiry: string; // YYYYMMDD
@@ -114,31 +115,30 @@ async function resolveTickerId(symbol: string): Promise<string | null> {
   return row?.id ?? null;
 }
 
-// 24h refresh, approved 2026-08-27 (see PROGRESS.md "Option chain cache") —
-// this raw cross-expiry/cross-exchange union barely changes day to day (new
-// weekly expiries roll forward periodically, existing ones don't change),
-// but was being re-fetched live on every chain open/scan. Fails open (no
-// caching, straight to lookupOptionParams) for a symbol with no tickers row.
-export async function getCachedOptionParams(
-  ib: IBApi,
-  symbol: string,
-  conId: number,
-): Promise<{ expirations: string[]; strikes: number[] }> {
-  const tickerId = await resolveTickerId(symbol);
-  if (!tickerId) return lookupOptionParams(ib, symbol, conId);
+// Option-chain structure model (Marcelo, 2026-09-23): the nightly capture (and
+// the new-ticker pipeline's chain_warmup) is the ONLY thing that asks IBKR for
+// expiries and strikes — refreshStoredOptionChain below. Everything else (the
+// Ticker Detail chain, position quotes, the alert scan) reads what it stored
+// and never goes to IBKR for chain structure. A ticker with nothing stored is
+// "not prepared yet", not a reason to fetch.
+export interface StoredOptionChain {
+  /** Every listed expiry, from reqSecDefOptParams. */
+  expirations: string[];
+  /** The real strike grid per expiry, stored for expiries inside the 0-90 DTE capture window only. */
+  strikesByExpiry: Map<string, number[]>;
+  fetchedAt: Date | null;
+}
 
-  const optionParamsRefreshMs = 24 * 60 * 60 * 1000;
-  const cached = await db("option_chain_params").where({ ticker_id: tickerId }).first();
-  if (cached && Date.now() - new Date(cached.fetched_at).getTime() < optionParamsRefreshMs) {
-    return { expirations: cached.expirations, strikes: cached.strikes.map(Number) };
-  }
-
-  const fresh = await lookupOptionParams(ib, symbol, conId);
-  await db("option_chain_params")
-    .insert({ ticker_id: tickerId, expirations: fresh.expirations, strikes: fresh.strikes, fetched_at: new Date() })
-    .onConflict("ticker_id")
-    .merge();
-  return fresh;
+export async function loadStoredOptionChain(tickerId: string): Promise<StoredOptionChain> {
+  const [params, gridRows] = await Promise.all([
+    db("option_chain_params").where({ ticker_id: tickerId }).first(),
+    db("option_chain_expiry_strikes").where({ ticker_id: tickerId }).select("expiry", "strikes", "fetched_at") as Promise<{ expiry: string; strikes: (string | number)[]; fetched_at: Date }[]>,
+  ]);
+  return {
+    expirations: params ? (params.expirations as string[]) : [],
+    strikesByExpiry: new Map(gridRows.map((row) => [row.expiry, row.strikes.map(Number)])),
+    fetchedAt: params ? new Date(params.fetched_at) : null,
+  };
 }
 
 function pickExpiries(expirations: string[], dteRange: { min: number; max: number }): string[] {
@@ -159,160 +159,160 @@ function pickStrikes(strikes: number[], spotPrice: number, countPerSide: number 
   return [...below, ...above];
 }
 
-// Extra raw candidates pulled per side before validation, since some will
-// turn out not to exist for the specific expiry being checked (see
-// checkStrikeExists) — this buffer keeps the odds high of still landing on
-// strikesPerSide real strikes per side after filtering.
-const candidateBufferPerSide = 3;
-const strikeCheckTimeoutMs = 5_000;
-
 // reqSecDefOptParams's strikes array is a union across every expiry/exchange
-// combination, not per-expiry — most of those strike x expiry pairs don't
-// actually exist as real contracts for a given expiry. We used to discover
-// the real per-expiry set with a wildcard contractDetails lookup (expiry
-// set, strike/right unset), but IBKR's own docs say that's the wrong tool:
-// "It is not recommended to use reqContractDetails to receive complete
-// option chains... the return will be throttled and take longer the more
-// ambiguous the contract definition" (this was the actual cause of AMAT's
-// 25s prod timeout on 2026-08-14 — not network latency, not connection
-// setup, measured at ~0.6-1.4s — see PROGRESS.md). A fully-qualified request
-// (strike AND right both specified) isn't ambiguous and isn't throttled, so
-// checking one candidate strike at a time in parallel replaces one slow
-// throttled scan with many fast, unthrottled ones. Right=Call only — calls
-// and puts always share the same listed strike grid.
-export function checkStrikeExists(ib: IBApi, symbol: string, expiry: string, strike: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const reqId = nextReqIdFor(ib, () => nextLookupReqId++);
-    let found = false;
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve(false);
-    }, strikeCheckTimeoutMs);
+// combination, not per-expiry: measured 2026-09-23 on AMAT, 49% of those
+// strike x expiry pairs don't exist (28% on the front expiry, ~60% a month
+// out). The real grid for one expiry comes from ONE reqContractDetails with
+// expiry and right fixed and strike left unset. IBKR spends ~4.5s "thinking"
+// before the first contract arrives, then streams the whole list in well
+// under a second — bounded and reliable, with two hard rules learned the
+// same day:
+//   1. One at a time per connection, always. IBKR queues these per client:
+//      concurrency 1, 2 and 4 all took the same total time (1 was slightly
+//      faster), and firing 17 at once earlier timed out 14 of them.
+//   2. Never the fully ambiguous form (no expiry either) — that is what
+//      throttled AMAT for 25s in prod on 2026-08-14.
+// This replaced per-strike probing (one fully-qualified reqContractDetails
+// per candidate strike): 36s for AMAT's 8 in-window expiries vs ~6 min for
+// the 641 probes the same window needed, and ~1,370 requests per ticker on
+// a big chain. Right=Call only — calls and puts share the listed grid.
+const expiryStrikesTimeoutMs = 30_000;
 
-    function onDetails(id: number) {
-      if (id !== reqId) return;
-      found = true;
-    }
-    function onEnd(id: number) {
-      if (id !== reqId) return;
-      cleanup();
-      resolve(found);
-    }
-    function onError(_error: Error, _code: number, id: number) {
-      if (id !== reqId) return;
-      cleanup();
-      resolve(false);
-    }
-    function cleanup() {
-      clearTimeout(timer);
-      ib.removeListener(EventName.contractDetails, onDetails);
-      ib.removeListener(EventName.contractDetailsEnd, onEnd);
-      ib.removeListener(EventName.error, onError);
-    }
-
-    const qualifiedOptionContract: Contract = {
-      symbol,
-      secType: SecType.OPT,
-      lastTradeDateOrContractMonth: expiry,
-      strike,
-      right: OptionType.Call,
-      exchange: "SMART",
-      currency: "USD",
-    };
-
-    // .on(), not .once() — with many of these checks in flight concurrently
-    // on one shared connection, EventEmitter.once() fires (and self-removes)
-    // *every* currently-registered once-listener on the first
-    // contractDetailsEnd for *any* reqId, not just the one whose id matches.
-    // That orphans every other in-flight check, which then just times out.
-    // Manual removeListener() inside onEnd (via cleanup(), gated on the id
-    // check) is what actually scopes removal to this one request.
-    ib.on(EventName.contractDetails, onDetails);
-    ib.on(EventName.contractDetailsEnd, onEnd);
-    ib.on(EventName.error, onError);
-    ib.reqContractDetails(reqId, qualifiedOptionContract);
-  });
+// The per-connection queue behind rule 1: whoever calls, no two wildcard
+// lookups are ever in flight on the same ib at once.
+const wildcardQueueByIb = new WeakMap<IBApi, Promise<unknown>>();
+function runOneAtATime<T>(ib: IBApi, task: () => Promise<T>): Promise<T> {
+  const previous = wildcardQueueByIb.get(ib) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(task);
+  wildcardQueueByIb.set(ib, next);
+  return next;
 }
 
-// Cached wrapper around checkStrikeExists, approved 2026-08-27 (see
-// PROGRESS.md "Option chain cache") — this is the flagship caching win here:
-// it's the exact call chain that caused the 2026-08-14 AMAT throttling
-// outage (see checkStrikeExists' own doc comment), and fires dozens of times
-// per chain open. Batches the whole candidate set for one expiry into a
-// single Postgres read, then only fires IBKR checks for whatever wasn't
-// already cached, instead of one DB round trip per candidate.
-//
-// exists=true is cached forever (a listed contract doesn't get delisted
-// mid-life). exists=false gets a 24h re-check window instead, since
-// exchanges do occasionally add new strikes to an already-listed expiry
-// after a large price move — caching "doesn't exist" forever risks
-// permanently hiding a strike that gets added later. Fails open for a
-// symbol with no tickers row.
-export async function getCachedValidStrikes(ib: IBApi, symbol: string, expiry: string, candidates: number[]): Promise<number[]> {
-  if (candidates.length === 0) return [];
-  const tickerId = await resolveTickerId(symbol);
-  if (!tickerId) {
-    const results = await Promise.all(
-      candidates.map(async (strike) => ({ strike, exists: await checkStrikeExists(ib, symbol, expiry, strike) })),
-    );
-    return results.filter((r) => r.exists).map((r) => r.strike);
-  }
+export interface ExpiryStrikesLookup {
+  strikes: number[];
+  contractCount: number;
+  elapsedMs: number;
+}
 
-  const negativeCheckRefreshMs = 24 * 60 * 60 * 1000;
-  const cachedRows: { strike: string; exists: boolean; checked_at: Date }[] = await db("option_chain_strike_checks")
-    .where({ ticker_id: tickerId, expiry })
-    .whereIn("strike", candidates);
-  const cachedByStrike = new Map(cachedRows.map((row) => [Number(row.strike), row]));
+export function lookupExpiryStrikes(ib: IBApi, symbol: string, expiry: string): Promise<ExpiryStrikesLookup> {
+  return runOneAtATime(
+    ib,
+    () =>
+      new Promise((resolve, reject) => {
+        const reqId = nextReqIdFor(ib, () => nextLookupReqId++);
+        const startedAt = Date.now();
+        const strikes = new Set<number>();
+        let contractCount = 0;
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new Error(`strike grid lookup for ${symbol} ${expiry} timed out after ${expiryStrikesTimeoutMs / 1000}s`));
+        }, expiryStrikesTimeoutMs);
 
-  const needsLiveCheck = candidates.filter((strike) => {
-    const row = cachedByStrike.get(strike);
-    if (!row) return true;
-    if (row.exists) return false;
-    return Date.now() - new Date(row.checked_at).getTime() >= negativeCheckRefreshMs;
-  });
+        function onDetails(id: number, details: ContractDetails) {
+          if (id !== reqId) return;
+          contractCount++;
+          if (details.contract.strike) strikes.add(details.contract.strike);
+        }
+        function onEnd(id: number) {
+          if (id !== reqId) return;
+          cleanup();
+          resolve({ strikes: [...strikes].sort((a, b) => a - b), contractCount, elapsedMs: Date.now() - startedAt });
+        }
+        function onError(error: Error, code: number, id: number) {
+          if (id !== reqId) return;
+          cleanup();
+          // 200 = "No security definition has been found": an expiry with no listed calls, not a failure.
+          if (code === 200) resolve({ strikes: [], contractCount: 0, elapsedMs: Date.now() - startedAt });
+          else reject(new Error(`strike grid lookup for ${symbol} ${expiry} failed (code ${code}): ${error.message}`));
+        }
+        function cleanup() {
+          clearTimeout(timer);
+          ib.removeListener(EventName.contractDetails, onDetails);
+          ib.removeListener(EventName.contractDetailsEnd, onEnd);
+          ib.removeListener(EventName.error, onError);
+        }
 
-  const liveResults = await Promise.all(
-    needsLiveCheck.map(async (strike) => ({ strike, exists: await checkStrikeExists(ib, symbol, expiry, strike) })),
+        const expiryWildcard: Contract = {
+          symbol,
+          secType: SecType.OPT,
+          lastTradeDateOrContractMonth: expiry,
+          right: OptionType.Call,
+          exchange: "SMART",
+          currency: "USD",
+        };
+        ib.on(EventName.contractDetails, onDetails);
+        ib.on(EventName.contractDetailsEnd, onEnd);
+        ib.on(EventName.error, onError);
+        ib.reqContractDetails(reqId, expiryWildcard);
+      }),
   );
+}
 
-  if (liveResults.length > 0) {
-    await db("option_chain_strike_checks")
-      .insert(liveResults.map(({ strike, exists }) => ({ ticker_id: tickerId, expiry, strike, exists, checked_at: new Date() })))
-      .onConflict(["ticker_id", "expiry", "strike"])
+export interface OptionChainRefreshTimings {
+  optionParamsMs: number;
+  expiries: { expiry: string; strikeCount: number; elapsedMs: number }[];
+  totalMs: number;
+}
+
+export interface StoredOptionChainRefresh {
+  expirations: string[];
+  strikesByExpiry: Map<string, number[]>;
+  timings: OptionChainRefreshTimings;
+}
+
+/**
+ * The one place chain structure is fetched from IBKR: every listed expiry
+ * (reqSecDefOptParams), then the real strike grid for each expiry inside the
+ * 0-90 DTE capture window, one wildcard at a time, each stored as soon as it
+ * lands so a failure part-way keeps the expiries already done. Always
+ * refreshes — the nightly capture is the schedule, there is no TTL.
+ */
+export async function refreshStoredOptionChain(
+  ib: IBApi,
+  ticker: { tickerId: string; symbol: string; contractId: number },
+  todayIso: string,
+): Promise<StoredOptionChainRefresh> {
+  const startedAt = Date.now();
+  const { expirations, strikes } = await lookupOptionParams(ib, ticker.symbol, ticker.contractId);
+  const optionParamsMs = Date.now() - startedAt;
+  await db("option_chain_params")
+    .insert({ ticker_id: ticker.tickerId, expirations, strikes, fetched_at: new Date() })
+    .onConflict("ticker_id")
+    .merge();
+
+  const expiriesInWindow = expirations
+    .filter((expiry) => {
+      const daysToExpiry = calendarDaysUntilExpiry(todayIso, expiry);
+      return daysToExpiry >= captureMinimumDaysToExpiry && daysToExpiry <= captureMaximumDaysToExpiry;
+    })
+    .sort();
+
+  const strikesByExpiry = new Map<string, number[]>();
+  const expiryTimings: OptionChainRefreshTimings["expiries"] = [];
+  for (const expiry of expiriesInWindow) {
+    const lookup = await lookupExpiryStrikes(ib, ticker.symbol, expiry);
+    strikesByExpiry.set(expiry, lookup.strikes);
+    expiryTimings.push({ expiry, strikeCount: lookup.strikes.length, elapsedMs: lookup.elapsedMs });
+    await db("option_chain_expiry_strikes")
+      .insert({ ticker_id: ticker.tickerId, expiry, strikes: lookup.strikes, fetched_at: new Date() })
+      .onConflict(["ticker_id", "expiry"])
       .merge();
   }
+  // Grids for expiries that have expired or rolled past the window are no longer read by anyone.
+  await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).whereNotIn("expiry", expiriesInWindow).delete();
 
-  const liveByStrike = new Map(liveResults.map((r) => [r.strike, r.exists]));
-  return candidates.filter((strike) => (liveByStrike.has(strike) ? liveByStrike.get(strike) : (cachedByStrike.get(strike)?.exists ?? false)));
+  return { expirations, strikesByExpiry, timings: { optionParamsMs, expiries: expiryTimings, totalMs: Date.now() - startedAt } };
 }
 
 // mustIncludeStrikes (approved 2026-08-26): a pending trade alert's strike
 // has to show up in the chain even when it's well outside the plain
 // near-the-money window — a covered-call alert can sit 20+ points OTM on a
-// low-delta strike, which the standard ±strikesPerSide trim below would
-// otherwise silently drop. Validated the same way as every other candidate
-// (checkStrikeExists), then unioned back in AFTER the near-the-money trim
-// so it survives regardless of how far it sits from spot.
-async function lookupValidStrikesForExpiry(
-  ib: IBApi,
-  symbol: string,
-  expiry: string,
-  rawStrikes: number[],
-  spotPrice: number,
-  mustIncludeStrikes: number[] = [],
-  // Reduced below the default strikesPerSide by prepareOptionChainStrikes
-  // when must-include strikes are eating into the shared 96-line budget —
-  // see that function's comment. Defaults to the normal count for every
-  // other caller (fetchOrderLegQuote.ts etc. don't pass must-include strikes
-  // at all, so this never shrinks for them).
-  nearTheMoneyCountPerSide: number = strikesPerSide,
-): Promise<number[]> {
-  const nearTheMoneyCandidates = pickStrikes(rawStrikes, spotPrice, nearTheMoneyCountPerSide + candidateBufferPerSide);
-  const candidates = Array.from(new Set([...nearTheMoneyCandidates, ...mustIncludeStrikes]));
-  const validStrikes = await getCachedValidStrikes(ib, symbol, expiry, candidates);
-  const nearTheMoney = pickStrikes(validStrikes, spotPrice, nearTheMoneyCountPerSide);
-  const validMustInclude = validStrikes.filter((s) => mustIncludeStrikes.includes(s));
-  return Array.from(new Set([...nearTheMoney, ...validMustInclude])).sort((a, b) => a - b);
+// low-delta strike, which the standard ±strikesPerSide trim would otherwise
+// silently drop. They come from real quotes (an alert or a held leg), so
+// they are unioned in as-is rather than checked against the stored grid.
+function pickExpiryStrikes(gridStrikes: number[], spotPrice: number, mustIncludeStrikes: number[], nearTheMoneyCountPerSide: number): number[] {
+  const nearTheMoney = pickStrikes(gridStrikes, spotPrice, nearTheMoneyCountPerSide);
+  return Array.from(new Set([...nearTheMoney, ...mustIncludeStrikes])).sort((a, b) => a - b);
 }
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -521,44 +521,25 @@ export interface ExpiryStrikes {
   strikes: number[];
 }
 
-// Needs spotPrice up front now (unlike the old wildcard-scan version) to
-// narrow reqSecDefOptParams's cross-expiry strike union to near-the-money
-// candidates *before* validating them one at a time — see
-// lookupValidStrikesForExpiry/checkStrikeExists above. That means this can
-// no longer start until the pricing snapshot resolves, giving up the old
-// "start as soon as conId is known" overlap with pricing — an acceptable
-// trade since the per-strike checks below replace what used to be a 10-20s+
-// throttled wildcard call per expiry.
-// Takes conId as a parameter rather than looking it up itself — the caller
-// already has it from its own contractDetails lookup (needed anyway for
-// companyName/sector), and firing a second, redundant reqContractDetails
-// call for the same underlying concurrently with the first was found to
-// trigger real request-pacing contention on IBKR's side (a genuine
-// "Pricing snapshot timeout" was reproduced from this).
-//
-// The two expiries are looked up concurrently, not sequentially — the
-// second expiry's lookup has been observed taking 4-5x longer than the
-// first when done sequentially in a loop, for reasons not fully
-// understood; running them via Promise.all avoids paying that cost twice
-// in serial.
-// Does not call reqMarketDataType itself — see the note on
-// lookupPricingSnapshot in fetchTickerOverview.ts. The caller (currently
-// only streamTickerDetail.ts) sets it once for the whole shared connection.
+// Reads chain structure from the DB only (see StoredOptionChain) — no IBKR
+// call, so it costs a couple of Postgres reads regardless of how many
+// expiries are shown. spotPrice picks the near-the-money strikes.
 export async function prepareOptionChainStrikes(
-  connection: IbkrConnection,
   symbol: string,
-  conId: number,
   spotPrice: number,
   dteRange: { min: number; max: number } = { min: defaultMinDaysToExpiry, max: defaultMaxDaysToExpiry },
   // Approved 2026-08-26: every pending trade alert's strike must show up in
   // the chain, even ones the near-the-money window alone would trim away
-  // (see lookupValidStrikesForExpiry). Keyed by expiry in the same YYYYMMDD
-  // shape used everywhere else in this file.
+  // (see pickExpiryStrikes). Keyed by expiry in the same YYYYMMDD shape used
+  // everywhere else in this file.
   alertStrikesByExpiry: Map<string, number[]> = new Map(),
 ): Promise<ExpiryStrikes[]> {
-  const { ib } = connection;
-
-  const { expirations, strikes } = await getCachedOptionParams(ib, symbol, conId);
+  const tickerId = await resolveTickerId(symbol);
+  const stored = tickerId ? await loadStoredOptionChain(tickerId) : null;
+  if (!stored || stored.strikesByExpiry.size === 0) {
+    throw new Error(`Option chain for ${symbol} is not prepared yet — it is stored by the nightly chain capture, or when the ticker is added to the Shortlist.`);
+  }
+  const { expirations } = stored;
 
   // A pending alert's/held position's expiry has to be browsable even if
   // maxExpiries' trim would otherwise cut it — same "every must-include
@@ -591,20 +572,14 @@ export async function prepareOptionChainStrikes(
       ? strikesPerSide
       : Math.min(strikesPerSide, Math.floor(remainingSlotsForNearTheMoney / (chosenExpiries.length * 2)));
 
-  return Promise.all(
-    chosenExpiries.map(async (expiry) => ({
+  // A must-include expiry outside the stored 0-90 DTE window has no grid; its
+  // must-include strikes (a held leg, a pending alert) still show on their own.
+  return chosenExpiries
+    .map((expiry) => ({
       expiry,
-      strikes: await lookupValidStrikesForExpiry(
-        ib,
-        symbol,
-        expiry,
-        strikes,
-        spotPrice,
-        alertStrikesByExpiry.get(expiry) ?? [],
-        nearTheMoneyCountPerSide,
-      ),
-    })),
-  );
+      strikes: pickExpiryStrikes(stored.strikesByExpiry.get(expiry) ?? [], spotPrice, alertStrikesByExpiry.get(expiry) ?? [], nearTheMoneyCountPerSide),
+    }))
+    .filter(({ strikes: expiryStrikes }) => expiryStrikes.length > 0);
 }
 
 // Strikes arriving here are already the final near-the-money, validated set

@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SnapshotCoverage } from "../lib/optionChainCaptureCoverage.js";
+import type { StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import {
   prepareTicker,
   runOptionChainCapture,
-  strikeValidationMaximumInFlight,
   type OptionChainCaptureDependencies,
   type OptionChainCaptureEvent,
   type PrepareTickerDependencies,
@@ -17,12 +17,23 @@ const ticker = (symbol: string, contractId: number | null = 1): UniverseTicker =
 
 // --- prepareTicker ---------------------------------------------------------
 
+const fullGrid = Array.from({ length: 81 }, (_, index) => 60 + index);
+
+/** A stored-chain refresh result where every listed expiry has the given grid (or its own, when a map is passed). */
+function storedChain(expirations: string[], grid: number[] | Map<string, number[]> = fullGrid): StoredOptionChainRefresh {
+  const strikesByExpiry = grid instanceof Map ? grid : new Map(expirations.map((expiry) => [expiry, grid]));
+  return {
+    expirations,
+    strikesByExpiry,
+    timings: { optionParamsMs: 1, expiries: [...strikesByExpiry].map(([expiry, strikes]) => ({ expiry, strikeCount: strikes.length, elapsedMs: 1 })), totalMs: 2 },
+  };
+}
+
 function prepareDependencies(overrides: Partial<PrepareTickerDependencies> = {}): PrepareTickerDependencies {
   return {
     fetchSpotPrice: async () => 100,
     loadReferenceVolatility: async () => ({ volatility: 0.3, source: "implied_volatility" }),
-    getOptionParams: async () => ({ expirations: ["20261016"], strikes: Array.from({ length: 81 }, (_, index) => 60 + index) }),
-    getValidStrikes: async (_ib, _symbol, _expiry, candidates) => candidates,
+    refreshStoredOptionChain: async () => storedChain(["20261016"]),
     ...overrides,
   };
 }
@@ -40,30 +51,34 @@ describe("prepareTicker", () => {
       fakeIb,
       ticker("AAA"),
       today,
-      prepareDependencies({ getOptionParams: async () => ({ expirations: ["20261221", "20261220", "20260921", "20260918"], strikes: [95, 100, 105] }) }),
+      prepareDependencies({ refreshStoredOptionChain: async () => storedChain(["20261221", "20261220", "20260921", "20260918"], [95, 100, 105]) }),
     );
     expect([...new Set(prepared.contracts.map((contract) => contract.expiry))]).toEqual(["20260921", "20261220"]);
     expect(prepared.contracts.every((contract) => typeof contract.expiry === "string" && contract.expiry.length === 8)).toBe(true);
   });
 
-  it("validates strikes in groups of at most the approved cap and drops strikes IBKR says do not exist", async () => {
-    const groupSizes: number[] = [];
+  it("refreshes the stored chain once per ticker and selects each expiry's contracts from that expiry's own grid", async () => {
+    const refreshStoredOptionChain = vi.fn(async () =>
+      storedChain(
+        ["20261016", "20261120"],
+        new Map([
+          ["20261016", fullGrid.filter((strike) => strike % 2 === 0)],
+          ["20261120", fullGrid.filter((strike) => strike % 5 === 0)],
+        ]),
+      ),
+    );
     const prepared = await prepareTicker(
       fakeIb,
       ticker("AAA"),
       today,
-      prepareDependencies({
-        loadReferenceVolatility: async () => ({ volatility: null, source: "widest_window" }),
-        getValidStrikes: async (_ib, _symbol, _expiry, candidates) => {
-          groupSizes.push(candidates.length);
-          return candidates.filter((strike) => strike % 2 === 0);
-        },
-      }),
+      prepareDependencies({ loadReferenceVolatility: async () => ({ volatility: null, source: "widest_window" }), refreshStoredOptionChain }),
     );
-    expect(groupSizes.length).toBeGreaterThan(1);
-    expect(Math.max(...groupSizes)).toBeLessThanOrEqual(strikeValidationMaximumInFlight);
+    expect(refreshStoredOptionChain).toHaveBeenCalledTimes(1);
+    expect(refreshStoredOptionChain).toHaveBeenCalledWith(fakeIb, { tickerId: "id-AAA", symbol: "AAA", contractId: 1 }, today);
     expect(prepared.contracts.length).toBeGreaterThan(0);
-    expect(prepared.contracts.every((contract) => contract.strike % 2 === 0)).toBe(true);
+    expect(prepared.contracts.filter((contract) => contract.expiry === "20261016").every((contract) => contract.strike % 2 === 0)).toBe(true);
+    expect(prepared.contracts.filter((contract) => contract.expiry === "20261120").every((contract) => contract.strike % 5 === 0)).toBe(true);
+    expect(prepared.chainRefresh.expiries.map((expiry) => expiry.expiry)).toEqual(["20261016", "20261120"]);
   });
 
   it("sizes the window from the reference volatility, and falls back to the widest (±50%) window when there is none", async () => {
@@ -82,7 +97,7 @@ describe("prepareTicker", () => {
   });
 
   it("returns no contracts (not an error) when the ticker has no expiry in range", async () => {
-    const prepared = await prepareTicker(fakeIb, ticker("AAA"), today, prepareDependencies({ getOptionParams: async () => ({ expirations: ["20270115"], strikes: [100] }) }));
+    const prepared = await prepareTicker(fakeIb, ticker("AAA"), today, prepareDependencies({ refreshStoredOptionChain: async () => storedChain(["20270115"], [100]) }));
     expect(prepared.contracts).toEqual([]);
   });
 });
@@ -101,6 +116,7 @@ const preparedFor = (universeTicker: UniverseTicker): PreparedTicker => ({
   referenceVolatility: 0.3,
   referenceVolatilitySource: "implied_volatility",
   contracts: [{ expiry: "20261016", strike: 100, right: "P" }],
+  chainRefresh: { optionParamsMs: 1, expiries: [{ expiry: "20261016", strikeCount: 1, elapsedMs: 1 }], totalMs: 2 },
 });
 
 function runDependencies(overrides: Partial<OptionChainCaptureDependencies> = {}) {

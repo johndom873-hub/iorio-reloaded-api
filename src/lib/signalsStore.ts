@@ -7,7 +7,7 @@ import { easternDateIso } from "./marketSessionStatus.js";
 import type { SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedByContract, scoreTicker, toScreenRow } from "./signalsLiveScoring.js";
 import type { RoadmapCounts } from "./signalsRoadmap.js";
-import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
+import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, TickerSignalsDetail, TickerSignalsInputs } from "./signalsTypes.js";
 import { loadVolatilityForecast } from "./volatilityForecastStore.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew } from "./tiltMeasures.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
@@ -49,7 +49,7 @@ export async function loadPreviousClose(tickerId: string, todayEasternIso: strin
   return row ? { close: Number(row.close), dateIso: row.dateIso } : null;
 }
 
-async function loadNextEarningsDate(tickerId: string, todayIso: string): Promise<string | null> {
+export async function loadNextEarningsDate(tickerId: string, todayIso: string): Promise<string | null> {
   const row = await db("ticker_calendar_events")
     .where({ ticker_id: tickerId, event_type: "earnings" })
     .where("event_date", ">=", todayIso)
@@ -60,7 +60,7 @@ async function loadNextEarningsDate(tickerId: string, todayIso: string): Promise
 }
 
 /** True when there is an upcoming ex-dividend but no regular cadence could be inferred to project later ones into the forward (Formula: see impliedVolatilitySurface.ts projectDividendSchedule, approved 2026-09-23). */
-async function loadDividendCadenceUnknown(tickerId: string, todayIso: string): Promise<boolean> {
+export async function loadDividendCadenceUnknown(tickerId: string, todayIso: string): Promise<boolean> {
   const [next, past] = await Promise.all([
     db("ticker_calendar_events")
       .where({ ticker_id: tickerId, event_type: "ex_dividend" })
@@ -86,6 +86,12 @@ export async function loadEarningsDatesForForecastWindow(tickerId: string): Prom
   return rows.map((row) => row.eventDate);
 }
 
+/** Same "resolved" check calendarConflict.ts uses: no TradingView symbol means earningsDatesIso is necessarily empty regardless of what's actually scheduled. */
+export async function loadEarningsCalendarResolved(tickerId: string): Promise<boolean> {
+  const row = await db("tickers").where({ id: tickerId }).first("tradingview_ticker");
+  return !!row?.tradingview_ticker;
+}
+
 export async function loadLatestSnapshot(tickerId: string): Promise<SnapshotHeader | null> {
   const row = await db("option_chain_snapshots")
     .where({ ticker_id: tickerId })
@@ -100,7 +106,25 @@ export async function loadLatestSnapshot(tickerId: string): Promise<SnapshotHead
 export async function loadSlices(snapshotId: string): Promise<SignalSurfaceSlice[]> {
   const rows = await db("option_surface_fits")
     .where({ snapshot_id: snapshotId })
-    .select(db.raw('expiry::text as expiry'), "status", "years_to_expiry as yearsToExpiry", "forward_price as forwardPrice", "k_min as kMin", "k_max as kMax", "param_a as a", "param_b as b", "param_rho as rho", "param_m as m", "param_sigma as sigma");
+    .select(
+      db.raw('expiry::text as expiry'),
+      "status",
+      "years_to_expiry as yearsToExpiry",
+      "forward_price as forwardPrice",
+      "k_min as kMin",
+      "k_max as kMax",
+      "param_a as a",
+      "param_b as b",
+      "param_rho as rho",
+      "param_m as m",
+      "param_sigma as sigma",
+      "point_count as pointCount",
+      "rmse_volatility as rmseVolatility",
+      "min_butterfly_density as minButterflyDensity",
+      "dropped_counts as droppedCounts",
+      "calendar_checks as calendarChecks",
+      "calendar_violations as calendarViolations",
+    );
   return rows.map((row) => ({
     expiry: row.expiry,
     status: row.status,
@@ -109,6 +133,12 @@ export async function loadSlices(snapshotId: string): Promise<SignalSurfaceSlice
     kMin: row.kMin === null ? null : Number(row.kMin),
     kMax: row.kMax === null ? null : Number(row.kMax),
     parameters: row.a === null ? null : { a: Number(row.a), b: Number(row.b), rho: Number(row.rho), m: Number(row.m), sigma: Number(row.sigma) },
+    pointCount: row.pointCount,
+    rmseVolatility: row.rmseVolatility === null ? null : Number(row.rmseVolatility),
+    minButterflyDensity: row.minButterflyDensity === null ? null : Number(row.minButterflyDensity),
+    droppedCounts: row.droppedCounts,
+    calendarChecks: row.calendarChecks,
+    calendarViolations: row.calendarViolations,
   }));
 }
 
@@ -147,10 +177,11 @@ export async function loadShortlistTicker(symbol: string): Promise<ShortlistTick
 /** Everything scoring needs for one ticker, from the DB only (no IBKR). Loaded once per REST call or stream start. */
 export async function loadTickerSignalsInputs(ticker: ShortlistTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {
   const todayEastern = easternDateIso(now);
-  const [bars, nextEarningsDateIso, earningsDatesIso, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown] = await Promise.all([
+  const [bars, nextEarningsDateIso, earningsDatesIso, earningsCalendarResolved, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown] = await Promise.all([
     loadBarsForTilt(ticker.tickerId, todayEastern),
     loadNextEarningsDate(ticker.tickerId, todayEastern),
     loadEarningsDatesForForecastWindow(ticker.tickerId),
+    loadEarningsCalendarResolved(ticker.tickerId),
     loadPreviousClose(ticker.tickerId, todayEastern),
     loadLatestSnapshot(ticker.tickerId),
     fetchAvailableUncoveredShares(ticker.tickerId),
@@ -164,16 +195,18 @@ export async function loadTickerSignalsInputs(ticker: ShortlistTickerRow, now: D
     ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso)])
     : [[], [], { forecast: null, suspectedSplitDateIso: null }];
 
-  return { ...ticker, header, slices, quotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
+  return { ...ticker, header, slices, quotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
 }
 
-/** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). */
-export async function loadTickerSignals(ticker: ShortlistTickerRow, accountContext: AccountContext, options: { withUncompensatedShare?: boolean } = {}): Promise<TickerSignals> {
+/** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). Includes the raw
+ * fitted-surface slices (unscaled by live spot) for the volatility-surface modal. */
+export async function loadTickerSignals(ticker: ShortlistTickerRow, accountContext: AccountContext, options: { withUncompensatedShare?: boolean } = {}): Promise<TickerSignalsDetail> {
   const inputs = await loadTickerSignalsInputs(ticker);
   const scored = scoreTicker(inputs, accountContext);
-  if (!options.withUncompensatedShare || !inputs.header?.underlyingPrice || scored.candidates.length === 0) return scored;
+  if (!options.withUncompensatedShare || !inputs.header?.underlyingPrice || scored.candidates.length === 0) return { ...scored, slices: inputs.slices };
   const uncompensatedByContract = computeUncompensatedByContract(scored.candidates, inputs.header.underlyingPrice, inputs.slices);
-  return scoreTicker(inputs, accountContext, { spotPrice: inputs.header.underlyingPrice, priceSource: "snapshot", uncompensatedByContract });
+  const rescored = scoreTicker(inputs, accountContext, { spotPrice: inputs.header.underlyingPrice, priceSource: "snapshot", uncompensatedByContract });
+  return { ...rescored, slices: inputs.slices };
 }
 
 /** The counts the roadmap's ETAs are projected from. */

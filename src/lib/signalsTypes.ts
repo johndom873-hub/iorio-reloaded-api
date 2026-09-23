@@ -32,6 +32,9 @@ export interface TickerSignalsInputs {
   /** Trading date the split guard flagged when it left the ticker without a forecast; null otherwise. */
   suspectedSplitDateIso: string | null;
   earningsDatesIso: string[];
+  /** False when the ticker has never resolved to a TradingView symbol -- earningsDatesIso is necessarily
+   * empty either way, so this is what actually tells the guard "no earnings scheduled" from "unchecked". */
+  earningsCalendarResolved: boolean;
   momentum: number | null;
   elevatedVolatility: ElevatedVolatilityFlag | null;
   skew: SkewMeasure | null;
@@ -87,3 +90,10 @@ export interface TickerSignals {
 
 /** One Signals-screen row: a TickerSignals without the candidate list (the modal fetches that per ticker). */
 export type SignalsScreenRow = Omit<TickerSignals, "candidates">;
+
+/** Single-ticker REST payload only: adds the raw fitted-surface slices (SVI params + fit-quality diagnostics)
+ * for the volatility-surface modal. Left off SignalsScreenRow/the list endpoint so the whole-screen payload
+ * doesn't carry every ticker's per-expiry SVI parameters. */
+export interface TickerSignalsDetail extends TickerSignals {
+  slices: SignalSurfaceSlice[];
+}

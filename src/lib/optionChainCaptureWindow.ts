@@ -14,6 +14,12 @@
 // only — puts below spot, calls above spot — plus the put AND call at the
 // strike nearest spot (needed for the forward price and skew).
 
+// Expiry range the nightly capture archives AND the range of per-expiry strike
+// grids it stores for every other reader (Ticker Detail chain, alert scan) —
+// approved 2026-09-21 (0-90 DTE) and confirmed 2026-09-23 as the stored range.
+export const captureMinimumDaysToExpiry = 0;
+export const captureMaximumDaysToExpiry = 90;
+
 const standardDeviationsEitherSide = 2;
 const minimumHalfWidth = 0.05;
 const maximumHalfWidth = 0.5;

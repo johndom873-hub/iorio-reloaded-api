@@ -140,6 +140,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       slices,
       quotes,
       earningsDatesIso: inputs.earningsDatesIso,
+      earningsCalendarResolved: inputs.earningsCalendarResolved,
       snapshotDateIso: header.tradingDateIso,
       freeShares: inputs.freeShares,
       freeCash: account.freeCash,

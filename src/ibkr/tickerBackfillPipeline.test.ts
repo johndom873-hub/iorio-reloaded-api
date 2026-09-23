@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SnapshotCoverage } from "../lib/optionChainCaptureCoverage.js";
 import type { BackfillRunStatus, BackfillStep } from "../lib/tickerBackfillSteps.js";
 import {
   executeBackfillRun,
@@ -44,7 +43,6 @@ function inMemoryStore() {
 }
 
 const history: HistoryStepResult = { barCount: 1253, ivPointCount: 1250, firstTradingDate: "2021-09-22", lastTradingDate: "2026-09-18", suspectedSplitDates: [], invalidBarDates: [] };
-const coverage: SnapshotCoverage = { contractsRequested: 200, contractsWithAnyTick: 198, contractsWithTwoSidedQuote: 190, contractsWithImpliedVolatility: 160 };
 const prepared = (): PreparedTicker => ({
   ticker: { tickerId: "t1", symbol: "SMCI", contractId: 1 },
   spotPrice: 40,
@@ -55,6 +53,14 @@ const prepared = (): PreparedTicker => ({
     { expiry: "20261016", strike: 42, right: "C" },
     { expiry: "20261120", strike: 40, right: "P" },
   ],
+  chainRefresh: {
+    optionParamsMs: 900,
+    expiries: [
+      { expiry: "20261016", strikeCount: 120, elapsedMs: 4500 },
+      { expiry: "20261120", strikeCount: 88, elapsedMs: 4800 },
+    ],
+    totalMs: 10_200,
+  },
 });
 
 function workers(overrides: Partial<BackfillStepWorkers> = {}) {
@@ -63,12 +69,9 @@ function workers(overrides: Partial<BackfillStepWorkers> = {}) {
   const base: BackfillStepWorkers = {
     connect,
     fetchHistory: vi.fn(async () => history),
-    captureCalendar: vi.fn(async () => ({ resolved: true, earningsWritten: 2, dividendsWritten: 0 })),
+    captureCalendar: vi.fn(async () => ({ resolved: true, earningsWritten: 2, dividendsWritten: 0, historicalEarningsWritten: 5, historicalEarningsSkippedEtf: false, historicalEarningsError: null })),
     loadUniverseTicker: vi.fn(async (tickerId: string, symbol: string) => ({ tickerId, symbol, contractId: 1 })),
     prepareChain: vi.fn(async () => prepared()),
-    isMarketOpen: vi.fn(async () => false),
-    getRiskFreeRate: vi.fn(async () => 0.0372),
-    captureSnapshot: vi.fn(async () => coverage),
     now: () => new Date(Date.UTC(2026, 8, 21, 14, 30)),
     ...overrides,
   };
@@ -81,7 +84,7 @@ const silence = () => vi.spyOn(console, "error").mockImplementation(() => {});
 // --- executeBackfillRun ------------------------------------------------------
 
 describe("executeBackfillRun", () => {
-  it("runs all four steps on one connection; with the market closed the snapshot is skipped and the run is complete", async () => {
+  it("runs all four steps on one connection; the snapshot step is always skipped, the run completes", async () => {
     const { store, runs } = inMemoryStore();
     const { workers: w, connect, disconnect } = workers();
     const run = await store.create("t1", []);
@@ -91,31 +94,11 @@ describe("executeBackfillRun", () => {
     expect(finished.status).toBe("complete");
     expect(statusOf(finished.steps)).toEqual({ history: "done", calendar: "done", chain_warmup: "done", first_snapshot: "skipped" });
     expect(finished.steps.find((step) => step.key === "history")!.message).toBe("1253 daily bars (2021-09-22 to 2026-09-18), 1250 implied-volatility points.");
-    expect(finished.steps.find((step) => step.key === "calendar")!.message).toBe("2 earnings and 0 dividend events.");
-    expect(finished.steps.find((step) => step.key === "chain_warmup")!.message).toBe("3 contracts across 2 expiries checked and cached.");
-    expect(finished.steps.find((step) => step.key === "first_snapshot")!.message).toContain("Market is closed");
-    expect(w.captureSnapshot).not.toHaveBeenCalled();
+    expect(finished.steps.find((step) => step.key === "calendar")!.message).toBe("2 earnings and 0 dividend events. 5 historical earnings dates.");
+    expect(finished.steps.find((step) => step.key === "chain_warmup")!.message).toBe("Strike grids stored for 2 expiries (208 strikes) in 10s; 3 contracts selected for capture.");
+    expect(finished.steps.find((step) => step.key === "first_snapshot")!.message).toBe("Captured by tonight's job in the normal 10:00 ET window, same as every other ticker.");
     expect(connect).toHaveBeenCalledTimes(1);
     expect(disconnect).toHaveBeenCalledTimes(1);
-  });
-
-  it("with the market open, captures the first snapshot using today's Eastern date and the rate as a percent", async () => {
-    const { store } = inMemoryStore();
-    const { workers: w } = workers({ isMarketOpen: async () => true });
-    const run = await store.create("t1", []);
-    await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
-    const [, , todayIso, ratePercent] = vi.mocked(w.captureSnapshot).mock.calls[0]!;
-    expect(todayIso).toBe("2026-09-21");
-    expect(ratePercent).toBeCloseTo(3.72, 10);
-    expect((await store.getLatest("t1"))!.steps.find((step) => step.key === "first_snapshot")).toMatchObject({ status: "done", message: "198 of 200 contracts received quotes." });
-  });
-
-  it("passes a null rate through as null", async () => {
-    const { store } = inMemoryStore();
-    const { workers: w } = workers({ isMarketOpen: async () => true, getRiskFreeRate: async () => null });
-    const run = await store.create("t1", []);
-    await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
-    expect(w.captureSnapshot).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.any(String), null);
   });
 
   it("a failing step is marked failed with its error text, the later steps still run, and the run ends partial", async () => {
@@ -133,24 +116,23 @@ describe("executeBackfillRun", () => {
 
   it("an unresolved calendar is skipped, not failed, and does not make the run partial", async () => {
     const { store } = inMemoryStore();
-    const { workers: w } = workers({ captureCalendar: async () => ({ resolved: false, earningsWritten: 0, dividendsWritten: 0 }) });
+    const { workers: w } = workers({ captureCalendar: async () => ({ resolved: false, earningsWritten: 0, dividendsWritten: 0, historicalEarningsWritten: 0, historicalEarningsSkippedEtf: false, historicalEarningsError: null }) });
     const run = await store.create("t1", []);
     await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
     const finished = (await store.getLatest("t1"))!;
-    expect(finished.steps[1]).toMatchObject({ status: "skipped", message: "Ticker not found on TradingView; calendar unavailable." });
+    expect(finished.steps[1]).toMatchObject({ status: "skipped", message: "Ticker not found on TradingView; forward calendar unavailable. 0 historical earnings dates." });
     expect(finished.status).toBe("complete");
   });
 
-  it("if the strike step fails, the snapshot step is skipped with that reason even when the market is open", async () => {
+  it("if the strike step fails, the snapshot step is skipped with that specific reason", async () => {
     const error = silence();
     const { store } = inMemoryStore();
-    const { workers: w } = workers({ isMarketOpen: async () => true, prepareChain: async () => { throw new Error("no usable spot price"); } });
+    const { workers: w } = workers({ prepareChain: async () => { throw new Error("no usable spot price"); } });
     const run = await store.create("t1", []);
     await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
     const finished = (await store.getLatest("t1"))!;
     expect(statusOf(finished.steps)).toMatchObject({ chain_warmup: "failed", first_snapshot: "skipped" });
     expect(finished.steps[3]!.message).toBe("Skipped because the strike step did not finish.");
-    expect(w.captureSnapshot).not.toHaveBeenCalled();
     expect(finished.status).toBe("partial");
     error.mockRestore();
   });

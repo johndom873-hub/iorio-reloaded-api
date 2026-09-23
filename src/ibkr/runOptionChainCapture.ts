@@ -1,12 +1,19 @@
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { getCachedOptionParams, getCachedValidStrikes } from "./fetchOptionChain.js";
+import { refreshStoredOptionChain, type OptionChainRefreshTimings, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { fetchLivePrices } from "./fetchLivePrices.js";
 import { captureOptionQuoteBatch, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "../lib/realizedVolatility.js";
-import { calendarDaysUntilExpiry, computeStrikeWindow, selectContractsToCapture, type StrikeWindow } from "../lib/optionChainCaptureWindow.js";
+import {
+  calendarDaysUntilExpiry,
+  captureMaximumDaysToExpiry,
+  captureMinimumDaysToExpiry,
+  computeStrikeWindow,
+  selectContractsToCapture,
+  type StrikeWindow,
+} from "../lib/optionChainCaptureWindow.js";
 import { chooseReferenceVolatility, type ReferenceVolatilitySource } from "../lib/optionChainCaptureReferenceVolatility.js";
 import {
   computeSnapshotCoverage,
@@ -24,17 +31,16 @@ import { excludeTickersBeingPrepared } from "../lib/tickersBeingPrepared.js";
 
 // Nightly option-chain archive (IORIO Signal Engine, Phase 0). One ticker at a
 // time, batches of 60 contracts one after another (approved 2026-09-21: keeps
-// one batch inside IBKR's 100 market-data-line cap and clear of the live app),
-// strike validation capped at 20 requests in flight.
+// one batch inside IBKR's 100 market-data-line cap and clear of the live app).
+// Chain structure (expiries + each expiry's real strike grid) is fetched and
+// stored here, one wildcard lookup at a time (Marcelo, 2026-09-23) — see
+// refreshStoredOptionChain; every other reader takes it from the DB.
 
-export const captureMinimumDaysToExpiry = 0;
-export const captureMaximumDaysToExpiry = 90; // approved: 0-90 DTE
-export const strikeValidationMaximumInFlight = 20; // approved 2026-09-21
 const widestWindowHalfWidth = 0.5;
 const referenceVolatilityBarCount = 40;
 
 export type OptionChainCaptureEvent =
-  | { type: "tickerStart"; symbol: string; contractCount: number; referenceVolatilitySource: ReferenceVolatilitySource }
+  | { type: "tickerStart"; symbol: string; contractCount: number; referenceVolatilitySource: ReferenceVolatilitySource; chainRefresh: OptionChainRefreshTimings }
   | { type: "tickerDone"; symbol: string; status: string; coverage: SnapshotCoverage }
   | { type: "tickerError"; symbol: string; message: string }
   | { type: "recaptureStart"; symbols: string[] };
@@ -59,6 +65,8 @@ export interface PreparedTicker {
   referenceVolatility: number | null;
   referenceVolatilitySource: ReferenceVolatilitySource;
   contracts: OptionContractRequest[];
+  /** How long IBKR took for the expiries list and each expiry's strike grid — logged by the job and kept in job_runs.details. */
+  chainRefresh: OptionChainRefreshTimings;
 }
 
 /** Shortlist (not removed) + tickers with an open position, de-duplicated. No hardcoded symbols (approved 2026-09-21). Tickers still being prepared by the new-ticker backfill are skipped (approved 2026-09-21). */
@@ -113,32 +121,20 @@ function windowFor(spotPrice: number, referenceVolatility: number | null, daysTo
   };
 }
 
-type IbkrApi = Parameters<typeof getCachedValidStrikes>[0];
+type IbkrApi = Parameters<typeof refreshStoredOptionChain>[0];
 
 /** The IBKR/DB lookups prepareTicker needs; injectable so the contract-selection logic is testable offline. */
 export interface PrepareTickerDependencies {
   fetchSpotPrice: (symbol: string) => Promise<number | null | undefined>;
   loadReferenceVolatility: (tickerId: string, todayIso: string) => Promise<{ volatility: number | null; source: ReferenceVolatilitySource }>;
-  getOptionParams: (ib: IbkrApi, symbol: string, contractId: number) => Promise<{ expirations: string[]; strikes: number[] }>;
-  getValidStrikes: (ib: IbkrApi, symbol: string, expiry: string, candidates: number[]) => Promise<number[]>;
+  refreshStoredOptionChain: (ib: IbkrApi, ticker: { tickerId: string; symbol: string; contractId: number }, todayIso: string) => Promise<StoredOptionChainRefresh>;
 }
 
 const defaultPrepareDependencies: PrepareTickerDependencies = {
   fetchSpotPrice: async (symbol) => (await fetchLivePrices([{ key: symbol, legType: "stock", symbol }]))[symbol],
   loadReferenceVolatility,
-  getOptionParams: getCachedOptionParams,
-  getValidStrikes: getCachedValidStrikes,
+  refreshStoredOptionChain,
 };
-
-/** Runs the strike validator in groups so at most `strikeValidationMaximumInFlight` IBKR checks are in flight. */
-async function validateStrikesWithCap(dependencies: PrepareTickerDependencies, ib: IbkrApi, symbol: string, expiry: string, strikes: number[]): Promise<Set<number>> {
-  const valid = new Set<number>();
-  for (let start = 0; start < strikes.length; start += strikeValidationMaximumInFlight) {
-    const group = strikes.slice(start, start + strikeValidationMaximumInFlight);
-    for (const strike of await dependencies.getValidStrikes(ib, symbol, expiry, group)) valid.add(strike);
-  }
-  return valid;
-}
 
 export async function prepareTicker(ib: IbkrApi, ticker: UniverseTicker, todayIso: string, dependencies: PrepareTickerDependencies = defaultPrepareDependencies): Promise<PreparedTicker> {
   if (ticker.contractId === null) throw new Error("no ibkr_contract_id stored for this ticker");
@@ -146,18 +142,17 @@ export async function prepareTicker(ib: IbkrApi, ticker: UniverseTicker, todayIs
   if (spotPrice === null || spotPrice === undefined || !(spotPrice > 0)) throw new Error("no usable spot price");
 
   const reference = await dependencies.loadReferenceVolatility(ticker.tickerId, todayIso);
-  const { expirations, strikes } = await dependencies.getOptionParams(ib, ticker.symbol, ticker.contractId);
+  const chain = await dependencies.refreshStoredOptionChain(ib, { tickerId: ticker.tickerId, symbol: ticker.symbol, contractId: ticker.contractId }, todayIso);
   const contracts: OptionContractRequest[] = [];
-  for (const expiry of [...expirations].sort()) {
+  for (const expiry of [...chain.expirations].sort()) {
     const daysToExpiry = calendarDaysUntilExpiry(todayIso, expiry);
     if (daysToExpiry < captureMinimumDaysToExpiry || daysToExpiry > captureMaximumDaysToExpiry) continue;
     const window = windowFor(spotPrice, reference.volatility, daysToExpiry);
     if (!window) continue;
-    const wanted = selectContractsToCapture(strikes, spotPrice, window);
-    const validStrikes = await validateStrikesWithCap(dependencies, ib, ticker.symbol, expiry, [...new Set(wanted.map((contract) => contract.strike))]);
-    for (const contract of wanted) if (validStrikes.has(contract.strike)) contracts.push({ expiry, ...contract });
+    // Selected from the expiry's real grid, so every contract here exists.
+    for (const contract of selectContractsToCapture(chain.strikesByExpiry.get(expiry) ?? [], spotPrice, window)) contracts.push({ expiry, ...contract });
   }
-  return { ticker, spotPrice, referenceVolatility: reference.volatility, referenceVolatilitySource: reference.source, contracts };
+  return { ticker, spotPrice, referenceVolatility: reference.volatility, referenceVolatilitySource: reference.source, contracts, chainRefresh: chain.timings };
 }
 
 async function captureAllBatches(ib: IbkrApi, prepared: PreparedTicker): Promise<CapturedOptionQuote[]> {
@@ -271,7 +266,7 @@ export async function runOptionChainCapture(
     for (const ticker of universe) {
       try {
         const prepared = await dependencies.prepareTicker(ib, ticker, todayIso);
-        onEvent({ type: "tickerStart", symbol: ticker.symbol, contractCount: prepared.contracts.length, referenceVolatilitySource: prepared.referenceVolatilitySource });
+        onEvent({ type: "tickerStart", symbol: ticker.symbol, contractCount: prepared.contracts.length, referenceVolatilitySource: prepared.referenceVolatilitySource, chainRefresh: prepared.chainRefresh });
         const coverage = await dependencies.captureAndSave(ib, prepared, todayIso, riskFreeRatePercent);
         record(ticker.symbol, coverage);
         if (isTickerStarved(coverage)) starved.push({ prepared, coverage });

@@ -1,11 +1,10 @@
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { fetchDailyHistoryFromIbkr, upsertDailyBars } from "./priceBarCache.js";
-import { captureAndSave, prepareTicker, type PreparedTicker, type UniverseTicker } from "./runOptionChainCapture.js";
-import type { SnapshotCoverage } from "../lib/optionChainCaptureCoverage.js";
+import { prepareTicker, type PreparedTicker, type UniverseTicker } from "./runOptionChainCapture.js";
 import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
-import { computeMarketSessionStatus, easternDateIso } from "../lib/marketSessionStatus.js";
-import { getRiskFreeRate } from "../lib/riskFreeRate.js";
+import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
+import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { summarizeBackfillBars } from "../lib/backfillBarSummary.js";
 import type { DailyOhlcvBar } from "../lib/realizedVolatility.js";
 import {
@@ -100,12 +99,12 @@ export interface BackfillRunStore {
 export interface BackfillStepWorkers {
   connect: () => Promise<{ ib: IbkrConnection["ib"]; disconnect: () => void }>;
   fetchHistory: (connection: IbkrConnection, tickerId: string, symbol: string) => Promise<HistoryStepResult>;
-  captureCalendar: (tickerId: string, symbol: string) => Promise<{ resolved: boolean; earningsWritten: number; dividendsWritten: number }>;
+  captureCalendar: (
+    tickerId: string,
+    symbol: string,
+  ) => Promise<{ resolved: boolean; earningsWritten: number; dividendsWritten: number; historicalEarningsWritten: number; historicalEarningsSkippedEtf: boolean; historicalEarningsError: string | null }>;
   loadUniverseTicker: (tickerId: string, symbol: string) => Promise<UniverseTicker>;
   prepareChain: (ib: IbkrConnection["ib"], ticker: UniverseTicker, todayIso: string) => Promise<PreparedTicker>;
-  isMarketOpen: () => Promise<boolean>;
-  getRiskFreeRate: () => Promise<number | null>;
-  captureSnapshot: (ib: IbkrConnection["ib"], prepared: PreparedTicker, todayIso: string, riskFreeRatePercent: number | null) => Promise<SnapshotCoverage>;
   now: () => Date;
 }
 
@@ -129,15 +128,25 @@ const databaseRunStore: BackfillRunStore = {
 const defaultStepWorkers: BackfillStepWorkers = {
   connect: connectToIbkrGateway,
   fetchHistory: (connection, tickerId, symbol) => fetchAndStoreFiveYearHistory(connection, tickerId, symbol),
-  captureCalendar: captureTickerCalendarEvents,
+  captureCalendar: async (tickerId, symbol) => {
+    // TradingView (forward-looking next/most-recent earnings + dividends) and API Ninjas (full earnings
+    // history) are independent sources writing into the same table -- run them in parallel, not gated on
+    // each other, since neither one's outage should block the other (2026-09-23).
+    const [forward, historical] = await Promise.all([captureTickerCalendarEvents(tickerId, symbol), captureHistoricalEarnings(tickerId, symbol)]);
+    return {
+      resolved: forward.resolved,
+      earningsWritten: forward.earningsWritten,
+      dividendsWritten: forward.dividendsWritten,
+      historicalEarningsWritten: historical.written,
+      historicalEarningsSkippedEtf: historical.skippedEtf,
+      historicalEarningsError: historical.error,
+    };
+  },
   loadUniverseTicker: async (tickerId, symbol) => {
     const row = await db("tickers").where({ id: tickerId }).first();
     return { tickerId, symbol, contractId: (row?.ibkr_contract_id as number | null | undefined) ?? null };
   },
   prepareChain: (ib, ticker, todayIso) => prepareTicker(ib, ticker, todayIso),
-  isMarketOpen: async () => (await computeMarketSessionStatus(new Date())).state === "open",
-  getRiskFreeRate,
-  captureSnapshot: captureAndSave,
   now: () => new Date(),
 };
 
@@ -203,23 +212,33 @@ export async function executeBackfillRun(runId: string, tickerId: string, symbol
 
     await runStep("calendar", async () => {
       const result = await workers.captureCalendar(tickerId, symbol);
-      if (!result.resolved) return { status: "skipped", message: "Ticker not found on TradingView; calendar unavailable." };
-      return { status: "done", message: `${result.earningsWritten} earnings and ${result.dividendsWritten} dividend events.` };
+      const historicalNote = result.historicalEarningsError
+        ? ` Historical earnings backfill failed: ${result.historicalEarningsError}.`
+        : result.historicalEarningsSkippedEtf
+          ? " ETF: no earnings to backfill."
+          : ` ${result.historicalEarningsWritten} historical earnings dates.`;
+      if (!result.resolved) return { status: "skipped", message: `Ticker not found on TradingView; forward calendar unavailable.${historicalNote}` };
+      return { status: "done", message: `${result.earningsWritten} earnings and ${result.dividendsWritten} dividend events.${historicalNote}` };
     });
 
     let prepared: PreparedTicker | null = null;
     await runStep("chain_warmup", async () => {
       prepared = await workers.prepareChain((await getConnection()).ib, await workers.loadUniverseTicker(tickerId, symbol), todayIso);
-      const expiryCount = new Set(prepared.contracts.map((contract) => contract.expiry)).size;
-      return { status: "done", message: `${prepared.contracts.length} contracts across ${expiryCount} expiries checked and cached.` };
+      const gridCount = prepared.chainRefresh.expiries.length;
+      const strikeCount = prepared.chainRefresh.expiries.reduce((sum, expiry) => sum + expiry.strikeCount, 0);
+      return { status: "done", message: `Strike grids stored for ${gridCount} expiries (${strikeCount} strikes) in ${(prepared.chainRefresh.totalMs / 1000).toFixed(0)}s; ${prepared.contracts.length} contracts selected for capture.` };
     });
 
     await runStep("first_snapshot", async () => {
-      if (!(await workers.isMarketOpen())) return { status: "skipped", message: "Market is closed; the first snapshot will be captured by tonight's job." };
+      // Always skipped, never captured immediately on add -- deliberately, not just "not built yet"
+      // (Marcelo, 2026-09-23). Every other night's capture runs inside the fixed 10:00-10:30 ET clock
+      // window (optionChainCaptureClock.ts), so every ticker's snapshot history lines up on the same
+      // reference time day to day. Capturing immediately whenever a ticker happened to be added --
+      // anywhere from 9:30am to 4pm ET -- gave that one ticker's first data point a different time-of-day
+      // basis than everything else, the same class of inconsistency already flagged once before (see the
+      // 2026-09-11 capture-timing finding in PROGRESS.md).
       if (!prepared) return { status: "skipped", message: "Skipped because the strike step did not finish." };
-      const riskFreeRate = await workers.getRiskFreeRate();
-      const coverage = await workers.captureSnapshot((await getConnection()).ib, prepared, todayIso, riskFreeRate === null ? null : riskFreeRate * 100);
-      return { status: "done", message: `${coverage.contractsWithAnyTick} of ${coverage.contractsRequested} contracts received quotes.` };
+      return { status: "skipped", message: "Captured by tonight's job in the normal 10:00 ET window, same as every other ticker." };
     });
   } finally {
     (connection as IbkrConnection | null)?.disconnect();

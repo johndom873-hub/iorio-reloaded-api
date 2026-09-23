@@ -90,7 +90,7 @@ export function buildSignalsRoadmap(counts: RoadmapCounts, todayIso: string): Ro
     {
       id: "earnings",
       title: "Earnings not adjusted in the volatility forecast",
-      summary: "Expiries spanning earnings are flagged, not corrected.",
+      summary: "Expiries spanning a known earnings date are excluded (not just flagged); the forecast itself still isn't corrected for the elevated IV.",
       needs: "Earnings-date history: the nightly calendar keeps one report date per quarter per ticker",
       status: "waiting_on_data",
       eta: {

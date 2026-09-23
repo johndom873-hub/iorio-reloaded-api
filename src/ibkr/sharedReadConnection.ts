@@ -57,7 +57,7 @@ export interface BorrowedConnection {
 }
 
 // Every shared connection's ib -> its own reqId allocator, so any helper that
-// is handed just an `ib` (lookupOptionParams, checkStrikeExists,
+// is handed just an `ib` (lookupOptionParams, lookupExpiryStrikes,
 // fetchQuotesForContracts, derived IV-bar ids, ...) takes its ids from the
 // right counter without every signature having to thread an allocator
 // through. reqIds only need to be unique per connection, and on a shared one

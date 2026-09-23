@@ -12,7 +12,21 @@ const rate = 0.04;
 const params: RawSviParameters = { a: 0.004, b: 0.06, rho: -0.35, m: 0.01, sigma: 0.12 };
 const years30 = 30 / 365;
 const years60 = 60 / 365;
-const slice = (expiry: string, years: number): SignalSurfaceSlice => ({ expiry, status: "ok", parameters: params, kMin: -0.4, kMax: 0.4, yearsToExpiry: years, forwardPrice: forward });
+const slice = (expiry: string, years: number): SignalSurfaceSlice => ({
+  expiry,
+  status: "ok",
+  parameters: params,
+  kMin: -0.4,
+  kMax: 0.4,
+  yearsToExpiry: years,
+  forwardPrice: forward,
+  pointCount: 20,
+  rmseVolatility: 0.01,
+  minButterflyDensity: 0.8,
+  droppedCounts: { inTheMoney: 0, noTwoSidedQuote: 0, spreadTooWide: 0, noImpliedVolatility: 0 },
+  calendarChecks: 0,
+  calendarViolations: 0,
+});
 function quoteAt(strike: number, right: "C" | "P", expiry: string, years: number): SignalQuote {
   const iv = Math.sqrt(sviTotalVariance(params, Math.log(strike / forward)) / years);
   const mid = blackScholesPriceOnForward(forward, strike, years, rate, iv, right === "C");
@@ -30,6 +44,7 @@ function inputsFor(ticker: ShortlistTickerRow, withSnapshot: boolean, freeShares
     forecast: withSnapshot ? { volatility: 0.15, windowDays: 63 } : null,
     suspectedSplitDateIso: null,
     earningsDatesIso: [],
+    earningsCalendarResolved: true,
     momentum: 0.1,
     elevatedVolatility: null,
     skew: null,

@@ -54,7 +54,7 @@ export async function streamPositionQuote(symbol: string, onEvent: (event: Posit
         const spotPrice = pricing?.last ?? (await getBestKnownStockPrice(symbol)) ?? pricing?.previousClose;
         if (!spotPrice) throw new Error("No spot price available to select option strikes.");
 
-        const expiryStrikes = await prepareOptionChainStrikes(connection, symbol, contractDetails.conId, spotPrice);
+        const expiryStrikes = await prepareOptionChainStrikes(symbol, spotPrice);
         const optionChain = await quoteOptionChain(connection, symbol, expiryStrikes);
         onEvent({ type: "optionChain", data: optionChain });
       } catch (error) {
