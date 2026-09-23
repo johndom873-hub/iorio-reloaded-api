@@ -5,7 +5,7 @@
 // or plain text where the wait is a decision or a later phase. The counts are the only
 // thing the store supplies; everything else is pure so it can be tested.
 
-export type RoadmapStatus = "waiting_on_data" | "waiting_on_sign_off" | "waiting_on_decision" | "waiting_on_later_phase";
+export type RoadmapStatus = "waiting_on_data" | "waiting_on_sign_off" | "waiting_on_decision" | "waiting_on_later_phase" | "waiting_on_build";
 
 export interface RoadmapProgress {
   have: number;
@@ -74,10 +74,10 @@ export function buildSignalsRoadmap(counts: RoadmapCounts, todayIso: string): Ro
     {
       id: "ratio",
       title: "Risk-adjusted ratio (Edge $ / dollar risk)",
-      summary: "Would fold the UncompensatedShare risk into the ranking without weights.",
-      needs: "Your sign-off on the formula, then a test on real chains",
-      status: "waiting_on_sign_off",
-      eta: { kind: "text", text: "Buildable once you approve" },
+      summary: "Formula approved 2026-09-23. Would fold the UncompensatedShare risk into the ranking without weights.",
+      needs: "Wiring into the ranking, then a test on real chains",
+      status: "waiting_on_build",
+      eta: { kind: "text", text: "In progress" },
     },
     {
       id: "skew",
@@ -98,14 +98,6 @@ export function buildSignalsRoadmap(counts: RoadmapCounts, todayIso: string): Ro
         dateIso: addCalendarDays(todayIso, Math.max(0, quartersForEarningsAdjustment - counts.minimumPastEarningsPerTicker) * calendarDaysPerQuarter),
         progress: { have: Math.min(counts.minimumPastEarningsPerTicker, quartersForEarningsAdjustment), need: quartersForEarningsAdjustment, unit: "past earnings dates per ticker (least-covered ticker)" },
       },
-    },
-    {
-      id: "dividends",
-      title: "Only the next dividend is in the forward",
-      summary: "Later dividends before a 60-90 day expiry are missing; matters for payers.",
-      needs: "A dividend schedule source (none chosen)",
-      status: "waiting_on_decision",
-      eta: { kind: "text", text: "No ETA" },
     },
     {
       id: "svi",
@@ -135,26 +127,20 @@ export function buildSignalsRoadmap(counts: RoadmapCounts, todayIso: string): Ro
       status: "waiting_on_later_phase",
       eta: { kind: "text", text: "After Phase 2" },
     },
-    {
-      id: "splits",
-      title: "Suspected stock splits are skipped silently in the volatility forecast",
-      summary: "The split guard drops a day it cannot trust but records nothing, so a ticker with an odd price history cannot be flagged.",
-      needs: "The forecast to record the days it skipped, per ticker",
-      status: "waiting_on_decision",
-      eta: { kind: "text", text: "Small change; ask for it when wanted" },
-    },
   ];
 }
 
-/** Per-ticker caveats derived from a row's own facts (no snapshot, short history, dividend payer). */
+/** Per-ticker caveats derived from a row's own facts (no snapshot, suspected split, short history, dividend payer). */
 export interface TickerCaveatInputs {
   unscoredReason: string | null;
+  suspectedSplitDateIso: string | null;
   dailyBarCount: number;
-  hasDividendEvents: boolean;
+  /** True when there is an upcoming ex-dividend but no regular cadence could be inferred to project later ones into the forward. */
+  dividendCadenceUnknown: boolean;
 }
 
 export interface TickerCaveat {
-  id: "no_snapshot" | "short_history" | "dividend_payer";
+  id: "no_snapshot" | "suspected_split" | "short_history" | "dividend_payer";
   title: string;
   summary: string;
   needs: string;
@@ -166,6 +152,16 @@ export function buildTickerCaveats(inputs: TickerCaveatInputs, todayIso: string)
   const caveats: TickerCaveat[] = [];
   if (inputs.unscoredReason === "no_snapshot") {
     caveats.push({ id: "no_snapshot", title: "No option-chain snapshot yet", summary: "Nothing to fit a surface from, so no scores.", needs: "The nightly capture to run for this ticker", status: "waiting_on_data", eta: { kind: "text", text: "First night after the capture runs" } });
+  }
+  if (inputs.suspectedSplitDateIso !== null) {
+    caveats.push({
+      id: "suspected_split",
+      title: `Suspected stock split on ${inputs.suspectedSplitDateIso}: no volatility forecast`,
+      summary: "The stored daily prices jump across that day the way a split does, so the forecast refuses to use them and the ticker is not scored. IBKR returns split-adjusted prices on a fresh fetch.",
+      needs: "Backfill history for this ticker (re-fetches five years of adjusted prices)",
+      status: "waiting_on_data",
+      eta: { kind: "text", text: "Scored on the next refresh after the backfill" },
+    });
   }
   if (inputs.dailyBarCount < tradingDaysForOwnVolatilityThreshold) {
     const momentumMissing = inputs.dailyBarCount < tradingDaysForMomentum;
@@ -180,8 +176,15 @@ export function buildTickerCaveats(inputs: TickerCaveatInputs, todayIso: string)
       eta: { kind: "date", dateIso: projectTradingDays(todayIso, momentumMissing ? barsForMomentum : barsForThreshold), progress: { have: inputs.dailyBarCount, need: momentumMissing ? tradingDaysForMomentum : tradingDaysForOwnVolatilityThreshold, unit: "daily bars" } },
     });
   }
-  if (inputs.hasDividendEvents) {
-    caveats.push({ id: "dividend_payer", title: "Dividend payer: later dividends missing from the forward", summary: "Only the next ex-dividend is stored.", needs: "A dividend schedule source", status: "waiting_on_decision", eta: { kind: "text", text: "No ETA" } });
+  if (inputs.dividendCadenceUnknown) {
+    caveats.push({
+      id: "dividend_payer",
+      title: "Dividend payer: later dividends missing from the forward",
+      summary: "No past ex-dividend on record (or an irregular gap to it), so a cadence can't be projected forward. Only the next ex-dividend is used.",
+      needs: "One more observed ex-dividend cycle on record for this ticker",
+      status: "waiting_on_data",
+      eta: { kind: "text", text: "No ETA" },
+    });
   }
   return caveats;
 }

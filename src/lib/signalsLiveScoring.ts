@@ -113,7 +113,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     atmImpliedVolatility: computeAtmImpliedVolatility(inputs.slices),
     forecast: inputs.forecast,
     dailyBarCount: inputs.dailyBarCount,
-    hasDividendEvents: inputs.hasDividendEvents,
+    dividendCadenceUnknown: inputs.dividendCadenceUnknown,
     caveats: [],
     freeShares: inputs.freeShares,
     freeCash: account.freeCash,
@@ -121,12 +121,12 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const withCaveats = (unscoredReason: TickerSignals["unscoredReason"]): TickerSignals => ({
     ...base,
     unscoredReason,
-    caveats: buildTickerCaveats({ unscoredReason, dailyBarCount: inputs.dailyBarCount, hasDividendEvents: inputs.hasDividendEvents }, inputs.todayEasternIso),
+    caveats: buildTickerCaveats({ unscoredReason, suspectedSplitDateIso: inputs.suspectedSplitDateIso, dailyBarCount: inputs.dailyBarCount, dividendCadenceUnknown: inputs.dividendCadenceUnknown }, inputs.todayEasternIso),
   });
 
   if (!header) return withCaveats("no_snapshot");
   if (base.fittedSliceCount === 0 || header.underlyingPrice === null || header.riskFreeRatePercent === null) return withCaveats("no_surface_fit");
-  if (!inputs.forecast) return withCaveats("no_forecast");
+  if (!inputs.forecast) return withCaveats(inputs.suspectedSplitDateIso !== null ? "suspected_split" : "no_forecast");
   if (spotPrice === null) return withCaveats("no_snapshot");
 
   const slices = live ? scaleSlicesToLiveSpot(inputs.slices, header.underlyingPrice, live.spotPrice) : inputs.slices;

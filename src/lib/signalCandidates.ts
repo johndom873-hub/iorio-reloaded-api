@@ -77,6 +77,12 @@ export interface SignalCandidate {
   /** Best case for an Adaptive order that fills at the mid: only the commission is conceded. */
   netEdgeAtMid: number;
   edgeDollarsAtMid: number;
+  /** Max theoretical loss per contract at the mid premium: strike*100-premium (CSP) or spot*100-premium (CC). Marcelo approved 2026-09-23. */
+  dollarRisk: number;
+  /** edgeDollars / dollarRisk. */
+  riskAdjustedRatio: number;
+  /** edgeDollarsAtMid / dollarRisk. */
+  riskAdjustedRatioAtMid: number;
   annualizedYield: number;
   uncompensatedSharePercent: number | null;
   quoteSource: SignalQuoteSource;
@@ -149,6 +155,9 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     const premium = (quote.bid + quote.ask) / 2;
     const capitalAtRisk = strategyKey === "covered_call" ? input.spotPrice : quote.strike;
     const annualizedYield = (premium / capitalAtRisk) * (annualDays / dte);
+    const dollarRisk = capitalAtRisk * 100 - premium;
+    const riskAdjustedRatio = edgeDollars / dollarRisk;
+    const riskAdjustedRatioAtMid = edgeDollarsAtMid / dollarRisk;
     const spreadPercent = ((quote.ask - quote.bid) / premium) * 100;
     const insideRange = logMoneyness >= slice.kMin && logMoneyness <= slice.kMax;
     const flags: SignalFlag[] = [];
@@ -178,6 +187,9 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       vega,
       netEdgeAtMid,
       edgeDollarsAtMid,
+      dollarRisk,
+      riskAdjustedRatio,
+      riskAdjustedRatioAtMid,
       annualizedYield,
       uncompensatedSharePercent: null,
       quoteSource: quote.source ?? "snapshot",

@@ -71,7 +71,7 @@ export interface YangZhangComponents {
 
 export type YangZhangResult =
   | { available: true; windowDays: number; annualizedVolatility: number; components: YangZhangComponents }
-  | { available: false; windowDays: number; reason: YangZhangUnavailableReason; detail: string };
+  | { available: false; windowDays: number; reason: YangZhangUnavailableReason; detail: string; /** Trading date of the flagged overnight move; only with reason "suspected_split". */ splitDateIso?: string };
 
 function isValidBar(bar: DailyOhlcvBar): boolean {
   const { open, high, low, close, volume } = bar;
@@ -142,7 +142,7 @@ export function computeYangZhangVolatility(bars: DailyOhlcvBar[], windowDays: nu
   }
   for (let index = firstWindowIndex; index < bars.length; index++) {
     if (isSuspectedSplitAt(bars, index)) {
-      return { available: false, windowDays, reason: "suspected_split", detail: `suspected split on ${bars[index]!.tradingDate}` };
+      return { available: false, windowDays, reason: "suspected_split", detail: `suspected split on ${bars[index]!.tradingDate}`, splitDateIso: bars[index]!.tradingDate };
     }
   }
 

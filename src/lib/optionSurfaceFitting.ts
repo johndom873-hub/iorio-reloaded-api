@@ -3,8 +3,8 @@ import {
   checkCalendarArbitrage,
   computeForwardPrice,
   fitSviSlice,
+  projectDividendSchedule,
   yearsBetweenIsoDates,
-  type DiscreteDividend,
   type FitPointDropCounts,
   type SurfaceQuote,
   type SviSliceFit,
@@ -25,6 +25,9 @@ export interface SurfaceSnapshotInput {
   riskFreeRatePercent: number | null;
   nextExDividendDate: string | null;
   nextExDividendAmount: number | null;
+  /** Most recent past ex-dividend on record, used only to infer a regular cadence for projecting later dividends. */
+  pastExDividendDate: string | null;
+  pastExDividendAmount: number | null;
   quotes: SurfaceSnapshotQuote[];
 }
 
@@ -49,12 +52,14 @@ export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOu
   if (input.quotes.length === 0) return { kind: "skipped", reason: "no_quotes" };
 
   const riskFreeRate = input.riskFreeRatePercent / 100;
-  const dividends: DiscreteDividend[] =
-    input.nextExDividendDate !== null && input.nextExDividendAmount !== null
-      ? [{ amount: input.nextExDividendAmount, yearsToExDividend: yearsBetweenIsoDates(input.tradingDate, input.nextExDividendDate) }]
-      : [];
-
   const expiries = [...new Set(input.quotes.map((quote) => quote.expiry))].sort();
+  const dividends = projectDividendSchedule(
+    input.tradingDate,
+    input.nextExDividendDate !== null && input.nextExDividendAmount !== null ? { date: input.nextExDividendDate, amount: input.nextExDividendAmount } : null,
+    input.pastExDividendDate !== null && input.pastExDividendAmount !== null ? { date: input.pastExDividendDate, amount: input.pastExDividendAmount } : null,
+    expiries[expiries.length - 1] ?? input.tradingDate,
+  );
+
   const fitted: FittedExpiry[] = [];
   let previousWithFit: { yearsToExpiry: number; parameters: NonNullable<SviSliceFit["parameters"]>; kMin: number; kMax: number } | null = null;
 

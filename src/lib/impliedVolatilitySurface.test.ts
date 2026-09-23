@@ -7,7 +7,9 @@ import {
   fitRawSvi,
   fitSviSlice,
   impliedVolatilityFromPrice,
+  isRegularDividendCadence,
   minimumButterflyDensity,
+  projectDividendSchedule,
   sviButterflyDensity,
   sviTotalVariance,
   yearsBetweenIsoDates,
@@ -42,6 +44,57 @@ describe("yearsBetweenIsoDates", () => {
   it("is calendar days over 365", () => {
     expect(yearsBetweenIsoDates("2026-09-21", "2026-10-01")).toBeCloseTo(10 / 365, 12);
     expect(yearsBetweenIsoDates("2026-10-30", "2026-11-06")).toBeCloseTo(7 / 365, 12);
+  });
+});
+
+describe("isRegularDividendCadence", () => {
+  it("is false without both a next and a past record, true only within the accepted gap band", () => {
+    expect(isRegularDividendCadence(null, null)).toBe(false);
+    expect(isRegularDividendCadence({ date: "2026-10-01", amount: 2 }, null)).toBe(false);
+    expect(isRegularDividendCadence({ date: "2026-10-01", amount: 2 }, { date: "2026-09-25", amount: 2 })).toBe(false); // 6 days: too short
+    expect(isRegularDividendCadence({ date: "2026-10-01", amount: 2 }, { date: "2025-06-01", amount: 2 })).toBe(false); // ~488 days: too long
+    expect(isRegularDividendCadence({ date: "2026-10-01", amount: 2 }, { date: "2026-09-01", amount: 2 })).toBe(true); // 30 days: monthly
+  });
+});
+
+describe("projectDividendSchedule", () => {
+  const tradingDate = "2026-09-21";
+
+  it("returns nothing when there is no next dividend on record", () => {
+    expect(projectDividendSchedule(tradingDate, null, null, "2026-12-01")).toEqual([]);
+    expect(projectDividendSchedule(tradingDate, null, { date: "2026-06-01", amount: 1 }, "2026-12-01")).toEqual([]);
+  });
+
+  it("returns only the next dividend when there is no past record to infer a cadence from", () => {
+    const result = projectDividendSchedule(tradingDate, { date: "2026-10-01", amount: 2 }, null, "2026-12-01");
+    expect(result).toEqual([{ amount: 2, yearsToExDividend: yearsBetweenIsoDates(tradingDate, "2026-10-01") }]);
+  });
+
+  it("returns only the next dividend when the past-to-next gap is not a plausible regular cadence", () => {
+    const tooShort = projectDividendSchedule(tradingDate, { date: "2026-10-01", amount: 2 }, { date: "2026-09-25", amount: 2 }, "2026-12-01");
+    expect(tooShort).toEqual([{ amount: 2, yearsToExDividend: yearsBetweenIsoDates(tradingDate, "2026-10-01") }]);
+
+    const tooLong = projectDividendSchedule(tradingDate, { date: "2026-10-01", amount: 2 }, { date: "2025-06-01", amount: 2 }, "2026-12-01");
+    expect(tooLong).toEqual([{ amount: 2, yearsToExDividend: yearsBetweenIsoDates(tradingDate, "2026-10-01") }]);
+  });
+
+  it("projects further dividends at the inferred cadence and the same amount, up to (not including) the horizon", () => {
+    const result = projectDividendSchedule(tradingDate, { date: "2026-10-01", amount: 2 }, { date: "2026-09-01", amount: 1.5 }, "2026-12-15");
+    expect(result).toEqual([
+      { amount: 2, yearsToExDividend: yearsBetweenIsoDates(tradingDate, "2026-10-01") },
+      { amount: 2, yearsToExDividend: yearsBetweenIsoDates(tradingDate, "2026-10-31") },
+      { amount: 2, yearsToExDividend: yearsBetweenIsoDates(tradingDate, "2026-11-30") },
+    ]);
+  });
+
+  it("stops projecting once a projected date reaches the horizon", () => {
+    const result = projectDividendSchedule(tradingDate, { date: "2026-10-01", amount: 2 }, { date: "2026-09-01", amount: 2 }, "2026-10-31");
+    expect(result).toEqual([{ amount: 2, yearsToExDividend: yearsBetweenIsoDates(tradingDate, "2026-10-01") }]);
+  });
+
+  it("caps the number of projected dividends even for a very distant horizon", () => {
+    const result = projectDividendSchedule(tradingDate, { date: "2026-10-01", amount: 2 }, { date: "2026-09-01", amount: 2 }, "2030-01-01");
+    expect(result).toHaveLength(7); // the next dividend plus the 6-projection cap
   });
 });
 

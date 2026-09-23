@@ -27,6 +27,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     slices: [slice("2026-10-21", years30), slice("2026-11-20", years60)],
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)],
     forecast: { volatility: 0.15, windowDays: 63 },
+    suspectedSplitDateIso: null,
     earningsDatesIso: [],
     momentum: 0.12,
     elevatedVolatility: null,
@@ -35,7 +36,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     previousClose: { close: 98, dateIso: "2026-09-21" },
     freeShares: 200,
     dailyBarCount: 1253,
-    hasDividendEvents: false,
+    dividendCadenceUnknown: false,
     todayEasternIso: "2026-09-22",
     ...overrides,
   };
@@ -108,6 +109,9 @@ describe("scoreTicker", () => {
     expect(scoreTicker(inputs({ header: null }), account).unscoredReason).toBe("no_snapshot");
     expect(scoreTicker(inputs({ slices: [slice("2026-10-21", years30, { status: "insufficient_points" as never })] }), account).unscoredReason).toBe("no_surface_fit");
     expect(scoreTicker(inputs({ forecast: null }), account).unscoredReason).toBe("no_forecast");
+    const split = scoreTicker(inputs({ forecast: null, suspectedSplitDateIso: "2026-09-15" }), account);
+    expect(split.unscoredReason).toBe("suspected_split");
+    expect(split.caveats.map((caveat) => caveat.id)).toContain("suspected_split");
   });
 
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {

@@ -110,6 +110,17 @@ describe("buildSignalCandidates: computed fields", () => {
     expect(c.vega).toBeCloseTo(blackScholesVega(forward, 90, 30 / 365, rate, c.surfaceImpliedVolatility), 12);
   });
 
+  it("dollar risk is max theoretical loss (strike or spot x 100, minus mid premium), and the risk-adjusted ratios follow from it", () => {
+    const call = buildSignalCandidates(baseInput({ quotes: [quoteAt(110, "C")], spotPrice: 100 }))[0]!;
+    const put = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spotPrice: 100 }))[0]!;
+    const premiumCall = (call.bid + call.ask) / 2;
+    const premiumPut = (put.bid + put.ask) / 2;
+    expect(call.dollarRisk).toBeCloseTo(100 * 100 - premiumCall, 10);
+    expect(put.dollarRisk).toBeCloseTo(90 * 100 - premiumPut, 10);
+    expect(put.riskAdjustedRatio).toBeCloseTo(put.edgeDollars / put.dollarRisk, 10);
+    expect(put.riskAdjustedRatioAtMid).toBeCloseTo(put.edgeDollarsAtMid / put.dollarRisk, 10);
+  });
+
   it("does not run the Monte Carlo: uncompensated share is null until attached", () => {
     const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(105, "C")] }))[0]!;
     expect(c.uncompensatedSharePercent).toBeNull();
@@ -237,7 +248,7 @@ describe("buildSignalCandidates: boundary conditions", () => {
 describe("gradeSignalCandidates", () => {
   // 10 candidates with net Edge 1..10 (all positive) -> top 10% (1) strong, next 20% (2) good, next 30% (3) marginal, rest (4) avoid
   function fakeCandidates(netEdges: number[]) {
-    return netEdges.map((netEdge, index) => ({ netEdge, strategyKey: "cash_secured_put" as const, expiry: "2026-10-21", strike: 90 - index, dte: 30, delta: -0.2, bid: 1, ask: 1.1, spreadPercent: 5, surfaceImpliedVolatility: 0.2, midImpliedVolatility: 0.2, forecastVolatility: 0.15, edge: netEdge, frictionVolatility: 0, edgeDollars: netEdge * 10, vega: 0.1, netEdgeAtMid: netEdge, edgeDollarsAtMid: netEdge * 10, annualizedYield: 0.2, uncompensatedSharePercent: 30, quoteSource: "snapshot" as const, flags: [], executable: true, grade: "avoid" as const }));
+    return netEdges.map((netEdge, index) => ({ netEdge, strategyKey: "cash_secured_put" as const, expiry: "2026-10-21", strike: 90 - index, dte: 30, delta: -0.2, bid: 1, ask: 1.1, spreadPercent: 5, surfaceImpliedVolatility: 0.2, midImpliedVolatility: 0.2, forecastVolatility: 0.15, edge: netEdge, frictionVolatility: 0, edgeDollars: netEdge * 10, vega: 0.1, netEdgeAtMid: netEdge, edgeDollarsAtMid: netEdge * 10, dollarRisk: 8999, riskAdjustedRatio: (netEdge * 10) / 8999, riskAdjustedRatioAtMid: (netEdge * 10) / 8999, annualizedYield: 0.2, uncompensatedSharePercent: 30, quoteSource: "snapshot" as const, flags: [], executable: true, grade: "avoid" as const }));
   }
 
   it("cuts at top 10% / next 20% / next 30% / rest, all positive net Edge", () => {

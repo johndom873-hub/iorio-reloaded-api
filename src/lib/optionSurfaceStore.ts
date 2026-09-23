@@ -28,6 +28,8 @@ interface SnapshotHeaderRow {
   riskFreeRatePercent: string | null;
   nextExDividendDate: string | null;
   nextExDividendAmount: string | null;
+  pastExDividendDate: string | null;
+  pastExDividendAmount: string | null;
 }
 
 const toNumberOrNull = (value: string | number | null | undefined): number | null => (value === null || value === undefined ? null : Number(value));
@@ -65,21 +67,33 @@ export async function saveSurfaceFits(snapshotId: string, expiries: FittedExpiry
 }
 
 async function loadHeaders(tradingDate: string, symbols?: string[]): Promise<SnapshotHeaderRow[]> {
-  const query = db("option_chain_snapshots as h")
-    .join("tickers as t", "t.id", "h.ticker_id")
-    .whereRaw("h.trading_date::text = ?", [tradingDate])
-    .whereIn("h.status", ["complete", "partial"])
-    .select(
-      "h.id as snapshotId",
-      "t.symbol",
-      "h.underlying_price as spotPrice",
-      "h.risk_free_rate_percent as riskFreeRatePercent",
-      db.raw('h.next_ex_dividend_date::text as "nextExDividendDate"'),
-      "h.next_ex_dividend_amount as nextExDividendAmount",
-    )
-    .orderBy("t.symbol");
-  if (symbols && symbols.length > 0) query.whereIn("t.symbol", symbols);
-  return query;
+  const hasSymbolFilter = symbols !== undefined && symbols.length > 0;
+  const { rows } = await db.raw(
+    `
+    SELECT
+      h.id AS "snapshotId",
+      t.symbol,
+      h.underlying_price AS "spotPrice",
+      h.risk_free_rate_percent AS "riskFreeRatePercent",
+      h.next_ex_dividend_date::text AS "nextExDividendDate",
+      h.next_ex_dividend_amount AS "nextExDividendAmount",
+      p."pastExDividendDate",
+      p."pastExDividendAmount"
+    FROM option_chain_snapshots h
+    JOIN tickers t ON t.id = h.ticker_id
+    LEFT JOIN LATERAL (
+      SELECT event_date::text AS "pastExDividendDate", amount AS "pastExDividendAmount"
+      FROM ticker_calendar_events c
+      WHERE c.ticker_id = h.ticker_id AND c.event_type = 'ex_dividend' AND c.event_date < ?::date
+      ORDER BY c.event_date DESC
+      LIMIT 1
+    ) p ON true
+    WHERE h.trading_date::text = ? AND h.status IN ('complete', 'partial') ${hasSymbolFilter ? "AND t.symbol = ANY(?)" : ""}
+    ORDER BY t.symbol
+    `,
+    hasSymbolFilter ? [tradingDate, tradingDate, symbols] : [tradingDate, tradingDate],
+  );
+  return rows;
 }
 
 async function loadQuotes(snapshotId: string) {
@@ -107,6 +121,8 @@ export async function fitAndStoreSurfacesForDate(tradingDate: string, onEvent: (
         riskFreeRatePercent: toNumberOrNull(header.riskFreeRatePercent),
         nextExDividendDate: header.nextExDividendDate,
         nextExDividendAmount: toNumberOrNull(header.nextExDividendAmount),
+        pastExDividendDate: header.pastExDividendDate,
+        pastExDividendAmount: toNumberOrNull(header.pastExDividendAmount),
         quotes: await loadQuotes(header.snapshotId),
       });
       if (outcome.kind === "skipped") {

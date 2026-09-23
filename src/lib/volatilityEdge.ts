@@ -24,13 +24,23 @@ export interface RealizedVolatilityForecast {
   windowDays: typeof primaryForecastWindowDays | typeof fallbackForecastWindowDays;
 }
 
+export interface RealizedVolatilityForecastSelection {
+  forecast: RealizedVolatilityForecast | null;
+  /** Set only when no window could be used and the last one tried was blocked by the split guard: the flagged trading date. */
+  suspectedSplitDateIso: string | null;
+}
+
 /** `bars` must be in date order and end at (not after) the snapshot date, so the forecast never sees the future. */
-export function selectRealizedVolatilityForecast(bars: DailyOhlcvBar[]): RealizedVolatilityForecast | null {
+export function selectRealizedVolatilityForecast(bars: DailyOhlcvBar[]): RealizedVolatilityForecastSelection {
+  let suspectedSplitDateIso: string | null = null;
   for (const windowDays of [primaryForecastWindowDays, fallbackForecastWindowDays] as const) {
     const result = computeYangZhangVolatility(bars, windowDays);
-    if (result.available && Number.isFinite(result.annualizedVolatility) && result.annualizedVolatility > 0) return { volatility: result.annualizedVolatility, windowDays };
+    if (result.available && Number.isFinite(result.annualizedVolatility) && result.annualizedVolatility > 0) {
+      return { forecast: { volatility: result.annualizedVolatility, windowDays }, suspectedSplitDateIso: null };
+    }
+    if (!result.available && result.reason === "suspected_split") suspectedSplitDateIso = result.splitDateIso ?? null;
   }
-  return null;
+  return { forecast: null, suspectedSplitDateIso };
 }
 
 export interface EdgeSlice {

@@ -34,12 +34,18 @@ describe("buildSignalsRoadmap", () => {
     expect(doneById.earnings!.eta).toMatchObject({ dateIso: today, progress: { have: 4 } });
   });
 
-  it("keeps decision / sign-off / later-phase items as text", () => {
-    expect(byId.ratio!.status).toBe("waiting_on_sign_off");
+  it("keeps decision / build / later-phase items as text", () => {
+    expect(byId.ratio!.status).toBe("waiting_on_build");
     expect(byId.ratio!.eta.kind).toBe("text");
-    expect(byId.dividends!.eta).toEqual({ kind: "text", text: "No ETA" });
     expect(byId.sizing!.status).toBe("waiting_on_later_phase");
-    expect(byId.splits!.status).toBe("waiting_on_decision");
+  });
+
+  it("no longer lists the split-guard item: suspected splits are a per-ticker caveat now", () => {
+    expect(byId.splits).toBeUndefined();
+  });
+
+  it("no longer lists the dividend-schedule item: the decision was made and the cadence projection was built", () => {
+    expect(byId.dividends).toBeUndefined();
   });
 
   it("friction says counting has not started while there are no Signals fills, then counts down", () => {
@@ -51,20 +57,27 @@ describe("buildSignalsRoadmap", () => {
 
 describe("buildTickerCaveats", () => {
   it("is empty for a scored ticker with full history and no dividends", () => {
-    expect(buildTickerCaveats({ unscoredReason: null, dailyBarCount: 1253, hasDividendEvents: false }, today)).toEqual([]);
+    expect(buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 1253, dividendCadenceUnknown: false }, today)).toEqual([]);
   });
   it("flags a missing snapshot, a short history (momentum first, then the own threshold) and dividends", () => {
-    const caveats = buildTickerCaveats({ unscoredReason: "no_snapshot", dailyBarCount: 118, hasDividendEvents: true }, today);
+    const caveats = buildTickerCaveats({ unscoredReason: "no_snapshot", suspectedSplitDateIso: null, dailyBarCount: 118, dividendCadenceUnknown: true }, today);
     expect(caveats.map((caveat) => caveat.id)).toEqual(["no_snapshot", "short_history", "dividend_payer"]);
     expect(caveats[1]!.title).toBe(`Momentum unavailable: 118 of ${tradingDaysForMomentum} daily bars`);
     expect(caveats[1]!.eta).toEqual({ kind: "date", dateIso: projectTradingDays(today, tradingDaysForMomentum - 118), progress: { have: 118, need: tradingDaysForMomentum, unit: "daily bars" } });
 
-    const [thresholdOnly] = buildTickerCaveats({ unscoredReason: null, dailyBarCount: 300, hasDividendEvents: false }, today);
+    const [thresholdOnly] = buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 300, dividendCadenceUnknown: false }, today);
     expect(thresholdOnly!.title).toContain(`300 of ${tradingDaysForOwnVolatilityThreshold}`);
     expect(thresholdOnly!.eta).toMatchObject({ dateIso: projectTradingDays(today, tradingDaysForOwnVolatilityThreshold - 300) });
   });
+  it("a suspected split names the flagged day and points at Backfill history, ahead of the history caveats", () => {
+    const caveats = buildTickerCaveats({ unscoredReason: "suspected_split", suspectedSplitDateIso: "2026-09-15", dailyBarCount: 118, dividendCadenceUnknown: false }, today);
+    expect(caveats.map((caveat) => caveat.id)).toEqual(["suspected_split", "short_history"]);
+    expect(caveats[0]!.title).toContain("2026-09-15");
+    expect(caveats[0]!.needs).toContain("Backfill history");
+    expect(caveats[0]!.status).toBe("waiting_on_data");
+  });
   it("a one-year backfill (252 bars) points at Backfill history rather than waiting", () => {
-    const [caveat] = buildTickerCaveats({ unscoredReason: null, dailyBarCount: 252, hasDividendEvents: false }, today);
+    const [caveat] = buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 252, dividendCadenceUnknown: false }, today);
     expect(caveat!.needs).toContain("Backfill history");
   });
 });

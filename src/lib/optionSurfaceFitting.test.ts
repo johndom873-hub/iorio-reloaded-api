@@ -27,6 +27,8 @@ function snapshot(overrides: Partial<SurfaceSnapshotInput> = {}): SurfaceSnapsho
     riskFreeRatePercent: ratePercent,
     nextExDividendDate: null,
     nextExDividendAmount: null,
+    pastExDividendDate: null,
+    pastExDividendAmount: null,
     quotes: [...quotesFor("2026-10-21", 1), ...quotesFor("2026-11-20", 2)],
     ...overrides,
   };
@@ -98,6 +100,34 @@ describe("fitSurfaceForSnapshot", () => {
     expect(withDividend.expiries[0]!.forwardPrice).toBeLessThan(plain.expiries[0]!.forwardPrice - 1.9);
     expect(afterExpiry.expiries[0]!.forwardPrice).toBeCloseTo(plain.expiries[0]!.forwardPrice, 10);
     expect(withDividend.expiries[0]!.slice.rmseVolatility!).toBeLessThan(0.005); // dividend-consistent quotes fit cleanly
+  });
+
+  it("projects a second dividend forward when the gap to the past ex-dividend implies a regular cadence, but not when the gap looks irregular", () => {
+    const div1 = { amount: 2, yearsToExDividend: yearsBetweenIsoDates(tradingDate, "2026-10-01") };
+    const div2 = { amount: 2, yearsToExDividend: yearsBetweenIsoDates(tradingDate, "2026-10-31") };
+    const regular = fitSurfaceForSnapshot(
+      snapshot({
+        pastExDividendDate: "2026-09-01", // 30 days before the next ex-div: a monthly cadence
+        pastExDividendAmount: 2,
+        nextExDividendDate: "2026-10-01",
+        nextExDividendAmount: 2,
+        quotes: quotesFor("2026-11-20", 1, [div1, div2]),
+      }),
+    );
+    if (regular.kind !== "fitted") throw new Error("expected a fit");
+    expect(regular.expiries[0]!.forwardPrice).toBeCloseTo(computeForwardPrice(spot, 0.04, yearsBetweenIsoDates(tradingDate, "2026-11-20"), [div1, div2]), 8);
+
+    const irregular = fitSurfaceForSnapshot(
+      snapshot({
+        pastExDividendDate: "2025-06-01", // ~488 days before the next ex-div: not a regular cadence
+        pastExDividendAmount: 2,
+        nextExDividendDate: "2026-10-01",
+        nextExDividendAmount: 2,
+        quotes: quotesFor("2026-11-20", 1, [div1]),
+      }),
+    );
+    if (irregular.kind !== "fitted") throw new Error("expected a fit");
+    expect(irregular.expiries[0]!.forwardPrice).toBeCloseTo(computeForwardPrice(spot, 0.04, yearsBetweenIsoDates(tradingDate, "2026-11-20"), [div1]), 8);
   });
 
   it("keeps the per-slice drop counts so a thin expiry can be explained", () => {

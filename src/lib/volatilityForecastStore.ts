@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { selectRealizedVolatilityForecast, primaryForecastWindowDays, type RealizedVolatilityForecast } from "./volatilityEdge.js";
+import { selectRealizedVolatilityForecast, primaryForecastWindowDays, type RealizedVolatilityForecastSelection } from "./volatilityEdge.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
 
 /** Bars needed for the primary window: 63 returns plus the prior close. */
@@ -11,7 +11,7 @@ const barsNeeded = primaryForecastWindowDays + 1;
  * snapshot cannot see the future. Dates are cast to text (raw `date` columns
  * shift with the server timezone when parsed).
  */
-export async function loadVolatilityForecast(tickerId: string, asOfDateIso: string): Promise<RealizedVolatilityForecast | null> {
+export async function loadVolatilityForecast(tickerId: string, asOfDateIso: string): Promise<RealizedVolatilityForecastSelection> {
   const rows: { tradingDate: string; open: string | null; high: string | null; low: string | null; close: string | null; volume: string | null }[] = await db("daily_price_bars")
     .where({ ticker_id: tickerId })
     .whereRaw("trading_date::text <= ?", [asOfDateIso])

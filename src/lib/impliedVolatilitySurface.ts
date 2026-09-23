@@ -47,6 +47,48 @@ export function yearsBetweenIsoDates(fromIso: string, toIso: string): number {
   return (Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / 86_400_000 / calendarDaysPerYear;
 }
 
+export interface KnownExDividend {
+  date: string; // ISO YYYY-MM-DD
+  amount: number;
+}
+
+// Approved 2026-09-23: only the *next* ex-dividend date is captured per ticker
+// (no dividend-schedule data source chosen), which understates the forward for
+// payers with another ex-div date before a 60-90 day expiry (common for
+// monthly/quarterly payers). Rather than integrate a new data source, project
+// additional ex-dividends by repeating the gap to the most recently known past
+// ex-dividend (same amount, no growth assumption) until the furthest expiry
+// being fit. Falls back to the single next dividend, unchanged, when there's
+// no past record or the gap doesn't look like a regular cadence.
+export const minimumRegularDividendCadenceDays = 20;
+export const maximumRegularDividendCadenceDays = 400;
+export const maximumProjectedDividends = 6;
+
+/** Whether the gap between two known ex-dividend dates looks like a regular cadence worth projecting forward. */
+export function isRegularDividendCadence(next: KnownExDividend | null, past: KnownExDividend | null): boolean {
+  if (next === null || past === null) return false;
+  const cadenceDays = Math.round((Date.parse(`${next.date}T00:00:00Z`) - Date.parse(`${past.date}T00:00:00Z`)) / 86_400_000);
+  return cadenceDays >= minimumRegularDividendCadenceDays && cadenceDays <= maximumRegularDividendCadenceDays;
+}
+
+/** Builds the dividend list for computeForwardPrice, projecting a regular cadence forward when possible. */
+export function projectDividendSchedule(tradingDateIso: string, next: KnownExDividend | null, past: KnownExDividend | null, horizonEndDateIso: string): DiscreteDividend[] {
+  if (next === null) return [];
+  const nextDividend: DiscreteDividend = { amount: next.amount, yearsToExDividend: yearsBetweenIsoDates(tradingDateIso, next.date) };
+  if (!isRegularDividendCadence(next, past)) return [nextDividend];
+
+  const cadenceDays = Math.round((Date.parse(`${next.date}T00:00:00Z`) - Date.parse(`${past!.date}T00:00:00Z`)) / 86_400_000);
+  const dividends: DiscreteDividend[] = [nextDividend];
+  let projectedDateMs = Date.parse(`${next.date}T00:00:00Z`);
+  for (let i = 0; i < maximumProjectedDividends; i++) {
+    projectedDateMs += cadenceDays * 86_400_000;
+    const projectedIso = new Date(projectedDateMs).toISOString().slice(0, 10);
+    if (projectedIso >= horizonEndDateIso) break;
+    dividends.push({ amount: next.amount, yearsToExDividend: yearsBetweenIsoDates(tradingDateIso, projectedIso) });
+  }
+  return dividends;
+}
+
 // --- Black-Scholes and implied volatility from a price -----------------------
 
 /** Discounted Black-Scholes value written on the forward (Black-76). */

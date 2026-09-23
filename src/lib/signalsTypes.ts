@@ -3,7 +3,7 @@ import type { TickerCaveat } from "./signalsRoadmap.js";
 import type { ElevatedVolatilityFlag, SkewMeasure } from "./tiltMeasures.js";
 import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
 
-export type SignalsUnscoredReason = "no_snapshot" | "no_surface_fit" | "no_forecast";
+export type SignalsUnscoredReason = "no_snapshot" | "no_surface_fit" | "no_forecast" | "suspected_split";
 export type SignalsPriceSource = "live" | "frozen" | "snapshot";
 
 export interface SnapshotHeader {
@@ -29,6 +29,8 @@ export interface TickerSignalsInputs {
   slices: SignalSurfaceSlice[];
   quotes: SignalQuote[];
   forecast: RealizedVolatilityForecast | null;
+  /** Trading date the split guard flagged when it left the ticker without a forecast; null otherwise. */
+  suspectedSplitDateIso: string | null;
   earningsDatesIso: string[];
   momentum: number | null;
   elevatedVolatility: ElevatedVolatilityFlag | null;
@@ -38,8 +40,8 @@ export interface TickerSignalsInputs {
   freeShares: number;
   /** All stored daily bars (momentum needs 253, the own-history volatility threshold 377). */
   dailyBarCount: number;
-  /** Any ex-dividend event on record: only the next dividend enters the forward, so payers carry a caveat. */
-  hasDividendEvents: boolean;
+  /** True when there is an upcoming ex-dividend but no regular cadence could be inferred to project later ones into the forward. */
+  dividendCadenceUnknown: boolean;
   /** Eastern session date the inputs were loaded for; caveat ETAs are projected from it. */
   todayEasternIso: string;
 }
@@ -74,7 +76,7 @@ export interface TickerSignals {
   atmImpliedVolatility: number | null;
   forecast: RealizedVolatilityForecast | null;
   dailyBarCount: number;
-  hasDividendEvents: boolean;
+  dividendCadenceUnknown: boolean;
   /** Ticker-specific "not accounted for" caveats (no snapshot, short history, dividend payer). */
   caveats: TickerCaveat[];
   /** What "executable" was judged against: uncovered shares of this ticker and free cash in the account. */

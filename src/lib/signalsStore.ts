@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { isRegularDividendCadence } from "./impliedVolatilitySurface.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
@@ -56,6 +57,26 @@ async function loadNextEarningsDate(tickerId: string, todayIso: string): Promise
     .select(db.raw('event_date::text as "eventDate"'))
     .first();
   return row?.eventDate ?? null;
+}
+
+/** True when there is an upcoming ex-dividend but no regular cadence could be inferred to project later ones into the forward (Formula: see impliedVolatilitySurface.ts projectDividendSchedule, approved 2026-09-23). */
+async function loadDividendCadenceUnknown(tickerId: string, todayIso: string): Promise<boolean> {
+  const [next, past] = await Promise.all([
+    db("ticker_calendar_events")
+      .where({ ticker_id: tickerId, event_type: "ex_dividend" })
+      .where("event_date", ">=", todayIso)
+      .orderBy("event_date")
+      .select(db.raw('event_date::text as "date"'), "amount")
+      .first(),
+    db("ticker_calendar_events")
+      .where({ ticker_id: tickerId, event_type: "ex_dividend" })
+      .where("event_date", "<", todayIso)
+      .orderBy("event_date", "desc")
+      .select(db.raw('event_date::text as "date"'), "amount")
+      .first(),
+  ]);
+  if (!next) return false;
+  return !isRegularDividendCadence({ date: next.date, amount: Number(next.amount) }, past ? { date: past.date, amount: Number(past.amount) } : null);
 }
 
 export async function loadEarningsDatesForForecastWindow(tickerId: string): Promise<string[]> {
@@ -126,7 +147,7 @@ export async function loadShortlistTicker(symbol: string): Promise<ShortlistTick
 /** Everything scoring needs for one ticker, from the DB only (no IBKR). Loaded once per REST call or stream start. */
 export async function loadTickerSignalsInputs(ticker: ShortlistTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {
   const todayEastern = easternDateIso(now);
-  const [bars, nextEarningsDateIso, earningsDatesIso, previousClose, header, freeShares, dailyBarCount, hasDividendEvents] = await Promise.all([
+  const [bars, nextEarningsDateIso, earningsDatesIso, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown] = await Promise.all([
     loadBarsForTilt(ticker.tickerId, todayEastern),
     loadNextEarningsDate(ticker.tickerId, todayEastern),
     loadEarningsDatesForForecastWindow(ticker.tickerId),
@@ -134,16 +155,16 @@ export async function loadTickerSignalsInputs(ticker: ShortlistTickerRow, now: D
     loadLatestSnapshot(ticker.tickerId),
     fetchAvailableUncoveredShares(ticker.tickerId),
     db("daily_price_bars").where({ ticker_id: ticker.tickerId }).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
-    db("ticker_calendar_events").where({ ticker_id: ticker.tickerId, event_type: "ex_dividend" }).first("id").then((row) => row !== undefined),
+    loadDividendCadenceUnknown(ticker.tickerId, todayEastern),
   ]);
   const momentum = computeMomentum(bars.map((bar) => bar.close));
   const elevatedVolatility = computeElevatedVolatilityFlag(bars);
 
-  const [slices, quotes, forecast] = header
+  const [slices, quotes, forecastSelection] = header
     ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso)])
-    : [[], [], null];
+    : [[], [], { forecast: null, suspectedSplitDateIso: null }];
 
-  return { ...ticker, header, slices, quotes, forecast, earningsDatesIso, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, dailyBarCount, hasDividendEvents, todayEasternIso: todayEastern };
+  return { ...ticker, header, slices, quotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
 }
 
 /** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). */

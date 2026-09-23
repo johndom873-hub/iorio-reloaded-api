@@ -28,6 +28,7 @@ function inputsFor(ticker: ShortlistTickerRow, withSnapshot: boolean, freeShares
     slices: withSnapshot ? [slice("2026-10-21", years30), slice("2026-11-20", years60)] : [],
     quotes: withSnapshot ? [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)] : [],
     forecast: withSnapshot ? { volatility: 0.15, windowDays: 63 } : null,
+    suspectedSplitDateIso: null,
     earningsDatesIso: [],
     momentum: 0.1,
     elevatedVolatility: null,
@@ -36,7 +37,7 @@ function inputsFor(ticker: ShortlistTickerRow, withSnapshot: boolean, freeShares
     previousClose: { close: 98, dateIso: "2026-09-21" },
     freeShares,
     dailyBarCount: 1253,
-    hasDividendEvents: false,
+    dividendCadenceUnknown: false,
     todayEasternIso: "2026-09-22",
   };
 }
