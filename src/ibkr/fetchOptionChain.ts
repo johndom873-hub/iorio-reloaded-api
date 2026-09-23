@@ -315,7 +315,11 @@ export async function refreshStoredOptionChain(
       .merge();
   }
   // Grids for expiries that have expired or rolled past the window are no longer read by anyone.
-  await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).whereNotIn("expiry", expiriesInWindow).delete();
+  // Guard the empty-array case: Knex compiles whereNotIn([]) as always-true, which would wipe
+  // every stored expiry for this ticker if expiriesInWindow ever came back empty.
+  if (expiriesInWindow.length > 0) {
+    await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).whereNotIn("expiry", expiriesInWindow).delete();
+  }
 
   return { expirations, strikesByExpiry, timings: { optionParamsMs, expiries: expiryTimings, totalMs: Date.now() - startedAt } };
 }

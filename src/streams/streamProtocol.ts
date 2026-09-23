@@ -39,7 +39,11 @@ export type StreamServerFrame =
   | { type: "error"; subscriptionId: string; message: string }
   // The producer finished on its own without being unsubscribed — the legacy
   // streams only ever do that on failure, so the browser treats it like one.
-  | { type: "end"; subscriptionId: string };
+  | { type: "end"; subscriptionId: string }
+  // Sent on the same interval as the old SSE comment ping, but as a real
+  // frame the browser can see — lets it detect a connection that looks open
+  // but has gone silent even at the transport level, not just per-subscription.
+  | { type: "heartbeat" };
 
 // Bounds that keep one misbehaving or very slow tab from hurting the dyno.
 export const maxSubscriptionsPerConnection = 24;

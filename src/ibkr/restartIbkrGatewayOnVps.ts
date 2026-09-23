@@ -15,8 +15,9 @@ export interface RestartIbkrGatewayOptions {
 export function restartIbkrGatewayOnVps(options: RestartIbkrGatewayOptions): Promise<ForcedCommandSshResult> {
   return runForcedCommandSsh({
     ...options,
-    // Normally finishes in well under a minute (25s sleep plus restart time).
-    timeoutMs: 90_000,
+    // restart-gateway.sh polls for login completion (up to 60s) plus a
+    // settle buffer and restart/log overhead — margin above that worst case.
+    timeoutMs: 120_000,
     timeoutMessage: "Timed out running IBKR Gateway restart script on VPS.",
   });
 }

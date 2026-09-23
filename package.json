@@ -26,6 +26,7 @@
     "job:daily-calendar-capture": "tsx scripts/run-daily-calendar-capture-job.ts",
     "job:daily-pnl-snapshot": "tsx scripts/run-daily-pnl-snapshot-job.ts",
     "job:trade-alerts": "tsx scripts/run-trade-alert-generation-job.ts",
+    "job:option-chain-structure": "tsx scripts/run-option-chain-structure-job.ts",
     "job:option-chain-capture": "tsx scripts/run-option-chain-capture-job.ts",
     "job:option-surface-fit": "tsx scripts/run-option-surface-fit-job.ts",
     "job:watchdog": "tsx scripts/run-watchdog-job.ts",

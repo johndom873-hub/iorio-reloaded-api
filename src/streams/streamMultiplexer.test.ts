@@ -266,10 +266,10 @@ describe("MultiplexedConnection", () => {
     });
   });
 
-  it("sends heartbeats as SSE comments and skips them while the transport is backed up", () => {
+  it("sends heartbeats as real frames and skips them while the transport is backed up", () => {
     const { sink, connection, snapshotRuns } = openConnection();
     connection.sendHeartbeat();
-    expect(sink.chunks.at(-1)).toBe(": ping\n\n");
+    expect(sink.chunks.at(-1)).toBe(`data: ${JSON.stringify({ type: "heartbeat" })}\n\n`);
 
     connection.subscribe("subscription-one", "greeks", {});
     sink.isFull = true;

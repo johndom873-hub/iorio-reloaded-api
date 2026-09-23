@@ -1,6 +1,7 @@
 import { OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
-import { fetchLivePrices, streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { streamPooledPrices } from "../ibkr/pricePool.js";
 import { dedupeInFlight } from "./dedupeInFlight.js";
 
 // Position "exposure"/"value" = full market value across every open leg
@@ -175,7 +176,7 @@ export async function streamPositionExposures(onUpdate: (rows: PositionExposureR
   // jump (Dashboard covered calls read 29,443 -> 29,725). After the first
   // reading every update goes out as before.
   let hasEmitted = false;
-  await streamLivePrices(
+  await streamPooledPrices(
     legsToPriceContracts(legs),
     (pricesByKey, { frozenPhaseComplete }) => {
       const everyLegPriced = legs.every((_, index) => pricesByKey[String(index)] !== null && pricesByKey[String(index)] !== undefined);

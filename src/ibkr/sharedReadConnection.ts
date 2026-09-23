@@ -47,8 +47,17 @@ const reconnectDelaysMs = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 // How long a caller waits for a healthy shared connection before giving up
 // and falling back to its own one-shot connect — kept short so a
 // mid-reconnect shared connection never makes a request slower than today's
-// ~4.5-5s one-shot baseline.
-const borrowTimeoutMs = 3_000;
+// ~4.5-5s one-shot baseline. Overridable per instance (see
+// setBorrowTimeoutMs) for one-off batch scripts, which have no user waiting
+// on latency and would rather queue behind the reconnect than pile a burst
+// of competing one-shot connections onto IBKR's single-live-session-per-login
+// limit — found 2026-09-23 backfilling the option chain capture job: a
+// mid-run shared-connection drop made every in-flight fetchLivePrices/
+// fetchLiveGreeks call fall back independently within the same few seconds,
+// and those one-shot connections competed with each other and with the
+// always-on VPS worker for the account's one live-data slot, extending the
+// outage well past the reconnect backoff itself.
+const defaultBorrowTimeoutMs = 3_000;
 
 export interface BorrowedConnection {
   ib: IBApi;
@@ -105,9 +114,20 @@ class SharedReadConnection {
   // old hardcoded reqId range (9001, 20000, 30000, ...), which only avoided
   // collisions because each one-shot call had a private socket to itself.
   private nextReqId = 1;
+  private borrowTimeoutMs = defaultBorrowTimeoutMs;
 
   allocateReqId(): number {
     return this.nextReqId++;
+  }
+
+  /**
+   * For one-off batch scripts only (see the borrowTimeoutMs comment above) —
+   * never call this from web-dyno request-handling code, where the short
+   * default is what keeps this connection from ever making a read slower
+   * than the one-shot baseline.
+   */
+  setBorrowTimeoutMs(timeoutMs: number): void {
+    this.borrowTimeoutMs = timeoutMs;
   }
 
   /**
@@ -152,7 +172,7 @@ class SharedReadConnection {
     await Promise.race([
       this.connecting,
       new Promise<void>((_, reject) => {
-        setTimeout(() => reject(new Error(`Shared IBKR ${this.options.label} connection not ready within timeout.`)), borrowTimeoutMs);
+        setTimeout(() => reject(new Error(`Shared IBKR ${this.options.label} connection not ready within timeout.`)), this.borrowTimeoutMs);
       }),
     ]);
 
@@ -268,7 +288,17 @@ class SharedReadConnection {
 
     setTimeout(() => {
       this.reconnecting = false;
-      this.connect().catch((error) => {
+      // Routed through this.connecting (not a bare this.connect() call) so a
+      // borrow() landing during this delay awaits this same attempt instead
+      // of starting its own — found 2026-09-23: borrow()'s own
+      // `if (!this.connecting) this.connecting = this.connect()` gate saw
+      // this.connecting as null during the gap between a disconnect and this
+      // scheduled retry firing, so it happily kicked off a second concurrent
+      // connect() (its own tunnel + IBKR login, its own clientId) that raced
+      // this one, and whichever settled last silently overwrote this.ib /
+      // this.tunnel, leaking the other one's tunnel and login open forever.
+      this.connecting = this.connect();
+      this.connecting.catch((error) => {
         console.error(`IBKR shared ${this.options.label} connection reconnect failed: ${error instanceof Error ? error.message : error}`);
         this.handleDisconnect();
       });

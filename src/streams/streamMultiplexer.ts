@@ -125,7 +125,7 @@ export class MultiplexedConnection {
 
   sendHeartbeat(): void {
     if (this.isClosed || this.isBackpressured) return;
-    this.sink.write(": ping\n\n");
+    this.sendFrame({ type: "heartbeat" }, false);
   }
 
   /** Aborts every subscription (releasing their IBKR lines) and ends the transport. Safe to call more than once. */

@@ -1,7 +1,6 @@
 import type { OptionType } from "@stoqey/ib";
-import { connectToIbkrGateway } from "./connectIbkr.js";
-import { requestRealtimeMarketData } from "./requestMarketData.js";
-import { fetchQuotesForContracts, type OptionQuote } from "./fetchOptionChain.js";
+import { streamPooledOptionQuotes } from "./pooledOptionQuotes.js";
+import type { OptionQuote } from "./fetchOptionChain.js";
 
 export interface DeltaComplianceResult {
   compliant: boolean;
@@ -48,10 +47,9 @@ export function checkDeltaCompliance(
  * Order Review panel's live bid/ask/Greeks for a single not-yet-confirmed
  * order's option leg (approved 2026-08-27, replacing the one-shot
  * fetchOrderLegQuote.ts) — streams for as long as `signal` stays unaborted,
- * same shape as streamTickerDetail.ts's live pricing/option-chain tasks:
- * connect once, keep the reqMktData subscription open via fetchQuotesForContracts's
- * `live` mode, and don't disconnect until the caller aborts (the route aborts
- * this the moment the SSE client disconnects).
+ * via marketDataPool.ts's shared subscription (approved 2026-09-24 — the
+ * same contract watched elsewhere, e.g. a held position in Pulse, now shares
+ * this one line instead of opening a second).
  */
 export async function streamOrderLegQuote(
   symbol: string,
@@ -61,18 +59,9 @@ export async function streamOrderLegQuote(
   onQuote: (quote: OptionQuote) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  const connection = await connectToIbkrGateway();
-  try {
-    requestRealtimeMarketData(connection.ib);
-    const [quote] = await fetchQuotesForContracts(connection.ib, symbol, [{ expiry, strike, right }], {
-      onUpdate: (quotes) => onQuote(quotes[0]!),
-      signal,
-    });
-    onQuote(quote!);
-    if (!signal.aborted) {
-      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
-    }
-  } finally {
-    connection.disconnect();
+  const [quote] = await streamPooledOptionQuotes([{ symbol, expiry, strike, right }], (quotes) => onQuote(quotes[0]!), signal);
+  onQuote(quote!);
+  if (!signal.aborted) {
+    await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
   }
 }

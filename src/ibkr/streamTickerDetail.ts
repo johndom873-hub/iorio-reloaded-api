@@ -1,11 +1,13 @@
+import { OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { nextReqIdFor, sharedLiveConnection } from "./sharedReadConnection.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { streamPricingUpdates, type TickerPricing, type PriceBar } from "./fetchTickerOverview.js";
-import { streamLivePrices } from "./fetchLivePrices.js";
+import { streamPooledPrices } from "./pricePool.js";
 import { getCachedChartBars } from "./priceBarCache.js";
-import { prepareOptionChainStrikes, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
+import { prepareOptionChainStrikes, type OptionQuote } from "./fetchOptionChain.js";
+import { streamPooledOptionQuotes } from "./pooledOptionQuotes.js";
 import { db } from "../db/connection.js";
 import { computeMacd, computeMovingAverages, computeRsi, computeSupportResistance, type MacdSignal, type MovingAverages, type SupportResistanceResult } from "../lib/technicalIndicators.js";
 
@@ -223,7 +225,7 @@ export async function streamTickerDetail(
     });
     const firstSpotTimer = setTimeout(() => resolveFirstSpot(null), sections.has("spot") ? firstSpotWaitMs : 0);
     const spotTask: Promise<void> = sections.has("spot")
-      ? streamLivePrices(
+      ? streamPooledPrices(
           [{ key: symbol, legType: "stock", symbol }],
           (pricesByKey) => {
             const last = pricesByKey[symbol];
@@ -334,10 +336,14 @@ export async function streamTickerDetail(
 
         const [dteRange, mustIncludeStrikesByExpiry] = await Promise.all([fetchStrategyDteRange(), fetchMustIncludeStrikesByExpiry(symbol)]);
         const expiryStrikes = await prepareOptionChainStrikes(symbol, spotPrice, dteRange, mustIncludeStrikesByExpiry);
-        const optionChain = await quoteOptionChain(connection, symbol, expiryStrikes, {
-          onUpdate: (updatedQuotes) => onEvent({ type: "optionChain", data: updatedQuotes }),
-          signal,
-        });
+        // Same call+put-per-strike expansion as fetchOptionChain.ts's quoteOptionChain.
+        const chainContracts = expiryStrikes.flatMap(({ expiry, strikes }) =>
+          strikes.flatMap((strike) => [
+            { symbol, expiry, strike, right: OptionType.Call },
+            { symbol, expiry, strike, right: OptionType.Put },
+          ]),
+        );
+        const optionChain = await streamPooledOptionQuotes(chainContracts, (updatedQuotes) => onEvent({ type: "optionChain", data: updatedQuotes }), signal);
         onEvent({ type: "optionChain", data: optionChain });
       } catch (error) {
         onEvent({ type: "error", section: "optionChain", message: errorMessage(error) });

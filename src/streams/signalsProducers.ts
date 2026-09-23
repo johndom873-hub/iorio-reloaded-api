@@ -1,4 +1,5 @@
-import { streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import type { PriceContract } from "../ibkr/fetchLivePrices.js";
+import { streamPooledPrices } from "../ibkr/pricePool.js";
 import { streamSignalsOptionQuotes } from "../ibkr/streamSignalsOptionQuotes.js";
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { uncompensatedShareRefreshIntervalMs, type SignalCandidate, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
@@ -49,7 +50,7 @@ export const defaultSignalsProducerDependencies: SignalsProducerDependencies = {
   loadTickerSignalsInputs,
   loadAccountContext,
   fetchAvailableUncoveredShares,
-  streamLivePrices,
+  streamLivePrices: streamPooledPrices,
   streamOptionQuotes: streamSignalsOptionQuotes,
   computeUncompensatedShares: (candidates, spotPrice, slices) => computeUncompensatedSharesInWorker(candidates, spotPrice, slices),
   now: () => new Date(),

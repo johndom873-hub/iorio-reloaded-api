@@ -8,6 +8,8 @@ import { connectToIbkrGateway } from "../ibkr/connectIbkr.js";
 import { staleBackfillRunMinutes } from "../lib/tickerBackfillSteps.js";
 import { loadShortlistDataReadiness } from "../lib/shortlistDataReadiness.js";
 import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
+import { refreshStoredOptionChain } from "../ibkr/fetchOptionChain.js";
+import { easternDateIso } from "../lib/marketSessionStatus.js";
 
 export const shortlistRouter = Router();
 shortlistRouter.use(requireAuth);
@@ -119,6 +121,36 @@ shortlistRouter.post("/:tickerId/backfill-price-history", async (request, respon
   try {
     const result = await fetchAndStoreFiveYearHistory(connection, ticker.id, ticker.symbol);
     response.json(result);
+  } finally {
+    connection.disconnect();
+  }
+});
+
+// Manual re-trigger for the Shortlist Actions dropdown's "Refresh Option Chain" item -- re-runs
+// refreshStoredOptionChain for this ticker only, same expiries+strikes fetch the nightly capture
+// does, without touching history/earnings/calendar. Returns the updated per-expiry strike counts so
+// the row can update without a full list reload.
+shortlistRouter.post("/:tickerId/refresh-option-chain", async (request, response) => {
+  const ticker = await db("tickers").where({ id: request.params.tickerId as string }).first();
+  if (!ticker) {
+    response.status(404).json({ error: "Ticker not found." });
+    return;
+  }
+  if (ticker.ibkr_contract_id === null) {
+    response.status(400).json({ error: "Ticker has no IBKR contract id stored." });
+    return;
+  }
+  const connection = await connectToIbkrGateway();
+  try {
+    const refresh = await refreshStoredOptionChain(
+      connection.ib,
+      { tickerId: ticker.id, symbol: ticker.symbol, contractId: ticker.ibkr_contract_id },
+      easternDateIso(new Date()),
+    );
+    const optionChainExpiries = Array.from(refresh.strikesByExpiry.entries())
+      .map(([expiry, strikes]) => ({ expiry, strikeCount: strikes.length }))
+      .sort((a, b) => a.expiry.localeCompare(b.expiry));
+    response.json({ optionChainExpiries });
   } finally {
     connection.disconnect();
   }

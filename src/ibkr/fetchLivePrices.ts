@@ -2,7 +2,7 @@ import { EventName, MarketDataType, Option, OptionType, Stock, type IBApi } from
 import type { Contract } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
-import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice, waitForAbortOrGatewayDisconnect } from "./requestMarketData.js";
 import { loadFallbackStockPrices, recordStockPrices } from "../lib/priceService.js";
 
 export interface PriceContract {
@@ -313,13 +313,7 @@ async function streamLivePricesFromIbkr(
       ib.reqMktData(reqId, buildContract(contract), "", false, false);
     }
 
-    await new Promise<void>((resolve) => {
-      if (signal.aborted) {
-        resolve();
-        return;
-      }
-      signal.addEventListener("abort", () => resolve(), { once: true });
-    });
+    await waitForAbortOrGatewayDisconnect(ib, signal);
   } finally {
     for (const reqId of allReqIds) {
       ib.cancelMktData(reqId);

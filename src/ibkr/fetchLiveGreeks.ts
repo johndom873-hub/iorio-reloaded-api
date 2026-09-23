@@ -1,7 +1,7 @@
 import { EventName, MarketDataType, Option, OptionType, type IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
-import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice, requestRealtimeMarketData, waitForAbortOrGatewayDisconnect } from "./requestMarketData.js";
 
 export interface GreeksContract {
   key: string;
@@ -301,13 +301,7 @@ export async function streamLiveGreeks(contracts: GreeksContract[], onUpdate: (g
       ib.reqMktData(reqId, new Option(contract.symbol, contract.expiry, contract.strike, contract.right, "SMART"), "", false, false);
     }
 
-    await new Promise<void>((resolve) => {
-      if (signal.aborted) {
-        resolve();
-        return;
-      }
-      signal.addEventListener("abort", () => resolve(), { once: true });
-    });
+    await waitForAbortOrGatewayDisconnect(ib, signal);
   } finally {
     for (const reqId of allReqIds) {
       ib.cancelMktData(reqId);

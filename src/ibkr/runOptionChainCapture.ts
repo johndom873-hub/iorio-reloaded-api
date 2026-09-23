@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { refreshStoredOptionChain, type OptionChainRefreshTimings, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
+import { refreshStoredOptionChain, loadStoredOptionChain, type OptionChainRefreshTimings, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { fetchLivePrices } from "./fetchLivePrices.js";
 import { captureOptionQuoteBatch, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
@@ -32,9 +32,14 @@ import { excludeTickersBeingPrepared } from "../lib/tickersBeingPrepared.js";
 // Nightly option-chain archive (IORIO Signal Engine, Phase 0). One ticker at a
 // time, batches of 60 contracts one after another (approved 2026-09-21: keeps
 // one batch inside IBKR's 100 market-data-line cap and clear of the live app).
-// Chain structure (expiries + each expiry's real strike grid) is fetched and
-// stored here, one wildcard lookup at a time (Marcelo, 2026-09-23) — see
-// refreshStoredOptionChain; every other reader takes it from the DB.
+// Ticks only — chain STRUCTURE (expiries + each expiry's real strike grid) is
+// refreshed earlier, pre-market, by runOptionChainStructureRefresh.ts (split
+// off 2026-09-23 since structure has no market-open dependency, unlike
+// ticks). This job's default dependencies (ticksOnlyPrepareDependencies,
+// below) read that structure from the DB instead of refreshing it — see
+// fetchOptionChain.ts's refreshStoredOptionChain (live fetch, still used
+// directly by both that job and tickerBackfillPipeline.ts for onboarding a
+// brand-new ticker) and loadStoredOptionChain (DB read).
 
 const widestWindowHalfWidth = 0.5;
 const referenceVolatilityBarCount = 40;
@@ -134,6 +139,30 @@ const defaultPrepareDependencies: PrepareTickerDependencies = {
   fetchSpotPrice: async (symbol) => (await fetchLivePrices([{ key: symbol, legType: "stock", symbol }]))[symbol],
   loadReferenceVolatility,
   refreshStoredOptionChain,
+};
+
+// Used by the nightly ticks job's defaultCaptureDependencies below only —
+// tickerBackfillPipeline.ts (onboarding a brand-new ticker, which has no
+// stored-today structure yet) keeps using prepareTicker's own live-refresh
+// default above. Wraps the existing loadStoredOptionChain (a DB read, no
+// IBKR call — also used by Ticker Detail/position quotes/the alert scan) in
+// StoredOptionChainRefresh's shape so prepareTicker's contract-selection
+// logic is unchanged; timings are zeroed since no IBKR round trip happened
+// here. Requires fetchedAt to be today: loadStoredOptionChain itself has no
+// freshness opinion (a stale-but-present chain is fine for those other
+// readers), but capturing ticks against yesterday's expiries — possibly
+// already expired or rolled — would be silently wrong, so this fails the
+// ticker clearly instead when the pre-market structure job
+// (run-option-chain-structure-job.ts) hasn't run yet today.
+export const ticksOnlyPrepareDependencies: PrepareTickerDependencies = {
+  ...defaultPrepareDependencies,
+  refreshStoredOptionChain: async (_ib, ticker, todayIso) => {
+    const stored = await loadStoredOptionChain(ticker.tickerId);
+    if (!stored.fetchedAt || easternDateIso(stored.fetchedAt) !== todayIso) {
+      throw new Error("no chain structure captured for today yet — the pre-market structure job may not have run");
+    }
+    return { expirations: stored.expirations, strikesByExpiry: stored.strikesByExpiry, timings: { optionParamsMs: 0, expiries: [], totalMs: 0 } };
+  },
 };
 
 export async function prepareTicker(ib: IbkrApi, ticker: UniverseTicker, todayIso: string, dependencies: PrepareTickerDependencies = defaultPrepareDependencies): Promise<PreparedTicker> {
@@ -238,7 +267,7 @@ const defaultCaptureDependencies: OptionChainCaptureDependencies = {
   loadUniverse: loadCaptureUniverse,
   getRiskFreeRate,
   connect: connectToIbkrGateway,
-  prepareTicker: (ib, ticker, todayIso) => prepareTicker(ib, ticker, todayIso),
+  prepareTicker: (ib, ticker, todayIso) => prepareTicker(ib, ticker, todayIso, ticksOnlyPrepareDependencies),
   captureAndSave,
   saveFailedSnapshot,
 };

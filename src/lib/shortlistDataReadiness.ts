@@ -2,6 +2,7 @@ import { db } from "../db/connection.js";
 import { loadVolatilityForecast } from "./volatilityForecastStore.js";
 import { loadDividendCadenceUnknown, loadEarningsDatesForForecastWindow, loadNextEarningsDate } from "./signalsStore.js";
 import { easternDateIso } from "./marketSessionStatus.js";
+import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 
 // Backs the Shortlist screen's data-sanity-check columns (redesigned 2026-09-23, replacing the old
 // IV/volume columns): per ticker, everything the Signals pipeline actually reads before it can score a
@@ -21,12 +22,14 @@ export interface ShortlistDataReadiness {
   /** Both null when there is no chain snapshot yet. */
   latestFittedSliceCount: number | null;
   latestTotalSliceCount: number | null;
+  /** One entry per expiry stored in option_chain_expiry_strikes, each with its strike count. */
+  optionChainExpiries: { expiry: string; strikeCount: number }[];
 }
 
 export async function loadShortlistDataReadiness(tickerId: string, sector: string | null, now: Date = new Date()): Promise<ShortlistDataReadiness> {
   const todayIso = easternDateIso(now);
 
-  const [barCountRow, forecastSelection, earningsDatesIso, nextEarningsDateIso, dividendHistoryCountRow, dividendCadenceUnknown, chainCountRow, latestSnapshot] = await Promise.all([
+  const [barCountRow, forecastSelection, earningsDatesIso, nextEarningsDateIso, dividendHistoryCountRow, dividendCadenceUnknown, chainCountRow, latestSnapshot, storedOptionChain] = await Promise.all([
     db("daily_price_bars").where({ ticker_id: tickerId }).count<{ count: string }[]>("* as count"),
     loadVolatilityForecast(tickerId, todayIso),
     loadEarningsDatesForForecastWindow(tickerId),
@@ -35,7 +38,12 @@ export async function loadShortlistDataReadiness(tickerId: string, sector: strin
     loadDividendCadenceUnknown(tickerId, todayIso),
     db("option_chain_snapshots").where({ ticker_id: tickerId }).count<{ count: string }[]>("* as count"),
     db("option_chain_snapshots").where({ ticker_id: tickerId }).orderBy("trading_date", "desc").first("id"),
+    loadStoredOptionChain(tickerId),
   ]);
+
+  const optionChainExpiries = Array.from(storedOptionChain.strikesByExpiry.entries())
+    .map(([expiry, strikes]) => ({ expiry, strikeCount: strikes.length }))
+    .sort((a, b) => a.expiry.localeCompare(b.expiry));
 
   let latestFittedSliceCount: number | null = null;
   let latestTotalSliceCount: number | null = null;
@@ -56,5 +64,6 @@ export async function loadShortlistDataReadiness(tickerId: string, sector: strin
     chainSnapshotCount: Number(chainCountRow[0]?.count ?? 0),
     latestFittedSliceCount,
     latestTotalSliceCount,
+    optionChainExpiries,
   };
 }

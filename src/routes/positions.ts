@@ -6,18 +6,21 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { positionSelect, fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { publishNotification } from "../lib/notificationChannel.js";
-import { fetchLiveGreeks, streamLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import { fetchLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import { streamPooledGreeks } from "../ibkr/greeksPool.js";
 import { fetchCyclesForTickers } from "../lib/cycleQueries.js";
 import { fetchBreakEvenByPositionId, type PositionBreakEven } from "../lib/cycleBreakEvenQueries.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { computeLegSuccessProbabilities, type SuccessProbabilityLeg } from "../lib/positionSuccessProbability.js";
-import { fetchLivePrices, streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { streamPooledPrices } from "../ibkr/pricePool.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning } from "../ibkr/calendarConflict.js";
 import { evaluateRollForPosition } from "../ibkr/evaluateRollForPosition.js";
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
+import { recordUnrealizedPnlSample, recordProfitProbabilitySample } from "../lib/pulseChartSampleCollector.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -430,10 +433,11 @@ export async function streamGreeksHandler(request: Request, response: Response):
       enriched[legId] = leg ? { ...result, ...computeLegSuccessProbabilities(leg, result, riskFreeRate) } : result;
     }
     send(enriched);
+    for (const [legId, result] of Object.entries(enriched)) recordProfitProbabilitySample(legId, result.probabilityByD2 ?? null);
   };
 
   try {
-    await streamLiveGreeks(
+    await streamPooledGreeks(
       contracts,
       serializeAsyncCalls(async (greeksByKey) => {
         if (!isFirstEvent) {
@@ -492,7 +496,7 @@ export async function streamGreeksHandler(request: Request, response: Response):
       abortController.signal,
     );
   } catch (error) {
-    console.error("positions/greeks/stream: streamLiveGreeks failed", error);
+    console.error("positions/greeks/stream: streamPooledGreeks failed", error);
   } finally {
     clearInterval(heartbeat);
     response.end();
@@ -805,7 +809,7 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
   const lastGoodResult: Record<string, UnrealizedPnlResult> = {};
 
   try {
-    await streamLivePrices(
+    await streamPooledPrices(
       priceContracts,
       serializeAsyncCalls(async (pricesByLegId) => {
         const { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId } = computeUnrealized(pricesByLegId);
@@ -823,6 +827,7 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
             };
           }
           send(lastGoodResult);
+          for (const [positionId, result] of Object.entries(lastGoodResult)) recordUnrealizedPnlSample(positionId, result.unrealizedPnl);
           return;
         }
         isFirstEvent = false;
@@ -880,11 +885,12 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
             : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, asOfDate: null };
         }
         send(lastGoodResult);
+        for (const [positionId, result] of Object.entries(lastGoodResult)) recordUnrealizedPnlSample(positionId, result.unrealizedPnl);
       }),
       abortController.signal,
     );
   } catch (error) {
-    console.error("positions/pnl/stream: streamLivePrices failed", error);
+    console.error("positions/pnl/stream: streamPooledPrices failed", error);
   } finally {
     clearInterval(heartbeat);
     response.end();
@@ -892,6 +898,39 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
 }
 
 positionsRouter.get("/pnl/stream", streamPnlHandler);
+
+// Backfills Pulse's two charts (approved 2026-09-23) from
+// pulseChartSampleCollector.ts's rolling 8h buffer, for continuity across a
+// refresh or a brief live-stream outage. Only open positions — matches what
+// the live streams above would show; the frontend applies the same
+// CC/CSP-only filter to the probability series it already applies live.
+positionsRouter.get("/pulse-chart-history", async (_request, response) => {
+  const [pnlRows, probabilityRows] = await Promise.all([
+    db("pulse_unrealized_pnl_samples as s")
+      .join("positions as p", "p.id", "s.position_id")
+      .where("p.status", "open")
+      .groupBy("s.sampled_at")
+      .orderBy("s.sampled_at", "asc")
+      .select("s.sampled_at as sampledAt", db.raw("SUM(COALESCE(s.unrealized_pnl, 0)) as \"totalUnrealizedPnl\"")),
+    db("pulse_profit_probability_samples as s")
+      .join("position_legs as pl", "pl.id", "s.position_leg_id")
+      .join("positions as p", "p.id", "pl.position_id")
+      .where("p.status", "open")
+      .whereNotNull("s.profit_probability")
+      .orderBy("s.sampled_at", "asc")
+      .select("pl.position_id as positionId", "s.sampled_at as sampledAt", "s.profit_probability as profitProbability"),
+  ]);
+
+  const probabilitySamplesByPositionId: Record<string, { sampledAtMs: number; probability: number }[]> = {};
+  for (const row of probabilityRows) {
+    (probabilitySamplesByPositionId[row.positionId] ??= []).push({ sampledAtMs: new Date(row.sampledAt).getTime(), probability: Number(row.profitProbability) });
+  }
+
+  response.json({
+    pnlSamples: pnlRows.map((row) => ({ sampledAtMs: new Date(row.sampledAt).getTime(), totalUnrealizedPnl: Number(row.totalUnrealizedPnl) })),
+    probabilitySamplesByPositionId,
+  });
+});
 
 // --- Order placement (approved 2026-08-24 — see the plan doc) ---
 // The web dyno never writes positions/position_legs/trades directly for a

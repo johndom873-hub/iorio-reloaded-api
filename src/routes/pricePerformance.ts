@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { streamPooledStockPrices } from "../ibkr/pricePool.js";
 import { getPricePerformanceSnapshot } from "../lib/pricePerformanceSnapshot.js";
 import { getPriceBarsRefreshStatus, startPriceBarsRefresh } from "../lib/priceBarsRefresh.js";
 
@@ -39,11 +39,9 @@ pricePerformanceRouter.post("/refresh", async (request, response) => {
 // computes the live % changes itself, so this stream no longer queries the
 // database or recomputes anything per connection; that also removes the old
 // risk of this route and GET / disagreeing on what "N days back" means (they
-// used to share one SQL fragment for exactly that reason). Same SSE
-// FROZEN-then-REALTIME mechanics as positions.ts's pnl/stream (see that
-// route's comments) — streamLivePrices borrows the shared read connection
-// (falling back to a one-shot one), the same read-only path Positions uses,
-// not the worker's persistent trading connection.
+// used to share one SQL fragment for exactly that reason). Prices come from
+// stockPriceSubscriptionPool.ts — one real IBKR line per symbol shared across
+// every tab watching it, not one per tab (approved 2026-09-23).
 export async function streamPricePerformancePricesHandler(request: Request, response: Response): Promise<void> {
   const symbolRows = await db("tickers as t")
     .select("t.symbol")
@@ -77,12 +75,10 @@ export async function streamPricePerformancePricesHandler(request: Request, resp
     return;
   }
 
-  const priceContracts: PriceContract[] = symbols.map((symbol) => ({ key: symbol, legType: "stock", symbol }));
-
   try {
-    await streamLivePrices(priceContracts, (pricesBySymbol) => send(pricesBySymbol), abortController.signal);
+    await streamPooledStockPrices(symbols, (pricesBySymbol) => send(pricesBySymbol), abortController.signal);
   } catch (error) {
-    console.error("price-performance/current-prices/stream: streamLivePrices failed", error);
+    console.error("price-performance/current-prices/stream: streamPooledStockPrices failed", error);
   } finally {
     clearInterval(heartbeat);
     if (!response.writableEnded) response.end();

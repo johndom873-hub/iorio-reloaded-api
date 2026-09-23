@@ -5,7 +5,7 @@ import { runTradeAlertGeneration } from "../ibkr/runTradeAlertGeneration.js";
 import { refreshTradeAlert } from "../ibkr/refreshTradeAlert.js";
 import { refreshTickerTradeAlerts } from "../ibkr/refreshTickerTradeAlerts.js";
 import { runJob, JobAlreadyRunningError } from "../lib/runJob.js";
-import { streamLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
+import { streamPooledStockPrices } from "../ibkr/pricePool.js";
 
 const tradeAlertSelect = `
   SELECT
@@ -244,12 +244,10 @@ export async function streamTradeAlertPricesHandler(request: Request, response: 
   const abortController = new AbortController();
   request.on("close", () => abortController.abort());
 
-  const priceContracts: PriceContract[] = symbols.map((symbol) => ({ key: symbol, legType: "stock", symbol }));
-
   try {
-    await streamLivePrices(priceContracts, (pricesBySymbol) => send(pricesBySymbol), abortController.signal);
+    await streamPooledStockPrices(symbols, (pricesBySymbol) => send(pricesBySymbol), abortController.signal);
   } catch (error) {
-    console.error("trade-alerts/current-prices/stream: streamLivePrices failed", error);
+    console.error("trade-alerts/current-prices/stream: streamPooledStockPrices failed", error);
   } finally {
     clearInterval(heartbeat);
     if (!response.writableEnded) response.end();
