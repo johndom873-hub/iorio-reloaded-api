@@ -22,27 +22,63 @@ export interface KnownPrice {
 const maxKnownPriceAgeMs = 14 * 24 * 60 * 60 * 1000;
 // Live tick storms must not become a DB write per tick: write a symbol at most this often unless the source upgrades.
 const minWriteIntervalMs = 5_000;
+// Concurrent overview/live-price streams call recordStockPrices independently per symbol; without this, simultaneous
+// per-symbol upserts deadlocked on last_known_prices and starved the (deliberately small, see databaseConnectionBudget.ts)
+// pool for every other query on the dyno (staging outage, 2026-09-23). Debouncing onto one flush per window, serialized
+// so a second burst waits for the first flush rather than overlapping it, keeps this to a single writer, single upsert.
+const flushDebounceMs = 250;
 
 const lastWrite = new Map<string, { price: number; at: number }>();
+const pendingWrites = new Map<string, { price: number; source: "live" | "frozen" | "daily_close" }>();
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let flushInFlight = false;
+let anotherFlushNeeded = false;
 
 /** Records real last-trade prices (fire-and-forget safe: never throws into a price stream). */
 export async function recordStockPrices(entries: { symbol: string; price: number; source: "live" | "frozen" | "daily_close" }[]): Promise<void> {
   const now = Date.now();
-  const due = entries.filter((entry) => {
-    if (!(entry.price > 0)) return false;
+  for (const entry of entries) {
+    if (!(entry.price > 0)) continue;
     const previous = lastWrite.get(entry.symbol);
-    if (previous && previous.price === entry.price) return false;
-    return !previous || now - previous.at >= minWriteIntervalMs;
-  });
-  if (due.length === 0) return;
+    if (previous && previous.price === entry.price) continue;
+    if (previous && now - previous.at < minWriteIntervalMs) continue;
+    pendingWrites.set(entry.symbol, { price: entry.price, source: entry.source });
+  }
+  scheduleFlush();
+}
+
+function scheduleFlush(): void {
+  if (flushTimer || flushInFlight) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void flushPendingWrites();
+  }, flushDebounceMs);
+}
+
+async function flushPendingWrites(): Promise<void> {
+  if (flushInFlight) {
+    anotherFlushNeeded = true;
+    return;
+  }
+  if (pendingWrites.size === 0) return;
+  flushInFlight = true;
+  const batch = [...pendingWrites.entries()];
+  pendingWrites.clear();
+  const now = Date.now();
   try {
     await db("last_known_prices")
-      .insert(due.map((entry) => ({ symbol: entry.symbol, price: entry.price, as_of: new Date(now), source: entry.source })))
+      .insert(batch.map(([symbol, entry]) => ({ symbol, price: entry.price, as_of: new Date(now), source: entry.source })))
       .onConflict("symbol")
       .merge();
-    for (const entry of due) lastWrite.set(entry.symbol, { price: entry.price, at: now });
+    for (const [symbol, entry] of batch) lastWrite.set(symbol, { price: entry.price, at: now });
   } catch (error) {
     console.warn(`priceService: could not record prices — ${error instanceof Error ? error.message : error}`);
+  } finally {
+    flushInFlight = false;
+    if (anotherFlushNeeded || pendingWrites.size > 0) {
+      anotherFlushNeeded = false;
+      scheduleFlush();
+    }
   }
 }
 
