@@ -20,7 +20,7 @@ import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning } fro
 import { evaluateRollForPosition } from "../ibkr/evaluateRollForPosition.js";
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
-import { recordUnrealizedPnlSample, recordProfitProbabilitySample } from "../lib/pulseChartSampleCollector.js";
+import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -433,7 +433,7 @@ export async function streamGreeksHandler(request: Request, response: Response):
       enriched[legId] = leg ? { ...result, ...computeLegSuccessProbabilities(leg, result, riskFreeRate) } : result;
     }
     send(enriched);
-    for (const [legId, result] of Object.entries(enriched)) recordProfitProbabilitySample(legId, result.probabilityByD2 ?? null);
+    for (const [legId, result] of Object.entries(enriched)) recordLegDeltaSample(legId, result.delta ?? null);
   };
 
   try {
@@ -903,32 +903,32 @@ positionsRouter.get("/pnl/stream", streamPnlHandler);
 // pulseChartSampleCollector.ts's rolling 8h buffer, for continuity across a
 // refresh or a brief live-stream outage. Only open positions — matches what
 // the live streams above would show; the frontend applies the same
-// CC/CSP-only filter to the probability series it already applies live.
+// CC/CSP-only filter to the delta series it already applies live.
 positionsRouter.get("/pulse-chart-history", async (_request, response) => {
-  const [pnlRows, probabilityRows] = await Promise.all([
+  const [pnlRows, deltaRows] = await Promise.all([
     db("pulse_unrealized_pnl_samples as s")
       .join("positions as p", "p.id", "s.position_id")
       .where("p.status", "open")
       .groupBy("s.sampled_at")
       .orderBy("s.sampled_at", "asc")
       .select("s.sampled_at as sampledAt", db.raw("SUM(COALESCE(s.unrealized_pnl, 0)) as \"totalUnrealizedPnl\"")),
-    db("pulse_profit_probability_samples as s")
+    db("pulse_leg_delta_samples as s")
       .join("position_legs as pl", "pl.id", "s.position_leg_id")
       .join("positions as p", "p.id", "pl.position_id")
       .where("p.status", "open")
-      .whereNotNull("s.profit_probability")
+      .whereNotNull("s.leg_delta")
       .orderBy("s.sampled_at", "asc")
-      .select("pl.position_id as positionId", "s.sampled_at as sampledAt", "s.profit_probability as profitProbability"),
+      .select("pl.position_id as positionId", "s.sampled_at as sampledAt", "s.leg_delta as legDelta"),
   ]);
 
-  const probabilitySamplesByPositionId: Record<string, { sampledAtMs: number; probability: number }[]> = {};
-  for (const row of probabilityRows) {
-    (probabilitySamplesByPositionId[row.positionId] ??= []).push({ sampledAtMs: new Date(row.sampledAt).getTime(), probability: Number(row.profitProbability) });
+  const deltaSamplesByPositionId: Record<string, { sampledAtMs: number; delta: number }[]> = {};
+  for (const row of deltaRows) {
+    (deltaSamplesByPositionId[row.positionId] ??= []).push({ sampledAtMs: new Date(row.sampledAt).getTime(), delta: Number(row.legDelta) });
   }
 
   response.json({
     pnlSamples: pnlRows.map((row) => ({ sampledAtMs: new Date(row.sampledAt).getTime(), totalUnrealizedPnl: Number(row.totalUnrealizedPnl) })),
-    probabilitySamplesByPositionId,
+    deltaSamplesByPositionId,
   });
 });
 
