@@ -2,8 +2,9 @@ import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
-import { lookupPricingSnapshot, lookupHistoricalBars, type TickerPricing } from "./fetchTickerOverview.js";
+import { lookupPricingSnapshot, type TickerPricing } from "./fetchTickerOverview.js";
 import { prepareOptionChainStrikes, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
+import { getCachedChartBars } from "./priceBarCache.js";
 
 const contractDetailsReqId = 1;
 const pricingReqId = 2;
@@ -37,9 +38,14 @@ function errorMessage(error: unknown): string {
  * are already synchronous request/response, not a UI with a spinner to
  * progressively fill in.
  *
- * The one-year daily-bar history call always succeeds (historical data
- * isn't gated by market hours) and gives a real last-known price even when
- * the live snapshot below can't. The live snapshot + option chain are
+ * The one-year daily-bar history read goes through priceBarCache.ts's
+ * DB-first cache (a tracked symbol with a fresh-enough cache skips IBKR
+ * entirely) rather than always fetching live — found during the 2026-09-23
+ * IBKR endpoint audit as a symbol this cache already covers for every other
+ * screen but this route bypassed. Untracked symbols (no shortlist/position
+ * history) still fall through to a live fetch, same as before. It always
+ * succeeds regardless of market hours and gives a real last-known price even
+ * when the live snapshot below can't. The live snapshot + option chain are
  * best-effort: IBKR's snapshot pricing (and therefore the option chain,
  * which needs a live spot price to pick strikes) is documented to fail
  * outside US market hours — that failure is caught and surfaced as
@@ -51,7 +57,7 @@ export async function fetchTickerQuoteSnapshot(symbol: string): Promise<TickerQu
   try {
     requestRealtimeMarketData(connection.ib);
 
-    const bars = await lookupHistoricalBars(connection, symbol, "1Y", historicalReqId);
+    const bars = await getCachedChartBars(connection, symbol, "1Y", historicalReqId);
     const lastBar = bars.at(-1);
     const lastKnownClose = lastBar ? { price: lastBar.close, asOf: new Date(lastBar.time * 1000).toISOString().slice(0, 10) } : null;
 

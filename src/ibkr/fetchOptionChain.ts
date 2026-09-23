@@ -69,7 +69,7 @@ export async function lookupOptionParams(
   ib: IBApi,
   symbol: string,
   conId: number,
-): Promise<{ expirations: string[]; strikes: number[] }> {
+): Promise<{ expirations: string[] }> {
   return new Promise((resolve, reject) => {
     const reqId = nextReqIdFor(ib, () => nextLookupReqId++);
     let lastError: string | null = null;
@@ -89,11 +89,10 @@ export async function lookupOptionParams(
       _tradingClass: string,
       _multiplier: string,
       expirations: string[],
-      strikes: number[],
     ) {
       if (id !== reqId || exchange !== "SMART") return;
       cleanup();
-      resolve({ expirations: Array.from(expirations), strikes: Array.from(strikes) });
+      resolve({ expirations: Array.from(expirations) });
     }
     // Captured, not rejected on immediately — IBKR sends routine informational
     // notices through this same event for reqIds that still go on to succeed
@@ -273,10 +272,10 @@ export async function refreshStoredOptionChain(
   todayIso: string,
 ): Promise<StoredOptionChainRefresh> {
   const startedAt = Date.now();
-  const { expirations, strikes } = await lookupOptionParams(ib, ticker.symbol, ticker.contractId);
+  const { expirations } = await lookupOptionParams(ib, ticker.symbol, ticker.contractId);
   const optionParamsMs = Date.now() - startedAt;
   await db("option_chain_params")
-    .insert({ ticker_id: ticker.tickerId, expirations, strikes, fetched_at: new Date() })
+    .insert({ ticker_id: ticker.tickerId, expirations, fetched_at: new Date() })
     .onConflict("ticker_id")
     .merge();
 
