@@ -198,14 +198,14 @@ describe("scoreTicker", () => {
     expect(rescored.candidates.filter((c) => candidateContractKey(c) !== key).every((c) => c.uncompensatedSharePercent === null)).toBe(true);
   });
 
-  it("drops a candidate over maxDeltaDriftPct once its drift share is known, but never one that's still unknown", () => {
+  it("never drops a candidate for maxDeltaDriftPct (the setting is stored but not applied)", () => {
     const first = scoreTicker(inputs(), account, permissiveSettings);
     const knownKey = candidateContractKey(first.candidates[0]!);
     const uncompensatedByContract = new Map([[knownKey, 40]]);
     const strict = { ...permissiveSettings, maxDeltaDriftPct: 10 };
     const rescored = scoreTicker(inputs(), account, strict, { spotPrice: forward, priceSource: "snapshot", uncompensatedByContract });
-    expect(rescored.candidates.some((c) => candidateContractKey(c) === knownKey)).toBe(false);
-    expect(rescored.candidates.some((c) => candidateContractKey(c) !== knownKey && c.uncompensatedSharePercent === null)).toBe(true);
+    expect(rescored.candidates.length).toBe(first.candidates.length);
+    expect(rescored.candidates.find((c) => candidateContractKey(c) === knownKey)!.uncompensatedSharePercent).toBe(40);
   });
 });
 

@@ -149,14 +149,11 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
     }),
   );
+  // settings.maxDeltaDriftPct is deliberately not applied: the drift share is only known for the open
+  // modal's ticker (Monte Carlo), so filtering on it would make the screen and modal disagree.
   if (live?.uncompensatedByContract) {
     const byContract = live.uncompensatedByContract;
-    candidates = candidates
-      .map((candidate) => ({ ...candidate, uncompensatedSharePercent: byContract.get(candidateContractKey(candidate)) ?? null }))
-      // Signals tab max delta drift (approved 2026-09-24): only known once the Monte Carlo has run for
-      // this candidate, so it filters here rather than in buildSignalCandidates -- a candidate whose
-      // drift share isn't known yet is never dropped for it.
-      .filter((candidate) => candidate.uncompensatedSharePercent === null || candidate.uncompensatedSharePercent <= settings.maxDeltaDriftPct);
+    candidates = candidates.map((candidate) => ({ ...candidate, uncompensatedSharePercent: byContract.get(candidateContractKey(candidate)) ?? null }));
   }
 
   return { ...withCaveats(null), candidates, best: pickBestCandidate(candidates), gradeCounts: countGrades(candidates) };
