@@ -10,6 +10,10 @@ import { requestRateStats, processStartedAt } from "../lib/requestRateTracker.js
 import { computeMarketSessionStatus } from "../lib/marketSessionStatus.js";
 import { dbQueryTimingStats } from "../lib/dbQueryTimingTracker.js";
 import { requireEnvironmentVariable } from "../config/env.js";
+import { daySignalsLoopStatus } from "../lib/daySignalsLoop.js";
+import { loadDayQuotesStatus } from "../lib/daySignalsStore.js";
+import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
+import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 
 export const systemHealthRouter = Router();
 systemHealthRouter.use(requireAuth);
@@ -123,6 +127,13 @@ systemHealthRouter.get("/market-status", async (_request, response) => {
   const status = await computeMarketSessionStatus();
 
   response.json({ exchanges: exchangeNames.length > 0 ? exchangeNames : ["US Markets"], state: status.state, label: status.label });
+});
+
+// Day Signals: the refresh loop's state (in-process; null when this process isn't running it),
+// the day tables' contents, and the live market-data pool's budget standing.
+systemHealthRouter.get("/day-signals", async (_request, response) => {
+  const [quotes, restriction] = await Promise.all([loadDayQuotesStatus(), loadMarketDataLineRestriction()]);
+  response.json({ loop: daySignalsLoopStatus(), quotes, marketDataPool: marketDataPoolSnapshot(), marketDataRestriction: restriction });
 });
 
 // Genosuke + LLM node stats. activeSessions will almost always read 0/1 in

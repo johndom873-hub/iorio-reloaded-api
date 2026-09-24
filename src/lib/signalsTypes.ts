@@ -1,4 +1,5 @@
-import type { SignalCandidate, SignalGrade, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
+import type { SignalCandidate, SignalGrade, SignalQuote, SignalQuoteSource, SignalSurfaceSlice } from "./signalCandidates.js";
+import type { LiveOptionQuote } from "./signalsLiveScoring.js";
 import type { TickerCaveat } from "./signalsRoadmap.js";
 import type { ElevatedVolatilityFlag, SkewMeasure } from "./tiltMeasures.js";
 import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
@@ -28,6 +29,8 @@ export interface TickerSignalsInputs {
   header: SnapshotHeader | null;
   slices: SignalSurfaceSlice[];
   quotes: SignalQuote[];
+  /** The Day Signals loop's latest bid/ask for this ticker's pooled contracts, from the same snapshot date as `header`; empty when none. */
+  dayQuotes: LiveOptionQuote[];
   forecast: RealizedVolatilityForecast | null;
   /** Trading date the split guard flagged when it left the ticker without a forecast; null otherwise. */
   suspectedSplitDateIso: string | null;
@@ -54,6 +57,20 @@ export interface AccountContext {
 }
 
 export type GradeCounts = Record<SignalGrade, number>;
+export type QuoteSourceCounts = Record<SignalQuoteSource, number>;
+
+/** Age range of the day quotes merged into this ticker's scoring (ISO times). */
+export interface DayQuotesAsOf {
+  oldest: string;
+  newest: string;
+  count: number;
+}
+
+/** Formula 3h per expiry: the parallel IV shift applied (in volatility points) and how many fresh quotes it came from. */
+export interface ExpiryIvShiftSummary {
+  shiftVolatilityPoints: number;
+  quoteCount: number;
+}
 
 export interface TickerSignals {
   tickerId: string;
@@ -85,6 +102,9 @@ export interface TickerSignals {
   /** What "executable" was judged against: uncovered shares of this ticker and free cash in the account. */
   freeShares: number;
   freeCash: number;
+  dayQuotesAsOf: DayQuotesAsOf | null;
+  ivShiftByExpiry: Record<string, ExpiryIvShiftSummary>;
+  quoteSourceCounts: QuoteSourceCounts;
   unscoredReason: SignalsUnscoredReason | null;
 }
 

@@ -1,27 +1,36 @@
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamPooledPrices } from "../ibkr/pricePool.js";
 import { streamSignalsOptionQuotes } from "../ibkr/streamSignalsOptionQuotes.js";
+import { onDayQuotesUpdated } from "../lib/daySignalsEvents.js";
+import { daySignalsLoopStatus, type DaySignalsLoopStatus } from "../lib/daySignalsLoop.js";
+import { loadDayQuotesStatus, type DayQuotesStatus } from "../lib/daySignalsStore.js";
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { uncompensatedShareRefreshIntervalMs, type SignalCandidate, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
-import { accountRefreshIntervalMs, contractKey, liveFrameIntervalMs, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
-import { loadAccountContext, loadShortlistTicker, loadShortlistTickers, loadTickerSignalsInputs, type ShortlistTickerRow } from "../lib/signalsStore.js";
+import { accountRefreshIntervalMs, candidateContractKey, candidateContractRef, contractKey, liveFrameIntervalMs, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
+import { loadAccountContext, loadDayQuotesAsLiveQuotes, loadShortlistTicker, loadShortlistTickers, loadTickerSignalsInputs, type ShortlistTickerRow } from "../lib/signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "../lib/signalSettingsStore.js";
 import type { AccountContext, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { computeUncompensatedSharesInWorker } from "../lib/uncompensatedShareWorkerPool.js";
 import type { StreamProducer } from "./streamProducers.js";
 import { StreamRequestError } from "./streamProtocol.js";
 
-// Signals live layer (stage 2, decisions with Marcelo 2026-09-22). Two snapshot
-// streams: `signalsScreen` (every shortlist ticker, one stock line each, rows only)
-// and `signalsTicker` (one ticker: stock line + live quotes for <= 40 contracts +
-// the UncompensatedShare Monte Carlo in a worker thread). Frames carry full state
-// and go out at most once a second; account context (free cash / shares) refreshes
-// every 60 s. Dependencies are injectable so the orchestration is testable offline.
+// Signals live layer (stage 2, decisions with Marcelo 2026-09-22; Day Signals
+// 2026-09-24). Two snapshot streams: `signalsScreen` (every shortlist ticker,
+// one stock line each plus — unless `bestContractLines` is "false" — one
+// pooled option line on each ticker's best contract, rows only) and
+// `signalsTicker` (one ticker: stock line + live quotes for the selected
+// expiry's contracts + the UncompensatedShare Monte Carlo in a worker
+// thread). Both merge the Day Signals loop's quotes for everything else and
+// re-score when the loop announces a ticker's quotes changed. Frames carry
+// full state and go out at most once a second; account context (free cash /
+// shares) refreshes every 60 s. Dependencies are injectable so the
+// orchestration is testable offline.
 
 export interface SignalsScreenFrame {
   type: "signalsScreen";
   at: string;
   rows: SignalsScreenRow[];
+  dayQuotes: { loop: DaySignalsLoopStatus | null; status: DayQuotesStatus };
 }
 
 export interface SignalsTickerFrame {
@@ -33,10 +42,16 @@ export interface SignalsTickerFrame {
   uncompensatedAsOf: { spotPrice: number; at: string } | null;
 }
 
+export const dayQuotesStatusRefreshIntervalMs = 30_000;
+
 export interface SignalsProducerDependencies {
   loadShortlistTickers(): Promise<ShortlistTickerRow[]>;
   loadShortlistTicker(symbol: string): Promise<ShortlistTickerRow | null>;
   loadTickerSignalsInputs(ticker: ShortlistTickerRow): Promise<TickerSignalsInputs>;
+  loadDayQuotes(ticker: ShortlistTickerRow, snapshotTradingDateIso: string): Promise<LiveOptionQuote[]>;
+  onDayQuotesUpdated(listener: (tickerId: string) => void): () => void;
+  loadDayQuotesStatus(): Promise<DayQuotesStatus>;
+  daySignalsLoopStatus(): DaySignalsLoopStatus | null;
   loadAccountContext(): Promise<AccountContext>;
   loadSignalSettings(): Promise<SignalSettings>;
   fetchAvailableUncoveredShares(tickerId: string): Promise<number>;
@@ -50,6 +65,10 @@ export const defaultSignalsProducerDependencies: SignalsProducerDependencies = {
   loadShortlistTickers,
   loadShortlistTicker,
   loadTickerSignalsInputs,
+  loadDayQuotes: (ticker, snapshotTradingDateIso) => loadDayQuotesAsLiveQuotes(ticker.tickerId, snapshotTradingDateIso),
+  onDayQuotesUpdated,
+  loadDayQuotesStatus,
+  daySignalsLoopStatus,
   loadAccountContext,
   loadSignalSettings,
   fetchAvailableUncoveredShares,
@@ -68,9 +87,14 @@ function readParameterObject(rawParameters: unknown): Record<string, unknown> {
   return rawParameters as Record<string, unknown>;
 }
 
-function parseNoParameters(rawParameters: unknown): Record<string, string> {
-  if (Object.keys(readParameterObject(rawParameters)).length > 0) throw new StreamRequestError(400, "This stream takes no parameters.");
-  return {};
+/** `bestContractLines: false` (the modal is open and holds its own lines) is the only option; anything else is rejected. */
+function parseScreenParameters(rawParameters: unknown): Record<string, string> {
+  const parameters = readParameterObject(rawParameters);
+  const unknownField = Object.keys(parameters).find((key) => key !== "bestContractLines");
+  if (unknownField) throw new StreamRequestError(400, `Unknown parameter: ${unknownField}.`);
+  const bestContractLines = parameters.bestContractLines;
+  if (bestContractLines !== undefined && typeof bestContractLines !== "boolean") throw new StreamRequestError(400, "bestContractLines must be a boolean.");
+  return bestContractLines === false ? { bestContractLines: "false" } : {};
 }
 
 function parseTickerParameters(rawParameters: unknown): Record<string, string> {
@@ -136,33 +160,108 @@ function liveOverrides(inputs: TickerSignalsInputs, spot: number | null, priceSo
   return { spotPrice: spot ?? snapshotSpot!, priceSource: spot === null ? ("snapshot" as const) : priceSource };
 }
 
+/** A child signal that aborts with its parent or on its own. */
+function childAbort(parent: AbortSignal): AbortController {
+  const controller = new AbortController();
+  if (parent.aborted) controller.abort();
+  else parent.addEventListener("abort", () => controller.abort(), { once: true });
+  return controller;
+}
+
 export function createSignalsProducers(deps: SignalsProducerDependencies = defaultSignalsProducerDependencies): { signalsScreen: StreamProducer; signalsTicker: StreamProducer } {
   const signalsScreen: StreamProducer = {
     isSnapshotStream: true,
-    parseParameters: parseNoParameters,
-    async run(_parameters, _context, emit, signal) {
-      const [tickers, initialAccount, settings] = await Promise.all([deps.loadShortlistTickers(), deps.loadAccountContext(), deps.loadSignalSettings()]);
+    parseParameters: parseScreenParameters,
+    async run(parameters, _context, emit, signal) {
+      const bestContractLines = parameters.bestContractLines !== "false";
+      const [tickers, initialAccount, settings, initialDayQuotesStatus] = await Promise.all([deps.loadShortlistTickers(), deps.loadAccountContext(), deps.loadSignalSettings(), deps.loadDayQuotesStatus()]);
       let account = initialAccount;
+      let dayQuotesStatus = initialDayQuotesStatus;
       const inputsList = await Promise.all(tickers.map((ticker) => deps.loadTickerSignalsInputs(ticker)));
       if (signal.aborted) return;
 
       interface TickerState {
+        ticker: ShortlistTickerRow;
         inputs: TickerSignalsInputs;
         spot: number | null;
         priceSource: SignalsPriceSource;
+        liveQuotes: LiveOptionQuote[];
+        /** The pooled line on this ticker's current best contract, if any. */
+        bestLine: { key: string; abort: AbortController } | null;
         scored: TickerSignals;
       }
       const states = new Map<string, TickerState>();
-      for (const inputs of inputsList) states.set(inputs.symbol, { inputs, spot: null, priceSource: "snapshot", scored: scoreTicker(inputs, account, settings) });
+      const statesByTickerId = new Map<string, TickerState>();
+      tickers.forEach((ticker, index) => {
+        const inputs = inputsList[index]!;
+        const state: TickerState = { ticker, inputs, spot: null, priceSource: "snapshot", liveQuotes: [], bestLine: null, scored: scoreTicker(inputs, account, settings) };
+        states.set(ticker.symbol, state);
+        statesByTickerId.set(ticker.tickerId, state);
+      });
       const rescore = (state: TickerState) => {
-        state.scored = scoreTicker(state.inputs, account, settings, liveOverrides(state.inputs, state.spot, state.priceSource));
+        const overrides = liveOverrides(state.inputs, state.spot, state.priceSource);
+        state.scored = scoreTicker(state.inputs, account, settings, overrides ? { ...overrides, liveQuotes: state.liveQuotes } : undefined);
       };
       const emitFrame = () => {
-        const frame: SignalsScreenFrame = { type: "signalsScreen", at: deps.now().toISOString(), rows: [...states.values()].map((state) => toScreenRow(state.scored)) };
+        const frame: SignalsScreenFrame = { type: "signalsScreen", at: deps.now().toISOString(), rows: [...states.values()].map((state) => toScreenRow(state.scored)), dayQuotes: { loop: deps.daySignalsLoopStatus(), status: dayQuotesStatus } };
         emit(frame);
       };
-      emitFrame();
       const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now());
+
+      // One pooled option line per ticker on its best contract (approved 2026-09-24), moved whenever "best" changes.
+      const syncBestLine = (state: TickerState) => {
+        if (!bestContractLines || signal.aborted) return;
+        const best = state.scored.best;
+        const key = best ? candidateContractKey(best) : null;
+        if ((state.bestLine?.key ?? null) === key) return;
+        state.bestLine?.abort.abort();
+        state.bestLine = null;
+        state.liveQuotes = [];
+        if (!best) return;
+        const abort = childAbort(signal);
+        const line = { key: key!, abort };
+        state.bestLine = line;
+        deps
+          .streamOptionQuotes(
+            state.ticker.symbol,
+            [candidateContractRef(best)],
+            (quotes) => {
+              if (state.bestLine !== line) return;
+              state.liveQuotes = quotes;
+              rescore(state);
+              syncBestLine(state);
+              frames.markDirty();
+            },
+            abort.signal,
+          )
+          .catch((error) => console.error(`signalsScreen ${state.ticker.symbol}: best-contract live quote failed`, error));
+      };
+      for (const state of states.values()) syncBestLine(state);
+      emitFrame();
+
+      const refreshDayQuotesStatus = async () => {
+        const status = await deps.loadDayQuotesStatus();
+        if (signal.aborted || JSON.stringify(status) === JSON.stringify(dayQuotesStatus)) return;
+        dayQuotesStatus = status;
+        frames.markDirty();
+      };
+      startPeriodicRefresh(dayQuotesStatusRefreshIntervalMs, refreshDayQuotesStatus, signal, "signalsScreen day quotes status");
+      const unsubscribeDayQuotes = deps.onDayQuotesUpdated((tickerId) => {
+        const state = statesByTickerId.get(tickerId);
+        const header = state?.inputs.header;
+        if (!state || !header || signal.aborted) return;
+        deps
+          .loadDayQuotes(state.ticker, header.tradingDateIso)
+          .then(async (dayQuotes) => {
+            if (signal.aborted) return;
+            state.inputs = { ...state.inputs, dayQuotes };
+            rescore(state);
+            syncBestLine(state);
+            await refreshDayQuotesStatus();
+          })
+          .catch((error) => console.error(`signalsScreen ${state.ticker.symbol}: day quotes reload failed`, error));
+      });
+      signal.addEventListener("abort", unsubscribeDayQuotes, { once: true });
 
       startPeriodicRefresh(
         accountRefreshIntervalMs,
@@ -174,7 +273,10 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
             const state = states.get(ticker.symbol);
             if (state) state.inputs = { ...state.inputs, freeShares: freeSharesList[index]! };
           });
-          for (const state of states.values()) rescore(state);
+          for (const state of states.values()) {
+            rescore(state);
+            syncBestLine(state);
+          }
           frames.markDirty();
         },
         signal,
@@ -195,6 +297,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
               state.spot = price;
               state.priceSource = priceSource;
               rescore(state);
+              syncBestLine(state);
               changed = true;
             }
             if (changed) frames.markDirty();
@@ -267,6 +370,20 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       void refreshUncompensatedShare();
       const simulationTimer = setInterval(() => void refreshUncompensatedShare(), uncompensatedShareRefreshIntervalMs);
       signal.addEventListener("abort", () => clearInterval(simulationTimer), { once: true });
+
+      const unsubscribeDayQuotes = deps.onDayQuotesUpdated((tickerId) => {
+        if (tickerId !== ticker.tickerId || !inputs.header || signal.aborted) return;
+        deps
+          .loadDayQuotes(ticker, inputs.header.tradingDateIso)
+          .then((dayQuotes) => {
+            if (signal.aborted) return;
+            inputs = { ...inputs, dayQuotes };
+            rescore();
+            frames.markDirty();
+          })
+          .catch((error) => console.error(`signalsTicker ${symbol}: day quotes reload failed`, error));
+      });
+      signal.addEventListener("abort", unsubscribeDayQuotes, { once: true });
 
       startPeriodicRefresh(
         accountRefreshIntervalMs,

@@ -6,6 +6,7 @@ import { checkPositionReconciliation } from "./checkPositionReconciliation.js";
 import { lookupLatestDailyBar } from "./fetchTickerOverview.js";
 import { runJob } from "../lib/runJob.js";
 import { environment } from "../config/env.js";
+import { reportDaySignalsLoopLiveness } from "../lib/daySignalsLiveness.js";
 
 // Confirmed 2026-08-27: reqHistoricalData can silently hang (no data, no
 // error event — just a timeout) while the connection handshake itself and
@@ -300,12 +301,17 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
       notifications.push(reconciliationNotifyMessage(problems));
     }
 
+    // Alerts on its own (state-based, hourly reminders) rather than through this
+    // job's per-run notify, which would repeat every 10 minutes while it is down.
+    const daySignalsProblem = await reportDaySignalsLoopLiveness().catch((error) => `Day Signals liveness check itself failed: ${error instanceof Error ? error.message : error}`);
+
     return {
       details: {
         output: gatewayOutput,
         worker: { active: workerCheck.active, restarted: workerCheck.restarted },
         reconciliationProblems: problems,
         competingLiveSession,
+        daySignalsProblem,
         farmStatusMessages,
       },
       notify: notifications.length > 0 ? notifications.join("\n\n") : undefined,

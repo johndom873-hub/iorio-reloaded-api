@@ -1,4 +1,4 @@
-import { blackScholesDelta, sviTotalVariance, type RawSviParameters, type SviSliceStatus } from "./impliedVolatilitySurface.js";
+import { blackScholesDelta, impliedVolatilityFromPrice, sviTotalVariance, type RawSviParameters, type SviSliceStatus } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, computeFrictionCost, computeNetEdge } from "./optionFriction.js";
 import { computeUncompensatedShare, type UncompensatedShareOptions } from "./uncompensatedShare.js";
 import { expirySpansEarnings, type RealizedVolatilityForecast } from "./volatilityEdge.js";
@@ -45,7 +45,8 @@ export interface SignalSurfaceSlice {
   calendarViolations: number;
 }
 
-export type SignalQuoteSource = "live" | "snapshot";
+/** live = a pooled IBKR subscription (modal / screen best line), day = the Day Signals refresh loop, snapshot = the 10:00 capture. */
+export type SignalQuoteSource = "live" | "day" | "snapshot";
 
 export interface SignalQuote {
   expiry: string; // ISO date, matches a slice's expiry
@@ -53,8 +54,10 @@ export interface SignalQuote {
   right: "C" | "P";
   bid: number | null;
   ask: number | null;
-  /** Where bid/ask came from: the 10:00 capture (default) or a live IBKR subscription (Signals modal). */
+  /** Where bid/ask came from: the 10:00 capture (default), the Day Signals loop, or a live IBKR subscription. */
   source?: SignalQuoteSource;
+  /** When a day/live quote was received (ISO); absent for the snapshot. */
+  quotedAt?: string;
 }
 
 export interface SignalCandidatesInput {
@@ -77,6 +80,8 @@ export interface SignalCandidatesInput {
   maxNetDelta: number;
   /** Signals tab setting: candidates with annualised yield (as a %) below this are filtered out. */
   minAnnualizedYieldPct: number;
+  /** Formula 3h (approved 2026-09-24): per-expiry parallel shift added to the surface IV, from computeExpiryIvShifts. */
+  ivShiftByExpiry?: Map<string, number>;
 }
 
 export interface SignalCandidate {
@@ -109,38 +114,64 @@ export interface SignalCandidate {
   annualizedYield: number;
   uncompensatedSharePercent: number | null;
   quoteSource: SignalQuoteSource;
+  /** When the quote behind bid/ask was received (day/live); null for the snapshot. */
+  quotedAt: string | null;
   flags: SignalFlag[];
   executable: boolean;
   grade: SignalGrade; // filled in by gradeSignalCandidates; "avoid" until then
 }
 
-function impliedVolatilityFromMid(forward: number, strike: number, yearsToExpiry: number, riskFreeRate: number, bid: number, ask: number, isCall: boolean): number | null {
-  // Local bisection, independent of the surface fitter's own inversion helper (same maths, kept
-  // separate so a change to the fitter's tolerance can't silently move what the Signals screen shows).
-  const mid = (bid + ask) / 2;
-  let low = 0.01;
-  let high = 5;
-  const price = (vol: number) => {
-    const sd = vol * Math.sqrt(yearsToExpiry);
-    const d1 = (Math.log(forward / strike) + 0.5 * sd * sd) / sd;
-    const d2 = d1 - sd;
-    const discount = Math.exp(-riskFreeRate * yearsToExpiry);
-    return discount * (isCall ? forward * cdf(d1) - strike * cdf(d2) : strike * cdf(-d2) - forward * cdf(-d1));
-  };
-  if (mid <= price(low) || mid >= price(high)) return null;
-  for (let i = 0; i < 60; i++) {
-    const mv = (low + high) / 2;
-    if (price(mv) > mid) high = mv;
-    else low = mv;
-  }
-  return (low + high) / 2;
+/** Mid-quote implied volatility through the surface library's own Black-76 inversion, so mid IV, surface IV and the fitter never disagree on pricing. */
+export function impliedVolatilityFromMid(forward: number, strike: number, yearsToExpiry: number, riskFreeRate: number, bid: number, ask: number, isCall: boolean): number | null {
+  return impliedVolatilityFromPrice((bid + ask) / 2, forward, strike, yearsToExpiry, riskFreeRate, isCall);
 }
-function cdf(x: number): number {
-  const sign = x < 0 ? -1 : 1;
-  const absX = Math.abs(x);
-  const t = 1 / (1 + 0.3275911 * absX);
-  const y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-absX * absX);
-  return 0.5 * (1 + sign * y);
+
+export const ivShiftMinimumQuotes = 5;
+
+export interface ExpiryIvShift {
+  /** Added to the surface IV of every strike in the expiry (a fraction: 0.021 = +2.1 vol points); 0 when too few quotes qualified. */
+  shift: number;
+  quoteCount: number;
+}
+
+/**
+ * Formula 3h (approved 2026-09-24): for each expiry, the median of (mid IV − surface IV) over its fresh
+ * (day/live) two-sided OTM quotes with spread ≤ 50% of the mid; requires ivShiftMinimumQuotes, else 0.
+ * Without it the 10:00 surface never learned that the market was paying more (or less) for volatility
+ * intraday — net Edge only moved through the friction term.
+ */
+export function computeExpiryIvShifts(slices: SignalSurfaceSlice[], quotes: SignalQuote[], riskFreeRate: number): Map<string, ExpiryIvShift> {
+  const slicesByExpiry = new Map(slices.map((slice) => [slice.expiry, slice]));
+  const differencesByExpiry = new Map<string, number[]>();
+  for (const quote of quotes) {
+    if (quote.source !== "day" && quote.source !== "live") continue;
+    const slice = slicesByExpiry.get(quote.expiry);
+    if (!slice || slice.status !== "ok" || !slice.parameters || !(slice.yearsToExpiry > 0)) continue;
+    const isCall = quote.right === "C";
+    if (isCall !== quote.strike >= slice.forwardPrice) continue;
+    if (quote.bid === null || quote.ask === null || !(quote.bid > 0) || !(quote.ask > quote.bid)) continue;
+    const mid = (quote.bid + quote.ask) / 2;
+    if ((quote.ask - quote.bid) / mid > wideSpreadThreshold) continue;
+    const totalVariance = sviTotalVariance(slice.parameters, Math.log(quote.strike / slice.forwardPrice));
+    if (!(totalVariance > 0)) continue;
+    const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry);
+    const midIv = impliedVolatilityFromMid(slice.forwardPrice, quote.strike, slice.yearsToExpiry, riskFreeRate, quote.bid, quote.ask, isCall);
+    if (midIv === null) continue;
+    const differences = differencesByExpiry.get(quote.expiry) ?? [];
+    differences.push(midIv - surfaceIv);
+    differencesByExpiry.set(quote.expiry, differences);
+  }
+  const shifts = new Map<string, ExpiryIvShift>();
+  for (const [expiry, differences] of differencesByExpiry) {
+    shifts.set(expiry, { shift: differences.length >= ivShiftMinimumQuotes ? median(differences) : 0, quoteCount: differences.length });
+  }
+  return shifts;
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
 /** Builds every structurally-eligible candidate for a ticker. Ungraded (grade is a placeholder "avoid" until gradeSignalCandidates runs). */
@@ -165,7 +196,8 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     const logMoneyness = Math.log(quote.strike / slice.forwardPrice);
     const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
     if (!(totalVariance > 0)) continue;
-    const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry);
+    const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry) + (input.ivShiftByExpiry?.get(quote.expiry) ?? 0);
+    if (!(surfaceIv > 0)) continue;
     const midIv = impliedVolatilityFromMid(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, quote.bid, quote.ask, isCall);
     const delta = blackScholesDelta(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
     if (Math.abs(delta) > input.maxNetDelta) continue; // Signals tab max net delta (approved 2026-09-24)
@@ -224,6 +256,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       annualizedYield,
       uncompensatedSharePercent: null,
       quoteSource: quote.source ?? "snapshot",
+      quotedAt: quote.quotedAt ?? null,
       flags,
       executable,
       grade: "avoid",

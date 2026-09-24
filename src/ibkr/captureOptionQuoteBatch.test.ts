@@ -2,7 +2,12 @@ import { EventEmitter } from "node:events";
 import type { IBApi } from "@stoqey/ib";
 import { EventName } from "@stoqey/ib";
 import { describe, expect, it, vi } from "vitest";
-import { captureOptionQuoteBatch, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
+import { captureOptionQuoteBatch as captureOptionQuoteBatchWithOwnReservation, type CaptureOptionQuoteBatchOptions, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
+
+// The collector reserves lines against the shared DB budget by default; these tests exercise
+// the IBKR side only, so they run as the capture job does — under a reservation the caller holds.
+const captureOptionQuoteBatch = (ib: IBApi, symbol: string, contracts: OptionContractRequest[], options: CaptureOptionQuoteBatchOptions = {}) =>
+  captureOptionQuoteBatchWithOwnReservation(ib, symbol, contracts, { lineReservation: "caller", ...options });
 
 // A stand-in for the IBKR socket: the collector only calls on/removeListener
 // (EventEmitter) and reqMktData/cancelMktData, so ticks are emitted by hand.

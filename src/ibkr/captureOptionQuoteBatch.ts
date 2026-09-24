@@ -3,7 +3,7 @@ import { EventName, Option, OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
-import { reserveMarketDataLines, releaseMarketDataLines } from "./marketDataLineBudget.js";
+import { describeMarketDataLineShortage, reserveMarketDataLines, releaseMarketDataLines } from "./marketDataLineBudget.js";
 
 // Quote collector for the nightly option-chain archive (IORIO Signal Engine,
 // Phase 0). Deliberately a NEW module rather than a change to
@@ -89,6 +89,12 @@ export interface CaptureOptionQuoteBatchOptions {
   ceilingMs?: number;
   /** When every contract is settled the batch resolves early. Overridable so live testing can tune it. */
   isSettled?: (quote: CapturedOptionQuote) => boolean;
+  /**
+   * "own" (default): this batch reserves its lines against the shared budget for its own duration.
+   * "caller": the caller already holds a reservation covering the batch (the capture job's run-long
+   * priority reservation), so no per-batch reservation is made.
+   */
+  lineReservation?: "own" | "caller";
 }
 
 /** Default: a price (two-sided or last), a model delta and an open-interest reading, or an error that means no data is coming. */
@@ -144,10 +150,11 @@ export async function captureOptionQuoteBatch(
   // past IBKR's cap silently. Failing here surfaces as this ticker's
   // capture failing with a clear reason instead of every contract in the
   // batch silently never ticking.
+  const ownsLineReservation = (options.lineReservation ?? "own") === "own";
   const lineHolder = `captureBatch:${symbol}:${randomUUID()}`;
-  const reservation = await reserveMarketDataLines(lineHolder, contracts.length, Math.ceil(ceilingMs / 1000) + 5);
-  if (!reservation.ok) {
-    throw new Error(`IBKR market data is busy — ${symbol} batch needs ${contracts.length} lines, only ${reservation.availableLines} available.`);
+  if (ownsLineReservation) {
+    const reservation = await reserveMarketDataLines(lineHolder, contracts.length, Math.ceil(ceilingMs / 1000) + 5);
+    if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, `${symbol} batch`, contracts.length));
   }
 
   const quotesByReqId = new Map<number, CapturedOptionQuote>();
@@ -275,7 +282,9 @@ export async function captureOptionQuoteBatch(
     ib.removeListener(EventName.tickSize, onTickSize);
     ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
     ib.removeListener(EventName.error, onError);
-    await releaseMarketDataLines(lineHolder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${lineHolder}: ${error instanceof Error ? error.message : error}`));
+    if (ownsLineReservation) {
+      await releaseMarketDataLines(lineHolder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${lineHolder}: ${error instanceof Error ? error.message : error}`));
+    }
   }
 
   return Array.from(quotesByReqId.values());

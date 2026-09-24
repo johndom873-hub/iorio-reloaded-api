@@ -41,6 +41,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     header: { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100 },
     slices: [slice("2026-10-21", years30), slice("2026-11-20", years60)],
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)],
+    dayQuotes: [],
     forecast: { volatility: 0.15, windowDays: 63 },
     suspectedSplitDateIso: null,
     earningsDatesIso: [],
@@ -245,17 +246,15 @@ describe("selectLiveQuoteContracts", () => {
     candidate("2026-12-18", 80, "cash_secured_put", 30),
   ];
 
-  it("takes the selected expiry first, then the best-ranked from other expiries, without duplicates", () => {
-    const selected = selectLiveQuoteContracts(list, "2026-10-21", { topCandidates: 2, maxContracts: 40 });
-    expect(selected.map(contractKey)).toEqual(["2026-10-21|90|P", "2026-10-21|110|C", "2026-11-20|85|P", "2026-11-20|115|C"]);
+  it("takes the selected expiry's candidates only, without duplicates (other expiries ride on day quotes)", () => {
+    expect(selectLiveQuoteContracts(list, "2026-10-21").map(contractKey)).toEqual(["2026-10-21|90|P", "2026-10-21|110|C"]);
+    expect(selectLiveQuoteContracts([...list, candidate("2026-10-21", 90, "cash_secured_put", 5)], "2026-10-21")).toHaveLength(2);
   });
   it("caps the total at maxContracts", () => {
-    const selected = selectLiveQuoteContracts(list, "2026-10-21", { topCandidates: 20, maxContracts: 3 });
-    expect(selected).toHaveLength(3);
-    expect(selected.map(contractKey)).toEqual(["2026-10-21|90|P", "2026-10-21|110|C", "2026-11-20|85|P"]);
+    expect(selectLiveQuoteContracts(list, "2026-11-20", { maxContracts: 1 }).map(contractKey)).toEqual(["2026-11-20|85|P"]);
   });
-  it("with no selected expiry just takes the top-ranked", () => {
-    expect(selectLiveQuoteContracts(list, null, { topCandidates: 1, maxContracts: 40 }).map(contractKey)).toEqual(["2026-11-20|85|P"]);
+  it("opens no lines without a selected expiry", () => {
+    expect(selectLiveQuoteContracts(list, null)).toEqual([]);
   });
 });
 
@@ -269,5 +268,66 @@ describe("toScreenRow / countGrades", () => {
   it("counts every grade", () => {
     const counts = countGrades([{ grade: "strong" }, { grade: "avoid" }, { grade: "avoid" }] as SignalCandidate[]);
     expect(counts).toEqual({ strong: 1, good: 0, weak: 0, avoid: 2 });
+  });
+});
+
+describe("day quotes and the intraday IV shift (formula 3h)", () => {
+  const expiry = "2026-10-21";
+  function quoteAtVolatility(strike: number, right: "C" | "P", volatility: number, quotedAt: string) {
+    const mid = blackScholesPriceOnForward(forward, strike, years30, rate, volatility, right === "C");
+    return { expiry, strike, right, bid: mid * 0.98, ask: mid * 1.02, quotedAt };
+  }
+  const strikes: [number, "C" | "P"][] = [[80, "P"], [85, "P"], [90, "P"], [95, "P"], [105, "C"], [110, "C"], [115, "C"], [120, "C"]];
+  const surfaceIvAt = (strike: number) => Math.sqrt(sviTotalVariance(params, Math.log(strike / forward)) / years30);
+  const richInputs = (dayQuoteCount: number) =>
+    inputs({
+      slices: [slice(expiry, years30)],
+      quotes: strikes.map(([strike, right]) => quoteAt(strike, right, expiry, years30)),
+      dayQuotes: strikes.slice(0, dayQuoteCount).map(([strike, right], index) => quoteAtVolatility(strike, right, surfaceIvAt(strike) + 0.02, `2026-09-24T15:${String(10 + index).padStart(2, "0")}:00.000Z`)),
+    });
+
+  it("merges day quotes with source 'day' and their time, and a live quote still wins over a day quote", () => {
+    const scored = scoreTicker(richInputs(3), account, permissiveSettings);
+    const byKey = new Map(scored.candidates.map((candidate) => [candidateContractKey(candidate), candidate]));
+    expect(byKey.get(`${expiry}|80|P`)).toMatchObject({ quoteSource: "day", quotedAt: "2026-09-24T15:10:00.000Z" });
+    expect(byKey.get(`${expiry}|120|C`)).toMatchObject({ quoteSource: "snapshot", quotedAt: null });
+    expect(scored.dayQuotesAsOf).toEqual({ oldest: "2026-09-24T15:10:00.000Z", newest: "2026-09-24T15:12:00.000Z", count: 3 });
+    expect(scored.quoteSourceCounts).toEqual({ live: 0, day: 3, snapshot: 5 });
+
+    const withLive = scoreTicker(richInputs(3), account, permissiveSettings, { spotPrice: forward, priceSource: "live", liveQuotes: [{ expiry, strike: 80, right: "P", bid: 1.4, ask: 1.5 }] });
+    expect(withLive.candidates.find((candidate) => candidateContractKey(candidate) === `${expiry}|80|P`)).toMatchObject({ quoteSource: "live", bid: 1.4, ask: 1.5 });
+    expect(withLive.quoteSourceCounts).toEqual({ live: 1, day: 2, snapshot: 5 });
+  });
+
+  it("shifts the whole expiry's surface IV by the median fresh mid-IV difference once five quotes qualify, and every candidate's edge moves with it", () => {
+    const unshifted = scoreTicker(richInputs(4), account, permissiveSettings);
+    expect(unshifted.ivShiftByExpiry[expiry]).toEqual({ shiftVolatilityPoints: 0, quoteCount: 4 });
+
+    const shifted = scoreTicker(richInputs(5), account, permissiveSettings);
+    expect(shifted.ivShiftByExpiry[expiry]!.quoteCount).toBe(5);
+    expect(shifted.ivShiftByExpiry[expiry]!.shiftVolatilityPoints).toBeCloseTo(2, 2);
+    const snapshotOnly = new Map(unshifted.candidates.map((candidate) => [candidateContractKey(candidate), candidate]));
+    for (const candidate of shifted.candidates) {
+      const before = snapshotOnly.get(candidateContractKey(candidate))!;
+      expect(candidate.surfaceImpliedVolatility - before.surfaceImpliedVolatility).toBeCloseTo(0.02, 3);
+      expect(candidate.edge - before.edge).toBeCloseTo(0.02, 3);
+    }
+    // A snapshot-quoted contract in the same expiry is shifted too: the shift is per expiry, not per quote.
+    expect(shifted.candidates.find((candidate) => candidate.strike === 120)!.quoteSource).toBe("snapshot");
+  });
+
+  it("ignores wide, one-sided and in-the-money fresh quotes when computing the shift", () => {
+    const wide = { ...quoteAtVolatility(80, "P", surfaceIvAt(80) + 0.5, "2026-09-24T15:00:00.000Z") };
+    wide.ask = wide.bid * 3; // 100% spread
+    const scored = scoreTicker(
+      inputs({
+        slices: [slice(expiry, years30)],
+        quotes: strikes.map(([strike, right]) => quoteAt(strike, right, expiry, years30)),
+        dayQuotes: [wide, { expiry, strike: 85, right: "P", bid: 1, ask: null, quotedAt: "2026-09-24T15:00:00.000Z" }, quoteAtVolatility(90, "C", 0.5, "2026-09-24T15:00:00.000Z")],
+      }),
+      account,
+      permissiveSettings,
+    );
+    expect(scored.ivShiftByExpiry[expiry]).toBeUndefined();
   });
 });

@@ -4,7 +4,7 @@ import type { Contract, ContractDetails, IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
-import { reserveMarketDataLines, renewMarketDataLineReservation, releaseMarketDataLines } from "./marketDataLineBudget.js";
+import { describeMarketDataLineShortage, reserveMarketDataLines, renewMarketDataLineReservation, releaseMarketDataLines } from "./marketDataLineBudget.js";
 import { db } from "../db/connection.js";
 import { calendarDaysUntilExpiry, captureMaximumDaysToExpiry, captureMinimumDaysToExpiry } from "../lib/optionChainCaptureWindow.js";
 
@@ -368,11 +368,7 @@ export async function fetchQuotesForContracts(
   const lineHolder = `optionQuote:${symbol}:${randomUUID()}`;
   if (contracts.length > 0) {
     const reservation = await reserveMarketDataLines(lineHolder, contracts.length, live ? liveLineReservationTtlSeconds : oneShotLineReservationTtlSeconds);
-    if (!reservation.ok) {
-      throw new Error(
-        `IBKR market data is busy (nightly capture or another live view) — ${symbol} needs ${contracts.length} lines, only ${reservation.availableLines} available. Try again shortly.`,
-      );
-    }
+    if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, symbol, contracts.length));
   }
 
   const quotes = new Map<number, OptionQuote>();

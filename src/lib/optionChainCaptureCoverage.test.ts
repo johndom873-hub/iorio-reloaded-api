@@ -18,10 +18,10 @@ function quote(overrides: Partial<CoverageQuoteInput> = {}): CoverageQuoteInput 
 const silent = () => quote({ receivedAnyTick: false, bid: null, ask: null, impliedVolatility: null, delta: null, sawRealTimeTicks: false });
 
 describe("splitIntoBatches", () => {
-  it("defaults to the approved 60 lines per batch", () => {
-    expect(optionChainCaptureBatchSize).toBe(60);
+  it("defaults to the approved 50 lines per batch", () => {
+    expect(optionChainCaptureBatchSize).toBe(50);
     const batches = splitIntoBatches(Array.from({ length: 130 }, (_, i) => i));
-    expect(batches.map((batch) => batch.length)).toEqual([60, 60, 10]);
+    expect(batches.map((batch) => batch.length)).toEqual([50, 50, 30]);
     expect(batches.flat()).toEqual(Array.from({ length: 130 }, (_, i) => i));
   });
 

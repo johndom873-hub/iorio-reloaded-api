@@ -2,8 +2,8 @@
 // (IORIO Signal Engine, Phase 0). All parameters below were approved as
 // starting values on 2026-09-21, to be tuned after the first live test.
 
-/** ~60 live quote lines per batch: IBKR's ~100-line quota is shared across the whole Gateway, so this leaves headroom for a person opening Ticker Detail. */
-export const optionChainCaptureBatchSize = 60;
+/** 50 live quote lines per batch (60 until 2026-09-24): the job holds these as a priority reservation for its whole run, leaving 40 of the 90-line budget for live screens while it captures. */
+export const optionChainCaptureBatchSize = 50;
 
 /** A ticker is "starved" when fewer than this fraction of its requested contracts received ANY tick. Not "two-sided quote": far-OTM contracts legitimately have no bid. */
 export const starvedTickerAnyTickFraction = 0.9;

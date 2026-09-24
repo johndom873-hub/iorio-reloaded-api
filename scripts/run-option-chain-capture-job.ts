@@ -31,6 +31,7 @@ import { isWithinChainCaptureClockWindow } from "../src/lib/optionChainCaptureCl
 import { easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { runOptionSurfaceFitJob } from "../src/lib/runOptionSurfaceFitJob.js";
 import { runJob } from "../src/lib/runJob.js";
+import { seedDaySignals } from "../src/lib/daySignalsSeed.js";
 
 // This job has no user waiting on latency, so it would rather queue behind
 // the shared connection's own reconnect (backoff caps at 60s, see
@@ -77,7 +78,22 @@ async function main(): Promise<void> {
 
   // Fit tonight's surfaces from the snapshots just captured. Failure here is
   // recorded by runJob's own try/catch inside runOptionSurfaceFitJob.
-  await runOptionSurfaceFitJob(easternDateIso(new Date()), { triggeredBy: "scheduler" });
+  const tradingDateIso = easternDateIso(new Date());
+  await runOptionSurfaceFitJob(tradingDateIso, { triggeredBy: "scheduler" });
+
+  // Seed the Day Signals pool from the snapshots + fits just written; the
+  // refresh loop on the web dyno picks it up on its next state check. A
+  // failure is recorded/alerted by runJob and never affects the capture or
+  // fit already saved.
+  await runJob(
+    "day_signals_seed",
+    async () => {
+      const seed = await seedDaySignals(tradingDateIso);
+      console.log(`Day Signals seed: ${seed.tickersPooled}/${seed.tickersScored} tickers pooled, ${seed.expiriesPooled} expiries; no pool: ${seed.symbolsWithoutPool.join(", ") || "-"}; no snapshot today: ${seed.symbolsWithoutTodaySnapshot.join(", ") || "-"}.`);
+      return { details: { ...seed } };
+    },
+    { triggeredBy: "scheduler" },
+  ).catch((error) => console.error(`day_signals_seed failed: ${error instanceof Error ? error.message : error}`));
 }
 
 main()

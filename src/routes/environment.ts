@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import { environment } from "../config/env.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { classifyTradingStatus } from "../lib/tradingGate.js";
+import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 
 // Feeds the top-bar environment badges (PAPER / LIVE / STAGING / DEV / TRADING BLOCKED).
@@ -17,12 +18,14 @@ environmentRouter.get("/", (_request, response) => {
 
 environmentRouter.get("/details", requireAuth, async (_request, response) => {
   const apiEnvironment = readAppEnvironment();
-  const workerRow = await db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first();
+  const [workerRow, marketDataRestriction] = await Promise.all([db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(), loadMarketDataLineRestriction()]);
   const trading = classifyTradingStatus(workerRow, apiEnvironment);
   response.json({
     environment: apiEnvironment,
     tradingMode: environment.ibkrTradingMode,
     trading,
+    // Non-null while the chain capture holds its priority lines — the top bar's "Live data restricted" state.
+    marketDataRestriction,
     worker: workerRow
       ? {
           gitSha: workerRow.git_sha ? String(workerRow.git_sha).slice(0, 7) : null,

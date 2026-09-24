@@ -123,6 +123,11 @@ function runDependencies(overrides: Partial<OptionChainCaptureDependencies> = {}
   const disconnect = vi.fn();
   const saveFailedSnapshot = vi.fn(async () => {});
   const clock = { nowMs: Date.UTC(2026, 8, 21, 14, 0, 0) };
+  const lineReservation = {
+    reserve: vi.fn(async () => ({ ok: true, availableLines: 90, priorityLinesHeld: 0 })),
+    renew: vi.fn(async () => {}),
+    release: vi.fn(async () => {}),
+  };
   const dependencies: OptionChainCaptureDependencies = {
     now: () => new Date(clock.nowMs),
     loadUniverse: async () => [ticker("AAA"), ticker("BBB")],
@@ -131,12 +136,48 @@ function runDependencies(overrides: Partial<OptionChainCaptureDependencies> = {}
     prepareTicker: async (_ib, universeTicker) => preparedFor(universeTicker),
     captureAndSave: async () => coverage(10, 10),
     saveFailedSnapshot,
+    lineReservation,
+    waitForPoolShedding: async () => {},
     ...overrides,
   };
-  return { dependencies, disconnect, saveFailedSnapshot, clock };
+  return { dependencies, disconnect, saveFailedSnapshot, clock, lineReservation };
 }
 
 describe("runOptionChainCapture", () => {
+  it("holds one priority line reservation for the whole run, waits for the pool to shed, and releases it even when the run fails", async () => {
+    const { dependencies, lineReservation } = runDependencies();
+    const order: string[] = [];
+    lineReservation.reserve.mockImplementation(async () => {
+      order.push("reserve");
+      return { ok: true, availableLines: 90, priorityLinesHeld: 0 };
+    });
+    const waitForPoolShedding = vi.fn(async () => {
+      order.push("wait");
+    });
+    const connect = vi.fn(async () => {
+      order.push("connect");
+      return { ib: fakeIb, disconnect: vi.fn() };
+    });
+    await runOptionChainCapture(undefined, { ...dependencies, waitForPoolShedding, connect });
+    expect(order).toEqual(["reserve", "wait", "connect"]);
+    expect(lineReservation.reserve).toHaveBeenCalledWith("optionChainCapture", 50, expect.any(Number));
+    expect(lineReservation.release).toHaveBeenCalledWith("optionChainCapture");
+
+    const failing = runDependencies({
+      connect: async () => {
+        throw new Error("gateway down");
+      },
+    });
+    await expect(runOptionChainCapture(undefined, failing.dependencies)).rejects.toThrow("gateway down");
+    expect(failing.lineReservation.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to run when the priority reservation is rejected", async () => {
+    const { dependencies, lineReservation } = runDependencies();
+    lineReservation.reserve.mockResolvedValue({ ok: false, availableLines: 10, priorityLinesHeld: 80 });
+    await expect(runOptionChainCapture(undefined, dependencies)).rejects.toThrow("chain capture");
+  });
+
   it("captures every ticker in order, reports events, and disconnects", async () => {
     const { dependencies, disconnect } = runDependencies();
     const events: OptionChainCaptureEvent[] = [];

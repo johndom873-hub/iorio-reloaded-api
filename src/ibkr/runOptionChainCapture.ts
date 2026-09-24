@@ -28,6 +28,19 @@ import {
 } from "../lib/optionChainCaptureCoverage.js";
 import { saveOptionChainSnapshot } from "../lib/optionChainSnapshotStore.js";
 import { excludeTickersBeingPrepared } from "../lib/tickersBeingPrepared.js";
+import { describeMarketDataLineShortage, releaseMarketDataLines, renewMarketDataLineReservation, reserveMarketDataLines, type LineReservationResult } from "./marketDataLineBudget.js";
+
+// The job holds ONE priority reservation for its whole run (approved
+// 2026-09-24): live screens see the budget minus these lines and the live
+// pool sheds to fit, so the capture can never be starved. Batches then run
+// under this reservation instead of reserving individually.
+export const captureLineReservationHolder = "optionChainCapture";
+const captureLineReservationTtlSeconds = 180;
+const captureLineReservationRenewIntervalMs = 60_000;
+// The live pool re-checks the budget every 15 s (marketDataPool.ts) and
+// pauses subscriptions to make room; the first batch waits this long after
+// the reservation so it never competes with lines that are still being shed.
+const poolSheddingGraceMs = 20_000;
 
 // Nightly option-chain archive (IORIO Signal Engine, Phase 0). One ticker at a
 // time, batches of 60 contracts one after another (approved 2026-09-21: keeps
@@ -187,7 +200,7 @@ export async function prepareTicker(ib: IbkrApi, ticker: UniverseTicker, todayIs
 async function captureAllBatches(ib: IbkrApi, prepared: PreparedTicker): Promise<CapturedOptionQuote[]> {
   const captured: CapturedOptionQuote[] = [];
   for (const batch of splitIntoBatches(prepared.contracts, optionChainCaptureBatchSize)) {
-    captured.push(...(await captureOptionQuoteBatch(ib, prepared.ticker.symbol, batch)));
+    captured.push(...(await captureOptionQuoteBatch(ib, prepared.ticker.symbol, batch, { lineReservation: "caller" })));
   }
   return captured;
 }
@@ -260,6 +273,13 @@ export interface OptionChainCaptureDependencies {
   prepareTicker: (ib: IbkrApi, ticker: UniverseTicker, todayIso: string) => Promise<PreparedTicker>;
   captureAndSave: (ib: IbkrApi, prepared: PreparedTicker, todayIso: string, riskFreeRatePercent: number | null) => Promise<SnapshotCoverage>;
   saveFailedSnapshot: (ticker: UniverseTicker, todayIso: string, message: string) => Promise<void>;
+  lineReservation: {
+    reserve: (holder: string, lines: number, ttlSeconds: number) => Promise<LineReservationResult>;
+    renew: (holder: string, ttlSeconds: number) => Promise<void>;
+    release: (holder: string) => Promise<void>;
+  };
+  /** Pause after the priority reservation so the live pool can shed to fit before the first batch subscribes. */
+  waitForPoolShedding: () => Promise<void>;
 }
 
 const defaultCaptureDependencies: OptionChainCaptureDependencies = {
@@ -270,6 +290,12 @@ const defaultCaptureDependencies: OptionChainCaptureDependencies = {
   prepareTicker: (ib, ticker, todayIso) => prepareTicker(ib, ticker, todayIso, ticksOnlyPrepareDependencies),
   captureAndSave,
   saveFailedSnapshot,
+  lineReservation: {
+    reserve: (holder, lines, ttlSeconds) => reserveMarketDataLines(holder, lines, ttlSeconds, { priority: true }),
+    renew: renewMarketDataLineReservation,
+    release: releaseMarketDataLines,
+  },
+  waitForPoolShedding: () => new Promise((resolve) => setTimeout(resolve, poolSheddingGraceMs)),
 };
 
 export async function runOptionChainCapture(
@@ -285,8 +311,18 @@ export async function runOptionChainCapture(
   const starved: { prepared: PreparedTicker; coverage: SnapshotCoverage }[] = [];
   const finalStatusBySymbol = new Map<string, string>();
 
-  const { ib, disconnect } = await dependencies.connect();
+  const reservation = await dependencies.lineReservation.reserve(captureLineReservationHolder, optionChainCaptureBatchSize, captureLineReservationTtlSeconds);
+  if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, "the chain capture", optionChainCaptureBatchSize));
+  const renewTimer = setInterval(() => {
+    dependencies.lineReservation.renew(captureLineReservationHolder, captureLineReservationTtlSeconds).catch((error) => console.warn(`could not renew the capture's line reservation: ${error instanceof Error ? error.message : error}`));
+  }, captureLineReservationRenewIntervalMs);
+  renewTimer.unref?.();
+
+  let connection: { ib: IbkrApi; disconnect: () => void } | null = null;
   try {
+    await dependencies.waitForPoolShedding();
+    connection = await dependencies.connect();
+    const { ib } = connection;
     const record = (symbol: string, coverage: SnapshotCoverage) => {
       const status = deriveSnapshotStatus(coverage);
       finalStatusBySymbol.set(symbol, status);
@@ -324,7 +360,9 @@ export async function runOptionChainCapture(
       }
     }
   } finally {
-    disconnect();
+    connection?.disconnect();
+    clearInterval(renewTimer);
+    await dependencies.lineReservation.release(captureLineReservationHolder).catch((error) => console.warn(`could not release the capture's line reservation: ${error instanceof Error ? error.message : error}`));
   }
   for (const status of finalStatusBySymbol.values()) {
     if (status === "complete") result.tickersComplete++;

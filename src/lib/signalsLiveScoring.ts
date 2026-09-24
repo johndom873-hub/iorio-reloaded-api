@@ -1,9 +1,9 @@
 import { sviTotalVariance } from "./impliedVolatilitySurface.js";
-import { attachUncompensatedShare, buildSignalCandidates, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
 import type { SignalSettings } from "./signalSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
-import type { AccountContext, GradeCounts, PreviousClose, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
+import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
 
 // Pure re-scoring for the Signals live layer (stage 2, decisions with Marcelo 2026-09-22):
 // the fitted surface stays the 10:00 snapshot and follows the live spot by sticky
@@ -15,7 +15,6 @@ import type { AccountContext, GradeCounts, PreviousClose, SignalsPriceSource, Si
 
 export const liveFrameIntervalMs = 1_000;
 export const accountRefreshIntervalMs = 60_000;
-export const liveQuoteTopCandidates = 20;
 export const liveQuoteMaxContracts = 40;
 
 export interface ContractRef {
@@ -27,6 +26,8 @@ export interface ContractRef {
 export interface LiveOptionQuote extends ContractRef {
   bid: number | null;
   ask: number | null;
+  /** ISO time the quote was received; the pooled live path leaves it unset (the frame's `at` is the time). */
+  quotedAt?: string;
 }
 
 export interface LiveScoringOverrides {
@@ -57,15 +58,30 @@ export function scaleSlicesToLiveSpot(slices: SignalSurfaceSlice[], snapshotSpot
   return slices.map((slice) => ({ ...slice, forwardPrice: slice.forwardPrice * ratio }));
 }
 
-/** Live two-sided quotes replace the snapshot's bid/ask; a live quote missing a side leaves the snapshot quote in place. */
-export function mergeLiveQuotes(snapshotQuotes: SignalQuote[], liveQuotes: LiveOptionQuote[]): SignalQuote[] {
+/**
+ * Fresh two-sided quotes replace the snapshot's bid/ask (source "live" or "day"); a fresh quote missing a
+ * side leaves the existing quote in place. Applied day first, then live, so precedence is live > day > snapshot.
+ */
+export function mergeLiveQuotes(snapshotQuotes: SignalQuote[], liveQuotes: LiveOptionQuote[], source: "live" | "day" = "live"): SignalQuote[] {
   if (liveQuotes.length === 0) return snapshotQuotes;
   const liveByKey = new Map(liveQuotes.map((quote) => [contractKey(quote), quote]));
   return snapshotQuotes.map((quote) => {
     const live = liveByKey.get(contractKey(quote));
     if (!live || live.bid === null || live.ask === null) return quote;
-    return { ...quote, bid: live.bid, ask: live.ask, source: "live" };
+    return { ...quote, bid: live.bid, ask: live.ask, source, quotedAt: live.quotedAt };
   });
+}
+
+export function summarizeDayQuotes(dayQuotes: LiveOptionQuote[]): DayQuotesAsOf | null {
+  const times = dayQuotes.map((quote) => quote.quotedAt).filter((value): value is string => typeof value === "string");
+  if (times.length === 0) return null;
+  return { oldest: times.reduce((a, b) => (a < b ? a : b)), newest: times.reduce((a, b) => (a > b ? a : b)), count: times.length };
+}
+
+export function countQuoteSources(candidates: SignalCandidate[]): QuoteSourceCounts {
+  const counts: QuoteSourceCounts = { live: 0, day: 0, snapshot: 0 };
+  for (const candidate of candidates) counts[candidate.quoteSource] += 1;
+  return counts;
 }
 
 /**
@@ -118,6 +134,9 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     caveats: [],
     freeShares: inputs.freeShares,
     freeCash: account.freeCash,
+    dayQuotesAsOf: summarizeDayQuotes(inputs.dayQuotes),
+    ivShiftByExpiry: {},
+    quoteSourceCounts: { live: 0, day: 0, snapshot: 0 },
   };
   const withCaveats = (unscoredReason: TickerSignals["unscoredReason"]): TickerSignals => ({
     ...base,
@@ -131,12 +150,16 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   if (spotPrice === null) return withCaveats("no_snapshot");
 
   const slices = live ? scaleSlicesToLiveSpot(inputs.slices, header.underlyingPrice, live.spotPrice) : inputs.slices;
-  const quotes = live?.liveQuotes ? mergeLiveQuotes(inputs.quotes, live.liveQuotes) : inputs.quotes;
+  // Precedence per contract: pooled live (modal / screen best line) > day (refresh loop) > 10:00 snapshot.
+  const withDayQuotes = mergeLiveQuotes(inputs.quotes, inputs.dayQuotes, "day");
+  const quotes = live?.liveQuotes ? mergeLiveQuotes(withDayQuotes, live.liveQuotes, "live") : withDayQuotes;
+  const riskFreeRate = header.riskFreeRatePercent / 100;
+  const ivShifts = computeExpiryIvShifts(slices, quotes, riskFreeRate);
 
   let candidates = gradeSignalCandidates(
     buildSignalCandidates({
       spotPrice,
-      riskFreeRate: header.riskFreeRatePercent / 100,
+      riskFreeRate,
       forecast: inputs.forecast,
       slices,
       quotes,
@@ -147,6 +170,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       freeCash: account.freeCash,
       maxNetDelta: settings.maxNetDelta,
       minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
+      ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
     }),
   );
   // settings.maxDeltaDriftPct is deliberately not applied: the drift share is only known for the open
@@ -156,7 +180,14 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     candidates = candidates.map((candidate) => ({ ...candidate, uncompensatedSharePercent: byContract.get(candidateContractKey(candidate)) ?? null }));
   }
 
-  return { ...withCaveats(null), candidates, best: pickBestCandidate(candidates), gradeCounts: countGrades(candidates) };
+  return {
+    ...withCaveats(null),
+    candidates,
+    best: pickBestCandidate(candidates),
+    gradeCounts: countGrades(candidates),
+    ivShiftByExpiry: Object.fromEntries([...ivShifts].map(([expiry, entry]) => [expiry, { shiftVolatilityPoints: entry.shift * 100, quoteCount: entry.quoteCount }])),
+    quoteSourceCounts: countQuoteSources(candidates),
+  };
 }
 
 /** Synchronous Monte Carlo for every candidate (REST first paint and tests); the live layer runs the same thing in a worker. */
@@ -171,26 +202,26 @@ export function shouldRefreshUncompensatedShare(lastSimulatedSpot: number | null
   return Math.abs(spotPrice / lastSimulatedSpot - 1) >= uncompensatedShareRefreshSpotMoveFraction - floatingPointSlack;
 }
 
+export function candidateContractRef(candidate: SignalCandidate): ContractRef {
+  return { expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" };
+}
+
 /**
- * The contracts the modal subscribes to live quotes for: every OTM candidate of the selected
- * expiry, then the best-ranked candidates from other expiries, capped at liveQuoteMaxContracts.
+ * The contracts the modal subscribes to live quotes for: the selected expiry's candidates only, capped at
+ * liveQuoteMaxContracts (Marcelo 2026-09-24 — every other expiry rides on the Day Signals quotes).
  */
-export function selectLiveQuoteContracts(candidates: SignalCandidate[], selectedExpiry: string | null, options = { topCandidates: liveQuoteTopCandidates, maxContracts: liveQuoteMaxContracts }): ContractRef[] {
+export function selectLiveQuoteContracts(candidates: SignalCandidate[], selectedExpiry: string | null, options = { maxContracts: liveQuoteMaxContracts }): ContractRef[] {
+  if (!selectedExpiry) return [];
   const selected: ContractRef[] = [];
   const seen = new Set<string>();
-  const add = (candidate: SignalCandidate) => {
-    const ref: ContractRef = { expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" };
+  for (const candidate of candidates) {
+    if (candidate.expiry !== selectedExpiry || selected.length >= options.maxContracts) continue;
+    const ref = candidateContractRef(candidate);
     const key = contractKey(ref);
-    if (seen.has(key) || selected.length >= options.maxContracts) return;
+    if (seen.has(key)) continue;
     seen.add(key);
     selected.push(ref);
-  };
-
-  if (selectedExpiry) {
-    for (const candidate of candidates) if (candidate.expiry === selectedExpiry) add(candidate);
   }
-  const ranked = [...candidates].sort((a, b) => b.edgeDollars - a.edgeDollars || b.netEdge - a.netEdge);
-  for (const candidate of ranked.slice(0, options.topCandidates)) add(candidate);
   return selected;
 }
 

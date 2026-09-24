@@ -17,6 +17,8 @@ export type AppNotification =
   // runTradeAlertGeneration.ts, and genosuke/bot.ts.
   | { type: "job_completed"; jobName: string; status: "success" | "failure" }
   | { type: "alert_generated"; strategyKey: string; symbol: string; annualizedYield: number }
+  // Day Signals: a pooled contract's grade went up between two refresh cycles (daySignalsNotifications.ts).
+  | { type: "signal_upgraded"; symbol: string; strategyKey: string; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netEdge: number; edgeDollars: number; annualizedYield: number }
   | { type: "genosuke_reply"; preview: string }
   | { type: "presence"; onlineUserIds: string[] }
   // Animation-only signal for the Pulse topology map's otherwise-silent lines

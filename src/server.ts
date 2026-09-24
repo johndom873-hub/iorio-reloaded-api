@@ -5,6 +5,7 @@ import { sharedLiveConnection, sharedReadConnection } from "./ibkr/sharedReadCon
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { installShutdownHandler } from "./lib/installShutdownHandler.js";
 import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
+import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
 
 installCrashHandlers("web");
 installShutdownHandler("web");
@@ -14,6 +15,14 @@ installShutdownHandler("web");
 // imports environment.ts for IBKR config but never binds a port) doesn't
 // crash on a missing PORT.
 const port = Number(requireEnvironmentVariable("PORT"));
+
+// Explicit on/off, never defaulted: local dev and staging share one IBKR
+// login but not a line-reservation table, so an always-on loop would cost
+// 10 market-data lines per running environment (see daySignalsLoop.ts).
+const daySignalsLoopFlag = requireEnvironmentVariable("DAY_SIGNALS_LOOP_ENABLED");
+if (daySignalsLoopFlag !== "true" && daySignalsLoopFlag !== "false") {
+  throw new Error(`DAY_SIGNALS_LOOP_ENABLED must be "true" or "false", got: ${daySignalsLoopFlag}`);
+}
 
 app.listen(port, () => {
   console.log(`Iorio Reloaded API listening on port ${port} (${environment.nodeEnvironment})`);
@@ -36,4 +45,6 @@ app.listen(port, () => {
   // self-authenticating API client (genosuke/apiClient.ts) has a live
   // server to call.
   startGenosuke();
+  if (daySignalsLoopFlag === "true") startDaySignalsLoop();
+  else console.log("Day Signals loop disabled (DAY_SIGNALS_LOOP_ENABLED=false).");
 });

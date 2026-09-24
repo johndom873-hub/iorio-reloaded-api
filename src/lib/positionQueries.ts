@@ -73,7 +73,8 @@ export const positionSelect = `
       ),
       0
     ) AS "realizedStockPnl",
-    -- Keyed on leg composition (open stock leg present?), not strategy_key —
+    -- Keyed on leg composition (is an open stock leg present), not strategy_key. Never put a
+    -- question mark in this SQL: knex.raw reads each one as a binding placeholder.
     -- an unstructured (N/S) position can be bare leftover stock with no
     -- option leg at all (e.g. shares left after a covered call's short call
     -- expired/was assigned away), and that stock still has real capital at

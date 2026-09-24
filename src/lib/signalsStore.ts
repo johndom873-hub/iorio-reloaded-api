@@ -5,7 +5,8 @@ import { computeCashLockedInCsps } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
 import { easternDateIso } from "./marketSessionStatus.js";
 import type { SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
-import { computeUncompensatedByContract, scoreTicker, toScreenRow } from "./signalsLiveScoring.js";
+import { computeUncompensatedByContract, scoreTicker, toScreenRow, type LiveOptionQuote } from "./signalsLiveScoring.js";
+import { loadDayQuotesForTicker } from "./daySignalsStore.js";
 import type { RoadmapCounts } from "./signalsRoadmap.js";
 import { loadSignalSettings } from "./signalSettingsStore.js";
 import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, TickerSignalsDetail, TickerSignalsInputs } from "./signalsTypes.js";
@@ -192,11 +193,17 @@ export async function loadTickerSignalsInputs(ticker: ShortlistTickerRow, now: D
   const momentum = computeMomentum(bars.map((bar) => bar.close));
   const elevatedVolatility = computeElevatedVolatilityFlag(bars);
 
-  const [slices, quotes, forecastSelection] = header
-    ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso)])
-    : [[], [], { forecast: null, suspectedSplitDateIso: null }];
+  const [slices, quotes, forecastSelection, dayQuotes] = header
+    ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
+    : [[], [], { forecast: null, suspectedSplitDateIso: null }, []];
 
-  return { ...ticker, header, slices, quotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
+  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
+}
+
+/** The Day Signals loop's quotes for one ticker, only when they belong to the snapshot date being scored (contracts that errored carry no quote). */
+export async function loadDayQuotesAsLiveQuotes(tickerId: string, snapshotTradingDateIso: string): Promise<LiveOptionQuote[]> {
+  const rows = await loadDayQuotesForTicker(tickerId, snapshotTradingDateIso);
+  return rows.filter((row) => row.errorCode === null).map((row) => ({ expiry: row.expiry, strike: row.strike, right: row.right, bid: row.bid, ask: row.ask, quotedAt: row.quotedAt }));
 }
 
 /** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). Includes the raw
