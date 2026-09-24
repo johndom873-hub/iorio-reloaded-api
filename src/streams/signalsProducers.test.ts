@@ -152,7 +152,7 @@ describe("signalsScreen producer", () => {
     expect(frames).toHaveLength(3);
   });
 
-  it("refreshes free cash and shares every 60 s and re-scores executability", async () => {
+  it("refreshes free cash every 60 s and re-scores put executability (a covered call ships both legs in one order, so shares never block it)", async () => {
     const harness = createHarness();
     const { signalsScreen } = createSignalsProducers(harness.deps);
     const frames: SignalsScreenFrame[] = [];
@@ -169,8 +169,13 @@ describe("signalsScreen producer", () => {
     await vi.advanceTimersByTimeAsync(1_100);
     expect(frames).toHaveLength(2);
     const bestAfter = frames[1]!.rows.find((row) => row.symbol === "AAOI")!.best!;
-    expect(bestAfter.executable).toBe(false);
-    expect(bestAfter.flags).toContain(bestAfter.strategyKey === "covered_call" ? "no_shares" : "insufficient_cash");
+    if (bestAfter.strategyKey === "cash_secured_put") {
+      expect(bestAfter.executable).toBe(false);
+      expect(bestAfter.flags).toContain("insufficient_cash");
+    } else {
+      expect(bestAfter.executable).toBe(true);
+      expect(bestAfter.flags).not.toContain("insufficient_cash");
+    }
     abort.abort();
   });
 

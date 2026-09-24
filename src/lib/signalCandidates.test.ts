@@ -212,13 +212,10 @@ describe("buildSignalCandidates: flags and executability", () => {
     expect(buildSignalCandidates(baseInput({ quotes: [slightlyWider] }))[0]!.flags).toContain("wide_spread");
   });
 
-  it("flags no_shares for a covered call without 100 free shares, and marks it not executable", () => {
+  it("a covered call without free shares is not flagged and stays executable (both legs ship in one order)", () => {
     const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(110, "C")], freeShares: 0 }))[0]!;
-    expect(c.flags).toContain("no_shares");
-    expect(c.executable).toBe(false);
-    const covered = buildSignalCandidates(baseInput({ quotes: [quoteAt(110, "C")], freeShares: 100 }))[0]!;
-    expect(covered.flags).not.toContain("no_shares");
-    expect(covered.executable).toBe(true);
+    expect(c.flags).toEqual([]);
+    expect(c.executable).toBe(true);
   });
 
   it("flags insufficient_cash for a put beyond free cash, and marks it not executable", () => {
@@ -230,8 +227,8 @@ describe("buildSignalCandidates: flags and executability", () => {
     expect(funded.executable).toBe(true);
   });
 
-  it("a call can be flagged AND executable is false, while its net Edge/grade are still computed (shown, not hidden)", () => {
-    const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(110, "C")], freeShares: 0 }))[0]!;
+  it("a put can be flagged AND executable is false, while its net Edge/grade are still computed (shown, not hidden)", () => {
+    const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], freeCash: 1000 }))[0]!;
     expect(Number.isFinite(c.netEdge)).toBe(true);
     expect(c.executable).toBe(false);
   });

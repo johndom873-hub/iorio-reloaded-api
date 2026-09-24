@@ -15,7 +15,7 @@ import { expirySpansEarnings, type RealizedVolatilityForecast } from "./volatili
 
 export type SignalStrategyKey = "covered_call" | "cash_secured_put";
 export type SignalGrade = "strong" | "good" | "marginal" | "avoid";
-export type SignalFlag = "earnings_calendar_unresolved" | "outside_fitted_range" | "wide_spread" | "no_shares" | "insufficient_cash";
+export type SignalFlag = "earnings_calendar_unresolved" | "outside_fitted_range" | "wide_spread" | "insufficient_cash";
 
 export const wideSpreadThreshold = 0.5; // matches the surface fit's own quote filter
 const annualDays = 365;
@@ -187,9 +187,10 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     if (!input.earningsCalendarResolved) flags.push("earnings_calendar_unresolved");
     if (!insideRange) flags.push("outside_fitted_range");
     if (spreadPercent / 100 > wideSpreadThreshold) flags.push("wide_spread");
-    if (strategyKey === "covered_call" && input.freeShares < 100) flags.push("no_shares");
     if (strategyKey === "cash_secured_put" && input.freeCash < quote.strike * 100) flags.push("insufficient_cash");
-    const executable = !flags.includes("no_shares") && !flags.includes("insufficient_cash");
+    // A covered call always ships as one order (buy the shares, sell the call), so free shares
+    // aren't a precondition -- only a cash-secured put needs the cash upfront.
+    const executable = !flags.includes("insufficient_cash");
 
     candidates.push({
       strategyKey,
