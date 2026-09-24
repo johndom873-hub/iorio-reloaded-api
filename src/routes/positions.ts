@@ -62,6 +62,8 @@ function serializeOrderRequest(row: Record<string, unknown>) {
     requestedByDisplayName: row.requested_by_display_name,
     cancelledByUserId: row.cancelled_by_user_id,
     cancelledByDisplayName: row.cancelled_by_display_name,
+    calendarWarning: row.calendar_warning,
+    riskFreeRate: row.risk_free_rate,
   };
 }
 
@@ -1168,7 +1170,6 @@ positionsRouter.post("/orders", async (request, response) => {
     })
     .returning("*");
 
-  await publishNotification({ type: "order_status", orderId: orderRequest.id });
   const note =
     excessUncoveredShares > 0
       ? `${excessUncoveredShares} uncovered share(s) of ${ticker.symbol} remain beyond what this order uses — worth checking whether an additional contract is worth selling.`
@@ -1177,7 +1178,17 @@ positionsRouter.post("/orders", async (request, response) => {
     fetchEconomicCalendarWarningEvents(normalizedExpiry).then(formatEconomicCalendarWarning),
     getRiskFreeRate().catch(() => null), // Order Review's probability of profit uses the same FRED rate as the alerts (approved 2026-09-24)
   ]);
-  response.status(201).json({ ...serializeOrderRequest(orderRequest), note, calendarWarning, riskFreeRate });
+  // Persisted (2026-09-24, fixing a flash-and-vanish banner) before the
+  // notification goes out, so the background-jobs SSE listener's own
+  // GET /orders/:id -- which fires the instant this notification is
+  // published -- always sees the same calendarWarning/riskFreeRate this
+  // response is about to return, instead of racing ahead of them.
+  const [persistedOrderRequest] = await db("order_requests")
+    .where("id", orderRequest.id)
+    .update({ calendar_warning: calendarWarning, risk_free_rate: riskFreeRate })
+    .returning("*");
+  await publishNotification({ type: "order_status", orderId: orderRequest.id });
+  response.status(201).json({ ...serializeOrderRequest(persistedOrderRequest), note });
 });
 
 positionsRouter.get("/orders", async (request, response) => {
@@ -1771,12 +1782,17 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     })
     .returning("*");
 
-  await publishNotification({ type: "order_status", orderId: orderRequest.id });
   const [calendarWarning, riskFreeRate] = await Promise.all([
     fetchEconomicCalendarWarningEvents(normalizedNewLegExpiry).then(formatEconomicCalendarWarning),
     getRiskFreeRate().catch(() => null),
   ]);
-  response.status(201).json({ ...serializeOrderRequest(orderRequest), calendarWarning, riskFreeRate });
+  // Persisted before notifying -- see the matching comment on POST /orders above.
+  const [persistedOrderRequest] = await db("order_requests")
+    .where("id", orderRequest.id)
+    .update({ calendar_warning: calendarWarning, risk_free_rate: riskFreeRate })
+    .returning("*");
+  await publishNotification({ type: "order_status", orderId: orderRequest.id });
+  response.status(201).json(serializeOrderRequest(persistedOrderRequest));
 });
 
 // Read-only preview: computes a roll candidate for one specific leg on
