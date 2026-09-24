@@ -106,14 +106,6 @@ export async function loadMarketDataLineRestriction(): Promise<MarketDataLineRes
   return { priorityLines: rows.reduce((sum, row) => sum + row.lines, 0), holders: rows.map((row) => row.holder) };
 }
 
-/** Total lines currently reserved account-wide (all holders, priority and non-priority) — for display, e.g. the Gateway node's "reserved" stat. */
-export async function currentMarketDataLineReservationTotal(): Promise<number> {
-  const { rows } = await db.raw(
-    `SELECT COALESCE(SUM(lines), 0)::int AS total FROM ibkr_market_data_line_reservations WHERE expires_at > now()`,
-  );
-  return rows[0].total;
-}
-
 /** One sentence for a failed reservation, naming the scheduled scan (chain capture or trade-alert scan) when it's the reason. */
 export function describeMarketDataLineShortage(result: LineReservationResult, what: string, linesNeeded: number): string {
   if (result.disabled) {

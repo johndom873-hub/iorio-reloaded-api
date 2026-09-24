@@ -14,7 +14,7 @@ import { requireEnvironmentVariable } from "../config/env.js";
 import { daySignalsLoopStatus } from "../lib/daySignalsLoop.js";
 import { loadDayQuotesStatus } from "../lib/daySignalsStore.js";
 import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
-import { loadMarketDataLineRestriction, currentMarketDataLineReservationTotal } from "../ibkr/marketDataLineBudget.js";
+import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 
 export const systemHealthRouter = Router();
 systemHealthRouter.use(requireAuth);
@@ -180,10 +180,10 @@ systemHealthRouter.get("/web-dyno", async (_request, response) => {
 // at all — it's a plain web-dyno query against order_requests, no round
 // trip needed.
 systemHealthRouter.get("/gateway", async (_request, response) => {
-  const [health, orderCountResult, reservedLineCount] = await Promise.all([
+  const [health, orderCountResult, restriction] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
     db("order_requests").whereIn("status", ["confirmed", "submitted", "cancel_requested"]).count("* as count").first(),
-    currentMarketDataLineReservationTotal(),
+    loadMarketDataLineRestriction(),
   ]);
 
   if (!health) {
@@ -205,7 +205,10 @@ systemHealthRouter.get("/gateway", async (_request, response) => {
     // hold no line) — not a Gateway-worker stat, but the only live "IBKR
     // lines in use" number the app has, shown alongside it.
     marketDataLineCount: marketDataPoolSnapshot().openLineCount,
-    reservedLineCount,
+    // Lines held by an active priority reservation (the 10:00 ET chain
+    // capture or the scheduled trade-alert scan, marketDataLineBudget.ts) —
+    // 0/null when neither job is running, not the full reservation ledger.
+    priorityReservedLineCount: restriction?.priorityLines ?? 0,
     staleOrMissing: false,
   });
 });
