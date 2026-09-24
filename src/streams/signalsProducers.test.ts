@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "../lib/impliedVolatilitySurface.js";
 import type { SignalQuote, SignalSurfaceSlice } from "../lib/signalCandidates.js";
@@ -267,6 +268,50 @@ describe("signalsScreen producer", () => {
     expect(row.best!.quoteSource).toBe("day");
     expect(row.best!.quotedAt).toBe("2026-09-22T15:00:00.000Z");
     expect(row.dayQuotesAsOf).toEqual({ oldest: "2026-09-22T15:00:00.000Z", newest: "2026-09-22T15:00:00.000Z", count: 1 });
+    abort.abort();
+  });
+
+  it("keeps a moved line's last live quote so the best line settles instead of ping-ponging, and unhooks each retired line from the parent signal", async () => {
+    const harness = createHarness();
+    const { signalsScreen } = createSignalsProducers(harness.deps);
+    const frames: SignalsScreenFrame[] = [];
+    const abort = new AbortController();
+    void signalsScreen.run({}, { userId: "u" }, (frame) => frames.push(frame as SignalsScreenFrame), abort.signal);
+    await vi.advanceTimersByTimeAsync(0);
+    const abortListenersAtStart = getEventListeners(abort.signal, "abort").length;
+    const first = frames[0]!.rows.find((row) => row.symbol === "AAOI")!.best!;
+    const firstRef: ContractRef = { expiry: first.expiry, strike: first.strike, right: first.strategyKey === "covered_call" ? "C" : "P" };
+    expect(harness.optionSubscriptions).toHaveLength(1);
+
+    // The line's own live market goes wide (spread friction sinks its net edge): the line moves to the new best contract.
+    harness.optionSubscriptions[0]!.push([{ ...firstRef, bid: first.bid * 0.5, ask: first.ask * 3 }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(harness.optionSubscriptions).toHaveLength(2);
+    expect(harness.optionSubscriptions[0]!.aborted()).toBe(true);
+    const second = frames.at(-1)!.rows.find((row) => row.symbol === "AAOI")!.best!;
+    const secondRef: ContractRef = { expiry: second.expiry, strike: second.strike, right: second.strategyKey === "covered_call" ? "C" : "P" };
+    expect(contractKey(secondRef)).not.toBe(contractKey(firstRef));
+    expect(harness.optionSubscriptions[1]!.contracts.map(contractKey)).toEqual([contractKey(secondRef)]);
+
+    // The new line quotes exactly its snapshot values. The first contract's wide live market is still
+    // held, so its stale snapshot cannot win the line back: no third subscription, no flip.
+    harness.optionSubscriptions[1]!.push([{ ...secondRef, bid: second.bid, ask: second.ask }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(harness.optionSubscriptions).toHaveLength(2);
+    expect(harness.optionSubscriptions[1]!.aborted()).toBe(false);
+    const settled = frames.at(-1)!.rows.find((row) => row.symbol === "AAOI")!.best!;
+    expect([settled.expiry, settled.strike]).toEqual([second.expiry, second.strike]);
+
+    // A day-quote reload drops the retired contract's stale live reading; on fresh day quotes it wins the line back.
+    harness.dayQuotes.rows = [{ ...firstRef, bid: first.bid, ask: first.ask, quotedAt: "2026-09-22T15:00:00.000Z" }];
+    harness.dayQuotes.emit("id-aaoi");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(harness.optionSubscriptions).toHaveLength(3);
+    expect(harness.optionSubscriptions[1]!.aborted()).toBe(true);
+    expect(harness.optionSubscriptions[2]!.contracts.map(contractKey)).toEqual([contractKey(firstRef)]);
+
+    // Two retired lines later the parent signal carries exactly the listeners it started with (one per live line).
+    expect(getEventListeners(abort.signal, "abort").length).toBe(abortListenersAtStart);
     abort.abort();
   });
 });

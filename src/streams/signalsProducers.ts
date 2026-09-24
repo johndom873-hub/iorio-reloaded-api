@@ -160,11 +160,16 @@ function liveOverrides(inputs: TickerSignalsInputs, spot: number | null, priceSo
   return { spotPrice: spot ?? snapshotSpot!, priceSource: spot === null ? ("snapshot" as const) : priceSource };
 }
 
-/** A child signal that aborts with its parent or on its own. */
+/** A child signal that aborts with its parent or on its own. Aborting the child also unhooks it from the parent, so a long-lived parent never accumulates listeners from retired children. */
 function childAbort(parent: AbortSignal): AbortController {
   const controller = new AbortController();
-  if (parent.aborted) controller.abort();
-  else parent.addEventListener("abort", () => controller.abort(), { once: true });
+  if (parent.aborted) {
+    controller.abort();
+    return controller;
+  }
+  const abortWithParent = () => controller.abort();
+  parent.addEventListener("abort", abortWithParent, { once: true });
+  controller.signal.addEventListener("abort", () => parent.removeEventListener("abort", abortWithParent), { once: true });
   return controller;
 }
 
@@ -185,7 +190,12 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
         inputs: TickerSignalsInputs;
         spot: number | null;
         priceSource: SignalsPriceSource;
-        liveQuotes: LiveOptionQuote[];
+        /**
+         * Last live reading per contract key, kept when the best line moves on: a move is then judged live
+         * against live and settles, rather than the new line's live quote against the old line's snapshot
+         * quote, which flips straight back (and forth, without yielding to the event loop).
+         */
+        liveQuotes: Map<string, LiveOptionQuote>;
         /** The pooled line on this ticker's current best contract, if any. */
         bestLine: { key: string; abort: AbortController } | null;
         scored: TickerSignals;
@@ -194,13 +204,13 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       const statesByTickerId = new Map<string, TickerState>();
       tickers.forEach((ticker, index) => {
         const inputs = inputsList[index]!;
-        const state: TickerState = { ticker, inputs, spot: null, priceSource: "snapshot", liveQuotes: [], bestLine: null, scored: scoreTicker(inputs, account, settings) };
+        const state: TickerState = { ticker, inputs, spot: null, priceSource: "snapshot", liveQuotes: new Map(), bestLine: null, scored: scoreTicker(inputs, account, settings) };
         states.set(ticker.symbol, state);
         statesByTickerId.set(ticker.tickerId, state);
       });
       const rescore = (state: TickerState) => {
         const overrides = liveOverrides(state.inputs, state.spot, state.priceSource);
-        state.scored = scoreTicker(state.inputs, account, settings, overrides ? { ...overrides, liveQuotes: state.liveQuotes } : undefined);
+        state.scored = scoreTicker(state.inputs, account, settings, overrides ? { ...overrides, liveQuotes: [...state.liveQuotes.values()] } : undefined);
       };
       const emitFrame = () => {
         const frame: SignalsScreenFrame = { type: "signalsScreen", at: deps.now().toISOString(), rows: [...states.values()].map((state) => toScreenRow(state.scored)), dayQuotes: { loop: deps.daySignalsLoopStatus(), status: dayQuotesStatus } };
@@ -216,7 +226,6 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
         if ((state.bestLine?.key ?? null) === key) return;
         state.bestLine?.abort.abort();
         state.bestLine = null;
-        state.liveQuotes = [];
         if (!best) return;
         const abort = childAbort(signal);
         const line = { key: key!, abort };
@@ -227,7 +236,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
             [candidateContractRef(best)],
             (quotes) => {
               if (state.bestLine !== line) return;
-              state.liveQuotes = quotes;
+              for (const quote of quotes) state.liveQuotes.set(contractKey(quote), quote);
               rescore(state);
               syncBestLine(state);
               frames.markDirty();
@@ -255,6 +264,8 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
           .then(async (dayQuotes) => {
             if (signal.aborted) return;
             state.inputs = { ...state.inputs, dayQuotes };
+            // Fresh day quotes outrank a live reading left behind by a line that has since moved on.
+            for (const contract of state.liveQuotes.keys()) if (contract !== state.bestLine?.key) state.liveQuotes.delete(contract);
             rescore(state);
             syncBestLine(state);
             await refreshDayQuotesStatus();
