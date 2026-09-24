@@ -1,5 +1,4 @@
 import { formatShortDate } from "./formatTradeAlertMessage.js";
-import { notifyTelegram } from "./notifyTelegram.js";
 import { publishNotification } from "./notificationChannel.js";
 import { goodCutVolatilityPoints, strongCutVolatilityPoints, type SignalCandidate, type SignalGrade } from "./signalCandidates.js";
 import type { RollSignalCandidate } from "./rollSignalCandidates.js";
@@ -13,9 +12,11 @@ import type { RollSignalCandidate } from "./rollSignalCandidates.js";
 // not seconds): clearsNotificationHysteresis requires the new grade be cleared
 // by a margin, not just barely crossed, and the loop (daySignalsLoop.ts) also
 // holds a per-contract cooldown so the same contract can't re-notify within
-// notificationCooldownMs regardless of further grade movement. Delivered three
-// ways from one call: Telegram, the persisted notification event (Pulse's
-// Latest Events) and — through the same event — the in-app toast.
+// notificationCooldownMs regardless of further grade movement. Delivered via
+// the persisted notification event (Pulse's Latest Events) and — through the
+// same event — the in-app toast. Telegram delivery is suspended;
+// formatSignalUpgradeMessage/formatRollSignalUpgradeMessage are unused but
+// kept for that path if it's re-enabled.
 
 const gradeRank: Record<SignalGrade, number> = { avoid: 0, weak: 1, good: 2, strong: 3 };
 const gradeLabel: Record<SignalGrade, string> = { avoid: "Avoid", weak: "Weak", good: "Good", strong: "Strong" };
@@ -63,7 +64,6 @@ export function formatSignalUpgradeMessage(upgrade: SignalUpgrade): string {
 export async function notifySignalUpgrade(upgrade: SignalUpgrade): Promise<void> {
   const { candidate } = upgrade;
   try {
-    await notifyTelegram(formatSignalUpgradeMessage(upgrade));
     await publishNotification({
       type: "signal_upgraded",
       symbol: upgrade.symbol,
@@ -109,7 +109,6 @@ export function formatRollSignalUpgradeMessage(upgrade: RollSignalUpgrade): stri
 export async function notifyRollSignalUpgrade(upgrade: RollSignalUpgrade): Promise<void> {
   const { roll } = upgrade;
   try {
-    await notifyTelegram(formatRollSignalUpgradeMessage(upgrade));
     await publishNotification({
       type: "roll_signal_upgraded",
       symbol: upgrade.symbol,
