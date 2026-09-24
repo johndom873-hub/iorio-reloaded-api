@@ -46,6 +46,8 @@ function baseInput(overrides: Partial<SignalCandidatesInput> = {}): SignalCandid
     snapshotDateIso: "2026-09-21",
     freeShares: 0,
     freeCash: 1_000_000,
+    maxNetDelta: 1,
+    minAnnualizedYieldPct: 0,
     ...overrides,
   };
 }
@@ -231,6 +233,21 @@ describe("buildSignalCandidates: flags and executability", () => {
     const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], freeCash: 1000 }))[0]!;
     expect(Number.isFinite(c.netEdge)).toBe(true);
     expect(c.executable).toBe(false);
+  });
+});
+
+describe("buildSignalCandidates: Signals tab filters", () => {
+  it("drops a candidate whose |delta| exceeds maxNetDelta", () => {
+    const unrestricted = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }))[0]!;
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], maxNetDelta: Math.abs(unrestricted.delta) - 0.001 }))).toHaveLength(0);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], maxNetDelta: Math.abs(unrestricted.delta) }))).toHaveLength(1);
+  });
+
+  it("drops a candidate whose annualised yield is below minAnnualizedYieldPct", () => {
+    const unrestricted = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }))[0]!;
+    const yieldPct = unrestricted.annualizedYield * 100;
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], minAnnualizedYieldPct: yieldPct + 1 }))).toHaveLength(0);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], minAnnualizedYieldPct: yieldPct }))).toHaveLength(1);
   });
 });
 

@@ -7,6 +7,7 @@ import { easternDateIso } from "./marketSessionStatus.js";
 import type { SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedByContract, scoreTicker, toScreenRow } from "./signalsLiveScoring.js";
 import type { RoadmapCounts } from "./signalsRoadmap.js";
+import { loadSignalSettings } from "./signalSettingsStore.js";
 import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, TickerSignalsDetail, TickerSignalsInputs } from "./signalsTypes.js";
 import { loadVolatilityForecast } from "./volatilityForecastStore.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew } from "./tiltMeasures.js";
@@ -201,11 +202,11 @@ export async function loadTickerSignalsInputs(ticker: ShortlistTickerRow, now: D
 /** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). Includes the raw
  * fitted-surface slices (unscaled by live spot) for the volatility-surface modal. */
 export async function loadTickerSignals(ticker: ShortlistTickerRow, accountContext: AccountContext, options: { withUncompensatedShare?: boolean } = {}): Promise<TickerSignalsDetail> {
-  const inputs = await loadTickerSignalsInputs(ticker);
-  const scored = scoreTicker(inputs, accountContext);
+  const [inputs, settings] = await Promise.all([loadTickerSignalsInputs(ticker), loadSignalSettings()]);
+  const scored = scoreTicker(inputs, accountContext, settings);
   if (!options.withUncompensatedShare || !inputs.header?.underlyingPrice || scored.candidates.length === 0) return { ...scored, slices: inputs.slices };
   const uncompensatedByContract = computeUncompensatedByContract(scored.candidates, inputs.header.underlyingPrice, inputs.slices);
-  const rescored = scoreTicker(inputs, accountContext, { spotPrice: inputs.header.underlyingPrice, priceSource: "snapshot", uncompensatedByContract });
+  const rescored = scoreTicker(inputs, accountContext, settings, { spotPrice: inputs.header.underlyingPrice, priceSource: "snapshot", uncompensatedByContract });
   return { ...rescored, slices: inputs.slices };
 }
 
@@ -234,7 +235,7 @@ export async function loadRoadmapCounts(now: Date = new Date()): Promise<Roadmap
 
 /** The whole Signals screen at snapshot prices: one account-context fetch shared across every ticker, no candidate lists. */
 export async function loadSignalsScreen(): Promise<SignalsScreenRow[]> {
-  const [tickers, accountContext] = await Promise.all([loadShortlistTickers(), loadAccountContext()]);
+  const [tickers, accountContext, settings] = await Promise.all([loadShortlistTickers(), loadAccountContext(), loadSignalSettings()]);
   const inputs = await Promise.all(tickers.map((ticker) => loadTickerSignalsInputs(ticker)));
-  return inputs.map((tickerInputs) => toScreenRow(scoreTicker(tickerInputs, accountContext)));
+  return inputs.map((tickerInputs) => toScreenRow(scoreTicker(tickerInputs, accountContext, settings)));
 }

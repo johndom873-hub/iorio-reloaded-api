@@ -5,6 +5,7 @@ import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { uncompensatedShareRefreshIntervalMs, type SignalCandidate, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
 import { accountRefreshIntervalMs, contractKey, liveFrameIntervalMs, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import { loadAccountContext, loadShortlistTicker, loadShortlistTickers, loadTickerSignalsInputs, type ShortlistTickerRow } from "../lib/signalsStore.js";
+import { loadSignalSettings, type SignalSettings } from "../lib/signalSettingsStore.js";
 import type { AccountContext, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { computeUncompensatedSharesInWorker } from "../lib/uncompensatedShareWorkerPool.js";
 import type { StreamProducer } from "./streamProducers.js";
@@ -37,6 +38,7 @@ export interface SignalsProducerDependencies {
   loadShortlistTicker(symbol: string): Promise<ShortlistTickerRow | null>;
   loadTickerSignalsInputs(ticker: ShortlistTickerRow): Promise<TickerSignalsInputs>;
   loadAccountContext(): Promise<AccountContext>;
+  loadSignalSettings(): Promise<SignalSettings>;
   fetchAvailableUncoveredShares(tickerId: string): Promise<number>;
   streamLivePrices(contracts: PriceContract[], onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void, signal: AbortSignal): Promise<void>;
   streamOptionQuotes(symbol: string, contracts: ContractRef[], onUpdate: (quotes: LiveOptionQuote[]) => void, signal: AbortSignal): Promise<void>;
@@ -49,6 +51,7 @@ export const defaultSignalsProducerDependencies: SignalsProducerDependencies = {
   loadShortlistTicker,
   loadTickerSignalsInputs,
   loadAccountContext,
+  loadSignalSettings,
   fetchAvailableUncoveredShares,
   streamLivePrices: streamPooledPrices,
   streamOptionQuotes: streamSignalsOptionQuotes,
@@ -138,7 +141,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
     isSnapshotStream: true,
     parseParameters: parseNoParameters,
     async run(_parameters, _context, emit, signal) {
-      const [tickers, initialAccount] = await Promise.all([deps.loadShortlistTickers(), deps.loadAccountContext()]);
+      const [tickers, initialAccount, settings] = await Promise.all([deps.loadShortlistTickers(), deps.loadAccountContext(), deps.loadSignalSettings()]);
       let account = initialAccount;
       const inputsList = await Promise.all(tickers.map((ticker) => deps.loadTickerSignalsInputs(ticker)));
       if (signal.aborted) return;
@@ -150,9 +153,9 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
         scored: TickerSignals;
       }
       const states = new Map<string, TickerState>();
-      for (const inputs of inputsList) states.set(inputs.symbol, { inputs, spot: null, priceSource: "snapshot", scored: scoreTicker(inputs, account) });
+      for (const inputs of inputsList) states.set(inputs.symbol, { inputs, spot: null, priceSource: "snapshot", scored: scoreTicker(inputs, account, settings) });
       const rescore = (state: TickerState) => {
-        state.scored = scoreTicker(state.inputs, account, liveOverrides(state.inputs, state.spot, state.priceSource));
+        state.scored = scoreTicker(state.inputs, account, settings, liveOverrides(state.inputs, state.spot, state.priceSource));
       };
       const emitFrame = () => {
         const frame: SignalsScreenFrame = { type: "signalsScreen", at: deps.now().toISOString(), rows: [...states.values()].map((state) => toScreenRow(state.scored)) };
@@ -212,7 +215,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       const symbol = parameters.symbol!;
       const ticker = await deps.loadShortlistTicker(symbol);
       if (!ticker) throw new StreamRequestError(404, `${symbol} is not on the shortlist.`);
-      const [initialInputs, initialAccount] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext()]);
+      const [initialInputs, initialAccount, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadSignalSettings()]);
       if (signal.aborted) return;
       let inputs = initialInputs;
       let account = initialAccount;
@@ -223,10 +226,10 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       let uncompensatedAsOf: SignalsTickerFrame["uncompensatedAsOf"] = null;
       let lastSimulatedSpot: number | null = null;
 
-      let scored = scoreTicker(inputs, account, liveOverrides(inputs, spot, priceSource));
+      let scored = scoreTicker(inputs, account, settings, liveOverrides(inputs, spot, priceSource));
       const rescore = () => {
         const overrides = liveOverrides(inputs, spot, priceSource);
-        scored = scoreTicker(inputs, account, overrides ? { ...overrides, liveQuotes, uncompensatedByContract } : undefined);
+        scored = scoreTicker(inputs, account, settings, overrides ? { ...overrides, liveQuotes, uncompensatedByContract } : undefined);
       };
 
       const selectedExpiry = parameters.expiry ?? scored.best?.expiry ?? null;

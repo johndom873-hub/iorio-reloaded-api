@@ -21,6 +21,7 @@ import { evaluateRollForPosition } from "../ibkr/evaluateRollForPosition.js";
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
+import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -953,6 +954,28 @@ async function requireExistingTicker(symbolInput: string): Promise<{ id: string;
   return (await db("tickers").where({ symbol: normalizedSymbol }).first()) ?? null;
 }
 
+// Shared by the confirm-step hard gate and the order's live quote-stream
+// compliance check below -- only ever runs for an order that actually came
+// from the Signals order-setup flow (signal_snapshot is only ever set
+// there), never for a Trade Alerts order, which has its own separate,
+// still-unenforced copy of these same-named settings (see PROGRESS.md).
+async function evaluateSignalOrderLimitsForOrderRequest(orderRequest: { signal_snapshot: unknown; payload: OrderRequestPayload; request_type: string }): Promise<{ blocked: boolean; reasons: string[] } | null> {
+  if (orderRequest.signal_snapshot === null || orderRequest.signal_snapshot === undefined) return null;
+  if (!(orderRequest.request_type as string).startsWith("open_")) return null;
+  const payload = orderRequest.payload;
+  const optionLeg = payload.legs.find((leg) => leg.role === "option");
+  if (!optionLeg || !optionLeg.strike || (payload.strategyKey !== "covered_call" && payload.strategyKey !== "cash_secured_put")) return null;
+  const ticker = await requireExistingTicker(payload.symbol);
+  if (!ticker) return null;
+  return evaluateSignalOrderLimits({
+    strategyKey: payload.strategyKey,
+    symbol: ticker.symbol,
+    tickerId: ticker.id,
+    quantity: optionLeg.quantity,
+    strike: optionLeg.strike,
+  });
+}
+
 interface OpenOrderRequestBody {
   symbol?: string;
   strategyKey?: string;
@@ -1176,6 +1199,14 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
     ? await db("strategy_settings").where({ strategy_key: payload.strategyKey }).first()
     : null;
 
+  // Re-evaluated periodically, not on every quote tick (each evaluation is a
+  // handful of IBKR/DB round trips) -- 10s keeps the Order Review panel's
+  // block/unblock verdict close to live without hammering the account
+  // summary on every sub-second option quote. Only ever set for a Signals
+  // order (see evaluateSignalOrderLimitsForOrderRequest); null otherwise.
+  const signalLimitsRefreshIntervalMs = 10_000;
+  let latestSignalLimits = await evaluateSignalOrderLimitsForOrderRequest(orderRequest);
+
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
   response.setHeader("Connection", "keep-alive");
@@ -1184,6 +1215,17 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
 
   const abortController = new AbortController();
   request.on("close", () => abortController.abort());
+
+  const signalLimitsTimer = latestSignalLimits
+    ? setInterval(() => {
+        evaluateSignalOrderLimitsForOrderRequest(orderRequest)
+          .then((result) => {
+            latestSignalLimits = result;
+          })
+          .catch((error) => console.error(`orders/${orderRequest.id}/quote/stream: signal limits refresh failed`, error));
+      }, signalLimitsRefreshIntervalMs)
+    : null;
+  if (signalLimitsTimer) abortController.signal.addEventListener("abort", () => clearInterval(signalLimitsTimer), { once: true });
 
   const send = (data: unknown) => {
     if (response.writableEnded) return;
@@ -1211,7 +1253,7 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
                 : null,
             )
           : null;
-        send({ type: "quote", data: { ...quote, compliance } });
+        send({ type: "quote", data: { ...quote, compliance, signalLimits: latestSignalLimits } });
       },
       abortController.signal,
     );
@@ -1220,6 +1262,7 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
     send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });
   } finally {
     clearInterval(heartbeat);
+    if (signalLimitsTimer) clearInterval(signalLimitsTimer);
     response.end();
   }
 });
@@ -1326,6 +1369,12 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   const tradingBlockedReason = await fetchTradingBlockedReason();
   if (tradingBlockedReason) {
     response.status(409).json({ error: tradingBlockedReason });
+    return;
+  }
+
+  const signalLimits = await evaluateSignalOrderLimitsForOrderRequest(orderRequest);
+  if (signalLimits?.blocked) {
+    response.status(409).json({ error: signalLimits.reasons.join(" ") });
     return;
   }
 

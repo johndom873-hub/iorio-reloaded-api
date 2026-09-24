@@ -79,6 +79,7 @@ function createHarness(): Harness {
     loadShortlistTicker: async (symbol) => (symbol === "AAOI" ? aaoi : symbol === "HOOD" ? hood : null),
     loadTickerSignalsInputs: async (ticker) => inputsFor(ticker, ticker.symbol === "AAOI", freeShares.value),
     loadAccountContext: async () => ({ freeCash: account.freeCash }),
+    loadSignalSettings: async () => ({ maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 }),
     fetchAvailableUncoveredShares: async () => freeShares.value,
     streamLivePrices: async (_contracts, onUpdate, signal) => {
       priceCallback = onUpdate;

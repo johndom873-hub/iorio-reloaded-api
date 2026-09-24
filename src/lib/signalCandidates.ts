@@ -5,9 +5,10 @@ import { expirySpansEarnings, type RealizedVolatilityForecast } from "./volatili
 
 // Signals screen: turns one ticker's fitted surface (one row per expiry, from
 // option_surface_fits) + that day's raw quotes into graded, tradable candidates.
-// Approved 2026-09-22 (mockup): STRUCTURAL filters only (OTM side, two-sided
-// quote, >=1 day to expiry, a slice with status 'ok') — nothing about delta,
-// DTE window, spread or open interest narrows the list; those show up as
+// Approved 2026-09-22 (mockup): structural filters (OTM side, two-sided quote,
+// >=1 day to expiry, a slice with status 'ok') plus, since 2026-09-24, two
+// Signals-tab settings (max net delta, min annualised yield) — DTE window,
+// spread or open interest still don't narrow the list; those show up as
 // columns/flags instead. Delta and the surface-vs-mid IV comparison are both
 // computed here (not read from IBKR's own tick-13 delta/IV), so every
 // candidate has a number even where IBKR's own computation tick never arrived
@@ -72,6 +73,10 @@ export interface SignalCandidatesInput {
   freeShares: number;
   /** Free cash available to secure a put. */
   freeCash: number;
+  /** Signals tab setting: candidates with |delta| above this are filtered out. */
+  maxNetDelta: number;
+  /** Signals tab setting: candidates with annualised yield (as a %) below this are filtered out. */
+  minAnnualizedYieldPct: number;
 }
 
 export interface SignalCandidate {
@@ -163,6 +168,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry);
     const midIv = impliedVolatilityFromMid(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, quote.bid, quote.ask, isCall);
     const delta = blackScholesDelta(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
+    if (Math.abs(delta) > input.maxNetDelta) continue; // Signals tab max net delta (approved 2026-09-24)
     const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: quote.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv });
     if (!friction) continue;
     const edge = input.forecast ? surfaceIv - input.forecast.volatility : null;
@@ -178,6 +184,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     const premium = (quote.bid + quote.ask) / 2;
     const capitalAtRisk = strategyKey === "covered_call" ? input.spotPrice : quote.strike;
     const annualizedYield = (premium / capitalAtRisk) * (annualDays / dte);
+    if (annualizedYield * 100 < input.minAnnualizedYieldPct) continue; // Signals tab min annualised yield (approved 2026-09-24)
     const dollarRisk = capitalAtRisk * 100 - premium;
     const riskAdjustedRatio = edgeDollars / dollarRisk;
     const riskAdjustedRatioAtMid = edgeDollarsAtMid / dollarRisk;

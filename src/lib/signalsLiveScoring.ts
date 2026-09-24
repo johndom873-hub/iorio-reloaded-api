@@ -1,6 +1,7 @@
 import { sviTotalVariance } from "./impliedVolatilitySurface.js";
 import { attachUncompensatedShare, buildSignalCandidates, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
+import type { SignalSettings } from "./signalSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
 import type { AccountContext, GradeCounts, PreviousClose, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
 
@@ -86,7 +87,7 @@ export function countGrades(candidates: SignalCandidate[]): GradeCounts {
 }
 
 /** Scores one ticker from its loaded inputs; `live` re-reads the snapshot at the live spot and merges live quotes. */
-export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, live?: LiveScoringOverrides): TickerSignals {
+export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: SignalSettings, live?: LiveScoringOverrides): TickerSignals {
   const { header } = inputs;
   const spotPrice = live?.spotPrice ?? header?.underlyingPrice ?? null;
   const base: Omit<TickerSignals, "unscoredReason"> = {
@@ -144,11 +145,18 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       snapshotDateIso: header.tradingDateIso,
       freeShares: inputs.freeShares,
       freeCash: account.freeCash,
+      maxNetDelta: settings.maxNetDelta,
+      minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
     }),
   );
   if (live?.uncompensatedByContract) {
     const byContract = live.uncompensatedByContract;
-    candidates = candidates.map((candidate) => ({ ...candidate, uncompensatedSharePercent: byContract.get(candidateContractKey(candidate)) ?? null }));
+    candidates = candidates
+      .map((candidate) => ({ ...candidate, uncompensatedSharePercent: byContract.get(candidateContractKey(candidate)) ?? null }))
+      // Signals tab max delta drift (approved 2026-09-24): only known once the Monte Carlo has run for
+      // this candidate, so it filters here rather than in buildSignalCandidates -- a candidate whose
+      // drift share isn't known yet is never dropped for it.
+      .filter((candidate) => candidate.uncompensatedSharePercent === null || candidate.uncompensatedSharePercent <= settings.maxDeltaDriftPct);
   }
 
   return { ...withCaveats(null), candidates, best: pickBestCandidate(candidates), gradeCounts: countGrades(candidates) };

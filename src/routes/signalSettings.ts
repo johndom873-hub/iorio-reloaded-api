@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
+import { loadShortlistTicker } from "../lib/signalsStore.js";
 
 export const signalSettingsRouter = Router();
 signalSettingsRouter.use(requireAuth);
@@ -69,4 +71,55 @@ signalSettingsRouter.put("/", async (request, response) => {
     return;
   }
   response.json(row);
+});
+
+// Single shared evaluation of the three blocking limits (max position %,
+// max concentration per ticker %, min cash reserve %) -- called by the
+// Order Setup card as the user edits contract quantity (debounced), and
+// reused as-is by the confirm-step hard gate and the order's live quote-
+// stream compliance check (positions.ts). Approved 2026-09-24.
+signalSettingsRouter.get("/order-limits-check", async (request, response) => {
+  const { symbol, strategyKey, quantity, strike, spotPrice } = request.query;
+  if (typeof symbol !== "string" || !symbol.trim()) {
+    response.status(400).json({ error: "symbol is required." });
+    return;
+  }
+  if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put") {
+    response.status(400).json({ error: "strategyKey must be covered_call or cash_secured_put." });
+    return;
+  }
+  const parsedQuantity = Number(quantity);
+  const parsedStrike = Number(strike);
+  if (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0) {
+    response.status(400).json({ error: "quantity must be a positive number." });
+    return;
+  }
+  if (!Number.isFinite(parsedStrike) || parsedStrike <= 0) {
+    response.status(400).json({ error: "strike must be a positive number." });
+    return;
+  }
+
+  const ticker = await loadShortlistTicker(symbol);
+  if (!ticker) {
+    response.status(400).json({ error: "Unknown symbol — add it via the Shortlist first." });
+    return;
+  }
+
+  // spotPrice is optional: the frontend already has a live spot for the modal it's calling from,
+  // so passing it avoids an extra IBKR round trip on every debounced keystroke. Omitted, it's fetched fresh.
+  const parsedSpotPrice = spotPrice === undefined ? undefined : Number(spotPrice);
+  if (parsedSpotPrice !== undefined && (!Number.isFinite(parsedSpotPrice) || parsedSpotPrice <= 0)) {
+    response.status(400).json({ error: "spotPrice must be a positive number." });
+    return;
+  }
+
+  const result = await evaluateSignalOrderLimits({
+    strategyKey,
+    symbol: ticker.symbol,
+    tickerId: ticker.tickerId,
+    quantity: parsedQuantity,
+    strike: parsedStrike,
+    spotPrice: parsedSpotPrice,
+  });
+  response.json(result);
 });

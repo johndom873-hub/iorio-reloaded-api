@@ -58,6 +58,9 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
   };
 }
 const account = { freeCash: 1_000_000 };
+// No test in this file is about the Signals tab's own limits (see signalCandidates.test.ts and
+// signalOrderLimits.test.ts for those) -- wide open here so every existing candidate stays in.
+const permissiveSettings = { maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 };
 
 describe("computeAtmImpliedVolatility", () => {
   it("reads the slice nearest 30 days (with >= 14 days left) at log-moneyness 0", () => {
@@ -70,8 +73,8 @@ describe("computeAtmImpliedVolatility", () => {
     expect(computeAtmImpliedVolatility([slice("2026-10-21", years30, { status: "insufficient_points" as never })])).toBeNull();
   });
   it("is part of scoreTicker's output and does not move with the live spot", () => {
-    const atSnapshot = scoreTicker(inputs(), account).atmImpliedVolatility;
-    const atLiveSpot = scoreTicker(inputs(), account, { spotPrice: 108, priceSource: "live" }).atmImpliedVolatility;
+    const atSnapshot = scoreTicker(inputs(), account, permissiveSettings).atmImpliedVolatility;
+    const atLiveSpot = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: 108, priceSource: "live" }).atmImpliedVolatility;
     expect(atSnapshot).toBeCloseTo(Math.sqrt(sviTotalVariance(params, 0) / years30), 12);
     expect(atLiveSpot).toBe(atSnapshot);
   });
@@ -122,18 +125,18 @@ describe("mergeLiveQuotes", () => {
 
 describe("scoreTicker", () => {
   it("reports the unscored reasons in order: no snapshot, no fit, no forecast", () => {
-    expect(scoreTicker(inputs({ header: null }), account).unscoredReason).toBe("no_snapshot");
-    expect(scoreTicker(inputs({ slices: [slice("2026-10-21", years30, { status: "insufficient_points" as never })] }), account).unscoredReason).toBe("no_surface_fit");
-    expect(scoreTicker(inputs({ forecast: null }), account).unscoredReason).toBe("no_forecast");
-    const split = scoreTicker(inputs({ forecast: null, suspectedSplitDateIso: "2026-09-15" }), account);
+    expect(scoreTicker(inputs({ header: null }), account, permissiveSettings).unscoredReason).toBe("no_snapshot");
+    expect(scoreTicker(inputs({ slices: [slice("2026-10-21", years30, { status: "insufficient_points" as never })] }), account, permissiveSettings).unscoredReason).toBe("no_surface_fit");
+    expect(scoreTicker(inputs({ forecast: null }), account, permissiveSettings).unscoredReason).toBe("no_forecast");
+    const split = scoreTicker(inputs({ forecast: null, suspectedSplitDateIso: "2026-09-15" }), account, permissiveSettings);
     expect(split.unscoredReason).toBe("suspected_split");
     expect(split.caveats.map((caveat) => caveat.id)).toContain("suspected_split");
   });
 
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {
     const in1 = inputs();
-    const scored = scoreTicker(in1, account);
-    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash }));
+    const scored = scoreTicker(in1, account, permissiveSettings);
+    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash, maxNetDelta: permissiveSettings.maxNetDelta, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct }));
     expect(scored.candidates).toEqual(direct);
     expect(scored.unscoredReason).toBeNull();
     expect(scored.priceSource).toBe("snapshot");
@@ -145,7 +148,7 @@ describe("scoreTicker", () => {
 
   it("re-reads the surface at the live spot: surface IV at the strike follows the scaled forward (independent SVI reference)", () => {
     const liveSpot = 105;
-    const scored = scoreTicker(inputs(), account, { spotPrice: liveSpot, priceSource: "live" });
+    const scored = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: liveSpot, priceSource: "live" });
     const put90 = scored.candidates.find((c) => c.strike === 90 && c.expiry === "2026-10-21")!;
     const scaledForward = forward * (liveSpot / forward);
     const expectedIv = Math.sqrt(sviTotalVariance(params, Math.log(90 / scaledForward)) / years30);
@@ -155,20 +158,20 @@ describe("scoreTicker", () => {
     expect(scored.priceSource).toBe("live");
     expect(scored.dayChangePercent).toBeCloseTo((105 / 98 - 1) * 100, 10);
     // A higher spot makes the 90 put further OTM: smaller |delta| than at the snapshot
-    const snapshotPut90 = scoreTicker(inputs(), account).candidates.find((c) => c.strike === 90 && c.expiry === "2026-10-21")!;
+    const snapshotPut90 = scoreTicker(inputs(), account, permissiveSettings).candidates.find((c) => c.strike === 90 && c.expiry === "2026-10-21")!;
     expect(Math.abs(put90.delta)).toBeLessThan(Math.abs(snapshotPut90.delta));
   });
 
   it("a live spot above the 110 call strike removes it from the OTM set entirely", () => {
-    const scored = scoreTicker(inputs(), account, { spotPrice: 112, priceSource: "live" });
+    const scored = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: 112, priceSource: "live" });
     expect(scored.candidates.some((c) => c.strike === 110 && c.strategyKey === "covered_call")).toBe(false);
   });
 
   it("live quotes change friction and net Edge for their contracts only, and mark the source", () => {
-    const snapshot = scoreTicker(inputs(), account, { spotPrice: forward, priceSource: "live" });
+    const snapshot = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: forward, priceSource: "live" });
     const put90Snapshot = snapshot.candidates.find((c) => c.strike === 90 && c.expiry === "2026-10-21")!;
     const wider = { bid: put90Snapshot.bid * 0.9, ask: put90Snapshot.ask * 1.1 };
-    const live = scoreTicker(inputs(), account, { spotPrice: forward, priceSource: "live", liveQuotes: [{ expiry: "2026-10-21", strike: 90, right: "P", ...wider }] });
+    const live = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: forward, priceSource: "live", liveQuotes: [{ expiry: "2026-10-21", strike: 90, right: "P", ...wider }] });
     const put90Live = live.candidates.find((c) => c.strike === 90 && c.expiry === "2026-10-21")!;
     expect(put90Live.quoteSource).toBe("live");
     expect(put90Live.bid).toBe(wider.bid);
@@ -181,25 +184,35 @@ describe("scoreTicker", () => {
   });
 
   it("overrides at the snapshot price (quotes or Monte Carlo only) still report no day change", () => {
-    const scored = scoreTicker(inputs(), account, { spotPrice: forward, priceSource: "snapshot", uncompensatedByContract: new Map() });
+    const scored = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: forward, priceSource: "snapshot", uncompensatedByContract: new Map() });
     expect(scored.dayChangePercent).toBeNull();
-    expect(scoreTicker(inputs(), account, { spotPrice: forward, priceSource: "frozen" }).dayChangePercent).toBeCloseTo((100 / 98 - 1) * 100, 10);
+    expect(scoreTicker(inputs(), account, permissiveSettings, { spotPrice: forward, priceSource: "frozen" }).dayChangePercent).toBeCloseTo((100 / 98 - 1) * 100, 10);
   });
 
   it("carries the last Monte Carlo result by contract across a re-score and leaves unknown contracts null", () => {
-    const first = scoreTicker(inputs(), account);
+    const first = scoreTicker(inputs(), account, permissiveSettings);
     const key = candidateContractKey(first.candidates[0]!);
     const uncompensatedByContract = new Map([[key, 37.5]]);
-    const rescored = scoreTicker(inputs(), account, { spotPrice: 101, priceSource: "live", uncompensatedByContract });
+    const rescored = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: 101, priceSource: "live", uncompensatedByContract });
     expect(rescored.candidates.find((c) => candidateContractKey(c) === key)!.uncompensatedSharePercent).toBe(37.5);
     expect(rescored.candidates.filter((c) => candidateContractKey(c) !== key).every((c) => c.uncompensatedSharePercent === null)).toBe(true);
+  });
+
+  it("drops a candidate over maxDeltaDriftPct once its drift share is known, but never one that's still unknown", () => {
+    const first = scoreTicker(inputs(), account, permissiveSettings);
+    const knownKey = candidateContractKey(first.candidates[0]!);
+    const uncompensatedByContract = new Map([[knownKey, 40]]);
+    const strict = { ...permissiveSettings, maxDeltaDriftPct: 10 };
+    const rescored = scoreTicker(inputs(), account, strict, { spotPrice: forward, priceSource: "snapshot", uncompensatedByContract });
+    expect(rescored.candidates.some((c) => candidateContractKey(c) === knownKey)).toBe(false);
+    expect(rescored.candidates.some((c) => candidateContractKey(c) !== knownKey && c.uncompensatedSharePercent === null)).toBe(true);
   });
 });
 
 describe("computeUncompensatedByContract", () => {
   it("keys every candidate and agrees with attaching directly at the same path count", () => {
     const in1 = inputs();
-    const scored = scoreTicker(in1, account);
+    const scored = scoreTicker(in1, account, permissiveSettings);
     const byContract = computeUncompensatedByContract(scored.candidates, forward, in1.slices);
     expect(byContract.size).toBe(scored.candidates.length);
     for (const candidate of scored.candidates) {
@@ -248,7 +261,7 @@ describe("selectLiveQuoteContracts", () => {
 
 describe("toScreenRow / countGrades", () => {
   it("strips the candidate list and nothing else", () => {
-    const scored = scoreTicker(inputs(), account);
+    const scored = scoreTicker(inputs(), account, permissiveSettings);
     const row = toScreenRow(scored);
     expect("candidates" in row).toBe(false);
     expect({ ...row, candidates: scored.candidates }).toEqual(scored);
