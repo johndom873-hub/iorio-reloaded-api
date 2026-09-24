@@ -5,7 +5,7 @@
 // or plain text where the wait is a decision or a later phase. The counts are the only
 // thing the store supplies; everything else is pure so it can be tested.
 
-export type RoadmapStatus = "waiting_on_data" | "waiting_on_sign_off" | "waiting_on_decision" | "waiting_on_later_phase" | "waiting_on_build";
+export type RoadmapStatus = "waiting_on_data" | "waiting_on_sign_off" | "waiting_on_decision" | "waiting_on_later_phase" | "waiting_on_build" | "waiting_on_next_run";
 
 export interface RoadmapProgress {
   have: number;
@@ -137,10 +137,12 @@ export interface TickerCaveatInputs {
   dailyBarCount: number;
   /** True when there is an upcoming ex-dividend but no regular cadence could be inferred to project later ones into the forward. */
   dividendCadenceUnknown: boolean;
+  /** Trading date of the volatility surface this ticker was scored on, if any. */
+  snapshotDateIso: string | null;
 }
 
 export interface TickerCaveat {
-  id: "no_snapshot" | "suspected_split" | "short_history" | "dividend_payer";
+  id: "no_snapshot" | "suspected_split" | "short_history" | "dividend_payer" | "stale_surface";
   title: string;
   summary: string;
   needs: string;
@@ -161,6 +163,16 @@ export function buildTickerCaveats(inputs: TickerCaveatInputs, todayIso: string)
       needs: "Backfill history for this ticker (re-fetches five years of adjusted prices)",
       status: "waiting_on_data",
       eta: { kind: "text", text: "Scored on the next refresh after the backfill" },
+    });
+  }
+  if (inputs.snapshotDateIso !== null && inputs.snapshotDateIso !== todayIso) {
+    caveats.push({
+      id: "stale_surface",
+      title: `Scored on a stale surface: ${inputs.snapshotDateIso}`,
+      summary: `No capture ran today; scored on the volatility surface captured on ${inputs.snapshotDateIso}, re-timed to today.`,
+      needs: "Tonight's capture to run",
+      status: "waiting_on_next_run",
+      eta: { kind: "text", text: "Next capture" },
     });
   }
   if (inputs.dailyBarCount < tradingDaysForOwnVolatilityThreshold) {

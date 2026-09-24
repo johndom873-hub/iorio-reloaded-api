@@ -57,27 +57,38 @@ describe("buildSignalsRoadmap", () => {
 
 describe("buildTickerCaveats", () => {
   it("is empty for a scored ticker with full history and no dividends", () => {
-    expect(buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 1253, dividendCadenceUnknown: false }, today)).toEqual([]);
+    expect(buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 1253, dividendCadenceUnknown: false, snapshotDateIso: today }, today)).toEqual([]);
   });
   it("flags a missing snapshot, a short history (momentum first, then the own threshold) and dividends", () => {
-    const caveats = buildTickerCaveats({ unscoredReason: "no_snapshot", suspectedSplitDateIso: null, dailyBarCount: 118, dividendCadenceUnknown: true }, today);
+    const caveats = buildTickerCaveats({ unscoredReason: "no_snapshot", suspectedSplitDateIso: null, dailyBarCount: 118, dividendCadenceUnknown: true, snapshotDateIso: null }, today);
     expect(caveats.map((caveat) => caveat.id)).toEqual(["no_snapshot", "short_history", "dividend_payer"]);
     expect(caveats[1]!.title).toBe(`Momentum unavailable: 118 of ${tradingDaysForMomentum} daily bars`);
     expect(caveats[1]!.eta).toEqual({ kind: "date", dateIso: projectTradingDays(today, tradingDaysForMomentum - 118), progress: { have: 118, need: tradingDaysForMomentum, unit: "daily bars" } });
 
-    const [thresholdOnly] = buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 300, dividendCadenceUnknown: false }, today);
+    const [thresholdOnly] = buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 300, dividendCadenceUnknown: false, snapshotDateIso: today }, today);
     expect(thresholdOnly!.title).toContain(`300 of ${tradingDaysForOwnVolatilityThreshold}`);
     expect(thresholdOnly!.eta).toMatchObject({ dateIso: projectTradingDays(today, tradingDaysForOwnVolatilityThreshold - 300) });
   });
   it("a suspected split names the flagged day and points at Backfill history, ahead of the history caveats", () => {
-    const caveats = buildTickerCaveats({ unscoredReason: "suspected_split", suspectedSplitDateIso: "2026-09-15", dailyBarCount: 118, dividendCadenceUnknown: false }, today);
+    const caveats = buildTickerCaveats({ unscoredReason: "suspected_split", suspectedSplitDateIso: "2026-09-15", dailyBarCount: 118, dividendCadenceUnknown: false, snapshotDateIso: today }, today);
     expect(caveats.map((caveat) => caveat.id)).toEqual(["suspected_split", "short_history"]);
     expect(caveats[0]!.title).toContain("2026-09-15");
     expect(caveats[0]!.needs).toContain("Backfill history");
     expect(caveats[0]!.status).toBe("waiting_on_data");
   });
   it("a one-year backfill (252 bars) points at Backfill history rather than waiting", () => {
-    const [caveat] = buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 252, dividendCadenceUnknown: false }, today);
+    const [caveat] = buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 252, dividendCadenceUnknown: false, snapshotDateIso: today }, today);
     expect(caveat!.needs).toContain("Backfill history");
+  });
+  it("flags a stale surface when the snapshot wasn't captured today, ahead of the history caveats", () => {
+    const caveats = buildTickerCaveats({ unscoredReason: null, suspectedSplitDateIso: null, dailyBarCount: 1253, dividendCadenceUnknown: false, snapshotDateIso: "2026-09-21" }, today);
+    expect(caveats.map((caveat) => caveat.id)).toEqual(["stale_surface"]);
+    expect(caveats[0]!.title).toBe("Scored on a stale surface: 2026-09-21");
+    expect(caveats[0]!.status).toBe("waiting_on_next_run");
+    expect(caveats[0]!.eta).toEqual({ kind: "text", text: "Next capture" });
+  });
+  it("does not flag a stale surface when there is no snapshot at all (already covered by no_snapshot)", () => {
+    const caveats = buildTickerCaveats({ unscoredReason: "no_snapshot", suspectedSplitDateIso: null, dailyBarCount: 1253, dividendCadenceUnknown: false, snapshotDateIso: null }, today);
+    expect(caveats.map((caveat) => caveat.id)).toEqual(["no_snapshot"]);
   });
 });

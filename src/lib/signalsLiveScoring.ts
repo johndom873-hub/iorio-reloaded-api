@@ -207,7 +207,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const withCaveats = (unscoredReason: TickerSignals["unscoredReason"]): TickerSignals => ({
     ...base,
     unscoredReason,
-    caveats: buildTickerCaveats({ unscoredReason, suspectedSplitDateIso: inputs.suspectedSplitDateIso, dailyBarCount: inputs.dailyBarCount, dividendCadenceUnknown: inputs.dividendCadenceUnknown }, inputs.todayEasternIso),
+    caveats: buildTickerCaveats({ unscoredReason, suspectedSplitDateIso: inputs.suspectedSplitDateIso, dailyBarCount: inputs.dailyBarCount, dividendCadenceUnknown: inputs.dividendCadenceUnknown, snapshotDateIso: base.snapshotDateIso }, inputs.todayEasternIso),
   });
 
   if (!header) return withCaveats("no_snapshot");
