@@ -5,7 +5,7 @@ import { releaseMarketDataLines, reserveMarketDataLines, type LineReservationRes
 import { sharedLiveConnection } from "../ibkr/sharedReadConnection.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { emitDayQuotesUpdated } from "./daySignalsEvents.js";
-import { isGradeUpgrade, notifyRollSignalUpgrade, notifySignalUpgrade, type RollSignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
+import { clearsNotificationHysteresis, isGradeUpgrade, notifyRollSignalUpgrade, notifySignalUpgrade, type RollSignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
 import { loadDayRollGrades, loadDaySignalExpiries, loadDaySignalUniverse, loadDayQuotesForTicker, updateDayQuoteGrades, upsertDayQuotes, upsertDayRollGrades, type DayQuoteContract, type DayQuoteWrite, type DaySignalExpiryRow } from "./daySignalsStore.js";
 import { computeMarketSessionStatus, easternDateIso } from "./marketSessionStatus.js";
 import { formatIsoDateAsExpiry } from "./optionChainSnapshotStore.js";
@@ -38,8 +38,10 @@ import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 //
 // After every ticker's block settles: its quotes are flushed, the ticker is
 // re-scored exactly as the screens score it (scoreTicker over the merged
-// day quotes), upward grade transitions vs day_signal_quotes.last_grade
-// are notified, and dayQuotesUpdated fires so open Signals streams reload.
+// day quotes), upward grade transitions vs day_signal_quotes.last_grade that
+// clear the notification hysteresis and cooldown (daySignalsNotifications.ts,
+// daySignalsNotificationCooldownMs) are notified, and dayQuotesUpdated fires
+// so open Signals streams reload.
 
 export const daySignalsLoopLineHolder = "daySignalsLoop";
 export const daySignalsLoopLines = 10;
@@ -50,6 +52,12 @@ const afterDisconnectBackoffMs = 5_000;
 const heartbeatIntervalMs = 60_000;
 // Assumptions to verify on the staging soak (PROGRESS.md): per-contract settle timeout, write batching.
 export const daySignalsContractTimeoutMs = 4_000;
+// Per-contract notification cooldown (approved 2026-09-24, alongside clearsNotificationHysteresis in
+// daySignalsNotifications.ts): once a contract notifies, it stays quiet for this long regardless of
+// further grade movement, purely by elapsed time — it does not require the grade to fall back first.
+// In-memory only (lastNotifiedAtByKey below), not persisted: a mid-window loop restart resets it, which
+// at worst re-notifies a contract slightly early, an acceptable tradeoff against a DB round trip per check.
+export const daySignalsNotificationCooldownMs = 10 * 60_000;
 const writeFlushIntervalMs = 1_000;
 const writeFlushRowCount = 20;
 
@@ -153,6 +161,9 @@ export class DaySignalsLoop {
   private renewTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private linesHeld = false;
+  /** Per-contract notification cooldown state -- see daySignalsNotificationCooldownMs. Keyed
+   * "signal:<tickerId>|<expiry>|<strike>|<right>" or "roll:<legId>|<expiry>|<strike>|<right>". */
+  private lastNotifiedAtByKey = new Map<string, number>();
 
   constructor(private readonly deps: DaySignalsLoopDependencies = defaultDaySignalsLoopDependencies) {
     this.status = { state: "disabled", reason: "not started", stateSince: deps.now().toISOString(), tradingDateIso: null, cycleNumber: 0, cycleStartedAt: null, lastCycleDurationMs: null, contractsInPool: 0, lastError: null };
@@ -351,6 +362,16 @@ export class DaySignalsLoop {
     }
   }
 
+  /** True when `key` has never notified, or last did at least daySignalsNotificationCooldownMs ago. */
+  private canNotify(key: string): boolean {
+    const lastNotifiedAt = this.lastNotifiedAtByKey.get(key);
+    return lastNotifiedAt === undefined || this.deps.now().getTime() - lastNotifiedAt >= daySignalsNotificationCooldownMs;
+  }
+
+  private markNotified(key: string): void {
+    this.lastNotifiedAtByKey.set(key, this.deps.now().getTime());
+  }
+
   private async rescoreTicker(ticker: SignalsTickerRow, tradingDateIso: string, spot: number | null, settings: SignalSettings, account: AccountContext): Promise<void> {
     try {
       const [inputs, lastGrades, lastRollGrades] = await Promise.all([this.deps.loadTickerSignalsInputs(ticker), this.deps.loadLastGrades(ticker.tickerId, tradingDateIso), this.deps.loadLastRollGrades(ticker.tickerId, tradingDateIso)]);
@@ -363,8 +384,10 @@ export class DaySignalsLoop {
         const key = rollCandidateKey(roll);
         const previousGrade = lastRollGrades.get(key) ?? null;
         const held = heldByLegId.get(roll.legId);
-        if (held && isGradeUpgrade(previousGrade, roll.grade)) {
+        const notificationKey = `roll:${key}`;
+        if (held && isGradeUpgrade(previousGrade, roll.grade) && clearsNotificationHysteresis(roll.grade, roll.netRollEdge) && this.canNotify(notificationKey)) {
           await this.deps.notifyRollUpgrade({ symbol: ticker.symbol, roll, held: { strike: held.strike, expiry: held.expiry, dte: held.dte }, previousGrade: previousGrade!, spotPrice: scored.spotPrice ?? spot ?? 0, quotedAt: roll.replacement.quotedAt });
+          this.markNotified(notificationKey);
         }
         rollGrades.push({ legId: roll.legId, expiry: roll.replacement.expiry, strike: roll.replacement.strike, right: roll.strategyKey === "covered_call" ? "C" : "P", grade: roll.grade });
       }
@@ -374,8 +397,10 @@ export class DaySignalsLoop {
         const key = candidateContractKey(candidate);
         if (!lastGrades.has(key)) continue; // not a pooled contract
         const previousGrade = lastGrades.get(key) ?? null;
-        if (isGradeUpgrade(previousGrade, candidate.grade)) {
+        const notificationKey = `signal:${ticker.tickerId}|${key}`;
+        if (isGradeUpgrade(previousGrade, candidate.grade) && clearsNotificationHysteresis(candidate.grade, candidate.netEdge) && this.canNotify(notificationKey)) {
           await this.deps.notifyUpgrade({ symbol: ticker.symbol, candidate, previousGrade: previousGrade!, spotPrice: scored.spotPrice ?? spot ?? 0, quotedAt: candidate.quotedAt });
+          this.markNotified(notificationKey);
         }
         grades.push({ expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", grade: candidate.grade });
       }

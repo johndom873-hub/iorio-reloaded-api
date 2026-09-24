@@ -7,6 +7,7 @@ import type { SignalGrade, SignalQuote, SignalSurfaceSlice } from "./signalCandi
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 import { rollCandidateKey } from "./rollSignalCandidates.js";
 import { scoreTicker } from "./signalsLiveScoring.js";
+import { clearsNotificationHysteresis } from "./daySignalsNotifications.js";
 
 const forward = 100;
 const rate = 0.04;
@@ -56,16 +57,16 @@ interface Harness {
   deps: DaySignalsLoopDependencies;
   loop: DaySignalsLoop;
   calls: { reserve: number; release: number; windows: WindowContract[][]; writes: number; notified: string[]; emitted: string[]; heartbeats: string[]; grades: SignalGrade[][]; rollGrades: SignalGrade[][]; rollNotified: string[] };
-  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; lastRollGrades: Map<string, SignalGrade>; openShortLegs: TickerSignalsInputs["openShortLegs"]; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean } };
+  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; lastRollGrades: Map<string, SignalGrade>; openShortLegs: TickerSignalsInputs["openShortLegs"]; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean }; nowIso: string };
 }
 
 /** The window fake answers every option with a two-sided quote at `impliedVolatility` and the stock with last = 100, synchronously. */
 function createHarness(impliedVolatilityShift = 0): Harness {
   const calls: Harness["calls"] = { reserve: 0, release: 0, windows: [], writes: 0, notified: [], emitted: [], heartbeats: [], grades: [], rollGrades: [], rollNotified: [] };
-  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), lastRollGrades: new Map(), openShortLegs: [], dayQuotes: [], windowResult: { disconnected: false } };
+  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), lastRollGrades: new Map(), openShortLegs: [], dayQuotes: [], windowResult: { disconnected: false }, nowIso: "2026-09-24T15:00:00Z" };
   let ticks = 0;
   const deps: DaySignalsLoopDependencies = {
-    now: () => new Date("2026-09-24T15:00:00Z"),
+    now: () => new Date(state.nowIso),
     isMarketOpen: async () => state.marketOpen,
     loadPool: async () => (state.pool ? [{ tickerId: "t1", symbol: "AAA", expiry, tradingDateIso, snapshotId: "s1", rank: 1 }] : []),
     loadUniverse: async () => strikes.map(([strike, right]) => ({ tickerId: "t1", symbol: "AAA", expiry, strike, right })),
@@ -203,6 +204,68 @@ describe("DaySignalsLoop", () => {
     expect(harness.calls.notified.some((entry) => entry.startsWith("80P:"))).toBe(false);
   });
 
+  it("withholds a notification that reaches Weak without clearing the hysteresis margin, while still recording the grade", async () => {
+    // At shift 0 every candidate scores Weak (per inputsFor's comment); pick a real one whose net Edge
+    // doesn't clear Weak's notification margin (2vp) and give it an Avoid baseline, so isGradeUpgrade
+    // alone would fire but the margin should withhold it -- this reproduces the HOOD $116 put boundary
+    // flap from staging (2026-09-24): a contract barely crossing a grade line should not notify on the
+    // crossing alone.
+    const harness = createHarness(0);
+    // Freeze the ticker's inputs (empty day quotes) so the pre-loop check below matches exactly what
+    // the loop's own re-score sees on cycle 1 -- the default harness wiring merges the cycle's just-settled
+    // day quotes into loadTickerSignalsInputs, which shifts net Edge by a fraction of a vp and would make
+    // a margin-sensitive assertion like this one nondeterministic.
+    harness.deps.loadTickerSignalsInputs = async () => inputsFor([]);
+    const expected = scoreTicker(inputsFor([]), { freeCash: 1_000_000 }, settings, { spotPrice: 100, priceSource: "live" });
+    const weakBelowMargin = expected.candidates.find((candidate) => candidate.grade === "weak" && !clearsNotificationHysteresis("weak", candidate.netEdge));
+    expect(weakBelowMargin).toBeDefined();
+    const key = `${weakBelowMargin!.expiry}|${weakBelowMargin!.strike}|${weakBelowMargin!.strategyKey === "covered_call" ? "C" : "P"}`;
+    for (const [strike, right] of strikes) harness.state.lastGrades.set(`${expiry}|${strike}|${right}`, "weak");
+    harness.state.lastGrades.set(key, "avoid");
+    const originalWindow = harness.deps.runQuoteWindow;
+    harness.deps.runQuoteWindow = async (contracts, options) => {
+      const result = await originalWindow(contracts, options);
+      harness.loop.stop();
+      return result;
+    };
+    await harness.loop.start();
+    // The grade itself is still recorded as Weak for the next cycle's comparison; only the notification is withheld.
+    expect(harness.state.lastGrades.get(key)).toBe("weak");
+    expect(harness.calls.notified.some((entry) => entry.startsWith(`${weakBelowMargin!.strike}${weakBelowMargin!.strategyKey === "covered_call" ? "C" : "P"}:`))).toBe(false);
+  });
+
+  it("suppresses a repeat notification for the same contract inside the cooldown window, then allows it once the cooldown has elapsed", async () => {
+    // Same setup as "notifies upward transitions only": +8vp lifts every candidate from Weak comfortably past the hysteresis margin.
+    const harness = createHarness(0.08);
+    for (const [strike, right] of strikes) harness.state.lastGrades.set(`${expiry}|${strike}|${right}`, "weak");
+    let cycles = 0;
+    // notifiedCountBeforeCycle[i] = calls.notified.length as of just before cycle i+2 starts, i.e. the
+    // fully-settled total after cycle i+1 (each cycle's own rescore/notify has completed by the time the
+    // loop's *next* runQuoteWindow call happens, since runCycle fully awaits it before the tick returns).
+    const notifiedCountBeforeCycle: number[] = [];
+    const originalWindow = harness.deps.runQuoteWindow;
+    harness.deps.runQuoteWindow = async (contracts, options) => {
+      cycles += 1;
+      notifiedCountBeforeCycle.push(harness.calls.notified.length);
+      // Force a fresh "weak" baseline before every cycle from the second on (as if quote noise dropped
+      // grades back down between cycles without a notify-worthy downgrade being recorded), so only the
+      // cooldown -- not isGradeUpgrade -- can explain a suppressed repeat notification.
+      if (cycles >= 2) for (const [strike, right] of strikes) harness.state.lastGrades.set(`${expiry}|${strike}|${right}`, "weak");
+      if (cycles === 2) harness.state.nowIso = "2026-09-24T15:05:00Z"; // 5 minutes after cycle 1: still inside the 10-minute cooldown
+      if (cycles === 3) harness.state.nowIso = "2026-09-24T15:11:00Z"; // 11 minutes after cycle 1: cooldown has elapsed
+      const result = await originalWindow(contracts, options);
+      if (cycles === 3) harness.loop.stop();
+      return result;
+    };
+    await harness.loop.start();
+    expect(cycles).toBe(3);
+    const [countBeforeCycle1, countBeforeCycle2, countBeforeCycle3] = notifiedCountBeforeCycle;
+    expect(countBeforeCycle1).toBe(0);
+    expect(countBeforeCycle2).toBeGreaterThan(0); // cycle 1 notified
+    expect(countBeforeCycle3).toBe(countBeforeCycle2); // cycle 2 (5 min later) was suppressed by the cooldown
+    expect(harness.calls.notified.length).toBeGreaterThan(countBeforeCycle3!); // cycle 3 (11 min later) notified again
+  });
+
   it("notifies roll upgrades per (held leg, replacement) against the recorded roll grade, and records the grades (Roll Signals)", async () => {
     const harness = createHarness();
     // A 60-day slice with the same IV at every log-moneyness (total variance doubled) so a 30-day held 95 put
@@ -214,7 +277,10 @@ describe("DaySignalsLoop", () => {
       return { expiry: expiry60, strike, right: "P", bid: mid * 0.98, ask: mid * 1.02, source: "snapshot" };
     });
     const heldLeg = { legId: "leg-1", positionId: "pos-1", strategyKey: "cash_secured_put" as const, expiry, strike: 95, right: "P" as const, quantity: 1, entryPrice: 2, entryAtIso: "2026-09-10T14:00:00Z" };
-    const withRoll = (): TickerSignalsInputs => ({ ...inputsFor(harness.state.dayQuotes), slices: [slice, slice60], quotes: [...inputsFor([]).quotes, ...quotes60], openShortLegs: [heldLeg] });
+    // Empty day quotes (not harness.state.dayQuotes): keeps this test's pre-loop `expected` computation
+    // identical to what the loop's own cycle-1 re-score sees, so the hysteresis-margin check below isn't
+    // thrown off by the day-quote merge shifting net roll Edge by a fraction of a vp between the two.
+    const withRoll = (): TickerSignalsInputs => ({ ...inputsFor([]), slices: [slice, slice60], quotes: [...inputsFor([]).quotes, ...quotes60], openShortLegs: [heldLeg] });
     harness.deps.loadTickerSignalsInputs = async () => withRoll();
     const expected = scoreTicker(withRoll(), { freeCash: 1_000_000 }, settings, { spotPrice: 100, priceSource: "live" });
     expect(expected.rolls.length).toBeGreaterThan(0);
@@ -231,8 +297,11 @@ describe("DaySignalsLoop", () => {
     await harness.loop.start();
     const upgraded = expected.rolls.filter((roll) => roll.grade !== "avoid");
     expect(upgraded.length).toBeGreaterThan(0);
-    // First cycle notifies exactly the rolls above Avoid; the second cycle sees the recorded grade and stays quiet.
-    expect(harness.calls.rollNotified.sort()).toEqual(upgraded.map((roll) => `leg-1:${roll.replacement.strike}:avoid->${roll.grade}`).sort());
+    // First cycle notifies the rolls above Avoid that also clear the notification hysteresis margin
+    // (a roll graded just barely above Avoid does not); the second cycle sees the recorded grade and stays quiet.
+    const notifiable = upgraded.filter((roll) => clearsNotificationHysteresis(roll.grade, roll.netRollEdge));
+    expect(notifiable.length).toBeGreaterThan(0);
+    expect(harness.calls.rollNotified.sort()).toEqual(notifiable.map((roll) => `leg-1:${roll.replacement.strike}:avoid->${roll.grade}`).sort());
     expect(harness.calls.rollGrades).toHaveLength(2);
     expect(harness.calls.rollGrades[0]).toEqual(expected.rolls.map((roll) => roll.grade));
     expect(harness.state.lastRollGrades.get(rollCandidateKey(upgraded[0]!))).toBe(upgraded[0]!.grade);

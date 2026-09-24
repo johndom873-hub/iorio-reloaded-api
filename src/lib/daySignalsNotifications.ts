@@ -1,14 +1,21 @@
 import { formatShortDate } from "./formatTradeAlertMessage.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { publishNotification } from "./notificationChannel.js";
-import type { SignalCandidate, SignalGrade } from "./signalCandidates.js";
+import { goodCutVolatilityPoints, strongCutVolatilityPoints, type SignalCandidate, type SignalGrade } from "./signalCandidates.js";
 import type { RollSignalCandidate } from "./rollSignalCandidates.js";
 
-// Upward grade transitions only, from any tier including Avoid, one message
-// per contract per transition, no cooldown (Marcelo 2026-09-24: a refresh
-// cycle takes minutes, so flapping is not a concern). Delivered three ways
-// from one call: Telegram, the persisted notification event (Pulse's Latest
-// Events) and — through the same event — the in-app toast.
+// Upward grade transitions only, from any tier including Avoid, one message per
+// contract per transition. Two guards against alert flooding, both approved
+// 2026-09-24 after a contract sitting right on a grade boundary re-notified 8
+// times in 11 minutes on staging (net Edge oscillating 5.0-7.5vp across the
+// weak/good line on quote noise, each upward wobble notified since the old
+// "no cooldown" design assumed a refresh cycle took minutes to move a grade,
+// not seconds): clearsNotificationHysteresis requires the new grade be cleared
+// by a margin, not just barely crossed, and the loop (daySignalsLoop.ts) also
+// holds a per-contract cooldown so the same contract can't re-notify within
+// notificationCooldownMs regardless of further grade movement. Delivered three
+// ways from one call: Telegram, the persisted notification event (Pulse's
+// Latest Events) and — through the same event — the in-app toast.
 
 const gradeRank: Record<SignalGrade, number> = { avoid: 0, weak: 1, good: 2, strong: 3 };
 const gradeLabel: Record<SignalGrade, string> = { avoid: "Avoid", weak: "Weak", good: "Good", strong: "Strong" };
@@ -16,6 +23,18 @@ const gradeLabel: Record<SignalGrade, string> = { avoid: "Avoid", weak: "Weak", 
 /** A transition counts only against a previously recorded grade: the first score after a seed or restart is a baseline. */
 export function isGradeUpgrade(previousGrade: SignalGrade | null, grade: SignalGrade): boolean {
   return previousGrade !== null && gradeRank[grade] > gradeRank[previousGrade];
+}
+
+/** Margin (in volatility points) a net Edge must clear above the grade's own cut point (Formula 3j) before an
+ * upward transition into it is convincing enough to notify. The grade shown on screen is unaffected by this —
+ * gradeForNetEdge still grades at the bare cut points; this only gates the notification trigger. */
+export const notificationHysteresisVolatilityPoints = 2;
+
+/** True when `grade`'s net Edge clears its own cut point by notificationHysteresisVolatilityPoints. Never true for "avoid" (nothing notifies into it). */
+export function clearsNotificationHysteresis(grade: SignalGrade, netEdge: number): boolean {
+  if (grade === "avoid") return false;
+  const entryCutVolatilityPoints = grade === "strong" ? strongCutVolatilityPoints : grade === "good" ? goodCutVolatilityPoints : 0;
+  return netEdge * 100 >= entryCutVolatilityPoints + notificationHysteresisVolatilityPoints;
 }
 
 export interface SignalUpgrade {

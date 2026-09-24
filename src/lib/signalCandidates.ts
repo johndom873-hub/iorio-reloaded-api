@@ -298,8 +298,10 @@ export function attachUncompensatedShare(candidates: SignalCandidate[], input: U
 // Grade cut points (approved 2026-09-24, replacing the old per-ticker quantile scale): fixed net
 // Edge thresholds, in volatility points (netEdge is a fraction, so /100 here) -- net Edge <= 0 is
 // avoid, 0-5vp is weak, 5-10vp is good, 10vp+ is strong.
-const strongCutVolatilityPoints = 10;
-const goodCutVolatilityPoints = 5;
+// Exported so daySignalsNotifications.ts's notification hysteresis can offset the same cut points
+// without duplicating the magic numbers.
+export const strongCutVolatilityPoints = 10;
+export const goodCutVolatilityPoints = 5;
 
 /** The grade for a net Edge (a fraction): the same cut points grade a new-trade candidate and a roll (Formula 3j). */
 export function gradeForNetEdge(netEdge: number): SignalGrade {
