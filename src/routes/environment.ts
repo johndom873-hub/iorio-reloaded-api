@@ -4,6 +4,7 @@ import { environment } from "../config/env.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { classifyTradingStatus } from "../lib/tradingGate.js";
 import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
+import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 
 // Feeds the top-bar environment badges (PAPER / LIVE / STAGING / DEV / TRADING BLOCKED).
@@ -26,6 +27,8 @@ environmentRouter.get("/details", requireAuth, async (_request, response) => {
     trading,
     // Non-null while the chain capture holds its priority lines — the top bar's "Live data restricted" state.
     marketDataRestriction,
+    // False when IBKR_MARKET_DATA_LINES_ENABLED=false — the top bar's "Real-time data disabled" state.
+    marketDataLinesEnabled: ibkrMarketDataLinesEnabled(),
     worker: workerRow
       ? {
           gitSha: workerRow.git_sha ? String(workerRow.git_sha).slice(0, 7) : null,
