@@ -2,7 +2,7 @@ import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { buildSignalsRoadmap } from "../lib/signalsRoadmap.js";
-import { loadAccountContext, loadRoadmapCounts, loadShortlistTicker, loadSignalsScreen, loadTickerSignals } from "../lib/signalsStore.js";
+import { loadAccountContext, loadRoadmapCounts, loadSignalsUniverseTicker, loadSignalsScreen, loadTickerSignals } from "../lib/signalsStore.js";
 
 // Snapshot-priced first paint for the Signals screen and modal (mockup approved
 // 2026-09-22); the live re-scoring runs over the stream multiplexer
@@ -22,9 +22,9 @@ signalsRouter.get("/roadmap", async (_request, response) => {
 });
 
 signalsRouter.get("/:symbol", async (request, response) => {
-  const ticker = await loadShortlistTicker(request.params.symbol);
+  const ticker = await loadSignalsUniverseTicker(request.params.symbol);
   if (!ticker) {
-    response.status(404).json({ error: `${request.params.symbol.toUpperCase()} is not on the shortlist` });
+    response.status(404).json({ error: `${request.params.symbol.toUpperCase()} is not on the shortlist and has no open short option leg` });
     return;
   }
   const accountContext = await loadAccountContext();

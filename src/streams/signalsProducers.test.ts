@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "../lib/impliedVolatilitySurface.js";
 import type { SignalQuote, SignalSurfaceSlice } from "../lib/signalCandidates.js";
 import { candidateContractKey, contractKey, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
-import type { ShortlistTickerRow } from "../lib/signalsStore.js";
+import type { SignalsTickerRow } from "../lib/signalsStore.js";
 import type { TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { createSignalsProducers, type SignalsProducerDependencies, type SignalsScreenFrame, type SignalsTickerFrame } from "./signalsProducers.js";
 import { StreamRequestError } from "./streamProtocol.js";
@@ -32,10 +32,10 @@ function quoteAt(strike: number, right: "C" | "P", expiry: string, years: number
   const mid = blackScholesPriceOnForward(forward, strike, years, rate, iv, right === "C");
   return { expiry, strike, right, bid: mid * 0.98, ask: mid * 1.02, source: "snapshot" };
 }
-const aaoi: ShortlistTickerRow = { tickerId: "id-aaoi", symbol: "AAOI", companyName: "Applied Opto", sector: "Tech" };
-const hood: ShortlistTickerRow = { tickerId: "id-hood", symbol: "HOOD", companyName: "Robinhood", sector: null };
+const aaoi: SignalsTickerRow = { tickerId: "id-aaoi", symbol: "AAOI", companyName: "Applied Opto", sector: "Tech" };
+const hood: SignalsTickerRow = { tickerId: "id-hood", symbol: "HOOD", companyName: "Robinhood", sector: null };
 
-function inputsFor(ticker: ShortlistTickerRow, withSnapshot: boolean, freeShares = 200): TickerSignalsInputs {
+function inputsFor(ticker: SignalsTickerRow, withSnapshot: boolean, freeShares = 200): TickerSignalsInputs {
   return {
     ...ticker,
     header: withSnapshot ? { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100 } : null,
@@ -46,12 +46,14 @@ function inputsFor(ticker: ShortlistTickerRow, withSnapshot: boolean, freeShares
     suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
+    macroEvents: [],
     momentum: 0.1,
     elevatedVolatility: null,
     skew: null,
     nextEarningsDateIso: null,
     previousClose: { close: 98, dateIso: "2026-09-21" },
     freeShares,
+    openShortLegs: [],
     dailyBarCount: 1253,
     dividendCadenceUnknown: false,
     todayEasternIso: "2026-09-22",
@@ -89,8 +91,8 @@ function createHarness(): Harness {
   const freeShares = { value: 200 };
   const untilAbort = (signal: AbortSignal) => new Promise<void>((resolve) => (signal.aborted ? resolve() : signal.addEventListener("abort", () => resolve(), { once: true })));
   const deps: SignalsProducerDependencies = {
-    loadShortlistTickers: async () => [aaoi, hood],
-    loadShortlistTicker: async (symbol) => (symbol === "AAOI" ? aaoi : symbol === "HOOD" ? hood : null),
+    loadSignalsUniverseTickers: async () => [aaoi, hood],
+    loadSignalsUniverseTicker: async (symbol) => (symbol === "AAOI" ? aaoi : symbol === "HOOD" ? hood : null),
     loadTickerSignalsInputs: async (ticker) => inputsFor(ticker, ticker.symbol === "AAOI", freeShares.value),
     loadDayQuotes: async () => {
       dayQuotes.loads += 1;

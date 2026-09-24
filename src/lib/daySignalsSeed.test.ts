@@ -34,6 +34,16 @@ describe("selectDaySignalExpiries", () => {
     expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-10-16"]);
   });
 
+  it("appends every open short leg's expiry after the ranked ones, outside the cap, without duplicating one already pooled (Roll Signals)", () => {
+    const list = [candidate("2026-10-16", 100, 200), candidate("2026-10-23", 90, 150), candidate("2026-10-30", 80, 100), candidate("2026-11-06", 70, 90)];
+    const seeds = selectDaySignalExpiries(list, undefined, ["2026-11-20", "2026-10-23", "2026-11-20"]);
+    expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-10-16", "2026-10-23", "2026-10-30", "2026-11-20"]);
+    expect(seeds.map((seed) => seed.rank)).toEqual([1, 2, 3, 4]);
+    expect(seeds[3]).toMatchObject({ seedBestEdgeDollars: 0, seedBestNetEdge: 0 });
+    // A held leg on a ticker with no positive candidate still gets a pool.
+    expect(selectDaySignalExpiries([candidate("2026-10-16", -1, -10)], undefined, ["2026-10-16"]).map((seed) => seed.expiry)).toEqual(["2026-10-16"]);
+  });
+
   it("returns nothing for a ticker with no positive candidate", () => {
     expect(selectDaySignalExpiries([])).toEqual([]);
     expect(selectDaySignalExpiries([candidate("2026-10-16", -0.2, -50)])).toEqual([]);
@@ -80,12 +90,14 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
+    macroEvents: [],
     momentum: null,
     elevatedVolatility: null,
     skew: null,
     nextEarningsDateIso: null,
     previousClose: null,
     freeShares: 0,
+    openShortLegs: [],
     dailyBarCount: 1000,
     dividendCadenceUnknown: false,
     todayEasternIso: tradingDateIso,
@@ -96,7 +108,7 @@ const settings = { maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta:
 function seedDependencies(overrides: Partial<DaySignalsSeedDependencies> = {}) {
   const replaceDaySignalPool = vi.fn(async () => {});
   const deps: DaySignalsSeedDependencies = {
-    loadShortlistTickers: async () => [
+    loadSignalsUniverseTickers: async () => [
       { tickerId: "id-RICH", symbol: "RICH", companyName: null, sector: null },
       { tickerId: "id-CHEAP", symbol: "CHEAP", companyName: null, sector: null },
       { tickerId: "id-OLD", symbol: "OLD", companyName: null, sector: null },
@@ -138,7 +150,7 @@ describe("seedDaySignals", () => {
   });
 
   it("writes an empty pool (still wiping yesterday's) when nothing qualifies", async () => {
-    const { deps, replaceDaySignalPool } = seedDependencies({ loadShortlistTickers: async () => [] });
+    const { deps, replaceDaySignalPool } = seedDependencies({ loadSignalsUniverseTickers: async () => [] });
     const result = await seedDaySignals("2026-09-24", deps);
     expect(result.tickersPooled).toBe(0);
     expect(replaceDaySignalPool).toHaveBeenCalledWith("2026-09-24", [], expect.any(Date));

@@ -149,12 +149,25 @@ export interface PrepareTickerDependencies {
   fetchSpotPrice: (symbol: string) => Promise<number | null | undefined>;
   loadReferenceVolatility: (tickerId: string, todayIso: string) => Promise<{ volatility: number | null; source: ReferenceVolatilitySource }>;
   refreshStoredOptionChain: (ib: IbkrApi, ticker: { tickerId: string; symbol: string; contractId: number }, todayIso: string) => Promise<StoredOptionChainRefresh>;
+  /** Open short option legs' exact contracts (Roll Signals): always captured, whatever side or strike window they sit in. */
+  loadOpenShortLegContracts: (tickerId: string) => Promise<OptionContractRequest[]>;
+}
+
+/** The contracts of every open short option leg on this ticker, in the capture's YYYYMMDD expiry form. */
+export async function loadOpenShortLegContracts(tickerId: string): Promise<OptionContractRequest[]> {
+  const rows: { expiry: string; strike: string; optionType: "call" | "put" }[] = await db("position_legs as pl")
+    .join("positions as p", "p.id", "pl.position_id")
+    .where({ "p.ticker_id": tickerId, "p.status": "open", "pl.leg_type": "option", "pl.side": "short" })
+    .whereNull("pl.exit_at")
+    .select(db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as expiry"), "pl.strike_price as strike", "pl.option_type as optionType");
+  return rows.map((row) => ({ expiry: row.expiry, strike: Number(row.strike), right: row.optionType === "call" ? "C" : "P" }));
 }
 
 const defaultPrepareDependencies: PrepareTickerDependencies = {
   fetchSpotPrice: async (symbol) => (await fetchLivePrices([{ key: symbol, legType: "stock", symbol }]))[symbol],
   loadReferenceVolatility,
   refreshStoredOptionChain,
+  loadOpenShortLegContracts,
 };
 
 // Used by the nightly ticks job's defaultCaptureDependencies below only —
@@ -196,6 +209,16 @@ export async function prepareTicker(ib: IbkrApi, ticker: UniverseTicker, todayIs
     if (!window) continue;
     // Selected from the expiry's real grid, so every contract here exists.
     for (const contract of selectContractsToCapture(chain.strikesByExpiry.get(expiry) ?? [], spotPrice, window)) contracts.push({ expiry, ...contract });
+  }
+  // Roll Signals (2026-09-24): an open short leg is scored as a contract to keep, so its exact
+  // contract is always captured -- the window above is OTM-side only, which is precisely the
+  // side an ITM leg (the defensive-roll case) is not on. A past expiry is left out.
+  const captured = new Set(contracts.map((contract) => `${contract.expiry}|${contract.strike}|${contract.right}`));
+  for (const heldContract of await dependencies.loadOpenShortLegContracts(ticker.tickerId)) {
+    const key = `${heldContract.expiry}|${heldContract.strike}|${heldContract.right}`;
+    if (captured.has(key) || calendarDaysUntilExpiry(todayIso, heldContract.expiry) < 0) continue;
+    captured.add(key);
+    contracts.push(heldContract);
   }
   return { ticker, spotPrice, referenceVolatility: reference.volatility, referenceVolatilitySource: reference.source, contracts, chainRefresh: chain.timings };
 }

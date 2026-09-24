@@ -57,6 +57,14 @@ export interface DayQuoteRow extends DayQuoteContract {
   lastGrade: SignalGrade | null;
 }
 
+export interface DayRollGradeRow {
+  legId: string;
+  expiry: string; // replacement's ISO expiry
+  strike: number;
+  right: "C" | "P";
+  lastGrade: SignalGrade;
+}
+
 export interface DayQuotesStatus {
   tradingDateIso: string | null;
   quoteCount: number;
@@ -69,6 +77,7 @@ export interface DayQuotesStatus {
 /** Wipes both day tables and writes the new pool in one transaction (the seed step). */
 export async function replaceDaySignalPool(tradingDateIso: string, seeds: DaySignalTickerSeed[], seededAt: Date): Promise<void> {
   await db.transaction(async (trx) => {
+    await trx("day_signal_roll_grades").del();
     await trx("day_signal_quotes").del();
     await trx("day_signal_expiries").del();
     const rows = seeds.flatMap((seed) =>
@@ -198,4 +207,18 @@ export async function loadDayQuotesStatus(): Promise<DayQuotesStatus> {
     expiryCount: Number(expiries?.expiryCount ?? 0),
     tickerCount: Number(expiries?.tickerCount ?? 0),
   };
+}
+
+/** Roll Signals: the grade each (held leg, replacement) roll had at the loop's last re-score of that ticker; upgrades against it are notified. */
+export async function loadDayRollGrades(tickerId: string, tradingDateIso: string): Promise<DayRollGradeRow[]> {
+  const rows = await db("day_signal_roll_grades").where({ ticker_id: tickerId }).whereRaw("trading_date::text = ?", [tradingDateIso]).select("leg_id as legId", db.raw('expiry::text as expiry'), "strike", db.raw('option_right as "right"'), "last_grade as lastGrade");
+  return rows.map((row) => ({ legId: row.legId, expiry: row.expiry, strike: Number(row.strike), right: row.right, lastGrade: row.lastGrade }));
+}
+
+export async function upsertDayRollGrades(tickerId: string, tradingDateIso: string, grades: { legId: string; expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[]): Promise<void> {
+  if (grades.length === 0) return;
+  await db("day_signal_roll_grades")
+    .insert(grades.map((entry) => ({ ticker_id: tickerId, leg_id: entry.legId, expiry: entry.expiry, strike: entry.strike, option_right: entry.right, trading_date: tradingDateIso, last_grade: entry.grade, updated_at: db.fn.now() })))
+    .onConflict(["leg_id", "expiry", "strike", "option_right"])
+    .merge(["trading_date", "last_grade", "updated_at"]);
 }

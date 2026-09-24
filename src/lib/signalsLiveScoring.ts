@@ -1,5 +1,6 @@
 import { sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
 import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { buildRollCandidates, heldLegContractKey, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
 import type { SignalSettings } from "./signalSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
@@ -70,6 +71,35 @@ export function mergeLiveQuotes(snapshotQuotes: SignalQuote[], liveQuotes: LiveO
     if (!live || live.bid === null || live.ask === null) return quote;
     return { ...quote, bid: live.bid, ask: live.ask, source, quotedAt: live.quotedAt };
   });
+}
+
+/**
+ * A held leg's contract is not always in the 10:00 snapshot (an ITM leg before the capture learned to include
+ * open legs, or one outside the strike window), and mergeLiveQuotes only replaces snapshot rows. This appends
+ * a fresh quote for any wanted contract the merged list lacks, live first, then day.
+ */
+export function appendMissingContractQuotes(quotes: SignalQuote[], wanted: ContractRef[], dayQuotes: LiveOptionQuote[], liveQuotes: LiveOptionQuote[]): SignalQuote[] {
+  if (wanted.length === 0) return quotes;
+  const present = new Set(quotes.map(contractKey));
+  const liveByKey = new Map(liveQuotes.map((quote) => [contractKey(quote), quote]));
+  const dayByKey = new Map(dayQuotes.map((quote) => [contractKey(quote), quote]));
+  const appended: SignalQuote[] = [];
+  for (const ref of wanted) {
+    const key = contractKey(ref);
+    if (present.has(key)) continue;
+    const live = liveByKey.get(key);
+    const day = dayByKey.get(key);
+    const source: "live" | "day" | null = live && live.bid !== null && live.ask !== null ? "live" : day && day.bid !== null && day.ask !== null ? "day" : null;
+    if (!source) continue;
+    const fresh = source === "live" ? live! : day!;
+    present.add(key);
+    appended.push({ expiry: ref.expiry, strike: ref.strike, right: ref.right, bid: fresh.bid, ask: fresh.ask, source, quotedAt: fresh.quotedAt });
+  }
+  return appended.length === 0 ? quotes : [...quotes, ...appended];
+}
+
+export function countRollableLegs(rolls: RollSignalCandidate[]): number {
+  return new Set(rolls.filter((roll) => roll.grade !== "avoid").map((roll) => roll.legId)).size;
 }
 
 export function summarizeDayQuotes(dayQuotes: LiveOptionQuote[]): DayQuotesAsOf | null {
@@ -152,12 +182,17 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     candidates: [],
     best: null,
     gradeCounts: { strong: 0, good: 0, weak: 0, avoid: 0 },
+    heldLegs: scoreHeldLegs(inputs.openShortLegs, { spotPrice: spotPrice ?? 0, riskFreeRate: 0, forecast: null, slices: [], quotes: [] }),
+    rolls: [],
+    bestRoll: null,
+    rollCount: 0,
     fittedSliceCount: inputs.slices.filter((slice) => slice.status === "ok").length,
     totalSliceCount: inputs.slices.length,
     momentum: inputs.momentum,
     skew: inputs.skew,
     elevatedVolatility: inputs.elevatedVolatility,
     nextEarningsDateIso: inputs.nextEarningsDateIso,
+    macroEvents: inputs.macroEvents,
     atmImpliedVolatility: computeAtmImpliedVolatility(rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso)),
     forecast: inputs.forecast,
     dailyBarCount: inputs.dailyBarCount,
@@ -184,7 +219,9 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const slices = live ? scaleSlicesToLiveSpot(todaySlices, header.underlyingPrice, live.spotPrice) : todaySlices;
   // Precedence per contract: pooled live (modal / screen best line) > day (refresh loop) > 10:00 snapshot.
   const withDayQuotes = mergeLiveQuotes(inputs.quotes, inputs.dayQuotes, "day");
-  const quotes = live?.liveQuotes ? mergeLiveQuotes(withDayQuotes, live.liveQuotes, "live") : withDayQuotes;
+  const mergedQuotes = live?.liveQuotes ? mergeLiveQuotes(withDayQuotes, live.liveQuotes, "live") : withDayQuotes;
+  const heldLegRefs: ContractRef[] = inputs.openShortLegs.map((leg) => ({ expiry: leg.expiry, strike: leg.strike, right: leg.right }));
+  const quotes = appendMissingContractQuotes(mergedQuotes, heldLegRefs, inputs.dayQuotes, live?.liveQuotes ?? []);
   const riskFreeRate = header.riskFreeRatePercent / 100;
   const ivShifts = computeExpiryIvShifts(slices, quotes, riskFreeRate);
 
@@ -197,6 +234,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       quotes,
       earningsDatesIso: inputs.earningsDatesIso,
       earningsCalendarResolved: inputs.earningsCalendarResolved,
+      macroEventDatesIso: [...new Set(inputs.macroEvents.map((event) => event.dateIso))],
       snapshotDateIso: header.tradingDateIso,
       freeShares: inputs.freeShares,
       freeCash: account.freeCash,
@@ -212,11 +250,25 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     candidates = candidates.map((candidate) => ({ ...candidate, uncompensatedSharePercent: byContract.get(candidateContractKey(candidate)) ?? null }));
   }
 
+  const heldLegs: HeldLegScore[] = scoreHeldLegs(inputs.openShortLegs, {
+    spotPrice,
+    riskFreeRate,
+    forecast: inputs.forecast,
+    slices,
+    quotes,
+    ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
+  });
+  const rolls = buildRollCandidates(heldLegs, candidates);
+
   return {
     ...withCaveats(null),
     candidates,
     best: pickBestCandidate(candidates),
     gradeCounts: countGrades(candidates),
+    heldLegs,
+    rolls,
+    bestRoll: pickBestRoll(rolls),
+    rollCount: countRollableLegs(rolls),
     ivShiftByExpiry: Object.fromEntries([...ivShifts].map(([expiry, entry]) => [expiry, { shiftVolatilityPoints: entry.shift * 100, quoteCount: entry.quoteCount }])),
     quoteSourceCounts: countQuoteSources(candidates),
   };
@@ -239,13 +291,20 @@ export function candidateContractRef(candidate: SignalCandidate): ContractRef {
 }
 
 /**
- * The contracts the modal subscribes to live quotes for: the selected expiry's candidates only, capped at
- * liveQuoteMaxContracts (Marcelo 2026-09-24 — every other expiry rides on the Day Signals quotes).
+ * The contracts the modal subscribes to live quotes for: every open short leg's contract first (Roll Signals,
+ * one line per leg), then the selected expiry's candidates, capped in total at liveQuoteMaxContracts
+ * (Marcelo 2026-09-24 — every other expiry rides on the Day Signals quotes).
  */
-export function selectLiveQuoteContracts(candidates: SignalCandidate[], selectedExpiry: string | null, options = { maxContracts: liveQuoteMaxContracts }): ContractRef[] {
-  if (!selectedExpiry) return [];
+export function selectLiveQuoteContracts(candidates: SignalCandidate[], selectedExpiry: string | null, heldLegs: ContractRef[] = [], options = { maxContracts: liveQuoteMaxContracts }): ContractRef[] {
   const selected: ContractRef[] = [];
   const seen = new Set<string>();
+  for (const leg of heldLegs) {
+    const key = heldLegContractKey(leg);
+    if (seen.has(key) || selected.length >= options.maxContracts) continue;
+    seen.add(key);
+    selected.push({ expiry: leg.expiry, strike: leg.strike, right: leg.right });
+  }
+  if (!selectedExpiry) return selected;
   for (const candidate of candidates) {
     if (candidate.expiry !== selectedExpiry || selected.length >= options.maxContracts) continue;
     const ref = candidateContractRef(candidate);
@@ -258,6 +317,6 @@ export function selectLiveQuoteContracts(candidates: SignalCandidate[], selected
 }
 
 export function toScreenRow(signals: TickerSignals): SignalsScreenRow {
-  const { candidates: _candidates, ...row } = signals;
+  const { candidates: _candidates, rolls: _rolls, ...row } = signals;
   return row;
 }

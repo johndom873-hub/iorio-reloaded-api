@@ -51,13 +51,23 @@ export function halfSpread(bid: number | null, ask: number | null): number {
   return (ask - bid) / 2;
 }
 
+export const sharesPerOptionContract = 100;
+
 // Commission component of a roll is a round trip (one fill to close the old
 // leg, one to open the replacement) -- 2x the average per-contract
-// commission. When there isn't enough fill history yet to trust that
-// average, this is $0 (no data, no penalty) rather than a hardcoded
-// published rate standing in for it -- the floor is weaker until real fills
-// accumulate, but never fabricated.
-export async function estimateRollCommissionComponent(): Promise<number> {
-  const commissionPerContract = await estimateAverageOptionCommissionPerContract();
-  return commissionPerContract !== null ? commissionPerContract * 2 : 0;
+// commission -- expressed PER SHARE, because it is added to per-share
+// premiums and half-spreads to form the credit floor. (Until 2026-09-24 the
+// per-contract dollar figure was added to per-share prices directly, which
+// put the floor ~$1.35/share too high and suppressed nearly every roll
+// alert; optionFriction.ts had always divided by 100.)
+export function rollCommissionPerShare(commissionPerContract: number | null): number {
+  return commissionPerContract !== null ? (commissionPerContract * 2) / sharesPerOptionContract : 0;
+}
+
+// When there isn't enough fill history yet to trust the average, this is $0
+// (no data, no penalty) rather than a hardcoded published rate standing in
+// for it -- the floor is weaker until real fills accumulate, but never
+// fabricated.
+export async function estimateRollCommissionPerShare(): Promise<number> {
+  return rollCommissionPerShare(await estimateAverageOptionCommissionPerContract());
 }

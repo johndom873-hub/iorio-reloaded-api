@@ -1,6 +1,6 @@
 import type { SignalCandidate } from "./signalCandidates.js";
 import { scoreTicker } from "./signalsLiveScoring.js";
-import { loadAccountContext, loadShortlistTickers, loadTickerSignalsInputs, type ShortlistTickerRow } from "./signalsStore.js";
+import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "./signalSettingsStore.js";
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 import { replaceDaySignalPool, type DaySignalExpirySeed, type DaySignalTickerSeed } from "./daySignalsStore.js";
@@ -16,8 +16,13 @@ import { replaceDaySignalPool, type DaySignalExpirySeed, type DaySignalTickerSee
 export const daySignalsSeedTopCandidates = 10;
 export const daySignalsSeedMaxExpiries = 3;
 
-/** Pure: which expiries make the pool, in first-appearance order among the top candidates by Edge $. */
-export function selectDaySignalExpiries(candidates: SignalCandidate[], options = { topCandidates: daySignalsSeedTopCandidates, maxExpiries: daySignalsSeedMaxExpiries }): DaySignalExpirySeed[] {
+/**
+ * Pure: which expiries make the pool, in first-appearance order among the top candidates by Edge $, then
+ * (Roll Signals, 2026-09-24) every open short leg's expiry that is not already in, ranked after them and
+ * outside the cap -- the held contract needs fresh quotes all session, and its expiry is where the
+ * same-expiry replacements live.
+ */
+export function selectDaySignalExpiries(candidates: SignalCandidate[], options = { topCandidates: daySignalsSeedTopCandidates, maxExpiries: daySignalsSeedMaxExpiries }, heldLegExpiries: string[] = []): DaySignalExpirySeed[] {
   const ranked = candidates.filter((candidate) => candidate.netEdge > 0).sort((a, b) => b.edgeDollars - a.edgeDollars || b.netEdge - a.netEdge);
   const seeds: DaySignalExpirySeed[] = [];
   for (const candidate of ranked.slice(0, options.topCandidates)) {
@@ -25,12 +30,17 @@ export function selectDaySignalExpiries(candidates: SignalCandidate[], options =
     if (seeds.length >= options.maxExpiries) break;
     seeds.push({ expiry: candidate.expiry, rank: seeds.length + 1, seedBestEdgeDollars: candidate.edgeDollars, seedBestNetEdge: candidate.netEdge });
   }
+  for (const expiry of [...new Set(heldLegExpiries)].sort()) {
+    if (seeds.some((seed) => seed.expiry === expiry)) continue;
+    const best = ranked.find((candidate) => candidate.expiry === expiry);
+    seeds.push({ expiry, rank: seeds.length + 1, seedBestEdgeDollars: best?.edgeDollars ?? 0, seedBestNetEdge: best?.netEdge ?? 0 });
+  }
   return seeds;
 }
 
 export interface DaySignalsSeedDependencies {
-  loadShortlistTickers(): Promise<ShortlistTickerRow[]>;
-  loadTickerSignalsInputs(ticker: ShortlistTickerRow): Promise<TickerSignalsInputs>;
+  loadSignalsUniverseTickers(): Promise<SignalsTickerRow[]>;
+  loadTickerSignalsInputs(ticker: SignalsTickerRow): Promise<TickerSignalsInputs>;
   loadAccountContext(): Promise<AccountContext>;
   loadSignalSettings(): Promise<SignalSettings>;
   replaceDaySignalPool(tradingDateIso: string, seeds: DaySignalTickerSeed[], seededAt: Date): Promise<void>;
@@ -38,7 +48,7 @@ export interface DaySignalsSeedDependencies {
 }
 
 export const defaultDaySignalsSeedDependencies: DaySignalsSeedDependencies = {
-  loadShortlistTickers,
+  loadSignalsUniverseTickers,
   loadTickerSignalsInputs,
   loadAccountContext,
   loadSignalSettings,
@@ -58,7 +68,7 @@ export interface DaySignalsSeedResult {
 }
 
 export async function seedDaySignals(tradingDateIso: string, deps: DaySignalsSeedDependencies = defaultDaySignalsSeedDependencies): Promise<DaySignalsSeedResult> {
-  const [tickers, settings] = await Promise.all([deps.loadShortlistTickers(), deps.loadSignalSettings()]);
+  const [tickers, settings] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadSignalSettings()]);
   // Free cash only affects the executable flag, never the ranking — a missing account summary must not block the seed.
   const account = await deps.loadAccountContext().catch((error) => {
     console.warn(`day signals seed: account context unavailable (${error instanceof Error ? error.message : error}) — seeding without it`);
@@ -75,7 +85,10 @@ export async function seedDaySignals(tradingDateIso: string, deps: DaySignalsSee
     }
     result.tickersScored += 1;
     const scored = scoreTicker(inputs, account, settings);
-    const expiries = selectDaySignalExpiries(scored.candidates);
+    // Only an expiry the snapshot actually holds can be refreshed; an expired leg's expiry never is.
+    const snapshotExpiries = new Set(inputs.slices.map((slice) => slice.expiry));
+    const heldLegExpiries = inputs.openShortLegs.map((leg) => leg.expiry).filter((expiry) => snapshotExpiries.has(expiry));
+    const expiries = selectDaySignalExpiries(scored.candidates, undefined, heldLegExpiries);
     if (expiries.length === 0) {
       result.symbolsWithoutPool.push(ticker.symbol);
       continue;

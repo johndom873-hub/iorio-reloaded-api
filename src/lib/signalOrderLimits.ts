@@ -36,6 +36,12 @@ export interface SignalOrderLimitsInput {
   spotPrice?: number;
   /** Current per-position exposures when the caller already streams them (the Order Review quote stream); omit to compute them. */
   exposures?: PositionExposureRow[];
+  /**
+   * Roll Signals: the strike of the short leg this order closes. A roll re-uses the closed leg's notional, so
+   * only the difference counts -- a covered-call roll adds nothing (the shares are already held), a
+   * cash-secured-put roll adds (newStrike − oldStrike) × 100 × quantity when it moves up, never a negative.
+   */
+  rollFromStrike?: number;
 }
 
 export interface SignalOrderLimitsResult {
@@ -49,17 +55,25 @@ function formatPct(fraction: number): string {
 
 async function resolveSpotPrice(input: SignalOrderLimitsInput): Promise<number | null> {
   if (input.spotPrice !== undefined) return input.spotPrice;
-  if (input.strategyKey !== "covered_call") return 0; // not needed for a cash-secured put
+  if (input.strategyKey !== "covered_call" || input.rollFromStrike !== undefined) return 0; // not needed for a cash-secured put or any roll
   const prices = await fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol: input.symbol }]);
   return prices["stock"] ?? null;
 }
 
-/** This order's own added notional -- see file header for the CSP/covered-call formulas. */
-async function computeOrderNotional(input: SignalOrderLimitsInput, spotPrice: number): Promise<number> {
+/** Pure: this order's own added notional -- see file header for the CSP/covered-call formulas and the roll rule. */
+export function computeSignalOrderNotional(input: Pick<SignalOrderLimitsInput, "strategyKey" | "strike" | "quantity" | "rollFromStrike">, spotPrice: number, availableUncoveredShares: number): number {
+  if (input.rollFromStrike !== undefined) {
+    if (input.strategyKey === "covered_call") return 0;
+    return Math.max(0, input.strike - input.rollFromStrike) * 100 * input.quantity;
+  }
   if (input.strategyKey === "cash_secured_put") return input.strike * 100 * input.quantity;
-  const availableUncoveredShares = await fetchAvailableUncoveredShares(input.tickerId);
   const shortfallShares = Math.max(0, input.quantity * 100 - availableUncoveredShares);
   return shortfallShares * spotPrice;
+}
+
+async function computeOrderNotional(input: SignalOrderLimitsInput, spotPrice: number): Promise<number> {
+  const needsShares = input.strategyKey === "covered_call" && input.rollFromStrike === undefined;
+  return computeSignalOrderNotional(input, spotPrice, needsShares ? await fetchAvailableUncoveredShares(input.tickerId) : 0);
 }
 
 export async function evaluateSignalOrderLimits(input: SignalOrderLimitsInput): Promise<SignalOrderLimitsResult> {

@@ -7,10 +7,12 @@ import { easternDateIso } from "./marketSessionStatus.js";
 import type { SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedByContract, scoreTicker, toScreenRow, type LiveOptionQuote } from "./signalsLiveScoring.js";
 import { loadDayQuotesForTicker } from "./daySignalsStore.js";
+import { loadUpcomingMajorMacroEvents } from "./macroEventCalendar.js";
 import type { RoadmapCounts } from "./signalsRoadmap.js";
 import { loadSignalSettings } from "./signalSettingsStore.js";
 import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, TickerSignalsDetail, TickerSignalsInputs } from "./signalsTypes.js";
 import { loadVolatilityForecast } from "./volatilityForecastStore.js";
+import type { OpenShortLeg } from "./rollSignalCandidates.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew } from "./tiltMeasures.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
 
@@ -151,35 +153,66 @@ export async function loadQuotes(snapshotId: string): Promise<SignalQuote[]> {
   return rows.map((row) => ({ expiry: row.expiry, strike: Number(row.strike), right: row.right, bid: row.bid === null ? null : Number(row.bid), ask: row.ask === null ? null : Number(row.ask), source: "snapshot" as const }));
 }
 
-export interface ShortlistTickerRow {
+export interface SignalsTickerRow {
   tickerId: string;
   symbol: string;
   companyName: string | null;
   sector: string | null;
 }
 
-export async function loadShortlistTickers(): Promise<ShortlistTickerRow[]> {
-  return db("shortlist_entries as se")
-    .join("tickers as t", "t.id", "se.ticker_id")
-    .whereNull("se.removed_at")
-    .select("t.id as tickerId", "t.symbol", "t.company_name as companyName", db.raw("NULLIF(t.sector, '') as sector"))
-    .orderBy("t.symbol");
+// The Signals universe: the shortlist plus every ticker with an open short
+// option leg (Roll Signals, 2026-09-24) -- a position on a ticker removed
+// from the shortlist still needs its roll scored.
+function signalsUniverseQuery() {
+  return db("tickers as t")
+    .where((builder) =>
+      builder
+        .whereIn("t.id", db("shortlist_entries").whereNull("removed_at").select("ticker_id"))
+        .orWhereIn("t.id", openShortLegPositionsQuery().select("p.ticker_id")),
+    )
+    .select("t.id as tickerId", "t.symbol", "t.company_name as companyName", db.raw("NULLIF(t.sector, '') as sector"));
 }
 
-export async function loadShortlistTicker(symbol: string): Promise<ShortlistTickerRow | null> {
-  const row = await db("shortlist_entries as se")
-    .join("tickers as t", "t.id", "se.ticker_id")
-    .whereNull("se.removed_at")
-    .where("t.symbol", symbol.toUpperCase())
-    .select("t.id as tickerId", "t.symbol", "t.company_name as companyName", db.raw("NULLIF(t.sector, '') as sector"))
-    .first();
+function openShortLegPositionsQuery() {
+  return db("position_legs as pl")
+    .join("positions as p", "p.id", "pl.position_id")
+    .where({ "p.status": "open", "pl.leg_type": "option", "pl.side": "short" })
+    .whereIn("p.strategy_key", ["covered_call", "cash_secured_put"])
+    .whereNull("pl.exit_at");
+}
+
+export async function loadSignalsUniverseTickers(): Promise<SignalsTickerRow[]> {
+  return signalsUniverseQuery().orderBy("t.symbol");
+}
+
+export async function loadSignalsUniverseTicker(symbol: string): Promise<SignalsTickerRow | null> {
+  const row = await signalsUniverseQuery().where("t.symbol", symbol.toUpperCase()).first();
   return row ?? null;
 }
 
+/** Every open short option leg on a covered-call or cash-secured-put position of this ticker (Roll Signals' A side). */
+export async function loadOpenShortLegs(tickerId: string): Promise<OpenShortLeg[]> {
+  const rows: { legId: string; positionId: string; strategyKey: string; expiry: string; strike: string; optionType: "call" | "put"; quantity: number; entryPrice: string; entryAt: Date }[] = await openShortLegPositionsQuery()
+    .where("p.ticker_id", tickerId)
+    .select("pl.id as legId", "p.id as positionId", "p.strategy_key as strategyKey", db.raw('pl.expiry_date::text as expiry'), "pl.strike_price as strike", "pl.option_type as optionType", "pl.quantity", "pl.entry_price as entryPrice", "pl.entry_at as entryAt")
+    .orderBy(["pl.expiry_date", "pl.strike_price"]);
+  return rows.map((row) => ({
+    legId: row.legId,
+    positionId: row.positionId,
+    strategyKey: row.strategyKey as OpenShortLeg["strategyKey"],
+    expiry: row.expiry,
+    strike: Number(row.strike),
+    right: row.optionType === "call" ? "C" : "P",
+    quantity: Number(row.quantity),
+    entryPrice: Number(row.entryPrice),
+    entryAtIso: new Date(row.entryAt).toISOString(),
+  }));
+}
+
 /** Everything scoring needs for one ticker, from the DB only (no IBKR). Loaded once per REST call or stream start. */
-export async function loadTickerSignalsInputs(ticker: ShortlistTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {
+export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {
   const todayEastern = easternDateIso(now);
-  const [bars, nextEarningsDateIso, earningsDatesIso, earningsCalendarResolved, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown] = await Promise.all([
+  const [bars, nextEarningsDateIso, earningsDatesIso, earningsCalendarResolved, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs] = await Promise.all([
     loadBarsForTilt(ticker.tickerId, todayEastern),
     loadNextEarningsDate(ticker.tickerId, todayEastern),
     loadEarningsDatesForForecastWindow(ticker.tickerId),
@@ -189,6 +222,8 @@ export async function loadTickerSignalsInputs(ticker: ShortlistTickerRow, now: D
     fetchAvailableUncoveredShares(ticker.tickerId),
     db("daily_price_bars").where({ ticker_id: ticker.tickerId }).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
     loadDividendCadenceUnknown(ticker.tickerId, todayEastern),
+    loadUpcomingMajorMacroEvents(),
+    loadOpenShortLegs(ticker.tickerId),
   ]);
   const momentum = computeMomentum(bars.map((bar) => bar.close));
   const elevatedVolatility = computeElevatedVolatilityFlag(bars);
@@ -197,7 +232,7 @@ export async function loadTickerSignalsInputs(ticker: ShortlistTickerRow, now: D
     ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
     : [[], [], { forecast: null, suspectedSplitDateIso: null }, []];
 
-  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
+  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
 }
 
 /** The Day Signals loop's quotes for one ticker, only when they belong to the snapshot date being scored (contracts that errored carry no quote). */
@@ -208,7 +243,7 @@ export async function loadDayQuotesAsLiveQuotes(tickerId: string, snapshotTradin
 
 /** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). Includes the raw
  * fitted-surface slices (unscaled by live spot) for the volatility-surface modal. */
-export async function loadTickerSignals(ticker: ShortlistTickerRow, accountContext: AccountContext, options: { withUncompensatedShare?: boolean } = {}): Promise<TickerSignalsDetail> {
+export async function loadTickerSignals(ticker: SignalsTickerRow, accountContext: AccountContext, options: { withUncompensatedShare?: boolean } = {}): Promise<TickerSignalsDetail> {
   const [inputs, settings] = await Promise.all([loadTickerSignalsInputs(ticker), loadSignalSettings()]);
   const scored = scoreTicker(inputs, accountContext, settings);
   if (!options.withUncompensatedShare || !inputs.header?.underlyingPrice || scored.candidates.length === 0) return { ...scored, slices: inputs.slices };
@@ -230,7 +265,8 @@ export async function loadRoadmapCounts(now: Date = new Date()): Promise<Roadmap
       .select(db.raw("(SELECT count(*) FROM ticker_calendar_events e WHERE e.ticker_id = se.ticker_id AND e.event_type = 'earnings' AND e.event_date < ?) AS past_earnings", [todayEastern]))
       .orderBy("past_earnings")
       .first<{ past_earnings: string } | undefined>(),
-    db("order_requests").whereNotNull("signal_snapshot").whereIn("status", ["filled", "partially_filled"]).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
+    // Open orders only: a roll's fill is a different friction sample (two legs, one combo), so it is counted apart (decided 2026-09-24).
+    db("order_requests").whereNotNull("signal_snapshot").where("request_type", "like", "open_%").whereIn("status", ["filled", "partially_filled"]).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
   ]);
   return {
     snapshotNights,
@@ -242,7 +278,7 @@ export async function loadRoadmapCounts(now: Date = new Date()): Promise<Roadmap
 
 /** The whole Signals screen at snapshot prices: one account-context fetch shared across every ticker, no candidate lists. */
 export async function loadSignalsScreen(): Promise<SignalsScreenRow[]> {
-  const [tickers, accountContext, settings] = await Promise.all([loadShortlistTickers(), loadAccountContext(), loadSignalSettings()]);
+  const [tickers, accountContext, settings] = await Promise.all([loadSignalsUniverseTickers(), loadAccountContext(), loadSignalSettings()]);
   const inputs = await Promise.all(tickers.map((ticker) => loadTickerSignalsInputs(ticker)));
   return inputs.map((tickerInputs) => toScreenRow(scoreTicker(tickerInputs, accountContext, settings)));
 }

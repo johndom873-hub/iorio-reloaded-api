@@ -968,10 +968,16 @@ async function evaluateSignalOrderLimitsForOrderRequest(
   live: { exposures?: PositionExposureRow[]; spotPrice?: number } = {},
 ): Promise<{ blocked: boolean; reasons: string[] } | null> {
   if (orderRequest.signal_snapshot === null || orderRequest.signal_snapshot === undefined) return null;
-  if (!(orderRequest.request_type as string).startsWith("open_")) return null;
+  const requestType = orderRequest.request_type as string;
+  const isRoll = requestType === "roll_leg";
+  if (!requestType.startsWith("open_") && !isRoll) return null;
   const payload = orderRequest.payload;
-  const optionLeg = payload.legs.find((leg) => leg.role === "option");
-  if (!optionLeg || !optionLeg.strike || (payload.strategyKey !== "covered_call" && payload.strategyKey !== "cash_secured_put")) return null;
+  if (payload.strategyKey !== "covered_call" && payload.strategyKey !== "cash_secured_put") return null;
+  // A Signals roll (Roll Signals, 2026-09-24) is one combo with two option legs: the close leg carries
+  // positionLegId, the open leg does not. Only the strike difference adds notional (signalOrderLimits.ts).
+  const optionLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && !leg.positionLegId) : payload.legs.find((leg) => leg.role === "option");
+  const closeLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && leg.positionLegId) : undefined;
+  if (!optionLeg || !optionLeg.strike || (isRoll && !closeLeg?.strike)) return null;
   const ticker = await requireExistingTicker(payload.symbol);
   if (!ticker) return null;
   return evaluateSignalOrderLimits({
@@ -982,6 +988,7 @@ async function evaluateSignalOrderLimitsForOrderRequest(
     strike: optionLeg.strike,
     spotPrice: live.spotPrice,
     exposures: live.exposures,
+    rollFromStrike: closeLeg?.strike,
   });
 }
 
@@ -1615,12 +1622,19 @@ positionsRouter.get("/:id", async (request, response) => {
 // position_legs/trades directly. Same idea as POST /orders above; only the
 // worker writes those tables now, once IBKR actually fills the order.
 positionsRouter.post("/:id/roll", async (request, response) => {
-  const { sourceAlertId, closeLegId, closeLimitPrice, newLeg } = request.body as {
+  const { sourceAlertId, closeLegId, closeLimitPrice, newLeg, signalSnapshot } = request.body as {
     sourceAlertId?: string;
     closeLegId?: string;
     closeLimitPrice?: number;
     newLeg?: { strikePrice: number; expiryDate: string; quantity: number; limitPrice: number };
+    /** Roll Signals only: both legs' scores at build time (stored as-is, like an open order's snapshot). */
+    signalSnapshot?: unknown;
   };
+  const snapshot = readSignalSnapshot(signalSnapshot);
+  if (!snapshot.ok) {
+    response.status(400).json({ error: snapshot.error });
+    return;
+  }
 
   if (!closeLegId || typeof closeLimitPrice !== "number" || closeLimitPrice < 0) {
     response.status(400).json({ error: "closeLegId and a non-negative closeLimitPrice are required." });
@@ -1753,6 +1767,7 @@ positionsRouter.post("/:id/roll", async (request, response) => {
       payload: JSON.stringify(payload),
       related_position_id: position.id,
       source_alert_id: sourceAlertId || null,
+      signal_snapshot: snapshot.value === null ? null : JSON.stringify(snapshot.value),
     })
     .returning("*");
 

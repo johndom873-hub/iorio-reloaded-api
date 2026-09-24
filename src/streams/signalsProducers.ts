@@ -7,7 +7,7 @@ import { loadDayQuotesStatus, type DayQuotesStatus } from "../lib/daySignalsStor
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { uncompensatedShareRefreshIntervalMs, type SignalCandidate, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
 import { accountRefreshIntervalMs, candidateContractKey, candidateContractRef, contractKey, liveFrameIntervalMs, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
-import { loadAccountContext, loadDayQuotesAsLiveQuotes, loadShortlistTicker, loadShortlistTickers, loadTickerSignalsInputs, type ShortlistTickerRow } from "../lib/signalsStore.js";
+import { loadAccountContext, loadDayQuotesAsLiveQuotes, loadSignalsUniverseTicker, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "../lib/signalSettingsStore.js";
 import type { AccountContext, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { computeUncompensatedSharesInWorker } from "../lib/uncompensatedShareWorkerPool.js";
@@ -45,10 +45,10 @@ export interface SignalsTickerFrame {
 export const dayQuotesStatusRefreshIntervalMs = 30_000;
 
 export interface SignalsProducerDependencies {
-  loadShortlistTickers(): Promise<ShortlistTickerRow[]>;
-  loadShortlistTicker(symbol: string): Promise<ShortlistTickerRow | null>;
-  loadTickerSignalsInputs(ticker: ShortlistTickerRow): Promise<TickerSignalsInputs>;
-  loadDayQuotes(ticker: ShortlistTickerRow, snapshotTradingDateIso: string): Promise<LiveOptionQuote[]>;
+  loadSignalsUniverseTickers(): Promise<SignalsTickerRow[]>;
+  loadSignalsUniverseTicker(symbol: string): Promise<SignalsTickerRow | null>;
+  loadTickerSignalsInputs(ticker: SignalsTickerRow): Promise<TickerSignalsInputs>;
+  loadDayQuotes(ticker: SignalsTickerRow, snapshotTradingDateIso: string): Promise<LiveOptionQuote[]>;
   onDayQuotesUpdated(listener: (tickerId: string) => void): () => void;
   loadDayQuotesStatus(): Promise<DayQuotesStatus>;
   daySignalsLoopStatus(): DaySignalsLoopStatus | null;
@@ -62,8 +62,8 @@ export interface SignalsProducerDependencies {
 }
 
 export const defaultSignalsProducerDependencies: SignalsProducerDependencies = {
-  loadShortlistTickers,
-  loadShortlistTicker,
+  loadSignalsUniverseTickers,
+  loadSignalsUniverseTicker,
   loadTickerSignalsInputs,
   loadDayQuotes: (ticker, snapshotTradingDateIso) => loadDayQuotesAsLiveQuotes(ticker.tickerId, snapshotTradingDateIso),
   onDayQuotesUpdated,
@@ -174,14 +174,14 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
     parseParameters: parseScreenParameters,
     async run(parameters, _context, emit, signal) {
       const bestContractLines = parameters.bestContractLines !== "false";
-      const [tickers, initialAccount, settings, initialDayQuotesStatus] = await Promise.all([deps.loadShortlistTickers(), deps.loadAccountContext(), deps.loadSignalSettings(), deps.loadDayQuotesStatus()]);
+      const [tickers, initialAccount, settings, initialDayQuotesStatus] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadAccountContext(), deps.loadSignalSettings(), deps.loadDayQuotesStatus()]);
       let account = initialAccount;
       let dayQuotesStatus = initialDayQuotesStatus;
       const inputsList = await Promise.all(tickers.map((ticker) => deps.loadTickerSignalsInputs(ticker)));
       if (signal.aborted) return;
 
       interface TickerState {
-        ticker: ShortlistTickerRow;
+        ticker: SignalsTickerRow;
         inputs: TickerSignalsInputs;
         spot: number | null;
         priceSource: SignalsPriceSource;
@@ -316,8 +316,8 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
     parseParameters: parseTickerParameters,
     async run(parameters, _context, emit, signal) {
       const symbol = parameters.symbol!;
-      const ticker = await deps.loadShortlistTicker(symbol);
-      if (!ticker) throw new StreamRequestError(404, `${symbol} is not on the shortlist.`);
+      const ticker = await deps.loadSignalsUniverseTicker(symbol);
+      if (!ticker) throw new StreamRequestError(404, `${symbol} is not on the shortlist and has no open short option leg.`);
       const [initialInputs, initialAccount, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadSignalSettings()]);
       if (signal.aborted) return;
       let inputs = initialInputs;
@@ -336,7 +336,8 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       };
 
       const selectedExpiry = parameters.expiry ?? scored.best?.expiry ?? null;
-      const liveQuoteContracts = selectLiveQuoteContracts(scored.candidates, selectedExpiry);
+      // One live line per open short leg (Roll Signals) ahead of the selected expiry's contracts.
+      const liveQuoteContracts = selectLiveQuoteContracts(scored.candidates, selectedExpiry, inputs.openShortLegs);
       const liveQuoteContractKeys = liveQuoteContracts.map(contractKey);
 
       const emitFrame = () => {

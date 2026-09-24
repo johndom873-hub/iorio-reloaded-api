@@ -5,14 +5,15 @@ import { releaseMarketDataLines, reserveMarketDataLines, type LineReservationRes
 import { sharedLiveConnection } from "../ibkr/sharedReadConnection.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { emitDayQuotesUpdated } from "./daySignalsEvents.js";
-import { isGradeUpgrade, notifySignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
-import { loadDaySignalExpiries, loadDaySignalUniverse, loadDayQuotesForTicker, updateDayQuoteGrades, upsertDayQuotes, type DayQuoteContract, type DayQuoteWrite, type DaySignalExpiryRow } from "./daySignalsStore.js";
+import { isGradeUpgrade, notifyRollSignalUpgrade, notifySignalUpgrade, type RollSignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
+import { loadDayRollGrades, loadDaySignalExpiries, loadDaySignalUniverse, loadDayQuotesForTicker, updateDayQuoteGrades, upsertDayQuotes, upsertDayRollGrades, type DayQuoteContract, type DayQuoteWrite, type DaySignalExpiryRow } from "./daySignalsStore.js";
 import { computeMarketSessionStatus, easternDateIso } from "./marketSessionStatus.js";
 import { formatIsoDateAsExpiry } from "./optionChainSnapshotStore.js";
 import { readGitSha } from "./readGitSha.js";
 import type { SignalGrade } from "./signalCandidates.js";
+import { rollCandidateKey } from "./rollSignalCandidates.js";
 import { candidateContractKey, scoreTicker } from "./signalsLiveScoring.js";
-import { loadAccountContext, loadTickerSignalsInputs, type ShortlistTickerRow } from "./signalsStore.js";
+import { loadAccountContext, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "./signalSettingsStore.js";
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 
@@ -77,12 +78,16 @@ export interface DaySignalsLoopDependencies {
   allocateReqId(): number;
   runQuoteWindow(contracts: WindowContract[], options: RollingQuoteWindowOptions): Promise<RollingQuoteWindowResult>;
   upsertDayQuotes(writes: DayQuoteWrite[]): Promise<void>;
-  loadTickerSignalsInputs(ticker: ShortlistTickerRow): Promise<TickerSignalsInputs>;
+  loadTickerSignalsInputs(ticker: SignalsTickerRow): Promise<TickerSignalsInputs>;
   loadAccountContext(): Promise<AccountContext>;
   loadSignalSettings(): Promise<SignalSettings>;
   loadLastGrades(tickerId: string, tradingDateIso: string): Promise<Map<string, SignalGrade | null>>;
   updateDayQuoteGrades(tickerId: string, grades: { expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[]): Promise<void>;
   notifyUpgrade(upgrade: SignalUpgrade): Promise<void>;
+  /** Roll Signals: last grade per (leg, replacement) key -- `legId|expiry|strike|right`. */
+  loadLastRollGrades(tickerId: string, tradingDateIso: string): Promise<Map<string, SignalGrade>>;
+  upsertRollGrades(tickerId: string, tradingDateIso: string, grades: { legId: string; expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[]): Promise<void>;
+  notifyRollUpgrade(upgrade: RollSignalUpgrade): Promise<void>;
   emitUpdated(tickerId: string): void;
   writeHeartbeat(status: DaySignalsLoopStatus): Promise<void>;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -121,6 +126,9 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   loadLastGrades: async (tickerId, tradingDateIso) => new Map((await loadDayQuotesForTicker(tickerId, tradingDateIso)).map((row) => [`${row.expiry}|${row.strike}|${row.right}`, row.lastGrade])),
   updateDayQuoteGrades,
   notifyUpgrade: notifySignalUpgrade,
+  loadLastRollGrades: async (tickerId, tradingDateIso) => new Map((await loadDayRollGrades(tickerId, tradingDateIso)).map((row) => [`${row.legId}|${row.expiry}|${row.strike}|${row.right}`, row.lastGrade])),
+  upsertRollGrades: upsertDayRollGrades,
+  notifyRollUpgrade: notifyRollSignalUpgrade,
   emitUpdated: emitDayQuotesUpdated,
   writeHeartbeat: async (status) => {
     await db("worker_health")
@@ -343,11 +351,24 @@ export class DaySignalsLoop {
     }
   }
 
-  private async rescoreTicker(ticker: ShortlistTickerRow, tradingDateIso: string, spot: number | null, settings: SignalSettings, account: AccountContext): Promise<void> {
+  private async rescoreTicker(ticker: SignalsTickerRow, tradingDateIso: string, spot: number | null, settings: SignalSettings, account: AccountContext): Promise<void> {
     try {
-      const [inputs, lastGrades] = await Promise.all([this.deps.loadTickerSignalsInputs(ticker), this.deps.loadLastGrades(ticker.tickerId, tradingDateIso)]);
+      const [inputs, lastGrades, lastRollGrades] = await Promise.all([this.deps.loadTickerSignalsInputs(ticker), this.deps.loadLastGrades(ticker.tickerId, tradingDateIso), this.deps.loadLastRollGrades(ticker.tickerId, tradingDateIso)]);
       if (!inputs.header || inputs.header.tradingDateIso !== tradingDateIso) return;
       const scored = scoreTicker(inputs, account, settings, spot !== null ? { spotPrice: spot, priceSource: "live" } : undefined);
+      // Roll Signals: same upward-only rule per (held leg, replacement); the first score after a seed or restart is a baseline.
+      const heldByLegId = new Map(scored.heldLegs.map((leg) => [leg.legId, leg]));
+      const rollGrades: { legId: string; expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[] = [];
+      for (const roll of scored.rolls) {
+        const key = rollCandidateKey(roll);
+        const previousGrade = lastRollGrades.get(key) ?? null;
+        const held = heldByLegId.get(roll.legId);
+        if (held && isGradeUpgrade(previousGrade, roll.grade)) {
+          await this.deps.notifyRollUpgrade({ symbol: ticker.symbol, roll, held: { strike: held.strike, expiry: held.expiry, dte: held.dte }, previousGrade: previousGrade!, spotPrice: scored.spotPrice ?? spot ?? 0, quotedAt: roll.replacement.quotedAt });
+        }
+        rollGrades.push({ legId: roll.legId, expiry: roll.replacement.expiry, strike: roll.replacement.strike, right: roll.strategyKey === "covered_call" ? "C" : "P", grade: roll.grade });
+      }
+      await this.deps.upsertRollGrades(ticker.tickerId, tradingDateIso, rollGrades);
       const grades: { expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[] = [];
       for (const candidate of scored.candidates) {
         const key = candidateContractKey(candidate);

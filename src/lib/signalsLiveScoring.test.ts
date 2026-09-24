@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { buildSignalCandidates, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, contractKey, countGrades, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
+import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, contractKey, countGrades, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 
 const forward = 100;
@@ -46,12 +46,14 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
+    macroEvents: [],
     momentum: 0.12,
     elevatedVolatility: null,
     skew: null,
     nextEarningsDateIso: "2026-11-05",
     previousClose: { close: 98, dateIso: "2026-09-21" },
     freeShares: 200,
+    openShortLegs: [],
     dailyBarCount: 1253,
     dividendCadenceUnknown: false,
     // Same day as the snapshot: the surface is scored as fitted. See the rebaseSlicesToToday tests for a stale snapshot.
@@ -168,7 +170,7 @@ describe("scoreTicker", () => {
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {
     const in1 = inputs();
     const scored = scoreTicker(in1, account, permissiveSettings);
-    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash, maxNetDelta: permissiveSettings.maxNetDelta, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct }));
+    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEventDatesIso: [], snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash, maxNetDelta: permissiveSettings.maxNetDelta, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct }));
     expect(scored.candidates).toEqual(direct);
     expect(scored.unscoredReason).toBeNull();
     expect(scored.priceSource).toBe("snapshot");
@@ -282,19 +284,31 @@ describe("selectLiveQuoteContracts", () => {
     expect(selectLiveQuoteContracts([...list, candidate("2026-10-21", 90, "cash_secured_put", 5)], "2026-10-21")).toHaveLength(2);
   });
   it("caps the total at maxContracts", () => {
-    expect(selectLiveQuoteContracts(list, "2026-11-20", { maxContracts: 1 }).map(contractKey)).toEqual(["2026-11-20|85|P"]);
+    expect(selectLiveQuoteContracts(list, "2026-11-20", [], { maxContracts: 1 }).map(contractKey)).toEqual(["2026-11-20|85|P"]);
   });
   it("opens no lines without a selected expiry", () => {
     expect(selectLiveQuoteContracts(list, null)).toEqual([]);
   });
+  it("puts every open short leg's contract first (Roll Signals), deduplicated against the expiry's candidates, inside the cap", () => {
+    const held = [
+      { expiry: "2026-10-21", strike: 90, right: "P" as const },
+      { expiry: "2026-12-18", strike: 120, right: "C" as const },
+      { expiry: "2026-12-18", strike: 120, right: "C" as const },
+    ];
+    expect(selectLiveQuoteContracts(list, "2026-10-21", held).map(contractKey)).toEqual(["2026-10-21|90|P", "2026-12-18|120|C", "2026-10-21|110|C"]);
+    expect(selectLiveQuoteContracts(list, null, held).map(contractKey)).toEqual(["2026-10-21|90|P", "2026-12-18|120|C"]);
+    expect(selectLiveQuoteContracts(list, "2026-10-21", held, { maxContracts: 1 }).map(contractKey)).toEqual(["2026-10-21|90|P"]);
+  });
 });
 
 describe("toScreenRow / countGrades", () => {
-  it("strips the candidate list and nothing else", () => {
+  it("strips the candidate and roll lists and nothing else (held legs, best roll and roll count stay for the badge)", () => {
     const scored = scoreTicker(inputs(), account, permissiveSettings);
     const row = toScreenRow(scored);
     expect("candidates" in row).toBe(false);
-    expect({ ...row, candidates: scored.candidates }).toEqual(scored);
+    expect("rolls" in row).toBe(false);
+    expect("heldLegs" in row && "bestRoll" in row && "rollCount" in row).toBe(true);
+    expect({ ...row, candidates: scored.candidates, rolls: scored.rolls }).toEqual(scored);
   });
   it("counts every grade", () => {
     const counts = countGrades([{ grade: "strong" }, { grade: "avoid" }, { grade: "avoid" }] as SignalCandidate[]);
@@ -360,5 +374,31 @@ describe("day quotes and the intraday IV shift (formula 3h)", () => {
       permissiveSettings,
     );
     expect(scored.ivShiftByExpiry[expiry]).toBeUndefined();
+  });
+});
+
+describe("appendMissingContractQuotes (Roll Signals)", () => {
+  const snapshot: SignalQuote[] = [{ expiry: "2026-10-21", strike: 95, right: "P", bid: 1, ask: 1.1, source: "snapshot" }];
+  it("appends a wanted contract the snapshot lacks, live before day, and leaves present or unquoted contracts alone", () => {
+    const wanted = [
+      { expiry: "2026-10-21", strike: 95, right: "P" as const }, // already present: untouched
+      { expiry: "2026-10-21", strike: 105, right: "P" as const }, // ITM held put: live wins over day
+      { expiry: "2026-10-21", strike: 110, right: "P" as const }, // day only
+      { expiry: "2026-10-21", strike: 115, right: "P" as const }, // one-sided live, no day: skipped
+    ];
+    const day = [
+      { expiry: "2026-10-21", strike: 105, right: "P" as const, bid: 6, ask: 6.4, quotedAt: "2026-09-24T14:00:00Z" },
+      { expiry: "2026-10-21", strike: 110, right: "P" as const, bid: 10, ask: 10.5, quotedAt: "2026-09-24T14:00:00Z" },
+    ];
+    const live = [
+      { expiry: "2026-10-21", strike: 105, right: "P" as const, bid: 6.1, ask: 6.3 },
+      { expiry: "2026-10-21", strike: 115, right: "P" as const, bid: 15, ask: null },
+    ];
+    const merged = appendMissingContractQuotes(snapshot, wanted, day, live);
+    expect(merged).toHaveLength(3);
+    expect(merged[0]).toBe(snapshot[0]);
+    expect(merged[1]).toMatchObject({ strike: 105, bid: 6.1, ask: 6.3, source: "live" });
+    expect(merged[2]).toMatchObject({ strike: 110, bid: 10, ask: 10.5, source: "day", quotedAt: "2026-09-24T14:00:00Z" });
+    expect(appendMissingContractQuotes(snapshot, [], day, live)).toBe(snapshot);
   });
 });

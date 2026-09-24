@@ -43,6 +43,7 @@ function baseInput(overrides: Partial<SignalCandidatesInput> = {}): SignalCandid
     quotes: [quoteAt(90, "P"), quoteAt(110, "C")],
     earningsDatesIso: [],
     earningsCalendarResolved: true,
+    macroEventDatesIso: [],
     snapshotDateIso: "2026-09-21",
     freeShares: 0,
     freeCash: 1_000_000,
@@ -196,6 +197,15 @@ describe("buildSignalCandidates: flags and executability", () => {
     expect(unresolved.flags).toContain("earnings_calendar_unresolved");
     const resolved = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: [] }))[0]!;
     expect(resolved.flags).not.toContain("earnings_calendar_unresolved");
+  });
+
+  it("flags macro_event_before_expiry (does not exclude) when a major macro release falls before the expiry", () => {
+    const spans = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEventDatesIso: ["2026-10-14"] }))[0]!;
+    expect(spans.flags).toContain("macro_event_before_expiry");
+    const onExpiry = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEventDatesIso: ["2026-10-21"] }))[0]!;
+    expect(onExpiry.flags).toContain("macro_event_before_expiry"); // release on expiry day still lands inside the trade
+    const after = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEventDatesIso: ["2026-10-22", "2026-09-21"] }))[0]!;
+    expect(after.flags).not.toContain("macro_event_before_expiry"); // after expiry, or on the snapshot date itself, is not spanned
   });
 
   it("flags outside_fitted_range when the strike's log-moneyness is beyond the slice's kMin/kMax", () => {

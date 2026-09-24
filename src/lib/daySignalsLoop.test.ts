@@ -5,6 +5,8 @@ import { DaySignalsLoop, daySignalsLoopLineHolder, type DaySignalsLoopDependenci
 import type { WindowContract, WindowQuote } from "../ibkr/daySignalsQuoteWindow.js";
 import type { SignalGrade, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
+import { rollCandidateKey } from "./rollSignalCandidates.js";
+import { scoreTicker } from "./signalsLiveScoring.js";
 
 const forward = 100;
 const rate = 0.04;
@@ -36,12 +38,14 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
     suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
+    macroEvents: [],
     momentum: null,
     elevatedVolatility: null,
     skew: null,
     nextEarningsDateIso: null,
     previousClose: null,
     freeShares: 0,
+    openShortLegs: [],
     dailyBarCount: 1000,
     dividendCadenceUnknown: false,
     todayEasternIso: tradingDateIso,
@@ -51,14 +55,14 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
 interface Harness {
   deps: DaySignalsLoopDependencies;
   loop: DaySignalsLoop;
-  calls: { reserve: number; release: number; windows: WindowContract[][]; writes: number; notified: string[]; emitted: string[]; heartbeats: string[]; grades: SignalGrade[][] };
-  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean } };
+  calls: { reserve: number; release: number; windows: WindowContract[][]; writes: number; notified: string[]; emitted: string[]; heartbeats: string[]; grades: SignalGrade[][]; rollGrades: SignalGrade[][]; rollNotified: string[] };
+  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; lastRollGrades: Map<string, SignalGrade>; openShortLegs: TickerSignalsInputs["openShortLegs"]; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean } };
 }
 
 /** The window fake answers every option with a two-sided quote at `impliedVolatility` and the stock with last = 100, synchronously. */
 function createHarness(impliedVolatilityShift = 0): Harness {
-  const calls: Harness["calls"] = { reserve: 0, release: 0, windows: [], writes: 0, notified: [], emitted: [], heartbeats: [], grades: [] };
-  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), dayQuotes: [], windowResult: { disconnected: false } };
+  const calls: Harness["calls"] = { reserve: 0, release: 0, windows: [], writes: 0, notified: [], emitted: [], heartbeats: [], grades: [], rollGrades: [], rollNotified: [] };
+  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), lastRollGrades: new Map(), openShortLegs: [], dayQuotes: [], windowResult: { disconnected: false } };
   let ticks = 0;
   const deps: DaySignalsLoopDependencies = {
     now: () => new Date("2026-09-24T15:00:00Z"),
@@ -99,9 +103,17 @@ function createHarness(impliedVolatilityShift = 0): Harness {
         if (!state.lastGrades.has(key)) state.lastGrades.set(key, null);
       }
     },
-    loadTickerSignalsInputs: async () => inputsFor(state.dayQuotes),
+    loadTickerSignalsInputs: async () => ({ ...inputsFor(state.dayQuotes), openShortLegs: state.openShortLegs }),
     loadAccountContext: async () => ({ freeCash: 1_000_000 }),
     loadSignalSettings: async () => settings,
+    loadLastRollGrades: async () => state.lastRollGrades,
+    upsertRollGrades: async (_tickerId, _tradingDateIso, grades) => {
+      calls.rollGrades.push(grades.map((entry) => entry.grade));
+      for (const entry of grades) state.lastRollGrades.set(`${entry.legId}|${entry.expiry}|${entry.strike}|${entry.right}`, entry.grade);
+    },
+    notifyRollUpgrade: async (upgrade) => {
+      calls.rollNotified.push(`${upgrade.roll.legId}:${upgrade.roll.replacement.strike}:${upgrade.previousGrade}->${upgrade.roll.grade}`);
+    },
     loadLastGrades: async () => new Map(state.lastGrades),
     updateDayQuoteGrades: async (_tickerId, grades) => {
       calls.grades.push(grades.map((grade) => grade.grade));
@@ -189,6 +201,41 @@ describe("DaySignalsLoop", () => {
     expect(harness.calls.notified.length).toBeGreaterThan(0);
     expect(harness.calls.notified.every((entry) => entry.includes("weak->"))).toBe(true);
     expect(harness.calls.notified.some((entry) => entry.startsWith("80P:"))).toBe(false);
+  });
+
+  it("notifies roll upgrades per (held leg, replacement) against the recorded roll grade, and records the grades (Roll Signals)", async () => {
+    const harness = createHarness();
+    // A 60-day slice with the same IV at every log-moneyness (total variance doubled) so a 30-day held 95 put
+    // has credit, lower-delta replacements out in time; the same-expiry puts are debits or riskier.
+    const expiry60 = "2026-11-20";
+    const slice60: SignalSurfaceSlice = { ...slice, expiry: expiry60, yearsToExpiry: 60 / 365, parameters: { ...params, a: params.a * 2, b: params.b * 2 } };
+    const quotes60: SignalQuote[] = [80, 85, 90, 95].map((strike) => {
+      const mid = blackScholesPriceOnForward(forward, strike, 60 / 365, rate, surfaceIvAt(strike), false);
+      return { expiry: expiry60, strike, right: "P", bid: mid * 0.98, ask: mid * 1.02, source: "snapshot" };
+    });
+    const heldLeg = { legId: "leg-1", positionId: "pos-1", strategyKey: "cash_secured_put" as const, expiry, strike: 95, right: "P" as const, quantity: 1, entryPrice: 2, entryAtIso: "2026-09-10T14:00:00Z" };
+    const withRoll = (): TickerSignalsInputs => ({ ...inputsFor(harness.state.dayQuotes), slices: [slice, slice60], quotes: [...inputsFor([]).quotes, ...quotes60], openShortLegs: [heldLeg] });
+    harness.deps.loadTickerSignalsInputs = async () => withRoll();
+    const expected = scoreTicker(withRoll(), { freeCash: 1_000_000 }, settings, { spotPrice: 100, priceSource: "live" });
+    expect(expected.rolls.length).toBeGreaterThan(0);
+    expect(expected.rolls.every((roll) => roll.replacement.expiry === expiry60)).toBe(true);
+    // Baseline: every roll recorded as Avoid, so each roll graded above Avoid is one upgrade.
+    for (const roll of expected.rolls) harness.state.lastRollGrades.set(rollCandidateKey(roll), "avoid");
+    let cycles = 0;
+    const originalWindow = harness.deps.runQuoteWindow;
+    harness.deps.runQuoteWindow = async (contracts, options) => {
+      cycles += 1;
+      if (cycles === 2) harness.loop.stop();
+      return originalWindow(contracts, options);
+    };
+    await harness.loop.start();
+    const upgraded = expected.rolls.filter((roll) => roll.grade !== "avoid");
+    expect(upgraded.length).toBeGreaterThan(0);
+    // First cycle notifies exactly the rolls above Avoid; the second cycle sees the recorded grade and stays quiet.
+    expect(harness.calls.rollNotified.sort()).toEqual(upgraded.map((roll) => `leg-1:${roll.replacement.strike}:avoid->${roll.grade}`).sort());
+    expect(harness.calls.rollGrades).toHaveLength(2);
+    expect(harness.calls.rollGrades[0]).toEqual(expected.rolls.map((roll) => roll.grade));
+    expect(harness.state.lastRollGrades.get(rollCandidateKey(upgraded[0]!))).toBe(upgraded[0]!.grade);
   });
 
   it("backs off and keeps going after the connection drops mid-cycle", async () => {

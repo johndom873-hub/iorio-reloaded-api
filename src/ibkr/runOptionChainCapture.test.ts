@@ -34,6 +34,7 @@ function prepareDependencies(overrides: Partial<PrepareTickerDependencies> = {})
     fetchSpotPrice: async () => 100,
     loadReferenceVolatility: async () => ({ volatility: 0.3, source: "implied_volatility" }),
     refreshStoredOptionChain: async () => storedChain(["20261016"]),
+    loadOpenShortLegContracts: async () => [],
     ...overrides,
   };
 }
@@ -55,6 +56,28 @@ describe("prepareTicker", () => {
     );
     expect([...new Set(prepared.contracts.map((contract) => contract.expiry))]).toEqual(["20260921", "20261220"]);
     expect(prepared.contracts.every((contract) => typeof contract.expiry === "string" && contract.expiry.length === 8)).toBe(true);
+  });
+
+  it("always captures every open short leg's exact contract, ITM or outside the window, once, and never a past expiry (Roll Signals)", async () => {
+    const prepared = await prepareTicker(
+      fakeIb,
+      ticker("AAA"),
+      today,
+      prepareDependencies({
+        refreshStoredOptionChain: async () => storedChain(["20261016"], [95, 100, 105]),
+        loadOpenShortLegContracts: async () => [
+          { expiry: "20261016", strike: 105, right: "P" }, // ITM put: the window keeps only the call at 105
+          { expiry: "20261016", strike: 95, right: "P" }, // already captured by the window: not duplicated
+          { expiry: "20261120", strike: 140, right: "C" }, // far outside any window and not in the stored chain: still captured
+          { expiry: "20250101", strike: 90, right: "P" }, // already expired: left out
+        ],
+      }),
+    );
+    const keys = prepared.contracts.map((contract) => `${contract.expiry}|${contract.strike}|${contract.right}`);
+    expect(keys).toContain("20261016|105|P");
+    expect(keys).toContain("20261120|140|C");
+    expect(keys.filter((key) => key === "20261016|95|P")).toHaveLength(1);
+    expect(keys.some((key) => key.startsWith("20250101"))).toBe(false);
   });
 
   it("refreshes the stored chain once per ticker and selects each expiry's contracts from that expiry's own grid", async () => {

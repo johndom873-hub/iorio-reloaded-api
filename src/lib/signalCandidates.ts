@@ -1,7 +1,7 @@
 import { blackScholesDelta, impliedVolatilityFromPrice, sviTotalVariance, type RawSviParameters, type SviSliceStatus } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, computeFrictionCost, computeNetEdge } from "./optionFriction.js";
 import { computeUncompensatedShare, type UncompensatedShareOptions } from "./uncompensatedShare.js";
-import { expirySpansEarnings, type RealizedVolatilityForecast } from "./volatilityEdge.js";
+import { expirySpansEarnings, expirySpansEventDate, type RealizedVolatilityForecast } from "./volatilityEdge.js";
 
 // Signals screen: turns one ticker's fitted surface (one row per expiry, from
 // option_surface_fits) + that day's raw quotes into graded, tradable candidates.
@@ -16,7 +16,7 @@ import { expirySpansEarnings, type RealizedVolatilityForecast } from "./volatili
 
 export type SignalStrategyKey = "covered_call" | "cash_secured_put";
 export type SignalGrade = "strong" | "good" | "weak" | "avoid";
-export type SignalFlag = "earnings_calendar_unresolved" | "outside_fitted_range" | "wide_spread" | "insufficient_cash";
+export type SignalFlag = "earnings_calendar_unresolved" | "outside_fitted_range" | "wide_spread" | "insufficient_cash" | "macro_event_before_expiry";
 
 export const wideSpreadThreshold = 0.5; // matches the surface fit's own quote filter
 const annualDays = 365;
@@ -71,6 +71,10 @@ export interface SignalCandidatesInput {
    * empty regardless of what's actually scheduled -- candidates are still produced but flagged, not excluded
    * (Marcelo 2026-09-23: don't block on missing data, but surface that earnings risk is unchecked). */
   earningsCalendarResolved: boolean;
+  /** Formula 3i (approved 2026-09-24): dates of major US macro releases (FOMC, CPI, jobs, PCE, GDP); a candidate whose
+   * expiry spans one is FLAGGED, never excluded -- with one flat forecast per ticker, a short-dated IV spike into such a
+   * date scores like mispricing, and the flag says so. See macroEventCalendar.ts for the curated list. */
+  macroEventDatesIso: string[];
   snapshotDateIso: string;
   /** Free (uncovered) shares available for a covered call. */
   freeShares: number;
@@ -227,6 +231,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     if (!insideRange) flags.push("outside_fitted_range");
     if (spreadPercent / 100 > wideSpreadThreshold) flags.push("wide_spread");
     if (strategyKey === "cash_secured_put" && input.freeCash < quote.strike * 100) flags.push("insufficient_cash");
+    if (expirySpansEventDate(input.snapshotDateIso, quote.expiry, input.macroEventDatesIso)) flags.push("macro_event_before_expiry");
     // A covered call always ships as one order (buy the shares, sell the call), so free shares
     // aren't a precondition -- only a cash-secured put needs the cash upfront.
     const executable = !flags.includes("insufficient_cash");
@@ -296,17 +301,18 @@ export function attachUncompensatedShare(candidates: SignalCandidate[], input: U
 const strongCutVolatilityPoints = 10;
 const goodCutVolatilityPoints = 5;
 
+/** The grade for a net Edge (a fraction): the same cut points grade a new-trade candidate and a roll (Formula 3j). */
+export function gradeForNetEdge(netEdge: number): SignalGrade {
+  const netEdgeVolatilityPoints = netEdge * 100;
+  if (netEdge <= 0) return "avoid";
+  if (netEdgeVolatilityPoints >= strongCutVolatilityPoints) return "strong";
+  if (netEdgeVolatilityPoints >= goodCutVolatilityPoints) return "good";
+  return "weak";
+}
+
 /** Assigns a grade to every candidate, in place conceptually (returns a new array), from its own net Edge. */
 export function gradeSignalCandidates(candidates: SignalCandidate[]): SignalCandidate[] {
-  return candidates.map((candidate) => {
-    const netEdgeVolatilityPoints = candidate.netEdge * 100;
-    let grade: SignalGrade;
-    if (candidate.netEdge <= 0) grade = "avoid";
-    else if (netEdgeVolatilityPoints >= strongCutVolatilityPoints) grade = "strong";
-    else if (netEdgeVolatilityPoints >= goodCutVolatilityPoints) grade = "good";
-    else grade = "weak";
-    return { ...candidate, grade };
-  });
+  return candidates.map((candidate) => ({ ...candidate, grade: gradeForNetEdge(candidate.netEdge) }));
 }
 
 /** The candidate the Signals screen shows as a ticker's headline: highest Edge $, ties broken by net Edge. */

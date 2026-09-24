@@ -30,7 +30,7 @@ function quoteAt(strike: number, right: "C" | "P"): SignalQuote {
   const mid = blackScholesPriceOnForward(forward, strike, years, rate, iv, right === "C");
   return { expiry: "2026-10-21", strike, right, bid: mid * 0.98, ask: mid * 1.02 };
 }
-const candidates = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: { volatility: 0.15, windowDays: 63 }, slices, quotes: [quoteAt(90, "P"), quoteAt(95, "P"), quoteAt(105, "C"), quoteAt(110, "C")], earningsDatesIso: [], earningsCalendarResolved: true, snapshotDateIso: "2026-09-21", freeShares: 0, freeCash: 1e6, maxNetDelta: 1, minAnnualizedYieldPct: 0 }));
+const candidates = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: { volatility: 0.15, windowDays: 63 }, slices, quotes: [quoteAt(90, "P"), quoteAt(95, "P"), quoteAt(105, "C"), quoteAt(110, "C")], earningsDatesIso: [], earningsCalendarResolved: true, macroEventDatesIso: [], snapshotDateIso: "2026-09-21", freeShares: 0, freeCash: 1e6, maxNetDelta: 1, minAnnualizedYieldPct: 0 }));
 
 afterAll(() => shutdownUncompensatedShareWorker());
 

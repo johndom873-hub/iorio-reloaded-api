@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
-import { loadShortlistTicker } from "../lib/signalsStore.js";
+import { loadSignalsUniverseTicker } from "../lib/signalsStore.js";
 
 export const signalSettingsRouter = Router();
 signalSettingsRouter.use(requireAuth);
@@ -79,7 +79,7 @@ signalSettingsRouter.put("/", async (request, response) => {
 // reused as-is by the confirm-step hard gate and the order's live quote-
 // stream compliance check (positions.ts). Approved 2026-09-24.
 signalSettingsRouter.get("/order-limits-check", async (request, response) => {
-  const { symbol, strategyKey, quantity, strike, spotPrice } = request.query;
+  const { symbol, strategyKey, quantity, strike, spotPrice, rollFromStrike } = request.query;
   if (typeof symbol !== "string" || !symbol.trim()) {
     response.status(400).json({ error: "symbol is required." });
     return;
@@ -99,7 +99,7 @@ signalSettingsRouter.get("/order-limits-check", async (request, response) => {
     return;
   }
 
-  const ticker = await loadShortlistTicker(symbol);
+  const ticker = await loadSignalsUniverseTicker(symbol);
   if (!ticker) {
     response.status(400).json({ error: "Unknown symbol — add it via the Shortlist first." });
     return;
@@ -113,6 +113,13 @@ signalSettingsRouter.get("/order-limits-check", async (request, response) => {
     return;
   }
 
+  // rollFromStrike marks a roll (Roll Signals): the order only adds the strike difference's notional, see signalOrderLimits.ts.
+  const parsedRollFromStrike = rollFromStrike === undefined ? undefined : Number(rollFromStrike);
+  if (parsedRollFromStrike !== undefined && (!Number.isFinite(parsedRollFromStrike) || parsedRollFromStrike <= 0)) {
+    response.status(400).json({ error: "rollFromStrike must be a positive number." });
+    return;
+  }
+
   const result = await evaluateSignalOrderLimits({
     strategyKey,
     symbol: ticker.symbol,
@@ -120,6 +127,7 @@ signalSettingsRouter.get("/order-limits-check", async (request, response) => {
     quantity: parsedQuantity,
     strike: parsedStrike,
     spotPrice: parsedSpotPrice,
+    rollFromStrike: parsedRollFromStrike,
   });
   response.json(result);
 });

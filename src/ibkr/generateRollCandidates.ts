@@ -3,7 +3,7 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { daysBetween, parseExpiry, type OptionQuote } from "./fetchOptionChain.js";
 import { quoteSingleContract } from "./quoteContracts.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
-import { estimateRollCommissionComponent, halfSpread } from "../lib/rollEconomics.js";
+import { estimateRollCommissionPerShare, halfSpread } from "../lib/rollEconomics.js";
 import {
   generateTradeAlertCandidates,
   type AlertCandidate,
@@ -115,7 +115,7 @@ export async function evaluateRollCandidate(
 
   const candidates = await generateTradeAlertCandidates(connection, leg.symbol, leg.tickerId, strategyKey, settings);
   const closeSpread = halfSpread(quote?.bid ?? null, quote?.ask ?? null);
-  const commissionComponent = await estimateRollCommissionComponent();
+  const commissionPerShare = await estimateRollCommissionPerShare();
 
   let replacement: AlertCandidate | undefined;
   let netCredit = 0;
@@ -123,7 +123,7 @@ export async function evaluateRollCandidate(
   for (const candidate of candidates) {
     if (candidate.strike === leg.strike && candidate.expiry === toIsoDate(leg.expiry)) continue;
     const candidateNetCredit = candidate.premium - currentPrice;
-    const minimumCredit = commissionComponent + closeSpread + halfSpread(candidate.bid, candidate.ask);
+    const minimumCredit = commissionPerShare + closeSpread + halfSpread(candidate.bid, candidate.ask);
     if (candidateNetCredit > minimumCredit) {
       replacement = candidate;
       netCredit = candidateNetCredit;

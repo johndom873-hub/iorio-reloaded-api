@@ -80,7 +80,12 @@ export function computeVolatilityEdge(slice: EdgeSlice, strike: number, forecast
   };
 }
 
-/** True when an earnings date falls after the snapshot date and on or before the expiry (ISO dates YYYY-MM-DD compare correctly as text). */
+/** True when any of the dates falls after the snapshot date and on or before the expiry (ISO dates YYYY-MM-DD compare correctly as text). */
+export function expirySpansEventDate(snapshotDateIso: string, expiryIso: string, eventDatesIso: string[]): boolean {
+  return eventDatesIso.some((eventDate) => eventDate > snapshotDateIso && eventDate <= expiryIso);
+}
+
+/** Earnings-specific name for expirySpansEventDate (hard exclusion in Signals and Trade Alerts). */
 export function expirySpansEarnings(snapshotDateIso: string, expiryIso: string, earningsDatesIso: string[]): boolean {
-  return earningsDatesIso.some((earningsDate) => earningsDate > snapshotDateIso && earningsDate <= expiryIso);
+  return expirySpansEventDate(snapshotDateIso, expiryIso, earningsDatesIso);
 }

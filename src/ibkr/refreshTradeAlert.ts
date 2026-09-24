@@ -11,7 +11,7 @@ import type { AlertCandidate, AlertStrategyKey } from "./generateTradeAlertCandi
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
-import { estimateRollCommissionComponent, halfSpread } from "../lib/rollEconomics.js";
+import { estimateRollCommissionPerShare, halfSpread } from "../lib/rollEconomics.js";
 import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
 import { referencedStrikesForNewTrade, referencedStrikesForRoll } from "../lib/tradeAlertReferencedStrikes.js";
 
@@ -235,9 +235,9 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
     const refreshedReplacement = await refreshNewTradeCandidate(connection, alert.symbol, strategyKey, structure.replacement, calendarContext, replacementQuote ?? null);
     if (typeof refreshedReplacement === "string") return { ok: false, error: refreshedReplacement };
 
-    const commissionComponent = await estimateRollCommissionComponent();
+    const commissionPerShare = await estimateRollCommissionPerShare();
     const closeSpread = halfSpread(closeQuote?.bid ?? null, closeQuote?.ask ?? null);
-    const requiredMinimumCredit = commissionComponent + closeSpread + halfSpread(refreshedReplacement.bid, refreshedReplacement.ask);
+    const requiredMinimumCredit = commissionPerShare + closeSpread + halfSpread(refreshedReplacement.bid, refreshedReplacement.ask);
     const netCredit = refreshedReplacement.premium - currentPrice;
     const stillNetCredit = netCredit > requiredMinimumCredit;
 

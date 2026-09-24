@@ -2,6 +2,7 @@ import { formatShortDate } from "./formatTradeAlertMessage.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { publishNotification } from "./notificationChannel.js";
 import type { SignalCandidate, SignalGrade } from "./signalCandidates.js";
+import type { RollSignalCandidate } from "./rollSignalCandidates.js";
 
 // Upward grade transitions only, from any tier including Avoid, one message
 // per contract per transition, no cooldown (Marcelo 2026-09-24: a refresh
@@ -59,5 +60,54 @@ export async function notifySignalUpgrade(upgrade: SignalUpgrade): Promise<void>
     });
   } catch (error) {
     console.error(`day signals: could not notify the ${upgrade.symbol} upgrade: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+export interface RollSignalUpgrade {
+  symbol: string;
+  roll: RollSignalCandidate;
+  held: { strike: number; expiry: string; dte: number | null };
+  previousGrade: SignalGrade;
+  spotPrice: number;
+  quotedAt: string | null;
+}
+
+export function formatRollSignalUpgradeMessage(upgrade: RollSignalUpgrade): string {
+  const { roll } = upgrade;
+  const right = roll.strategyKey === "covered_call" ? "Call" : "Put";
+  const quoteTime = upgrade.quotedAt ? new Date(upgrade.quotedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false }) : "n/a";
+  return [
+    `▲ Roll signal upgraded — ${upgrade.symbol}`,
+    `${right} $${upgrade.held.strike}${upgrade.held.dte === null ? "" : ` (${upgrade.held.dte} DTE)`} → ${right} $${roll.replacement.strike} · ${formatShortDate(roll.replacement.expiry)} (${roll.replacement.dte} DTE)`,
+    `${gradeLabel[upgrade.previousGrade]} → ${gradeLabel[roll.grade]}`,
+    `Net roll Edge ${(roll.netRollEdge * 100).toFixed(1)}vp · ${roll.netRollEdgeDollars >= 0 ? "+" : "−"}$${Math.abs(roll.netRollEdgeDollars).toFixed(0)} for ${roll.quantity} contract${roll.quantity === 1 ? "" : "s"} · net credit $${roll.netCreditPerShare.toFixed(2)}/sh`,
+    `Spot $${upgrade.spotPrice.toFixed(2)} · quote ${quoteTime} ET (day quotes)`,
+    `Open: Signals → ${upgrade.symbol} → Your positions`,
+  ].join("\n");
+}
+
+/** Never throws: a notification failure must not stop the refresh loop. */
+export async function notifyRollSignalUpgrade(upgrade: RollSignalUpgrade): Promise<void> {
+  const { roll } = upgrade;
+  try {
+    await notifyTelegram(formatRollSignalUpgradeMessage(upgrade));
+    await publishNotification({
+      type: "roll_signal_upgraded",
+      symbol: upgrade.symbol,
+      strategyKey: roll.strategyKey,
+      legId: roll.legId,
+      heldStrike: upgrade.held.strike,
+      heldExpiry: upgrade.held.expiry,
+      strike: roll.replacement.strike,
+      expiry: roll.replacement.expiry,
+      dte: roll.replacement.dte,
+      previousGrade: upgrade.previousGrade,
+      grade: roll.grade,
+      netRollEdge: roll.netRollEdge,
+      netRollEdgeDollars: roll.netRollEdgeDollars,
+      netCreditPerShare: roll.netCreditPerShare,
+    });
+  } catch (error) {
+    console.error(`day signals: could not notify the ${upgrade.symbol} roll upgrade: ${error instanceof Error ? error.message : error}`);
   }
 }
