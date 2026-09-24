@@ -19,14 +19,17 @@ import { standardNormalCdf } from "./blackScholesPop.js";
 //
 // Paths are geometric Brownian motion with volatility σ = the SVI-fitted implied
 // volatility at the strike (approved), zero drift and zero rate (an implementation
-// detail: over ≤ 90 days it moves the shares by well under a point), one step per trading
-// day to expiry, antithetic pairs, and a fixed seed so the same inputs always give the
-// same answer. Sanity-checked against the paper: an ATM monthly call at 16% volatility
-// gives ≈ 25% timing (paper: ≈ 25%), and against an independent Python simulation.
+// detail: over ≤ 90 days it moves the shares by well under a point), one step per
+// calendar day to expiry (yearsToExpiry throughout this codebase is calendar-day based,
+// see yearsBetweenIsoDates -- steps must use the same 365-day convention or a short-dated
+// option rounds to a single step, which is structurally always 0% timing share), antithetic
+// pairs, and a fixed seed so the same inputs always give the same answer. Sanity-checked
+// against the paper: an ATM monthly call at 16% volatility gives ≈ 25% timing (paper: ≈ 25%),
+// and against an independent Python simulation.
 
 export const simulationPathCount = 4000; // even, for antithetic pairs
 export const simulationSeed = 20_260_922;
-const tradingDaysPerYear = 252;
+const calendarDaysPerYear = 365;
 const minimumTotalVarianceFraction = 1e-10;
 
 /** mulberry32: a small, well-behaved seeded generator. */
@@ -76,7 +79,7 @@ export function computeUncompensatedShare(input: UncompensatedShareInput, option
   if (![spotPrice, strike, yearsToExpiry, volatility].every((value) => Number.isFinite(value) && value > 0)) return null;
   const pathCount = options.pathCount ?? simulationPathCount;
 
-  const steps = Math.max(1, Math.round(yearsToExpiry * tradingDaysPerYear));
+  const steps = Math.max(1, Math.round(yearsToExpiry * calendarDaysPerYear));
   const dt = yearsToExpiry / steps;
   const drift = -0.5 * volatility * volatility * dt;
   const diffusion = volatility * Math.sqrt(dt);
