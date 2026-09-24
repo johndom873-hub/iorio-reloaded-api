@@ -153,6 +153,11 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
     throw error;
   }
 
+  // Published only after the job_runs insert succeeds — a run that instead
+  // hits JobAlreadyRunningError above never reaches here, so Latest Events
+  // never shows a "started" entry for a run that didn't actually start.
+  await publishNotification({ type: "job_started", jobName }).catch(() => {});
+
   let result: JobResult;
   try {
     result = await fn();

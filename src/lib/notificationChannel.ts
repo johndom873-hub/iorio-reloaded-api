@@ -15,6 +15,7 @@ export type AppNotification =
   // Iorio Pulse's live System Events feed / topology pulses — see
   // presenceTracker.ts (presence) and the publish call sites in runJob.ts,
   // runTradeAlertGeneration.ts, and genosuke/bot.ts.
+  | { type: "job_started"; jobName: string }
   | { type: "job_completed"; jobName: string; status: "success" | "failure" }
   | { type: "alert_generated"; strategyKey: string; symbol: string; annualizedYield: number }
   // Day Signals: a pooled contract's grade went up between two refresh cycles (daySignalsNotifications.ts).
@@ -47,7 +48,7 @@ export async function publishNotification(notification: AppNotification): Promis
   // live SSE handler in PulsePage.tsx). Skipping persistence — not just
   // display — means a long quiet stretch (e.g. a holiday weekend) can't let
   // the retention cleanup below evict real history in favor of noise.
-  if (notification.type === "job_completed" && notification.jobName === "ibkr_health_check") return;
+  if ((notification.type === "job_started" || notification.type === "job_completed") && notification.jobName === "ibkr_health_check") return;
 
   await db("notification_events").insert({ payload: JSON.stringify(notification) });
   await db.raw(
@@ -68,7 +69,7 @@ export async function fetchRecentNotificationEvents(
   // events that are still within the retention window.
   const rows = await db("notification_events")
     .select("payload", "occurred_at")
-    .whereRaw(`NOT (payload->>'type' = ? AND payload->>'jobName' = ?)`, ["job_completed", "ibkr_health_check"])
+    .whereRaw(`NOT (payload->>'type' IN (?, ?) AND payload->>'jobName' = ?)`, ["job_started", "job_completed", "ibkr_health_check"])
     .orderBy("occurred_at", "desc")
     .limit(limit);
   return rows.map((row) => ({ notification: row.payload as AppNotification, occurredAt: row.occurred_at.toISOString() }));
