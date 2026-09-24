@@ -224,13 +224,19 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
     const positionLegs = legsByPositionId.get(position.id) ?? [];
 
     const isUnstructured = position.strategyKey === "unstructured";
-    // The stock position a CSP assignment leaves behind is conceptually part
-    // of the assignment itself, not a separate transaction — the CSP's own
-    // "closed"/"assigned" event already tells that story, so its paired
-    // "opened" event here would just be a confusing duplicate ("No strategy"
-    // next to "Assigned" for the same real-world event).
-    const isCspAssignedLeftoverStock = isUnstructured && position.unstructuredReason === "csp_assigned_stock";
-    if (!isCspAssignedLeftoverStock) {
+    // A leftover-stock position that exists only because another event
+    // happened is not its own transaction: the shares a CSP assignment or an
+    // expired covered call leaves behind are already told by that position's
+    // "Assigned"/"Expired" event, and the same shares being absorbed into a
+    // new covered call is told by that covered call's "Opened" event. Showing
+    // the leftover position's own open/close alongside those would read as a
+    // duplicate ("No strategy" next to "Assigned" for one real-world event).
+    // A leftover position closed because its shares were actually sold is a
+    // real transaction and still shows.
+    const openIsConsequenceOfAnotherEvent =
+      isUnstructured && (position.unstructuredReason === "csp_assigned_stock" || position.unstructuredReason === "cc_expired_leftover_stock");
+    const closeIsConsequenceOfAnotherEvent = isUnstructured && position.closeReason === "stock_rolled_into_covered_call";
+    if (!openIsConsequenceOfAnotherEvent) {
       events.push({
         positionId: position.id,
         eventType: isUnstructured ? "unstructured" : "opened",
@@ -248,7 +254,7 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
       });
     }
 
-    if (position.closedAt) {
+    if (position.closedAt && !closeIsConsequenceOfAnotherEvent) {
       events.push({
         positionId: position.id,
         eventType: "closed",
