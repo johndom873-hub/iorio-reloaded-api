@@ -45,6 +45,10 @@ export interface CycleOptionLeg {
   expiryDate: string;
   /** Daily close on expiryDate, null when no bar exists. */
   expiryClose: number | null;
+  /** positions.close_reason for this leg's own position — "assigned" means ibkrGatewayWorker already
+   * confirmed a real fill produced/removed the shares (see cycleBreakEven.ts's assignment-matching note
+   * below), so the ledger must not also infer shares from the strike price and double them up. */
+  positionCloseReason: string | null;
 }
 
 export interface CycleStockTrade {
@@ -98,6 +102,29 @@ export function summarizeOpenCycle(
     events.push({ at: trade.at.getTime(), sharesDelta: signedShares, openOptionsDelta: 0, acquiredShares: isBuy ? trade.quantity : 0, acquiredCost: isBuy ? trade.quantity * trade.price + trade.commission : 0 });
   }
 
+  // A confirmed assignment (positions.close_reason === "assigned", stamped by ibkrGatewayWorker's
+  // reconciliation the moment the assignment is detected) normally already has its own real stock
+  // trade in `stockTrades` above -- IBKR reports the assignment as an ordinary execution, and
+  // upsertLeftoverStockPosition/upsertSyncedPosition record it like any other fill. Below, an assigned
+  // leg that finds its matching real trade skips the strike-price-based synthesis entirely, so the
+  // shares aren't counted twice (real bug found 2026-09-24: a same-day TLT/QQQ CSP assignment showed
+  // 200 sh in the ledger against 100 sh actually held, nulling out break-even). If no matching trade is
+  // found -- the execution report never arrived, a known gap this file's worker comments call out
+  // elsewhere -- fall back to today's strike-price inference so a genuinely untracked assignment still
+  // gets a break-even instead of silently losing its shares.
+  const matchedAssignmentTradeIndices = new Set<number>();
+  function findMatchingAssignmentTrade(exitAtMs: number, expectedSide: "buy" | "sell", shares: number): boolean {
+    for (let i = 0; i < stockTrades.length; i += 1) {
+      if (matchedAssignmentTradeIndices.has(i)) continue;
+      const trade = stockTrades[i]!;
+      if (trade.side !== expectedSide || trade.quantity !== shares) continue;
+      if (Math.abs(trade.at.getTime() - exitAtMs) > groupingWindowMs) continue;
+      matchedAssignmentTradeIndices.add(i);
+      return true;
+    }
+    return false;
+  }
+
   for (const leg of optionLegs) {
     events.push({ at: leg.entryAt.getTime(), sharesDelta: 0, openOptionsDelta: 1, acquiredShares: 0, acquiredCost: 0 });
     if (leg.exitAt === null) continue;
@@ -113,10 +140,15 @@ export function summarizeOpenCycle(
           unavailableReason ??= `${leg.optionType} $${leg.strike} (${leg.expiryDate}) expired within $${marginalThreshold} of the strike — assignment unclear`;
         } else if (inTheMoneyBy >= marginalThreshold) {
           const shares = leg.quantity * leg.multiplier;
-          sharesDelta = leg.optionType === "put" ? shares : -shares;
-          if (leg.optionType === "put") {
-            acquiredShares = shares;
-            acquiredCost = shares * leg.strike;
+          const expectedSide = leg.optionType === "put" ? "buy" : "sell";
+          const alreadyRecordedByRealTrade =
+            leg.positionCloseReason === "assigned" && findMatchingAssignmentTrade(leg.exitAt.getTime(), expectedSide, shares);
+          if (!alreadyRecordedByRealTrade) {
+            sharesDelta = leg.optionType === "put" ? shares : -shares;
+            if (leg.optionType === "put") {
+              acquiredShares = shares;
+              acquiredCost = shares * leg.strike;
+            }
           }
         }
       }
