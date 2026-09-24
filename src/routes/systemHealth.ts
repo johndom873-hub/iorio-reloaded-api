@@ -205,9 +205,10 @@ systemHealthRouter.get("/gateway", async (_request, response) => {
     // hold no line) — not a Gateway-worker stat, but the only live "IBKR
     // lines in use" number the app has, shown alongside it.
     marketDataLineCount: marketDataPoolSnapshot().openLineCount,
-    // Lines held by an active priority reservation (the 10:00 ET chain
-    // capture or the scheduled trade-alert scan, marketDataLineBudget.ts) —
-    // 0/null when neither job is running, not the full reservation ledger.
+    // Lines held by every active priority reservation (the Day Signals loop's
+    // session-long 10, plus the 10:00 ET chain capture or the trade-alert scan
+    // while one runs — marketDataLineBudget.ts), not the full reservation ledger.
+    // Factual on purpose: the top bar's banner is the one that ignores the loop.
     priorityReservedLineCount: restriction?.priorityLines ?? 0,
     staleOrMissing: false,
   });

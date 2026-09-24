@@ -96,11 +96,19 @@ export interface MarketDataLineRestriction {
   holders: string[];
 }
 
-/** Non-null while a priority holder (the chain capture or the scheduled trade-alert scan) is active — what the top bar's "Live data restricted" state is driven by. */
-export async function loadMarketDataLineRestriction(): Promise<MarketDataLineRestriction | null> {
+/**
+ * Non-null while a priority holder is active. `excludeHolders` leaves out holders whose priority
+ * reservation is normal operation rather than a restriction worth surfacing (the Day Signals loop
+ * holds its lines for the whole session — see routes/environment.ts).
+ */
+export async function loadMarketDataLineRestriction(options: { excludeHolders?: string[] } = {}): Promise<MarketDataLineRestriction | null> {
+  const excludeHolders = options.excludeHolders ?? [];
   const rows: { holder: string; lines: number }[] = await db("ibkr_market_data_line_reservations")
     .where("priority", true)
     .where("expires_at", ">", db.fn.now())
+    .modify((query) => {
+      if (excludeHolders.length > 0) query.whereNotIn("holder", excludeHolders);
+    })
     .select("holder", "lines");
   if (rows.length === 0) return null;
   return { priorityLines: rows.reduce((sum, row) => sum + row.lines, 0), holders: rows.map((row) => row.holder) };

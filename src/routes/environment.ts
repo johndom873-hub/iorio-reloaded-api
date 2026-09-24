@@ -5,6 +5,7 @@ import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { classifyTradingStatus } from "../lib/tradingGate.js";
 import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
+import { daySignalsLoopLineHolder } from "../lib/daySignalsLoop.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 
 // Feeds the top-bar environment badges (PAPER / LIVE / STAGING / DEV / TRADING BLOCKED).
@@ -19,13 +20,18 @@ environmentRouter.get("/", (_request, response) => {
 
 environmentRouter.get("/details", requireAuth, async (_request, response) => {
   const apiEnvironment = readAppEnvironment();
-  const [workerRow, marketDataRestriction] = await Promise.all([db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(), loadMarketDataLineRestriction()]);
+  // The Day Signals loop holds its priority lines for the whole session (Marcelo 2026-09-24): that is
+  // normal operation, not a restriction, so only the chain capture / trade-alert scan drive the banner.
+  const [workerRow, marketDataRestriction] = await Promise.all([
+    db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
+    loadMarketDataLineRestriction({ excludeHolders: [daySignalsLoopLineHolder] }),
+  ]);
   const trading = classifyTradingStatus(workerRow, apiEnvironment);
   response.json({
     environment: apiEnvironment,
     tradingMode: environment.ibkrTradingMode,
     trading,
-    // Non-null while the chain capture holds its priority lines — the top bar's "Live data restricted" state.
+    // Non-null while a scheduled scan holds its priority lines — the top bar's "Live data restricted" state.
     marketDataRestriction,
     // False when IBKR_MARKET_DATA_LINES_ENABLED=false — the top bar's "Real-time data disabled" state.
     marketDataLinesEnabled: ibkrMarketDataLinesEnabled(),
