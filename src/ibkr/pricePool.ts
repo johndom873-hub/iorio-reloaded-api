@@ -1,5 +1,22 @@
-import { subscribeToPooledQuote, settleGraceMs } from "./marketDataPool.js";
-import type { PriceContract } from "./fetchLivePrices.js";
+import { peekPooledQuote, subscribeToPooledQuote, waitForFirstReading } from "./marketDataPool.js";
+import { fetchLivePrices, type PriceContract } from "./fetchLivePrices.js";
+
+/**
+ * One-shot prices, pool first (2026-09-24): a contract some open screen is
+ * already streaming is read from the pool with no IBKR request; only the
+ * rest go out as a (budgeted) snapshot. Same shape as fetchLivePrices.
+ */
+export async function fetchPricesPoolFirst(contracts: PriceContract[]): Promise<Record<string, number | null>> {
+  const pricesByKey: Record<string, number | null> = {};
+  const notPooled: PriceContract[] = [];
+  for (const contract of contracts) {
+    const pooled = peekPooledQuote(contract)?.last ?? null;
+    if (pooled !== null) pricesByKey[contract.key] = pooled;
+    else notPooled.push(contract);
+  }
+  if (notPooled.length > 0) Object.assign(pricesByKey, await fetchLivePrices(notPooled));
+  return pricesByKey;
+}
 
 // Thin price-shaped view over marketDataPool.ts (the one real pool — see its
 // header comment) — kept as its own file/signatures so every consumer
@@ -32,12 +49,14 @@ export async function streamPooledPrices(
   for (const contract of contracts) pricesByKey[contract.key] = null;
   let settled = false;
   const emit = () => onUpdate({ ...pricesByKey }, { frozenPhaseComplete: settled });
+  const firstReading = waitForFirstReading(() => contracts.every((contract) => pricesByKey[contract.key] !== null));
 
   const unsubscribes = await Promise.all(
     contracts.map((contract) =>
       subscribeToPooledPrice(contract, (price) => {
         pricesByKey[contract.key] = price;
         if (settled) emit();
+        else firstReading.check();
       }),
     ),
   );
@@ -45,7 +64,8 @@ export async function streamPooledPrices(
     for (const unsubscribe of unsubscribes) unsubscribe();
     return;
   }
-  await new Promise((resolve) => setTimeout(resolve, settleGraceMs));
+  firstReading.check();
+  await firstReading.settled;
   settled = true;
   emit();
 

@@ -1,7 +1,7 @@
 import { OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
-import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
-import { streamPooledPrices } from "../ibkr/pricePool.js";
+import type { PriceContract } from "../ibkr/fetchLivePrices.js";
+import { fetchPricesPoolFirst, streamPooledPrices } from "../ibkr/pricePool.js";
 import { dedupeInFlight } from "./dedupeInFlight.js";
 
 // Position "exposure"/"value" = full market value across every open leg
@@ -142,13 +142,19 @@ function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegRow[], p
   }));
 }
 
+// Pool first (2026-09-24): legs already held by an open Positions/Pulse/
+// Dashboard stream are priced from the pool with no IBKR request at all;
+// only legs nobody has pooled fall back to a one-shot snapshot. The Signals
+// order-limit check calls this on every debounced keystroke, on confirm and
+// every 10s from the Order Review quote stream, so this is what keeps those
+// from opening a snapshot per open leg each time.
 async function computePositionExposuresUncached(): Promise<PositionExposureRow[]> {
   const { positions, legs } = await resolveOpenPositionsAndLegs();
   if (positions.length === 0) return [];
 
   let pricesByKey: Record<string, number | null> = {};
   try {
-    pricesByKey = await fetchLivePrices(legsToPriceContracts(legs));
+    pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs));
   } catch {
     // Leave pricesByKey empty — every leg falls back to entry_price below.
   }

@@ -106,7 +106,10 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   isMarketOpen: async (now) => (await computeMarketSessionStatus(now)).state === "open",
   loadPool: loadDaySignalExpiries,
   loadUniverse: loadDaySignalUniverse,
-  reserveLines: (holder, lines, ttlSeconds) => reserveMarketDataLines(holder, lines, ttlSeconds),
+  // Priority (approved 2026-09-24): the loop must keep its 10 lines for the
+  // whole session, so like the chain capture it only has to fit alongside
+  // other priority holders and live screens shed to it, never the reverse.
+  reserveLines: (holder, lines, ttlSeconds) => reserveMarketDataLines(holder, lines, ttlSeconds, { priority: true }),
   releaseLines: releaseMarketDataLines,
   borrowLiveConnection: () => sharedLiveConnection.borrow(),
   allocateReqId: () => sharedLiveConnection.allocateReqId(),
@@ -244,7 +247,12 @@ export class DaySignalsLoop {
     const reservation = await this.deps.reserveLines(daySignalsLoopLineHolder, daySignalsLoopLines, lineReservationTtlSeconds);
     if (!reservation.ok) {
       this.linesHeld = false;
-      this.setState("idle", `IBKR market-data lines unavailable (${reservation.availableLines} free${reservation.priorityLinesHeld > 0 ? ", chain capture running" : ""})`);
+      this.setState(
+        "idle",
+        reservation.disabled
+          ? "IBKR market-data lines disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false)"
+          : `IBKR market-data lines unavailable (${reservation.availableLines} free${reservation.priorityLinesHeld > 0 ? ", a scheduled scan is running" : ""})`,
+      );
       return false;
     }
     this.linesHeld = true;

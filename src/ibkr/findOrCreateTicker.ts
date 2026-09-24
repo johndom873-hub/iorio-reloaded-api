@@ -16,6 +16,14 @@ export interface FindOrCreateTickerResult {
  * addTickerToShortlist starts the shared backfill pipeline (tickerBackfillPipeline.ts). Extracted 2026-09-05 from screener.ts's POST / handler
  * — see that route's history for the original inline version.
  */
+/** Thrown when IBKR has no contract for the symbol — routes answer 422, nothing is stored. */
+export class UnknownSymbolError extends Error {
+  constructor(symbol: string) {
+    super(`${symbol} is not a symbol IBKR recognises — check the spelling (or IBKR did not answer in time; try again).`);
+    this.name = "UnknownSymbolError";
+  }
+}
+
 export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTickerResult> {
   const normalizedSymbol = symbol.trim().toUpperCase();
 
@@ -25,7 +33,15 @@ export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTi
   }
 
   const tickerData = await fetchNewTickerData(normalizedSymbol);
-  const [ticker] = await db("tickers")
+  // A symbol IBKR does not recognise (a typo, or a lookup that timed out)
+  // used to be saved with a null contract id for good and then fail every
+  // later step (2026-09-24). Refuse instead; nothing is written.
+  if (tickerData.conId === null || tickerData.conId === undefined) {
+    throw new UnknownSymbolError(normalizedSymbol);
+  }
+  // Two concurrent adds of the same new symbol: the loser re-reads the row
+  // the winner inserted instead of surfacing the unique violation as a 500.
+  const [inserted] = await db("tickers")
     .insert({
       symbol: normalizedSymbol,
       company_name: tickerData.companyName,
@@ -33,7 +49,12 @@ export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTi
       ibkr_contract_id: tickerData.conId,
       primary_exchange: tickerData.primaryExchange,
     })
+    .onConflict("symbol")
+    .ignore()
     .returning("*");
+  const ticker = inserted ?? (await db("tickers").where({ symbol: normalizedSymbol }).first());
+  if (!ticker) throw new Error(`Ticker ${normalizedSymbol} could not be created.`);
+  if (!inserted) return { ticker, created: false };
 
   await db("market_data_snapshots")
     .insert({
@@ -52,7 +73,7 @@ export interface AddTickerToShortlistResult {
   id: string;
   addedAt: string;
   notes: string | null;
-  backfillRun: TickerBackfillRun;
+  backfillRun: TickerBackfillRun | null;
 }
 
 /**
@@ -79,7 +100,14 @@ export async function addTickerToShortlist(
     })
     .returning("*");
 
-  const backfillRun = await startTickerBackfill(tickerId, symbol);
+  // The entry is already saved; a backfill that cannot start must not read
+  // as "add failed" (2026-09-24). Reported as null — the row shows no run.
+  let backfillRun: TickerBackfillRun | null = null;
+  try {
+    backfillRun = await startTickerBackfill(tickerId, symbol);
+  } catch (error) {
+    console.warn(`addTickerToShortlist: backfill for ${symbol} could not start — ${error instanceof Error ? error.message : error}`);
+  }
 
   return { id: entry.id, addedAt: entry.added_at, notes: entry.notes, backfillRun };
 }

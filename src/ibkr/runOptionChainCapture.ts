@@ -2,7 +2,7 @@ import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { refreshStoredOptionChain, loadStoredOptionChain, type OptionChainRefreshTimings, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { fetchLivePrices } from "./fetchLivePrices.js";
-import { captureOptionQuoteBatch, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
+import { openCaptureQuoteWindow, type CaptureQuoteWindow, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "../lib/realizedVolatility.js";
@@ -23,7 +23,6 @@ import {
   optionChainCaptureBatchSize,
   recapturePassMaximumDurationMs,
   shouldRecaptureStarvedTicker,
-  splitIntoBatches,
   type SnapshotCoverage,
 } from "../lib/optionChainCaptureCoverage.js";
 import { saveOptionChainSnapshot } from "../lib/optionChainSnapshotStore.js";
@@ -42,9 +41,13 @@ const captureLineReservationRenewIntervalMs = 60_000;
 // the reservation so it never competes with lines that are still being shed.
 const poolSheddingGraceMs = 20_000;
 
-// Nightly option-chain archive (IORIO Signal Engine, Phase 0). One ticker at a
-// time, batches of 60 contracts one after another (approved 2026-09-21: keeps
-// one batch inside IBKR's 100 market-data-line cap and clear of the live app).
+// Nightly option-chain archive (IORIO Signal Engine, Phase 0). One rolling
+// window of optionChainCaptureBatchSize lines across every ticker's contracts
+// (approved 2026-09-24, replacing fixed per-ticker batches that waited on
+// their slowest contract — see openCaptureQuoteWindow): tickers are prepared
+// one after another and their contracts queued as soon as each is ready, so
+// the next ticker's contracts take lines the moment the previous ticker's
+// settle. A ticker's snapshot is saved when its last contract settles.
 // Ticks only — chain STRUCTURE (expiries + each expiry's real strike grid) is
 // refreshed earlier, pre-market, by runOptionChainStructureRefresh.ts (split
 // off 2026-09-23 since structure has no market-open dependency, unlike
@@ -197,13 +200,6 @@ export async function prepareTicker(ib: IbkrApi, ticker: UniverseTicker, todayIs
   return { ticker, spotPrice, referenceVolatility: reference.volatility, referenceVolatilitySource: reference.source, contracts, chainRefresh: chain.timings };
 }
 
-async function captureAllBatches(ib: IbkrApi, prepared: PreparedTicker): Promise<CapturedOptionQuote[]> {
-  const captured: CapturedOptionQuote[] = [];
-  for (const batch of splitIntoBatches(prepared.contracts, optionChainCaptureBatchSize)) {
-    captured.push(...(await captureOptionQuoteBatch(ib, prepared.ticker.symbol, batch, { lineReservation: "caller" })));
-  }
-  return captured;
-}
 
 async function loadNextExDividend(tickerId: string, todayIso: string): Promise<{ date: string | null; amount: number | null }> {
   const row = await db("ticker_calendar_events")
@@ -215,9 +211,7 @@ async function loadNextExDividend(tickerId: string, todayIso: string): Promise<{
   return { date: row?.eventDate ?? null, amount: row?.amount === null || row?.amount === undefined ? null : Number(row.amount) };
 }
 
-export async function captureAndSave(ib: IbkrApi, prepared: PreparedTicker, todayIso: string, riskFreeRatePercent: number | null): Promise<SnapshotCoverage> {
-  const startedAt = Date.now();
-  const quotes = await captureAllBatches(ib, prepared);
+export async function saveCapturedSnapshot(prepared: PreparedTicker, quotes: CapturedOptionQuote[], todayIso: string, riskFreeRatePercent: number | null, captureDurationMs: number): Promise<SnapshotCoverage> {
   const coverage = computeSnapshotCoverage(quotes);
   const exDividend = await loadNextExDividend(prepared.ticker.tickerId, todayIso);
   await saveOptionChainSnapshot(
@@ -232,7 +226,7 @@ export async function captureAndSave(ib: IbkrApi, prepared: PreparedTicker, toda
       referenceImpliedVolatility: prepared.referenceVolatilitySource === "implied_volatility" ? prepared.referenceVolatility : null,
       marketDataType: deriveMarketDataType(quotes),
       coverage,
-      captureDurationMs: Date.now() - startedAt,
+      captureDurationMs,
       status: deriveSnapshotStatus(coverage),
       errorMessage: prepared.referenceVolatilitySource === "implied_volatility" ? null : `strike window sized from ${prepared.referenceVolatilitySource}`,
     },
@@ -270,8 +264,12 @@ export interface OptionChainCaptureDependencies {
   loadUniverse: () => Promise<UniverseTicker[]>;
   getRiskFreeRate: () => Promise<number | null>;
   connect: () => Promise<{ ib: IbkrApi; disconnect: () => void }>;
-  prepareTicker: (ib: IbkrApi, ticker: UniverseTicker, todayIso: string) => Promise<PreparedTicker>;
-  captureAndSave: (ib: IbkrApi, prepared: PreparedTicker, todayIso: string, riskFreeRatePercent: number | null) => Promise<SnapshotCoverage>;
+  /** Every ticker's spot in ONE priority snapshot before the window starts, instead of one unbudgeted snapshot per ticker in the loop. */
+  fetchSpotPrices: (symbols: string[]) => Promise<Record<string, number | null>>;
+  prepareTicker: (ib: IbkrApi, ticker: UniverseTicker, todayIso: string, spotPrice: number | null) => Promise<PreparedTicker>;
+  /** The rolling quote window shared by every ticker of the run — see openCaptureQuoteWindow. */
+  openQuoteWindow: (ib: IbkrApi) => CaptureQuoteWindow;
+  saveSnapshot: (prepared: PreparedTicker, quotes: CapturedOptionQuote[], todayIso: string, riskFreeRatePercent: number | null, captureDurationMs: number) => Promise<SnapshotCoverage>;
   saveFailedSnapshot: (ticker: UniverseTicker, todayIso: string, message: string) => Promise<void>;
   lineReservation: {
     reserve: (holder: string, lines: number, ttlSeconds: number) => Promise<LineReservationResult>;
@@ -287,8 +285,10 @@ const defaultCaptureDependencies: OptionChainCaptureDependencies = {
   loadUniverse: loadCaptureUniverse,
   getRiskFreeRate,
   connect: connectToIbkrGateway,
-  prepareTicker: (ib, ticker, todayIso) => prepareTicker(ib, ticker, todayIso, ticksOnlyPrepareDependencies),
-  captureAndSave,
+  fetchSpotPrices: async (symbols) => fetchLivePrices(symbols.map((symbol) => ({ key: symbol, legType: "stock", symbol })), { priorityLines: true }),
+  prepareTicker: (ib, ticker, todayIso, spotPrice) => prepareTicker(ib, ticker, todayIso, { ...ticksOnlyPrepareDependencies, fetchSpotPrice: async () => spotPrice }),
+  openQuoteWindow: (ib) => openCaptureQuoteWindow(ib, { concurrency: optionChainCaptureBatchSize }),
+  saveSnapshot: saveCapturedSnapshot,
   saveFailedSnapshot,
   lineReservation: {
     reserve: (holder, lines, ttlSeconds) => reserveMarketDataLines(holder, lines, ttlSeconds, { priority: true }),
@@ -319,47 +319,80 @@ export async function runOptionChainCapture(
   renewTimer.unref?.();
 
   let connection: { ib: IbkrApi; disconnect: () => void } | null = null;
+  let window: CaptureQuoteWindow | null = null;
   try {
     await dependencies.waitForPoolShedding();
     connection = await dependencies.connect();
     const { ib } = connection;
+    window = dependencies.openQuoteWindow(ib);
+    const quoteWindow = window;
     const record = (symbol: string, coverage: SnapshotCoverage) => {
       const status = deriveSnapshotStatus(coverage);
       finalStatusBySymbol.set(symbol, status);
       onEvent({ type: "tickerDone", symbol, status, coverage });
     };
-    for (const ticker of universe) {
-      try {
-        const prepared = await dependencies.prepareTicker(ib, ticker, todayIso);
-        onEvent({ type: "tickerStart", symbol: ticker.symbol, contractCount: prepared.contracts.length, referenceVolatilitySource: prepared.referenceVolatilitySource, chainRefresh: prepared.chainRefresh });
-        const coverage = await dependencies.captureAndSave(ib, prepared, todayIso, riskFreeRatePercent);
-        record(ticker.symbol, coverage);
-        if (isTickerStarved(coverage)) starved.push({ prepared, coverage });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        onEvent({ type: "tickerError", symbol: ticker.symbol, message });
-        finalStatusBySymbol.set(ticker.symbol, "failed");
-        await dependencies.saveFailedSnapshot(ticker, todayIso, message).catch((saveError: unknown) => console.warn(`could not record failed snapshot for ${ticker.symbol}: ${saveError}`));
-      }
-    }
+    const recordFailure = async (ticker: UniverseTicker, message: string) => {
+      onEvent({ type: "tickerError", symbol: ticker.symbol, message });
+      finalStatusBySymbol.set(ticker.symbol, "failed");
+      await dependencies.saveFailedSnapshot(ticker, todayIso, message).catch((saveError: unknown) => console.warn(`could not record failed snapshot for ${ticker.symbol}: ${saveError}`));
+    };
+    const captureAndSave = async (prepared: PreparedTicker): Promise<SnapshotCoverage> => {
+      const startedAt = dependencies.now().getTime();
+      const quotes = await quoteWindow.capture(prepared.ticker.symbol, prepared.contracts);
+      return dependencies.saveSnapshot(prepared, quotes, todayIso, riskFreeRatePercent, dependencies.now().getTime() - startedAt);
+    };
 
-    // One re-capture pass for starved tickers (too few contracts got any tick), time-boxed.
+    // Preparation runs ahead: each ticker's contracts are queued on the shared
+    // window as soon as they are known, and its snapshot is saved (in the
+    // background) once its last contract settles. Failures stay per ticker.
+    const spotBySymbol = universe.length > 0 ? await dependencies.fetchSpotPrices(universe.map((ticker) => ticker.symbol)) : {};
+    const captures: Promise<void>[] = [];
+    for (const ticker of universe) {
+      let prepared: PreparedTicker;
+      try {
+        prepared = await dependencies.prepareTicker(ib, ticker, todayIso, spotBySymbol[ticker.symbol] ?? null);
+      } catch (error) {
+        await recordFailure(ticker, error instanceof Error ? error.message : String(error));
+        continue;
+      }
+      onEvent({ type: "tickerStart", symbol: ticker.symbol, contractCount: prepared.contracts.length, referenceVolatilitySource: prepared.referenceVolatilitySource, chainRefresh: prepared.chainRefresh });
+      captures.push(
+        captureAndSave(prepared)
+          .then((coverage) => {
+            record(ticker.symbol, coverage);
+            if (isTickerStarved(coverage)) starved.push({ prepared, coverage });
+          })
+          .catch((error: unknown) => recordFailure(ticker, error instanceof Error ? error.message : String(error))),
+      );
+    }
+    await Promise.all(captures);
+
+    // One re-capture pass for starved tickers (too few contracts got any tick):
+    // every candidate is queued on the window at once so the lines stay busy,
+    // and the pass budget is a deadline — when it expires the window is closed
+    // and each still-open re-capture is saved with whatever it has.
+    starved.sort((a, b) => universe.findIndex((ticker) => ticker.symbol === a.prepared.ticker.symbol) - universe.findIndex((ticker) => ticker.symbol === b.prepared.ticker.symbol));
     const recaptureCandidates = starved.filter(({ coverage }) => shouldRecaptureStarvedTicker(coverage, dependencies.now().getTime() - jobStartedAt)).map(({ prepared }) => prepared);
     if (recaptureCandidates.length > 0) {
       onEvent({ type: "recaptureStart", symbols: recaptureCandidates.map((prepared) => prepared.ticker.symbol) });
-      const passStartedAt = dependencies.now().getTime();
-      for (const prepared of recaptureCandidates) {
-        if (dependencies.now().getTime() - passStartedAt > recapturePassMaximumDurationMs) break;
-        try {
-          const coverage = await dependencies.captureAndSave(ib, prepared, todayIso, riskFreeRatePercent);
-          record(prepared.ticker.symbol, coverage);
-          result.recapturedSymbols.push(prepared.ticker.symbol);
-        } catch (error) {
-          onEvent({ type: "tickerError", symbol: prepared.ticker.symbol, message: `re-capture failed: ${error instanceof Error ? error.message : error}` });
-        }
+      const deadline = setTimeout(() => quoteWindow.close(), recapturePassMaximumDurationMs);
+      try {
+        await Promise.all(
+          recaptureCandidates.map((prepared) =>
+            captureAndSave(prepared)
+              .then((coverage) => {
+                record(prepared.ticker.symbol, coverage);
+                result.recapturedSymbols.push(prepared.ticker.symbol);
+              })
+              .catch((error: unknown) => onEvent({ type: "tickerError", symbol: prepared.ticker.symbol, message: `re-capture failed: ${error instanceof Error ? error.message : error}` })),
+          ),
+        );
+      } finally {
+        clearTimeout(deadline);
       }
     }
   } finally {
+    window?.close();
     connection?.disconnect();
     clearInterval(renewTimer);
     await dependencies.lineReservation.release(captureLineReservationHolder).catch((error) => console.warn(`could not release the capture's line reservation: ${error instanceof Error ? error.message : error}`));

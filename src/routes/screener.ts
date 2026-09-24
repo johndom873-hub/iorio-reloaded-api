@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { findOrCreateTicker, addTickerToShortlist } from "../ibkr/findOrCreateTicker.js";
+import { findOrCreateTicker, addTickerToShortlist, UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
 
 export const screenerRouter = Router();
 screenerRouter.use(requireAuth);
@@ -113,7 +113,16 @@ screenerRouter.post("/:symbol/shortlist", async (request, response) => {
     return;
   }
 
-  const { ticker } = await findOrCreateTicker(symbol);
+  let ticker: Awaited<ReturnType<typeof findOrCreateTicker>>["ticker"];
+  try {
+    ({ ticker } = await findOrCreateTicker(symbol));
+  } catch (error) {
+    if (error instanceof UnknownSymbolError) {
+      response.status(422).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
 
   try {
     await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, notes);

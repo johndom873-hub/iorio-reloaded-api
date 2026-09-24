@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
+import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps, computePositionExposures, streamPositionExposures } from "../lib/positionExposure.js";
@@ -26,16 +27,28 @@ const defaultHistoryDays = 90;
 // Calendar-based WTD/MTD/YTD windows (ISO week = Monday start, Postgres
 // default) — the standard convention for a business P&L dashboard, not
 // arbitrary trailing N-day windows. Sums daily_pnl (already a delta) over
-// each window; "day" is just the latest snapshot's own daily_pnl.
+// each window. "day" is the latest snapshot's own daily_pnl, but only when
+// the snapshot before it is the previous open session: the nightly job
+// diffs against whatever the previous ROW is, so after a missed night the
+// next row's delta spans two sessions — right for the window sums (nothing
+// is lost), wrong as a one-day figure, so the Day card shows nothing then.
 async function loadPeriodPnl() {
-  const result = await db.raw(`
-    SELECT
-      (SELECT daily_pnl FROM account_pnl_snapshots ORDER BY snapshot_date DESC LIMIT 1) AS day,
-      (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('week', CURRENT_DATE)) AS week,
-      (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('month', CURRENT_DATE)) AS month,
-      (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('year', CURRENT_DATE)) AS year
-  `);
-  return result.rows[0];
+  const [sums, latestTwo] = await Promise.all([
+    db.raw(`
+      SELECT
+        (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('week', CURRENT_DATE)) AS week,
+        (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('month', CURRENT_DATE)) AS month,
+        (SELECT SUM(daily_pnl) FROM account_pnl_snapshots WHERE snapshot_date >= date_trunc('year', CURRENT_DATE)) AS year
+    `),
+    db.raw(`SELECT to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate", daily_pnl AS "dailyPnl" FROM account_pnl_snapshots ORDER BY snapshot_date DESC LIMIT 2`),
+  ]);
+  const [latest, previous] = latestTwo.rows as { snapshotDate: string; dailyPnl: string | null }[];
+  let day: string | null = null;
+  if (latest && previous && latest.dailyPnl !== null) {
+    const expectedPreviousDate = await previousOpenSessionDate(latest.snapshotDate);
+    day = previous.snapshotDate === expectedPreviousDate ? latest.dailyPnl : null;
+  }
+  return { day, week: sums.rows[0].week, month: sums.rows[0].month, year: sums.rows[0].year };
 }
 
 dashboardRouter.get("/summary", async (_request, response) => {

@@ -20,6 +20,14 @@ export interface RunJobOptions {
    * Unset = alert on every failure (the default for once-a-day jobs).
    */
   failureAlertReminderIntervalMs?: number;
+  /**
+   * How long a "running" row may go without finishing before a new run treats
+   * it as abandoned (crashed process) and supersedes it. Must exceed the
+   * job's longest legitimate run, or a manual re-trigger mid-run starts a
+   * second concurrent copy — the option_chain_capture takes ~20 minutes for
+   * 21 tickers, so it passes its own ceiling. Unset = defaultStaleRunningJobThresholdMs.
+   */
+  staleRunningJobThresholdMs?: number;
 }
 
 // Thrown instead of starting a second concurrent run of the same job —
@@ -58,7 +66,7 @@ export class JobAlreadyRunningError extends Error {
  * graceful-restart case, but nothing catches a hard kill) rather than a
  * real overlapping run, and is superseded instead of blocking the new one.
  */
-const staleRunningJobThresholdMs = 15 * 60 * 1000;
+export const defaultStaleRunningJobThresholdMs = 15 * 60 * 1000;
 
 // Exported (alongside findPrecedingFailureStreak below) so a one-off replay
 // script (e.g. tmp/simulateJobNotifications.ts) can reuse the exact same
@@ -104,16 +112,20 @@ export async function findPrecedingFailureStreak(jobName: string, currentRunId: 
 }
 
 export async function runJob(jobName: string, fn: () => Promise<JobResult>, options: RunJobOptions = {}): Promise<void> {
+  const staleRunningJobThresholdMs = options.staleRunningJobThresholdMs ?? defaultStaleRunningJobThresholdMs;
   const alreadyRunning = await db("job_runs").where({ job_name: jobName, status: "running" }).first();
   if (alreadyRunning) {
     const ageMs = Date.now() - new Date(alreadyRunning.started_at).getTime();
     if (ageMs < staleRunningJobThresholdMs) throw new JobAlreadyRunningError(jobName);
 
+    // finished_at = started_at, not now(): the real end is unknown, and
+    // stamping the moment of discovery made System Health show the gap as
+    // the run's duration (the UI renders "unknown" for abandoned rows).
     await db("job_runs")
       .where({ id: alreadyRunning.id })
       .update({
         status: "failure",
-        finished_at: db.fn.now(),
+        finished_at: alreadyRunning.started_at,
         error_message: `Abandoned: still "running" after ${Math.round(ageMs / 1000)}s with no update -- likely a crashed process. Superseded by a new run.`,
       });
   }
@@ -131,8 +143,10 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
       })
       .returning("*");
   } catch (error) {
-    // Postgres unique_violation on job_runs_one_running_per_job — the
-    // pre-check above raced with another caller's insert.
+    // Postgres unique_violation on job_runs_one_running_per_job (partial
+    // unique index, migration 20260831000002) — the pre-check above raced
+    // with another caller's insert, e.g. the scheduled run and a "Run Now"
+    // click landing in the same second.
     if (error instanceof Error && "code" in error && (error as { code: string }).code === "23505") {
       throw new JobAlreadyRunningError(jobName);
     }

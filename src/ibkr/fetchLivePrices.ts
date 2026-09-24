@@ -2,8 +2,19 @@ import { EventName, MarketDataType, Option, OptionType, Stock, type IBApi } from
 import type { Contract } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
-import { isDelayedDataFallbackNotice, waitForAbortOrGatewayDisconnect } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 import { loadFallbackStockPrices, recordStockPrices } from "../lib/priceService.js";
+import { randomUUID } from "node:crypto";
+import { describeMarketDataLineShortage, releaseMarketDataLines, reserveMarketDataLines } from "./marketDataLineBudget.js";
+
+// Snapshot requests occupy lines for the seconds they are outstanding, so
+// they are budgeted too (2026-09-24): one short reservation per call. The
+// chain capture's spot fetch runs as a priority holder like the capture.
+const snapshotReservationTtlSeconds = 15;
+
+export interface FetchLivePricesOptions {
+  priorityLines?: boolean;
+}
 
 export interface PriceContract {
   key: string;
@@ -192,155 +203,22 @@ function recordRealStockPrices(contracts: PriceContract[], prices: Record<string
   if (entries.length > 0) void recordStockPrices(entries);
 }
 
-export async function fetchLivePrices(contracts: PriceContract[]): Promise<Record<string, number | null>> {
-  const [prices, fallback] = await Promise.all([fetchLivePricesFromIbkr(contracts), loadFallbackStockPrices(stockSymbolsOf(contracts))]);
-  recordRealStockPrices(contracts, prices, "frozen");
-  return fillStockGaps(contracts, prices, fallback);
+export async function fetchLivePrices(contracts: PriceContract[], options: FetchLivePricesOptions = {}): Promise<Record<string, number | null>> {
+  if (contracts.length === 0) return {};
+  const holder = `snapshot:prices:${randomUUID()}`;
+  const reservation = await reserveMarketDataLines(holder, contracts.length, snapshotReservationTtlSeconds, { priority: options.priorityLines ?? false });
+  if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, `a ${contracts.length}-contract price snapshot`, contracts.length));
+  try {
+    const [prices, fallback] = await Promise.all([fetchLivePricesFromIbkr(contracts), loadFallbackStockPrices(stockSymbolsOf(contracts))]);
+    recordRealStockPrices(contracts, prices, "frozen");
+    return fillStockGaps(contracts, prices, fallback);
+  } finally {
+    releaseMarketDataLines(holder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${holder}: ${error instanceof Error ? error.message : error}`));
+  }
 }
 
 function buildContract(contract: PriceContract): Contract {
   return contract.legType === "stock"
     ? new Stock(contract.symbol, "SMART", "USD")
     : new Option(contract.symbol, contract.expiry!, contract.strike!, contract.right!, "SMART");
-}
-
-// How long to wait for FROZEN ticks to land before emitting the first
-// update regardless of what's arrived — FROZEN data isn't gated on live
-// market activity, so this is a short, fixed grace period, not a safety
-// ceiling for something that might not happen. Measured
-// (tmp/testFrozenMarketData.ts, 2026-09-09, real open option legs):
-// 2.4-2.8s for all 4 legs.
-const frozenGraceMs = 3_000;
-
-/**
- * Live-upgrading variant for the SSE-backed screens (approved 2026-09-09):
- * emits FROZEN prices first — fast, reliable, not gated on a live trade
- * occurring (see fetchLivePrices' header comment on why plain REALTIME
- * snapshots are unreliable for options) — then switches to a genuine
- * REALTIME streaming subscription and emits again every time a price
- * actually changes, for as long as `signal` stays unaborted. The frozen
- * emission is clearly non-live; callers should treat it as a starting point
- * to upgrade from, not a live figure, until a post-frozen update arrives.
- * `status.frozenPhaseComplete` is false until the frozen phase has ended, so
- * a caller that would rather not show a partially-priced first reading can
- * hold back until every contract has a price or that flag turns true.
- *
- * Always opens its own one-shot connection (not the shared read
- * connection) — a stream is held open for the caller's whole SSE session,
- * which is a fundamentally different lifetime than the shared connection's
- * fast-in-fast-out reads, same reasoning as streamOrderLegQuote.ts /
- * streamTickerDetail.ts already use for their own live subscriptions.
- */
-async function streamLivePricesFromIbkr(
-  contracts: PriceContract[],
-  onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void,
-  signal: AbortSignal,
-): Promise<void> {
-  if (contracts.length === 0) return;
-
-  // Shared read connection first (no per-stream tunnel + handshake, ~5.4s
-  // measured 2026-09-19), one-shot connection only when it isn't available.
-  let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
-  try {
-    borrowed = await sharedReadConnection.borrow();
-  } catch (error) {
-    console.log(
-      `streamLivePrices: shared read connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`,
-    );
-  }
-  const connection = borrowed
-    ? { ib: borrowed.ib, disconnect: borrowed.release }
-    : await connectToIbkrGateway();
-  const { ib } = connection;
-
-  const priceByKey = new Map<string, number | null>();
-  contracts.forEach((contract) => priceByKey.set(contract.key, null));
-  const reqIdToContract = new Map<number, PriceContract>();
-  const allReqIds = new Set<number>();
-  let nextOneShotReqId = 1;
-  const allocateReqId = () => (borrowed ? sharedReadConnection.allocateReqId() : nextOneShotReqId++);
-  // False until the frozen phase has ended — reported to the caller so it
-  // can hold back a partially-priced first reading (see streamLivePrices'
-  // header comment).
-  let frozenPhaseComplete = false;
-
-  function onTickPrice(reqId: number, tickType: number, price: number) {
-    const contract = reqIdToContract.get(reqId);
-    if (!contract || price <= 0) return;
-    if (!lastTickTypes.includes(tickType)) return;
-    if (priceByKey.get(contract.key) === price) return;
-    priceByKey.set(contract.key, price);
-    onUpdate(Object.fromEntries(priceByKey), { frozenPhaseComplete });
-  }
-
-  function onError(error: Error, code: number, reqId: number) {
-    const contract = reqIdToContract.get(reqId);
-    if (!contract) return;
-    if (isDelayedDataFallbackNotice(code)) return;
-    console.error(`streamLivePrices error for ${contract.symbol} (${contract.legType}, code ${code}): ${error.message}`);
-  }
-
-  ib.on(EventName.tickPrice, onTickPrice);
-  ib.on(EventName.error, onError);
-
-  try {
-    // Phase 1: FROZEN — fast, not gated on live activity. Snapshot mode so
-    // IBKR doesn't leave a long-lived subscription open under these reqIds
-    // (we're about to request fresh ones for phase 2 anyway).
-    ib.reqMarketDataType(MarketDataType.FROZEN);
-    for (const contract of contracts) {
-      const reqId = allocateReqId();
-      reqIdToContract.set(reqId, contract);
-      allReqIds.add(reqId);
-      ib.reqMktData(reqId, buildContract(contract), "", true, false);
-    }
-    await new Promise((resolve) => setTimeout(resolve, frozenGraceMs));
-    frozenPhaseComplete = true;
-    onUpdate(Object.fromEntries(priceByKey), { frozenPhaseComplete });
-
-    if (signal.aborted) return;
-
-    // Phase 2: switch to REALTIME, fresh reqIds, genuine streaming
-    // subscription (snapshot=false) — kept open until the caller aborts.
-    // Only a real change re-emits (the onTickPrice guard above), so this
-    // won't spam identical values.
-    reqIdToContract.clear();
-    ib.reqMarketDataType(MarketDataType.REALTIME);
-    for (const contract of contracts) {
-      const reqId = allocateReqId();
-      reqIdToContract.set(reqId, contract);
-      allReqIds.add(reqId);
-      ib.reqMktData(reqId, buildContract(contract), "", false, false);
-    }
-
-    await waitForAbortOrGatewayDisconnect(ib, signal);
-  } finally {
-    for (const reqId of allReqIds) {
-      ib.cancelMktData(reqId);
-    }
-    ib.removeListener(EventName.tickPrice, onTickPrice);
-    ib.removeListener(EventName.error, onError);
-    connection.disconnect();
-  }
-}
-
-/**
- * Public streaming entry point: the IBKR stream above plus the shared price service — real last trades are recorded as
- * they arrive, and stocks with no last yet are filled from the stored last known good price so every screen agrees.
- */
-export async function streamLivePrices(
-  contracts: PriceContract[],
-  onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void,
-  signal: AbortSignal,
-): Promise<void> {
-  if (contracts.length === 0) return;
-  const fallback = await loadFallbackStockPrices(stockSymbolsOf(contracts));
-  await streamLivePricesFromIbkr(
-    contracts,
-    (prices, status) => {
-      recordRealStockPrices(contracts, prices, status.frozenPhaseComplete ? "live" : "frozen");
-      onUpdate(fillStockGaps(contracts, prices, fallback), status);
-    },
-    signal,
-  );
 }

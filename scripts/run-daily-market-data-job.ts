@@ -36,10 +36,11 @@ let nextReqId = 1;
 // backoff between retries — approved 2026-08-25 after a run where all 14
 // tickers failed identically (a suspected transient IBKR historical-data
 // outage around market close), and a single immediate retry wasn't enough
-// to clear it. This job starts ~21:00 UTC; Trade Alert generation only
-// runs once/day, at 1:30 PM UTC (confirmed 2026-09-05 against actual
-// Heroku Scheduler config — there is no same-day 22:00 UTC run), so it
-// always consumes this job's *previous* evening's data, not same-day.
+// to clear it. This job starts 22:00 UTC (moved from 21:00 on 2026-09-24);
+// Trade Alert generation only runs once/day, at 1:30 PM UTC, so it always
+// consumes this job's *previous* evening's data, not same-day. On a bad
+// night the retries can overlap the 22:30 UTC P&L snapshot; both only make
+// historical/snapshot requests (no market-data lines), so that is tolerable.
 // Retries are still capped by wall-clock budget rather than just attempt
 // count, so a bad run doesn't retry indefinitely into the next day's jobs.
 const MAX_ATTEMPTS = 5;

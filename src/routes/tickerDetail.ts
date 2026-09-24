@@ -1,10 +1,10 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { allTickerDetailStreamSections, streamTickerDetail, type TickerDetailStreamSection } from "../ibkr/streamTickerDetail.js";
-import { streamPositionQuote } from "../ibkr/streamPositionQuote.js";
 import type { ChartRange } from "../ibkr/fetchTickerOverview.js";
 import { fetchCachedPriceBars, fetchCachedIvBars, type IvChartRange } from "../ibkr/priceBarCache.js";
 import { fetchTickerQuoteSnapshot } from "../ibkr/fetchTickerQuoteSnapshot.js";
+import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 
 export const tickerDetailRouter = Router();
 tickerDetailRouter.use(requireAuth);
@@ -66,39 +66,11 @@ tickerDetailRouter.get("/:symbol/detail/stream", async (request, response) => {
     return;
   }
 
-  try {
-    await streamTickerDetail(symbol, send, abortController.signal, (rawSections as TickerDetailStreamSection[] | null) ?? undefined);
-    send({ type: "done" });
-  } catch (error) {
-    send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });
-  } finally {
-    clearInterval(heartbeat);
-    response.end();
-  }
-});
-
-// New Position form's live-quote lookup: pricing + option chain only, no
-// chart. See streamPositionQuote.ts for why this isn't just streamTickerDetail
-// with the chart event ignored client-side.
-tickerDetailRouter.get("/:symbol/position-quote/stream", async (request, response) => {
-  const symbol = request.params.symbol.toUpperCase();
-
-  response.setHeader("Content-Type", "text/event-stream");
-  response.setHeader("Cache-Control", "no-cache");
-  response.setHeader("Connection", "keep-alive");
-  response.flushHeaders();
-  response.on("error", () => {});
-
-  const send = (data: unknown) => {
-    if (response.writableEnded) return;
-    response.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-  const heartbeat = setInterval(() => {
-    if (!response.writableEnded) response.write(": ping\n\n");
-  }, heartbeatIntervalMs);
+  // ?expiry=YYYYMMDD picks which option-chain expiry is quoted live (see TickerDetailStreamOptions).
+  const rawExpiry = typeof request.query.expiry === "string" && /^\d{8}$/.test(request.query.expiry) ? request.query.expiry : undefined;
 
   try {
-    await streamPositionQuote(symbol, send);
+    await streamTickerDetail(symbol, send, abortController.signal, (rawSections as TickerDetailStreamSection[] | null) ?? undefined, { expiry: rawExpiry });
     send({ type: "done" });
   } catch (error) {
     send({ type: "streamError", message: error instanceof Error ? error.message : String(error) });
@@ -127,8 +99,9 @@ tickerDetailRouter.get("/:symbol/chart", async (request, response) => {
     return;
   }
 
-  const bars = await fetchCachedPriceBars(symbol, range as ChartRange);
-  response.json(bars);
+  // Streamed (2026-09-24): a cold cache backfills 20 years of daily bars
+  // plus implied volatility, past Heroku's 30 s router timeout.
+  await respondWithStreamedResult(response, async () => ({ status: 200, body: await fetchCachedPriceBars(symbol, range as ChartRange) }));
 });
 
 const validIvChartRanges: IvChartRange[] = ["1Y", "5Y", "All"];

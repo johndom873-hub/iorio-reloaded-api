@@ -1,7 +1,7 @@
 import { IBApi, EventName, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
 import { openIbkrTunnel } from "./ibkrGatewayTunnel.js";
-import { ibkrGatewayPortByTradingMode } from "./constants.js";
+import { ibkrGatewayPortByTradingMode, ibkrMessagesPerSecondBudget } from "./constants.js";
 import { runIbkrHandshake } from "./ibkrHandshakeQueue.js";
 
 export interface IbkrConnection {
@@ -29,6 +29,7 @@ export async function connectToIbkrGateway(): Promise<IbkrConnection> {
   const ib = new IBApi({
     host: "127.0.0.1",
     port: tunnel.localPort,
+    maxReqPerSec: ibkrMessagesPerSecondBudget.oneShot,
   });
 
   return runIbkrHandshake(

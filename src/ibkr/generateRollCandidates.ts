@@ -1,6 +1,7 @@
 import { OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { daysBetween, parseExpiry, quoteOptionChain } from "./fetchOptionChain.js";
+import { daysBetween, parseExpiry, type OptionQuote } from "./fetchOptionChain.js";
+import { quoteSingleContract } from "./quoteContracts.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
 import { estimateRollCommissionComponent, halfSpread } from "../lib/rollEconomics.js";
 import {
@@ -88,15 +89,16 @@ export async function evaluateRollCandidate(
   // on an arbitrary position (see evaluateRollForPosition.ts), which should
   // work regardless of whether the batch job would have flagged this leg.
   // The batch job never passes this, so its behavior is unchanged.
-  options?: { force?: boolean },
+  // knownQuote: the leg's live quote when the caller already has it (the
+  // scheduled roll pass's assignment-risk check), so the leg is quoted once.
+  options?: { force?: boolean; knownQuote?: OptionQuote },
 ): Promise<RollSuggestion | null> {
   const today = new Date();
   const dte = daysBetween(today, parseExpiry(leg.expiry));
   if (dte <= 0) return null; // already expired/expiring today, not a roll candidate
 
   const optionType = leg.right === "call" ? OptionType.Call : OptionType.Put;
-  const quotes = await quoteOptionChain(connection, leg.symbol, [{ expiry: leg.expiry, strikes: [leg.strike] }]);
-  const quote = quotes.find((q) => q.strike === leg.strike && q.right === optionType);
+  const quote = options?.knownQuote ?? (await quoteSingleContract(connection.ib, leg.symbol, leg.expiry, leg.strike, optionType));
   const currentPrice = quote?.bid !== null && quote?.ask !== null && quote ? (quote.bid! + quote.ask!) / 2 : quote?.last ?? null;
   if (currentPrice === null || currentPrice === undefined) return null; // no live quote — skip rather than false-trigger
 

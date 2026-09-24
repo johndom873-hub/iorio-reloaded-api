@@ -1,7 +1,7 @@
 import { IBApi, EventName, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
 import { openIbkrTunnel, type IbkrTunnel } from "./ibkrGatewayTunnel.js";
-import { ibkrGatewayPortByTradingMode } from "./constants.js";
+import { ibkrGatewayPortByTradingMode, ibkrMessagesPerSecondBudget } from "./constants.js";
 
 // Every other IBKR call site (connectIbkr.ts) opens a connection per request
 // and closes it when done — fine for one-shot reads, but real-time order
@@ -101,7 +101,7 @@ class PersistentIbkrConnection {
     // Forget the previous session's accounts: a reconnect may land on a different Gateway login, and an old
     // list must never make a new session look bound (see ibkrGatewayAccountBinding.ts).
     this.managedAccountIds = [];
-    const ib = new IBApi({ host: "127.0.0.1", port: tunnel.localPort });
+    const ib = new IBApi({ host: "127.0.0.1", port: tunnel.localPort, maxReqPerSec: ibkrMessagesPerSecondBudget.worker });
 
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error, code: ErrorCode, reqId: number) => {

@@ -133,8 +133,10 @@ function runDependencies(overrides: Partial<OptionChainCaptureDependencies> = {}
     loadUniverse: async () => [ticker("AAA"), ticker("BBB")],
     getRiskFreeRate: async () => 0.04,
     connect: async () => ({ ib: fakeIb, disconnect }),
+    fetchSpotPrices: async (symbols) => Object.fromEntries(symbols.map((symbol) => [symbol, 100])),
     prepareTicker: async (_ib, universeTicker) => preparedFor(universeTicker),
-    captureAndSave: async () => coverage(10, 10),
+    openQuoteWindow: () => ({ capture: async () => [], close: vi.fn(), inFlightCount: () => 0 }),
+    saveSnapshot: async () => coverage(10, 10),
     saveFailedSnapshot,
     lineReservation,
     waitForPoolShedding: async () => {},
@@ -188,13 +190,13 @@ describe("runOptionChainCapture", () => {
   });
 
   it("passes today's Eastern date and the risk-free rate as a percent to the capture", async () => {
-    const captureAndSave = vi.fn(async () => coverage(10, 10));
-    const { dependencies } = runDependencies({ captureAndSave, loadUniverse: async () => [ticker("AAA")] });
+    const saveSnapshot = vi.fn(async () => coverage(10, 10));
+    const { dependencies } = runDependencies({ saveSnapshot, loadUniverse: async () => [ticker("AAA")] });
     await runOptionChainCapture(undefined, dependencies);
-    expect(captureAndSave).toHaveBeenCalledWith(fakeIb, expect.anything(), "2026-09-21", 4);
+    expect(saveSnapshot).toHaveBeenCalledWith(expect.anything(), [], "2026-09-21", 4, expect.any(Number));
     const noRate = vi.fn(async () => coverage(10, 10));
-    await runOptionChainCapture(undefined, runDependencies({ captureAndSave: noRate, getRiskFreeRate: async () => null, loadUniverse: async () => [ticker("AAA")] }).dependencies);
-    expect(noRate).toHaveBeenCalledWith(fakeIb, expect.anything(), "2026-09-21", null);
+    await runOptionChainCapture(undefined, runDependencies({ saveSnapshot: noRate, getRiskFreeRate: async () => null, loadUniverse: async () => [ticker("AAA")] }).dependencies);
+    expect(noRate).toHaveBeenCalledWith(expect.anything(), [], "2026-09-21", null, expect.any(Number));
   });
 
   it("records a failed ticker, keeps going with the rest, and still disconnects", async () => {
@@ -228,7 +230,7 @@ describe("runOptionChainCapture", () => {
   });
 
   it("disconnects and rethrows if something outside the per-ticker handling blows up", async () => {
-    const { dependencies, disconnect } = runDependencies({ loadUniverse: async () => [ticker("AAA")], captureAndSave: async () => coverage(10, 2) });
+    const { dependencies, disconnect } = runDependencies({ loadUniverse: async () => [ticker("AAA")], saveSnapshot: async () => coverage(10, 2) });
     await expect(
       runOptionChainCapture((event) => {
         if (event.type === "recaptureStart") throw new Error("listener blew up");
@@ -241,7 +243,7 @@ describe("runOptionChainCapture", () => {
     const coverages: Record<string, SnapshotCoverage> = { AAA: coverage(10, 10), BBB: coverage(10, 5), CCC: coverage(10, 0) };
     const { dependencies } = runDependencies({
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
-      captureAndSave: async (_ib, prepared) => coverages[prepared.ticker.symbol]!,
+      saveSnapshot: async (prepared) => coverages[prepared.ticker.symbol]!,
     });
     const result = await runOptionChainCapture(undefined, dependencies);
     expect(result).toMatchObject({ tickersComplete: 1, tickersPartial: 1, tickersFailed: 1 });
@@ -250,7 +252,7 @@ describe("runOptionChainCapture", () => {
   it("re-captures a starved ticker once, and the re-capture's status is the one that counts", async () => {
     let bbbCalls = 0;
     const { dependencies } = runDependencies({
-      captureAndSave: async (_ib, prepared) => {
+      saveSnapshot: async (prepared) => {
         if (prepared.ticker.symbol !== "BBB") return coverage(10, 10);
         bbbCalls++;
         return bbbCalls === 1 ? coverage(10, 3) : coverage(10, 10);
@@ -264,48 +266,61 @@ describe("runOptionChainCapture", () => {
   });
 
   it("does not re-capture a ticker that requested nothing, or one that got no ticks at all is still re-captured only if starved", async () => {
-    const captureAndSave = vi.fn(async () => coverage(0, 0));
-    const { dependencies } = runDependencies({ captureAndSave, loadUniverse: async () => [ticker("AAA")] });
+    const saveSnapshot = vi.fn(async () => coverage(0, 0));
+    const { dependencies } = runDependencies({ saveSnapshot, loadUniverse: async () => [ticker("AAA")] });
     const result = await runOptionChainCapture(undefined, dependencies);
-    expect(captureAndSave).toHaveBeenCalledTimes(1);
+    expect(saveSnapshot).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ tickersFailed: 1, recapturedSymbols: [] });
   });
 
   it("skips the re-capture entirely once the job has used up its 45-minute budget", async () => {
     const { dependencies, clock } = runDependencies({ loadUniverse: async () => [ticker("AAA")] });
-    const captureAndSave = vi.fn(async () => {
+    const saveSnapshot = vi.fn(async () => {
       clock.nowMs += 46 * 60 * 1000;
       return coverage(10, 2);
     });
-    const result = await runOptionChainCapture(undefined, { ...dependencies, captureAndSave });
-    expect(captureAndSave).toHaveBeenCalledTimes(1);
+    const result = await runOptionChainCapture(undefined, { ...dependencies, saveSnapshot });
+    expect(saveSnapshot).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ tickersPartial: 1, recapturedSymbols: [] });
   });
 
-  it("stops the re-capture pass after its 10-minute budget, leaving the rest with their first result", async () => {
-    const { dependencies, clock } = runDependencies({ loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")] });
-    const calls: string[] = [];
-    let firstPassDone = 0;
-    const captureAndSave = vi.fn(async (_ib: unknown, prepared: PreparedTicker) => {
-      calls.push(prepared.ticker.symbol);
-      if (firstPassDone < 3) {
-        firstPassDone++;
-        return coverage(10, 2);
+  it("queues every starved ticker on the window at once for the re-capture pass and fetches all spots in one call up front", async () => {
+    const fetchSpotPrices = vi.fn(async (symbols: string[]) => Object.fromEntries(symbols.map((symbol) => [symbol, 100])));
+    const captureCalls: string[] = [];
+    let resolveAll: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (resolveAll = resolve));
+    let firstPass = 0;
+    const capture = vi.fn(async (symbol: string) => {
+      captureCalls.push(symbol);
+      if (firstPass < 3) {
+        firstPass++;
+        return [];
       }
-      clock.nowMs += 11 * 60 * 1000; // the first re-capture alone blows the pass budget
-      return coverage(10, 10);
+      await gate; // re-captures are all in flight together before any resolves
+      return [];
     });
-    const result = await runOptionChainCapture(undefined, { ...dependencies, captureAndSave });
-    expect(calls).toEqual(["AAA", "BBB", "CCC", "AAA"]);
-    expect(result.recapturedSymbols).toEqual(["AAA"]);
-    expect(result).toMatchObject({ tickersComplete: 1, tickersPartial: 2 });
+    let saves = 0;
+    const { dependencies } = runDependencies({
+      loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
+      fetchSpotPrices,
+      openQuoteWindow: () => ({ capture, close: vi.fn(), inFlightCount: () => 0 }),
+      saveSnapshot: async () => (++saves <= 3 ? coverage(10, 2) : coverage(10, 10)),
+    });
+    const run = runOptionChainCapture(undefined, dependencies);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(captureCalls).toEqual(["AAA", "BBB", "CCC", "AAA", "BBB", "CCC"]);
+    resolveAll();
+    const result = await run;
+    expect(fetchSpotPrices).toHaveBeenCalledTimes(1);
+    expect(fetchSpotPrices).toHaveBeenCalledWith(["AAA", "BBB", "CCC"]);
+    expect(result).toMatchObject({ tickersComplete: 3, recapturedSymbols: ["AAA", "BBB", "CCC"] });
   });
 
   it("keeps the first result when a re-capture itself fails", async () => {
     let calls = 0;
     const { dependencies } = runDependencies({
       loadUniverse: async () => [ticker("AAA")],
-      captureAndSave: async () => {
+      saveSnapshot: async () => {
         calls++;
         if (calls === 2) throw new Error("gateway hiccup");
         return coverage(10, 4);
@@ -315,6 +330,26 @@ describe("runOptionChainCapture", () => {
     const result = await runOptionChainCapture((event) => events.push(event), dependencies);
     expect(result).toMatchObject({ tickersPartial: 1, recapturedSymbols: [] });
     expect(events).toContainEqual({ type: "tickerError", symbol: "AAA", message: "re-capture failed: gateway hiccup" });
+  });
+
+  it("opens one quote window for the run, queues each ticker on it as soon as it is prepared, and closes it at the end", async () => {
+    const order: string[] = [];
+    const close = vi.fn();
+    const capture = vi.fn(async (symbol: string) => {
+      order.push(`capture:${symbol}`);
+      return [];
+    });
+    const { dependencies } = runDependencies({
+      openQuoteWindow: () => ({ capture, close, inFlightCount: () => 0 }),
+      prepareTicker: async (_ib, universeTicker) => {
+        order.push(`prepare:${universeTicker.symbol}`);
+        return preparedFor(universeTicker);
+      },
+    });
+    await runOptionChainCapture(undefined, dependencies);
+    expect(order).toEqual(["prepare:AAA", "capture:AAA", "prepare:BBB", "capture:BBB"]);
+    expect(capture).toHaveBeenCalledWith("AAA", preparedFor(ticker("AAA")).contracts);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it("handles an empty universe", async () => {

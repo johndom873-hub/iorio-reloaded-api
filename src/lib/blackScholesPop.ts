@@ -10,10 +10,11 @@
 // Uses the breakeven price (strike adjusted by premium collected), not the
 // raw strike -- this is "probability of profit" (accounts for the credit
 // received), not "probability of expiring OTM" (a different, more
-// pessimistic number some platforms show instead). Risk-free rate assumed
-// 0: every candidate here is single-digit-to-low-double-digit DTE, where a
-// realistic ~4-5% annual rate moves d2 by a negligible amount -- not worth
-// the complexity of threading a rate through every caller.
+// pessimistic number some platforms show instead). Uses the same FRED
+// risk-free rate as computeSuccessProbability below (approved 2026-09-24 so
+// the two probabilities share one convention; the rate moves the result by
+// under one percentage point at 45 DTE). No rate available -> null, never a
+// silent 0%.
 
 // Abramowitz & Stegun 7.1.26 approximation of the error function, accurate
 // to ~1.5e-7 -- standard-normal CDF then follows directly from erf.
@@ -42,6 +43,8 @@ export interface ProbabilityOfProfitInput {
   impliedVolatility: number;
   daysToExpiry: number;
   right: "call" | "put";
+  /** Annual risk-free rate as a decimal (0.04 = 4%); null when none is available. */
+  riskFreeRate: number | null;
 }
 
 /**
@@ -52,14 +55,15 @@ export interface ProbabilityOfProfitInput {
  * negative under an unrealistically large premium).
  */
 export function computeProbabilityOfProfit(input: ProbabilityOfProfitInput): number | null {
-  const { spotPrice, strike, premium, impliedVolatility, daysToExpiry, right } = input;
+  const { spotPrice, strike, premium, impliedVolatility, daysToExpiry, right, riskFreeRate } = input;
+  if (riskFreeRate === null || !Number.isFinite(riskFreeRate)) return null;
   if (spotPrice <= 0 || strike <= 0 || impliedVolatility <= 0 || daysToExpiry <= 0) return null;
 
   const breakeven = right === "call" ? strike + premium : strike - premium;
   if (breakeven <= 0) return null;
 
   const t = daysToExpiry / 365;
-  const d2 = (Math.log(spotPrice / breakeven) - 0.5 * impliedVolatility * impliedVolatility * t) / (impliedVolatility * Math.sqrt(t));
+  const d2 = (Math.log(spotPrice / breakeven) + (riskFreeRate - 0.5 * impliedVolatility * impliedVolatility) * t) / (impliedVolatility * Math.sqrt(t));
 
   // Short call profits if S_T < breakeven: P(S_T < breakeven) = N(-d2).
   // Short put profits if S_T > breakeven: P(S_T > breakeven) = N(d2).

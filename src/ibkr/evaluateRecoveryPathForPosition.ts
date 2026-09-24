@@ -1,12 +1,36 @@
 import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { db } from "../db/connection.js";
-import { connectToIbkrGateway } from "./connectIbkr.js";
+import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedLiveConnection } from "./sharedReadConnection.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import { generateTradeAlertCandidates, type AlertCandidate } from "./generateTradeAlertCandidates.js";
 import { toSettings } from "./runTradeAlertGeneration.js";
 
 const SHARES_PER_CONTRACT = 100;
+const daysPerMonth = 30;
+
+export interface RecoveryProjectionInput {
+  entryPrice: number;
+  currentPrice: number;
+  shares: number;
+  contractsAvailable: number;
+  candidate: Pick<AlertCandidate, "premium" | "dte"> | null;
+}
+
+export interface RecoveryProjection {
+  unrealizedLoss: number;
+  monthlyPremium: number | null;
+  monthsToRecover: number | null;
+}
+
+/** Pure arithmetic of the approved formula (see the header of evaluateRecoveryPathForPosition below). */
+export function computeRecoveryProjection(input: RecoveryProjectionInput): RecoveryProjection {
+  const { entryPrice, currentPrice, shares, contractsAvailable, candidate } = input;
+  const unrealizedLoss = Math.max(0, entryPrice - currentPrice) * shares;
+  const monthlyPremium = candidate && candidate.dte > 0 ? candidate.premium * SHARES_PER_CONTRACT * contractsAvailable * (daysPerMonth / candidate.dte) : null;
+  const monthsToRecover = monthlyPremium !== null && monthlyPremium > 0 ? Math.ceil(unrealizedLoss / monthlyPremium) : null;
+  return { unrealizedLoss, monthlyPremium, monthsToRecover };
+}
 
 export type RecoveryPathEvaluation =
   | { status: "not_found" }
@@ -30,9 +54,11 @@ export type RecoveryPathEvaluation =
 /**
  * On-demand recovery-path projection for an unstructured bare-stock
  * position (leftover from an expired covered call or an assigned CSP) --
- * "Recovery Path Formula" proposal, approved by Marcelo 2026-08-31:
+ * "Recovery Path Formula" proposal, approved by Marcelo 2026-08-31, premium
+ * scaled to a 30-day month 2026-09-24 (a 45-DTE candidate's premium is not a
+ * monthly figure; the old formula treated it as one):
  *   unrealized loss = max(0, entry price − current price) × shares
- *   monthly premium = top-ranked live covered-call candidate's premium × 100 × contracts available
+ *   monthly premium = top-ranked live covered-call candidate's premium × 100 × contracts available × (30 ÷ candidate DTE)
  *   months to recover = ceil(unrealized loss ÷ monthly premium)
  * Reuses generateTradeAlertCandidates (same delta/DTE window already
  * configured for covered_call) rather than a separate recommendation
@@ -65,23 +91,21 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
   if (!settingsRow) return { status: "no_settings" };
   const settings = toSettings(settingsRow);
 
-  const connection = await connectToIbkrGateway();
+  const connection = await borrowSharedConnectionOrConnect(sharedLiveConnection, "evaluateRecoveryPathForPosition");
   requestRealtimeMarketData(connection.ib);
   try {
-    const pricing = await lookupPricingSnapshot(connection, positionRow.symbol);
+    const pricing = await lookupPricingSnapshot(connection, positionRow.symbol, nextReqIdFor(connection.ib, () => 2));
     const currentPrice = pricing.last ?? (await getBestKnownStockPrice(positionRow.symbol)) ?? pricing.previousClose;
     if (currentPrice === null) throw new Error(`No current price available for ${positionRow.symbol}`);
 
     const contractsAvailable = Math.floor(shares / SHARES_PER_CONTRACT);
     const candidates =
       contractsAvailable >= 1
-        ? await generateTradeAlertCandidates(connection, positionRow.symbol, positionRow.tickerId, "covered_call", settings)
+        ? await generateTradeAlertCandidates(connection, positionRow.symbol, positionRow.tickerId, "covered_call", settings, { spotPrice: currentPrice })
         : [];
     const candidate = candidates[0] ?? null;
 
-    const unrealizedLoss = Math.max(0, entryPrice - currentPrice) * shares;
-    const monthlyPremium = candidate ? candidate.premium * SHARES_PER_CONTRACT * contractsAvailable : null;
-    const monthsToRecover = monthlyPremium !== null && monthlyPremium > 0 ? Math.ceil(unrealizedLoss / monthlyPremium) : null;
+    const { unrealizedLoss, monthlyPremium, monthsToRecover } = computeRecoveryProjection({ entryPrice, currentPrice, shares, contractsAvailable, candidate });
 
     const rationale =
       contractsAvailable < 1

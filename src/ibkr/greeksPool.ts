@@ -1,5 +1,18 @@
-import { subscribeToPooledQuote, settleGraceMs } from "./marketDataPool.js";
-import type { Greeks, GreeksContract } from "./fetchLiveGreeks.js";
+import { peekPooledQuote, subscribeToPooledQuote, waitForFirstReading } from "./marketDataPool.js";
+import { fetchLiveGreeks, type Greeks, type GreeksContract } from "./fetchLiveGreeks.js";
+
+/** One-shot greeks, pool first — see pricePool.ts's fetchPricesPoolFirst. A pooled contract counts once it has a delta. */
+export async function fetchGreeksPoolFirst(contracts: GreeksContract[]): Promise<Record<string, Greeks>> {
+  const greeksByKey: Record<string, Greeks> = {};
+  const notPooled: GreeksContract[] = [];
+  for (const contract of contracts) {
+    const pooled = peekPooledQuote(toGreeksContract(contract));
+    if (pooled && pooled.delta !== null) greeksByKey[contract.key] = { delta: pooled.delta, gamma: pooled.gamma, vega: pooled.vega, theta: pooled.theta, impliedVolatility: pooled.impliedVolatility, underlyingPrice: pooled.underlyingPrice };
+    else notPooled.push(contract);
+  }
+  if (notPooled.length > 0) Object.assign(greeksByKey, await fetchLiveGreeks(notPooled));
+  return greeksByKey;
+}
 
 const emptyGreeks: Greeks = { delta: null, gamma: null, vega: null, theta: null };
 
@@ -33,12 +46,14 @@ export async function streamPooledGreeks(contracts: GreeksContract[], onUpdate: 
   for (const contract of contracts) greeksByKey[contract.key] = emptyGreeks;
   let settled = false;
   const emit = () => onUpdate({ ...greeksByKey });
+  const firstReading = waitForFirstReading(() => contracts.every((contract) => greeksByKey[contract.key]?.delta !== null));
 
   const unsubscribes = await Promise.all(
     contracts.map((contract) =>
       subscribeToPooledGreeks(contract, (greeks) => {
         greeksByKey[contract.key] = greeks;
         if (settled) emit();
+        else firstReading.check();
       }),
     ),
   );
@@ -46,7 +61,8 @@ export async function streamPooledGreeks(contracts: GreeksContract[], onUpdate: 
     for (const unsubscribe of unsubscribes) unsubscribe();
     return;
   }
-  await new Promise((resolve) => setTimeout(resolve, settleGraceMs));
+  firstReading.check();
+  await firstReading.settled;
   settled = true;
   emit();
 

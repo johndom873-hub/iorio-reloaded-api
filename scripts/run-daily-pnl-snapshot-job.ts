@@ -57,7 +57,7 @@ import { fetchFlexCashTransactions } from "../src/ibkr/fetchFlexCashTransactions
 import { fetchLiveGreeks, type GreeksContract } from "../src/ibkr/fetchLiveGreeks.js";
 import { fetchDailyClosingPrices } from "../src/ibkr/fetchDailyClosingPrices.js";
 import type { PriceContract } from "../src/ibkr/fetchLivePrices.js";
-import { easternDateIso } from "../src/lib/marketSessionStatus.js";
+import { previousOpenSessionDate, easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 
@@ -188,10 +188,17 @@ async function main(): Promise<void> {
         // nights, since deposits/withdrawals are rare. reconcileCashFlows
         // below corrects this (and past days) once real Flex data confirms
         // otherwise; see this file's header comment.
-        const previousRow: { netLiquidationValue: string | null } | undefined = await db.raw(
-          `SELECT net_liquidation_value AS "netLiquidationValue" FROM account_pnl_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1`,
+        const previousRow: { netLiquidationValue: string | null; snapshotDate: string } | undefined = await db.raw(
+          `SELECT net_liquidation_value AS "netLiquidationValue", to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate" FROM account_pnl_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1`,
           [snapshotDate],
         ).then((result) => result.rows[0]);
+        // Deliberately still a delta against the previous ROW when a night was
+        // missed: the window sums on the Dashboard stay right that way (the
+        // missed sessions' move is not lost). The Dashboard's Day card hides
+        // the figure when it spans more than one session (dashboard.ts).
+        if (previousRow && previousRow.snapshotDate !== (await previousOpenSessionDate(snapshotDate))) {
+          console.warn(`daily_pnl for ${snapshotDate} spans more than one session: the previous snapshot is ${previousRow.snapshotDate}, not the previous open day.`);
+        }
         const dailyPnl =
           previousRow?.netLiquidationValue != null && accountSummary.netLiquidationValue != null
             ? accountSummary.netLiquidationValue - Number(previousRow.netLiquidationValue)

@@ -29,7 +29,7 @@ const settingsFields = [
 // position" concept and leaves these columns null.
 const existingPositionDeltaFields = ["delta_target_min_existing_position", "delta_target_max_existing_position"] as const;
 
-function validateSettingsPayload(strategyKey: string, payload: Record<string, unknown>): string | null {
+function validateSettingsPayload(strategyKey: string, payload: Record<string, unknown>, stored: Record<string, unknown> | undefined): string | null {
   for (const field of settingsFields) {
     const value = payload[field];
     if (typeof value !== "number" || Number.isNaN(value)) {
@@ -37,6 +37,14 @@ function validateSettingsPayload(strategyKey: string, payload: Record<string, un
     }
   }
   const p = payload as Record<(typeof settingsFields)[number], number>;
+  // Omitted existing-position fields keep their stored values (2026-09-24):
+  // the assistant's update_risk_limits tool never sends them, and every
+  // covered-call update from it was rejected after the human had approved.
+  if (strategyKey === "covered_call") {
+    for (const field of existingPositionDeltaFields) {
+      if (payload[field] === undefined && stored && stored[field] !== null && stored[field] !== undefined) payload[field] = Number(stored[field]);
+    }
+  }
 
   if (p.delta_target_min < 0 || p.delta_target_max > 1) return "Delta targets must be between 0 and 1.";
   if (p.delta_target_min > p.delta_target_max) return "delta_target_min cannot exceed delta_target_max.";
@@ -81,6 +89,15 @@ riskLimitsRouter.get("/settings", async (_request, response) => {
   response.json(rows);
 });
 
+function buildUpdatePayload(strategyKey: string, body: Record<string, number>): Record<string, number> {
+  const updatePayload: Record<string, number> = {};
+  for (const field of settingsFields) updatePayload[field] = body[field] as number;
+  if (strategyKey === "covered_call") {
+    for (const field of existingPositionDeltaFields) updatePayload[field] = body[field] as number;
+  }
+  return updatePayload;
+}
+
 riskLimitsRouter.put("/settings/:strategyKey", async (request, response) => {
   const { strategyKey } = request.params;
   if (!validStrategyKeys.includes(strategyKey)) {
@@ -88,26 +105,17 @@ riskLimitsRouter.put("/settings/:strategyKey", async (request, response) => {
     return;
   }
 
-  const validationError = validateSettingsPayload(strategyKey, request.body ?? {});
+  const stored = await db("strategy_settings").where({ strategy_key: strategyKey }).first();
+  const body = { ...(request.body ?? {}) } as Record<string, unknown>;
+  const validationError = validateSettingsPayload(strategyKey, body, stored);
   if (validationError) {
     response.status(400).json({ error: validationError });
     return;
   }
 
-  const body = request.body as Record<string, number>;
-  const updatePayload: Record<string, number> = {};
-  for (const field of settingsFields) {
-    updatePayload[field] = body[field] as number;
-  }
-  if (strategyKey === "covered_call") {
-    for (const field of existingPositionDeltaFields) {
-      updatePayload[field] = body[field] as number;
-    }
-  }
-
   const [row] = await db("strategy_settings")
     .where({ strategy_key: strategyKey })
-    .update({ ...updatePayload, updated_at: db.fn.now(), updated_by_user_id: request.session.userId })
+    .update({ ...buildUpdatePayload(strategyKey, body as Record<string, number>), updated_at: db.fn.now(), updated_by_user_id: request.session.userId })
     .returning("*");
 
   if (!row) {
@@ -115,6 +123,43 @@ riskLimitsRouter.put("/settings/:strategyKey", async (request, response) => {
     return;
   }
   response.json(row);
+});
+
+// Both strategies in ONE transaction (2026-09-24): the Risk & Limits form
+// saves both at once, and two separate PUTs could leave one saved and the
+// other rejected. Body: { covered_call: {...}, cash_secured_put: {...} }.
+riskLimitsRouter.put("/settings", async (request, response) => {
+  const body = (request.body ?? {}) as Record<string, Record<string, unknown> | undefined>;
+  const entries = validStrategyKeys.filter((strategyKey) => body[strategyKey] !== undefined);
+  if (entries.length === 0) {
+    response.status(400).json({ error: "Send at least one of covered_call / cash_secured_put." });
+    return;
+  }
+  const storedRows = await db("strategy_settings").whereIn("strategy_key", entries);
+  const payloads: Record<string, Record<string, number>> = {};
+  for (const strategyKey of entries) {
+    const payload = { ...(body[strategyKey] ?? {}) } as Record<string, unknown>;
+    const validationError = validateSettingsPayload(strategyKey, payload, storedRows.find((row) => row.strategy_key === strategyKey));
+    if (validationError) {
+      response.status(400).json({ error: `${strategyKey}: ${validationError}` });
+      return;
+    }
+    payloads[strategyKey] = buildUpdatePayload(strategyKey, payload as Record<string, number>);
+  }
+
+  const rows = await db.transaction(async (trx) => {
+    const updated = [];
+    for (const strategyKey of entries) {
+      const [row] = await trx("strategy_settings")
+        .where({ strategy_key: strategyKey })
+        .update({ ...payloads[strategyKey], updated_at: trx.fn.now(), updated_by_user_id: request.session.userId })
+        .returning("*");
+      if (!row) throw new Error(`No strategy_settings row for ${strategyKey}.`);
+      updated.push(row);
+    }
+    return updated;
+  });
+  response.json(rows);
 });
 
 // Approved 2026-08-25: every concentration/allocation % on this page and

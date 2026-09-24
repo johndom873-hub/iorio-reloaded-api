@@ -1,7 +1,8 @@
 import { IBApi, EventName, MarketDataType, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
 import { openIbkrTunnel, type IbkrTunnel } from "./ibkrGatewayTunnel.js";
-import { ibkrGatewayPortByTradingMode } from "./constants.js";
+import { ibkrGatewayPortByTradingMode, ibkrMessagesPerSecondBudget } from "./constants.js";
+import { connectToIbkrGateway } from "./connectIbkr.js";
 import { runIbkrHandshake } from "./ibkrHandshakeQueue.js";
 import { markMarketDataTypeManaged } from "./requestMarketData.js";
 
@@ -87,6 +88,8 @@ export function nextReqIdFor(ib: IBApi, fallback: () => number): number {
 interface SharedConnectionOptions {
   /** Used in log lines and error messages, e.g. "read" or "live". */
   label: string;
+  /** Per-instance outbound message cap — see ibkrMessagesPerSecondBudget in constants.ts. */
+  maxRequestsPerSecond: number;
   clientIdRangeStart: number;
   clientIdRangeSize: number;
   /**
@@ -203,7 +206,7 @@ class SharedReadConnection {
         `IBKR shared ${this.options.label} connection: SSH tunnel open on local port ${tunnel.localPort} (${Date.now() - connectStartedAt}ms) — connecting to IBKR API with clientId ${clientId}...`,
       );
 
-      const ib = new IBApi({ host: "127.0.0.1", port: tunnel.localPort });
+      const ib = new IBApi({ host: "127.0.0.1", port: tunnel.localPort, maxReqPerSec: this.options.maxRequestsPerSecond });
 
       await runIbkrHandshake(
         () =>
@@ -306,8 +309,25 @@ class SharedReadConnection {
   }
 }
 
+/**
+ * The shared connection when it is up (no per-call tunnel + handshake,
+ * ~5 s), otherwise a one-shot connection — the pattern every request-time
+ * IBKR caller should use (2026-09-24). Request ids on the shared connection
+ * must come from nextReqIdFor; the returned `disconnect` releases either kind.
+ */
+export async function borrowSharedConnectionOrConnect(shared: SharedReadConnection, callerLabel: string): Promise<{ ib: IBApi; disconnect: () => void }> {
+  try {
+    const borrowed = await shared.borrow();
+    return { ib: borrowed.ib, disconnect: borrowed.release };
+  } catch (error) {
+    console.log(`${callerLabel}: shared IBKR connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`);
+    return connectToIbkrGateway();
+  }
+}
+
 export const sharedReadConnection = new SharedReadConnection({
   label: "read",
+  maxRequestsPerSecond: ibkrMessagesPerSecondBudget.sharedRead,
   clientIdRangeStart: 1_000_000,
   clientIdRangeSize: 500_000,
 });
@@ -318,6 +338,7 @@ export const sharedReadConnection = new SharedReadConnection({
 // borrowers flip it between FROZEN and REALTIME per request.
 export const sharedLiveConnection = new SharedReadConnection({
   label: "live",
+  maxRequestsPerSecond: ibkrMessagesPerSecondBudget.sharedLive,
   clientIdRangeStart: 1_500_000,
   clientIdRangeSize: 500_000,
   fixedMarketDataType: MarketDataType.REALTIME,

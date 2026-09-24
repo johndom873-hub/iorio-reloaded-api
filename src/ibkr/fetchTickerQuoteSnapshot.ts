@@ -1,9 +1,11 @@
 import { getBestKnownStockPrice } from "../lib/priceService.js";
-import { connectToIbkrGateway } from "./connectIbkr.js";
+import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedLiveConnection } from "./sharedReadConnection.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot, type TickerPricing } from "./fetchTickerOverview.js";
-import { prepareOptionChainStrikes, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
+import { prepareOptionChainStrikes, type OptionQuote } from "./fetchOptionChain.js";
+import { quoteContracts } from "./quoteContracts.js";
+import { OptionType } from "@stoqey/ib";
 import { getCachedChartBars } from "./priceBarCache.js";
 
 const contractDetailsReqId = 1;
@@ -32,7 +34,7 @@ function errorMessage(error: unknown): string {
  * anywhere (market_data_snapshots only covers the shortlist.s
  * IV/volume), so a Telegram request for "what's MU trading at" had no data
  * source at all until this (see PROGRESS.md's readTools.ts gap, closed
- * 2026-08-24). Reuses the exact functions streamPositionQuote.ts uses for
+ * 2026-08-24). Reuses the same pricing/strike-selection functions the modal uses for
  * the New Position form's live-quote lookup, just as one blocking call
  * instead of an SSE stream — appropriate here since Genosuke's tool calls
  * are already synchronous request/response, not a UI with a spinner to
@@ -53,17 +55,17 @@ function errorMessage(error: unknown): string {
  * lookup still returns useful data rather than erroring out entirely.
  */
 export async function fetchTickerQuoteSnapshot(symbol: string): Promise<TickerQuoteSnapshot> {
-  const connection = await connectToIbkrGateway();
+  const connection = await borrowSharedConnectionOrConnect(sharedLiveConnection, "fetchTickerQuoteSnapshot");
   try {
     requestRealtimeMarketData(connection.ib);
 
-    const bars = await getCachedChartBars(connection, symbol, "1Y", historicalReqId);
+    const bars = await getCachedChartBars(connection, symbol, "1Y", nextReqIdFor(connection.ib, () => historicalReqId));
     const lastBar = bars.at(-1);
     const lastKnownClose = lastBar ? { price: lastBar.close, asOf: new Date(lastBar.time * 1000).toISOString().slice(0, 10) } : null;
 
     try {
-      const contractDetailsPromise = getCachedContractDetails(connection, symbol, contractDetailsReqId);
-      const pricing = await lookupPricingSnapshot(connection, symbol, pricingReqId);
+      const contractDetailsPromise = getCachedContractDetails(connection, symbol, nextReqIdFor(connection.ib, () => contractDetailsReqId));
+      const pricing = await lookupPricingSnapshot(connection, symbol, nextReqIdFor(connection.ib, () => pricingReqId));
       const contractDetails = await contractDetailsPromise;
 
       // Shared price hierarchy (priceService.ts): a real last, else the stored last known good — the previous close is a session old outside market hours.
@@ -72,8 +74,21 @@ export async function fetchTickerQuoteSnapshot(symbol: string): Promise<TickerQu
         throw new Error("No contract or spot price available to select option strikes.");
       }
 
-      const expiryStrikes = await prepareOptionChainStrikes(symbol, spotPrice);
-      const optionChain = await quoteOptionChain(connection, symbol, expiryStrikes);
+      // Nearest expiry only (2026-09-24): the assistant answers "what's X
+      // trading at" with a handful of near-the-money strikes; the old
+      // 4-expiry, 48-line chain was over the 40-line one-shot cap during the
+      // capture window and far more than a Telegram reply shows.
+      const [nearest] = await prepareOptionChainStrikes(symbol, spotPrice);
+      const optionChain = nearest
+        ? await quoteContracts(
+            connection.ib,
+            symbol,
+            nearest.strikes.flatMap((strike) => [
+              { expiry: nearest.expiry, strike, right: OptionType.Call },
+              { expiry: nearest.expiry, strike, right: OptionType.Put },
+            ]),
+          )
+        : [];
 
       return { symbol, lastKnownClose, live: { pricing, optionChain }, liveUnavailableReason: null };
     } catch (error) {

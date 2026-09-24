@@ -1,5 +1,7 @@
 import { db } from "../db/connection.js";
-import { connectToIbkrGateway } from "./connectIbkr.js";
+import { borrowSharedConnectionOrConnect, sharedLiveConnection } from "./sharedReadConnection.js";
+import { quoteSingleContract } from "./quoteContracts.js";
+import { OptionType } from "@stoqey/ib";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { evaluateRollCandidate, type OpenShortLeg } from "./generateRollCandidates.js";
 import { rationaleForRoll, toIsoDate, toSettings } from "./runTradeAlertGeneration.js";
@@ -10,6 +12,7 @@ export type RollCandidateEvaluation =
   | { status: "not_rollable"; reason: string }
   | { status: "no_settings" }
   | { status: "no_candidate" }
+  | { status: "no_quote" }
   | {
       status: "ok";
       symbol: string;
@@ -94,10 +97,14 @@ export async function evaluateRollForPosition(positionId: string, legId: string)
   if (!settingsRow) return { status: "no_settings" };
   const settings = toSettings(settingsRow);
 
-  const connection = await connectToIbkrGateway();
+  const connection = await borrowSharedConnectionOrConnect(sharedLiveConnection, "evaluateRollForPosition");
   requestRealtimeMarketData(connection.ib);
   try {
-    const suggestion = await evaluateRollCandidate(connection, leg, strategyKey, settings, { force: true });
+    // Quoted here first so "no live quote for the current leg" (outside
+    // market hours) reads as that, not as "no viable replacement" (2026-09-24).
+    const knownQuote = await quoteSingleContract(connection.ib, leg.symbol, leg.expiry, leg.strike, leg.right === "call" ? OptionType.Call : OptionType.Put);
+    if (!knownQuote) return { status: "no_quote" };
+    const suggestion = await evaluateRollCandidate(connection, leg, strategyKey, settings, { force: true, knownQuote });
     if (!suggestion) return { status: "no_candidate" };
 
     return {

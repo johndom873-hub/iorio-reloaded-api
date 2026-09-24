@@ -1,11 +1,10 @@
 import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { runTradeAlertGeneration } from "../ibkr/runTradeAlertGeneration.js";
 import { refreshTradeAlert } from "../ibkr/refreshTradeAlert.js";
 import { refreshTickerTradeAlerts } from "../ibkr/refreshTickerTradeAlerts.js";
-import { runJob, JobAlreadyRunningError } from "../lib/runJob.js";
 import { streamPooledStockPrices } from "../ibkr/pricePool.js";
+import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 
 const tradeAlertSelect = `
   SELECT
@@ -142,68 +141,6 @@ tradeAlertsRouter.patch("/:id", async (request, response) => {
   response.json(result.rows[0]);
 });
 
-// Manual "Run Now" trigger for the same scan as run-trade-alert-generation-job.ts
-// (Heroku Scheduler). SSE rather than a blocking POST — the scan makes
-// multiple sequential IBKR calls per shortlisted ticker per strategy (same
-// shape as tickerDetail.ts's option-chain lookup) and can easily run past
-// Heroku's ~30s router timeout once there's more than a handful of tickers.
-// GET (not POST) because EventSource only supports GET — same tradeoff
-// tickerDetail.ts's stream route made; the button click is still an
-// explicit, user-initiated action, not something that could fire twice by
-// accident (browsers don't prefetch EventSource requests).
-//
-// Wrapped in the same runJob() the scheduled script uses, so a manual run
-// shows up in System Health's job history/status exactly like a scheduled
-// one. Deliberately does not notify Telegram (per Marcelo, 2026-08-27) —
-// this is a foreground run with live progress already visible in the
-// browser via the SSE stream below, so a Telegram ping would just be noise.
-// The scheduled job (run-trade-alert-generation-job.ts) is the one that
-// notifies.
-tradeAlertsRouter.get("/run-stream", async (request, response) => {
-  response.setHeader("Content-Type", "text/event-stream");
-  response.setHeader("Cache-Control", "no-cache");
-  response.setHeader("Connection", "keep-alive");
-  response.flushHeaders();
-  response.on("error", () => {});
-
-  const send = (data: unknown) => {
-    if (response.writableEnded) return;
-    response.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-  const heartbeat = setInterval(() => {
-    if (!response.writableEnded) response.write(": ping\n\n");
-  }, heartbeatIntervalMs);
-
-  try {
-    await runJob(
-      "trade_alert_generation",
-      async () => {
-        const { tickersScanned, totalNewAlerts } =
-          await runTradeAlertGeneration((event) => send(event));
-        return { details: { tickersScanned, totalNewAlerts } };
-      },
-      { triggeredBy: "manual", triggeredByUserId: request.session.userId },
-    );
-    send({ type: "done" });
-  } catch (error) {
-    if (error instanceof JobAlreadyRunningError) {
-      send({
-        type: "alreadyRunning",
-        message:
-          "A trade alert scan is already in progress — check back shortly instead of running another.",
-      });
-    } else {
-      send({
-        type: "streamError",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  } finally {
-    clearInterval(heartbeat);
-    response.end();
-  }
-});
-
 // Live current price for whatever symbols the Trade Alerts page currently
 // has grouped on screen — added per Juan's 2026-09-17 ask to show current
 // price next to the ticker name. Deliberately takes `symbols` from the
@@ -261,31 +198,27 @@ tradeAlertsRouter.get("/current-prices/stream", streamTradeAlertPricesHandler);
 // scan the next morning) can validate a specific alert right as the US
 // market opens without re-running the whole shortlist scan. See
 // refreshTradeAlert.ts for why this is a couple of small IBKR calls, not
-// the multi-strike scan "Run Alerts Now" does. Blocking POST, not SSE —
-// one contract (or two, for a roll) is fast enough not to risk Heroku's
-// router timeout the way the full scan can.
+// the multi-strike scan "Run Alerts Now" does. Streamed (2026-09-24, see
+// streamedResponse.ts): a one-shot connect + contract details + an 8s quote
+// ceiling can still pass Heroku's 30s router timeout on a slow IBKR moment.
 tradeAlertsRouter.post("/:id/refresh", async (request, response) => {
-  const result = await refreshTradeAlert(request.params.id);
-  if (!result.ok) {
-    response
-      .status(result.error === "Trade alert not found." ? 404 : 422)
-      .json({ error: result.error });
-    return;
-  }
-
-  const updated = await db.raw(`${tradeAlertSelect} WHERE ta.id = ?`, [
-    request.params.id,
-  ]);
-  response.json(updated.rows[0]);
+  await respondWithStreamedResult(response, async () => {
+    const result = await refreshTradeAlert(request.params.id);
+    if (!result.ok) {
+      return { status: result.error === "Trade alert not found." ? 404 : 422, body: { error: result.error } };
+    }
+    const updated = await db.raw(`${tradeAlertSelect} WHERE ta.id = ?`, [request.params.id]);
+    return { status: 200, body: updated.rows[0] };
+  });
 });
 
 // Per-ticker equivalent of "Run Alerts Now" for new_trade alerts only (roll
 // alerts are refreshed independently via their own per-alert refresh) —
 // backs the Trade Alerts page's per-ticker "Refresh" button and the Ticker
 // Detail modal's "Scan for Alerts"/"Refresh" button, both calling this same
-// endpoint. Blocking POST, not SSE: a single ticker's two-strategy scan is
-// fast enough not to risk Heroku's router timeout the way the full
-// shortlist scan can (same reasoning as /:id/refresh above).
+// endpoint. Streamed (2026-09-24, see streamedResponse.ts): a two-strategy
+// scan of one ticker quotes up to ~200 contracts in sequential batches of 40
+// (generateTradeAlertCandidates.ts), well past Heroku's 30s router timeout.
 tradeAlertsRouter.post("/refresh-ticker", async (request, response) => {
   const { symbol } = request.body as { symbol?: string };
   if (!symbol) {
@@ -301,22 +234,20 @@ tradeAlertsRouter.post("/refresh-ticker", async (request, response) => {
     return;
   }
 
-  try {
-    await refreshTickerTradeAlerts(ticker.id, ticker.symbol);
-  } catch (error) {
-    response
-      .status(502)
-      .json({ error: error instanceof Error ? error.message : String(error) });
-    return;
-  }
-
-  const updated = await db.raw(
-    `
-    ${tradeAlertSelect}
-    WHERE ta.ticker_id = ? AND ta.alert_type = 'new_trade' AND ta.status = 'pending'
-    ORDER BY (ta.suggested_structure->>'annualizedYield')::numeric DESC
-    `,
-    [ticker.id],
-  );
-  response.json(updated.rows);
+  await respondWithStreamedResult(response, async () => {
+    try {
+      await refreshTickerTradeAlerts(ticker.id, ticker.symbol);
+    } catch (error) {
+      return { status: 502, body: { error: error instanceof Error ? error.message : String(error) } };
+    }
+    const updated = await db.raw(
+      `
+      ${tradeAlertSelect}
+      WHERE ta.ticker_id = ? AND ta.alert_type = 'new_trade' AND ta.status = 'pending'
+      ORDER BY (ta.suggested_structure->>'annualizedYield')::numeric DESC
+      `,
+      [ticker.id],
+    );
+    return { status: 200, body: updated.rows };
+  });
 });

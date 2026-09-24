@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { runIbkrHealthCheckJob } from "../ibkr/checkIbkrHealthJob.js";
 import * as presenceTracker from "../lib/presenceTracker.js";
 import { getStreamMultiplexerStats } from "../streams/streamMultiplexer.js";
+import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { fetchPresenceOverview } from "../lib/userLastSeen.js";
 import * as llmStats from "../genosuke/llmStats.js";
 import { requestRateStats, processStartedAt } from "../lib/requestRateTracker.js";
@@ -55,20 +56,23 @@ systemHealthRouter.get("/status", async (_request, response) => {
   response.json(result.rows);
 });
 
-// Runs the VPS SSH round-trip synchronously and returns the resulting
-// job_runs row — fast enough (single SSH exec) not to need SSE, unlike the
-// slower IBKR market-data calls elsewhere in the app.
-systemHealthRouter.post("/check-ibkr", async (_request, response) => {
-  try {
-    await runIbkrHealthCheckJob();
-  } catch {
-    // runIbkrHealthCheckJob (via runJob) already logged the failure to
-    // job_runs and notified Telegram — swallow here so the response below
-    // still returns the logged row instead of a 500.
-  }
-
-  const result = await db.raw(`${jobRunSelect} WHERE job_name = 'ibkr_health_check' ORDER BY started_at DESC LIMIT 1`);
-  response.json(result.rows[0] ?? null);
+// Runs the health check and returns the resulting job_runs row. Streamed
+// (2026-09-24, see streamedResponse.ts): a normal run takes ~60-90s (two SSH
+// round trips, the historical probe, the reconciliation) and a Gateway
+// restart minutes — far past Heroku's 30s router timeout.
+systemHealthRouter.post("/check-ibkr", async (request, response) => {
+  await respondWithStreamedResult(response, async () => {
+    try {
+      const marketState = (await computeMarketSessionStatus()).state;
+      await runIbkrHealthCheckJob({ allowGatewayRestart: marketState !== "open", triggeredBy: "manual", triggeredByUserId: request.session.userId });
+    } catch {
+      // runIbkrHealthCheckJob (via runJob) already logged the failure to
+      // job_runs and notified Telegram — swallow here so the response below
+      // still returns the logged row instead of a 500.
+    }
+    const result = await db.raw(`${jobRunSelect} WHERE job_name = 'ibkr_health_check' ORDER BY started_at DESC LIMIT 1`);
+    return { status: 200, body: result.rows[0] ?? null };
+  });
 });
 
 // --- Iorio Pulse support routes (2026-09-13) ---

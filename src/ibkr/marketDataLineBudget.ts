@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 
 // IBKR caps market-data lines at 100 per TWS username, shared across every
 // connection on that login (verified against IBKR's docs 2026-09-21) — not
@@ -9,7 +10,8 @@ import { db } from "../db/connection.js";
 // probe) that aren't worth coordinating here — see PROGRESS.md.
 //
 // Priority reservations (approved 2026-09-24): the 10:00 ET chain capture
-// reserves its lines with `priority: true`. A priority reservation only has
+// and the scheduled trade-alert scan (runTradeAlertGeneration.ts) reserve
+// their lines with `priority: true`. A priority reservation only has
 // to fit alongside other priority reservations, and its lines are subtracted
 // from what every non-priority holder may take — so live screens can never
 // starve the capture; they get whatever is left ("Fit" variant) and the live
@@ -22,6 +24,8 @@ export interface LineReservationResult {
   availableLines: number;
   /** Lines currently held by active priority reservations other than this holder (0 when none — "normal operation"). */
   priorityLinesHeld: number;
+  /** True when IBKR_MARKET_DATA_LINES_ENABLED=false refused the reservation outright (no DB round trip, nothing held). */
+  disabled?: boolean;
 }
 
 export interface ReserveMarketDataLinesOptions {
@@ -48,6 +52,7 @@ export function computeAvailableLines(usage: LineUsage, priority: boolean, budge
  */
 export async function reserveMarketDataLines(holder: string, lines: number, ttlSeconds: number, options: ReserveMarketDataLinesOptions = {}): Promise<LineReservationResult> {
   const priority = options.priority ?? false;
+  if (!ibkrMarketDataLinesEnabled()) return { ok: false, availableLines: 0, priorityLinesHeld: 0, disabled: true };
   return db.transaction(async (trx) => {
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
     // Postgres doesn't allow FOR UPDATE on an aggregate, so an advisory
@@ -91,7 +96,7 @@ export interface MarketDataLineRestriction {
   holders: string[];
 }
 
-/** Non-null while a priority holder (the chain capture) is active — what the top bar's "Live data restricted" state is driven by. */
+/** Non-null while a priority holder (the chain capture or the scheduled trade-alert scan) is active — what the top bar's "Live data restricted" state is driven by. */
 export async function loadMarketDataLineRestriction(): Promise<MarketDataLineRestriction | null> {
   const rows: { holder: string; lines: number }[] = await db("ibkr_market_data_line_reservations")
     .where("priority", true)
@@ -101,10 +106,13 @@ export async function loadMarketDataLineRestriction(): Promise<MarketDataLineRes
   return { priorityLines: rows.reduce((sum, row) => sum + row.lines, 0), holders: rows.map((row) => row.holder) };
 }
 
-/** One sentence for a failed reservation, naming the capture when it's the reason. */
+/** One sentence for a failed reservation, naming the scheduled scan (chain capture or trade-alert scan) when it's the reason. */
 export function describeMarketDataLineShortage(result: LineReservationResult, what: string, linesNeeded: number): string {
+  if (result.disabled) {
+    return `IBKR market-data lines are disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false) — ${what} needs ${linesNeeded} lines.`;
+  }
   if (result.priorityLinesHeld > 0) {
-    return `IBKR market data is restricted while the chain capture runs (${result.priorityLinesHeld} lines reserved for it, usually until ~10:30 ET) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again after.`;
+    return `IBKR market data is restricted while a scheduled scan runs (the 10:00 ET chain capture or the trade-alert scan; ${result.priorityLinesHeld} lines reserved for it) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again after.`;
   }
   return `IBKR market data is busy (another live view) — ${what} needs ${linesNeeded} lines, only ${result.availableLines} available. Try again shortly.`;
 }

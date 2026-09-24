@@ -1,6 +1,6 @@
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
-import { fetchLivePrices } from "../ibkr/fetchLivePrices.js";
-import { computeCashLockedInCsps, computePositionExposures } from "./positionExposure.js";
+import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
+import { computeCashLockedInCsps, computePositionExposures, type PositionExposureRow } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
 import type { SignalStrategyKey } from "./signalCandidates.js";
 import { loadSignalSettings } from "./signalSettingsStore.js";
@@ -32,8 +32,10 @@ export interface SignalOrderLimitsInput {
   tickerId: string;
   quantity: number;
   strike: number;
-  /** Underlying stock price, used only for a covered call's share-shortfall notional. Omit to fetch a live price. */
+  /** Underlying stock price, used only for a covered call's share-shortfall notional. Omit to read the pool, then fetch a live price. */
   spotPrice?: number;
+  /** Current per-position exposures when the caller already streams them (the Order Review quote stream); omit to compute them. */
+  exposures?: PositionExposureRow[];
 }
 
 export interface SignalOrderLimitsResult {
@@ -48,7 +50,7 @@ function formatPct(fraction: number): string {
 async function resolveSpotPrice(input: SignalOrderLimitsInput): Promise<number | null> {
   if (input.spotPrice !== undefined) return input.spotPrice;
   if (input.strategyKey !== "covered_call") return 0; // not needed for a cash-secured put
-  const prices = await fetchLivePrices([{ key: "stock", legType: "stock", symbol: input.symbol }]);
+  const prices = await fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol: input.symbol }]);
   return prices["stock"] ?? null;
 }
 
@@ -70,7 +72,7 @@ export async function evaluateSignalOrderLimits(input: SignalOrderLimitsInput): 
     [account, cashLockedInCsps, exposures, settings, spotPrice] = await Promise.all([
       fetchAccountSummary(),
       computeCashLockedInCsps(),
-      computePositionExposures(),
+      input.exposures ?? computePositionExposures(),
       loadSignalSettings(),
       resolveSpotPrice(input),
     ]);

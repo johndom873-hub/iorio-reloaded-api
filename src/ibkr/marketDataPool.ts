@@ -48,12 +48,38 @@ const reservationTtlSeconds = 90;
 // how quickly paused contracts resume afterwards.
 const reconcileIntervalMs = 15_000;
 const resubscribeRetryDelaysMs = [1_000, 2_000, 5_000, 10_000, 30_000];
+// A contract whose last subscriber leaves is kept subscribed this long before
+// its line is cancelled (approved 2026-09-24, 2 s): the reopen cases — an
+// effect torn down and re-run, a Ticker Detail tab switch, StrictMode's
+// double mount — all come back within milliseconds, and each used to cancel
+// and re-request the same line (plus a reservation write) every time.
+export const unsubscribeGraceMs = 2_000;
 
 // How long streamPooledPrices/streamPooledGreeks/streamPooledOptionQuotes
 // wait for pooled REALTIME data (and, for stock legs, the DB fallback) to
 // arrive before declaring their first reading final — same value/reasoning
 // as the old frozenGraceMs a real FROZEN request used to provide.
 export const settleGraceMs = 3_000;
+
+/**
+ * Waits for the first reading of a pooled stream: resolves as soon as
+ * `isComplete()` says every contract has what the caller needs (call
+ * `check` after each update), or after settleGraceMs with whatever arrived
+ * (2026-09-24 — a warm pool used to make every caller wait the full grace).
+ */
+export function waitForFirstReading(isComplete: () => boolean): { settled: Promise<void>; check: () => void } {
+  let resolveSettled: () => void = () => {};
+  const settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
+  const timer = setTimeout(resolveSettled, settleGraceMs);
+  const check = () => {
+    if (!isComplete()) return;
+    clearTimeout(timer);
+    resolveSettled();
+  };
+  return { settled, check };
+}
 
 // Real-time / delayed pairs — see fetchOptionChain.ts's matching comments
 // for why both are always accepted (real-time entitlement can label ticks
@@ -62,6 +88,12 @@ const lastTickTypes = [4, 68];
 const bidTickTypes = [1, 66];
 const askTickTypes = [2, 67];
 const greeksTickTypes = [13, 83];
+// Session fields — same real-time/delayed pairs lookupPricingSnapshot accepts.
+const highTickTypes = [6, 72];
+const lowTickTypes = [7, 73];
+const closeTickTypes = [9, 75];
+const openTickTypes = [14, 76];
+const volumeTickTypes = [8, 74];
 
 export interface PooledQuote {
   last: number | null;
@@ -73,6 +105,13 @@ export interface PooledQuote {
   theta: number | null;
   impliedVolatility: number | null;
   underlyingPrice: number | null;
+  // Session fields (stocks; 2026-09-24) so the Ticker Detail header reads
+  // from the pooled line instead of opening a second, unbudgeted one.
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  previousClose: number | null;
+  volume: number | null;
 }
 
 export const emptyPooledQuote: PooledQuote = {
@@ -85,10 +124,17 @@ export const emptyPooledQuote: PooledQuote = {
   theta: null,
   impliedVolatility: null,
   underlyingPrice: null,
+  open: null,
+  high: null,
+  low: null,
+  previousClose: null,
+  volume: null,
 };
 
 interface PoolEntry {
   contract: PriceContract;
+  /** Set while the entry has no subscribers and is waiting out the cancel grace (see unsubscribeGraceMs). */
+  cancelTimer: ReturnType<typeof setTimeout> | null;
   /** -1 while unsubscribed from IBKR (never subscribed yet, paused for budget, or the underlying connection dropped). */
   reqId: number;
   quote: PooledQuote;
@@ -117,7 +163,12 @@ function quoteEqual(a: PooledQuote, b: PooledQuote): boolean {
     a.vega === b.vega &&
     a.theta === b.theta &&
     a.impliedVolatility === b.impliedVolatility &&
-    a.underlyingPrice === b.underlyingPrice
+    a.underlyingPrice === b.underlyingPrice &&
+    a.open === b.open &&
+    a.high === b.high &&
+    a.low === b.low &&
+    a.previousClose === b.previousClose &&
+    a.volume === b.volume
   );
 }
 
@@ -141,10 +192,21 @@ export function marketDataPoolSnapshot(): { contractCount: number; subscriberCou
   return { contractCount: entriesByPoolKey.size, subscriberCount, pausedCount, restricted };
 }
 
+/**
+ * The pool's current quote for a contract some open stream is already
+ * subscribed to, without subscribing (no line, no reservation) — null when
+ * nothing has it pooled. Lets one-shot readers (order-limit checks) reuse
+ * what the Positions/Pulse/Dashboard streams already hold instead of opening
+ * fresh snapshot requests for the same legs.
+ */
+export function peekPooledQuote(contract: PriceContract): PooledQuote | null {
+  return entriesByPoolKey.get(poolKeyFor(contract))?.quote ?? null;
+}
+
 export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: (quote: PooledQuote) => void): Promise<() => void> {
   const poolKey = poolKeyFor(contract);
   if (!entriesByPoolKey.has(poolKey)) {
-    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sequence: nextSequence++, paused: false };
+    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sequence: nextSequence++, paused: false, cancelTimer: null };
     entriesByPoolKey.set(poolKey, newEntry);
     if (contract.legType === "stock") {
       // Fast first paint while the live subscription is still being
@@ -161,6 +223,10 @@ export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: 
     }
   }
   const entry = entriesByPoolKey.get(poolKey)!;
+  if (entry.cancelTimer !== null) {
+    clearTimeout(entry.cancelTimer);
+    entry.cancelTimer = null;
+  }
   entry.subscribers.add(onUpdate);
   onUpdate(entry.quote);
 
@@ -171,10 +237,15 @@ export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: 
     const current = entriesByPoolKey.get(poolKey);
     if (current !== entry) return;
     entry.subscribers.delete(onUpdate);
-    if (entry.subscribers.size > 0) return;
-    entriesByPoolKey.delete(poolKey);
-    cancelIbkrSubscription(entry);
-    scheduleReconcile();
+    if (entry.subscribers.size > 0 || entry.cancelTimer !== null) return;
+    entry.cancelTimer = setTimeout(() => {
+      entry.cancelTimer = null;
+      if (entriesByPoolKey.get(poolKey) !== entry || entry.subscribers.size > 0) return;
+      entriesByPoolKey.delete(poolKey);
+      cancelIbkrSubscription(entry);
+      scheduleReconcile();
+    }, unsubscribeGraceMs);
+    entry.cancelTimer.unref?.();
   };
 }
 
@@ -209,13 +280,25 @@ function scheduleReconcile(): void {
   void reconcile();
 }
 
-/** Reserve → shed/resume to what the budget allows → subscribe whatever is active and unsubscribed. */
+/**
+ * Reserve → shed/resume to what the budget allows → subscribe whatever is
+ * active and unsubscribed. A failed reservation query (DB hiccup) skips the
+ * subscribe pass entirely: nothing may open a line the budget has not
+ * granted, so the entries stay as they are until the next reconcile. With
+ * no entries left the periodic timer stops too, instead of deleting the
+ * (already absent) reservation every 15s for the rest of the process life.
+ */
 async function reconcile(): Promise<void> {
+  let reservationSucceeded = false;
   try {
     const desired = entriesByPoolKey.size;
     if (desired === 0) {
       await releaseMarketDataLines(reservationHolder);
       setRestricted(false);
+      if (reconcileTimer !== null) {
+        clearInterval(reconcileTimer);
+        reconcileTimer = null;
+      }
       return;
     }
     let allowed = desired;
@@ -228,6 +311,7 @@ async function reconcile(): Promise<void> {
     }
     applyCapacityPlan(allowed);
     setRestricted(allowed < desired);
+    reservationSucceeded = true;
   } catch (error) {
     console.warn(`marketDataPool: reservation reconcile failed — ${error instanceof Error ? error.message : error}`);
   } finally {
@@ -237,7 +321,7 @@ async function reconcile(): Promise<void> {
       scheduleReconcile();
     }
   }
-  await subscribeUnsubscribedEntries();
+  if (reservationSucceeded) await subscribeUnsubscribedEntries();
 }
 
 function applyCapacityPlan(allowedLines: number): void {
@@ -261,7 +345,7 @@ function applyCapacityPlan(allowedLines: number): void {
 function setRestricted(value: boolean): void {
   if (restricted === value) return;
   restricted = value;
-  console.log(value ? "marketDataPool: restricted — fewer budget lines than pooled contracts (chain capture running?)." : "marketDataPool: restriction lifted — every pooled contract fits the budget again.");
+  console.log(value ? "marketDataPool: restricted — fewer budget lines than pooled contracts (a scheduled scan running, or lines disabled by IBKR_MARKET_DATA_LINES_ENABLED?)." : "marketDataPool: restriction lifted — every pooled contract fits the budget again.");
 }
 
 function attachListeners(ib: IBApi): void {
@@ -288,6 +372,16 @@ function attachListeners(ib: IBApi): void {
     if (lastTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { last: value });
     else if (bidTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { bid: value });
     else if (askTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { ask: value });
+    else if (highTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { high: value });
+    else if (lowTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { low: value });
+    else if (closeTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { previousClose: value });
+    else if (openTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { open: value });
+  });
+  ib.on(EventName.tickSize, (reqId: number, tickType: number | undefined, size: number | undefined) => {
+    if (tickType === undefined || size === undefined || !volumeTickTypes.includes(tickType)) return;
+    const poolKey = reqIdToPoolKey.get(reqId);
+    if (!poolKey) return;
+    updateEntry(poolKey, reqId, { volume: size >= 0 ? size : null });
   });
   ib.on(
     EventName.tickOptionComputation,

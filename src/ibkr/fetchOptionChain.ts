@@ -1,19 +1,11 @@
-import { randomUUID } from "node:crypto";
 import { EventName, Option, OptionType, SecType } from "@stoqey/ib";
 import type { Contract, ContractDetails, IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { nextReqIdFor } from "./sharedReadConnection.js";
-import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
-import { describeMarketDataLineShortage, reserveMarketDataLines, renewMarketDataLineReservation, releaseMarketDataLines } from "./marketDataLineBudget.js";
 import { db } from "../db/connection.js";
 import { calendarDaysUntilExpiry, captureMaximumDaysToExpiry, captureMinimumDaysToExpiry } from "../lib/optionChainCaptureWindow.js";
+import { easternDateIso } from "../lib/marketSessionStatus.js";
 
-// Reservation lifetimes for fetchQuotesForContracts' account-wide market-data-line budget
-// (marketDataLineBudget.ts). One-shot covers quoteTimeoutMs's wait plus margin; live is
-// renewed on liveLineReservationRenewIntervalMs, so its TTL just needs to survive one missed tick.
-const oneShotLineReservationTtlSeconds = 15;
-const liveLineReservationTtlSeconds = 45;
-const liveLineReservationRenewIntervalMs = 20_000;
 
 export interface OptionQuote {
   expiry: string; // YYYYMMDD
@@ -68,8 +60,15 @@ export function parseExpiry(expiry: string): Date {
   return new Date(`${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}T00:00:00Z`);
 }
 
+/**
+ * Calendar days from `from` to `to` (an expiry parsed by parseExpiry, i.e. a
+ * UTC-midnight date). `from` is taken on the US Eastern calendar (2026-09-24):
+ * every caller passes "now", and the UTC date runs one day ahead of the
+ * market's between 20:00 and 00:00 ET, which reported an expiry as already
+ * expired the evening before, and every DTE one day short.
+ */
 export function daysBetween(from: Date, to: Date): number {
-  const fromMidnightUtc = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
+  const fromMidnightUtc = Date.parse(`${easternDateIso(from)}T00:00:00Z`);
   const toMidnightUtc = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
   return Math.round((toMidnightUtc - fromMidnightUtc) / 86_400_000);
 }
@@ -305,8 +304,21 @@ export async function refreshStoredOptionChain(
 
   const strikesByExpiry = new Map<string, number[]>();
   const expiryTimings: OptionChainRefreshTimings["expiries"] = [];
+  const storedGrids = new Map<string, number[]>(
+    (await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).select("expiry", "strikes")).map((row: { expiry: string; strikes: number[] }) => [String(row.expiry).slice(0, 10).replaceAll("-", ""), row.strikes]),
+  );
   for (const expiry of expiriesInWindow) {
     const lookup = await lookupExpiryStrikes(ib, ticker.symbol, expiry);
+    const stored = storedGrids.get(expiry) ?? [];
+    // An empty lookup (IBKR error 200 / no definitions right now) must not
+    // replace a grid we already have (2026-09-24): downstream, an empty grid
+    // means "no contracts" and the next alert refresh expires everything.
+    if (lookup.strikes.length === 0 && stored.length > 0) {
+      console.warn(`${ticker.symbol} ${expiry}: strike lookup came back empty — keeping the stored grid (${stored.length} strikes).`);
+      strikesByExpiry.set(expiry, stored);
+      expiryTimings.push({ expiry, strikeCount: stored.length, elapsedMs: lookup.elapsedMs });
+      continue;
+    }
     strikesByExpiry.set(expiry, lookup.strikes);
     expiryTimings.push({ expiry, strikeCount: lookup.strikes.length, elapsedMs: lookup.elapsedMs });
     await db("option_chain_expiry_strikes")
@@ -337,228 +349,12 @@ function pickExpiryStrikes(gridStrikes: number[], spotPrice: number, mustInclude
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
-// Exported for reuse by fetchOrderLegQuote.ts (Order Review panel's live
-// bid/ask/Greeks/IV for a not-yet-confirmed order's option leg) — same
-// underlying subscribe/collect/cancel logic, just a single contract instead
-// of a whole chain.
-function isQuoteReady(quote: OptionQuote): boolean {
-  const hasPrice = (quote.bid !== null && quote.ask !== null) || quote.last !== null;
-  return hasPrice && quote.delta !== null;
-}
-
-
-export async function fetchQuotesForContracts(
-  ib: IBApi,
-  symbol: string,
-  contracts: { expiry: string; strike: number; right: OptionType }[],
-  // Optional continuous mode (approved 2026-08-26, for the Ticker Detail
-  // modal): when provided, this function keeps every contract's streaming
-  // subscription open past the initial resolve and calls onUpdate with the
-  // latest full quote list on a fixed interval, until `signal` aborts —
-  // instead of cancelling and returning once. Every other caller (Order
-  // Review's live quote, trade-alert generation/refresh, Greeks lookups)
-  // omits this and keeps the original one-shot behavior unchanged.
-  live?: { onUpdate: (quotes: OptionQuote[]) => void; signal: AbortSignal },
-): Promise<OptionQuote[]> {
-  // Every reqMktData line this call is about to open must fit the account-wide
-  // shared budget (marketDataLineBudget.ts) before any subscription opens —
-  // otherwise a contended moment (the nightly capture job mid-batch) doesn't
-  // silently starve both sides, it fails this call immediately with a clear
-  // reason instead of a 8-25s hang that looks like an IBKR outage.
-  const lineHolder = `optionQuote:${symbol}:${randomUUID()}`;
-  if (contracts.length > 0) {
-    const reservation = await reserveMarketDataLines(lineHolder, contracts.length, live ? liveLineReservationTtlSeconds : oneShotLineReservationTtlSeconds);
-    if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, symbol, contracts.length));
-  }
-
-  const quotes = new Map<number, OptionQuote>();
-  const reqIdToContract = new Map<number, { expiry: string; strike: number; right: "C" | "P" }>();
-  const readyReqIds = new Set<number>();
-  let nextReqId = 10_000;
-  let onAllReady: (() => void) | null = null;
-  let lineReservationHeartbeat: ReturnType<typeof setInterval> | null = null;
-
-  // Streaming reqMktData subscriptions have no IBKR-side "done" event (unlike
-  // snapshot mode's tickSnapshotEnd) — the fixed quoteTimeoutMs wait below is
-  // a safety ceiling, not the expected path. Most contracts get both a price
-  // and a modeled delta well before that, so this resolves as soon as every
-  // contract is ready rather than always paying the full wait. Illiquid
-  // strikes that never produce a delta tick still fall through to the
-  // ceiling, same as before this change.
-  //
-  // Snapshot mode (reqMktData's snapshot=true, with tickSnapshotEnd as the
-  // completion signal) was tried and measured worse on both axes: it never
-  // resolved before the ceiling across a full 14-ticker test run, and
-  // averaged ~54% price+delta completeness vs. ~83% for this streaming
-  // approach — delayed-data snapshot requests for options are unreliable on
-  // this account, consistent with the account's general delayed-data
-  // limitations (see other IBKR notes in this codebase).
-  function checkReady(reqId: number) {
-    if (readyReqIds.has(reqId)) return;
-    const quote = quotes.get(reqId);
-    if (!quote || !isQuoteReady(quote)) return;
-    readyReqIds.add(reqId);
-    if (readyReqIds.size === reqIdToContract.size) onAllReady?.();
-  }
-
-  // True real-time push (approved 2026-08-27, replacing a fixed 1.5s
-  // interval) once live mode is active — see the matching note in
-  // fetchTickerOverview.ts's streamPricingUpdates. Coalesced only within
-  // the same event-loop turn: a chain of 30+ contracts can have several
-  // land back to back from one network read, and this still pushes on
-  // every genuinely new batch of ticks, just not once per individual field.
-  let liveMode: { onUpdate: (quotes: OptionQuote[]) => void; signal: AbortSignal } | null = null;
-  let pushScheduled = false;
-  function schedulePush() {
-    if (!liveMode || pushScheduled) return;
-    pushScheduled = true;
-    setImmediate(() => {
-      pushScheduled = false;
-      liveMode?.onUpdate(Array.from(quotes.values()));
-    });
-  }
-
-  function onTickPrice(reqId: number, tickType: number, price: number) {
-    const quote = quotes.get(reqId);
-    if (!quote) return;
-    // IBKR sends -1 as an explicit "no data for this field right now" tick
-    // (found 2026-08-27 investigating stale post-close option bid/ask that
-    // never cleared) -- normalized to null here rather than silently
-    // dropped, so a field that genuinely stops being quoted goes back to "no
-    // data" instead of freezing on the last real value it ever held for the
-    // rest of this streaming session.
-    const value = price > 0 ? price : null;
-    // Real-time tick types: bid=1, ask=2, last=4. Delayed: bid=66, ask=67,
-    // last=68. Accepts both — see the tickOptionComputation comment below
-    // for why (real-time entitlement enabled 2026-08-31 sends real-time
-    // tick types regardless of what reqMarketDataType() requests).
-    if (tickType === 1 || tickType === 66) quote.bid = value;
-    if (tickType === 2 || tickType === 67) quote.ask = value;
-    if (tickType === 4 || tickType === 68) quote.last = value;
-    checkReady(reqId);
-    schedulePush();
-  }
-
-  function onTickOptionComputation(
-    reqId: number,
-    tickType: number,
-    _tickAttrib: number | undefined,
-    impliedVol?: number,
-    delta?: number,
-    _optPrice?: number,
-    _pvDividend?: number,
-    gamma?: number,
-    vega?: number,
-    theta?: number,
-    _undPrice?: number,
-  ) {
-    const quote = quotes.get(reqId);
-    // Model computation only — doesn't depend on a stale last trade the way
-    // the last-computation tick (12/82) does. Accepts both the real-time
-    // (13) and delayed (83) variants: this account held delayed-only
-    // entitlements when 83-only was written, but real-time market data was
-    // enabled 2026-08-31, and IBKR sends real-time-labeled ticks (13) once
-    // that's active regardless of what reqMarketDataType() requests —
-    // an 83-only filter silently discarded every tick from that point on,
-    // which is exactly what caused that day's trade-alert outage (see
-    // runTradeAlertGeneration.ts's history around 2026-08-31).
-    if (!quote || (tickType !== 83 && tickType !== 13)) return;
-    quote.impliedVolatility = impliedVol ?? null;
-    quote.delta = delta ?? null;
-    quote.gamma = gamma ?? null;
-    quote.vega = vega ?? null;
-    quote.theta = theta ?? null;
-    checkReady(reqId);
-    schedulePush();
-  }
-
-  function onError(error: Error, code: number, reqId: number) {
-    if (!quotes.has(reqId)) return;
-    // Informational "using delayed data" notices, expected wherever this
-    // account isn't entitled for real-time on a given symbol.
-    if (isDelayedDataFallbackNotice(code)) return;
-    const contract = reqIdToContract.get(reqId);
-    console.error(
-      `Option quote error for ${symbol} ${contract?.expiry} ${contract?.strike}${contract?.right} (code ${code}): ${error.message}`,
-    );
-  }
-
-  ib.on(EventName.tickPrice, onTickPrice);
-  ib.on(EventName.tickOptionComputation, onTickOptionComputation);
-  ib.on(EventName.error, onError);
-
-  for (const contract of contracts) {
-    const reqId = nextReqIdFor(ib, () => nextReqId++);
-    reqIdToContract.set(reqId, contract);
-    quotes.set(reqId, {
-      expiry: contract.expiry,
-      strike: contract.strike,
-      right: contract.right,
-      bid: null,
-      ask: null,
-      last: null,
-      impliedVolatility: null,
-      delta: null,
-      gamma: null,
-      vega: null,
-      theta: null,
-    });
-    ib.reqMktData(reqId, new Option(symbol, contract.expiry, contract.strike, contract.right, "SMART"), "", false, false);
-  }
-
-  const startedAt = Date.now();
-  await new Promise<void>((resolve) => {
-    if (reqIdToContract.size === 0) {
-      resolve();
-      return;
-    }
-    const timer = setTimeout(resolve, quoteTimeoutMs);
-    onAllReady = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-  });
-  console.log(
-    `${symbol}: quotes ready in ${Date.now() - startedAt}ms (${readyReqIds.size}/${reqIdToContract.size} contracts had price+delta)`,
-  );
-
-  function cleanup() {
-    for (const reqId of reqIdToContract.keys()) {
-      ib.cancelMktData(reqId);
-    }
-    ib.removeListener(EventName.tickPrice, onTickPrice);
-    ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
-    ib.removeListener(EventName.error, onError);
-    if (lineReservationHeartbeat) clearInterval(lineReservationHeartbeat);
-    if (contracts.length > 0) releaseMarketDataLines(lineHolder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${lineHolder}: ${error instanceof Error ? error.message : error}`));
-  }
-
-  if (!live || live.signal.aborted) {
-    cleanup();
-    return Array.from(quotes.values());
-  }
-
-  // Deliberately NOT awaited: the initial ready/timeout wait above already
-  // satisfies this function's promise (the caller — streamTickerDetail.ts —
-  // needs that first chain painted right away, not once the whole streaming
-  // session eventually ends). Arming liveMode makes schedulePush (above)
-  // start pushing on every real-time tick for the rest of the connection's
-  // life, cleaning itself up once `live.signal` aborts.
-  liveMode = live;
-  live.signal.addEventListener("abort", cleanup, { once: true });
-  // Keeps this call's reservation alive for as long as the stream itself —
-  // otherwise a Ticker Detail modal left open past oneShot/liveLineReservationTtlSeconds
-  // would silently lose its lines back to the shared budget while still subscribed.
-  if (contracts.length > 0) {
-    lineReservationHeartbeat = setInterval(() => {
-      renewMarketDataLineReservation(lineHolder, liveLineReservationTtlSeconds).catch((error) =>
-        console.warn(`Failed to renew IBKR market data line reservation ${lineHolder}: ${error instanceof Error ? error.message : error}`),
-      );
-    }, liveLineReservationRenewIntervalMs);
-  }
-
-  return Array.from(quotes.values());
-}
+/**
+ * Largest single reqMktData batch any caller opens at once — the line budget
+ * is 90 for the whole login, so one call must never ask for more than what
+ * leaves room for the pool (live screens) and the chain capture's 50.
+ */
+export const maximumQuoteBatchSize = 40;
 
 export interface ExpiryStrikes {
   expiry: string;
@@ -625,26 +421,3 @@ export async function prepareOptionChainStrikes(
     }))
     .filter(({ strikes: expiryStrikes }) => expiryStrikes.length > 0);
 }
-
-// Strikes arriving here are already the final near-the-money, validated set
-// from prepareOptionChainStrikes — just subscribe and collect quotes. `live`
-// passes straight through to fetchQuotesForContracts — see its doc comment.
-export async function quoteOptionChain(
-  connection: IbkrConnection,
-  symbol: string,
-  expiryStrikes: ExpiryStrikes[],
-  live?: { onUpdate: (quotes: OptionQuote[]) => void; signal: AbortSignal },
-): Promise<OptionQuote[]> {
-  const { ib } = connection;
-
-  const contracts: { expiry: string; strike: number; right: OptionType }[] = [];
-  for (const { expiry, strikes } of expiryStrikes) {
-    for (const strike of strikes) {
-      contracts.push({ expiry, strike, right: OptionType.Call });
-      contracts.push({ expiry, strike, right: OptionType.Put });
-    }
-  }
-
-  return fetchQuotesForContracts(ib, symbol, contracts, live);
-}
-

@@ -16,6 +16,26 @@ function requireIbkrTradingMode(): "paper" | "live" {
   return value;
 }
 
+export function requireBooleanEnvironmentVariable(variableName: string): boolean {
+  const value = requireEnvironmentVariable(variableName);
+  if (value !== "true" && value !== "false") {
+    throw new Error(`${variableName} must be "true" or "false", got: ${value}`);
+  }
+  return value === "true";
+}
+
+/**
+ * Whether this process may open IBKR market-data lines through the shared
+ * line budget (marketDataLineBudget.ts). Read at call time, not at boot:
+ * only the web dyno and the one-off jobs reserve lines (the VPS worker never
+ * does), and the web dyno additionally validates it at startup (server.ts)
+ * so a missing value fails loudly there. Local dev shares the paper login
+ * with staging, so it keeps this "false" unless a live screen is being tested.
+ */
+export function ibkrMarketDataLinesEnabled(): boolean {
+  return requireBooleanEnvironmentVariable("IBKR_MARKET_DATA_LINES_ENABLED");
+}
+
 export const environment = {
   nodeEnvironment: process.env.NODE_ENV ?? "development",
   databaseUrl: requireEnvironmentVariable("DATABASE_URL"),

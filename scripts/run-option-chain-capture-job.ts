@@ -41,6 +41,10 @@ import { seedDaySignals } from "../src/lib/daySignalsSeed.js";
 // session" errors against the VPS worker (found 2026-09-23).
 sharedReadConnection.setBorrowTimeoutMs(60_000);
 
+// ~20 minutes observed for 21 tickers (2026-09-23), growing with the
+// shortlist — see RunJobOptions.staleRunningJobThresholdMs.
+const optionChainCaptureStaleRunningThresholdMs = 60 * 60 * 1000;
+
 async function main(): Promise<void> {
   const forced = process.argv.includes("--force");
   if (!forced && !isWithinChainCaptureClockWindow(new Date())) {
@@ -68,7 +72,7 @@ async function main(): Promise<void> {
         // tickers failed is surfaced via details and the failed snapshot rows.
         return { details: { ...result } };
       },
-      { triggeredBy: "scheduler" },
+      { triggeredBy: "scheduler", staleRunningJobThresholdMs: optionChainCaptureStaleRunningThresholdMs },
     );
   } catch (error) {
     // Already recorded/notified by runJob — the fit below must still run

@@ -7,14 +7,21 @@ import type { RequestHandler } from "express";
 const windowMs = 60_000;
 let timestamps: number[] = [];
 
+function pruneOlderThanWindow(now: number): void {
+  timestamps = timestamps.filter((timestamp) => now - timestamp <= windowMs);
+}
+
+// Pruned on every push, not only when the Pulse page reads it — otherwise
+// the array grows by one entry per request for as long as nobody opens Pulse.
 export const requestRateMiddleware: RequestHandler = (_request, _response, next) => {
-  timestamps.push(Date.now());
+  const now = Date.now();
+  pruneOlderThanWindow(now);
+  timestamps.push(now);
   next();
 };
 
 export function requestRateStats(): { requestsPerMinute: number } {
-  const now = Date.now();
-  timestamps = timestamps.filter((timestamp) => now - timestamp <= windowMs);
+  pruneOlderThanWindow(Date.now());
   return { requestsPerMinute: timestamps.length };
 }
 

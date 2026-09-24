@@ -1,5 +1,6 @@
 import { EventName, Stock } from "@stoqey/ib";
-import { connectToIbkrGateway } from "./connectIbkr.js";
+import type { connectToIbkrGateway } from "./connectIbkr.js";
+import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "./sharedReadConnection.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { captureMarketDataSnapshot } from "./captureMarketDataSnapshot.js";
 import { db } from "../db/connection.js";
@@ -178,16 +179,17 @@ export async function getCachedContractDetails(
  * not a hot path, not worth a persistent server-side connection).
  */
 export async function fetchNewTickerData(symbol: string): Promise<NewTickerData> {
-  const connection = await connectToIbkrGateway();
+  const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "fetchNewTickerData");
   try {
     requestRealtimeMarketData(connection.ib);
 
-    const contractDetailsPromise = lookupContractDetails(connection);
-    connection.ib.reqContractDetails(contractDetailsReqId, new Stock(symbol, "SMART", "USD"));
+    const detailsReqId = nextReqIdFor(connection.ib, () => contractDetailsReqId);
+    const contractDetailsPromise = lookupContractDetails(connection, detailsReqId);
+    connection.ib.reqContractDetails(detailsReqId, new Stock(symbol, "SMART", "USD"));
 
     const [contractDetails, marketData] = await Promise.all([
       contractDetailsPromise,
-      captureMarketDataSnapshot(connection, marketDataReqId, symbol, interactiveMarketDataTimeoutMs),
+      captureMarketDataSnapshot(connection, nextReqIdFor(connection.ib, () => marketDataReqId), symbol, interactiveMarketDataTimeoutMs),
     ]);
 
     return { ...contractDetails, ...marketData };

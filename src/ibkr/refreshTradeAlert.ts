@@ -1,13 +1,15 @@
-import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { OptionType } from "@stoqey/ib";
 import { db } from "../db/connection.js";
-import { connectToIbkrGateway } from "./connectIbkr.js";
+import type { connectToIbkrGateway } from "./connectIbkr.js";
+import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedLiveConnection } from "./sharedReadConnection.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
-import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
-import { daysBetween, parseExpiry, quoteOptionChain, type OptionQuote } from "./fetchOptionChain.js";
+import { daysBetween, parseExpiry, type OptionQuote } from "./fetchOptionChain.js";
+import { hasPriceAndDelta, quoteContracts } from "./quoteContracts.js";
+import { resolveScanSpotPrice } from "./generateTradeAlertCandidates.js";
 import { decayThresholdFraction, dteThreshold, ivRankThresholdForDecayRoll } from "./generateRollCandidates.js";
 import type { AlertCandidate, AlertStrategyKey } from "./generateTradeAlertCandidates.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
+import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
 import { estimateRollCommissionComponent, halfSpread } from "../lib/rollEconomics.js";
 import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConflictContext } from "./calendarConflict.js";
@@ -28,16 +30,20 @@ function midOrLast(quote: OptionQuote | null): number | null {
   return quote.bid !== null && quote.ask !== null ? (quote.bid + quote.ask) / 2 : quote.last;
 }
 
-async function quoteContract(
-  connection: IbkrConnection,
-  symbol: string,
-  expiryIso: string,
-  strike: number,
-  right: "call" | "put",
-): Promise<OptionQuote | null> {
-  const quotes = await quoteOptionChain(connection, symbol, [{ expiry: toYyyymmdd(expiryIso), strikes: [strike] }]);
-  const optionType = right === "call" ? OptionType.Call : OptionType.Put;
-  return quotes.find((q) => q.strike === strike && q.right === optionType) ?? null;
+// Exact contracts only (the alert's own strike, or a roll's closing leg plus
+// replacement) in ONE pooled-first request — the old path quoted call+put
+// for each, one reservation after another.
+async function quoteExactContracts(connection: IbkrConnection, symbol: string, legs: { expiryIso: string; strike: number; right: "call" | "put" }[]): Promise<(OptionQuote | null)[]> {
+  const quotes = await quoteContracts(
+    connection.ib,
+    symbol,
+    legs.map((leg) => ({ expiry: toYyyymmdd(leg.expiryIso), strike: leg.strike, right: leg.right === "call" ? OptionType.Call : OptionType.Put })),
+  );
+  return legs.map((leg) => {
+    const optionType = leg.right === "call" ? OptionType.Call : OptionType.Put;
+    const quote = quotes.find((q) => q.expiry === toYyyymmdd(leg.expiryIso) && q.strike === leg.strike && q.right === optionType) ?? null;
+    return quote && hasPriceAndDelta(quote) ? quote : null;
+  });
 }
 
 async function refreshNewTradeCandidate(
@@ -46,12 +52,14 @@ async function refreshNewTradeCandidate(
   strategyKey: AlertStrategyKey,
   candidate: AlertCandidate,
   calendarContext: CalendarConflictContext,
+  knownQuote?: OptionQuote | null,
 ): Promise<AlertCandidate | string> {
-  const [pricing, quote] = await Promise.all([
-    lookupPricingSnapshot(connection, symbol, 2),
-    quoteContract(connection, symbol, candidate.expiry, candidate.strike, candidate.right),
+  const [resolvedSpot, quote, riskFreeRate] = await Promise.all([
+    resolveScanSpotPrice(connection, symbol, nextReqIdFor(connection.ib, () => 2)),
+    knownQuote !== undefined ? Promise.resolve(knownQuote) : quoteExactContracts(connection, symbol, [{ expiryIso: candidate.expiry, strike: candidate.strike, right: candidate.right }]).then((quotes) => quotes[0] ?? null),
+    getRiskFreeRate().catch(() => null),
   ]);
-  const spotPrice = pricing.last ?? (await getBestKnownStockPrice(symbol)) ?? candidate.spotPrice ?? pricing.previousClose;
+  const spotPrice = resolvedSpot ?? candidate.spotPrice;
   const premium = midOrLast(quote);
   if (!quote || premium === null || premium <= 0 || quote.delta === null) {
     return "No live quote available for this contract right now — try again during market hours.";
@@ -70,6 +78,7 @@ async function refreshNewTradeCandidate(
           impliedVolatility: quote.impliedVolatility,
           daysToExpiry: dte,
           right: candidate.right,
+          riskFreeRate,
         })
       : null;
 
@@ -177,7 +186,7 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
 
   const strategyKey = alert.strategy_key as AlertStrategyKey;
   const calendarContext = await fetchCalendarConflictContext(alert.ticker_id as string);
-  const connection = await connectToIbkrGateway();
+  const connection = await borrowSharedConnectionOrConnect(sharedLiveConnection, "refreshTradeAlert");
   try {
     requestRealtimeMarketData(connection.ib);
 
@@ -186,7 +195,7 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
       const refreshed = await refreshNewTradeCandidate(connection, alert.symbol, strategyKey, candidate, calendarContext);
       if (typeof refreshed === "string") return { ok: false, error: refreshed };
 
-      await db("trade_alerts").where({ id: alertId }).update({
+      await db("trade_alerts").where({ id: alertId, status: "pending" }).update({
         suggested_structure: JSON.stringify(refreshed),
         referenced_strikes: JSON.stringify(referencedStrikesForNewTrade(refreshed)),
         rationale: rationaleForRefreshedNewTrade(strategyKey, alert.symbol, refreshed, calendarContext),
@@ -203,8 +212,11 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
       replacement: AlertCandidate;
     };
 
-    const closeQuote = await quoteContract(connection, alert.symbol, structure.closeLeg.expiry, structure.closeLeg.strike, structure.closeLeg.right);
-    const currentPrice = midOrLast(closeQuote);
+    const [closeQuote, replacementQuote] = await quoteExactContracts(connection, alert.symbol, [
+      { expiryIso: structure.closeLeg.expiry, strike: structure.closeLeg.strike, right: structure.closeLeg.right },
+      { expiryIso: structure.replacement.expiry, strike: structure.replacement.strike, right: structure.replacement.right },
+    ]);
+    const currentPrice = midOrLast(closeQuote ?? null);
     if (currentPrice === null) {
       return { ok: false, error: "No live quote available for the closing leg right now — try again during market hours." };
     }
@@ -220,7 +232,7 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
       if (ivMetrics.ivRank === null || ivMetrics.ivRank >= ivRankThresholdForDecayRoll) stillTriggered = true;
     }
 
-    const refreshedReplacement = await refreshNewTradeCandidate(connection, alert.symbol, strategyKey, structure.replacement, calendarContext);
+    const refreshedReplacement = await refreshNewTradeCandidate(connection, alert.symbol, strategyKey, structure.replacement, calendarContext, replacementQuote ?? null);
     if (typeof refreshedReplacement === "string") return { ok: false, error: refreshedReplacement };
 
     const commissionComponent = await estimateRollCommissionComponent();
@@ -231,7 +243,7 @@ export async function refreshTradeAlert(alertId: string): Promise<TradeAlertRefr
 
     const refreshedCloseLeg = { ...structure.closeLeg, currentPrice };
     await db("trade_alerts")
-      .where({ id: alertId })
+      .where({ id: alertId, status: "pending" })
       .update({
         suggested_structure: JSON.stringify({
           closeLeg: refreshedCloseLeg,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { buildSignalCandidates, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, contractKey, countGrades, mergeLiveQuotes, scaleSlicesToLiveSpot, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
+import { candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, contractKey, countGrades, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 
 const forward = 100;
@@ -54,7 +54,8 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     freeShares: 200,
     dailyBarCount: 1253,
     dividendCadenceUnknown: false,
-    todayEasternIso: "2026-09-22",
+    // Same day as the snapshot: the surface is scored as fitted. See the rebaseSlicesToToday tests for a stale snapshot.
+    todayEasternIso: "2026-09-21",
     ...overrides,
   };
 }
@@ -78,6 +79,36 @@ describe("computeAtmImpliedVolatility", () => {
     const atLiveSpot = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: 108, priceSource: "live" }).atmImpliedVolatility;
     expect(atSnapshot).toBeCloseTo(Math.sqrt(sviTotalVariance(params, 0) / years30), 12);
     expect(atLiveSpot).toBe(atSnapshot);
+  });
+});
+
+describe("rebaseSlicesToToday (stale snapshot)", () => {
+  it("re-times each slice to today, keeps the surface IV at every strike, and drops expiries already past", () => {
+    const stale = [slice("2026-09-22", 1 / 365), slice("2026-10-21", years30), slice("2026-11-20", years60)];
+    const rebased = rebaseSlicesToToday(stale, "2026-09-23");
+    expect(rebased.map((s) => s.expiry)).toEqual(["2026-10-21", "2026-11-20"]);
+    expect(rebased[0]!.yearsToExpiry).toBeCloseTo(28 / 365, 12);
+    expect(rebased[1]!.yearsToExpiry).toBeCloseTo(58 / 365, 12);
+    for (const k of [-0.2, 0, 0.15]) {
+      const ivBefore = Math.sqrt(sviTotalVariance(params, k) / years30);
+      const ivAfter = Math.sqrt(sviTotalVariance(rebased[0]!.parameters!, k) / rebased[0]!.yearsToExpiry);
+      expect(ivAfter).toBeCloseTo(ivBefore, 12);
+    }
+  });
+
+  it("is the identity when today is the snapshot day", () => {
+    const same = [slice("2026-10-21", years30)];
+    expect(rebaseSlicesToToday(same, "2026-09-21")).toEqual(same);
+  });
+
+  it("makes yesterday's snapshot score one day shorter today", () => {
+    const today = scoreTicker(inputs(), account, permissiveSettings);
+    const stale = scoreTicker(inputs({ todayEasternIso: "2026-09-22" }), account, permissiveSettings);
+    const todayPut = today.candidates.find((c) => c.expiry === "2026-10-21" && c.strike === 90)!;
+    const stalePut = stale.candidates.find((c) => c.expiry === "2026-10-21" && c.strike === 90)!;
+    expect(todayPut.dte).toBe(30);
+    expect(stalePut.dte).toBe(29);
+    expect(stalePut.surfaceImpliedVolatility).toBeCloseTo(todayPut.surfaceImpliedVolatility, 12);
   });
 });
 

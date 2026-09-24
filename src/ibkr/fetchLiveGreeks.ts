@@ -1,7 +1,12 @@
 import { EventName, MarketDataType, Option, OptionType, type IBApi } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
-import { isDelayedDataFallbackNotice, requestRealtimeMarketData, waitForAbortOrGatewayDisconnect } from "./requestMarketData.js";
+import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "./requestMarketData.js";
+import { randomUUID } from "node:crypto";
+import { describeMarketDataLineShortage, releaseMarketDataLines, reserveMarketDataLines } from "./marketDataLineBudget.js";
+
+// Budgeted like fetchLivePrices (2026-09-24): one short reservation per call.
+const snapshotReservationTtlSeconds = 15;
 
 export interface GreeksContract {
   key: string;
@@ -155,6 +160,17 @@ function requestLiveGreeks(ib: IBApi, allocateReqId: () => number, contracts: Gr
  */
 export async function fetchLiveGreeks(contracts: GreeksContract[]): Promise<Record<string, Greeks>> {
   if (contracts.length === 0) return {};
+  const holder = `snapshot:greeks:${randomUUID()}`;
+  const reservation = await reserveMarketDataLines(holder, contracts.length, snapshotReservationTtlSeconds);
+  if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, `a ${contracts.length}-contract greeks snapshot`, contracts.length));
+  try {
+    return await fetchLiveGreeksFromIbkr(contracts);
+  } finally {
+    releaseMarketDataLines(holder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${holder}: ${error instanceof Error ? error.message : error}`));
+  }
+}
+
+async function fetchLiveGreeksFromIbkr(contracts: GreeksContract[]): Promise<Record<string, Greeks>> {
 
   let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
   try {
@@ -180,134 +196,6 @@ export async function fetchLiveGreeks(contracts: GreeksContract[]): Promise<Reco
     let nextReqId = 20_000;
     return await requestLiveGreeks(ib, () => nextReqId++, contracts);
   } finally {
-    connection.disconnect();
-  }
-}
-
-// How long to wait for FROZEN greeks to land before emitting the first
-// update regardless of what's arrived — see fetchLivePrices.ts's matching
-// constant for the measurement this is based on (2.4-2.8s for all 4 real
-// option legs tested, tmp/testFrozenMarketData.ts).
-const frozenGraceMs = 3_000;
-
-/**
- * Live-upgrading variant for the SSE-backed Positions screen (approved
- * 2026-09-09): emits FROZEN greeks first — fast, reliable, not gated on a
- * live trade occurring — then switches to a genuine REALTIME streaming
- * subscription and emits again whenever greeks actually change, for as long
- * as `signal` stays unaborted. Same shape as fetchLivePrices.ts's
- * streamLivePrices — see its header comment for the full reasoning.
- *
- * Always opens its own one-shot connection, not the shared read connection
- * — same reasoning as streamLivePrices.
- */
-export async function streamLiveGreeks(contracts: GreeksContract[], onUpdate: (greeks: Record<string, Greeks>) => void, signal: AbortSignal): Promise<void> {
-  if (contracts.length === 0) return;
-
-  // Shared read connection first (no per-stream tunnel + handshake), one-shot
-  // connection only when it isn't available — same as streamLivePrices.
-  let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
-  try {
-    borrowed = await sharedReadConnection.borrow();
-  } catch (error) {
-    console.log(
-      `streamLiveGreeks: shared read connection unavailable (${error instanceof Error ? error.message : error}), falling back to a one-shot connection.`,
-    );
-  }
-  const connection = borrowed
-    ? { ib: borrowed.ib, disconnect: borrowed.release }
-    : await connectToIbkrGateway();
-  const { ib } = connection;
-
-  const greeksByKey = new Map<string, Greeks>();
-  contracts.forEach((contract) => greeksByKey.set(contract.key, { delta: null, gamma: null, vega: null, theta: null }));
-  const reqIdToContract = new Map<number, GreeksContract>();
-  const allReqIds = new Set<number>();
-  let nextOneShotReqId = 1;
-  const allocateReqId = () => (borrowed ? sharedReadConnection.allocateReqId() : nextOneShotReqId++);
-
-  function greeksEqual(a: Greeks, b: Greeks): boolean {
-    return (
-      a.delta === b.delta &&
-      a.gamma === b.gamma &&
-      a.vega === b.vega &&
-      a.theta === b.theta &&
-      a.impliedVolatility === b.impliedVolatility &&
-      a.underlyingPrice === b.underlyingPrice
-    );
-  }
-
-  function onTickOptionComputation(
-    reqId: number,
-    tickType: number,
-    _tickAttrib: number | undefined,
-    impliedVol?: number,
-    delta?: number,
-    _optPrice?: number,
-    _pvDividend?: number,
-    gamma?: number,
-    vega?: number,
-    theta?: number,
-    underlyingPrice?: number,
-  ) {
-    const contract = reqIdToContract.get(reqId);
-    if (!contract || (tickType !== 83 && tickType !== 13)) return;
-    // Merge, don't replace — see requestLiveGreeks's matching comment above.
-    const previous = greeksByKey.get(contract.key)!;
-    const next: Greeks = {
-      delta: delta ?? previous.delta,
-      gamma: gamma ?? previous.gamma,
-      vega: vega ?? previous.vega,
-      theta: theta ?? previous.theta,
-      impliedVolatility: impliedVol ?? previous.impliedVolatility ?? null,
-      underlyingPrice: underlyingPrice ?? previous.underlyingPrice ?? null,
-    };
-    if (greeksEqual(previous, next)) return;
-    greeksByKey.set(contract.key, next);
-    onUpdate(Object.fromEntries(greeksByKey));
-  }
-
-  function onError(error: Error, code: number, reqId: number) {
-    const contract = reqIdToContract.get(reqId);
-    if (!contract) return;
-    if (isDelayedDataFallbackNotice(code)) return;
-    console.error(`streamLiveGreeks error for ${contract.symbol} ${contract.expiry} ${contract.strike}${contract.right} (code ${code}): ${error.message}`);
-  }
-
-  ib.on(EventName.tickOptionComputation, onTickOptionComputation);
-  ib.on(EventName.error, onError);
-
-  try {
-    // Phase 1: FROZEN.
-    ib.reqMarketDataType(MarketDataType.FROZEN);
-    for (const contract of contracts) {
-      const reqId = allocateReqId();
-      reqIdToContract.set(reqId, contract);
-      allReqIds.add(reqId);
-      ib.reqMktData(reqId, new Option(contract.symbol, contract.expiry, contract.strike, contract.right, "SMART"), "", true, false);
-    }
-    await new Promise((resolve) => setTimeout(resolve, frozenGraceMs));
-    onUpdate(Object.fromEntries(greeksByKey));
-
-    if (signal.aborted) return;
-
-    // Phase 2: REALTIME streaming, fresh reqIds, kept open until aborted.
-    reqIdToContract.clear();
-    ib.reqMarketDataType(MarketDataType.REALTIME);
-    for (const contract of contracts) {
-      const reqId = allocateReqId();
-      reqIdToContract.set(reqId, contract);
-      allReqIds.add(reqId);
-      ib.reqMktData(reqId, new Option(contract.symbol, contract.expiry, contract.strike, contract.right, "SMART"), "", false, false);
-    }
-
-    await waitForAbortOrGatewayDisconnect(ib, signal);
-  } finally {
-    for (const reqId of allReqIds) {
-      ib.cancelMktData(reqId);
-    }
-    ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
-    ib.removeListener(EventName.error, onError);
     connection.disconnect();
   }
 }

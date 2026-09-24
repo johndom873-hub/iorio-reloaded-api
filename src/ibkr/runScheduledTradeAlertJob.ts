@@ -10,9 +10,8 @@ import { runJob } from "../lib/runJob.js";
 // after the nightly chain capture.
 
 export async function runScheduledTradeAlertJob(): Promise<void> {
-  // Guard lives here, not in runTradeAlertGeneration.ts, so the manual
-  // "Run Now" button (routes/tradeAlerts.ts) still works on weekends if
-  // someone deliberately wants to trigger it.
+  // Guard lives here, not in runTradeAlertGeneration.ts, which is the
+  // scan itself (also exercised by tests) and has no market-day opinion.
   if (await isMarketClosedToday()) {
     console.log("Skipping trade_alert_generation — market closed today.");
     return;
@@ -24,9 +23,8 @@ export async function runScheduledTradeAlertJob(): Promise<void> {
       // end-of-run summary, roll alerts go out as a single batch message as
       // soon as the roll scan finishes, then each shortlisted ticker gets its
       // own message (covering both strategies) as soon as its scan finishes —
-      // this only applies to the scheduled job. The manual "Run Now" SSE route
-      // (routes/tradeAlerts.ts) doesn't notify at all, since that's a
-      // foreground run with live progress already visible in the browser.
+      // (the "Run Alerts Now" button that used to run this without notifying
+      // was removed 2026-09-24 — the scan is scheduled-only now).
       // Telegram's 4096-char cap is handled by notifyTelegram's truncation, so
       // a very large message just gets cut off rather than failing to send.
       const { tickersScanned, totalNewAlerts } = await runTradeAlertGeneration(

@@ -1,4 +1,6 @@
 import { EventName, Stock, type TickType } from "@stoqey/ib";
+import { randomUUID } from "node:crypto";
+import { describeMarketDataLineShortage, releaseMarketDataLines, reserveMarketDataLines } from "./marketDataLineBudget.js";
 import type { IbkrConnection } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 
@@ -50,12 +52,27 @@ export interface CandidateEnrichment {
  * pacing, since this codebase has hit real IBKR pacing/contention bugs
  * firing concurrent requests before (see PROGRESS.md).
  */
-export function enrichCandidate(
+export async function enrichCandidate(
   connection: IbkrConnection,
   reqId: number,
   symbol: string,
   timeoutMs: number = defaultEnrichmentTimeoutMs,
 ): Promise<CandidateEnrichment> {
+  const holder = `snapshot:scanner:${symbol}:${randomUUID()}`;
+  const reservation = await reserveMarketDataLines(holder, 1, Math.ceil(timeoutMs / 1000) + 5);
+  if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, `${symbol} scanner enrichment`, 1));
+  try {
+    return await enrichCandidateUnbudgeted(connection, reqId, symbol, timeoutMs);
+  } finally {
+    releaseMarketDataLines(holder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${holder}: ${error instanceof Error ? error.message : error}`));
+  }
+}
+
+// Settles a short grace after every field it asks for has arrived instead of
+// always waiting the full timeout (2026-09-24); the timeout stays as the ceiling.
+const afterAllFieldsGraceMs = 500;
+
+function enrichCandidateUnbudgeted(connection: IbkrConnection, reqId: number, symbol: string, timeoutMs: number): Promise<CandidateEnrichment> {
   return new Promise((resolve) => {
     let bid: number | null = null;
     let ask: number | null = null;
@@ -81,14 +98,18 @@ export function enrichCandidate(
       if (fieldId === OPTION_IMPLIED_VOL_TICK) result.impliedVolatility = value;
       if (fieldId === OPTION_CALL_OPEN_INTEREST_TICK) result.callOpenInterest = value;
       if (fieldId === OPTION_PUT_OPEN_INTEREST_TICK) result.putOpenInterest = value;
+      const allFieldsIn = bid !== null && ask !== null && result.lastPrice !== null && result.avgShareVolume !== null && result.impliedVolatility !== null && result.callOpenInterest !== null && result.putOpenInterest !== null;
+      if (allFieldsIn && graceTimer === null) graceTimer = setTimeout(finish, afterAllFieldsGraceMs);
     };
 
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
     const timer = setTimeout(finish, timeoutMs);
 
     function finish() {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (graceTimer !== null) clearTimeout(graceTimer);
       connection.ib.off(EventName.tickPrice, onTick);
       connection.ib.off(EventName.tickSize, onTick);
       connection.ib.off(EventName.tickGeneric, onTick);

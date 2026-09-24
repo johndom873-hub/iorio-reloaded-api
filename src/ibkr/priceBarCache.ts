@@ -6,6 +6,7 @@ import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { fetchHistoricalBarsRaw, type ChartRange, type PriceBar } from "./fetchTickerOverview.js";
 import { minDaysForIvPercentile } from "../lib/ivMetrics.js";
 import { normalizeBarVolume } from "../lib/normalizeBarVolume.js";
+import { lastCompletedSessionDate } from "../lib/marketSessionStatus.js";
 
 // MA99 (technicalIndicators.ts) is the deeper of the two indicator
 // thresholds this backfill exists for — IV Percentile only needs
@@ -75,7 +76,36 @@ const intradayConfig: Record<IntradayRange, { barSize: BarSizeSetting; fullDurat
 // use covers "All", so there's never a second cold fetch needed for the
 // other two once a ticker's daily cache is warm.
 const dailyBackfillDuration = "20 Y";
-const dailyTopUpDuration = "5 D";
+// Top-ups are sized from the gap since the newest cached bar (2026-09-24):
+// a fixed 5-day window left a permanent hole for any ticker not viewed for
+// a while, and a ticker whose newest daily bar is already the last
+// completed session skips IBKR entirely.
+const dailyTopUpMinimumDays = 5;
+const dailyTopUpMaximumDays = 365;
+
+function daysBetweenUtc(from: Date, to: Date): number {
+  return Math.max(0, Math.ceil((to.getTime() - from.getTime()) / 86_400_000));
+}
+
+function dailyTopUpDurationFor(latestCached: Date, now: Date): string {
+  const gapDays = daysBetweenUtc(latestCached, now);
+  if (gapDays > dailyTopUpMaximumDays) return dailyBackfillDuration;
+  return `${Math.max(dailyTopUpMinimumDays, gapDays + 2)} D`;
+}
+
+function intradayTopUpDurationFor(latestCached: Date, now: Date, configured: string, full: string): string {
+  const gapDays = daysBetweenUtc(latestCached, now);
+  const configuredDays = Number(configured.trim().split(/\s+/)[0]);
+  const fullDate = subtractDuration(now, full);
+  if (latestCached <= fullDate) return full;
+  return `${Math.max(configuredDays, gapDays + 1)} D`;
+}
+
+async function dailyBarsAreCurrent(latestCached: Date | null): Promise<boolean> {
+  if (!latestCached) return false;
+  const lastSession = await lastCompletedSessionDate();
+  return latestCached.toISOString().slice(0, 10) >= lastSession;
+}
 
 function subtractDuration(from: Date, duration: string): Date {
   const match = duration.trim().match(/^(\d+)\s*([DWMY])$/i);
@@ -301,7 +331,9 @@ async function needsLiveFetch(tickerId: string | null, symbol: string, range: Ch
   if (!tickerId) return true;
   if (range === "1Y" || range === "5Y" || range === "All") {
     const latestCached = await getLatestDailyBarDate(tickerId);
-    return !latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range);
+    if (!latestCached) return true;
+    if (isFreshEnoughToSkipLiveFetch(symbol, range)) return false;
+    return !(await dailyBarsAreCurrent(latestCached));
   }
   const cfg = intradayConfig[range];
   const latestCached = await getLatestIntradayBarTime(tickerId, cfg.barSize);
@@ -340,8 +372,8 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
     }
 
     const latestCached = await getLatestDailyBarDate(tickerId);
-    if (!latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range)) {
-      const fetchDuration = latestCached ? dailyTopUpDuration : dailyBackfillDuration;
+    if (!latestCached || (!isFreshEnoughToSkipLiveFetch(symbol, range) && !(await dailyBarsAreCurrent(latestCached)))) {
+      const fetchDuration = latestCached ? dailyTopUpDurationFor(latestCached, new Date()) : dailyBackfillDuration;
       const freshBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, fetchDuration, reqId);
       // Best-effort — a failed IV fetch shouldn't block the price bars this
       // chart actually needs; falls back to no IV data for this pass rather
@@ -371,7 +403,7 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
 
   const latestCached = await getLatestIntradayBarTime(tickerId, cfg.barSize);
   if (!latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range)) {
-    const fetchDuration = latestCached ? cfg.topUpDuration : cfg.fullDuration;
+    const fetchDuration = latestCached ? intradayTopUpDurationFor(latestCached, new Date(), cfg.topUpDuration, cfg.fullDuration) : cfg.fullDuration;
     const freshBars = await fetchHistoricalBarsRaw(connection, symbol, cfg.barSize, fetchDuration, reqId);
     await upsertIntradayBars(tickerId, cfg.barSize, freshBars);
     markLiveFetched(symbol, range);

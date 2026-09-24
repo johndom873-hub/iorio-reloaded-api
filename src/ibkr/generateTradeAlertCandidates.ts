@@ -1,8 +1,9 @@
 import { getBestKnownStockPrice } from "../lib/priceService.js";
-import { EventName, OptionType } from "@stoqey/ib";
+import { OptionType } from "@stoqey/ib";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { computeProbabilityOfProfit } from "../lib/blackScholesPop.js";
 import { computeIvMetrics, type IvMetrics } from "../lib/ivMetrics.js";
+import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { fetchAvailableUncoveredShares, fetchOpenPositionStrategyKeys } from "../lib/positionQueries.js";
 import {
   computeMovingAverages,
@@ -15,12 +16,15 @@ import { fetchCalendarConflictContext, findCalendarConflict, type CalendarConfli
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import { getCachedChartBars } from "./priceBarCache.js";
+import { hasPriceAndDelta, quoteContracts, type QuoteContractRequest } from "./quoteContracts.js";
+import { peekPooledQuote } from "./marketDataPool.js";
+import { nextReqIdFor } from "./sharedReadConnection.js";
+import { db } from "../db/connection.js";
+import { easternDateIso } from "../lib/marketSessionStatus.js";
 import {
   daysBetween,
-  fetchQuotesForContracts,
   loadStoredOptionChain,
   parseExpiry,
-  quoteOptionChain,
   type ExpiryStrikes,
   type OptionQuote,
   type StoredOptionChain,
@@ -156,6 +160,10 @@ const maxExpiriesToScan = 2;
 // pathologically fine strike grids.
 const otmBandFraction = 0.4;
 const maxStrikeCandidatesPerExpiry = 50;
+// One-shot-connection numbering only: on a shared connection every id comes
+// from that connection's own counter (nextReqIdFor), or two concurrent
+// callers collide ("Duplicate ticker id", found 2026-09-24 once the
+// per-ticker refresh started borrowing the shared live connection).
 const contractDetailsReqId = 1;
 const pricingReqId = 2;
 const hourlyBarsReqId = 3;
@@ -211,13 +219,32 @@ const emptyChain: StoredOptionChain = { expirations: [], strikesByExpiry: new Ma
 // Factored out so the batch scan (generateTradeAlertCandidatesForTicker) can
 // fetch this once per ticker and reuse it across both strategies, instead of
 // each strategy paying for it independently.
-async function fetchTickerPrepData(connection: IbkrConnection, symbol: string, tickerId: string): Promise<TickerPrepData> {
-  const contractDetailsPromise = getCachedContractDetails(connection, symbol, contractDetailsReqId);
-  const pricingPromise = lookupPricingSnapshot(connection, symbol, pricingReqId);
+/**
+ * The underlying's current price for a scan: the pool first (a screen already
+ * streaming this stock costs nothing), else one pricing snapshot, then the
+ * shared price hierarchy (priceService.ts) — a real last, else the stored
+ * last known good; the previous close only as a last resort.
+ */
+export async function resolveScanSpotPrice(connection: IbkrConnection, symbol: string, reqId: number): Promise<number | null> {
+  const pooled = peekPooledQuote({ key: symbol, legType: "stock", symbol })?.last ?? null;
+  if (pooled !== null) return pooled;
+  try {
+    const pricing = await lookupPricingSnapshot(connection, symbol, reqId);
+    return pricing.last ?? (await getBestKnownStockPrice(symbol)) ?? pricing.previousClose;
+  } catch (error) {
+    // A snapshot that times out (REALTIME outside market hours) must not sink
+    // the whole scan/refresh: the stored last known good price still picks
+    // the strikes correctly, and the option quotes decide the rest.
+    console.warn(`${symbol}: pricing snapshot failed (${error instanceof Error ? error.message : error}) — using the last known price.`);
+    return getBestKnownStockPrice(symbol);
+  }
+}
 
-  const [contractDetails, pricing] = await Promise.all([contractDetailsPromise, pricingPromise]);
-  // Shared price hierarchy (priceService.ts): a real last, else the stored last known good; the previous close only as a last resort.
-  const spotPrice = pricing.last ?? (await getBestKnownStockPrice(symbol)) ?? pricing.previousClose;
+async function fetchTickerPrepData(connection: IbkrConnection, symbol: string, tickerId: string, knownSpotPrice?: number): Promise<TickerPrepData> {
+  const contractDetailsPromise = getCachedContractDetails(connection, symbol, nextReqIdFor(connection.ib, () => contractDetailsReqId));
+  const spotPricePromise = knownSpotPrice !== undefined ? Promise.resolve(knownSpotPrice) : resolveScanSpotPrice(connection, symbol, nextReqIdFor(connection.ib, () => pricingReqId));
+
+  const [contractDetails, spotPrice] = await Promise.all([contractDetailsPromise, spotPricePromise]);
   if (!contractDetails.conId || !spotPrice) {
     return { conId: contractDetails.conId, spotPrice: null, chain: emptyChain };
   }
@@ -235,7 +262,7 @@ async function fetchTickerPrepData(connection: IbkrConnection, symbol: string, t
 // fail-open treatment as calendarUnverified above.
 async function fetchTickerSupportResistance(connection: IbkrConnection, symbol: string, spotPrice: number): Promise<SupportResistanceResult | null> {
   try {
-    const hourlyBars = await getCachedChartBars(connection, symbol, "3M", hourlyBarsReqId);
+    const hourlyBars = await getCachedChartBars(connection, symbol, "3M", nextReqIdFor(connection.ib, () => hourlyBarsReqId));
     if (hourlyBars.length === 0) return null;
     const lastBar = hourlyBars[hourlyBars.length - 1]!;
     const currentCandleIsOpen = Date.now() / 1000 - lastBar.time < oneHourInSeconds;
@@ -257,7 +284,7 @@ async function fetchTickerTrendLabel(
   spotPrice: number,
 ): Promise<"uptrend" | "downtrend" | "mixed" | null> {
   try {
-    const dailyBars = await getCachedChartBars(connection, symbol, "1Y", dailyBarsReqId);
+    const dailyBars = await getCachedChartBars(connection, symbol, "1Y", nextReqIdFor(connection.ib, () => dailyBarsReqId));
     if (dailyBars.length === 0) return null;
     const closes = dailyBars.map((bar) => bar.close);
     return buildTrendLabel(spotPrice, computeMovingAverages(closes));
@@ -276,6 +303,58 @@ function pickExpiryStrikesForStrategy(chain: StoredOptionChain, spotPrice: numbe
     .filter((expiryStrikes) => expiryStrikes.strikes.length > 0);
 }
 
+/** `${expiryYyyymmdd}|${strike}|${C|P}` → the delta the 10:00 ET chain capture archived today. Empty when there is no capture for today. */
+export type ArchivedDeltas = Map<string, number>;
+
+export function archivedDeltaKey(expiryYyyymmdd: string, strike: number, right: "call" | "put"): string {
+  return `${expiryYyyymmdd}|${strike}|${right === "call" ? "C" : "P"}`;
+}
+
+async function loadArchivedDeltasForToday(tickerId: string): Promise<ArchivedDeltas> {
+  const rows: { expiry: string; strike: string; right: "C" | "P"; delta: string | null }[] = await db("option_quote_snapshots as q")
+    .join("option_chain_snapshots as s", "s.id", "q.snapshot_id")
+    .where({ "s.ticker_id": tickerId, "s.trading_date": easternDateIso(new Date()) })
+    .whereIn("s.status", ["complete", "partial"])
+    .whereNotNull("q.delta")
+    .select(db.raw("to_char(q.expiry, 'YYYYMMDD') as expiry"), "q.strike", db.raw('q.option_right as "right"'), "q.delta");
+  return new Map(rows.map((row) => [`${row.expiry}|${Number(row.strike)}|${row.right}`, Number(row.delta)]));
+}
+
+// How far outside the strategy's delta band an archived delta may sit and the
+// strike still be quoted live — covers the intraday drift since 10:00 ET.
+export const archivedDeltaMargin = 0.1;
+
+/**
+ * Trims the one-sided ±40% strike band to the strikes whose delta, as archived
+ * by today's chain capture, can plausibly land in the strategy's target band
+ * now (approved 2026-09-24). Only the delta band survives rankCandidates
+ * anyway, so the far wings were pure line cost: ~200 contracts per ticker
+ * quoted live to keep a dozen. A strike with no archived delta (not captured,
+ * or captured without a model tick) is kept — absence is not evidence.
+ * With no archive for today at all, the band is quoted in full as before.
+ */
+export function filterStrikesByArchivedDelta(expiryStrikes: ExpiryStrikes[], right: "call" | "put", settings: { deltaTargetMin: number; deltaTargetMax: number }, archived: ArchivedDeltas): ExpiryStrikes[] {
+  if (archived.size === 0) return expiryStrikes;
+  const lower = settings.deltaTargetMin - archivedDeltaMargin;
+  const upper = settings.deltaTargetMax + archivedDeltaMargin;
+  return expiryStrikes
+    .map(({ expiry, strikes }) => ({
+      expiry,
+      strikes: strikes.filter((strike) => {
+        const delta = archived.get(archivedDeltaKey(expiry, strike, right));
+        if (delta === undefined) return true;
+        const magnitude = Math.abs(delta);
+        return magnitude >= lower && magnitude <= upper;
+      }),
+    }))
+    .filter(({ strikes }) => strikes.length > 0);
+}
+
+function toQuoteRequests(expiryStrikes: ExpiryStrikes[], right: "call" | "put"): QuoteContractRequest[] {
+  const optionType = right === "call" ? OptionType.Call : OptionType.Put;
+  return expiryStrikes.flatMap(({ expiry, strikes }) => strikes.map((strike) => ({ expiry, strike, right: optionType })));
+}
+
 function rankCandidates(
   quotes: OptionQuote[],
   right: "call" | "put",
@@ -286,6 +365,7 @@ function rankCandidates(
   ivMetrics: IvMetrics,
   supportResistance: SupportResistanceResult | null,
   trendLabel: "uptrend" | "downtrend" | "mixed" | null,
+  riskFreeRate: number | null,
 ): AlertCandidate[] {
   const optionType = right === "call" ? OptionType.Call : OptionType.Put;
   const today = new Date();
@@ -315,6 +395,7 @@ function rankCandidates(
             impliedVolatility: quote.impliedVolatility,
             daysToExpiry: dte,
             right,
+            riskFreeRate,
           })
         : null;
 
@@ -367,44 +448,62 @@ export async function generateTradeAlertCandidates(
   tickerId: string,
   strategyKey: AlertStrategyKey,
   settings: AlertStrategySettings,
+  options: GenerateTradeAlertCandidatesOptions = {},
 ): Promise<AlertCandidate[]> {
   const right: "call" | "put" = strategyKey === "covered_call" ? "call" : "put";
 
-  const prep = await fetchTickerPrepData(connection, symbol, tickerId);
+  const prep = await fetchTickerPrepData(connection, symbol, tickerId, options.spotPrice);
   if (!prep.conId || !prep.spotPrice) {
     console.warn(`Skipping ${symbol} (${strategyKey}) — missing conId or spot price.`);
     return [];
   }
 
-  const expiryStrikes = pickExpiryStrikesForStrategy(prep.chain, prep.spotPrice, right, settings.dteTargetMin, settings.dteTargetMax);
+  const archivedDeltas = await loadArchivedDeltasForToday(tickerId);
+  const expiryStrikes = filterStrikesByArchivedDelta(pickExpiryStrikesForStrategy(prep.chain, prep.spotPrice, right, settings.dteTargetMin, settings.dteTargetMax), right, settings, archivedDeltas);
   if (expiryStrikes.length === 0) return [];
 
-  const [quotes, calendarContext, ivMetrics, supportResistance, trendLabel] = await Promise.all([
-    quoteOptionChain(connection, symbol, expiryStrikes),
+  // One right only (a covered call never ranks puts) — half the lines of the old call+put chain quote.
+  const [quotes, calendarContext, ivMetrics, supportResistance, trendLabel, riskFreeRate] = await Promise.all([
+    quoteContracts(connection.ib, symbol, toQuoteRequests(expiryStrikes, right), { priorityLines: options.priorityLines }),
     fetchCalendarConflictContext(tickerId),
     computeIvMetrics(tickerId),
     fetchTickerSupportResistance(connection, symbol, prep.spotPrice),
     fetchTickerTrendLabel(connection, symbol, prep.spotPrice),
+    getRiskFreeRate().catch(() => null),
   ]);
-  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice, calendarContext, ivMetrics, supportResistance, trendLabel);
+  return rankCandidates(quotes, right, strategyKey, settings, prep.spotPrice, calendarContext, ivMetrics, supportResistance, trendLabel, riskFreeRate);
 }
 
 /**
  * Batch variant of generateTradeAlertCandidates for the daily trade-alert
  * scan (runTradeAlertGeneration.ts), which needs both covered_call and
  * cash_secured_put candidates for the same ticker. Fetches contractDetails,
- * pricing, and secDefOptParams once instead of once per strategy, and issues
- * a single fetchQuotesForContracts call covering both strategies' strikes
- * instead of two separate quoteOptionChain calls — each of those calls waits
- * a fixed 8s for IBKR to stream ticks back (see quoteTimeoutMs in
- * fetchOptionChain.ts), so this halves that fixed cost per ticker as well as
- * the duplicated setup lookups.
+ * pricing, and secDefOptParams once instead of once per strategy, and quotes
+ * both strategies' strikes through one batched fetch (fetchQuotesInBatches)
+ * instead of two separate quoteOptionChain calls.
  */
+export interface GenerateTradeAlertCandidatesOptions {
+  /** Scheduled scan only — see QuoteContractsOptions.priorityLines. */
+  priorityLines?: boolean;
+  /** The underlying's price when the caller already has it (the recovery path's own snapshot); omitted → resolveScanSpotPrice. */
+  spotPrice?: number;
+  /** Reports how many contracts were quoted and how many came back usable — so a caller can tell "no candidates" from "no quotes". */
+  onQuoteStats?: (stats: QuoteStats) => void;
+}
+
+export interface QuoteStats {
+  requested: number;
+  withPriceAndDelta: number;
+  /** True when the ticker could not even be prepared (no contract id, no spot price, no stored strike grid) — nothing was quoted, so "no candidates" is not a finding. */
+  prepFailed: boolean;
+}
+
 export async function generateTradeAlertCandidatesForTicker(
   connection: IbkrConnection,
   symbol: string,
   tickerId: string,
   settingsByStrategy: Map<AlertStrategyKey, AlertStrategySettings>,
+  options: GenerateTradeAlertCandidatesOptions = {},
 ): Promise<Map<AlertStrategyKey, AlertCandidate[]>> {
   const { ib } = connection;
   const results = new Map<AlertStrategyKey, AlertCandidate[]>();
@@ -412,6 +511,11 @@ export async function generateTradeAlertCandidatesForTicker(
   const prep = await fetchTickerPrepData(connection, symbol, tickerId);
   if (!prep.conId || !prep.spotPrice) {
     console.warn(`Skipping ${symbol} — missing conId or spot price.`);
+    options.onQuoteStats?.({ requested: 0, withPriceAndDelta: 0, prepFailed: true });
+    return results;
+  }
+  if (prep.chain.strikesByExpiry.size === 0) {
+    options.onQuoteStats?.({ requested: 0, withPriceAndDelta: 0, prepFailed: true });
     return results;
   }
   const spotPrice = prep.spotPrice;
@@ -469,26 +573,24 @@ export async function generateTradeAlertCandidatesForTicker(
     })
     .filter((p) => p.expiryStrikes.length > 0);
 
-  const contracts: { expiry: string; strike: number; right: OptionType }[] = [];
-  for (const prep of preps) {
-    const optionType = prep.right === "call" ? OptionType.Call : OptionType.Put;
-    for (const { expiry, strikes } of prep.expiryStrikes) {
-      for (const strike of strikes) {
-        contracts.push({ expiry, strike, right: optionType });
-      }
-    }
+  const archivedDeltas = await loadArchivedDeltasForToday(tickerId);
+  const contracts: QuoteContractRequest[] = preps.flatMap((prep) => toQuoteRequests(filterStrikesByArchivedDelta(prep.expiryStrikes, prep.right, prep.settings, archivedDeltas), prep.right));
+  if (contracts.length === 0) {
+    options.onQuoteStats?.({ requested: 0, withPriceAndDelta: 0, prepFailed: false });
+    return results;
   }
-  if (contracts.length === 0) return results;
 
-  const [quotes, calendarContext, ivMetrics, supportResistance, trendLabel] = await Promise.all([
-    fetchQuotesForContracts(ib, symbol, contracts),
+  const [quotes, calendarContext, ivMetrics, supportResistance, trendLabel, riskFreeRate] = await Promise.all([
+    quoteContracts(ib, symbol, contracts, { priorityLines: options.priorityLines }),
     fetchCalendarConflictContext(tickerId),
     computeIvMetrics(tickerId),
     fetchTickerSupportResistance(connection, symbol, spotPrice),
     fetchTickerTrendLabel(connection, symbol, spotPrice),
+    getRiskFreeRate().catch(() => null),
   ]);
+  options.onQuoteStats?.({ requested: contracts.length, withPriceAndDelta: quotes.filter(hasPriceAndDelta).length, prepFailed: false });
   for (const { strategyKey, settings, right } of preps) {
-    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice, calendarContext, ivMetrics, supportResistance, trendLabel));
+    results.set(strategyKey, rankCandidates(quotes, right, strategyKey, settings, spotPrice, calendarContext, ivMetrics, supportResistance, trendLabel, riskFreeRate));
   }
   return results;
 }

@@ -6,6 +6,7 @@ import { checkPositionReconciliation } from "./checkPositionReconciliation.js";
 import { lookupLatestDailyBar } from "./fetchTickerOverview.js";
 import { runJob } from "../lib/runJob.js";
 import { environment } from "../config/env.js";
+import { db } from "../db/connection.js";
 import { reportDaySignalsLoopLiveness } from "../lib/daySignalsLiveness.js";
 
 // Confirmed 2026-08-27: reqHistoricalData can silently hang (no data, no
@@ -93,6 +94,34 @@ async function competingLiveSessionIsBlockingData(connection: IbkrConnection): P
     connection.ib.reqMarketDataType(MarketDataType.REALTIME);
     connection.ib.reqMktData(reqId, new Stock(HISTORICAL_DATA_PROBE_SYMBOL, "SMART", "USD"), "", false, false);
   });
+}
+
+// Evidence 2026-09-24 (job_runs since 2026-08-24): the SPY probe's "Historical
+// data timeout" fired 7 times in 3,648 runs, and the two most recent both
+// landed while the option-chain capture / trade-alert scan was mid-run on the
+// same login — the check then restarted the Gateway underneath that scan and
+// reported "restart didn't recover it" because the load was still there.
+// So a probe timeout is not restart-worthy on its own. A restart is only
+// justified when (a) no other job is running right now and (b) the previous
+// check's probe also failed — a single failure is recorded in job_runs.details
+// (probe.failed) and waits for the next run to confirm.
+const runningJobLookbackMs = 2 * 60 * 60 * 1000;
+
+async function findOtherRunningJobName(): Promise<string | null> {
+  const row = await db("job_runs")
+    .where({ status: "running" })
+    .whereNot({ job_name: "ibkr_health_check" })
+    .where("started_at", ">", new Date(Date.now() - runningJobLookbackMs))
+    .orderBy("started_at", "desc")
+    .first("job_name");
+  return row?.job_name ?? null;
+}
+
+async function previousHealthCheckProbeFailed(): Promise<boolean> {
+  const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).orderBy("started_at", "desc").first("details", "error_message");
+  if (!row) return false;
+  const probe = (row.details as { probe?: { failed?: boolean } } | null)?.probe;
+  return probe?.failed === true || String(row.error_message ?? "").includes("reqHistoricalData failed");
 }
 
 function requireEnvironmentVariable(variableName: string): string {
@@ -191,15 +220,32 @@ const healthCheckFailureReminderIntervalMs = 60 * 60_000;
  * button, so both show up in the same job history instead of the scheduled
  * runs being invisible to that screen.
  */
-export async function runIbkrHealthCheckJob(): Promise<void> {
+export interface IbkrHealthCheckOptions {
+  /**
+   * False for the System Health button during market hours (approved
+   * 2026-09-24): a Gateway restart disconnects the order worker for a minute
+   * or more, so a person clicking mid-session gets a report instead. The
+   * scheduled check keeps its own restart policy.
+   */
+  allowGatewayRestart?: boolean;
+  triggeredBy?: "scheduler" | "manual";
+  triggeredByUserId?: string;
+}
+
+export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}): Promise<void> {
+  const allowGatewayRestart = options.allowGatewayRestart ?? true;
   await runJob("ibkr_health_check", async () => {
     const notifications: string[] = [];
     const farmStatusMessages: FarmStatusMessage[] = [];
 
     let connection = await tryConnect(farmStatusMessages);
     let gatewayOutput = "healthy";
+    let probe: { failed: boolean; reason: string | null; restarted: boolean } = { failed: false, reason: null, restarted: false };
 
     async function restartAndReconnect(problemDescription: string): Promise<IbkrConnection> {
+      if (!allowGatewayRestart) {
+        throw new Error(`IBKR Gateway ${problemDescription} — not restarted: restarts are not allowed from the manual check while the market is open (the scheduled check will handle it).`);
+      }
       const sshPrivateKey = Buffer.from(requireEnvironmentVariable("IBKR_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64"), "base64");
 
       const result = await restartIbkrGatewayOnVps({
@@ -261,10 +307,20 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
               "Someone else is likely logged into johndom873 elsewhere. Not a Gateway problem and a restart won't fix it — expect it to clear on its own once that session ends.",
           );
         } else {
-          connection.disconnect();
-          connection = await restartAndReconnect(
-            `handshake succeeded but reqHistoricalData failed (${historicalDataCheck.errorMessage ?? "unknown error"})`,
-          );
+          const reason = historicalDataCheck.errorMessage ?? "unknown error";
+          const otherRunningJob = await findOtherRunningJobName();
+          const previousProbeFailed = await previousHealthCheckProbeFailed();
+          if (otherRunningJob) {
+            probe = { failed: true, reason, restarted: false };
+            gatewayOutput = `healthy handshake; reqHistoricalData probe failed (${reason}) while ${otherRunningJob} is running — not restarting under load`;
+          } else if (!previousProbeFailed) {
+            probe = { failed: true, reason, restarted: false };
+            gatewayOutput = `healthy handshake; reqHistoricalData probe failed once (${reason}) — no restart until it fails on the next run too`;
+          } else {
+            probe = { failed: true, reason, restarted: true };
+            connection.disconnect();
+            connection = await restartAndReconnect(`handshake succeeded but reqHistoricalData failed on two consecutive runs (${reason})`);
+          }
         }
       }
     }
@@ -308,6 +364,7 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
     return {
       details: {
         output: gatewayOutput,
+        probe,
         worker: { active: workerCheck.active, restarted: workerCheck.restarted },
         reconciliationProblems: problems,
         competingLiveSession,
@@ -316,5 +373,5 @@ export async function runIbkrHealthCheckJob(): Promise<void> {
       },
       notify: notifications.length > 0 ? notifications.join("\n\n") : undefined,
     };
-  }, { failureAlertReminderIntervalMs: healthCheckFailureReminderIntervalMs });
+  }, { failureAlertReminderIntervalMs: healthCheckFailureReminderIntervalMs, triggeredBy: options.triggeredBy, triggeredByUserId: options.triggeredByUserId });
 }

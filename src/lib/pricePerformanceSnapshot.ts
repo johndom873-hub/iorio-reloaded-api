@@ -83,9 +83,10 @@ export interface PricePerformanceSnapshot {
   meta: PricePerformanceMeta;
 }
 
-// The nightly capture runs at 9:00 PM UTC (~5 PM ET), about an hour after the
-// close; data is not "behind" until that job has had a comfortable window.
-const nightlyJobGraceMs = 90 * 60 * 1000;
+// The nightly capture runs at 10:00 PM UTC (6 PM EDT / 5 PM EST), 1-2 hours after the
+// close; data is not "behind" until that job has had a comfortable window —
+// 2.5 h after the close is 6:30 PM ET, past the job's EDT start.
+const nightlyJobGraceMs = 150 * 60 * 1000;
 const trendHistoryYears = 1;
 
 function toNumberOrNull(value: string | null): number | null {

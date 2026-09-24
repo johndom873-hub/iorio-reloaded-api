@@ -104,6 +104,19 @@ export class GenosukeApiClient {
       throw new GenosukeApiError(response.status, `${init.method ?? "GET"} ${path} → ${response.status}: ${body}`);
     }
     if (response.status === 204) return undefined as T;
+    // Routes that can outlast Heroku's router timeout answer as a stream
+    // (lib/streamedResponse.ts, 2026-09-24): heartbeats, then one final
+    // `data:` frame carrying the status and body a JSON route would have sent.
+    // Same handling as the app's apiStreamedRequest, so tools (alert refresh,
+    // health check) see the real status instead of a JSON parse error.
+    if ((response.headers.get("content-type") ?? "").includes("text/event-stream")) {
+      const text = await response.text();
+      const finalFrame = text.split("\n").filter((line) => line.startsWith("data: ")).at(-1);
+      if (!finalFrame) throw new GenosukeApiError(502, `${init.method ?? "GET"} ${path} → stream ended without a result`);
+      const result = JSON.parse(finalFrame.slice("data: ".length)) as { status: number; body: unknown };
+      if (result.status >= 400) throw new GenosukeApiError(result.status, `${init.method ?? "GET"} ${path} → ${result.status}: ${JSON.stringify(result.body)}`);
+      return result.body as T;
+    }
     return (await response.json()) as T;
   }
 

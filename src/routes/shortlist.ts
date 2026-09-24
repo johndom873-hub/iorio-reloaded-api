@@ -2,12 +2,13 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
-import { findOrCreateTicker, addTickerToShortlist } from "../ibkr/findOrCreateTicker.js";
+import { findOrCreateTicker, addTickerToShortlist, UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
 import { fetchAndStoreFiveYearHistory, getLatestBackfillRun, startTickerBackfill } from "../ibkr/tickerBackfillPipeline.js";
-import { connectToIbkrGateway } from "../ibkr/connectIbkr.js";
+import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
 import { staleBackfillRunMinutes } from "../lib/tickerBackfillSteps.js";
 import { loadShortlistDataReadiness } from "../lib/shortlistDataReadiness.js";
 import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
+import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { refreshStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
 
@@ -111,25 +112,31 @@ shortlistRouter.post("/:tickerId/backfill-earnings", async (request, response) =
 // button claims to do (Marcelo caught this live, 2026-09-23: the progress modal it opened showed all 4
 // steps running). Matches "Backfill Earnings" above in being a single-purpose action with no side effects
 // outside its own name.
+// Streamed (2026-09-24, see streamedResponse.ts): two sequential 5-year
+// historical requests can pass Heroku's 30 s router timeout.
 shortlistRouter.post("/:tickerId/backfill-price-history", async (request, response) => {
   const ticker = await db("tickers").where({ id: request.params.tickerId as string }).first();
   if (!ticker) {
     response.status(404).json({ error: "Ticker not found." });
     return;
   }
-  const connection = await connectToIbkrGateway();
-  try {
-    const result = await fetchAndStoreFiveYearHistory(connection, ticker.id, ticker.symbol);
-    response.json(result);
-  } finally {
-    connection.disconnect();
-  }
+  await respondWithStreamedResult(response, async () => {
+    const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "backfill-price-history");
+    try {
+      const result = await fetchAndStoreFiveYearHistory(connection, ticker.id, ticker.symbol, { reqId: nextReqIdFor(connection.ib, () => 1) });
+      return { status: 200, body: result };
+    } finally {
+      connection.disconnect();
+    }
+  });
 });
 
 // Manual re-trigger for the Shortlist Actions dropdown's "Refresh Option Chain" item -- re-runs
 // refreshStoredOptionChain for this ticker only, same expiries+strikes fetch the nightly capture
 // does, without touching history/earnings/calendar. Returns the updated per-expiry strike counts so
-// the row can update without a full list reload.
+// the row can update without a full list reload. Streamed (2026-09-24, see
+// streamedResponse.ts): one wildcard contract-details request per expiry at
+// ~4.5s each, sequential, passes Heroku's 30s router timeout past 6 expiries.
 shortlistRouter.post("/:tickerId/refresh-option-chain", async (request, response) => {
   const ticker = await db("tickers").where({ id: request.params.tickerId as string }).first();
   if (!ticker) {
@@ -140,20 +147,22 @@ shortlistRouter.post("/:tickerId/refresh-option-chain", async (request, response
     response.status(400).json({ error: "Ticker has no IBKR contract id stored." });
     return;
   }
-  const connection = await connectToIbkrGateway();
-  try {
-    const refresh = await refreshStoredOptionChain(
-      connection.ib,
-      { tickerId: ticker.id, symbol: ticker.symbol, contractId: ticker.ibkr_contract_id },
-      easternDateIso(new Date()),
-    );
-    const optionChainExpiries = Array.from(refresh.strikesByExpiry.entries())
-      .map(([expiry, strikes]) => ({ expiry, strikeCount: strikes.length }))
-      .sort((a, b) => a.expiry.localeCompare(b.expiry));
-    response.json({ optionChainExpiries });
-  } finally {
-    connection.disconnect();
-  }
+  await respondWithStreamedResult(response, async () => {
+    const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "refresh-option-chain");
+    try {
+      const refresh = await refreshStoredOptionChain(
+        connection.ib,
+        { tickerId: ticker.id, symbol: ticker.symbol, contractId: ticker.ibkr_contract_id },
+        easternDateIso(new Date()),
+      );
+      const optionChainExpiries = Array.from(refresh.strikesByExpiry.entries())
+        .map(([expiry, strikes]) => ({ expiry, strikeCount: strikes.length }))
+        .sort((a, b) => a.expiry.localeCompare(b.expiry));
+      return { status: 200, body: { optionChainExpiries } };
+    } finally {
+      connection.disconnect();
+    }
+  });
 });
 
 shortlistRouter.post("/", async (request, response) => {
@@ -168,7 +177,16 @@ shortlistRouter.post("/", async (request, response) => {
   }
 
   const normalizedSymbol = symbol.trim().toUpperCase();
-  const { ticker } = await findOrCreateTicker(normalizedSymbol);
+  let ticker: Awaited<ReturnType<typeof findOrCreateTicker>>["ticker"];
+  try {
+    ({ ticker } = await findOrCreateTicker(normalizedSymbol));
+  } catch (error) {
+    if (error instanceof UnknownSymbolError) {
+      response.status(422).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
 
   try {
     const entry = await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, notes);
@@ -270,12 +288,20 @@ shortlistRouter.patch("/:id", async (request, response) => {
 });
 
 shortlistRouter.delete("/:id", async (request, response) => {
-  const updatedCount = await db("shortlist_entries")
-    .where({ id: request.params.id })
-    .whereNull("removed_at")
-    .update({ removed_at: db.fn.now() });
+  // Same transaction (2026-09-24): a removed ticker's pending new-trade
+  // alerts stayed approvable for up to a day with no scan refreshing them.
+  const removed = await db.transaction(async (trx) => {
+    const [entry] = await trx("shortlist_entries")
+      .where({ id: request.params.id })
+      .whereNull("removed_at")
+      .update({ removed_at: trx.fn.now() })
+      .returning(["ticker_id"]);
+    if (!entry) return false;
+    await trx("trade_alerts").where({ ticker_id: entry.ticker_id, alert_type: "new_trade", status: "pending" }).update({ status: "expired" });
+    return true;
+  });
 
-  if (updatedCount === 0) {
+  if (!removed) {
     response.status(404).json({ error: "Entry not found or already removed." });
     return;
   }

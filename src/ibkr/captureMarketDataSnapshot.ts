@@ -1,7 +1,13 @@
 import { EventName, Stock, type TickType } from "@stoqey/ib";
+import { randomUUID } from "node:crypto";
 import type { IbkrConnection } from "./connectIbkr.js";
+import { describeMarketDataLineShortage, releaseMarketDataLines, reserveMarketDataLines } from "./marketDataLineBudget.js";
 
 const defaultSnapshotTimeoutMs = 15_000;
+// Average option volume (tick 87) consistently never arrives (see PROGRESS.md),
+// so waiting the full timeout for it cost every ticker add 5-15 s. Once IV is
+// in, a short grace is all the volume tick gets (2026-09-24).
+const afterImpliedVolatilityGraceMs = 500;
 
 // TickType is exported as a type only, not a runtime enum, so these mirror
 // its fixed protocol values directly (interactivebrokers.github.io/tws-api/tick_types.html).
@@ -30,23 +36,36 @@ export interface CapturedMarketDataSnapshot {
  * the unattended daily batch job; pass something shorter for an interactive
  * flow where a person is actively waiting.
  */
-export function captureMarketDataSnapshot(
+export async function captureMarketDataSnapshot(
   connection: IbkrConnection,
   reqId: number,
   symbol: string,
   timeoutMs: number = defaultSnapshotTimeoutMs,
 ): Promise<CapturedMarketDataSnapshot> {
+  const holder = `snapshot:marketData:${symbol}:${randomUUID()}`;
+  const reservation = await reserveMarketDataLines(holder, 1, Math.ceil(timeoutMs / 1000) + 5);
+  if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, `${symbol} market data`, 1));
+  try {
+    return await captureMarketDataSnapshotUnbudgeted(connection, reqId, symbol, timeoutMs);
+  } finally {
+    releaseMarketDataLines(holder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${holder}: ${error instanceof Error ? error.message : error}`));
+  }
+}
+
+function captureMarketDataSnapshotUnbudgeted(connection: IbkrConnection, reqId: number, symbol: string, timeoutMs: number): Promise<CapturedMarketDataSnapshot> {
   return new Promise((resolve) => {
     const snapshot: CapturedMarketDataSnapshot = { impliedVolatility: null, avgOptionVolume: null };
     let settled = false;
 
     const haveBoth = () => snapshot.impliedVolatility !== null && snapshot.avgOptionVolume !== null;
 
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
     const onTick = (tickReqId: number, field: TickType | undefined, value: number | undefined) => {
       if (tickReqId !== reqId || value === undefined) return;
       if ((field as unknown as number) === OPTION_IMPLIED_VOL_TICK) snapshot.impliedVolatility = value;
       if ((field as unknown as number) === AVG_OPT_VOLUME_TICK) snapshot.avgOptionVolume = value;
       if (haveBoth()) finish();
+      else if (snapshot.impliedVolatility !== null && graceTimer === null) graceTimer = setTimeout(finish, afterImpliedVolatilityGraceMs);
     };
 
     const timer = setTimeout(finish, timeoutMs);
@@ -55,6 +74,7 @@ export function captureMarketDataSnapshot(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (graceTimer !== null) clearTimeout(graceTimer);
       connection.ib.off(EventName.tickGeneric, onTick);
       connection.ib.off(EventName.tickSize, onTick);
       connection.ib.cancelMktData(reqId);

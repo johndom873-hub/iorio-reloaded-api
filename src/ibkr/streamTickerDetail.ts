@@ -3,7 +3,8 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { requestRealtimeMarketData } from "./requestMarketData.js";
 import { nextReqIdFor, sharedLiveConnection } from "./sharedReadConnection.js";
 import { getCachedContractDetails } from "./fetchNewTickerData.js";
-import { streamPricingUpdates, type TickerPricing, type PriceBar } from "./fetchTickerOverview.js";
+import type { TickerPricing, PriceBar } from "./fetchTickerOverview.js";
+import { subscribeToPooledQuote, type PooledQuote } from "./marketDataPool.js";
 import { streamPooledPrices } from "./pricePool.js";
 import { getCachedChartBars } from "./priceBarCache.js";
 import { prepareOptionChainStrikes, type OptionQuote } from "./fetchOptionChain.js";
@@ -33,6 +34,9 @@ export type TickerDetailStreamEvent =
   | { type: "spot"; data: { last: number } }
   | { type: "chart"; data: PriceBar[] }
   | { type: "optionChain"; data: OptionQuote[] }
+  // The chain's expiry tabs with their strikes (sent before any quote), and
+  // which expiry this stream is quoting — see the optionChain task below.
+  | { type: "optionChainExpiries"; data: { expiries: { expiry: string; strikes: number[] }[]; activeExpiry: string } }
   | { type: "technicals"; data: TickerTechnicals }
   | { type: "error"; section: TickerDetailSection; message: string };
 
@@ -41,8 +45,21 @@ export type TickerDetailStreamEvent =
 // these fixed values would collide across concurrent modals sharing it.
 // How long the option chain / technicals wait for the frozen last price before falling back to the pricing stream.
 const firstSpotWaitMs = 5_000;
+const overviewReadyWaitMs = 5_000;
 const overviewReqId = 1;
-const pricingReqId = 2;
+
+function toTickerPricing(quote: PooledQuote | null): TickerPricing {
+  return {
+    last: quote?.last ?? null,
+    bid: quote?.bid ?? null,
+    ask: quote?.ask ?? null,
+    open: quote?.open ?? null,
+    high: quote?.high ?? null,
+    low: quote?.low ?? null,
+    previousClose: quote?.previousClose ?? null,
+    volume: quote?.volume ?? null,
+  };
+}
 const chartReqId = 3;
 const technicalsDailyReqId = 4;
 // A hovering-open hourly bar is one whose start time is within the current
@@ -172,11 +189,33 @@ async function fetchMustIncludeStrikesByExpiry(symbol: string): Promise<Map<stri
 export type TickerDetailStreamSection = "overview" | "spot" | "chart" | "optionChain" | "technicals";
 export const allTickerDetailStreamSections: readonly TickerDetailStreamSection[] = ["overview", "spot", "chart", "optionChain", "technicals"];
 
+export interface TickerDetailStreamOptions {
+  /**
+   * Which expiry to quote live (YYYYMMDD). Approved 2026-09-24: the modal
+   * shows one expiry tab at a time, so only that tab's strikes are
+   * subscribed (12 lines instead of the whole 4-expiry window's 48), plus
+   * every must-include strike (pending alerts, held legs) in the other
+   * expiries so the alert rows keep their live figures. Omitted or unknown
+   * → the first expiry with a pending new-trade alert, else the nearest.
+   * Switching tabs reopens the stream with a new value.
+   */
+  expiry?: string;
+}
+
+async function fetchPendingNewTradeAlertExpiries(symbol: string): Promise<Set<string>> {
+  const rows: { expiry: string | null }[] = await db("trade_alerts as ta")
+    .join("tickers as t", "t.id", "ta.ticker_id")
+    .where({ "t.symbol": symbol, "ta.status": "pending", "ta.alert_type": "new_trade" })
+    .select(db.raw("ta.suggested_structure->>'expiry' as expiry"));
+  return new Set(rows.flatMap((row) => (row.expiry ? [row.expiry.replaceAll("-", "")] : [])));
+}
+
 export async function streamTickerDetail(
   symbol: string,
   onEvent: (event: TickerDetailStreamEvent) => void,
   signal: AbortSignal,
   requestedSections: readonly TickerDetailStreamSection[] = allTickerDetailStreamSections,
+  options: TickerDetailStreamOptions = {},
 ): Promise<void> {
   const sections = new Set(requestedSections);
   // Shared live connection first (no per-open tunnel + handshake, and its
@@ -193,7 +232,7 @@ export async function streamTickerDetail(
   const connection = borrowed ? { ib: borrowed.ib, disconnect: borrowed.release } : await connectToIbkrGateway();
   try {
     // Connection-wide setting, called exactly once here — not inside any of
-    // streamPricingUpdates/getCachedChartBars/prepareOptionChainStrikes,
+    // getCachedChartBars/prepareOptionChainStrikes,
     // which all run concurrently on this connection below. A second call
     // while a market-data subscription is still outstanding was found to
     // silently prevent it from ever producing a first tick (see the note on
@@ -243,27 +282,32 @@ export async function streamTickerDetail(
         })
       : Promise.resolve();
 
+    // Overview pricing comes from the POOLED stock line (2026-09-24) — the
+    // same line the header's spot price and every other screen share — not
+    // a second, unbudgeted subscription of its own as before. Ready on the
+    // first last/previous-close reading, or after overviewReadyWaitMs with
+    // whatever has arrived.
     const overviewReadyTask: Promise<TickerPricing | null> = (async () => {
       if (!sections.has("overview")) return null;
       try {
         const [contractDetails, isShortlisted] = await Promise.all([contractDetailsPromise, isShortlistedPromise]);
-        const pricing = await streamPricingUpdates(
-          connection,
-          symbol,
-          (updatedPricing) => {
-            onEvent({
-              type: "overview",
-              data: { companyName: contractDetails.companyName, sector: contractDetails.sector, pricing: updatedPricing, isShortlisted },
-            });
-          },
-          signal,
-          nextReqIdFor(connection.ib, () => pricingReqId),
-        );
-        onEvent({
-          type: "overview",
-          data: { companyName: contractDetails.companyName, sector: contractDetails.sector, pricing, isShortlisted },
+        let latestPricing = toTickerPricing(null);
+        let resolveReady: (pricing: TickerPricing) => void = () => {};
+        const ready = new Promise<TickerPricing>((resolve) => {
+          resolveReady = resolve;
         });
-        return pricing;
+        const readyTimer = setTimeout(() => resolveReady(latestPricing), overviewReadyWaitMs);
+        const unsubscribe = await subscribeToPooledQuote({ key: symbol, legType: "stock", symbol }, (quote) => {
+          latestPricing = toTickerPricing(quote);
+          onEvent({ type: "overview", data: { companyName: contractDetails.companyName, sector: contractDetails.sector, pricing: latestPricing, isShortlisted } });
+          if (latestPricing.last !== null || latestPricing.previousClose !== null) {
+            clearTimeout(readyTimer);
+            resolveReady(latestPricing);
+          }
+        });
+        if (signal.aborted) unsubscribe();
+        else signal.addEventListener("abort", unsubscribe, { once: true });
+        return await ready;
       } catch (error) {
         onEvent({ type: "error", section: "overview", message: errorMessage(error) });
         return null;
@@ -325,7 +369,7 @@ export async function streamTickerDetail(
         const contractDetails = await contractDetailsPromise;
         if (!contractDetails.conId) throw new Error("No contract found to look up the option chain.");
 
-        // Waits for the *first* pricing reading only (streamPricingUpdates'
+        // Waits for the *first* pricing reading only (the overview task's
         // own promise resolves there) — the option chain doesn't need to
         // wait for every subsequent live pricing tick, just an initial spot
         // price to pick near-the-money strikes.
@@ -334,15 +378,23 @@ export async function streamTickerDetail(
         const spotPrice = (await firstSpotPromise) ?? pricing?.last ?? pricing?.previousClose;
         if (!spotPrice) throw new Error("No spot price available to select option strikes.");
 
-        const [dteRange, mustIncludeStrikesByExpiry] = await Promise.all([fetchStrategyDteRange(), fetchMustIncludeStrikesByExpiry(symbol)]);
+        const [dteRange, mustIncludeStrikesByExpiry, alertExpiries] = await Promise.all([fetchStrategyDteRange(), fetchMustIncludeStrikesByExpiry(symbol), fetchPendingNewTradeAlertExpiries(symbol)]);
         const expiryStrikes = await prepareOptionChainStrikes(symbol, spotPrice, dteRange, mustIncludeStrikesByExpiry);
-        // Same call+put-per-strike expansion as fetchOptionChain.ts's quoteOptionChain.
-        const chainContracts = expiryStrikes.flatMap(({ expiry, strikes }) =>
-          strikes.flatMap((strike) => [
+        const activeExpiry =
+          expiryStrikes.find(({ expiry }) => expiry === options.expiry)?.expiry ??
+          expiryStrikes.find(({ expiry }) => alertExpiries.has(expiry))?.expiry ??
+          expiryStrikes[0]?.expiry;
+        onEvent({ type: "optionChainExpiries", data: { expiries: expiryStrikes, activeExpiry: activeExpiry ?? "" } });
+        // The active expiry in full; the other expiries only their must-include
+        // strikes — see TickerDetailStreamOptions.expiry. Same call+put-per-strike
+        // expansion the chain has always used.
+        const chainContracts = expiryStrikes.flatMap(({ expiry, strikes }) => {
+          const quotedStrikes = expiry === activeExpiry ? strikes : strikes.filter((strike) => (mustIncludeStrikesByExpiry.get(expiry) ?? []).includes(strike));
+          return quotedStrikes.flatMap((strike) => [
             { symbol, expiry, strike, right: OptionType.Call },
             { symbol, expiry, strike, right: OptionType.Put },
-          ]),
-        );
+          ]);
+        });
         const optionChain = await streamPooledOptionQuotes(chainContracts, (updatedQuotes) => onEvent({ type: "optionChain", data: updatedQuotes }), signal);
         onEvent({ type: "optionChain", data: optionChain });
       } catch (error) {
@@ -353,7 +405,7 @@ export async function streamTickerDetail(
     // Each task above resolves as soon as its section's *initial* paint is
     // ready — that's what makes the modal open fast. But the whole point of
     // streaming is that the connection (and the background push intervals
-    // streamPricingUpdates/quoteOptionChain kicked off) must stay alive
+    // the pooled overview/chain subscriptions) must stay alive
     // past that point. So this function itself doesn't return — and the
     // `finally` below doesn't disconnect from IBKR — until `signal` aborts,
     // which the route does the moment the SSE client actually disconnects.

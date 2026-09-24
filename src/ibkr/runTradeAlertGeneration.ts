@@ -116,11 +116,10 @@ export function toSettings(settingsRow: Record<string, unknown>): AlertStrategyS
 
 /**
  * The daily trade-alert scan's actual work, factored out of
- * run-trade-alert-generation-job.ts so both the Heroku Scheduler entry point
- * and the manual "Run Now" SSE route (tradeAlerts.ts) share one
- * implementation — same shape as streamTickerDetail.ts being shared between
- * callers via an onEvent callback instead of each caller reimplementing the
- * scan.
+ * run-trade-alert-generation-job.ts (runScheduledTradeAlertJob.ts) and
+ * reported through an onEvent callback. Scheduled-only since 2026-09-24
+ * (the "Run Alerts Now" button and its SSE route were removed); per-ticker
+ * re-scans go through refreshTickerTradeAlerts.ts.
  */
 export async function runTradeAlertGeneration(
   onEvent: (event: TradeAlertGenerationEvent) => void | Promise<void>,
@@ -223,7 +222,7 @@ export async function runTradeAlertGeneration(
 
       let suggestion: Awaited<ReturnType<typeof evaluateRollCandidate>>;
       try {
-        suggestion = await evaluateRollCandidate(connection, leg, leg.strategyKey as AlertStrategyKey, settings);
+        suggestion = await evaluateRollCandidate(connection, leg, leg.strategyKey as AlertStrategyKey, settings, { knownQuote: assignmentRisk?.quote });
       } catch (error) {
         await onEvent({ type: "rollError", symbol: leg.symbol, message: error instanceof Error ? error.message : String(error) });
         continue;
@@ -289,7 +288,7 @@ export async function runTradeAlertGeneration(
       tickersScanned++;
       let candidatesByStrategy: Awaited<ReturnType<typeof generateTradeAlertCandidatesForTicker>>;
       try {
-        candidatesByStrategy = await generateTradeAlertCandidatesForTicker(connection, ticker.symbol, ticker.tickerId, settingsByStrategy);
+        candidatesByStrategy = await generateTradeAlertCandidatesForTicker(connection, ticker.symbol, ticker.tickerId, settingsByStrategy, { priorityLines: true });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         for (const strategyKey of settingsByStrategy.keys()) {
@@ -303,8 +302,10 @@ export async function runTradeAlertGeneration(
         if (!settingsByStrategy.has(strategyKey)) continue;
         const candidates = candidatesByStrategy.get(strategyKey) ?? [];
 
+        // Only new_trade alerts are superseded here: the roll pass above has already
+        // inserted this run's pending roll alerts for the same ticker/strategy.
         await db("trade_alerts")
-          .where({ ticker_id: ticker.tickerId, strategy_key: strategyKey, status: "pending" })
+          .where({ ticker_id: ticker.tickerId, strategy_key: strategyKey, alert_type: "new_trade", status: "pending" })
           .update({ status: "expired" });
 
         const topCandidates = candidates.slice(0, maxAlertsPerTicker);

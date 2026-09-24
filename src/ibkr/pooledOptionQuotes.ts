@@ -1,5 +1,5 @@
 import type { OptionType } from "@stoqey/ib";
-import { subscribeToPooledQuote, settleGraceMs, emptyPooledQuote, type PooledQuote } from "./marketDataPool.js";
+import { subscribeToPooledQuote, waitForFirstReading, emptyPooledQuote, type PooledQuote } from "./marketDataPool.js";
 import type { PriceContract } from "./fetchLivePrices.js";
 import type { OptionQuote } from "./fetchOptionChain.js";
 
@@ -63,11 +63,16 @@ export async function streamPooledOptionQuotes(contracts: OptionQuoteContract[],
     });
   }
 
+  // First reading: every contract has a price and a delta, or the grace elapses.
+  const firstReading = waitForFirstReading(() =>
+    entries.every(({ quote }) => ((quote.bid !== null && quote.ask !== null) || quote.last !== null) && quote.delta !== null),
+  );
   const unsubscribes = await Promise.all(
     entries.map((entry, index) =>
       subscribeToPooledQuote(toPriceContract(entry.contract), (pooledQuote) => {
         entries[index]!.quote = pooledQuote;
-        schedulePush();
+        if (settled) schedulePush();
+        else firstReading.check();
       }),
     ),
   );
@@ -81,7 +86,8 @@ export async function streamPooledOptionQuotes(contracts: OptionQuoteContract[],
     return currentArray();
   }
 
-  await new Promise((resolve) => setTimeout(resolve, settleGraceMs));
+  firstReading.check();
+  await firstReading.settled;
   settled = true;
 
   if (signal.aborted) {

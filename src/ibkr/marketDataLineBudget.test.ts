@@ -19,16 +19,21 @@ describe("computeAvailableLines", () => {
 });
 
 describe("describeMarketDataLineShortage", () => {
-  it("names the chain capture when a priority reservation is the reason", () => {
+  it("names the scheduled scan when a priority reservation is the reason", () => {
     const message = describeMarketDataLineShortage({ ok: false, availableLines: 12, priorityLinesHeld: 50 }, "AAOI", 40);
-    expect(message).toContain("chain capture");
+    expect(message).toContain("scheduled scan");
     expect(message).toContain("50 lines reserved");
     expect(message).toContain("AAOI needs 40 lines, 12 available");
   });
 
   it("falls back to the plain busy message otherwise", () => {
     const message = describeMarketDataLineShortage({ ok: false, availableLines: 3, priorityLinesHeld: 0 }, "AAOI", 40);
-    expect(message).not.toContain("chain capture");
+    expect(message).not.toContain("scheduled scan");
     expect(message).toContain("only 3 available");
+  });
+
+  it("says so when lines are disabled by the environment switch", () => {
+    const message = describeMarketDataLineShortage({ ok: false, availableLines: 0, priorityLinesHeld: 0, disabled: true }, "AAOI", 40);
+    expect(message).toContain("IBKR_MARKET_DATA_LINES_ENABLED=false");
   });
 });

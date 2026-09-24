@@ -1,9 +1,7 @@
-import { randomUUID } from "node:crypto";
 import { EventName, Option, OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
-import { describeMarketDataLineShortage, reserveMarketDataLines, releaseMarketDataLines } from "./marketDataLineBudget.js";
 
 // Quote collector for the nightly option-chain archive (IORIO Signal Engine,
 // Phase 0). Deliberately a NEW module rather than a change to
@@ -84,19 +82,6 @@ export interface CapturedOptionQuote extends OptionContractRequest {
   errorCode: number | null;
 }
 
-export interface CaptureOptionQuoteBatchOptions {
-  /** Safety ceiling for the whole batch. Streaming has no IBKR-side "done" event. */
-  ceilingMs?: number;
-  /** When every contract is settled the batch resolves early. Overridable so live testing can tune it. */
-  isSettled?: (quote: CapturedOptionQuote) => boolean;
-  /**
-   * "own" (default): this batch reserves its lines against the shared budget for its own duration.
-   * "caller": the caller already holds a reservation covering the batch (the capture job's run-long
-   * priority reservation), so no per-batch reservation is made.
-   */
-  lineReservation?: "own" | "caller";
-}
-
 /** Default: a price (two-sided or last), a model delta and an open-interest reading, or an error that means no data is coming. */
 export function isOptionQuoteSettledByDefault(quote: CapturedOptionQuote): boolean {
   if (quote.errorCode !== null) return true;
@@ -132,38 +117,85 @@ function normalizeModelPrice(value: number | undefined): number | null {
   return value !== undefined && Number.isFinite(value) && value >= 0 && value < 1e10 ? value : null;
 }
 
-export async function captureOptionQuoteBatch(
-  ib: IBApi,
-  symbol: string,
-  contracts: OptionContractRequest[],
-  options: CaptureOptionQuoteBatchOptions = {},
-): Promise<CapturedOptionQuote[]> {
-  const ceilingMs = options.ceilingMs ?? defaultBatchCeilingMs;
+// --- Rolling window (approved 2026-09-24) ------------------------------------
+//
+// The nightly capture used fixed batches of optionChainCaptureBatchSize
+// contracts: subscribe all, wait until every one settled or the ceiling
+// hit, cancel, next batch. A contract settled in one second held its line
+// idle until the batch's slowest contract or the 8 s ceiling — 1,118 s for
+// 3,217 contracts on 2026-09-23. This window keeps `concurrency` lines in
+// flight across ticker boundaries and hands each freed line to the next
+// queued contract the moment one settles (the Day Signals loop's
+// daySignalsQuoteWindow.ts shape, with this file's fuller tick capture and
+// settle rule), so throughput is lines ÷ the average settle time rather than
+// lines ÷ the ceiling. Each contract still has its own timeout (the old
+// ceiling) as its safety net.
+
+export interface CaptureQuoteWindowOptions {
+  /** Lines kept in flight — the caller's line reservation must cover this many. */
+  concurrency: number;
+  /** Per-contract safety net; a contract that never settles is reported after this long. */
+  timeoutMs?: number;
+  isSettled?: (quote: CapturedOptionQuote) => boolean;
+}
+
+export interface CaptureQuoteWindow {
+  /**
+   * Queues one ticker's contracts and resolves with their final quotes once
+   * every one of them has settled. Other tickers' contracts may be queued and
+   * in flight at the same time; the order of settlement across tickers is
+   * whatever IBKR's ticks make it.
+   */
+  capture(symbol: string, contracts: OptionContractRequest[]): Promise<CapturedOptionQuote[]>;
+  /** Cancels anything still in flight, resolves every open capture with what it has, and detaches the listeners. */
+  close(): void;
+  /** Contracts subscribed right now — for logs and tests. */
+  inFlightCount(): number;
+}
+
+interface WindowGroup {
+  symbol: string;
+  remaining: number;
+  quotes: CapturedOptionQuote[];
+  resolve: (quotes: CapturedOptionQuote[]) => void;
+}
+
+interface WindowPending {
+  quote: CapturedOptionQuote;
+  group: WindowGroup;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+function emptyCapturedQuote(contract: OptionContractRequest): CapturedOptionQuote {
+  return {
+    ...contract,
+    bid: null,
+    ask: null,
+    last: null,
+    bidSize: null,
+    askSize: null,
+    impliedVolatility: null,
+    delta: null,
+    gamma: null,
+    vega: null,
+    theta: null,
+    modelOptionPrice: null,
+    underlyingPrice: null,
+    openInterest: null,
+    volume: null,
+    receivedAnyTick: false,
+    sawRealTimeTicks: false,
+    sawDelayedTicks: false,
+    errorCode: null,
+  };
+}
+
+export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOptions): CaptureQuoteWindow {
+  const timeoutMs = options.timeoutMs ?? defaultBatchCeilingMs;
   const isSettled = options.isSettled ?? isOptionQuoteSettledByDefault;
-  if (contracts.length === 0) return [];
-
-  // Reserves this batch's lines against the account-wide shared budget
-  // (marketDataLineBudget.ts) before subscribing — this job already sized
-  // its batches (60) for the shared ~100-line cap, but without a real
-  // reservation another connection (the Ticker Detail modal's live chain)
-  // could still be holding lines at the same moment, pushing the true total
-  // past IBKR's cap silently. Failing here surfaces as this ticker's
-  // capture failing with a clear reason instead of every contract in the
-  // batch silently never ticking.
-  const ownsLineReservation = (options.lineReservation ?? "own") === "own";
-  const lineHolder = `captureBatch:${symbol}:${randomUUID()}`;
-  if (ownsLineReservation) {
-    const reservation = await reserveMarketDataLines(lineHolder, contracts.length, Math.ceil(ceilingMs / 1000) + 5);
-    if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, `${symbol} batch`, contracts.length));
-  }
-
-  const quotesByReqId = new Map<number, CapturedOptionQuote>();
-  let onAllSettled: (() => void) | null = null;
-
-  function checkAllSettled(): void {
-    for (const quote of quotesByReqId.values()) if (!isSettled(quote)) return;
-    onAllSettled?.();
-  }
+  const queue: { contract: OptionContractRequest; group: WindowGroup }[] = [];
+  const pending = new Map<number, WindowPending>();
+  let closed = false;
 
   function markTick(quote: CapturedOptionQuote, tickType: number): void {
     quote.receivedAnyTick = true;
@@ -171,26 +203,66 @@ export async function captureOptionQuoteBatch(
     if (delayedTickTypes.has(tickType)) quote.sawDelayedTicks = true;
   }
 
+  function settle(reqId: number): void {
+    const entry = pending.get(reqId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    pending.delete(reqId);
+    try {
+      ib.cancelMktData(reqId);
+    } catch {
+      // the connection may already be gone
+    }
+    entry.group.remaining -= 1;
+    if (entry.group.remaining === 0) entry.group.resolve(entry.group.quotes);
+    pump();
+  }
+
+  function checkSettled(reqId: number): void {
+    const entry = pending.get(reqId);
+    if (entry && isSettled(entry.quote)) settle(reqId);
+  }
+
+  function pump(): void {
+    if (closed) return;
+    while (pending.size < options.concurrency && queue.length > 0) {
+      const { contract, group } = queue.shift()!;
+      const reqId = nextReqIdFor(ib, () => nextFallbackReqId++);
+      const quote = emptyCapturedQuote(contract);
+      group.quotes.push(quote);
+      pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId), timeoutMs) });
+      const right = contract.right === "C" ? OptionType.Call : OptionType.Put;
+      try {
+        ib.reqMktData(reqId, new Option(group.symbol, contract.expiry, contract.strike, right, "SMART"), openInterestGenericTickList, false, false);
+      } catch (error) {
+        console.warn(`Option capture could not subscribe ${group.symbol} ${contract.expiry} ${contract.strike}${contract.right}: ${error instanceof Error ? error.message : error}`);
+        quote.errorCode = -1;
+        settle(reqId);
+      }
+    }
+  }
+
   function onTickPrice(reqId: number, tickType: number, price: number): void {
-    const quote = quotesByReqId.get(reqId);
-    if (!quote) return;
-    markTick(quote, tickType);
-    if (bidPriceTicks.has(tickType)) quote.bid = normalizePrice(price);
-    if (askPriceTicks.has(tickType)) quote.ask = normalizePrice(price);
-    if (lastPriceTicks.has(tickType)) quote.last = normalizePrice(price);
-    checkAllSettled();
+    const entry = pending.get(reqId);
+    if (!entry) return;
+    markTick(entry.quote, tickType);
+    if (bidPriceTicks.has(tickType)) entry.quote.bid = normalizePrice(price);
+    if (askPriceTicks.has(tickType)) entry.quote.ask = normalizePrice(price);
+    if (lastPriceTicks.has(tickType)) entry.quote.last = normalizePrice(price);
+    checkSettled(reqId);
   }
 
   function onTickSize(reqId: number, tickType: number | undefined, size: number | undefined): void {
-    const quote = quotesByReqId.get(reqId);
-    if (!quote || tickType === undefined) return;
+    const entry = pending.get(reqId);
+    if (!entry || tickType === undefined) return;
+    const { quote } = entry;
     markTick(quote, tickType);
     if (bidSizeTicks.has(tickType)) quote.bidSize = normalizeSize(size);
     if (askSizeTicks.has(tickType)) quote.askSize = normalizeSize(size);
     if (volumeTicks.has(tickType)) quote.volume = normalizeSize(size);
     if (tickType === callOpenInterestTick && quote.right === "C") quote.openInterest = normalizeSize(size);
     if (tickType === putOpenInterestTick && quote.right === "P") quote.openInterest = normalizeSize(size);
-    checkAllSettled();
+    checkSettled(reqId);
   }
 
   function onTickOptionComputation(
@@ -206,34 +278,28 @@ export async function captureOptionQuoteBatch(
     theta?: number,
     underlyingPrice?: number,
   ): void {
-    const quote = quotesByReqId.get(reqId);
-    if (!quote) return;
+    const entry = pending.get(reqId);
+    if (!entry) return;
+    const { quote } = entry;
     markTick(quote, tickType);
-    // Model computation only (13 real-time / 83 delayed) — the bid/ask/last
-    // computation ticks depend on a stale last trade, same reasoning as
-    // fetchOptionChain.ts.
-    if (!modelComputationTicks.has(tickType)) {
-      checkAllSettled();
-      return;
+    if (modelComputationTicks.has(tickType)) {
+      quote.impliedVolatility = normalizeImpliedVolatility(impliedVolatility);
+      quote.delta = normalizeDelta(delta);
+      quote.gamma = normalizeNonNegativeGreek(gamma);
+      quote.vega = normalizeNonNegativeGreek(vega);
+      quote.theta = normalizeTheta(theta);
+      quote.modelOptionPrice = normalizeModelPrice(optionPrice);
+      quote.underlyingPrice = normalizePrice(underlyingPrice);
     }
-    quote.impliedVolatility = normalizeImpliedVolatility(impliedVolatility);
-    quote.delta = normalizeDelta(delta);
-    quote.gamma = normalizeNonNegativeGreek(gamma);
-    quote.vega = normalizeNonNegativeGreek(vega);
-    quote.theta = normalizeTheta(theta);
-    quote.modelOptionPrice = normalizeModelPrice(optionPrice);
-    quote.underlyingPrice = normalizePrice(underlyingPrice);
-    checkAllSettled();
+    checkSettled(reqId);
   }
 
   function onError(error: Error, code: number, reqId: number): void {
-    const quote = quotesByReqId.get(reqId);
-    if (!quote) return;
-    // Informational "using delayed data" notices, not a failure for this contract.
-    if (isDelayedDataFallbackNotice(code)) return;
-    quote.errorCode = code;
-    console.warn(`Option capture error for ${symbol} ${quote.expiry} ${quote.strike}${quote.right} (code ${code}): ${error.message}`);
-    checkAllSettled();
+    const entry = pending.get(reqId);
+    if (!entry || isDelayedDataFallbackNotice(code)) return;
+    entry.quote.errorCode = code;
+    console.warn(`Option capture error for ${entry.group.symbol} ${entry.quote.expiry} ${entry.quote.strike}${entry.quote.right} (code ${code}): ${error.message}`);
+    checkSettled(reqId);
   }
 
   ib.on(EventName.tickPrice, onTickPrice);
@@ -241,51 +307,38 @@ export async function captureOptionQuoteBatch(
   ib.on(EventName.tickOptionComputation, onTickOptionComputation);
   ib.on(EventName.error, onError);
 
-  try {
-    for (const contract of contracts) {
-      const reqId = nextReqIdFor(ib, () => nextFallbackReqId++);
-      quotesByReqId.set(reqId, {
-        ...contract,
-        bid: null,
-        ask: null,
-        last: null,
-        bidSize: null,
-        askSize: null,
-        impliedVolatility: null,
-        delta: null,
-        gamma: null,
-        vega: null,
-        theta: null,
-        modelOptionPrice: null,
-        underlyingPrice: null,
-        openInterest: null,
-        volume: null,
-        receivedAnyTick: false,
-        sawRealTimeTicks: false,
-        sawDelayedTicks: false,
-        errorCode: null,
+  return {
+    capture(symbol, contracts) {
+      if (closed) return Promise.reject(new Error("the capture quote window is closed"));
+      if (contracts.length === 0) return Promise.resolve([]);
+      return new Promise<CapturedOptionQuote[]>((resolve) => {
+        const group: WindowGroup = { symbol, remaining: contracts.length, quotes: [], resolve };
+        for (const contract of contracts) queue.push({ contract, group });
+        pump();
       });
-      const right = contract.right === "C" ? OptionType.Call : OptionType.Put;
-      ib.reqMktData(reqId, new Option(symbol, contract.expiry, contract.strike, right, "SMART"), openInterestGenericTickList, false, false);
-    }
-
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, ceilingMs);
-      onAllSettled = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-    });
-  } finally {
-    for (const reqId of quotesByReqId.keys()) ib.cancelMktData(reqId);
-    ib.removeListener(EventName.tickPrice, onTickPrice);
-    ib.removeListener(EventName.tickSize, onTickSize);
-    ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
-    ib.removeListener(EventName.error, onError);
-    if (ownsLineReservation) {
-      await releaseMarketDataLines(lineHolder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${lineHolder}: ${error instanceof Error ? error.message : error}`));
-    }
-  }
-
-  return Array.from(quotesByReqId.values());
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      const openGroups = new Set<WindowGroup>();
+      for (const [reqId, entry] of pending) {
+        clearTimeout(entry.timer);
+        try {
+          ib.cancelMktData(reqId);
+        } catch {
+          // the connection may already be gone
+        }
+        openGroups.add(entry.group);
+      }
+      pending.clear();
+      for (const { group } of queue) openGroups.add(group);
+      queue.length = 0;
+      for (const group of openGroups) group.resolve(group.quotes);
+      ib.removeListener(EventName.tickPrice, onTickPrice);
+      ib.removeListener(EventName.tickSize, onTickSize);
+      ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
+      ib.removeListener(EventName.error, onError);
+    },
+    inFlightCount: () => pending.size,
+  };
 }

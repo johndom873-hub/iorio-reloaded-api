@@ -109,6 +109,21 @@ function previousCalendarDate(dateIso: string): string {
 }
 
 /**
+ * The open trading day immediately before `dateIso` (holiday- and
+ * weekend-aware through market_calendar). The nightly account snapshot's
+ * daily_pnl is a delta against the previous snapshot ROW; only when that row
+ * is this date is it a one-session figure — see dashboard.ts's Day card.
+ */
+export async function previousOpenSessionDate(dateIso: string, isOpenDay: (dateIso: string) => Promise<boolean> = resolveIsOpenDay): Promise<string> {
+  let candidate = previousCalendarDate(dateIso);
+  for (let attempt = 0; attempt < 14; attempt++) {
+    if (await isOpenDay(candidate)) return candidate;
+    candidate = previousCalendarDate(candidate);
+  }
+  return candidate;
+}
+
+/**
  * The most recent trading session whose regular close (16:00 ET) has passed at
  * `now` — i.e. the newest date a COMPLETED daily bar can exist for. Holiday- and
  * weekend-aware through market_calendar. Before today's close (or when today is

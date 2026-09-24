@@ -43,7 +43,14 @@ interface OrderRequestResult {
 
 async function buildAndConfirmOrder(api: GenosukeApiClient, path: string, body: unknown) {
   const order = await api.post<OrderRequestResult>(path, body);
-  return api.post<OrderRequestResult>(`/positions/orders/${order.id}/confirm`, {});
+  try {
+    return await api.post<OrderRequestResult>(`/positions/orders/${order.id}/confirm`, {});
+  } catch (error) {
+    // A failed confirm (trading blocked, limits, stale) must not leave a
+    // confirmable order behind — see stalePendingOrders.ts.
+    await api.post(`/positions/orders/${order.id}/cancel`, {}).catch(() => {});
+    throw error;
+  }
 }
 
 export const financialWriteTools: GenosukeTool[] = [

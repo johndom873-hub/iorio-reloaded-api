@@ -1,4 +1,4 @@
-import { sviTotalVariance } from "./impliedVolatilitySurface.js";
+import { sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
 import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
 import type { SignalSettings } from "./signalSettingsStore.js";
@@ -102,6 +102,37 @@ export function countGrades(candidates: SignalCandidate[]): GradeCounts {
   return counts;
 }
 
+/**
+ * Re-times a surface fitted on an earlier day to today (2026-09-24): after a
+ * missed capture the screen scored yesterday's slices with yesterday's
+ * yearsToExpiry, so every DTE and yield was a day off and an expiry that
+ * has since passed still appeared. Time to expiry is recomputed from today's
+ * Eastern date; expiries already past are dropped. The SVI total variance is
+ * scaled by T_today / T_fit (a and b are linear in it), which keeps every
+ * strike's implied volatility exactly as fitted — only the time changes.
+ * The alternative, leaving the total variance untouched, would inflate a
+ * 7-day slice's IV by ~8% per elapsed day.
+ */
+export function rebaseSlicesToToday(slices: SignalSurfaceSlice[], todayEasternIso: string): SignalSurfaceSlice[] {
+  const rebased: SignalSurfaceSlice[] = [];
+  for (const slice of slices) {
+    // Same convention as the fit itself (optionSurfaceFitting.ts): calendar days / 365.
+    const yearsToExpiry = yearsBetweenIsoDates(todayEasternIso, slice.expiry);
+    if (!(yearsToExpiry > 0)) continue;
+    if (!(slice.yearsToExpiry > 0) || Math.abs(yearsToExpiry - slice.yearsToExpiry) < 1e-9) {
+      rebased.push(slice);
+      continue;
+    }
+    const scale = yearsToExpiry / slice.yearsToExpiry;
+    rebased.push({
+      ...slice,
+      yearsToExpiry,
+      parameters: slice.parameters ? { ...slice.parameters, a: slice.parameters.a * scale, b: slice.parameters.b * scale } : null,
+    });
+  }
+  return rebased;
+}
+
 /** Scores one ticker from its loaded inputs; `live` re-reads the snapshot at the live spot and merges live quotes. */
 export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: SignalSettings, live?: LiveScoringOverrides): TickerSignals {
   const { header } = inputs;
@@ -127,7 +158,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     skew: inputs.skew,
     elevatedVolatility: inputs.elevatedVolatility,
     nextEarningsDateIso: inputs.nextEarningsDateIso,
-    atmImpliedVolatility: computeAtmImpliedVolatility(inputs.slices),
+    atmImpliedVolatility: computeAtmImpliedVolatility(rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso)),
     forecast: inputs.forecast,
     dailyBarCount: inputs.dailyBarCount,
     dividendCadenceUnknown: inputs.dividendCadenceUnknown,
@@ -149,7 +180,8 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   if (!inputs.forecast) return withCaveats(inputs.suspectedSplitDateIso !== null ? "suspected_split" : "no_forecast");
   if (spotPrice === null) return withCaveats("no_snapshot");
 
-  const slices = live ? scaleSlicesToLiveSpot(inputs.slices, header.underlyingPrice, live.spotPrice) : inputs.slices;
+  const todaySlices = rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso);
+  const slices = live ? scaleSlicesToLiveSpot(todaySlices, header.underlyingPrice, live.spotPrice) : todaySlices;
   // Precedence per contract: pooled live (modal / screen best line) > day (refresh loop) > 10:00 snapshot.
   const withDayQuotes = mergeLiveQuotes(inputs.quotes, inputs.dayQuotes, "day");
   const quotes = live?.liveQuotes ? mergeLiveQuotes(withDayQuotes, live.liveQuotes, "live") : withDayQuotes;

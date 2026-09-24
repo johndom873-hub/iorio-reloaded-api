@@ -1,5 +1,6 @@
 import { app } from "./app.js";
-import { environment, requireEnvironmentVariable } from "./config/env.js";
+import { environment, ibkrMarketDataLinesEnabled, requireEnvironmentVariable } from "./config/env.js";
+import { startStalePendingOrderSweep } from "./lib/stalePendingOrders.js";
 import { startGenosuke } from "./genosuke/bot.js";
 import { sharedLiveConnection, sharedReadConnection } from "./ibkr/sharedReadConnection.js";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
@@ -24,9 +25,15 @@ if (daySignalsLoopFlag !== "true" && daySignalsLoopFlag !== "false") {
   throw new Error(`DAY_SIGNALS_LOOP_ENABLED must be "true" or "false", got: ${daySignalsLoopFlag}`);
 }
 
+// Validated at boot so a deploy without it fails here, not silently at the
+// first reservation — see ibkrMarketDataLinesEnabled() in config/env.ts.
+const marketDataLinesEnabled = ibkrMarketDataLinesEnabled();
+if (!marketDataLinesEnabled) console.log("IBKR market-data lines disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false): live quotes, option chains and the Day Signals loop will not open lines.");
+
 app.listen(port, () => {
   console.log(`Iorio Reloaded API listening on port ${port} (${environment.nodeEnvironment})`);
   startNotificationBroadcaster();
+  startStalePendingOrderSweep();
   // Open the shared IBKR read and live connections now (2026-09-19) rather than on the
   // first request after a deploy/restart, which otherwise pays the full
   // ~5s tunnel + handshake itself. borrow() starts the connect and keeps it

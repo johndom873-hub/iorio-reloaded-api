@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTechnicalNote } from "./generateTradeAlertCandidates.js";
+import { archivedDeltaKey, buildTechnicalNote, filterStrikesByArchivedDelta } from "./generateTradeAlertCandidates.js";
 import type { SupportResistanceResult } from "../lib/technicalIndicators.js";
 
 function zone(price: number, qualityPct: number, atr: number, touches = 2): SupportResistanceResult["support"] {
@@ -53,5 +53,36 @@ describe("buildTechnicalNote (Slice 2A rationale annotation)", () => {
   it("is exactly at the 1.0x ATR boundary (inclusive)", () => {
     const sr: SupportResistanceResult = { support: zone(98, 50, 2, 2), resistance: null };
     expect(buildTechnicalNote(100, "put", sr)).not.toBeNull(); // distance 2 === 1.0 * atr(2)
+  });
+});
+
+describe("filterStrikesByArchivedDelta (quote only what can land in the delta band)", () => {
+  const settings = { deltaTargetMin: 0.2, deltaTargetMax: 0.3 };
+  const expiryStrikes = [{ expiry: "20261016", strikes: [100, 105, 110, 115, 120] }];
+
+  it("keeps strikes whose archived |delta| is within the band ± margin, drops the rest, keeps unarchived strikes", () => {
+    const archived = new Map([
+      [archivedDeltaKey("20261016", 100, "call"), 0.55],
+      [archivedDeltaKey("20261016", 105, "call"), 0.38],
+      [archivedDeltaKey("20261016", 110, "call"), 0.25],
+      [archivedDeltaKey("20261016", 115, "call"), 0.11],
+      // 120 has no archived delta → kept
+    ]);
+    expect(filterStrikesByArchivedDelta(expiryStrikes, "call", settings, archived)).toEqual([{ expiry: "20261016", strikes: [105, 110, 115, 120] }]);
+  });
+
+  it("uses the delta's magnitude for puts and drops an expiry left with no strikes", () => {
+    const archived = new Map([
+      [archivedDeltaKey("20261016", 100, "put"), -0.02],
+      [archivedDeltaKey("20261016", 105, "put"), -0.05],
+      [archivedDeltaKey("20261016", 110, "put"), -0.6],
+      [archivedDeltaKey("20261016", 115, "put"), -0.7],
+      [archivedDeltaKey("20261016", 120, "put"), -0.8],
+    ]);
+    expect(filterStrikesByArchivedDelta(expiryStrikes, "put", settings, archived)).toEqual([]);
+  });
+
+  it("is the identity when there is no archive for today", () => {
+    expect(filterStrikesByArchivedDelta(expiryStrikes, "call", settings, new Map())).toEqual(expiryStrikes);
   });
 });

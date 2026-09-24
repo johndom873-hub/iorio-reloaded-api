@@ -1,5 +1,6 @@
 import { OptionType } from "@stoqey/ib";
-import { quoteOptionChain } from "./fetchOptionChain.js";
+import type { OptionQuote } from "./fetchOptionChain.js";
+import { quoteSingleContract } from "./quoteContracts.js";
 import type { connectToIbkrGateway } from "./connectIbkr.js";
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -13,28 +14,26 @@ export const assignmentRiskDeltaThreshold = 0.5;
 export interface AssignmentRiskCheck {
   atRisk: boolean;
   delta: number;
+  /** The live quote this was judged on — handed to evaluateRollCandidate so the same leg is not quoted twice. */
+  quote: OptionQuote;
 }
 
 /**
  * An open short leg's live delta, plus whether it's crossed the
  * assignment-risk threshold. Returns both (not just the boolean) so the
  * caller can format a notification line from the same live quote instead of
- * re-fetching it. A second `quoteOptionChain` call alongside
- * evaluateRollCandidate's own (not threaded through — that function's return
- * contract is money-adjacent and several callers deep, not worth widening
- * for this) — acceptable here since this only runs once per *open
- * position*, not once per shortlisted ticker, so it doesn't add to the scan
- * that's previously hit IBKR pacing limits. Returns null when no live quote
- * is available, distinguishing "checked, not at risk" from "couldn't check"
- * — same convention as evaluateRollCandidate's own null-quote skip.
+ * re-fetching it — and so the roll pass can pass the same quote on to
+ * evaluateRollCandidate (knownQuote) instead of quoting the leg a second
+ * time. Returns null when no live quote is available, distinguishing
+ * "checked, not at risk" from "couldn't check" — same convention as
+ * evaluateRollCandidate's own null-quote skip.
  */
 export async function checkAssignmentRisk(
   connection: IbkrConnection,
   leg: { symbol: string; expiry: string; strike: number; right: "call" | "put" },
 ): Promise<AssignmentRiskCheck | null> {
   const optionType = leg.right === "call" ? OptionType.Call : OptionType.Put;
-  const quotes = await quoteOptionChain(connection, leg.symbol, [{ expiry: leg.expiry, strikes: [leg.strike] }]);
-  const quote = quotes.find((q) => q.strike === leg.strike && q.right === optionType);
+  const quote = await quoteSingleContract(connection.ib, leg.symbol, leg.expiry, leg.strike, optionType);
   if (!quote || quote.delta === null) return null;
-  return { atRisk: Math.abs(quote.delta) >= assignmentRiskDeltaThreshold, delta: quote.delta };
+  return { atRisk: Math.abs(quote.delta) >= assignmentRiskDeltaThreshold, delta: quote.delta, quote };
 }

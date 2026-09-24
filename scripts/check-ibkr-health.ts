@@ -32,7 +32,23 @@ import { db } from "../src/db/connection.js";
 // restarting it -- a worse blind spot than the already-documented 4-day
 // daily-market-data outage, since a broken Gateway sits unfixed all
 // weekend and is still broken the moment Monday's trading actions need it.
+// Heroku Scheduler can only run this "every 10 minutes", on the hour and
+// every 10 minutes after — and every daily job's entry sits on a :00/:30
+// slot too. Skipping the two slots that coincide with those (a couple of
+// minutes of dispatch slack either side) keeps this check from ever starting
+// its own IBKR handshake, SSH round trips and DB connections in the same
+// second as a daily job; four runs an hour still satisfy the watchdog's
+// "ran within the last 30 minutes" check. Decided 2026-09-24.
+function isSharedSchedulerSlot(now: Date): boolean {
+  const minute = now.getUTCMinutes();
+  return minute >= 58 || minute <= 2 || (minute >= 28 && minute <= 32);
+}
+
 async function main(): Promise<void> {
+  if (isSharedSchedulerSlot(new Date())) {
+    console.log("Skipping ibkr_health_check — this slot coincides with a daily Scheduler job (see the comment above main).");
+    return;
+  }
   await runIbkrHealthCheckJob();
 }
 

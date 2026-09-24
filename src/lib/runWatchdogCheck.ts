@@ -1,14 +1,22 @@
 import { db } from "../db/connection.js";
 import { runJob } from "./runJob.js";
 
+// Every job with a daily Heroku Scheduler entry (all before this 11:30 PM UTC
+// check, see PROGRESS.md's job list). The option-chain jobs skip market-closed
+// days before writing a job_runs row, as does this watchdog itself
+// (scripts/run-watchdog-job.ts), so they are only expected on open days.
 const DAILY_JOB_NAMES = [
   "daily_market_data_capture",
   "daily_pnl_snapshot",
   "trade_alert_generation",
   "daily_calendar_capture",
   "daily_screener_scan",
-  // Runs 10:00 PM UTC every day (weekends too), so it has always run by the weekday 10:30 PM check.
+  // Runs 11:00 PM UTC every day (weekends too), so it has always run by this check.
   "expiry_settlement_audit",
+  "option_chain_structure_refresh",
+  "option_chain_capture",
+  "option_surface_fit",
+  "day_signals_seed",
 ] as const;
 const IBKR_HEALTH_CHECK_JOB_NAME = "ibkr_health_check";
 const IBKR_HEALTH_CHECK_WINDOW_MS = 30 * 60 * 1000;

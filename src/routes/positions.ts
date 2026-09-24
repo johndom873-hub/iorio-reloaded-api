@@ -2,18 +2,22 @@ import { fetchTradingBlockedReason } from "../lib/tradingGate.js";
 import { Router, type Request, type Response } from "express";
 import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
+import type { Knex } from "knex";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { positionSelect, fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { publishNotification } from "../lib/notificationChannel.js";
-import { fetchLiveGreeks, type Greeks, type GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import type { Greeks, GreeksContract } from "../ibkr/fetchLiveGreeks.js";
+import { fetchGreeksPoolFirst } from "../ibkr/greeksPool.js";
 import { streamPooledGreeks } from "../ibkr/greeksPool.js";
 import { fetchCyclesForTickers } from "../lib/cycleQueries.js";
 import { fetchBreakEvenByPositionId, type PositionBreakEven } from "../lib/cycleBreakEvenQueries.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { computeLegSuccessProbabilities, type SuccessProbabilityLeg } from "../lib/positionSuccessProbability.js";
-import { fetchLivePrices, type PriceContract } from "../ibkr/fetchLivePrices.js";
-import { streamPooledPrices } from "../ibkr/pricePool.js";
+import type { PriceContract } from "../ibkr/fetchLivePrices.js";
+import { fetchPricesPoolFirst, streamPooledPrices, subscribeToPooledPrice } from "../ibkr/pricePool.js";
+import type { PositionExposureRow } from "../lib/positionExposure.js";
+import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning } from "../ibkr/calendarConflict.js";
@@ -276,7 +280,7 @@ positionsRouter.get("/greeks", async (request, response) => {
   // key that will never arrive.
   let greeks: Record<string, Greeks> = {};
   try {
-    greeks = await fetchLiveGreeks(contracts);
+    greeks = await fetchGreeksPoolFirst(contracts);
   } catch (error) {
     console.error("positions/greeks: fetchLiveGreeks failed, returning null greeks for every contract", error);
   }
@@ -597,7 +601,7 @@ positionsRouter.get("/pnl", async (request, response) => {
   // connect, so that failure mode has to be caught explicitly here.
   let pricesByLegId: Record<string, number | null> = {};
   try {
-    pricesByLegId = await fetchLivePrices(priceContracts);
+    pricesByLegId = await fetchPricesPoolFirst(priceContracts);
   } catch (error) {
     console.error("positions/pnl: fetchLivePrices failed, falling back to position_pnl_snapshots", error);
   }
@@ -959,7 +963,10 @@ async function requireExistingTicker(symbolInput: string): Promise<{ id: string;
 // from the Signals order-setup flow (signal_snapshot is only ever set
 // there), never for a Trade Alerts order, which has its own separate,
 // still-unenforced copy of these same-named settings (see PROGRESS.md).
-async function evaluateSignalOrderLimitsForOrderRequest(orderRequest: { signal_snapshot: unknown; payload: OrderRequestPayload; request_type: string }): Promise<{ blocked: boolean; reasons: string[] } | null> {
+async function evaluateSignalOrderLimitsForOrderRequest(
+  orderRequest: { signal_snapshot: unknown; payload: OrderRequestPayload; request_type: string },
+  live: { exposures?: PositionExposureRow[]; spotPrice?: number } = {},
+): Promise<{ blocked: boolean; reasons: string[] } | null> {
   if (orderRequest.signal_snapshot === null || orderRequest.signal_snapshot === undefined) return null;
   if (!(orderRequest.request_type as string).startsWith("open_")) return null;
   const payload = orderRequest.payload;
@@ -973,6 +980,8 @@ async function evaluateSignalOrderLimitsForOrderRequest(orderRequest: { signal_s
     tickerId: ticker.id,
     quantity: optionLeg.quantity,
     strike: optionLeg.strike,
+    spotPrice: live.spotPrice,
+    exposures: live.exposures,
   });
 }
 
@@ -1010,8 +1019,8 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(400).json({ error: "A positive option contract quantity is required." });
     return;
   }
-  if (typeof option.limitPrice !== "number" || option.limitPrice < 0) {
-    response.status(400).json({ error: "option.limitPrice must be a non-negative number." });
+  if (typeof option.limitPrice !== "number" || !(option.limitPrice > 0)) {
+    response.status(400).json({ error: "option.limitPrice must be a positive number — a short option is never sold for $0." });
     return;
   }
   if (typeof option.strikePrice !== "number" || option.strikePrice <= 0 || !option.expiryDate) {
@@ -1062,12 +1071,15 @@ positionsRouter.post("/orders", async (request, response) => {
   let excessUncoveredShares = 0;
   if (strategyKey === "covered_call" && !resolvedStock) {
     const requiredShares = option.quantity * 100;
-    const availableUncovered = await fetchAvailableUncoveredShares(ticker.id);
+    // Shares already committed by in-flight covered-call orders on this
+    // symbol (2026-09-24) — two builds could otherwise both skip the stock
+    // leg against the same uncovered shares and leave the second call naked.
+    const availableUncovered = Math.max(0, (await fetchAvailableUncoveredShares(ticker.id)) - (await sharesCommittedByInFlightCoveredCalls(ticker.symbol)));
     const shortfall = Math.max(0, requiredShares - availableUncovered);
     excessUncoveredShares = Math.max(0, availableUncovered - requiredShares);
 
     if (shortfall > 0) {
-      const livePrices = await fetchLivePrices([{ key: "stock", legType: "stock", symbol: ticker.symbol }]);
+      const livePrices = await fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol: ticker.symbol }]);
       const price = livePrices["stock"];
       if (price === null || price === undefined) {
         response.status(400).json({
@@ -1119,6 +1131,11 @@ positionsRouter.post("/orders", async (request, response) => {
       response.status(404).json({ error: "Pending trade alert not found for sourceAlertId." });
       return;
     }
+    const conflict = await findActiveOrderConflict(db, { sourceAlertId });
+    if (conflict) {
+      response.status(409).json({ error: describeActiveOrderConflict(conflict) });
+      return;
+    }
     if (alert.ticker_id !== ticker.id || alert.strategy_key !== strategyKey) {
       response.status(400).json({ error: "sourceAlertId does not match this symbol/strategy." });
       return;
@@ -1149,8 +1166,11 @@ positionsRouter.post("/orders", async (request, response) => {
     excessUncoveredShares > 0
       ? `${excessUncoveredShares} uncovered share(s) of ${ticker.symbol} remain beyond what this order uses — worth checking whether an additional contract is worth selling.`
       : null;
-  const calendarWarning = formatEconomicCalendarWarning(await fetchEconomicCalendarWarningEvents(normalizedExpiry));
-  response.status(201).json({ ...serializeOrderRequest(orderRequest), note, calendarWarning });
+  const [calendarWarning, riskFreeRate] = await Promise.all([
+    fetchEconomicCalendarWarningEvents(normalizedExpiry).then(formatEconomicCalendarWarning),
+    getRiskFreeRate().catch(() => null), // Order Review's probability of profit uses the same FRED rate as the alerts (approved 2026-09-24)
+  ]);
+  response.status(201).json({ ...serializeOrderRequest(orderRequest), note, calendarWarning, riskFreeRate });
 });
 
 positionsRouter.get("/orders", async (request, response) => {
@@ -1199,11 +1219,13 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
     ? await db("strategy_settings").where({ strategy_key: payload.strategyKey }).first()
     : null;
 
-  // Re-evaluated periodically, not on every quote tick (each evaluation is a
-  // handful of IBKR/DB round trips) -- 10s keeps the Order Review panel's
-  // block/unblock verdict close to live without hammering the account
-  // summary on every sub-second option quote. Only ever set for a Signals
-  // order (see evaluateSignalOrderLimitsForOrderRequest); null otherwise.
+  // Re-evaluated periodically, not on every quote tick -- 10s keeps the
+  // Order Review panel's block/unblock verdict close to live without
+  // hammering the account summary on every sub-second option quote. Only
+  // ever set for a Signals order (see evaluateSignalOrderLimitsForOrderRequest);
+  // null otherwise. The re-evaluations are fed from the market-data pool
+  // (2026-09-24): every open leg and the order's underlying are pooled for
+  // this stream's lifetime below, so no re-evaluation opens IBKR snapshots.
   const signalLimitsRefreshIntervalMs = 10_000;
   let latestSignalLimits = await evaluateSignalOrderLimitsForOrderRequest(orderRequest);
 
@@ -1216,16 +1238,28 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
   const abortController = new AbortController();
   request.on("close", () => abortController.abort());
 
+  // Re-checks read exposures through computePositionExposures (pool first,
+  // snapshot only for unpooled legs) rather than subscribing every open leg
+  // for the panel's lifetime (2026-09-24). Only the order's underlying is
+  // pooled here, for the covered-call shortfall notional.
+  let latestSpotPrice: number | undefined;
   const signalLimitsTimer = latestSignalLimits
     ? setInterval(() => {
-        evaluateSignalOrderLimitsForOrderRequest(orderRequest)
+        evaluateSignalOrderLimitsForOrderRequest(orderRequest, { spotPrice: latestSpotPrice })
           .then((result) => {
             latestSignalLimits = result;
           })
           .catch((error) => console.error(`orders/${orderRequest.id}/quote/stream: signal limits refresh failed`, error));
       }, signalLimitsRefreshIntervalMs)
     : null;
-  if (signalLimitsTimer) abortController.signal.addEventListener("abort", () => clearInterval(signalLimitsTimer), { once: true });
+  if (signalLimitsTimer) {
+    abortController.signal.addEventListener("abort", () => clearInterval(signalLimitsTimer), { once: true });
+    subscribeToPooledPrice({ key: "stock", legType: "stock", symbol: payload.symbol }, (price) => {
+      if (price !== null) latestSpotPrice = price;
+    })
+      .then((unsubscribe) => abortController.signal.addEventListener("abort", unsubscribe, { once: true }))
+      .catch((error) => console.error(`orders/${orderRequest.id}/quote/stream: spot subscription failed`, error));
+  }
 
   const send = (data: unknown) => {
     if (response.writableEnded) return;
@@ -1330,6 +1364,72 @@ positionsRouter.get("/quote/stream", async (request, response) => {
 // showing the user exactly what will be submitted.
 const adaptivePriorities = new Set(["Urgent", "Normal", "Patient"]);
 
+// Approved 2026-09-24: a built order must be confirmed within this long.
+export const pendingConfirmationMaxAgeMs = 15 * 60 * 1000;
+
+// Statuses that mean an order is still on its way to, or working at, IBKR.
+const activeOrderStatuses = ["pending_confirmation", "confirmed", "submitted", "partially_filled", "cancel_requested"] as const;
+
+interface ActiveOrderConflict {
+  orderId: string;
+  status: string;
+  requestType: string;
+  symbol: string;
+}
+
+class ActiveOrderConflictError extends Error {
+  constructor(public readonly conflict: ActiveOrderConflict) {
+    super(describeActiveOrderConflict(conflict));
+    this.name = "ActiveOrderConflictError";
+  }
+}
+
+function describeActiveOrderConflict(conflict: ActiveOrderConflict): string {
+  return `An order for this ${conflict.requestType.startsWith("open_") ? "alert" : "position"} is already in progress (${conflict.symbol}, ${conflict.status.replaceAll("_", " ")}) — cancel it first or wait for it to finish.`;
+}
+
+/**
+ * The first still-active order_requests row that references the same
+ * position (close/roll) or the same source alert (open) — or, for a close
+ * or roll, any of the same position_legs (2026-09-24). Two working orders on
+ * one position can sell the stock twice or buy the call back twice.
+ */
+async function findActiveOrderConflict(
+  executor: Knex | Knex.Transaction,
+  target: { excludeOrderId?: string; positionId?: string | null; sourceAlertId?: string | null; payload?: OrderRequestPayload },
+): Promise<ActiveOrderConflict | null> {
+  if (!target.positionId && !target.sourceAlertId) return null;
+  const rows: { id: string; status: string; request_type: string; payload: OrderRequestPayload }[] = await executor("order_requests")
+    .whereIn("status", [...activeOrderStatuses])
+    .andWhere((builder) => {
+      if (target.positionId) builder.orWhere({ related_position_id: target.positionId });
+      if (target.sourceAlertId) builder.orWhere({ source_alert_id: target.sourceAlertId });
+    })
+    .modify((builder) => {
+      if (target.excludeOrderId) builder.whereNot({ id: target.excludeOrderId });
+    })
+    .select("id", "status", "request_type", "payload");
+  const first = rows[0];
+  return first ? { orderId: first.id, status: first.status, requestType: first.request_type, symbol: first.payload.symbol } : null;
+}
+
+/** Shares that in-flight covered-call open orders on this symbol are already writing against without buying (option contracts × 100 minus their stock leg). */
+async function sharesCommittedByInFlightCoveredCalls(symbol: string): Promise<number> {
+  const rows: { payload: OrderRequestPayload }[] = await db("order_requests")
+    .whereIn("status", [...activeOrderStatuses])
+    .where("request_type", "like", "open_%")
+    .whereRaw("payload->>'symbol' = ?", [symbol])
+    .whereRaw("payload->>'strategyKey' = ?", ["covered_call"])
+    .select("payload");
+  let committed = 0;
+  for (const { payload } of rows) {
+    const optionContracts = payload.legs.filter((leg) => leg.role === "option").reduce((sum, leg) => sum + leg.quantity, 0);
+    const stockShares = payload.legs.filter((leg) => leg.role === "stock").reduce((sum, leg) => sum + leg.quantity, 0);
+    committed += Math.max(0, optionContracts * 100 - stockShares);
+  }
+  return committed;
+}
+
 positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
   if (!orderRequest) {
@@ -1364,6 +1464,14 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     return;
   }
 
+  // A limit price built more than pendingConfirmationMaxAgeMs ago is stale
+  // (approved 2026-09-24, 15 min): refuse, and the sweep in
+  // stalePendingOrders.ts cancels such rows on its own.
+  if (Date.now() - new Date(orderRequest.created_at).getTime() > pendingConfirmationMaxAgeMs) {
+    response.status(409).json({ error: "This order was built more than 15 minutes ago — its limit prices are stale. Build it again at current prices." });
+    return;
+  }
+
   // Fail-closed account binding (Phase B WP2): no order is confirmed unless the trading worker recently
   // reported that it is bound to this environment's IBKR account. The order stays pending_confirmation.
   const tradingBlockedReason = await fetchTradingBlockedReason();
@@ -1378,7 +1486,28 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     return;
   }
 
-  const wonRace = await db.transaction(async (trx) => {
+  let wonRace: boolean;
+  try {
+    wonRace = await runConfirmTransaction();
+  } catch (error) {
+    if (error instanceof ActiveOrderConflictError) {
+      response.status(409).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
+
+  const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
+  if (wonRace) await publishNotification({ type: "order_status", orderId: orderRequest.id });
+  response.json(serializeOrderRequest(updated));
+
+  function runConfirmTransaction(): Promise<boolean> {
+  return db.transaction(async (trx) => {
+    // Re-checked inside the transaction (2026-09-24): building already
+    // refuses a second order for a position or alert with one in flight,
+    // but two rows built before either was confirmed could both confirm.
+    const conflict = await findActiveOrderConflict(trx, { excludeOrderId: orderRequest.id, positionId: orderRequest.related_position_id, sourceAlertId: orderRequest.source_alert_id, payload: orderRequest.payload });
+    if (conflict) throw new ActiveOrderConflictError(conflict);
     const payload = requestedPriority ? { ...orderRequest.payload, adaptivePriority: requestedPriority } : orderRequest.payload;
     // Conditioned on status still being pending_confirmation, and read back
     // via .returning, so two near-simultaneous confirm calls for the same
@@ -1409,10 +1538,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     await trx.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
     return true;
   });
-
-  const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
-  if (wonRace) await publishNotification({ type: "order_status", orderId: orderRequest.id });
-  response.json(serializeOrderRequest(updated));
+  }
 });
 
 positionsRouter.post("/orders/:id/cancel", async (request, response) => {
@@ -1423,15 +1549,23 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
   }
 
   if (orderRequest.status === "pending_confirmation" || orderRequest.status === "confirmed") {
-    // Never reached IBKR — cancelling here is a pure local status flip.
-    await db("order_requests")
-      .where({ id: orderRequest.id })
-      .update({ status: "cancelled", updated_at: db.fn.now(), cancelled_by_user_id: request.session.userId });
-    const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
-    await revertSourceAlertToPending(orderRequest.source_alert_id);
-    await publishNotification({ type: "order_status", orderId: orderRequest.id });
-    response.json(serializeOrderRequest(updated));
-    return;
+    // Never reached IBKR — a pure local status flip, but CONDITIONED on the
+    // status we read (2026-09-24): the worker may be turning "confirmed" into
+    // "submitted" this very moment, and an unconditional update here left an
+    // order live at IBKR while the app said "cancelled". Zero rows changed
+    // means the worker won; fall through and treat it as already submitted.
+    const flipped = await db("order_requests")
+      .where({ id: orderRequest.id, status: orderRequest.status })
+      .update({ status: "cancelled", updated_at: db.fn.now(), cancelled_by_user_id: request.session.userId })
+      .returning("id");
+    if (flipped.length > 0) {
+      const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
+      await revertSourceAlertToPending(orderRequest.source_alert_id);
+      await publishNotification({ type: "order_status", orderId: orderRequest.id });
+      response.json(serializeOrderRequest(updated));
+      return;
+    }
+    orderRequest.status = (await db("order_requests").where({ id: orderRequest.id }).first())?.status ?? orderRequest.status;
   }
 
   if (orderRequest.status === "submitted" || orderRequest.status === "partially_filled") {
@@ -1500,9 +1634,9 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     typeof newLeg.quantity !== "number" ||
     newLeg.quantity <= 0 ||
     typeof newLeg.limitPrice !== "number" ||
-    newLeg.limitPrice < 0
+    !(newLeg.limitPrice > 0)
   ) {
-    response.status(400).json({ error: "newLeg requires strikePrice, expiryDate, quantity, and limitPrice." });
+    response.status(400).json({ error: "newLeg requires strikePrice, expiryDate, quantity, and a positive limitPrice (the new leg is sold, never for $0)." });
     return;
   }
   const normalizedNewLegExpiry = normalizeExpiryDate(newLeg.expiryDate);
@@ -1519,6 +1653,13 @@ positionsRouter.post("/:id/roll", async (request, response) => {
   if (position.status !== "open") {
     response.status(409).json({ error: "Position is already closed." });
     return;
+  }
+  {
+    const conflict = await findActiveOrderConflict(db, { positionId: position.id, sourceAlertId });
+    if (conflict) {
+      response.status(409).json({ error: describeActiveOrderConflict(conflict) });
+      return;
+    }
   }
 
   // Optional — a user-initiated roll built via the on-demand roll-candidate
@@ -1616,8 +1757,11 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     .returning("*");
 
   await publishNotification({ type: "order_status", orderId: orderRequest.id });
-  const calendarWarning = formatEconomicCalendarWarning(await fetchEconomicCalendarWarningEvents(normalizedNewLegExpiry));
-  response.status(201).json({ ...serializeOrderRequest(orderRequest), calendarWarning });
+  const [calendarWarning, riskFreeRate] = await Promise.all([
+    fetchEconomicCalendarWarningEvents(normalizedNewLegExpiry).then(formatEconomicCalendarWarning),
+    getRiskFreeRate().catch(() => null),
+  ]);
+  response.status(201).json({ ...serializeOrderRequest(orderRequest), calendarWarning, riskFreeRate });
 });
 
 // Read-only preview: computes a roll candidate for one specific leg on
@@ -1626,7 +1770,9 @@ positionsRouter.post("/:id/roll", async (request, response) => {
 // job hasn't (or never would) flag this leg as triggered. See
 // evaluateRollForPosition.ts. The response shape mirrors a roll trade
 // alert's suggestedStructure so the frontend can feed it straight into the
-// same RollPositionModal used for real roll alerts.
+// same RollPositionModal used for real roll alerts. Streamed (2026-09-24,
+// see streamedResponse.ts): a one-shot connect, contract details per expiry
+// and an 8s quote ceiling can pass Heroku's 30s router timeout.
 positionsRouter.post("/:id/roll-candidate", async (request, response) => {
   const { legId } = request.body as { legId?: string };
   if (!legId) {
@@ -1634,77 +1780,79 @@ positionsRouter.post("/:id/roll-candidate", async (request, response) => {
     return;
   }
 
-  let result: Awaited<ReturnType<typeof evaluateRollForPosition>>;
-  try {
-    result = await evaluateRollForPosition(request.params.id!, legId);
-  } catch (error) {
-    response.status(502).json({ error: error instanceof Error ? error.message : String(error) });
-    return;
-  }
-  switch (result.status) {
-    case "not_found":
-      response.status(404).json({ error: "Leg not found on this position." });
-      return;
-    case "not_rollable":
-      response.status(400).json({ error: result.reason });
-      return;
-    case "no_settings":
-      response.status(409).json({ error: "No strategy settings configured for this position's strategy." });
-      return;
-    case "no_candidate":
-      response.status(422).json({ error: "No viable replacement contract found for this leg right now." });
-      return;
-    case "ok":
-      response.json({
-        symbol: result.symbol,
-        relatedPositionId: result.relatedPositionId,
-        rationale: result.rationale,
-        suggestedStructure: result.suggestedStructure,
-      });
-      return;
-  }
+  await respondWithStreamedResult(response, async () => {
+    let result: Awaited<ReturnType<typeof evaluateRollForPosition>>;
+    try {
+      result = await evaluateRollForPosition(request.params.id!, legId);
+    } catch (error) {
+      return { status: 502, body: { error: error instanceof Error ? error.message : String(error) } };
+    }
+    switch (result.status) {
+      case "not_found":
+        return { status: 404, body: { error: "Leg not found on this position." } };
+      case "not_rollable":
+        return { status: 400, body: { error: result.reason } };
+      case "no_settings":
+        return { status: 409, body: { error: "No strategy settings configured for this position's strategy." } };
+      case "no_quote":
+        return { status: 422, body: { error: "No live quote for the current leg right now — try again during market hours." } };
+      case "no_candidate":
+        return { status: 422, body: { error: "No viable replacement contract found for this leg right now." } };
+      case "ok":
+        return {
+          status: 200,
+          body: {
+            symbol: result.symbol,
+            relatedPositionId: result.relatedPositionId,
+            rationale: result.rationale,
+            suggestedStructure: result.suggestedStructure,
+          },
+        };
+    }
+  });
 });
 
 // Read-only recovery-path projection for an unstructured bare-stock
 // position — "Recovery Path Formula" proposal, approved by Marcelo
 // 2026-08-31. See evaluateRecoveryPathForPosition.ts for the formula.
 // Writes nothing; opens its own short-lived IBKR connection per call.
+// Streamed (2026-09-24, see streamedResponse.ts) for the same reason as
+// /:id/roll-candidate above.
 positionsRouter.post("/:id/recovery-path", async (request, response) => {
-  let result: Awaited<ReturnType<typeof evaluateRecoveryPathForPosition>>;
-  try {
-    result = await evaluateRecoveryPathForPosition(request.params.id!);
-  } catch (error) {
-    response.status(502).json({ error: error instanceof Error ? error.message : String(error) });
-    return;
-  }
-  switch (result.status) {
-    case "not_found":
-      response.status(404).json({ error: "Position not found." });
-      return;
-    case "not_unstructured":
-      response.status(400).json({ error: result.reason });
-      return;
-    case "no_shares":
-      response.status(422).json({ error: "No open stock shares held on this position." });
-      return;
-    case "no_settings":
-      response.status(409).json({ error: "No strategy settings configured for covered calls." });
-      return;
-    case "ok":
-      response.json({
-        symbol: result.symbol,
-        shares: result.shares,
-        entryPrice: result.entryPrice,
-        currentPrice: result.currentPrice,
-        unrealizedLoss: result.unrealizedLoss,
-        contractsAvailable: result.contractsAvailable,
-        candidate: result.candidate,
-        monthlyPremium: result.monthlyPremium,
-        monthsToRecover: result.monthsToRecover,
-        rationale: result.rationale,
-      });
-      return;
-  }
+  await respondWithStreamedResult(response, async () => {
+    let result: Awaited<ReturnType<typeof evaluateRecoveryPathForPosition>>;
+    try {
+      result = await evaluateRecoveryPathForPosition(request.params.id!);
+    } catch (error) {
+      return { status: 502, body: { error: error instanceof Error ? error.message : String(error) } };
+    }
+    switch (result.status) {
+      case "not_found":
+        return { status: 404, body: { error: "Position not found." } };
+      case "not_unstructured":
+        return { status: 400, body: { error: result.reason } };
+      case "no_shares":
+        return { status: 422, body: { error: "No open stock shares held on this position." } };
+      case "no_settings":
+        return { status: 409, body: { error: "No strategy settings configured for covered calls." } };
+      case "ok":
+        return {
+          status: 200,
+          body: {
+            symbol: result.symbol,
+            shares: result.shares,
+            entryPrice: result.entryPrice,
+            currentPrice: result.currentPrice,
+            unrealizedLoss: result.unrealizedLoss,
+            contractsAvailable: result.contractsAvailable,
+            candidate: result.candidate,
+            monthlyPremium: result.monthlyPremium,
+            monthsToRecover: result.monthsToRecover,
+            rationale: result.rationale,
+          },
+        };
+    }
+  });
 });
 
 // Builds an order_requests row (request_type "close_position") for a combo
@@ -1760,6 +1908,13 @@ positionsRouter.post("/:id/close", async (request, response) => {
   if (position.status !== "open") {
     response.status(409).json({ error: "Position is already closed." });
     return;
+  }
+  {
+    const conflict = await findActiveOrderConflict(db, { positionId: position.id });
+    if (conflict) {
+      response.status(409).json({ error: describeActiveOrderConflict(conflict) });
+      return;
+    }
   }
 
   const existingLegs = await db("position_legs").where({ position_id: position.id, exit_at: null });

@@ -114,8 +114,18 @@ const databaseRunStore: BackfillRunStore = {
     await db("ticker_backfill_runs").where({ ticker_id: tickerId, status: "running" }).update({ status: "partial", finished_at: db.fn.now() });
   },
   create: async (tickerId, steps) => {
-    const [row] = await db("ticker_backfill_runs").insert({ ticker_id: tickerId, status: "running", steps: JSON.stringify(steps), progress_percent: 0 }).returning("*");
-    return toRun(row);
+    try {
+      const [row] = await db("ticker_backfill_runs").insert({ ticker_id: tickerId, status: "running", steps: JSON.stringify(steps), progress_percent: 0 }).returning("*");
+      return toRun(row);
+    } catch (error) {
+      // Two starts in the same instant: the one-running index rejects the
+      // second — hand back the run that won instead of a 500 (2026-09-24).
+      if ((error as { code?: string }).code === "23505") {
+        const existing = await getLatestBackfillRun(tickerId);
+        if (existing && existing.status === "running") return existing;
+      }
+      throw error;
+    }
   },
   saveProgress: async (runId, steps) => {
     await db("ticker_backfill_runs").where({ id: runId }).update({ steps: JSON.stringify(steps), progress_percent: computeProgressPercent(steps) });
