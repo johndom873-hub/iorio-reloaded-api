@@ -182,14 +182,16 @@ let resubscribeRetryAttempt = 0;
 let restricted = false;
 
 /** Live subscribers right now — for the health/observability endpoint. */
-export function marketDataPoolSnapshot(): { contractCount: number; subscriberCount: number; pausedCount: number; restricted: boolean } {
+export function marketDataPoolSnapshot(): { contractCount: number; subscriberCount: number; pausedCount: number; openLineCount: number; restricted: boolean } {
   let subscriberCount = 0;
   let pausedCount = 0;
+  let openLineCount = 0;
   for (const entry of entriesByPoolKey.values()) {
     subscriberCount += entry.subscribers.size;
     if (entry.paused) pausedCount += 1;
+    if (entry.reqId !== -1) openLineCount += 1;
   }
-  return { contractCount: entriesByPoolKey.size, subscriberCount, pausedCount, restricted };
+  return { contractCount: entriesByPoolKey.size, subscriberCount, pausedCount, openLineCount, restricted };
 }
 
 /**
