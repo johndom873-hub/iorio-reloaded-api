@@ -73,11 +73,22 @@ export const positionSelect = `
       ),
       0
     ) AS "realizedStockPnl",
+    -- Keyed on leg composition (open stock leg present?), not strategy_key —
+    -- an unstructured (N/S) position can be bare leftover stock with no
+    -- option leg at all (e.g. shares left after a covered call's short call
+    -- expired/was assigned away), and that stock still has real capital at
+    -- risk. Gating this on strategy_key = 'covered_call' missed that case
+    -- and showed "–" for EXP $/% on those rows — same bug class already
+    -- fixed for Stock P&L display 2026-08-30, see positionHasStockLeg's
+    -- doc comment in positionPnl.ts. Fixed 2026-09-24.
     CASE
-      WHEN p.strategy_key = 'covered_call' THEN (
+      WHEN EXISTS (
+        SELECT 1 FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.exit_at IS NULL
+      ) THEN (
         SELECT pl.entry_price * pl.quantity
         FROM position_legs pl
-        WHERE pl.position_id = p.id AND pl.leg_type = 'stock'
+        WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.exit_at IS NULL
         LIMIT 1
       )
       ELSE (

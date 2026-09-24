@@ -116,7 +116,11 @@ function normalizeExpiryDate(raw: string): string | null {
 //     locked-in gain even while the position is still open.
 //   capitalAtRisk = entry-time capital committed, same definition as Trade
 //     Alerts' approved capitalAtRisk (spot for covered calls, strike for
-//     CSPs) but from entry actuals rather than a scan-time estimate.
+//     CSPs) but from entry actuals rather than a scan-time estimate. Keyed
+//     on leg composition (open stock leg present?), not strategy_key, so a
+//     bare-stock unstructured (N/S) position — e.g. leftover shares after a
+//     covered call's short call expired/was assigned away — still gets a
+//     real capitalAtRisk instead of null (fixed 2026-09-24).
 // Shared with ibkrGatewayWorker.ts's post-close Telegram notification, so
 // both agree on the same realizedPnl/capitalAtRisk numbers — see
 // lib/positionQueries.ts.
