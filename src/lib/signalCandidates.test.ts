@@ -267,30 +267,31 @@ describe("buildSignalCandidates: boundary conditions", () => {
 });
 
 describe("gradeSignalCandidates", () => {
-  // 10 candidates with net Edge 1..10 (all positive) -> top 10% (1) strong, next 20% (2) good, next 30% (3) marginal, rest (4) avoid
-  function fakeCandidates(netEdges: number[]) {
-    return netEdges.map((netEdge, index) => ({ netEdge, strategyKey: "cash_secured_put" as const, expiry: "2026-10-21", strike: 90 - index, dte: 30, delta: -0.2, bid: 1, ask: 1.1, spreadPercent: 5, surfaceImpliedVolatility: 0.2, midImpliedVolatility: 0.2, forecastVolatility: 0.15, edge: netEdge, frictionVolatility: 0, edgeDollars: netEdge * 10, vega: 0.1, netEdgeAtMid: netEdge, edgeDollarsAtMid: netEdge * 10, dollarRisk: 8999, riskAdjustedRatio: (netEdge * 10) / 8999, riskAdjustedRatioAtMid: (netEdge * 10) / 8999, annualizedYield: 0.2, uncompensatedSharePercent: 30, quoteSource: "snapshot" as const, flags: [], executable: true, grade: "avoid" as const }));
+  // Fixed net Edge cut points (approved 2026-09-24): <=0 avoid, 0-5vp weak, 5-10vp good, 10vp+ strong.
+  // netEdgeVolatilityPoints is netEdge * 100, so fakeCandidates takes vp directly for readability.
+  function fakeCandidates(netEdgesVolatilityPoints: number[]) {
+    return netEdgesVolatilityPoints.map((vp, index) => {
+      const netEdge = vp / 100;
+      return { netEdge, strategyKey: "cash_secured_put" as const, expiry: "2026-10-21", strike: 90 - index, dte: 30, delta: -0.2, bid: 1, ask: 1.1, spreadPercent: 5, surfaceImpliedVolatility: 0.2, midImpliedVolatility: 0.2, forecastVolatility: 0.15, edge: netEdge, frictionVolatility: 0, edgeDollars: netEdge * 10, vega: 0.1, netEdgeAtMid: netEdge, edgeDollarsAtMid: netEdge * 10, dollarRisk: 8999, riskAdjustedRatio: (netEdge * 10) / 8999, riskAdjustedRatioAtMid: (netEdge * 10) / 8999, annualizedYield: 0.2, uncompensatedSharePercent: 30, quoteSource: "snapshot" as const, flags: [], executable: true, grade: "avoid" as const };
+    });
   }
 
-  it("cuts at top 10% / next 20% / next 30% / rest, all positive net Edge", () => {
-    const graded = gradeSignalCandidates(fakeCandidates([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
-    const byNetEdge = new Map(graded.map((c) => [c.netEdge, c.grade]));
-    expect(byNetEdge.get(10)).toBe("strong");
-    expect(byNetEdge.get(9)).toBe("good");
-    expect(byNetEdge.get(8)).toBe("good");
-    expect(byNetEdge.get(7)).toBe("marginal");
-    expect(byNetEdge.get(5)).toBe("marginal");
-    expect(byNetEdge.get(4)).toBe("avoid");
-    expect(byNetEdge.get(1)).toBe("avoid");
-  });
-
-  it("net Edge <= 0 is always avoid, even if it would rank in the top 10% of an all-negative ticker", () => {
-    const graded = gradeSignalCandidates(fakeCandidates([-1, -2, -3, -0.1, 0]));
-    expect(graded.every((c) => c.grade === "avoid")).toBe(true);
+  it("cuts at 10vp+ strong, 5-10vp good, 0-5vp weak, <=0 avoid", () => {
+    const graded = gradeSignalCandidates(fakeCandidates([-1, 0, 2, 4.99, 5, 8, 9.99, 10, 15]));
+    const byNetEdgeVp = new Map(graded.map((c) => [Math.round(c.netEdge * 10000) / 100, c.grade]));
+    expect(byNetEdgeVp.get(15)).toBe("strong");
+    expect(byNetEdgeVp.get(10)).toBe("strong");
+    expect(byNetEdgeVp.get(9.99)).toBe("good");
+    expect(byNetEdgeVp.get(8)).toBe("good");
+    expect(byNetEdgeVp.get(5)).toBe("good");
+    expect(byNetEdgeVp.get(4.99)).toBe("weak");
+    expect(byNetEdgeVp.get(2)).toBe("weak");
+    expect(byNetEdgeVp.get(0)).toBe("avoid");
+    expect(byNetEdgeVp.get(-1)).toBe("avoid");
   });
 
   it("handles a single candidate and an empty list without throwing", () => {
-    expect(gradeSignalCandidates(fakeCandidates([3]))[0]!.grade).toBe("strong");
+    expect(gradeSignalCandidates(fakeCandidates([15]))[0]!.grade).toBe("strong");
     expect(gradeSignalCandidates([])).toEqual([]);
   });
 

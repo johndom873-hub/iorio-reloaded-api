@@ -255,6 +255,6 @@ describe("toScreenRow / countGrades", () => {
   });
   it("counts every grade", () => {
     const counts = countGrades([{ grade: "strong" }, { grade: "avoid" }, { grade: "avoid" }] as SignalCandidate[]);
-    expect(counts).toEqual({ strong: 1, good: 0, marginal: 0, avoid: 2 });
+    expect(counts).toEqual({ strong: 1, good: 0, weak: 0, avoid: 2 });
   });
 });

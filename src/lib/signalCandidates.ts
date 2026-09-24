@@ -14,7 +14,7 @@ import { expirySpansEarnings, type RealizedVolatilityForecast } from "./volatili
 // (~17% of contracts, see PROGRESS.md).
 
 export type SignalStrategyKey = "covered_call" | "cash_secured_put";
-export type SignalGrade = "strong" | "good" | "marginal" | "avoid";
+export type SignalGrade = "strong" | "good" | "weak" | "avoid";
 export type SignalFlag = "earnings_calendar_unresolved" | "outside_fitted_range" | "wide_spread" | "insufficient_cash";
 
 export const wideSpreadThreshold = 0.5; // matches the surface fit's own quote filter
@@ -250,28 +250,21 @@ export function attachUncompensatedShare(candidates: SignalCandidate[], input: U
   });
 }
 
-// Grade cut points (approved 2026-09-22): top 10% of net Edge = strong, next 20% = good, next 30% = marginal,
-// the rest = avoid; net Edge <= 0 is always avoid regardless of rank.
-const strongQuantile = 0.9;
-const goodQuantile = 0.7;
-const marginalQuantile = 0.4;
+// Grade cut points (approved 2026-09-24, replacing the old per-ticker quantile scale): fixed net
+// Edge thresholds, in volatility points (netEdge is a fraction, so /100 here) -- net Edge <= 0 is
+// avoid, 0-5vp is weak, 5-10vp is good, 10vp+ is strong.
+const strongCutVolatilityPoints = 10;
+const goodCutVolatilityPoints = 5;
 
-/** Assigns a grade to every candidate, in place conceptually (returns a new array), from the ticker's own net-Edge distribution. */
+/** Assigns a grade to every candidate, in place conceptually (returns a new array), from its own net Edge. */
 export function gradeSignalCandidates(candidates: SignalCandidate[]): SignalCandidate[] {
-  if (candidates.length === 0) return candidates;
-  const sortedNetEdges = candidates.map((candidate) => candidate.netEdge).sort((a, b) => a - b);
-  const quantile = (probability: number) => sortedNetEdges[Math.min(sortedNetEdges.length - 1, Math.floor(probability * sortedNetEdges.length))]!;
-  const strongCut = quantile(strongQuantile);
-  const goodCut = quantile(goodQuantile);
-  const marginalCut = quantile(marginalQuantile);
-
   return candidates.map((candidate) => {
+    const netEdgeVolatilityPoints = candidate.netEdge * 100;
     let grade: SignalGrade;
     if (candidate.netEdge <= 0) grade = "avoid";
-    else if (candidate.netEdge >= strongCut) grade = "strong";
-    else if (candidate.netEdge >= goodCut) grade = "good";
-    else if (candidate.netEdge >= marginalCut) grade = "marginal";
-    else grade = "avoid";
+    else if (netEdgeVolatilityPoints >= strongCutVolatilityPoints) grade = "strong";
+    else if (netEdgeVolatilityPoints >= goodCutVolatilityPoints) grade = "good";
+    else grade = "weak";
     return { ...candidate, grade };
   });
 }

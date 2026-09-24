@@ -80,7 +80,7 @@ export function computeAtmImpliedVolatility(slices: SignalSurfaceSlice[]): numbe
 }
 
 export function countGrades(candidates: SignalCandidate[]): GradeCounts {
-  const counts: GradeCounts = { strong: 0, good: 0, marginal: 0, avoid: 0 };
+  const counts: GradeCounts = { strong: 0, good: 0, weak: 0, avoid: 0 };
   for (const candidate of candidates) counts[candidate.grade] += 1;
   return counts;
 }
@@ -103,7 +103,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     dayChangePercent: live && live.priceSource !== "snapshot" ? computeDayChangePercent(spotPrice, inputs.previousClose) : null,
     candidates: [],
     best: null,
-    gradeCounts: { strong: 0, good: 0, marginal: 0, avoid: 0 },
+    gradeCounts: { strong: 0, good: 0, weak: 0, avoid: 0 },
     fittedSliceCount: inputs.slices.filter((slice) => slice.status === "ok").length,
     totalSliceCount: inputs.slices.length,
     momentum: inputs.momentum,
