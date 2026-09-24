@@ -18,6 +18,7 @@ import { riskLimitsRouter } from "./routes/riskLimits.js";
 import { screenerRouter } from "./routes/screener.js";
 import { shortlistRouter } from "./routes/shortlist.js";
 import { signalsRouter } from "./routes/signals.js";
+import { signalSettingsRouter } from "./routes/signalSettings.js";
 import { systemHealthRouter } from "./routes/systemHealth.js";
 import { tickerDetailRouter } from "./routes/tickerDetail.js";
 import { tradeAlertsRouter } from "./routes/tradeAlerts.js";
@@ -67,6 +68,7 @@ app.use("/stream", createStreamMultiplexerRouter({ producers: streamProducers })
 app.use("/trade-blotter", tradeBlotterRouter);
 app.use("/trade-alerts", tradeAlertsRouter);
 app.use("/signals", signalsRouter);
+app.use("/signal-settings", signalSettingsRouter);
 app.use("/system-health", systemHealthRouter);
 app.use("/calendar-events", calendarEventsRouter);
 app.use("/dashboard", dashboardRouter);
