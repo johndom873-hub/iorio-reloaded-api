@@ -224,21 +224,29 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
     const positionLegs = legsByPositionId.get(position.id) ?? [];
 
     const isUnstructured = position.strategyKey === "unstructured";
-    events.push({
-      positionId: position.id,
-      eventType: isUnstructured ? "unstructured" : "opened",
-      eventAt: position.openedAt,
-      openedAt: position.openedAt,
-      symbol: position.symbol,
-      strategyKey: position.strategyKey,
-      closeReason: null,
-      unstructuredReason: isUnstructured ? position.unstructuredReason : null,
-      realizedPnl: null,
-      netCashEffect: isUnstructured ? null : netCashEffectFor(positionLegs),
-      fullMarketValue: fullMarketValueFor(positionLegs, position.strategyKey, false),
-      attributedTo: openAttributionByPositionId.get(position.id) ?? null,
-      legs: legSummaries(positionLegs),
-    });
+    // The stock position a CSP assignment leaves behind is conceptually part
+    // of the assignment itself, not a separate transaction — the CSP's own
+    // "closed"/"assigned" event already tells that story, so its paired
+    // "opened" event here would just be a confusing duplicate ("No strategy"
+    // next to "Assigned" for the same real-world event).
+    const isCspAssignedLeftoverStock = isUnstructured && position.unstructuredReason === "csp_assigned_stock";
+    if (!isCspAssignedLeftoverStock) {
+      events.push({
+        positionId: position.id,
+        eventType: isUnstructured ? "unstructured" : "opened",
+        eventAt: position.openedAt,
+        openedAt: position.openedAt,
+        symbol: position.symbol,
+        strategyKey: position.strategyKey,
+        closeReason: null,
+        unstructuredReason: isUnstructured ? position.unstructuredReason : null,
+        realizedPnl: null,
+        netCashEffect: isUnstructured ? null : netCashEffectFor(positionLegs),
+        fullMarketValue: fullMarketValueFor(positionLegs, position.strategyKey, false),
+        attributedTo: openAttributionByPositionId.get(position.id) ?? null,
+        legs: legSummaries(positionLegs),
+      });
+    }
 
     if (position.closedAt) {
       events.push({
