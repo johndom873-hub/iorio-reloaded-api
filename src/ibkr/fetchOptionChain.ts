@@ -106,8 +106,6 @@ export async function lookupOptionParams(
       _multiplier: string,
       expirations: string[],
     ) {
-      // TEMP DIAGNOSTIC (remove after QQQ/SMCI/SMH secDefOptParams timeout investigation):
-      console.log(`[secDefOptParams diag] ${symbol} reqId=${reqId} gotId=${id} exchange=${exchange} expirationsCount=${expirations?.length ?? 0}`);
       if (id !== reqId || exchange !== "SMART") return;
       cleanup();
       resolve({ expirations: Array.from(expirations) });
@@ -119,8 +117,6 @@ export async function lookupOptionParams(
     // timeout instead of the generic message masking it.
     function onError(error: Error, code: number, errorReqId: number) {
       if (errorReqId !== reqId) return;
-      // TEMP DIAGNOSTIC (remove after QQQ/SMCI/SMH secDefOptParams timeout investigation):
-      console.log(`[secDefOptParams diag] ${symbol} reqId=${reqId} error code=${code}: ${error.message}`);
       lastError = `secDefOptParams error for ${symbol} (code ${code}): ${error.message}`;
     }
     ib.on(EventName.securityDefinitionOptionParameter, onParams);
