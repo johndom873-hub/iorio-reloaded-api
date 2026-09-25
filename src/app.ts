@@ -40,6 +40,13 @@ app.use(
   cors({
     origin: environment.frontendOrigin,
     credentials: true,
+    // Without this, no Access-Control-Max-Age is sent, so the browser never
+    // caches the preflight and re-sends OPTIONS before every single
+    // cross-origin request — doubling Heroku router log volume with no
+    // functional effect (CORS policy itself is unchanged either way).
+    // 86400s is the ceiling browsers actually honor (Chromium caps at 7200s,
+    // Firefox at 86400s); asking for more just gets clamped.
+    maxAge: 86400,
   }),
 );
 app.use(express.json());
