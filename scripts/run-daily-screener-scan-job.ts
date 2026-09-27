@@ -1,70 +1,93 @@
-// Scheduled job (see PROGRESS.md's "Screener discovery tool" decision,
-// 2026-09-05): runs IBKR's market scanner (reqScannerSubscription) across
-// three scan codes to find covered-call/CSP candidates, enriches each with
-// price/liquidity/IV data, and upserts the result into
-// screener_scan_results — the Screener tab reads this cached table, no
-// live IBKR call on page load. Deliberately independent of `tickers`/
-// `shortlist_entries`: most candidates are never added to the shortlist,
-// and creating `tickers` rows for all of them would expand the "we
-// actually monitor this" universe relied on by run-daily-market-data-job.ts
-// and runTradeAlertGeneration.ts. Runs once nightly, offset ~30min after
-// job:daily-market-data to avoid two jobs holding concurrent IBKR Gateway
-// connections back-to-back.
+// Scheduled job (redesigned 2026-09-25, see PROGRESS.md "Screener revamp"):
+// builds/maintains screener_universe, an ACCUMULATING candidate list —
+// unlike the table this replaces (screener_scan_results, purged daily),
+// a symbol is never removed just because it didn't match tonight's scans.
+// Every symbol already in the table gets re-enriched every night regardless
+// of whether it matched, so the data never goes stale for a ticker that's
+// stopped qualifying; best_rank/matched_scan_codes reflect ONLY tonight's
+// outcome (999/'{}' sentinel when unmatched, sorts to the bottom).
+//
+// Query phase: 6 scan codes spanning both "rich" (high/changing IV) and
+// "liquid" (option volume/open interest) signals, all with a $10B market
+// cap floor (research-backed choice, 2026-09-25 — $1B was found to admit
+// thin/speculative names with poor option liquidity despite clearing the
+// old floor). HIGH_OPT_VOLUME_PUT_CALL_RATIO deliberately excluded — it's a
+// skew/sentiment signal, not a richness or liquidity one.
 //
 // Usage (dev):
 //   npm run job:daily-screener-scan
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-daily-screener-scan-job.js
 
-import { ScanCode } from "@stoqey/ib";
+import { ScanCode, Stock } from "@stoqey/ib";
 import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { runScannerSubscription, type ScannerCandidate } from "../src/ibkr/fetchScannerCandidates.js";
 import { enrichCandidate } from "../src/ibkr/enrichScannerCandidates.js";
+import { lookupContractDetails } from "../src/ibkr/fetchNewTickerData.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 
-const scanCodes = [ScanCode.HIGH_OPT_IMP_VOLAT_OVER_HIST, ScanCode.HOT_BY_OPT_VOLUME, ScanCode.HIGH_OPT_IMP_VOLAT];
+const scanCodes = [
+  ScanCode.HIGH_OPT_IMP_VOLAT,
+  ScanCode.HIGH_OPT_IMP_VOLAT_OVER_HIST,
+  ScanCode.TOP_OPT_IMP_VOLAT_GAIN,
+  ScanCode.HOT_BY_OPT_VOLUME,
+  ScanCode.OPT_VOLUME_MOST_ACTIVE,
+  ScanCode.OPT_OPEN_INTEREST_MOST_ACTIVE,
+];
 const rowsPerScan = 50;
-const marketCapAboveUsd = 1_000_000_000;
+const marketCapAboveUsd = 10_000_000_000;
+const unmatchedRankSentinel = 999;
 
 let nextReqId = 1;
 
-interface PooledCandidate {
+interface PooledMatch {
   symbol: string;
-  companyName: string | null;
-  sector: string | null;
   conId: number | null;
-  scanCodes: Set<ScanCode>;
+  scanCodes: Set<string>;
   bestRank: number;
-  ivVsHistRatio: number | null;
 }
 
-function poolCandidates(scanResults: ScannerCandidate[][]): PooledCandidate[] {
-  const bySymbol = new Map<string, PooledCandidate>();
-
+function poolMatches(scanResults: ScannerCandidate[][]): Map<string, PooledMatch> {
+  const bySymbol = new Map<string, PooledMatch>();
   for (const candidates of scanResults) {
     for (const candidate of candidates) {
       const existing = bySymbol.get(candidate.symbol);
+      const scanCodeName = ScanCode[candidate.scanCode] ?? String(candidate.scanCode);
       if (!existing) {
-        bySymbol.set(candidate.symbol, {
-          symbol: candidate.symbol,
-          companyName: candidate.companyName,
-          sector: candidate.sector,
-          conId: candidate.conId,
-          scanCodes: new Set([candidate.scanCode]),
-          bestRank: candidate.rank,
-          ivVsHistRatio: candidate.ivVsHistRatio,
-        });
+        bySymbol.set(candidate.symbol, { symbol: candidate.symbol, conId: candidate.conId, scanCodes: new Set([scanCodeName]), bestRank: candidate.rank });
         continue;
       }
-      existing.scanCodes.add(candidate.scanCode);
+      existing.scanCodes.add(scanCodeName);
       existing.bestRank = Math.min(existing.bestRank, candidate.rank);
-      existing.ivVsHistRatio = existing.ivVsHistRatio ?? candidate.ivVsHistRatio;
+      existing.conId ??= candidate.conId;
     }
   }
+  return bySymbol;
+}
 
-  return [...bySymbol.values()];
+interface ExistingUniverseRow {
+  symbol: string;
+  ibkrContractId: number | null;
+  companyName: string | null;
+  sector: string | null;
+  primaryExchange: string | null;
+}
+
+interface EnrichedRow {
+  symbol: string;
+  ibkr_contract_id: number | null;
+  company_name: string | null;
+  sector: string | null;
+  primary_exchange: string | null;
+  last_price: number | null;
+  avg_share_volume: number | null;
+  avg_option_volume: number | null;
+  call_open_interest: number | null;
+  put_open_interest: number | null;
+  bid_ask_spread_pct: number | null;
+  implied_volatility: number | null;
 }
 
 async function main(): Promise<void> {
@@ -77,92 +100,156 @@ async function main(): Promise<void> {
     console.log("Connecting to IBKR Gateway for the screener scan...");
     const connection = await connectToIbkrGateway();
 
-    const scanResults: ScannerCandidate[][] = [];
+    const scanCounts: Record<string, number> = {};
     let enriched = 0;
     let failed = 0;
-    const scanCounts: Record<string, number> = {};
 
     try {
-      // Sequential, not Promise.all — three concurrent scanner subscriptions
-      // plus later concurrent enrichment would stack IBKR-side load; this
-      // matches the sequential-per-ticker precedent in
-      // run-daily-market-data-job.ts.
+      // Sequential, not Promise.all — matches the existing precedent
+      // (daily-market-data job, and this job's own prior version) that
+      // concurrent IBKR requests on one connection cause pacing/contention
+      // issues.
+      const scanResults: ScannerCandidate[][] = [];
       for (const scanCode of scanCodes) {
-        const candidates = await runScannerSubscription(connection, scanCode, nextReqId++, {
-          numberOfRows: rowsPerScan,
-          marketCapAboveUsd,
-        });
+        const candidates = await runScannerSubscription(connection, scanCode, nextReqId++, { numberOfRows: rowsPerScan, marketCapAboveUsd });
         scanCounts[ScanCode[scanCode] ?? String(scanCode)] = candidates.length;
         scanResults.push(candidates);
-
-        // benchmark/projection's real format is undocumented by IBKR (see
-        // fetchScannerCandidates.ts's parseNumericField comment) and gets
-        // dropped once pooled below — log a small raw sample per scan code
-        // so a wrong-looking ivVsHistRatio can actually be diagnosed after
-        // this job's first live runs, instead of needing another manual
-        // live re-test.
-        for (const sample of candidates.slice(0, 3)) {
-          console.log(
-            `  sample ${sample.symbol} (${ScanCode[scanCode] ?? scanCode}): ` +
-              `rawBenchmark=${JSON.stringify(sample.rawBenchmark)} rawProjection=${JSON.stringify(sample.rawProjection)} ` +
-              `parsedIvVsHistRatio=${sample.ivVsHistRatio}`,
-          );
-        }
       }
 
-      const pooled = poolCandidates(scanResults);
-      console.log(`Pooled ${pooled.length} unique candidate(s) across ${scanCodes.length} scan(s).`);
+      const matches = poolMatches(scanResults);
+      console.log(`Pooled ${matches.size} unique candidate(s) across ${scanCodes.length} scan(s).`);
 
-      const today = new Date().toISOString().slice(0, 10);
-      const rows: Record<string, unknown>[] = [];
+      const existingRows: { symbol: string; ibkr_contract_id: number | null; company_name: string | null; sector: string | null; primary_exchange: string | null }[] = await db(
+        "screener_universe",
+      ).select("symbol", "ibkr_contract_id", "company_name", "sector", "primary_exchange");
+      const existingBySymbol = new Map<string, ExistingUniverseRow>(
+        existingRows.map((row) => [row.symbol, { symbol: row.symbol, ibkrContractId: row.ibkr_contract_id, companyName: row.company_name, sector: row.sector, primaryExchange: row.primary_exchange }]),
+      );
 
-      for (const candidate of pooled) {
+      // The full nightly re-enrichment set: tonight's matches (new or
+      // already-known) UNION every symbol already accumulated, whether or
+      // not it matched tonight — the "keep it, re-enrich anyway" decision.
+      const fullSymbolSet = new Set<string>([...matches.keys(), ...existingBySymbol.keys()]);
+      console.log(`Enriching ${fullSymbolSet.size} symbol(s) (${fullSymbolSet.size - matches.size} carried over from the existing universe, not matched tonight).`);
+
+      const matchedRows: (EnrichedRow & { best_rank: number; matched_scan_codes: string[] })[] = [];
+      const carriedOverRows: EnrichedRow[] = [];
+
+      for (const symbol of fullSymbolSet) {
         try {
-          const enrichment = await enrichCandidate(connection, nextReqId++, candidate.symbol);
-          const existing = await db("screener_scan_results").where({ symbol: candidate.symbol }).first();
+          const existing = existingBySymbol.get(symbol);
+          const match = matches.get(symbol);
 
-          rows.push({
-            symbol: candidate.symbol,
-            company_name: candidate.companyName,
-            sector: candidate.sector,
-            ibkr_contract_id: candidate.conId,
-            scan_codes: [...candidate.scanCodes].map((code) => ScanCode[code] ?? String(code)),
-            best_rank: candidate.bestRank,
-            last_price: enrichment.lastPrice,
-            avg_share_volume: enrichment.avgShareVolume,
-            avg_option_volume: enrichment.avgOptionVolume,
-            call_open_interest: enrichment.callOpenInterest,
-            put_open_interest: enrichment.putOpenInterest,
-            bid_ask_spread_pct: enrichment.bidAskSpreadPct,
-            iv_vs_hist_ratio: candidate.ivVsHistRatio,
-            implied_volatility: enrichment.impliedVolatility,
-            scan_date: today,
-            first_seen_date: existing?.first_seen_date ?? today,
-            captured_at: db.fn.now(),
-          });
+          // Identity (name/sector/exchange/conId) rarely changes — only
+          // pay for a live reqContractDetails lookup for a symbol this
+          // table has never seen before.
+          let identity = { companyName: existing?.companyName ?? null, sector: existing?.sector ?? null, primaryExchange: existing?.primaryExchange ?? null, conId: existing?.ibkrContractId ?? match?.conId ?? null };
+          if (!existing) {
+            const detailsReqId = nextReqId++;
+            const detailsPromise = lookupContractDetails(connection, detailsReqId);
+            connection.ib.reqContractDetails(detailsReqId, new Stock(symbol, "SMART", "USD"));
+            const details = await detailsPromise;
+            identity = { companyName: details.companyName, sector: details.sector, primaryExchange: details.primaryExchange, conId: details.conId ?? identity.conId };
+          }
+
+          const quote = await enrichCandidate(connection, nextReqId++, symbol);
+
+          const enrichedRow: EnrichedRow = {
+            symbol,
+            ibkr_contract_id: identity.conId,
+            company_name: identity.companyName,
+            sector: identity.sector,
+            primary_exchange: identity.primaryExchange,
+            last_price: quote.lastPrice,
+            avg_share_volume: quote.avgShareVolume,
+            avg_option_volume: quote.avgOptionVolume,
+            call_open_interest: quote.callOpenInterest,
+            put_open_interest: quote.putOpenInterest,
+            bid_ask_spread_pct: quote.bidAskSpreadPct,
+            implied_volatility: quote.impliedVolatility,
+          };
+
+          if (match) {
+            matchedRows.push({ ...enrichedRow, best_rank: match.bestRank, matched_scan_codes: [...match.scanCodes] });
+          } else {
+            carriedOverRows.push(enrichedRow);
+          }
           enriched++;
         } catch (error) {
           failed++;
-          console.warn(`${candidate.symbol}: enrichment failed — ${error instanceof Error ? error.message : error}`);
+          console.warn(`${symbol}: enrichment failed — ${error instanceof Error ? error.message : error}`);
         }
       }
 
-      // Anything not refreshed by this run has dropped out of every scan —
-      // purge before upserting so the table stays an honest "today's
-      // candidates" list rather than accumulating stale rows forever.
-      await db("screener_scan_results").where("scan_date", "<", today).del();
-
-      if (rows.length > 0) {
-        await db("screener_scan_results")
-          .insert(rows)
-          .onConflict(["symbol"])
-          .merge();
+      // Two batches: matched rows update best_rank/matched_scan_codes/last_matched_at;
+      // carried-over (unmatched tonight) rows reset best_rank to the sentinel and
+      // clear matched_scan_codes, but leave last_matched_at untouched (excluded from
+      // the merge list) so it still reflects the last time this symbol actually matched.
+      // first_seen_at is excluded from both merge lists — set once, by the column
+      // default, only on a genuine first insert.
+      if (matchedRows.length > 0) {
+        await db("screener_universe")
+          .insert(
+            matchedRows.map((row) => ({
+              ...row,
+              matched_scan_codes: row.matched_scan_codes,
+              last_matched_at: db.fn.now(),
+              last_refreshed_at: db.fn.now(),
+            })),
+          )
+          .onConflict("symbol")
+          .merge([
+            "ibkr_contract_id",
+            "company_name",
+            "sector",
+            "primary_exchange",
+            "last_price",
+            "avg_share_volume",
+            "avg_option_volume",
+            "call_open_interest",
+            "put_open_interest",
+            "bid_ask_spread_pct",
+            "implied_volatility",
+            "best_rank",
+            "matched_scan_codes",
+            "last_matched_at",
+            "last_refreshed_at",
+          ]);
       }
 
-      console.log(`Screener scan complete: ${enriched} enriched, ${failed} failed, ${rows.length} row(s) upserted.`);
+      if (carriedOverRows.length > 0) {
+        await db("screener_universe")
+          .insert(
+            carriedOverRows.map((row) => ({
+              ...row,
+              best_rank: unmatchedRankSentinel,
+              matched_scan_codes: [],
+              last_refreshed_at: db.fn.now(),
+            })),
+          )
+          .onConflict("symbol")
+          .merge([
+            "ibkr_contract_id",
+            "company_name",
+            "sector",
+            "primary_exchange",
+            "last_price",
+            "avg_share_volume",
+            "avg_option_volume",
+            "call_open_interest",
+            "put_open_interest",
+            "bid_ask_spread_pct",
+            "implied_volatility",
+            "best_rank",
+            "matched_scan_codes",
+            "last_refreshed_at",
+          ]);
+      }
+
+      console.log(`Screener scan complete: ${enriched} enriched, ${failed} failed, ${matchedRows.length} matched, ${carriedOverRows.length} carried over.`);
       return {
-        details: { scanCounts, pooled: pooled.length, enriched, failed },
-        notify: failed > pooled.length / 2 ? `⚠️ Screener scan: ${failed}/${pooled.length} candidate(s) failed enrichment.` : undefined,
+        details: { scanCounts, matched: matches.size, universeSize: fullSymbolSet.size, enriched, failed },
+        notify: failed > fullSymbolSet.size / 2 ? `⚠️ Screener scan: ${failed}/${fullSymbolSet.size} symbol(s) failed enrichment.` : undefined,
       };
     } finally {
       connection.disconnect();

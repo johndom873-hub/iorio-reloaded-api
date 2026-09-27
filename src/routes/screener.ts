@@ -6,63 +6,72 @@ import { findOrCreateTicker, addTickerToShortlist, UnknownSymbolError } from "..
 export const screenerRouter = Router();
 screenerRouter.use(requireAuth);
 
+const unmatchedRankSentinel = 999;
+const bestRankBuckets: Record<string, { min: number; max: number }> = {
+  "1-10": { min: 1, max: 10 },
+  "11-20": { min: 11, max: 20 },
+  "21-30": { min: 21, max: 30 },
+  "31-40": { min: 31, max: 40 },
+  "41-50": { min: 41, max: 50 },
+};
+
 interface ScreenerFilters {
-  maxPrice?: number;
-  minIvRatio?: number;
-  maxIvRatio?: number;
-  minAvgOptionVolume?: number;
-  minAvgShareVolume?: number;
-  maxBidAskSpreadPct?: number;
+  search?: string;
   sector?: string;
+  minIv?: number;
+  bestRankBucket?: string;
 }
 
 function parseFilters(query: Record<string, unknown>): ScreenerFilters {
-  const num = (key: string): number | undefined => {
-    const raw = query[key];
-    if (typeof raw !== "string" || raw.trim() === "") return undefined;
-    const value = Number(raw);
-    return Number.isFinite(value) ? value : undefined;
-  };
-
+  const str = (key: string): string | undefined => (typeof query[key] === "string" && (query[key] as string).trim() ? (query[key] as string).trim() : undefined);
+  const minIvRaw = str("minIv");
+  const minIv = minIvRaw !== undefined ? Number(minIvRaw) : undefined;
   return {
-    maxPrice: num("maxPrice"),
-    minIvRatio: num("minIvRatio"),
-    maxIvRatio: num("maxIvRatio"),
-    minAvgOptionVolume: num("minAvgOptionVolume"),
-    minAvgShareVolume: num("minAvgShareVolume"),
-    maxBidAskSpreadPct: num("maxBidAskSpreadPct"),
-    sector: typeof query.sector === "string" && query.sector.trim() ? query.sector.trim() : undefined,
+    search: str("search"),
+    sector: str("sector"),
+    minIv: minIv !== undefined && Number.isFinite(minIv) ? minIv : undefined,
+    bestRankBucket: str("bestRankBucket"),
   };
 }
 
-// Reads the latest cached daily scan (job:daily-screener-scan) — never
+// Reads the accumulated screener_universe (job:daily-screener-scan) — never
 // calls IBKR live, so filter changes are instant. isShortlisted is a
-// per-row EXISTS check by symbol (screener_scan_results has no FK to
-// `tickers` — see the migration comment for why) so the UI can hide/disable
-// "Add to Shortlist" for candidates already being monitored.
+// per-row EXISTS check by symbol (no FK to `tickers` — see the migration
+// comment for why) so the UI can hide/disable "Add to Shortlist" for
+// candidates already being monitored. IBKR ranks are 0-indexed; the API
+// keeps that convention and the frontend displays rank + 1.
 screenerRouter.get("/", async (request, response) => {
   const filters = parseFilters(request.query as Record<string, unknown>);
 
-  const query = db("screener_scan_results as ssr").select(
-    "ssr.*",
+  const query = db("screener_universe as su").select(
+    "su.*",
     db.raw(`
       EXISTS (
         SELECT 1 FROM tickers t
         JOIN shortlist_entries se ON se.ticker_id = t.id AND se.removed_at IS NULL
-        WHERE t.symbol = ssr.symbol
+        WHERE t.symbol = su.symbol
       ) AS "isShortlisted"
     `),
   );
 
-  if (filters.maxPrice !== undefined) query.where("ssr.last_price", "<=", filters.maxPrice);
-  if (filters.minIvRatio !== undefined) query.where("ssr.iv_vs_hist_ratio", ">=", filters.minIvRatio);
-  if (filters.maxIvRatio !== undefined) query.where("ssr.iv_vs_hist_ratio", "<=", filters.maxIvRatio);
-  if (filters.minAvgOptionVolume !== undefined) query.where("ssr.avg_option_volume", ">=", filters.minAvgOptionVolume);
-  if (filters.minAvgShareVolume !== undefined) query.where("ssr.avg_share_volume", ">=", filters.minAvgShareVolume);
-  if (filters.maxBidAskSpreadPct !== undefined) query.where("ssr.bid_ask_spread_pct", "<=", filters.maxBidAskSpreadPct);
-  if (filters.sector !== undefined) query.where("ssr.sector", filters.sector);
+  if (filters.search !== undefined) {
+    const like = `%${filters.search.replace(/[%_]/g, (char) => `\\${char}`)}%`;
+    query.where((builder) => builder.whereILike("su.symbol", like).orWhereILike("su.company_name", like));
+  }
+  if (filters.sector !== undefined) query.where("su.sector", filters.sector);
+  if (filters.minIv !== undefined) query.where("su.implied_volatility", ">=", filters.minIv);
+  if (filters.bestRankBucket !== undefined) {
+    if (filters.bestRankBucket === "unmatched") {
+      query.where("su.best_rank", unmatchedRankSentinel);
+    } else {
+      const bucket = bestRankBuckets[filters.bestRankBucket];
+      // IBKR's 0-indexed rank stored as-is — a "1-10" bucket (1-indexed, as
+      // shown to the user) covers stored ranks 0-9.
+      if (bucket) query.whereBetween("su.best_rank", [bucket.min - 1, bucket.max - 1]);
+    }
+  }
 
-  const rows = await query.orderBy("ssr.best_rank", "asc");
+  const rows = await query.orderBy("su.best_rank", "asc");
 
   response.json(
     rows.map((row) => ({
@@ -70,29 +79,28 @@ screenerRouter.get("/", async (request, response) => {
       symbol: row.symbol,
       companyName: row.company_name,
       sector: row.sector,
-      scanCodes: row.scan_codes,
       bestRank: row.best_rank,
-      lastPrice: row.last_price,
+      matchedScanCodes: row.matched_scan_codes,
       avgShareVolume: row.avg_share_volume,
       avgOptionVolume: row.avg_option_volume,
       callOpenInterest: row.call_open_interest,
       putOpenInterest: row.put_open_interest,
       bidAskSpreadPct: row.bid_ask_spread_pct,
-      ivVsHistRatio: row.iv_vs_hist_ratio,
       impliedVolatility: row.implied_volatility,
-      scanDate: row.scan_date,
-      firstSeenDate: row.first_seen_date,
+      firstSeenAt: row.first_seen_at,
+      lastMatchedAt: row.last_matched_at,
+      lastRefreshedAt: row.last_refreshed_at,
       isShortlisted: row.isShortlisted,
     })),
   );
 });
 
-// Distinct sectors across today's full candidate pool — independent of the
-// current filter selection, so the dropdown doesn't shrink to whatever
+// Distinct sectors across the whole accumulated universe — independent of
+// the current filter selection, so the dropdown doesn't shrink to whatever
 // sectors happen to survive the active filters (self-referential bug fixed
-// 2026-09-09).
+// 2026-09-09 on the old table; same rule applies here).
 screenerRouter.get("/sectors", async (_request, response) => {
-  const rows = await db("screener_scan_results")
+  const rows = await db("screener_universe")
     .distinct("sector")
     .whereNotNull("sector")
     .orderBy("sector", "asc");
@@ -107,7 +115,7 @@ screenerRouter.post("/:symbol/shortlist", async (request, response) => {
   const symbol = request.params.symbol.trim().toUpperCase();
   const { notes } = request.body as { notes?: string };
 
-  const candidate = await db("screener_scan_results").where({ symbol }).first();
+  const candidate = await db("screener_universe").where({ symbol }).first();
   if (!candidate) {
     response.status(404).json({ error: `${symbol} is not a current screener candidate.` });
     return;

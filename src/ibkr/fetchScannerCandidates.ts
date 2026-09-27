@@ -7,40 +7,9 @@ const defaultMarketCapAboveUsd = 1_000_000_000;
 
 export interface ScannerCandidate {
   symbol: string;
-  companyName: string | null;
-  sector: string | null;
   conId: number | null;
   rank: number;
   scanCode: ScanCode;
-  // Raw scannerData fields, kept alongside the parsed numeric value below —
-  // NOT YET VERIFIED against live market data (see tmp/testScannerSubscription.ts;
-  // every field came back empty on a weekend run with no market data).
-  // ivVsHistRatio is best-effort parsed from `benchmark`/`projection` and is
-  // null whenever the format doesn't match a plain number, rather than risk
-  // storing a wrong value.
-  rawBenchmark: string;
-  rawProjection: string;
-  ivVsHistRatio: number | null;
-}
-
-// Same industry/category-with-ETF-fallback logic as fetchNewTickerData.ts's
-// resolveSector — kept duplicated (not imported) since scannerData's
-// ContractDetails shape and reqContractDetails' callback shape are distinct
-// types in @stoqey/ib, even though the fields happen to be named alike.
-function resolveSector(details: { industry?: string; category?: string; stockType?: string }): string | null {
-  return details.industry || details.category || (details.stockType === "ETF" ? "ETF" : null);
-}
-
-// benchmark/projection are documented by IBKR as scan-specific free-form
-// strings, populated for some scan codes and blank for others — parse
-// defensively, never throw, never guess at a value that doesn't parse
-// cleanly as a plain decimal.
-function parseNumericField(raw: string | undefined): number | null {
-  if (!raw) return null;
-  const cleaned = raw.replace(/[^0-9.\-]/g, "");
-  if (!cleaned) return null;
-  const value = Number(cleaned);
-  return Number.isFinite(value) ? value : null;
 }
 
 /**
@@ -48,11 +17,20 @@ function parseNumericField(raw: string | undefined): number | null {
  * completion and resolves with every row returned. Caller owns the
  * connection's lifecycle; reqId must not be in use elsewhere on it.
  *
- * Universe/liquidity filters are the native IBKR scan params (see
- * PROGRESS.md's Screener discovery decision, 2026-09-05): US-listed common
- * stock + ETF only, market cap floor. IV/volume-based filtering happens via
- * scanCode selection, not a numeric param — IBKR has no raw "IV between X
- * and Y" filter.
+ * Only symbol/conId/rank come back — confirmed live 2026-09-25 (see
+ * PROGRESS.md) that the scanner NEVER populates ContractDetails' other
+ * fields (longName/industry/category/stockType) or the benchmark/projection
+ * fields, regardless of scan code or ticker quality; this matches IBKR's own
+ * docs ("no market data fields returned from the scanner... requested
+ * separately with reqMktData"). Company name/sector/quote data are fetched
+ * by a separate per-candidate enrichment step (enrichScannerCandidates.ts).
+ *
+ * Universe/liquidity filters are the native IBKR scan params: US-listed
+ * common stock + ETF only, market cap floor. The market cap floor is passed
+ * as the raw filter tag `marketCapAbove1e6` (units: millions), NOT the typed
+ * ScannerSubscription.marketCapAbove field — that field maps to a
+ * deprecated/non-functional IBKR wire field and silently returns zero rows
+ * (root-caused live 2026-09-25, see PROGRESS.md).
  */
 export function runScannerSubscription(
   connection: IbkrConnection,
@@ -63,29 +41,11 @@ export function runScannerSubscription(
   return new Promise((resolve) => {
     const candidates: ScannerCandidate[] = [];
 
-    const onScannerData = (
-      id: number,
-      rank: number,
-      contractDetails: ContractDetails,
-      _distance: string,
-      benchmark: string,
-      projection: string,
-    ) => {
+    const onScannerData = (id: number, rank: number, contractDetails: ContractDetails) => {
       if (id !== reqId) return;
       const contract = contractDetails.contract;
       if (!contract.symbol) return;
-
-      candidates.push({
-        symbol: contract.symbol,
-        companyName: contractDetails.longName || null,
-        sector: resolveSector(contractDetails),
-        conId: contract.conId ?? null,
-        rank,
-        scanCode,
-        rawBenchmark: benchmark,
-        rawProjection: projection,
-        ivVsHistRatio: parseNumericField(projection) ?? parseNumericField(benchmark),
-      });
+      candidates.push({ symbol: contract.symbol, conId: contract.conId ?? null, rank, scanCode });
     };
 
     const onScannerDataEnd = (id: number) => {
@@ -120,6 +80,7 @@ export function runScannerSubscription(
     connection.ib.once(EventName.scannerDataEnd, onScannerDataEnd);
     connection.ib.on(EventName.error, onError);
 
+    const marketCapAboveUsd = options.marketCapAboveUsd ?? defaultMarketCapAboveUsd;
     connection.ib.reqScannerSubscription(
       reqId,
       {
@@ -128,11 +89,10 @@ export function runScannerSubscription(
         locationCode: LocationCode.STK_US,
         scanCode,
         stockTypeFilter: "CORP,ETF",
-        marketCapAbove: options.marketCapAboveUsd ?? defaultMarketCapAboveUsd,
         ...(options.abovePriceUsd !== undefined ? { abovePrice: options.abovePriceUsd } : {}),
       },
       [],
-      [],
+      [{ tag: "marketCapAbove1e6", value: String(marketCapAboveUsd / 1_000_000) }],
     );
   });
 }

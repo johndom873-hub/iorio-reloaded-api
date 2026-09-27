@@ -10,7 +10,7 @@ export interface FindOrCreateTickerResult {
 /**
  * Idempotent find-or-create for a ticker by symbol, shared by every "add
  * this symbol to the shortlist" entry point (manual add in screener.ts,
- * and adding a screener_scan_results candidate). A brand-new symbol gets a
+ * and adding a screener_universe candidate). A brand-new symbol gets a
  * live IBKR lookup (fetchNewTickerData), a `tickers` row, a
  * market_data_snapshots row for today. History backfill is NOT started here —
  * addTickerToShortlist starts the shared backfill pipeline (tickerBackfillPipeline.ts). Extracted 2026-09-05 from screener.ts's POST / handler
