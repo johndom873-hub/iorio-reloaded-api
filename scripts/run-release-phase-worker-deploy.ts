@@ -6,8 +6,7 @@
 // Skip decision: computeSourceClosureHash walks THIS commit's worker-relevant source closure and
 // compares it against worker_health.worker_code_hash (what the currently-running worker reports
 // having). Identical -> this release doesn't touch anything the worker runs -> skip the SSH round
-// trip entirely, but still send a Telegram message either way (Marcelo asked for that explicitly --
-// silence on a skip would look identical to a script that silently stopped working). Anything that
+// trip entirely (logged to console only, no Telegram message for the routine case). Anything that
 // makes the comparison inconclusive (no worker_health row yet, a stale/offline worker, src/ missing
 // from this dyno for some reason) fails toward DEPLOYING, never toward silently skipping.
 //
@@ -103,7 +102,6 @@ Release ABORTED — the API was NOT deployed either. This is not a failure, it's
   const action = decideWorkerDeployAction({ localHash, storedHash: workerHealthRow?.worker_code_hash });
 
   if (action.kind === "skip_unchanged") {
-    await notifyTelegram(`ℹ️ Worker deploy step: skipped — this release doesn't change anything the worker runs (source hash unchanged).`);
     console.log(`Worker unchanged (hash ${action.hashPrefix}...) — skipping the worker deploy.`);
     return;
   }
