@@ -1,7 +1,7 @@
+import { MarketDataType } from "@stoqey/ib";
 import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { db } from "../db/connection.js";
-import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedLiveConnection } from "./sharedReadConnection.js";
-import { requestRealtimeMarketData } from "./requestMarketData.js";
+import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "./sharedReadConnection.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import { generateTradeAlertCandidates, type AlertCandidate } from "./generateTradeAlertCandidates.js";
 import { toSettings } from "./runTradeAlertGeneration.js";
@@ -91,8 +91,18 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
   if (!settingsRow) return { status: "no_settings" };
   const settings = toSettings(settingsRow);
 
-  const connection = await borrowSharedConnectionOrConnect(sharedLiveConnection, "evaluateRecoveryPathForPosition");
-  requestRealtimeMarketData(connection.ib);
+  // FROZEN, not REALTIME — this is just an estimate, and it needs to work
+  // outside market hours too (REALTIME's snapshot never completes with no
+  // live trades to gate on). Runs on sharedReadConnection, not
+  // sharedLiveConnection: that one is pinned to REALTIME for the life of the
+  // connection for the Ticker Detail modal's long-lived streams, and
+  // changing type on a connection with subscriptions outstanding has been
+  // seen to silently stop them (see requestMarketData.ts's
+  // marketDataTypeManagedConnections comment). sharedReadConnection's
+  // borrowers each set their own type per one-shot call instead, same as
+  // fetchLivePrices/fetchLiveGreeks.
+  const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "evaluateRecoveryPathForPosition");
+  connection.ib.reqMarketDataType(MarketDataType.FROZEN);
   try {
     const pricing = await lookupPricingSnapshot(connection, positionRow.symbol, nextReqIdFor(connection.ib, () => 2));
     const currentPrice = pricing.last ?? (await getBestKnownStockPrice(positionRow.symbol)) ?? pricing.previousClose;
