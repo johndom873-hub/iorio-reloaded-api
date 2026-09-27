@@ -24,8 +24,8 @@ describe("summarizeExpirySettlement", () => {
     legsExamined: 3,
     realizedPnlDelta: 437.5,
     actions: [
-      { kind: "call_away_stock_exit", symbol: "AMAT", description: "AMAT call $437.5: stock exit -> strike" },
-      { kind: "skipped", symbol: "AAOI", description: "AAOI put $107 ITM but shares untracked" },
+      { kind: "call_away_stock_exit", symbol: "AMAT", positionId: "11111111-1111-1111-1111-111111111111", description: "AMAT call $437.5: stock exit -> strike" },
+      { kind: "skipped", symbol: "AAOI", positionId: "22222222-2222-2222-2222-222222222222", description: "AAOI put $107 ITM but shares untracked" },
     ],
   };
 

@@ -125,6 +125,7 @@ afterAll(async () => {
     await testDb("trades").whereIn("position_leg_id", testDb("position_legs").whereIn("position_id", positionIds).select("id")).del();
     await testDb("position_legs").whereIn("position_id", positionIds).del();
     await testDb("positions").whereIn("id", positionIds).del();
+    await testDb("daily_price_bars").whereIn("ticker_id", createdTickerIds).del();
     await testDb("tickers").whereIn("id", createdTickerIds).del();
   }
   await testDb.destroy();
@@ -228,6 +229,38 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(newStockLeg.exit_at).toBeNull();
     expect(telegramMessages).toHaveLength(1);
     expect(telegramMessages[0]!.toLowerCase()).not.toContain("assigned");
+  });
+
+  it("covered call genuinely assigned at expiry: the notification reflects the correction instead of the same-pass default", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    await insertStockLeg(coveredCallId, stockConId, 100, 100);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 105, isoDateDaysFromToday(-2), 2);
+    await testDb("daily_price_bars").insert({ ticker_id: ticker.id, trading_date: isoDateDaysFromToday(-2), close_price: 110 });
+    telegramMessages.length = 0;
+
+    const previousMode = process.env.EXPIRY_SETTLEMENT_MODE;
+    process.env.EXPIRY_SETTLEMENT_MODE = "apply";
+    try {
+      // IBKR no longer holds either leg — the shares were actually called away, not merely retained.
+      await runPass([]);
+    } finally {
+      process.env.EXPIRY_SETTLEMENT_MODE = previousMode;
+    }
+
+    const [coveredCall] = await positionsFor(ticker.id);
+    expect(coveredCall.status).toBe("closed");
+    expect(coveredCall.close_reason).toBe("assigned");
+    const stockLeg = (await legsFor(coveredCallId)).find((leg) => leg.leg_type === "stock")!;
+    expect(Number(stockLeg.exit_price)).toBeCloseTo(105, 4);
+
+    // Two messages this pass: the aggregate audit summary, and the per-position expiry notification.
+    const expiryMessage = telegramMessages.find((message) => message.includes(ticker.symbol));
+    expect(expiryMessage).toBeDefined();
+    expect(expiryMessage!.toLowerCase()).toContain("assigned");
+    expect(expiryMessage!.toLowerCase()).not.toContain("no assignment");
   });
 
   it("a call that vanishes before expiry with no trade (IBKR report gap) does not restructure anything", async () => {

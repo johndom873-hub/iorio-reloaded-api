@@ -31,6 +31,14 @@ let dependencies: ReconciliationDependencies;
 let currentPassId = 0;
 let heldStockSharesBySymbol = new Map<string, number>();
 let legsHandedOffThisPass = 0;
+// Positions whose just-expired short leg finished within the audit's marginal ITM/OTM threshold
+// this pass — the audit left the assignment call as "manual review" rather than deciding it, so
+// notifyPositionExpired flags the message as unverified instead of stating it as fact.
+let marginalCallPositionIds = new Set<string>();
+// Positions closed this pass whose expiry notification is queued until after
+// correctExpirySettlementsNow runs, so it reads a close_reason the audit already had a chance to
+// correct (see finalizeClosedPosition).
+let pendingExpiryNotifications: string[] = [];
 
 // Right-after-expiry correction (approved 2026-09-22, replaces waiting up to a day for the nightly
 // expiry_settlement_audit). Reuses that audit unchanged: the expiry-day bar already exists by the time
@@ -41,7 +49,10 @@ async function correctExpirySettlementsNow(passId: number): Promise<void> {
     const mode = readExpirySettlementMode();
     const result = await runExpirySettlementAudit(mode);
     const { changes, skipped, notify } = summarizeExpirySettlement(mode, result);
-    for (const action of result.actions) console.log(`Reconciliation #${passId}: expiry settlement [${mode}] ${action.kind}: ${action.description}`);
+    for (const action of result.actions) {
+      console.log(`Reconciliation #${passId}: expiry settlement [${mode}] ${action.kind}: ${action.description}`);
+      if (action.kind === "marginal_call") marginalCallPositionIds.add(action.positionId);
+    }
     console.log(`Reconciliation #${passId}: expiry settlement (${mode}): ${result.legsExamined} expired short leg(s) examined, ${changes.length} correction(s), ${skipped.length} skipped.`);
     if (notify) await dependencies.notifyTelegram(notify);
   } catch (error) {
@@ -175,10 +186,15 @@ async function determineCloseReason(positionId: string): Promise<string> {
   return "unknown";
 }
 
-// The single place a position row flips to closed. close_reason is fixed
-// here once; the expiry notification fires only when the caller knows an
-// option leg of this position expired without a trade (never for a manual
-// close through the app, which has its own confirmation UI and toast).
+// The single place a position row flips to closed. close_reason is fixed here once — still
+// immediately, so same-pass readers of it (e.g. determineLeftoverStockReason on a sibling position)
+// keep seeing it right away. The Telegram/toast notification is queued instead of sent here: a
+// covered call's real assignment looks identical, same-pass, to IBKR's own held-report gap at
+// settlement (see determineCloseReason's comment above), so close_reason can still read "expired
+// worthless" at this exact moment for a leg that correctExpirySettlementsNow's objective
+// expiry-day-close-vs-strike test corrects to "assigned" moments later in this same pass —
+// reconcileHeldPositions drains the queue after that correction has run, re-reading close_reason
+// fresh so the notification reflects it instead of racing it.
 async function finalizeClosedPosition(
   positionId: string,
   options: { notifyExpired: boolean; closeReasonOverride?: string },
@@ -193,11 +209,7 @@ async function finalizeClosedPosition(
       { positionId },
     );
   }
-  if (options.notifyExpired) {
-    await notifyPositionExpired(positionId, closeReason).catch((error) =>
-      console.error(`Expiry notification failed for position ${positionId}: ${error}`),
-    );
-  }
+  if (options.notifyExpired) pendingExpiryNotifications.push(positionId);
   return closeReason;
 }
 
@@ -295,6 +307,8 @@ export async function reconcileHeldPositions(held: IbkrHeldPosition[], passId: n
   dependencies = deps;
   currentPassId = passId;
   legsHandedOffThisPass = 0;
+  marginalCallPositionIds = new Set();
+  pendingExpiryNotifications = [];
 
   // Computed once up front so upsertSplitCoveredCallPosition can also use it
   // this same pass -- see its own comment for why.
@@ -327,6 +341,17 @@ export async function reconcileHeldPositions(held: IbkrHeldPosition[], passId: n
   // audit. Runs on any closure, not just expired options, because the stock leg can close a pass later
   // than the option. Idempotent; the nightly job stays as the safety net.
   if (closedLegCount + legsHandedOffThisPass > 0) await correctExpirySettlementsNow(passId);
+
+  // Only now — after the correction above has had its one shot at flipping a same-pass "expired
+  // worthless" default to "assigned" — do the expiry notifications queued above go out, reading
+  // close_reason fresh so a correction the audit just applied is reflected instead of raced.
+  for (const positionId of pendingExpiryNotifications) {
+    const position = await db("positions").where({ id: positionId }).first("close_reason");
+    if (!position) continue;
+    await notifyPositionExpired(positionId, position.close_reason).catch((error) =>
+      console.error(`Expiry notification failed for position ${positionId}: ${error}`),
+    );
+  }
 }
 
 // Anything tracked as open in our DB but no longer reported by IBKR at
@@ -526,6 +551,7 @@ async function notifyPositionExpired(positionId: string, closeReason: string): P
     realizedPnl,
     realizedPnlPercent,
     assigned,
+    uncertain: marginalCallPositionIds.has(positionId),
   });
   await dependencies.notifyTelegram(message);
   await publishNotification({ type: "position_closed", positionId: position.id, symbol: position.symbol, message });

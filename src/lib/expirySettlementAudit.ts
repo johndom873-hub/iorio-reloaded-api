@@ -34,9 +34,13 @@ import { requireEnvironmentVariable } from "../config/env.js";
 export type ExpirySettlementMode = "dry_run" | "apply";
 
 export interface ExpirySettlementAction {
-  kind: "call_away_stock_exit" | "put_assigned_stock_entry" | "close_reason" | "option_exit_price" | "skipped";
+  kind: "call_away_stock_exit" | "put_assigned_stock_entry" | "close_reason" | "option_exit_price" | "skipped" | "marginal_call";
   symbol: string;
   description: string;
+  /** The position whose expired short leg this action concerns — lets a caller (the worker's
+   * right-after-expiry notification) correlate a "marginal_call" back to the specific closed
+   * position it's about, without parsing the description text. */
+  positionId: string;
   /** Realized P&L this correction adds, when it can be stated. */
   pnlDelta?: number;
 }
@@ -119,6 +123,7 @@ async function setCloseReasonAssigned(database: Knex, leg: ExpiredShortOptionLeg
   actions.push({
     kind: "close_reason",
     symbol: leg.symbol,
+    positionId: leg.positionId,
     description: `${leg.symbol} ${leg.optionType} $${leg.strike} (expiry ${leg.expiryDate}): close_reason ${leg.closeReason ?? "empty"} -> assigned`,
   });
   if (mode === "apply") await database("positions").where({ id: leg.positionId }).update({ close_reason: "assigned" });
@@ -147,6 +152,7 @@ async function correctCallAway(database: Knex, leg: ExpiredShortOptionLeg, mode:
     actions.push({
       kind: "skipped",
       symbol: leg.symbol,
+      positionId: leg.positionId,
       description: `${leg.symbol} call $${leg.strike} ITM at expiry covers ${calledAwayShares} sh but the position's uncorrected stock legs total ${candidateShares} sh — needs manual review`,
     });
     return;
@@ -157,6 +163,7 @@ async function correctCallAway(database: Knex, leg: ExpiredShortOptionLeg, mode:
     actions.push({
       kind: "call_away_stock_exit",
       symbol: leg.symbol,
+      positionId: leg.positionId,
       description: `${leg.symbol} ${stockLeg.quantity} sh called away at $${leg.strike} (expiry close ${money(leg.expiryClose!)}): stock leg exit ${stockLeg.exitPrice === null ? "empty" : money(stockLeg.exitPrice)} -> ${money(leg.strike)}`,
       pnlDelta,
     });
@@ -185,6 +192,7 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
     actions.push({
       kind: "skipped",
       symbol: leg.symbol,
+      positionId: leg.positionId,
       description: `${leg.symbol} put $${leg.strike} ITM at expiry (${money(leg.expiryClose!)}) but no stock leg entered at strike − premium (${money(expectedPremiumAdjustedEntry)}) — assigned shares not tracked as a leg; manual review`,
     });
     return;
@@ -213,6 +221,7 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
     actions.push({
       kind: "skipped",
       symbol: leg.symbol,
+      positionId: leg.positionId,
       description: chainEndsOpen
         ? `${leg.symbol} put $${leg.strike} assigned: stock chain is still open (worker re-syncs its entry to IBKR average cost) — cost basis handled in the cycle view, not edited`
         : `${leg.symbol} put $${leg.strike} assigned: chain share total does not equal ${assignedShares} — manual review`,
@@ -230,6 +239,7 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
     actions.push({
       kind: "put_assigned_stock_entry",
       symbol: leg.symbol,
+      positionId: leg.positionId,
       description: `${leg.symbol} assigned stock leg: entry ${money(stockLeg.entryPrice)} -> ${money(leg.strike)} (put strike)${exitEqualsEntry ? ", exit moved with it (handoff)" : ""}`,
       pnlDelta: hasRealExit ? -(leg.strike - stockLeg.entryPrice) * stockLeg.quantity : 0,
     });
@@ -262,6 +272,7 @@ async function findAndCorrect(database: Knex): Promise<Omit<ExpirySettlementResu
       actions.push({
         kind: "option_exit_price",
         symbol: leg.symbol,
+        positionId: leg.positionId,
         description: `${leg.symbol} short ${leg.optionType} $${leg.strike} (expiry ${leg.expiryDate}): exit price empty -> 0 (premium kept)`,
         pnlDelta: leg.entryPrice * leg.quantity * leg.multiplier,
       });
@@ -272,8 +283,9 @@ async function findAndCorrect(database: Knex): Promise<Omit<ExpirySettlementResu
     if (distanceInTheMoney <= 0) continue; // OTM: worthless is right
     if (distanceInTheMoney < marginalThreshold) {
       actions.push({
-        kind: "skipped",
+        kind: "marginal_call",
         symbol: leg.symbol,
+        positionId: leg.positionId,
         description: `${leg.symbol} ${leg.optionType} $${leg.strike} finished only ${money(distanceInTheMoney)} in the money (close ${money(leg.expiryClose)}) — too close to call, manual review`,
       });
       continue;
@@ -318,8 +330,8 @@ export async function runExpirySettlementAudit(mode: ExpirySettlementMode, datab
  * repeat until fixed by hand, so they never trigger a message on their own.
  */
 export function summarizeExpirySettlement(mode: ExpirySettlementMode, result: ExpirySettlementResult) {
-  const changes = result.actions.filter((action) => action.kind !== "skipped");
-  const skipped = result.actions.filter((action) => action.kind === "skipped");
+  const changes = result.actions.filter((action) => action.kind !== "skipped" && action.kind !== "marginal_call");
+  const skipped = result.actions.filter((action) => action.kind === "skipped" || action.kind === "marginal_call");
   const pnlDelta = result.realizedPnlDelta;
   const notify =
     changes.length === 0
