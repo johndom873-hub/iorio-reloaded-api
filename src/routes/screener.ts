@@ -17,20 +17,28 @@ const bestRankBuckets: Record<string, { min: number; max: number }> = {
 
 interface ScreenerFilters {
   search?: string;
-  sector?: string;
+  sector?: string[];
   minIv?: number;
+  minOpenInterest?: number;
   bestRankBucket?: string;
+  matchedScanCodes?: string[];
 }
 
 function parseFilters(query: Record<string, unknown>): ScreenerFilters {
   const str = (key: string): string | undefined => (typeof query[key] === "string" && (query[key] as string).trim() ? (query[key] as string).trim() : undefined);
   const minIvRaw = str("minIv");
   const minIv = minIvRaw !== undefined ? Number(minIvRaw) : undefined;
+  const minOpenInterestRaw = str("minOpenInterest");
+  const minOpenInterest = minOpenInterestRaw !== undefined ? Number(minOpenInterestRaw) : undefined;
+  const sectorRaw = str("sector");
+  const matchedScanCodesRaw = str("matchedScanCodes");
   return {
     search: str("search"),
-    sector: str("sector"),
+    sector: sectorRaw ? sectorRaw.split(",").filter(Boolean) : undefined,
     minIv: minIv !== undefined && Number.isFinite(minIv) ? minIv : undefined,
+    minOpenInterest: minOpenInterest !== undefined && Number.isFinite(minOpenInterest) ? minOpenInterest : undefined,
     bestRankBucket: str("bestRankBucket"),
+    matchedScanCodes: matchedScanCodesRaw ? matchedScanCodesRaw.split(",").filter(Boolean) : undefined,
   };
 }
 
@@ -58,8 +66,16 @@ screenerRouter.get("/", async (request, response) => {
     const like = `%${filters.search.replace(/[%_]/g, (char) => `\\${char}`)}%`;
     query.where((builder) => builder.whereILike("su.symbol", like).orWhereILike("su.company_name", like));
   }
-  if (filters.sector !== undefined) query.where("su.sector", filters.sector);
+  if (filters.sector !== undefined && filters.sector.length > 0) query.whereIn("su.sector", filters.sector);
   if (filters.minIv !== undefined) query.where("su.implied_volatility", ">=", filters.minIv);
+  // Worst-case liquidity across both sides of the chain, not either side alone.
+  if (filters.minOpenInterest !== undefined) {
+    query.whereRaw("LEAST(su.call_open_interest, su.put_open_interest) >= ?", [filters.minOpenInterest]);
+  }
+  // Overlap, not containment: "matched any of the selected types", not "matched all of them".
+  if (filters.matchedScanCodes !== undefined && filters.matchedScanCodes.length > 0) {
+    query.whereRaw("su.matched_scan_codes && ?::text[]", [filters.matchedScanCodes]);
+  }
   if (filters.bestRankBucket !== undefined) {
     if (filters.bestRankBucket === "unmatched") {
       query.where("su.best_rank", unmatchedRankSentinel);
