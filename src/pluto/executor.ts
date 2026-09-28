@@ -131,6 +131,54 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
   }
 }
 
+export interface ExecuteCloseInput {
+  actionId: string;
+  symbol: string;
+  positionId: string;
+  legs: { legId: string; limitPrice: number }[];
+  description: string;
+  reasons: string[];
+}
+
+/** Closes through POST /positions/:id/close (the server-side close gate runs there and again at confirm). */
+export async function executePlutoClose(api: InternalApiClient, settings: PlutoSettings, input: ExecuteCloseInput): Promise<ExecuteResult> {
+  let built: OrderRequestResponse;
+  try {
+    built = await api.post<OrderRequestResponse>(`/positions/${input.positionId}/close`, { legs: input.legs, plutoActionId: input.actionId });
+  } catch (error) {
+    if (error instanceof InternalApiError && (error.status === 400 || error.status === 404 || error.status === 409)) return await closeBlocked(`build refused: ${error.message}`);
+    return await closeErrored(`build failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  await updatePlutoAction(input.actionId, { outcome: "order_built", orderRequestId: built.id });
+  await recordPlutoEvent("order_built", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description: input.description });
+  try {
+    const confirmed = await api.post<OrderRequestResponse>(`/positions/orders/${built.id}/confirm`, { adaptivePriority: "Normal" });
+    if (confirmed.status === "pending_confirmation") return await closeBlocked("confirm did not move the order", built.id);
+  } catch (error) {
+    await api.post(`/positions/orders/${built.id}/cancel`, {}).catch(() => {});
+    if (error instanceof InternalApiError && error.status === 409) return await closeBlocked(`confirm refused: ${error.message}`, built.id);
+    return await closeErrored(`confirm failed: ${error instanceof Error ? error.message : String(error)}`, built.id);
+  }
+  await updatePlutoAction(input.actionId, { outcome: "confirmed" });
+  await recordPlutoEvent("order_confirmed", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description: input.description });
+  if (settings.telegramVerbosity !== "off") await notifyTelegram(`🪐 Pluto sent a close: ${input.description}\n${input.reasons.join(" ")}`);
+  return { outcome: "confirmed", orderId: built.id, detail: input.description };
+
+  async function closeBlocked(reason: string, orderId: string | null = null): Promise<ExecuteResult> {
+    await updatePlutoAction(input.actionId, { outcome: "blocked", blockReason: reason, orderRequestId: orderId });
+    await recordPlutoEvent("action_blocked", { actionId: input.actionId, symbol: input.symbol, reason, stage: "route" });
+    return { outcome: "blocked", orderId, detail: reason };
+  }
+  async function closeErrored(reason: string, orderId: string | null = null): Promise<ExecuteResult> {
+    await updatePlutoAction(input.actionId, { outcome: "error", blockReason: reason, orderRequestId: orderId });
+    await recordPlutoEvent("order_outcome", { actionId: input.actionId, symbol: input.symbol, outcome: "error", reason });
+    await tripPlutoBreaker("order_error", reason);
+    await recordPlutoEvent("breaker_tripped", { name: "order_error", detail: reason });
+    await notifyTelegram(`🛑 Pluto breaker tripped (order_error): ${reason}. Pluto is paused until a human resets it.`);
+    return { outcome: "error", orderId, detail: reason };
+  }
+}
+
 export interface WatchResult {
   outcome: PlutoActionOutcome;
   detail: string;
@@ -149,7 +197,7 @@ export async function averageFillPrice(orderId: string): Promise<number | null> 
 export async function watchPlutoOrder(
   api: InternalApiClient,
   settings: PlutoSettings,
-  input: { actionId: string; orderId: string; symbol: string; referenceBid: number; description: string },
+  input: { actionId: string; orderId: string; symbol: string; reference: { price: number; side: "sell" | "buy"; multiplier: number }; description: string },
   options: { pollIntervalMs?: number; now?: () => number } = {},
 ): Promise<WatchResult> {
   const pollIntervalMs = options.pollIntervalMs ?? 5_000;
@@ -169,8 +217,10 @@ export async function watchPlutoOrder(
     if (isOrderRequestFinal({ status: order.status, ibkr_status: order.ibkrStatus ?? null })) {
       const outcome = order.status as PlutoActionOutcome;
       const fillPrice = order.status === "filled" || order.status === "partially_filled" ? await averageFillPrice(input.orderId) : null;
-      // Pessimistic bracket (design 2026-09-28): what the same trade would have made filling at the bid.
-      const pessimisticPnl = fillPrice === null ? null : Math.round((input.referenceBid - fillPrice) * 100 * (order.filledQuantity ?? 1) * 100) / 100;
+      // Pessimistic bracket (design 2026-09-28): the P&L difference had the order filled at the worse side of
+      // the market it was placed into (the bid for a sell, the ask for a buy) instead of where it did fill.
+      const filledUnits = (order.filledQuantity ?? 1) * input.reference.multiplier;
+      const pessimisticPnl = fillPrice === null ? null : Math.round((input.reference.side === "sell" ? input.reference.price - fillPrice : fillPrice - input.reference.price) * filledUnits * 100) / 100;
       await updatePlutoAction(input.actionId, { outcome, fillPrice, pessimisticPnl, blockReason: order.errorMessage ?? null });
       await recordPlutoEvent("order_outcome", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, outcome, fillPrice, error: order.errorMessage ?? undefined });
       if (outcome === "rejected" || outcome === "error") {

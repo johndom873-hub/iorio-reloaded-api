@@ -9,7 +9,9 @@ import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js"
 import { loadPlutoBook } from "./book.js";
 import { deterministicTopPick, filterTickerForPluto, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { noTrade, parsePlutoDecision, reconcileAgreement, type PlutoDecision } from "./decisionSchema.js";
-import { executePlutoOrder, watchPlutoOrder } from "./executor.js";
+import { executePlutoClose, executePlutoOrder, watchPlutoOrder } from "./executor.js";
+import { buildCloseOffersForTicker, type CloseOffer } from "./closeActions.js";
+import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
 import { candidateSetFingerprint } from "./inputHash.js";
 import { finishPlutoPass, recordPlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
@@ -60,6 +62,7 @@ interface EvaluatedTicker {
   scored: TickerSignals;
   filtered: PlutoTickerFilterResult;
   fingerprint: string;
+  closeOffers: CloseOffer[];
 }
 
 async function loadEnabledTickerRows(): Promise<SignalsTickerRow[]> {
@@ -88,7 +91,20 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   const live = spot !== null ? { spotPrice: spot, priceSource: "live" as const, liveQuotes: extraLiveQuotes } : undefined;
   const scored = scoreTicker(inputs, account, signalSettings, live);
   const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled });
-  return { row, inputs, scored, filtered, fingerprint: candidateSetFingerprint(filtered.eligible, filtered.eligibleRolls) };
+  return { row, inputs, scored, filtered, fingerprint: candidateSetFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [] };
+}
+
+/** Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here, the rest go to the model. */
+async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string): Promise<void> {
+  const watched = context.marketWatch.snapshot(ticker.row.symbol);
+  const { offers } = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: ticker.scored.heldLegs, rolls: ticker.scored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso });
+  for (const offer of offers) {
+    if (!offer.automatic) continue;
+    const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: "odd lot below 100 shares at a positive cycle P&L (Formula P1)" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
+    const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.limitPrice })), description: offer.description, reasons: ["automatic odd-lot close (Formula P1)"] });
+    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description }));
+  }
+  ticker.closeOffers = offers.filter((offer) => !offer.automatic);
 }
 
 export async function runPlutoPass(request: PassRequest, context: PassRunnerContext): Promise<PassSummary> {
@@ -149,7 +165,12 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     evaluated.push(ticker);
     context.marketWatch.markEvaluated(row.symbol);
   }
-  const offeredCount = evaluated.reduce((sum, ticker) => sum + ticker.filtered.eligible.length + ticker.filtered.eligibleRolls.length, 0);
+  const previousSessionDateIso = await previousOpenSessionDate(checks.context.todayEasternIso);
+  for (const ticker of evaluated) {
+    await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId);
+    if (ticker.closeOffers.length > 0) ticker.fingerprint = `${ticker.fingerprint}|closes:${ticker.closeOffers.map((offer) => offer.id).sort().join(",")}`;
+  }
+  const offeredCount = evaluated.reduce((sum, ticker) => sum + ticker.filtered.eligible.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length, 0);
 
   // 4. Only call the model when something material changed (or on the opening look).
   const cooldownMs = settings.perTickerModelCooldownMinutes * 60_000;
@@ -175,7 +196,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const recentDecisions: { parsed_output: { decision?: string; candidate_id?: string | null; reasons?: string[] } | null; created_at: Date }[] = await db("pluto_decisions").whereNotNull("parsed_output").orderBy("created_at", "desc").limit(10).select("parsed_output", "created_at");
   const openPositionsBySymbol: Record<string, string[]> = {};
   for (const position of book.openPositions) (openPositionsBySymbol[position.symbol] ??= []).push(position.strategyKey);
-  const tickersForPrompt: PlutoPromptTickerInput[] = evaluated.map((ticker) => ({ scored: ticker.scored, eligible: ticker.filtered.eligible, eligibleRolls: ticker.filtered.eligibleRolls, closeActions: [] }));
+  const tickersForPrompt: PlutoPromptTickerInput[] = evaluated.map((ticker) => ({ scored: ticker.scored, eligible: ticker.filtered.eligible, eligibleRolls: ticker.filtered.eligibleRolls, closeActions: ticker.closeOffers }));
   const windowEnd = settings.windowEndEt.split(":").map(Number);
   const minutesToWindowEnd = (windowEnd[0]! * 60 + windowEnd[1]!) - easternMinutesOfDay(now);
   const { payload, offeredIds } = buildPlutoUserPayload({
@@ -240,11 +261,13 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   }
 
   const chosenId = decision.candidateId!;
-  const owner = evaluated.find((ticker) => ticker.filtered.eligible.some((entry) => entry.id === chosenId) || ticker.filtered.eligibleRolls.some((entry) => entry.id === chosenId));
+  const owner = evaluated.find((ticker) => ticker.filtered.eligible.some((entry) => entry.id === chosenId) || ticker.filtered.eligibleRolls.some((entry) => entry.id === chosenId) || ticker.closeOffers.some((offer) => offer.id === chosenId));
   if (!owner) {
     await recordPlutoAction({ passId, kind: "no_trade", symbol: "—", tickerId: null, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: [{ gate: "candidate_present", ok: false, detail: `${chosenId} not found among the offers` }], sizeTier: null, quantity: null, limitPrice: null, outcome: "blocked", blockReason: "chosen candidate not found", referenceBid: null, referenceMid: null });
     return { passId, modelCalled: true, skippedReason: null, outcome: "blocked" };
   }
+  const chosenClose = owner.closeOffers.find((offer) => offer.id === chosenId);
+  if (chosenClose) return runChosenClose(owner, chosenClose);
   const chosenOpen: PlutoOpenCandidate | undefined = owner.filtered.eligible.find((entry) => entry.id === chosenId);
   const chosenRoll: PlutoRollCandidate | undefined = owner.filtered.eligibleRolls.find((entry) => entry.id === chosenId);
   const netEdgeAtDecision = chosenOpen ? chosenOpen.candidate.netEdge : chosenRoll!.roll.netRollEdge;
@@ -321,9 +344,33 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       : { kind: "roll", actionId, symbol: owner.row.symbol, roll: freshRoll!, heldLeg: fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll!.roll.legId)!, plan: gates.plan!, decision, scoresSnapshot },
   );
   if (result.outcome === "confirmed" && result.orderId) {
-    context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: owner.row.symbol, referenceBid: contract!.bid, description: result.detail }));
+    context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: owner.row.symbol, reference: { price: contract!.bid, side: "sell", multiplier: 100 }, description: result.detail }));
   }
   return { passId, modelCalled: true, skippedReason: null, outcome: result.outcome };
+
+  async function runChosenClose(ticker: EvaluatedTicker, offer: CloseOffer): Promise<PassSummary> {
+    // Re-derive the offer fresh: the cycle P&L, the quote and the leg's edge can all have moved.
+    const watched = context.marketWatch.snapshot(ticker.row.symbol);
+    const freshScored = (await evaluateTicker(ticker.row, settings, context, account, signalSettings, true, Date.now())).scored;
+    const rebuilt = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: freshScored.heldLegs, rolls: freshScored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso });
+    const freshOffer = rebuilt.offers.find((entry) => entry.id === offer.id) ?? null;
+    const gateResults: PlutoGateResult[] = [
+      { gate: "verdict", ok: true, detail: "trade" },
+      { gate: "confidence_floor", ok: decision.confidence >= settings.confidenceFloor, detail: `${decision.confidence.toFixed(2)} vs floor ${settings.confidenceFloor}` },
+      { gate: "offer_fresh", ok: freshOffer !== null, detail: freshOffer ? "still offered on fresh data" : rebuilt.skipped.find((entry) => entry.id === offer.id)?.reason ?? "no longer offered" },
+      { gate: "working_order", ok: !book.workingOrderSymbols.has(ticker.row.symbol), detail: book.workingOrderSymbols.has(ticker.row.symbol) ? "a Pluto order on this symbol is already working" : "no working Pluto order on the symbol" },
+    ];
+    const ok = gateResults.every((gate) => gate.ok);
+    const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds }, candidateScores: (freshOffer ?? offer).detail, deterministicTopPick: topPickSummary, gateResults, sizeTier: null, quantity: (freshOffer ?? offer).quantity, limitPrice: (freshOffer ?? offer).limitPrice, outcome: ok ? "validated" : "blocked", blockReason: ok ? null : gateResults.filter((gate) => !gate.ok).map((gate) => `${gate.gate}: ${gate.detail}`).join(" | "), referenceBid: (freshOffer ?? offer).limitPrice, referenceMid: (freshOffer ?? offer).limitPrice });
+    if (!ok) {
+      await recordPlutoEvent("action_blocked", { passId, actionId, symbol: offer.symbol, candidateId: offer.id, stage: "post_model", failed: gateResults.filter((gate) => !gate.ok) });
+      return { passId, modelCalled: true, skippedReason: null, outcome: "blocked" };
+    }
+    await recordPlutoEvent("action_validated", { passId, actionId, symbol: offer.symbol, candidateId: offer.id, quantity: freshOffer!.quantity, limitPrice: freshOffer!.limitPrice, reasons: decision.reasons });
+    const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: freshOffer!.positionId, legs: freshOffer!.legIds.map((legId) => ({ legId, limitPrice: freshOffer!.limitPrice })), description: freshOffer!.description, reasons: decision.reasons });
+    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: freshOffer!.limitPrice, side: freshOffer!.side, multiplier: freshOffer!.multiplier }, description: freshOffer!.description }));
+    return { passId, modelCalled: true, skippedReason: null, outcome: result.outcome };
+  }
 
   async function modelCall(callIndex: number) {
     const call = await callPlutoModel({ apiKey: context.openRouterApiKey, modelId: settings.modelId, reasoningEffort: settings.reasoningEffort, timeoutSeconds: settings.callTimeoutSeconds, systemPrompt, userPayload, seed: callIndex });
