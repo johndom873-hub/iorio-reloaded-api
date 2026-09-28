@@ -2,11 +2,11 @@ import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, type PlutoMode } from "../pluto/stateStore.js";
 import { recordPlutoEvent } from "../pluto/ledger.js";
 import { cancelPlutoOrders, countPlutoWorkingOrders } from "../pluto/orders.js";
+import { loadPlutoTodayCounters } from "../pluto/counters.js";
 
 // The Pluto screen's API. Any signed-in user can operate every control (Marcelo, 2026-09-28:
 // both users share one access level); the UI puts confirm modals in front of the risky ones.
@@ -23,29 +23,12 @@ async function currentUserDisplayName(request: Request): Promise<string> {
   return (row?.display_name as string | undefined) ?? "an operator";
 }
 
-/** Today's session counters straight from the ledger, in Eastern time. */
-async function loadTodayCounters(): Promise<{ actionsToday: number; modelCallsToday: number; costTodayUsd: number }> {
-  const todayIso = easternDateIso(new Date());
-  const [actions, calls] = await Promise.all([
-    db("pluto_actions")
-      .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?", [todayIso])
-      .whereIn("outcome", ["order_built", "confirmed", "filled", "partially_filled", "cancelled", "rejected", "error"])
-      .count<{ count: string }[]>("* as count")
-      .then((rows) => Number(rows[0]?.count ?? 0)),
-    db("pluto_decisions")
-      .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?", [todayIso])
-      .select(db.raw("count(*)::int as calls"), db.raw("coalesce(sum(cost_usd), 0)::float as cost"))
-      .first(),
-  ]);
-  return { actionsToday: actions, modelCallsToday: Number(calls?.calls ?? 0), costTodayUsd: Number(calls?.cost ?? 0) };
-}
-
 plutoRouter.get("/state", async (_request: Request, response: Response) => {
   const [state, settings, working, counters, agentHealth, enabledCount] = await Promise.all([
     loadPlutoState(),
     loadPlutoSettings(),
     countPlutoWorkingOrders(),
-    loadTodayCounters(),
+    loadPlutoTodayCounters(),
     db("worker_health").where({ process_name: "pluto_agent" }).first(),
     db("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
   ]);
