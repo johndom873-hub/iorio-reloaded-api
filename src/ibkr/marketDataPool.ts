@@ -5,6 +5,9 @@ import { planPoolCapacity, type PoolCapacityEntry } from "./marketDataPoolCapaci
 import { loadFallbackStockPrices } from "../lib/priceService.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 import type { PriceContract } from "./fetchLivePrices.js";
+import { competingLiveSessionErrorCode } from "./probeCompetingLiveSession.js";
+import { broadcastToLocalSubscribers } from "../lib/notificationBroadcaster.js";
+import type { MarketDataFeedRefusal } from "../lib/notificationChannel.js";
 
 // The ONE place in the app that ever calls IBKR's reqMktData for a live
 // (non-order-execution, non-nightly-capture, non-Day-Signals) subscription.
@@ -180,6 +183,23 @@ let reconcileTimer: ReturnType<typeof setInterval> | null = null;
 let resubscribeRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let resubscribeRetryAttempt = 0;
 let restricted = false;
+// Set when IBKR refuses the pool's subscriptions because the live username has
+// a session open elsewhere (10197), which it pushes to already-open
+// subscriptions the moment that login happens; cleared by the next real price.
+// Pushed to every open tab at once, and read by /environment/details for tabs
+// opened later. In-process state: correct while one web dyno serves both.
+let feedRefusal: MarketDataFeedRefusal | null = null;
+
+export function marketDataFeedRefusal(): MarketDataFeedRefusal | null {
+  return feedRefusal;
+}
+
+function setFeedRefusal(value: MarketDataFeedRefusal | null): void {
+  if ((feedRefusal === null) === (value === null)) return;
+  feedRefusal = value;
+  console.log(value ? `marketDataPool: IBKR refused market data (code ${value.code}): ${value.message}` : "marketDataPool: market data flowing again after a refusal.");
+  broadcastToLocalSubscribers({ type: "market_data_feed", refusal: value });
+}
 
 /** Live subscribers right now — for the health/observability endpoint. */
 export function marketDataPoolSnapshot(): { contractCount: number; subscriberCount: number; pausedCount: number; openLineCount: number; restricted: boolean } {
@@ -297,6 +317,8 @@ async function reconcile(): Promise<void> {
     if (desired === 0) {
       await releaseMarketDataLines(reservationHolder);
       setRestricted(false);
+      // Nothing subscribed means nothing to observe: don't keep reporting a refusal nobody can confirm.
+      setFeedRefusal(null);
       if (reconcileTimer !== null) {
         clearInterval(reconcileTimer);
         reconcileTimer = null;
@@ -371,6 +393,7 @@ function attachListeners(ib: IBApi): void {
     // stops being quoted goes back to "no data" (see fetchOptionChain.ts's
     // matching comment on the incident this fixes).
     const value = price > 0 ? price : null;
+    if (value !== null && (lastTickTypes.includes(tickType) || bidTickTypes.includes(tickType) || askTickTypes.includes(tickType))) setFeedRefusal(null);
     if (lastTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { last: value });
     else if (bidTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { bid: value });
     else if (askTickTypes.includes(tickType)) updateEntry(poolKey, reqId, { ask: value });
@@ -422,6 +445,7 @@ function attachListeners(ib: IBApi): void {
     if (isDelayedDataFallbackNotice(code)) return;
     const poolKey = reqIdToPoolKey.get(reqId);
     if (!poolKey) return;
+    if (code === competingLiveSessionErrorCode && feedRefusal === null) setFeedRefusal({ code, message: error.message, since: new Date().toISOString() });
     console.error(`marketDataPool: error for ${poolKey} (code ${code}): ${error.message}`);
   });
   ib.once(EventName.disconnected, handleUnderlyingDisconnect);

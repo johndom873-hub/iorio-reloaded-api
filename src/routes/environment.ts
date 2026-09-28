@@ -6,6 +6,7 @@ import { classifyTradingStatus } from "../lib/tradingGate.js";
 import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { daySignalsLoopLineHolder } from "../lib/daySignalsLoop.js";
+import { marketDataFeedRefusal } from "../ibkr/marketDataPool.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 
 // Feeds the top-bar environment badges (PAPER / LIVE / STAGING / DEV / TRADING BLOCKED).
@@ -35,6 +36,8 @@ environmentRouter.get("/details", requireAuth, async (_request, response) => {
     marketDataRestriction,
     // False when IBKR_MARKET_DATA_LINES_ENABLED=false — the top bar's "Real-time data disabled" state.
     marketDataLinesEnabled: ibkrMarketDataLinesEnabled(),
+    // Non-null while IBKR refuses the live pool's data (10197: the live account is logged in elsewhere) — the top bar's "Live prices stopped" state.
+    marketDataFeedRefusal: marketDataFeedRefusal(),
     worker: workerRow
       ? {
           gitSha: workerRow.git_sha ? String(workerRow.git_sha).slice(0, 7) : null,

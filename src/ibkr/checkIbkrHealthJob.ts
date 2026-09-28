@@ -1,4 +1,4 @@
-import { EventName, MarketDataType, Stock } from "@stoqey/ib";
+import { EventName } from "@stoqey/ib";
 import { restartIbkrGatewayOnVps } from "./restartIbkrGatewayOnVps.js";
 import { checkWorkerOnVps } from "./checkWorkerOnVps.js";
 import { connectToIbkrGateway, type IbkrConnection } from "./connectIbkr.js";
@@ -8,6 +8,8 @@ import { runJob } from "../lib/runJob.js";
 import { environment } from "../config/env.js";
 import { db } from "../db/connection.js";
 import { reportDaySignalsLoopLiveness } from "../lib/daySignalsLiveness.js";
+import { probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
+import { reportCompetingLiveSession } from "../lib/competingLiveSessionAlert.js";
 
 // Confirmed 2026-08-27: reqHistoricalData can silently hang (no data, no
 // error event — just a timeout) while the connection handshake itself and
@@ -54,46 +56,6 @@ async function checkHistoricalData(connection: IbkrConnection): Promise<Historic
 // for unrelated messages too (e.g. "API scanner subscription cancelled").
 function isCompetingSessionHistoricalDataError(errorMessage: string): boolean {
   return errorMessage.includes("(code 162)") && errorMessage.includes("different IP address");
-}
-
-// Confirmed 2026-08-31 (see PROGRESS.md): IBKR's shared-market-data paper
-// account cannot receive real-time quotes while its own live username
-// (johndom873) has an active session anywhere (Client Portal/TWS/mobile) —
-// error 10197 on every market-data request, with the Gateway connection
-// itself staying up and healthy throughout, so nothing else here would ever
-// catch it. Restarting the Gateway does not fix this — it's a live-session
-// state issue, not a Gateway problem — so this is reported as a notify-only
-// finding, the same pattern as position-reconciliation problems below.
-async function competingLiveSessionIsBlockingData(connection: IbkrConnection): Promise<boolean> {
-  return new Promise((resolve) => {
-    const reqId = 999_002;
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve(false);
-    }, 5_000);
-
-    function onError(_error: Error, code: number, id: number) {
-      if (id !== reqId || code !== 10197) return;
-      cleanup();
-      resolve(true);
-    }
-    function onMarketDataType(id: number) {
-      if (id !== reqId) return;
-      cleanup();
-      resolve(false);
-    }
-    function cleanup() {
-      clearTimeout(timer);
-      connection.ib.removeListener(EventName.error, onError);
-      connection.ib.removeListener(EventName.marketDataType, onMarketDataType);
-      connection.ib.cancelMktData(reqId);
-    }
-
-    connection.ib.on(EventName.error, onError);
-    connection.ib.on(EventName.marketDataType, onMarketDataType);
-    connection.ib.reqMarketDataType(MarketDataType.REALTIME);
-    connection.ib.reqMktData(reqId, new Stock(HISTORICAL_DATA_PROBE_SYMBOL, "SMART", "USD"), "", false, false);
-  });
 }
 
 // Evidence 2026-09-24 (job_runs since 2026-08-24): the SPY probe's "Historical
@@ -341,14 +303,9 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       notifications.push(`⚠️ iorio-worker.service was inactive — restarted successfully, now active.`);
     }
 
-    const competingLiveSession = await competingLiveSessionIsBlockingData(connection);
-    if (competingLiveSession) {
-      notifications.push(
-        "⚠️ Real-time market data is currently blocked — IBKR error 10197 (competing live session). " +
-          "Someone is likely logged into johndom873 in Client Portal/TWS/mobile; ask them to log out. " +
-          "Not a Gateway problem, won't be fixed by a restart.",
-      );
-    }
+    // Alerts on its own (state-based: once, hourly reminders, then "restored"), like the Day Signals check below.
+    const competingLiveSession = await probeCompetingLiveSession(connection.ib, 999_002, HISTORICAL_DATA_PROBE_SYMBOL);
+    await reportCompetingLiveSession(competingLiveSession).catch((error) => console.warn(`competing live session alert failed: ${error instanceof Error ? error.message : error}`));
 
     const problems = await runReconciliationSafely(connection);
     connection.disconnect();

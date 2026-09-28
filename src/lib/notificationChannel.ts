@@ -27,7 +27,16 @@ export type AppNotification =
   // Animation-only signal for the Pulse topology map's otherwise-silent lines
   // (see pulseEmitter.ts / publishPulse below) — never persisted, never shown
   // in Latest Events.
-  | { type: "pulse"; edgeId: PulseEdgeId };
+  | { type: "pulse"; edgeId: PulseEdgeId }
+  // Live price pool (marketDataPool.ts): IBKR started or stopped refusing market data. Web-dyno-local, never persisted.
+  | { type: "market_data_feed"; refusal: MarketDataFeedRefusal | null };
+
+export interface MarketDataFeedRefusal {
+  code: number;
+  message: string;
+  /** ISO time of the first refusal. */
+  since: string;
+}
 
 export type PulseEdgeId = "ibkr-gateway" | "heroku-browser" | "heroku-db" | "genosuke-db" | "genosuke-llm";
 
