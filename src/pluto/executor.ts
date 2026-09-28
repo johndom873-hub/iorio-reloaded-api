@@ -1,0 +1,196 @@
+import { db } from "../db/connection.js";
+import { InternalApiClient, InternalApiError } from "../lib/internalApiClient.js";
+import { isOrderRequestFinal } from "../lib/orderRequestStatus.js";
+import { notifyTelegram } from "../lib/notifyTelegram.js";
+import type { SignalCandidate } from "../lib/signalCandidates.js";
+import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
+import type { PlutoDecision } from "./decisionSchema.js";
+import { recordPlutoEvent, updatePlutoAction, type PlutoActionOutcome } from "./ledger.js";
+import type { PlutoOrderPlan } from "./postModelGates.js";
+import type { PlutoSettings } from "./settingsStore.js";
+import { tripPlutoBreaker } from "./stateStore.js";
+
+// Execution (design round 3, items 6 and 22): the agent never writes an order row itself. It builds
+// through the same routes the screens use — POST /positions/orders or /positions/:id/roll — with the
+// scores snapshot and its pluto_action_id, confirms with Adaptive Normal, then watches the order and
+// cancels it if IBKR has not filled it within the timeout. Every route gate (halt, delta band, limits,
+// active-order conflict, 15-minute staleness) runs on the way, and a refusal is a blocked action, never
+// a retry. An order error or rejection trips the order_error breaker: a human looks before Pluto acts again.
+
+interface OrderRequestResponse {
+  id: string;
+  status: string;
+  errorMessage: string | null;
+  ibkrStatus?: string | null;
+  filledQuantity?: number | null;
+  remainingQuantity?: number | null;
+}
+
+export interface ExecuteOpenInput {
+  kind: "open";
+  actionId: string;
+  symbol: string;
+  candidate: SignalCandidate;
+  plan: PlutoOrderPlan;
+  decision: PlutoDecision;
+  scoresSnapshot: unknown;
+}
+
+export interface ExecuteRollInput {
+  kind: "roll";
+  actionId: string;
+  symbol: string;
+  roll: RollSignalCandidate;
+  heldLeg: HeldLegScore;
+  plan: PlutoOrderPlan;
+  decision: PlutoDecision;
+  scoresSnapshot: unknown;
+}
+
+export type ExecuteInput = ExecuteOpenInput | ExecuteRollInput;
+
+export interface ExecuteResult {
+  outcome: PlutoActionOutcome;
+  orderId: string | null;
+  detail: string;
+}
+
+function isoToIbkrExpiry(expiryIso: string): string {
+  return expiryIso.replace(/-/g, "");
+}
+
+function describeOrder(input: ExecuteInput): string {
+  if (input.kind === "open") {
+    const right = input.candidate.strategyKey === "covered_call" ? "C" : "P";
+    return `${input.symbol} ${input.plan.quantity}× $${input.candidate.strike}${right} ${input.candidate.expiry} @ ${input.plan.limitPrice.toFixed(2)}`;
+  }
+  return `${input.symbol} roll ${input.plan.quantity}× $${input.heldLeg.strike} → $${input.roll.replacement.strike} ${input.roll.replacement.expiry} @ ${input.plan.limitPrice.toFixed(2)}`;
+}
+
+/** Builds and confirms; returns once IBKR has the order (confirmed) or the route refused it (blocked). */
+export async function executePlutoOrder(api: InternalApiClient, settings: PlutoSettings, input: ExecuteInput): Promise<ExecuteResult> {
+  const description = describeOrder(input);
+  let built: OrderRequestResponse;
+  try {
+    if (input.kind === "open") {
+      built = await api.post<OrderRequestResponse>("/positions/orders", {
+        symbol: input.symbol,
+        strategyKey: input.candidate.strategyKey,
+        option: { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice, strikePrice: input.candidate.strike, expiryDate: isoToIbkrExpiry(input.candidate.expiry) },
+        signalSnapshot: input.scoresSnapshot,
+        plutoActionId: input.actionId,
+      });
+    } else {
+      const held = input.heldLeg;
+      const closeLimitPrice = held.bid !== null && held.ask !== null ? Math.round(((held.bid + held.ask) / 2) * 100) / 100 : null;
+      if (closeLimitPrice === null) return await blocked(input, "the held leg has no live two-sided quote to price the buyback");
+      built = await api.post<OrderRequestResponse>(`/positions/${input.roll.positionId}/roll`, {
+        closeLegId: input.roll.legId,
+        closeLimitPrice,
+        newLeg: { strikePrice: input.roll.replacement.strike, expiryDate: isoToIbkrExpiry(input.roll.replacement.expiry), quantity: input.plan.quantity, limitPrice: input.plan.limitPrice },
+        signalSnapshot: input.scoresSnapshot,
+        plutoActionId: input.actionId,
+      });
+    }
+  } catch (error) {
+    if (error instanceof InternalApiError && (error.status === 400 || error.status === 404 || error.status === 409)) return await blocked(input, `build refused: ${error.message}`);
+    return await errored(input, `build failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  await updatePlutoAction(input.actionId, { outcome: "order_built", orderRequestId: built.id });
+  await recordPlutoEvent("order_built", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description });
+
+  try {
+    const confirmed = await api.post<OrderRequestResponse>(`/positions/orders/${built.id}/confirm`, { adaptivePriority: "Normal" });
+    if (confirmed.status === "pending_confirmation") return await blocked(input, "confirm did not move the order", built.id);
+  } catch (error) {
+    // The order row stays pending_confirmation; the stale sweep cancels it in 15 minutes, but be explicit now.
+    await api.post(`/positions/orders/${built.id}/cancel`, {}).catch(() => {});
+    if (error instanceof InternalApiError && error.status === 409) return await blocked(input, `confirm refused: ${error.message}`, built.id);
+    return await errored(input, `confirm failed: ${error instanceof Error ? error.message : String(error)}`, built.id);
+  }
+
+  await updatePlutoAction(input.actionId, { outcome: "confirmed" });
+  await recordPlutoEvent("order_confirmed", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description });
+  if (settings.telegramVerbosity !== "off") await notifyTelegram(`🪐 Pluto sent an order: ${description}\n${input.decision.reasons.join(" ")}`);
+  return { outcome: "confirmed", orderId: built.id, detail: description };
+
+  async function blocked(action: ExecuteInput, reason: string, orderId: string | null = null): Promise<ExecuteResult> {
+    await updatePlutoAction(action.actionId, { outcome: "blocked", blockReason: reason, orderRequestId: orderId });
+    await recordPlutoEvent("action_blocked", { actionId: action.actionId, symbol: action.symbol, reason, stage: "route" });
+    return { outcome: "blocked", orderId, detail: reason };
+  }
+
+  async function errored(action: ExecuteInput, reason: string, orderId: string | null = null): Promise<ExecuteResult> {
+    await updatePlutoAction(action.actionId, { outcome: "error", blockReason: reason, orderRequestId: orderId });
+    await recordPlutoEvent("order_outcome", { actionId: action.actionId, symbol: action.symbol, outcome: "error", reason });
+    await tripPlutoBreaker("order_error", reason);
+    await recordPlutoEvent("breaker_tripped", { name: "order_error", detail: reason });
+    await notifyTelegram(`🛑 Pluto breaker tripped (order_error): ${reason}. Pluto is paused until a human resets it.`);
+    return { outcome: "error", orderId, detail: reason };
+  }
+}
+
+export interface WatchResult {
+  outcome: PlutoActionOutcome;
+  detail: string;
+}
+
+/** Average fill price across this order's recorded executions, weighted by quantity; null until something filled. */
+export async function averageFillPrice(orderId: string): Promise<number | null> {
+  const row = await db("trades").where({ source_order_request_id: orderId }).select(db.raw("sum(price * quantity) / nullif(sum(quantity), 0) as avg_price")).first();
+  return row?.avg_price === null || row?.avg_price === undefined ? null : Number(row.avg_price);
+}
+
+/**
+ * Polls the order until IBKR is done with it or the timeout passes (then asks for a cancel and keeps
+ * polling until the cancel lands). Records the outcome, the fill price and the pessimistic-fill gap.
+ */
+export async function watchPlutoOrder(
+  api: InternalApiClient,
+  settings: PlutoSettings,
+  input: { actionId: string; orderId: string; symbol: string; referenceBid: number; description: string },
+  options: { pollIntervalMs?: number; now?: () => number } = {},
+): Promise<WatchResult> {
+  const pollIntervalMs = options.pollIntervalMs ?? 5_000;
+  const now = options.now ?? (() => Date.now());
+  const startedAt = now();
+  const timeoutMs = settings.unfilledCancelMinutes * 60_000;
+  let cancelRequested = false;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    let order: OrderRequestResponse;
+    try {
+      order = await api.get<OrderRequestResponse>(`/positions/orders/${input.orderId}`);
+    } catch (error) {
+      console.warn(`Pluto watch: could not read order ${input.orderId} — ${error instanceof Error ? error.message : error}`);
+      continue;
+    }
+    if (isOrderRequestFinal({ status: order.status, ibkr_status: order.ibkrStatus ?? null })) {
+      const outcome = order.status as PlutoActionOutcome;
+      const fillPrice = order.status === "filled" || order.status === "partially_filled" ? await averageFillPrice(input.orderId) : null;
+      // Pessimistic bracket (design 2026-09-28): what the same trade would have made filling at the bid.
+      const pessimisticPnl = fillPrice === null ? null : Math.round((input.referenceBid - fillPrice) * 100 * (order.filledQuantity ?? 1) * 100) / 100;
+      await updatePlutoAction(input.actionId, { outcome, fillPrice, pessimisticPnl, blockReason: order.errorMessage ?? null });
+      await recordPlutoEvent("order_outcome", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, outcome, fillPrice, error: order.errorMessage ?? undefined });
+      if (outcome === "rejected" || outcome === "error") {
+        const detail = `${input.description}: ${order.errorMessage ?? outcome}`;
+        await tripPlutoBreaker("order_error", detail);
+        await recordPlutoEvent("breaker_tripped", { name: "order_error", detail });
+        await notifyTelegram(`🛑 Pluto breaker tripped (order_error): ${detail}. Pluto is paused until a human resets it.`);
+      } else if (settings.telegramVerbosity !== "off") {
+        await notifyTelegram(`🪐 Pluto order ${outcome}: ${input.description}${fillPrice !== null ? ` (avg fill ${fillPrice.toFixed(2)})` : ""}`);
+      }
+      return { outcome, detail: order.errorMessage ?? outcome };
+    }
+    if (!cancelRequested && now() - startedAt > timeoutMs) {
+      cancelRequested = true;
+      try {
+        await api.post(`/positions/orders/${input.orderId}/cancel`, {});
+        await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: `unfilled after ${settings.unfilledCancelMinutes} min — cancel requested` });
+      } catch (error) {
+        console.warn(`Pluto watch: cancel request failed for ${input.orderId} — ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  }
+}
