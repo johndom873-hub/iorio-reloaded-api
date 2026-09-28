@@ -211,6 +211,8 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   });
 
   if (!header) return withCaveats("no_snapshot");
+  // Surface max age (gap fix 8, 2026-09-28): older than the previous open session is not graded at all.
+  if (inputs.oldestAcceptableSnapshotDateIso !== undefined && base.snapshotDateIso !== null && base.snapshotDateIso < inputs.oldestAcceptableSnapshotDateIso) return withCaveats("stale_surface");
   if (base.fittedSliceCount === 0 || header.underlyingPrice === null || header.riskFreeRatePercent === null) return withCaveats("no_surface_fit");
   if (!inputs.forecast) return withCaveats(inputs.suspectedSplitDateIso !== null ? "suspected_split" : "no_forecast");
   if (spotPrice === null) return withCaveats("no_snapshot");

@@ -6,7 +6,8 @@ import type { ElevatedVolatilityFlag, SkewMeasure } from "./tiltMeasures.js";
 import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
 import type { HeldLegScore, OpenShortLeg, RollSignalCandidate } from "./rollSignalCandidates.js";
 
-export type SignalsUnscoredReason = "no_snapshot" | "no_surface_fit" | "no_forecast" | "suspected_split";
+/** "stale_surface" (gap fix 8, 2026-09-28): the newest surface is older than the previous open session, so nothing is graded. */
+export type SignalsUnscoredReason = "no_snapshot" | "no_surface_fit" | "no_forecast" | "suspected_split" | "stale_surface";
 export type SignalsPriceSource = "live" | "frozen" | "snapshot";
 
 export interface SnapshotHeader {
@@ -36,6 +37,12 @@ export interface TickerSignalsInputs {
   forecast: RealizedVolatilityForecast | null;
   /** Trading date the split guard flagged when it left the ticker without a forecast; null otherwise. */
   suspectedSplitDateIso: string | null;
+  /**
+   * Surface max age (gap fix 8, 2026-09-28): the previous open session's date. A snapshot older than this
+   * is not graded (unscoredReason "stale_surface"); one from exactly this date is scored with the
+   * stale_surface caveat, as before. Omitted = no cap (tests, ad-hoc builders).
+   */
+  oldestAcceptableSnapshotDateIso?: string;
   earningsDatesIso: string[];
   /** False when the ticker has never resolved to a TradingView symbol -- earningsDatesIso is necessarily
    * empty either way, so this is what actually tells the guard "no earnings scheduled" from "unchecked". */

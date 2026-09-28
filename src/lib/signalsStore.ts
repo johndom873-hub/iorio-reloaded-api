@@ -3,7 +3,7 @@ import { isRegularDividendCadence } from "./impliedVolatilitySurface.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
-import { easternDateIso } from "./marketSessionStatus.js";
+import { easternDateIso, previousOpenSessionDate } from "./marketSessionStatus.js";
 import type { SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedByContract, scoreTicker, toScreenRow, type LiveOptionQuote } from "./signalsLiveScoring.js";
 import { loadDayQuotesForTicker } from "./daySignalsStore.js";
@@ -212,7 +212,7 @@ export async function loadOpenShortLegs(tickerId: string): Promise<OpenShortLeg[
 /** Everything scoring needs for one ticker, from the DB only (no IBKR). Loaded once per REST call or stream start. */
 export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {
   const todayEastern = easternDateIso(now);
-  const [bars, nextEarningsDateIso, earningsDatesIso, earningsCalendarResolved, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs] = await Promise.all([
+  const [bars, nextEarningsDateIso, earningsDatesIso, earningsCalendarResolved, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs, oldestAcceptableSnapshotDateIso] = await Promise.all([
     loadBarsForTilt(ticker.tickerId, todayEastern),
     loadNextEarningsDate(ticker.tickerId, todayEastern),
     loadEarningsDatesForForecastWindow(ticker.tickerId),
@@ -224,6 +224,7 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
     loadDividendCadenceUnknown(ticker.tickerId, todayEastern),
     loadUpcomingMajorMacroEvents(),
     loadOpenShortLegs(ticker.tickerId),
+    previousOpenSessionDate(todayEastern),
   ]);
   const momentum = computeMomentum(bars.map((bar) => bar.close));
   const elevatedVolatility = computeElevatedVolatilityFlag(bars);
@@ -232,7 +233,7 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
     ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
     : [[], [], { forecast: null, suspectedSplitDateIso: null }, []];
 
-  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
+  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern, oldestAcceptableSnapshotDateIso };
 }
 
 /** The Day Signals loop's quotes for one ticker, only when they belong to the snapshot date being scored (contracts that errored carry no quote). */

@@ -112,6 +112,20 @@ describe("rebaseSlicesToToday (stale snapshot)", () => {
     expect(stalePut.dte).toBe(29);
     expect(stalePut.surfaceImpliedVolatility).toBeCloseTo(todayPut.surfaceImpliedVolatility, 12);
   });
+
+  // Surface max age (gap fix 8, 2026-09-28): the previous open session is the oldest snapshot still graded.
+  it("scores a snapshot from the previous open session, but not one older than that", () => {
+    const previousSession = scoreTicker(inputs({ todayEasternIso: "2026-09-22", oldestAcceptableSnapshotDateIso: "2026-09-21" }), account, permissiveSettings);
+    expect(previousSession.unscoredReason).toBeNull();
+    expect(previousSession.candidates.length).toBeGreaterThan(0);
+    expect(previousSession.caveats.map((caveat) => caveat.id)).toContain("stale_surface");
+
+    const tooOld = scoreTicker(inputs({ todayEasternIso: "2026-09-23", oldestAcceptableSnapshotDateIso: "2026-09-22" }), account, permissiveSettings);
+    expect(tooOld.unscoredReason).toBe("stale_surface");
+    expect(tooOld.candidates).toEqual([]);
+    const caveat = tooOld.caveats.find((entry) => entry.id === "stale_surface");
+    expect(caveat?.title).toBe("Not scored: the newest surface is from 2026-09-21");
+  });
 });
 
 describe("computeDayChangePercent", () => {
