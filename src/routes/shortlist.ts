@@ -11,6 +11,7 @@ import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
 import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { refreshStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
+import { invalidatePricePerformanceSnapshot } from "../lib/pricePerformanceSnapshot.js";
 import { countOpenPositionsForTicker, describeOpenPositionsBlockingRemoval } from "../lib/positionQueries.js";
 
 export const shortlistRouter = Router();
@@ -319,5 +320,7 @@ shortlistRouter.delete("/:id", async (request, response) => {
     response.status(409).json({ error: describeOpenPositionsBlockingRemoval(outcome.openPositionCount) });
     return;
   }
+  // Price Performance caches its table for a minute; its live stream reads the shortlist directly.
+  invalidatePricePerformanceSnapshot();
   response.status(204).end();
 });
