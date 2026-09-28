@@ -1,5 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
+import { isoDateFromDbDate } from "../lib/dbDate.js";
 
 // Pluto's runtime state: one row (pluto_state). Mode is off/on (Marcelo, 2026-09-28: no
 // other modes). Pause is a separate flag that overrides everything: manual (either user),
@@ -26,6 +27,9 @@ export interface PlutoState {
   lastSeenRelease: string | null;
   breakers: Record<string, PlutoBreakerTrip>;
   lastPassAt: string | null;
+  /** Eastern date on which the SPY stress check is overridden (screen switch), else null. */
+  stressOverrideDate: string | null;
+  stressOverrideByDisplayName: string | null;
   updatedAt: string;
 }
 
@@ -40,6 +44,8 @@ function rowToState(row: Record<string, unknown>): PlutoState {
     lastSeenRelease: (row.last_seen_release as string | null) ?? null,
     breakers: (row.breakers as Record<string, PlutoBreakerTrip>) ?? {},
     lastPassAt: row.last_pass_at ? new Date(row.last_pass_at as string).toISOString() : null,
+    stressOverrideDate: isoDateFromDbDate(row.stress_override_date),
+    stressOverrideByDisplayName: (row.stress_override_by_display_name as string | null) ?? null,
     updatedAt: new Date(row.updated_at as string).toISOString(),
   };
 }
@@ -47,8 +53,9 @@ function rowToState(row: Record<string, unknown>): PlutoState {
 export async function loadPlutoState(connection: Knex = db): Promise<PlutoState> {
   const row = await connection("pluto_state as s")
     .leftJoin("users as u", "u.id", "s.paused_by_user_id")
+    .leftJoin("users as su", "su.id", "s.stress_override_by_user_id")
     .where("s.id", 1)
-    .select("s.*", "u.display_name as paused_by_display_name")
+    .select("s.*", "u.display_name as paused_by_display_name", "su.display_name as stress_override_by_display_name")
     .first();
   if (!row) throw new Error("No pluto_state row found.");
   return rowToState(row);
@@ -61,6 +68,12 @@ export function describePlutoBlock(state: PlutoState): string | null {
   if (tripped.length > 0) return `Circuit breaker tripped: ${tripped.map(([name, trip]) => `${name} (${trip.detail})`).join("; ")}. Needs a human reset.`;
   if (state.paused) return `Pluto is paused (${state.pauseReason ?? "manual"}${state.pausedByDisplayName ? ` by ${state.pausedByDisplayName}` : ""}).`;
   return null;
+}
+
+/** Same-day override of the SPY stress check; `dateIso` null clears it. */
+export async function setPlutoStressOverride(dateIso: string | null, userId: string | null): Promise<PlutoState> {
+  await db("pluto_state").where({ id: 1 }).update({ stress_override_date: dateIso, stress_override_by_user_id: dateIso ? userId : null, updated_at: db.fn.now() });
+  return loadPlutoState();
 }
 
 export async function setPlutoMode(mode: PlutoMode): Promise<PlutoState> {

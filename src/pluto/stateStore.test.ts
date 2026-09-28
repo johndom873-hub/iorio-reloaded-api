@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { describePlutoBlock, type PlutoState } from "./stateStore.js";
 
-const base: PlutoState = { mode: "on", paused: false, pauseReason: null, pausedByUserId: null, pausedByDisplayName: null, pausedAt: null, lastSeenRelease: null, breakers: {}, lastPassAt: null, updatedAt: "2026-09-28T00:00:00.000Z" };
+const base: PlutoState = { mode: "on", paused: false, pauseReason: null, pausedByUserId: null, pausedByDisplayName: null, pausedAt: null, lastSeenRelease: null, breakers: {}, lastPassAt: null, stressOverrideDate: null, stressOverrideByDisplayName: null, updatedAt: "2026-09-28T00:00:00.000Z" };
 
 describe("describePlutoBlock", () => {
   it("allows only on + unpaused + no breakers", () => {

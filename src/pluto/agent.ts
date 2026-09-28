@@ -7,7 +7,7 @@ import { computeMarketSessionStatus, easternDateIso } from "../lib/marketSession
 import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
 import type { PlutoConfig } from "./config.js";
-import { recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
+import { plutoEventsRetentionDays, pruneOldPlutoEvents, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRunnerContext } from "./passRunner.js";
 import { recordSessionCloseFromIbkr, resolvePlutoSession } from "./sessionSchedule.js";
@@ -146,6 +146,7 @@ export class PlutoAgent {
       this.settings = await loadPlutoSettings();
       this.marketWatch.updateSettings(this.settings);
       await this.readSessionCloseOncePerDay();
+      await this.pruneEventsOncePerDay();
       const { allowed, insideWindow } = await this.isAllowedToAct();
       if (!allowed || !insideWindow) {
         if (this.watching) {
@@ -173,6 +174,19 @@ export class PlutoAgent {
       }
     } catch (error) {
       console.error(`Pluto housekeeping failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  private eventsPrunedFor: string | null = null;
+  private async pruneEventsOncePerDay(): Promise<void> {
+    const todayIso = easternDateIso(new Date());
+    if (this.eventsPrunedFor === todayIso) return;
+    this.eventsPrunedFor = todayIso;
+    try {
+      const pruned = await pruneOldPlutoEvents();
+      if (pruned > 0) console.log(`Pluto: pruned ${pruned} timeline event(s) older than ${plutoEventsRetentionDays} days.`);
+    } catch (error) {
+      console.warn(`Pluto: event pruning failed — ${error instanceof Error ? error.message : error}`);
     }
   }
 

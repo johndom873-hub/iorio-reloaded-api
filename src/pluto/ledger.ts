@@ -35,6 +35,18 @@ export async function startPlutoPass(trigger: PlutoTrigger, triggerDetail: Recor
   return row.id as string;
 }
 
+/** The poll pass found out what it really was (a grade crossing or a held-leg change): rename it before the model is called. */
+export async function relabelPlutoPass(passId: string, trigger: PlutoTrigger, triggerDetail: Record<string, unknown>): Promise<void> {
+  await db("pluto_passes").where({ id: passId }).update({ trigger, trigger_detail: JSON.stringify(triggerDetail) });
+}
+
+/** Timeline retention (built 2026-09-28, Marcelo to veto the number): events older than this are pruned once a day; passes, decisions and actions are the ledger and are kept. */
+export const plutoEventsRetentionDays = 90;
+
+export async function pruneOldPlutoEvents(now: Date = new Date()): Promise<number> {
+  return db("pluto_events").where("occurred_at", "<", new Date(now.getTime() - plutoEventsRetentionDays * 24 * 60 * 60 * 1000)).del();
+}
+
 export interface FinishPlutoPassInput {
   inputHash?: string | null;
   candidateCount?: number;
@@ -201,6 +213,7 @@ export type PlutoEventType =
   | "ticker_disabled"
   | "lines_changed"
   | "session_schedule"
+  | "stress_override_changed"
   | "warning";
 
 /** Appends to the timeline and pushes a `pluto_event` notification so open screens update live. */

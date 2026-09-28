@@ -6,7 +6,8 @@ import { resolvePlutoSession } from "../pluto/sessionSchedule.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
-import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, type PlutoMode } from "../pluto/stateStore.js";
+import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
+import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { recordPlutoEvent } from "../pluto/ledger.js";
 import { cancelPlutoOrders, countPlutoWorkingOrders } from "../pluto/orders.js";
 import { loadPlutoTodayCounters } from "../pluto/counters.js";
@@ -126,6 +127,76 @@ plutoRouter.post("/breakers/:name/reset", async (request: Request, response: Res
   await recordPlutoEvent("breaker_reset", { name, by: who });
   await notifyTelegram(`🔧 Pluto breaker "${name}" reset by ${who}. Pluto stays paused until resumed.`);
   response.json(state);
+});
+
+// "Allow opens under stress today": clears itself with the Eastern date (Marcelo, 2026-09-28).
+plutoRouter.put("/stress-override", async (request: Request, response: Response) => {
+  const enabled = request.body?.enabled;
+  if (typeof enabled !== "boolean") {
+    response.status(400).json({ error: "enabled must be true or false." });
+    return;
+  }
+  const todayIso = easternDateIso(new Date());
+  const who = await currentUserDisplayName(request);
+  const state = await setPlutoStressOverride(enabled ? todayIso : null, currentUserId(request));
+  await recordPlutoEvent("stress_override_changed", { enabled, dateIso: todayIso, by: who });
+  await notifyTelegram(enabled ? `⚠️ Pluto: ${who} allowed new opens under SPY stress for ${todayIso}.` : `Pluto: ${who} removed today's SPY stress override.`);
+  response.json(state);
+});
+
+plutoRouter.get("/scoreboard", async (_request: Request, response: Response) => {
+  const actions: { id: string; pass_id: string; kind: string; outcome: string; pessimistic_pnl: string | null; deterministic_top_pick: { id?: string } | null; order_request_id: string | null }[] = await db("pluto_actions").select("id", "pass_id", "kind", "outcome", "pessimistic_pnl", "deterministic_top_pick", "order_request_id");
+  const realized = await loadRealizedPnlByActionId(actions.filter((action) => action.order_request_id).map((action) => action.id));
+  const decisions: { pass_id: string; parsed_output: { decision?: string; candidate_id?: string | null } | null }[] = await db("pluto_decisions").where("call_index", 1).whereNotNull("parsed_output").select("pass_id", "parsed_output");
+  const passes = await db("pluto_passes").select(db.raw("count(*)::int AS passes, count(*) FILTER (WHERE model_called)::int AS model_called, COALESCE(SUM(cost_usd), 0) AS cost_usd, MIN(started_at) AS since")).first();
+
+  const outcomes: Record<string, number> = {};
+  for (const action of actions) outcomes[action.outcome] = (outcomes[action.outcome] ?? 0) + 1;
+  let realizedPnl = 0;
+  let pessimisticPnl = 0;
+  let closedActions = 0;
+  let winningActions = 0;
+  let openActions = 0;
+  for (const action of actions) {
+    pessimisticPnl += action.pessimistic_pnl === null ? 0 : Number(action.pessimistic_pnl);
+    const figures = realized.get(action.id);
+    if (!figures) continue;
+    if (figures.realizedPnl !== null) realizedPnl += figures.realizedPnl;
+    if (figures.openLegCount > 0) openActions += 1;
+    else if (figures.closedLegCount > 0) {
+      closedActions += 1;
+      if ((figures.realizedPnl ?? 0) > 0) winningActions += 1;
+    }
+  }
+  // Model vs the deterministic Edge $ top pick, per pass that called the model.
+  const topPickByPass = new Map<string, string | null>();
+  for (const action of actions) if (action.deterministic_top_pick !== null) topPickByPass.set(action.pass_id, action.deterministic_top_pick?.id ?? null);
+  let agree = 0;
+  let disagree = 0;
+  let noTrade = 0;
+  for (const decision of decisions) {
+    const verdict = decision.parsed_output?.decision;
+    if (verdict !== "trade") {
+      noTrade += 1;
+      continue;
+    }
+    const topPick = topPickByPass.get(decision.pass_id) ?? null;
+    if (topPick !== null && decision.parsed_output?.candidate_id === topPick) agree += 1;
+    else disagree += 1;
+  }
+  response.json({
+    since: passes?.since ? new Date(passes.since).toISOString() : null,
+    passes: Number(passes?.passes ?? 0),
+    modelCalls: Number(passes?.model_called ?? 0),
+    costUsd: Math.round(Number(passes?.cost_usd ?? 0) * 10000) / 10000,
+    outcomes,
+    realizedPnl: Math.round(realizedPnl * 100) / 100,
+    pessimisticPnl: Math.round(pessimisticPnl * 100) / 100,
+    closedActions,
+    winningActions,
+    openActions,
+    modelVsTopPick: { agree, disagree, noTrade },
+  });
 });
 
 plutoRouter.get("/settings", async (_request: Request, response: Response) => {

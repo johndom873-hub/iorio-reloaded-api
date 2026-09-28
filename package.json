@@ -14,6 +14,7 @@
     "start": "node --max-old-space-size=384 dist/src/server.js",
     "agent": "node --max-old-space-size=384 dist/src/plutoAgent.js",
     "agent:dev": "tsx src/plutoAgent.ts",
+    "pluto:replay": "tsx scripts/pluto-replay.ts",
     "migrate:latest": "tsx node_modules/.bin/knex migrate:latest --knexfile src/db/knexfile.ts",
     "migrate:latest:prod": "node node_modules/.bin/knex migrate:latest --knexfile dist/src/db/knexfile.js",
     "migrate:rollback": "tsx node_modules/.bin/knex migrate:rollback --knexfile src/db/knexfile.ts",

@@ -12,8 +12,8 @@ import { noTrade, parsePlutoDecision, reconcileAgreement, type PlutoDecision } f
 import { executePlutoClose, executePlutoOrder, watchPlutoOrder } from "./executor.js";
 import { buildCloseOffersForTicker, type CloseOffer } from "./closeActions.js";
 import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
-import { candidateSetFingerprint } from "./inputHash.js";
-import { finishPlutoPass, recordPlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger } from "./ledger.js";
+import { candidateSetFingerprint, classifyFingerprintChange, tickerFingerprint } from "./inputHash.js";
+import { finishPlutoPass, recordPlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { callPlutoModel } from "./modelClient.js";
 import { runPostModelGates } from "./postModelGates.js";
@@ -91,7 +91,7 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   const live = spot !== null ? { spotPrice: spot, priceSource: "live" as const, liveQuotes: extraLiveQuotes } : undefined;
   const scored = scoreTicker(inputs, account, signalSettings, live);
   const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled });
-  return { row, inputs, scored, filtered, fingerprint: candidateSetFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [] };
+  return { row, inputs, scored, filtered, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [] };
 }
 
 /** Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here, the rest go to the model. */
@@ -138,8 +138,12 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   // lasts; rolls and profit-taking closes stay allowed. Recorded as a check, not a breaker, so it lifts
   // on its own when SPY recovers.
   const spyDayChangePct = context.marketWatch.spyDayChangePct();
-  const marketStress = spyDayChangePct !== null && spyDayChangePct <= -settings.spyStressBreakerPct;
-  checks.checks.market_stress = { ok: !marketStress, detail: spyDayChangePct === null ? "SPY day change unknown" : `SPY ${spyDayChangePct.toFixed(2)}% (opens blocked at -${settings.spyStressBreakerPct}%)` };
+  const stressOverridden = checks.context.state.stressOverrideDate === checks.context.todayEasternIso;
+  const marketStress = spyDayChangePct !== null && spyDayChangePct <= -settings.spyStressBreakerPct && !stressOverridden;
+  checks.checks.market_stress = {
+    ok: !marketStress,
+    detail: `${spyDayChangePct === null ? "SPY day change unknown" : `SPY ${spyDayChangePct.toFixed(2)}% (opens blocked at -${settings.spyStressBreakerPct}%)`}${stressOverridden ? ` — override on for today${checks.context.state.stressOverrideByDisplayName ? ` by ${checks.context.state.stressOverrideByDisplayName}` : ""}` : ""}`,
+  };
 
   // 2. Universe.
   const enabledRows = await loadEnabledTickerRows();
@@ -168,7 +172,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const previousSessionDateIso = await previousOpenSessionDate(checks.context.todayEasternIso);
   for (const ticker of evaluated) {
     await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs);
-    if (ticker.closeOffers.length > 0) ticker.fingerprint = `${ticker.fingerprint}|closes:${ticker.closeOffers.map((offer) => offer.id).sort().join(",")}`;
+    if (ticker.closeOffers.length > 0) ticker.fingerprint = tickerFingerprint(ticker.filtered.eligible, ticker.filtered.eligibleRolls, ticker.closeOffers.map((offer) => offer.id));
   }
   const offeredCount = evaluated.reduce((sum, ticker) => sum + ticker.filtered.eligible.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length, 0);
 
@@ -189,6 +193,17 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   if (!request.force && changed.length === 0) return skip("no material change since the model last looked", checks.checks);
   if (context.lastModelCallAtMs.value !== null && nowMs - context.lastModelCallAtMs.value < settings.globalMinCallIntervalSeconds * 1000) {
     return skip(`global model-call interval (${settings.globalMinCallIntervalSeconds}s) not elapsed`, checks.checks);
+  }
+  // The 30 s poll is only the messenger: name the pass after what actually moved (design round 4 triggers).
+  let trigger: PlutoTrigger = request.trigger;
+  let triggerDetail = request.triggerDetail;
+  if (request.trigger === "day_quotes" && changed.length > 0) {
+    const kinds = changed.map((ticker) => ({ symbol: ticker.row.symbol, kind: classifyFingerprintChange(context.lastFingerprintBySymbol.get(ticker.row.symbol), ticker.fingerprint) }));
+    const heldLeg = kinds.filter((entry) => entry.kind === "held_leg").map((entry) => entry.symbol);
+    const gradeCrossing = kinds.filter((entry) => entry.kind === "grade_crossing").map((entry) => entry.symbol);
+    trigger = gradeCrossing.length > 0 ? "grade_crossing" : "held_leg";
+    triggerDetail = { ...request.triggerDetail, symbols: kinds.map((entry) => entry.symbol), gradeCrossing, heldLeg };
+    await relabelPlutoPass(passId, trigger, triggerDetail);
   }
 
   // 5. Prompt.
@@ -218,7 +233,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     settings,
     tickers: tickersForPrompt,
     recentDecisions: recentDecisions.map((row) => ({ at: new Date(row.created_at).toISOString(), verdict: row.parsed_output?.decision ?? "invalid", candidateId: row.parsed_output?.candidate_id ?? null, reason: row.parsed_output?.reasons?.[0] ?? null })),
-    trigger: { kind: request.trigger, detail: request.triggerDetail },
+    trigger: { kind: trigger, detail: triggerDetail },
   });
   const systemPrompt = buildPlutoSystemPrompt(settings);
   const userPayload = JSON.stringify(payload);
@@ -246,7 +261,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     decision = reconciled.decision;
     agreementDetail = reconciled.detail;
   }
-  await recordPlutoEvent("model_called", { passId, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, agreement: agreementDetail, reasons: decision.reasons });
+  await recordPlutoEvent("model_called", { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, agreement: agreementDetail, reasons: decision.reasons });
   await finishPlutoPass(passId, { inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, tokensIn, tokensOut, costUsd, servedModelIds });
   await recordPlutoPass();
 
