@@ -26,6 +26,7 @@ import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathFor
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
 import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
+import { streamCloseLiveHandler } from "./positionCloseLive.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -1374,6 +1375,9 @@ positionsRouter.get("/quote/stream", async (request, response) => {
     response.end();
   }
 });
+
+// Live quotes, live wheel-cycle P&L and the closing gate for the Close form only (see positionCloseLive.ts).
+positionsRouter.get("/:id/close-live/stream", streamCloseLiveHandler);
 
 // The explicit confirmation gate (approved 2026-08-24) — building an order
 // above never transmits it; only this endpoint does, by NOTIFYing the
