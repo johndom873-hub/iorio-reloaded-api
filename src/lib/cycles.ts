@@ -146,6 +146,33 @@ function isSettledWithoutTrade(leg: CycleOptionLeg): boolean {
   return leg.side === "short" && leg.exitAt !== null && !leg.hasClosingTrade && (leg.exitPrice === 0 || leg.exitPrice === null);
 }
 
+// IBKR reports a put assignment as a real stock buy at the strike, which the worker records as a trade, while the
+// ledger already infers the same assignment from the expired-ITM option leg (putAssigned). Counting both doubles
+// the shares, so the trade is dropped when it matches an inferred assignment: same share count, price equal to the
+// strike, and executed within assignmentFillWindowMs of the leg's exit. Each put leg absorbs at most one fill.
+const assignmentFillWindowMs = 36 * 3_600_000;
+
+function dropInferredAssignmentFills(stockTrades: CycleStockTrade[], optionLegs: CycleOptionLeg[]): CycleStockTrade[] {
+  const absorbingLegIds = new Set<string>();
+  return stockTrades.filter((trade) => {
+    if (trade.side !== "buy") return true;
+    const assignedLeg = optionLegs.find(
+      (leg) =>
+        !absorbingLegIds.has(leg.id) &&
+        leg.optionType === "put" &&
+        isSettledWithoutTrade(leg) &&
+        leg.expiryClose !== null &&
+        leg.strike - leg.expiryClose >= marginalThreshold &&
+        trade.quantity === leg.quantity * leg.multiplier &&
+        Math.abs(trade.price - leg.strike) < 0.00005 &&
+        Math.abs(trade.at.getTime() - leg.exitAt!.getTime()) <= assignmentFillWindowMs,
+    );
+    if (!assignedLeg) return true;
+    absorbingLegIds.add(assignedLeg.id);
+    return false;
+  });
+}
+
 export function deriveCycles(input: CycleInput): Cycle[] {
   const { optionLegs, stockLegs, stockTrades, dailyCloses, lastPrice, openPositionPremiumPnl } = input;
 
@@ -200,7 +227,10 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
   const { dailyCloses, lastPrice, openPositionPremiumPnl, openPositionPremiumPnlUnavailable } = input;
   const inWindow = (at: number) => at >= window.start && (window.end === null || at <= window.end + groupingWindowMs);
   const optionLegs = input.optionLegs.filter((leg) => inWindow(leg.entryAt.getTime()));
-  const stockTrades = input.stockTrades.filter((trade) => trade.at.getTime() >= window.start - fillLookbackMs && (window.end === null || trade.at.getTime() <= window.end + groupingWindowMs));
+  const stockTrades = dropInferredAssignmentFills(
+    input.stockTrades.filter((trade) => trade.at.getTime() >= window.start - fillLookbackMs && (window.end === null || trade.at.getTime() <= window.end + groupingWindowMs)),
+    optionLegs,
+  );
   const dataFlags: string[] = [];
 
   // 2. Raw event stream.
