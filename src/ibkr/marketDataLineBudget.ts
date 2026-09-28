@@ -124,3 +124,40 @@ export function describeMarketDataLineShortage(result: LineReservationResult, wh
   }
   return `IBKR market data is busy (another live view) — ${what} needs ${linesNeeded} lines, only ${result.availableLines} available. Try again shortly.`;
 }
+
+export interface MarketDataLineUsage {
+  inUse: number;
+  budget: number;
+  byUse: { label: string; lines: number }[];
+}
+
+// Holder name prefix (before the first ":") → what the lines are for, as shown on Pulse.
+const lineHolderLabels: Record<string, string> = {
+  marketDataPool: "Screens",
+  optionChainCapture: "Chain capture",
+  daySignalsLoop: "Day Signals",
+  tradeAlertScan: "Trade-alert scan",
+  optionQuote: "Option quotes",
+  snapshot: "Snapshots",
+};
+
+/**
+ * Pure: lines in use across every process sharing the IBKR login. The live pool counts the lines it
+ * really has open (it can hold fewer than it reserved); every other holder fills its reservation for
+ * as long as it holds it (the capture keeps its window full, snapshots reserve exactly their size).
+ */
+export function summarizeMarketDataLineUsage(reservations: { holder: string; lines: number }[], poolOpenLines: number): MarketDataLineUsage {
+  const linesByLabel = new Map<string, number>([["Screens", poolOpenLines]]);
+  for (const { holder, lines } of reservations) {
+    const prefix = holder.split(":")[0]!;
+    if (prefix === "marketDataPool") continue;
+    const label = lineHolderLabels[prefix] ?? prefix;
+    linesByLabel.set(label, (linesByLabel.get(label) ?? 0) + lines);
+  }
+  const byUse = [...linesByLabel].map(([label, lines]) => ({ label, lines })).filter((use) => use.lines > 0);
+  return { inUse: byUse.reduce((sum, use) => sum + use.lines, 0), budget: totalMarketDataLineBudget, byUse };
+}
+
+export async function loadActiveMarketDataLineReservations(): Promise<{ holder: string; lines: number }[]> {
+  return db("ibkr_market_data_line_reservations").where("expires_at", ">", db.fn.now()).select("holder", "lines");
+}

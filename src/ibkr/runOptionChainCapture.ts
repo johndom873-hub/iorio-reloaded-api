@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { refreshStoredOptionChain, loadStoredOptionChain, type OptionChainRefreshTimings, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { fetchLivePrices } from "./fetchLivePrices.js";
-import { openCaptureQuoteWindow, type CaptureQuoteWindow, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
+import { openCaptureQuoteWindow, type CaptureQuoteWindow, type CaptureSettleStats, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "../lib/realizedVolatility.js";
@@ -35,6 +35,24 @@ import { describeMarketDataLineShortage, releaseMarketDataLines, renewMarketData
 // pool sheds to fit, so the capture can never be starved. Batches then run
 // under this reservation instead of reserving individually.
 export const captureLineReservationHolder = "optionChainCapture";
+const captureProgressLogIntervalMs = 10_000;
+
+/**
+ * One line of empirical line usage: how many lines were subscribed (now, and the lowest/highest during
+ * the period), the time-weighted average in use, and how long each released contract held its line.
+ */
+export function describeCaptureLineUsage(heading: string, inFlight: number | null, stats: CaptureSettleStats): string {
+  const seconds = (ms: number | null) => (ms === null ? "—" : `${(ms / 1000).toFixed(1)}s`);
+  const fields = (counts: CaptureSettleStats["lastField"]) => `price ${counts.price}, delta ${counts.delta}, OI ${counts.openInterest}`;
+  const averageInUse = stats.intervalMs > 0 ? (stats.lineBusyMs / stats.intervalMs).toFixed(1) : "—";
+  const released = stats.settled + stats.timedOut + stats.errored;
+  return (
+    `${heading}: lines ${inFlight === null ? "" : `${inFlight}/${optionChainCaptureBatchSize} now, `}min ${stats.minInFlight ?? "—"} max ${stats.maxInFlight ?? "—"}, ` +
+    `avg in use ${averageInUse} over ${seconds(stats.intervalMs)}; ${released} released, held p50 ${seconds(stats.holdMsP50)} p90 ${seconds(stats.holdMsP90)} max ${seconds(stats.holdMsMax)}; ` +
+    `${stats.settled} full data (waited last on ${fields(stats.lastField)}), ` +
+    `${stats.timedOut} timed out holding ${seconds(stats.timedOutLineMs)} of line time (missing ${fields(stats.missingOnTimeout)}), ${stats.errored} errored.`
+  );
+}
 const captureLineReservationTtlSeconds = 180;
 const captureLineReservationRenewIntervalMs = 60_000;
 // The live pool re-checks the budget every 15 s (marketDataPool.ts) and
@@ -348,6 +366,7 @@ export async function runOptionChainCapture(
   // A dropped connection (e.g. a Gateway restart) closes the window and stops the run: carrying on
   // would subscribe every remaining ticker on the dead socket for 0 ticks while holding the lines.
   let connectionLost = false;
+  let progressTimer: ReturnType<typeof setInterval> | null = null;
   const onDisconnected = () => {
     connectionLost = true;
     window?.close();
@@ -359,6 +378,9 @@ export async function runOptionChainCapture(
     ib.once(EventName.disconnected, onDisconnected);
     window = dependencies.openQuoteWindow(ib);
     const quoteWindow = window;
+    // How many of the reserved lines are really subscribed (Pulse counts the whole reservation as in use).
+    progressTimer = setInterval(() => console.log(describeCaptureLineUsage("Capture window", quoteWindow.inFlightCount(), quoteWindow.drainSettleStats())), captureProgressLogIntervalMs);
+    progressTimer.unref?.();
     const record = (symbol: string, coverage: SnapshotCoverage) => {
       const status = deriveSnapshotStatus(coverage);
       finalStatusBySymbol.set(symbol, status);
@@ -430,6 +452,8 @@ export async function runOptionChainCapture(
       }
     }
   } finally {
+    if (progressTimer) clearInterval(progressTimer);
+    if (window) console.log(describeCaptureLineUsage("Capture run total", null, window.wholeRunSettleStats()));
     connection?.ib.removeListener(EventName.disconnected, onDisconnected);
     window?.close();
     connection?.disconnect();

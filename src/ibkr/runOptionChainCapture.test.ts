@@ -16,6 +16,21 @@ import {
 // An EventEmitter: the run listens for the connection dropping.
 const fakeIb = new EventEmitter() as never;
 const today = "2026-09-21";
+const emptySettleStats = () => ({
+  intervalMs: 0,
+  minInFlight: null,
+  maxInFlight: null,
+  lineBusyMs: 0,
+  timedOutLineMs: 0,
+  settled: 0,
+  timedOut: 0,
+  errored: 0,
+  holdMsP50: null,
+  holdMsP90: null,
+  holdMsMax: null,
+  lastField: { price: 0, delta: 0, openInterest: 0 },
+  missingOnTimeout: { price: 0, delta: 0, openInterest: 0 },
+});
 const ticker = (symbol: string, contractId: number | null = 1): UniverseTicker => ({ tickerId: `id-${symbol}`, symbol, contractId });
 
 // --- prepareTicker ---------------------------------------------------------
@@ -161,7 +176,7 @@ function runDependencies(overrides: Partial<OptionChainCaptureDependencies> = {}
     connect: async () => ({ ib: fakeIb, disconnect }),
     fetchSpotPrices: async (symbols) => Object.fromEntries(symbols.map((symbol) => [symbol, 100])),
     prepareTicker: async (_ib, universeTicker) => preparedFor(universeTicker),
-    openQuoteWindow: () => ({ capture: async () => [], close: vi.fn(), inFlightCount: () => 0 }),
+    openQuoteWindow: () => ({ capture: async () => [], close: vi.fn(), inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
     saveSnapshot: async () => coverage(10, 10),
     saveFailedSnapshot,
     lineReservation,
@@ -228,7 +243,7 @@ describe("runOptionChainCapture", () => {
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
       connect: async () => ({ ib: ib as never, disconnect }),
       prepareTicker: prepareTicker as never,
-      openQuoteWindow: () => ({ capture: async () => [], close, inFlightCount: () => 0 }),
+      openQuoteWindow: () => ({ capture: async () => [], close, inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
     });
     await expect(runOptionChainCapture(undefined, { ...dependencies, saveFailedSnapshot })).rejects.toThrow("IBKR connection lost mid-run; not captured: CCC");
     expect(prepareTicker).toHaveBeenCalledTimes(2);
@@ -352,7 +367,7 @@ describe("runOptionChainCapture", () => {
     const { dependencies } = runDependencies({
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
       fetchSpotPrices,
-      openQuoteWindow: () => ({ capture, close: vi.fn(), inFlightCount: () => 0 }),
+      openQuoteWindow: () => ({ capture, close: vi.fn(), inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       saveSnapshot: async () => (++saves <= 3 ? coverage(10, 2) : coverage(10, 10)),
     });
     const run = runOptionChainCapture(undefined, dependencies);
@@ -389,7 +404,7 @@ describe("runOptionChainCapture", () => {
       return [];
     });
     const { dependencies } = runDependencies({
-      openQuoteWindow: () => ({ capture, close, inFlightCount: () => 0 }),
+      openQuoteWindow: () => ({ capture, close, inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       prepareTicker: async (_ib, universeTicker) => {
         order.push(`prepare:${universeTicker.symbol}`);
         return preparedFor(universeTicker);
@@ -405,5 +420,30 @@ describe("runOptionChainCapture", () => {
     const { dependencies, disconnect } = runDependencies({ loadUniverse: async () => [] });
     expect(await runOptionChainCapture(undefined, dependencies)).toEqual({ tickersAttempted: 0, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [] });
     expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("describeCaptureLineUsage", () => {
+  it("reports lines in use, the time-weighted average, hold times and where line time went", async () => {
+    const { describeCaptureLineUsage } = await import("./runOptionChainCapture.js");
+    const line = describeCaptureLineUsage("Capture window", 50, {
+      ...emptySettleStats(),
+      intervalMs: 10_000,
+      minInFlight: 48,
+      maxInFlight: 50,
+      lineBusyMs: 495_000,
+      timedOutLineMs: 72_000,
+      settled: 101,
+      timedOut: 9,
+      holdMsP50: 3_900,
+      holdMsP90: 7_200,
+      holdMsMax: 8_000,
+      lastField: { price: 6, delta: 15, openInterest: 80 },
+      missingOnTimeout: { price: 0, delta: 2, openInterest: 9 },
+    });
+    expect(line).toBe(
+      "Capture window: lines 50/50 now, min 48 max 50, avg in use 49.5 over 10.0s; 110 released, held p50 3.9s p90 7.2s max 8.0s; " +
+        "101 full data (waited last on price 6, delta 15, OI 80), 9 timed out holding 72.0s of line time (missing price 0, delta 2, OI 9), 0 errored.",
+    );
   });
 });

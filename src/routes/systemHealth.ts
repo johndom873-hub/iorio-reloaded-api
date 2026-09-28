@@ -14,7 +14,7 @@ import { requireEnvironmentVariable } from "../config/env.js";
 import { daySignalsLoopStatus } from "../lib/daySignalsLoop.js";
 import { loadDayQuotesStatus } from "../lib/daySignalsStore.js";
 import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
-import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
+import { loadActiveMarketDataLineReservations, loadMarketDataLineRestriction, summarizeMarketDataLineUsage } from "../ibkr/marketDataLineBudget.js";
 
 export const systemHealthRouter = Router();
 systemHealthRouter.use(requireAuth);
@@ -180,10 +180,10 @@ systemHealthRouter.get("/web-dyno", async (_request, response) => {
 // at all — it's a plain web-dyno query against order_requests, no round
 // trip needed.
 systemHealthRouter.get("/gateway", async (_request, response) => {
-  const [health, orderCountResult, restriction] = await Promise.all([
+  const [health, orderCountResult, reservations] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
     db("order_requests").whereIn("status", ["confirmed", "submitted", "cancel_requested"]).count("* as count").first(),
-    loadMarketDataLineRestriction(),
+    loadActiveMarketDataLineReservations(),
   ]);
 
   if (!health) {
@@ -199,17 +199,9 @@ systemHealthRouter.get("/gateway", async (_request, response) => {
     clientId: health.client_id,
     updatedAt: health.updated_at,
     inFlightOrderCount: Number(orderCountResult?.count ?? 0),
-    // Lines open on IBKR right now from the live market-data pool
-    // (marketDataPool.ts, web dyno process: one reqMktData per subscribed
-    // contract, however many screens share it; paused/unsubscribed entries
-    // hold no line) — not a Gateway-worker stat, but the only live "IBKR
-    // lines in use" number the app has, shown alongside it.
-    marketDataLineCount: marketDataPoolSnapshot().openLineCount,
-    // Lines held by every active priority reservation (the Day Signals loop's
-    // session-long 10, plus the 10:00 ET chain capture or the trade-alert scan
-    // while one runs — marketDataLineBudget.ts), not the full reservation ledger.
-    // Factual on purpose: the top bar's banner is the one that ignores the loop.
-    priorityReservedLineCount: restriction?.priorityLines ?? 0,
+    // IBKR market-data lines in use across every process sharing the login (web dyno pool, capture,
+    // Day Signals, one-off snapshots), against the shared budget — see summarizeMarketDataLineUsage.
+    marketDataLines: summarizeMarketDataLineUsage(reservations, marketDataPoolSnapshot().openLineCount),
     staleOrMissing: false,
   });
 });

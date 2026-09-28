@@ -116,8 +116,23 @@ export interface RecentNotificationEventWithOrder {
  * authenticated requests per Pulse load that exhausted Postgres connections
  * (2026-09-19).
  */
+/**
+ * Pure: keeps only the newest order_status event per order (input newest first). Each status change
+ * publishes one, but a row shows the order's current status, so older ones read as duplicates.
+ */
+export function keepNewestEventPerOrder<T extends { notification: AppNotification }>(eventsNewestFirst: T[]): T[] {
+  const seenOrderIds = new Set<string>();
+  return eventsNewestFirst.filter((event) => {
+    if (event.notification.type !== "order_status") return true;
+    if (seenOrderIds.has(event.notification.orderId)) return false;
+    seenOrderIds.add(event.notification.orderId);
+    return true;
+  });
+}
+
 export async function fetchRecentNotificationEventsWithOrders(limit: number): Promise<RecentNotificationEventWithOrder[]> {
-  const events = await fetchRecentNotificationEvents(limit);
+  // Read the whole retained window (small) so collapsing orders still leaves `limit` rows.
+  const events = keepNewestEventPerOrder(await fetchRecentNotificationEvents(notificationEventsRetentionCount)).slice(0, limit);
   const orderIds = [...new Set(events.flatMap((event) => (event.notification.type === "order_status" ? [event.notification.orderId] : [])))];
   if (orderIds.length === 0) return events;
 
