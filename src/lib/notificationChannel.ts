@@ -24,6 +24,8 @@ export type AppNotification =
   | { type: "roll_signal_upgraded"; symbol: string; strategyKey: string; legId: string; heldStrike: number; heldExpiry: string; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netRollEdge: number; netRollEdgeDollars: number; netCreditPerShare: number }
   | { type: "genosuke_reply"; preview: string }
   | { type: "trading_halt_changed"; enabled: boolean; reason: string | null; byDisplayName: string | null }
+  // Pluto's timeline (pluto_events): the Pluto screen updates live from these.
+  | { type: "pluto_event"; eventId: number; eventType: string; occurredAt: string; payload: Record<string, unknown> }
   | { type: "presence"; onlineUserIds: string[] }
   // Animation-only signal for the Pulse topology map's otherwise-silent lines
   // (see pulseEmitter.ts / publishPulse below) — never persisted, never shown
