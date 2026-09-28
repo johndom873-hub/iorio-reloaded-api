@@ -1,3 +1,4 @@
+import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 
@@ -165,4 +166,16 @@ export async function fetchOpenPositionStrategyKeys(tickerId: string): Promise<S
     .where({ ticker_id: tickerId, status: "open" })
     .distinct("strategy_key as strategyKey");
   return new Set(rows.map((r) => r.strategyKey));
+}
+
+// Number of open positions on a ticker. A shortlist entry can't be removed
+// while this is above zero: the roll scan and Recovery Path both read the
+// shortlist, so dropping the ticker would orphan a live position.
+export async function countOpenPositionsForTicker(tickerId: string, trx: Knex = db): Promise<number> {
+  const result = await trx("positions").where({ ticker_id: tickerId, status: "open" }).count({ total: "*" }).first();
+  return Number(result?.total ?? 0);
+}
+
+export function describeOpenPositionsBlockingRemoval(openPositionCount: number): string {
+  return `${openPositionCount} open position${openPositionCount === 1 ? "" : "s"} on this ticker. Close ${openPositionCount === 1 ? "it" : "them"} before removing.`;
 }

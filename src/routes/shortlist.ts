@@ -11,6 +11,7 @@ import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
 import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { refreshStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
+import { countOpenPositionsForTicker, describeOpenPositionsBlockingRemoval } from "../lib/positionQueries.js";
 
 export const shortlistRouter = Router();
 shortlistRouter.use(requireAuth);
@@ -51,6 +52,8 @@ shortlistRouter.get("/", async (_request, response) => {
       -- the Actions menu can offer a full-pipeline retry, not just the narrower price-history-only one.
       CASE WHEN b.status = 'partial' THEN true ELSE false END AS "backfillNeedsRetry",
       hb.first_bar::text AS "historyStartDate",
+      -- Remove is disabled in the Actions menu while this is above zero (DELETE below enforces the same).
+      op.open_position_count::int AS "openPositionCount",
       -- Flagged when there is less than ~5 years of daily bars AND no pipeline run has ever completed the
       -- history step (a ticker that IPO'd recently can never reach 5 years, so a successful run clears the flag).
       CASE
@@ -75,6 +78,11 @@ shortlistRouter.get("/", async (_request, response) => {
       FROM daily_price_bars
       WHERE ticker_id = t.id
     ) hb ON true
+    LEFT JOIN LATERAL (
+      SELECT count(*) AS open_position_count
+      FROM positions
+      WHERE ticker_id = t.id AND status = 'open'
+    ) op ON true
     WHERE se.removed_at IS NULL
     ORDER BY t.symbol
     `,
@@ -201,6 +209,7 @@ shortlistRouter.post("/", async (request, response) => {
       symbol: ticker.symbol,
       companyName: ticker.company_name,
       sector,
+      openPositionCount: await countOpenPositionsForTicker(ticker.id),
       ...(await loadShortlistDataReadiness(ticker.id, sector)),
     });
   } catch (error) {
@@ -290,19 +299,24 @@ shortlistRouter.patch("/:id", async (request, response) => {
 shortlistRouter.delete("/:id", async (request, response) => {
   // Same transaction (2026-09-24): a removed ticker's pending new-trade
   // alerts stayed approvable for up to a day with no scan refreshing them.
-  const removed = await db.transaction(async (trx) => {
-    const [entry] = await trx("shortlist_entries")
-      .where({ id: request.params.id })
-      .whereNull("removed_at")
-      .update({ removed_at: trx.fn.now() })
-      .returning(["ticker_id"]);
-    if (!entry) return false;
+  // Refused while the ticker has an open position; the UI greys Remove out
+  // for the same reason, this covers Genosuke and stale tabs.
+  const outcome = await db.transaction(async (trx): Promise<"removed" | "not_found" | { openPositionCount: number }> => {
+    const entry = await trx("shortlist_entries").where({ id: request.params.id }).whereNull("removed_at").first(["ticker_id"]);
+    if (!entry) return "not_found";
+    const openPositionCount = await countOpenPositionsForTicker(entry.ticker_id, trx);
+    if (openPositionCount > 0) return { openPositionCount };
+    await trx("shortlist_entries").where({ id: request.params.id }).update({ removed_at: trx.fn.now() });
     await trx("trade_alerts").where({ ticker_id: entry.ticker_id, alert_type: "new_trade", status: "pending" }).update({ status: "expired" });
-    return true;
+    return "removed";
   });
 
-  if (!removed) {
+  if (outcome === "not_found") {
     response.status(404).json({ error: "Entry not found or already removed." });
+    return;
+  }
+  if (outcome !== "removed") {
+    response.status(409).json({ error: describeOpenPositionsBlockingRemoval(outcome.openPositionCount) });
     return;
   }
   response.status(204).end();
