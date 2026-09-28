@@ -27,7 +27,8 @@ import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
 import { evaluateCloseGateForPosition } from "../lib/closeGate.js";
 import { evaluateDeltaBandForOrderRequest } from "../lib/deltaBandGate.js";
-import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
+import { evaluateStrategyOrderLimits } from "../lib/strategyOrderLimits.js";
+import { evaluateSignalOrderLimits, type SignalOrderLimitsInput } from "../lib/signalOrderLimits.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
 
@@ -962,43 +963,47 @@ positionsRouter.get("/pulse-chart-history", async (_request, response) => {
 // matching doesn't let GET /:id's wildcard segment swallow "/orders" as an
 // id value.
 
-async function requireExistingTicker(symbolInput: string): Promise<{ id: string; symbol: string } | null> {
+async function requireExistingTicker(symbolInput: string): Promise<{ id: string; symbol: string; sector: string | null } | null> {
   const normalizedSymbol = symbolInput.trim().toUpperCase();
   return (await db("tickers").where({ symbol: normalizedSymbol }).first()) ?? null;
 }
 
 // Shared by the confirm-step hard gate and the order's live quote-stream
-// compliance check below -- only ever runs for an order that actually came
-// from the Signals order-setup flow (signal_snapshot is only ever set
-// there), never for a Trade Alerts order, which has its own separate,
-// still-unenforced copy of these same-named settings (see PROGRESS.md).
-async function evaluateSignalOrderLimitsForOrderRequest(
+// compliance check below. A Signals / Roll Signals order (signal_snapshot is
+// only ever set there) is checked against the Signals tab's settings; every
+// other opening order or roll (Trade Alerts, Ticker Detail, Genosuke, bots)
+// against the Trade Alerts tab's strategy_settings maxima, which were stored
+// but never enforced until 2026-09-28 (gap fix 6 for Pluto). Null only for
+// orders with nothing to size (closes, non-CC/CSP payloads).
+async function evaluateOrderLimitsForOrderRequest(
   orderRequest: { signal_snapshot: unknown; payload: OrderRequestPayload; request_type: string },
   live: { exposures?: PositionExposureRow[]; spotPrice?: number } = {},
 ): Promise<{ blocked: boolean; reasons: string[] } | null> {
-  if (orderRequest.signal_snapshot === null || orderRequest.signal_snapshot === undefined) return null;
   const requestType = orderRequest.request_type as string;
   const isRoll = requestType === "roll_leg";
   if (!requestType.startsWith("open_") && !isRoll) return null;
   const payload = orderRequest.payload;
   if (payload.strategyKey !== "covered_call" && payload.strategyKey !== "cash_secured_put") return null;
-  // A Signals roll (Roll Signals, 2026-09-24) is one combo with two option legs: the close leg carries
-  // positionLegId, the open leg does not. Only the strike difference adds notional (signalOrderLimits.ts).
+  // A roll is one combo with two option legs: the close leg carries positionLegId, the open leg
+  // does not. Only the strike difference adds notional (signalOrderLimits.ts).
   const optionLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && !leg.positionLegId) : payload.legs.find((leg) => leg.role === "option");
   const closeLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && leg.positionLegId) : undefined;
   if (!optionLeg || !optionLeg.strike || (isRoll && !closeLeg?.strike)) return null;
   const ticker = await requireExistingTicker(payload.symbol);
   if (!ticker) return null;
-  return evaluateSignalOrderLimits({
+  const input: SignalOrderLimitsInput = {
     strategyKey: payload.strategyKey,
     symbol: ticker.symbol,
     tickerId: ticker.id,
+    sector: ticker.sector ?? null,
     quantity: optionLeg.quantity,
     strike: optionLeg.strike,
     spotPrice: live.spotPrice,
     exposures: live.exposures,
     rollFromStrike: closeLeg?.strike,
-  });
+  };
+  const isSignalsOrder = orderRequest.signal_snapshot !== null && orderRequest.signal_snapshot !== undefined;
+  return isSignalsOrder ? evaluateSignalOrderLimits(input) : evaluateStrategyOrderLimits(input);
 }
 
 interface OpenOrderRequestBody {
@@ -1246,13 +1251,13 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
 
   // Re-evaluated periodically, not on every quote tick -- 10s keeps the
   // Order Review panel's block/unblock verdict close to live without
-  // hammering the account summary on every sub-second option quote. Only
-  // ever set for a Signals order (see evaluateSignalOrderLimitsForOrderRequest);
-  // null otherwise. The re-evaluations are fed from the market-data pool
+  // hammering the account summary on every sub-second option quote. Set for
+  // every opening order / roll (see evaluateOrderLimitsForOrderRequest);
+  // null only when there is nothing to size. The re-evaluations are fed from the market-data pool
   // (2026-09-24): every open leg and the order's underlying are pooled for
   // this stream's lifetime below, so no re-evaluation opens IBKR snapshots.
   const signalLimitsRefreshIntervalMs = 10_000;
-  let latestSignalLimits = await evaluateSignalOrderLimitsForOrderRequest(orderRequest);
+  let latestSignalLimits = await evaluateOrderLimitsForOrderRequest(orderRequest);
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -1270,7 +1275,7 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
   let latestSpotPrice: number | undefined;
   const signalLimitsTimer = latestSignalLimits
     ? setInterval(() => {
-        evaluateSignalOrderLimitsForOrderRequest(orderRequest, { spotPrice: latestSpotPrice })
+        evaluateOrderLimitsForOrderRequest(orderRequest, { spotPrice: latestSpotPrice })
           .then((result) => {
             latestSignalLimits = result;
           })
@@ -1508,7 +1513,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     return;
   }
 
-  const signalLimits = await evaluateSignalOrderLimitsForOrderRequest(orderRequest);
+  const signalLimits = await evaluateOrderLimitsForOrderRequest(orderRequest);
   if (signalLimits?.blocked) {
     response.status(409).json({ error: signalLimits.reasons.join(" ") });
     return;
