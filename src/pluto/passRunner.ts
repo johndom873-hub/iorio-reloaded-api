@@ -95,14 +95,14 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
 }
 
 /** Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here, the rest go to the model. */
-async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string): Promise<void> {
+async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string, cancelByMs: number): Promise<void> {
   const watched = context.marketWatch.snapshot(ticker.row.symbol);
   const { offers } = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: ticker.scored.heldLegs, rolls: ticker.scored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso });
   for (const offer of offers) {
     if (!offer.automatic) continue;
     const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: "odd lot below 100 shares at a positive cycle P&L (Formula P1)" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
     const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.limitPrice })), description: offer.description, reasons: ["automatic odd-lot close (Formula P1)"] });
-    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description }));
+    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description, cancelByMs }));
   }
   ticker.closeOffers = offers.filter((offer) => !offer.automatic);
 }
@@ -167,7 +167,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   }
   const previousSessionDateIso = await previousOpenSessionDate(checks.context.todayEasternIso);
   for (const ticker of evaluated) {
-    await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId);
+    await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs);
     if (ticker.closeOffers.length > 0) ticker.fingerprint = `${ticker.fingerprint}|closes:${ticker.closeOffers.map((offer) => offer.id).sort().join(",")}`;
   }
   const offeredCount = evaluated.reduce((sum, ticker) => sum + ticker.filtered.eligible.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length, 0);
@@ -345,7 +345,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       : { kind: "roll", actionId, symbol: owner.row.symbol, roll: freshRoll!, heldLeg: fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll!.roll.legId)!, plan: gates.plan!, decision, scoresSnapshot },
   );
   if (result.outcome === "confirmed" && result.orderId) {
-    context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: owner.row.symbol, reference: { price: contract!.bid, side: "sell", multiplier: 100 }, description: result.detail }));
+    context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: owner.row.symbol, reference: { price: contract!.bid, side: "sell", multiplier: 100 }, description: result.detail, cancelByMs: checks.context.session.cancelByMs }));
   }
   return { passId, modelCalled: true, skippedReason: null, outcome: result.outcome };
 
@@ -369,7 +369,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     }
     await recordPlutoEvent("action_validated", { passId, actionId, symbol: offer.symbol, candidateId: offer.id, quantity: freshOffer!.quantity, limitPrice: freshOffer!.limitPrice, reasons: decision.reasons });
     const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: freshOffer!.positionId, legs: freshOffer!.legIds.map((legId) => ({ legId, limitPrice: freshOffer!.limitPrice })), description: freshOffer!.description, reasons: decision.reasons });
-    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: freshOffer!.limitPrice, side: freshOffer!.side, multiplier: freshOffer!.multiplier }, description: freshOffer!.description }));
+    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: freshOffer!.limitPrice, side: freshOffer!.side, multiplier: freshOffer!.multiplier }, description: freshOffer!.description, cancelByMs: checks.context.session.cancelByMs }));
     return { passId, modelCalled: true, skippedReason: null, outcome: result.outcome };
   }
 

@@ -7,16 +7,12 @@ import { classifyTradingStatus } from "../lib/tradingGate.js";
 import { countTrailingModelFailures, loadPlutoTodayCounters, type PlutoTodayCounters } from "./counters.js";
 import type { PlutoSystemCheck } from "./ledger.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { resolvePlutoSession, type PlutoSession } from "./sessionSchedule.js";
 import { describePlutoBlock, loadPlutoState, type PlutoState } from "./stateStore.js";
 
 // Pre-model system gates (design round 3, item 19, approved 2026-09-28). Every check runs and is
 // recorded on the pass row, so the screen shows the whole board, not just the first failure;
 // any failure means no model call. Fail closed: a check that cannot be evaluated fails.
-
-// NYSE early closes (13:00 ET). No half-day handling exists in the market calendar yet, so the
-// agent carries the list (kept short: this year's and next year's known dates) and skips those days
-// entirely, per design round 3 item 49.
-export const earlyCloseDatesIso = new Set(["2026-11-27", "2026-12-24", "2027-11-26", "2027-12-23"]);
 
 export interface PlutoSystemCheckContext {
   state: PlutoState;
@@ -25,6 +21,7 @@ export interface PlutoSystemCheckContext {
   totalCashValue: number | null;
   counters: PlutoTodayCounters;
   todayEasternIso: string;
+  session: PlutoSession;
 }
 
 export interface PlutoSystemChecksResult {
@@ -77,9 +74,13 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   } catch (error) {
     record("market_session", false, `could not resolve the session: ${error instanceof Error ? error.message : String(error)}`);
   }
-  record("early_close_day", !earlyCloseDatesIso.has(todayEasternIso), earlyCloseDatesIso.has(todayEasternIso) ? `${todayEasternIso} is an early-close day` : "full session");
-  const inWindow = isInsideTradingWindow(now, todayEasternIso, settings.windowStartEt, settings.windowEndEt);
-  record("trading_window", inWindow, `${inWindow ? "inside" : "outside"} ${settings.windowStartEt}–${settings.windowEndEt} ET`);
+  // The close must be known from IBKR's liquid hours (or the fallback list on a known half day):
+  // assuming 16:00 on an unread day is how orders get stranded into a 13:00 close.
+  const session = await resolvePlutoSession(now, settings);
+  const closeKnown = session.closeSource !== "regular" || session.closeReadAt !== null;
+  record("session_close", closeKnown, `closes ${session.closeTimeEt} ET (${session.closeSource === "ibkr_liquid_hours" ? "IBKR liquid hours" : session.closeSource === "fallback_list" ? "fallback list, IBKR not read yet" : "assumed regular, IBKR not read yet"})`);
+  const inWindow = isInsideTradingWindow(now, todayEasternIso, session.windowStartEt, session.windowEndEt);
+  record("trading_window", inWindow, `${inWindow ? "inside" : "outside"} ${session.windowStartEt}–${session.windowEndEt} ET${session.windowEndEt !== settings.windowEndEt ? ` (configured end ${settings.windowEndEt}, pulled in by the ${session.closeTimeEt} close)` : ""}`);
 
   try {
     const workerRow = await db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first();
@@ -117,5 +118,5 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   record("model_failures", trailingFailures < settings.consecutiveModelFailuresBreaker, `${trailingFailures} consecutive model failure(s), breaker at ${settings.consecutiveModelFailuresBreaker}`);
 
   const failures = Object.entries(checks).filter(([, check]) => !check.ok).map(([name, check]) => `${name}: ${check.detail}`);
-  return { ok: failures.length === 0, checks, failures, context: { state, marketState, netLiquidationValue, totalCashValue, counters, todayEasternIso } };
+  return { ok: failures.length === 0, checks, failures, context: { state, marketState, netLiquidationValue, totalCashValue, counters, todayEasternIso, session } };
 }

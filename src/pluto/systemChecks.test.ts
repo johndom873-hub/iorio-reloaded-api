@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dailyLossPercent, earlyCloseDatesIso, isInsideTradingWindow } from "./systemChecks.js";
+import { dailyLossPercent, isInsideTradingWindow } from "./systemChecks.js";
 
 describe("isInsideTradingWindow", () => {
   const today = "2026-09-28"; // EDT, UTC-4
@@ -22,13 +22,5 @@ describe("dailyLossPercent", () => {
     expect(dailyLossPercent(null, 1_000_000)).toBeNull();
     expect(dailyLossPercent(980_000, null)).toBeNull();
     expect(dailyLossPercent(980_000, 0)).toBeNull();
-  });
-});
-
-describe("early-close days", () => {
-  it("knows the day after Thanksgiving and Christmas Eve", () => {
-    expect(earlyCloseDatesIso.has("2026-11-27")).toBe(true);
-    expect(earlyCloseDatesIso.has("2026-12-24")).toBe(true);
-    expect(earlyCloseDatesIso.has("2026-09-28")).toBe(false);
   });
 });

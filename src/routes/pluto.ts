@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
+import { resolvePlutoSession } from "../pluto/sessionSchedule.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
@@ -38,6 +39,7 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
     orders: working,
     counters: { ...counters, maxActionsPerSession: settings.maxActionsPerSession, maxModelCallsPerSession: settings.maxModelCallsPerSession, dailyCostCeilingUsd: settings.dailyCostCeilingUsd },
     enabledTickers: { count: enabledCount, max: settings.maxEnabledTickers },
+    session: await resolvePlutoSession(new Date(), settings),
     agent: agentHealth
       ? {
           connected: Boolean(agentHealth.connected),

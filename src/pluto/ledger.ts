@@ -200,6 +200,7 @@ export type PlutoEventType =
   | "ticker_enabled"
   | "ticker_disabled"
   | "lines_changed"
+  | "session_schedule"
   | "warning";
 
 /** Appends to the timeline and pushes a `pluto_event` notification so open screens update live. */

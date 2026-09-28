@@ -57,6 +57,38 @@ export async function resolveIsOpenDay(dateIso: string): Promise<boolean> {
   return isWeekday(dateIso);
 }
 
+export type SessionCloseSource = "ibkr_liquid_hours" | "regular";
+
+/** One day's schedule: open or not, and when the regular session closes (16:00 ET unless the calendar knows better). */
+export interface SessionSchedule {
+  dateIso: string;
+  isOpen: boolean;
+  closeTimeEt: string;
+  closeSource: SessionCloseSource;
+  closeReadAt: string | null;
+}
+
+export function hhmmParts(hhmm: string): { hour: number; minute: number } {
+  const [hour, minute] = hhmm.split(":").map(Number);
+  return { hour: hour ?? 0, minute: minute ?? 0 };
+}
+
+export const regularCloseEt = `${String(REGULAR_CLOSE.hour).padStart(2, "0")}:${String(REGULAR_CLOSE.minute).padStart(2, "0")}`;
+
+// market_calendar.close_time (a Postgres time, "13:00:00") is written from IBKR's liquid hours
+// (see pluto/sessionSchedule.ts); NULL means the regular close.
+export async function resolveSessionSchedule(dateIso: string): Promise<SessionSchedule> {
+  const row = await db("market_calendar").where({ calendar_date: dateIso }).first();
+  const closeTime = row?.close_time ? String(row.close_time).slice(0, 5) : null;
+  return {
+    dateIso,
+    isOpen: row ? Boolean(row.is_open) : isWeekday(dateIso),
+    closeTimeEt: closeTime ?? regularCloseEt,
+    closeSource: closeTime ? "ibkr_liquid_hours" : "regular",
+    closeReadAt: row?.close_time_read_at ? new Date(row.close_time_read_at).toISOString() : null,
+  };
+}
+
 async function nextOpenDateAfter(dateIso: string): Promise<string> {
   let cursor = new Date(`${dateIso}T12:00:00Z`);
   for (let i = 0; i < 14; i++) {
@@ -79,11 +111,13 @@ function formatCountdown(ms: number, prefix: string): string {
 
 export async function computeMarketSessionStatus(now: Date = new Date()): Promise<MarketSessionStatus> {
   const dateIso = easternDateIso(now);
-  const todayIsOpen = await resolveIsOpenDay(dateIso);
+  const schedule = await resolveSessionSchedule(dateIso);
+  const todayIsOpen = schedule.isOpen;
+  const close = hhmmParts(schedule.closeTimeEt);
 
   const preMarketStart = easternInstant(dateIso, PRE_MARKET_START.hour, PRE_MARKET_START.minute);
   const regularOpen = easternInstant(dateIso, REGULAR_OPEN.hour, REGULAR_OPEN.minute);
-  const regularClose = easternInstant(dateIso, REGULAR_CLOSE.hour, REGULAR_CLOSE.minute);
+  const regularClose = easternInstant(dateIso, close.hour, close.minute);
   const afterHoursEnd = easternInstant(dateIso, AFTER_HOURS_END.hour, AFTER_HOURS_END.minute);
 
   if (todayIsOpen && now >= preMarketStart && now < regularOpen) {

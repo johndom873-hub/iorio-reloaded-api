@@ -197,13 +197,14 @@ export async function averageFillPrice(orderId: string): Promise<number | null> 
 export async function watchPlutoOrder(
   api: InternalApiClient,
   settings: PlutoSettings,
-  input: { actionId: string; orderId: string; symbol: string; reference: { price: number; side: "sell" | "buy"; multiplier: number }; description: string },
+  input: { actionId: string; orderId: string; symbol: string; reference: { price: number; side: "sell" | "buy"; multiplier: number }; description: string; cancelByMs?: number | null },
   options: { pollIntervalMs?: number; now?: () => number } = {},
 ): Promise<WatchResult> {
   const pollIntervalMs = options.pollIntervalMs ?? 5_000;
   const now = options.now ?? (() => Date.now());
   const startedAt = now();
-  const timeoutMs = settings.unfilledCancelMinutes * 60_000;
+  // Unfilled orders are cancelled after the configured minutes, or before the session close if that comes first.
+  const cancelAtMs = Math.min(startedAt + settings.unfilledCancelMinutes * 60_000, input.cancelByMs ?? Number.POSITIVE_INFINITY);
   let cancelRequested = false;
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
@@ -233,11 +234,12 @@ export async function watchPlutoOrder(
       }
       return { outcome, detail: order.errorMessage ?? outcome };
     }
-    if (!cancelRequested && now() - startedAt > timeoutMs) {
+    if (!cancelRequested && now() > cancelAtMs) {
       cancelRequested = true;
+      const why = input.cancelByMs !== null && input.cancelByMs !== undefined && cancelAtMs === input.cancelByMs ? "session close approaching" : `unfilled after ${settings.unfilledCancelMinutes} min`;
       try {
         await api.post(`/positions/orders/${input.orderId}/cancel`, {});
-        await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: `unfilled after ${settings.unfilledCancelMinutes} min — cancel requested` });
+        await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: `${why} — cancel requested` });
       } catch (error) {
         console.warn(`Pluto watch: cancel request failed for ${input.orderId} — ${error instanceof Error ? error.message : error}`);
       }
