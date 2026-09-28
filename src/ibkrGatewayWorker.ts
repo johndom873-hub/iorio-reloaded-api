@@ -33,6 +33,7 @@ import { publishNotification, publishPulse } from "./lib/notificationChannel.js"
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
 import { describeTradingHaltBlock, fetchTradingHalt } from "./lib/platformControls.js";
+import { finalOrderRequestStatuses, isInformationalIbkrOrderCode, mapIbkrOrderStatus, rejectionErrorCodes } from "./lib/orderRequestStatus.js";
 
 installCrashHandlers("worker");
 
@@ -479,16 +480,7 @@ async function listenForOrderRequests(): Promise<void> {
   );
 }
 
-// Truly final statuses only — partially_filled deliberately excluded, since
-// that order can still receive further fills or a cancellation.
-const finalOrderRequestStatuses = ["filled", "cancelled", "rejected", "error"];
-
-function orderStatusToRequestStatus(status: string): string | null {
-  if (status === "Filled") return "filled";
-  if (status === "Cancelled" || status === "ApiCancelled") return "cancelled";
-  if (status === "Submitted" || status === "PreSubmitted") return "submitted";
-  return null;
-}
+// Status mapping and finality rules live in lib/orderRequestStatus.ts (gap fix 7, 2026-09-28).
 
 function setupOrderTrackingListeners(): void {
   const ib = persistentIbkrConnection.getIb();
@@ -496,8 +488,13 @@ function setupOrderTrackingListeners(): void {
 
   ib.on(EventName.orderStatus, (orderId, status, filled, remaining, _avgFillPrice, permId) => {
     publishPulse("ibkr-gateway").catch(() => {});
-    const requestStatus = filled > 0 && remaining > 0 ? "partially_filled" : orderStatusToRequestStatus(status);
+    // Honest states (gap fix 7, 2026-09-28): a cancelled/inactive order that already filled part
+    // of its quantity stays partially_filled (final via ibkr_status) instead of collapsing to
+    // "cancelled"; an Inactive order with no fills is a rejection. Fill counts and IBKR's raw
+    // status are recorded on every change.
+    const requestStatus = mapIbkrOrderStatus(status, filled, remaining);
     if (!requestStatus) return;
+    const inactiveMessage = status === "Inactive" ? "IBKR reports the order as Inactive: not working because it was invalid, ignored by the destination, or rejected." : null;
     // permId is globally unique forever, unlike ibkr_order_id, which resets
     // and gets reused after every Gateway/worker restart — found 2026-08-27
     // when a fill for reused id 5 matched both a stale two-day-old row and
@@ -528,19 +525,23 @@ function setupOrderTrackingListeners(): void {
       .whereNotIn("status", finalOrderRequestStatuses)
       .andWhere((builder) => (permId ? builder.whereNull("ibkr_perm_id").orWhere("ibkr_perm_id", permId) : builder))
       .andWhere((builder) => {
-        builder.whereNot("status", requestStatus);
+        builder.whereNot("status", requestStatus).orWhereRaw("filled_quantity IS DISTINCT FROM ?", [filled]).orWhereRaw("ibkr_status IS DISTINCT FROM ?", [status]);
         if (permId) builder.orWhereNull("ibkr_perm_id");
       })
       .update({
         status: requestStatus,
+        filled_quantity: filled,
+        remaining_quantity: remaining,
+        ibkr_status: status,
         updated_at: db.fn.now(),
         ...(permId ? { ibkr_perm_id: permId } : {}),
+        ...(inactiveMessage ? { error_message: inactiveMessage } : {}),
       })
       .returning(["id", "source_alert_id"])
       .then(async (rows) => {
         if (!rows[0]) return;
         await publishNotification({ type: "order_status", orderId: rows[0].id });
-        if (requestStatus === "cancelled") await revertSourceAlertToPending(rows[0].source_alert_id);
+        if (requestStatus === "cancelled" || requestStatus === "rejected") await revertSourceAlertToPending(rows[0].source_alert_id);
       })
       .catch((error) => console.error(`Failed to update order_requests for order ${orderId}: ${error}`));
   });
@@ -571,19 +572,29 @@ function setupOrderTrackingListeners(): void {
   // market hours). IBKR's own convention is that the 2100-2169 range is
   // informational "system messages" too. Treating these as fatal would
   // flip a perfectly good queued order to "error".
+  //
+  // Gap fix 7 (2026-09-28): a refusal code (lib/orderRequestStatus.ts's rejectionErrorCodes) now
+  // writes "rejected" — a status that existed in the CHECK constraint but was never written — and
+  // is accepted in ANY non-final status (a rejection arriving while the row was partially_filled
+  // or cancel_requested used to be dropped on the floor). Other non-informational codes keep the
+  // historical treatment: "error", only while the row is submitted. 202 ("Order cancelled") is
+  // informational here: the matching orderStatus event records the cancel.
   ib.on(EventName.error, (error, code, reqId) => {
     if (reqId === -1) return;
-    if (code === 399 || (code >= 2100 && code <= 2169)) {
+    if (isInformationalIbkrOrderCode(code)) {
       console.log(`Order ${reqId} informational message: ${code} ${error.message}`);
       return;
     }
+    const isRejection = rejectionErrorCodes.has(code);
+    const nextStatus = isRejection ? "rejected" : "error";
     db("order_requests")
-      .where({ ibkr_order_id: reqId, status: "submitted" })
-      .update({ status: "error", error_message: `IBKR error ${code}: ${error.message}`, updated_at: db.fn.now() })
+      .where({ ibkr_order_id: reqId })
+      .andWhere((builder) => (isRejection ? builder.whereNotIn("status", finalOrderRequestStatuses) : builder.where({ status: "submitted" })))
+      .update({ status: nextStatus, error_message: `IBKR error ${code}: ${error.message}`, updated_at: db.fn.now() })
       .returning(["id", "source_alert_id"])
       .then(async (rows) => {
         if (!rows[0]) return;
-        console.error(`Order ${reqId} errored: ${code} ${error.message}`);
+        console.error(`Order ${reqId} ${nextStatus}: ${code} ${error.message}`);
         await publishNotification({ type: "order_status", orderId: rows[0].id });
         await revertSourceAlertToPending(rows[0].source_alert_id);
       })
@@ -879,16 +890,18 @@ async function reconcileStaleOrderRequests(): Promise<void> {
     if (liveOrderIds.has(row.ibkr_order_id)) continue;
 
     const completedStatus = row.ibkr_perm_id ? completedStatusByPermId.get(row.ibkr_perm_id) : undefined;
-    const resolvedStatus = completedStatus ? orderStatusToRequestStatus(completedStatus) : null;
-    if (resolvedStatus === "filled" || resolvedStatus === "cancelled") {
-      await db("order_requests").where({ id: row.id }).update({ status: resolvedStatus, updated_at: db.fn.now() });
-      console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${resolvedStatus}" from IBKR's completed orders (permId ${row.ibkr_perm_id}).`);
+    const executed = await executedOutcomeForOrderRequest(row.id, row.payload);
+    // Completed-orders snapshots carry no fill counts, so our own recorded executions decide
+    // whether a Cancelled/Inactive order ends as partially_filled (gap fix 7) rather than cancelled.
+    const resolvedStatus = completedStatus ? mapIbkrOrderStatus(completedStatus, executed === "none" ? 0 : 1, 0) : null;
+    if (resolvedStatus === "filled" || resolvedStatus === "cancelled" || resolvedStatus === "rejected" || resolvedStatus === "partially_filled") {
+      await db("order_requests").where({ id: row.id }).update({ status: resolvedStatus, ibkr_status: completedStatus, updated_at: db.fn.now() });
+      console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${resolvedStatus}" from IBKR's completed orders (permId ${row.ibkr_perm_id}, IBKR status ${completedStatus}).`);
       await publishNotification({ type: "order_status", orderId: row.id });
-      if (resolvedStatus === "cancelled") await revertSourceAlertToPending(row.source_alert_id);
+      if (resolvedStatus === "cancelled" || resolvedStatus === "rejected") await revertSourceAlertToPending(row.source_alert_id);
       continue;
     }
 
-    const executed = await executedOutcomeForOrderRequest(row.id, row.payload);
     if (executed !== "none") {
       await db("order_requests").where({ id: row.id }).update({ status: executed, updated_at: db.fn.now() });
       console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${executed}" from its recorded executions.`);

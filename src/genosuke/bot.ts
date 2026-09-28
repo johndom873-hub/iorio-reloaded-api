@@ -27,7 +27,7 @@ import { publishNotification } from "../lib/notificationChannel.js";
 
 const ORDER_POLL_INTERVAL_MS = 5000;
 const ORDER_POLL_TIMEOUT_MS = 5 * 60 * 1000;
-const ORDER_TERMINAL_STATUSES = new Set(["filled", "partially_filled", "cancelled", "error"]);
+const ORDER_TERMINAL_STATUSES = new Set(["filled", "partially_filled", "cancelled", "rejected", "error"]);
 
 interface OrderRequestRow {
   id: string;
@@ -128,6 +128,8 @@ function describeOrderOutcome(order: OrderRequestRow): string {
       return "⚠️ Order partially filled — check the Trade Blotter for the remaining quantity.";
     case "cancelled":
       return "Order was cancelled at IBKR — nothing was filled.";
+    case "rejected":
+      return `⛔ Order rejected by IBKR: ${order.errorMessage ?? "no reason given"}.`;
     case "error":
       return `❌ Order failed: ${order.errorMessage ?? "unknown error"}.`;
     default:

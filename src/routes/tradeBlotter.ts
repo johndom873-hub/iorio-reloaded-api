@@ -123,6 +123,9 @@ tradeBlotterRouter.get("/", async (request, response) => {
       -- a real React key collision (rows silently dropped/duplicated).
       orq.id || ':' || leg_ordinality AS id,
       orq.status,
+      orq.filled_quantity AS "filledQuantity",
+      orq.remaining_quantity AS "remainingQuantity",
+      orq.ibkr_status AS "ibkrStatus",
       orq.ibkr_order_id AS "ibkrOrderId",
       orq.ibkr_perm_id AS "ibkrPermId",
       orq.error_message AS "errorMessage",

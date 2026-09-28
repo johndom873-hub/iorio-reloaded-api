@@ -69,6 +69,10 @@ function serializeOrderRequest(row: Record<string, unknown>) {
     cancelledByDisplayName: row.cancelled_by_display_name,
     calendarWarning: row.calendar_warning,
     riskFreeRate: row.risk_free_rate,
+    // Fill tracking (gap fix 7, 2026-09-28): IBKR's running counts and its last raw status.
+    filledQuantity: row.filled_quantity ?? null,
+    remainingQuantity: row.remaining_quantity ?? null,
+    ibkrStatus: row.ibkr_status ?? null,
   };
 }
 
