@@ -23,6 +23,7 @@ export type AppNotification =
   // Roll Signals: a (held leg, replacement) roll's grade went up between two refresh cycles.
   | { type: "roll_signal_upgraded"; symbol: string; strategyKey: string; legId: string; heldStrike: number; heldExpiry: string; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netRollEdge: number; netRollEdgeDollars: number; netCreditPerShare: number }
   | { type: "genosuke_reply"; preview: string }
+  | { type: "trading_halt_changed"; enabled: boolean; reason: string | null; byDisplayName: string | null }
   | { type: "presence"; onlineUserIds: string[] }
   // Animation-only signal for the Pulse topology map's otherwise-silent lines
   // (see pulseEmitter.ts / publishPulse below) — never persisted, never shown

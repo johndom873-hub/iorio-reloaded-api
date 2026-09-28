@@ -32,6 +32,7 @@ import { revertSourceAlertToPending } from "./lib/revertSourceAlertToPending.js"
 import { publishNotification, publishPulse } from "./lib/notificationChannel.js";
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
+import { describeTradingHaltBlock, fetchTradingHalt } from "./lib/platformControls.js";
 
 installCrashHandlers("worker");
 
@@ -272,6 +273,22 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
     console.error(`processOrderRequest(${orderRequestId}): ${message}`);
     await db("order_requests").where({ id: orderRequestId }).update({ status: "error", error_message: message, updated_at: db.fn.now() });
     await notifyTelegramWithTimeout(`🛑 Order for ${payload.symbol} (id ${orderRequestId}) was NOT sent to IBKR.\n${message}`);
+    return;
+  }
+  // The operator kill switch (platform_controls.trading_halt, gap fix 1 for Pluto, 2026-09-28).
+  // Re-read here, not trusted from confirm time: a halt flipped after the web dyno confirmed
+  // must still stop the order. Fail closed — a failed read errors the row rather than placing.
+  let haltBlockedReason: string | null;
+  try {
+    haltBlockedReason = describeTradingHaltBlock(await fetchTradingHalt());
+  } catch (error) {
+    haltBlockedReason = `Could not read the trading-halt switch (${error instanceof Error ? error.message : String(error)})`;
+  }
+  if (haltBlockedReason) {
+    console.error(`processOrderRequest(${orderRequestId}): ${haltBlockedReason}`);
+    await db("order_requests").where({ id: orderRequestId }).update({ status: "error", error_message: haltBlockedReason, updated_at: db.fn.now() });
+    await revertSourceAlertToPending(orderRequest.source_alert_id);
+    await notifyTelegramWithTimeout(`🛑 Order for ${payload.symbol} (id ${orderRequestId}) was NOT sent to IBKR.\n${haltBlockedReason}`);
     return;
   }
   console.log(`processOrderRequest(${orderRequestId}): building order for ${payload.symbol}, ${payload.legs.length} leg(s).`);

@@ -14,6 +14,7 @@ import { requireEnvironmentVariable } from "../config/env.js";
 import { daySignalsLoopStatus } from "../lib/daySignalsLoop.js";
 import { loadDayQuotesStatus } from "../lib/daySignalsStore.js";
 import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
+import { fetchTradingHalt } from "../lib/platformControls.js";
 import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 
 export const systemHealthRouter = Router();
@@ -180,19 +181,22 @@ systemHealthRouter.get("/web-dyno", async (_request, response) => {
 // at all — it's a plain web-dyno query against order_requests, no round
 // trip needed.
 systemHealthRouter.get("/gateway", async (_request, response) => {
-  const [health, orderCountResult, restriction] = await Promise.all([
+  const [health, orderCountResult, restriction, tradingHalt] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
     db("order_requests").whereIn("status", ["confirmed", "submitted", "cancel_requested"]).count("* as count").first(),
     loadMarketDataLineRestriction(),
+    fetchTradingHalt(),
   ]);
 
   if (!health) {
-    response.json({ connected: false, staleOrMissing: true, inFlightOrderCount: Number(orderCountResult?.count ?? 0) });
+    response.json({ connected: false, staleOrMissing: true, inFlightOrderCount: Number(orderCountResult?.count ?? 0), tradingHalted: tradingHalt.enabled });
     return;
   }
 
   response.json({
     connected: health.connected,
+    // The operator kill switch (platform_controls.trading_halt) — the Pulse Gateway card's "Trading" row.
+    tradingHalted: tradingHalt.enabled,
     uptimeMs: health.uptime_ms !== null ? Number(health.uptime_ms) : null,
     totalReconnects: health.total_reconnects,
     lastSystemStatusCode: health.last_system_status_code,
