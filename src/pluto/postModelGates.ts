@@ -20,8 +20,10 @@ export interface PostModelBookInput {
   /** Every open position's exposure on this symbol and sector, humans' included (computePositionExposures). */
   existingTickerExposure: number;
   existingSectorExposure: number;
-  /** Uncovered shares of the symbol Pluto may write calls against. */
+  /** Uncovered shares of the symbol Pluto may write calls against without buying any. */
   freeShares: number;
+  /** Live underlying price: a covered call buys 100 shares per contract beyond the free ones (buy-write). */
+  spotPrice: number | null;
   workingOrderOnSymbol: boolean;
   lastActionDateIso: string | null;
   todayEasternIso: string;
@@ -135,11 +137,23 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     fullSizeQuantity = Math.min(byRoom, liquidityCap);
     gate("sizing", fullSizeQuantity >= 1, `room allows ${byRoom} contract(s) (${describeRoom(room)}), volume share allows ${liquidityCap}`);
   } else {
-    // Covered calls only against shares Pluto already has free; Pluto never buys shares to write calls.
-    unitNotional = 0;
-    const byShares = Math.floor(book.freeShares / 100);
-    fullSizeQuantity = Math.min(byShares, liquidityCap);
-    gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${byShares} contract(s), volume share allows ${liquidityCap}`);
+    // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
+    // contract is a buy-write that buys 100 shares at the live spot, sized from the same room as a put.
+    const coveredByShares = Math.floor(book.freeShares / 100);
+    if (book.spotPrice === null || !(book.spotPrice > 0)) {
+      unitNotional = 0;
+      fullSizeQuantity = Math.min(coveredByShares, liquidityCap);
+      gate("sizing", fullSizeQuantity >= 1, `no live spot to price a buy-write; ${book.freeShares} free shares cover ${coveredByShares} contract(s), volume share allows ${liquidityCap}`);
+    } else {
+      unitNotional = book.spotPrice * 100;
+      const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
+      const buyWriteContracts = Math.floor(Math.max(0, roomDollars) / unitNotional);
+      fullSizeQuantity = Math.min(coveredByShares + buyWriteContracts, liquidityCap);
+      gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${coveredByShares} contract(s), room allows ${buyWriteContracts} buy-write contract(s) at ${book.spotPrice.toFixed(2)} (${describeRoom(room)}), volume share allows ${liquidityCap}`);
+    }
+    // Only the shares actually bought count as notional: the free-share contracts commit no new cash.
+    const plannedQuantity = decision.sizeTier === "half" ? Math.floor(fullSizeQuantity / 2) : fullSizeQuantity;
+    unitNotional = plannedQuantity > 0 ? (Math.max(0, plannedQuantity - coveredByShares) * unitNotional) / plannedQuantity : 0;
   }
   const quantity = decision.sizeTier === "half" && !isRoll ? Math.floor(fullSizeQuantity / 2) : fullSizeQuantity;
   if (fullSizeQuantity >= 1) gate("size_tier", quantity >= 1, quantity >= 1 ? `${decision.sizeTier} size = ${quantity} contract(s)` : "half size rounds down to zero contracts");

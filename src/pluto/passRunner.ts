@@ -304,6 +304,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       existingTickerExposure: exposures.filter((row) => row.symbol === owner.row.symbol).reduce((sum, row) => sum + row.exposure, 0),
       existingSectorExposure: sector === null ? 0 : exposures.filter((row) => row.sector === sector).reduce((sum, row) => sum + row.exposure, 0),
       freeShares: fresh.scored.freeShares,
+      spotPrice: fresh.scored.spotPrice,
       workingOrderOnSymbol: book.workingOrderSymbols.has(owner.row.symbol),
       lastActionDateIso: book.lastActionDateBySymbol.get(owner.row.symbol) ?? null,
       todayEasternIso: checks.context.todayEasternIso,

@@ -29,7 +29,7 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
 
 const book: PostModelBookInput = {
   netLiquidationValue: 1_000_000, freeCash: 600_000, committedDollars: 50_000, openPositionCount: 2, existingTickerExposure: 20_000, existingSectorExposure: 100_000, freeShares: 0,
-  workingOrderOnSymbol: false, lastActionDateIso: "2026-09-25", todayEasternIso: "2026-09-28",
+  workingOrderOnSymbol: false, lastActionDateIso: "2026-09-25", todayEasternIso: "2026-09-28", spotPrice: 110,
 };
 
 const trade: PlutoDecision = { decision: "trade", actionKind: "open_cash_secured_put", candidateId: "HOOD:cash_secured_put:2026-10-16:100", sizeTier: "full", confidence: 0.8, reasons: ["r"], risksAcknowledged: [], systemConcerns: [] };
@@ -87,13 +87,20 @@ describe("runPostModelGates — the gates", () => {
 });
 
 describe("runPostModelGates — covered calls and rolls", () => {
-  it("a covered call is sized from free shares only and commits no cash", () => {
+  it("a covered call uses free shares first, then buy-writes sized like a put from the tightest room", () => {
     const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22 });
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
-    expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350 } })).plan).toEqual({ quantity: 3, limitPrice: 2.05, notional: 0, fullSizeQuantity: 3 });
-    const none = runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 80 } }));
+    // 350 free shares → 3 covered; room 80k / (110 × 100) = 7 buy-writes → 10 contracts, 7 × 11,000 bought
+    expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350 } })).plan).toEqual({ quantity: 10, limitPrice: 2.05, notional: 77_000, fullSizeQuantity: 10 });
+    // no free shares at all: a pure buy-write
+    expect(runPostModelGates(input({ decision, candidate: call })).plan).toEqual({ quantity: 7, limitPrice: 2.05, notional: 77_000, fullSizeQuantity: 7 });
+    // half of 10 = 5: the 3 covered contracts are free, 2 are bought
+    expect(runPostModelGates(input({ decision: { ...decision, sizeTier: "half" }, candidate: call, book: { ...book, freeShares: 350 } })).plan).toEqual({ quantity: 5, limitPrice: 2.05, notional: 22_000, fullSizeQuantity: 10 });
+    // no room and no shares → nothing
+    const none = runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 80, freeCash: 40_000 } }));
     expect(failed(none)).toEqual(["sizing"]);
-    expect(none.gates.find((gate) => gate.gate === "sizing")?.detail).toMatch(/80 free shares cover 0/);
+    // no live spot: free shares only
+    expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350, spotPrice: null } })).plan).toEqual({ quantity: 3, limitPrice: 2.05, notional: 0, fullSizeQuantity: 3 });
   });
   it("a roll keeps the held quantity, ignores the tier, and only counts a strike increase as notional", () => {
     const roll: RollSignalCandidate = { legId: "leg1", positionId: "p1", strategyKey: "cash_secured_put", quantity: 3, replacement: candidate({ strike: 95 }), netRollEdge: 0.07, netRollEdgeDollarsPerContract: 40, netRollEdgeDollars: 120, netCreditPerShare: 0.4, deltaChange: -0.02, dollarRiskChange: -500, flags: [], grade: "good" };
