@@ -25,6 +25,8 @@ import { evaluateRollForPosition } from "../ibkr/evaluateRollForPosition.js";
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
+import { evaluateCloseGateForPosition } from "../lib/closeGate.js";
+import { evaluateDeltaBandForOrderRequest } from "../lib/deltaBandGate.js";
 import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
@@ -1512,6 +1514,26 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     return;
   }
 
+  // Delta band at the transmit point (gap fix 5 for Pluto, 2026-09-28): the Order Review panel's
+  // Confirm gate, now enforced server-side with the same fail-closed semantics (opening orders only).
+  {
+    const deltaBand = await evaluateDeltaBandForOrderRequest(orderRequest);
+    if (deltaBand && !deltaBand.compliant) {
+      response.status(409).json({ error: deltaBand.reason });
+      return;
+    }
+  }
+
+  // A close built during the session can be confirmed after the bell (or after the cycle data
+  // changed): re-run the close gate at the real transmit point, the same way building does.
+  if (orderRequest.request_type === "close_position" && orderRequest.related_position_id) {
+    const closeGate = await evaluateCloseGateForPosition(orderRequest.related_position_id);
+    if (closeGate.blocked) {
+      response.status(409).json({ error: closeGate.reason });
+      return;
+    }
+  }
+
   let wonRace: boolean;
   try {
     wonRace = await runConfirmTransaction();
@@ -2027,6 +2049,17 @@ positionsRouter.post("/:id/close", async (request, response) => {
         });
         return;
       }
+    }
+  }
+
+  // Server-side close gate (gap fix 4 for Pluto, 2026-09-28): the same verdict the Close form's
+  // live stream shows — regular session open, live two-sided quotes on every leg, a consistent open
+  // wheel cycle — now refused here too, so no API caller can close what the form would not let a human close.
+  {
+    const closeGate = await evaluateCloseGateForPosition(position.id);
+    if (closeGate.blocked) {
+      response.status(409).json({ error: closeGate.reason });
+      return;
     }
   }
 
