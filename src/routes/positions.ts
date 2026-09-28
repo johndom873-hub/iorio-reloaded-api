@@ -27,6 +27,7 @@ import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
 import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
+import { getCycleMarksHandler } from "./positionCycleMarks.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -203,6 +204,9 @@ positionsRouter.get("/cycles", async (request, response) => {
   const [symbolCycles] = await fetchCyclesForTickers([ticker.id]);
   response.json({ symbol, cycles: [...(symbolCycles?.cycles ?? [])].reverse() });
 });
+
+// Stored-mark cycle figures per open ticker for the Positions table's Cycle P&L column (see positionCycleMarks.ts).
+positionsRouter.get("/cycles/marks", getCycleMarksHandler);
 
 // Fair strategy scoreboard (approved 2026-09-19): every cycle of every symbol attributed to the CSP / Unstructured /
 // CC buckets. Cycles whose ledger can't be trusted (dataFlags) are left out of the totals and counted instead.
