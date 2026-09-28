@@ -2,6 +2,7 @@ import { db } from "../db/connection.js";
 import { sharedLiveConnection } from "../ibkr/sharedReadConnection.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { InternalApiClient } from "../lib/internalApiClient.js";
+import { startNotificationBroadcaster, subscribeToNotifications } from "../lib/notificationBroadcaster.js";
 import { computeMarketSessionStatus, easternDateIso } from "../lib/marketSessionStatus.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
@@ -26,11 +27,19 @@ const housekeepingIntervalMs = 60_000;
 const dayQuotesPollIntervalMs = 30_000;
 export const plutoProcessName = "pluto_agent";
 
+// Settings that shape how Pluto operates but never what it would decide: changing only these does
+// not warrant a forced pass (and its model call).
+export const settingsFieldsThatNeverChangeADecision = new Set([
+  "telegramVerbosity", "crashLoopRestartsPerHour", "messageRateLimitPerSecond", "burstLines", "burstSettleSeconds",
+  "coalescingWindowSeconds", "callTimeoutSeconds", "maxEnabledTickers", "unfilledCancelMinutes", "promptVersion",
+]);
+
 export class PlutoAgent {
   private readonly api: InternalApiClient;
   private readonly marketWatch: PlutoMarketWatch;
   private settings: PlutoSettings | null = null;
   private timers: ReturnType<typeof setInterval>[] = [];
+  private unsubscribeNotifications: (() => void) | null = null;
   private coalesceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingSymbols = new Set<string>();
   private pendingTrigger: PlutoTrigger = "day_quotes";
@@ -73,6 +82,14 @@ export class PlutoAgent {
     this.timers.push(setInterval(() => void this.housekeeping(), housekeepingIntervalMs));
     this.timers.push(setInterval(() => void this.pollDayQuotes(), dayQuotesPollIntervalMs));
     this.marketWatch.onSpotMove((trigger) => this.enqueue("spot_move", [trigger.symbol], { symbol: trigger.symbol, movePct: Math.round(trigger.movePct * 100) / 100, fromSpot: trigger.fromSpot, spot: trigger.spot }, false));
+    // A saved settings change is felt within the coalescing window, not at the next market trigger (Marcelo, 2026-09-28).
+    startNotificationBroadcaster();
+    this.unsubscribeNotifications = subscribeToNotifications((notification) => {
+      if (notification.type !== "pluto_event" || notification.eventType !== "settings_changed") return;
+      const fields = ((notification.payload.fields as { field: string }[] | undefined) ?? []).map((change) => change.field);
+      if (fields.length > 0 && fields.every((field) => settingsFieldsThatNeverChangeADecision.has(field))) return;
+      this.enqueue("settings_changed", [], { fields, by: notification.payload.by ?? null }, true);
+    });
     await this.housekeeping();
     console.log("Pluto agent started.");
   }
@@ -217,6 +234,7 @@ export class PlutoAgent {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.unsubscribeNotifications?.();
     for (const timer of this.timers) clearInterval(timer);
     if (this.coalesceTimer) clearTimeout(this.coalesceTimer);
     await this.passChain.catch(() => {});

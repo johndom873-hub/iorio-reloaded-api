@@ -197,7 +197,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const openPositionsBySymbol: Record<string, string[]> = {};
   for (const position of book.openPositions) (openPositionsBySymbol[position.symbol] ??= []).push(position.strategyKey);
   const tickersForPrompt: PlutoPromptTickerInput[] = evaluated.map((ticker) => ({ scored: ticker.scored, eligible: ticker.filtered.eligible, eligibleRolls: ticker.filtered.eligibleRolls, closeActions: ticker.closeOffers }));
-  const windowEnd = settings.windowEndEt.split(":").map(Number);
+  const windowEnd = checks.context.session.windowEndEt.split(":").map(Number);
   const minutesToWindowEnd = (windowEnd[0]! * 60 + windowEnd[1]!) - easternMinutesOfDay(now);
   const { payload, offeredIds } = buildPlutoUserPayload({
     now,

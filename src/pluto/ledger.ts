@@ -6,7 +6,7 @@ import { publishNotification } from "../lib/notificationChannel.js";
 // concrete outcome (including "no_trade"), and a timeline of events. Writers only; the
 // routes read.
 
-export type PlutoTrigger = "opening_look" | "spot_move" | "grade_crossing" | "day_quotes" | "held_leg" | "manual" | "housekeeping";
+export type PlutoTrigger = "opening_look" | "spot_move" | "grade_crossing" | "day_quotes" | "held_leg" | "manual" | "housekeeping" | "settings_changed";
 
 export interface PlutoSystemCheck {
   ok: boolean;
