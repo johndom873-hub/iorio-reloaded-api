@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega } from "./optionFriction.js";
-import { attachUncompensatedShare, buildSignalCandidates, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, wideSpreadThreshold, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { attachUncompensatedShare, buildSignalCandidates, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, wideSpreadThreshold, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedShare } from "./uncompensatedShare.js";
 
 const forward = 100;
@@ -258,6 +258,44 @@ describe("buildSignalCandidates: Signals tab filters", () => {
     const yieldPct = unrestricted.annualizedYield * 100;
     expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], minAnnualizedYieldPct: yieldPct + 1 }))).toHaveLength(0);
     expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], minAnnualizedYieldPct: yieldPct }))).toHaveLength(1);
+  });
+});
+
+describe("buildSignalCandidates: exclusion tally", () => {
+  it("records rejected-fit and earnings-spanning expiries, but not an expiry with no slice at all", () => {
+    const tally = emptyCandidateExclusionTally();
+    const later = slice30({ expiry: "2026-11-20", yearsToExpiry: 60 / 365 });
+    buildSignalCandidates(baseInput({
+      exclusionTally: tally,
+      slices: [slice30({ status: "poor_fit" }), later],
+      quotes: [quoteAt(90, "P"), quoteAt(85, "P", 0.04, "2026-11-20", 60 / 365), quoteAt(90, "P", 0.04, "2026-12-18", 90 / 365)],
+      earningsDatesIso: ["2026-11-05"],
+    }));
+    expect([...tally.surfaceFitRejectedExpiries]).toEqual(["2026-10-21"]);
+    expect([...tally.spansEarningsExpiries]).toEqual(["2026-11-20"]);
+    expect(tally.bestAnnualizedYieldPct).toBeNull(); // nothing reached the yield check
+  });
+
+  it("counts max-delta and min-yield drops and keeps the best yield seen, including ones that passed", () => {
+    const unrestricted = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P"), quoteAt(95, "P")] }));
+    const yields = unrestricted.map((c) => c.annualizedYield * 100);
+    const deltas = unrestricted.map((c) => Math.abs(c.delta));
+
+    const deltaTally = emptyCandidateExclusionTally();
+    buildSignalCandidates(baseInput({ exclusionTally: deltaTally, quotes: [quoteAt(90, "P"), quoteAt(95, "P")], maxNetDelta: Math.min(...deltas) }));
+    expect(deltaTally.aboveMaxDeltaCount).toBe(1);
+    expect(deltaTally.belowMinYieldCount).toBe(0);
+
+    const yieldTally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ exclusionTally: yieldTally, quotes: [quoteAt(90, "P"), quoteAt(95, "P")], minAnnualizedYieldPct: Math.max(...yields) }));
+    expect(kept).toHaveLength(1);
+    expect(yieldTally.belowMinYieldCount).toBe(1);
+    expect(yieldTally.bestAnnualizedYieldPct).toBeCloseTo(Math.max(...yields), 10);
+  });
+
+  it("gives the same candidates with or without a tally", () => {
+    const input = baseInput({ quotes: [quoteAt(90, "P"), quoteAt(110, "C")] });
+    expect(buildSignalCandidates({ ...input, exclusionTally: emptyCandidateExclusionTally() })).toEqual(buildSignalCandidates(input));
   });
 });
 

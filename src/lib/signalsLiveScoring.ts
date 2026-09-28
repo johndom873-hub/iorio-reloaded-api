@@ -1,10 +1,10 @@
 import { sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
-import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { buildRollCandidates, heldLegContractKey, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
 import type { SignalSettings } from "./signalSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
-import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
+import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsNoCandidatesReason, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
 
 // Pure re-scoring for the Signals live layer (stage 2, decisions with Marcelo 2026-09-22):
 // the fitted surface stays the 10:00 snapshot and follows the live spot by sticky
@@ -203,6 +203,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     dayQuotesAsOf: summarizeDayQuotes(inputs.dayQuotes),
     ivShiftByExpiry: {},
     quoteSourceCounts: { live: 0, day: 0, snapshot: 0 },
+    noCandidatesReason: null,
   };
   const withCaveats = (unscoredReason: TickerSignals["unscoredReason"]): TickerSignals => ({
     ...base,
@@ -225,8 +226,10 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const riskFreeRate = header.riskFreeRatePercent / 100;
   const ivShifts = computeExpiryIvShifts(slices, quotes, riskFreeRate);
 
+  const exclusionTally = emptyCandidateExclusionTally();
   let candidates = gradeSignalCandidates(
     buildSignalCandidates({
+      exclusionTally,
       spotPrice,
       riskFreeRate,
       forecast: inputs.forecast,
@@ -271,6 +274,30 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     rollCount: countRollableLegs(rolls),
     ivShiftByExpiry: Object.fromEntries([...ivShifts].map(([expiry, entry]) => [expiry, { shiftVolatilityPoints: entry.shift * 100, quoteCount: entry.quoteCount }])),
     quoteSourceCounts: countQuoteSources(candidates),
+    noCandidatesReason: candidates.length > 0 ? null : describeNoCandidates(exclusionTally, inputs.earningsDatesIso, header.tradingDateIso, settings),
+  };
+}
+
+/** Pure: turns the builder's exclusion tally into the reason a scored ticker shows no candidates. */
+export function describeNoCandidates(
+  tally: CandidateExclusionTally,
+  earningsDatesIso: string[],
+  snapshotDateIso: string,
+  settings: { minAnnualizedYieldPct: number; maxNetDelta: number },
+): SignalsNoCandidatesReason {
+  const filtered = tally.aboveMaxDeltaCount + tally.belowMinYieldCount > 0;
+  // Strictly after the snapshot, as expirySpansEarnings counts it.
+  const nextEarnings = [...earningsDatesIso].sort().find((dateIso) => dateIso > snapshotDateIso) ?? null;
+  return {
+    kind: filtered ? "filtered" : "nothing_scorable",
+    surfaceFitRejectedExpiries: [...tally.surfaceFitRejectedExpiries].sort(),
+    spansEarningsExpiries: [...tally.spansEarningsExpiries].sort(),
+    earningsDateIso: tally.spansEarningsExpiries.size > 0 ? nextEarnings : null,
+    aboveMaxDeltaCount: tally.aboveMaxDeltaCount,
+    belowMinYieldCount: tally.belowMinYieldCount,
+    bestAnnualizedYieldPct: tally.bestAnnualizedYieldPct,
+    minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
+    maxNetDelta: settings.maxNetDelta,
   };
 }
 

@@ -84,6 +84,8 @@ export interface SignalCandidatesInput {
   maxNetDelta: number;
   /** Signals tab setting: candidates with annualised yield (as a %) below this are filtered out. */
   minAnnualizedYieldPct: number;
+  /** When given, records why quotes were dropped (for a ticker that ends with no candidates). */
+  exclusionTally?: CandidateExclusionTally;
   /** Formula 3h (approved 2026-09-24): per-expiry parallel shift added to the surface IV, from computeExpiryIvShifts. */
   ivShiftByExpiry?: Map<string, number>;
 }
@@ -178,14 +180,32 @@ function median(values: number[]): number {
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
+/** Why quotes were dropped by buildSignalCandidates, filled in when the caller passes one. */
+export interface CandidateExclusionTally {
+  surfaceFitRejectedExpiries: Set<string>;
+  spansEarningsExpiries: Set<string>;
+  aboveMaxDeltaCount: number;
+  belowMinYieldCount: number;
+  bestAnnualizedYieldPct: number | null;
+}
+
+export function emptyCandidateExclusionTally(): CandidateExclusionTally {
+  return { surfaceFitRejectedExpiries: new Set(), spansEarningsExpiries: new Set(), aboveMaxDeltaCount: 0, belowMinYieldCount: 0, bestAnnualizedYieldPct: null };
+}
+
 /** Builds every structurally-eligible candidate for a ticker. Ungraded (grade is a placeholder "avoid" until gradeSignalCandidates runs). */
 export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandidate[] {
   const slicesByExpiry = new Map(input.slices.map((slice) => [slice.expiry, slice]));
   const candidates: SignalCandidate[] = [];
 
+  const tally = input.exclusionTally;
   for (const quote of input.quotes) {
     const slice = slicesByExpiry.get(quote.expiry);
-    if (!slice || slice.status !== "ok" || !slice.parameters || slice.kMin === null || slice.kMax === null) continue;
+    if (!slice || slice.status !== "ok" || !slice.parameters || slice.kMin === null || slice.kMax === null) {
+      // No slice at all is an expiry already past (dropped by the rebase) or an appended held-leg contract, not a rejected fit.
+      if (slice) tally?.surfaceFitRejectedExpiries.add(quote.expiry);
+      continue;
+    }
     if (!(slice.yearsToExpiry > 0)) continue; // expiring today: excluded, same as the surface fitter -- also caught downstream by computeFrictionCost's vega guard, kept explicit for clarity
 
     const isCall = quote.right === "C";
@@ -195,7 +215,10 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     // Matches generateTradeAlertCandidates.ts's calendar-conflict exclusion. Only excludes when the calendar
     // is actually resolved -- an unresolved ticker can't tell true "no earnings" apart from "unchecked", so
     // it falls through to the earnings_calendar_unresolved flag below instead of being silently allowed.
-    if (input.earningsCalendarResolved && expirySpansEarnings(input.snapshotDateIso, quote.expiry, input.earningsDatesIso)) continue;
+    if (input.earningsCalendarResolved && expirySpansEarnings(input.snapshotDateIso, quote.expiry, input.earningsDatesIso)) {
+      tally?.spansEarningsExpiries.add(quote.expiry);
+      continue;
+    }
 
     const logMoneyness = Math.log(quote.strike / slice.forwardPrice);
     const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
@@ -204,7 +227,11 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     if (!(surfaceIv > 0)) continue;
     const midIv = impliedVolatilityFromMid(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, quote.bid, quote.ask, isCall);
     const delta = blackScholesDelta(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
-    if (Math.abs(delta) > input.maxNetDelta) continue; // Signals tab max net delta (approved 2026-09-24)
+    if (Math.abs(delta) > input.maxNetDelta) {
+      // Signals tab max net delta (approved 2026-09-24)
+      if (tally) tally.aboveMaxDeltaCount += 1;
+      continue;
+    }
     const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: quote.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv });
     if (!friction) continue;
     const edge = input.forecast ? surfaceIv - input.forecast.volatility : null;
@@ -220,7 +247,12 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     const premium = (quote.bid + quote.ask) / 2;
     const capitalAtRisk = strategyKey === "covered_call" ? input.spotPrice : quote.strike;
     const annualizedYield = (premium / capitalAtRisk) * (annualDays / dte);
-    if (annualizedYield * 100 < input.minAnnualizedYieldPct) continue; // Signals tab min annualised yield (approved 2026-09-24)
+    if (tally) tally.bestAnnualizedYieldPct = Math.max(tally.bestAnnualizedYieldPct ?? -Infinity, annualizedYield * 100);
+    if (annualizedYield * 100 < input.minAnnualizedYieldPct) {
+      // Signals tab min annualised yield (approved 2026-09-24)
+      if (tally) tally.belowMinYieldCount += 1;
+      continue;
+    }
     const dollarRisk = capitalAtRisk * 100 - premium;
     const riskAdjustedRatio = edgeDollars / dollarRisk;
     const riskAdjustedRatioAtMid = edgeDollarsAtMid / dollarRisk;

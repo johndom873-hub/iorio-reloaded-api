@@ -20,7 +20,7 @@ import type { PositionExposureRow } from "../lib/positionExposure.js";
 import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
-import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning } from "../ibkr/calendarConflict.js";
+import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning, type EconomicCalendarWarningEvent } from "../ibkr/calendarConflict.js";
 import { evaluateRollForPosition } from "../ibkr/evaluateRollForPosition.js";
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
@@ -65,8 +65,14 @@ function serializeOrderRequest(row: Record<string, unknown>) {
     cancelledByUserId: row.cancelled_by_user_id,
     cancelledByDisplayName: row.cancelled_by_display_name,
     calendarWarning: row.calendar_warning,
+    calendarWarningEvents: row.calendar_warning_events ?? null,
     riskFreeRate: row.risk_free_rate,
   };
+}
+
+/** Both forms of the economic-calendar warning: the events (one per line in Order Review) and the one-line text. */
+function calendarWarningColumns(events: EconomicCalendarWarningEvent[]): { calendar_warning: string | null; calendar_warning_events: string | null } {
+  return { calendar_warning: formatEconomicCalendarWarning(events), calendar_warning_events: events.length > 0 ? JSON.stringify(events.map(({ title, eventDate }) => ({ title, eventDate }))) : null };
 }
 
 // Joins in the requester/canceller's display name (e.g. "Marce", "Genosuke")
@@ -1179,8 +1185,8 @@ positionsRouter.post("/orders", async (request, response) => {
     excessUncoveredShares > 0
       ? `${excessUncoveredShares} uncovered share(s) of ${ticker.symbol} remain beyond what this order uses — worth checking whether an additional contract is worth selling.`
       : null;
-  const [calendarWarning, riskFreeRate] = await Promise.all([
-    fetchEconomicCalendarWarningEvents(normalizedExpiry).then(formatEconomicCalendarWarning),
+  const [calendarWarningEvents, riskFreeRate] = await Promise.all([
+    fetchEconomicCalendarWarningEvents(normalizedExpiry),
     getRiskFreeRate().catch(() => null), // Order Review's probability of profit uses the same FRED rate as the alerts (approved 2026-09-24)
   ]);
   // Persisted (2026-09-24, fixing a flash-and-vanish banner) before the
@@ -1190,7 +1196,7 @@ positionsRouter.post("/orders", async (request, response) => {
   // response is about to return, instead of racing ahead of them.
   const [persistedOrderRequest] = await db("order_requests")
     .where("id", orderRequest.id)
-    .update({ calendar_warning: calendarWarning, risk_free_rate: riskFreeRate })
+    .update({ ...calendarWarningColumns(calendarWarningEvents), risk_free_rate: riskFreeRate })
     .returning("*");
   await publishNotification({ type: "order_status", orderId: orderRequest.id });
   response.status(201).json({ ...serializeOrderRequest(persistedOrderRequest), note });
@@ -1790,14 +1796,14 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     })
     .returning("*");
 
-  const [calendarWarning, riskFreeRate] = await Promise.all([
-    fetchEconomicCalendarWarningEvents(normalizedNewLegExpiry).then(formatEconomicCalendarWarning),
+  const [calendarWarningEvents, riskFreeRate] = await Promise.all([
+    fetchEconomicCalendarWarningEvents(normalizedNewLegExpiry),
     getRiskFreeRate().catch(() => null),
   ]);
   // Persisted before notifying -- see the matching comment on POST /orders above.
   const [persistedOrderRequest] = await db("order_requests")
     .where("id", orderRequest.id)
-    .update({ calendar_warning: calendarWarning, risk_free_rate: riskFreeRate })
+    .update({ ...calendarWarningColumns(calendarWarningEvents), risk_free_rate: riskFreeRate })
     .returning("*");
   await publishNotification({ type: "order_status", orderId: orderRequest.id });
   response.status(201).json(serializeOrderRequest(persistedOrderRequest));

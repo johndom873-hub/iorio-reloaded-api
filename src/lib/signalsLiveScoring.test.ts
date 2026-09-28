@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSignalCandidates, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, contractKey, countGrades, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
+import { buildSignalCandidates, emptyCandidateExclusionTally, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, contractKey, countGrades, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 
 const forward = 100;
@@ -240,6 +240,61 @@ describe("scoreTicker", () => {
     const rescored = scoreTicker(inputs(), account, strict, { spotPrice: forward, priceSource: "snapshot", uncompensatedByContract });
     expect(rescored.candidates.length).toBe(first.candidates.length);
     expect(rescored.candidates.find((c) => candidateContractKey(c) === knownKey)!.uncompensatedSharePercent).toBe(40);
+  });
+});
+
+describe("noCandidatesReason", () => {
+  const settings = { minAnnualizedYieldPct: 50, maxNetDelta: 0.3 };
+
+  it("is null when the ticker has candidates, or is unscored", () => {
+    expect(scoreTicker(inputs(), account, permissiveSettings).noCandidatesReason).toBeNull();
+    expect(scoreTicker(inputs({ forecast: null }), account, permissiveSettings).noCandidatesReason).toBeNull();
+  });
+
+  it("is 'filtered' with the best yield when every contract is under the min yield (the TLT case)", () => {
+    const scored = scoreTicker(inputs(), account, { ...permissiveSettings, minAnnualizedYieldPct: 10_000 });
+    expect(scored.candidates).toHaveLength(0);
+    const reason = scored.noCandidatesReason!;
+    expect(reason.kind).toBe("filtered");
+    expect(reason.belowMinYieldCount).toBe(4);
+    expect(reason.minAnnualizedYieldPct).toBe(10_000);
+    expect(reason.bestAnnualizedYieldPct).toBeGreaterThan(0);
+    expect(reason.bestAnnualizedYieldPct).toBeLessThan(10_000);
+  });
+
+  it("is 'nothing_scorable' when the near slice failed its fit and the far expiry spans earnings (the NBIS case)", () => {
+    const scored = scoreTicker(
+      inputs({ slices: [slice("2026-10-21", years30, { status: "poor_fit" as never }), slice("2026-11-20", years60)], earningsDatesIso: ["2026-09-21", "2026-11-05"] }),
+      account,
+      permissiveSettings,
+    );
+    expect(scored.unscoredReason).toBeNull();
+    expect(scored.noCandidatesReason).toMatchObject({
+      kind: "nothing_scorable",
+      surfaceFitRejectedExpiries: ["2026-10-21"],
+      spansEarningsExpiries: ["2026-11-20"],
+      earningsDateIso: "2026-11-05", // not the snapshot-day date, which spans nothing
+      bestAnnualizedYieldPct: null,
+    });
+  });
+});
+
+describe("describeNoCandidates", () => {
+  it("is 'filtered' whenever any contract hit a Signals tab filter, even alongside fit rejections", () => {
+    const tally = { ...emptyCandidateExclusionTally(), surfaceFitRejectedExpiries: new Set(["2026-10-21"]), aboveMaxDeltaCount: 2 };
+    const reason = describeNoCandidates(tally, [], "2026-09-21", { minAnnualizedYieldPct: 50, maxNetDelta: 0.3 });
+    expect(reason.kind).toBe("filtered");
+    expect(reason.aboveMaxDeltaCount).toBe(2);
+    expect(reason.maxNetDelta).toBe(0.3);
+    expect(reason.earningsDateIso).toBeNull(); // no expiry spanned earnings
+  });
+
+  it("sorts the expiry lists", () => {
+    const tally = { ...emptyCandidateExclusionTally(), surfaceFitRejectedExpiries: new Set(["2026-10-23", "2026-10-02"]), spansEarningsExpiries: new Set(["2026-12-18", "2026-10-30"]) };
+    const reason = describeNoCandidates(tally, ["2026-10-22"], "2026-09-28", { minAnnualizedYieldPct: 50, maxNetDelta: 0.3 });
+    expect(reason.surfaceFitRejectedExpiries).toEqual(["2026-10-02", "2026-10-23"]);
+    expect(reason.spansEarningsExpiries).toEqual(["2026-10-30", "2026-12-18"]);
+    expect(reason.earningsDateIso).toBe("2026-10-22");
   });
 });
 
