@@ -36,7 +36,7 @@ environmentRouter.get("/details", requireAuth, async (_request, response) => {
     marketDataRestriction,
     // False when IBKR_MARKET_DATA_LINES_ENABLED=false — the top bar's "Real-time data disabled" state.
     marketDataLinesEnabled: ibkrMarketDataLinesEnabled(),
-    // Non-null while IBKR refuses the live pool's data (10197: the live account is logged in elsewhere) — the top bar's "Live prices stopped" state.
+    // Non-null while IBKR refuses the live pool's data (10197; see marketDataPool.ts) — the top bar's "Live prices stopped" state.
     marketDataFeedRefusal: marketDataFeedRefusal(),
     worker: workerRow
       ? {

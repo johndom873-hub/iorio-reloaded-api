@@ -183,9 +183,10 @@ let reconcileTimer: ReturnType<typeof setInterval> | null = null;
 let resubscribeRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let resubscribeRetryAttempt = 0;
 let restricted = false;
-// Set when IBKR refuses the pool's subscriptions because the live username has
-// a session open elsewhere (10197), which it pushes to already-open
-// subscriptions the moment that login happens; cleared by the next real price.
+// Set when IBKR refuses the pool's subscriptions with 10197 ("competing live
+// session"), which it also pushes to already-open subscriptions; cleared by the
+// next real price. Causes and recovery: probeCompetingLiveSession.ts and the
+// IBKR health check, which restarts the Gateway once per episode.
 // Pushed to every open tab at once, and read by /environment/details for tabs
 // opened later. In-process state: correct while one web dyno serves both.
 let feedRefusal: MarketDataFeedRefusal | null = null;

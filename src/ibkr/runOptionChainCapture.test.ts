@@ -1,3 +1,5 @@
+import { EventEmitter } from "node:events";
+import { EventName } from "@stoqey/ib";
 import { describe, expect, it, vi } from "vitest";
 import type { SnapshotCoverage } from "../lib/optionChainCaptureCoverage.js";
 import type { StoredOptionChainRefresh } from "./fetchOptionChain.js";
@@ -11,7 +13,8 @@ import {
   type UniverseTicker,
 } from "./runOptionChainCapture.js";
 
-const fakeIb = {} as never;
+// An EventEmitter: the run listens for the connection dropping.
+const fakeIb = new EventEmitter() as never;
 const today = "2026-09-21";
 const ticker = (symbol: string, contractId: number | null = 1): UniverseTicker => ({ tickerId: `id-${symbol}`, symbol, contractId });
 
@@ -207,9 +210,32 @@ describe("runOptionChainCapture", () => {
     const { dependencies, disconnect } = runDependencies();
     const events: OptionChainCaptureEvent[] = [];
     const result = await runOptionChainCapture((event) => events.push(event), dependencies);
-    expect(result).toEqual({ tickersAttempted: 2, tickersComplete: 2, tickersPartial: 0, tickersFailed: 0, recapturedSymbols: [] });
+    expect(result).toEqual({ tickersAttempted: 2, tickersComplete: 2, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [] });
     expect(events.filter((event) => event.type === "tickerStart").map((event) => (event as { symbol: string }).symbol)).toEqual(["AAA", "BBB"]);
     expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops when the IBKR connection drops mid-run instead of subscribing the rest on a dead socket", async () => {
+    const ib = new EventEmitter();
+    const close = vi.fn();
+    const saveFailedSnapshot = vi.fn(async () => {});
+    const prepareTicker = vi.fn(async (_ib: unknown, universeTicker: UniverseTicker) => {
+      // The connection drops while the second ticker is being prepared (a Gateway restart).
+      if (universeTicker.symbol === "BBB") ib.emit(EventName.disconnected);
+      return preparedFor(universeTicker);
+    });
+    const { dependencies, disconnect, lineReservation } = runDependencies({
+      loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
+      connect: async () => ({ ib: ib as never, disconnect }),
+      prepareTicker: prepareTicker as never,
+      openQuoteWindow: () => ({ capture: async () => [], close, inFlightCount: () => 0 }),
+    });
+    await expect(runOptionChainCapture(undefined, { ...dependencies, saveFailedSnapshot })).rejects.toThrow("IBKR connection lost mid-run; not captured: CCC");
+    expect(prepareTicker).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalled();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(lineReservation.release).toHaveBeenCalledWith("optionChainCapture");
+    expect(ib.listenerCount(EventName.disconnected)).toBe(0);
   });
 
   it("passes today's Eastern date and the risk-free rate as a percent to the capture", async () => {
@@ -293,7 +319,7 @@ describe("runOptionChainCapture", () => {
     const { dependencies } = runDependencies({ saveSnapshot, loadUniverse: async () => [ticker("AAA")] });
     const result = await runOptionChainCapture(undefined, dependencies);
     expect(saveSnapshot).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ tickersFailed: 1, recapturedSymbols: [] });
+    expect(result).toMatchObject({ tickersFailed: 1, failedSymbols: expect.any(Array), recapturedSymbols: [] });
   });
 
   it("skips the re-capture entirely once the job has used up its 45-minute budget", async () => {
@@ -377,7 +403,7 @@ describe("runOptionChainCapture", () => {
 
   it("handles an empty universe", async () => {
     const { dependencies, disconnect } = runDependencies({ loadUniverse: async () => [] });
-    expect(await runOptionChainCapture(undefined, dependencies)).toEqual({ tickersAttempted: 0, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, recapturedSymbols: [] });
+    expect(await runOptionChainCapture(undefined, dependencies)).toEqual({ tickersAttempted: 0, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [] });
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
 });

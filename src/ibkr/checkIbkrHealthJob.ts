@@ -9,7 +9,7 @@ import { environment } from "../config/env.js";
 import { db } from "../db/connection.js";
 import { reportDaySignalsLoopLiveness } from "../lib/daySignalsLiveness.js";
 import { probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
-import { reportCompetingLiveSession } from "../lib/competingLiveSessionAlert.js";
+import { blockedAfterReloginMessage, blockedRestartDeferredMessage, competingLiveSessionSurvivedRestart, reportCompetingLiveSession } from "../lib/competingLiveSessionAlert.js";
 
 // Confirmed 2026-08-27: reqHistoricalData can silently hang (no data, no
 // error event — just a timeout) while the connection handshake itself and
@@ -303,9 +303,31 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       notifications.push(`⚠️ iorio-worker.service was inactive — restarted successfully, now active.`);
     }
 
-    // Alerts on its own (state-based: once, hourly reminders, then "restored"), like the Day Signals check below.
-    const competingLiveSession = await probeCompetingLiveSession(connection.ib, 999_002, HISTORICAL_DATA_PROBE_SYMBOL);
-    await reportCompetingLiveSession(competingLiveSession).catch((error) => console.warn(`competing live session alert failed: ${error instanceof Error ? error.message : error}`));
+    // IBKR 10197 ("competing live session"): usually a stale Gateway session that only a fresh login
+    // clears (probeCompetingLiveSession.ts), so restart once per episode; if 10197 survives the fresh
+    // login, a real session on the live username is the likelier cause and the alert says so instead of
+    // restarting again. Alerts are state-based (once, hourly reminders, "flowing again").
+    let competingLiveSession = await probeCompetingLiveSession(connection.ib, 999_002, HISTORICAL_DATA_PROBE_SYMBOL);
+    let blockedMessage = blockedAfterReloginMessage;
+    let recoveredByRestart = false;
+    if (competingLiveSession === "blocked" && !(await competingLiveSessionSurvivedRestart())) {
+      const otherRunningJob = allowGatewayRestart ? await findOtherRunningJobName() : null;
+      if (!allowGatewayRestart) {
+        blockedMessage = blockedRestartDeferredMessage("restarts aren't allowed from the manual check while the market is open; the scheduled check will restart it");
+      } else if (otherRunningJob) {
+        blockedMessage = blockedRestartDeferredMessage(`${otherRunningJob} is running; the next check restarts the Gateway once it finishes`);
+      } else {
+        connection.disconnect();
+        connection = await restartAndReconnect("was refused real-time market data (IBKR 10197)");
+        competingLiveSession = await probeCompetingLiveSession(connection.ib, 999_003, HISTORICAL_DATA_PROBE_SYMBOL);
+        recoveredByRestart = competingLiveSession === "flowing";
+      }
+    }
+    const sentRecovery = await reportCompetingLiveSession(competingLiveSession, blockedMessage).catch((error) => {
+      console.warn(`competing live session alert failed: ${error instanceof Error ? error.message : error}`);
+      return false;
+    });
+    if (recoveredByRestart && !sentRecovery) notifications.push("✅ Real-time market data is flowing again after the Gateway re-login (IBKR 10197: stale session).");
 
     const problems = await runReconciliationSafely(connection);
     connection.disconnect();

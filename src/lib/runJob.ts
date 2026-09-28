@@ -8,6 +8,11 @@ export interface JobResult {
   details?: Record<string, unknown>;
   /** If set, sent via Telegram on success — e.g. "Trade Alerts: 5 new alerts." Omit for quiet successes. */
   notify?: string;
+  /**
+   * Set when the job ran to the end but part of its work failed (e.g. some tickers): recorded as
+   * a failure, with `details` kept and the usual failure alert, instead of a "success" that hides it.
+   */
+  failureMessage?: string;
 }
 
 export interface RunJobOptions {
@@ -172,6 +177,15 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
       await notifyTelegram(failureAlert);
     }
     throw error;
+  }
+
+  if (result.failureMessage) {
+    await db("job_runs").where({ id: run.id }).update({ status: "failure", finished_at: db.fn.now(), details: result.details ?? null, error_message: result.failureMessage });
+    await publishNotification({ type: "job_completed", jobName, status: "failure" }).catch(() => {});
+    const failureAlert = `⚠️ ${jobName} failed: ${telegramFailureSummary(result.failureMessage)}`;
+    if (options.failureAlertReminderIntervalMs !== undefined) await notifyDownThrottled(`job_failure:${jobName}`, failureAlert, options.failureAlertReminderIntervalMs);
+    else await notifyTelegram(failureAlert);
+    return;
   }
 
   await db("job_runs")

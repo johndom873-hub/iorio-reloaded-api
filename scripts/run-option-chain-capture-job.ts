@@ -68,9 +68,12 @@ async function main(): Promise<void> {
           else console.log(`Re-capturing starved tickers: ${event.symbols.join(", ")}`);
         });
         console.log(`Chain capture: ${result.tickersComplete} complete, ${result.tickersPartial} partial, ${result.tickersFailed} failed of ${result.tickersAttempted}.`);
-        // runJob's failure path handles Telegram for a thrown error; a run where
-        // tickers failed is surfaced via details and the failed snapshot rows.
-        return { details: { ...result } };
+        // A run where tickers failed is recorded as a failure (runJob alerts), not a "success" that
+        // hides it; the failed tickers also have failed snapshot rows.
+        return {
+          details: { ...result },
+          failureMessage: result.tickersFailed > 0 ? `${result.tickersFailed} of ${result.tickersAttempted} tickers not captured: ${result.failedSymbols.join(", ")}` : undefined,
+        };
       },
       { triggeredBy: "scheduler", staleRunningJobThresholdMs: optionChainCaptureStaleRunningThresholdMs },
     );

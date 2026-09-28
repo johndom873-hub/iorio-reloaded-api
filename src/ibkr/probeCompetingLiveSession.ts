@@ -1,10 +1,11 @@
 import { EventName, MarketDataType, Stock, type IBApi } from "@stoqey/ib";
 
-// IBKR's shared-market-data paper account cannot receive real-time quotes
-// while its own live username (johndom873) has an active session anywhere
-// (Client Portal/TWS/mobile): error 10197 on every market-data request, with
-// the Gateway connection itself staying up and healthy throughout. Restarting
-// the Gateway does not fix it; only logging out that live session does.
+// IBKR error 10197 ("No market data during competing live session") on every
+// market-data request, with the Gateway connection itself up and healthy. Two
+// causes: the live username (johndom873) logged in elsewhere (TWS, mobile,
+// Client Portal), which only logging it out fixes; or the Gateway's own session
+// gone stale after IBKR silently dropped and restored it (no login dialog, just
+// "Connecting to server..."), which a Gateway restart (fresh login) fixes.
 //
 // Resolves on the first decisive event only. IBKR answers reqMktData with a
 // marketDataType event BEFORE any 10197 error, so that event says nothing

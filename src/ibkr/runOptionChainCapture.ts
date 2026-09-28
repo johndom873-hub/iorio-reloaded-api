@@ -1,3 +1,4 @@
+import { EventName } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { refreshStoredOptionChain, loadStoredOptionChain, type OptionChainRefreshTimings, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
@@ -71,6 +72,7 @@ export interface OptionChainCaptureResult {
   tickersComplete: number;
   tickersPartial: number;
   tickersFailed: number;
+  failedSymbols: string[];
   recapturedSymbols: string[];
 }
 
@@ -330,7 +332,7 @@ export async function runOptionChainCapture(
   const universe = await dependencies.loadUniverse();
   const riskFreeRate = await dependencies.getRiskFreeRate();
   const riskFreeRatePercent = riskFreeRate === null ? null : riskFreeRate * 100;
-  const result: OptionChainCaptureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, recapturedSymbols: [] };
+  const result: OptionChainCaptureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [] };
   const starved: { prepared: PreparedTicker; coverage: SnapshotCoverage }[] = [];
   const finalStatusBySymbol = new Map<string, string>();
 
@@ -343,10 +345,18 @@ export async function runOptionChainCapture(
 
   let connection: { ib: IbkrApi; disconnect: () => void } | null = null;
   let window: CaptureQuoteWindow | null = null;
+  // A dropped connection (e.g. a Gateway restart) closes the window and stops the run: carrying on
+  // would subscribe every remaining ticker on the dead socket for 0 ticks while holding the lines.
+  let connectionLost = false;
+  const onDisconnected = () => {
+    connectionLost = true;
+    window?.close();
+  };
   try {
     await dependencies.waitForPoolShedding();
     connection = await dependencies.connect();
     const { ib } = connection;
+    ib.once(EventName.disconnected, onDisconnected);
     window = dependencies.openQuoteWindow(ib);
     const quoteWindow = window;
     const record = (symbol: string, coverage: SnapshotCoverage) => {
@@ -371,6 +381,7 @@ export async function runOptionChainCapture(
     const spotBySymbol = universe.length > 0 ? await dependencies.fetchSpotPrices(universe.map((ticker) => ticker.symbol)) : {};
     const captures: Promise<void>[] = [];
     for (const ticker of universe) {
+      if (connectionLost) break;
       let prepared: PreparedTicker;
       try {
         prepared = await dependencies.prepareTicker(ib, ticker, todayIso, spotBySymbol[ticker.symbol] ?? null);
@@ -389,6 +400,10 @@ export async function runOptionChainCapture(
       );
     }
     await Promise.all(captures);
+    if (connectionLost) {
+      const notCaptured = universe.filter((ticker) => finalStatusBySymbol.get(ticker.symbol) !== "complete" && finalStatusBySymbol.get(ticker.symbol) !== "partial").map((ticker) => ticker.symbol);
+      throw new Error(`IBKR connection lost mid-run; not captured: ${notCaptured.join(", ")}`);
+    }
 
     // One re-capture pass for starved tickers (too few contracts got any tick):
     // every candidate is queued on the window at once so the lines stay busy,
@@ -415,15 +430,19 @@ export async function runOptionChainCapture(
       }
     }
   } finally {
+    connection?.ib.removeListener(EventName.disconnected, onDisconnected);
     window?.close();
     connection?.disconnect();
     clearInterval(renewTimer);
     await dependencies.lineReservation.release(captureLineReservationHolder).catch((error) => console.warn(`could not release the capture's line reservation: ${error instanceof Error ? error.message : error}`));
   }
-  for (const status of finalStatusBySymbol.values()) {
+  for (const [symbol, status] of finalStatusBySymbol) {
     if (status === "complete") result.tickersComplete++;
     else if (status === "partial") result.tickersPartial++;
-    else result.tickersFailed++;
+    else {
+      result.tickersFailed++;
+      result.failedSymbols.push(symbol);
+    }
   }
   return result;
 }

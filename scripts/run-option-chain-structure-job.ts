@@ -32,15 +32,24 @@ async function main(): Promise<void> {
       const result = await runOptionChainStructureRefresh((event) => {
         if (event.type === "tickerDone") {
           const slowest = event.timings.expiries.reduce((max, expiry) => Math.max(max, expiry.elapsedMs), 0);
+          const reused = event.timings.expiries.filter((expiry) => expiry.reused).length;
           console.log(
-            `${event.symbol}: structure refreshed in ${(event.timings.totalMs / 1000).toFixed(1)}s (expiries ${event.timings.optionParamsMs}ms; ${event.expiryCount} strike grids, ${event.strikeCount} strikes total, slowest ${slowest}ms).`,
+            `${event.symbol}: structure refreshed in ${(event.timings.totalMs / 1000).toFixed(1)}s (expiries ${event.timings.optionParamsMs}ms; ${event.expiryCount} strike grids, ${event.expiryCount - reused} looked up, ${reused} reused; ${event.strikeCount} strikes total, slowest ${slowest}ms).`,
           );
-        } else {
+        } else if (event.type === "tickerError") {
           console.warn(`${event.symbol}: structure refresh failed — ${event.message}`);
+        } else {
+          console.warn(`Stopping after ${event.afterSymbol}'s IBKR timeout (the request stays queued in the Gateway; sending more would stall it). Not attempted: ${event.skippedSymbols.join(", ")}.`);
         }
       });
-      console.log(`Structure refresh: ${result.tickersComplete} complete, ${result.tickersFailed} failed of ${result.tickersAttempted}.`);
-      return { details: { ...result } };
+      console.log(
+        `Structure refresh: ${result.tickersComplete} complete, ${result.tickersFailed} failed, ${result.skippedSymbols.length} skipped of ${result.tickersAttempted} (${result.gridLookups} grid lookups, ${result.gridsReused} reused).`,
+      );
+      const incomplete = [...result.failedSymbols, ...result.skippedSymbols];
+      return {
+        details: { ...result },
+        failureMessage: incomplete.length > 0 ? `${incomplete.length} of ${result.tickersAttempted} tickers have no structure today, so the capture skips them: ${incomplete.join(", ")}` : undefined,
+      };
     },
     { triggeredBy: "scheduler" },
   );

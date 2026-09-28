@@ -81,6 +81,13 @@ export function daysBetween(from: Date, to: Date): number {
 // sharing the same connection.
 let nextLookupReqId = 5_000;
 
+/**
+ * An IBKR contract-definition request that never answered. It cannot be cancelled (the API has no
+ * cancel for reqContractDetails/reqSecDefOptParams), so it stays queued in the Gateway's session and
+ * everything sent after it waits behind it — callers should stop sending, not carry on.
+ */
+export class IbkrLookupTimeoutError extends Error {}
+
 export async function lookupOptionParams(
   ib: IBApi,
   symbol: string,
@@ -91,7 +98,7 @@ export async function lookupOptionParams(
     let lastError: string | null = null;
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error(lastError ?? `secDefOptParams timeout for ${symbol}`));
+      reject(new IbkrLookupTimeoutError(lastError ?? `secDefOptParams timeout for ${symbol}`));
     }, 10_000);
     function cleanup() {
       clearTimeout(timer);
@@ -220,7 +227,7 @@ export function lookupExpiryStrikes(ib: IBApi, symbol: string, expiry: string): 
         let contractCount = 0;
         const timer = setTimeout(() => {
           cleanup();
-          reject(new Error(`strike grid lookup for ${symbol} ${expiry} timed out after ${expiryStrikesTimeoutMs / 1000}s`));
+          reject(new IbkrLookupTimeoutError(`strike grid lookup for ${symbol} ${expiry} timed out after ${expiryStrikesTimeoutMs / 1000}s`));
         }, expiryStrikesTimeoutMs);
 
         function onDetails(id: number, details: ContractDetails) {
@@ -265,7 +272,8 @@ export function lookupExpiryStrikes(ib: IBApi, symbol: string, expiry: string): 
 
 export interface OptionChainRefreshTimings {
   optionParamsMs: number;
-  expiries: { expiry: string; strikeCount: number; elapsedMs: number }[];
+  /** reused: the stored grid was fresh enough and no IBKR lookup was made for this expiry. */
+  expiries: { expiry: string; strikeCount: number; elapsedMs: number; reused?: boolean }[];
   totalMs: number;
 }
 
@@ -275,25 +283,45 @@ export interface StoredOptionChainRefresh {
   timings: OptionChainRefreshTimings;
 }
 
+export interface StoredGridReuse {
+  /** A stored grid younger than this is reused instead of looked up again. */
+  maxAgeDays: number;
+  /** A stored grid is only reused while spot sits inside its strike range; null = decide on age alone. */
+  spotPrice: number | null;
+}
+
+/** Pure: whether a stored strike grid can stand in for a fresh wildcard lookup. */
+export function canReuseStoredGrid(stored: { strikes: number[]; fetchedAt: Date } | undefined, reuse: StoredGridReuse, now: Date): boolean {
+  if (!stored || stored.strikes.length === 0) return false;
+  if (now.getTime() - stored.fetchedAt.getTime() > reuse.maxAgeDays * 86_400_000) return false;
+  if (reuse.spotPrice === null) return true;
+  return reuse.spotPrice >= Math.min(...stored.strikes) && reuse.spotPrice <= Math.max(...stored.strikes);
+}
+
 /**
  * The one place chain structure is fetched from IBKR: every listed expiry
  * (reqSecDefOptParams), then the real strike grid for each expiry inside the
  * 0-90 DTE capture window, one wildcard at a time, each stored as soon as it
- * lands so a failure part-way keeps the expiries already done. Always
- * refreshes — the nightly capture is the schedule, there is no TTL.
+ * lands so a failure part-way keeps the expiries already done.
+ *
+ * With `reuse` (the daily structure job), a stored grid that is still fresh is
+ * kept instead of looked up: a run of ~180 back-to-back wildcard lookups got
+ * throttled by IBKR, stalling the whole Gateway session. Without it
+ * (new-ticker warmup, the shortlist route), every expiry is looked up.
+ *
+ * option_chain_params (whose fetched_at is what the capture checks as "today's
+ * structure") is written last, so a ticker interrupted part-way never looks
+ * complete.
  */
 export async function refreshStoredOptionChain(
   ib: IBApi,
   ticker: { tickerId: string; symbol: string; contractId: number },
   todayIso: string,
+  reuse?: StoredGridReuse,
 ): Promise<StoredOptionChainRefresh> {
   const startedAt = Date.now();
   const { expirations } = await lookupOptionParams(ib, ticker.symbol, ticker.contractId);
   const optionParamsMs = Date.now() - startedAt;
-  await db("option_chain_params")
-    .insert({ ticker_id: ticker.tickerId, expirations, fetched_at: new Date() })
-    .onConflict("ticker_id")
-    .merge();
 
   const expiriesInWindow = expirations
     .filter((expiry) => {
@@ -304,12 +332,22 @@ export async function refreshStoredOptionChain(
 
   const strikesByExpiry = new Map<string, number[]>();
   const expiryTimings: OptionChainRefreshTimings["expiries"] = [];
-  const storedGrids = new Map<string, number[]>(
-    (await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).select("expiry", "strikes")).map((row: { expiry: string; strikes: number[] }) => [String(row.expiry).slice(0, 10).replaceAll("-", ""), row.strikes]),
+  const storedGrids = new Map<string, { strikes: number[]; fetchedAt: Date }>(
+    (await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).select("expiry", "strikes", "fetched_at")).map((row: { expiry: string; strikes: (string | number)[]; fetched_at: Date }) => [
+      String(row.expiry).slice(0, 10).replaceAll("-", ""),
+      { strikes: row.strikes.map(Number), fetchedAt: new Date(row.fetched_at) },
+    ]),
   );
+  const now = new Date();
   for (const expiry of expiriesInWindow) {
+    const storedGrid = storedGrids.get(expiry);
+    if (reuse && canReuseStoredGrid(storedGrid, reuse, now)) {
+      strikesByExpiry.set(expiry, storedGrid!.strikes);
+      expiryTimings.push({ expiry, strikeCount: storedGrid!.strikes.length, elapsedMs: 0, reused: true });
+      continue;
+    }
     const lookup = await lookupExpiryStrikes(ib, ticker.symbol, expiry);
-    const stored = storedGrids.get(expiry) ?? [];
+    const stored = storedGrid?.strikes ?? [];
     // An empty lookup (IBKR error 200 / no definitions right now) must not
     // replace a grid we already have (2026-09-24): downstream, an empty grid
     // means "no contracts" and the next alert refresh expires everything.
@@ -332,6 +370,10 @@ export async function refreshStoredOptionChain(
   if (expiriesInWindow.length > 0) {
     await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).whereNotIn("expiry", expiriesInWindow).delete();
   }
+  await db("option_chain_params")
+    .insert({ ticker_id: ticker.tickerId, expirations, fetched_at: new Date() })
+    .onConflict("ticker_id")
+    .merge();
 
   return { expirations, strikesByExpiry, timings: { optionParamsMs, expiries: expiryTimings, totalMs: Date.now() - startedAt } };
 }
