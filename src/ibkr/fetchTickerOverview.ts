@@ -70,18 +70,27 @@ type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 // One line for the seconds the snapshot is outstanding — budgeted (2026-09-24).
 const pricingSnapshotReservationTtlSeconds = 20;
 
-export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: string, reqId = 2): Promise<TickerPricing> {
+export interface PricingSnapshotOptions {
+  /**
+   * Resolve the moment a real last price arrives instead of waiting for IBKR's
+   * tickSnapshotEnd, which can land 10+ s after the data itself (past the 10 s
+   * ceiling below) — the returned pricing then holds only what had arrived by then.
+   */
+  resolveOnFirstLast?: boolean;
+}
+
+export async function lookupPricingSnapshot(connection: IbkrConnection, symbol: string, reqId = 2, options: PricingSnapshotOptions = {}): Promise<TickerPricing> {
   const holder = `snapshot:pricing:${symbol}:${randomUUID()}`;
   const reservation = await reserveMarketDataLines(holder, 1, pricingSnapshotReservationTtlSeconds);
   if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, `${symbol} pricing`, 1));
   try {
-    return await lookupPricingSnapshotUnbudgeted(connection, symbol, reqId);
+    return await lookupPricingSnapshotUnbudgeted(connection, symbol, reqId, options);
   } finally {
     releaseMarketDataLines(holder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${holder}: ${error instanceof Error ? error.message : error}`));
   }
 }
 
-async function lookupPricingSnapshotUnbudgeted(connection: IbkrConnection, symbol: string, reqId = 1): Promise<TickerPricing> {
+async function lookupPricingSnapshotUnbudgeted(connection: IbkrConnection, symbol: string, reqId: number, options: PricingSnapshotOptions): Promise<TickerPricing> {
   const { ib } = connection;
 
   return new Promise((resolve, reject) => {
@@ -132,6 +141,12 @@ async function lookupPricingSnapshotUnbudgeted(connection: IbkrConnection, symbo
       if (tickType === 4 || tickType === 68) {
         pricing.last = value;
         if (value !== null) void recordStockPrices([{ symbol, price: value, source: "live" }]);
+        if (value !== null && options.resolveOnFirstLast) {
+          cleanup();
+          ib.cancelMktData(reqId);
+          resolve(pricing);
+          return;
+        }
       }
       if (tickType === 6 || tickType === 72) pricing.high = value;
       if (tickType === 7 || tickType === 73) pricing.low = value;

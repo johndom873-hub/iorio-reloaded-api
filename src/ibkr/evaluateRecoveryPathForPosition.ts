@@ -104,7 +104,7 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
   const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "evaluateRecoveryPathForPosition");
   connection.ib.reqMarketDataType(MarketDataType.FROZEN);
   try {
-    const pricing = await lookupPricingSnapshot(connection, positionRow.symbol, nextReqIdFor(connection.ib, () => 2));
+    const pricing = await lookupPricingSnapshot(connection, positionRow.symbol, nextReqIdFor(connection.ib, () => 2), { resolveOnFirstLast: true });
     const currentPrice = pricing.last ?? (await getBestKnownStockPrice(positionRow.symbol)) ?? pricing.previousClose;
     if (currentPrice === null) throw new Error(`No current price available for ${positionRow.symbol}`);
 
