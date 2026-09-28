@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
+import { loadRealizedPnlByActionId, type PlutoActionRealizedPnl } from "../pluto/actionRealizedPnl.js";
 import { loadPlutoBook } from "../pluto/book.js";
 import { resolvePlutoSession } from "../pluto/sessionSchedule.js";
 import { requireAuth } from "../middleware/requireAuth.js";
@@ -171,12 +172,13 @@ plutoRouter.get("/passes", async (request: Request, response: Response) => {
     db("pluto_decisions").whereIn("pass_id", passIds).orderBy("call_index"),
     db("pluto_actions").whereIn("pass_id", passIds).orderBy("created_at"),
   ]);
+  const realized = await loadRealizedPnlByActionId(actions.map((action) => String(action.id)));
   response.json(
     rows.map((row) => ({
       ...serializePass(row),
       // Compact per-call summary for the Decisions card (the full input payload stays on GET /passes/:id).
       decisions: decisions.filter((decision) => decision.pass_id === row.id).map((decision) => ({ callIndex: decision.call_index, servedModelId: decision.served_model_id ?? null, parsedOutput: decision.parsed_output ?? null, schemaValid: Boolean(decision.schema_valid), latencyMs: decision.latency_ms ?? null, costUsd: decision.cost_usd === null ? null : Number(decision.cost_usd), error: decision.error ?? null })),
-      actions: actions.filter((action) => action.pass_id === row.id).map(serializeAction),
+      actions: actions.filter((action) => action.pass_id === row.id).map((action) => serializeAction(action, realized.get(String(action.id)))),
     })),
   );
 });
@@ -191,12 +193,14 @@ plutoRouter.get("/passes/:id", async (request: Request, response: Response) => {
     db("pluto_decisions").where({ pass_id: pass.id }).orderBy("call_index"),
     db("pluto_actions").where({ pass_id: pass.id }).orderBy("created_at"),
   ]);
-  response.json({ ...serializePass(pass), decisions: decisions.map(serializeDecision), actions: actions.map(serializeAction) });
+  const realized = await loadRealizedPnlByActionId(actions.map((action) => String(action.id)));
+  response.json({ ...serializePass(pass), decisions: decisions.map(serializeDecision), actions: actions.map((action) => serializeAction(action, realized.get(String(action.id)))) });
 });
 
 plutoRouter.get("/actions", async (request: Request, response: Response) => {
   const rows = await db("pluto_actions").orderBy("created_at", "desc").limit(limitFrom(request, 100));
-  response.json(rows.map(serializeAction));
+  const realized = await loadRealizedPnlByActionId(rows.map((row) => String(row.id)));
+  response.json(rows.map((row) => serializeAction(row, realized.get(String(row.id)))));
 });
 
 plutoRouter.get("/events", async (request: Request, response: Response) => {
@@ -268,7 +272,7 @@ function serializeDecision(row: Record<string, unknown>) {
   };
 }
 
-function serializeAction(row: Record<string, unknown>) {
+function serializeAction(row: Record<string, unknown>, realized?: PlutoActionRealizedPnl) {
   const num = (value: unknown) => (value === null || value === undefined ? null : Number(value));
   return {
     id: row.id,
@@ -290,7 +294,10 @@ function serializeAction(row: Record<string, unknown>) {
     referenceMid: num(row.reference_mid),
     fillPrice: num(row.fill_price),
     pessimisticPnl: num(row.pessimistic_pnl),
-    realizedPnl: num(row.realized_pnl),
+    // Derived at read time from the legs this action opened (see pluto/actionRealizedPnl.ts); the column is not read.
+    realizedPnl: realized?.realizedPnl ?? null,
+    closedLegCount: realized?.closedLegCount ?? 0,
+    openLegCount: realized?.openLegCount ?? 0,
     evaluatedAt: row.evaluated_at ? new Date(row.evaluated_at as string).toISOString() : null,
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
