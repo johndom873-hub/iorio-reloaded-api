@@ -47,6 +47,9 @@ shortlistRouter.get("/", async (_request, response) => {
       t.symbol,
       t.company_name AS "companyName",
       NULLIF(t.sector, '') AS sector,
+      se.bot_enabled AS "botEnabled",
+      se.bot_enabled_changed_at AS "botEnabledChangedAt",
+      bu.display_name AS "botEnabledChangedBy",
       CASE WHEN b.status = 'running' AND b.started_at > now() - make_interval(mins => ${staleBackfillRunMinutes}) THEN 'preparing' ELSE NULL END AS "backfillStatus",
       b.progress_percent AS "backfillProgressPercent",
       -- A 'partial' run means some pipeline step (calendar/chain-strikes/snapshot) failed -- surfaced so
@@ -65,6 +68,7 @@ shortlistRouter.get("/", async (_request, response) => {
       END AS "historyIncomplete"
     FROM shortlist_entries se
     JOIN tickers t ON t.id = se.ticker_id
+    LEFT JOIN users bu ON bu.id = se.bot_enabled_changed_by_user_id
     LEFT JOIN LATERAL (
       SELECT status, started_at, progress_percent
       FROM ticker_backfill_runs

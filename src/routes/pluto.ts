@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
+import { loadPlutoBook } from "../pluto/book.js";
 import { resolvePlutoSession } from "../pluto/sessionSchedule.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
@@ -25,14 +26,18 @@ async function currentUserDisplayName(request: Request): Promise<string> {
 }
 
 plutoRouter.get("/state", async (_request: Request, response: Response) => {
-  const [state, settings, working, counters, agentHealth, enabledCount] = await Promise.all([
+  const [state, settings, working, counters, agentHealth, enabledCount, book, lastSnapshot] = await Promise.all([
     loadPlutoState(),
     loadPlutoSettings(),
     countPlutoWorkingOrders(),
     loadPlutoTodayCounters(),
     db("worker_health").where({ process_name: "pluto_agent" }).first(),
     db("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
+    loadPlutoBook(),
+    db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first("net_liquidation_value", "snapshot_date"),
   ]);
+  // The book tile uses last night's NLV (no IBKR round trip on a screen load); the agent's passes use the live figure.
+  const netLiquidationValue = lastSnapshot ? Number(lastSnapshot.net_liquidation_value) : null;
   response.json({
     ...state,
     blockReason: describePlutoBlock(state),
@@ -40,6 +45,16 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
     counters: { ...counters, maxActionsPerSession: settings.maxActionsPerSession, maxModelCallsPerSession: settings.maxModelCallsPerSession, dailyCostCeilingUsd: settings.dailyCostCeilingUsd },
     enabledTickers: { count: enabledCount, max: settings.maxEnabledTickers },
     session: await resolvePlutoSession(new Date(), settings),
+    book: {
+      committedDollars: book.committedDollars,
+      openPositionCount: book.openPositions.length,
+      openSymbols: [...book.openSymbols].sort(),
+      workingOrderSymbols: [...book.workingOrderSymbols].sort(),
+      netLiquidationValue,
+      netLiquidationValueAsOf: lastSnapshot ? String(lastSnapshot.snapshot_date).slice(0, 10) : null,
+      capitalBudgetPct: settings.capitalBudgetPct,
+      maxOpenPositions: settings.maxOpenPositions,
+    },
     agent: agentHealth
       ? {
           connected: Boolean(agentHealth.connected),
@@ -151,7 +166,19 @@ function limitFrom(request: Request, fallback: number): number {
 
 plutoRouter.get("/passes", async (request: Request, response: Response) => {
   const rows = await db("pluto_passes").orderBy("started_at", "desc").limit(limitFrom(request, 50));
-  response.json(rows.map(serializePass));
+  const passIds = rows.map((row) => row.id);
+  const [decisions, actions] = passIds.length === 0 ? [[], []] : await Promise.all([
+    db("pluto_decisions").whereIn("pass_id", passIds).orderBy("call_index"),
+    db("pluto_actions").whereIn("pass_id", passIds).orderBy("created_at"),
+  ]);
+  response.json(
+    rows.map((row) => ({
+      ...serializePass(row),
+      // Compact per-call summary for the Decisions card (the full input payload stays on GET /passes/:id).
+      decisions: decisions.filter((decision) => decision.pass_id === row.id).map((decision) => ({ callIndex: decision.call_index, servedModelId: decision.served_model_id ?? null, parsedOutput: decision.parsed_output ?? null, schemaValid: Boolean(decision.schema_valid), latencyMs: decision.latency_ms ?? null, costUsd: decision.cost_usd === null ? null : Number(decision.cost_usd), error: decision.error ?? null })),
+      actions: actions.filter((action) => action.pass_id === row.id).map(serializeAction),
+    })),
+  );
 });
 
 plutoRouter.get("/passes/:id", async (request: Request, response: Response) => {
