@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
-import { evaluateShortLegBuyback, evaluateUnstructuredClose, type UnstructuredSharePosition } from "./closeActions.js";
+import { evaluateShortLegBuyback, evaluateUnstructuredClose, orderedEntryPremium, type UnstructuredSharePosition } from "./closeActions.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 const settings = { unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50, buybackMinDte: 2 } as PlutoSettings;
@@ -57,10 +57,27 @@ describe("Formula P2 — short-leg buyback", () => {
     expect(evaluateShortLegBuyback({ ...base, rolls: [roll("avoid")] }).offer).not.toBeNull();
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, dte: 1 } }).reason).toMatch(/DTE 1 below 2/);
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.6, bid: 2.5 } }).reason).toMatch(/would realise/);
+    // Recorded 2.40, but we set 2.00 on the leg in a combo: an ask of 2.20 is a loss on what we really received.
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.2, bid: 2.1 } }).offer).not.toBeNull();
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.2, bid: 2.1 }, orderedEntryPremium: 2.0 }).reason).toMatch(/would realise -40/);
   });
   it("is limited to single-leg positions and needs a scored leg with a live quote", () => {
     expect(evaluateShortLegBuyback({ ...base, singleLegPosition: false }).reason).toMatch(/single-leg/);
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, unscoredReason: "no_quote" } }).reason).toMatch(/not scored/);
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: null } }).reason).toMatch(/two-sided quote/);
+  });
+});
+
+describe("orderedEntryPremium", () => {
+  it("moves the recorded entry by IBKR's combo split, keeping its commission treatment", () => {
+    // AMAT roll: we set the new call at 4.60, IBKR reported it at 5.04; recorded entry 5.0284 (commission in).
+    expect(orderedEntryPremium(5.0284, [{ quantity: 1, price: 5.04, orderedLegPrice: 4.6 }])).toBeCloseTo(4.5884, 6);
+    // SPCX buy-write: two fills at 1.61 and 1.59 against our 1.72.
+    expect(orderedEntryPremium(1.5926, [{ quantity: 1, price: 1.61, orderedLegPrice: 1.72 }, { quantity: 1, price: 1.59, orderedLegPrice: 1.72 }])).toBeCloseTo(1.7126, 6);
+  });
+  it("is null for legs opened by single-leg orders and weights mixed openings by quantity", () => {
+    expect(orderedEntryPremium(2.0, [{ quantity: 2, price: 2.01, orderedLegPrice: null }])).toBeNull();
+    expect(orderedEntryPremium(2.0, [])).toBeNull();
+    expect(orderedEntryPremium(2.0, [{ quantity: 1, price: 2.1, orderedLegPrice: 1.9 }, { quantity: 3, price: 2.0, orderedLegPrice: null }])).toBeCloseTo(1.95, 6);
   });
 });

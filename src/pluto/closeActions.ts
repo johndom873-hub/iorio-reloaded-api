@@ -15,9 +15,11 @@ import type { PlutoSettings } from "./settingsStore.js";
 //   Never at a cycle loss.
 // P2 — short-leg buyback: offered only when holdEdge$ − closeCost$ < 0, no credit roll on the leg
 //   grades Weak or better, the leg's own P&L at the ask is positive, and at least buybackMinDte
-//   remain. Never at a loss. Limited to single-leg positions (cash-secured puts) because the close
-//   route requires every open leg of a structured position; a covered call's call-only buyback
-//   needs a route extension first.
+//   remain. Never at a loss. Limited to single-leg positions (cash-secured puts): closing only the
+//   call of a covered call is not allowed for anyone (Marcelo 2026-09-29), so it never becomes unstructured.
+//   The leg's premium for the loss check is the price we set on it when it was opened by a two-part
+//   order (Marcelo 2026-09-29): IBKR fills a combo at exactly its net but splits it between the legs
+//   its own way, so its recorded fill for one leg is arbitrary (orderedEntryPremium).
 
 export interface UnstructuredSharePosition {
   positionId: string;
@@ -39,6 +41,59 @@ export interface CloseOffer extends PlutoCloseActionOffer {
   side: "sell" | "buy";
   multiplier: number;
   quantity: number;
+}
+
+export interface OpeningTradeForPremium {
+  quantity: number;
+  price: number;
+  /** The price we set on this leg in the order, when the order had more than one leg; null otherwise. */
+  orderedLegPrice: number | null;
+}
+
+/**
+ * Pure: the leg's recorded entry premium moved by IBKR's combo split — entry + (our leg price − IBKR's
+ * leg fill), quantity-weighted over the opening trades. Keeps the recorded entry's commission treatment
+ * and changes nothing for legs opened by single-leg orders. Null when no opening trade came from a combo.
+ */
+export function orderedEntryPremium(recordedEntryPrice: number, openingTrades: OpeningTradeForPremium[]): number | null {
+  const totalQuantity = openingTrades.reduce((sum, trade) => sum + trade.quantity, 0);
+  if (totalQuantity === 0 || openingTrades.every((trade) => trade.orderedLegPrice === null)) return null;
+  const splitSkew = openingTrades.reduce((sum, trade) => sum + ((trade.orderedLegPrice ?? trade.price) - trade.price) * trade.quantity, 0) / totalQuantity;
+  return recordedEntryPrice + splitSkew;
+}
+
+function normalizedExpiry(value: unknown): string {
+  return String(value ?? "").replace(/-/g, "").slice(0, 8);
+}
+
+/** Opening trades per option leg, each with the price we set on that leg when its order had more than one leg. */
+export async function loadOpeningTradesForPremium(legIds: string[]): Promise<Map<string, OpeningTradeForPremium[]>> {
+  const result = new Map<string, OpeningTradeForPremium[]>();
+  if (legIds.length === 0) return result;
+  const rows: { legId: string; quantity: number; price: string; side: string; strike: string; expiry: Date | string; optionType: string; payload: { legs?: { role: string; action: string; strike?: number; expiry?: string; right?: string; unitPrice: number }[] } | null }[] = await db("trades as t")
+    .join("position_legs as pl", "pl.id", "t.position_leg_id")
+    .leftJoin("order_requests as o", "o.id", "t.source_order_request_id")
+    .whereIn("t.position_leg_id", legIds)
+    .where("t.is_closing_trade", false)
+    .select("t.position_leg_id as legId", "t.quantity", "t.price", "t.side", "pl.strike_price as strike", db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as expiry"), "pl.option_type as optionType", "o.payload");
+  for (const row of rows) {
+    const orderLegs = row.payload?.legs ?? [];
+    const orderedLeg =
+      orderLegs.length > 1
+        ? orderLegs.find(
+            (leg) =>
+              leg.role === "option" &&
+              leg.action === (row.side === "sell" ? "SELL" : "BUY") &&
+              Number(leg.strike) === Number(row.strike) &&
+              normalizedExpiry(leg.expiry) === normalizedExpiry(row.expiry) &&
+              leg.right === (row.optionType === "call" ? "C" : "P"),
+          )
+        : undefined;
+    const trades = result.get(row.legId) ?? [];
+    trades.push({ quantity: Number(row.quantity), price: Number(row.price), orderedLegPrice: orderedLeg ? Number(orderedLeg.unitPrice) : null });
+    result.set(row.legId, trades);
+  }
+  return result;
 }
 
 export async function loadUnstructuredSharePositions(symbols: string[]): Promise<UnstructuredSharePosition[]> {
@@ -106,11 +161,14 @@ export interface P2Input {
   settings: PlutoSettings;
   /** Whether the leg's position has exactly this one open leg (the close route needs every leg). */
   singleLegPosition: boolean;
+  /** The leg's premium corrected for a combo split (orderedEntryPremium); null = use the recorded entry. */
+  orderedEntryPremium?: number | null;
 }
 
 /** Pure P2: the buyback offer, or the reason there is none. */
 export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | null; reason: string | null } {
   const { leg, settings } = input;
+  const entryPremium = input.orderedEntryPremium ?? leg.entryPrice;
   if (leg.unscoredReason) return { offer: null, reason: `held leg not scored: ${leg.unscoredReason}` };
   if (!input.singleLegPosition) return { offer: null, reason: "buybacks are limited to single-leg positions for now" };
   if (leg.holdEdgeDollars === null || leg.closeCostDollars === null) return { offer: null, reason: "no hold edge / close cost" };
@@ -118,7 +176,7 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
   if (input.rolls.some((roll) => roll.legId === leg.legId && roll.grade !== "avoid")) return { offer: null, reason: "a credit roll grades Weak or better" };
   if (leg.dte === null || leg.dte < settings.buybackMinDte) return { offer: null, reason: `DTE ${leg.dte ?? "unknown"} below ${settings.buybackMinDte}` };
   if (leg.ask === null || leg.bid === null || !(leg.ask > 0) || leg.ask < leg.bid) return { offer: null, reason: "no live two-sided quote on the held leg" };
-  const pnlAtAsk = (leg.entryPrice - leg.ask) * leg.quantity * 100;
+  const pnlAtAsk = (entryPremium - leg.ask) * leg.quantity * 100;
   if (pnlAtAsk <= 0) return { offer: null, reason: `buying back at the ask would realise ${pnlAtAsk.toFixed(0)}` };
   const limitPrice = Math.round(((leg.bid + leg.ask) / 2) * 100) / 100;
   return {
@@ -126,9 +184,9 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
       id: `${input.symbol}:close_leg:${leg.legId}`,
       kind: "close_leg",
       symbol: input.symbol,
-      description: `Buy back ${leg.quantity}× ${input.symbol} $${leg.strike}${leg.right} ${leg.expiry} at ~${limitPrice.toFixed(2)} (sold at ${leg.entryPrice.toFixed(2)}); locks ${pnlAtAsk.toFixed(0)} at the ask`,
+      description: `Buy back ${leg.quantity}× ${input.symbol} $${leg.strike}${leg.right} ${leg.expiry} at ~${limitPrice.toFixed(2)} (sold at ${entryPremium.toFixed(2)}); locks ${pnlAtAsk.toFixed(0)} at the ask`,
       cycle_pnl: pnlAtAsk,
-      detail: { dte: leg.dte, entry_credit: leg.entryPrice, ask: leg.ask, hold_edge_dollars: Math.round(leg.holdEdgeDollars), close_cost_dollars: Math.round(leg.closeCostDollars), pnl_at_ask: Math.round(pnlAtAsk) },
+      detail: { dte: leg.dte, entry_credit: entryPremium, recorded_entry_credit: leg.entryPrice, ask: leg.ask, hold_edge_dollars: Math.round(leg.holdEdgeDollars), close_cost_dollars: Math.round(leg.closeCostDollars), pnl_at_ask: Math.round(pnlAtAsk) },
       positionId: leg.positionId,
       legIds: [leg.legId],
       automatic: false,
@@ -163,8 +221,16 @@ export async function buildCloseOffersForTicker(input: {
   if (input.heldLegs.length > 0) {
     const legCounts: { position_id: string; count: string }[] = await db("position_legs").whereIn("position_id", [...new Set(input.heldLegs.map((leg) => leg.positionId))]).whereNull("exit_at").groupBy("position_id").select("position_id").count("* as count");
     const openLegCountByPosition = new Map(legCounts.map((row) => [row.position_id, Number(row.count)]));
+    const openingTradesByLeg = await loadOpeningTradesForPremium(input.heldLegs.map((leg) => leg.legId));
     for (const leg of input.heldLegs) {
-      const result = evaluateShortLegBuyback({ symbol: input.symbol, leg, rolls: input.rolls, settings: input.settings, singleLegPosition: (openLegCountByPosition.get(leg.positionId) ?? 0) === 1 });
+      const result = evaluateShortLegBuyback({
+        symbol: input.symbol,
+        leg,
+        rolls: input.rolls,
+        settings: input.settings,
+        singleLegPosition: (openLegCountByPosition.get(leg.positionId) ?? 0) === 1,
+        orderedEntryPremium: orderedEntryPremium(leg.entryPrice, openingTradesByLeg.get(leg.legId) ?? []),
+      });
       if (result.offer) offers.push(result.offer);
       else skipped.push({ id: `${input.symbol}:close_leg:${leg.legId}`, reason: result.reason ?? "not offered" });
     }

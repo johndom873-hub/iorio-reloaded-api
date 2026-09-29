@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { reconciliationRunFailedPrefix } from "../ibkr/checkIbkrHealthJob.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { computeMarketSessionStatus, easternDateIso, easternInstant, type MarketSessionState } from "../lib/marketSessionStatus.js";
@@ -57,7 +58,8 @@ export interface HealthCheckRunForReconciliation {
 /**
  * Pure: the reconciliation check from the newest *successful* health-check run. A running or
  * failed run carries no reconciliation result, so it must never count as "IBKR and the book agree".
- * The "discrepancy" detail prefix is what trips the reconciliation breaker in the pass runner.
+ * The "discrepancy" detail prefix is what trips the reconciliation breaker in the pass runner; a
+ * reconciliation that could not run only fails the check (Marcelo 2026-09-29) and lifts on the next good run.
  */
 export function evaluateReconciliationCheck(latestSuccessfulRun: HealthCheckRunForReconciliation | undefined, now: Date): PlutoSystemCheck {
   if (!latestSuccessfulRun) return { ok: false, detail: "no successful health-check run recorded" };
@@ -65,7 +67,9 @@ export function evaluateReconciliationCheck(latestSuccessfulRun: HealthCheckRunF
   if (ageMinutes > reconciliationMaxAgeMinutes) return { ok: false, detail: `last successful health check ${Math.round(ageMinutes)} min ago (limit ${reconciliationMaxAgeMinutes})` };
   const problems = latestSuccessfulRun.details?.reconciliationProblems;
   if (!Array.isArray(problems)) return { ok: false, detail: "the last successful health check recorded no reconciliation result" };
-  if (problems.length > 0) return { ok: false, detail: `discrepancy: ${problems.map(String).join("; ")}` };
+  const discrepancies = problems.map(String).filter((problem) => !problem.startsWith(reconciliationRunFailedPrefix));
+  if (discrepancies.length > 0) return { ok: false, detail: `discrepancy: ${discrepancies.join("; ")}` };
+  if (problems.length > 0) return { ok: false, detail: `reconciliation did not run: ${problems.map(String).join("; ")}` };
   return { ok: true, detail: `IBKR and the book agree (checked ${Math.round(ageMinutes)} min ago)` };
 }
 

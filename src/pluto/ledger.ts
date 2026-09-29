@@ -172,6 +172,8 @@ export interface UpdatePlutoActionInput {
   orderRequestId?: string | null;
   gateResults?: PlutoGateResult[];
   fillPrice?: number | null;
+  /** Two-part orders only: the chosen option's price implied by the net fill (see impliedChosenLegPrice). */
+  impliedFillPrice?: number | null;
   pessimisticPnl?: number | null;
   realizedPnl?: number | null;
   evaluatedAt?: Date | null;
@@ -189,6 +191,7 @@ export async function updatePlutoAction(actionId: string, input: UpdatePlutoActi
       ...(input.orderRequestId !== undefined ? { order_request_id: input.orderRequestId } : {}),
       ...(input.gateResults !== undefined ? { gate_results: JSON.stringify(input.gateResults) } : {}),
       ...(input.fillPrice !== undefined ? { fill_price: input.fillPrice } : {}),
+      ...(input.impliedFillPrice !== undefined ? { implied_fill_price: input.impliedFillPrice } : {}),
       ...(input.pessimisticPnl !== undefined ? { pessimistic_pnl: input.pessimisticPnl } : {}),
       ...(input.realizedPnl !== undefined ? { realized_pnl: input.realizedPnl } : {}),
       ...(input.evaluatedAt !== undefined ? { evaluated_at: input.evaluatedAt } : {}),

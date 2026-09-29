@@ -40,6 +40,10 @@ describe("evaluateReconciliationCheck", () => {
     const check = evaluateReconciliationCheck({ started_at: minutesAgo(5), details: { reconciliationProblems: ["AAPL: IBKR 100, book 0"] } }, now);
     expect(check).toEqual({ ok: false, detail: "discrepancy: AAPL: IBKR 100, book 0" });
   });
+  it("fails without a discrepancy (so no breaker) when reconciliation could not run", () => {
+    const check = evaluateReconciliationCheck({ started_at: minutesAgo(5), details: { reconciliationProblems: ["Reconciliation check itself failed: timeout"] } }, now);
+    expect(check).toEqual({ ok: false, detail: "reconciliation did not run: Reconciliation check itself failed: timeout" });
+  });
   it("fails when a successful run carries no reconciliation result", () => {
     expect(evaluateReconciliationCheck({ started_at: minutesAgo(5), details: null }, now).ok).toBe(false);
     expect(evaluateReconciliationCheck({ started_at: minutesAgo(5), details: {} }, now).detail).toBe("the last successful health check recorded no reconciliation result");

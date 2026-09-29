@@ -366,6 +366,7 @@ function serializeAction(row: Record<string, unknown>, realized?: PlutoActionRea
     referenceBid: num(row.reference_bid),
     referenceMid: num(row.reference_mid),
     fillPrice: num(row.fill_price),
+    impliedFillPrice: num(row.implied_fill_price),
     pessimisticPnl: num(row.pessimistic_pnl),
     // Derived at read time from the legs this action opened (see pluto/actionRealizedPnl.ts); the column is not read.
     realizedPnl: realized?.realizedPnl ?? null,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareFillsWithReference, referenceForAdoptedOrder } from "./executor.js";
+import { compareFillsWithReference, impliedChosenLegPrice, otherLegOrderPrices, referenceForAdoptedOrder } from "./executor.js";
 
 describe("compareFillsWithReference", () => {
   const option = (side: "sell" | "buy", quantity: number, price: number) => ({ side, quantity, price, multiplier: 100 });
@@ -45,5 +45,25 @@ describe("referenceForAdoptedOrder", () => {
     expect(referenceForAdoptedOrder({ kind: "open_cash_secured_put", symbol: "HOOD", reference_bid: "2.0500", reference_mid: "2.1", limit_price: "2.1", quantity: 2, contract: { strike: 100, expiry: "2026-10-16" } })).toEqual({ price: 2.05, side: "sell", multiplier: 100, description: "HOOD 2× open_cash_secured_put $100 2026-10-16" });
     expect(referenceForAdoptedOrder({ kind: "close_leg", symbol: "COIN", reference_bid: null, reference_mid: null, limit_price: "0.40", quantity: 1, contract: null })).toMatchObject({ price: 0.4, side: "buy", multiplier: 100 });
     expect(referenceForAdoptedOrder({ kind: "close_shares", symbol: "AAOI", reference_bid: "101.4", reference_mid: null, limit_price: null, quantity: 40, contract: null })).toMatchObject({ price: 101.4, side: "sell", multiplier: 1 });
+  });
+});
+
+describe("impliedChosenLegPrice", () => {
+  const option = (side: "sell" | "buy", quantity: number, price: number) => ({ side, quantity, price, multiplier: 100 });
+  const call = { side: "sell" as const, multiplier: 100 };
+
+  it("buy-write: the call's share of the net with the shares at our price (COHR, 2026-09-21)", () => {
+    const others = otherLegOrderPrices(call, [{ role: "stock", action: "BUY", unitPrice: 328.52 }, { role: "option", action: "SELL", unitPrice: 7.9 }]);
+    expect(others).toEqual([{ side: "buy", price: 328.52, multiplier: 1 }]);
+    expect(impliedChosenLegPrice(call, others, [option("sell", 1, 6.86), { side: "buy", quantity: 100, price: 327.48, multiplier: 1 }])).toBeCloseTo(7.9, 6);
+  });
+  it("roll: the new option's share of the net credit with the buyback at our price (AMAT, 2026-09-10)", () => {
+    const others = otherLegOrderPrices(call, [{ role: "option", action: "BUY", unitPrice: 1.61 }, { role: "option", action: "SELL", unitPrice: 4.6 }]);
+    expect(impliedChosenLegPrice(call, others, [option("buy", 1, 2.05), option("sell", 1, 5.04)])).toBeCloseTo(4.6, 6);
+  });
+  it("is null for a single-leg order or before the chosen leg fills", () => {
+    expect(otherLegOrderPrices(call, [{ role: "option", action: "SELL", unitPrice: 2 }])).toEqual([]);
+    expect(impliedChosenLegPrice(call, [], [option("sell", 1, 2)])).toBeNull();
+    expect(impliedChosenLegPrice(call, [{ side: "buy", price: 1, multiplier: 100 }], [option("buy", 1, 1)])).toBeNull();
   });
 });
