@@ -853,6 +853,10 @@ async function upsertSplitCoveredCallPosition(
     if (siblingStillLive) continue;
 
     const sourcePosition = await db("positions").where({ id: candidate.position_id }).first();
+    // A leftover-stock position has no option legs, so the check above can't tell it from a
+    // stale roll source. Once this position owns its shares the hand-off already happened
+    // (once), and the leftover is resized by upsertLeftoverStockPosition, not recycled.
+    if (ownStockLeg && sourcePosition?.strategy_key === "unstructured") continue;
     const handedOff = await handOffOpenStockLegs(candidate.position_id, symbol, `to covered call position ${positionId}`);
     if (!ownStockLeg && handoffEntryPrice === undefined) handoffEntryPrice = handedOff.get(stockConId);
 

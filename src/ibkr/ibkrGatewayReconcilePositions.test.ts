@@ -46,10 +46,10 @@ function heldStock(symbol: string, conId: number, quantity: number, avgCost: num
   return { contract: { conId, symbol, secType: SecType.STK, multiplier: "" as unknown as number, strike: 0, lastTradeDateOrContractMonth: "" }, quantity, avgCost };
 }
 
-function heldShortOption(symbol: string, conId: number, right: OptionType, strike: number, expiryIsoDate: string, avgCostPerContract: number): IbkrHeldPosition {
+function heldShortOption(symbol: string, conId: number, right: OptionType, strike: number, expiryIsoDate: string, avgCostPerContract: number, contracts = 1): IbkrHeldPosition {
   return {
     contract: { conId, symbol, secType: SecType.OPT, right, strike, lastTradeDateOrContractMonth: expiryIsoDate.replaceAll("-", ""), multiplier: 100 },
-    quantity: -1,
+    quantity: -contracts,
     avgCost: avgCostPerContract,
   };
 }
@@ -197,6 +197,44 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(await positionsFor(ticker.id)).toHaveLength(2);
     expect(await legsFor(coveredCall.id)).toHaveLength(2);
     expect((await legsFor(coveredCall.id)).filter((leg) => leg.exit_at === null)).toHaveLength(2);
+  });
+
+  it("a multi-contract call filling one lot at a time: the leftover shares stay one position instead of being closed and recreated every pass", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const expiry = isoDateDaysFromToday(20);
+    const holdings = (contractsFilled: number) => [
+      heldStock(ticker.symbol, stockConId, 300, 101),
+      heldShortOption(ticker.symbol, callConId, OptionType.Call, 103, expiry, 150, contractsFilled),
+    ];
+    const openLegs = async (positionId: string) => (await legsFor(positionId)).filter((leg) => leg.exit_at === null);
+
+    await runPass(holdings(1));
+    const afterFirstFill = await positionsFor(ticker.id);
+    expect(afterFirstFill.map((position) => position.strategy_key).sort()).toEqual(["covered_call", "unstructured"]);
+    const leftoverId = afterFirstFill.find((position) => position.strategy_key === "unstructured")!.id;
+    const coveredCallId = afterFirstFill.find((position) => position.strategy_key === "covered_call")!.id;
+
+    // Same holdings on later passes (the 60s loop while the order is still partly filled): no new positions.
+    await runPass(holdings(1));
+    await runPass(holdings(1));
+    expect(await positionsFor(ticker.id)).toHaveLength(2);
+    expect((await openLegs(leftoverId)).map((leg) => Number(leg.quantity))).toEqual([200]);
+
+    await runPass(holdings(2));
+    await runPass(holdings(2));
+    expect(await positionsFor(ticker.id)).toHaveLength(2);
+    expect((await openLegs(leftoverId)).map((leg) => Number(leg.quantity))).toEqual([100]);
+    expect(Number((await legsFor(coveredCallId)).find((leg) => leg.leg_type === "stock")!.quantity)).toBe(200);
+
+    await runPass(holdings(3));
+    const finalPositions = await positionsFor(ticker.id);
+    expect(finalPositions).toHaveLength(2);
+    expect(finalPositions.find((position) => position.id === leftoverId)!.status).toBe("closed");
+    expect(finalPositions.find((position) => position.id === coveredCallId)!.status).toBe("open");
+    const finalStockLeg = (await openLegs(coveredCallId)).find((leg) => leg.leg_type === "stock")!;
+    expect(Number(finalStockLeg.quantity)).toBe(300);
   });
 
   it("covered call expires with the shares retained: the covered call closes as expired and hands its shares to a leftover-stock position", async () => {
