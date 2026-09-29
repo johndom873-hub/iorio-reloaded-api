@@ -46,6 +46,8 @@ export interface PlutoSettings {
   unfilledCancelMinutes: number;
   maxEdgeDriftVp: number;
   tickerCooldownSessions: number;
+  /** A fill this far (% of the reference price) past the reference trips the fill_slippage breaker. */
+  maxFillSlippagePct: number;
   // Model
   modelId: string;
   reasoningEffort: PlutoReasoningEffort;
@@ -109,6 +111,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   unfilledCancelMinutes: { column: "unfilled_cancel_minutes", kind: "integer", min: 1 },
   maxEdgeDriftVp: { column: "max_edge_drift_vp", kind: "number", min: 0 },
   tickerCooldownSessions: { column: "ticker_cooldown_sessions", kind: "integer", min: 0 },
+  maxFillSlippagePct: { column: "max_fill_slippage_pct", kind: "number", min: 0, max: 100 },
   modelId: { column: "model_id", kind: "text" },
   reasoningEffort: { column: "reasoning_effort", kind: "text", oneOf: ["low", "medium", "high"] },
   callTimeoutSeconds: { column: "call_timeout_seconds", kind: "integer", min: 5 },

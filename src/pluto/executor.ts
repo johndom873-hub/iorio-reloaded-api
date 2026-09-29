@@ -185,6 +185,48 @@ export interface WatchResult {
 }
 
 /** Average fill price across this order's recorded executions, weighted by quantity; null until something filled. */
+/** Pure: how far past the reference a fill landed, as % of the reference — positive means worse than the reference (below the bid for a sell, above the ask for a buy). */
+export function fillSlippagePct(reference: { price: number; side: "sell" | "buy" }, fillPrice: number): number {
+  if (!(reference.price > 0)) return 0;
+  const adverse = reference.side === "sell" ? reference.price - fillPrice : fillPrice - reference.price;
+  return (adverse / reference.price) * 100;
+}
+
+export interface AdoptableOrder {
+  orderId: string;
+  actionId: string;
+  symbol: string;
+  kind: string;
+  createdAtMs: number;
+  reference: { price: number; side: "sell" | "buy"; multiplier: number };
+  description: string;
+}
+
+/** Pure: the watch reference for an order found working after a restart, rebuilt from its action row. */
+export function referenceForAdoptedOrder(action: { kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown }): AdoptableOrder["reference"] & { description: string } {
+  const num = (value: unknown) => (value === null || value === undefined || Number.isNaN(Number(value)) ? null : Number(value));
+  const price = num(action.reference_bid) ?? num(action.reference_mid) ?? num(action.limit_price) ?? 0;
+  const side: "sell" | "buy" = action.kind === "close_leg" ? "buy" : "sell";
+  const multiplier = action.kind === "close_shares" ? 1 : 100;
+  const contract = (action.contract ?? {}) as { strike?: number; expiry?: string; strategyKey?: string };
+  const description = `${action.symbol} ${num(action.quantity) ?? ""}× ${action.kind}${contract.strike !== undefined ? ` $${contract.strike}` : ""}${contract.expiry ? ` ${contract.expiry}` : ""}`.replace(/\s+/g, " ").trim();
+  return { price, side, multiplier, description };
+}
+
+/** Pluto orders IBKR may still be working: everything with a pluto_action_id that is not final. */
+export async function loadWorkingPlutoOrders(): Promise<AdoptableOrder[]> {
+  const rows: { id: string; status: string; ibkr_status: string | null; created_at: Date; action_id: string; kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown }[] = await db("order_requests as o")
+    .join("pluto_actions as a", "a.id", "o.pluto_action_id")
+    .whereNotIn("o.status", ["filled", "cancelled", "rejected", "error"])
+    .select("o.id", "o.status", "o.ibkr_status", "o.created_at", "a.id as action_id", "a.kind", "a.symbol", "a.reference_bid", "a.reference_mid", "a.limit_price", "a.quantity", "a.contract");
+  return rows
+    .filter((row) => !isOrderRequestFinal({ status: row.status, ibkr_status: row.ibkr_status }))
+    .map((row) => {
+      const reference = referenceForAdoptedOrder(row);
+      return { orderId: row.id, actionId: row.action_id, symbol: row.symbol, kind: row.kind, createdAtMs: new Date(row.created_at).getTime(), reference: { price: reference.price, side: reference.side, multiplier: reference.multiplier }, description: reference.description };
+    });
+}
+
 export async function averageFillPrice(orderId: string): Promise<number | null> {
   const row = await db("trades").where({ source_order_request_id: orderId }).select(db.raw("sum(price * quantity) / nullif(sum(quantity), 0) as avg_price")).first();
   return row?.avg_price === null || row?.avg_price === undefined ? null : Number(row.avg_price);
@@ -197,12 +239,13 @@ export async function averageFillPrice(orderId: string): Promise<number | null> 
 export async function watchPlutoOrder(
   api: InternalApiClient,
   settings: PlutoSettings,
-  input: { actionId: string; orderId: string; symbol: string; reference: { price: number; side: "sell" | "buy"; multiplier: number }; description: string; cancelByMs?: number | null },
+  input: { actionId: string; orderId: string; symbol: string; reference: { price: number; side: "sell" | "buy"; multiplier: number }; description: string; cancelByMs?: number | null; startedAtMs?: number },
   options: { pollIntervalMs?: number; now?: () => number } = {},
 ): Promise<WatchResult> {
   const pollIntervalMs = options.pollIntervalMs ?? 5_000;
   const now = options.now ?? (() => Date.now());
-  const startedAt = now();
+  // An adopted order (agent restarted while it was working) keeps its original clock.
+  const startedAt = input.startedAtMs ?? now();
   // Unfilled orders are cancelled after the configured minutes, or before the session close if that comes first.
   const cancelAtMs = Math.min(startedAt + settings.unfilledCancelMinutes * 60_000, input.cancelByMs ?? Number.POSITIVE_INFINITY);
   let cancelRequested = false;
@@ -229,6 +272,13 @@ export async function watchPlutoOrder(
         await tripPlutoBreaker("order_error", detail);
         await recordPlutoEvent("breaker_tripped", { name: "order_error", detail });
         await notifyTelegram(`🛑 Pluto breaker tripped (order_error): ${detail}. Pluto is paused until a human resets it.`);
+      } else if (fillPrice !== null && fillSlippagePct(input.reference, fillPrice) > settings.maxFillSlippagePct) {
+        // Fill far from the reference (design breaker list): the market moved through the limit, or the limit
+        // was wrong. Either way a human looks before the next order.
+        const detail = `${input.description}: filled at ${fillPrice.toFixed(2)} vs reference ${input.reference.price.toFixed(2)} (${fillSlippagePct(input.reference, fillPrice).toFixed(1)}% past it, limit ${settings.maxFillSlippagePct}%)`;
+        await tripPlutoBreaker("fill_slippage", detail);
+        await recordPlutoEvent("breaker_tripped", { name: "fill_slippage", detail });
+        await notifyTelegram(`🛑 Pluto breaker tripped (fill_slippage): ${detail}. Pluto is paused until a human resets it.`);
       } else if (settings.telegramVerbosity !== "off") {
         await notifyTelegram(`🪐 Pluto order ${outcome}: ${input.description}${fillPrice !== null ? ` (avg fill ${fillPrice.toFixed(2)})` : ""}`);
       }

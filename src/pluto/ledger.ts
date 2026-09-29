@@ -217,6 +217,7 @@ export type PlutoEventType =
   | "lines_changed"
   | "session_schedule"
   | "stress_override_changed"
+  | "order_adopted"
   | "warning";
 
 /** Appends to the timeline and pushes a `pluto_event` notification so open screens update live. */

@@ -14,6 +14,9 @@ import { describePlutoBlock, loadPlutoState, type PlutoState } from "./stateStor
 // recorded on the pass row, so the screen shows the whole board, not just the first failure;
 // any failure means no model call. Fail closed: a check that cannot be evaluated fails.
 
+/** The health-check job runs every 10 minutes; older than this and Pluto no longer trusts the book (Marcelo to veto). */
+export const reconciliationMaxAgeMinutes = 30;
+
 export interface PlutoSystemCheckContext {
   state: PlutoState;
   marketState: MarketSessionState;
@@ -114,6 +117,19 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   record("cost_ceiling", counters.costTodayUsd < settings.dailyCostCeilingUsd, `$${counters.costTodayUsd.toFixed(3)} of $${settings.dailyCostCeilingUsd} today`);
   record("model_calls_cap", counters.modelCallsToday < settings.maxModelCallsPerSession, `${counters.modelCallsToday} of ${settings.maxModelCallsPerSession} calls today`);
   record("actions_cap", counters.actionsToday < settings.maxActionsPerSession, `${counters.actionsToday} of ${settings.maxActionsPerSession} actions today`);
+  // Position reconciliation: the 10-minute health-check job compares IBKR's holdings with the book and
+  // stores what it found in job_runs.details.reconciliationProblems. Stale = three missed runs.
+  try {
+    const health = await db("job_runs").where({ job_name: "ibkr_health_check" }).orderBy("started_at", "desc").first("started_at", "details");
+    const ageMinutes = health ? (now.getTime() - new Date(health.started_at).getTime()) / 60_000 : null;
+    const problems: string[] = Array.isArray(health?.details?.reconciliationProblems) ? health.details.reconciliationProblems.map(String) : [];
+    if (ageMinutes === null || ageMinutes > reconciliationMaxAgeMinutes) record("reconciliation", false, ageMinutes === null ? "no health-check run recorded" : `last health check ${Math.round(ageMinutes)} min ago (limit ${reconciliationMaxAgeMinutes})`);
+    else if (problems.length > 0) record("reconciliation", false, `discrepancy: ${problems.join("; ")}`);
+    else record("reconciliation", true, `IBKR and the book agree (checked ${Math.round(ageMinutes)} min ago)`);
+  } catch (error) {
+    record("reconciliation", false, `could not read the health check: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   const trailingFailures = await countTrailingModelFailures(now);
   record("model_failures", trailingFailures < settings.consecutiveModelFailuresBreaker, `${trailingFailures} consecutive model failure(s), breaker at ${settings.consecutiveModelFailuresBreaker}`);
 

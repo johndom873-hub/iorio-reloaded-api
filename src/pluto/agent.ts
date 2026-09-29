@@ -8,6 +8,7 @@ import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
 import type { PlutoConfig } from "./config.js";
 import { labelExpiredCandidateOutcomes } from "./candidateOutcomes.js";
+import { loadWorkingPlutoOrders, watchPlutoOrder } from "./executor.js";
 import { plutoEventsRetentionDays, pruneOldPlutoEvents, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRunnerContext } from "./passRunner.js";
@@ -48,6 +49,7 @@ export class PlutoAgent {
   private pendingForce = false;
   private passChain: Promise<unknown> = Promise.resolve();
   private readonly watches = new Set<Promise<unknown>>();
+  private readonly watchedOrderIds = new Set<string>();
   private openingLookDoneFor: string | null = null;
   private sessionCloseReadFor: string | null = null;
   private sessionCloseWarnedFor: string | null = null;
@@ -66,14 +68,23 @@ export class PlutoAgent {
       lastFingerprintBySymbol: new Map(),
       lastModelEvaluationAtBySymbol: new Map(),
       lastModelCallAtMs: { value: null },
-      trackWatch: (promise) => {
+      trackWatch: (promise, orderId) => {
         this.watches.add(promise);
-        promise.catch((error) => console.error(`Pluto: order watch failed — ${error instanceof Error ? error.message : error}`)).finally(() => this.watches.delete(promise));
+        this.watchedOrderIds.add(orderId);
+        promise
+          .catch((error) => console.error(`Pluto: order watch failed — ${error instanceof Error ? error.message : error}`))
+          .finally(() => {
+            this.watches.delete(promise);
+            this.watchedOrderIds.delete(orderId);
+          });
       },
     };
   }
 
   async start(): Promise<void> {
+    // The first housekeeping tick borrows the IBKR connection while it is still connecting; the default 3 s
+    // borrow timeout made the day's first session-close read fail every boot.
+    sharedLiveConnection.setBorrowTimeoutMs(30_000);
     this.settings = await loadPlutoSettings();
     this.marketWatch.updateSettings(this.settings);
     await recordPlutoEvent("agent_started", { environment: readAppEnvironment(), release: currentRelease() });
@@ -147,6 +158,7 @@ export class PlutoAgent {
       this.settings = await loadPlutoSettings();
       this.marketWatch.updateSettings(this.settings);
       await this.readSessionCloseOncePerDay();
+      await this.adoptWorkingOrders();
       await this.pruneEventsOncePerDay();
       await this.labelCandidateOutcomesOncePerDay();
       const { allowed, insideWindow } = await this.isAllowedToAct();
@@ -190,6 +202,31 @@ export class PlutoAgent {
       if (result.labelled > 0 || result.missingBars.length > 0) console.log(`Pluto: labelled ${result.labelled} candidate outcome(s), ${result.pending} pending expiry${result.missingBars.length > 0 ? `, no bar for ${result.missingBars.join(", ")}` : ""}.`);
     } catch (error) {
       console.warn(`Pluto: candidate outcome labelling failed — ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  /**
+   * Orders IBKR may still be working that no watch in this process covers — after a restart, or a
+   * deploy mid-session. Each gets a watch with its original clock, so the unfilled-cancel timeout and
+   * the cancel-by-close still apply. Runs on boot and every housekeeping tick.
+   */
+  private async adoptWorkingOrders(): Promise<void> {
+    if (!this.settings) return;
+    try {
+      const working = await loadWorkingPlutoOrders();
+      const orphans = working.filter((order) => !this.watchedOrderIds.has(order.orderId));
+      if (orphans.length === 0) return;
+      const session = await resolvePlutoSession(new Date(), this.settings);
+      for (const order of orphans) {
+        await recordPlutoEvent("order_adopted", { actionId: order.actionId, orderId: order.orderId, symbol: order.symbol, description: order.description, ageMinutes: Math.round((Date.now() - order.createdAtMs) / 60_000) });
+        this.context.trackWatch(
+          watchPlutoOrder(this.api, this.settings, { actionId: order.actionId, orderId: order.orderId, symbol: order.symbol, reference: order.reference, description: order.description, cancelByMs: session.cancelByMs, startedAtMs: order.createdAtMs }),
+          order.orderId,
+        );
+      }
+      console.log(`Pluto: adopted ${orphans.length} working order(s) left from a previous process.`);
+    } catch (error) {
+      console.warn(`Pluto: could not adopt working orders — ${error instanceof Error ? error.message : error}`);
     }
   }
 
