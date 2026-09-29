@@ -6,6 +6,14 @@ import { kindFromCandidateId, type PlutoDecision } from "./decisionSchema.js";
 
 export const openRouterDecisionsUrl = "https://openrouter.ai/api/alpha/decisions";
 
+/** The alias OpenRouter resolves to the newest Jev; the response still names the exact version served, which the ledger records. */
+export const jevLatestModelId = "~typesafe/jev-latest";
+
+/** Pure: a model id that must go to the Decisions API rather than chat/completions ("typesafe/jev-1.13", "~typesafe/jev-latest"). */
+export function isDecisionsModel(modelId: string): boolean {
+  return modelId.replace(/^~/, "").startsWith("typesafe/");
+}
+
 export interface JevQuestions {
   [name: string]: { type: "choice"; instructions: string; criteria: Record<string, string> } | { type: "noul"; instructions: string } | { type: "score"; instructions: string; criteria: string[] };
 }

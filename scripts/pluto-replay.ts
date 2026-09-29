@@ -5,19 +5,19 @@ import "dotenv/config";
 // routing shows up here), and agreement with the recorded verdict and the Edge $ top pick.
 //
 // Usage:
-//   npm run pluto:replay -- --latest 20 --model openai/gpt-6-luna --model typesafe/jev-1.13
-//   npm run pluto:replay -- --pass <passId> --model typesafe/jev-1.13 --effort low
+//   npm run pluto:replay -- --latest 20 --model openai/gpt-6-luna --model ~typesafe/jev-latest
+//   npm run pluto:replay -- --pass <passId> --model ~typesafe/jev-latest --effort low
 //   npm run pluto:replay -- --fixture tmp/somePayload.json --model openai/gpt-6-luna
 //   add --calls 2 to send two seeded calls per case (agreement rate), --json for machine output,
 //   --current-prompt to use today's prompt instead of the one stored with each decision.
-//   A typesafe/* model goes to the Decisions API (choice over the offered ids + no_trade).
+//   A typesafe model (typesafe/jev-1.13 or the ~typesafe/jev-latest alias) goes to the Decisions API (choice over the offered ids + no_trade).
 // Every call costs real money through OPENROUTER_API_KEY; the summary prints the total.
 import { readFileSync } from "node:fs";
 import { db } from "../src/db/connection.js";
 import { parsePlutoDecision, reconcileAgreement, type PlutoDecision } from "../src/pluto/decisionSchema.js";
 import { callPlutoModel, type PlutoModelCallResult } from "../src/pluto/modelClient.js";
 import { buildPlutoSystemPrompt } from "../src/pluto/prompt.js";
-import { callJevDecision, jevQuestionsForPayload, plutoDecisionFromJev } from "../src/pluto/decisionsClient.js";
+import { callJevDecision, isDecisionsModel, jevQuestionsForPayload, plutoDecisionFromJev } from "../src/pluto/decisionsClient.js";
 import { loadPlutoPrompt } from "../src/pluto/prompts.js";
 import { loadPlutoSettings } from "../src/pluto/settingsStore.js";
 
@@ -113,9 +113,9 @@ async function runCase(replayCase: ReplayCase, modelId: string, effort: "low" | 
   const offeredIds = collectOfferedIds(replayCase.payload);
   const userPayload = JSON.stringify(replayCase.payload);
   const results: { call: Pick<PlutoModelCallResult, "ok" | "servedModelId" | "latencyMs" | "costUsd" | "tokensIn" | "tokensOut">; decision: PlutoDecision | null; error: string | null }[] = [];
-  const isDecisionsModel = modelId.startsWith("typesafe/");
-  for (let seed = 1; seed <= (isDecisionsModel ? 1 : calls); seed += 1) {
-    if (isDecisionsModel) {
+  const decisionsModel = isDecisionsModel(modelId);
+  for (let seed = 1; seed <= (decisionsModel ? 1 : calls); seed += 1) {
+    if (decisionsModel) {
       const call = await callJevDecision({ apiKey: process.env.OPENROUTER_API_KEY!, modelId, state: replayCase.payload, questions: jevQuestionsForPayload(replayCase.payload, offeredIds), timeoutSeconds });
       results.push({ call, decision: call.answers ? plutoDecisionFromJev(call.answers, offeredIds) : null, error: call.error });
       continue;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { jevQuestionsForPayload, plutoDecisionFromJev } from "./decisionsClient.js";
+import { isDecisionsModel, jevQuestionsForPayload, plutoDecisionFromJev } from "./decisionsClient.js";
 
 const offered = new Set(["HOOD:cash_secured_put:2026-10-16:100", "HOOD:roll:leg1:2026-10-30:95"]);
 const payload = {
@@ -23,5 +23,13 @@ describe("plutoDecisionFromJev", () => {
     expect(plutoDecisionFromJev({ action: { type: "choice", choice: "no_trade", probabilities: { no_trade: 0.9 }, confidence: 0.85 } }, offered).decision).toBe("no_trade");
     expect(plutoDecisionFromJev({ action: { type: "choice", choice: "HOOD:cash_secured_put:2026-10-16:100", probabilities: {}, confidence: 0.9 }, system_concern: { type: "noul", noul: 0.7 } }, offered).decision).toBe("abstain_system_concern");
     expect(plutoDecisionFromJev({ action: { type: "choice", choice: "made_up", probabilities: {}, confidence: 0.9 } }, offered).decision).toBe("no_trade");
+  });
+});
+
+describe("isDecisionsModel", () => {
+  it("recognises pinned and alias ids and nothing else", () => {
+    expect(isDecisionsModel("typesafe/jev-1.13")).toBe(true);
+    expect(isDecisionsModel("~typesafe/jev-latest")).toBe(true);
+    expect(isDecisionsModel("openai/gpt-6-luna")).toBe(false);
   });
 });

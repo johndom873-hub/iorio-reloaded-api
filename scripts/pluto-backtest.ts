@@ -4,7 +4,7 @@ import "dotenv/config";
 // approved hold-to-expiry formula), the P&L of the candidate each decision-maker picks.
 //
 //   npm run pluto:backtest                          # free: the decision as recorded, the Edge $ top pick, best possible, always no-trade
-//   npm run pluto:backtest -- --model openai/gpt-6-luna --model typesafe/jev-1.13   # replays each case through those models (costs money)
+//   npm run pluto:backtest -- --model openai/gpt-6-luna --model ~typesafe/jev-latest   # replays each case through those models (costs money)
 //   options: --since 2026-10-01  --limit 200  --allow-partial (score cases with some candidates unlabelled)
 //            --current-prompt (today's prompt instead of the stored one)  --json
 //
@@ -12,7 +12,7 @@ import "dotenv/config";
 // holding it to expiry would have made at the bid the model saw.
 import { db } from "../src/db/connection.js";
 import { labelExpiredCandidateOutcomes, loadCandidateOutcomes } from "../src/pluto/candidateOutcomes.js";
-import { callJevDecision, jevQuestionsForPayload, plutoDecisionFromJev } from "../src/pluto/decisionsClient.js";
+import { callJevDecision, isDecisionsModel, jevQuestionsForPayload, plutoDecisionFromJev } from "../src/pluto/decisionsClient.js";
 import { parsePlutoDecision, type PlutoDecision } from "../src/pluto/decisionSchema.js";
 import { callPlutoModel } from "../src/pluto/modelClient.js";
 import { buildPlutoSystemPrompt } from "../src/pluto/prompt.js";
@@ -163,7 +163,7 @@ async function modelPick(backtestCase: BacktestCase, modelId: string, systemProm
   let error: string | null = null;
   let costUsd = 0;
   let latencyMs = 0;
-  if (modelId.startsWith("typesafe/")) {
+  if (isDecisionsModel(modelId)) {
     const call = await callJevDecision({ apiKey, modelId, state: backtestCase.payload, questions: jevQuestionsForPayload(backtestCase.payload, backtestCase.offeredIds), timeoutSeconds });
     decision = call.answers ? plutoDecisionFromJev(call.answers, backtestCase.offeredIds) : null;
     error = call.error;
