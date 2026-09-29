@@ -14,8 +14,11 @@ import { describePlutoBlock, loadPlutoState, type PlutoState } from "./stateStor
 // recorded on the pass row, so the screen shows the whole board, not just the first failure;
 // any failure means no model call. Fail closed: a check that cannot be evaluated fails.
 
-/** The health-check job runs every 10 minutes; older than this and Pluto no longer trusts the book (Marcelo to veto). */
-export const reconciliationMaxAgeMinutes = 30;
+/**
+ * The health-check job runs at :10, :20, :40 and :50 (it skips the :00/:30 Scheduler slots), so
+ * gaps are already up to 20 minutes: 35 tolerates one missed run and fails on two (Marcelo 2026-09-29).
+ */
+export const reconciliationMaxAgeMinutes = 35;
 
 export interface PlutoSystemCheckContext {
   state: PlutoState;
@@ -44,6 +47,26 @@ export function isInsideTradingWindow(now: Date, todayEasternIso: string, window
   const start = easternInstant(todayEasternIso, Math.floor(minutesOfDay(windowStartEt) / 60), minutesOfDay(windowStartEt) % 60).getTime();
   const end = easternInstant(todayEasternIso, Math.floor(minutesOfDay(windowEndEt) / 60), minutesOfDay(windowEndEt) % 60).getTime();
   return now.getTime() >= start && now.getTime() < end;
+}
+
+export interface HealthCheckRunForReconciliation {
+  started_at: Date | string;
+  details: { reconciliationProblems?: unknown } | null;
+}
+
+/**
+ * Pure: the reconciliation check from the newest *successful* health-check run. A running or
+ * failed run carries no reconciliation result, so it must never count as "IBKR and the book agree".
+ * The "discrepancy" detail prefix is what trips the reconciliation breaker in the pass runner.
+ */
+export function evaluateReconciliationCheck(latestSuccessfulRun: HealthCheckRunForReconciliation | undefined, now: Date): PlutoSystemCheck {
+  if (!latestSuccessfulRun) return { ok: false, detail: "no successful health-check run recorded" };
+  const ageMinutes = (now.getTime() - new Date(latestSuccessfulRun.started_at).getTime()) / 60_000;
+  if (ageMinutes > reconciliationMaxAgeMinutes) return { ok: false, detail: `last successful health check ${Math.round(ageMinutes)} min ago (limit ${reconciliationMaxAgeMinutes})` };
+  const problems = latestSuccessfulRun.details?.reconciliationProblems;
+  if (!Array.isArray(problems)) return { ok: false, detail: "the last successful health check recorded no reconciliation result" };
+  if (problems.length > 0) return { ok: false, detail: `discrepancy: ${problems.map(String).join("; ")}` };
+  return { ok: true, detail: `IBKR and the book agree (checked ${Math.round(ageMinutes)} min ago)` };
 }
 
 /** Pure: the daily-loss breaker input — today's move against last night's net liquidation value. */
@@ -117,15 +140,12 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   record("cost_ceiling", counters.costTodayUsd < settings.dailyCostCeilingUsd, `$${counters.costTodayUsd.toFixed(3)} of $${settings.dailyCostCeilingUsd} today`);
   record("model_calls_cap", counters.modelCallsToday < settings.maxModelCallsPerSession, `${counters.modelCallsToday} of ${settings.maxModelCallsPerSession} calls today`);
   record("actions_cap", counters.actionsToday < settings.maxActionsPerSession, `${counters.actionsToday} of ${settings.maxActionsPerSession} actions today`);
-  // Position reconciliation: the 10-minute health-check job compares IBKR's holdings with the book and
-  // stores what it found in job_runs.details.reconciliationProblems. Stale = three missed runs.
+  // Position reconciliation: the health-check job compares IBKR's holdings with the book and
+  // stores what it found in job_runs.details.reconciliationProblems.
   try {
-    const health = await db("job_runs").where({ job_name: "ibkr_health_check" }).orderBy("started_at", "desc").first("started_at", "details");
-    const ageMinutes = health ? (now.getTime() - new Date(health.started_at).getTime()) / 60_000 : null;
-    const problems: string[] = Array.isArray(health?.details?.reconciliationProblems) ? health.details.reconciliationProblems.map(String) : [];
-    if (ageMinutes === null || ageMinutes > reconciliationMaxAgeMinutes) record("reconciliation", false, ageMinutes === null ? "no health-check run recorded" : `last health check ${Math.round(ageMinutes)} min ago (limit ${reconciliationMaxAgeMinutes})`);
-    else if (problems.length > 0) record("reconciliation", false, `discrepancy: ${problems.join("; ")}`);
-    else record("reconciliation", true, `IBKR and the book agree (checked ${Math.round(ageMinutes)} min ago)`);
+    const latestSuccessfulRun = await db("job_runs").where({ job_name: "ibkr_health_check", status: "success" }).orderBy("started_at", "desc").first("started_at", "details");
+    const reconciliation = evaluateReconciliationCheck(latestSuccessfulRun, now);
+    record("reconciliation", reconciliation.ok, reconciliation.detail);
   } catch (error) {
     record("reconciliation", false, `could not read the health check: ${error instanceof Error ? error.message : String(error)}`);
   }

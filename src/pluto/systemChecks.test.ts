@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dailyLossPercent, isInsideTradingWindow } from "./systemChecks.js";
+import { dailyLossPercent, evaluateReconciliationCheck, isInsideTradingWindow } from "./systemChecks.js";
 
 describe("isInsideTradingWindow", () => {
   const today = "2026-09-28"; // EDT, UTC-4
@@ -22,5 +22,26 @@ describe("dailyLossPercent", () => {
     expect(dailyLossPercent(null, 1_000_000)).toBeNull();
     expect(dailyLossPercent(980_000, null)).toBeNull();
     expect(dailyLossPercent(980_000, 0)).toBeNull();
+  });
+});
+
+describe("evaluateReconciliationCheck", () => {
+  const now = new Date("2026-09-29T15:00:00Z");
+  const minutesAgo = (minutes: number) => new Date(now.getTime() - minutes * 60_000);
+
+  it("fails closed when there is no successful run", () => {
+    expect(evaluateReconciliationCheck(undefined, now)).toEqual({ ok: false, detail: "no successful health-check run recorded" });
+  });
+  it("passes on a clean run inside the limit and fails past it", () => {
+    expect(evaluateReconciliationCheck({ started_at: minutesAgo(35), details: { reconciliationProblems: [] } }, now).ok).toBe(true);
+    expect(evaluateReconciliationCheck({ started_at: minutesAgo(36), details: { reconciliationProblems: [] } }, now)).toEqual({ ok: false, detail: "last successful health check 36 min ago (limit 35)" });
+  });
+  it("reports a discrepancy with the prefix the breaker trips on", () => {
+    const check = evaluateReconciliationCheck({ started_at: minutesAgo(5), details: { reconciliationProblems: ["AAPL: IBKR 100, book 0"] } }, now);
+    expect(check).toEqual({ ok: false, detail: "discrepancy: AAPL: IBKR 100, book 0" });
+  });
+  it("fails when a successful run carries no reconciliation result", () => {
+    expect(evaluateReconciliationCheck({ started_at: minutesAgo(5), details: null }, now).ok).toBe(false);
+    expect(evaluateReconciliationCheck({ started_at: minutesAgo(5), details: {} }, now).detail).toBe("the last successful health check recorded no reconciliation result");
   });
 });
