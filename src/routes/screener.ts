@@ -97,6 +97,7 @@ screenerRouter.get("/", async (request, response) => {
       sector: row.sector,
       bestRank: row.best_rank,
       matchedScanCodes: row.matched_scan_codes,
+      lastPrice: row.last_price,
       avgShareVolume: row.avg_share_volume,
       avgOptionVolume: row.avg_option_volume,
       callOpenInterest: row.call_open_interest,
