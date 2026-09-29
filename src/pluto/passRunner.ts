@@ -13,6 +13,7 @@ import { executePlutoClose, executePlutoOrder, watchPlutoOrder } from "./executo
 import { buildCloseOffersForTicker, type CloseOffer } from "./closeActions.js";
 import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
 import { candidateSetFingerprint, classifyFingerprintChange, tickerFingerprint } from "./inputHash.js";
+import { ensurePlutoPrompt } from "./prompts.js";
 import { finishPlutoPass, recordPlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { callPlutoModel } from "./modelClient.js";
@@ -108,9 +109,9 @@ async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSetting
 }
 
 export async function runPlutoPass(request: PassRequest, context: PassRunnerContext): Promise<PassSummary> {
-  const passId = await startPlutoPass(request.trigger, request.triggerDetail);
-  await recordPlutoEvent("pass_started", { passId, trigger: request.trigger, symbols: request.symbols });
   const settings = await loadPlutoSettings();
+  const passId = await startPlutoPass(request.trigger, request.triggerDetail, settings);
+  await recordPlutoEvent("pass_started", { passId, trigger: request.trigger, symbols: request.symbols });
   const now = new Date();
   const nowMs = now.getTime();
 
@@ -236,6 +237,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     trigger: { kind: trigger, detail: triggerDetail },
   });
   const systemPrompt = buildPlutoSystemPrompt(settings);
+  const promptId = await ensurePlutoPrompt(settings.promptVersion, systemPrompt);
   const userPayload = JSON.stringify(payload);
 
   // 6. Two calls that must agree (design item 7 / 25).
@@ -393,7 +395,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     const parsed = call.ok && call.rawText ? parsePlutoDecision(call.rawText, offeredIds) : null;
     const decisionOrNull = parsed && parsed.ok ? parsed.decision : null;
     const error = call.error ?? (parsed && !parsed.ok ? `invalid decision: ${parsed.error}` : null);
-    await recordPlutoDecision({ passId, callIndex, modelId: settings.modelId, servedModelId: call.servedModelId, inputPayload: callIndex === 1 ? payload : { sameAsCall: 1 }, rawOutput: call.rawText, parsedOutput: decisionOrNull ? { decision: decisionOrNull.decision, action_kind: decisionOrNull.actionKind, candidate_id: decisionOrNull.candidateId, size_tier: decisionOrNull.sizeTier, confidence: decisionOrNull.confidence, reasons: decisionOrNull.reasons, risks_acknowledged: decisionOrNull.risksAcknowledged, system_concerns: decisionOrNull.systemConcerns } : null, schemaValid: decisionOrNull !== null, latencyMs: call.latencyMs, tokensIn: call.tokensIn, tokensOut: call.tokensOut, costUsd: call.costUsd, error });
+    await recordPlutoDecision({ passId, callIndex, modelId: settings.modelId, servedModelId: call.servedModelId, promptId, inputPayload: callIndex === 1 ? payload : { sameAsCall: 1 }, rawOutput: call.rawText, parsedOutput: decisionOrNull ? { decision: decisionOrNull.decision, action_kind: decisionOrNull.actionKind, candidate_id: decisionOrNull.candidateId, size_tier: decisionOrNull.sizeTier, confidence: decisionOrNull.confidence, reasons: decisionOrNull.reasons, risks_acknowledged: decisionOrNull.risksAcknowledged, system_concerns: decisionOrNull.systemConcerns } : null, schemaValid: decisionOrNull !== null, latencyMs: call.latencyMs, tokensIn: call.tokensIn, tokensOut: call.tokensOut, costUsd: call.costUsd, error });
     return { callIndex, decision: decisionOrNull, error, servedModelId: call.servedModelId, tokensIn: call.tokensIn, tokensOut: call.tokensOut, costUsd: call.costUsd };
   }
 }

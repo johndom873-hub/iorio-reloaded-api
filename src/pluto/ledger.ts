@@ -30,8 +30,8 @@ export interface PlutoPassRow {
   servedModelIds: string[];
 }
 
-export async function startPlutoPass(trigger: PlutoTrigger, triggerDetail: Record<string, unknown> = {}): Promise<string> {
-  const [row] = await db("pluto_passes").insert({ trigger, trigger_detail: JSON.stringify(triggerDetail) }).returning("id");
+export async function startPlutoPass(trigger: PlutoTrigger, triggerDetail: Record<string, unknown> = {}, settingsSnapshot: unknown = null): Promise<string> {
+  const [row] = await db("pluto_passes").insert({ trigger, trigger_detail: JSON.stringify(triggerDetail), settings_snapshot: settingsSnapshot === null ? null : JSON.stringify(settingsSnapshot) }).returning("id");
   return row.id as string;
 }
 
@@ -90,6 +90,8 @@ export interface RecordPlutoDecisionInput {
   tokensOut: number | null;
   costUsd: number | null;
   error: string | null;
+  /** pluto_prompts row of the exact system prompt used (null for a call that never built one). */
+  promptId?: string | null;
 }
 
 export async function recordPlutoDecision(input: RecordPlutoDecisionInput): Promise<string> {
@@ -99,6 +101,7 @@ export async function recordPlutoDecision(input: RecordPlutoDecisionInput): Prom
       call_index: input.callIndex,
       model_id: input.modelId,
       served_model_id: input.servedModelId,
+      prompt_id: input.promptId ?? null,
       input_payload: JSON.stringify(input.inputPayload),
       raw_output: input.rawOutput,
       parsed_output: input.parsedOutput === null ? null : JSON.stringify(input.parsedOutput),

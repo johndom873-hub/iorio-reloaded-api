@@ -7,6 +7,7 @@ import { computeMarketSessionStatus, easternDateIso } from "../lib/marketSession
 import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
 import type { PlutoConfig } from "./config.js";
+import { labelExpiredCandidateOutcomes } from "./candidateOutcomes.js";
 import { plutoEventsRetentionDays, pruneOldPlutoEvents, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRunnerContext } from "./passRunner.js";
@@ -147,6 +148,7 @@ export class PlutoAgent {
       this.marketWatch.updateSettings(this.settings);
       await this.readSessionCloseOncePerDay();
       await this.pruneEventsOncePerDay();
+      await this.labelCandidateOutcomesOncePerDay();
       const { allowed, insideWindow } = await this.isAllowedToAct();
       if (!allowed || !insideWindow) {
         if (this.watching) {
@@ -174,6 +176,20 @@ export class PlutoAgent {
       }
     } catch (error) {
       console.error(`Pluto housekeeping failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  private outcomesLabelledFor: string | null = null;
+  /** Hold-to-expiry labels for every candidate offered in past passes, once the expiry has settled (backtest data). */
+  private async labelCandidateOutcomesOncePerDay(): Promise<void> {
+    const todayIso = easternDateIso(new Date());
+    if (this.outcomesLabelledFor === todayIso) return;
+    this.outcomesLabelledFor = todayIso;
+    try {
+      const result = await labelExpiredCandidateOutcomes();
+      if (result.labelled > 0 || result.missingBars.length > 0) console.log(`Pluto: labelled ${result.labelled} candidate outcome(s), ${result.pending} pending expiry${result.missingBars.length > 0 ? `, no bar for ${result.missingBars.join(", ")}` : ""}.`);
+    } catch (error) {
+      console.warn(`Pluto: candidate outcome labelling failed — ${error instanceof Error ? error.message : error}`);
     }
   }
 

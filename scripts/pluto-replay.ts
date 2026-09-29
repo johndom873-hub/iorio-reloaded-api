@@ -8,18 +8,24 @@ import "dotenv/config";
 //   npm run pluto:replay -- --latest 20 --model openai/gpt-6-luna --model typesafe/jev-1.13
 //   npm run pluto:replay -- --pass <passId> --model typesafe/jev-1.13 --effort low
 //   npm run pluto:replay -- --fixture tmp/somePayload.json --model openai/gpt-6-luna
-//   add --calls 2 to send two seeded calls per case (agreement rate), --json for machine output.
+//   add --calls 2 to send two seeded calls per case (agreement rate), --json for machine output,
+//   --current-prompt to use today's prompt instead of the one stored with each decision.
+//   A typesafe/* model goes to the Decisions API (choice over the offered ids + no_trade).
 // Every call costs real money through OPENROUTER_API_KEY; the summary prints the total.
 import { readFileSync } from "node:fs";
 import { db } from "../src/db/connection.js";
 import { parsePlutoDecision, reconcileAgreement, type PlutoDecision } from "../src/pluto/decisionSchema.js";
 import { callPlutoModel, type PlutoModelCallResult } from "../src/pluto/modelClient.js";
 import { buildPlutoSystemPrompt } from "../src/pluto/prompt.js";
+import { callJevDecision, jevQuestionsForPayload, plutoDecisionFromJev } from "../src/pluto/decisionsClient.js";
+import { loadPlutoPrompt } from "../src/pluto/prompts.js";
 import { loadPlutoSettings } from "../src/pluto/settingsStore.js";
 
 interface ReplayCase {
   label: string;
   payload: Record<string, unknown>;
+  /** The system prompt this payload was judged under; null when not recorded (falls back to today's). */
+  storedPrompt: string | null;
   recordedVerdict: string | null;
   recordedCandidateId: string | null;
   topPickId: string | null;
@@ -52,6 +58,7 @@ function parseArguments(argv: string[]) {
   let effort: "low" | "medium" | "high" | null = null;
   let calls = 1;
   let json = false;
+  let currentPrompt = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     const next = () => argv[++index];
@@ -62,9 +69,10 @@ function parseArguments(argv: string[]) {
     else if (argument === "--effort") effort = next() as "low" | "medium" | "high";
     else if (argument === "--calls") calls = Number(next());
     else if (argument === "--json") json = true;
+    else if (argument === "--current-prompt") currentPrompt = true;
     else throw new Error(`Unknown argument ${argument}`);
   }
-  return { models, latest, passId, fixture, effort, calls, json };
+  return { models, latest, passId, fixture, effort, calls, json, currentPrompt };
 }
 
 /** Every "id" under the payload's tickers is an offered candidate/roll/close id. */
@@ -84,14 +92,17 @@ function collectOfferedIds(payload: Record<string, unknown>): Set<string> {
 }
 
 async function loadRecordedCases(latest: number, passId: string | null): Promise<ReplayCase[]> {
-  let query = db("pluto_decisions as d").join("pluto_passes as p", "p.id", "d.pass_id").where("d.call_index", 1).select("d.pass_id", "d.input_payload", "d.parsed_output", "p.started_at", "p.trigger").orderBy("p.started_at", "desc");
+  let query = db("pluto_decisions as d").join("pluto_passes as p", "p.id", "d.pass_id").where("d.call_index", 1).select("d.pass_id", "d.input_payload", "d.parsed_output", "d.prompt_id", "p.started_at", "p.trigger").orderBy("p.started_at", "desc");
   query = passId ? query.where("d.pass_id", passId) : query.limit(latest);
   const rows = await query;
   const passIds = rows.map((row) => row.pass_id);
   const topPicks: { pass_id: string; deterministic_top_pick: { id?: string } | null }[] = passIds.length === 0 ? [] : await db("pluto_actions").whereIn("pass_id", passIds).whereNotNull("deterministic_top_pick").select("pass_id", "deterministic_top_pick");
+  const prompts = new Map<string, string | null>();
+  for (const row of rows) if (row.prompt_id && !prompts.has(row.prompt_id)) prompts.set(row.prompt_id, (await loadPlutoPrompt(row.prompt_id))?.content ?? null);
   return rows.map((row) => ({
     label: `${new Date(row.started_at).toISOString().slice(0, 16)} ${row.trigger} ${String(row.pass_id).slice(0, 8)}`,
     payload: row.input_payload,
+    storedPrompt: row.prompt_id ? (prompts.get(row.prompt_id) ?? null) : null,
     recordedVerdict: row.parsed_output?.decision ?? null,
     recordedCandidateId: row.parsed_output?.candidate_id ?? null,
     topPickId: topPicks.find((pick) => pick.pass_id === row.pass_id)?.deterministic_top_pick?.id ?? null,
@@ -101,8 +112,14 @@ async function loadRecordedCases(latest: number, passId: string | null): Promise
 async function runCase(replayCase: ReplayCase, modelId: string, effort: "low" | "medium" | "high", timeoutSeconds: number, systemPrompt: string, calls: number): Promise<CaseResult> {
   const offeredIds = collectOfferedIds(replayCase.payload);
   const userPayload = JSON.stringify(replayCase.payload);
-  const results: { call: PlutoModelCallResult; decision: PlutoDecision | null; error: string | null }[] = [];
-  for (let seed = 1; seed <= calls; seed += 1) {
+  const results: { call: Pick<PlutoModelCallResult, "ok" | "servedModelId" | "latencyMs" | "costUsd" | "tokensIn" | "tokensOut">; decision: PlutoDecision | null; error: string | null }[] = [];
+  const isDecisionsModel = modelId.startsWith("typesafe/");
+  for (let seed = 1; seed <= (isDecisionsModel ? 1 : calls); seed += 1) {
+    if (isDecisionsModel) {
+      const call = await callJevDecision({ apiKey: process.env.OPENROUTER_API_KEY!, modelId, state: replayCase.payload, questions: jevQuestionsForPayload(replayCase.payload, offeredIds), timeoutSeconds });
+      results.push({ call, decision: call.answers ? plutoDecisionFromJev(call.answers, offeredIds) : null, error: call.error });
+      continue;
+    }
     const call = await callPlutoModel({ apiKey: process.env.OPENROUTER_API_KEY!, modelId, reasoningEffort: effort, timeoutSeconds, systemPrompt, userPayload, seed });
     const parsed = call.rawText ? parsePlutoDecision(call.rawText, offeredIds) : null;
     results.push({ call, decision: parsed?.ok ? parsed.decision : null, error: call.error ?? (parsed && !parsed.ok ? parsed.error : null) });
@@ -160,7 +177,7 @@ const systemPrompt = buildPlutoSystemPrompt(settings);
 let cases: ReplayCase[];
 if (options.fixture) {
   const payload = JSON.parse(readFileSync(options.fixture, "utf-8")) as Record<string, unknown>;
-  cases = [{ label: options.fixture, payload, recordedVerdict: null, recordedCandidateId: null, topPickId: null }];
+  cases = [{ label: options.fixture, payload, storedPrompt: null, recordedVerdict: null, recordedCandidateId: null, topPickId: null }];
 } else {
   cases = await loadRecordedCases(options.latest || 10, options.passId);
 }
@@ -169,7 +186,7 @@ if (cases.length === 0) throw new Error("No recorded decisions to replay (Pluto 
 const results: CaseResult[] = [];
 for (const replayCase of cases) {
   for (const modelId of models) {
-    const result = await runCase(replayCase, modelId, effort, settings.callTimeoutSeconds, systemPrompt, options.calls);
+    const result = await runCase(replayCase, modelId, effort, settings.callTimeoutSeconds, options.currentPrompt ? systemPrompt : (replayCase.storedPrompt ?? systemPrompt), options.calls);
     results.push(result);
     if (!options.json) console.log(`${result.caseLabel} · ${modelId} → ${result.ok ? "" : "HTTP FAIL "}${result.schemaValid ? "valid" : "INVALID"} · ${result.verdict ?? "—"}${result.candidateId ? ` ${result.candidateId}` : ""} · conf ${result.confidence ?? "—"} · ${result.latencyMs} ms · $${result.costUsd.toFixed(4)} · served ${result.servedModelId ?? "?"}${result.error ? ` · ${result.error}` : ""}`);
   }

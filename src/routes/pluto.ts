@@ -320,6 +320,7 @@ function serializePass(row: Record<string, unknown>) {
     tokensOut: row.tokens_out ?? null,
     costUsd: row.cost_usd === null || row.cost_usd === undefined ? null : Number(row.cost_usd),
     servedModelIds: row.served_model_ids ?? [],
+    settingsSnapshot: row.settings_snapshot ?? null,
   };
 }
 
@@ -330,6 +331,7 @@ function serializeDecision(row: Record<string, unknown>) {
     callIndex: row.call_index,
     modelId: row.model_id,
     servedModelId: row.served_model_id ?? null,
+    promptId: row.prompt_id ?? null,
     inputPayload: row.input_payload,
     rawOutput: row.raw_output ?? null,
     parsedOutput: row.parsed_output ?? null,
