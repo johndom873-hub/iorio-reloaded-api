@@ -7,7 +7,7 @@ import { readAppEnvironment } from "./appEnvironment.js";
 import { emitDayQuotesUpdated } from "./daySignalsEvents.js";
 import { selectContractsToCapture, computeStrikeWindow, calendarDaysUntilExpiry } from "./optionChainCaptureWindow.js";
 import { selectDaySignalContractSet, shouldRerankExpiries, type DayContractRef, type DayContractSetExpiry } from "./daySignalsContractSet.js";
-import { loadDayTickerContractContexts, type DayTickerContractContext } from "./daySignalsContractContextStore.js";
+import { loadDayTickerContractContexts, loadDayUnpooledTickers, type DayTickerContractContext, type DayTrackedTicker } from "./daySignalsContractContextStore.js";
 import { selectDaySignalExpiries } from "./daySignalsSeed.js";
 import { clearsNotificationHysteresis, decideAssignmentRiskAlert, isGradeUpgrade, notifyAssignmentRisk, notifyRollSignalUpgrade, notifySignalUpgrade, type AssignmentRiskAlert, type RollSignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
 import {
@@ -123,12 +123,14 @@ export interface DaySignalsLoopDependencies {
   runSpotPass(contracts: WindowContract[], options: RollingQuoteWindowOptions): Promise<RollingQuoteWindowResult>;
   upsertDayQuotes(writes: DayQuoteWrite[]): Promise<void>;
   /** Per pooled ticker: strike grids, ATM IV, held legs and last cycle's contracts. A ticker missing from the map stays on the snapshot's contracts. */
-  loadContractContexts(pool: DaySignalExpiryRow[], tradingDateIso: string): Promise<Map<string, DayTickerContractContext>>;
+  loadContractContexts(tickers: DayTrackedTicker[], tradingDateIso: string): Promise<Map<string, DayTickerContractContext>>;
+  /** Tickers scored at 9:30 that the seed left without a pool: watched for a move big enough to re-rank them into one. */
+  loadUnpooledTickers(tradingDateIso: string): Promise<DayTrackedTicker[]>;
   pruneDayQuotes(tickerId: string, keep: DayContractRef[]): Promise<void>;
   loadRerankStates(tradingDateIso: string): Promise<Map<string, DayRerankState>>;
   saveRerankState(tickerId: string, tradingDateIso: string, state: DayRerankState): Promise<void>;
-  /** Mid-day re-rank: replaces one ticker's pooled expiries; false when the ticker has no pool row. */
-  replaceTickerPool(tickerId: string, tradingDateIso: string, expiries: DaySignalExpirySeed[], seededAt: Date): Promise<boolean>;
+  /** Mid-day re-rank: sets one ticker's pooled expiries (creating its pool when it had none); false for an empty list. */
+  replaceTickerPool(tickerId: string, tradingDateIso: string, snapshotId: string, expiries: DaySignalExpirySeed[], seededAt: Date): Promise<boolean>;
   loadTickerSignalsInputs(ticker: SignalsTickerRow): Promise<TickerSignalsInputs>;
   loadAccountContext(): Promise<AccountContext>;
   loadSignalSettings(): Promise<SignalSettings>;
@@ -182,6 +184,7 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   runSpotPass: runRollingQuoteWindow,
   upsertDayQuotes,
   loadContractContexts: loadDayTickerContractContexts,
+  loadUnpooledTickers: loadDayUnpooledTickers,
   pruneDayQuotes: pruneDayQuotesOutsideSet,
   replaceTickerPool: replaceTickerPoolExpiries,
   loadRerankStates: loadDayRerankStates,
@@ -364,9 +367,9 @@ export class DaySignalsLoop {
 
     // Spot pass: every pooled ticker's stock first, so the contract set below follows the live price.
     const spotByTicker = new Map<string, number | null>();
-    const pooledTickers = new Map<string, string>();
-    for (const row of pool) if (!pooledTickers.has(row.tickerId)) pooledTickers.set(row.tickerId, row.symbol);
-    const spotWindowContracts: WindowContract[] = [...pooledTickers].map(([tickerId, symbol]) => ({ key: `${tickerId}|stock`, legType: "stock", symbol }));
+    // Tracked = pooled tickers plus tickers scored at 9:30 with no pool: a stock that jumped after the open may only now have puts worth selling.
+    let trackedTickers = await this.trackedTickersFor(pool, tradingDateIso);
+    const spotWindowContracts: WindowContract[] = trackedTickers.map((ticker) => ({ key: `${ticker.tickerId}|stock`, legType: "stock", symbol: ticker.symbol }));
     const spotPass = await this.deps.runSpotPass(spotWindowContracts, {
       ib,
       allocateReqId: this.deps.allocateReqId,
@@ -380,10 +383,11 @@ export class DaySignalsLoop {
 
     let activePool = pool;
     let universe = snapshotUniverse;
-    let contexts = await this.loadContractContextsSafely(pool, tradingDateIso);
+    let contexts = await this.loadContractContextsSafely(trackedTickers, tradingDateIso);
     let poolChanged = false;
+    const rerankedTickerIds = new Set<string>();
     const rerankStates = await this.loadRerankStatesSafely(tradingDateIso);
-    for (const [tickerId] of pooledTickers) {
+    for (const { tickerId } of trackedTickers) {
       const context = contexts.get(tickerId);
       const spot = spotByTicker.get(tickerId) ?? null;
       if (!context || spot === null || context.atmImpliedVolatility === null || context.snapshotSpotPrice === null || signal.aborted) continue;
@@ -395,13 +399,17 @@ export class DaySignalsLoop {
       await this.deps.saveRerankState(tickerId, tradingDateIso, nextState).catch((error) => console.warn(`day signals loop: could not save ${context.symbol}'s re-rank state — ${error instanceof Error ? error.message : error}`));
       const outcome = await this.rerankTicker(ib, context, spot, tradingDateIso, settings, account, signal);
       if (outcome === "disconnected") return { settled: 0, disconnected: true, aborted: false };
-      if (outcome === "changed") poolChanged = true;
+      if (outcome === "changed") {
+        poolChanged = true;
+        rerankedTickerIds.add(tickerId);
+      }
     }
     if (poolChanged) {
       [activePool, universe] = await Promise.all([this.deps.loadPool(tradingDateIso), this.deps.loadUniverse(tradingDateIso)]);
-      contexts = await this.loadContractContextsSafely(activePool, tradingDateIso);
+      trackedTickers = await this.trackedTickersFor(activePool, tradingDateIso);
+      contexts = await this.loadContractContextsSafely(trackedTickers, tradingDateIso);
     }
-    const built = await this.buildCycleUniverse(activePool, universe, contexts, spotByTicker);
+    const built = await this.buildCycleUniverse(activePool, universe, contexts, spotByTicker, rerankedTickerIds);
     universe = built.universe;
     const newContractKeysByTicker = built.newContractKeysByTicker;
     this.status.contractsInPool = universe.length;
@@ -467,6 +475,18 @@ export class DaySignalsLoop {
     }
   }
 
+  /** The pooled tickers (from the pool rows), then the unpooled scored ones; an unavailable unpooled list leaves just the pooled. */
+  private async trackedTickersFor(pool: DaySignalExpiryRow[], tradingDateIso: string): Promise<DayTrackedTicker[]> {
+    const tracked = new Map<string, DayTrackedTicker>();
+    for (const row of pool) if (!tracked.has(row.tickerId)) tracked.set(row.tickerId, { tickerId: row.tickerId, symbol: row.symbol, snapshotId: row.snapshotId });
+    try {
+      for (const ticker of await this.deps.loadUnpooledTickers(tradingDateIso)) if (!tracked.has(ticker.tickerId)) tracked.set(ticker.tickerId, ticker);
+    } catch (error) {
+      console.warn(`day signals loop: unpooled tickers unavailable, tracking pooled ones only — ${error instanceof Error ? error.message : error}`);
+    }
+    return [...tracked.values()];
+  }
+
   private async loadRerankStatesSafely(tradingDateIso: string): Promise<Map<string, DayRerankState>> {
     try {
       return await this.deps.loadRerankStates(tradingDateIso);
@@ -477,9 +497,9 @@ export class DaySignalsLoop {
   }
 
   /** A failed context load leaves every ticker on the snapshot's contracts for this cycle rather than stopping the loop. */
-  private async loadContractContextsSafely(pool: DaySignalExpiryRow[], tradingDateIso: string): Promise<Map<string, DayTickerContractContext>> {
+  private async loadContractContextsSafely(trackedTickers: DayTrackedTicker[], tradingDateIso: string): Promise<Map<string, DayTickerContractContext>> {
     try {
-      return await this.deps.loadContractContexts(pool, tradingDateIso);
+      return await this.deps.loadContractContexts(trackedTickers, tradingDateIso);
     } catch (error) {
       console.warn(`day signals loop: contract contexts unavailable, using the snapshot's contracts — ${error instanceof Error ? error.message : error}`);
       return new Map();
@@ -490,7 +510,7 @@ export class DaySignalsLoop {
    * The cycle's contracts: per ticker with a live spot, ATM IV and stored strike grids, the capture's rule at that spot for every
    * pooled expiry it can window (and its stored quotes outside that set are deleted); anything else stays on the snapshot's contracts.
    */
-  private async buildCycleUniverse(pool: DaySignalExpiryRow[], snapshotUniverse: (DayQuoteContract & { symbol: string })[], contexts: Map<string, DayTickerContractContext>, spotByTicker: Map<string, number | null>): Promise<{ universe: (DayQuoteContract & { symbol: string })[]; newContractKeysByTicker: Map<string, Set<string>> }> {
+  private async buildCycleUniverse(pool: DaySignalExpiryRow[], snapshotUniverse: (DayQuoteContract & { symbol: string })[], contexts: Map<string, DayTickerContractContext>, spotByTicker: Map<string, number | null>, rerankedTickerIds: Set<string>): Promise<{ universe: (DayQuoteContract & { symbol: string })[]; newContractKeysByTicker: Map<string, Set<string>> }> {
     const universe: (DayQuoteContract & { symbol: string })[] = [];
     const newContractKeysByTicker = new Map<string, Set<string>>();
     const prunes: Promise<void>[] = [];
@@ -521,7 +541,8 @@ export class DaySignalsLoop {
       universe.push(...kept.map((contract) => ({ tickerId, symbol, expiry: contract.expiry, strike: contract.strike, right: contract.right })));
       // Contracts the loop starts quoting mid-day (the price moved, or a re-rank added an expiry): with quotes stored from an earlier
       // cycle, so the very first cycle after the seed (nothing stored) stays a baseline. Their first grade can notify.
-      if (context.previousContracts.length > 0) {
+      // A ticker pooled by a re-rank this cycle has nothing stored yet, but everything it quotes is new to the loop.
+      if (context.previousContracts.length > 0 || rerankedTickerIds.has(tickerId)) {
         const previousKeys = new Set(context.previousContracts.map((contract) => `${contract.expiry}|${contract.strike}|${contract.right}`));
         newContractKeysByTicker.set(tickerId, new Set(kept.map((contract) => `${contract.expiry}|${contract.strike}|${contract.right}`).filter((key) => !previousKeys.has(key))));
       }
@@ -570,7 +591,7 @@ export class DaySignalsLoop {
       const expiries = selectDaySignalExpiries(candidates, undefined, heldLegExpiries);
       // No positive-Edge candidate anywhere: keep the pool as it is rather than emptying a ticker mid-session.
       if (expiries.length === 0) return "unchanged";
-      const changed = await this.deps.replaceTickerPool(context.tickerId, tradingDateIso, expiries, this.deps.now());
+      const changed = await this.deps.replaceTickerPool(context.tickerId, tradingDateIso, context.snapshotId, expiries, this.deps.now());
       if (changed) console.log(`day signals loop: re-ranked ${context.symbol} at ${spot} — pooled expiries ${expiries.map((entry) => entry.expiry).join(", ")}`);
       return changed ? "changed" : "unchanged";
     } catch (error) {

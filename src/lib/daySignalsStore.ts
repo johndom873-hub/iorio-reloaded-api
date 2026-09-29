@@ -104,21 +104,20 @@ export async function replaceDaySignalPool(tradingDateIso: string, seeds: DaySig
 }
 
 /**
- * A mid-day re-rank (daySignalsLoop.ts): replaces ONE ticker's pooled expiries, keeping the snapshot it was seeded from,
- * and deletes that ticker's day quotes of expiries that left the pool so they can never be scored as fresh. A ticker
- * with no pool row is left alone (the seed owns creating pools).
+ * A mid-day re-rank (daySignalsLoop.ts): sets ONE ticker's pooled expiries, creating its pool when the 9:30 seed left it out
+ * (a ticker that only became interesting after a move) or replacing it, always on the given snapshot. Deletes the ticker's
+ * day quotes of expiries that are not pooled, so they can never be scored as fresh. False for an empty expiry list.
  */
-export async function replaceTickerPoolExpiries(tickerId: string, tradingDateIso: string, expiries: DaySignalExpirySeed[], seededAt: Date): Promise<boolean> {
-  return db.transaction(async (trx) => {
-    const existing = await trx("day_signal_expiries").where({ ticker_id: tickerId }).whereRaw("trading_date::text = ?", [tradingDateIso]).first("snapshot_id");
-    if (!existing || expiries.length === 0) return false;
+export async function replaceTickerPoolExpiries(tickerId: string, tradingDateIso: string, snapshotId: string, expiries: DaySignalExpirySeed[], seededAt: Date): Promise<boolean> {
+  if (expiries.length === 0) return false;
+  await db.transaction(async (trx) => {
     await trx("day_signal_expiries").where({ ticker_id: tickerId }).del();
     await trx("day_signal_expiries").insert(
       expiries.map((expiry) => ({
         ticker_id: tickerId,
         expiry: expiry.expiry,
         trading_date: tradingDateIso,
-        snapshot_id: existing.snapshot_id,
+        snapshot_id: snapshotId,
         rank: expiry.rank,
         seed_best_edge_dollars: expiry.seedBestEdgeDollars,
         seed_best_net_edge: expiry.seedBestNetEdge,
@@ -126,8 +125,8 @@ export async function replaceTickerPoolExpiries(tickerId: string, tradingDateIso
       })),
     );
     await trx("day_signal_quotes").where({ ticker_id: tickerId }).whereNotIn("expiry", expiries.map((expiry) => expiry.expiry)).del();
-    return true;
   });
+  return true;
 }
 
 export interface DayRerankState {

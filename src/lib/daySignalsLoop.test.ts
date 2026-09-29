@@ -10,7 +10,7 @@ import { scoreTicker } from "./signalsLiveScoring.js";
 import { assignmentRiskAlertAbsoluteDelta, assignmentRiskRearmAbsoluteDelta, clearsNotificationHysteresis } from "./daySignalsNotifications.js";
 import type { AssignmentRiskAlertState, DayRerankState } from "./daySignalsStore.js";
 import type { DayContractRef } from "./daySignalsContractSet.js";
-import type { DayTickerContractContext } from "./daySignalsContractContextStore.js";
+import type { DayTickerContractContext, DayTrackedTicker } from "./daySignalsContractContextStore.js";
 
 const forward = 100;
 const rate = 0.04;
@@ -59,14 +59,14 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
 interface Harness {
   deps: DaySignalsLoopDependencies;
   loop: DaySignalsLoop;
-  calls: { reserve: number; release: number; windows: WindowContract[][]; writes: number; notified: string[]; emitted: string[]; heartbeats: string[]; grades: SignalGrade[][]; rollGrades: SignalGrade[][]; rollNotified: string[]; assignmentAlerts: string[]; assignmentRearms: string[]; spotPasses: string[][]; prunes: { tickerId: string; keep: DayContractRef[] }[]; poolReplacements: { tickerId: string; expiries: string[] }[] };
-  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; lastRollGrades: Map<string, SignalGrade>; openShortLegs: TickerSignalsInputs["openShortLegs"]; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean }; nowIso: string; assignmentRiskStates: Map<string, AssignmentRiskAlertState>; spot: number; contexts: Map<string, DayTickerContractContext>; rerankStates: Map<string, DayRerankState> };
+  calls: { reserve: number; release: number; windows: WindowContract[][]; writes: number; notified: string[]; emitted: string[]; heartbeats: string[]; grades: SignalGrade[][]; rollGrades: SignalGrade[][]; rollNotified: string[]; assignmentAlerts: string[]; assignmentRearms: string[]; spotPasses: string[][]; prunes: { tickerId: string; keep: DayContractRef[] }[]; poolReplacements: { tickerId: string; snapshotId: string; expiries: string[] }[] };
+  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; lastRollGrades: Map<string, SignalGrade>; openShortLegs: TickerSignalsInputs["openShortLegs"]; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean }; nowIso: string; assignmentRiskStates: Map<string, AssignmentRiskAlertState>; spot: number; contexts: Map<string, DayTickerContractContext>; rerankStates: Map<string, DayRerankState>; unpooledTickers: DayTrackedTicker[] };
 }
 
 /** The window fake answers every option with a two-sided quote at `impliedVolatility` and the stock with last = 100, synchronously. */
 function createHarness(impliedVolatilityShift = 0): Harness {
   const calls: Harness["calls"] = { reserve: 0, release: 0, windows: [], writes: 0, notified: [], emitted: [], heartbeats: [], grades: [], rollGrades: [], rollNotified: [], assignmentAlerts: [], assignmentRearms: [], spotPasses: [], prunes: [], poolReplacements: [] };
-  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), lastRollGrades: new Map(), openShortLegs: [], dayQuotes: [], windowResult: { disconnected: false }, nowIso: "2026-09-24T15:00:00Z", assignmentRiskStates: new Map(), spot: 100, contexts: new Map(), rerankStates: new Map() };
+  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), lastRollGrades: new Map(), openShortLegs: [], dayQuotes: [], windowResult: { disconnected: false }, nowIso: "2026-09-24T15:00:00Z", assignmentRiskStates: new Map(), spot: 100, contexts: new Map(), rerankStates: new Map(), unpooledTickers: [] };
   let ticks = 0;
   const deps: DaySignalsLoopDependencies = {
     now: () => new Date(state.nowIso),
@@ -110,8 +110,9 @@ function createHarness(impliedVolatilityShift = 0): Harness {
     pruneDayQuotes: async (tickerId, keep) => {
       calls.prunes.push({ tickerId, keep });
     },
-    replaceTickerPool: async (tickerId, _tradingDateIso, expiries) => {
-      calls.poolReplacements.push({ tickerId, expiries: expiries.map((entry) => entry.expiry) });
+    loadUnpooledTickers: async () => state.unpooledTickers,
+    replaceTickerPool: async (tickerId, _tradingDateIso, snapshotId, expiries) => {
+      calls.poolReplacements.push({ tickerId, snapshotId, expiries: expiries.map((entry) => entry.expiry) });
       return true;
     },
     upsertDayQuotes: async (writes) => {
@@ -300,7 +301,7 @@ describe("DaySignalsLoop", () => {
       const discoveryWindows = harness.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock")));
       expect(discoveryWindows).toHaveLength(1);
       expect(discoveryWindows[0]!.every((contract) => contract.legType === "option")).toBe(true);
-      expect(harness.calls.poolReplacements).toEqual([{ tickerId: "t1", expiries: [expiry] }]);
+      expect(harness.calls.poolReplacements).toEqual([{ tickerId: "t1", snapshotId: "s1", expiries: [expiry] }]);
     });
 
     it("persists the re-rank state: a restarted loop neither repeats a re-rank nor resets the daily cap", async () => {
@@ -335,6 +336,29 @@ describe("DaySignalsLoop", () => {
       };
       await capped.start();
       expect(discoveryCount()).toBe(1);
+    });
+
+    it("re-ranks a ticker the 9:30 seed left without a pool when it jumps, creating its pool on the snapshot it was scored from", async () => {
+      const harness = createHarness(0.05);
+      harness.state.spot = 110;
+      harness.state.unpooledTickers = [{ tickerId: "t2", symbol: "BBB", snapshotId: "s2" }];
+      harness.state.contexts = new Map([["t2", contextAt({ tickerId: "t2", symbol: "BBB", snapshotId: "s2", atmImpliedVolatility: 0.8, previousContracts: [] })]]);
+      await runCycles(harness, 1);
+      expect(harness.calls.spotPasses[0]).toEqual(["t1|stock", "t2|stock"]);
+      const discovery = harness.calls.windows.find((window) => !window.some((contract) => contract.key.endsWith("|stock")))!;
+      expect(discovery.every((contract) => contract.key.startsWith("t2|"))).toBe(true);
+      expect(harness.calls.poolReplacements).toEqual([{ tickerId: "t2", snapshotId: "s2", expiries: [expiry] }]);
+      expect(harness.state.rerankStates.get("t2")).toEqual({ referenceSpotPrice: 110, reranks: 1 });
+    });
+
+    it("leaves an unpooled ticker alone while it stays under the trigger", async () => {
+      const harness = createHarness(0.05);
+      harness.state.spot = 101;
+      harness.state.unpooledTickers = [{ tickerId: "t2", symbol: "BBB", snapshotId: "s2" }];
+      harness.state.contexts = new Map([["t2", contextAt({ tickerId: "t2", symbol: "BBB", snapshotId: "s2", atmImpliedVolatility: 0.8, previousContracts: [] })]]);
+      await runCycles(harness, 1);
+      expect(harness.calls.poolReplacements).toEqual([]);
+      expect(harness.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock")))).toHaveLength(0);
     });
 
     it("does not re-rank a move under the trigger, nor after the daily cap", async () => {

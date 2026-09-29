@@ -2,10 +2,9 @@ import { db } from "../db/connection.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { calendarDaysUntilExpiry, captureMaximumDaysToExpiry, captureMinimumDaysToExpiry } from "./optionChainCaptureWindow.js";
 import type { DayContractRef } from "./daySignalsContractSet.js";
-import type { DaySignalExpiryRow } from "./daySignalsStore.js";
 import { computeAtmImpliedVolatility, rebaseSlicesToToday } from "./signalsLiveScoring.js";
 import { yyyymmddToIso } from "./signalsChain.js";
-import { loadOpenShortLegs, loadSlices } from "./signalsStore.js";
+import { loadOpenShortLegs, loadSignalsUniverseTickers, loadSlices } from "./signalsStore.js";
 
 /** Everything the Day Signals loop needs to work out one ticker's contract set from its live spot. */
 export interface DayTickerContractContext {
@@ -23,10 +22,32 @@ export interface DayTickerContractContext {
   previousContracts: DayContractRef[];
 }
 
-/** One context per pooled ticker; DB only. Loaded each cycle: held legs and stored quotes change intraday. */
-export async function loadDayTickerContractContexts(pool: DaySignalExpiryRow[], tradingDateIso: string): Promise<Map<string, DayTickerContractContext>> {
-  const tickers = new Map<string, DaySignalExpiryRow>();
-  for (const row of pool) if (!tickers.has(row.tickerId)) tickers.set(row.tickerId, row);
+/** A ticker the loop tracks the spot of: pooled, or scored at 9:30 but left without a pool. */
+export interface DayTrackedTicker {
+  tickerId: string;
+  symbol: string;
+  /** The snapshot the ticker's pool is (or would be) seeded from. */
+  snapshotId: string;
+}
+
+/** Signals-universe tickers with today's snapshot but no pooled expiry: the 9:30 seed found no positive-Edge candidate at the open's prices, which a later move can change. */
+export async function loadDayUnpooledTickers(tradingDateIso: string): Promise<DayTrackedTicker[]> {
+  const universe = await loadSignalsUniverseTickers();
+  if (universe.length === 0) return [];
+  const symbolById = new Map(universe.map((ticker) => [ticker.tickerId, ticker.symbol]));
+  const rows: { tickerId: string; snapshotId: string }[] = await db("option_chain_snapshots as s")
+    .whereIn("s.ticker_id", [...symbolById.keys()])
+    .whereRaw("s.trading_date::text = ?", [tradingDateIso])
+    .whereIn("s.status", ["complete", "partial"])
+    .whereNotExists(db("day_signal_expiries as e").whereRaw("e.ticker_id = s.ticker_id").whereRaw("e.trading_date::text = ?", [tradingDateIso]).select(db.raw("1")))
+    .select("s.ticker_id as tickerId", "s.id as snapshotId");
+  return rows.map((row) => ({ tickerId: row.tickerId, symbol: symbolById.get(row.tickerId)!, snapshotId: row.snapshotId }));
+}
+
+/** One context per tracked ticker; DB only. Loaded each cycle: held legs and stored quotes change intraday. */
+export async function loadDayTickerContractContexts(trackedTickers: DayTrackedTicker[], tradingDateIso: string): Promise<Map<string, DayTickerContractContext>> {
+  const tickers = new Map<string, DayTrackedTicker>();
+  for (const row of trackedTickers) if (!tickers.has(row.tickerId)) tickers.set(row.tickerId, row);
   const contexts = await Promise.all(
     [...tickers.values()].map(async (row): Promise<DayTickerContractContext> => {
       const [chain, snapshot, slices, legs, previousRows] = await Promise.all([
