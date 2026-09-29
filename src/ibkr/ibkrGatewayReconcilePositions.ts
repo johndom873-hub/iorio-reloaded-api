@@ -251,6 +251,29 @@ async function judgeStructureChange(optionLegs: OptionLegRetirementRow[]): Promi
 // and the caller re-creates the leg on the successor at that same price so
 // the cost basis carries across unchanged. Returns the entry price per conId
 // for exactly that.
+/** Records that `positionId` received shares from `sourcePositionId` (position_share_sources); idempotent. */
+async function recordShareSource(positionId: string, sourcePositionId: string): Promise<void> {
+  if (positionId === sourcePositionId) return;
+  await db("position_share_sources").insert({ position_id: positionId, source_position_id: sourcePositionId }).onConflict(["position_id", "source_position_id"]).ignore();
+}
+
+// An assigned put delivers its shares with no handoff to follow: link the stock position to the most
+// recently assigned put on the ticker, when that put closed after (or within an hour before) the stock
+// position opened — an older assignment's shares are not these.
+async function recordAssignedPutShareSource(symbol: string, positionId: string): Promise<void> {
+  const position = await db("positions").where({ id: positionId }).first("ticker_id", "opened_at");
+  if (!position) return;
+  const assignedPut = await db("positions")
+    .where({ ticker_id: position.ticker_id, strategy_key: "cash_secured_put", close_reason: "assigned" })
+    .whereNotNull("closed_at")
+    .orderBy("closed_at", "desc")
+    .first("id", "closed_at");
+  if (!assignedPut) return;
+  if (new Date(assignedPut.closed_at).getTime() < new Date(position.opened_at).getTime() - 60 * 60_000) return;
+  await recordShareSource(positionId, assignedPut.id);
+  console.log(`Reconciliation #${currentPassId}: ${symbol} — stock position ${positionId} records its shares as delivered by assigned put position ${assignedPut.id}.`);
+}
+
 async function handOffOpenStockLegs(positionId: string, symbol: string, toDescription: string): Promise<Map<string, number>> {
   const openStockLegs = await db("position_legs").where({ position_id: positionId, leg_type: "stock" }).whereNull("exit_at");
   const entryPriceByConId = new Map<string, number>();
@@ -718,10 +741,12 @@ async function upsertUnstructuredPosition(
   }
 
   const handoffEntryPriceByConId = new Map<string, number>();
+  const shareSourcePositionIds: string[] = [];
   for (const foreign of foreignPositions) {
     const { optionLegs } = verdicts.get(foreign.id)!;
     const handedOff = await handOffOpenStockLegs(foreign.id, symbol, "to a leftover-stock position");
     for (const [conId, entryPrice] of handedOff) handoffEntryPriceByConId.set(conId, entryPrice);
+    if (handedOff.size > 0) shareSourcePositionIds.push(foreign.id);
     const remainingOpenLegs = await db("position_legs").where({ position_id: foreign.id }).whereNull("exit_at");
     if (remainingOpenLegs.length === 0) {
       const expiredWithoutTrade = optionLegs.some((leg) => leg.exitAt !== null && !leg.hasClosingTrade);
@@ -757,6 +782,9 @@ async function upsertUnstructuredPosition(
   // a second chance. Safe to call repeatedly — the query only ever matches
   // an alert with resulting_position_id still NULL.
   await backfillAlertResultingPositionId(symbol, positionId!);
+
+  for (const sourcePositionId of shareSourcePositionIds) await recordShareSource(positionId!, sourcePositionId);
+  if (unstructuredReason === "csp_assigned_stock") await recordAssignedPutShareSource(symbol, positionId!);
 
   for (const leg of legs) {
     const conId = String(leg.held.contract.conId);
@@ -894,6 +922,7 @@ async function upsertSplitCoveredCallPosition(
     const sourcePosition = await db("positions").where({ id: candidate.position_id }).first();
     const handedOff = await handOffOpenStockLegs(candidate.position_id, symbol, `to covered call position ${positionId}`);
     if (!ownStockLeg && handoffEntryPrice === undefined) handoffEntryPrice = handedOff.get(stockConId);
+    if (handedOff.size > 0) await recordShareSource(positionId!, candidate.position_id);
 
     const remainingOpenLegs = await db("position_legs").where({ position_id: candidate.position_id }).whereNull("exit_at");
     if (remainingOpenLegs.length === 0) {

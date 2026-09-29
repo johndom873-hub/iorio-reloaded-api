@@ -2,9 +2,10 @@ import { db } from "../db/connection.js";
 import { positionSelect } from "../lib/positionQueries.js";
 
 // Pluto's book: the open positions its own orders created (order_requests.pluto_action_id →
-// trades.source_order_request_id → position_legs → positions), the capital they commit against
-// the Pluto budget, and the per-symbol facts the post-model gates need (last action date for
-// the cooldown, symbols with a working Pluto order).
+// trades.source_order_request_id → position_legs → positions) or that received shares from them
+// (position_share_sources), the capital they commit against the Pluto budget, and the per-symbol
+// facts the post-model gates need (last filled action for the cooldown, symbols with a working
+// Pluto order).
 
 export interface PlutoBookPosition {
   positionId: string;
@@ -24,19 +25,32 @@ export interface PlutoBook {
   workingOrderSymbols: Set<string>;
 }
 
+/**
+ * Pluto's positions: every position a Pluto order filled on, plus every position that received shares
+ * from one of them (position_share_sources, followed transitively). A stock position that mixes Pluto's
+ * and humans' shares counts as Pluto's whole — the budget errs towards less room (Marcelo, 2026-09-29).
+ * For use after WITH RECURSIVE.
+ */
+export const plutoPositionIdsCte = `pluto_position_ids(id) AS (
+  SELECT pl.position_id
+  FROM order_requests orq
+  JOIN trades tr ON tr.source_order_request_id = orq.id
+  JOIN position_legs pl ON pl.id = tr.position_leg_id
+  WHERE orq.pluto_action_id IS NOT NULL
+  UNION
+  SELECT pss.position_id
+  FROM position_share_sources pss
+  JOIN pluto_position_ids known ON known.id = pss.source_position_id
+)`;
+
 export async function loadPlutoBook(): Promise<PlutoBook> {
   const [positionRows, lastFilledActions, workingOrders] = await Promise.all([
     db.raw(
-      `SELECT x.id, x.symbol, t.sector, x."strategyKey", x."capitalAtRisk"
+      `WITH RECURSIVE ${plutoPositionIdsCte}
+       SELECT x.id, x.symbol, t.sector, x."strategyKey", x."capitalAtRisk"
        FROM (${positionSelect}) x
        JOIN tickers t ON t.symbol = x.symbol
-       WHERE x.status = 'open' AND x.id IN (
-         SELECT DISTINCT pl.position_id
-         FROM order_requests orq
-         JOIN trades tr ON tr.source_order_request_id = orq.id
-         JOIN position_legs pl ON pl.id = tr.position_leg_id
-         WHERE orq.pluto_action_id IS NOT NULL
-       )`,
+       WHERE x.status = 'open' AND x.id IN (SELECT id FROM pluto_position_ids)`,
     ),
     // Read from the orders themselves, not the action's outcome, which is only written when the watcher next polls.
     db("pluto_actions as pa")
