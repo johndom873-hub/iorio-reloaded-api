@@ -116,6 +116,7 @@ export async function notifyRollSignalUpgrade(upgrade: RollSignalUpgrade): Promi
       legId: roll.legId,
       heldStrike: upgrade.held.strike,
       heldExpiry: upgrade.held.expiry,
+      heldDte: upgrade.held.dte,
       strike: roll.replacement.strike,
       expiry: roll.replacement.expiry,
       dte: roll.replacement.dte,
