@@ -6,10 +6,9 @@ import { daySignalsLoopStatus, type DaySignalsLoopStatus } from "../lib/daySigna
 import { loadDayQuotesStatus, type DayQuotesStatus } from "../lib/daySignalsStore.js";
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { uncompensatedShareRefreshIntervalMs, type SignalCandidate, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
-import { accountRefreshIntervalMs, candidateContractKey, candidateContractRef, contractKey, liveFrameIntervalMs, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
-import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
-import { createChainCellResolver, scoreTickerWithExclusions, yyyymmddToIso, type SignalsChainCell } from "../lib/signalsChain.js";
-import { selectLiveChainContracts, shouldRecenterLiveChain } from "../lib/signalsLiveChainContracts.js";
+import { accountRefreshIntervalMs, candidateContractKey, candidateContractRef, contractKey, liveFrameIntervalMs, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
+import { createChainCellResolver, scoreTickerWithExclusions, type SignalsChainCell } from "../lib/signalsChain.js";
+import { rollCandidateKey, type HeldLegScore, type RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import { loadAccountContext, loadDayQuotesAsLiveQuotes, loadSignalsUniverseTicker, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "../lib/signalSettingsStore.js";
 import type { AccountContext, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
@@ -21,9 +20,9 @@ import { StreamRequestError } from "./streamProtocol.js";
 // 2026-09-24). Two snapshot streams: `signalsScreen` (every shortlist ticker,
 // one stock line each plus — unless `bestContractLines` is "false" — one
 // pooled option line on each ticker's best contract, rows only) and
-// `signalsTicker` (one ticker: stock line + live quotes for the selected
-// expiry's contracts + the UncompensatedShare Monte Carlo in a worker
-// thread). Both merge the Day Signals loop's quotes for everything else and
+// `signalsTicker` (one ticker: stock line + the UncompensatedShare Monte Carlo in a worker
+// thread; since 2026-09-29 it holds no option lines — `signalsQuotes` below holds them, only for the
+// contracts the modal has on screen). Both merge the Day Signals loop's quotes for everything else and
 // re-score when the loop announces a ticker's quotes changed. Frames carry
 // full state and go out at most once a second; account context (free cash /
 // shares) refreshes every 60 s. Dependencies are injectable so the
@@ -40,12 +39,32 @@ export interface SignalsTickerFrame {
   type: "signalsTicker";
   at: string;
   signals: TickerSignals;
-  /** Contract keys (expiry|strike|right) with a live IBKR quote subscription for this stream's life. */
-  liveQuoteContracts: string[];
-  /** The chain cell of every live-quoted contract, scored at the live spot, keyed like liveQuoteContracts: the option chain overlays these on its fetch-time cells. Empty cells (nothing quoted yet) are left out. */
-  liveChainCells: Record<string, SignalsChainCell>;
   uncompensatedAsOf: { spotPrice: number; at: string } | null;
 }
+
+/**
+ * The `signalsQuotes` stream: live quotes for exactly the contracts the Signals modal has on screen (visible rows plus one row
+ * each side; approved 2026-09-29), scored at the live spot. The modal reopens it when what is on screen changes, and overlays
+ * these on the ticker stream's day/snapshot-priced state. Keys are expiry|strike|right; held legs are keyed by leg id.
+ */
+export interface SignalsQuotesFrame {
+  type: "signalsQuotes";
+  at: string;
+  spotPrice: number | null;
+  /** Requested contracts with a live line (their quote may not have arrived yet). */
+  contractKeys: string[];
+  /** Option-chain cell of each requested contract that has a quote. */
+  cells: Record<string, SignalsChainCell>;
+  /** Signals candidates among the requested contracts. */
+  candidates: Record<string, SignalCandidate>;
+  /** Held legs whose contract was requested, by leg id. */
+  heldLegs: Record<string, HeldLegScore>;
+  /** Rolls whose held leg and replacement were both requested, by rollCandidateKey. */
+  rolls: Record<string, RollSignalCandidate>;
+}
+
+export const signalsQuotesMaxContracts = 60;
+const contractKeyPattern = /^\d{4}-\d{2}-\d{2}\|\d+(\.\d+)?\|[CP]$/;
 
 export const dayQuotesStatusRefreshIntervalMs = 30_000;
 
@@ -62,8 +81,6 @@ export interface SignalsProducerDependencies {
   fetchAvailableUncoveredShares(tickerId: string): Promise<number>;
   streamLivePrices(contracts: PriceContract[], onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void, signal: AbortSignal): Promise<void>;
   streamOptionQuotes(symbol: string, contracts: ContractRef[], onUpdate: (quotes: LiveOptionQuote[]) => void, signal: AbortSignal): Promise<void>;
-  /** The stored strike grid per expiry (ISO date keys) the modal's live lines are chosen from. */
-  loadExpiryStrikes(tickerId: string): Promise<Map<string, number[]>>;
   computeUncompensatedShares(candidates: SignalCandidate[], spotPrice: number, slices: SignalSurfaceSlice[]): Promise<Map<string, number | null>>;
   now(): Date;
 }
@@ -81,7 +98,6 @@ export const defaultSignalsProducerDependencies: SignalsProducerDependencies = {
   fetchAvailableUncoveredShares,
   streamLivePrices: streamPooledPrices,
   streamOptionQuotes: streamSignalsOptionQuotes,
-  loadExpiryStrikes: async (tickerId) => new Map([...(await loadStoredOptionChain(tickerId)).strikesByExpiry].map(([expiry, strikes]) => [yyyymmddToIso(expiry), strikes])),
   computeUncompensatedShares: (candidates, spotPrice, slices) => computeUncompensatedSharesInWorker(candidates, spotPrice, slices),
   now: () => new Date(),
 };
@@ -114,6 +130,24 @@ function parseTickerParameters(rawParameters: unknown): Record<string, string> {
   const expiry = parameters.expiry;
   if (expiry !== undefined && (typeof expiry !== "string" || !isoDatePattern.test(expiry))) throw new StreamRequestError(400, "expiry must be a YYYY-MM-DD date.");
   return expiry === undefined ? { symbol: symbol.toUpperCase() } : { symbol: symbol.toUpperCase(), expiry };
+}
+
+/** `contracts`: comma-separated expiry|strike|right keys, at most signalsQuotesMaxContracts (an empty list is allowed: nothing on screen). */
+function parseQuotesParameters(rawParameters: unknown): Record<string, string> {
+  const parameters = readParameterObject(rawParameters);
+  const unknownField = Object.keys(parameters).find((key) => key !== "symbol" && key !== "contracts");
+  if (unknownField) throw new StreamRequestError(400, `Unknown parameter: ${unknownField}.`);
+  const symbol = parameters.symbol;
+  if (typeof symbol !== "string" || !symbolPattern.test(symbol)) throw new StreamRequestError(400, "symbol is required.");
+  const contracts = parameters.contracts;
+  if (!Array.isArray(contracts) || contracts.some((key) => typeof key !== "string" || !contractKeyPattern.test(key))) throw new StreamRequestError(400, "contracts must be a list of expiry|strike|right keys.");
+  if (contracts.length > signalsQuotesMaxContracts) throw new StreamRequestError(400, `At most ${signalsQuotesMaxContracts} contracts.`);
+  return { symbol: symbol.toUpperCase(), contracts: [...new Set(contracts as string[])].join(",") };
+}
+
+function parseContractKey(key: string): ContractRef {
+  const [expiry, strike, right] = key.split("|") as [string, string, "C" | "P"];
+  return { expiry, strike: Number(strike), right };
 }
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
@@ -181,7 +215,7 @@ function childAbort(parent: AbortSignal): AbortController {
   return controller;
 }
 
-export function createSignalsProducers(deps: SignalsProducerDependencies = defaultSignalsProducerDependencies): { signalsScreen: StreamProducer; signalsTicker: StreamProducer } {
+export function createSignalsProducers(deps: SignalsProducerDependencies = defaultSignalsProducerDependencies): { signalsScreen: StreamProducer; signalsTicker: StreamProducer; signalsQuotes: StreamProducer } {
   const signalsScreen: StreamProducer = {
     isSnapshotStream: true,
     parseParameters: parseScreenParameters,
@@ -343,79 +377,23 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       let account = initialAccount;
       let spot: number | null = null;
       let priceSource: SignalsPriceSource = "snapshot";
-      let liveQuotes: LiveOptionQuote[] = [];
       let uncompensatedByContract = new Map<string, number | null>();
       let uncompensatedAsOf: SignalsTickerFrame["uncompensatedAsOf"] = null;
       let lastSimulatedSpot: number | null = null;
 
-      let scoring = scoreTickerWithExclusions(inputs, account, settings, liveOverrides(inputs, spot, priceSource));
-      let scored = scoring.scored;
+      let scored = scoreTicker(inputs, account, settings, liveOverrides(inputs, spot, priceSource));
       const rescore = () => {
         const overrides = liveOverrides(inputs, spot, priceSource);
-        scoring = scoreTickerWithExclusions(inputs, account, settings, overrides ? { ...overrides, liveQuotes, uncompensatedByContract } : undefined);
-        scored = scoring.scored;
+        scored = scoreTicker(inputs, account, settings, overrides ? { ...overrides, uncompensatedByContract } : undefined);
       };
 
-      const selectedExpiry = parameters.expiry ?? scored.best?.expiry ?? null;
-      // The selected expiry's listed strikes: with them the live lines follow the spot (the out-of-the-money contracts nearest it);
-      // without a stored grid they stay on the expiry's Signals candidates.
-      const expiryStrikes = selectedExpiry ? ((await deps.loadExpiryStrikes(ticker.tickerId).catch((error) => {
-        console.error(`signalsTicker ${symbol}: strike grid unavailable, live lines stay on the candidates`, error);
-        return new Map<string, number[]>();
-      })).get(selectedExpiry) ?? []) : [];
-      if (signal.aborted) return;
-      const chooseLiveContracts = (spotForSelection: number | null): ContractRef[] =>
-        selectedExpiry && expiryStrikes.length > 0 && spotForSelection !== null
-          ? selectLiveChainContracts({ expiry: selectedExpiry, strikes: expiryStrikes, spotPrice: spotForSelection, heldLegs: inputs.openShortLegs })
-          : // One live line per open short leg (Roll Signals) ahead of the selected expiry's contracts.
-            selectLiveQuoteContracts(scored.candidates, selectedExpiry, inputs.openShortLegs);
-      let liveSetSpot: number | null = inputs.header?.underlyingPrice ?? null;
-      let liveQuoteContracts = chooseLiveContracts(liveSetSpot);
-      let liveQuoteContractKeys = liveQuoteContracts.map(contractKey);
-      let liveQuotesController: AbortController | null = null;
-
       const emitFrame = () => {
-        const cellFor = createChainCellResolver(scoring, new Map());
-        const liveChainCells: Record<string, SignalsChainCell> = {};
-        for (const contract of liveQuoteContracts) {
-          const cell = cellFor(contract);
-          if (cell.state !== "not_captured") liveChainCells[contractKey(contract)] = cell;
-        }
-        const frame: SignalsTickerFrame = { type: "signalsTicker", at: deps.now().toISOString(), signals: scored, liveQuoteContracts: liveQuoteContractKeys, liveChainCells, uncompensatedAsOf };
+        const frame: SignalsTickerFrame = { type: "signalsTicker", at: deps.now().toISOString(), signals: scored, uncompensatedAsOf };
         emit(frame);
       };
       emitFrame();
       const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now());
 
-      // (Re)subscribes the live option lines to `contracts`, dropping the previous subscription; pooled lines are shared, so contracts that stay in the set do not churn.
-      const startLiveQuotes = (contracts: ContractRef[]) => {
-        liveQuotesController?.abort();
-        liveQuoteContracts = contracts;
-        liveQuoteContractKeys = contracts.map(contractKey);
-        // Quotes of contracts that stay in the set carry over until the new subscription reports.
-        const kept = new Set(liveQuoteContractKeys);
-        liveQuotes = liveQuotes.filter((quote) => kept.has(contractKey(quote)));
-        if (contracts.length === 0) {
-          liveQuotesController = null;
-          return;
-        }
-        const controller = new AbortController();
-        liveQuotesController = controller;
-        signal.addEventListener("abort", () => controller.abort(), { once: true });
-        void deps
-          .streamOptionQuotes(
-            symbol,
-            contracts,
-            (quotes) => {
-              if (controller.signal.aborted) return;
-              liveQuotes = quotes;
-              rescore();
-              frames.markDirty();
-            },
-            controller.signal,
-          )
-          .catch((error) => console.error(`signalsTicker ${symbol}: live option quotes failed, staying at snapshot quotes`, error));
-      };
 
       // Monte Carlo: now, then every 5 s but only after a >= 0.5% spot move (never overlapping).
       let simulationInFlight = false;
@@ -480,11 +458,6 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
             if (spot === price && priceSource === source) return;
             spot = price;
             priceSource = source;
-            // The live set follows the spot: re-chosen once it is two strike steps from where the current set was chosen.
-            if (liveSetSpot !== null && expiryStrikes.length > 0 && shouldRecenterLiveChain(liveSetSpot, price, expiryStrikes)) {
-              liveSetSpot = price;
-              startLiveQuotes(chooseLiveContracts(price));
-            }
             rescore();
             frames.markDirty();
           },
@@ -492,11 +465,80 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
         )
         .catch((error) => console.error(`signalsTicker ${symbol}: live price failed, staying at the snapshot price`, error));
 
-      startLiveQuotes(liveQuoteContracts);
       await pricesTask;
       await waitForAbort(signal);
     },
   };
 
-  return { signalsScreen, signalsTicker };
+  const signalsQuotes: StreamProducer = {
+    isSnapshotStream: true,
+    parseParameters: parseQuotesParameters,
+    async run(parameters, _context, emit, signal) {
+      const symbol = parameters.symbol!;
+      const contractKeys = parameters.contracts ? parameters.contracts.split(",") : [];
+      const ticker = await deps.loadSignalsUniverseTicker(symbol);
+      if (!ticker) throw new StreamRequestError(404, `${symbol} is not on the shortlist and has no open short option leg.`);
+      const [inputs, account, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadSignalSettings()]);
+      if (signal.aborted) return;
+      const requested = new Set(contractKeys);
+      let spot: number | null = null;
+      let priceSource: SignalsPriceSource = "snapshot";
+      let liveQuotes: LiveOptionQuote[] = [];
+
+      const emitFrame = () => {
+        const overrides = liveOverrides(inputs, spot, priceSource);
+        const scoring = scoreTickerWithExclusions(inputs, account, settings, overrides ? { ...overrides, liveQuotes } : undefined);
+        const cellFor = createChainCellResolver(scoring, new Map());
+        const frame: SignalsQuotesFrame = { type: "signalsQuotes", at: deps.now().toISOString(), spotPrice: scoring.scored.spotPrice, contractKeys, cells: {}, candidates: {}, heldLegs: {}, rolls: {} };
+        for (const key of contractKeys) {
+          const cell = cellFor(parseContractKey(key));
+          if (cell.state !== "not_captured") frame.cells[key] = cell;
+        }
+        for (const candidate of scoring.scored.candidates) if (requested.has(candidateContractKey(candidate))) frame.candidates[candidateContractKey(candidate)] = candidate;
+        const heldKeyByLegId = new Map(scoring.scored.heldLegs.map((leg) => [leg.legId, contractKey(leg)]));
+        for (const leg of scoring.scored.heldLegs) if (requested.has(contractKey(leg))) frame.heldLegs[leg.legId] = leg;
+        for (const roll of scoring.scored.rolls) {
+          if (requested.has(heldKeyByLegId.get(roll.legId) ?? "") && requested.has(candidateContractKey(roll.replacement))) frame.rolls[rollCandidateKey(roll)] = roll;
+        }
+        emit(frame);
+      };
+      emitFrame();
+      const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now());
+
+      // The stock line is shared with the ticker stream's through the pool: no extra IBKR line.
+      const pricesTask = deps
+        .streamLivePrices(
+          [{ key: symbol, legType: "stock", symbol }],
+          (prices, status) => {
+            const price = prices[symbol];
+            if (price === null || price === undefined) return;
+            const source: SignalsPriceSource = status.frozenPhaseComplete ? "live" : "frozen";
+            if (spot === price && priceSource === source) return;
+            spot = price;
+            priceSource = source;
+            frames.markDirty();
+          },
+          signal,
+        )
+        .catch((error) => console.error(`signalsQuotes ${symbol}: live price failed`, error));
+      const quotesTask =
+        contractKeys.length === 0
+          ? Promise.resolve()
+          : deps
+              .streamOptionQuotes(
+                symbol,
+                contractKeys.map(parseContractKey),
+                (quotes) => {
+                  liveQuotes = quotes;
+                  frames.markDirty();
+                },
+                signal,
+              )
+              .catch((error) => console.error(`signalsQuotes ${symbol}: live option quotes failed`, error));
+      await Promise.all([pricesTask, quotesTask]);
+      await waitForAbort(signal);
+    },
+  };
+
+  return { signalsScreen, signalsTicker, signalsQuotes };
 }

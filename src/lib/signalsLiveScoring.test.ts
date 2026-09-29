@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { buildSignalCandidates, emptyCandidateExclusionTally, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, contractKey, countGrades, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
+import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, countGrades, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 
 const forward = 100;
@@ -320,39 +320,6 @@ describe("shouldRefreshUncompensatedShare", () => {
     expect(shouldRefreshUncompensatedShare(100, 100.5)).toBe(true);
     expect(shouldRefreshUncompensatedShare(100, 99.5)).toBe(true);
     expect(shouldRefreshUncompensatedShare(100, 99.6)).toBe(false);
-  });
-});
-
-describe("selectLiveQuoteContracts", () => {
-  const candidate = (expiry: string, strike: number, strategyKey: SignalCandidate["strategyKey"], edgeDollars: number): SignalCandidate =>
-    ({ strategyKey, expiry, strike, edgeDollars, netEdge: edgeDollars / 10 }) as SignalCandidate;
-  const list = [
-    candidate("2026-10-21", 90, "cash_secured_put", 5),
-    candidate("2026-10-21", 110, "covered_call", 1),
-    candidate("2026-11-20", 85, "cash_secured_put", 50),
-    candidate("2026-11-20", 115, "covered_call", 40),
-    candidate("2026-12-18", 80, "cash_secured_put", 30),
-  ];
-
-  it("takes the selected expiry's candidates only, without duplicates (other expiries ride on day quotes)", () => {
-    expect(selectLiveQuoteContracts(list, "2026-10-21").map(contractKey)).toEqual(["2026-10-21|90|P", "2026-10-21|110|C"]);
-    expect(selectLiveQuoteContracts([...list, candidate("2026-10-21", 90, "cash_secured_put", 5)], "2026-10-21")).toHaveLength(2);
-  });
-  it("caps the total at maxContracts", () => {
-    expect(selectLiveQuoteContracts(list, "2026-11-20", [], { maxContracts: 1 }).map(contractKey)).toEqual(["2026-11-20|85|P"]);
-  });
-  it("opens no lines without a selected expiry", () => {
-    expect(selectLiveQuoteContracts(list, null)).toEqual([]);
-  });
-  it("puts every open short leg's contract first (Roll Signals), deduplicated against the expiry's candidates, inside the cap", () => {
-    const held = [
-      { expiry: "2026-10-21", strike: 90, right: "P" as const },
-      { expiry: "2026-12-18", strike: 120, right: "C" as const },
-      { expiry: "2026-12-18", strike: 120, right: "C" as const },
-    ];
-    expect(selectLiveQuoteContracts(list, "2026-10-21", held).map(contractKey)).toEqual(["2026-10-21|90|P", "2026-12-18|120|C", "2026-10-21|110|C"]);
-    expect(selectLiveQuoteContracts(list, null, held).map(contractKey)).toEqual(["2026-10-21|90|P", "2026-12-18|120|C"]);
-    expect(selectLiveQuoteContracts(list, "2026-10-21", held, { maxContracts: 1 }).map(contractKey)).toEqual(["2026-10-21|90|P"]);
   });
 });
 

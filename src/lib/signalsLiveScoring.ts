@@ -1,6 +1,6 @@
 import { sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
 import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { buildRollCandidates, heldLegContractKey, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
+import { buildRollCandidates, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
 import type { SignalSettings } from "./signalSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
@@ -16,7 +16,6 @@ import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSo
 
 export const liveFrameIntervalMs = 1_000;
 export const accountRefreshIntervalMs = 60_000;
-export const liveQuoteMaxContracts = 40;
 
 export interface ContractRef {
   expiry: string; // ISO date
@@ -327,31 +326,6 @@ export function candidateContractRef(candidate: SignalCandidate): ContractRef {
   return { expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" };
 }
 
-/**
- * The contracts the modal subscribes to live quotes for: every open short leg's contract first (Roll Signals,
- * one line per leg), then the selected expiry's candidates, capped in total at liveQuoteMaxContracts
- * (Marcelo 2026-09-24 — every other expiry rides on the Day Signals quotes).
- */
-export function selectLiveQuoteContracts(candidates: SignalCandidate[], selectedExpiry: string | null, heldLegs: ContractRef[] = [], options = { maxContracts: liveQuoteMaxContracts }): ContractRef[] {
-  const selected: ContractRef[] = [];
-  const seen = new Set<string>();
-  for (const leg of heldLegs) {
-    const key = heldLegContractKey(leg);
-    if (seen.has(key) || selected.length >= options.maxContracts) continue;
-    seen.add(key);
-    selected.push({ expiry: leg.expiry, strike: leg.strike, right: leg.right });
-  }
-  if (!selectedExpiry) return selected;
-  for (const candidate of candidates) {
-    if (candidate.expiry !== selectedExpiry || selected.length >= options.maxContracts) continue;
-    const ref = candidateContractRef(candidate);
-    const key = contractKey(ref);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    selected.push(ref);
-  }
-  return selected;
-}
 
 export function toScreenRow(signals: TickerSignals): SignalsScreenRow {
   const { candidates: _candidates, rolls: _rolls, ...row } = signals;
