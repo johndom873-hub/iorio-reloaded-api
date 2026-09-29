@@ -1444,6 +1444,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   // type (open/close/roll) without threading it through three separate
   // build endpoints. Undefined/omitted leaves the payload as built, which
   // ibkrGatewayWorker.ts's buildOrder() already defaults to "Normal".
+  // Multi-leg (combo) orders take no priority: Adaptive is single-leg only.
   const requestedPriority = request.body?.adaptivePriority;
   if (requestedPriority !== undefined && !adaptivePriorities.has(requestedPriority)) {
     response.status(400).json({ error: "adaptivePriority must be Urgent, Normal, or Patient." });
@@ -1510,7 +1511,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     // but two rows built before either was confirmed could both confirm.
     const conflict = await findActiveOrderConflict(trx, { excludeOrderId: orderRequest.id, positionId: orderRequest.related_position_id, payload: orderRequest.payload });
     if (conflict) throw new ActiveOrderConflictError(conflict);
-    const payload = requestedPriority ? { ...orderRequest.payload, adaptivePriority: requestedPriority } : orderRequest.payload;
+    const payload = requestedPriority && orderRequest.payload.legs.length === 1 ? { ...orderRequest.payload, adaptivePriority: requestedPriority } : orderRequest.payload;
     // Conditioned on status still being pending_confirmation, and read back
     // via .returning, so two near-simultaneous confirm calls for the same
     // order can't both fall through to the NOTIFY below — only the one that
