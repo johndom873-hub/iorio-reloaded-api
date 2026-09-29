@@ -8,7 +8,9 @@ import type { TickerSignalsInputs } from "./signalsTypes.js";
 import { rollCandidateKey } from "./rollSignalCandidates.js";
 import { scoreTicker } from "./signalsLiveScoring.js";
 import { assignmentRiskAlertAbsoluteDelta, assignmentRiskRearmAbsoluteDelta, clearsNotificationHysteresis } from "./daySignalsNotifications.js";
-import type { AssignmentRiskAlertState } from "./daySignalsStore.js";
+import type { AssignmentRiskAlertState, DayRerankState } from "./daySignalsStore.js";
+import type { DayContractRef } from "./daySignalsContractSet.js";
+import type { DayTickerContractContext } from "./daySignalsContractContextStore.js";
 
 const forward = 100;
 const rate = 0.04;
@@ -57,14 +59,14 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
 interface Harness {
   deps: DaySignalsLoopDependencies;
   loop: DaySignalsLoop;
-  calls: { reserve: number; release: number; windows: WindowContract[][]; writes: number; notified: string[]; emitted: string[]; heartbeats: string[]; grades: SignalGrade[][]; rollGrades: SignalGrade[][]; rollNotified: string[]; assignmentAlerts: string[]; assignmentRearms: string[] };
-  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; lastRollGrades: Map<string, SignalGrade>; openShortLegs: TickerSignalsInputs["openShortLegs"]; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean }; nowIso: string; assignmentRiskStates: Map<string, AssignmentRiskAlertState> };
+  calls: { reserve: number; release: number; windows: WindowContract[][]; writes: number; notified: string[]; emitted: string[]; heartbeats: string[]; grades: SignalGrade[][]; rollGrades: SignalGrade[][]; rollNotified: string[]; assignmentAlerts: string[]; assignmentRearms: string[]; spotPasses: string[][]; prunes: { tickerId: string; keep: DayContractRef[] }[]; poolReplacements: { tickerId: string; expiries: string[] }[] };
+  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; lastRollGrades: Map<string, SignalGrade>; openShortLegs: TickerSignalsInputs["openShortLegs"]; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean }; nowIso: string; assignmentRiskStates: Map<string, AssignmentRiskAlertState>; spot: number; contexts: Map<string, DayTickerContractContext>; rerankStates: Map<string, DayRerankState> };
 }
 
 /** The window fake answers every option with a two-sided quote at `impliedVolatility` and the stock with last = 100, synchronously. */
 function createHarness(impliedVolatilityShift = 0): Harness {
-  const calls: Harness["calls"] = { reserve: 0, release: 0, windows: [], writes: 0, notified: [], emitted: [], heartbeats: [], grades: [], rollGrades: [], rollNotified: [], assignmentAlerts: [], assignmentRearms: [] };
-  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), lastRollGrades: new Map(), openShortLegs: [], dayQuotes: [], windowResult: { disconnected: false }, nowIso: "2026-09-24T15:00:00Z", assignmentRiskStates: new Map() };
+  const calls: Harness["calls"] = { reserve: 0, release: 0, windows: [], writes: 0, notified: [], emitted: [], heartbeats: [], grades: [], rollGrades: [], rollNotified: [], assignmentAlerts: [], assignmentRearms: [], spotPasses: [], prunes: [], poolReplacements: [] };
+  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), lastRollGrades: new Map(), openShortLegs: [], dayQuotes: [], windowResult: { disconnected: false }, nowIso: "2026-09-24T15:00:00Z", assignmentRiskStates: new Map(), spot: 100, contexts: new Map(), rerankStates: new Map() };
   let ticks = 0;
   const deps: DaySignalsLoopDependencies = {
     now: () => new Date(state.nowIso),
@@ -94,6 +96,23 @@ function createHarness(impliedVolatilityShift = 0): Harness {
         options.onSettled(contract, quote);
       }
       return { settled: contracts.length, ...state.windowResult, aborted: false };
+    },
+    runSpotPass: async (contracts, options) => {
+      calls.spotPasses.push(contracts.map((contract) => contract.key));
+      for (const contract of contracts) options.onSettled(contract, { bid: null, ask: null, last: state.spot, errorCode: null, timedOut: false, settledAt: new Date("2026-09-24T15:00:30Z") });
+      return { settled: contracts.length, disconnected: false, aborted: false };
+    },
+    loadContractContexts: async () => state.contexts,
+    loadRerankStates: async () => new Map(state.rerankStates),
+    saveRerankState: async (tickerId, _tradingDateIso, saved) => {
+      state.rerankStates.set(tickerId, saved);
+    },
+    pruneDayQuotes: async (tickerId, keep) => {
+      calls.prunes.push({ tickerId, keep });
+    },
+    replaceTickerPool: async (tickerId, _tradingDateIso, expiries) => {
+      calls.poolReplacements.push({ tickerId, expiries: expiries.map((entry) => entry.expiry) });
+      return true;
     },
     upsertDayQuotes: async (writes) => {
       calls.writes += writes.length;
@@ -199,6 +218,146 @@ describe("DaySignalsLoop", () => {
     expect(harness.loop.getStatus()).toMatchObject({ cycleNumber: 1, contractsInPool: 6, tradingDateIso });
   });
 
+  describe("tracking the live spot", () => {
+    const listedStrikes = [80, 85, 90, 95, 100, 105, 110, 115, 120];
+    function contextAt(overrides: Partial<DayTickerContractContext> = {}): DayTickerContractContext {
+      return {
+        tickerId: "t1",
+        symbol: "AAA",
+        snapshotId: "s1",
+        snapshotSpotPrice: 100,
+        atmImpliedVolatility: 0.3,
+        strikesByExpiry: new Map([[expiry, listedStrikes]]),
+        heldContracts: [],
+        previousContracts: strikes.map(([strike, right]) => ({ expiry, strike, right })),
+        ...overrides,
+      };
+    }
+    /** Runs exactly `cycleCount` full cycles (each ends in its main quote window). */
+    async function runCycles(harness: Harness, cycleCount: number): Promise<void> {
+      let mainWindows = 0;
+      const originalWindow = harness.deps.runQuoteWindow;
+      harness.deps.runQuoteWindow = async (contracts, options) => {
+        const result = await originalWindow(contracts, options);
+        if (contracts.some((contract) => contract.key.endsWith("|stock"))) {
+          mainWindows += 1;
+          if (mainWindows === cycleCount) harness.loop.stop();
+        }
+        return result;
+      };
+      await harness.loop.start();
+    }
+
+    it("quotes the capture's rule at the live spot: follows a rally, drops far ITM contracts, keeps one strike step of buffer, and prunes what it dropped", async () => {
+      const harness = createHarness();
+      harness.state.spot = 112;
+      // snapshotSpotPrice equal to the spot keeps the re-rank out of this test.
+      harness.state.contexts = new Map([["t1", contextAt({ snapshotSpotPrice: 112 })]]);
+      await runCycles(harness, 1);
+      // Window at 112 with 27 DTE and 30% IV is 95.1..132. Puts below spot inside it, both rights at 110 (nearest strike), calls above spot.
+      // 95P was captured and sits under the lower bound by less than one strike step (kept); 80P/85P/90P and the ITM 105C are gone.
+      const expected = ["95P", "100P", "105P", "110C", "110P", "115C", "120C"];
+      expect(harness.calls.windows.at(-1)!.map((contract) => contract.key)).toEqual([...expected.map((label) => `t1|${expiry}|${label.slice(0, -1)}|${label.slice(-1)}`), "t1|stock"]);
+      expect(harness.calls.prunes).toHaveLength(1);
+      expect(harness.calls.prunes[0]!.keep.map((contract) => `${contract.strike}${contract.right}`)).toEqual(expected);
+      expect(harness.calls.poolReplacements).toEqual([]);
+      expect(harness.loop.getStatus().contractsInPool).toBe(7);
+    });
+
+    it("always quotes an open leg's contract, even far in the money", async () => {
+      const harness = createHarness();
+      harness.state.spot = 112;
+      harness.state.contexts = new Map([["t1", contextAt({ snapshotSpotPrice: 112, heldContracts: [{ expiry, strike: 85, right: "P" }] })]]);
+      await runCycles(harness, 1);
+      expect(harness.calls.windows.at(-1)!.map((contract) => contract.key)).toContain(`t1|${expiry}|85|P`);
+    });
+
+    it("stays on the snapshot's contracts for a ticker with no context or no usable spot, and never prunes it", async () => {
+      const noContext = createHarness();
+      await runCycles(noContext, 1);
+      expect(noContext.calls.windows.at(-1)!.map((contract) => contract.key)).toEqual([...strikes.map(([strike, right]) => `t1|${expiry}|${strike}|${right}`), "t1|stock"]);
+      expect(noContext.calls.prunes).toEqual([]);
+
+      const noIv = createHarness();
+      noIv.state.contexts = new Map([["t1", contextAt({ atmImpliedVolatility: null })]]);
+      noIv.state.spot = 112;
+      await runCycles(noIv, 1);
+      expect(noIv.calls.windows.at(-1)!.map((contract) => contract.key)).toHaveLength(7);
+      expect(noIv.calls.prunes).toEqual([]);
+    });
+
+    it("runs the spot pass before the contract window each cycle, one stock per pooled ticker", async () => {
+      const harness = createHarness();
+      await runCycles(harness, 2);
+      expect(harness.calls.spotPasses).toEqual([["t1|stock"], ["t1|stock"]]);
+    });
+
+    it("re-ranks a ticker once when its spot moves past the trigger (2.5% at 80% IV), quoting all its fitted expiries at the new spot, and not again until it moves that far again", async () => {
+      const harness = createHarness(0.05);
+      harness.state.spot = 110; // +10% vs the 100 snapshot spot
+      harness.state.contexts = new Map([["t1", contextAt({ atmImpliedVolatility: 0.8 })]]);
+      await runCycles(harness, 3);
+      const discoveryWindows = harness.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock")));
+      expect(discoveryWindows).toHaveLength(1);
+      expect(discoveryWindows[0]!.every((contract) => contract.legType === "option")).toBe(true);
+      expect(harness.calls.poolReplacements).toEqual([{ tickerId: "t1", expiries: [expiry] }]);
+    });
+
+    it("persists the re-rank state: a restarted loop neither repeats a re-rank nor resets the daily cap", async () => {
+      const harness = createHarness(0.05);
+      harness.state.spot = 110;
+      harness.state.contexts = new Map([["t1", contextAt({ atmImpliedVolatility: 0.8 })]]);
+      await runCycles(harness, 1);
+      expect(harness.state.rerankStates.get("t1")).toEqual({ referenceSpotPrice: 110, reranks: 1 });
+      const discoveryCount = () => harness.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock"))).length;
+      expect(discoveryCount()).toBe(1);
+
+      // A fresh loop instance on the same stored state: the 9:30 spot (100) is no longer the reference, so 110 is not a new move.
+      const restarted = new DaySignalsLoop(harness.deps);
+      let cycles = 0;
+      const originalWindow = harness.deps.runQuoteWindow;
+      harness.deps.runQuoteWindow = async (contracts, options) => {
+        const result = await originalWindow(contracts, options);
+        if (contracts.some((contract) => contract.key.endsWith("|stock")) && (cycles += 1) === 1) restarted.stop();
+        return result;
+      };
+      await restarted.start();
+      expect(discoveryCount()).toBe(1);
+
+      // A stored count at the cap blocks any further re-rank however far the price has moved since.
+      harness.state.rerankStates.set("t1", { referenceSpotPrice: 100, reranks: 3 });
+      const capped = new DaySignalsLoop(harness.deps);
+      cycles = 0;
+      harness.deps.runQuoteWindow = async (contracts, options) => {
+        const result = await originalWindow(contracts, options);
+        if (contracts.some((contract) => contract.key.endsWith("|stock")) && (cycles += 1) === 1) capped.stop();
+        return result;
+      };
+      await capped.start();
+      expect(discoveryCount()).toBe(1);
+    });
+
+    it("does not re-rank a move under the trigger, nor after the daily cap", async () => {
+      const small = createHarness(0.05);
+      small.state.spot = 102; // +2% < 2.52%
+      small.state.contexts = new Map([["t1", contextAt({ atmImpliedVolatility: 0.8 })]]);
+      await runCycles(small, 1);
+      expect(small.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock")))).toHaveLength(0);
+
+      const capped = createHarness(0.05);
+      capped.state.contexts = new Map([["t1", contextAt({ atmImpliedVolatility: 0.8 })]]);
+      let cycle = 0;
+      const originalSpotPass = capped.deps.runSpotPass;
+      capped.deps.runSpotPass = async (contracts, options) => {
+        cycle += 1;
+        capped.state.spot = 100 * 1.1 ** cycle; // +10% every cycle: always past the trigger
+        return originalSpotPass(contracts, options);
+      };
+      await runCycles(capped, 6);
+      expect(capped.calls.poolReplacements).toHaveLength(3);
+    });
+  });
+
   it("notifies upward transitions only, against the last recorded grade", async () => {
     // Quotes come back 8 vol points richer than the surface: shift +8vp lifts every candidate from Weak to Good/Strong.
     const harness = createHarness(0.08);
@@ -214,6 +373,43 @@ describe("DaySignalsLoop", () => {
     expect(harness.calls.notified.length).toBeGreaterThan(0);
     expect(harness.calls.notified.every((entry) => entry.includes("weak->"))).toBe(true);
     expect(harness.calls.notified.some((entry) => entry.startsWith("80P:"))).toBe(false);
+  });
+
+  it("notifies a contract the loop only just started quoting (price moved) from Avoid, while the first cycle after the seed stays a baseline", async () => {
+    const stopAfterMainWindow = (harness: Harness) => {
+      const originalWindow = harness.deps.runQuoteWindow;
+      harness.deps.runQuoteWindow = async (contracts, options) => {
+        const result = await originalWindow(contracts, options);
+        harness.loop.stop();
+        return result;
+      };
+    };
+    const contextWithPrevious = (previous: [number, "C" | "P"][]): DayTickerContractContext => ({
+      tickerId: "t1",
+      symbol: "AAA",
+      snapshotId: "s1",
+      snapshotSpotPrice: 100,
+      atmImpliedVolatility: 0.3,
+      strikesByExpiry: new Map([[expiry, [80, 85, 90, 95, 100, 105, 110]]]),
+      heldContracts: [],
+      previousContracts: previous.map(([strike, right]) => ({ expiry, strike, right })),
+    });
+
+    // Quotes 8 vol points rich. Only 90P/95P were quoted last cycle; every other contract of today's set is new to the loop.
+    const midDay = createHarness(0.08);
+    midDay.state.contexts = new Map([["t1", contextWithPrevious([[90, "P"], [95, "P"]])]]);
+    stopAfterMainWindow(midDay);
+    await midDay.loop.start();
+    expect(midDay.calls.notified.length).toBeGreaterThan(0);
+    expect(midDay.calls.notified.every((entry) => entry.includes("avoid->"))).toBe(true);
+    expect(midDay.calls.notified.some((entry) => entry.startsWith("90P:") || entry.startsWith("95P:"))).toBe(false); // known contracts: no recorded grade is still a baseline
+
+    // Nothing stored yet (the first cycle after the seed): everything is a baseline, nothing notifies.
+    const firstCycle = createHarness(0.08);
+    firstCycle.state.contexts = new Map([["t1", contextWithPrevious([])]]);
+    stopAfterMainWindow(firstCycle);
+    await firstCycle.loop.start();
+    expect(firstCycle.calls.notified).toEqual([]);
   });
 
   it("withholds a notification that reaches Weak without clearing the hysteresis margin, while still recording the grade", async () => {

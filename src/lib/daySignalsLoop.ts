@@ -5,6 +5,10 @@ import { releaseMarketDataLines, reserveMarketDataLines, type LineReservationRes
 import { sharedLiveConnection } from "../ibkr/sharedReadConnection.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { emitDayQuotesUpdated } from "./daySignalsEvents.js";
+import { selectContractsToCapture, computeStrikeWindow, calendarDaysUntilExpiry } from "./optionChainCaptureWindow.js";
+import { selectDaySignalContractSet, shouldRerankExpiries, type DayContractRef, type DayContractSetExpiry } from "./daySignalsContractSet.js";
+import { loadDayTickerContractContexts, type DayTickerContractContext } from "./daySignalsContractContextStore.js";
+import { selectDaySignalExpiries } from "./daySignalsSeed.js";
 import { clearsNotificationHysteresis, decideAssignmentRiskAlert, isGradeUpgrade, notifyAssignmentRisk, notifyRollSignalUpgrade, notifySignalUpgrade, type AssignmentRiskAlert, type RollSignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
 import {
   loadAssignmentRiskAlertStates,
@@ -12,14 +16,20 @@ import {
   loadDaySignalExpiries,
   loadDaySignalUniverse,
   loadDayQuotesForTicker,
+  loadDayRerankStates,
+  pruneDayQuotesOutsideSet,
   rearmAssignmentRiskAlert,
   recordAssignmentRiskAlert,
+  replaceTickerPoolExpiries,
+  saveDayRerankState,
   updateDayQuoteGrades,
   upsertDayQuotes,
   upsertDayRollGrades,
   type AssignmentRiskAlertState,
   type DayQuoteContract,
   type DayQuoteWrite,
+  type DayRerankState,
+  type DaySignalExpirySeed,
   type DaySignalExpiryRow,
 } from "./daySignalsStore.js";
 import { computeMarketSessionStatus, easternDateIso } from "./marketSessionStatus.js";
@@ -27,7 +37,7 @@ import { formatIsoDateAsExpiry } from "./optionChainSnapshotStore.js";
 import { readGitSha } from "./readGitSha.js";
 import type { SignalGrade } from "./signalCandidates.js";
 import { rollCandidateKey, type HeldLegScore } from "./rollSignalCandidates.js";
-import { candidateContractKey, scoreTicker } from "./signalsLiveScoring.js";
+import { candidateContractKey, scoreTicker, type LiveOptionQuote } from "./signalsLiveScoring.js";
 import { loadAccountContext, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "./signalSettingsStore.js";
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
@@ -50,6 +60,14 @@ import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 //             through a rolling window (daySignalsQuoteWindow.ts). Each
 //             ticker's block ends with one transient stock slot whose last
 //             price is the spot for that ticker's re-score.
+//
+// Each cycle starts with a spot pass (every pooled ticker's stock, one line each). The contracts
+// quoted for a ticker are then the capture's own rule applied at that LIVE spot (approved 2026-09-29,
+// daySignalsContractSet.ts), not the 9:30 snapshot's: a stock that moved after the open would otherwise
+// leave a hole where the puts (or calls) it now wants to sell should be. Contracts that stop qualifying
+// are dropped and their stored quotes deleted, so the set stays about the same size. A ticker whose spot
+// moved by max(1%, half its one-day expected move) since it was last ranked (at most 3 times a day) also
+// gets its pooled expiries re-ranked from a one-off discovery pass over all its expiries.
 //
 // After every ticker's block settles: its quotes are flushed, the ticker is
 // re-scored exactly as the screens score it (scoreTicker over the merged
@@ -101,7 +119,16 @@ export interface DaySignalsLoopDependencies {
   borrowLiveConnection(): Promise<{ ib: IBApi }>;
   allocateReqId(): number;
   runQuoteWindow(contracts: WindowContract[], options: RollingQuoteWindowOptions): Promise<RollingQuoteWindowResult>;
+  /** The start-of-cycle pass over every pooled ticker's stock (one line each); the same fetcher as runQuoteWindow, separate so callers can tell them apart. */
+  runSpotPass(contracts: WindowContract[], options: RollingQuoteWindowOptions): Promise<RollingQuoteWindowResult>;
   upsertDayQuotes(writes: DayQuoteWrite[]): Promise<void>;
+  /** Per pooled ticker: strike grids, ATM IV, held legs and last cycle's contracts. A ticker missing from the map stays on the snapshot's contracts. */
+  loadContractContexts(pool: DaySignalExpiryRow[], tradingDateIso: string): Promise<Map<string, DayTickerContractContext>>;
+  pruneDayQuotes(tickerId: string, keep: DayContractRef[]): Promise<void>;
+  loadRerankStates(tradingDateIso: string): Promise<Map<string, DayRerankState>>;
+  saveRerankState(tickerId: string, tradingDateIso: string, state: DayRerankState): Promise<void>;
+  /** Mid-day re-rank: replaces one ticker's pooled expiries; false when the ticker has no pool row. */
+  replaceTickerPool(tickerId: string, tradingDateIso: string, expiries: DaySignalExpirySeed[], seededAt: Date): Promise<boolean>;
   loadTickerSignalsInputs(ticker: SignalsTickerRow): Promise<TickerSignalsInputs>;
   loadAccountContext(): Promise<AccountContext>;
   loadSignalSettings(): Promise<SignalSettings>;
@@ -120,6 +147,10 @@ export interface DaySignalsLoopDependencies {
   emitUpdated(tickerId: string): void;
   writeHeartbeat(status: DaySignalsLoopStatus): Promise<void>;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
+}
+
+function spotFromQuote(quote: WindowQuote): number | null {
+  return quote.last ?? (quote.bid !== null && quote.ask !== null ? (quote.bid + quote.ask) / 2 : null);
 }
 
 function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
@@ -148,7 +179,13 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   borrowLiveConnection: () => sharedLiveConnection.borrow(),
   allocateReqId: () => sharedLiveConnection.allocateReqId(),
   runQuoteWindow: runRollingQuoteWindow,
+  runSpotPass: runRollingQuoteWindow,
   upsertDayQuotes,
+  loadContractContexts: loadDayTickerContractContexts,
+  pruneDayQuotes: pruneDayQuotesOutsideSet,
+  replaceTickerPool: replaceTickerPoolExpiries,
+  loadRerankStates: loadDayRerankStates,
+  saveRerankState: saveDayRerankState,
   loadTickerSignalsInputs,
   loadAccountContext,
   loadSignalSettings,
@@ -279,7 +316,7 @@ export class DaySignalsLoop {
     this.status.tradingDateIso = tradingDateIso;
     this.status.contractsInPool = universe.length;
     this.setState("running", `${pool.length} expiries, ${universe.length} contracts`);
-    const result = await this.runCycle(borrowed.ib, universe, tradingDateIso, signal);
+    const result = await this.runCycle(borrowed.ib, pool, universe, tradingDateIso, signal);
     if (result.disconnected) {
       this.status.lastError = "IBKR live connection dropped mid-cycle";
       await this.deps.sleep(afterDisconnectBackoffMs, signal);
@@ -319,11 +356,55 @@ export class DaySignalsLoop {
     await this.deps.releaseLines(daySignalsLoopLineHolder).catch((error) => console.warn(`day signals loop: could not release lines — ${error instanceof Error ? error.message : error}`));
   }
 
-  private async runCycle(ib: IBApi, universe: (DayQuoteContract & { symbol: string })[], tradingDateIso: string, signal: AbortSignal): Promise<RollingQuoteWindowResult> {
+  private async runCycle(ib: IBApi, pool: DaySignalExpiryRow[], snapshotUniverse: (DayQuoteContract & { symbol: string })[], tradingDateIso: string, signal: AbortSignal): Promise<RollingQuoteWindowResult> {
     const cycleNumber = ++this.status.cycleNumber;
     const startedAt = this.deps.now();
     this.status.cycleStartedAt = startedAt.toISOString();
     const [settings, account] = await Promise.all([this.deps.loadSignalSettings(), this.deps.loadAccountContext()]);
+
+    // Spot pass: every pooled ticker's stock first, so the contract set below follows the live price.
+    const spotByTicker = new Map<string, number | null>();
+    const pooledTickers = new Map<string, string>();
+    for (const row of pool) if (!pooledTickers.has(row.tickerId)) pooledTickers.set(row.tickerId, row.symbol);
+    const spotWindowContracts: WindowContract[] = [...pooledTickers].map(([tickerId, symbol]) => ({ key: `${tickerId}|stock`, legType: "stock", symbol }));
+    const spotPass = await this.deps.runSpotPass(spotWindowContracts, {
+      ib,
+      allocateReqId: this.deps.allocateReqId,
+      concurrency: daySignalsLoopLines,
+      timeoutMs: daySignalsContractTimeoutMs,
+      signal,
+      onSettled: (contract, quote) => spotByTicker.set(contract.key.split("|")[0]!, spotFromQuote(quote)),
+      now: this.deps.now,
+    });
+    if (spotPass.disconnected || spotPass.aborted) return spotPass;
+
+    let activePool = pool;
+    let universe = snapshotUniverse;
+    let contexts = await this.loadContractContextsSafely(pool, tradingDateIso);
+    let poolChanged = false;
+    const rerankStates = await this.loadRerankStatesSafely(tradingDateIso);
+    for (const [tickerId] of pooledTickers) {
+      const context = contexts.get(tickerId);
+      const spot = spotByTicker.get(tickerId) ?? null;
+      if (!context || spot === null || context.atmImpliedVolatility === null || context.snapshotSpotPrice === null || signal.aborted) continue;
+      const state = rerankStates.get(tickerId) ?? { referenceSpotPrice: context.snapshotSpotPrice, reranks: 0 };
+      if (!shouldRerankExpiries({ spotPrice: spot, referenceSpotPrice: state.referenceSpotPrice, atmImpliedVolatility: context.atmImpliedVolatility, reranksToday: state.reranks })) continue;
+      // Counted and re-referenced whatever the outcome (and saved before the discovery runs): a failing discovery or a restart must not retry it.
+      const nextState = { referenceSpotPrice: spot, reranks: state.reranks + 1 };
+      rerankStates.set(tickerId, nextState);
+      await this.deps.saveRerankState(tickerId, tradingDateIso, nextState).catch((error) => console.warn(`day signals loop: could not save ${context.symbol}'s re-rank state — ${error instanceof Error ? error.message : error}`));
+      const outcome = await this.rerankTicker(ib, context, spot, tradingDateIso, settings, account, signal);
+      if (outcome === "disconnected") return { settled: 0, disconnected: true, aborted: false };
+      if (outcome === "changed") poolChanged = true;
+    }
+    if (poolChanged) {
+      [activePool, universe] = await Promise.all([this.deps.loadPool(tradingDateIso), this.deps.loadUniverse(tradingDateIso)]);
+      contexts = await this.loadContractContextsSafely(activePool, tradingDateIso);
+    }
+    const built = await this.buildCycleUniverse(activePool, universe, contexts, spotByTicker);
+    universe = built.universe;
+    const newContractKeysByTicker = built.newContractKeysByTicker;
+    this.status.contractsInPool = universe.length;
 
     // ticker → its contracts, in universe order; each block ends with the ticker's stock slot.
     const tickers = new Map<string, { symbol: string; contracts: (DayQuoteContract & { symbol: string })[] }>();
@@ -342,7 +423,6 @@ export class DaySignalsLoop {
       remainingByTicker.set(tickerId, entry.contracts.length + 1);
     }
 
-    const spotByTicker = new Map<string, number | null>();
     let writeBuffer: DayQuoteWrite[] = [];
     let flushChain: Promise<void> = Promise.resolve();
     const flush = (): Promise<void> => {
@@ -362,7 +442,7 @@ export class DaySignalsLoop {
         writeBuffer.push({ tickerId, expiry, strike: Number(strike), right, tradingDateIso, bid: quote.bid, ask: quote.ask, last: quote.last, errorCode: quote.errorCode, quotedAt: quote.settledAt, cycleNumber });
         if (writeBuffer.length >= writeFlushRowCount) void flush();
       } else {
-        spotByTicker.set(tickerId, quote.last ?? (quote.bid !== null && quote.ask !== null ? (quote.bid + quote.ask) / 2 : null));
+        spotByTicker.set(tickerId, spotFromQuote(quote));
       }
       const remaining = (remainingByTicker.get(tickerId) ?? 1) - 1;
       remainingByTicker.set(tickerId, remaining);
@@ -370,7 +450,7 @@ export class DaySignalsLoop {
         const symbol = tickers.get(tickerId)!.symbol;
         tickerWorkChain = tickerWorkChain.then(async () => {
           await flush();
-          await this.rescoreTicker({ tickerId, symbol, companyName: null, sector: null }, tradingDateIso, spotByTicker.get(tickerId) ?? null, settings, account);
+          await this.rescoreTicker({ tickerId, symbol, companyName: null, sector: null }, tradingDateIso, spotByTicker.get(tickerId) ?? null, settings, account, newContractKeysByTicker.get(tickerId) ?? new Set());
         });
       }
     };
@@ -387,6 +467,118 @@ export class DaySignalsLoop {
     }
   }
 
+  private async loadRerankStatesSafely(tradingDateIso: string): Promise<Map<string, DayRerankState>> {
+    try {
+      return await this.deps.loadRerankStates(tradingDateIso);
+    } catch (error) {
+      console.warn(`day signals loop: re-rank state unavailable, assuming none — ${error instanceof Error ? error.message : error}`);
+      return new Map();
+    }
+  }
+
+  /** A failed context load leaves every ticker on the snapshot's contracts for this cycle rather than stopping the loop. */
+  private async loadContractContextsSafely(pool: DaySignalExpiryRow[], tradingDateIso: string): Promise<Map<string, DayTickerContractContext>> {
+    try {
+      return await this.deps.loadContractContexts(pool, tradingDateIso);
+    } catch (error) {
+      console.warn(`day signals loop: contract contexts unavailable, using the snapshot's contracts — ${error instanceof Error ? error.message : error}`);
+      return new Map();
+    }
+  }
+
+  /**
+   * The cycle's contracts: per ticker with a live spot, ATM IV and stored strike grids, the capture's rule at that spot for every
+   * pooled expiry it can window (and its stored quotes outside that set are deleted); anything else stays on the snapshot's contracts.
+   */
+  private async buildCycleUniverse(pool: DaySignalExpiryRow[], snapshotUniverse: (DayQuoteContract & { symbol: string })[], contexts: Map<string, DayTickerContractContext>, spotByTicker: Map<string, number | null>): Promise<{ universe: (DayQuoteContract & { symbol: string })[]; newContractKeysByTicker: Map<string, Set<string>> }> {
+    const universe: (DayQuoteContract & { symbol: string })[] = [];
+    const newContractKeysByTicker = new Map<string, Set<string>>();
+    const prunes: Promise<void>[] = [];
+    const tickerIds = [...new Set(pool.map((row) => row.tickerId))];
+    for (const tickerId of tickerIds) {
+      const symbol = pool.find((row) => row.tickerId === tickerId)!.symbol;
+      const snapshotContracts = snapshotUniverse.filter((contract) => contract.tickerId === tickerId);
+      const context = contexts.get(tickerId);
+      const spot = spotByTicker.get(tickerId) ?? null;
+      if (!context || spot === null || !(spot > 0) || context.atmImpliedVolatility === null) {
+        universe.push(...snapshotContracts);
+        continue;
+      }
+      const windowable: DayContractSetExpiry[] = [];
+      const snapshotOnlyExpiries = new Set<string>();
+      for (const row of pool.filter((entry) => entry.tickerId === tickerId)) {
+        const strikes = context.strikesByExpiry.get(row.expiry);
+        const window = strikes ? computeStrikeWindow({ spotPrice: spot, atmImpliedVolatility: context.atmImpliedVolatility, daysToExpiry: calendarDaysUntilExpiry(row.tradingDateIso, row.expiry.replaceAll("-", "")) }) : null;
+        if (strikes && window) windowable.push({ expiry: row.expiry, strikes, window });
+        else snapshotOnlyExpiries.add(row.expiry);
+      }
+      const dynamic = selectDaySignalContractSet({ expiries: windowable, spotPrice: spot, previousContracts: context.previousContracts, heldContracts: context.heldContracts });
+      const kept = [...dynamic, ...snapshotContracts.filter((contract) => snapshotOnlyExpiries.has(contract.expiry))].sort((a, b) => a.expiry.localeCompare(b.expiry) || a.strike - b.strike || a.right.localeCompare(b.right));
+      if (kept.length === 0) {
+        universe.push(...snapshotContracts);
+        continue;
+      }
+      universe.push(...kept.map((contract) => ({ tickerId, symbol, expiry: contract.expiry, strike: contract.strike, right: contract.right })));
+      // Contracts the loop starts quoting mid-day (the price moved, or a re-rank added an expiry): with quotes stored from an earlier
+      // cycle, so the very first cycle after the seed (nothing stored) stays a baseline. Their first grade can notify.
+      if (context.previousContracts.length > 0) {
+        const previousKeys = new Set(context.previousContracts.map((contract) => `${contract.expiry}|${contract.strike}|${contract.right}`));
+        newContractKeysByTicker.set(tickerId, new Set(kept.map((contract) => `${contract.expiry}|${contract.strike}|${contract.right}`).filter((key) => !previousKeys.has(key))));
+      }
+      prunes.push(this.deps.pruneDayQuotes(tickerId, kept).catch((error) => console.warn(`day signals loop: pruning ${symbol}'s dropped contracts failed — ${error instanceof Error ? error.message : error}`)));
+    }
+    await Promise.all(prunes);
+    return { universe, newContractKeysByTicker };
+  }
+
+  /** One-off discovery for a ticker whose spot moved: quote the capture's contract set at the new spot across all its fitted expiries, score, and re-pick the pooled expiries (open legs' expiries always stay). */
+  private async rerankTicker(ib: IBApi, context: DayTickerContractContext, spot: number, tradingDateIso: string, settings: SignalSettings, account: AccountContext, signal: AbortSignal): Promise<"changed" | "unchanged" | "disconnected"> {
+    try {
+      const inputs = await this.deps.loadTickerSignalsInputs({ tickerId: context.tickerId, symbol: context.symbol, companyName: null, sector: null });
+      if (!inputs.header || inputs.header.tradingDateIso !== tradingDateIso || context.atmImpliedVolatility === null) return "unchanged";
+      const fittedExpiries = new Set(inputs.slices.filter((slice) => slice.status === "ok" && slice.parameters).map((slice) => slice.expiry));
+      const contracts: WindowContract[] = [];
+      for (const [expiry, strikes] of context.strikesByExpiry) {
+        if (!fittedExpiries.has(expiry)) continue;
+        const window = computeStrikeWindow({ spotPrice: spot, atmImpliedVolatility: context.atmImpliedVolatility, daysToExpiry: calendarDaysUntilExpiry(tradingDateIso, expiry.replaceAll("-", "")) });
+        if (!window) continue;
+        for (const contract of selectContractsToCapture(strikes, spot, window)) {
+          contracts.push({ key: `${context.tickerId}|${expiry}|${contract.strike}|${contract.right}`, legType: "option", symbol: context.symbol, expiry: formatIsoDateAsExpiry(expiry), strike: contract.strike, right: contract.right });
+        }
+      }
+      if (contracts.length === 0) return "unchanged";
+      const freshQuotes: LiveOptionQuote[] = [];
+      const result = await this.deps.runQuoteWindow(contracts, {
+        ib,
+        allocateReqId: this.deps.allocateReqId,
+        concurrency: daySignalsLoopLines,
+        timeoutMs: daySignalsContractTimeoutMs,
+        signal,
+        onSettled: (contract, quote) => {
+          const [, expiry, strike, right] = contract.key.split("|") as [string, string, string, "C" | "P"];
+          freshQuotes.push({ expiry, strike: Number(strike), right, bid: quote.bid, ask: quote.ask, quotedAt: quote.settledAt.toISOString() });
+        },
+        now: this.deps.now,
+      });
+      if (result.disconnected) return "disconnected";
+      if (result.aborted) return "unchanged";
+      const scored = scoreTicker(inputs, account, settings, { spotPrice: spot, priceSource: "live", liveQuotes: freshQuotes });
+      // Only contracts quoted in this pass: a snapshot-priced candidate from before the move would rank on a stale price.
+      const candidates = scored.candidates.filter((candidate) => candidate.quoteSource === "live");
+      const snapshotExpiries = new Set(inputs.slices.map((slice) => slice.expiry));
+      const heldLegExpiries = inputs.openShortLegs.map((leg) => leg.expiry).filter((expiry) => snapshotExpiries.has(expiry));
+      const expiries = selectDaySignalExpiries(candidates, undefined, heldLegExpiries);
+      // No positive-Edge candidate anywhere: keep the pool as it is rather than emptying a ticker mid-session.
+      if (expiries.length === 0) return "unchanged";
+      const changed = await this.deps.replaceTickerPool(context.tickerId, tradingDateIso, expiries, this.deps.now());
+      if (changed) console.log(`day signals loop: re-ranked ${context.symbol} at ${spot} — pooled expiries ${expiries.map((entry) => entry.expiry).join(", ")}`);
+      return changed ? "changed" : "unchanged";
+    } catch (error) {
+      console.error(`day signals loop: re-rank of ${context.symbol} failed — ${error instanceof Error ? error.message : error}`);
+      return "unchanged";
+    }
+  }
+
   /** True when `key` has never notified, or last did at least daySignalsNotificationCooldownMs ago. */
   private canNotify(key: string): boolean {
     const lastNotifiedAt = this.lastNotifiedAtByKey.get(key);
@@ -397,7 +589,7 @@ export class DaySignalsLoop {
     this.lastNotifiedAtByKey.set(key, this.deps.now().getTime());
   }
 
-  private async rescoreTicker(ticker: SignalsTickerRow, tradingDateIso: string, spot: number | null, settings: SignalSettings, account: AccountContext): Promise<void> {
+  private async rescoreTicker(ticker: SignalsTickerRow, tradingDateIso: string, spot: number | null, settings: SignalSettings, account: AccountContext, newContractKeys: Set<string>): Promise<void> {
     try {
       const [inputs, lastGrades, lastRollGrades] = await Promise.all([this.deps.loadTickerSignalsInputs(ticker), this.deps.loadLastGrades(ticker.tickerId, tradingDateIso), this.deps.loadLastRollGrades(ticker.tickerId, tradingDateIso)]);
       if (!inputs.header || inputs.header.tradingDateIso !== tradingDateIso) return;
@@ -407,7 +599,9 @@ export class DaySignalsLoop {
       const rollGrades: { legId: string; expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[] = [];
       for (const roll of scored.rolls) {
         const key = rollCandidateKey(roll);
-        const previousGrade = lastRollGrades.get(key) ?? null;
+        // A replacement contract the loop only just started quoting has no recorded grade: it counts as coming from Avoid, not as a baseline.
+        const storedRollGrade = lastRollGrades.get(key) ?? null;
+        const previousGrade = storedRollGrade === null && newContractKeys.has(`${roll.replacement.expiry}|${roll.replacement.strike}|${roll.strategyKey === "covered_call" ? "C" : "P"}`) ? "avoid" : storedRollGrade;
         const held = heldByLegId.get(roll.legId);
         const notificationKey = `roll:${key}`;
         if (held && isGradeUpgrade(previousGrade, roll.grade) && clearsNotificationHysteresis(roll.grade, roll.netRollEdge) && this.canNotify(notificationKey)) {
@@ -421,7 +615,9 @@ export class DaySignalsLoop {
       for (const candidate of scored.candidates) {
         const key = candidateContractKey(candidate);
         if (!lastGrades.has(key)) continue; // not a pooled contract
-        const previousGrade = lastGrades.get(key) ?? null;
+        // Same for a newly quoted contract: no recorded grade, but not a baseline either.
+        const storedGrade = lastGrades.get(key) ?? null;
+        const previousGrade = storedGrade === null && newContractKeys.has(key) ? "avoid" : storedGrade;
         const notificationKey = `signal:${ticker.tickerId}|${key}`;
         if (isGradeUpgrade(previousGrade, candidate.grade) && clearsNotificationHysteresis(candidate.grade, candidate.netEdge) && this.canNotify(notificationKey)) {
           await this.deps.notifyUpgrade({ symbol: ticker.symbol, candidate, previousGrade: previousGrade!, spotPrice: scored.spotPrice ?? spot ?? 0, quotedAt: candidate.quotedAt });

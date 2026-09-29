@@ -204,6 +204,14 @@ describe("assembleSignalsChain", () => {
     expect(row(80).put.state).toBe("not_captured");
   });
 
+  it("shows a contract the Day Signals loop quoted but the 9:30 capture never stored (the price moved) as a scored candidate", () => {
+    const fresh = quoteAt(85, "P", near, years30);
+    const dayQuote = { expiry: near, strike: 85, right: "P" as const, bid: fresh.bid, ask: fresh.ask, quotedAt: "2026-09-21T15:00:00Z" };
+    const putAt85 = (tickerInputs: TickerSignalsInputs) => chainFor(tickerInputs, near).strikes.find((entry) => entry.strike === 85)!.put;
+    expect(putAt85(inputs()).state).toBe("not_captured");
+    expect(putAt85(inputs({ dayQuotes: [dayQuote] }))).toMatchObject({ state: "candidate", quoteSource: "day", bid: dayQuote.bid, ask: dayQuote.ask });
+  });
+
   it("marks quoted contracts of an unscored ticker as filtered with the ticker's reason", () => {
     const chain = chainFor(inputs({ forecast: null }), near);
     expect(chain.unscoredReason).toBe("no_forecast");

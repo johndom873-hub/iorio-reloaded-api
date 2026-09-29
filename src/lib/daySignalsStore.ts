@@ -29,6 +29,12 @@ export interface DaySignalExpiryRow {
   rank: number;
 }
 
+export interface DayQuoteContractRef {
+  expiry: string; // ISO date
+  strike: number;
+  right: "C" | "P";
+}
+
 export interface DayQuoteContract {
   tickerId: string;
   expiry: string; // ISO date
@@ -77,6 +83,7 @@ export interface DayQuotesStatus {
 /** Wipes both day tables and writes the new pool in one transaction (the seed step). */
 export async function replaceDaySignalPool(tradingDateIso: string, seeds: DaySignalTickerSeed[], seededAt: Date): Promise<void> {
   await db.transaction(async (trx) => {
+    await trx("day_signal_rerank_state").del();
     await trx("day_signal_roll_grades").del();
     await trx("day_signal_quotes").del();
     await trx("day_signal_expiries").del();
@@ -94,6 +101,62 @@ export async function replaceDaySignalPool(tradingDateIso: string, seeds: DaySig
     );
     if (rows.length > 0) await trx("day_signal_expiries").insert(rows);
   });
+}
+
+/**
+ * A mid-day re-rank (daySignalsLoop.ts): replaces ONE ticker's pooled expiries, keeping the snapshot it was seeded from,
+ * and deletes that ticker's day quotes of expiries that left the pool so they can never be scored as fresh. A ticker
+ * with no pool row is left alone (the seed owns creating pools).
+ */
+export async function replaceTickerPoolExpiries(tickerId: string, tradingDateIso: string, expiries: DaySignalExpirySeed[], seededAt: Date): Promise<boolean> {
+  return db.transaction(async (trx) => {
+    const existing = await trx("day_signal_expiries").where({ ticker_id: tickerId }).whereRaw("trading_date::text = ?", [tradingDateIso]).first("snapshot_id");
+    if (!existing || expiries.length === 0) return false;
+    await trx("day_signal_expiries").where({ ticker_id: tickerId }).del();
+    await trx("day_signal_expiries").insert(
+      expiries.map((expiry) => ({
+        ticker_id: tickerId,
+        expiry: expiry.expiry,
+        trading_date: tradingDateIso,
+        snapshot_id: existing.snapshot_id,
+        rank: expiry.rank,
+        seed_best_edge_dollars: expiry.seedBestEdgeDollars,
+        seed_best_net_edge: expiry.seedBestNetEdge,
+        seeded_at: seededAt,
+      })),
+    );
+    await trx("day_signal_quotes").where({ ticker_id: tickerId }).whereNotIn("expiry", expiries.map((expiry) => expiry.expiry)).del();
+    return true;
+  });
+}
+
+export interface DayRerankState {
+  /** Spot at the ticker's last expiry re-rank. */
+  referenceSpotPrice: number;
+  /** Re-ranks run for the ticker today. */
+  reranks: number;
+}
+
+/** Today's re-rank bookkeeping per ticker; a ticker with no row has not re-ranked today (its reference is the 9:30 capture spot). */
+export async function loadDayRerankStates(tradingDateIso: string): Promise<Map<string, DayRerankState>> {
+  const rows = await db("day_signal_rerank_state").whereRaw("trading_date::text = ?", [tradingDateIso]).select("ticker_id as tickerId", "reference_spot_price as referenceSpotPrice", "rerank_count as reranks");
+  return new Map(rows.map((row) => [row.tickerId, { referenceSpotPrice: Number(row.referenceSpotPrice), reranks: Number(row.reranks) }]));
+}
+
+export async function saveDayRerankState(tickerId: string, tradingDateIso: string, state: DayRerankState): Promise<void> {
+  await db("day_signal_rerank_state")
+    .insert({ ticker_id: tickerId, trading_date: tradingDateIso, reference_spot_price: state.referenceSpotPrice, rerank_count: state.reranks, updated_at: db.fn.now() })
+    .onConflict("ticker_id")
+    .merge(["trading_date", "reference_spot_price", "rerank_count", "updated_at"]);
+}
+
+/** Deletes a ticker's day quotes for every contract not in `keep`: contracts the loop stopped quoting must not linger as "fresh" quotes. No-op for an empty list (an empty set is a bug, never a reason to wipe). */
+export async function pruneDayQuotesOutsideSet(tickerId: string, keep: DayQuoteContractRef[]): Promise<void> {
+  if (keep.length === 0) return;
+  await db("day_signal_quotes")
+    .where({ ticker_id: tickerId })
+    .whereNotIn(["expiry", "strike", "option_right"], keep.map((contract) => [contract.expiry, contract.strike, contract.right]))
+    .del();
 }
 
 export async function loadDaySignalExpiries(tradingDateIso: string): Promise<DaySignalExpiryRow[]> {

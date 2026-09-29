@@ -74,8 +74,8 @@ export function mergeLiveQuotes(snapshotQuotes: SignalQuote[], liveQuotes: LiveO
 }
 
 /**
- * A held leg's contract is not always in the 9:30 snapshot (an ITM leg before the capture learned to include
- * open legs, or one outside the strike window), and mergeLiveQuotes only replaces snapshot rows. This appends
+ * A wanted contract is not always in the 9:30 snapshot (a held leg outside the strike window, or a contract that
+ * only became out-of-the-money after the price moved), and mergeLiveQuotes only replaces snapshot rows. This appends
  * a fresh quote for any wanted contract the merged list lacks, live first, then day.
  */
 export function appendMissingContractQuotes(quotes: SignalQuote[], wanted: ContractRef[], dayQuotes: LiveOptionQuote[], liveQuotes: LiveOptionQuote[]): SignalQuote[] {
@@ -229,7 +229,8 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const withDayQuotes = mergeLiveQuotes(inputs.quotes, inputs.dayQuotes, "day");
   const mergedQuotes = live?.liveQuotes ? mergeLiveQuotes(withDayQuotes, live.liveQuotes, "live") : withDayQuotes;
   const heldLegRefs: ContractRef[] = inputs.openShortLegs.map((leg) => ({ expiry: leg.expiry, strike: leg.strike, right: leg.right }));
-  const quotes = appendMissingContractQuotes(mergedQuotes, heldLegRefs, inputs.dayQuotes, live?.liveQuotes ?? []);
+  // Contracts the loop or the modal quoted that the 9:30 snapshot never stored (the price moved past the capture window) are scored too.
+  const quotes = appendMissingContractQuotes(mergedQuotes, [...heldLegRefs, ...inputs.dayQuotes, ...(live?.liveQuotes ?? [])], inputs.dayQuotes, live?.liveQuotes ?? []);
   const riskFreeRate = header.riskFreeRatePercent / 100;
   const ivShifts = computeExpiryIvShifts(slices, quotes, riskFreeRate);
   observer?.onScoringQuotes?.(quotes);

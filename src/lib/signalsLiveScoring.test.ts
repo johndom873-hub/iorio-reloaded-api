@@ -432,6 +432,20 @@ describe("day quotes and the intraday IV shift (formula 3h)", () => {
   });
 });
 
+describe("scoreTicker with day quotes outside the snapshot (price moved past the capture window)", () => {
+  it("scores a day-quoted put the snapshot never stored, and never invents one without a two-sided quote", () => {
+    const fresh = quoteAt(95, "P", "2026-10-21", years30);
+    const dayQuote = { expiry: "2026-10-21", strike: 95, right: "P" as const, bid: fresh.bid, ask: fresh.ask, quotedAt: "2026-09-21T15:00:00Z" };
+    const withDay = scoreTicker(inputs({ dayQuotes: [dayQuote] }), account, permissiveSettings);
+    const scored = withDay.candidates.find((candidate) => candidateContractKey(candidate) === "2026-10-21|95|P");
+    expect(scored).toBeDefined();
+    expect(scored!.quoteSource).toBe("day");
+
+    const oneSided = scoreTicker(inputs({ dayQuotes: [{ ...dayQuote, bid: null }] }), account, permissiveSettings);
+    expect(oneSided.candidates.some((candidate) => candidateContractKey(candidate) === "2026-10-21|95|P")).toBe(false);
+  });
+});
+
 describe("appendMissingContractQuotes (Roll Signals)", () => {
   const snapshot: SignalQuote[] = [{ expiry: "2026-10-21", strike: 95, right: "P", bid: 1, ask: 1.1, source: "snapshot" }];
   it("appends a wanted contract the snapshot lacks, live before day, and leaves present or unquoted contracts alone", () => {
