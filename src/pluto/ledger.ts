@@ -175,6 +175,8 @@ export interface UpdatePlutoActionInput {
   pessimisticPnl?: number | null;
   realizedPnl?: number | null;
   evaluatedAt?: Date | null;
+  /** A combo's legs other than the chosen option, at their reference prices (see executor.ts). */
+  referenceOtherLegs?: { side: "sell" | "buy"; price: number; multiplier: number }[] | null;
 }
 
 export async function updatePlutoAction(actionId: string, input: UpdatePlutoActionInput): Promise<void> {
@@ -190,6 +192,7 @@ export async function updatePlutoAction(actionId: string, input: UpdatePlutoActi
       ...(input.pessimisticPnl !== undefined ? { pessimistic_pnl: input.pessimisticPnl } : {}),
       ...(input.realizedPnl !== undefined ? { realized_pnl: input.realizedPnl } : {}),
       ...(input.evaluatedAt !== undefined ? { evaluated_at: input.evaluatedAt } : {}),
+      ...(input.referenceOtherLegs !== undefined ? { reference_other_legs: input.referenceOtherLegs === null ? null : JSON.stringify(input.referenceOtherLegs) } : {}),
     });
 }
 

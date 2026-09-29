@@ -371,7 +371,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       : { kind: "roll", actionId, symbol: owner.row.symbol, roll: freshRoll!, heldLeg: fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll!.roll.legId)!, plan: gates.plan!, decision, scoresSnapshot },
   );
   if (result.outcome === "confirmed" && result.orderId) {
-    context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: owner.row.symbol, reference: { price: contract!.bid, side: "sell", multiplier: 100 }, description: result.detail, cancelByMs: checks.context.session.cancelByMs }), result.orderId);
+    context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: owner.row.symbol, reference: { price: contract!.bid, side: "sell", multiplier: 100, otherLegs: result.otherReferenceLegs }, description: result.detail, cancelByMs: checks.context.session.cancelByMs }), result.orderId);
   }
   return { passId, modelCalled: true, skippedReason: null, outcome: result.outcome };
 

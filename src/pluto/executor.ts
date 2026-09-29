@@ -20,6 +20,7 @@ import { tripPlutoBreaker } from "./stateStore.js";
 interface OrderRequestResponse {
   id: string;
   status: string;
+  payload?: { legs?: { role: "stock" | "option"; action: string; unitPrice: number }[] };
   errorMessage: string | null;
   ibkrStatus?: string | null;
   filledQuantity?: number | null;
@@ -53,6 +54,27 @@ export interface ExecuteResult {
   outcome: PlutoActionOutcome;
   orderId: string | null;
   detail: string;
+  /** A combo's legs other than the chosen option, priced for the fill comparison (see compareFillsWithReference). */
+  otherReferenceLegs?: PlutoReferenceLeg[];
+}
+
+/** One leg's reference price: the worse side of its market (bid for a sell, ask for a buy). */
+export interface PlutoReferenceLeg {
+  side: "sell" | "buy";
+  price: number;
+  multiplier: number;
+}
+
+/** The chosen leg (the option Pluto picked, or the leg a close trades) plus, for a combo, its other legs. */
+export interface PlutoFillReference extends PlutoReferenceLeg {
+  otherLegs?: PlutoReferenceLeg[];
+}
+
+export interface PlutoFill {
+  side: "sell" | "buy";
+  quantity: number;
+  price: number;
+  multiplier: number;
 }
 
 function isoToIbkrExpiry(expiryIso: string): string {
@@ -97,7 +119,12 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
     return await errored(input, `build failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  await updatePlutoAction(input.actionId, { outcome: "order_built", orderRequestId: built.id });
+  // A buy-write's shares are priced by the route at the live price; a roll's buyback at the held leg's ask.
+  const otherReferenceLegs: PlutoReferenceLeg[] =
+    input.kind === "open"
+      ? (built.payload?.legs ?? []).filter((leg) => leg.role === "stock").map((leg) => ({ side: leg.action === "SELL" ? ("sell" as const) : ("buy" as const), price: Number(leg.unitPrice), multiplier: 1 }))
+      : [{ side: "buy", price: input.heldLeg.ask!, multiplier: 100 }]; // a roll without a two-sided held quote was blocked above
+  await updatePlutoAction(input.actionId, { outcome: "order_built", orderRequestId: built.id, referenceOtherLegs: otherReferenceLegs.length > 0 ? otherReferenceLegs : null });
   await recordPlutoEvent("order_built", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description });
 
   try {
@@ -113,7 +140,7 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
   await updatePlutoAction(input.actionId, { outcome: "confirmed" });
   await recordPlutoEvent("order_confirmed", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description });
   if (settings.telegramVerbosity !== "off") await notifyTelegram(`🪐 Pluto sent an order: ${description}\n${input.decision.reasons.join(" ")}`);
-  return { outcome: "confirmed", orderId: built.id, detail: description };
+  return { outcome: "confirmed", orderId: built.id, detail: description, otherReferenceLegs };
 
   async function blocked(action: ExecuteInput, reason: string, orderId: string | null = null): Promise<ExecuteResult> {
     await updatePlutoAction(action.actionId, { outcome: "blocked", blockReason: reason, orderRequestId: orderId });
@@ -185,11 +212,53 @@ export interface WatchResult {
 }
 
 /** Average fill price across this order's recorded executions, weighted by quantity; null until something filled. */
-/** Pure: how far past the reference a fill landed, as % of the reference — positive means worse than the reference (below the bid for a sell, above the ask for a buy). */
-export function fillSlippagePct(reference: { price: number; side: "sell" | "buy" }, fillPrice: number): number {
-  if (!(reference.price > 0)) return 0;
-  const adverse = reference.side === "sell" ? reference.price - fillPrice : fillPrice - reference.price;
-  return (adverse / reference.price) * 100;
+export interface FillComparison {
+  /** Average fill of the chosen leg alone — for a combo, IBKR's split between the legs moves it. */
+  chosenLegFillPrice: number;
+  /** Signed dollars, credits positive, over the quantities that filled. */
+  referenceNetDollars: number;
+  fillNetDollars: number;
+  /** Net shortfall against the reference as % of the chosen leg's reference value; positive = worse. */
+  slippagePct: number;
+  /** Reference net minus fill net: what the fill would have been worth at the worse side of each leg's market. */
+  pessimisticPnl: number;
+}
+
+/**
+ * Pure: compares an order's fills with its reference on the net (Marcelo, 2026-09-29). A guaranteed
+ * combo fills at its net limit but IBKR splits that net between the legs its own way, so only the net
+ * is meaningful. Each reference leg takes the fills with its side and multiplier (unique per leg in
+ * every order Pluto sends: one option, a buy-write's shares + call, a roll's buyback + new option).
+ * For a single leg this reduces to (reference − fill) / reference for a sell and the mirror for a buy.
+ * Null until the chosen leg has a fill.
+ */
+export function compareFillsWithReference(reference: PlutoFillReference, fills: PlutoFill[]): FillComparison | null {
+  const signed = (side: "sell" | "buy", dollars: number) => (side === "sell" ? dollars : -dollars);
+  const legs = [{ leg: reference as PlutoReferenceLeg, chosen: true }, ...(reference.otherLegs ?? []).map((leg) => ({ leg, chosen: false }))];
+  let referenceNetDollars = 0;
+  let fillNetDollars = 0;
+  let chosenQuantity = 0;
+  let chosenFillValue = 0;
+  for (const { leg, chosen } of legs) {
+    const matched = fills.filter((fill) => fill.side === leg.side && fill.multiplier === leg.multiplier);
+    const quantity = matched.reduce((sum, fill) => sum + fill.quantity, 0);
+    referenceNetDollars += signed(leg.side, leg.price * quantity * leg.multiplier);
+    fillNetDollars += matched.reduce((sum, fill) => sum + signed(fill.side, fill.price * fill.quantity * fill.multiplier), 0);
+    if (chosen) {
+      chosenQuantity = quantity;
+      chosenFillValue = matched.reduce((sum, fill) => sum + fill.price * fill.quantity, 0);
+    }
+  }
+  if (chosenQuantity === 0) return null;
+  const chosenReferenceDollars = reference.price * chosenQuantity * reference.multiplier;
+  const shortfall = referenceNetDollars - fillNetDollars;
+  return {
+    chosenLegFillPrice: chosenFillValue / chosenQuantity,
+    referenceNetDollars,
+    fillNetDollars,
+    slippagePct: chosenReferenceDollars > 0 ? (shortfall / chosenReferenceDollars) * 100 : 0,
+    pessimisticPnl: Math.round(shortfall * 100) / 100,
+  };
 }
 
 export interface AdoptableOrder {
@@ -198,38 +267,43 @@ export interface AdoptableOrder {
   symbol: string;
   kind: string;
   createdAtMs: number;
-  reference: { price: number; side: "sell" | "buy"; multiplier: number };
+  reference: PlutoFillReference;
   description: string;
 }
 
 /** Pure: the watch reference for an order found working after a restart, rebuilt from its action row. */
-export function referenceForAdoptedOrder(action: { kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown }): AdoptableOrder["reference"] & { description: string } {
+export function referenceForAdoptedOrder(action: { kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs?: unknown }): AdoptableOrder["reference"] & { description: string } {
   const num = (value: unknown) => (value === null || value === undefined || Number.isNaN(Number(value)) ? null : Number(value));
   const price = num(action.reference_bid) ?? num(action.reference_mid) ?? num(action.limit_price) ?? 0;
   const side: "sell" | "buy" = action.kind === "close_leg" ? "buy" : "sell";
   const multiplier = action.kind === "close_shares" ? 1 : 100;
   const contract = (action.contract ?? {}) as { strike?: number; expiry?: string; strategyKey?: string };
   const description = `${action.symbol} ${num(action.quantity) ?? ""}× ${action.kind}${contract.strike !== undefined ? ` $${contract.strike}` : ""}${contract.expiry ? ` ${contract.expiry}` : ""}`.replace(/\s+/g, " ").trim();
-  return { price, side, multiplier, description };
+  const otherLegs = Array.isArray(action.reference_other_legs) ? (action.reference_other_legs as PlutoReferenceLeg[]) : undefined;
+  return { price, side, multiplier, ...(otherLegs ? { otherLegs } : {}), description };
 }
 
 /** Pluto orders IBKR may still be working: everything with a pluto_action_id that is not final. */
 export async function loadWorkingPlutoOrders(): Promise<AdoptableOrder[]> {
-  const rows: { id: string; status: string; ibkr_status: string | null; created_at: Date; action_id: string; kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown }[] = await db("order_requests as o")
+  const rows: { id: string; status: string; ibkr_status: string | null; created_at: Date; action_id: string; kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs: unknown }[] = await db("order_requests as o")
     .join("pluto_actions as a", "a.id", "o.pluto_action_id")
     .whereNotIn("o.status", ["filled", "cancelled", "rejected", "error"])
-    .select("o.id", "o.status", "o.ibkr_status", "o.created_at", "a.id as action_id", "a.kind", "a.symbol", "a.reference_bid", "a.reference_mid", "a.limit_price", "a.quantity", "a.contract");
+    .select("o.id", "o.status", "o.ibkr_status", "o.created_at", "a.id as action_id", "a.kind", "a.symbol", "a.reference_bid", "a.reference_mid", "a.limit_price", "a.quantity", "a.contract", "a.reference_other_legs");
   return rows
     .filter((row) => !isOrderRequestFinal({ status: row.status, ibkr_status: row.ibkr_status }))
     .map((row) => {
-      const reference = referenceForAdoptedOrder(row);
-      return { orderId: row.id, actionId: row.action_id, symbol: row.symbol, kind: row.kind, createdAtMs: new Date(row.created_at).getTime(), reference: { price: reference.price, side: reference.side, multiplier: reference.multiplier }, description: reference.description };
+      const { description, ...reference } = referenceForAdoptedOrder(row);
+      return { orderId: row.id, actionId: row.action_id, symbol: row.symbol, kind: row.kind, createdAtMs: new Date(row.created_at).getTime(), reference, description };
     });
 }
 
-export async function averageFillPrice(orderId: string): Promise<number | null> {
-  const row = await db("trades").where({ source_order_request_id: orderId }).select(db.raw("sum(price * quantity) / nullif(sum(quantity), 0) as avg_price")).first();
-  return row?.avg_price === null || row?.avg_price === undefined ? null : Number(row.avg_price);
+/** Every execution recorded against the order, with its leg's multiplier (1 for shares, 100 for options). */
+export async function loadOrderFills(orderId: string): Promise<PlutoFill[]> {
+  const rows: { side: string; quantity: number; price: string; multiplier: number | string }[] = await db("trades as t")
+    .join("position_legs as pl", "pl.id", "t.position_leg_id")
+    .where("t.source_order_request_id", orderId)
+    .select("t.side", "t.quantity", "t.price", "pl.multiplier");
+  return rows.map((row) => ({ side: row.side.toLowerCase() === "buy" ? "buy" : "sell", quantity: Number(row.quantity), price: Number(row.price), multiplier: Number(row.multiplier) }));
 }
 
 /**
@@ -239,7 +313,7 @@ export async function averageFillPrice(orderId: string): Promise<number | null> 
 export async function watchPlutoOrder(
   api: InternalApiClient,
   settings: PlutoSettings,
-  input: { actionId: string; orderId: string; symbol: string; reference: { price: number; side: "sell" | "buy"; multiplier: number }; description: string; cancelByMs?: number | null; startedAtMs?: number },
+  input: { actionId: string; orderId: string; symbol: string; reference: PlutoFillReference; description: string; cancelByMs?: number | null; startedAtMs?: number },
   options: { pollIntervalMs?: number; now?: () => number } = {},
 ): Promise<WatchResult> {
   const pollIntervalMs = options.pollIntervalMs ?? 5_000;
@@ -249,6 +323,7 @@ export async function watchPlutoOrder(
   // Unfilled orders are cancelled after the configured minutes, or before the session close if that comes first.
   const cancelAtMs = Math.min(startedAt + settings.unfilledCancelMinutes * 60_000, input.cancelByMs ?? Number.POSITIVE_INFINITY);
   let cancelRequested = false;
+  let missingFillPolls = 0;
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     let order: OrderRequestResponse;
@@ -260,11 +335,14 @@ export async function watchPlutoOrder(
     }
     if (isOrderRequestFinal({ status: order.status, ibkr_status: order.ibkrStatus ?? null })) {
       const outcome = order.status as PlutoActionOutcome;
-      const fillPrice = order.status === "filled" || order.status === "partially_filled" ? await averageFillPrice(input.orderId) : null;
       // Pessimistic bracket (design 2026-09-28): the P&L difference had the order filled at the worse side of
-      // the market it was placed into (the bid for a sell, the ask for a buy) instead of where it did fill.
-      const filledUnits = (order.filledQuantity ?? 1) * input.reference.multiplier;
-      const pessimisticPnl = fillPrice === null ? null : Math.round((input.reference.side === "sell" ? input.reference.price - fillPrice : fillPrice - input.reference.price) * filledUnits * 100) / 100;
+      // the market it was placed into (the bid for a sell, the ask for a buy) instead of where it did fill —
+      // on the net for a combo (compareFillsWithReference).
+      const comparison = order.status === "filled" || order.status === "partially_filled" ? compareFillsWithReference(input.reference, await loadOrderFills(input.orderId)) : null;
+      // The status can land a moment before the executions are written: give them a few polls.
+      if ((order.status === "filled" || order.status === "partially_filled") && comparison === null && missingFillPolls++ < 3) continue;
+      const fillPrice = comparison?.chosenLegFillPrice ?? null;
+      const pessimisticPnl = comparison?.pessimisticPnl ?? null;
       await updatePlutoAction(input.actionId, { outcome, fillPrice, pessimisticPnl, blockReason: order.errorMessage ?? null });
       await recordPlutoEvent("order_outcome", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, outcome, fillPrice, error: order.errorMessage ?? undefined });
       if (outcome === "rejected" || outcome === "error") {
@@ -272,10 +350,13 @@ export async function watchPlutoOrder(
         await tripPlutoBreaker("order_error", detail);
         await recordPlutoEvent("breaker_tripped", { name: "order_error", detail });
         await notifyTelegram(`🛑 Pluto breaker tripped (order_error): ${detail}. Pluto is paused until a human resets it.`);
-      } else if (fillPrice !== null && fillSlippagePct(input.reference, fillPrice) > settings.maxFillSlippagePct) {
+      } else if (comparison !== null && comparison.slippagePct > settings.maxFillSlippagePct) {
         // Fill far from the reference (design breaker list): the market moved through the limit, or the limit
         // was wrong. Either way a human looks before the next order.
-        const detail = `${input.description}: filled at ${fillPrice.toFixed(2)} vs reference ${input.reference.price.toFixed(2)} (${fillSlippagePct(input.reference, fillPrice).toFixed(1)}% past it, limit ${settings.maxFillSlippagePct}%)`;
+        const where = input.reference.otherLegs?.length
+          ? `net ${comparison.fillNetDollars.toFixed(2)} vs reference net ${comparison.referenceNetDollars.toFixed(2)}`
+          : `filled at ${comparison.chosenLegFillPrice.toFixed(2)} vs reference ${input.reference.price.toFixed(2)}`;
+        const detail = `${input.description}: ${where} (${comparison.slippagePct.toFixed(1)}%${input.reference.otherLegs?.length ? " of the option's reference value" : ""} past it, limit ${settings.maxFillSlippagePct}%)`;
         await tripPlutoBreaker("fill_slippage", detail);
         await recordPlutoEvent("breaker_tripped", { name: "fill_slippage", detail });
         await notifyTelegram(`🛑 Pluto breaker tripped (fill_slippage): ${detail}. Pluto is paused until a human resets it.`);
