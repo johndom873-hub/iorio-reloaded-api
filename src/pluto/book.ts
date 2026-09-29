@@ -1,6 +1,5 @@
 import { db } from "../db/connection.js";
 import { positionSelect } from "../lib/positionQueries.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 
 // Pluto's book: the open positions its own orders created (order_requests.pluto_action_id →
 // trades.source_order_request_id → position_legs → positions), the capital they commit against
@@ -19,14 +18,14 @@ export interface PlutoBook {
   openPositions: PlutoBookPosition[];
   committedDollars: number;
   openSymbols: Set<string>;
-  /** Eastern date of the last Pluto action per symbol that reached IBKR (built or beyond). */
-  lastActionDateBySymbol: Map<string, string>;
+  /** When the last Pluto action per symbol whose order filled (fully or partly) was taken — the ticker cooldown's clock. */
+  lastFilledActionAtBySymbol: Map<string, Date>;
   /** Symbols with a Pluto order IBKR may still be working. */
   workingOrderSymbols: Set<string>;
 }
 
 export async function loadPlutoBook(): Promise<PlutoBook> {
-  const [positionRows, lastActions, workingOrders] = await Promise.all([
+  const [positionRows, lastFilledActions, workingOrders] = await Promise.all([
     db.raw(
       `SELECT x.id, x.symbol, t.sector, x."strategyKey", x."capitalAtRisk"
        FROM (${positionSelect}) x
@@ -39,11 +38,13 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
          WHERE orq.pluto_action_id IS NOT NULL
        )`,
     ),
-    db("pluto_actions")
-      .whereIn("outcome", ["order_built", "confirmed", "filled", "partially_filled", "cancelled", "rejected", "error"])
-      .groupBy("symbol")
-      .select("symbol")
-      .max("created_at as last_at"),
+    // Read from the orders themselves, not the action's outcome, which is only written when the watcher next polls.
+    db("pluto_actions as pa")
+      .join("order_requests as orq", "orq.pluto_action_id", "pa.id")
+      .where((query) => query.where("orq.filled_quantity", ">", 0).orWhereIn("orq.status", ["filled", "partially_filled"]))
+      .groupBy("pa.symbol")
+      .select("pa.symbol")
+      .max("pa.created_at as last_at"),
     db("order_requests as orq")
       .whereNotNull("orq.pluto_action_id")
       .whereIn("orq.status", ["pending_confirmation", "confirmed", "submitted", "partially_filled", "cancel_requested"])
@@ -60,7 +61,7 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
     openPositions,
     committedDollars: openPositions.reduce((sum, position) => sum + position.capitalAtRisk, 0),
     openSymbols: new Set(openPositions.map((position) => position.symbol)),
-    lastActionDateBySymbol: new Map((lastActions as { symbol: string; last_at: Date | string }[]).map((row) => [row.symbol, easternDateIso(new Date(row.last_at))])),
+    lastFilledActionAtBySymbol: new Map((lastFilledActions as { symbol: string; last_at: Date | string }[]).map((row) => [row.symbol, new Date(row.last_at)])),
     workingOrderSymbols: new Set((workingOrders as { symbol: string | null }[]).map((row) => row.symbol).filter((symbol): symbol is string => Boolean(symbol))),
   };
 }

@@ -25,8 +25,9 @@ export interface PostModelBookInput {
   /** Live underlying price: a covered call buys 100 shares per contract beyond the free ones (buy-write). */
   spotPrice: number | null;
   workingOrderOnSymbol: boolean;
-  lastActionDateIso: string | null;
-  todayEasternIso: string;
+  /** When Pluto last acted on this symbol with an order that filled (fully or partly); null if never. */
+  lastFilledActionAt: Date | null;
+  nowMs: number;
 }
 
 export interface PostModelGateInput {
@@ -115,8 +116,15 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
   const driftVp = Math.abs(netEdgeNow - input.netEdgeAtDecision) * 100;
   gate("edge_drift", driftVp <= settings.maxEdgeDriftVp, `${driftVp.toFixed(2)} vp since the decision, max ${settings.maxEdgeDriftVp}`);
   gate("working_order", !book.workingOrderOnSymbol, book.workingOrderOnSymbol ? "a Pluto order on this symbol is already working" : "no working Pluto order on the symbol");
-  const cooledDown = settings.tickerCooldownSessions === 0 || book.lastActionDateIso === null || book.lastActionDateIso < book.todayEasternIso;
-  gate("ticker_cooldown", cooledDown, cooledDown ? "no Pluto action on this symbol this session" : `last Pluto action on this symbol was ${book.lastActionDateIso}`);
+  const minutesSinceLastFill = book.lastFilledActionAt === null ? null : (book.nowMs - book.lastFilledActionAt.getTime()) / 60_000;
+  const cooledDown = settings.tickerCooldownMinutes === 0 || minutesSinceLastFill === null || minutesSinceLastFill >= settings.tickerCooldownMinutes;
+  gate(
+    "ticker_cooldown",
+    cooledDown,
+    minutesSinceLastFill === null
+      ? "no filled Pluto action on this symbol"
+      : `last filled Pluto action on this symbol ${Math.floor(minutesSinceLastFill)} min ago (cooldown ${settings.tickerCooldownMinutes} min)`,
+  );
   if (!isRoll) gate("open_positions_cap", book.openPositionCount < settings.maxOpenPositions, `${book.openPositionCount} of ${settings.maxOpenPositions} open Pluto positions`);
 
   // Sizing — code sizes (design item 4); the model only picked full or half.

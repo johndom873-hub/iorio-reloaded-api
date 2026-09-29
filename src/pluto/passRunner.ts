@@ -332,8 +332,8 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       freeShares: fresh.scored.freeShares,
       spotPrice: fresh.scored.spotPrice,
       workingOrderOnSymbol: book.workingOrderSymbols.has(owner.row.symbol),
-      lastActionDateIso: book.lastActionDateBySymbol.get(owner.row.symbol) ?? null,
-      todayEasternIso: checks.context.todayEasternIso,
+      lastFilledActionAt: book.lastFilledActionAtBySymbol.get(owner.row.symbol) ?? null,
+      nowMs: Date.now(),
     },
   });
   const contract = freshCandidate ?? freshRoll?.replacement ?? null;

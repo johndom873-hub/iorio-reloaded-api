@@ -45,7 +45,8 @@ export interface PlutoSettings {
   // Execution
   unfilledCancelMinutes: number;
   maxEdgeDriftVp: number;
-  tickerCooldownSessions: number;
+  /** Minutes after a filled Pluto action on a symbol before Pluto may act on it again; 0 = no cooldown. */
+  tickerCooldownMinutes: number;
   /** A fill this far (% of the reference price) past the reference trips the fill_slippage breaker. */
   maxFillSlippagePct: number;
   // Model
@@ -110,7 +111,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   spyStressBreakerPct: { column: "spy_stress_breaker_pct", kind: "number", min: 0, max: 100 },
   unfilledCancelMinutes: { column: "unfilled_cancel_minutes", kind: "integer", min: 1 },
   maxEdgeDriftVp: { column: "max_edge_drift_vp", kind: "number", min: 0 },
-  tickerCooldownSessions: { column: "ticker_cooldown_sessions", kind: "integer", min: 0 },
+  tickerCooldownMinutes: { column: "ticker_cooldown_minutes", kind: "integer", min: 0 },
   maxFillSlippagePct: { column: "max_fill_slippage_pct", kind: "number", min: 0, max: 100 },
   modelId: { column: "model_id", kind: "text" },
   reasoningEffort: { column: "reasoning_effort", kind: "text", oneOf: ["low", "medium", "high"] },

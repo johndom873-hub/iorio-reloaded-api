@@ -10,7 +10,7 @@ const settings: PlutoSettings = {
   minGrade: "good", minEdgeDollars: 30, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxAbsDayChangePct: 6,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
-  unfilledCancelMinutes: 20, maxEdgeDriftVp: 1, tickerCooldownSessions: 1, maxFillSlippagePct: 25,
+  unfilledCancelMinutes: 20, maxEdgeDriftVp: 1, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
   modelId: "openai/gpt-6-luna", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 3, confidenceFloor: 0.6, maxModelCallsPerSession: 12, consecutiveModelFailuresBreaker: 3, promptVersion: "v1",
   spotMoveTriggerPct: 1.5, burstLines: 10, burstSettleSeconds: 4, coalescingWindowSeconds: 20, perTickerModelCooldownMinutes: 10, globalMinCallIntervalSeconds: 60, maxEnabledTickers: 15, messageRateLimitPerSecond: 8,
   crashLoopRestartsPerHour: 3, telegramVerbosity: "actions",
@@ -29,7 +29,7 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
 
 const book: PostModelBookInput = {
   netLiquidationValue: 1_000_000, freeCash: 600_000, committedDollars: 50_000, openPositionCount: 2, existingTickerExposure: 20_000, existingSectorExposure: 100_000, freeShares: 0,
-  workingOrderOnSymbol: false, lastActionDateIso: "2026-09-25", todayEasternIso: "2026-09-28", spotPrice: 110,
+  workingOrderOnSymbol: false, lastFilledActionAt: null, nowMs: Date.parse("2026-09-28T16:00:00Z"), spotPrice: 110,
 };
 
 const trade: PlutoDecision = { decision: "trade", actionKind: "open_cash_secured_put", candidateId: "HOOD:cash_secured_put:2026-10-16:100", sizeTier: "full", confidence: 0.8, reasons: ["r"], risksAcknowledged: [], systemConcerns: [] };
@@ -69,11 +69,15 @@ describe("runPostModelGates — the gates", () => {
     expect(failed(runPostModelGates(input({ netEdgeAtDecision: 0.12 })))).toEqual(["edge_drift"]);
     expect(failed(runPostModelGates(input({ netEdgeAtDecision: 0.105 })))).toEqual([]);
   });
-  it("refuses a symbol with a working order, one traded this session, and a full book", () => {
+  it("refuses a symbol with a working order, one filled inside the cooldown, and a full book", () => {
+    const filledMinutesAgo = (minutes: number) => new Date(book.nowMs - minutes * 60_000);
     expect(failed(runPostModelGates(input({ book: { ...book, workingOrderOnSymbol: true } })))).toEqual(["working_order"]);
-    expect(failed(runPostModelGates(input({ book: { ...book, lastActionDateIso: "2026-09-28" } })))).toEqual(["ticker_cooldown"]);
+    const inside = runPostModelGates(input({ book: { ...book, lastFilledActionAt: filledMinutesAgo(59) } }));
+    expect(failed(inside)).toEqual(["ticker_cooldown"]);
+    expect(inside.gates.find((gate) => gate.gate === "ticker_cooldown")?.detail).toBe("last filled Pluto action on this symbol 59 min ago (cooldown 60 min)");
+    expect(failed(runPostModelGates(input({ book: { ...book, lastFilledActionAt: filledMinutesAgo(60) } })))).toEqual([]);
     expect(failed(runPostModelGates(input({ book: { ...book, openPositionCount: 8 } })))).toEqual(["open_positions_cap"]);
-    expect(failed(runPostModelGates(input({ settings: { ...settings, tickerCooldownSessions: 0 }, book: { ...book, lastActionDateIso: "2026-09-28" } })))).toEqual([]);
+    expect(failed(runPostModelGates(input({ settings: { ...settings, tickerCooldownMinutes: 0 }, book: { ...book, lastFilledActionAt: filledMinutesAgo(1) } })))).toEqual([]);
   });
   it("sector room only bites when a sector cap is set", () => {
     expect(computeSizingRoom(settings, book, true).sectorRoom).toBe(Number.POSITIVE_INFINITY);
