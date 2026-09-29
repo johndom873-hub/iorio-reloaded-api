@@ -140,19 +140,53 @@ export interface AssembleSignalsChainInput {
 
 const notCapturedCell: SignalsChainCell = { state: "not_captured", bid: null, ask: null, delta: null, quoteSource: null, quotedAt: null, grade: null, netEdge: null, reason: null };
 
+export interface ChainCellScoring {
+  scored: TickerSignals;
+  scoringQuotes: SignalQuote[];
+  exclusions: Map<string, SignalContractExclusion>;
+}
+
+/** Pure: how one contract shows in the chain (candidate / filtered with the reason / not captured), from one scoring run. Shared by the REST chain and the live stream so both draw a cell the same way. */
+export function createChainCellResolver(scoring: ChainCellScoring | null, capturedDeltaByContract: Map<string, number>): (ref: ContractRef) => SignalsChainCell {
+  const candidatesByKey = new Map((scoring?.scored.candidates ?? []).map((candidate) => [candidateContractKey(candidate), candidate]));
+  const quotesByKey = new Map((scoring?.scoringQuotes ?? []).map((quote) => [contractKey(quote), quote]));
+  const unscoredReason = scoring?.scored.unscoredReason ?? null;
+  return (ref) => {
+    const key = contractKey(ref);
+    const candidate = candidatesByKey.get(key);
+    if (candidate) {
+      return { state: "candidate", bid: candidate.bid, ask: candidate.ask, delta: candidate.delta, quoteSource: candidate.quoteSource, quotedAt: candidate.quotedAt, grade: candidate.grade, netEdge: candidate.netEdge, reason: null };
+    }
+    const quote = quotesByKey.get(key);
+    if (!quote) return notCapturedCell;
+    const exclusion = scoring?.exclusions.get(key);
+    const reason = exclusion ? describeContractExclusion(exclusion) : unscoredReason ? describeUnscoredTicker(unscoredReason) : "Not a Signals candidate";
+    return {
+      state: "filtered",
+      bid: quote.bid,
+      ask: quote.ask,
+      delta: exclusionDelta(exclusion) ?? capturedDeltaByContract.get(key) ?? null,
+      quoteSource: quote.source ?? "snapshot",
+      quotedAt: quote.quotedAt ?? null,
+      grade: null,
+      netEdge: null,
+      reason,
+    };
+  };
+}
+
 /** Pure: the expiry list and the selected expiry's strike rows. */
 export function assembleSignalsChain(input: AssembleSignalsChainInput): SignalsChain {
   const { scoring } = input;
   const candidates = scoring?.scored.candidates ?? [];
-  const candidatesByKey = new Map(candidates.map((candidate) => [candidateContractKey(candidate), candidate]));
-  const quotesByKey = new Map((scoring?.scoringQuotes ?? []).map((quote) => [contractKey(quote), quote]));
+  const quotesForStrikes = scoring?.scoringQuotes ?? [];
   const fittedExpiries = new Set((scoring?.inputs.slices ?? []).filter((slice) => slice.status === "ok" && slice.parameters).map((slice) => slice.expiry));
   const unscoredReason = scoring?.scored.unscoredReason ?? null;
 
   // Stored grids, plus any quoted strike the grid lacks, inside the capture's own DTE range.
   const strikesByIsoExpiry = new Map<string, Set<number>>();
   for (const [expiry, strikes] of input.strikesByExpiry) strikesByIsoExpiry.set(yyyymmddToIso(expiry), new Set(strikes));
-  for (const quote of quotesByKey.values()) {
+  for (const quote of quotesForStrikes) {
     const strikes = strikesByIsoExpiry.get(quote.expiry) ?? new Set<number>();
     strikes.add(quote.strike);
     strikesByIsoExpiry.set(quote.expiry, strikes);
@@ -169,29 +203,7 @@ export function assembleSignalsChain(input: AssembleSignalsChainInput): SignalsC
     expiries[0]?.expiry ??
     null;
 
-  const cellFor = (ref: ContractRef): SignalsChainCell => {
-    const key = contractKey(ref);
-    const candidate = candidatesByKey.get(key);
-    if (candidate) {
-      return { state: "candidate", bid: candidate.bid, ask: candidate.ask, delta: candidate.delta, quoteSource: candidate.quoteSource, quotedAt: candidate.quotedAt, grade: candidate.grade, netEdge: candidate.netEdge, reason: null };
-    }
-    const quote = quotesByKey.get(key);
-    if (!quote) return notCapturedCell;
-    const exclusion = scoring?.exclusions.get(key);
-    const reason = exclusion ? describeContractExclusion(exclusion) : unscoredReason ? describeUnscoredTicker(unscoredReason) : "Not a Signals candidate";
-    return {
-      state: "filtered",
-      bid: quote.bid,
-      ask: quote.ask,
-      delta: exclusionDelta(exclusion) ?? input.capturedDeltaByContract.get(key) ?? null,
-      quoteSource: quote.source ?? "snapshot",
-      quotedAt: quote.quotedAt ?? null,
-      grade: null,
-      netEdge: null,
-      reason,
-    };
-  };
-
+  const cellFor = createChainCellResolver(scoring, input.capturedDeltaByContract);
   const strikes: SignalsChainStrikeRow[] = selectedExpiry
     ? [...(strikesByIsoExpiry.get(selectedExpiry) ?? [])]
         .sort((a, b) => a - b)

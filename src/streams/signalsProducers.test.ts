@@ -78,6 +78,8 @@ interface Harness {
   monteCarloCalls: { spotPrice: number; candidateCount: number }[];
   account: { freeCash: number };
   freeShares: { value: number };
+  /** The stored strike grids (ISO expiry keys) the modal's live lines are chosen from; empty = live lines stay on the candidates. */
+  expiryStrikes: Map<string, number[]>;
 }
 
 function createHarness(): Harness {
@@ -90,6 +92,7 @@ function createHarness(): Harness {
   const monteCarloCalls: Harness["monteCarloCalls"] = [];
   const account = { freeCash: 1_000_000 };
   const freeShares = { value: 200 };
+  const expiryStrikes = new Map<string, number[]>();
   const untilAbort = (signal: AbortSignal) => new Promise<void>((resolve) => (signal.aborted ? resolve() : signal.addEventListener("abort", () => resolve(), { once: true })));
   const deps: SignalsProducerDependencies = {
     loadSignalsUniverseTickers: async () => [aaoi, hood],
@@ -112,6 +115,7 @@ function createHarness(): Harness {
       priceCallback = onUpdate;
       await untilAbort(signal);
     },
+    loadExpiryStrikes: async () => expiryStrikes,
     streamOptionQuotes: async (symbol, contracts, onUpdate, signal) => {
       quoteContracts = contracts;
       quoteCallback = onUpdate;
@@ -133,6 +137,7 @@ function createHarness(): Harness {
     monteCarloCalls,
     account,
     freeShares,
+    expiryStrikes,
   };
 }
 
@@ -356,6 +361,71 @@ describe("signalsTicker producer", () => {
     expect(frames[1]!.uncompensatedAsOf).toEqual({ spotPrice: forward, at: expect.any(String) });
     expect(frames[1]!.signals.candidates.every((c) => c.uncompensatedSharePercent === 42)).toBe(true);
     abort.abort();
+  });
+
+  describe("live lines follow the spot when the expiry's strike grid is stored", () => {
+    const grid = [80, 85, 90, 95, 100, 105, 110, 115, 120];
+    const expiry = "2026-10-21";
+
+    it("subscribes the out-of-the-money contracts nearest the spot, and puts a live-scored cell for each quoted one in the frame", async () => {
+      const harness = createHarness();
+      harness.expiryStrikes.set(expiry, grid);
+      const { signalsTicker } = createSignalsProducers(harness.deps);
+      const frames: SignalsTickerFrame[] = [];
+      const abort = new AbortController();
+      void signalsTicker.run({ symbol: "AAOI", expiry }, { userId: "u" }, (frame) => frames.push(frame as SignalsTickerFrame), abort.signal);
+      await vi.advanceTimersByTimeAsync(0);
+      // Snapshot spot 100: puts at or below it, calls at or above, nearest first.
+      expect(frames[0]!.liveQuoteContracts).toEqual(["100P", "100C", "95P", "105C", "90P", "110C", "85P", "115C", "80P", "120C"].map((label) => `${expiry}|${label.slice(0, -1)}|${label.slice(-1)}`));
+      // Contracts with a quote (the snapshot's, until a live one arrives) get a cell scored at the live spot; unquoted ones are left out.
+      const firstCells = frames[0]!.liveChainCells;
+      expect(firstCells[`${expiry}|90|P`]).toMatchObject({ quoteSource: "snapshot" });
+      expect(firstCells[`${expiry}|120|C`]).toBeUndefined();
+      expect(Object.values(firstCells).every((cell) => cell.state !== "not_captured")).toBe(true);
+
+      harness.quoteUpdates.push([{ expiry, strike: 95, right: "P", bid: 0.4, ask: 0.5 }]);
+      await vi.advanceTimersByTimeAsync(1000);
+      const cell = frames.at(-1)!.liveChainCells[`${expiry}|95|P`]!;
+      expect(cell).toMatchObject({ bid: 0.4, ask: 0.5, quoteSource: "live" });
+      expect(["candidate", "filtered"]).toContain(cell.state);
+      abort.abort();
+    });
+
+    it("re-chooses the set once the spot is two strike steps ($10 on a $5 grid) from where it was chosen, dropping the old subscription", async () => {
+      const harness = createHarness();
+      harness.expiryStrikes.set(expiry, grid);
+      const { signalsTicker } = createSignalsProducers(harness.deps);
+      const frames: SignalsTickerFrame[] = [];
+      const abort = new AbortController();
+      void signalsTicker.run({ symbol: "AAOI", expiry }, { userId: "u" }, (frame) => frames.push(frame as SignalsTickerFrame), abort.signal);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(harness.optionSubscriptions).toHaveLength(1);
+
+      harness.priceUpdates.push({ AAOI: 105 }, true); // one step: same set
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(harness.optionSubscriptions).toHaveLength(1);
+
+      harness.priceUpdates.push({ AAOI: 112 }, true); // 12 from the 100 the set was chosen at
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(harness.optionSubscriptions).toHaveLength(2);
+      expect(harness.optionSubscriptions[0]!.aborted()).toBe(true);
+      expect(harness.optionSubscriptions[1]!.aborted()).toBe(false);
+      expect(harness.optionSubscriptions[1]!.contracts.map((contract) => `${contract.strike}${contract.right}`).slice(0, 4)).toEqual(["110P", "115C", "105P", "120C"]);
+      expect(frames.at(-1)!.liveQuoteContracts).toEqual(harness.optionSubscriptions[1]!.contracts.map(contractKey));
+      abort.abort();
+    });
+
+    it("without a stored grid the live lines stay on the expiry's candidates and never re-subscribe on a price move", async () => {
+      const harness = createHarness();
+      const { signalsTicker } = createSignalsProducers(harness.deps);
+      const abort = new AbortController();
+      void signalsTicker.run({ symbol: "AAOI", expiry: "2026-11-20" }, { userId: "u" }, () => {}, abort.signal);
+      await vi.advanceTimersByTimeAsync(0);
+      harness.priceUpdates.push({ AAOI: 150 }, true);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(harness.optionSubscriptions).toHaveLength(1);
+      abort.abort();
+    });
   });
 
   it("live quotes re-score their own contracts and are marked live; the rest keep snapshot quotes", async () => {

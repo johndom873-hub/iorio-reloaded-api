@@ -7,6 +7,9 @@ import { loadDayQuotesStatus, type DayQuotesStatus } from "../lib/daySignalsStor
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { uncompensatedShareRefreshIntervalMs, type SignalCandidate, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
 import { accountRefreshIntervalMs, candidateContractKey, candidateContractRef, contractKey, liveFrameIntervalMs, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
+import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
+import { createChainCellResolver, scoreTickerWithExclusions, yyyymmddToIso, type SignalsChainCell } from "../lib/signalsChain.js";
+import { selectLiveChainContracts, shouldRecenterLiveChain } from "../lib/signalsLiveChainContracts.js";
 import { loadAccountContext, loadDayQuotesAsLiveQuotes, loadSignalsUniverseTicker, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "../lib/signalSettingsStore.js";
 import type { AccountContext, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
@@ -39,6 +42,8 @@ export interface SignalsTickerFrame {
   signals: TickerSignals;
   /** Contract keys (expiry|strike|right) with a live IBKR quote subscription for this stream's life. */
   liveQuoteContracts: string[];
+  /** The chain cell of every live-quoted contract, scored at the live spot, keyed like liveQuoteContracts: the option chain overlays these on its fetch-time cells. Empty cells (nothing quoted yet) are left out. */
+  liveChainCells: Record<string, SignalsChainCell>;
   uncompensatedAsOf: { spotPrice: number; at: string } | null;
 }
 
@@ -57,6 +62,8 @@ export interface SignalsProducerDependencies {
   fetchAvailableUncoveredShares(tickerId: string): Promise<number>;
   streamLivePrices(contracts: PriceContract[], onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void, signal: AbortSignal): Promise<void>;
   streamOptionQuotes(symbol: string, contracts: ContractRef[], onUpdate: (quotes: LiveOptionQuote[]) => void, signal: AbortSignal): Promise<void>;
+  /** The stored strike grid per expiry (ISO date keys) the modal's live lines are chosen from. */
+  loadExpiryStrikes(tickerId: string): Promise<Map<string, number[]>>;
   computeUncompensatedShares(candidates: SignalCandidate[], spotPrice: number, slices: SignalSurfaceSlice[]): Promise<Map<string, number | null>>;
   now(): Date;
 }
@@ -74,6 +81,7 @@ export const defaultSignalsProducerDependencies: SignalsProducerDependencies = {
   fetchAvailableUncoveredShares,
   streamLivePrices: streamPooledPrices,
   streamOptionQuotes: streamSignalsOptionQuotes,
+  loadExpiryStrikes: async (tickerId) => new Map([...(await loadStoredOptionChain(tickerId)).strikesByExpiry].map(([expiry, strikes]) => [yyyymmddToIso(expiry), strikes])),
   computeUncompensatedShares: (candidates, spotPrice, slices) => computeUncompensatedSharesInWorker(candidates, spotPrice, slices),
   now: () => new Date(),
 };
@@ -340,23 +348,74 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       let uncompensatedAsOf: SignalsTickerFrame["uncompensatedAsOf"] = null;
       let lastSimulatedSpot: number | null = null;
 
-      let scored = scoreTicker(inputs, account, settings, liveOverrides(inputs, spot, priceSource));
+      let scoring = scoreTickerWithExclusions(inputs, account, settings, liveOverrides(inputs, spot, priceSource));
+      let scored = scoring.scored;
       const rescore = () => {
         const overrides = liveOverrides(inputs, spot, priceSource);
-        scored = scoreTicker(inputs, account, settings, overrides ? { ...overrides, liveQuotes, uncompensatedByContract } : undefined);
+        scoring = scoreTickerWithExclusions(inputs, account, settings, overrides ? { ...overrides, liveQuotes, uncompensatedByContract } : undefined);
+        scored = scoring.scored;
       };
 
       const selectedExpiry = parameters.expiry ?? scored.best?.expiry ?? null;
-      // One live line per open short leg (Roll Signals) ahead of the selected expiry's contracts.
-      const liveQuoteContracts = selectLiveQuoteContracts(scored.candidates, selectedExpiry, inputs.openShortLegs);
-      const liveQuoteContractKeys = liveQuoteContracts.map(contractKey);
+      // The selected expiry's listed strikes: with them the live lines follow the spot (the out-of-the-money contracts nearest it);
+      // without a stored grid they stay on the expiry's Signals candidates.
+      const expiryStrikes = selectedExpiry ? ((await deps.loadExpiryStrikes(ticker.tickerId).catch((error) => {
+        console.error(`signalsTicker ${symbol}: strike grid unavailable, live lines stay on the candidates`, error);
+        return new Map<string, number[]>();
+      })).get(selectedExpiry) ?? []) : [];
+      if (signal.aborted) return;
+      const chooseLiveContracts = (spotForSelection: number | null): ContractRef[] =>
+        selectedExpiry && expiryStrikes.length > 0 && spotForSelection !== null
+          ? selectLiveChainContracts({ expiry: selectedExpiry, strikes: expiryStrikes, spotPrice: spotForSelection, heldLegs: inputs.openShortLegs })
+          : // One live line per open short leg (Roll Signals) ahead of the selected expiry's contracts.
+            selectLiveQuoteContracts(scored.candidates, selectedExpiry, inputs.openShortLegs);
+      let liveSetSpot: number | null = inputs.header?.underlyingPrice ?? null;
+      let liveQuoteContracts = chooseLiveContracts(liveSetSpot);
+      let liveQuoteContractKeys = liveQuoteContracts.map(contractKey);
+      let liveQuotesController: AbortController | null = null;
 
       const emitFrame = () => {
-        const frame: SignalsTickerFrame = { type: "signalsTicker", at: deps.now().toISOString(), signals: scored, liveQuoteContracts: liveQuoteContractKeys, uncompensatedAsOf };
+        const cellFor = createChainCellResolver(scoring, new Map());
+        const liveChainCells: Record<string, SignalsChainCell> = {};
+        for (const contract of liveQuoteContracts) {
+          const cell = cellFor(contract);
+          if (cell.state !== "not_captured") liveChainCells[contractKey(contract)] = cell;
+        }
+        const frame: SignalsTickerFrame = { type: "signalsTicker", at: deps.now().toISOString(), signals: scored, liveQuoteContracts: liveQuoteContractKeys, liveChainCells, uncompensatedAsOf };
         emit(frame);
       };
       emitFrame();
       const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now());
+
+      // (Re)subscribes the live option lines to `contracts`, dropping the previous subscription; pooled lines are shared, so contracts that stay in the set do not churn.
+      const startLiveQuotes = (contracts: ContractRef[]) => {
+        liveQuotesController?.abort();
+        liveQuoteContracts = contracts;
+        liveQuoteContractKeys = contracts.map(contractKey);
+        // Quotes of contracts that stay in the set carry over until the new subscription reports.
+        const kept = new Set(liveQuoteContractKeys);
+        liveQuotes = liveQuotes.filter((quote) => kept.has(contractKey(quote)));
+        if (contracts.length === 0) {
+          liveQuotesController = null;
+          return;
+        }
+        const controller = new AbortController();
+        liveQuotesController = controller;
+        signal.addEventListener("abort", () => controller.abort(), { once: true });
+        void deps
+          .streamOptionQuotes(
+            symbol,
+            contracts,
+            (quotes) => {
+              if (controller.signal.aborted) return;
+              liveQuotes = quotes;
+              rescore();
+              frames.markDirty();
+            },
+            controller.signal,
+          )
+          .catch((error) => console.error(`signalsTicker ${symbol}: live option quotes failed, staying at snapshot quotes`, error));
+      };
 
       // Monte Carlo: now, then every 5 s but only after a >= 0.5% spot move (never overlapping).
       let simulationInFlight = false;
@@ -421,6 +480,11 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
             if (spot === price && priceSource === source) return;
             spot = price;
             priceSource = source;
+            // The live set follows the spot: re-chosen once it is two strike steps from where the current set was chosen.
+            if (liveSetSpot !== null && expiryStrikes.length > 0 && shouldRecenterLiveChain(liveSetSpot, price, expiryStrikes)) {
+              liveSetSpot = price;
+              startLiveQuotes(chooseLiveContracts(price));
+            }
             rescore();
             frames.markDirty();
           },
@@ -428,23 +492,8 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
         )
         .catch((error) => console.error(`signalsTicker ${symbol}: live price failed, staying at the snapshot price`, error));
 
-      const quotesTask =
-        liveQuoteContracts.length === 0
-          ? Promise.resolve()
-          : deps
-              .streamOptionQuotes(
-                symbol,
-                liveQuoteContracts,
-                (quotes) => {
-                  liveQuotes = quotes;
-                  rescore();
-                  frames.markDirty();
-                },
-                signal,
-              )
-              .catch((error) => console.error(`signalsTicker ${symbol}: live option quotes failed, staying at snapshot quotes`, error));
-
-      await Promise.all([pricesTask, quotesTask]);
+      startLiveQuotes(liveQuoteContracts);
+      await pricesTask;
       await waitForAbort(signal);
     },
   };
