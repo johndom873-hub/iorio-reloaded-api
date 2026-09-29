@@ -37,25 +37,12 @@ export interface OptionQuote {
 // connection's own ask reasonable. pickExpiries sorts ascending and takes
 // the first N, so the nearest (weekly/intra-weekly) expiries are always the
 // ones kept if more than 4 exist in the window.
-//
-// mustIncludeStrikes/alertStrikesByExpiry (see prepareOptionChainStrikes)
-// spend from this same 48-line budget rather than adding to it — regression
-// found 2026-09-15: an earlier version of this file unioned must-include
-// expiries/strikes on top of the line-count target, which could push a given
-// connection's subscription count past IBKR's actual 100-line cap. Contracts
-// requested past that cap never receive tickPrice/tickOptionComputation
-// ticks, so their bid/ask/delta stayed null forever and their yield
-// silently rendered blank — while the must-include strikes themselves (early
-// in subscription order) kept working, which is what made it look like only
-// "regular" strikes were affected.
 const defaultMinDaysToExpiry = 0;
 const defaultMaxDaysToExpiry = 60;
 const maxExpiries = 4;
 const strikesPerSide = 3;
 const quoteTimeoutMs = 8_000;
 
-// Exported for reuse by the trade-alert candidate generator, which needs
-// its own per-strategy DTE window instead of this file's fixed one.
 export function parseExpiry(expiry: string): Date {
   return new Date(`${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}T00:00:00Z`);
 }
@@ -378,17 +365,6 @@ export async function refreshStoredOptionChain(
   return { expirations, strikesByExpiry, timings: { optionParamsMs, expiries: expiryTimings, totalMs: Date.now() - startedAt } };
 }
 
-// mustIncludeStrikes (approved 2026-08-26): a pending trade alert's strike
-// has to show up in the chain even when it's well outside the plain
-// near-the-money window — a covered-call alert can sit 20+ points OTM on a
-// low-delta strike, which the standard ±strikesPerSide trim would otherwise
-// silently drop. They come from real quotes (an alert or a held leg), so
-// they are unioned in as-is rather than checked against the stored grid.
-function pickExpiryStrikes(gridStrikes: number[], spotPrice: number, mustIncludeStrikes: number[], nearTheMoneyCountPerSide: number): number[] {
-  const nearTheMoney = pickStrikes(gridStrikes, spotPrice, nearTheMoneyCountPerSide);
-  return Array.from(new Set([...nearTheMoney, ...mustIncludeStrikes])).sort((a, b) => a - b);
-}
-
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
 /**
@@ -406,60 +382,13 @@ export interface ExpiryStrikes {
 // Reads chain structure from the DB only (see StoredOptionChain) — no IBKR
 // call, so it costs a couple of Postgres reads regardless of how many
 // expiries are shown. spotPrice picks the near-the-money strikes.
-export async function prepareOptionChainStrikes(
-  symbol: string,
-  spotPrice: number,
-  dteRange: { min: number; max: number } = { min: defaultMinDaysToExpiry, max: defaultMaxDaysToExpiry },
-  // Approved 2026-08-26: every pending trade alert's strike must show up in
-  // the chain, even ones the near-the-money window alone would trim away
-  // (see pickExpiryStrikes). Keyed by expiry in the same YYYYMMDD shape used
-  // everywhere else in this file.
-  alertStrikesByExpiry: Map<string, number[]> = new Map(),
-): Promise<ExpiryStrikes[]> {
+export async function prepareOptionChainStrikes(symbol: string, spotPrice: number): Promise<ExpiryStrikes[]> {
   const tickerId = await resolveTickerId(symbol);
   const stored = tickerId ? await loadStoredOptionChain(tickerId) : null;
   if (!stored || stored.strikesByExpiry.size === 0) {
     throw new Error(`Option chain for ${symbol} is not prepared yet — it is stored by the nightly chain capture, or when the ticker is added to the Shortlist.`);
   }
-  const { expirations } = stored;
-
-  // A pending alert's/held position's expiry has to be browsable even if
-  // maxExpiries' trim would otherwise cut it — same "every must-include
-  // strike must be visible" requirement as mustIncludeStrikes below, one
-  // level up (expiries, not just strikes within an already-kept expiry).
-  // Must-include expiries always survive; only the remaining slots up to
-  // maxExpiries are filled with the nearest regular expiries, so this no
-  // longer just appends on top of maxExpiries (see the file-level budget
-  // comment). The one accepted edge case: more must-include expiries than
-  // maxExpiries for a single ticker at once goes over budget rather than
-  // dropping one of them — showing every held position/alert wins over the
-  // line-count margin in that rare situation.
-  const mustExpiries = Array.from(alertStrikesByExpiry.keys()).sort();
-  const regularExpiries = pickExpiries(expirations, dteRange).filter((expiry) => !alertStrikesByExpiry.has(expiry));
-  const remainingExpirySlots = Math.max(0, maxExpiries - mustExpiries.length);
-  const chosenExpiries = Array.from(new Set([...mustExpiries, ...regularExpiries.slice(0, remainingExpirySlots)])).sort();
-
-  // Spend the shared 96-line budget: reserve slots for must-include strikes
-  // first (counted pre-validation — a couple of lines' slack either way
-  // doesn't threaten the 96/100 margin), then split whatever's left evenly
-  // across the chosen expiries for the normal near-the-money picks, never
-  // exceeding the default strikesPerSide. This is what keeps must-include
-  // strikes from just piling on top of the budget the way the regression
-  // did — see the file-level comment.
-  const totalStrikeSlots = maxExpiries * strikesPerSide * 2;
-  const mustSlotsUsed = chosenExpiries.reduce((sum, expiry) => sum + (alertStrikesByExpiry.get(expiry)?.length ?? 0), 0);
-  const remainingSlotsForNearTheMoney = Math.max(0, totalStrikeSlots - mustSlotsUsed);
-  const nearTheMoneyCountPerSide =
-    chosenExpiries.length === 0
-      ? strikesPerSide
-      : Math.min(strikesPerSide, Math.floor(remainingSlotsForNearTheMoney / (chosenExpiries.length * 2)));
-
-  // A must-include expiry outside the stored 0-90 DTE window has no grid; its
-  // must-include strikes (a held leg, a pending alert) still show on their own.
-  return chosenExpiries
-    .map((expiry) => ({
-      expiry,
-      strikes: pickExpiryStrikes(stored.strikesByExpiry.get(expiry) ?? [], spotPrice, alertStrikesByExpiry.get(expiry) ?? [], nearTheMoneyCountPerSide),
-    }))
-    .filter(({ strikes: expiryStrikes }) => expiryStrikes.length > 0);
+  return pickExpiries(stored.expirations, { min: defaultMinDaysToExpiry, max: defaultMaxDaysToExpiry })
+    .map((expiry) => ({ expiry, strikes: pickStrikes(stored.strikesByExpiry.get(expiry) ?? [], spotPrice) }))
+    .filter(({ strikes }) => strikes.length > 0);
 }

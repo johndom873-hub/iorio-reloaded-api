@@ -39,15 +39,13 @@ export interface PositionEvent {
   // "closed" event with a genuinely ambiguous exit (same null-not-zero
   // reasoning as realizedPnl above).
   fullMarketValue: number | null;
-  // Best-effort, not exhaustive — the full user-attribution audit flagged
-  // in PROGRESS.md (2026-08-28) hasn't happened yet. Determinable today:
-  // closes/rolls (order_requests.related_position_id is always set for
-  // those) and alert-sourced opens (via trade_alerts.resulting_position_id).
-  // A manually-entered new position with no source alert has no link back
-  // to an order_request at all yet, so this is null there — an honest gap,
-  // not a guess. Genosuke acts as a real users row (see
-  // project_internal_api_client_pattern), so bot-initiated trades already
-  // attribute correctly through the same join, no separate bot detection.
+  // Best-effort, not exhaustive. Closes/rolls: order_requests.related_position_id
+  // is always set for those. Opens: whoever requested the order behind the
+  // position's earliest opening fill that links to one
+  // (trades.source_order_request_id) — an open order, or the roll whose fill
+  // created the position. A position with no linked opening fill (e.g. one
+  // placed outside the app) is null — an honest gap, not a guess. Genosuke acts as a real
+  // users row, so bot-initiated trades attribute through the same joins.
   attributedTo: string | null;
   legs: {
     legType: "stock" | "option";
@@ -111,12 +109,14 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
   const positionIds = positions.map((p) => p.id);
 
   const [openAttributions, closeAttributions] = await Promise.all([
-    db("trade_alerts as ta")
-      .join("order_requests as orq", (join) => join.on("orq.source_alert_id", "ta.id").andOnVal("orq.status", "filled"))
+    db("trades as tr")
+      .join("position_legs as pl", "pl.id", "tr.position_leg_id")
+      .join("order_requests as orq", "orq.id", "tr.source_order_request_id")
       .join("users as u", "u.id", "orq.requested_by_user_id")
-      .whereIn("ta.resulting_position_id", positionIds)
-      .orderBy("orq.created_at", "asc")
-      .select("ta.resulting_position_id as positionId", "u.display_name as displayName"),
+      .where("tr.is_closing_trade", false)
+      .whereIn("pl.position_id", positionIds)
+      .orderBy("tr.executed_at", "asc")
+      .select("pl.position_id as positionId", "u.display_name as displayName"),
     db("order_requests as orq")
       .join("users as u", "u.id", "orq.requested_by_user_id")
       .where("orq.status", "filled")
@@ -125,7 +125,7 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
       .select("orq.related_position_id as positionId", "u.display_name as displayName"),
   ]);
   // First match wins per position — openAttributions ordered earliest-first
-  // (the alert that originally led to this position), closeAttributions
+  // (the order whose fill opened this position), closeAttributions
   // ordered latest-first (the most recent close/roll confirmation).
   const openAttributionByPositionId = new Map<string, string>();
   for (const row of openAttributions) if (!openAttributionByPositionId.has(row.positionId)) openAttributionByPositionId.set(row.positionId, row.displayName);

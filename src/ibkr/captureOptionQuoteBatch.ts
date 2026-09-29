@@ -4,12 +4,9 @@ import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 
 // Quote collector for the nightly option-chain archive (IORIO Signal Engine,
-// Phase 0). Deliberately a NEW module rather than a change to
-// fetchQuotesForContracts (fetchOptionChain.ts), which trade-alert generation
-// and the Ticker Detail chain depend on: that one ignores bid/ask sizes, open
+// Phase 0). Captures what a plain live quote ignores — bid/ask sizes, open
 // interest, volume, the option's model price and the underlying price the
-// model used — all needed for the archive — and altering it risks live alerts.
-// Same subscription pattern, wider capture.
+// model used — all needed for the archive.
 //
 // Streaming reqMktData, one subscription per contract, with generic tick 101
 // requested for open interest. The caller must keep a batch to the agreed ~60

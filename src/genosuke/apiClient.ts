@@ -107,7 +107,7 @@ export class GenosukeApiClient {
     // Routes that can outlast Heroku's router timeout answer as a stream
     // (lib/streamedResponse.ts, 2026-09-24): heartbeats, then one final
     // `data:` frame carrying the status and body a JSON route would have sent.
-    // Same handling as the app's apiStreamedRequest, so tools (alert refresh,
+    // Same handling as the app's apiStreamedRequest, so tools (e.g. the
     // health check) see the real status instead of a JSON parse error.
     if ((response.headers.get("content-type") ?? "").includes("text/event-stream")) {
       const text = await response.text();

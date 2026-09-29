@@ -11,15 +11,12 @@ export const stalePendingOrderSweepIntervalMs = 60_000;
 
 export async function cancelStalePendingConfirmations(): Promise<number> {
   const cutoff = new Date(Date.now() - pendingConfirmationMaxAgeMs);
-  const rows: { id: string; source_alert_id: string | null }[] = await db("order_requests")
+  const rows: { id: string }[] = await db("order_requests")
     .where({ status: "pending_confirmation" })
     .where("created_at", "<", cutoff)
     .update({ status: "cancelled", error_message: "Not confirmed within 15 minutes — cancelled automatically (limit prices would be stale).", updated_at: db.fn.now() })
-    .returning(["id", "source_alert_id"]);
+    .returning(["id"]);
   for (const row of rows) {
-    if (row.source_alert_id) {
-      await db("trade_alerts").where({ id: row.source_alert_id, status: "approved" }).update({ status: "pending", reviewed_by_user_id: null, reviewed_at: null });
-    }
     await publishNotification({ type: "order_status", orderId: row.id }).catch(() => {});
   }
   return rows.length;

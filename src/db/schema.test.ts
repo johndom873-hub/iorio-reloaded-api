@@ -37,7 +37,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await db("trades").where({ position_leg_id: positionLegId }).del();
   await db("position_pnl_snapshots").where({ position_id: positionId }).del();
-  await db("trade_alerts").where({ ticker_id: tickerId }).del();
   await db("position_legs").where({ position_id: positionId }).del();
   await db("positions").where({ id: positionId }).del();
   await db("shortlist_entries").where({ ticker_id: tickerId }).del();
@@ -136,18 +135,16 @@ describe("database schema round-trips", () => {
     ).rejects.toThrow(/duplicate key/i);
   });
 
-  it("trade_alerts: stores and retrieves a row with jsonb suggested_structure", async () => {
-    const [alert] = await db("trade_alerts")
-      .insert({
-        strategy_key: "covered_call",
-        ticker_id: tickerId,
-        alert_type: "new_trade",
-        suggested_structure: { strike: 220, expiry: "2026-09-18", contracts: 1 },
-        rationale: "Test rationale",
-      })
-      .returning("*");
-    expect(alert.status).toBe("pending");
-    expect(alert.suggested_structure.strike).toBe(220);
+  it("position_legs: stores and retrieves the assignment-risk alert state", async () => {
+    await db("position_legs").where({ id: positionLegId }).update({ assignment_risk_notified_at: new Date("2026-09-24T15:00:00Z"), assignment_risk_last_alert_trading_date: "2026-09-24" });
+    const leg = await db("position_legs").where({ id: positionLegId }).first("assignment_risk_notified_at", db.raw("assignment_risk_last_alert_trading_date::text as last_alert_trading_date"));
+    expect(new Date(leg.assignment_risk_notified_at).toISOString()).toBe("2026-09-24T15:00:00.000Z");
+    expect(leg.last_alert_trading_date).toBe("2026-09-24");
+  });
+
+  it("trade_alerts and order_requests.source_alert_id are gone (Trade Alerts retired)", async () => {
+    expect(await db.schema.hasTable("trade_alerts")).toBe(false);
+    expect(await db.schema.hasColumn("order_requests", "source_alert_id")).toBe(false);
   });
 
   it("account_pnl_snapshots: stores and retrieves a row, enforces unique snapshot_date", async () => {

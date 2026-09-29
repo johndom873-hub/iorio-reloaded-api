@@ -107,41 +107,9 @@ export function buildCloseCard(position: PositionForCard, requestedLegs: { legId
   return [positionHeading("Close", position), ...lines, "One combo order, sent to IBKR immediately when you tap Yes."].join("\n");
 }
 
-/** Returns an error for the model if the leg being rolled isn't an open leg of the position. */
-export function validateRollCloseLeg(position: PositionForCard, closeLegId: string): string | null {
-  if (position.status !== "open") return `Position ${position.symbol} is already closed — nothing to roll.`;
-  const leg = position.legs.find((candidate) => candidate.id === closeLegId);
-  if (leg && !leg.exitAt) return null;
-  const correctLegs = openLegs(position)
-    .filter((candidate) => candidate.legType === "option")
-    .map((candidate) => `${candidate.id} (${candidate.side} ${describeLegContract(candidate)})`)
-    .join("; ");
-  return `Roll not sent for confirmation: closeLegId ${closeLegId} is not an open leg of this position. Open option legs (isOpen: true): ${correctLegs || "none"}.`;
-}
-
-export function buildRollCard(
-  position: PositionForCard,
-  closeLegId: string,
-  closeLimitPrice: unknown,
-  newLeg: { strikePrice: unknown; expiryDate: unknown; quantity: unknown; limitPrice: unknown },
-): string {
-  const closingLeg = position.legs.find((leg) => leg.id === closeLegId);
-  const closeLine = closingLeg
-    ? `• ${closingVerb(closingLeg)} ${describeLegContract(closingLeg)}, limit ${formatLimitPrice(closeLimitPrice)}`
-    : `• close leg ${closeLegId}, limit ${formatLimitPrice(closeLimitPrice)}`;
-  const optionType = closingLeg?.optionType ?? "option";
-  const newLine = `• SELL ${newLeg.quantity} ${optionType} $${newLeg.strikePrice} exp ${toIsoExpiry(String(newLeg.expiryDate))}, limit ${formatLimitPrice(newLeg.limitPrice)}`;
-  return [positionHeading("Roll", position), closeLine, newLine, "One atomic combo order, sent to IBKR immediately when you tap Yes."].join("\n");
-}
-
-export function buildRejectAlertCard(alert: { symbol: string; strategyKey: string; alertType: string } | undefined, alertId: string): string {
-  if (!alert) return `Reject trade alert ${alertId}`;
-  return `Reject pending ${alert.alertType === "roll" ? "roll" : "new-trade"} alert: ${alert.symbol} (${labelStrategy(alert.strategyKey)})`;
-}
-
 export function buildRiskLimitsCard(input: Record<string, unknown>): string {
   const lines = riskSettingLabels.map(([key, label]) => `• ${label}: ${input[key]}`);
-  return [`Update ${labelStrategy(String(input.strategyKey))} risk settings (governs future alerts only)`, ...lines].join("\n");
+  return [`Update ${labelStrategy(String(input.strategyKey))} risk settings`, ...lines].join("\n");
 }
 
 /** Adds isOpen to each leg so the model never has to infer it from exitAt. Non-position values pass through. */

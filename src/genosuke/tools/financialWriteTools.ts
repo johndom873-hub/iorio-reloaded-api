@@ -1,6 +1,6 @@
 // Financial-consequence write tools — every one of these has a real effect
-// on the trading record (a position gets created/rolled/closed, an alert
-// gets rejected, risk settings that govern future trade generation change).
+// on the trading record (a position gets created/closed, risk settings
+// change).
 // None of these execute on the model's say-so alone: the bot loop (see
 // bot.ts) intercepts any call to a tool in this tier, sends a Telegram
 // inline Yes/Cancel confirmation built from describeForConfirmation(), and
@@ -12,9 +12,9 @@
 // Since 2026-08-24, iorio places REAL orders against IBKR (still the paper
 // account) — see PROGRESS.md's "IBKR is the source of truth" decision. The
 // old claim here ("blast radius of a mistake is a bad database record, not
-// an actual fill") is no longer true: create_position/roll_position/
-// close_position now build an order via POST /positions/orders (or
-// /:id/roll, /:id/close) and immediately confirm it via
+// an actual fill") is no longer true: create_position/close_position now
+// build an order via POST /positions/orders (or /:id/close) and
+// immediately confirm it via
 // POST /positions/orders/:id/confirm, which transmits the order to IBKR.
 // The Telegram Yes/Cancel tap IS the human confirmation gate for that
 // transmit step — there's no second in-app confirmation for the bot path,
@@ -24,11 +24,8 @@ import type { GenosukeApiClient } from "../apiClient.js";
 import type { GenosukeTool } from "./types.js";
 import {
   buildCloseCard,
-  buildRejectAlertCard,
   buildRiskLimitsCard,
-  buildRollCard,
   validateCloseLegs,
-  validateRollCloseLeg,
   type PositionForCard,
 } from "../confirmationText.js";
 
@@ -57,7 +54,7 @@ export const financialWriteTools: GenosukeTool[] = [
   {
     name: "create_position",
     description:
-      "Open a new position by placing a real order with IBKR — either approving a pending Trade Alert (pass sourceAlertId; strongly preferred when one exists, since the alert's suggested strike/expiry/premium is already validated against the live option chain) or a fully manual entry (higher risk of a typo'd strike/price — the human confirmation step is the safety net here). Builds and immediately confirms the order — nothing further is needed after the human taps Yes.",
+      "Open a new position by placing a real order with IBKR (the human confirmation step is the safety net against a typo'd strike/price). Builds and immediately confirms the order — nothing further is needed after the human taps Yes.",
     tier: "financial-write",
     parameters: {
       type: "object",
@@ -67,7 +64,7 @@ export const financialWriteTools: GenosukeTool[] = [
         stock: {
           type: "object",
           description:
-            "Buy-write stock leg — used for covered_call only. For cash_secured_put, omit this field entirely (do not pass it with zeros or placeholder values — cash_secured_put never has a stock leg, and the server ignores this field for that strategy regardless). For covered_call, never ask the human how many shares or what stock price to use: compute quantity yourself as option.quantity * 100 and limitPrice as the current stock price (from get_ticker_quote or the source alert's spot price, rounded to the nearest cent) — pass it here so the human sees the real stock leg on the Yes/Cancel confirmation before it's sent to IBKR. If omitted, the server will auto-fill the same 100-shares-per-contract default using its own live quote, but the human then won't see the stock leg in the confirmation text, so only rely on that fallback if no price source is available. Only ask the human explicitly if they want deliberate over-coverage (more shares than the calls need) or a stock limit different from market.",
+            "Buy-write stock leg — used for covered_call only. For cash_secured_put, omit this field entirely (do not pass it with zeros or placeholder values — cash_secured_put never has a stock leg, and the server ignores this field for that strategy regardless). For covered_call, never ask the human how many shares or what stock price to use: compute quantity yourself as option.quantity * 100 and limitPrice as the current stock price (from get_ticker_quote, rounded to the nearest cent) — pass it here so the human sees the real stock leg on the Yes/Cancel confirmation before it's sent to IBKR. If omitted, the server will auto-fill the same 100-shares-per-contract default using its own live quote, but the human then won't see the stock leg in the confirmation text, so only rely on that fallback if no price source is available. Only ask the human explicitly if they want deliberate over-coverage (more shares than the calls need) or a stock limit different from market.",
           properties: { quantity: { type: "number" }, limitPrice: { type: "number" } },
           required: ["quantity", "limitPrice"],
         },
@@ -82,7 +79,6 @@ export const financialWriteTools: GenosukeTool[] = [
           },
           required: ["quantity", "limitPrice", "strikePrice", "expiryDate"],
         },
-        sourceAlertId: { type: "string", description: "If approving a pending Trade Alert, its id — links the alert and marks it approved." },
       },
       required: ["symbol", "strategyKey", "option"],
     },
@@ -90,49 +86,10 @@ export const financialWriteTools: GenosukeTool[] = [
       const option = input.option as { quantity: unknown; strikePrice: unknown; expiryDate: unknown; limitPrice: unknown };
       const stock = input.stock as { quantity: unknown; limitPrice: unknown } | undefined;
       const stockPart = stock ? `BUY ${stock.quantity} sh @ ${stock.limitPrice} + ` : "";
-      return `Place order for ${input.symbol} (${input.strategyKey}): ${stockPart}SELL ${option.quantity}x $${option.strikePrice} exp ${option.expiryDate} @ ${option.limitPrice}${input.sourceAlertId ? " (approving pending alert)" : " (manual entry)"} — will be sent to IBKR immediately on confirm.`;
+      return `Place order for ${input.symbol} (${input.strategyKey}): ${stockPart}SELL ${option.quantity}x $${option.strikePrice} exp ${option.expiryDate} @ ${option.limitPrice} — will be sent to IBKR immediately on confirm.`;
     },
     tracksOrderStatus: true,
     execute: (input, api) => buildAndConfirmOrder(api, "/positions/orders", input),
-  },
-  {
-    name: "roll_position",
-    description:
-      "Roll one short option leg on an open position by placing a real atomic combo order with IBKR (buy back the existing leg, sell the new one, in one order) — tied to a pending roll-type Trade Alert. Only valid for a pending alert of alertType 'roll' — get its details from list_trade_alerts/get_position first. Builds and immediately confirms the order.",
-    tier: "financial-write",
-    parameters: {
-      type: "object",
-      properties: {
-        positionId: { type: "string" },
-        sourceAlertId: { type: "string" },
-        closeLegId: { type: "string", description: "The existing option leg being closed." },
-        closeLimitPrice: { type: "number", description: "Max price willing to pay to buy back the closing leg." },
-        newLeg: {
-          type: "object",
-          properties: {
-            strikePrice: { type: "number" },
-            expiryDate: { type: "string" },
-            quantity: { type: "number" },
-            limitPrice: { type: "number", description: "Min premium willing to accept for the new leg." },
-          },
-          required: ["strikePrice", "expiryDate", "quantity", "limitPrice"],
-        },
-      },
-      required: ["positionId", "sourceAlertId", "closeLegId", "closeLimitPrice", "newLeg"],
-    },
-    validateBeforeConfirmation: async (input, api) => validateRollCloseLeg(await fetchPositionForCard(api, input.positionId), String(input.closeLegId)),
-    describeForConfirmation: async (input, api) =>
-      buildRollCard(
-        await fetchPositionForCard(api, input.positionId),
-        String(input.closeLegId),
-        input.closeLimitPrice,
-        input.newLeg as { strikePrice: unknown; expiryDate: unknown; quantity: unknown; limitPrice: unknown },
-      ),
-    tracksOrderStatus: true,
-    execute: (input, api) => {
-      const { positionId, ...body } = input;
-      return buildAndConfirmOrder(api, `/positions/${positionId}/roll`, body);
-    },
   },
   {
     name: "close_position",
@@ -165,19 +122,8 @@ export const financialWriteTools: GenosukeTool[] = [
     },
   },
   {
-    name: "reject_trade_alert",
-    description: "Reject a pending Trade Alert. This is the only status change this tool supports — approving happens via create_position/roll_position with sourceAlertId instead, so the actual order terms are always confirmed first.",
-    tier: "financial-write",
-    parameters: { type: "object", properties: { alertId: { type: "string" } }, required: ["alertId"] },
-    describeForConfirmation: async (input, api) => {
-      const pendingAlerts = await api.get<{ id: string; symbol: string; strategyKey: string; alertType: string }[]>("/trade-alerts?status=pending");
-      return buildRejectAlertCard(pendingAlerts.find((alert) => alert.id === input.alertId), String(input.alertId));
-    },
-    execute: (input, api) => api.patch(`/trade-alerts/${input.alertId}`, { status: "rejected" }),
-  },
-  {
     name: "update_risk_limits",
-    description: "Update a strategy's risk settings (delta/DTE targets, position/collateral/concentration caps, minimum cash reserve). Governs future Trade Alert generation, not existing positions.",
+    description: "Update a strategy's risk settings (delta/DTE targets, position/collateral/concentration caps, minimum cash reserve). Governs the delta check on new orders and the recovery-path suggestion, not existing positions.",
     tier: "financial-write",
     parameters: {
       type: "object",

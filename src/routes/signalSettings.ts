@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
-import { loadSignalsUniverseTicker } from "../lib/signalsStore.js";
+import { loadTickerBySymbol } from "../lib/signalsChainStore.js";
 
 export const signalSettingsRouter = Router();
 signalSettingsRouter.use(requireAuth);
@@ -99,9 +99,10 @@ signalSettingsRouter.get("/order-limits-check", async (request, response) => {
     return;
   }
 
-  const ticker = await loadSignalsUniverseTicker(symbol);
+  // Any known ticker: a contract picked from the full chain can be on a ticker outside the Signals universe (a stock-only position).
+  const ticker = await loadTickerBySymbol(symbol);
   if (!ticker) {
-    response.status(400).json({ error: "Unknown symbol — add it via the Shortlist first." });
+    response.status(400).json({ error: "Unknown symbol." });
     return;
   }
 

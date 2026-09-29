@@ -222,3 +222,27 @@ export async function upsertDayRollGrades(tickerId: string, tradingDateIso: stri
     .onConflict(["leg_id", "expiry", "strike", "option_right"])
     .merge(["trading_date", "last_grade", "updated_at"]);
 }
+
+/** Assignment-risk alert state of one held short leg — see decideAssignmentRiskAlert (daySignalsNotifications.ts). */
+export interface AssignmentRiskAlertState {
+  /** Set while the leg is flagged (alerted and not yet re-armed); null = armed. */
+  notifiedAt: string | null;
+  /** Eastern trading date (YYYY-MM-DD) of the last alert, for the once-per-day rule. */
+  lastAlertTradingDateIso: string | null;
+}
+
+export async function loadAssignmentRiskAlertStates(legIds: string[]): Promise<Map<string, AssignmentRiskAlertState>> {
+  if (legIds.length === 0) return new Map();
+  const rows: { id: string; notifiedAt: Date | null; lastAlertTradingDateIso: string | null }[] = await db("position_legs")
+    .whereIn("id", legIds)
+    .select("id", "assignment_risk_notified_at as notifiedAt", db.raw('assignment_risk_last_alert_trading_date::text as "lastAlertTradingDateIso"'));
+  return new Map(rows.map((row) => [row.id, { notifiedAt: row.notifiedAt ? new Date(row.notifiedAt).toISOString() : null, lastAlertTradingDateIso: row.lastAlertTradingDateIso }]));
+}
+
+export async function recordAssignmentRiskAlert(legId: string, tradingDateIso: string): Promise<void> {
+  await db("position_legs").where({ id: legId }).update({ assignment_risk_notified_at: db.fn.now(), assignment_risk_last_alert_trading_date: tradingDateIso });
+}
+
+export async function rearmAssignmentRiskAlert(legId: string): Promise<void> {
+  await db("position_legs").where({ id: legId }).update({ assignment_risk_notified_at: null });
+}

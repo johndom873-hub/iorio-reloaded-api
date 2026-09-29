@@ -2,12 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   annotateLegOpenState,
   buildCloseCard,
-  buildRejectAlertCard,
   buildRiskLimitsCard,
-  buildRollCard,
   toIsoExpiry,
   validateCloseLegs,
-  validateRollCloseLeg,
   type PositionForCard,
 } from "./confirmationText.js";
 
@@ -60,29 +57,7 @@ describe("close", () => {
   });
 });
 
-describe("roll", () => {
-  it("rejects rolling a leg that is already closed", () => {
-    expect(validateRollCloseLeg(aaoi, "call-leg")).toContain("not an open leg");
-    expect(validateRollCloseLeg(aaoi, "nope")).toContain("not an open leg");
-  });
-
-  it("builds a readable roll card with a compact-format expiry converted to ISO", () => {
-    const open: PositionForCard = {
-      ...aaoi,
-      legs: [{ id: "call-leg", legType: "option", side: "short", quantity: 1, optionType: "call", strikePrice: 110, expiryDate: "2026-09-18", exitAt: null }],
-    };
-    const card = buildRollCard(open, "call-leg", 0.3, { strikePrice: 115, expiryDate: "20260925", quantity: 1, limitPrice: 1.2 });
-    expect(card).toContain("• BUY BACK 1 call $110 exp 2026-09-18, limit 0.30");
-    expect(card).toContain("• SELL 1 call $115 exp 2026-09-25, limit 1.20");
-  });
-});
-
 describe("other cards", () => {
-  it("names the alert being rejected, falling back to the id when it can't be found", () => {
-    expect(buildRejectAlertCard({ symbol: "MU", strategyKey: "cash_secured_put", alertType: "new_trade" }, "x")).toBe("Reject pending new-trade alert: MU (cash-secured put)");
-    expect(buildRejectAlertCard(undefined, "abc")).toBe("Reject trade alert abc");
-  });
-
   it("lists every risk setting instead of '5 other fields'", () => {
     const card = buildRiskLimitsCard({ strategyKey: "cash_secured_put", delta_target_min: 0.2, delta_target_max: 0.3, dte_target_min: 20, dte_target_max: 45, max_position_pct_of_portfolio: 10, max_aggregate_collateral_pct: 60, max_concentration_per_ticker_pct: 15, max_concentration_per_sector_pct: 30, min_cash_reserve_pct: 20 });
     expect(card).toContain("• Min cash reserve %: 20");

@@ -15,7 +15,7 @@ import { annotateLegOpenState } from "../confirmationText.js";
 import type { GenosukeTool } from "./types.js";
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
-// The blotter route (unlike alerts/shortlist) also accepts "unstructured".
+// The blotter route (unlike shortlist) also accepts "unstructured".
 const blotterStrategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "unstructured"] };
 
 export const readTools: GenosukeTool[] = [
@@ -79,29 +79,10 @@ export const readTools: GenosukeTool[] = [
   {
     name: "get_ticker_quote",
     description:
-      "Stock price and option chain for a symbol — including one with no open position and no trade alert (e.g. picking parameters for a manual order). Always returns lastKnownClose (yesterday's-or-earlier daily close, works anytime). live.pricing/live.optionChain (bid/ask/strikes/premiums) are only populated during US market hours — check liveUnavailableReason before assuming live data exists, and never invent a bid/ask/premium if live is null.",
+      "Stock price and option chain for a symbol — including one with no open position (e.g. picking parameters for a manual order). Always returns lastKnownClose (yesterday's-or-earlier daily close, works anytime). live.pricing/live.optionChain (bid/ask/strikes/premiums) are only populated during US market hours — check liveUnavailableReason before assuming live data exists, and never invent a bid/ask/premium if live is null.",
     tier: "read",
     parameters: { type: "object", properties: { symbol: { type: "string" } }, required: ["symbol"] },
     execute: (input, api) => api.get(`/tickers/${String(input.symbol).toUpperCase()}/quote`),
-  },
-  {
-    name: "list_trade_alerts",
-    description: "List trade alert suggestions (new_trade or roll) by status.",
-    tier: "read",
-    parameters: {
-      type: "object",
-      properties: {
-        status: { type: "string", enum: ["pending", "approved", "rejected", "modified", "expired"], description: "Defaults to pending if omitted." },
-        strategyKey: strategyKeyEnum,
-      },
-    },
-    execute: (input, api) => {
-      const params = new URLSearchParams();
-      if (input.status) params.set("status", String(input.status));
-      if (input.strategyKey) params.set("strategy", String(input.strategyKey));
-      const query = params.toString();
-      return api.get(`/trade-alerts${query ? `?${query}` : ""}`);
-    },
   },
   {
     name: "list_trades",
@@ -157,7 +138,7 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "get_system_health_status",
-    description: "Latest run status per scheduled job (daily market data, P&L snapshot, trade alerts, IBKR health check, watchdog).",
+    description: "Latest run status per scheduled job (daily market data, P&L snapshot, option chain capture/fit, Day Signals seed, IBKR health check, watchdog).",
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/system-health/status"),

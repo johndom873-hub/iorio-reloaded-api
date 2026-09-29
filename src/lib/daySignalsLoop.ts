@@ -5,13 +5,28 @@ import { releaseMarketDataLines, reserveMarketDataLines, type LineReservationRes
 import { sharedLiveConnection } from "../ibkr/sharedReadConnection.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { emitDayQuotesUpdated } from "./daySignalsEvents.js";
-import { clearsNotificationHysteresis, isGradeUpgrade, notifyRollSignalUpgrade, notifySignalUpgrade, type RollSignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
-import { loadDayRollGrades, loadDaySignalExpiries, loadDaySignalUniverse, loadDayQuotesForTicker, updateDayQuoteGrades, upsertDayQuotes, upsertDayRollGrades, type DayQuoteContract, type DayQuoteWrite, type DaySignalExpiryRow } from "./daySignalsStore.js";
+import { clearsNotificationHysteresis, decideAssignmentRiskAlert, isGradeUpgrade, notifyAssignmentRisk, notifyRollSignalUpgrade, notifySignalUpgrade, type AssignmentRiskAlert, type RollSignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
+import {
+  loadAssignmentRiskAlertStates,
+  loadDayRollGrades,
+  loadDaySignalExpiries,
+  loadDaySignalUniverse,
+  loadDayQuotesForTicker,
+  rearmAssignmentRiskAlert,
+  recordAssignmentRiskAlert,
+  updateDayQuoteGrades,
+  upsertDayQuotes,
+  upsertDayRollGrades,
+  type AssignmentRiskAlertState,
+  type DayQuoteContract,
+  type DayQuoteWrite,
+  type DaySignalExpiryRow,
+} from "./daySignalsStore.js";
 import { computeMarketSessionStatus, easternDateIso } from "./marketSessionStatus.js";
 import { formatIsoDateAsExpiry } from "./optionChainSnapshotStore.js";
 import { readGitSha } from "./readGitSha.js";
 import type { SignalGrade } from "./signalCandidates.js";
-import { rollCandidateKey } from "./rollSignalCandidates.js";
+import { rollCandidateKey, type HeldLegScore } from "./rollSignalCandidates.js";
 import { candidateContractKey, scoreTicker } from "./signalsLiveScoring.js";
 import { loadAccountContext, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "./signalSettingsStore.js";
@@ -40,8 +55,9 @@ import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 // re-scored exactly as the screens score it (scoreTicker over the merged
 // day quotes), upward grade transitions vs day_signal_quotes.last_grade that
 // clear the notification hysteresis and cooldown (daySignalsNotifications.ts,
-// daySignalsNotificationCooldownMs) are notified, and dayQuotesUpdated fires
-// so open Signals streams reload.
+// daySignalsNotificationCooldownMs) are notified, held short legs that reached
+// assignment risk are alerted (decideAssignmentRiskAlert), and dayQuotesUpdated
+// fires so open Signals streams reload.
 
 export const daySignalsLoopLineHolder = "daySignalsLoop";
 export const daySignalsLoopLines = 10;
@@ -96,6 +112,11 @@ export interface DaySignalsLoopDependencies {
   loadLastRollGrades(tickerId: string, tradingDateIso: string): Promise<Map<string, SignalGrade>>;
   upsertRollGrades(tickerId: string, tradingDateIso: string, grades: { legId: string; expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[]): Promise<void>;
   notifyRollUpgrade(upgrade: RollSignalUpgrade): Promise<void>;
+  /** Assignment-risk alert state per held leg id (legs with no row are absent). */
+  loadAssignmentRiskAlertStates(legIds: string[]): Promise<Map<string, AssignmentRiskAlertState>>;
+  recordAssignmentRiskAlert(legId: string, tradingDateIso: string): Promise<void>;
+  rearmAssignmentRiskAlert(legId: string): Promise<void>;
+  notifyAssignmentRisk(alert: AssignmentRiskAlert): Promise<void>;
   emitUpdated(tickerId: string): void;
   writeHeartbeat(status: DaySignalsLoopStatus): Promise<void>;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -137,6 +158,10 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   loadLastRollGrades: async (tickerId, tradingDateIso) => new Map((await loadDayRollGrades(tickerId, tradingDateIso)).map((row) => [`${row.legId}|${row.expiry}|${row.strike}|${row.right}`, row.lastGrade])),
   upsertRollGrades: upsertDayRollGrades,
   notifyRollUpgrade: notifyRollSignalUpgrade,
+  loadAssignmentRiskAlertStates,
+  recordAssignmentRiskAlert,
+  rearmAssignmentRiskAlert,
+  notifyAssignmentRisk,
   emitUpdated: emitDayQuotesUpdated,
   writeHeartbeat: async (status) => {
     await db("worker_health")
@@ -406,8 +431,27 @@ export class DaySignalsLoop {
       }
       await this.deps.updateDayQuoteGrades(ticker.tickerId, grades);
       this.deps.emitUpdated(ticker.tickerId);
+      await this.checkAssignmentRisk(ticker.symbol, scored.heldLegs, tradingDateIso, scored.spotPrice ?? spot);
     } catch (error) {
       console.error(`day signals loop: re-score of ${ticker.symbol} failed — ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  /** Alerts held legs whose |delta| reached assignment risk, and re-arms flagged ones that fell back (decideAssignmentRiskAlert). Unscored legs (no delta) are skipped. */
+  private async checkAssignmentRisk(symbol: string, heldLegs: HeldLegScore[], tradingDateIso: string, spotPrice: number | null): Promise<void> {
+    const scoredLegs = heldLegs.filter((leg): leg is HeldLegScore & { delta: number } => leg.delta !== null);
+    if (scoredLegs.length === 0) return;
+    const states = await this.deps.loadAssignmentRiskAlertStates(scoredLegs.map((leg) => leg.legId));
+    for (const leg of scoredLegs) {
+      const state = states.get(leg.legId);
+      if (!state) continue; // leg closed since the inputs were loaded
+      const decision = decideAssignmentRiskAlert(leg.delta, state, tradingDateIso);
+      if (decision === "rearm") await this.deps.rearmAssignmentRiskAlert(leg.legId);
+      if (decision === "alert") {
+        // Recorded before notifying: a failed write must not turn into a re-alert every cycle.
+        await this.deps.recordAssignmentRiskAlert(leg.legId, tradingDateIso);
+        await this.deps.notifyAssignmentRisk({ symbol, leg, spotPrice });
+      }
     }
   }
 }

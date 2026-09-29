@@ -6,7 +6,7 @@ import { clearDownState, notifyDownThrottled } from "./throttledAlert.js";
 
 export interface JobResult {
   details?: Record<string, unknown>;
-  /** If set, sent via Telegram on success — e.g. "Trade Alerts: 5 new alerts." Omit for quiet successes. */
+  /** If set, sent via Telegram on success — a short summary of what the run produced. Omit for quiet successes. */
   notify?: string;
   /**
    * Set when the job ran to the end but part of its work failed (e.g. some tickers): recorded as
@@ -36,14 +36,9 @@ export interface RunJobOptions {
 }
 
 // Thrown instead of starting a second concurrent run of the same job —
-// found necessary 2026-08-31 when repeated "Run Now" clicks on Trade Alerts
-// (nothing was rendering on screen, so the button got clicked several times)
-// stacked multiple simultaneous IBKR option-chain scans on top of the
-// nightly scheduled run, each opening its own Gateway connection and
-// requesting live greeks for the same ~100+ contracts per ticker — enough
-// concurrent market-data lines to exhaust the Gateway's shared quota and
-// leave every scan (including ones already in flight) getting back 0/N
-// contracts with price+delta for the rest of the session.
+// overlapping runs of an IBKR-heavy job (a repeated "Run Now" click on top
+// of the scheduled run) each request market data for the same contracts,
+// enough to exhaust the login's shared line quota and starve every run.
 export class JobAlreadyRunningError extends Error {
   constructor(jobName: string) {
     super(`${jobName} is already running.`);

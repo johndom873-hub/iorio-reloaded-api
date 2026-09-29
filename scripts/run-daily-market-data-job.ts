@@ -36,10 +36,8 @@ let nextReqId = 1;
 // backoff between retries — approved 2026-08-25 after a run where all 14
 // tickers failed identically (a suspected transient IBKR historical-data
 // outage around market close), and a single immediate retry wasn't enough
-// to clear it. This job starts 22:00 UTC (moved from 21:00 on 2026-09-24);
-// Trade Alert generation only runs once/day, at 1:30 PM UTC, so it always
-// consumes this job's *previous* evening's data, not same-day. On a bad
-// night the retries can overlap the 22:30 UTC P&L snapshot; both only make
+// to clear it. This job starts 22:00 UTC (moved from 21:00 on 2026-09-24).
+// On a bad night the retries can overlap the 22:30 UTC P&L snapshot; both only make
 // historical/snapshot requests (no market-data lines), so that is tolerable.
 // Retries are still capped by wall-clock budget rather than just attempt
 // count, so a bad run doesn't retry indefinitely into the next day's jobs.
@@ -157,7 +155,7 @@ async function main(): Promise<void> {
           const backoff = RETRY_BACKOFF_MS[attempt - 1]!;
           if (Date.now() - jobStart + backoff > RETRY_BUDGET_MS) {
             console.log(
-              `Stopping retries — waiting ${backoff / 1000}s would exceed the ${RETRY_BUDGET_MS / 60_000}min retry budget before Trade Alert generation runs.`,
+              `Stopping retries — waiting ${backoff / 1000}s would exceed the ${RETRY_BUDGET_MS / 60_000}min retry budget.`,
             );
             bailedOnBudget = true;
             break;

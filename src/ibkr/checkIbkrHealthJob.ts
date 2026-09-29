@@ -60,7 +60,7 @@ function isCompetingSessionHistoricalDataError(errorMessage: string): boolean {
 
 // Evidence 2026-09-24 (job_runs since 2026-08-24): the SPY probe's "Historical
 // data timeout" fired 7 times in 3,648 runs, and the two most recent both
-// landed while the option-chain capture / trade-alert scan was mid-run on the
+// landed while a scheduled option scan was mid-run on the
 // same login — the check then restarted the Gateway underneath that scan and
 // reported "restart didn't recover it" because the load was still there.
 // So a probe timeout is not restart-worthy on its own. A restart is only

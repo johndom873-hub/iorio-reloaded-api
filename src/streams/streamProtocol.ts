@@ -7,15 +7,15 @@
 export const streamProtocolVersion = 1;
 
 // Every kind is backed by exactly one producer in streamProducers.ts. The
-// money path (order-leg quote, roll/close contract quote, position quote,
-// trade-alert run) is deliberately absent — those keep their own one-shot
+// money path (order-leg quote, roll/close contract quote, position quote)
+// is deliberately absent — those keep their own one-shot
 // fail-closed streams (design decision D3).
 export const streamKinds = [
   "greeks",
   "pnl",
   "exposure",
   "pricePerformancePrices",
-  "tradeAlertPrices",
+  "stockPrices",
   "signalsScreen",
   "signalsTicker",
   "notifications",

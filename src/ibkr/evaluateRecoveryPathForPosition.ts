@@ -3,8 +3,8 @@ import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { db } from "../db/connection.js";
 import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "./sharedReadConnection.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
-import { generateTradeAlertCandidates, type AlertCandidate } from "./generateTradeAlertCandidates.js";
-import { toSettings } from "./runTradeAlertGeneration.js";
+import { loadStrategyTargetWindow } from "../lib/strategySettings.js";
+import { scanRecoveryPathCoveredCallCandidates, type CoveredCallCandidate } from "./scanRecoveryPathCoveredCallCandidates.js";
 
 const SHARES_PER_CONTRACT = 100;
 const daysPerMonth = 30;
@@ -14,7 +14,7 @@ export interface RecoveryProjectionInput {
   currentPrice: number;
   shares: number;
   contractsAvailable: number;
-  candidate: Pick<AlertCandidate, "premium" | "dte"> | null;
+  candidate: Pick<CoveredCallCandidate, "premium" | "dte"> | null;
 }
 
 export interface RecoveryProjection {
@@ -45,7 +45,7 @@ export type RecoveryPathEvaluation =
       currentPrice: number;
       unrealizedLoss: number;
       contractsAvailable: number;
-      candidate: AlertCandidate | null;
+      candidate: CoveredCallCandidate | null;
       monthlyPremium: number | null;
       monthsToRecover: number | null;
       rationale: string;
@@ -60,11 +60,10 @@ export type RecoveryPathEvaluation =
  *   unrealized loss = max(0, entry price − current price) × shares
  *   monthly premium = top-ranked live covered-call candidate's premium × 100 × contracts available × (30 ÷ candidate DTE)
  *   months to recover = ceil(unrealized loss ÷ monthly premium)
- * Reuses generateTradeAlertCandidates (same delta/DTE window already
- * configured for covered_call) rather than a separate recommendation
- * engine, per the approved proposal. Read-only, writes nothing — same
- * pattern as evaluateRollForPosition.ts. Opens its own short-lived IBKR
- * connection.
+ * The candidate comes from scanRecoveryPathCoveredCallCandidates (the
+ * delta/DTE window configured for covered_call in strategy_settings).
+ * Read-only, writes nothing. Borrows the shared read connection, or opens
+ * its own short-lived one.
  */
 export async function evaluateRecoveryPathForPosition(positionId: string): Promise<RecoveryPathEvaluation> {
   const positionRow = await db("positions as p")
@@ -87,15 +86,14 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
   if (shares <= 0) return { status: "no_shares" };
   const entryPrice = legs.reduce((sum, leg) => sum + Number(leg.quantity) * Number(leg.entryPrice), 0) / shares;
 
-  const settingsRow = await db("strategy_settings").where({ strategy_key: "covered_call" }).first();
-  if (!settingsRow) return { status: "no_settings" };
-  const settings = toSettings(settingsRow);
+  const targetWindow = await loadStrategyTargetWindow("covered_call");
+  if (!targetWindow) return { status: "no_settings" };
 
   // FROZEN, not REALTIME — this is just an estimate, and it needs to work
   // outside market hours too (REALTIME's snapshot never completes with no
   // live trades to gate on). Runs on sharedReadConnection, not
   // sharedLiveConnection: that one is pinned to REALTIME for the life of the
-  // connection for the Ticker Detail modal's long-lived streams, and
+  // connection for the Signals ticker modal's long-lived streams, and
   // changing type on a connection with subscriptions outstanding has been
   // seen to silently stop them (see requestMarketData.ts's
   // marketDataTypeManagedConnections comment). sharedReadConnection's
@@ -111,7 +109,7 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
     const contractsAvailable = Math.floor(shares / SHARES_PER_CONTRACT);
     const candidates =
       contractsAvailable >= 1
-        ? await generateTradeAlertCandidates(connection, positionRow.symbol, positionRow.tickerId, "covered_call", settings, { spotPrice: currentPrice })
+        ? await scanRecoveryPathCoveredCallCandidates(connection.ib, positionRow.symbol, positionRow.tickerId, currentPrice, targetWindow)
         : [];
     const candidate = candidates[0] ?? null;
 

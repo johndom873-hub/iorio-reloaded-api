@@ -16,7 +16,7 @@ const minDailyBarsForIndicators = 99;
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
 /**
- * Cache-then-delta-fetch layer for the Ticker Detail modal's chart, approved
+ * Cache-then-delta-fetch layer for the Signals ticker modal's chart, approved
  * 2026-08-27 (see PROGRESS.md "Chart bar caching"). Historical bars for past
  * dates never change, so once a ticker/bar-size combo has been fetched once,
  * repeat views only need to top up with whatever's new since the last cached
@@ -354,7 +354,7 @@ async function readCachedBarsOnly(tickerId: string, range: ChartRange): Promise<
 
 /**
  * Chart bars for one range, cached — call on an already-open connection
- * (the Ticker Detail SSE stream's shared connection). See
+ * (the ticker detail SSE stream's shared connection). See
  * fetchCachedPriceBars below for the open-own-connection variant the plain
  * /chart route uses for range switches after the modal is already open.
  *
@@ -466,7 +466,7 @@ export interface IvChartPoint {
 }
 
 /**
- * IV history for the TickerDetailModal chart (approved 2026-08-31 — see
+ * IV history for the Signals ticker modal chart (approved 2026-08-31 — see
  * PROGRESS.md and lib/ivMetrics.ts). Daily-only, unlike the price chart's
  * six intraday ranges: IBKR's OPTION_IMPLIED_VOLATILITY historical series is
  * one blended value per day, so there's no intraday IV to show — 1Y/5Y/All

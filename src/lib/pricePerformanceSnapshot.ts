@@ -6,8 +6,8 @@ import { computePriceTrend, type PriceTrend } from "./priceTrends.js";
 // Everything the Price Performance page shows except the live price: end-of-day
 // facts computed from daily_price_bars alone — zero IBKR calls at request time
 // (design: PROGRESS.md "Price Performance redesign"). Only COMPLETED session
-// bars are used, so a partial in-progress bar left behind by a chart top-up or a
-// trade-alert scan can never show up as a "last close".
+// bars are used, so a partial in-progress bar left behind by a chart top-up
+// can never show up as a "last close".
 
 interface RawRow {
   tickerId: string;

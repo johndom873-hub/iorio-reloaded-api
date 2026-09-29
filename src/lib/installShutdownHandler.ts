@@ -2,14 +2,12 @@ import { db } from "../db/connection.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 
 // A Heroku deploy sends SIGTERM to the web dyno to restart it. If a manual
-// job (e.g. Trade Alerts' "Run Now", via runJob() in runJob.ts) is mid-run
+// job (one a user triggered, via runJob() in runJob.ts) is mid-run
 // at that moment, the process dies before runJob()'s own try/catch ever
 // gets to update its job_runs row -- so the row is abandoned in status
 // "running" forever, and every future run of that job is rejected by
 // runJob()'s already-running guard even though nothing is actually running
-// anymore. Root-caused 2026-09-11: a deploy killed a manual Trade Alerts
-// scan mid-stream, and every "Run Now" click afterward silently no-opped
-// with "already running" until the stuck row was fixed by hand.
+// anymore.
 //
 // Scoped to triggered_by: "manual" only -- scheduler-triggered jobs run in
 // their own one-off Heroku Scheduler dyno, entirely independent of the web

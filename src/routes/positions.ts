@@ -5,7 +5,6 @@ import { db } from "../db/connection.js";
 import type { Knex } from "knex";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { positionSelect, fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
-import { revertSourceAlertToPending } from "../lib/revertSourceAlertToPending.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 import type { Greeks, GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchGreeksPoolFirst } from "../ibkr/greeksPool.js";
@@ -21,7 +20,6 @@ import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning, type EconomicCalendarWarningEvent } from "../ibkr/calendarConflict.js";
-import { evaluateRollForPosition } from "../ibkr/evaluateRollForPosition.js";
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
@@ -54,7 +52,6 @@ function serializeOrderRequest(row: Record<string, unknown>) {
     requestType: row.request_type,
     payload: row.payload,
     relatedPositionId: row.related_position_id,
-    sourceAlertId: row.source_alert_id,
     status: row.status,
     ibkrOrderId: row.ibkr_order_id,
     errorMessage: row.error_message,
@@ -129,9 +126,8 @@ function normalizeExpiryDate(raw: string): string | null {
 //     * (short ? -1 : 1) — same shape as the Trade Blotter's approved formula
 //     (2026-08-20), aggregated per position. Includes a rolled-away leg's
 //     locked-in gain even while the position is still open.
-//   capitalAtRisk = entry-time capital committed, same definition as Trade
-//     Alerts' approved capitalAtRisk (spot for covered calls, strike for
-//     CSPs) but from entry actuals rather than a scan-time estimate. Keyed
+//   capitalAtRisk = entry-time capital committed: spot for covered calls,
+//     strike for CSPs, from entry actuals rather than a scan-time estimate. Keyed
 //     on leg composition (open stock leg present?), not strategy_key, so a
 //     bare-stock unstructured (N/S) position — e.g. leftover shares after a
 //     covered call's short call expired/was assigned away — still gets a
@@ -974,8 +970,7 @@ async function requireExistingTicker(symbolInput: string): Promise<{ id: string;
 // Shared by the confirm-step hard gate and the order's live quote-stream
 // compliance check below -- only ever runs for an order that actually came
 // from the Signals order-setup flow (signal_snapshot is only ever set
-// there), never for a Trade Alerts order, which has its own separate,
-// still-unenforced copy of these same-named settings (see PROGRESS.md).
+// there),// still-unenforced copy of these same-named settings (see PROGRESS.md).
 async function evaluateSignalOrderLimitsForOrderRequest(
   orderRequest: { signal_snapshot: unknown; payload: OrderRequestPayload; request_type: string },
   live: { exposures?: PositionExposureRow[]; spotPrice?: number } = {},
@@ -1010,7 +1005,6 @@ interface OpenOrderRequestBody {
   strategyKey?: string;
   stock?: { quantity: number; limitPrice: number };
   option?: { quantity: number; limitPrice: number; strikePrice: number; expiryDate: string };
-  sourceAlertId?: string;
   /** Signals modal only: the scores at the moment the order was built (stored as-is in order_requests.signal_snapshot). */
   signalSnapshot?: unknown;
 }
@@ -1025,7 +1019,7 @@ function readSignalSnapshot(raw: unknown): { ok: true; value: Record<string, unk
 }
 
 positionsRouter.post("/orders", async (request, response) => {
-  const { symbol, strategyKey, stock, option, sourceAlertId } = request.body as OpenOrderRequestBody;
+  const { symbol, strategyKey, stock, option } = request.body as OpenOrderRequestBody;
 
   if (!symbol || !symbol.trim()) {
     response.status(400).json({ error: "Symbol is required." });
@@ -1145,23 +1139,6 @@ positionsRouter.post("/orders", async (request, response) => {
 
   const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey, legs };
 
-  if (sourceAlertId) {
-    const alert = await db("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
-    if (!alert) {
-      response.status(404).json({ error: "Pending trade alert not found for sourceAlertId." });
-      return;
-    }
-    const conflict = await findActiveOrderConflict(db, { sourceAlertId });
-    if (conflict) {
-      response.status(409).json({ error: describeActiveOrderConflict(conflict) });
-      return;
-    }
-    if (alert.ticker_id !== ticker.id || alert.strategy_key !== strategyKey) {
-      response.status(400).json({ error: "sourceAlertId does not match this symbol/strategy." });
-      return;
-    }
-  }
-
   const signalSnapshot = readSignalSnapshot((request.body as OpenOrderRequestBody).signalSnapshot);
   if (!signalSnapshot.ok) {
     response.status(400).json({ error: signalSnapshot.error });
@@ -1173,10 +1150,6 @@ positionsRouter.post("/orders", async (request, response) => {
       requested_by_user_id: request.session.userId,
       request_type: strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put",
       payload: JSON.stringify(payload),
-      // sourceAlertId can arrive as "" (e.g. Genosuke's manual-entry path,
-      // not omitted) rather than undefined — ?? only catches null/undefined,
-      // and an empty string fails Postgres's uuid parser outright.
-      source_alert_id: sourceAlertId || null,
       signal_snapshot: signalSnapshot.value === null ? null : JSON.stringify(signalSnapshot.value),
     })
     .returning("*");
@@ -1187,7 +1160,7 @@ positionsRouter.post("/orders", async (request, response) => {
       : null;
   const [calendarWarningEvents, riskFreeRate] = await Promise.all([
     fetchEconomicCalendarWarningEvents(normalizedExpiry),
-    getRiskFreeRate().catch(() => null), // Order Review's probability of profit uses the same FRED rate as the alerts (approved 2026-09-24)
+    getRiskFreeRate().catch(() => null), // Order Review's probability of profit uses the FRED risk-free rate (approved 2026-09-24)
   ]);
   // Persisted (2026-09-24, fixing a flash-and-vanish banner) before the
   // notification goes out, so the background-jobs SSE listener's own
@@ -1417,26 +1390,23 @@ class ActiveOrderConflictError extends Error {
 }
 
 function describeActiveOrderConflict(conflict: ActiveOrderConflict): string {
-  return `An order for this ${conflict.requestType.startsWith("open_") ? "alert" : "position"} is already in progress (${conflict.symbol}, ${conflict.status.replaceAll("_", " ")}) — cancel it first or wait for it to finish.`;
+  return `An order for this position is already in progress (${conflict.symbol}, ${conflict.status.replaceAll("_", " ")}) — cancel it first or wait for it to finish.`;
 }
 
 /**
  * The first still-active order_requests row that references the same
- * position (close/roll) or the same source alert (open) — or, for a close
- * or roll, any of the same position_legs (2026-09-24). Two working orders on
+ * position (close/roll) — or, for a close or roll, any of the same
+ * position_legs (2026-09-24). Two working orders on
  * one position can sell the stock twice or buy the call back twice.
  */
 async function findActiveOrderConflict(
   executor: Knex | Knex.Transaction,
-  target: { excludeOrderId?: string; positionId?: string | null; sourceAlertId?: string | null; payload?: OrderRequestPayload },
+  target: { excludeOrderId?: string; positionId?: string | null; payload?: OrderRequestPayload },
 ): Promise<ActiveOrderConflict | null> {
-  if (!target.positionId && !target.sourceAlertId) return null;
+  if (!target.positionId) return null;
   const rows: { id: string; status: string; request_type: string; payload: OrderRequestPayload }[] = await executor("order_requests")
     .whereIn("status", [...activeOrderStatuses])
-    .andWhere((builder) => {
-      if (target.positionId) builder.orWhere({ related_position_id: target.positionId });
-      if (target.sourceAlertId) builder.orWhere({ source_alert_id: target.sourceAlertId });
-    })
+    .where({ related_position_id: target.positionId })
     .modify((builder) => {
       if (target.excludeOrderId) builder.whereNot({ id: target.excludeOrderId });
     })
@@ -1536,9 +1506,9 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   function runConfirmTransaction(): Promise<boolean> {
   return db.transaction(async (trx) => {
     // Re-checked inside the transaction (2026-09-24): building already
-    // refuses a second order for a position or alert with one in flight,
+    // refuses a second order for a position with one in flight,
     // but two rows built before either was confirmed could both confirm.
-    const conflict = await findActiveOrderConflict(trx, { excludeOrderId: orderRequest.id, positionId: orderRequest.related_position_id, sourceAlertId: orderRequest.source_alert_id, payload: orderRequest.payload });
+    const conflict = await findActiveOrderConflict(trx, { excludeOrderId: orderRequest.id, positionId: orderRequest.related_position_id, payload: orderRequest.payload });
     if (conflict) throw new ActiveOrderConflictError(conflict);
     const payload = requestedPriority ? { ...orderRequest.payload, adaptivePriority: requestedPriority } : orderRequest.payload;
     // Conditioned on status still being pending_confirmation, and read back
@@ -1550,22 +1520,6 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
       .update({ status: "confirmed", payload, updated_at: trx.fn.now() })
       .returning(["id"]);
     if (updatedRows.length === 0) return false;
-
-    if (orderRequest.source_alert_id) {
-      // resulting_position_id for a brand-new position isn't known yet at
-      // confirm time (the worker creates/matches it once IBKR actually
-      // fills the order) — left null here for a new_trade alert. For a
-      // roll, related_position_id is already the right answer since a roll
-      // never creates a new position.
-      await trx("trade_alerts")
-        .where({ id: orderRequest.source_alert_id })
-        .update({
-          status: "approved",
-          resulting_position_id: orderRequest.related_position_id ?? null,
-          reviewed_by_user_id: request.session.userId,
-          reviewed_at: trx.fn.now(),
-        });
-    }
 
     await trx.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
     return true;
@@ -1592,7 +1546,6 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
       .returning("id");
     if (flipped.length > 0) {
       const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
-      await revertSourceAlertToPending(orderRequest.source_alert_id);
       await publishNotification({ type: "order_status", orderId: orderRequest.id });
       response.json(serializeOrderRequest(updated));
       return;
@@ -1608,11 +1561,6 @@ positionsRouter.post("/orders/:id/cancel", async (request, response) => {
     // other terminal status. The frontend already polls GET
     // /positions/orders/:id until a terminal status, so this responds
     // immediately with the transient row rather than waiting.
-    // Not reverting the linked alert here yet — the order hasn't actually
-    // been cancelled at IBKR at this point (only requested), and it could
-    // still fill before IBKR processes the cancel. Reverted from the
-    // worker's orderStatus listener instead, once IBKR confirms the terminal
-    // "cancelled" status — see revertSourceAlertToPending's doc comment.
     await db("order_requests")
       .where({ id: orderRequest.id })
       .update({ status: "cancel_requested", updated_at: db.fn.now(), cancelled_by_user_id: request.session.userId });
@@ -1647,8 +1595,7 @@ positionsRouter.get("/:id", async (request, response) => {
 // position_legs/trades directly. Same idea as POST /orders above; only the
 // worker writes those tables now, once IBKR actually fills the order.
 positionsRouter.post("/:id/roll", async (request, response) => {
-  const { sourceAlertId, closeLegId, closeLimitPrice, newLeg, signalSnapshot } = request.body as {
-    sourceAlertId?: string;
+  const { closeLegId, closeLimitPrice, newLeg, signalSnapshot } = request.body as {
     closeLegId?: string;
     closeLimitPrice?: number;
     newLeg?: { strikePrice: number; expiryDate: string; quantity: number; limitPrice: number };
@@ -1694,29 +1641,9 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     return;
   }
   {
-    const conflict = await findActiveOrderConflict(db, { positionId: position.id, sourceAlertId });
+    const conflict = await findActiveOrderConflict(db, { positionId: position.id });
     if (conflict) {
       response.status(409).json({ error: describeActiveOrderConflict(conflict) });
-      return;
-    }
-  }
-
-  // Optional — a user-initiated roll built via the on-demand roll-candidate
-  // endpoint (evaluateRollForPosition.ts) has no backing trade_alerts row.
-  // When present, validated the same way POST /orders validates its own
-  // sourceAlertId.
-  if (sourceAlertId) {
-    const alert = await db("trade_alerts").where({ id: sourceAlertId, status: "pending" }).first();
-    if (!alert) {
-      response.status(404).json({ error: "Pending trade alert not found for sourceAlertId." });
-      return;
-    }
-    if (alert.alert_type !== "roll") {
-      response.status(400).json({ error: "sourceAlertId is not a roll alert." });
-      return;
-    }
-    if (alert.related_position_id !== position.id) {
-      response.status(400).json({ error: "sourceAlertId does not match this position." });
       return;
     }
   }
@@ -1791,7 +1718,6 @@ positionsRouter.post("/:id/roll", async (request, response) => {
       request_type: "roll_leg",
       payload: JSON.stringify(payload),
       related_position_id: position.id,
-      source_alert_id: sourceAlertId || null,
       signal_snapshot: snapshot.value === null ? null : JSON.stringify(snapshot.value),
     })
     .returning("*");
@@ -1809,60 +1735,13 @@ positionsRouter.post("/:id/roll", async (request, response) => {
   response.status(201).json(serializeOrderRequest(persistedOrderRequest));
 });
 
-// Read-only preview: computes a roll candidate for one specific leg on
-// demand (live IBKR quotes, no order/alert written) — added 2026-08-31 so
-// a user-initiated "Roll" click works even when the scheduled trade-alert
-// job hasn't (or never would) flag this leg as triggered. See
-// evaluateRollForPosition.ts. The response shape mirrors a roll trade
-// alert's suggestedStructure so the frontend can feed it straight into the
-// same RollPositionModal used for real roll alerts. Streamed (2026-09-24,
-// see streamedResponse.ts): a one-shot connect, contract details per expiry
-// and an 8s quote ceiling can pass Heroku's 30s router timeout.
-positionsRouter.post("/:id/roll-candidate", async (request, response) => {
-  const { legId } = request.body as { legId?: string };
-  if (!legId) {
-    response.status(400).json({ error: "legId is required." });
-    return;
-  }
-
-  await respondWithStreamedResult(response, async () => {
-    let result: Awaited<ReturnType<typeof evaluateRollForPosition>>;
-    try {
-      result = await evaluateRollForPosition(request.params.id!, legId);
-    } catch (error) {
-      return { status: 502, body: { error: error instanceof Error ? error.message : String(error) } };
-    }
-    switch (result.status) {
-      case "not_found":
-        return { status: 404, body: { error: "Leg not found on this position." } };
-      case "not_rollable":
-        return { status: 400, body: { error: result.reason } };
-      case "no_settings":
-        return { status: 409, body: { error: "No strategy settings configured for this position's strategy." } };
-      case "no_quote":
-        return { status: 422, body: { error: "No live quote for the current leg right now — try again during market hours." } };
-      case "no_candidate":
-        return { status: 422, body: { error: "No viable replacement contract found for this leg right now." } };
-      case "ok":
-        return {
-          status: 200,
-          body: {
-            symbol: result.symbol,
-            relatedPositionId: result.relatedPositionId,
-            rationale: result.rationale,
-            suggestedStructure: result.suggestedStructure,
-          },
-        };
-    }
-  });
-});
-
 // Read-only recovery-path projection for an unstructured bare-stock
 // position — "Recovery Path Formula" proposal, approved by Marcelo
 // 2026-08-31. See evaluateRecoveryPathForPosition.ts for the formula.
 // Writes nothing; opens its own short-lived IBKR connection per call.
-// Streamed (2026-09-24, see streamedResponse.ts) for the same reason as
-// /:id/roll-candidate above.
+// Streamed (2026-09-24, see streamedResponse.ts): a one-shot connect,
+// contract details and an 8s quote ceiling can pass Heroku's 30s router
+// timeout.
 positionsRouter.post("/:id/recovery-path", async (request, response) => {
   await respondWithStreamedResult(response, async () => {
     let result: Awaited<ReturnType<typeof evaluateRecoveryPathForPosition>>;

@@ -6,13 +6,12 @@ import { db } from "../db/connection.js";
 // confirmed available for every ticker actually shortlisted/held via
 // tmp/checkHistoricalIvCoverage.ts, 2026-08-31) so the two numbers can never
 // silently disagree about what "today" or "the history" means, even though
-// they're shown on different screens (Screener, Trade Alerts).
+// they're shown on different screens.
 //
 // Deliberately one shared source, not two: Screener's IV Rank originally
 // read market_data_snapshots (a different table, populated by the live
-// generic-tick capture) — migrated here 2026-08-31 when IV Percentile was
-// added to Trade Alerts, specifically to close that drift risk rather than
-// ship two IV numbers that could quietly diverge.
+// generic-tick capture) — migrated here 2026-08-31 to close that drift risk
+// rather than ship two IV numbers that could quietly diverge.
 //
 // - IV Rank = (today's IV − window min) / (window max − window min) × 100.
 //   Approved formula (see PROGRESS.md "Decisions made"), unchanged — only

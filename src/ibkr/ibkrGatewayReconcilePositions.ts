@@ -557,33 +557,6 @@ async function notifyPositionExpired(positionId: string, closeReason: string): P
   await publishNotification({ type: "position_closed", positionId: position.id, symbol: position.symbol, message });
 }
 
-/**
- * Fills in trade_alerts.resulting_position_id for a brand-new position
- * (known gap flagged 2026-08-24: a `roll` already knows related_position_id
- * at confirm time, but a new_trade alert's position doesn't exist until
- * this reconciliation pass creates it — nothing wrote the link back until
- * now). Matches on symbol + still-unlinked alert rather than a contract id,
- * since the order_requests payload for a brand-new open never has a conId
- * (it isn't resolved until the worker places the order) — safe because this
- * only matches request_types that never set related_position_id (an
- * open_covered_call/open_cash_secured_put, never a roll/close), and only
- * order_requests that came from a trade alert in the first place (a
- * manually-entered new position has no source_alert_id, so nothing to link).
- */
-async function backfillAlertResultingPositionId(symbol: string, positionId: string): Promise<void> {
-  const orderRequest = await db("order_requests as orq")
-    .join("trade_alerts as ta", "ta.id", "orq.source_alert_id")
-    .whereIn("orq.request_type", ["open_covered_call", "open_cash_secured_put"])
-    .whereIn("orq.status", ["filled", "partially_filled"])
-    .whereRaw("orq.payload->>'symbol' = ?", [symbol])
-    .whereNull("ta.resulting_position_id")
-    .orderBy("orq.created_at", "asc")
-    .first({ alertId: "ta.id" });
-  if (!orderRequest) return;
-
-  await db("trade_alerts").where({ id: orderRequest.alertId }).update({ resulting_position_id: positionId });
-}
-
 // Insert-or-update for a single position_legs row against one IBKR-held
 // contract. Shared by upsertUnstructuredPosition (looks up an existing leg
 // by conId alone, which stays safe there since that path never splits one
@@ -749,14 +722,6 @@ async function upsertUnstructuredPosition(
       await db("positions").where({ id: positionId }).update({ unstructured_reason: unstructuredReason });
     }
   }
-  // Retried on every pass, not just at creation (found 2026-08-28): a real
-  // race with the order's own fill-status callback — reconciliation can
-  // detect and create the position from IBKR's held-positions report before
-  // that order's order_requests row has actually flipped to "filled", so a
-  // creation-time-only call sometimes found nothing to link and never got
-  // a second chance. Safe to call repeatedly — the query only ever matches
-  // an alert with resulting_position_id still NULL.
-  await backfillAlertResultingPositionId(symbol, positionId!);
 
   for (const leg of legs) {
     const conId = String(leg.held.contract.conId);
@@ -836,10 +801,6 @@ async function upsertSplitCoveredCallPosition(
       console.warn(`upsertSplitCoveredCallPosition(${symbol}): call leg ${existingCallLeg!.id} sits on position ${positionId} labelled ${owner?.strategy_key} — left as-is.`);
     }
   }
-  // Retried on every pass, not just at creation — see upsertUnstructuredPosition's
-  // matching comment for why (2026-08-28).
-  await backfillAlertResultingPositionId(symbol, positionId!);
-
   await upsertPositionLeg(positionId!, callLeg, "short");
 
   // A newly sold call always lands here via the "no positionId found" branch
@@ -971,10 +932,6 @@ async function upsertSplitCashSecuredPutPosition(symbol: string, putLeg: IbkrHel
       console.warn(`upsertSplitCashSecuredPutPosition(${symbol}): put leg ${existingPutLeg!.id} sits on position ${positionId} labelled ${owner?.strategy_key} — left as-is.`);
     }
   }
-  // Retried on every pass, not just at creation — see upsertUnstructuredPosition's
-  // matching comment for why (2026-08-28).
-  await backfillAlertResultingPositionId(symbol, positionId!);
-
   await upsertPositionLeg(positionId!, putLeg, "short");
 }
 

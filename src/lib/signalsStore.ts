@@ -20,7 +20,7 @@ import type { DailyOhlcvBar } from "./realizedVolatility.js";
 // inputs once (loadTickerSignalsInputs); scoring itself is the pure scoreTicker in
 // signalsLiveScoring.ts, so the REST routes and the live producers score the exact
 // same way. Shares out for a covered call, and cash out for a cash-secured put, use
-// the same live account/position queries the existing Trade Alerts flow uses.
+// the same live account/position queries the order-limit checks use.
 
 export async function loadAccountContext(): Promise<AccountContext> {
   const [account, cashLockedInCsps] = await Promise.all([fetchAccountSummary(), computeCashLockedInCsps()]);

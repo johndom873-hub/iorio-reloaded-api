@@ -241,14 +241,14 @@ export async function executeBackfillRun(runId: string, tickerId: string, symbol
 
     await runStep("first_snapshot", async () => {
       // Always skipped, never captured immediately on add -- deliberately, not just "not built yet"
-      // (Marcelo, 2026-09-23). Every other night's capture runs inside the fixed 10:00-10:30 ET clock
+      // (Marcelo, 2026-09-23). Every other night's capture runs inside the fixed 9:30-9:30 ET clock
       // window (optionChainCaptureClock.ts), so every ticker's snapshot history lines up on the same
       // reference time day to day. Capturing immediately whenever a ticker happened to be added --
       // anywhere from 9:30am to 4pm ET -- gave that one ticker's first data point a different time-of-day
       // basis than everything else, the same class of inconsistency already flagged once before (see the
       // 2026-09-11 capture-timing finding in PROGRESS.md).
       if (!prepared) return { status: "skipped", message: "Skipped because the strike step did not finish." };
-      return { status: "skipped", message: "Captured by tonight's job in the normal 10:00 ET window, same as every other ticker." };
+      return { status: "skipped", message: "Captured by tonight's job in the normal 9:30 ET window, same as every other ticker." };
     });
   } finally {
     (connection as IbkrConnection | null)?.disconnect();

@@ -1,7 +1,6 @@
 // One-off cleanup: marks orphaned job_runs rows stuck in status='running'
-// as 'failure' with an explanatory error_message. These 5 rows (4x
-// trade_alert_generation, 1x ibkr_health_check, all 2026-08-24) were left
-// behind when the web dyno was briefly on Eco and its 30-min idle-sleep
+// as 'failure' with an explanatory error_message. The rows it was written
+// for (all 2026-08-24) were left behind when the web dyno was briefly on Eco and its 30-min idle-sleep
 // SIGTERM'd in-flight Heroku Scheduler one-off dynos mid-run — root-caused
 // and fixed by switching back to Basic on 2026-08-25 (see PROGRESS.md).
 // runJob() only updates job_runs from inside its own try/catch, so an

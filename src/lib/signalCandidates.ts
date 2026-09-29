@@ -45,7 +45,7 @@ export interface SignalSurfaceSlice {
   calendarViolations: number;
 }
 
-/** live = a pooled IBKR subscription (modal / screen best line), day = the Day Signals refresh loop, snapshot = the 10:00 capture. */
+/** live = a pooled IBKR subscription (modal / screen best line), day = the Day Signals refresh loop, snapshot = the 9:30 capture. */
 export type SignalQuoteSource = "live" | "day" | "snapshot";
 
 export interface SignalQuote {
@@ -54,7 +54,7 @@ export interface SignalQuote {
   right: "C" | "P";
   bid: number | null;
   ask: number | null;
-  /** Where bid/ask came from: the 10:00 capture (default), the Day Signals loop, or a live IBKR subscription. */
+  /** Where bid/ask came from: the 9:30 capture (default), the Day Signals loop, or a live IBKR subscription. */
   source?: SignalQuoteSource;
   /** When a day/live quote was received (ISO); absent for the snapshot. */
   quotedAt?: string;
@@ -88,7 +88,23 @@ export interface SignalCandidatesInput {
   exclusionTally?: CandidateExclusionTally;
   /** Formula 3h (approved 2026-09-24): per-expiry parallel shift added to the surface IV, from computeExpiryIvShifts. */
   ivShiftByExpiry?: Map<string, number>;
+  /** When given, told about every quote that did not become a candidate and why (the Signals chain grid). Never changes which contracts are candidates. */
+  onContractExcluded?: (quote: SignalQuote, exclusion: SignalContractExclusion) => void;
 }
+
+/** Why one quote did not become a candidate, in the order buildSignalCandidates checks. */
+export type SignalContractExclusion =
+  | { kind: "no_surface_slice" }
+  | { kind: "surface_fit_rejected"; sliceStatus: SviSliceStatus }
+  | { kind: "expiring_today" }
+  | { kind: "in_the_money" }
+  | { kind: "no_two_sided_quote" }
+  | { kind: "spans_earnings"; earningsDateIso: string | null }
+  | { kind: "no_surface_volatility" }
+  | { kind: "above_max_delta"; delta: number; maxNetDelta: number }
+  | { kind: "no_friction"; delta: number }
+  | { kind: "no_forecast"; delta: number }
+  | { kind: "below_min_yield"; delta: number; annualizedYieldPct: number; minAnnualizedYieldPct: number };
 
 export interface SignalCandidate {
   strategyKey: SignalStrategyKey;
@@ -143,7 +159,7 @@ export interface ExpiryIvShift {
 /**
  * Formula 3h (approved 2026-09-24): for each expiry, the median of (mid IV − surface IV) over its fresh
  * (day/live) two-sided OTM quotes with spread ≤ 50% of the mid; requires ivShiftMinimumQuotes, else 0.
- * Without it the 10:00 surface never learned that the market was paying more (or less) for volatility
+ * Without it the 9:30 surface never learned that the market was paying more (or less) for volatility
  * intraday — net Edge only moved through the friction term.
  */
 export function computeExpiryIvShifts(slices: SignalSurfaceSlice[], quotes: SignalQuote[], riskFreeRate: number): Map<string, ExpiryIvShift> {
@@ -199,44 +215,70 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
   const candidates: SignalCandidate[] = [];
 
   const tally = input.exclusionTally;
+  const exclude = (quote: SignalQuote, exclusion: SignalContractExclusion) => input.onContractExcluded?.(quote, exclusion);
   for (const quote of input.quotes) {
     const slice = slicesByExpiry.get(quote.expiry);
     if (!slice || slice.status !== "ok" || !slice.parameters || slice.kMin === null || slice.kMax === null) {
       // No slice at all is an expiry already past (dropped by the rebase) or an appended held-leg contract, not a rejected fit.
       if (slice) tally?.surfaceFitRejectedExpiries.add(quote.expiry);
+      exclude(quote, slice ? { kind: "surface_fit_rejected", sliceStatus: slice.status } : { kind: "no_surface_slice" });
       continue;
     }
-    if (!(slice.yearsToExpiry > 0)) continue; // expiring today: excluded, same as the surface fitter -- also caught downstream by computeFrictionCost's vega guard, kept explicit for clarity
+    if (!(slice.yearsToExpiry > 0)) {
+      exclude(quote, { kind: "expiring_today" });
+      continue; // expiring today: excluded, same as the surface fitter -- also caught downstream by computeFrictionCost's vega guard, kept explicit for clarity
+    }
 
     const isCall = quote.right === "C";
-    if (isCall !== quote.strike >= slice.forwardPrice) continue; // OTM side only
-    if (quote.bid === null || quote.ask === null || !(quote.bid > 0) || !(quote.ask > quote.bid)) continue; // two-sided quote
+    if (isCall !== quote.strike >= slice.forwardPrice) {
+      exclude(quote, { kind: "in_the_money" });
+      continue; // OTM side only
+    }
+    if (quote.bid === null || quote.ask === null || !(quote.bid > 0) || !(quote.ask > quote.bid)) {
+      exclude(quote, { kind: "no_two_sided_quote" });
+      continue; // two-sided quote
+    }
     // Hard exclude, not a flag: don't offer a trade that spans a known earnings date (Marcelo 2026-09-23).
-    // Matches generateTradeAlertCandidates.ts's calendar-conflict exclusion. Only excludes when the calendar
+    // Only excludes when the calendar
     // is actually resolved -- an unresolved ticker can't tell true "no earnings" apart from "unchecked", so
     // it falls through to the earnings_calendar_unresolved flag below instead of being silently allowed.
     if (input.earningsCalendarResolved && expirySpansEarnings(input.snapshotDateIso, quote.expiry, input.earningsDatesIso)) {
       tally?.spansEarningsExpiries.add(quote.expiry);
+      if (input.onContractExcluded) exclude(quote, { kind: "spans_earnings", earningsDateIso: [...input.earningsDatesIso].sort().find((dateIso) => dateIso > input.snapshotDateIso && dateIso <= quote.expiry) ?? null });
       continue;
     }
 
     const logMoneyness = Math.log(quote.strike / slice.forwardPrice);
     const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
-    if (!(totalVariance > 0)) continue;
+    if (!(totalVariance > 0)) {
+      exclude(quote, { kind: "no_surface_volatility" });
+      continue;
+    }
     const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry) + (input.ivShiftByExpiry?.get(quote.expiry) ?? 0);
-    if (!(surfaceIv > 0)) continue;
+    if (!(surfaceIv > 0)) {
+      exclude(quote, { kind: "no_surface_volatility" });
+      continue;
+    }
     const midIv = impliedVolatilityFromMid(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, quote.bid, quote.ask, isCall);
     const delta = blackScholesDelta(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
     if (Math.abs(delta) > input.maxNetDelta) {
       // Signals tab max net delta (approved 2026-09-24)
       if (tally) tally.aboveMaxDeltaCount += 1;
+      exclude(quote, { kind: "above_max_delta", delta, maxNetDelta: input.maxNetDelta });
       continue;
     }
     const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: quote.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv });
-    if (!friction) continue;
+    if (!friction) {
+      exclude(quote, { kind: "no_friction", delta });
+      continue;
+    }
     const edge = input.forecast ? surfaceIv - input.forecast.volatility : null;
     const netEdge = edge === null ? null : computeNetEdge({ impliedVolatility: surfaceIv, forecastVolatility: input.forecast!.volatility, forecastWindowDays: input.forecast!.windowDays, edge, insideFittedRange: true }, friction);
-    if (netEdge === null) continue; // no forecast: unscored, not shown as a candidate at all (caller shows the ticker as "Unscored")
+    if (netEdge === null) {
+      // no forecast: unscored, not shown as a candidate at all (caller shows the ticker as "Unscored")
+      exclude(quote, { kind: "no_forecast", delta });
+      continue;
+    }
     const vega = blackScholesVega(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv);
     const edgeDollars = netEdge * vega * 100;
     const netEdgeAtMid = edge! - friction.commissionVolatility;
@@ -251,6 +293,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     if (annualizedYield * 100 < input.minAnnualizedYieldPct) {
       // Signals tab min annualised yield (approved 2026-09-24)
       if (tally) tally.belowMinYieldCount += 1;
+      exclude(quote, { kind: "below_min_yield", delta, annualizedYieldPct: annualizedYield * 100, minAnnualizedYieldPct: input.minAnnualizedYieldPct });
       continue;
     }
     const dollarRisk = capitalAtRisk * 100 - premium;

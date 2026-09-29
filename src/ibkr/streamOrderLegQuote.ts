@@ -7,11 +7,9 @@ export interface DeltaComplianceResult {
   reason: string | null;
 }
 
-// Same Math.abs()/inclusive-bounds convention as generateTradeAlertCandidates.ts's
-// rankCandidates (approved 2026-08-20) — reused, not reimplemented, so "in band"
-// means the same thing here as it does for trade-alert screening. There it's a
-// silent filter (out-of-band candidates are just skipped); here the result drives
-// a user-facing block, so null/missing-threshold cases need an explicit reason
+// Math.abs() of the delta against inclusive bounds (the convention approved
+// 2026-08-20, same as the recovery-path candidate scan). The result drives a
+// user-facing block, so null/missing-threshold cases need an explicit reason
 // rather than silently failing closed with no explanation.
 export function checkDeltaCompliance(
   delta: number | null,

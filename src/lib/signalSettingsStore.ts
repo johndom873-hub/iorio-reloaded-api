@@ -1,7 +1,7 @@
 import { db } from "../db/connection.js";
 
 // Single source of truth for the Signals tab's own copy of these limits
-// (deliberately separate from strategy_settings/Trade Alerts, see
+// (deliberately separate from strategy_settings, see
 // signalSettings.ts route) -- every reader of signal_settings goes through
 // this loader instead of re-querying the row.
 

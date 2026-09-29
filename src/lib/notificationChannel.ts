@@ -13,15 +13,16 @@ export type AppNotification =
   | { type: "position_closed"; positionId: string; symbol: string; message: string }
   | { type: "position_opened"; positionId: string; symbol: string }
   // Iorio Pulse's live System Events feed / topology pulses — see
-  // presenceTracker.ts (presence) and the publish call sites in runJob.ts,
-  // runTradeAlertGeneration.ts, and genosuke/bot.ts.
+  // presenceTracker.ts (presence) and the publish call sites in runJob.ts
+  // and genosuke/bot.ts.
   | { type: "job_started"; jobName: string }
   | { type: "job_completed"; jobName: string; status: "success" | "failure" }
-  | { type: "alert_generated"; strategyKey: string; symbol: string; annualizedYield: number }
   // Day Signals: a pooled contract's grade went up between two refresh cycles (daySignalsNotifications.ts).
   | { type: "signal_upgraded"; symbol: string; strategyKey: string; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netEdge: number; edgeDollars: number; annualizedYield: number }
   // Roll Signals: a (held leg, replacement) roll's grade went up between two refresh cycles.
   | { type: "roll_signal_upgraded"; symbol: string; strategyKey: string; legId: string; heldStrike: number; heldExpiry: string; heldDte: number | null; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netRollEdge: number; netRollEdgeDollars: number; netCreditPerShare: number }
+  // Day Signals: a held short leg's |delta| reached the assignment-risk threshold (daySignalsNotifications.ts).
+  | { type: "assignment_risk"; symbol: string; strategyKey: string; positionId: string; legId: string; right: "C" | "P"; strike: number; expiry: string; dte: number | null; delta: number; spotPrice: number | null }
   | { type: "genosuke_reply"; preview: string }
   | { type: "presence"; onlineUserIds: string[] }
   // Animation-only signal for the Pulse topology map's otherwise-silent lines

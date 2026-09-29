@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildTrendLabel } from "../ibkr/generateTradeAlertCandidates.js";
 import { computePriceTrend } from "./priceTrends.js";
-import { computeMacd, computeMovingAverages } from "./technicalIndicators.js";
+import { buildTrendLabel, computeMacd, computeMovingAverages } from "./technicalIndicators.js";
 
 // The calculation the deleted GET /price-performance/trends endpoint ran, copied
 // verbatim, so the new path can never drift from it.

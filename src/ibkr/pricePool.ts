@@ -21,7 +21,7 @@ export async function fetchPricesPoolFirst(contracts: PriceContract[]): Promise<
 // Thin price-shaped view over marketDataPool.ts (the one real pool — see its
 // header comment) — kept as its own file/signatures so every consumer
 // migrated before the 2026-09-24 pool merge (positions.ts, positionExposure.ts,
-// tradeAlerts.ts, signalsProducers.ts, pricePerformance.ts) needed zero
+// signalsProducers.ts, pricePerformance.ts) needed zero
 // changes when price and greeks pooling were unified into one subscription
 // per contract.
 export async function subscribeToPooledPrice(contract: PriceContract, onUpdate: (price: number | null) => void): Promise<() => void> {
@@ -82,7 +82,7 @@ export async function streamPooledPrices(
   }
 }
 
-/** Thin convenience wrapper of streamPooledPrices for stock-only symbol lists (Price Performance, Trade Alerts, Signals list) — no frozenPhaseComplete status needed by any of those callers. */
+/** Thin convenience wrapper of streamPooledPrices for stock-only symbol lists (Price Performance, the stock price stream, Signals list) — no frozenPhaseComplete status needed by any of those callers. */
 export async function streamPooledStockPrices(symbols: string[], onUpdate: (pricesBySymbol: Record<string, number | null>) => void, signal: AbortSignal): Promise<void> {
   if (symbols.length === 0) return;
   await streamPooledPrices(

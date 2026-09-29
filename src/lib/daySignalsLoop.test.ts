@@ -7,7 +7,8 @@ import type { SignalGrade, SignalQuote, SignalSurfaceSlice } from "./signalCandi
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 import { rollCandidateKey } from "./rollSignalCandidates.js";
 import { scoreTicker } from "./signalsLiveScoring.js";
-import { clearsNotificationHysteresis } from "./daySignalsNotifications.js";
+import { assignmentRiskAlertAbsoluteDelta, assignmentRiskRearmAbsoluteDelta, clearsNotificationHysteresis } from "./daySignalsNotifications.js";
+import type { AssignmentRiskAlertState } from "./daySignalsStore.js";
 
 const forward = 100;
 const rate = 0.04;
@@ -56,14 +57,14 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
 interface Harness {
   deps: DaySignalsLoopDependencies;
   loop: DaySignalsLoop;
-  calls: { reserve: number; release: number; windows: WindowContract[][]; writes: number; notified: string[]; emitted: string[]; heartbeats: string[]; grades: SignalGrade[][]; rollGrades: SignalGrade[][]; rollNotified: string[] };
-  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; lastRollGrades: Map<string, SignalGrade>; openShortLegs: TickerSignalsInputs["openShortLegs"]; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean }; nowIso: string };
+  calls: { reserve: number; release: number; windows: WindowContract[][]; writes: number; notified: string[]; emitted: string[]; heartbeats: string[]; grades: SignalGrade[][]; rollGrades: SignalGrade[][]; rollNotified: string[]; assignmentAlerts: string[]; assignmentRearms: string[] };
+  state: { marketOpen: boolean; pool: boolean; linesOk: boolean; lastGrades: Map<string, SignalGrade | null>; lastRollGrades: Map<string, SignalGrade>; openShortLegs: TickerSignalsInputs["openShortLegs"]; dayQuotes: TickerSignalsInputs["dayQuotes"]; windowResult: { disconnected: boolean }; nowIso: string; assignmentRiskStates: Map<string, AssignmentRiskAlertState> };
 }
 
 /** The window fake answers every option with a two-sided quote at `impliedVolatility` and the stock with last = 100, synchronously. */
 function createHarness(impliedVolatilityShift = 0): Harness {
-  const calls: Harness["calls"] = { reserve: 0, release: 0, windows: [], writes: 0, notified: [], emitted: [], heartbeats: [], grades: [], rollGrades: [], rollNotified: [] };
-  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), lastRollGrades: new Map(), openShortLegs: [], dayQuotes: [], windowResult: { disconnected: false }, nowIso: "2026-09-24T15:00:00Z" };
+  const calls: Harness["calls"] = { reserve: 0, release: 0, windows: [], writes: 0, notified: [], emitted: [], heartbeats: [], grades: [], rollGrades: [], rollNotified: [], assignmentAlerts: [], assignmentRearms: [] };
+  const state: Harness["state"] = { marketOpen: true, pool: true, linesOk: true, lastGrades: new Map(), lastRollGrades: new Map(), openShortLegs: [], dayQuotes: [], windowResult: { disconnected: false }, nowIso: "2026-09-24T15:00:00Z", assignmentRiskStates: new Map() };
   let ticks = 0;
   const deps: DaySignalsLoopDependencies = {
     now: () => new Date(state.nowIso),
@@ -122,6 +123,17 @@ function createHarness(impliedVolatilityShift = 0): Harness {
     },
     notifyUpgrade: async (upgrade) => {
       calls.notified.push(`${upgrade.candidate.strike}${upgrade.candidate.strategyKey === "covered_call" ? "C" : "P"}:${upgrade.previousGrade}->${upgrade.candidate.grade}`);
+    },
+    loadAssignmentRiskAlertStates: async (legIds) => new Map(legIds.flatMap((legId) => (state.assignmentRiskStates.has(legId) ? [[legId, { ...state.assignmentRiskStates.get(legId)! }] as const] : []))),
+    recordAssignmentRiskAlert: async (legId, alertTradingDateIso) => {
+      state.assignmentRiskStates.set(legId, { notifiedAt: state.nowIso, lastAlertTradingDateIso: alertTradingDateIso });
+    },
+    rearmAssignmentRiskAlert: async (legId) => {
+      calls.assignmentRearms.push(legId);
+      state.assignmentRiskStates.set(legId, { ...state.assignmentRiskStates.get(legId)!, notifiedAt: null });
+    },
+    notifyAssignmentRisk: async (alert) => {
+      calls.assignmentAlerts.push(`${alert.leg.legId}:${alert.leg.strike}${alert.leg.right}`);
     },
     emitUpdated: (tickerId) => {
       calls.emitted.push(tickerId);
@@ -325,6 +337,111 @@ describe("DaySignalsLoop", () => {
     expect(cycles).toBe(2);
     expect(sleeps).toContain(5_000);
     expect(harness.loop.getStatus().lastError).toBe("IBKR live connection dropped mid-cycle");
+  });
+
+  describe("assignment-risk alerts", () => {
+    // One held short put (leg-1) whose strike is swapped per cycle to move its surface delta: the 105 put is in
+    // the money (|delta| >= 0.50), the 100 put sits between the re-arm and alert thresholds, the 90 put is well below.
+    const heldPut = (strike: number) => ({ legId: "leg-1", positionId: "pos-1", strategyKey: "cash_secured_put" as const, expiry, strike, right: "P" as const, quantity: 1, entryPrice: 2, entryAtIso: "2026-09-10T14:00:00Z" });
+    function inputsWithHeldPut(strike: number, dayIso: string): TickerSignalsInputs {
+      const base = inputsFor([]);
+      return { ...base, header: { ...base.header!, tradingDateIso: dayIso }, todayEasternIso: dayIso, quotes: [...base.quotes.filter((quote) => !(quote.strike === strike && quote.right === "P")), quoteAt(strike, "P")], openShortLegs: [heldPut(strike)] };
+    }
+    const heldDelta = (strike: number) => scoreTicker(inputsWithHeldPut(strike, tradingDateIso), { freeCash: 1_000_000 }, settings, { spotPrice: 100, priceSource: "live" }).heldLegs[0]!.delta!;
+
+    /** Runs one loop cycle per step; returns the assignment alerts sent in each cycle. */
+    async function runSteps(harness: Harness, steps: { strike: number; nowIso: string }[]): Promise<string[][]> {
+      const alertsPerCycle: string[][] = [];
+      let cycles = 0;
+      let currentStep = steps[0]!;
+      harness.state.nowIso = currentStep.nowIso;
+      harness.deps.loadTickerSignalsInputs = async () => inputsWithHeldPut(currentStep.strike, currentStep.nowIso.slice(0, 10));
+      const originalWindow = harness.deps.runQuoteWindow;
+      harness.deps.runQuoteWindow = async (contracts, options) => {
+        if (cycles > 0) alertsPerCycle.push(harness.calls.assignmentAlerts.splice(0));
+        currentStep = steps[cycles]!;
+        cycles += 1;
+        const result = await originalWindow(contracts, options);
+        if (cycles === steps.length) harness.loop.stop();
+        else harness.state.nowIso = steps[cycles]!.nowIso; // the next tick reads its trading date before its window runs
+        return result;
+      };
+      await harness.loop.start();
+      alertsPerCycle.push(harness.calls.assignmentAlerts.splice(0));
+      return alertsPerCycle;
+    }
+
+    const day1 = "2026-09-24T15:00:00Z";
+    const day1Later = "2026-09-24T16:00:00Z";
+    const day2 = "2026-09-25T15:00:00Z";
+
+    it("uses strikes on the intended side of each threshold", () => {
+      expect(Math.abs(heldDelta(105))).toBeGreaterThanOrEqual(assignmentRiskAlertAbsoluteDelta);
+      expect(Math.abs(heldDelta(100))).toBeGreaterThanOrEqual(assignmentRiskRearmAbsoluteDelta);
+      expect(Math.abs(heldDelta(100))).toBeLessThan(assignmentRiskAlertAbsoluteDelta);
+      expect(Math.abs(heldDelta(90))).toBeLessThan(assignmentRiskRearmAbsoluteDelta);
+    });
+
+    it("alerts once when |delta| crosses 0.50, and not again while it stays at or above 0.45", async () => {
+      const harness = createHarness();
+      harness.state.assignmentRiskStates.set("leg-1", { notifiedAt: null, lastAlertTradingDateIso: null });
+      const alerts = await runSteps(harness, [
+        { strike: 100, nowIso: day1 },
+        { strike: 105, nowIso: day1 },
+        { strike: 105, nowIso: day1 },
+        { strike: 100, nowIso: day1 },
+        { strike: 105, nowIso: day2 },
+      ]);
+      expect(alerts).toEqual([[], ["leg-1:105P"], [], [], []]);
+      expect(harness.state.assignmentRiskStates.get("leg-1")).toMatchObject({ lastAlertTradingDateIso: "2026-09-24" });
+      expect(harness.state.assignmentRiskStates.get("leg-1")!.notifiedAt).not.toBeNull();
+      expect(harness.calls.assignmentRearms).toEqual([]);
+    });
+
+    it("re-arms once |delta| falls below 0.45, then alerts on the next crossing (on a later trading day)", async () => {
+      const harness = createHarness();
+      harness.state.assignmentRiskStates.set("leg-1", { notifiedAt: null, lastAlertTradingDateIso: null });
+      const alerts = await runSteps(harness, [
+        { strike: 105, nowIso: day1 },
+        { strike: 90, nowIso: day1Later },
+        { strike: 105, nowIso: day2 },
+      ]);
+      expect(alerts).toEqual([["leg-1:105P"], [], ["leg-1:105P"]]);
+      expect(harness.calls.assignmentRearms).toEqual(["leg-1"]);
+      expect(harness.state.assignmentRiskStates.get("leg-1")).toMatchObject({ lastAlertTradingDateIso: "2026-09-25" });
+    });
+
+    it("sends at most one alert per leg per Eastern trading day, even after re-arming", async () => {
+      const harness = createHarness();
+      harness.state.assignmentRiskStates.set("leg-1", { notifiedAt: null, lastAlertTradingDateIso: null });
+      const alerts = await runSteps(harness, [
+        { strike: 105, nowIso: day1 },
+        { strike: 90, nowIso: day1 },
+        { strike: 105, nowIso: day1Later },
+        { strike: 105, nowIso: day2 },
+      ]);
+      expect(alerts).toEqual([["leg-1:105P"], [], [], ["leg-1:105P"]]);
+    });
+
+    it("skips a held leg with no delta (unscored) and one with no position_legs row", async () => {
+      const unscored = createHarness();
+      unscored.state.assignmentRiskStates.set("leg-1", { notifiedAt: null, lastAlertTradingDateIso: null });
+      // No slice for the held leg's expiry: it scores as unscored (delta null).
+      const originalInputs = inputsWithHeldPut(105, tradingDateIso);
+      unscored.deps.loadTickerSignalsInputs = async () => ({ ...originalInputs, openShortLegs: [{ ...heldPut(105), expiry: "2026-12-18" }] });
+      const window = unscored.deps.runQuoteWindow;
+      unscored.deps.runQuoteWindow = async (contracts, options) => {
+        const result = await window(contracts, options);
+        unscored.loop.stop();
+        return result;
+      };
+      await unscored.loop.start();
+      expect(unscored.calls.assignmentAlerts).toEqual([]);
+
+      const noRow = createHarness();
+      const alerts = await runSteps(noRow, [{ strike: 105, nowIso: day1 }]);
+      expect(alerts).toEqual([[]]);
+    });
   });
 
   it("uses the agreed holder name for its reservation", () => {

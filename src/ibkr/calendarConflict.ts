@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import type { AlertStrategyKey } from "./generateTradeAlertCandidates.js";
+import type { SignalStrategyKey } from "../lib/signalCandidates.js";
 
 export interface CalendarConflict {
   eventType: "earnings" | "ex_dividend";
@@ -44,7 +44,7 @@ export async function fetchCalendarConflictContext(tickerId: string): Promise<Ca
  */
 export function findCalendarConflict(
   context: CalendarConflictContext,
-  strategyKey: AlertStrategyKey,
+  strategyKey: SignalStrategyKey,
   expiryIso: string,
 ): CalendarConflict | null {
   for (const event of context.events) {

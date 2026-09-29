@@ -85,7 +85,7 @@ export function expirySpansEventDate(snapshotDateIso: string, expiryIso: string,
   return eventDatesIso.some((eventDate) => eventDate > snapshotDateIso && eventDate <= expiryIso);
 }
 
-/** Earnings-specific name for expirySpansEventDate (hard exclusion in Signals and Trade Alerts). */
+/** Earnings-specific name for expirySpansEventDate (hard exclusion in Signals). */
 export function expirySpansEarnings(snapshotDateIso: string, expiryIso: string, earningsDatesIso: string[]): boolean {
   return expirySpansEventDate(snapshotDateIso, expiryIso, earningsDatesIso);
 }

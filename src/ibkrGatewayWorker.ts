@@ -28,7 +28,6 @@ import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { notifyTelegram } from "./lib/notifyTelegram.js";
 import { clearDownState, notifyDownThrottled } from "./lib/throttledAlert.js";
 import { formatDurationHuman } from "./lib/formatDurationHuman.js";
-import { revertSourceAlertToPending } from "./lib/revertSourceAlertToPending.js";
 import { publishNotification, publishPulse } from "./lib/notificationChannel.js";
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
@@ -519,11 +518,10 @@ function setupOrderTrackingListeners(): void {
         updated_at: db.fn.now(),
         ...(permId ? { ibkr_perm_id: permId } : {}),
       })
-      .returning(["id", "source_alert_id"])
+      .returning(["id"])
       .then(async (rows) => {
         if (!rows[0]) return;
         await publishNotification({ type: "order_status", orderId: rows[0].id });
-        if (requestStatus === "cancelled") await revertSourceAlertToPending(rows[0].source_alert_id);
       })
       .catch((error) => console.error(`Failed to update order_requests for order ${orderId}: ${error}`));
   });
@@ -563,12 +561,11 @@ function setupOrderTrackingListeners(): void {
     db("order_requests")
       .where({ ibkr_order_id: reqId, status: "submitted" })
       .update({ status: "error", error_message: `IBKR error ${code}: ${error.message}`, updated_at: db.fn.now() })
-      .returning(["id", "source_alert_id"])
+      .returning(["id"])
       .then(async (rows) => {
         if (!rows[0]) return;
         console.error(`Order ${reqId} errored: ${code} ${error.message}`);
         await publishNotification({ type: "order_status", orderId: rows[0].id });
-        await revertSourceAlertToPending(rows[0].source_alert_id);
       })
       .catch((dbError) => console.error(`Failed to record order error for ${reqId}: ${dbError}`));
   });
@@ -848,10 +845,10 @@ async function reconcileStaleOrderRequests(): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
   if (!ib) return;
 
-  const staleCandidates: { id: string; ibkr_order_id: number; ibkr_perm_id: number | null; source_alert_id: string | null; payload: OrderRequestPayload }[] = await db("order_requests")
+  const staleCandidates: { id: string; ibkr_order_id: number; ibkr_perm_id: number | null; payload: OrderRequestPayload }[] = await db("order_requests")
     .whereIn("status", ["submitted", "partially_filled", "cancel_requested"])
     .whereNotNull("ibkr_order_id")
-    .select("id", "ibkr_order_id", "ibkr_perm_id", "source_alert_id", "payload");
+    .select("id", "ibkr_order_id", "ibkr_perm_id", "payload");
   if (staleCandidates.length === 0) return;
 
   const [openOrders, completedOrders] = await Promise.all([fetchIbkrOpenOrders(ib), fetchIbkrCompletedOrders(ib)]);
@@ -867,7 +864,6 @@ async function reconcileStaleOrderRequests(): Promise<void> {
       await db("order_requests").where({ id: row.id }).update({ status: resolvedStatus, updated_at: db.fn.now() });
       console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${resolvedStatus}" from IBKR's completed orders (permId ${row.ibkr_perm_id}).`);
       await publishNotification({ type: "order_status", orderId: row.id });
-      if (resolvedStatus === "cancelled") await revertSourceAlertToPending(row.source_alert_id);
       continue;
     }
 
@@ -890,7 +886,6 @@ async function reconcileStaleOrderRequests(): Promise<void> {
       });
     console.warn(`reconcileStaleOrderRequests: flagged orphaned order_requests row ${row.id} (was ibkr_order_id ${row.ibkr_order_id}).`);
     await publishNotification({ type: "order_status", orderId: row.id });
-    await revertSourceAlertToPending(row.source_alert_id);
   }
 }
 

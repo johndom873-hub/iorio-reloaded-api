@@ -1,14 +1,6 @@
 // Scheduled job: nightly option-chain TICKS capture (IORIO Signal Engine,
 // Phase 0), chained with the SVI surface fit (2026-09-22). The fit depends on
-// this job's output (it fits from the snapshots just captured); trade-alert
-// generation was chained here too until 2026-09-24, when it was split back
-// out to its own standalone Scheduler entry (run-trade-alert-generation-job.js)
-// — it's the old trade-alerts system, unrelated to Signals (which reads
-// option_chain_snapshots/option_surface_fits directly, computed fresh on
-// every Signals-screen request, no trade-alert generation involved at all),
-// and chaining it here was a duplicate: it was already on its own schedule,
-// so it ran twice a day, the earlier of the two firing before this job's
-// data even existed that day.
+// this job's output (it fits from the snapshots just captured).
 //
 // Chain STRUCTURE (expiries + strike grids) is no longer refreshed here —
 // split off 2026-09-23 into run-option-chain-structure-job.ts, which runs
@@ -16,8 +8,8 @@
 // job reads that structure from the DB and only needs the market open for
 // the ticks themselves, hence the later window below.
 //
-// Heroku Scheduler is fixed-UTC, so two entries are scheduled (14:00 and 15:00
-// UTC) and the clock guard lets only the one that lands in 10:00-10:30 ET run;
+// Heroku Scheduler is fixed-UTC, so two entries are scheduled (13:30 and 14:30
+// UTC) and the clock guard lets only the one that lands in 9:30-9:30 ET run;
 // pass --force to bypass the guard for a manual run.
 //
 // Usage (dev):  npm run job:option-chain-capture [-- --force]
@@ -48,7 +40,7 @@ const optionChainCaptureStaleRunningThresholdMs = 60 * 60 * 1000;
 async function main(): Promise<void> {
   const forced = process.argv.includes("--force");
   if (!forced && !isWithinChainCaptureClockWindow(new Date())) {
-    console.log("Skipping option_chain_capture — outside the 10:00-10:30 ET window (the other DST-paired Scheduler entry handles today).");
+    console.log("Skipping option_chain_capture — outside the 9:30-9:30 ET window (the other DST-paired Scheduler entry handles today).");
     return;
   }
   if (await isMarketClosedToday()) {

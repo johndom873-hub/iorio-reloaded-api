@@ -9,9 +9,8 @@ import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 // small one-shot lookups (single pricing snapshots, the health check's SPY
 // probe) that aren't worth coordinating here — see PROGRESS.md.
 //
-// Priority reservations (approved 2026-09-24): the 10:00 ET chain capture
-// and the scheduled trade-alert scan (runTradeAlertGeneration.ts) reserve
-// their lines with `priority: true`. A priority reservation only has
+// Priority reservations (approved 2026-09-24): the 9:30 ET chain capture
+// and the Day Signals loop reserve their lines with `priority: true`. A priority reservation only has
 // to fit alongside other priority reservations, and its lines are subtracted
 // from what every non-priority holder may take — so live screens can never
 // starve the capture; they get whatever is left ("Fit" variant) and the live
@@ -114,13 +113,13 @@ export async function loadMarketDataLineRestriction(options: { excludeHolders?: 
   return { priorityLines: rows.reduce((sum, row) => sum + row.lines, 0), holders: rows.map((row) => row.holder) };
 }
 
-/** One sentence for a failed reservation, naming the scheduled scan (chain capture or trade-alert scan) when it's the reason. */
+/** One sentence for a failed reservation, naming the scheduled scan (chain capture) when it's the reason. */
 export function describeMarketDataLineShortage(result: LineReservationResult, what: string, linesNeeded: number): string {
   if (result.disabled) {
     return `IBKR market-data lines are disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false) — ${what} needs ${linesNeeded} lines.`;
   }
   if (result.priorityLinesHeld > 0) {
-    return `IBKR market data is restricted while a scheduled scan runs (the 10:00 ET chain capture or the trade-alert scan; ${result.priorityLinesHeld} lines reserved for it) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again after.`;
+    return `IBKR market data is restricted while a scheduled scan runs (the 9:30 ET chain capture; ${result.priorityLinesHeld} lines reserved for it) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again after.`;
   }
   return `IBKR market data is busy (another live view) — ${what} needs ${linesNeeded} lines, only ${result.availableLines} available. Try again shortly.`;
 }
@@ -136,7 +135,6 @@ const lineHolderLabels: Record<string, string> = {
   marketDataPool: "Screens",
   optionChainCapture: "Chain capture",
   daySignalsLoop: "Day Signals",
-  tradeAlertScan: "Trade-alert scan",
   optionQuote: "Option quotes",
   snapshot: "Snapshots",
 };

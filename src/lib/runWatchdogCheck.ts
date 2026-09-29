@@ -8,7 +8,6 @@ import { runJob } from "./runJob.js";
 const DAILY_JOB_NAMES = [
   "daily_market_data_capture",
   "daily_pnl_snapshot",
-  "trade_alert_generation",
   "daily_calendar_capture",
   "daily_screener_scan",
   // Runs 11:00 PM UTC every day (weekends too), so it has always run by this check.

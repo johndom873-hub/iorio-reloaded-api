@@ -5,7 +5,7 @@ import { loadSignalSettings, type SignalSettings } from "./signalSettingsStore.j
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 import { replaceDaySignalPool, type DaySignalExpirySeed, type DaySignalTickerSeed } from "./daySignalsStore.js";
 
-// Seeds the day's pool from the 10:00 ET snapshot scoring (approved
+// Seeds the day's pool from the 9:30 ET snapshot scoring (approved
 // 2026-09-24 over a live first pass, which would take 17-45 min on 10 lines
 // and duplicate the capture that just finished): per ticker with TODAY's
 // snapshot, positive-net-Edge candidates ranked by Edge $, the distinct

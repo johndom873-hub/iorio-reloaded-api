@@ -298,17 +298,15 @@ shortlistRouter.patch("/:id", async (request, response) => {
 });
 
 shortlistRouter.delete("/:id", async (request, response) => {
-  // Same transaction (2026-09-24): a removed ticker's pending new-trade
-  // alerts stayed approvable for up to a day with no scan refreshing them.
   // Refused while the ticker has an open position; the UI greys Remove out
-  // for the same reason, this covers Genosuke and stale tabs.
+  // for the same reason, this covers Genosuke and stale tabs. Checked in the
+  // same transaction as the removal so a position opening in between can't slip past.
   const outcome = await db.transaction(async (trx): Promise<"removed" | "not_found" | { openPositionCount: number }> => {
     const entry = await trx("shortlist_entries").where({ id: request.params.id }).whereNull("removed_at").first(["ticker_id"]);
     if (!entry) return "not_found";
     const openPositionCount = await countOpenPositionsForTicker(entry.ticker_id, trx);
     if (openPositionCount > 0) return { openPositionCount };
     await trx("shortlist_entries").where({ id: request.params.id }).update({ removed_at: trx.fn.now() });
-    await trx("trade_alerts").where({ ticker_id: entry.ticker_id, alert_type: "new_trade", status: "pending" }).update({ status: "expired" });
     return "removed";
   });
 

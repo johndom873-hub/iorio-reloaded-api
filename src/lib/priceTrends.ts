@@ -1,5 +1,4 @@
-import { buildTrendLabel } from "../ibkr/generateTradeAlertCandidates.js";
-import { computeMacd, computeMovingAverages, type MacdSignal } from "./technicalIndicators.js";
+import { buildTrendLabel, computeMacd, computeMovingAverages, type MacdSignal } from "./technicalIndicators.js";
 
 export interface PriceTrend {
   macdTrend: MacdSignal | null;

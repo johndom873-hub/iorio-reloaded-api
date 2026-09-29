@@ -5,7 +5,7 @@ import { recordUserLastSeen } from "../lib/userLastSeen.js";
 import { streamExposureHandler } from "../routes/riskLimits.js";
 import { streamGreeksHandler, streamPnlHandler } from "../routes/positions.js";
 import { streamPricePerformancePricesHandler } from "../routes/pricePerformance.js";
-import { streamTradeAlertPricesHandler } from "../routes/tradeAlerts.js";
+import { streamStockPricesHandler } from "../routes/tickerDetail.js";
 import { runStreamHandlerAsProducer, type StreamHandler } from "./legacyStreamHandlerAdapter.js";
 import { createSignalsProducers } from "./signalsProducers.js";
 import { StreamRequestError, type StreamKind } from "./streamProtocol.js";
@@ -108,7 +108,7 @@ export const streamProducers: StreamProducerRegistry = {
   })),
   exposure: handlerProducer(streamExposureHandler, requireNoParameters),
   pricePerformancePrices: handlerProducer(streamPricePerformancePricesHandler, requireNoParameters),
-  tradeAlertPrices: handlerProducer(streamTradeAlertPricesHandler, (rawParameters) => ({
+  stockPrices: handlerProducer(streamStockPricesHandler, (rawParameters) => ({
     symbols: parseStringList(rawParameters, "symbols", symbolPattern, maxSymbolsPerSubscription).join(","),
   })),
   ...createSignalsProducers(),
