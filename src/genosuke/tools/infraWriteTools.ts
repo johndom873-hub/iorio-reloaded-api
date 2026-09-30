@@ -9,8 +9,12 @@
 // same reasoning as financial-write's departure from Jack (approved
 // 2026-08-21) — a rule change hits live production traffic immediately and
 // a mistaken expression could block real users, not just cost a bad
-// database record.
+// database record. Also resend_gateway_2fa, which restarts this
+// environment's IBKR Gateway so a fresh 2FA push reaches the phone.
+import { environment } from "../../config/env.js";
 import { addWafRule, removeWafRule, unblockIp } from "../../lib/cloudflareService.js";
+import { describeFreshLoginResult } from "../../ibkr/gatewayControlResult.js";
+import { startFreshGatewayLoginOnVps } from "../../ibkr/startFreshGatewayLoginOnVps.js";
 import type { GenosukeTool } from "./types.js";
 
 export const infraWriteTools: GenosukeTool[] = [
@@ -48,5 +52,18 @@ export const infraWriteTools: GenosukeTool[] = [
     parameters: { type: "object", properties: { ip: { type: "string" } }, required: ["ip"] },
     describeForConfirmation: (input) => `Unblock IP ${input.ip} on ioriore.com's Cloudflare WAF`,
     execute: (input) => unblockIp(String(input.ip)),
+  },
+  {
+    name: "resend_gateway_2fa",
+    description:
+      "Start a fresh login on this environment's IBKR Gateway so IBKR sends a new two-factor push to the owner's phone (about 3 minutes to approve). Use it only when the Gateway is logged out or a 2FA approval was missed. It restarts the Gateway, so the VPS script refuses on its own if the Gateway is already logged in and answering, and if it ran less than 2 minutes ago. Tell the owner to watch their phone after it succeeds.",
+    tier: "infra-write",
+    parameters: { type: "object", properties: {}, required: [] },
+    describeForConfirmation: () => `Restart the ${environment.ibkrTradingMode.toUpperCase()} IBKR Gateway to send you a fresh 2FA push (you will have about 3 minutes to approve it)`,
+    execute: async () => {
+      const { resultKind, output } = await startFreshGatewayLoginOnVps();
+      if (!resultKind) throw new Error(`The Gateway login script returned no result: ${output.trim().slice(-300)}`);
+      return { result: resultKind, message: describeFreshLoginResult(resultKind) };
+    },
   },
 ];
