@@ -1,7 +1,7 @@
 import { selectContractsToCapture, type StrikeWindow } from "./optionChainCaptureWindow.js";
 
 // Which contracts the Day Signals loop quotes for each ticker, tracked to the LIVE spot
-// (approved 2026-09-29, PROGRESS.md "DAY SIGNALS"). The 9:30 capture only stores the contracts that
+// (approved 2026-09-29, PROGRESS.md "DAY SIGNALS"). The 10:00 capture only stores the contracts that
 // were out-of-the-money at the open; a stock that moves afterwards leaves a hole where the puts (or
 // calls) it now wants to sell should be. Each cycle the loop re-applies the capture's own rule at the
 // current spot, so the set stays the same size while it follows the price.
@@ -80,7 +80,7 @@ export function selectDaySignalContractSet(input: DayContractSetInput): DayContr
 
 // ---- Re-ranking the pooled expiries after a large move ----
 // Formula approved 2026-09-29: a ticker re-ranks when its spot has moved, since the last rank (initially
-// the 9:30 capture spot), by at least max(1%, 0.5 x one-day expected move), where the one-day expected
+// the 10:00 capture spot), by at least max(1%, 0.5 x one-day expected move), where the one-day expected
 // move is ATM IV / sqrt(252). At most three re-ranks per ticker per day.
 
 export const daySignalsRerankMinimumMoveFraction = 0.01;
@@ -94,7 +94,7 @@ export function daySignalsRerankTriggerFraction(atmImpliedVolatility: number): n
 
 export interface RerankDecisionInput {
   spotPrice: number;
-  /** Spot at the last rank (the 9:30 capture spot until the first re-rank). */
+  /** Spot at the last rank (the 10:00 capture spot until the first re-rank). */
   referenceSpotPrice: number;
   atmImpliedVolatility: number;
   reranksToday: number;

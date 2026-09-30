@@ -361,13 +361,39 @@ const defaultCaptureDependencies: OptionChainCaptureDependencies = {
   waitForPoolShedding: () => new Promise((resolve) => setTimeout(resolve, poolSheddingGraceMs)),
 };
 
+export interface OptionChainCaptureOptions {
+  /** Capture only these tickers (the retry rounds); default is the whole universe. */
+  symbols?: string[];
+  /** The caller already holds the priority line reservation (and let the pool shed), so this run neither reserves nor releases it. */
+  linesAlreadyHeld?: boolean;
+}
+
+/**
+ * Reserves the capture's priority lines and keeps the reservation alive until the returned function
+ * releases it. Throws when the lines are not available. The retry rounds hold ONE reservation across rounds.
+ */
+export async function holdCaptureLineReservation(lineReservation: OptionChainCaptureDependencies["lineReservation"] = defaultCaptureDependencies.lineReservation): Promise<() => Promise<void>> {
+  const reservation = await lineReservation.reserve(captureLineReservationHolder, optionChainCaptureBatchSize, captureLineReservationTtlSeconds);
+  if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, "the chain capture", optionChainCaptureBatchSize));
+  const renewTimer = setInterval(() => {
+    lineReservation.renew(captureLineReservationHolder, captureLineReservationTtlSeconds).catch((error) => console.warn(`could not renew the capture's line reservation: ${error instanceof Error ? error.message : error}`));
+  }, captureLineReservationRenewIntervalMs);
+  renewTimer.unref?.();
+  return async () => {
+    clearInterval(renewTimer);
+    await lineReservation.release(captureLineReservationHolder).catch((error) => console.warn(`could not release the capture's line reservation: ${error instanceof Error ? error.message : error}`));
+  };
+}
+
 export async function runOptionChainCapture(
   onEvent: (event: OptionChainCaptureEvent) => void = () => {},
   dependencies: OptionChainCaptureDependencies = defaultCaptureDependencies,
+  options: OptionChainCaptureOptions = {},
 ): Promise<OptionChainCaptureResult> {
   const jobStartedAt = dependencies.now().getTime();
   const todayIso = easternDateIso(dependencies.now());
-  const universe = await dependencies.loadUniverse();
+  const fullUniverse = await dependencies.loadUniverse();
+  const universe = options.symbols === undefined ? fullUniverse : fullUniverse.filter((ticker) => options.symbols!.includes(ticker.symbol));
   const riskFreeRate = await dependencies.getRiskFreeRate();
   const riskFreeRatePercent = riskFreeRate === null ? null : riskFreeRate * 100;
   const result: OptionChainCaptureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: riskFreeRate === null, fallbackSpotSymbols: [], qualityProblems: [] };
@@ -376,12 +402,7 @@ export async function runOptionChainCapture(
   // Latest saved coverage and data type per ticker (a re-capture overwrites the first pass).
   const snapshotQualityBySymbol = new Map<string, { coverage: SnapshotCoverage; marketDataType: OptionChainMarketDataType }>();
 
-  const reservation = await dependencies.lineReservation.reserve(captureLineReservationHolder, optionChainCaptureBatchSize, captureLineReservationTtlSeconds);
-  if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, "the chain capture", optionChainCaptureBatchSize));
-  const renewTimer = setInterval(() => {
-    dependencies.lineReservation.renew(captureLineReservationHolder, captureLineReservationTtlSeconds).catch((error) => console.warn(`could not renew the capture's line reservation: ${error instanceof Error ? error.message : error}`));
-  }, captureLineReservationRenewIntervalMs);
-  renewTimer.unref?.();
+  const releaseLines = options.linesAlreadyHeld ? async () => {} : await holdCaptureLineReservation(dependencies.lineReservation);
 
   let connection: { ib: IbkrApi; disconnect: () => void } | null = null;
   let window: CaptureQuoteWindow | null = null;
@@ -394,7 +415,7 @@ export async function runOptionChainCapture(
     window?.close();
   };
   try {
-    await dependencies.waitForPoolShedding();
+    if (!options.linesAlreadyHeld) await dependencies.waitForPoolShedding();
     connection = await dependencies.connect();
     const { ib } = connection;
     ib.once(EventName.disconnected, onDisconnected);
@@ -481,8 +502,7 @@ export async function runOptionChainCapture(
     connection?.ib.removeListener(EventName.disconnected, onDisconnected);
     window?.close();
     connection?.disconnect();
-    clearInterval(renewTimer);
-    await dependencies.lineReservation.release(captureLineReservationHolder).catch((error) => console.warn(`could not release the capture's line reservation: ${error instanceof Error ? error.message : error}`));
+    await releaseLines();
   }
   for (const [symbol, status] of finalStatusBySymbol) {
     if (status === "complete") result.tickersComplete++;

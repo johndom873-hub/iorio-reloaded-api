@@ -13,7 +13,7 @@
 //
 // leaving ~2 for psql / pg:pull. Two jobs overlap routinely: every daily
 // Scheduler entry sits on a :00/:30 slot that the 10-minute IBKR health
-// check also fires on, and the 9:30 ET chain capture runs ~20 minutes.
+// check also fires on, and the 10:00 ET chain capture runs ~20 minutes.
 // A job script's queries are sequential, so 2 connections lose nothing
 // (db/connection.ts picks jobKnexPoolMax for anything started from
 // scripts/). Waiting requests queue on the pool rather than failing. Raise

@@ -371,7 +371,7 @@ describe("DaySignalsLoop", () => {
       const discoveryCount = () => harness.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock"))).length;
       expect(discoveryCount()).toBe(1);
 
-      // A fresh loop instance on the same stored state: the 9:30 spot (100) is no longer the reference, so 110 is not a new move.
+      // A fresh loop instance on the same stored state: the 10:00 spot (100) is no longer the reference, so 110 is not a new move.
       const restarted = new DaySignalsLoop(harness.deps);
       let cycles = 0;
       const originalWindow = harness.deps.runQuoteWindow;
@@ -396,7 +396,7 @@ describe("DaySignalsLoop", () => {
       expect(discoveryCount()).toBe(1);
     });
 
-    it("re-ranks a ticker the 9:30 seed left without a pool when it jumps, creating its pool on the snapshot it was scored from", async () => {
+    it("re-ranks a ticker the 10:00 seed left without a pool when it jumps, creating its pool on the snapshot it was scored from", async () => {
       const harness = createHarness(0.05);
       harness.state.spot = 110;
       harness.state.unpooledTickers = [{ tickerId: "t2", symbol: "BBB", snapshotId: "s2" }];

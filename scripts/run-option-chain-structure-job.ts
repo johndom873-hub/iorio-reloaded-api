@@ -2,14 +2,14 @@
 // expiry's real strike grid) — split off run-option-chain-capture-job.ts
 // 2026-09-23, since structure is plain IBKR contract-definition data with no
 // dependency on the market being open, unlike the ticks that job still
-// captures at 9:30 ET. Running this first means the 9:30 ET job reads
+// captures at 10:00 ET. Running this first means the 10:00 ET job reads
 // today's structure from the DB instead of re-fetching it from IBKR.
 //
 // One fixed-UTC Scheduler entry (12:00 UTC), unlike the ticks job's
 // DST-paired pair — this job isn't pinned to a specific ET time the way
 // "30 minutes after the open" is, so it doesn't need the two-slot trick:
 // 12:00 UTC is always well clear of IBKR Gateway's overnight restart and
-// comfortably ahead of the 9:30 ET ticks job (7:00 ET in winter, 8:00 ET in
+// comfortably ahead of the 10:00 ET ticks job (7:00 ET in winter, 8:00 ET in
 // summer — either way, hours of slack).
 //
 // Usage (dev):  npm run job:option-chain-structure

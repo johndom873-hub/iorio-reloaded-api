@@ -9,7 +9,7 @@ import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 // small one-shot lookups (single pricing snapshots, the health check's SPY
 // probe) that aren't worth coordinating here — see PROGRESS.md.
 //
-// Priority reservations (approved 2026-09-24): the 9:30 ET chain capture
+// Priority reservations (approved 2026-09-24): the 10:00 ET chain capture
 // and the Day Signals loop reserve their lines with `priority: true`. A priority reservation only has
 // to fit alongside other priority reservations, and its lines are subtracted
 // from what every non-priority holder may take — so live screens can never
@@ -119,7 +119,7 @@ export function describeMarketDataLineShortage(result: LineReservationResult, wh
     return `IBKR market-data lines are disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false) — ${what} needs ${linesNeeded} lines.`;
   }
   if (result.priorityLinesHeld > 0) {
-    return `IBKR market data is restricted while a scheduled scan runs (the 9:30 ET chain capture; ${result.priorityLinesHeld} lines reserved for it) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again after.`;
+    return `IBKR market data is restricted while a scheduled scan runs (the 10:00 ET chain capture; ${result.priorityLinesHeld} lines reserved for it) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again after.`;
   }
   return `IBKR market data is busy (another live view) — ${what} needs ${linesNeeded} lines, only ${result.availableLines} available. Try again shortly.`;
 }

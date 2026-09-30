@@ -96,7 +96,7 @@ describe("executeBackfillRun", () => {
     expect(finished.steps.find((step) => step.key === "history")!.message).toBe("1253 daily bars (2021-09-22 to 2026-09-18), 1250 implied-volatility points.");
     expect(finished.steps.find((step) => step.key === "calendar")!.message).toBe("2 earnings and 0 dividend events. 5 historical earnings dates.");
     expect(finished.steps.find((step) => step.key === "chain_warmup")!.message).toBe("Strike grids stored for 2 expiries (208 strikes) in 10s; 3 contracts selected for capture.");
-    expect(finished.steps.find((step) => step.key === "first_snapshot")!.message).toBe("Captured by tonight's job in the normal 9:30 ET window, same as every other ticker.");
+    expect(finished.steps.find((step) => step.key === "first_snapshot")!.message).toBe("Captured by tonight's job in the normal 10:00 ET window, same as every other ticker.");
     expect(connect).toHaveBeenCalledTimes(1);
     expect(disconnect).toHaveBeenCalledTimes(1);
   });

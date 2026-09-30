@@ -7,7 +7,7 @@ import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.
 import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsNoCandidatesReason, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
 
 // Pure re-scoring for the Signals live layer (stage 2, decisions with Marcelo 2026-09-22):
-// the fitted surface stays the 9:30 snapshot and follows the live spot by sticky
+// the fitted surface stays the 10:00 snapshot and follows the live spot by sticky
 // moneyness (every expiry's forward scales with spot); live bid/ask replace the
 // snapshot's only for the contracts the modal subscribes to (marked quoteSource
 // "live"); frames go out at most once a second; account context refreshes every
@@ -78,7 +78,7 @@ export function mergeLiveQuotes(snapshotQuotes: SignalQuote[], liveQuotes: LiveO
 }
 
 /**
- * A wanted contract is not always in the 9:30 snapshot (a held leg outside the strike window, or a contract that
+ * A wanted contract is not always in the 10:00 snapshot (a held leg outside the strike window, or a contract that
  * only became out-of-the-money after the price moved), and mergeLiveQuotes only replaces snapshot rows. This appends
  * a fresh quote for any wanted contract the merged list lacks, live first, then day.
  */
@@ -188,7 +188,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     spotPrice,
     priceSource: live?.priceSource ?? "snapshot",
     previousClose: inputs.previousClose,
-    // Only a live/frozen price is "today's": the 9:30 snapshot spot vs that same day's close is not a day change.
+    // Only a live/frozen price is "today's": the 10:00 snapshot spot vs that same day's close is not a day change.
     dayChangePercent: live && live.priceSource !== "snapshot" ? computeDayChangePercent(spotPrice, inputs.previousClose) : null,
     candidates: [],
     best: null,
@@ -229,11 +229,11 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
 
   const todaySlices = rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso);
   const slices = live ? scaleSlicesToLiveSpot(todaySlices, header.underlyingPrice, live.spotPrice) : todaySlices;
-  // Precedence per contract: pooled live (modal / screen best line) > day (refresh loop) > 9:30 snapshot.
+  // Precedence per contract: pooled live (modal / screen best line) > day (refresh loop) > 10:00 snapshot.
   const withDayQuotes = mergeLiveQuotes(inputs.quotes, inputs.dayQuotes, "day");
   const mergedQuotes = live?.liveQuotes ? mergeLiveQuotes(withDayQuotes, live.liveQuotes, "live") : withDayQuotes;
   const heldLegRefs: ContractRef[] = inputs.openShortLegs.map((leg) => ({ expiry: leg.expiry, strike: leg.strike, right: leg.right }));
-  // Contracts the loop or the modal quoted that the 9:30 snapshot never stored (the price moved past the capture window) are scored too.
+  // Contracts the loop or the modal quoted that the 10:00 snapshot never stored (the price moved past the capture window) are scored too.
   const quotes = appendMissingContractQuotes(mergedQuotes, [...heldLegRefs, ...inputs.dayQuotes, ...(live?.liveQuotes ?? [])], inputs.dayQuotes, live?.liveQuotes ?? []);
   const riskFreeRate = header.riskFreeRatePercent / 100;
   const ivShifts = computeExpiryIvShifts(slices, quotes, riskFreeRate);

@@ -104,7 +104,7 @@ export async function replaceDaySignalPool(tradingDateIso: string, seeds: DaySig
 }
 
 /**
- * A mid-day re-rank (daySignalsLoop.ts): sets ONE ticker's pooled expiries, creating its pool when the 9:30 seed left it out
+ * A mid-day re-rank (daySignalsLoop.ts): sets ONE ticker's pooled expiries, creating its pool when the 10:00 seed left it out
  * (a ticker that only became interesting after a move) or replacing it, always on the given snapshot. Deletes the ticker's
  * day quotes of expiries that are not pooled, so they can never be scored as fresh. False for an empty expiry list.
  */
@@ -136,7 +136,7 @@ export interface DayRerankState {
   reranks: number;
 }
 
-/** Today's re-rank bookkeeping per ticker; a ticker with no row has not re-ranked today (its reference is the 9:30 capture spot). */
+/** Today's re-rank bookkeeping per ticker; a ticker with no row has not re-ranked today (its reference is the 10:00 capture spot). */
 export async function loadDayRerankStates(tradingDateIso: string): Promise<Map<string, DayRerankState>> {
   const rows = await db("day_signal_rerank_state").whereRaw("trading_date::text = ?", [tradingDateIso]).select("ticker_id as tickerId", "reference_spot_price as referenceSpotPrice", "rerank_count as reranks");
   return new Map(rows.map((row) => [row.tickerId, { referenceSpotPrice: Number(row.referenceSpotPrice), reranks: Number(row.reranks) }]));

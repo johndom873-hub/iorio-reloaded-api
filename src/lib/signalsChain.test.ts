@@ -204,7 +204,7 @@ describe("assembleSignalsChain", () => {
     expect(row(80).put.state).toBe("not_captured");
   });
 
-  it("shows a contract the Day Signals loop quoted but the 9:30 capture never stored (the price moved) as a scored candidate", () => {
+  it("shows a contract the Day Signals loop quoted but the 10:00 capture never stored (the price moved) as a scored candidate", () => {
     const fresh = quoteAt(85, "P", near, years30);
     const dayQuote = { expiry: near, strike: 85, right: "P" as const, bid: fresh.bid, ask: fresh.ask, quotedAt: "2026-09-21T15:00:00Z" };
     const putAt85 = (tickerInputs: TickerSignalsInputs) => chainFor(tickerInputs, near).strikes.find((entry) => entry.strike === 85)!.put;

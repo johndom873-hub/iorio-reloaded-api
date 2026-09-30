@@ -47,7 +47,7 @@ export interface SignalSurfaceSlice {
   calendarViolations: number;
 }
 
-/** live = a pooled IBKR subscription (modal / screen best line), day = the Day Signals refresh loop, snapshot = the 9:30 capture. */
+/** live = a pooled IBKR subscription (modal / screen best line), day = the Day Signals refresh loop, snapshot = the 10:00 capture. */
 export type SignalQuoteSource = "live" | "day" | "snapshot";
 
 export interface SignalQuote {
@@ -56,7 +56,7 @@ export interface SignalQuote {
   right: "C" | "P";
   bid: number | null;
   ask: number | null;
-  /** Where bid/ask came from: the 9:30 capture (default), the Day Signals loop, or a live IBKR subscription. */
+  /** Where bid/ask came from: the 10:00 capture (default), the Day Signals loop, or a live IBKR subscription. */
   source?: SignalQuoteSource;
   /** When a day/live quote was received (ISO); absent for the snapshot. */
   quotedAt?: string;
@@ -161,7 +161,7 @@ export interface ExpiryIvShift {
 /**
  * Formula 3h (approved 2026-09-24): for each expiry, the median of (mid IV − surface IV) over its fresh
  * (day/live) two-sided OTM quotes with spread ≤ 50% of the mid; requires ivShiftMinimumQuotes, else 0.
- * Without it the 9:30 surface never learned that the market was paying more (or less) for volatility
+ * Without it the 10:00 surface never learned that the market was paying more (or less) for volatility
  * intraday — net Edge only moved through the friction term.
  */
 export function computeExpiryIvShifts(slices: SignalSurfaceSlice[], quotes: SignalQuote[], riskFreeRate: number): Map<string, ExpiryIvShift> {

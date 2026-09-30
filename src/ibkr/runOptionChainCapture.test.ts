@@ -230,6 +230,21 @@ describe("runOptionChainCapture", () => {
     expect(failing.lineReservation.release).toHaveBeenCalledTimes(1);
   });
 
+  it("captures only the requested symbols, and neither reserves lines nor waits for the pool when the caller already holds them (retry rounds)", async () => {
+    const { dependencies, lineReservation } = runDependencies({ loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")] });
+    const waitForPoolShedding = vi.fn(async () => {});
+    const fetchSpotPrices = vi.fn(async (symbols: string[]) => Object.fromEntries(symbols.map((symbol) => [symbol, 100])));
+    const events: OptionChainCaptureEvent[] = [];
+    const result = await runOptionChainCapture((event) => events.push(event), { ...dependencies, waitForPoolShedding, fetchSpotPrices }, { symbols: ["BBB", "CCC"], linesAlreadyHeld: true });
+    expect(result.tickersAttempted).toBe(2);
+    expect(events.filter((event) => event.type === "tickerStart").map((event) => (event as { symbol: string }).symbol)).toEqual(["BBB", "CCC"]);
+    // Fresh spots for just the retried tickers, so a retry is never priced off the first pass's stale spot.
+    expect(fetchSpotPrices).toHaveBeenCalledWith(["BBB", "CCC"], expect.any(Function));
+    expect(lineReservation.reserve).not.toHaveBeenCalled();
+    expect(lineReservation.release).not.toHaveBeenCalled();
+    expect(waitForPoolShedding).not.toHaveBeenCalled();
+  });
+
   it("refuses to run when the priority reservation is rejected", async () => {
     const { dependencies, lineReservation } = runDependencies();
     lineReservation.reserve.mockResolvedValue({ ok: false, availableLines: 10, priorityLinesHeld: 80 });

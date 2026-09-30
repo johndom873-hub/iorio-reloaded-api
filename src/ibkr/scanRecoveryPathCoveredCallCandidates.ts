@@ -38,7 +38,7 @@ const otmBandFraction = 0.4;
 const maxStrikeCandidatesPerExpiry = 50;
 
 // How far outside the delta band an archived delta may sit and the strike
-// still be quoted live — covers the intraday drift since the 9:30 ET capture.
+// still be quoted live — covers the intraday drift since the 10:00 ET capture.
 export const archivedDeltaMargin = 0.1;
 
 function pickExpiriesInWindow(expirations: string[], dteMin: number, dteMax: number): string[] {
@@ -64,7 +64,7 @@ function toIsoDate(expiryYyyymmdd: string): string {
   return `${expiryYyyymmdd.slice(0, 4)}-${expiryYyyymmdd.slice(4, 6)}-${expiryYyyymmdd.slice(6, 8)}`;
 }
 
-/** `${expiryYyyymmdd}|${strike}` → the call delta the 9:30 ET chain capture archived today. Empty when there is no capture for today. */
+/** `${expiryYyyymmdd}|${strike}` → the call delta the 10:00 ET chain capture archived today. Empty when there is no capture for today. */
 export type ArchivedCallDeltas = Map<string, number>;
 
 export function archivedCallDeltaKey(expiryYyyymmdd: string, strike: number): string {

@@ -8,9 +8,13 @@
 // job reads that structure from the DB and only needs the market open for
 // the ticks themselves, hence the later window below.
 //
-// Heroku Scheduler is fixed-UTC, so two entries are scheduled (13:30 and 14:30
-// UTC) and the clock guard lets only the one that lands in 9:30-9:30 ET run;
+// Heroku Scheduler is fixed-UTC, so two entries are scheduled (14:00 and 15:00
+// UTC) and the clock guard lets only the one that lands in 10:00-10:30 ET run;
 // pass --force to bypass the guard for a manual run.
+//
+// Flow: capture -> fit -> retry rounds (tickers whose surface came out unusable are
+// re-captured and re-fitted, up to 3 attempts in all, see runOptionChainCaptureRetries.ts)
+// -> Day Signals seed.
 //
 // Usage (dev):  npm run job:option-chain-capture [-- --force]
 // Usage (prod): node dist/scripts/run-option-chain-capture-job.js
@@ -19,7 +23,8 @@ import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
-import { buildCaptureFailureMessage, runOptionChainCapture } from "../src/ibkr/runOptionChainCapture.js";
+import { buildCaptureFailureMessage, runOptionChainCapture, type OptionChainCaptureEvent } from "../src/ibkr/runOptionChainCapture.js";
+import { buildCaptureRetryFailureMessage, buildDefaultCaptureRetryDependencies, runCaptureRetryRounds } from "../src/ibkr/runOptionChainCaptureRetries.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { isWithinChainCaptureClockWindow } from "../src/lib/optionChainCaptureClock.js";
 import { easternDateIso } from "../src/lib/marketSessionStatus.js";
@@ -39,10 +44,18 @@ sharedReadConnection.setBorrowTimeoutMs(60_000);
 // shortlist — see RunJobOptions.staleRunningJobThresholdMs.
 const optionChainCaptureStaleRunningThresholdMs = 60 * 60 * 1000;
 
+function logCaptureEvent(event: OptionChainCaptureEvent): void {
+  if (event.type === "tickerStart") {
+    console.log(`${event.symbol}: capturing ${event.contractCount} contracts (window from ${event.referenceVolatilitySource}).`);
+  } else if (event.type === "tickerDone") console.log(`${event.symbol}: ${event.status} — ${event.coverage.contractsWithAnyTick}/${event.coverage.contractsRequested} with ticks.`);
+  else if (event.type === "tickerError") console.warn(`${event.symbol}: capture failed — ${event.message}`);
+  else console.log(`Re-capturing starved tickers: ${event.symbols.join(", ")}`);
+}
+
 async function main(): Promise<void> {
   const forced = process.argv.includes("--force");
   if (!forced && !isWithinChainCaptureClockWindow(new Date())) {
-    console.log("Skipping option_chain_capture — outside the 9:30-9:30 ET window (the other DST-paired Scheduler entry handles today).");
+    console.log("Skipping option_chain_capture — outside the 10:00-10:30 ET window (the other DST-paired Scheduler entry handles today).");
     return;
   }
   if (await isMarketClosedToday()) {
@@ -54,13 +67,7 @@ async function main(): Promise<void> {
     await runJob(
       "option_chain_capture",
       async () => {
-        const result = await runOptionChainCapture((event) => {
-          if (event.type === "tickerStart") {
-            console.log(`${event.symbol}: capturing ${event.contractCount} contracts (window from ${event.referenceVolatilitySource}).`);
-          } else if (event.type === "tickerDone") console.log(`${event.symbol}: ${event.status} — ${event.coverage.contractsWithAnyTick}/${event.coverage.contractsRequested} with ticks.`);
-          else if (event.type === "tickerError") console.warn(`${event.symbol}: capture failed — ${event.message}`);
-          else console.log(`Re-capturing starved tickers: ${event.symbols.join(", ")}`);
-        });
+        const result = await runOptionChainCapture(logCaptureEvent);
         console.log(`Chain capture: ${result.tickersComplete} complete, ${result.tickersPartial} partial, ${result.tickersFailed} failed of ${result.tickersAttempted}.`);
         // A run where tickers failed, or that saved every snapshot without a risk-free rate, is recorded
         // as a failure (runJob alerts), not a "success" that hides it; failed tickers also have failed snapshot rows.
@@ -78,6 +85,18 @@ async function main(): Promise<void> {
   // recorded by runJob's own try/catch inside runOptionSurfaceFitJob.
   const tradingDateIso = easternDateIso(new Date());
   await runOptionSurfaceFitJob(tradingDateIso, { triggeredBy: "scheduler" });
+
+  // Re-capture and re-fit the tickers whose surface came out unusable. A failure here is recorded/alerted
+  // by runJob and never blocks the seed below.
+  await runJob(
+    "option_chain_capture_retry",
+    async () => {
+      const retry = await runCaptureRetryRounds(tradingDateIso, buildDefaultCaptureRetryDependencies(logCaptureEvent));
+      console.log(`Capture retry: ${retry.roundSymbols.length === 0 ? "nothing to retry" : retry.roundSymbols.map((symbols, index) => `attempt ${index + 2}: ${symbols.join(", ")}`).join("; ")}; still failing: ${retry.stillFailingSymbols.join(", ") || "-"}.`);
+      return { details: { ...retry }, failureMessage: buildCaptureRetryFailureMessage(retry) };
+    },
+    { triggeredBy: "scheduler", staleRunningJobThresholdMs: optionChainCaptureStaleRunningThresholdMs },
+  ).catch((error) => console.error(`option_chain_capture_retry failed, continuing to the seed: ${error instanceof Error ? error.message : error}`));
 
   // Seed the Day Signals pool from the snapshots + fits just written; the
   // refresh loop on the web dyno picks it up on its next state check. A

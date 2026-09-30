@@ -11,7 +11,7 @@ export interface DayTickerContractContext {
   tickerId: string;
   symbol: string;
   snapshotId: string;
-  /** Spot the 9:30 capture used; the reference for the first re-rank. */
+  /** Spot the 10:00 capture used; the reference for the first re-rank. */
   snapshotSpotPrice: number | null;
   /** Null when no fitted slice gives one; the loop then keeps that ticker on the captured contracts. */
   atmImpliedVolatility: number | null;
@@ -22,7 +22,7 @@ export interface DayTickerContractContext {
   previousContracts: DayContractRef[];
 }
 
-/** A ticker the loop tracks the spot of: pooled, or scored at 9:30 but left without a pool. */
+/** A ticker the loop tracks the spot of: pooled, or scored at 10:00 but left without a pool. */
 export interface DayTrackedTicker {
   tickerId: string;
   symbol: string;
@@ -30,7 +30,7 @@ export interface DayTrackedTicker {
   snapshotId: string;
 }
 
-/** Signals-universe tickers with today's snapshot but no pooled expiry: the 9:30 seed found no positive-Edge candidate at the open's prices, which a later move can change. */
+/** Signals-universe tickers with today's snapshot but no pooled expiry: the 10:00 seed found no positive-Edge candidate at the open's prices, which a later move can change. */
 export async function loadDayUnpooledTickers(tradingDateIso: string): Promise<DayTrackedTicker[]> {
   const universe = await loadSignalsUniverseTickers();
   if (universe.length === 0) return [];

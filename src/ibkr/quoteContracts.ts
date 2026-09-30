@@ -54,7 +54,7 @@ export async function quoteContracts(ib: IBApi, symbol: string, contracts: Quote
   if (notPooled.length === 0) return quotes;
 
   // Takes what fits (approved 2026-09-24): first ask for the full window,
-  // then, when the budget is short (a request while the 9:30 ET capture
+  // then, when the budget is short (a request while the 10:00 ET capture
   // and Day Signals hold their priority lines), whatever is free — the
   // rolling window just runs narrower. Only a budget with nothing free fails.
   const wanted = Math.min(maximumQuoteBatchSize, notPooled.length);

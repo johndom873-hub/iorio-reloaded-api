@@ -64,7 +64,7 @@ import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 //
 // Each cycle starts with a spot pass (every pooled ticker's stock, one line each). The contracts
 // quoted for a ticker are then the capture's own rule applied at that LIVE spot (approved 2026-09-29,
-// daySignalsContractSet.ts), not the 9:30 snapshot's: a stock that moved after the open would otherwise
+// daySignalsContractSet.ts), not the 10:00 snapshot's: a stock that moved after the open would otherwise
 // leave a hole where the puts (or calls) it now wants to sell should be. Contracts that stop qualifying
 // are dropped and their stored quotes deleted, so the set stays about the same size. A ticker whose spot
 // moved by max(1%, half its one-day expected move) since it was last ranked (at most 3 times a day) also
@@ -125,7 +125,7 @@ export interface DaySignalsLoopDependencies {
   upsertDayQuotes(writes: DayQuoteWrite[]): Promise<void>;
   /** Per pooled ticker: strike grids, ATM IV, held legs and last cycle's contracts. A ticker missing from the map stays on the snapshot's contracts. */
   loadContractContexts(tickers: DayTrackedTicker[], tradingDateIso: string): Promise<Map<string, DayTickerContractContext>>;
-  /** Tickers scored at 9:30 that the seed left without a pool: watched for a move big enough to re-rank them into one. */
+  /** Tickers scored at 10:00 that the seed left without a pool: watched for a move big enough to re-rank them into one. */
   loadUnpooledTickers(tradingDateIso: string): Promise<DayTrackedTicker[]>;
   pruneDayQuotes(tickerId: string, keep: DayContractRef[]): Promise<void>;
   loadRerankStates(tradingDateIso: string): Promise<Map<string, DayRerankState>>;
@@ -381,7 +381,7 @@ export class DaySignalsLoop {
 
     // Spot pass: every pooled ticker's stock first, so the contract set below follows the live price.
     const spotByTicker = new Map<string, number | null>();
-    // Tracked = pooled tickers plus tickers scored at 9:30 with no pool: a stock that jumped after the open may only now have puts worth selling.
+    // Tracked = pooled tickers plus tickers scored at 10:00 with no pool: a stock that jumped after the open may only now have puts worth selling.
     let trackedTickers = await this.trackedTickersFor(pool, tradingDateIso);
     const spotWindowContracts: WindowContract[] = trackedTickers.map((ticker) => ({ key: `${ticker.tickerId}|stock`, legType: "stock", symbol: ticker.symbol }));
     const spotPass = await this.deps.runSpotPass(spotWindowContracts, {
