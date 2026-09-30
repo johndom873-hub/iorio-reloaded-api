@@ -9,6 +9,7 @@ import {
   type SurfaceQuote,
   type SviSliceFit,
 } from "./impliedVolatilitySurface.js";
+import { median } from "./statistics.js";
 
 // Fits every expiry of one ticker's chain snapshot (Formula 3b) and runs the
 // calendar-arbitrage check between neighbouring fitted expiries. Pure: the DB
@@ -17,6 +18,8 @@ import {
 export interface SurfaceSnapshotQuote extends SurfaceQuote {
   /** ISO date YYYY-MM-DD. */
   expiry: string;
+  /** The underlying's price when this quote was taken; null/absent when the tick carried none. */
+  underlyingPrice?: number | null;
 }
 
 export interface SurfaceSnapshotInput {
@@ -46,6 +49,15 @@ export type SurfaceFitOutcome =
   | { kind: "fitted"; expiries: FittedExpiry[] }
   | { kind: "skipped"; reason: "no_spot_price" | "no_risk_free_rate" | "no_quotes" };
 
+/**
+ * The underlying price the quotes were taken at (median across the expiry's quotes), or null when none carries one. The snapshot's own
+ * spot is read once before the quotes arrive, so on a fast mover it can sit far enough from them to split calls from puts at a short expiry.
+ */
+function underlyingPriceOfQuotes(quotes: SurfaceSnapshotQuote[]): number | null {
+  const prices = quotes.flatMap((quote) => (quote.underlyingPrice !== null && quote.underlyingPrice !== undefined && quote.underlyingPrice > 0 ? [quote.underlyingPrice] : []));
+  return prices.length === 0 ? null : median(prices);
+}
+
 export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOutcome {
   if (input.spotPrice === null || !(input.spotPrice > 0)) return { kind: "skipped", reason: "no_spot_price" };
   if (input.riskFreeRatePercent === null) return { kind: "skipped", reason: "no_risk_free_rate" };
@@ -66,9 +78,10 @@ export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOu
   for (const expiry of expiries) {
     const yearsToExpiry = yearsBetweenIsoDates(input.tradingDate, expiry);
     if (!(yearsToExpiry > 0)) continue; // expiring today: no time value to fit
-    const forwardPrice = computeForwardPrice(input.spotPrice, riskFreeRate, yearsToExpiry, dividends);
+    const expiryQuotes = input.quotes.filter((quote) => quote.expiry === expiry);
+    const forwardPrice = computeForwardPrice(underlyingPriceOfQuotes(expiryQuotes) ?? input.spotPrice, riskFreeRate, yearsToExpiry, dividends);
     const { points, dropped } = buildSviFitPoints(
-      input.quotes.filter((quote) => quote.expiry === expiry),
+      expiryQuotes,
       forwardPrice,
       yearsToExpiry,
       riskFreeRate,

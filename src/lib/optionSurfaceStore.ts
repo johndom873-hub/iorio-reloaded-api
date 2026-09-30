@@ -99,10 +99,10 @@ async function loadHeaders(tradingDate: string, symbols?: string[]): Promise<Sna
 }
 
 async function loadQuotes(snapshotId: string) {
-  const rows: { expiry: string; strike: string; right: "C" | "P"; bid: string | null; ask: string | null }[] = await db("option_quote_snapshots")
+  const rows: { expiry: string; strike: string; right: "C" | "P"; bid: string | null; ask: string | null; underlyingPrice: string | null }[] = await db("option_quote_snapshots")
     .where({ snapshot_id: snapshotId })
-    .select(db.raw("expiry::text as expiry"), "strike", db.raw("option_right as \"right\""), "bid", "ask");
-  return rows.map((row) => ({ expiry: row.expiry, strike: Number(row.strike), right: row.right, bid: toNumberOrNull(row.bid), ask: toNumberOrNull(row.ask) }));
+    .select(db.raw("expiry::text as expiry"), "strike", db.raw("option_right as \"right\""), "bid", "ask", "underlying_price as underlyingPrice");
+  return rows.map((row) => ({ expiry: row.expiry, strike: Number(row.strike), right: row.right, bid: toNumberOrNull(row.bid), ask: toNumberOrNull(row.ask), underlyingPrice: toNumberOrNull(row.underlyingPrice) }));
 }
 
 function describeOutcome(outcome: SurfaceFitOutcome): string {

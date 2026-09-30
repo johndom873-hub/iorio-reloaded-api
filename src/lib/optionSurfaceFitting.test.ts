@@ -130,6 +130,41 @@ describe("fitSurfaceForSnapshot", () => {
     expect(irregular.expiries[0]!.forwardPrice).toBeCloseTo(computeForwardPrice(spot, 0.04, yearsBetweenIsoDates(tradingDate, "2026-11-20"), [div1]), 8);
   });
 
+  describe("the underlying price the quotes were taken at", () => {
+    const shortExpiry = "2026-09-24";
+    const staleSnapshotSpot = 98; // the snapshot's spot, read before the quotes arrived; the quotes were struck with the underlying at 100
+    const withUnderlying = (underlyingPrice: number | null | undefined, quotes = quotesFor(shortExpiry)) => quotes.map((quote) => ({ ...quote, underlyingPrice }));
+    const fitShortExpiry = (quotes: SurfaceSnapshotQuote[]) => {
+      const outcome = fitSurfaceForSnapshot(snapshot({ spotPrice: staleSnapshotSpot, quotes }));
+      if (outcome.kind !== "fitted") throw new Error("expected a fit");
+      return outcome.expiries[0]!;
+    };
+
+    it("builds the forward from the quoted underlying instead of the snapshot spot, so a stale snapshot spot no longer rejects a short expiry", () => {
+      const againstSnapshotSpot = fitShortExpiry(withUnderlying(undefined));
+      expect(againstSnapshotSpot.slice.status).toBe("poor_fit");
+
+      const againstQuotedUnderlying = fitShortExpiry(withUnderlying(spot));
+      expect(againstQuotedUnderlying.slice.status).toBe("ok");
+      expect(againstQuotedUnderlying.forwardPrice).toBeCloseTo(computeForwardPrice(spot, ratePercent / 100, yearsBetweenIsoDates(tradingDate, shortExpiry)), 10);
+    });
+
+    it("uses the median of the quotes' underlying prices, ignoring missing and non-positive ones", () => {
+      const quotes = quotesFor(shortExpiry).map((quote, index) => ({ ...quote, underlyingPrice: index % 5 === 0 ? null : index % 7 === 0 ? 0 : spot + (index % 2 === 0 ? -0.5 : 0.5) }));
+      const expiry = fitShortExpiry(quotes);
+      expect(expiry.forwardPrice).toBeGreaterThan(computeForwardPrice(spot - 0.5, ratePercent / 100, expiry.yearsToExpiry));
+      expect(expiry.forwardPrice).toBeLessThan(computeForwardPrice(spot + 0.5, ratePercent / 100, expiry.yearsToExpiry));
+    });
+
+    it("falls back to the snapshot spot for an expiry whose quotes carry no underlying price, per expiry", () => {
+      const outcome = fitSurfaceForSnapshot(snapshot({ quotes: [...withUnderlying(101, quotesFor("2026-10-21")), ...withUnderlying(null, quotesFor("2026-11-20", 2))] }));
+      if (outcome.kind !== "fitted") throw new Error("expected a fit");
+      const [near, far] = outcome.expiries;
+      expect(near!.forwardPrice).toBeCloseTo(computeForwardPrice(101, ratePercent / 100, near!.yearsToExpiry), 10);
+      expect(far!.forwardPrice).toBeCloseTo(computeForwardPrice(spot, ratePercent / 100, far!.yearsToExpiry), 10);
+    });
+  });
+
   it("keeps the per-slice drop counts so a thin expiry can be explained", () => {
     const extra = [
       { expiry: "2026-10-21", strike: 95, right: "P" as const, bid: 0.5, ask: 1.5 }, // 100% spread
