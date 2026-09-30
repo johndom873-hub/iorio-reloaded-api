@@ -165,6 +165,40 @@ describe("fitSurfaceForSnapshot", () => {
     });
   });
 
+  describe("the put-call parity forward", () => {
+    const shortExpiry = "2026-09-24";
+    const yearsToShortExpiry = yearsBetweenIsoDates(tradingDate, shortExpiry);
+    const impliedForward = computeForwardPrice(spot, ratePercent / 100, yearsToShortExpiry) * 1.012; // the option market's forward sits 1.2% above the spot-based one
+    // Both sides at strikes near the money, all priced off impliedForward from the known smile.
+    const pairedQuotes = (): SurfaceSnapshotQuote[] =>
+      Array.from({ length: 41 }, (_, index) => 80 + index).flatMap((strike) =>
+        (["C", "P"] as const).map((right) => {
+          const volatility = Math.sqrt(sviTotalVariance(truth, Math.log(strike / impliedForward)) / yearsToShortExpiry);
+          const mid = blackScholesPriceOnForward(impliedForward, strike, yearsToShortExpiry, ratePercent / 100, volatility, right === "C");
+          return { expiry: shortExpiry, strike, right, bid: mid * 0.985, ask: mid * 1.015 };
+        }),
+      );
+    const fit = (quotes: SurfaceSnapshotQuote[]) => {
+      const outcome = fitSurfaceForSnapshot(snapshot({ quotes }));
+      if (outcome.kind !== "fitted") throw new Error("expected a fit");
+      return outcome.expiries[0]!;
+    };
+
+    it("takes the forward the calls and puts imply, which the spot-based forward cannot reproduce", () => {
+      const single = pairedQuotes().filter((quote) => (quote.right === "C") === (quote.strike >= impliedForward));
+      expect(fit(single).slice.status).toBe("poor_fit"); // no pairs: spot-based forward, 1.2% off the quotes
+
+      const paired = fit(pairedQuotes());
+      expect(paired.slice.status).toBe("ok");
+      expect(paired.forwardPrice).toBeCloseTo(impliedForward, 4);
+    });
+
+    it("anchors the forward to the quoted underlying (else the snapshot spot), not to the parity forward", () => {
+      expect(fit(pairedQuotes()).underlyingPrice).toBe(spot);
+      expect(fit(pairedQuotes().map((quote) => ({ ...quote, underlyingPrice: 101 }))).underlyingPrice).toBe(101);
+    });
+  });
+
   it("keeps the per-slice drop counts so a thin expiry can be explained", () => {
     const extra = [
       { expiry: "2026-10-21", strike: 95, right: "P" as const, bid: 0.5, ask: 1.5 }, // 100% spread

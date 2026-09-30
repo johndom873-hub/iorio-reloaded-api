@@ -36,6 +36,8 @@ export interface SignalSurfaceSlice {
   kMax: number | null;
   yearsToExpiry: number;
   forwardPrice: number;
+  /** The underlying price forwardPrice is anchored to; null/absent on fits made before it was stored (anchored to the snapshot spot). */
+  fitUnderlyingPrice?: number | null;
   /** Fit-quality diagnostics, surfaced for the volatility-surface modal; not consumed by scoring. */
   pointCount: number;
   rmseVolatility: number | null;

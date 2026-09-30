@@ -9,6 +9,8 @@ import {
   impliedVolatilityFromPrice,
   isRegularDividendCadence,
   minimumButterflyDensity,
+  parityForwardStrikeWindowFraction,
+  parityImpliedForward,
   projectDividendSchedule,
   sviButterflyDensity,
   sviTotalVariance,
@@ -114,6 +116,46 @@ describe("Black-Scholes on the forward and implied volatility", () => {
     expect(impliedVolatilityFromPrice(99, 100, 105, 0.25, 0.04, true)).toBeNull();
     expect(impliedVolatilityFromPrice(0, 100, 105, 0.25, 0.04, true)).toBeNull();
     expect(impliedVolatilityFromPrice(3, 100, 105, 0, 0.04, true)).toBeNull();
+  });
+});
+
+describe("parityImpliedForward", () => {
+  const years = 2 / 365;
+  const rate = 0.04;
+  const trueForward = 102;
+  // Both sides of a strike priced by exact Black-Scholes on the true forward at a flat 80% volatility, bid/ask symmetric around the mid.
+  function pair(strike: number, spread = 0.02): SurfaceQuote[] {
+    return (["C", "P"] as const).map((right) => {
+      const mid = blackScholesPriceOnForward(trueForward, strike, years, rate, 0.8, right === "C");
+      return { strike, right, bid: mid * (1 - spread / 2), ask: mid * (1 + spread / 2) };
+    });
+  }
+
+  it("recovers the forward the option prices were built on, whatever forward the caller starts from", () => {
+    const quotes = [100, 101, 102, 103, 104].flatMap((strike) => pair(strike));
+    expect(parityImpliedForward(quotes, 100, years, rate)).toBeCloseTo(trueForward, 6);
+    expect(parityImpliedForward(quotes, 104, years, rate)).toBeCloseTo(trueForward, 6);
+  });
+
+  it("takes the median over strikes, so one bad pair does not move it", () => {
+    const skewed = pair(103).map((quote) => (quote.right === "C" ? { ...quote, bid: quote.bid! + 0.6, ask: quote.ask! + 0.6 } : quote));
+    const quotes = [...pair(100), ...pair(101), ...pair(102), ...skewed, ...pair(104)];
+    expect(parityImpliedForward(quotes, 102, years, rate)).toBeCloseTo(trueForward, 6);
+  });
+
+  it("uses only strikes with a usable call AND put inside the strike window", () => {
+    const outsideWindow = 102 * (1 + parityForwardStrikeWindowFraction) + 1;
+    const oneSided: SurfaceQuote[] = pair(101).filter((quote) => quote.right === "C");
+    const wideSpread = pair(103, 0.6);
+    const noBid = pair(104).map((quote) => (quote.right === "P" ? { ...quote, bid: 0 } : quote));
+    expect(parityImpliedForward([...pair(outsideWindow), ...oneSided, ...wideSpread, ...noBid], 102, years, rate)).toBeNull();
+    expect(parityImpliedForward([...pair(outsideWindow), ...oneSided, ...wideSpread, ...noBid, ...pair(102)], 102, years, rate)).toBeCloseTo(trueForward, 6);
+  });
+
+  it("is null without quotes, and rejects a non-positive result", () => {
+    expect(parityImpliedForward([], 100, years, rate)).toBeNull();
+    const absurd: SurfaceQuote[] = [{ strike: 100, right: "C", bid: 0.1, ask: 0.11 }, { strike: 100, right: "P", bid: 400, ask: 401 }];
+    expect(parityImpliedForward(absurd, 100, years, rate)).toBeNull();
   });
 });
 

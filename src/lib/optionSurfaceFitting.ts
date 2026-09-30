@@ -3,6 +3,7 @@ import {
   checkCalendarArbitrage,
   computeForwardPrice,
   fitSviSlice,
+  parityImpliedForward,
   projectDividendSchedule,
   yearsBetweenIsoDates,
   type FitPointDropCounts,
@@ -38,6 +39,8 @@ export interface FittedExpiry {
   expiry: string;
   yearsToExpiry: number;
   forwardPrice: number;
+  /** The underlying price the forward is anchored to (the quotes' median underlying, else the snapshot spot): live scoring rescales the forward from it. */
+  underlyingPrice: number;
   slice: SviSliceFit;
   dropped: FitPointDropCounts;
   /** Calendar check against the previous expiry that produced a fit (0 / 0 for the first). */
@@ -79,7 +82,9 @@ export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOu
     const yearsToExpiry = yearsBetweenIsoDates(input.tradingDate, expiry);
     if (!(yearsToExpiry > 0)) continue; // expiring today: no time value to fit
     const expiryQuotes = input.quotes.filter((quote) => quote.expiry === expiry);
-    const forwardPrice = computeForwardPrice(underlyingPriceOfQuotes(expiryQuotes) ?? input.spotPrice, riskFreeRate, yearsToExpiry, dividends);
+    const underlyingPrice = underlyingPriceOfQuotes(expiryQuotes) ?? input.spotPrice;
+    const spotBasedForward = computeForwardPrice(underlyingPrice, riskFreeRate, yearsToExpiry, dividends);
+    const forwardPrice = parityImpliedForward(expiryQuotes, spotBasedForward, yearsToExpiry, riskFreeRate) ?? spotBasedForward;
     const { points, dropped } = buildSviFitPoints(
       expiryQuotes,
       forwardPrice,
@@ -95,7 +100,7 @@ export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOu
       if (previousWithFit) ({ checks: calendarChecks, violations: calendarViolations } = checkCalendarArbitrage([previousWithFit, current]));
       previousWithFit = current;
     }
-    fitted.push({ expiry, yearsToExpiry, forwardPrice, slice, dropped, calendarChecks, calendarViolations });
+    fitted.push({ expiry, yearsToExpiry, forwardPrice, underlyingPrice, slice, dropped, calendarChecks, calendarViolations });
   }
   return { kind: "fitted", expiries: fitted };
 }

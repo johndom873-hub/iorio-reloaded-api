@@ -37,11 +37,12 @@ interface SnapshotHeaderRow {
 const toNumberOrNull = (value: string | number | null | undefined): number | null => (value === null || value === undefined ? null : Number(value));
 
 function buildInsertRows(snapshotId: string, expiries: FittedExpiry[]): Record<string, unknown>[] {
-  return expiries.map(({ expiry, yearsToExpiry, forwardPrice, slice, dropped, calendarChecks, calendarViolations }) => ({
+  return expiries.map(({ expiry, yearsToExpiry, forwardPrice, underlyingPrice, slice, dropped, calendarChecks, calendarViolations }) => ({
     snapshot_id: snapshotId,
     expiry,
     years_to_expiry: yearsToExpiry,
     forward_price: forwardPrice,
+    underlying_price: underlyingPrice,
     status: slice.status,
     point_count: slice.pointCount,
     dropped_counts: JSON.stringify(dropped),

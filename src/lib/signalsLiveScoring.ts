@@ -53,11 +53,14 @@ export function computeDayChangePercent(spotPrice: number | null, previousClose:
   return (spotPrice / previousClose.close - 1) * 100;
 }
 
-/** Sticky moneyness: the 9:30 surface is re-read at the live spot by moving every expiry's forward in proportion. */
+/**
+ * Sticky moneyness: the 10:00 surface is re-read at the live spot by moving every expiry's forward in proportion to the underlying
+ * price that forward is anchored to (its own `fitUnderlyingPrice`, else the snapshot spot for fits that predate it). At the snapshot
+ * spot itself the slices are returned as fitted, quotes and forward being consistent as captured.
+ */
 export function scaleSlicesToLiveSpot(slices: SignalSurfaceSlice[], snapshotSpot: number, liveSpot: number): SignalSurfaceSlice[] {
   if (!(snapshotSpot > 0) || !(liveSpot > 0) || liveSpot === snapshotSpot) return slices;
-  const ratio = liveSpot / snapshotSpot;
-  return slices.map((slice) => ({ ...slice, forwardPrice: slice.forwardPrice * ratio }));
+  return slices.map((slice) => ({ ...slice, forwardPrice: slice.forwardPrice * (liveSpot / (slice.fitUnderlyingPrice ?? snapshotSpot)) }));
 }
 
 /**

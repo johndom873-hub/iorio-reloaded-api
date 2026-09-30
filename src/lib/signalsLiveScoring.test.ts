@@ -133,6 +133,12 @@ describe("scaleSlicesToLiveSpot (sticky moneyness)", () => {
     expect(scaled[1]!.forwardPrice).toBeCloseTo(101.2 * 1.05, 10);
     expect(scaled[0]!.parameters).toBe(params); // surface itself untouched
   });
+  it("scales from each slice's own anchor when it has one, and from the snapshot spot when it does not", () => {
+    const scaled = scaleSlicesToLiveSpot([slice("a", years30, { forwardPrice: 101, fitUnderlyingPrice: 101 }), slice("b", years60, { forwardPrice: 101.2, fitUnderlyingPrice: null }), slice("c", years60, { forwardPrice: 102 })], 100, 105);
+    expect(scaled[0]!.forwardPrice).toBeCloseTo(101 * (105 / 101), 10);
+    expect(scaled[1]!.forwardPrice).toBeCloseTo(101.2 * 1.05, 10);
+    expect(scaled[2]!.forwardPrice).toBeCloseTo(102 * 1.05, 10);
+  });
   it("returns the same array when the spot has not moved or the inputs are unusable", () => {
     const slices = [slice("a", years30)];
     expect(scaleSlicesToLiveSpot(slices, 100, 100)).toBe(slices);

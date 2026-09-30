@@ -1,4 +1,5 @@
 import { standardNormalCdf } from "./blackScholesPop.js";
+import { median } from "./statistics.js";
 
 // Implied-volatility surface for the IORIO Signal Engine (Phase 1 input to
 // Edge(K,T) = IV_SVI − RV_forecast). Formulas and every choice below were
@@ -8,6 +9,8 @@ import { standardNormalCdf } from "./blackScholesPop.js";
 // ("SVI exploratory fit") for the evidence (real AAOI chain, 2026-09-21).
 //
 //   Forward   F = (S − Σ dᵢ·e^(−r·tᵢ)) · e^(r·T)          k = ln(K / F)
+//             or, when the chain has near-ATM call/put pairs, the parity forward
+//             F = median over pairs of K + (C_mid − P_mid)·e^(r·T)   (see parityImpliedForward)
 //   Mid IV    σ such that Black-Scholes(F,K,T,r,σ) = (bid+ask)/2, OTM side only
 //   Raw SVI   w(k) = a + b·[ρ(k−m) + √((k−m)² + σ²)],      w = IV²·T
 //   No-arb    butterfly g(k) ≥ 0 (Gatheral & Jacquier 2014); calendar w(k,T₂) ≥ w(k,T₁)
@@ -25,6 +28,8 @@ export const maximumSpreadFractionOfMid = 0.5;
 export const minimumSpreadWeightFloor = 0.02;
 export const minimumPointsPerSlice = 8;
 export const maximumSliceRmseVolatility = 0.03; // 3 volatility points
+/** Strikes within this fraction of the reference forward may take part in the put-call parity forward. */
+export const parityForwardStrikeWindowFraction = 0.05;
 const calendarDaysPerYear = 365;
 
 // --- forward ---------------------------------------------------------------
@@ -124,6 +129,34 @@ export function impliedVolatilityFromPrice(price: number, forward: number, strik
     else low = middle;
   }
   return (low + high) / 2;
+}
+
+// --- parity-implied forward --------------------------------------------------
+
+function isUsableTwoSidedQuote(quote: SurfaceQuote): quote is SurfaceQuote & { bid: number; ask: number } {
+  return quote.bid !== null && quote.ask !== null && quote.bid > 0 && quote.ask > quote.bid && (quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2) <= maximumSpreadFractionOfMid;
+}
+
+/**
+ * The forward the option market itself implies for one expiry: put-call parity C − P = (F − K)·e^(−rT) gives F = K + (C_mid − P_mid)·e^(rT)
+ * at every strike that has a usable call AND put (same quote filter as the fit points) within `parityForwardStrikeWindowFraction` of
+ * `referenceForward`; the median over those strikes. It carries dividends and borrow without modelling them. Null when no strike qualifies
+ * (the caller keeps its spot-based forward).
+ */
+export function parityImpliedForward(quotes: SurfaceQuote[], referenceForward: number, yearsToExpiry: number, riskFreeRate: number): number | null {
+  const pairsByStrike = new Map<number, { call?: SurfaceQuote & { bid: number; ask: number }; put?: SurfaceQuote & { bid: number; ask: number } }>();
+  for (const quote of quotes) {
+    if (!isUsableTwoSidedQuote(quote) || Math.abs(quote.strike / referenceForward - 1) > parityForwardStrikeWindowFraction) continue;
+    const pair = pairsByStrike.get(quote.strike) ?? {};
+    if (quote.right === "C") pair.call = quote;
+    else pair.put = quote;
+    pairsByStrike.set(quote.strike, pair);
+  }
+  const growth = Math.exp(riskFreeRate * yearsToExpiry);
+  const forwards = [...pairsByStrike.entries()].flatMap(([strike, { call, put }]) => (call && put ? [strike + ((call.bid + call.ask) / 2 - (put.bid + put.ask) / 2) * growth] : []));
+  if (forwards.length === 0) return null;
+  const forward = median(forwards);
+  return forward > 0 ? forward : null;
 }
 
 // --- fit points from quotes --------------------------------------------------
