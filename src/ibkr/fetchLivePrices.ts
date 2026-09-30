@@ -14,6 +14,8 @@ const snapshotReservationTtlSeconds = 15;
 
 export interface FetchLivePricesOptions {
   priorityLines?: boolean;
+  /** Called with the symbols whose price was filled from a stored last-known-good/daily close because IBKR sent no last. */
+  onFallbackPriceUsed?: (symbols: string[]) => void;
 }
 
 export interface PriceContract {
@@ -187,13 +189,16 @@ function stockSymbolsOf(contracts: PriceContract[]): string[] {
   return contracts.filter((contract) => contract.legType === "stock").map((contract) => contract.symbol);
 }
 
-function fillStockGaps(contracts: PriceContract[], prices: Record<string, number | null>, fallback: Map<string, { price: number }>): Record<string, number | null> {
+function fillStockGaps(contracts: PriceContract[], prices: Record<string, number | null>, fallback: Map<string, { price: number }>): { filled: Record<string, number | null>; fallbackSymbols: string[] } {
   const filled = { ...prices };
+  const fallbackSymbols: string[] = [];
   for (const contract of contracts) {
     if (contract.legType !== "stock" || (filled[contract.key] ?? null) !== null) continue;
-    filled[contract.key] = fallback.get(contract.symbol)?.price ?? null;
+    const fallbackPrice = fallback.get(contract.symbol)?.price ?? null;
+    filled[contract.key] = fallbackPrice;
+    if (fallbackPrice !== null) fallbackSymbols.push(contract.symbol);
   }
-  return filled;
+  return { filled, fallbackSymbols };
 }
 
 function recordRealStockPrices(contracts: PriceContract[], prices: Record<string, number | null>, source: "live" | "frozen"): void {
@@ -211,7 +216,9 @@ export async function fetchLivePrices(contracts: PriceContract[], options: Fetch
   try {
     const [prices, fallback] = await Promise.all([fetchLivePricesFromIbkr(contracts), loadFallbackStockPrices(stockSymbolsOf(contracts))]);
     recordRealStockPrices(contracts, prices, "frozen");
-    return fillStockGaps(contracts, prices, fallback);
+    const { filled, fallbackSymbols } = fillStockGaps(contracts, prices, fallback);
+    if (fallbackSymbols.length > 0) options.onFallbackPriceUsed?.(fallbackSymbols);
+    return filled;
   } finally {
     releaseMarketDataLines(holder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${holder}: ${error instanceof Error ? error.message : error}`));
   }

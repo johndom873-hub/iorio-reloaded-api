@@ -19,6 +19,8 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-daily-screener-scan-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { ScanCode, Stock } from "@stoqey/ib";
 import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
@@ -26,6 +28,7 @@ import { runScannerSubscription, type ScannerCandidate } from "../src/ibkr/fetch
 import { enrichCandidate } from "../src/ibkr/enrichScannerCandidates.js";
 import { lookupContractDetails } from "../src/ibkr/fetchNewTickerData.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
+import { buildScreenerFailureMessage, isEmptyEnrichment } from "../src/lib/screenerScanOutcome.js";
 import { runJob } from "../src/lib/runJob.js";
 
 const scanCodes = [
@@ -103,6 +106,7 @@ async function main(): Promise<void> {
     const scanCounts: Record<string, number> = {};
     let enriched = 0;
     let failed = 0;
+    const failedSymbols: string[] = [];
 
     try {
       // Sequential, not Promise.all — matches the existing precedent
@@ -153,6 +157,9 @@ async function main(): Promise<void> {
           }
 
           const quote = await enrichCandidate(connection, nextReqId++, symbol);
+          // enrichCandidate resolves with every field null on a timeout: writing that would wipe the symbol's stored
+          // data and stamp last_refreshed_at, so it counts as a failure and the stored row is left alone.
+          if (isEmptyEnrichment(quote)) throw new Error("enrichment returned no data (timeout or IBKR error)");
 
           const enrichedRow: EnrichedRow = {
             symbol,
@@ -177,6 +184,7 @@ async function main(): Promise<void> {
           enriched++;
         } catch (error) {
           failed++;
+          failedSymbols.push(symbol);
           console.warn(`${symbol}: enrichment failed — ${error instanceof Error ? error.message : error}`);
         }
       }
@@ -248,8 +256,8 @@ async function main(): Promise<void> {
 
       console.log(`Screener scan complete: ${enriched} enriched, ${failed} failed, ${matchedRows.length} matched, ${carriedOverRows.length} carried over.`);
       return {
-        details: { scanCounts, matched: matches.size, universeSize: fullSymbolSet.size, enriched, failed },
-        notify: failed > fullSymbolSet.size / 2 ? `⚠️ Screener scan: ${failed}/${fullSymbolSet.size} symbol(s) failed enrichment.` : undefined,
+        details: { scanCounts, matched: matches.size, universeSize: fullSymbolSet.size, enriched, failed, failedSymbols },
+        failureMessage: buildScreenerFailureMessage({ scanCounts, failedSymbols, universeSize: fullSymbolSet.size }),
       };
     } finally {
       connection.disconnect();
@@ -257,9 +265,4 @@ async function main(): Promise<void> {
   });
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("run-daily-screener-scan-job", main, () => db.destroy());

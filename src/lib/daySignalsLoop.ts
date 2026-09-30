@@ -35,6 +35,7 @@ import {
 import { computeMarketSessionStatus, easternDateIso } from "./marketSessionStatus.js";
 import { formatIsoDateAsExpiry } from "./optionChainSnapshotStore.js";
 import { readGitSha } from "./readGitSha.js";
+import { reportBackgroundFailure, reportBackgroundRecovery } from "./backgroundFailureAlert.js";
 import type { SignalGrade } from "./signalCandidates.js";
 import { rollCandidateKey, type HeldLegScore } from "./rollSignalCandidates.js";
 import { candidateContractKey, scoreTicker, type LiveOptionQuote } from "./signalsLiveScoring.js";
@@ -148,6 +149,9 @@ export interface DaySignalsLoopDependencies {
   notifyAssignmentRisk(alert: AssignmentRiskAlert): Promise<void>;
   emitUpdated(tickerId: string): void;
   writeHeartbeat(status: DaySignalsLoopStatus): Promise<void>;
+  /** Rate-limited Telegram alert for a failure that is otherwise only logged (backgroundFailureAlert.ts). Optional so tests can omit it. */
+  reportFailure?(source: string, message: string): void;
+  reportRecovery?(source: string, message: string): void;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
 }
 
@@ -218,6 +222,8 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
       .merge();
   },
   sleep: sleepUnlessAborted,
+  reportFailure: reportBackgroundFailure,
+  reportRecovery: reportBackgroundRecovery,
 };
 
 export class DaySignalsLoop {
@@ -265,6 +271,7 @@ export class DaySignalsLoop {
       await this.deps.writeHeartbeat(this.getStatus());
     } catch (error) {
       console.warn(`day signals loop: heartbeat failed — ${error instanceof Error ? error.message : error}`);
+      this.deps.reportFailure?.("day-signals:heartbeat", `Day Signals loop could not write its heartbeat (${error instanceof Error ? error.message : error}). The health check will report the loop as down.`);
     }
   }
 
@@ -277,6 +284,7 @@ export class DaySignalsLoop {
         } catch (error) {
           this.status.lastError = error instanceof Error ? error.message : String(error);
           console.error(`day signals loop: ${this.status.lastError}`);
+          this.deps.reportFailure?.("day-signals:cycle", `Day Signals loop failed: ${this.status.lastError}. It retries every 30 s; live Signals quotes are stale until it recovers.`);
           this.setState("idle", `error: ${this.status.lastError}`);
         }
         if (!ranCycle && !signal.aborted) await this.deps.sleep(stateCheckIntervalMs, signal);
@@ -322,7 +330,10 @@ export class DaySignalsLoop {
     const result = await this.runCycle(borrowed.ib, pool, universe, tradingDateIso, signal);
     if (result.disconnected) {
       this.status.lastError = "IBKR live connection dropped mid-cycle";
+      this.deps.reportFailure?.("day-signals:cycle", "Day Signals loop: the IBKR live connection dropped mid-cycle. It retries after a short pause.");
       await this.deps.sleep(afterDisconnectBackoffMs, signal);
+    } else if (!signal.aborted) {
+      this.deps.reportRecovery?.("day-signals:cycle", "Day Signals loop cycles are completing again");
     }
     return true;
   }
@@ -342,7 +353,10 @@ export class DaySignalsLoop {
     this.linesHeld = true;
     if (!this.renewTimer) {
       this.renewTimer = setInterval(() => {
-        this.deps.reserveLines(daySignalsLoopLineHolder, daySignalsLoopLines, lineReservationTtlSeconds).catch((error) => console.warn(`day signals loop: could not renew lines — ${error instanceof Error ? error.message : error}`));
+        this.deps.reserveLines(daySignalsLoopLineHolder, daySignalsLoopLines, lineReservationTtlSeconds).catch((error) => {
+          console.warn(`day signals loop: could not renew lines — ${error instanceof Error ? error.message : error}`);
+          this.deps.reportFailure?.("day-signals:line-renew", `Day Signals loop could not renew its IBKR market-data lines (${error instanceof Error ? error.message : error}). Live screens may take them mid-session.`);
+        });
       }, lineReservationRenewIntervalMs);
       this.renewTimer.unref?.();
     }
@@ -396,7 +410,10 @@ export class DaySignalsLoop {
       // Counted and re-referenced whatever the outcome (and saved before the discovery runs): a failing discovery or a restart must not retry it.
       const nextState = { referenceSpotPrice: spot, reranks: state.reranks + 1 };
       rerankStates.set(tickerId, nextState);
-      await this.deps.saveRerankState(tickerId, tradingDateIso, nextState).catch((error) => console.warn(`day signals loop: could not save ${context.symbol}'s re-rank state — ${error instanceof Error ? error.message : error}`));
+      await this.deps.saveRerankState(tickerId, tradingDateIso, nextState).catch((error) => {
+        console.warn(`day signals loop: could not save ${context.symbol}'s re-rank state — ${error instanceof Error ? error.message : error}`);
+        this.deps.reportFailure?.("day-signals:rerank-state-save", `Day Signals loop could not save ${context.symbol}'s re-rank state (${error instanceof Error ? error.message : error}).`);
+      });
       const outcome = await this.rerankTicker(ib, context, spot, tradingDateIso, settings, account, signal);
       if (outcome === "disconnected") return { settled: 0, disconnected: true, aborted: false };
       if (outcome === "changed") {
@@ -437,7 +454,10 @@ export class DaySignalsLoop {
       if (writeBuffer.length === 0) return flushChain;
       const batch = writeBuffer;
       writeBuffer = [];
-      flushChain = flushChain.then(() => this.deps.upsertDayQuotes(batch)).catch((error) => console.error(`day signals loop: quote write failed — ${error instanceof Error ? error.message : error}`));
+      flushChain = flushChain.then(() => this.deps.upsertDayQuotes(batch)).catch((error) => {
+        console.error(`day signals loop: quote write failed — ${error instanceof Error ? error.message : error}`);
+        this.deps.reportFailure?.("day-signals:quote-write", `Day Signals loop could not save its quotes (${error instanceof Error ? error.message : error}). Live Signals quotes are stale.`);
+      });
       return flushChain;
     };
     const flushTimer = setInterval(() => void flush(), writeFlushIntervalMs);
@@ -483,6 +503,7 @@ export class DaySignalsLoop {
       for (const ticker of await this.deps.loadUnpooledTickers(tradingDateIso)) if (!tracked.has(ticker.tickerId)) tracked.set(ticker.tickerId, ticker);
     } catch (error) {
       console.warn(`day signals loop: unpooled tickers unavailable, tracking pooled ones only — ${error instanceof Error ? error.message : error}`);
+      this.deps.reportFailure?.("day-signals:unpooled-tickers", `Day Signals loop could not read the unpooled tickers (${error instanceof Error ? error.message : error}), so only pooled tickers are being tracked.`);
     }
     return [...tracked.values()];
   }
@@ -492,6 +513,7 @@ export class DaySignalsLoop {
       return await this.deps.loadRerankStates(tradingDateIso);
     } catch (error) {
       console.warn(`day signals loop: re-rank state unavailable, assuming none — ${error instanceof Error ? error.message : error}`);
+      this.deps.reportFailure?.("day-signals:rerank-state", `Day Signals loop could not read its re-rank state (${error instanceof Error ? error.message : error}), so it assumes none.`);
       return new Map();
     }
   }
@@ -502,6 +524,7 @@ export class DaySignalsLoop {
       return await this.deps.loadContractContexts(trackedTickers, tradingDateIso);
     } catch (error) {
       console.warn(`day signals loop: contract contexts unavailable, using the snapshot's contracts — ${error instanceof Error ? error.message : error}`);
+      this.deps.reportFailure?.("day-signals:contract-contexts", `Day Signals loop could not read its contract contexts (${error instanceof Error ? error.message : error}), so it quotes the morning snapshot's contracts only.`);
       return new Map();
     }
   }
@@ -596,6 +619,7 @@ export class DaySignalsLoop {
       return changed ? "changed" : "unchanged";
     } catch (error) {
       console.error(`day signals loop: re-rank of ${context.symbol} failed — ${error instanceof Error ? error.message : error}`);
+      this.deps.reportFailure?.("day-signals:rerank", `Day Signals re-rank of ${context.symbol} failed (${error instanceof Error ? error.message : error}). Other tickers may be affected too; this alert repeats at most hourly.`);
       return "unchanged";
     }
   }
@@ -651,6 +675,7 @@ export class DaySignalsLoop {
       await this.checkAssignmentRisk(ticker.symbol, scored.heldLegs, tradingDateIso, scored.spotPrice ?? spot);
     } catch (error) {
       console.error(`day signals loop: re-score of ${ticker.symbol} failed — ${error instanceof Error ? error.message : error}`);
+      this.deps.reportFailure?.("day-signals:rescore", `Day Signals re-score of ${ticker.symbol} failed (${error instanceof Error ? error.message : error}), so its grades and upgrade notifications are not updating. Other tickers may be affected too.`);
     }
   }
 
@@ -679,7 +704,10 @@ let runningLoop: DaySignalsLoop | null = null;
 export function startDaySignalsLoop(): DaySignalsLoop {
   if (runningLoop) return runningLoop;
   runningLoop = new DaySignalsLoop();
-  runningLoop.start().catch((error) => console.error(`day signals loop exited: ${error instanceof Error ? error.message : error}`));
+  runningLoop.start().catch((error) => {
+    console.error(`day signals loop exited: ${error instanceof Error ? error.message : error}`);
+    reportBackgroundFailure("day-signals:loop-exited", `🔥 Day Signals loop exited and will not restart until the web dyno does: ${error instanceof Error ? error.message : error}`);
+  });
   return runningLoop;
 }
 

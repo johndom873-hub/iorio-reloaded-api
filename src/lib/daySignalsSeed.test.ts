@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
+import { buildSeedFailureMessage, seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
 import type { SignalCandidate, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 
@@ -128,7 +128,7 @@ describe("seedDaySignals", () => {
   it("pools only tickers with today's snapshot and a positive candidate, and replaces the whole pool in one call", async () => {
     const { deps, replaceDaySignalPool } = seedDependencies();
     const result = await seedDaySignals("2026-09-24", deps);
-    expect(result).toEqual({ tradingDateIso: "2026-09-24", tickersScored: 2, tickersPooled: 1, expiriesPooled: 1, symbolsWithoutPool: ["CHEAP"], symbolsWithoutTodaySnapshot: ["OLD"] });
+    expect(result).toEqual({ tradingDateIso: "2026-09-24", tickersScored: 2, tickersPooled: 1, expiriesPooled: 1, symbolsWithoutPool: ["CHEAP"], symbolsWithoutTodaySnapshot: ["OLD"], accountContextUnavailable: false });
     expect(replaceDaySignalPool).toHaveBeenCalledTimes(1);
     const [tradingDateIso, seeds, seededAt] = replaceDaySignalPool.mock.calls[0]! as unknown as [string, { tickerId: string; snapshotId: string; expiries: { expiry: string; rank: number }[] }[], Date];
     expect(tradingDateIso).toBe("2026-09-24");
@@ -154,5 +154,22 @@ describe("seedDaySignals", () => {
     const result = await seedDaySignals("2026-09-24", deps);
     expect(result.tickersPooled).toBe(0);
     expect(replaceDaySignalPool).toHaveBeenCalledWith("2026-09-24", [], expect.any(Date));
+  });
+});
+
+describe("seed failure reporting", () => {
+  it("flags an unavailable account summary", async () => {
+    const { deps } = seedDependencies({ loadAccountContext: async () => { throw new Error("no IBKR"); } });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await seedDaySignals("2026-09-24", deps);
+    expect(result.accountContextUnavailable).toBe(true);
+    expect(buildSeedFailureMessage(result)).toContain("account summary unavailable");
+  });
+
+  it("names tickers without today's snapshot and is silent when everything is present", async () => {
+    const { deps } = seedDependencies();
+    const result = await seedDaySignals("2026-09-24", deps);
+    expect(buildSeedFailureMessage(result)).toBe("no snapshot for today, so no Day Signals pool: OLD");
+    expect(buildSeedFailureMessage({ ...result, symbolsWithoutTodaySnapshot: [], accountContextUnavailable: false })).toBeUndefined();
   });
 });

@@ -10,7 +10,10 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-daily-calendar-capture-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
+import { buildCalendarCaptureFailureMessage, type CalendarFetchFailure } from "../src/lib/calendarCaptureOutcome.js";
 import { runJob } from "../src/lib/runJob.js";
 import {
   fetchDividendEvents,
@@ -62,6 +65,8 @@ async function main(): Promise<void> {
     const tickerIdByTvTicker = new Map(Array.from(tvTickerByTickerId.entries()).map(([id, tv]) => [tv, id]));
     const tvTickers = Array.from(tvTickerByTickerId.values());
 
+    const fetchFailures: CalendarFetchFailure[] = [];
+    const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
     let earningsWritten = 0;
     let dividendsWritten = 0;
     try {
@@ -69,6 +74,7 @@ async function main(): Promise<void> {
       earningsWritten = await upsertEarningsEvents(earningsRows, tickerIdByTvTicker);
     } catch (error) {
       console.error("daily_calendar_capture: earnings fetch failed", error);
+      fetchFailures.push({ source: "earnings", message: describeError(error) });
     }
 
     try {
@@ -76,6 +82,7 @@ async function main(): Promise<void> {
       dividendsWritten = await upsertDividendEvents(dividendRows, tickerIdByTvTicker);
     } catch (error) {
       console.error("daily_calendar_capture: dividends fetch failed", error);
+      fetchFailures.push({ source: "dividends", message: describeError(error) });
     }
 
     let economicWritten = 0;
@@ -103,6 +110,7 @@ async function main(): Promise<void> {
       }
     } catch (error) {
       console.error("daily_calendar_capture: economic calendar fetch failed", error);
+      fetchFailures.push({ source: "economic calendar", message: describeError(error) });
     }
 
     console.log(
@@ -118,14 +126,12 @@ async function main(): Promise<void> {
         earningsWritten,
         dividendsWritten,
         economicWritten,
+        fetchFailures,
       },
+      // Recorded as a failure (runJob alerts) instead of a success with stale rows: the earnings dates gate trades.
+      failureMessage: buildCalendarCaptureFailureMessage({ tickerCount: tickers.length, fetchFailures, unresolvedSymbols: unresolved }),
     };
   });
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("run-daily-calendar-capture-job", main, () => db.destroy());

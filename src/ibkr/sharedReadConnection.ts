@@ -5,6 +5,7 @@ import { ibkrGatewayPortByTradingMode, ibkrMessagesPerSecondBudget } from "./con
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { runIbkrHandshake } from "./ibkrHandshakeQueue.js";
 import { markMarketDataTypeManaged } from "./requestMarketData.js";
+import { reportBackgroundFailure, reportBackgroundRecovery } from "../lib/backgroundFailureAlert.js";
 
 // Step 1 of the "Shared IBKR Read Connection" design proposal (2026-09-09,
 // see PROGRESS.md) — a single long-lived connection for the web dyno's
@@ -44,6 +45,8 @@ function pickClientId(rangeStart: number, rangeSize: number): number {
 }
 
 const reconnectDelaysMs = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
+/** A connection that has been down this long without recovering alerts on Telegram (approved 2026-09-30); shorter blips, like the daily Gateway restart, stay quiet. */
+const outageAlertAfterMs = 10 * 60_000;
 
 // How long a caller waits for a healthy shared connection before giving up
 // and falling back to its own one-shot connect — kept short so a
@@ -111,6 +114,7 @@ class SharedReadConnection {
   private reconnecting = false;
   private connecting: Promise<void> | null = null;
   private connectedSince: number | null = null;
+  private disconnectedSince: number | null = null;
   private totalReconnects = 0;
   private shuttingDown = false;
   // Shared across every concurrent borrower — replaces each read helper's
@@ -254,6 +258,10 @@ class SharedReadConnection {
       this.tunnel = tunnel;
       this.reconnectAttempt = 0;
       this.connectedSince = Date.now();
+      if (this.disconnectedSince !== null) {
+        this.disconnectedSince = null;
+        reportBackgroundRecovery(`shared-ibkr:${this.options.label}`, `The web dyno's shared IBKR ${this.options.label} connection is back`);
+      }
       console.log(
         `IBKR shared ${this.options.label} connection: connected (took ${Date.now() - connectStartedAt}ms total, lifetime reconnects=${this.totalReconnects}).`,
       );
@@ -282,6 +290,14 @@ class SharedReadConnection {
     this.tunnel?.close();
     this.tunnel = null;
     this.totalReconnects++;
+    if (this.disconnectedSince === null) this.disconnectedSince = Date.now();
+    const downForMs = Date.now() - this.disconnectedSince;
+    if (downForMs >= outageAlertAfterMs) {
+      reportBackgroundFailure(
+        `shared-ibkr:${this.options.label}`,
+        `The web dyno's shared IBKR ${this.options.label} connection has been down for ${Math.round(downForMs / 60_000)} min (attempt ${this.reconnectAttempt + 1}). Live prices, quotes and greeks fall back to one-shot connections or stay stale. The 10-minute health check reports the Gateway itself separately.`,
+      );
+    }
 
     const delay = reconnectDelaysMs[Math.min(this.reconnectAttempt, reconnectDelaysMs.length - 1)];
     this.reconnectAttempt++;

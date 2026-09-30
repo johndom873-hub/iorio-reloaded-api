@@ -14,6 +14,8 @@ import { clearDownState, notifyDownThrottled } from "./throttledAlert.js";
 // when it recovers.
 
 export const daySignalsHeartbeatStaleAfterMs = 5 * 60_000;
+/** A cycle takes about 6 minutes, so a loop that has been running this long without saving any quote is hung (approved 2026-09-30). */
+export const daySignalsQuotesStaleAfterMs = 15 * 60_000;
 const daySignalsDownAlertKey = "day_signals_loop_down";
 const daySignalsDownReminderIntervalMs = 60 * 60_000;
 
@@ -21,7 +23,10 @@ export interface DaySignalsLivenessInput {
   now: Date;
   marketOpen: boolean;
   poolSeededToday: boolean;
-  heartbeat: { updatedAt: Date; connected: boolean } | null;
+  /** uptimeMs is how long the loop has been in its current state (worker_health.uptime_ms). */
+  heartbeat: { updatedAt: Date; connected: boolean; uptimeMs: number | null } | null;
+  /** Newest quoted_at among today's day quotes, or null when none were saved. */
+  latestQuoteAt: Date | null;
 }
 
 /** Pure: the problem to report, or null when the loop is fine or not expected to run right now. */
@@ -31,21 +36,31 @@ export function evaluateDaySignalsLiveness(input: DaySignalsLivenessInput): stri
   const ageMs = input.now.getTime() - input.heartbeat.updatedAt.getTime();
   if (ageMs > daySignalsHeartbeatStaleAfterMs) return `Day Signals loop heartbeat is ${Math.round(ageMs / 60_000)} min old — the loop is not running.`;
   if (!input.heartbeat.connected) return "Day Signals loop is idle although the market is open and today's pool is seeded — check its reason on System Health.";
+  // The heartbeat runs on its own timer, so a hung cycle or a failing quote write still beats as "running": judge the quotes themselves.
+  const runningLongEnough = input.heartbeat.uptimeMs !== null && input.heartbeat.uptimeMs > daySignalsQuotesStaleAfterMs;
+  if (runningLongEnough) {
+    if (input.latestQuoteAt === null) return `Day Signals loop has been running for ${Math.round(input.heartbeat.uptimeMs! / 60_000)} min but has saved no quote today.`;
+    const quoteAgeMs = input.now.getTime() - input.latestQuoteAt.getTime();
+    if (quoteAgeMs > daySignalsQuotesStaleAfterMs) return `Day Signals loop is running but its newest saved quote is ${Math.round(quoteAgeMs / 60_000)} min old (a cycle takes about 6): the cycle is hung or quotes are not being written.`;
+  }
   return null;
 }
 
 /** Runs the check against the real tables and sends/clears the throttled alert. Returns the problem text, if any. */
 export async function reportDaySignalsLoopLiveness(now: Date = new Date()): Promise<string | null> {
-  const [session, pool, heartbeatRow] = await Promise.all([
+  const todayIso = easternDateIso(now);
+  const [session, pool, heartbeatRow, quoteRow] = await Promise.all([
     computeMarketSessionStatus(now),
-    loadDaySignalExpiries(easternDateIso(now)),
-    db("worker_health").where({ process_name: "day_signals_loop" }).first("updated_at", "connected"),
+    loadDaySignalExpiries(todayIso),
+    db("worker_health").where({ process_name: "day_signals_loop" }).first("updated_at", "connected", "uptime_ms"),
+    db("day_signal_quotes").whereRaw("trading_date::text = ?", [todayIso]).max<{ latest: Date | null }[]>("quoted_at as latest").first(),
   ]);
   const problem = evaluateDaySignalsLiveness({
     now,
     marketOpen: session.state === "open",
     poolSeededToday: pool.length > 0,
-    heartbeat: heartbeatRow ? { updatedAt: new Date(heartbeatRow.updated_at), connected: Boolean(heartbeatRow.connected) } : null,
+    heartbeat: heartbeatRow ? { updatedAt: new Date(heartbeatRow.updated_at), connected: Boolean(heartbeatRow.connected), uptimeMs: heartbeatRow.uptime_ms === null || heartbeatRow.uptime_ms === undefined ? null : Number(heartbeatRow.uptime_ms) } : null,
+    latestQuoteAt: quoteRow?.latest ? new Date(quoteRow.latest) : null,
   });
   if (problem) {
     await notifyDownThrottled(daySignalsDownAlertKey, `⚠️ ${problem}`, daySignalsDownReminderIntervalMs);

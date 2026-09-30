@@ -8,8 +8,11 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/sync-market-calendar.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { requireEnvironmentVariable } from "../src/config/env.js";
+import { parseMarketStatus } from "../src/lib/marketStatusParsing.js";
 import { runJob } from "../src/lib/runJob.js";
 
 const TRAILING_DAYS = 30;
@@ -49,31 +52,19 @@ async function main(): Promise<void> {
     const data = (await response.json()) as MarketStatusResponse;
     if (data.s !== "ok") throw new Error(`MarketData.app returned status "${data.s}": ${data.errmsg ?? "no error message"}`);
 
-    const dates = data.date ?? [];
-    const statuses = data.status ?? [];
-    if (dates.length === 0) throw new Error("MarketData.app returned no dates for the requested range");
+    const { knownDays, unknownDates } = parseMarketStatus(data.date ?? [], data.status ?? [], toDateString(now));
 
-    let written = 0;
-    for (let i = 0; i < dates.length; i++) {
-      const dateValue = dates[i];
-      if (dateValue === undefined) continue;
-      const calendarDate = toDateString(new Date(dateValue * 1000));
-      const isOpen = statuses[i] === "open";
-      await db("market_calendar")
-        .insert({ calendar_date: calendarDate, is_open: isOpen })
-        .onConflict("calendar_date")
-        .merge(["is_open"]);
-      written++;
+    for (const day of knownDays) {
+      await db("market_calendar").insert({ calendar_date: day.calendarDate, is_open: day.isOpen }).onConflict("calendar_date").merge(["is_open"]);
     }
+    // No published status yet (a year or more out): drop any row an older sync stored as "closed"
+    // so isMarketClosedToday falls back to the weekday check instead of skipping a real trading day.
+    if (unknownDates.length > 0) await db("market_calendar").whereIn("calendar_date", unknownDates).del();
+    const written = knownDays.length;
 
     console.log(`market_calendar synced: ${written} day(s) from ${from} to ${to}.`);
-    return { details: { daysWritten: written, from, to } };
+    return { details: { daysWritten: written, unknownDays: unknownDates.length, from, to } };
   });
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("sync-market-calendar", main, () => db.destroy());

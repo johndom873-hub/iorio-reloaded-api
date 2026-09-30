@@ -106,7 +106,7 @@ const telegramNotifyTimeoutMs = 5_000;
 
 /** Never lets a hung Telegram call block startup/shutdown paths that must proceed regardless. */
 function notifyTelegramWithTimeout(message: string): Promise<void> {
-  return Promise.race([notifyTelegram(message), new Promise<void>((resolve) => setTimeout(resolve, telegramNotifyTimeoutMs))]);
+  return Promise.race([notifyTelegram(message).then(() => undefined), new Promise<void>((resolve) => setTimeout(resolve, telegramNotifyTimeoutMs))]);
 }
 
 function gcd(a: number, b: number): number {

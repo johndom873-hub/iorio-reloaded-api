@@ -20,10 +20,12 @@ import {
   computeSnapshotCoverage,
   deriveMarketDataType,
   deriveSnapshotStatus,
+  describeSnapshotQualityProblems,
   isTickerStarved,
   optionChainCaptureBatchSize,
   recapturePassMaximumDurationMs,
   shouldRecaptureStarvedTicker,
+  type OptionChainMarketDataType,
   type SnapshotCoverage,
 } from "../lib/optionChainCaptureCoverage.js";
 import { saveOptionChainSnapshot } from "../lib/optionChainSnapshotStore.js";
@@ -92,6 +94,23 @@ export interface OptionChainCaptureResult {
   tickersFailed: number;
   failedSymbols: string[];
   recapturedSymbols: string[];
+  /** True when no risk-free rate was available, so every snapshot was saved without one and no surface can be fitted from them. */
+  riskFreeRateUnavailable: boolean;
+  /** Tickers whose spot came from a stored price, not a live one: the strike window and the stored underlying price are stale. */
+  fallbackSpotSymbols: string[];
+  /** One entry per captured snapshot that is weak (partial, thin quotes or IV, not real-time), e.g. "AAA: two-sided quotes 60% (min 75%)". */
+  qualityProblems: string[];
+}
+
+/** One line for the job alert when the capture ran but part of its work is unusable, or undefined when it is clean. */
+export function buildCaptureFailureMessage(result: OptionChainCaptureResult): string | undefined {
+  const problems: string[] = [];
+  if (result.tickersAttempted === 0) problems.push("no tickers to capture (shortlist and open positions are both empty)");
+  if (result.tickersFailed > 0) problems.push(`${result.tickersFailed} of ${result.tickersAttempted} tickers not captured: ${result.failedSymbols.join(", ")}`);
+  if (result.riskFreeRateUnavailable) problems.push("risk-free rate unavailable (FRED fetch failed and none is stored), so the snapshots were saved without it and no surface can be fitted");
+  if (result.fallbackSpotSymbols.length > 0) problems.push(`spot price came from a stored fallback, not live: ${result.fallbackSpotSymbols.join(", ")}`);
+  if (result.qualityProblems.length > 0) problems.push(`weak snapshots: ${result.qualityProblems.join(", ")}`);
+  return problems.length > 0 ? problems.join("; ") : undefined;
 }
 
 export interface UniverseTicker {
@@ -308,7 +327,7 @@ export interface OptionChainCaptureDependencies {
   getRiskFreeRate: () => Promise<number | null>;
   connect: () => Promise<{ ib: IbkrApi; disconnect: () => void }>;
   /** Every ticker's spot in ONE priority snapshot before the window starts, instead of one unbudgeted snapshot per ticker in the loop. */
-  fetchSpotPrices: (symbols: string[]) => Promise<Record<string, number | null>>;
+  fetchSpotPrices: (symbols: string[], onFallbackPriceUsed?: (symbols: string[]) => void) => Promise<Record<string, number | null>>;
   prepareTicker: (ib: IbkrApi, ticker: UniverseTicker, todayIso: string, spotPrice: number | null) => Promise<PreparedTicker>;
   /** The rolling quote window shared by every ticker of the run — see openCaptureQuoteWindow. */
   openQuoteWindow: (ib: IbkrApi) => CaptureQuoteWindow;
@@ -328,7 +347,7 @@ const defaultCaptureDependencies: OptionChainCaptureDependencies = {
   loadUniverse: loadCaptureUniverse,
   getRiskFreeRate,
   connect: connectToIbkrGateway,
-  fetchSpotPrices: async (symbols) => fetchLivePrices(symbols.map((symbol) => ({ key: symbol, legType: "stock", symbol })), { priorityLines: true }),
+  fetchSpotPrices: async (symbols, onFallbackPriceUsed) => fetchLivePrices(symbols.map((symbol) => ({ key: symbol, legType: "stock", symbol })), { priorityLines: true, onFallbackPriceUsed }),
   prepareTicker: (ib, ticker, todayIso, spotPrice) => prepareTicker(ib, ticker, todayIso, { ...ticksOnlyPrepareDependencies, fetchSpotPrice: async () => spotPrice }),
   openQuoteWindow: (ib) => openCaptureQuoteWindow(ib, { concurrency: optionChainCaptureBatchSize }),
   saveSnapshot: saveCapturedSnapshot,
@@ -350,9 +369,11 @@ export async function runOptionChainCapture(
   const universe = await dependencies.loadUniverse();
   const riskFreeRate = await dependencies.getRiskFreeRate();
   const riskFreeRatePercent = riskFreeRate === null ? null : riskFreeRate * 100;
-  const result: OptionChainCaptureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [] };
+  const result: OptionChainCaptureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: riskFreeRate === null, fallbackSpotSymbols: [], qualityProblems: [] };
   const starved: { prepared: PreparedTicker; coverage: SnapshotCoverage }[] = [];
   const finalStatusBySymbol = new Map<string, string>();
+  // Latest saved coverage and data type per ticker (a re-capture overwrites the first pass).
+  const snapshotQualityBySymbol = new Map<string, { coverage: SnapshotCoverage; marketDataType: OptionChainMarketDataType }>();
 
   const reservation = await dependencies.lineReservation.reserve(captureLineReservationHolder, optionChainCaptureBatchSize, captureLineReservationTtlSeconds);
   if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, "the chain capture", optionChainCaptureBatchSize));
@@ -394,13 +415,15 @@ export async function runOptionChainCapture(
     const captureAndSave = async (prepared: PreparedTicker): Promise<SnapshotCoverage> => {
       const startedAt = dependencies.now().getTime();
       const quotes = await quoteWindow.capture(prepared.ticker.symbol, prepared.contracts);
-      return dependencies.saveSnapshot(prepared, quotes, todayIso, riskFreeRatePercent, dependencies.now().getTime() - startedAt);
+      const coverage = await dependencies.saveSnapshot(prepared, quotes, todayIso, riskFreeRatePercent, dependencies.now().getTime() - startedAt);
+      snapshotQualityBySymbol.set(prepared.ticker.symbol, { coverage, marketDataType: deriveMarketDataType(quotes) });
+      return coverage;
     };
 
     // Preparation runs ahead: each ticker's contracts are queued on the shared
     // window as soon as they are known, and its snapshot is saved (in the
     // background) once its last contract settles. Failures stay per ticker.
-    const spotBySymbol = universe.length > 0 ? await dependencies.fetchSpotPrices(universe.map((ticker) => ticker.symbol)) : {};
+    const spotBySymbol = universe.length > 0 ? await dependencies.fetchSpotPrices(universe.map((ticker) => ticker.symbol), (symbols) => result.fallbackSpotSymbols.push(...symbols)) : {};
     const captures: Promise<void>[] = [];
     for (const ticker of universe) {
       if (connectionLost) break;
@@ -467,6 +490,11 @@ export async function runOptionChainCapture(
       result.tickersFailed++;
       result.failedSymbols.push(symbol);
     }
+  }
+  for (const [symbol, quality] of snapshotQualityBySymbol) {
+    if (finalStatusBySymbol.get(symbol) === "failed") continue;
+    const problems = describeSnapshotQualityProblems(quality.coverage, quality.marketDataType);
+    if (problems.length > 0) result.qualityProblems.push(`${symbol}: ${problems.join(", ")}`);
   }
   return result;
 }

@@ -44,6 +44,21 @@ describe("runOptionChainStructureRefresh", () => {
     expect(refreshStoredOptionChain).toHaveBeenCalledWith(fakeIb, { tickerId: "id-BBB", symbol: "BBB", contractId: 43 }, "2026-09-23", { maxAgeDays: structureGridMaxAgeDays, spotPrice: null });
   });
 
+  it("counts a ticker with no expirations, or expirations without any strikes, as failed instead of complete", async () => {
+    const dependencies = runDependencies({
+      loadUniverse: async () => [ticker("AAA"), ticker("NOEXP"), ticker("NOSTRIKES")],
+      refreshStoredOptionChain: async (_ib, universeTicker) => {
+        if (universeTicker.symbol === "NOEXP") return refreshResult([]);
+        if (universeTicker.symbol === "NOSTRIKES") return refreshResult([{ expiry: "20261016", strikeCount: 0 }]);
+        return refreshResult([{ expiry: "20261016", strikeCount: 5 }]);
+      },
+    });
+    const events: OptionChainStructureEvent[] = [];
+    const result = await runOptionChainStructureRefresh((event) => events.push(event), dependencies);
+    expect(result).toMatchObject({ tickersComplete: 1, tickersFailed: 2, failedSymbols: ["NOEXP", "NOSTRIKES"] });
+    expect(events.filter((event) => event.type === "tickerError").map((event) => (event as { message: string }).message)).toEqual(["IBKR returned no option expirations", "IBKR returned no strikes for any expiry"]);
+  });
+
   it("counts looked-up and reused grids", async () => {
     const dependencies = runDependencies({
       refreshStoredOptionChain: async () =>

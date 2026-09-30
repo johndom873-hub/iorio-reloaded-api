@@ -73,6 +73,10 @@ export async function runOptionChainStructureRefresh(
           spotPrice: spotBySymbol.get(ticker.symbol) ?? null,
         });
         const strikeCount = [...chain.strikesByExpiry.values()].reduce((sum, strikes) => sum + strikes.length, 0);
+        // An empty structure is stored as valid by the fetch (IBKR error 200 becomes zero strikes), so a
+        // ticker with nothing to capture would count as complete here and only fail a stage later in the capture.
+        if (chain.expirations.length === 0) throw new Error("IBKR returned no option expirations");
+        if (strikeCount === 0) throw new Error("IBKR returned no strikes for any expiry");
         const reused = chain.timings.expiries.filter((expiry) => expiry.reused).length;
         result.gridsReused += reused;
         result.gridLookups += chain.timings.expiries.length - reused;

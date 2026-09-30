@@ -11,6 +11,8 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-watchdog-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runWatchdogCheck } from "../src/lib/runWatchdogCheck.js";
@@ -25,9 +27,4 @@ async function main(): Promise<void> {
   await runWatchdogCheck();
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("run-watchdog-job", main, () => db.destroy());

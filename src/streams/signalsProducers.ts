@@ -1,6 +1,7 @@
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamPooledPrices } from "../ibkr/pricePool.js";
 import { streamSignalsOptionQuotes } from "../ibkr/streamSignalsOptionQuotes.js";
+import { reportBackgroundFailure } from "../lib/backgroundFailureAlert.js";
 import { onDayQuotesUpdated } from "../lib/daySignalsEvents.js";
 import { daySignalsLoopStatus, type DaySignalsLoopStatus } from "../lib/daySignalsLoop.js";
 import { loadDayQuotesStatus, type DayQuotesStatus } from "../lib/daySignalsStore.js";
@@ -16,6 +17,17 @@ import type { AccountContext, SignalsPriceSource, SignalsScreenRow, TickerSignal
 import { computeUncompensatedSharesInWorker } from "../lib/uncompensatedShareWorkerPool.js";
 import type { StreamProducer } from "./streamProducers.js";
 import { StreamRequestError } from "./streamProtocol.js";
+
+/**
+ * A failure inside a Signals stream (per viewer, so it can repeat every frame): still logged, and one
+ * rate-limited Telegram alert per category per hour (backgroundFailureAlert.ts). Rows/quotes stay on
+ * the snapshot values meanwhile, which is exactly what makes the failure invisible on screen.
+ */
+function reportStreamFailure(category: string, description: string, error: unknown): void {
+  console.error(description, error);
+  reportBackgroundFailure(`signals:${category}`, `Signals live data failing (${category}): ${description}: ${error instanceof Error ? error.message : error}. Rows and quotes stay on their snapshot values until it recovers; this alert repeats at most hourly.`);
+}
+
 
 // Signals live layer (stage 2, decisions with Marcelo 2026-09-22; Day Signals
 // 2026-09-24). Two snapshot streams: `signalsScreen` (every shortlist ticker,
@@ -225,7 +237,7 @@ function startPeriodicRefresh(intervalMs: number, refresh: () => Promise<void>, 
     if (inFlight || signal.aborted) return;
     inFlight = true;
     refresh()
-      .catch((error) => console.error(`${label} refresh failed:`, error))
+      .catch((error) => reportStreamFailure("refresh", `${label} refresh failed`, error))
       .finally(() => {
         inFlight = false;
       });
@@ -323,7 +335,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
             },
             abort.signal,
           )
-          .catch((error) => console.error(`signalsScreen ${state.ticker.symbol}: best-contract live quote failed`, error));
+          .catch((error) => reportStreamFailure("best-contract-quote", `signalsScreen ${state.ticker.symbol}: best-contract live quote failed`, error));
       };
       for (const state of states.values()) syncBestLine(state);
 
@@ -349,7 +361,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
             syncBestLine(state);
             await refreshDayQuotesStatus();
           })
-          .catch((error) => console.error(`signalsScreen ${state.ticker.symbol}: day quotes reload failed`, error));
+          .catch((error) => reportStreamFailure("day-quotes-reload", `signalsScreen ${state.ticker.symbol}: day quotes reload failed`, error));
       });
       signal.addEventListener("abort", unsubscribeDayQuotes, { once: true });
 
@@ -397,7 +409,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
           signal,
         );
       } catch (error) {
-        console.error("signalsScreen: live prices failed, rows stay at snapshot prices", error);
+        reportStreamFailure("live-prices", "signalsScreen: live prices failed, rows stay at snapshot prices", error);
       }
       await waitForAbort(signal);
     },
@@ -451,7 +463,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
           rescore();
           frames.markDirty();
         } catch (error) {
-          console.error(`signalsTicker ${symbol}: UncompensatedShare simulation failed`, error);
+          reportStreamFailure("uncompensated-share", `signalsTicker ${symbol}: UncompensatedShare simulation failed`, error);
         } finally {
           simulationInFlight = false;
         }
@@ -480,7 +492,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
             rescore();
             frames.markDirty();
           })
-          .catch((error) => console.error(`signalsTicker ${symbol}: day quotes reload failed`, error));
+          .catch((error) => reportStreamFailure("day-quotes-reload", `signalsTicker ${symbol}: day quotes reload failed`, error));
       });
       signal.addEventListener("abort", unsubscribeDayQuotes, { once: true });
 
@@ -514,7 +526,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
           },
           signal,
         )
-        .catch((error) => console.error(`signalsTicker ${symbol}: live price failed, staying at the snapshot price`, error));
+        .catch((error) => reportStreamFailure("live-price", `signalsTicker ${symbol}: live price failed, staying at the snapshot price`, error));
 
       await pricesTask;
       await waitForAbort(signal);
@@ -596,7 +608,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
           pinnedUncompensatedByContract = results;
           frames.markDirty();
         } catch (error) {
-          console.error(`signalsQuotes ${symbol}: UncompensatedShare simulation failed`, error);
+          reportStreamFailure("uncompensated-share", `signalsQuotes ${symbol}: UncompensatedShare simulation failed`, error);
           // No result for these candidates: record empty ones so the next frame does not retry in a loop.
           pinnedUncompensatedByContract = new Map(latestPinnedCandidates.map((candidate) => [candidateContractKey(candidate), null]));
         } finally {
@@ -623,7 +635,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
           },
           signal,
         )
-        .catch((error) => console.error(`signalsQuotes ${symbol}: live price failed`, error));
+        .catch((error) => reportStreamFailure("live-price", `signalsQuotes ${symbol}: live price failed`, error));
       const quotesTask =
         contractKeys.length === 0
           ? Promise.resolve()
@@ -637,7 +649,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
                 },
                 signal,
               )
-              .catch((error) => console.error(`signalsQuotes ${symbol}: live option quotes failed`, error));
+              .catch((error) => reportStreamFailure("live-option-quotes", `signalsQuotes ${symbol}: live option quotes failed`, error));
       await Promise.all([pricesTask, quotesTask]);
       await waitForAbort(signal);
     },

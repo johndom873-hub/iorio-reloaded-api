@@ -15,6 +15,8 @@
 // Usage (dev):  npm run job:option-chain-structure
 // Usage (prod): node dist/scripts/run-option-chain-structure-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { runOptionChainStructureRefresh } from "../src/ibkr/runOptionChainStructureRefresh.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
@@ -48,18 +50,16 @@ async function main(): Promise<void> {
       const incomplete = [...result.failedSymbols, ...result.skippedSymbols];
       return {
         details: { ...result },
-        failureMessage: incomplete.length > 0 ? `${incomplete.length} of ${result.tickersAttempted} tickers have no structure today, so the capture skips them: ${incomplete.join(", ")}` : undefined,
+        failureMessage:
+          result.tickersAttempted === 0
+            ? "no tickers to refresh (shortlist and open positions are both empty)"
+            : incomplete.length > 0
+              ? `${incomplete.length} of ${result.tickersAttempted} tickers have no structure today, so the capture skips them: ${incomplete.join(", ")}`
+              : undefined,
       };
     },
     { triggeredBy: "scheduler" },
   );
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await db.destroy();
-  });
+runScript("run-option-chain-structure-job", main, () => db.destroy());

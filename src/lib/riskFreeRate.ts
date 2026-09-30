@@ -17,7 +17,11 @@ import { requireEnvironmentVariable } from "../config/env.js";
 
 const fredSeriesId = "TB3MS";
 const freshnessWindowMs = 20 * 24 * 60 * 60 * 1000;
-const fredRequestTimeoutMs = 8_000;
+// 3 attempts of 10 s with 2 s / 4 s pauses (approved 2026-09-30): the first prod capture lost its
+// only 8 s attempt to a timeout and saved every snapshot without a rate.
+const fredRequestTimeoutMs = 10_000;
+const fredAttempts = 3;
+const fredRetryBackoffMs = [2_000, 4_000];
 
 let inFlightRefresh: Promise<number | null> | null = null;
 
@@ -25,6 +29,20 @@ async function readStoredRate(): Promise<{ ratePercent: number; fetchedAt: Date 
   const row = await db("risk_free_rates").where({ series_id: fredSeriesId }).first();
   if (!row) return null;
   return { ratePercent: Number(row.rate_percent), fetchedAt: new Date(row.fetched_at) };
+}
+
+/** Runs `operation` up to `attempts` times, pausing backoffMs[i] after failed attempt i; throws the last error. */
+export async function runWithRetries<T>(operation: () => Promise<T>, attempts: number, backoffMs: number[], sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await sleep(backoffMs[attempt - 1] ?? backoffMs[backoffMs.length - 1] ?? 0);
+    }
+  }
+  throw lastError;
 }
 
 async function fetchAndStoreFromFred(): Promise<number> {
@@ -36,9 +54,15 @@ async function fetchAndStoreFromFred(): Promise<number> {
   url.searchParams.set("api_key", apiKey);
   url.searchParams.set("file_type", "json");
 
-  const response = await fetch(url, { signal: AbortSignal.timeout(fredRequestTimeoutMs) });
-  if (!response.ok) throw new Error(`FRED responded ${response.status}`);
-  const body = (await response.json()) as { observations?: { date: string; value: string }[] };
+  const body = await runWithRetries(
+    async () => {
+      const response = await fetch(url, { signal: AbortSignal.timeout(fredRequestTimeoutMs) });
+      if (!response.ok) throw new Error(`FRED responded ${response.status}`);
+      return (await response.json()) as { observations?: { date: string; value: string }[] };
+    },
+    fredAttempts,
+    fredRetryBackoffMs,
+  );
   const latestObservation = body.observations?.[0];
   if (!latestObservation) throw new Error("FRED returned no observations");
   const ratePercent = parseFloat(latestObservation.value);
@@ -64,7 +88,7 @@ export async function getRiskFreeRate(): Promise<number | null> {
   // Concurrent callers (several streams opening at once) share one FRED call.
   inFlightRefresh ??= fetchAndStoreFromFred()
     .catch((error) => {
-      console.warn(`riskFreeRate: FRED refresh failed — ${error instanceof Error ? error.message : error}`);
+      console.warn(`riskFreeRate: FRED refresh failed after ${fredAttempts} attempts — ${error instanceof Error ? error.message : error}`);
       return stored ? stored.ratePercent : null;
     })
     .finally(() => {

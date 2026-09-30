@@ -77,3 +77,26 @@ export function deriveMarketDataType(quotes: CoverageQuoteInput[]): OptionChainM
 export function shouldRecaptureStarvedTicker(coverage: SnapshotCoverage, jobElapsedMs: number): boolean {
   return isTickerStarved(coverage) && jobElapsedMs < recaptureMaximumElapsedMs;
 }
+
+/**
+ * Floors for a usable snapshot, shared by the capture's failure report and the morning data checks
+ * (dataInvariants.ts). Approved 2026-09-30, set below the worst complete real-time snapshot seen in
+ * staging (two-sided 86.7%, implied volatility 84.8%).
+ */
+export const twoSidedQuoteMinPercent = 75;
+export const impliedVolatilityMinPercent = 70;
+
+const coveragePercent = (part: number, whole: number): number => (whole > 0 ? (100 * part) / whole : 0);
+
+/** Everything wrong with one captured snapshot that the status alone does not say; empty when it is healthy. */
+export function describeSnapshotQualityProblems(coverage: SnapshotCoverage, marketDataType: OptionChainMarketDataType): string[] {
+  const problems: string[] = [];
+  const status = deriveSnapshotStatus(coverage);
+  if (status === "partial") problems.push(`partial (${Math.round(coveragePercent(coverage.contractsWithAnyTick, coverage.contractsRequested))}% of contracts got a tick)`);
+  const twoSided = coveragePercent(coverage.contractsWithTwoSidedQuote, coverage.contractsRequested);
+  if (status !== "failed" && twoSided < twoSidedQuoteMinPercent) problems.push(`two-sided quotes ${Math.round(twoSided)}% (min ${twoSidedQuoteMinPercent}%)`);
+  const impliedVolatility = coveragePercent(coverage.contractsWithImpliedVolatility, coverage.contractsRequested);
+  if (status !== "failed" && impliedVolatility < impliedVolatilityMinPercent) problems.push(`implied volatility ${Math.round(impliedVolatility)}% (min ${impliedVolatilityMinPercent}%)`);
+  if (status !== "failed" && marketDataType !== "real_time") problems.push(`market data type ${marketDataType}`);
+  return problems;
+}

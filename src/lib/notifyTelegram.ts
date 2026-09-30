@@ -40,22 +40,9 @@ function truncateForTelegram(message: string): string {
   return `${message.slice(0, maxLength)}${TELEGRAM_TRUNCATED_SUFFIX}`;
 }
 
-export async function notifyTelegram(message: string): Promise<void> {
-  // Local .env sets this so dev crashes/jobs never page the ops channel.
-  // Unset in Heroku and on the VPS worker, so those keep alerting. Only the
-  // exact value "true" (any case) disables — a typo must not silence prod.
-  if (process.env.TELEGRAM_NOTIFICATIONS_DISABLED?.trim().toLowerCase() === "true") {
-    console.log("TELEGRAM_NOTIFICATIONS_DISABLED is set — skipping Telegram notification:", message);
-    return;
-  }
+const telegramRetryDelayMs = 2_000;
 
-  const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
-  const telegramChatId = process.env.TELEGRAM_CHAT_ID;
-  if (!telegramBotToken || !telegramChatId) {
-    console.warn("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — skipping Telegram notification:", message);
-    return;
-  }
-
+async function sendTelegramMessageOnce(telegramBotToken: string, telegramChatId: string, message: string): Promise<boolean> {
   try {
     const response = await fetch(`https://api.telegram.org/bot${telegramBotToken}/sendMessage`, {
       method: "POST",
@@ -66,11 +53,39 @@ export async function notifyTelegram(message: string): Promise<void> {
         parse_mode: "HTML",
         disable_web_page_preview: true,
       }),
+      signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) {
-      console.error(`Telegram notification failed (${response.status}): ${await response.text()}`);
-    }
+    if (response.ok) return true;
+    console.error(`Telegram notification failed (${response.status}): ${await response.text()}`);
   } catch (error) {
     console.error("Telegram notification failed:", error instanceof Error ? error.message : error);
   }
+  return false;
+}
+
+/**
+ * Returns whether the message was delivered: true when sent, or when notifications are
+ * disabled on purpose (local dev); false when Telegram is not configured or the send failed
+ * twice (one retry). Callers that must not lose an alert record the false case
+ * (undeliveredAlerts.ts); most callers ignore the result.
+ */
+export async function notifyTelegram(message: string): Promise<boolean> {
+  // Local .env sets this so dev crashes/jobs never page the ops channel.
+  // Unset in Heroku and on the VPS worker, so those keep alerting. Only the
+  // exact value "true" (any case) disables — a typo must not silence prod.
+  if (process.env.TELEGRAM_NOTIFICATIONS_DISABLED?.trim().toLowerCase() === "true") {
+    console.log("TELEGRAM_NOTIFICATIONS_DISABLED is set — skipping Telegram notification:", message);
+    return true;
+  }
+
+  const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+  const telegramChatId = process.env.TELEGRAM_CHAT_ID;
+  if (!telegramBotToken || !telegramChatId) {
+    console.warn("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — skipping Telegram notification:", message);
+    return false;
+  }
+
+  if (await sendTelegramMessageOnce(telegramBotToken, telegramChatId, message)) return true;
+  await new Promise((resolve) => setTimeout(resolve, telegramRetryDelayMs));
+  return sendTelegramMessageOnce(telegramBotToken, telegramChatId, message);
 }

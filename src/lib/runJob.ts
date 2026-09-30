@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { notifyTelegram } from "./notifyTelegram.js";
+import { notifyTelegramTracked } from "./undeliveredAlerts.js";
 import { formatDurationHuman } from "./formatDurationHuman.js";
 import { publishNotification } from "./notificationChannel.js";
 import { clearDownState, notifyDownThrottled } from "./throttledAlert.js";
@@ -44,6 +44,34 @@ export class JobAlreadyRunningError extends Error {
     super(`${jobName} is already running.`);
     this.name = "JobAlreadyRunningError";
   }
+}
+
+// Errors runJob has already reported to Telegram, so the script-level catch (runScript.ts)
+// does not send a second alert for the same failure.
+const alertedErrors = new WeakSet<object>();
+
+export function wasErrorAlerted(error: unknown): boolean {
+  return typeof error === "object" && error !== null && alertedErrors.has(error);
+}
+
+function markErrorAlerted(error: unknown): void {
+  if (typeof error === "object" && error !== null) alertedErrors.add(error);
+}
+
+// A scheduled run that never starts because the previous one still looks alive is a missed
+// run, so it alerts; a manual "Run Now" already shows the error to the person who clicked.
+async function alertScheduledRunSkipped(jobName: string, options: RunJobOptions): Promise<void> {
+  if ((options.triggeredBy ?? "scheduler") !== "scheduler") return;
+  const message = `⚠️ ${jobName} was skipped: its previous run is still marked "running", so this scheduled run did not start.`;
+  if (options.failureAlertReminderIntervalMs !== undefined) await notifyDownThrottled(`job_skipped:${jobName}`, message, options.failureAlertReminderIntervalMs);
+  else await notifyTelegramTracked(message);
+}
+
+async function throwJobAlreadyRunning(jobName: string, options: RunJobOptions): Promise<never> {
+  const error = new JobAlreadyRunningError(jobName);
+  await alertScheduledRunSkipped(jobName, options);
+  markErrorAlerted(error);
+  throw error;
 }
 
 /**
@@ -116,7 +144,7 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
   const alreadyRunning = await db("job_runs").where({ job_name: jobName, status: "running" }).first();
   if (alreadyRunning) {
     const ageMs = Date.now() - new Date(alreadyRunning.started_at).getTime();
-    if (ageMs < staleRunningJobThresholdMs) throw new JobAlreadyRunningError(jobName);
+    if (ageMs < staleRunningJobThresholdMs) return throwJobAlreadyRunning(jobName, options);
 
     // finished_at = started_at, not now(): the real end is unknown, and
     // stamping the moment of discovery made System Health show the gap as
@@ -128,6 +156,7 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
         finished_at: alreadyRunning.started_at,
         error_message: `Abandoned: still "running" after ${Math.round(ageMs / 1000)}s with no update -- likely a crashed process. Superseded by a new run.`,
       });
+    await notifyTelegramTracked(`⚠️ ${jobName} died mid-run: the run started ${new Date(alreadyRunning.started_at).toISOString()} never finished (process killed or out of memory). A new run is starting.`);
   }
 
   const startedAt = new Date();
@@ -148,7 +177,7 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
     // with another caller's insert, e.g. the scheduled run and a "Run Now"
     // click landing in the same second.
     if (error instanceof Error && "code" in error && (error as { code: string }).code === "23505") {
-      throw new JobAlreadyRunningError(jobName);
+      return throwJobAlreadyRunning(jobName, options);
     }
     throw error;
   }
@@ -163,14 +192,16 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
     result = await fn();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await db("job_runs").where({ id: run.id }).update({ status: "failure", finished_at: db.fn.now(), error_message: message });
+    // The alert below must go out even when the database is the thing that failed.
+    await db("job_runs").where({ id: run.id }).update({ status: "failure", finished_at: db.fn.now(), error_message: message }).catch((writeError) => console.error(`${jobName}: could not record the failure in job_runs — ${writeError instanceof Error ? writeError.message : writeError}`));
     await publishNotification({ type: "job_completed", jobName, status: "failure" }).catch(() => {});
     const failureAlert = `⚠️ ${jobName} failed: ${telegramFailureSummary(message)}`;
     if (options.failureAlertReminderIntervalMs !== undefined) {
       await notifyDownThrottled(`job_failure:${jobName}`, failureAlert, options.failureAlertReminderIntervalMs);
     } else {
-      await notifyTelegram(failureAlert);
+      await notifyTelegramTracked(failureAlert);
     }
+    markErrorAlerted(error);
     throw error;
   }
 
@@ -179,13 +210,21 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
     await publishNotification({ type: "job_completed", jobName, status: "failure" }).catch(() => {});
     const failureAlert = `⚠️ ${jobName} failed: ${telegramFailureSummary(result.failureMessage)}`;
     if (options.failureAlertReminderIntervalMs !== undefined) await notifyDownThrottled(`job_failure:${jobName}`, failureAlert, options.failureAlertReminderIntervalMs);
-    else await notifyTelegram(failureAlert);
+    else await notifyTelegramTracked(failureAlert);
+    if (result.notify) await notifyTelegramTracked(result.notify);
     return;
   }
 
-  await db("job_runs")
-    .where({ id: run.id })
-    .update({ status: "success", finished_at: db.fn.now(), details: result.details ?? null });
+  try {
+    await db("job_runs")
+      .where({ id: run.id })
+      .update({ status: "success", finished_at: db.fn.now(), details: result.details ?? null });
+  } catch (writeError) {
+    const writeMessage = writeError instanceof Error ? writeError.message : String(writeError);
+    await notifyTelegramTracked(`⚠️ ${jobName} finished but its result could not be recorded in job_runs (${writeMessage.split("\n")[0]}). The row stays "running".`);
+    markErrorAlerted(writeError);
+    throw writeError;
+  }
   await publishNotification({ type: "job_completed", jobName, status: "success" }).catch(() => {});
 
   if (options.failureAlertReminderIntervalMs !== undefined) await clearDownState(`job_failure:${jobName}`);
@@ -194,10 +233,10 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
   if (failureStreak) {
     const attempts = failureStreak.failureCount === 1 ? "1 failed attempt" : `${failureStreak.failureCount} failed attempts`;
     const downtime = formatDurationHuman(Date.now() - failureStreak.failingSince.getTime());
-    await notifyTelegram(`✅ ${jobName} recovered after ${attempts} (was down since ${failureStreak.failingSince.toISOString()}, ~${downtime}).`);
+    await notifyTelegramTracked(`✅ ${jobName} recovered after ${attempts} (was down since ${failureStreak.failingSince.toISOString()}, ~${downtime}).`);
   }
 
   if (result.notify) {
-    await notifyTelegram(result.notify);
+    await notifyTelegramTracked(result.notify);
   }
 }

@@ -278,7 +278,16 @@ async function findAndCorrect(database: Knex): Promise<Omit<ExpirySettlementResu
       });
       await database("position_legs").where({ id: leg.id }).update({ exit_price: 0 });
     }
-    if (leg.expiryClose === null) continue; // no bar for the expiry date (yet) — retried on the next run
+    if (leg.expiryClose === null) {
+      // No bar for the expiry date (yet): retried on the next run, but flagged so a bar that never arrives is not silent.
+      actions.push({
+        kind: "skipped",
+        symbol: leg.symbol,
+        positionId: leg.positionId,
+        description: `${leg.symbol} short ${leg.optionType} $${leg.strike} (expiry ${leg.expiryDate}): no daily bar for the expiry date, so assignment could not be checked`,
+      });
+      continue;
+    }
     const distanceInTheMoney = leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose;
     if (distanceInTheMoney <= 0) continue; // OTM: worthless is right
     if (distanceInTheMoney < marginalThreshold) {

@@ -1,14 +1,15 @@
+import "./lib/installWebCrashAlert.js";
 import { app } from "./app.js";
 import { environment, ibkrMarketDataLinesEnabled, requireEnvironmentVariable } from "./config/env.js";
 import { startStalePendingOrderSweep } from "./lib/stalePendingOrders.js";
 import { startGenosuke } from "./genosuke/bot.js";
 import { sharedLiveConnection, sharedReadConnection } from "./ibkr/sharedReadConnection.js";
-import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { installShutdownHandler } from "./lib/installShutdownHandler.js";
 import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
+import { startOpsMonitor } from "./lib/opsMonitor.js";
+import { notifyTelegramTracked } from "./lib/undeliveredAlerts.js";
 
-installCrashHandlers("web");
 installShutdownHandler("web");
 
 // Only the web dyno gets a $PORT from Heroku — read lazily here rather than
@@ -32,6 +33,9 @@ if (!marketDataLinesEnabled) console.log("IBKR market-data lines disabled in thi
 
 app.listen(port, () => {
   console.log(`Iorio Reloaded API listening on port ${port} (${environment.nodeEnvironment})`);
+  // A killed process (out of memory, a Heroku platform restart) can never send its own alert, so every
+  // start announces itself: an unexpected restart or a crash loop shows up as repeated messages.
+  void notifyTelegramTracked(`🟢 API web dyno started (commit ${process.env.HEROKU_SLUG_COMMIT?.slice(0, 7) ?? "unknown"}, ${process.env.APP_ENVIRONMENT ?? "unknown environment"}).`);
   startNotificationBroadcaster();
   startStalePendingOrderSweep();
   // Open the shared IBKR read and live connections now (2026-09-19) rather than on the
@@ -52,6 +56,7 @@ app.listen(port, () => {
   // self-authenticating API client (genosuke/apiClient.ts) has a live
   // server to call.
   startGenosuke();
+  startOpsMonitor();
   if (daySignalsLoopFlag === "true") startDaySignalsLoop();
   else console.log("Day Signals loop disabled (DAY_SIGNALS_LOOP_ENABLED=false).");
 });

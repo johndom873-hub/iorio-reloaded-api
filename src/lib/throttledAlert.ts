@@ -1,5 +1,6 @@
 import { db } from "../db/connection.js";
 import { notifyTelegram } from "./notifyTelegram.js";
+import { notifyTelegramTracked } from "./undeliveredAlerts.js";
 import { formatDurationHuman } from "./formatDurationHuman.js";
 
 // State-based alerting for things that can stay broken for hours (IBKR
@@ -50,4 +51,25 @@ export async function clearDownState(alertKey: string): Promise<number | null> {
   const cleared: { first_alerted_at: Date }[] = await db("alert_state").where({ alert_key: alertKey }).del().returning("first_alerted_at");
   if (cleared.length === 0) return null;
   return Date.now() - new Date(cleared[0]!.first_alerted_at).getTime();
+}
+
+/**
+ * Sends `message` unless this alertKey already alerted within the last intervalMs. For failures that
+ * can repeat every few seconds and have no clear "recovered" moment (per-viewer stream errors, a
+ * failing background write): a fresh failure after the interval alerts again. One atomic statement,
+ * so concurrent callers cannot both send. Returns whether anything was sent.
+ */
+export async function notifyRateLimited(alertKey: string, message: string, intervalMs: number): Promise<boolean> {
+  const cutoff = new Date(Date.now() - intervalMs);
+  const result = await db.raw(
+    `INSERT INTO alert_state (alert_key, first_alerted_at, last_alerted_at, last_message)
+     VALUES (?, now(), now(), ?)
+     ON CONFLICT (alert_key) DO UPDATE SET last_alerted_at = now(), last_message = EXCLUDED.last_message
+     WHERE alert_state.last_alerted_at <= ?
+     RETURNING alert_key`,
+    [alertKey, message, cutoff],
+  );
+  if (result.rows.length === 0) return false;
+  await notifyTelegramTracked(message);
+  return true;
 }

@@ -8,6 +8,8 @@ import { runJob } from "../lib/runJob.js";
 import { environment } from "../config/env.js";
 import { db } from "../db/connection.js";
 import { reportDaySignalsLoopLiveness } from "../lib/daySignalsLiveness.js";
+import { reportOpsMonitorLiveness } from "../lib/opsMonitorLiveness.js";
+import { reportWorkerHeartbeat } from "../lib/workerHeartbeatLiveness.js";
 import { probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
 import { blockedAfterReloginMessage, blockedRestartDeferredMessage, competingLiveSessionSurvivedRestart, reportCompetingLiveSession } from "../lib/competingLiveSessionAlert.js";
 
@@ -340,6 +342,12 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
     // job's per-run notify, which would repeat every 10 minutes while it is down.
     const daySignalsProblem = await reportDaySignalsLoopLiveness().catch((error) => `Day Signals liveness check itself failed: ${error instanceof Error ? error.message : error}`);
 
+    // The systemd unit can be "active" while the worker is hung; its own heartbeat says whether it is really working.
+    const workerHeartbeatProblem = await reportWorkerHeartbeat({ serviceActive: workerCheck.active, restartedJustNow: workerCheck.restarted }).catch((error) => `Worker heartbeat check itself failed: ${error instanceof Error ? error.message : error}`);
+
+    // Reverse of the ops monitor's watch over the Scheduler jobs: confirms the monitor is still beating.
+    const opsMonitorProblem = await reportOpsMonitorLiveness().catch((error) => `Ops monitor liveness check itself failed: ${error instanceof Error ? error.message : error}`);
+
     return {
       details: {
         output: gatewayOutput,
@@ -348,6 +356,8 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
         reconciliationProblems: problems,
         competingLiveSession,
         daySignalsProblem,
+        opsMonitorProblem,
+        workerHeartbeatProblem,
         farmStatusMessages,
       },
       notify: notifications.length > 0 ? notifications.join("\n\n") : undefined,

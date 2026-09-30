@@ -182,6 +182,64 @@ describe("DaySignalsLoop", () => {
     expect(harness.loop.getStatus()).toMatchObject({ state: "disabled", reason: "stopped" });
   });
 
+  describe("reports failures that were only logged before", () => {
+    const stopAfterFirstWindow = (harness: Harness) => {
+      const originalWindow = harness.deps.runQuoteWindow;
+      harness.deps.runQuoteWindow = async (contracts, options) => {
+        const result = await originalWindow(contracts, options);
+        harness.loop.stop();
+        return result;
+      };
+    };
+
+    it("alerts when a quote write fails, with the source and the error text", async () => {
+      const harness = createHarness();
+      const reports: { source: string; message: string }[] = [];
+      harness.deps.reportFailure = (source, message) => reports.push({ source, message });
+      harness.deps.upsertDayQuotes = async () => {
+        throw new Error("connection terminated");
+      };
+      stopAfterFirstWindow(harness);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      await harness.loop.start();
+      expect(reports.find((report) => report.source === "day-signals:quote-write")?.message).toContain("connection terminated");
+    });
+
+    it("alerts when a cycle throws, and announces recovery once a later cycle completes", async () => {
+      const harness = createHarness();
+      const reports: string[] = [];
+      const recoveries: string[] = [];
+      harness.deps.reportFailure = (source) => reports.push(source);
+      harness.deps.reportRecovery = (source) => {
+        recoveries.push(source);
+        harness.loop.stop();
+      };
+      let attempts = 0;
+      const originalLoadUniverse = harness.deps.loadUniverse;
+      harness.deps.loadUniverse = async (tradingDateIso) => {
+        if (++attempts === 1) throw new Error("database is down");
+        return originalLoadUniverse(tradingDateIso);
+      };
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      await harness.loop.start();
+      expect(reports).toContain("day-signals:cycle");
+      expect(recoveries).toContain("day-signals:cycle");
+    });
+
+    it("alerts when a re-score fails", async () => {
+      const harness = createHarness();
+      const reports: { source: string; message: string }[] = [];
+      harness.deps.reportFailure = (source, message) => reports.push({ source, message });
+      harness.deps.loadTickerSignalsInputs = async () => {
+        throw new Error("no snapshot");
+      };
+      stopAfterFirstWindow(harness);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      await harness.loop.start();
+      expect(reports.find((report) => report.source === "day-signals:rescore")?.message).toContain("AAA");
+    });
+  });
+
   it("stays idle until today's pool exists, and when the lines cannot be reserved", async () => {
     const noPool = createHarness();
     noPool.state.pool = false;

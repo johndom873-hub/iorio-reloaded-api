@@ -9,6 +9,8 @@ export interface SurfaceFitRunEvent {
   symbol: string;
   outcome: "fitted" | "skipped" | "error";
   detail: string;
+  /** Set when outcome is "skipped": the machine-readable skip reason (no_risk_free_rate, ...). */
+  skipReason?: string;
 }
 
 export interface SurfaceFitRunResult {
@@ -127,7 +129,7 @@ export async function fitAndStoreSurfacesForDate(tradingDate: string, onEvent: (
       });
       if (outcome.kind === "skipped") {
         result.tickersSkipped++;
-        onEvent({ symbol: header.symbol, outcome: "skipped", detail: describeOutcome(outcome) });
+        onEvent({ symbol: header.symbol, outcome: "skipped", detail: describeOutcome(outcome), skipReason: outcome.reason });
         continue;
       }
       await saveSurfaceFits(header.snapshotId, outcome.expiries);

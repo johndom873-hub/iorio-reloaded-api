@@ -15,15 +15,17 @@
 // Usage (dev):  npm run job:option-chain-capture [-- --force]
 // Usage (prod): node dist/scripts/run-option-chain-capture-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
-import { runOptionChainCapture } from "../src/ibkr/runOptionChainCapture.js";
+import { buildCaptureFailureMessage, runOptionChainCapture } from "../src/ibkr/runOptionChainCapture.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { isWithinChainCaptureClockWindow } from "../src/lib/optionChainCaptureClock.js";
 import { easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { runOptionSurfaceFitJob } from "../src/lib/runOptionSurfaceFitJob.js";
 import { runJob } from "../src/lib/runJob.js";
-import { seedDaySignals } from "../src/lib/daySignalsSeed.js";
+import { buildSeedFailureMessage, seedDaySignals } from "../src/lib/daySignalsSeed.js";
 
 // This job has no user waiting on latency, so it would rather queue behind
 // the shared connection's own reconnect (backoff caps at 60s, see
@@ -60,12 +62,9 @@ async function main(): Promise<void> {
           else console.log(`Re-capturing starved tickers: ${event.symbols.join(", ")}`);
         });
         console.log(`Chain capture: ${result.tickersComplete} complete, ${result.tickersPartial} partial, ${result.tickersFailed} failed of ${result.tickersAttempted}.`);
-        // A run where tickers failed is recorded as a failure (runJob alerts), not a "success" that
-        // hides it; the failed tickers also have failed snapshot rows.
-        return {
-          details: { ...result },
-          failureMessage: result.tickersFailed > 0 ? `${result.tickersFailed} of ${result.tickersAttempted} tickers not captured: ${result.failedSymbols.join(", ")}` : undefined,
-        };
+        // A run where tickers failed, or that saved every snapshot without a risk-free rate, is recorded
+        // as a failure (runJob alerts), not a "success" that hides it; failed tickers also have failed snapshot rows.
+        return { details: { ...result }, failureMessage: buildCaptureFailureMessage(result) };
       },
       { triggeredBy: "scheduler", staleRunningJobThresholdMs: optionChainCaptureStaleRunningThresholdMs },
     );
@@ -89,20 +88,15 @@ async function main(): Promise<void> {
     async () => {
       const seed = await seedDaySignals(tradingDateIso);
       console.log(`Day Signals seed: ${seed.tickersPooled}/${seed.tickersScored} tickers pooled, ${seed.expiriesPooled} expiries; no pool: ${seed.symbolsWithoutPool.join(", ") || "-"}; no snapshot today: ${seed.symbolsWithoutTodaySnapshot.join(", ") || "-"}.`);
-      return { details: { ...seed } };
+      return { details: { ...seed }, failureMessage: buildSeedFailureMessage(seed) };
     },
     { triggeredBy: "scheduler" },
   ).catch((error) => console.error(`day_signals_seed failed: ${error instanceof Error ? error.message : error}`));
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  // The capture reads spot prices through the lazy shared IBKR connection, which
-  // otherwise keeps this one-off process alive forever (see shutdown()).
-  .finally(async () => {
-    await sharedReadConnection.shutdown();
-    await db.destroy();
-  });
+// The capture reads spot prices through the lazy shared IBKR connection, which
+// otherwise keeps this one-off process alive forever (see shutdown()).
+runScript("run-option-chain-capture-job", main, async () => {
+  await sharedReadConnection.shutdown();
+  await db.destroy();
+});
