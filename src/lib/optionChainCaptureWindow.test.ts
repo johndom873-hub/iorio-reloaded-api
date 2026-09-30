@@ -55,6 +55,28 @@ describe("selectContractsToCapture", () => {
     ]);
   });
 
+  describe("both sides near the money (bothSidesWithinFractionOfSpot)", () => {
+    const window = computeStrikeWindow({ spotPrice: 100.4, atmImpliedVolatility: 0.5, daysToExpiry: 0 })!; // ≈ ±5.2%, wider than the 3% used below
+    const keys = (contracts: { strike: number; right: string }[]) => contracts.map((contract) => `${contract.strike}${contract.right}`);
+
+    it("adds the in-the-money side of every strike within the fraction of spot, and nothing else", () => {
+      const base = keys(selectContractsToCapture(strikes, 100.4, window));
+      const withBothSides = keys(selectContractsToCapture(strikes, 100.4, window, { bothSidesWithinFractionOfSpot: 0.03 })); // 97.39..103.41 → strikes 98..103
+      expect(withBothSides.filter((key) => !base.includes(key)).sort()).toEqual(["101P", "102P", "103P", "98C", "99C"]);
+      expect(base.every((key) => withBothSides.includes(key))).toBe(true);
+      for (const strike of [98, 99, 100, 101, 102, 103]) expect(withBothSides).toEqual(expect.arrayContaining([`${strike}C`, `${strike}P`]));
+      expect(withBothSides).not.toContain("97C"); // outside 3%: still OTM-side only
+      expect(withBothSides).not.toContain("104P");
+    });
+
+    it("is off unless asked for, stays sorted by strike then right, and never duplicates a contract", () => {
+      expect(selectContractsToCapture(strikes, 100.4, window)).toEqual(selectContractsToCapture(strikes, 100.4, window, {}));
+      const contracts = selectContractsToCapture([...strikes, ...strikes], 100.4, window, { bothSidesWithinFractionOfSpot: 0.03 });
+      expect(new Set(keys(contracts)).size).toBe(contracts.length);
+      expect(contracts).toEqual([...contracts].sort((a, b) => a.strike - b.strike || a.right.localeCompare(b.right)));
+    });
+  });
+
   it("does not capture in-the-money contracts (no calls below spot, no puts above spot) except the ATM pair", () => {
     const window = computeStrikeWindow({ spotPrice: 100.4, atmImpliedVolatility: 0.5, daysToExpiry: 0 })!;
     const contracts = selectContractsToCapture(strikes, 100.4, window);

@@ -9,6 +9,7 @@ import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "../lib/realizedVolatility.js";
 import {
   calendarDaysUntilExpiry,
+  captureBothSidesWithinFractionOfSpot,
   captureMaximumDaysToExpiry,
   captureMinimumDaysToExpiry,
   computeStrikeWindow,
@@ -247,7 +248,7 @@ export async function prepareTicker(ib: IbkrApi, ticker: UniverseTicker, todayIs
     const window = windowFor(spotPrice, reference.volatility, daysToExpiry);
     if (!window) continue;
     // Selected from the expiry's real grid, so every contract here exists.
-    for (const contract of selectContractsToCapture(chain.strikesByExpiry.get(expiry) ?? [], spotPrice, window)) contracts.push({ expiry, ...contract });
+    for (const contract of selectContractsToCapture(chain.strikesByExpiry.get(expiry) ?? [], spotPrice, window, { bothSidesWithinFractionOfSpot: captureBothSidesWithinFractionOfSpot })) contracts.push({ expiry, ...contract });
   }
   // Roll Signals (2026-09-24): an open short leg is scored as a contract to keep, so its exact
   // contract is always captured -- the window above is OTM-side only, which is precisely the

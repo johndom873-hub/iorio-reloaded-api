@@ -12,13 +12,19 @@
 //
 // Within the window each contract is captured on its out-of-the-money side
 // only — puts below spot, calls above spot — plus the put AND call at the
-// strike nearest spot (needed for the forward price and skew).
+// strike nearest spot (needed for the forward price and skew). The nightly
+// capture also takes both sides of every strike within
+// `captureBothSidesWithinFractionOfSpot` of spot, so the put-call parity forward
+// (impliedVolatilitySurface.ts) rests on several pairs instead of one.
 
 // Expiry range the nightly capture archives AND the range of per-expiry strike
 // grids it stores for every other reader (Ticker Detail chain, alert scan) —
 // approved 2026-09-21 (0-90 DTE) and confirmed 2026-09-23 as the stored range.
 export const captureMinimumDaysToExpiry = 0;
 export const captureMaximumDaysToExpiry = 90;
+
+/** The nightly capture stores both rights at every strike this close to spot, as a fraction of spot (approved 2026-10-01). */
+export const captureBothSidesWithinFractionOfSpot = 0.03;
 
 const standardDeviationsEitherSide = 2;
 const minimumHalfWidth = 0.05;
@@ -82,19 +88,34 @@ function nearestStrikeToSpot(strikes: number[], spotPrice: number): number | nul
   return nearest;
 }
 
+export interface SelectContractsOptions {
+  /** Also take both rights at every strike within this fraction of spot (|K / spot − 1|). Off by default: the Day Signals loop shares this rule and must not grow. */
+  bothSidesWithinFractionOfSpot?: number;
+}
+
 /**
  * The contracts to capture for one expiry: OTM puts and calls inside the
  * window, plus both rights at the strike nearest spot (even when that strike
- * sits just outside the window on a very coarse strike grid). Sorted by strike
- * then right, with no duplicates.
+ * sits just outside the window on a very coarse strike grid), plus, when
+ * asked, both rights at every strike close to spot. Sorted by strike then
+ * right, with no duplicates.
  */
-export function selectContractsToCapture(availableStrikes: number[], spotPrice: number, window: StrikeWindow): ContractToCapture[] {
+export function selectContractsToCapture(availableStrikes: number[], spotPrice: number, window: StrikeWindow, options: SelectContractsOptions = {}): ContractToCapture[] {
   const contractsByKey = new Map<string, ContractToCapture>();
   const add = (strike: number, right: CaptureOptionRight) => contractsByKey.set(`${strike}|${right}`, { strike, right });
 
   for (const strike of availableStrikes) {
     if (strike < spotPrice && strike >= window.lowerBound) add(strike, "P");
     if (strike > spotPrice && strike <= window.upperBound) add(strike, "C");
+  }
+
+  if (options.bothSidesWithinFractionOfSpot !== undefined) {
+    for (const strike of availableStrikes) {
+      if (Math.abs(strike / spotPrice - 1) <= options.bothSidesWithinFractionOfSpot) {
+        add(strike, "P");
+        add(strike, "C");
+      }
+    }
   }
 
   const atTheMoneyStrike = nearestStrikeToSpot(availableStrikes, spotPrice);

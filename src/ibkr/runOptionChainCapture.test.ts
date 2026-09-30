@@ -78,6 +78,19 @@ describe("prepareTicker", () => {
     expect(prepared.contracts.every((contract) => typeof contract.expiry === "string" && contract.expiry.length === 8)).toBe(true);
   });
 
+  it("stores both rights at every strike within 3% of spot (the put-call parity forward needs several pairs) and only the OTM side further out", async () => {
+    const prepared = await prepareTicker(fakeIb, ticker("AAA"), today, prepareDependencies({ refreshStoredOptionChain: async () => storedChain(["20261016"]) })); // spot 100, strikes 60..140
+    const keys = new Set(prepared.contracts.map((contract) => `${contract.strike}${contract.right}`));
+    for (const strike of [98, 99, 100, 101, 102]) {
+      expect(keys.has(`${strike}C`)).toBe(true);
+      expect(keys.has(`${strike}P`)).toBe(true);
+    }
+    expect(keys.has("95C")).toBe(false);
+    expect(keys.has("95P")).toBe(true);
+    expect(keys.has("105P")).toBe(false);
+    expect(keys.has("105C")).toBe(true);
+  });
+
   it("always captures every open short leg's exact contract, ITM or outside the window, once, and never a past expiry (Roll Signals)", async () => {
     const prepared = await prepareTicker(
       fakeIb,
