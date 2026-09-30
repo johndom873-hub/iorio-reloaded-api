@@ -107,6 +107,9 @@ async function main(): Promise<void> {
     let enriched = 0;
     let failed = 0;
     const failedSymbols: string[] = [];
+    // Symbols whose enrichment came back empty: their stored data must survive, but tonight's match result still counts.
+    const matchOnlyRows: { symbol: string; ibkr_contract_id: number | null; company_name: string | null; sector: string | null; primary_exchange: string | null; best_rank: number; matched_scan_codes: string[] }[] = [];
+    const unmatchedWithoutEnrichment: string[] = [];
 
     try {
       // Sequential, not Promise.all — matches the existing precedent
@@ -118,6 +121,12 @@ async function main(): Promise<void> {
         const candidates = await runScannerSubscription(connection, scanCode, nextReqId++, { numberOfRows: rowsPerScan, marketCapAboveUsd });
         scanCounts[ScanCode[scanCode] ?? String(scanCode)] = candidates.length;
         scanResults.push(candidates);
+      }
+
+      // Every scan empty means the scanner itself is broken (a bad filter, an IBKR error that resolves empty), not that
+      // nothing matched. Continuing would re-rank and clear every stored symbol as "unmatched": stop before any write.
+      if (scanCodes.length > 0 && Object.values(scanCounts).every((rowCount) => rowCount === 0)) {
+        throw new Error(`every screener scan returned zero rows (${Object.keys(scanCounts).join(", ")}), so the stored universe was left untouched`);
       }
 
       const matches = poolMatches(scanResults);
@@ -158,8 +167,17 @@ async function main(): Promise<void> {
 
           const quote = await enrichCandidate(connection, nextReqId++, symbol);
           // enrichCandidate resolves with every field null on a timeout: writing that would wipe the symbol's stored
-          // data and stamp last_refreshed_at, so it counts as a failure and the stored row is left alone.
-          if (isEmptyEnrichment(quote)) throw new Error("enrichment returned no data (timeout or IBKR error)");
+          // data and stamp last_refreshed_at, so it counts as a failed enrichment and only the match result is recorded.
+          if (isEmptyEnrichment(quote)) {
+            failed++;
+            failedSymbols.push(symbol);
+            console.warn(`${symbol}: enrichment returned no data (timeout or IBKR error), keeping its stored values.`);
+            // A symbol not yet in the table is NOT inserted from an empty enrichment: its identity lookup usually timed out too,
+            // and once a row exists the lookup never runs again, freezing null name/sector for good. It is retried tomorrow.
+            if (match && existing) matchOnlyRows.push({ symbol, ibkr_contract_id: identity.conId, company_name: identity.companyName, sector: identity.sector, primary_exchange: identity.primaryExchange, best_rank: match.bestRank, matched_scan_codes: [...match.scanCodes] });
+            else if (existing) unmatchedWithoutEnrichment.push(symbol);
+            continue;
+          }
 
           const enrichedRow: EnrichedRow = {
             symbol,
@@ -252,6 +270,17 @@ async function main(): Promise<void> {
             "matched_scan_codes",
             "last_refreshed_at",
           ]);
+      }
+
+      // Match result only (best_rank, matched_scan_codes, last_matched_at): enrichment columns and last_refreshed_at are untouched.
+      if (matchOnlyRows.length > 0) {
+        await db("screener_universe")
+          .insert(matchOnlyRows.map((row) => ({ ...row, last_matched_at: db.fn.now() })))
+          .onConflict("symbol")
+          .merge(["best_rank", "matched_scan_codes", "last_matched_at"]);
+      }
+      if (unmatchedWithoutEnrichment.length > 0) {
+        await db("screener_universe").whereIn("symbol", unmatchedWithoutEnrichment).update({ best_rank: unmatchedRankSentinel, matched_scan_codes: [] });
       }
 
       console.log(`Screener scan complete: ${enriched} enriched, ${failed} failed, ${matchedRows.length} matched, ${carriedOverRows.length} carried over.`);

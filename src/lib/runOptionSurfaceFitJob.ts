@@ -6,7 +6,9 @@ import { runJob } from "./runJob.js";
  * error text), or undefined when every ticker was fitted. Kept free of "): " because
  * telegramFailureSummary truncates the Telegram alert at the first one.
  */
-export function buildSurfaceFitFailureMessage(events: SurfaceFitRunEvent[], snapshotsConsidered: number): string | undefined {
+export function buildSurfaceFitFailureMessage(events: SurfaceFitRunEvent[], snapshotsConsidered: number, tradingDate: string): string | undefined {
+  // Nothing to fit is not a healthy run: the capture produced no usable snapshot, so Signals has no surface today.
+  if (snapshotsConsidered === 0) return `no complete or partial snapshots found for ${tradingDate}, so no surfaces were fitted`;
   const symbolsByReason = new Map<string, string[]>();
   for (const event of events) {
     if (event.outcome === "fitted") continue;
@@ -35,7 +37,7 @@ export async function runOptionSurfaceFitJob(tradingDate: string, options: { sym
       );
       console.log(`Surface fit ${tradingDate}: ${result.tickersFitted} fitted, ${result.tickersSkipped} skipped, ${result.tickersFailed} failed of ${result.snapshotsConsidered}; ${result.expiriesOk} expiries ok, ${result.expiriesFlagged} flagged.`);
       // A run where tickers got no surface is recorded as a failure (runJob alerts), not a "success" that hides it.
-      return { details: { ...result }, failureMessage: buildSurfaceFitFailureMessage(events, result.snapshotsConsidered) };
+      return { details: { ...result }, failureMessage: buildSurfaceFitFailureMessage(events, result.snapshotsConsidered, tradingDate) };
     },
     { triggeredBy: options.triggeredBy },
   );

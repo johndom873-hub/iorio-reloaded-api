@@ -16,16 +16,21 @@ const workerHungAlertKey = "worker_heartbeat_stale";
 const workerHungReminderIntervalMs = 60 * 60_000;
 
 /** Pure: the problem to report, or null. `restartedJustNow` gives a freshly restarted worker time to write its first beat. */
-export function evaluateWorkerHeartbeat(input: { now: Date; heartbeatAt: Date | null; serviceActive: boolean; restartedJustNow: boolean }): string | null {
-  if (!input.serviceActive || input.restartedJustNow) return null;
-  if (input.heartbeatAt === null) return "The VPS worker service is active but has never written a heartbeat to worker_health.";
+export function evaluateWorkerHeartbeat(input: { now: Date; heartbeatAt: Date | null; serviceActive: boolean | null; restartedJustNow: boolean }): string | null {
+  // serviceActive === false: the systemd probe already reports a stopped service, so a stale heartbeat is expected.
+  // null: the probe did not run this time (an earlier step failed), so the service state is unknown.
+  if (input.serviceActive === false || input.restartedJustNow) return null;
+  const subject = input.serviceActive === null ? "The VPS worker heartbeat (the service state was not checked this run, because an earlier step failed)" : "The VPS worker service is active but its heartbeat";
+  if (input.heartbeatAt === null) return `${subject} has never been written to worker_health.`;
   const ageMs = input.now.getTime() - input.heartbeatAt.getTime();
-  if (ageMs > workerHeartbeatAlertAfterMs) return `The VPS worker service is active but its heartbeat is ${Math.round(ageMs / 60_000)} min old (it beats every 45 s): the worker looks hung, so orders are not being placed or reconciled.`;
+  if (ageMs > workerHeartbeatAlertAfterMs) {
+    return `${subject} is over ${workerHeartbeatAlertAfterMs / 60_000} min old (it beats every 45 s): the worker is ${input.serviceActive === null ? "hung or stopped" : "hung"}, so orders are not being placed or reconciled.`;
+  }
   return null;
 }
 
 /** Runs the check against worker_health and sends/clears the throttled alert. Returns the problem text, if any. */
-export async function reportWorkerHeartbeat(input: { serviceActive: boolean; restartedJustNow: boolean }, now: Date = new Date()): Promise<string | null> {
+export async function reportWorkerHeartbeat(input: { serviceActive: boolean | null; restartedJustNow: boolean }, now: Date = new Date()): Promise<string | null> {
   const row = await db("worker_health").where({ process_name: workerProcessName }).first("updated_at");
   const problem = evaluateWorkerHeartbeat({ now, heartbeatAt: row ? new Date(row.updated_at) : null, ...input });
   if (problem) {

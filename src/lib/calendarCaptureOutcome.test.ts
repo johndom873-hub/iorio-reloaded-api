@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCalendarCaptureFailureMessage } from "./calendarCaptureOutcome.js";
+import { buildCalendarCaptureFailureMessage, selectAlertWorthyUnresolved } from "./calendarCaptureOutcome.js";
 
 describe("buildCalendarCaptureFailureMessage", () => {
   it("is undefined when everything worked", () => {
@@ -26,5 +26,18 @@ describe("buildCalendarCaptureFailureMessage", () => {
 
   it("never contains the '): ' sequence that truncates the Telegram alert", () => {
     expect(buildCalendarCaptureFailureMessage({ tickerCount: 1, fetchFailures: [{ source: "earnings", message: "x" }], unresolvedSymbols: ["A"] })).not.toContain("): ");
+  });
+});
+
+describe("selectAlertWorthyUnresolved", () => {
+  it("ignores an ETF with no TradingView match (normal), but not a stock or any failed lookup", () => {
+    expect(
+      selectAlertWorthyUnresolved([
+        { symbol: "TLT", sector: "ETF", reason: "no_match" },
+        { symbol: "SPY", sector: "ETF", reason: "lookup_error" },
+        { symbol: "NEWCO", sector: "Technology", reason: "no_match" },
+        { symbol: "UNKNOWN", sector: null, reason: "no_match" },
+      ]),
+    ).toEqual(["SPY", "NEWCO", "UNKNOWN"]);
   });
 });

@@ -34,14 +34,14 @@ export function evaluateDaySignalsLiveness(input: DaySignalsLivenessInput): stri
   if (!input.marketOpen || !input.poolSeededToday) return null;
   if (!input.heartbeat) return "Day Signals loop has never reported a heartbeat although today's pool is seeded and the market is open (is DAY_SIGNALS_LOOP_ENABLED=true on the web dyno?).";
   const ageMs = input.now.getTime() - input.heartbeat.updatedAt.getTime();
-  if (ageMs > daySignalsHeartbeatStaleAfterMs) return `Day Signals loop heartbeat is ${Math.round(ageMs / 60_000)} min old — the loop is not running.`;
+  if (ageMs > daySignalsHeartbeatStaleAfterMs) return `Day Signals loop heartbeat is over ${daySignalsHeartbeatStaleAfterMs / 60_000} min old — the loop is not running.`;
   if (!input.heartbeat.connected) return "Day Signals loop is idle although the market is open and today's pool is seeded — check its reason on System Health.";
   // The heartbeat runs on its own timer, so a hung cycle or a failing quote write still beats as "running": judge the quotes themselves.
   const runningLongEnough = input.heartbeat.uptimeMs !== null && input.heartbeat.uptimeMs > daySignalsQuotesStaleAfterMs;
   if (runningLongEnough) {
-    if (input.latestQuoteAt === null) return `Day Signals loop has been running for ${Math.round(input.heartbeat.uptimeMs! / 60_000)} min but has saved no quote today.`;
+    if (input.latestQuoteAt === null) return `Day Signals loop has been running for over ${daySignalsQuotesStaleAfterMs / 60_000} min but has saved no quote today.`;
     const quoteAgeMs = input.now.getTime() - input.latestQuoteAt.getTime();
-    if (quoteAgeMs > daySignalsQuotesStaleAfterMs) return `Day Signals loop is running but its newest saved quote is ${Math.round(quoteAgeMs / 60_000)} min old (a cycle takes about 6): the cycle is hung or quotes are not being written.`;
+    if (quoteAgeMs > daySignalsQuotesStaleAfterMs) return `Day Signals loop is running but its newest saved quote is over ${daySignalsQuotesStaleAfterMs / 60_000} min old (a cycle takes about 6): the cycle is hung or quotes are not being written.`;
   }
   return null;
 }

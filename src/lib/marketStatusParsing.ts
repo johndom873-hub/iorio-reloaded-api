@@ -15,6 +15,9 @@ export interface ParsedMarketStatus {
   unknownDates: string[];
 }
 
+/** A null status is normal only far ahead (the exchange calendar is published about a year out); a null this close to today means the API answered badly. */
+export const nullStatusMinimumDaysAhead = 90;
+
 export function parseMarketStatus(dateSeconds: number[], statuses: (string | null)[], todayIso: string): ParsedMarketStatus {
   if (dateSeconds.length === 0) throw new Error("MarketData.app returned no dates for the requested range");
   if (statuses.length !== dateSeconds.length) throw new Error(`MarketData.app returned ${dateSeconds.length} dates but ${statuses.length} statuses`);
@@ -26,7 +29,11 @@ export function parseMarketStatus(dateSeconds: number[], statuses: (string | nul
     const status = statuses[index];
     if (status === "open") knownDays.push({ calendarDate, isOpen: true });
     else if (status === "closed") knownDays.push({ calendarDate, isOpen: false });
-    else if (status === null || status === undefined) unknownDates.push(calendarDate);
+    else if (status === null || status === undefined) {
+      const daysAhead = Math.round((Date.parse(`${calendarDate}T12:00:00Z`) - Date.parse(`${todayIso}T12:00:00Z`)) / 86_400_000);
+      if (daysAhead < nullStatusMinimumDaysAhead) throw new Error(`MarketData.app returned no market status for ${calendarDate}, only ${daysAhead} day(s) from today (a null is expected only ${nullStatusMinimumDaysAhead}+ days out)`);
+      unknownDates.push(calendarDate);
+    }
     else throw new Error(`MarketData.app returned an unexpected market status "${status}" for ${calendarDate} (expected open, closed or null)`);
   });
 

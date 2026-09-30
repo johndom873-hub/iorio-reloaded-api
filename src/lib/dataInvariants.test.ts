@@ -78,4 +78,16 @@ describe("evaluateDataInvariants", () => {
     const problems = failing({ ...healthyInputs(), marketCalendarDaysAhead: 13, latestTickerCalendarCapturedAt: new Date("2026-09-29T00:00:00Z"), latestEconomicCalendarCapturedAt: null });
     expect(problems.map((problem) => problem.name)).toEqual(["Market calendar", "Ticker calendar (earnings, dividends)", "Economic calendar"]);
   });
+
+  it("does not repeat a failed snapshot as a missing rate or thin coverage (it is already reported as not complete)", () => {
+    const inputs = healthyInputs();
+    inputs.snapshots = [snapshot("AAA"), snapshot("BBB", { status: "failed", riskFreeRatePercent: null, contractsRequested: 0, contractsWithTwoSidedQuote: 0, contractsWithImpliedVolatility: 0, okFitCount: 0 })];
+    expect(failing(inputs).map((problem) => problem.name)).toEqual(["Today's option-chain snapshots"]);
+  });
+
+  it("counts only complete universe snapshots in the healthy detail line", () => {
+    const inputs = healthyInputs();
+    inputs.snapshots = [snapshot("AAA"), snapshot("BBB"), snapshot("EXTRA")];
+    expect(evaluateDataInvariants(inputs)[0]?.detail).toBe("2 of 2 complete");
+  });
 });

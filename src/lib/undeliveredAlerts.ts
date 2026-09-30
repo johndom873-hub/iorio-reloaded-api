@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { db } from "../db/connection.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 
@@ -12,7 +13,7 @@ export async function notifyTelegramTracked(message: string): Promise<void> {
   const delivered = await notifyTelegram(message);
   if (delivered) return;
   await db("alert_state")
-    .insert({ alert_key: `${undeliveredKeyPrefix}${Date.now()}`, first_alerted_at: db.fn.now(), last_alerted_at: db.fn.now(), last_message: message })
+    .insert({ alert_key: `${undeliveredKeyPrefix}${Date.now()}:${randomUUID().slice(0, 8)}`, first_alerted_at: db.fn.now(), last_alerted_at: db.fn.now(), last_message: message })
     .onConflict("alert_key")
     .ignore()
     .catch((error) => console.error(`Could not record an undelivered alert: ${error instanceof Error ? error.message : error}`));

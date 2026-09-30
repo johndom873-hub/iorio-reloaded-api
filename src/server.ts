@@ -9,6 +9,7 @@ import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
 import { startOpsMonitor } from "./lib/opsMonitor.js";
 import { notifyTelegramTracked } from "./lib/undeliveredAlerts.js";
+import { readAppEnvironment } from "./lib/appEnvironment.js";
 
 installShutdownHandler("web");
 
@@ -35,7 +36,18 @@ app.listen(port, () => {
   console.log(`Iorio Reloaded API listening on port ${port} (${environment.nodeEnvironment})`);
   // A killed process (out of memory, a Heroku platform restart) can never send its own alert, so every
   // start announces itself: an unexpected restart or a crash loop shows up as repeated messages.
-  void notifyTelegramTracked(`🟢 API web dyno started (commit ${process.env.HEROKU_SLUG_COMMIT?.slice(0, 7) ?? "unknown"}, ${process.env.APP_ENVIRONMENT ?? "unknown environment"}).`);
+  Promise.resolve()
+    .then(() => {
+      // A start notice must not be lost because the environment label is unreadable: say so in the message instead.
+      let environmentLabel: string;
+      try {
+        environmentLabel = readAppEnvironment();
+      } catch (error) {
+        environmentLabel = `environment unreadable: ${error instanceof Error ? error.message : error}`;
+      }
+      return notifyTelegramTracked(`🟢 API web dyno started (commit ${process.env.HEROKU_SLUG_COMMIT?.slice(0, 7) ?? "unknown"}, ${environmentLabel}).`);
+    })
+    .catch((error) => console.error(`Could not send the start notice: ${error instanceof Error ? error.message : error}`));
   startNotificationBroadcaster();
   startStalePendingOrderSweep();
   // Open the shared IBKR read and live connections now (2026-09-19) rather than on the

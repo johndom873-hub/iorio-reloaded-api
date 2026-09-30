@@ -12,12 +12,19 @@ describe("evaluateWorkerHeartbeat", () => {
   });
 
   it("reports a hung worker: service active but the heartbeat is stale", () => {
-    expect(evaluateWorkerHeartbeat({ ...base, heartbeatAt: beatAgo(workerHeartbeatAlertAfterMs + 60_000) })).toContain("6 min old");
-    expect(evaluateWorkerHeartbeat({ ...base, heartbeatAt: null })).toContain("never written a heartbeat");
+    expect(evaluateWorkerHeartbeat({ ...base, heartbeatAt: beatAgo(workerHeartbeatAlertAfterMs + 60_000) })).toContain("over 5 min old");
+    expect(evaluateWorkerHeartbeat({ ...base, heartbeatAt: null })).toContain("has never been written");
   });
 
   it("stays quiet when the service is not active (the systemd check reports that) or was just restarted", () => {
     expect(evaluateWorkerHeartbeat({ ...base, serviceActive: false, heartbeatAt: beatAgo(60 * 60_000) })).toBeNull();
     expect(evaluateWorkerHeartbeat({ ...base, restartedJustNow: true, heartbeatAt: beatAgo(60 * 60_000) })).toBeNull();
+  });
+
+  it("when the service state is unknown (an earlier health-check step failed) it still reports a stale heartbeat, without claiming the service is active", () => {
+    const message = evaluateWorkerHeartbeat({ ...base, serviceActive: null, heartbeatAt: beatAgo(workerHeartbeatAlertAfterMs + 60_000) });
+    expect(message).toContain("service state was not checked");
+    expect(message).toContain("hung or stopped");
+    expect(evaluateWorkerHeartbeat({ ...base, serviceActive: null, heartbeatAt: beatAgo(45_000) })).toBeNull();
   });
 });

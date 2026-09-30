@@ -55,19 +55,21 @@ function result(name: string, problemSymbols: string[], okDetail: string, proble
 export function evaluateDataInvariants(input: DataInvariantInputs): InvariantResult[] {
   const results: InvariantResult[] = [];
   const snapshotBySymbol = new Map(input.snapshots.map((snapshot) => [snapshot.symbol, snapshot]));
+  // A failed snapshot is already reported as "not complete"; its zero coverage and null rate are not separate findings.
+  const usableSnapshots = input.snapshots.filter((snapshot) => snapshot.status !== "failed");
 
   if (input.universeSymbols.length === 0) {
     results.push({ name: "Capture universe", ok: false, detail: "no tickers to capture (shortlist and open positions are both empty)" });
   }
   const missing = input.universeSymbols.filter((symbol) => !snapshotBySymbol.has(symbol));
   const notComplete = input.snapshots.filter((snapshot) => snapshot.status !== "complete").map((snapshot) => `${snapshot.symbol} (${snapshot.status})`);
-  results.push(result("Today's option-chain snapshots", [...missing.map((symbol) => `${symbol} (missing)`), ...notComplete], `${input.snapshots.length} of ${input.universeSymbols.length} complete`, "not complete"));
+  results.push(result("Today's option-chain snapshots", [...missing.map((symbol) => `${symbol} (missing)`), ...notComplete], `${input.snapshots.filter((snapshot) => snapshot.status === "complete" && input.universeSymbols.includes(snapshot.symbol)).length} of ${input.universeSymbols.length} complete`, "not complete"));
 
-  results.push(result("Risk-free rate on snapshots", input.snapshots.filter((snapshot) => snapshot.riskFreeRatePercent === null).map((snapshot) => snapshot.symbol), "present on every snapshot", "missing on"));
+  results.push(result("Risk-free rate on snapshots", usableSnapshots.filter((snapshot) => snapshot.riskFreeRatePercent === null).map((snapshot) => snapshot.symbol), "present on every snapshot", "missing on"));
   results.push(
     result(
       "Two-sided quote coverage",
-      input.snapshots.filter((snapshot) => percent(snapshot.contractsWithTwoSidedQuote, snapshot.contractsRequested) < twoSidedQuoteMinPercent).map((snapshot) => `${snapshot.symbol} ${Math.round(percent(snapshot.contractsWithTwoSidedQuote, snapshot.contractsRequested))}%`),
+      usableSnapshots.filter((snapshot) => percent(snapshot.contractsWithTwoSidedQuote, snapshot.contractsRequested) < twoSidedQuoteMinPercent).map((snapshot) => `${snapshot.symbol} ${Math.round(percent(snapshot.contractsWithTwoSidedQuote, snapshot.contractsRequested))}%`),
       `at least ${twoSidedQuoteMinPercent}% on every snapshot`,
       `below ${twoSidedQuoteMinPercent}%`,
     ),
@@ -75,7 +77,7 @@ export function evaluateDataInvariants(input: DataInvariantInputs): InvariantRes
   results.push(
     result(
       "Implied volatility coverage",
-      input.snapshots.filter((snapshot) => percent(snapshot.contractsWithImpliedVolatility, snapshot.contractsRequested) < impliedVolatilityMinPercent).map((snapshot) => `${snapshot.symbol} ${Math.round(percent(snapshot.contractsWithImpliedVolatility, snapshot.contractsRequested))}%`),
+      usableSnapshots.filter((snapshot) => percent(snapshot.contractsWithImpliedVolatility, snapshot.contractsRequested) < impliedVolatilityMinPercent).map((snapshot) => `${snapshot.symbol} ${Math.round(percent(snapshot.contractsWithImpliedVolatility, snapshot.contractsRequested))}%`),
       `at least ${impliedVolatilityMinPercent}% on every snapshot`,
       `below ${impliedVolatilityMinPercent}%`,
     ),

@@ -260,7 +260,7 @@ class SharedReadConnection {
       this.connectedSince = Date.now();
       if (this.disconnectedSince !== null) {
         this.disconnectedSince = null;
-        reportBackgroundRecovery(`shared-ibkr:${this.options.label}`, `The web dyno's shared IBKR ${this.options.label} connection is back`);
+        reportBackgroundRecovery(`shared-ibkr:${this.options.label}`, `The shared IBKR ${this.options.label} connection is back`);
       }
       console.log(
         `IBKR shared ${this.options.label} connection: connected (took ${Date.now() - connectStartedAt}ms total, lifetime reconnects=${this.totalReconnects}).`,
@@ -276,9 +276,26 @@ class SharedReadConnection {
       });
 
       ib.once(EventName.disconnected, () => this.handleDisconnect());
+    } catch (error) {
+      // A connect that fails before it ever succeeded (Gateway down at boot) never reaches handleDisconnect,
+      // so without this the outage clock would never start and no alert could fire.
+      this.startOutageClockAndAlertIfLong();
+      throw error;
     } finally {
       this.connecting = null;
     }
+  }
+
+  /** Starts the outage clock on the first failure and alerts once it has run past outageAlertAfterMs (rate-limited by reportBackgroundFailure). */
+  private startOutageClockAndAlertIfLong(): void {
+    if (this.shuttingDown) return;
+    if (this.disconnectedSince === null) this.disconnectedSince = Date.now();
+    const downForMs = Date.now() - this.disconnectedSince;
+    if (downForMs < outageAlertAfterMs) return;
+    reportBackgroundFailure(
+      `shared-ibkr:${this.options.label}`,
+      `The shared IBKR ${this.options.label} connection has been down for over ${outageAlertAfterMs / 60_000} min. Live prices, quotes and greeks fall back to one-shot connections or stay stale. The 10-minute health check reports the Gateway itself separately.`,
+    );
   }
 
   private handleDisconnect(): void {
@@ -290,14 +307,7 @@ class SharedReadConnection {
     this.tunnel?.close();
     this.tunnel = null;
     this.totalReconnects++;
-    if (this.disconnectedSince === null) this.disconnectedSince = Date.now();
-    const downForMs = Date.now() - this.disconnectedSince;
-    if (downForMs >= outageAlertAfterMs) {
-      reportBackgroundFailure(
-        `shared-ibkr:${this.options.label}`,
-        `The web dyno's shared IBKR ${this.options.label} connection has been down for ${Math.round(downForMs / 60_000)} min (attempt ${this.reconnectAttempt + 1}). Live prices, quotes and greeks fall back to one-shot connections or stay stale. The 10-minute health check reports the Gateway itself separately.`,
-      );
-    }
+    this.startOutageClockAndAlertIfLong();
 
     const delay = reconnectDelaysMs[Math.min(this.reconnectAttempt, reconnectDelaysMs.length - 1)];
     this.reconnectAttempt++;

@@ -7,7 +7,24 @@ export interface CalendarFetchFailure {
   message: string;
 }
 
-/** One line for the job alert, or undefined when every fetch worked and every ticker resolved. Free of "): " (Telegram truncation). */
+export interface UnresolvedTicker {
+  symbol: string;
+  /** tickers.sector: IBKR labels ETFs "ETF". */
+  sector: string | null;
+  reason: "no_match" | "lookup_error";
+}
+
+/**
+ * Which unresolved tickers are worth an alert. A failed lookup always is. "No TradingView match" is normal for an
+ * ETF (it has no earnings calendar and TradingView lists it as a fund, not a stock), so only a non-ETF that
+ * TradingView cannot match is a problem: its earnings dates would silently never gate a trade. Without this the
+ * job would fail every night for the 7 ETFs on the shortlist.
+ */
+export function selectAlertWorthyUnresolved(unresolved: UnresolvedTicker[]): string[] {
+  return unresolved.filter((ticker) => ticker.reason === "lookup_error" || ticker.sector !== "ETF").map((ticker) => ticker.symbol);
+}
+
+/** One line for the job alert, or undefined when every fetch worked and every ticker that should resolve did. Free of "): " (Telegram truncation). */
 export function buildCalendarCaptureFailureMessage(input: { tickerCount: number; fetchFailures: CalendarFetchFailure[]; unresolvedSymbols: string[] }): string | undefined {
   const problems: string[] = [];
   if (input.tickerCount === 0) problems.push("no tickers to capture (shortlist and open positions are both empty)");

@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { notifyTelegram } from "./notifyTelegram.js";
 import { notifyTelegramTracked } from "./undeliveredAlerts.js";
 import { formatDurationHuman } from "./formatDurationHuman.js";
 import { publishNotification } from "./notificationChannel.js";
@@ -56,6 +57,29 @@ export function wasErrorAlerted(error: unknown): boolean {
 
 function markErrorAlerted(error: unknown): void {
   if (typeof error === "object" && error !== null) alertedErrors.add(error);
+}
+
+/** An AggregateError (a refused connection) has an empty message: fall back to its code or name so an alert is never blank. */
+function describeThrown(error: Error): string {
+  const code = (error as { code?: unknown }).code;
+  return error.message || (typeof code === "string" ? code : "") || error.name;
+}
+
+/**
+ * The failure alert must go out even when the database is the thing that failed: the throttled variant
+ * needs alert_state, so if it throws, fall back to a plain send.
+ */
+async function sendFailureAlert(jobName: string, failureAlert: string, options: RunJobOptions): Promise<void> {
+  if (options.failureAlertReminderIntervalMs === undefined) {
+    await notifyTelegramTracked(failureAlert);
+    return;
+  }
+  try {
+    await notifyDownThrottled(`job_failure:${jobName}`, failureAlert, options.failureAlertReminderIntervalMs);
+  } catch (error) {
+    console.error(`${jobName}: throttled failure alert failed, sending it directly — ${error instanceof Error ? error.message : error}`);
+    await notifyTelegram(failureAlert);
+  }
 }
 
 // A scheduled run that never starts because the previous one still looks alive is a missed
@@ -190,27 +214,39 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
   let result: JobResult;
   try {
     result = await fn();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+  } catch (thrown) {
+    // A non-Error throw (a string, null) cannot carry the "already alerted" marker, so normalise it.
+    const error =
+      thrown instanceof Error
+        ? thrown
+        : new Error(typeof thrown === "object" && thrown !== null && "message" in thrown ? String((thrown as { message: unknown }).message) : String(thrown));
+    const message = describeThrown(error);
     // The alert below must go out even when the database is the thing that failed.
     await db("job_runs").where({ id: run.id }).update({ status: "failure", finished_at: db.fn.now(), error_message: message }).catch((writeError) => console.error(`${jobName}: could not record the failure in job_runs — ${writeError instanceof Error ? writeError.message : writeError}`));
     await publishNotification({ type: "job_completed", jobName, status: "failure" }).catch(() => {});
-    const failureAlert = `⚠️ ${jobName} failed: ${telegramFailureSummary(message)}`;
-    if (options.failureAlertReminderIntervalMs !== undefined) {
-      await notifyDownThrottled(`job_failure:${jobName}`, failureAlert, options.failureAlertReminderIntervalMs);
-    } else {
-      await notifyTelegramTracked(failureAlert);
-    }
+    await sendFailureAlert(jobName, `⚠️ ${jobName} failed: ${telegramFailureSummary(message)}`, options);
     markErrorAlerted(error);
     throw error;
   }
 
   if (result.failureMessage) {
-    await db("job_runs").where({ id: run.id }).update({ status: "failure", finished_at: db.fn.now(), details: result.details ?? null, error_message: result.failureMessage });
+    // Guarded like the catch path: the alert below is the point, the row is the record. If the row with its details
+    // cannot be written (details that will not serialise), record the failure without them rather than leave the row "running".
+    await db("job_runs")
+      .where({ id: run.id })
+      .update({ status: "failure", finished_at: db.fn.now(), details: result.details ?? null, error_message: result.failureMessage })
+      .catch(async (writeError) => {
+        console.error(`${jobName}: could not record the failure with its details in job_runs — ${writeError instanceof Error ? writeError.message : writeError}`);
+        await db("job_runs")
+          .where({ id: run.id })
+          .update({ status: "failure", finished_at: db.fn.now(), error_message: result.failureMessage })
+          .catch((retryError) => console.error(`${jobName}: could not record the failure in job_runs — ${retryError instanceof Error ? retryError.message : retryError}`));
+      });
     await publishNotification({ type: "job_completed", jobName, status: "failure" }).catch(() => {});
-    const failureAlert = `⚠️ ${jobName} failed: ${telegramFailureSummary(result.failureMessage)}`;
-    if (options.failureAlertReminderIntervalMs !== undefined) await notifyDownThrottled(`job_failure:${jobName}`, failureAlert, options.failureAlertReminderIntervalMs);
-    else await notifyTelegramTracked(failureAlert);
+    // Sent whole, not cut at the first "): " like a thrown error's message: jobs build failureMessage as a
+    // deliberate one-line summary, but it embeds raw IBKR/API error text that contains "): " and would
+    // otherwise drop every problem listed after it. Telegram's own length limit still applies.
+    await sendFailureAlert(jobName, `⚠️ ${jobName} failed: ${result.failureMessage}`, options);
     if (result.notify) await notifyTelegramTracked(result.notify);
     return;
   }
@@ -227,7 +263,10 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
   }
   await publishNotification({ type: "job_completed", jobName, status: "success" }).catch(() => {});
 
-  if (options.failureAlertReminderIntervalMs !== undefined) await clearDownState(`job_failure:${jobName}`);
+  if (options.failureAlertReminderIntervalMs !== undefined) {
+    await clearDownState(`job_failure:${jobName}`);
+    await clearDownState(`job_skipped:${jobName}`);
+  }
 
   const failureStreak = await findPrecedingFailureStreak(jobName, run.id, startedAt);
   if (failureStreak) {

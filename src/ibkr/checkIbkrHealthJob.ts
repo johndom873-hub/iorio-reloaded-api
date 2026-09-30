@@ -202,6 +202,22 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
     const notifications: string[] = [];
     const farmStatusMessages: FarmStatusMessage[] = [];
 
+    // Independent checks (they only read the database), run FIRST: everything after this can throw during an IBKR
+    // outage or a VPS problem, and these two must not go blind exactly then.
+    const daySignalsProblem = await reportDaySignalsLoopLiveness().catch((error) => `Day Signals liveness check itself failed: ${error instanceof Error ? error.message : error}`);
+    const opsMonitorProblem = await reportOpsMonitorLiveness().catch((error) => `Ops monitor liveness check itself failed: ${error instanceof Error ? error.message : error}`);
+
+    // The worker heartbeat needs the systemd probe below to tell "hung" from "stopped" (and to give a just-restarted worker
+    // time to beat), so it runs after the probe; the finally guarantees it still runs when an earlier IBKR step throws,
+    // reporting the service state as unknown in that case.
+    let workerProbe: { active: boolean; restarted: boolean } | null = null;
+    let workerHeartbeatProblem: string | null | undefined;
+    const checkWorkerHeartbeat = async (): Promise<void> => {
+      if (workerHeartbeatProblem !== undefined) return;
+      workerHeartbeatProblem = await reportWorkerHeartbeat({ serviceActive: workerProbe ? workerProbe.active : null, restartedJustNow: workerProbe?.restarted ?? false }).catch((error) => `Worker heartbeat check itself failed: ${error instanceof Error ? error.message : error}`);
+    };
+
+    try {
     let connection = await tryConnect(farmStatusMessages);
     let gatewayOutput = "healthy";
     let probe: { failed: boolean; reason: string | null; restarted: boolean } = { failed: false, reason: null, restarted: false };
@@ -296,6 +312,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       sshUsername: environment.ibkrTunnelSshUsername,
       sshPrivateKey: workerSshPrivateKey,
     });
+    workerProbe = workerCheck;
 
     if (workerCheck.restarted) {
       if (!workerCheck.active) {
@@ -338,16 +355,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       notifications.push(reconciliationNotifyMessage(problems));
     }
 
-    // Alerts on its own (state-based, hourly reminders) rather than through this
-    // job's per-run notify, which would repeat every 10 minutes while it is down.
-    const daySignalsProblem = await reportDaySignalsLoopLiveness().catch((error) => `Day Signals liveness check itself failed: ${error instanceof Error ? error.message : error}`);
-
-    // The systemd unit can be "active" while the worker is hung; its own heartbeat says whether it is really working.
-    const workerHeartbeatProblem = await reportWorkerHeartbeat({ serviceActive: workerCheck.active, restartedJustNow: workerCheck.restarted }).catch((error) => `Worker heartbeat check itself failed: ${error instanceof Error ? error.message : error}`);
-
-    // Reverse of the ops monitor's watch over the Scheduler jobs: confirms the monitor is still beating.
-    const opsMonitorProblem = await reportOpsMonitorLiveness().catch((error) => `Ops monitor liveness check itself failed: ${error instanceof Error ? error.message : error}`);
-
+    await checkWorkerHeartbeat();
     return {
       details: {
         output: gatewayOutput,
@@ -362,5 +370,8 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       },
       notify: notifications.length > 0 ? notifications.join("\n\n") : undefined,
     };
+    } finally {
+      await checkWorkerHeartbeat();
+    }
   }, { failureAlertReminderIntervalMs: healthCheckFailureReminderIntervalMs, triggeredBy: options.triggeredBy, triggeredByUserId: options.triggeredByUserId });
 }

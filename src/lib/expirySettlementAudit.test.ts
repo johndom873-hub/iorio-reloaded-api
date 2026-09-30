@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readExpirySettlementMode, summarizeExpirySettlement, type ExpirySettlementResult } from "./expirySettlementAudit.js";
+import { buildExpiryAuditFailureMessage, classifyAssignedChainSkip, readExpirySettlementMode, summarizeExpirySettlement, type ExpirySettlementAction, type ExpirySettlementResult } from "./expirySettlementAudit.js";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -44,5 +44,32 @@ describe("summarizeExpirySettlement", () => {
 
   it("never notifies for skipped items alone", () => {
     expect(summarizeExpirySettlement("apply", { ...result, actions: [result.actions[1]!] }).notify).toBeUndefined();
+  });
+});
+
+describe("buildExpiryAuditFailureMessage", () => {
+  const skipped = (description: string, informational?: boolean): ExpirySettlementAction => ({ kind: "skipped", symbol: "AAA", positionId: "p", description, informational });
+
+  it("is undefined when nothing was skipped, or only informational waiting states were", () => {
+    expect(buildExpiryAuditFailureMessage([])).toBeUndefined();
+    expect(buildExpiryAuditFailureMessage([skipped("TLT put $81 assigned: stock chain is still open", true)])).toBeUndefined();
+  });
+
+  it("lists the actionable skips and ignores informational ones next to them", () => {
+    const message = buildExpiryAuditFailureMessage([skipped("TLT put $81 assigned: stock chain is still open", true), skipped("AAOI put $107 (expiry 20260925): no daily bar for the expiry date")]);
+    expect(message).toBe("1 expired leg(s) need review or could not be audited, AAOI put $107 (expiry 20260925) - no daily bar for the expiry date");
+    expect(message).not.toContain("): ");
+  });
+});
+
+describe("classifyAssignedChainSkip", () => {
+  it("only a matching-but-still-open chain is a normal waiting state", () => {
+    expect(classifyAssignedChainSkip(true, true)).toBe("informational");
+    expect(classifyAssignedChainSkip(true, false)).toBeNull();
+  });
+
+  it("a share-total mismatch always needs review, open or not", () => {
+    expect(classifyAssignedChainSkip(false, false)).toBe("needs_review");
+    expect(classifyAssignedChainSkip(false, true)).toBe("needs_review");
   });
 });

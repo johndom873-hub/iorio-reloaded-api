@@ -19,7 +19,7 @@ import { runScript } from "../src/lib/runScript.js";
 import "dotenv/config";
 import { db } from "../src/db/connection.js";
 import { runJob } from "../src/lib/runJob.js";
-import { readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "../src/lib/expirySettlementAudit.js";
+import { buildExpiryAuditFailureMessage, readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "../src/lib/expirySettlementAudit.js";
 
 async function main() {
   const mode = readExpirySettlementMode();
@@ -32,9 +32,10 @@ async function main() {
     return {
       details: { mode, legsExamined: result.legsExamined, corrections: changes.length, skipped: skipped.map((action) => action.description), pnlDelta },
       notify,
-      // Skipped legs (no expiry bar, share-count mismatch, a call too close to call) leave realized P&L wrong until someone
-      // acts, so the nightly run is recorded as a failure every night they persist. Free of "): " (Telegram truncation).
-      failureMessage: skipped.length > 0 ? `${skipped.length} expired leg(s) need review or could not be audited, ${skipped.map((action) => action.description).join(" | ").replaceAll("): ", ") - ")}` : undefined,
+      // Skipped legs that need someone (no expiry bar, share-count mismatch, untracked shares, a call too close to
+      // call) leave realized P&L wrong until fixed, so the nightly run is recorded as a failure every night they
+      // persist. A chain that is merely still open is a waiting state, not a problem, and is left out.
+      failureMessage: buildExpiryAuditFailureMessage(skipped),
     };
   });
 }

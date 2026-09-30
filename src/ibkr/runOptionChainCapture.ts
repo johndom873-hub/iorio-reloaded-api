@@ -4,7 +4,7 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { refreshStoredOptionChain, loadStoredOptionChain, type OptionChainRefreshTimings, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { fetchLivePrices } from "./fetchLivePrices.js";
 import { openCaptureQuoteWindow, type CaptureQuoteWindow, type CaptureSettleStats, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
-import { getRiskFreeRate } from "../lib/riskFreeRate.js";
+import { getRiskFreeRateForJob } from "../lib/riskFreeRate.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "../lib/realizedVolatility.js";
 import {
@@ -345,7 +345,7 @@ export interface OptionChainCaptureDependencies {
 const defaultCaptureDependencies: OptionChainCaptureDependencies = {
   now: () => new Date(),
   loadUniverse: loadCaptureUniverse,
-  getRiskFreeRate,
+  getRiskFreeRate: getRiskFreeRateForJob,
   connect: connectToIbkrGateway,
   fetchSpotPrices: async (symbols, onFallbackPriceUsed) => fetchLivePrices(symbols.map((symbol) => ({ key: symbol, legType: "stock", symbol })), { priorityLines: true, onFallbackPriceUsed }),
   prepareTicker: (ib, ticker, todayIso, spotPrice) => prepareTicker(ib, ticker, todayIso, { ...ticksOnlyPrepareDependencies, fetchSpotPrice: async () => spotPrice }),

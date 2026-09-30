@@ -16,7 +16,7 @@ const opsMonitorDownReminderIntervalMs = 60 * 60_000;
 export function evaluateOpsMonitorLiveness(input: { now: Date; heartbeatAt: Date | null }): string | null {
   if (input.heartbeatAt === null) return "The ops monitor has never reported a heartbeat (is the web dyno running?).";
   const ageMs = input.now.getTime() - input.heartbeatAt.getTime();
-  if (ageMs > opsMonitorHeartbeatStaleAfterMs) return `The ops monitor heartbeat is ${Math.round(ageMs / 60_000)} min old: job deadline alerts and the morning digest are not running.`;
+  if (ageMs > opsMonitorHeartbeatStaleAfterMs) return `The ops monitor heartbeat is over ${opsMonitorHeartbeatStaleAfterMs / 60_000} min old: job deadline alerts and the morning digest are not running.`;
   return null;
 }
 

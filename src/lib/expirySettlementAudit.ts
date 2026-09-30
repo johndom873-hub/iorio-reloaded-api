@@ -41,6 +41,8 @@ export interface ExpirySettlementAction {
    * right-after-expiry notification) correlate a "marginal_call" back to the specific closed
    * position it's about, without parsing the description text. */
   positionId: string;
+  /** A "skipped" item that is a normal waiting state (an assigned stock chain that is still open), not something anyone must fix: it never fails the nightly run. */
+  informational?: boolean;
   /** Realized P&L this correction adds, when it can be stated. */
   pnlDelta?: number;
 }
@@ -217,14 +219,17 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
 
   const chainTotalIsAssignedShares = firstLegs.reduce((sum, stockLeg) => sum + stockLeg.quantity, 0) === assignedShares;
   const chainEndsOpen = chain.some((stockLeg) => stockLeg.exitAt === null);
-  if (!chainTotalIsAssignedShares || chainEndsOpen) {
+  const chainSkip = classifyAssignedChainSkip(chainTotalIsAssignedShares, chainEndsOpen);
+  if (chainSkip !== null) {
     actions.push({
       kind: "skipped",
       symbol: leg.symbol,
       positionId: leg.positionId,
-      description: chainEndsOpen
-        ? `${leg.symbol} put $${leg.strike} assigned: stock chain is still open (worker re-syncs its entry to IBKR average cost) — cost basis handled in the cycle view, not edited`
-        : `${leg.symbol} put $${leg.strike} assigned: chain share total does not equal ${assignedShares} — manual review`,
+      informational: chainSkip === "informational",
+      description:
+        chainSkip === "informational"
+          ? `${leg.symbol} put $${leg.strike} assigned: stock chain is still open (worker re-syncs its entry to IBKR average cost) — cost basis handled in the cycle view, not edited`
+          : `${leg.symbol} put $${leg.strike} assigned: chain share total does not equal ${assignedShares}${chainEndsOpen ? " (and the chain is still open)" : ""} — manual review`,
     });
     return;
   }
@@ -349,4 +354,24 @@ export function summarizeExpirySettlement(mode: ExpirySettlementMode, result: Ex
         changes.map((action) => `• ${action.description}`).join("\n") +
         (skipped.length > 0 ? `\n${skipped.length} item(s) need manual review (see job log).` : "");
   return { changes, skipped, pnlDelta, notify };
+}
+
+/**
+ * One line for the nightly job alert: the skipped legs that need someone, or undefined when there are none
+ * (informational waiting states are ignored). Free of "): " so it survives Telegram's failure summary.
+ */
+export function buildExpiryAuditFailureMessage(skipped: ExpirySettlementAction[]): string | undefined {
+  const needsAttention = skipped.filter((action) => !action.informational);
+  if (needsAttention.length === 0) return undefined;
+  return `${needsAttention.length} expired leg(s) need review or could not be audited, ${needsAttention.map((action) => action.description).join(" | ").replaceAll("): ", ") - ")}`;
+}
+
+/**
+ * Why an assigned put's stock chain cannot be corrected automatically, or null when it can. A chain that matches the assigned
+ * shares but is still open is a normal waiting state ("informational": it never fails the nightly run); a share-total mismatch,
+ * open or not, needs someone.
+ */
+export function classifyAssignedChainSkip(chainTotalIsAssignedShares: boolean, chainEndsOpen: boolean): "informational" | "needs_review" | null {
+  if (!chainTotalIsAssignedShares) return "needs_review";
+  return chainEndsOpen ? "informational" : null;
 }

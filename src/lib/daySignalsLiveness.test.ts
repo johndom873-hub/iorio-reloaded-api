@@ -18,7 +18,7 @@ describe("evaluateDaySignalsLiveness", () => {
   it("reports a missing, stale, or idle heartbeat while the loop should be running", () => {
     expect(evaluateDaySignalsLiveness({ now, marketOpen: true, poolSeededToday: true, heartbeat: null, latestQuoteAt: null })).toContain("never reported");
     const stale = { updatedAt: new Date(now.getTime() - daySignalsHeartbeatStaleAfterMs - 60_000), connected: true, uptimeMs: 3 * 60_000 };
-    expect(evaluateDaySignalsLiveness({ now, marketOpen: true, poolSeededToday: true, heartbeat: stale, latestQuoteAt: null })).toContain("6 min old");
+    expect(evaluateDaySignalsLiveness({ now, marketOpen: true, poolSeededToday: true, heartbeat: stale, latestQuoteAt: null })).toContain("over 5 min old");
     expect(evaluateDaySignalsLiveness({ now, marketOpen: true, poolSeededToday: true, heartbeat: { ...fresh, connected: false }, latestQuoteAt: null })).toContain("idle");
   });
 
@@ -32,7 +32,7 @@ describe("evaluateDaySignalsLiveness", () => {
 
     it("reports a hung cycle: newest quote older than the limit, exactly at the limit is fine", () => {
       expect(evaluateDaySignalsLiveness({ now, marketOpen: true, poolSeededToday: true, heartbeat: running, latestQuoteAt: quoteAgoMs(daySignalsQuotesStaleAfterMs) })).toBeNull();
-      expect(evaluateDaySignalsLiveness({ now, marketOpen: true, poolSeededToday: true, heartbeat: running, latestQuoteAt: quoteAgoMs(daySignalsQuotesStaleAfterMs + 60_000) })).toContain("16 min old");
+      expect(evaluateDaySignalsLiveness({ now, marketOpen: true, poolSeededToday: true, heartbeat: running, latestQuoteAt: quoteAgoMs(daySignalsQuotesStaleAfterMs + 60_000) })).toContain("over 15 min old");
     });
 
     it("reports a loop that has run a long time and saved nothing", () => {
