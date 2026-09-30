@@ -8,6 +8,8 @@
 #                                 already answers a real handshake, and when it already ran in the last 2 minutes.
 #   restart-session <paper|live>  IBC's RESTART: the same in-process restart as the daily auto-restart, which
 #                                 reuses the session (no re-login, no 2FA). Needs the IBC command server.
+#   recover <paper|live>          The health check's action: restart-session first. Only paper may fall back to a
+#                                 cold restart (no 2FA there); live never does, it reports needs_manual_login.
 #
 # The last line printed is always GATEWAY_CONTROL_RESULT=<kind>, for the caller to parse.
 set -uo pipefail
@@ -17,6 +19,7 @@ readonly fresh_login_minimum_interval_seconds=120
 readonly login_wait_seconds=60
 readonly restart_down_wait_seconds=60
 readonly restart_up_wait_seconds=240
+readonly cold_restart_wait_seconds=90
 
 ENVIRONMENT=""
 CONTAINER=""
@@ -127,20 +130,54 @@ restart_session() {
   print_result session_restarted
 }
 
+cold_restart_and_wait() {
+  echo "restarting ${CONTAINER} (cold)"
+  if ! docker restart "$CONTAINER" >/dev/null; then
+    print_result restart_failed
+    return 1
+  fi
+  local waited=0
+  until api_answers "$API_PORT"; do
+    if (( waited >= cold_restart_wait_seconds )); then
+      print_result cold_restart_not_recovered
+      return 1
+    fi
+    sleep 5
+    waited=$(( waited + 5 ))
+  done
+  print_result cold_restarted
+}
+
+recover() {
+  if api_answers "$API_PORT"; then
+    local output result_kind
+    output=$(restart_session)
+    echo "$output"
+    result_kind=$(echo "$output" | sed -n 's/^GATEWAY_CONTROL_RESULT=//p' | tail -1)
+    [[ "$result_kind" == "session_restarted" ]] && return 0
+    [[ "$ENVIRONMENT" == "live" ]] && return 1
+  elif [[ "$ENVIRONMENT" == "live" ]]; then
+    print_result needs_manual_login
+    return 1
+  fi
+  cold_restart_and_wait
+}
+
 main() {
   local action="${1:-}"
   ENVIRONMENT="${2:-}"
   case "$ENVIRONMENT" in
     paper) CONTAINER="iorio-ibkr-ib-gateway-paper-1"; API_PORT=4002 ;;
     live) CONTAINER="iorio-ibkr-ib-gateway-live-1"; API_PORT=4001 ;;
-    *) echo "usage: gateway-control.sh <fresh-login|restart-session> <paper|live>" >&2; exit 2 ;;
+    *) echo "usage: gateway-control.sh <fresh-login|restart-session|recover> <paper|live>" >&2; exit 2 ;;
   esac
 
   echo "=== gateway-control ${action} ${ENVIRONMENT}: $(date -u +%FT%TZ) ==="
   case "$action" in
     fresh-login) fresh_login ;;
     restart-session) restart_session ;;
-    *) echo "usage: gateway-control.sh <fresh-login|restart-session> <paper|live>" >&2; exit 2 ;;
+    recover) recover ;;
+    *) echo "usage: gateway-control.sh <fresh-login|restart-session|recover> <paper|live>" >&2; exit 2 ;;
   esac
 }
 
