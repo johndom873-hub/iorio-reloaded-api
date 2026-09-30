@@ -211,6 +211,8 @@ async function handleCallbackQuery(
     if (tool.tracksOrderStatus && typeof (result as { id?: unknown })?.id === "string") {
       await telegram.sendMessage(chatId, `Sent to IBKR:\n${description}\nI'll follow up once it's placed or if anything fails.`);
       pollOrderAndFollowUp(chatId, (result as { id: string }).id, telegram, api).catch((error) => console.error("Genosuke: order poll failed", error));
+    } else if (tool.describeResult) {
+      await telegram.sendMessage(chatId, tool.describeResult(result));
     } else {
       await telegram.sendMessage(chatId, `Done:\n${description}`);
     }

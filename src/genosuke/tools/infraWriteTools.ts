@@ -60,6 +60,7 @@ export const infraWriteTools: GenosukeTool[] = [
     tier: "infra-write",
     parameters: { type: "object", properties: {}, required: [] },
     describeForConfirmation: () => `Restart the ${environment.ibkrTradingMode.toUpperCase()} IBKR Gateway to send you a fresh 2FA push (you will have about 3 minutes to approve it)`,
+    describeResult: (result) => (result as { message: string }).message,
     execute: async () => {
       const { resultKind, output } = await startFreshGatewayLoginOnVps();
       if (!resultKind) throw new Error(`The Gateway login script returned no result: ${output.trim().slice(-300)}`);

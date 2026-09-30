@@ -11,5 +11,7 @@ export interface GenosukeTool extends ToolDefinition {
   validateBeforeConfirmation?: (input: Record<string, unknown>, api: GenosukeApiClient) => Promise<string | null>;
   /** True for tools whose execute() result is an order_requests row still in flight ("confirmed", not yet a terminal IBKR outcome) — bot.ts polls it and sends a follow-up once it resolves. */
   tracksOrderStatus?: boolean;
+  /** For tools whose outcome the human must read (an action that can be refused, or that needs them to do something next): the message sent after the confirmation instead of the generic "Done:" line. */
+  describeResult?: (result: unknown) => string;
   execute: (input: Record<string, unknown>, api: GenosukeApiClient) => Promise<unknown>;
 }
