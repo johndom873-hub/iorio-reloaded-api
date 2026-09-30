@@ -159,6 +159,13 @@ async function pollOrderAndFollowUp(chatId: string, orderId: string, telegram: T
   await telegram.sendMessage(chatId, "Still haven't heard back from IBKR on that order after 5 minutes — check the Trade Blotter, or ask me again shortly.");
 }
 
+// A confirmation card is resolved by a button tap, which the chat history never sees: without the reply stored
+// there, the model believes the card is still waiting and refuses to send a fresh one.
+async function replyAndRecord(telegram: TelegramApi, chatId: string, text: string): Promise<void> {
+  await telegram.sendMessage(chatId, text);
+  await appendHistory(chatId, [{ role: "assistant", content: text }], 0).catch((error) => console.error("Genosuke: could not record the reply in the chat history", error));
+}
+
 async function handleCallbackQuery(
   callbackQuery: NonNullable<TelegramUpdate["callback_query"]>,
   config: GenosukeConfig,
@@ -194,14 +201,14 @@ async function handleCallbackQuery(
 
   if (action === "cancel") {
     await telegram.answerCallbackQuery(callbackQuery.id, "Cancelled.");
-    await telegram.sendMessage(chatId, "Cancelled — no action taken.");
+    await replyAndRecord(telegram, chatId, "Cancelled — no action taken.");
     return;
   }
 
   await telegram.answerCallbackQuery(callbackQuery.id, "Confirmed.");
   const tool = TOOLS_BY_NAME.get(confirmation.toolName);
   if (!tool) {
-    await telegram.sendMessage(chatId, `Error: tool "${confirmation.toolName}" no longer exists.`);
+    await replyAndRecord(telegram, chatId, `Error: tool "${confirmation.toolName}" no longer exists.`);
     return;
   }
 
@@ -209,16 +216,16 @@ async function handleCallbackQuery(
     const result = await tool.execute(confirmation.input, api);
     const description = confirmation.description;
     if (tool.tracksOrderStatus && typeof (result as { id?: unknown })?.id === "string") {
-      await telegram.sendMessage(chatId, `Sent to IBKR:\n${description}\nI'll follow up once it's placed or if anything fails.`);
+      await replyAndRecord(telegram, chatId, `Sent to IBKR:\n${description}\nI'll follow up once it's placed or if anything fails.`);
       pollOrderAndFollowUp(chatId, (result as { id: string }).id, telegram, api).catch((error) => console.error("Genosuke: order poll failed", error));
     } else if (tool.describeResult) {
-      await telegram.sendMessage(chatId, tool.describeResult(result));
+      await replyAndRecord(telegram, chatId, tool.describeResult(result));
     } else {
-      await telegram.sendMessage(chatId, `Done:\n${description}`);
+      await replyAndRecord(telegram, chatId, `Done:\n${description}`);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await telegram.sendMessage(chatId, `That failed: ${message}`);
+    await replyAndRecord(telegram, chatId, `That failed: ${message}`);
   }
 }
 
