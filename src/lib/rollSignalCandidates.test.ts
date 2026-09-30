@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, computeFrictionCost } from "./optionFriction.js";
 import { buildSignalCandidates, gradeForNetEdge, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { assignmentRiskDeltaThreshold, buildRollCandidates, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs, type OpenShortLeg } from "./rollSignalCandidates.js";
+import { assignmentRiskDeltaThreshold, buildRollCandidates, scoreRollPair, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs, type OpenShortLeg } from "./rollSignalCandidates.js";
 
 // Formula 3j (approved 2026-09-24). Fixtures mirror signalsLiveScoring.test.ts: one
 // SVI surface, a 30-day and a 60-day slice with the SAME implied volatility at every
@@ -225,5 +225,40 @@ describe("buildRollCandidates", () => {
     expect(heldCall.dollarRisk).toBeCloseTo(forward * 100 - heldCall.mid!, 9);
     const callRolls = buildRollCandidates([heldCall], all);
     expect(callRolls.every((roll) => roll.replacement.strategyKey === "covered_call")).toBe(true);
+  });
+});
+
+describe("scoreRollPair", () => {
+  const held = scoreOne(leg());
+  const all = candidates();
+  const putAt = (strike: number, expiry: string) => all.find((B) => B.strategyKey === "cash_secured_put" && B.strike === strike && B.expiry === expiry)!;
+
+  it("is Formula 3j with no warnings for a listed roll, and buildRollCandidates returns exactly those pairs", () => {
+    const listed = buildRollCandidates([held], all);
+    expect(listed.length).toBeGreaterThan(0);
+    for (const roll of listed) {
+      expect(scoreRollPair(held, roll.replacement)).toEqual(roll);
+      expect(roll.warnings).toEqual([]);
+    }
+  });
+
+  it("turns the list's two hard filters into warnings instead of dropping the pair", () => {
+    const debit = scoreRollPair(held, putAt(90, expiry30))!; // cheaper, lower delta
+    expect(debit.warnings).toEqual(["debit"]);
+    expect(debit.netCreditPerShare).toBeLessThan(0);
+    expect(debit.netRollEdge).toBeCloseTo(debit.replacement.netEdge - held.edge! - held.frictionVolatility!, 12);
+    const highDeltaHeld = scoreOne(leg({ strike: 90 }));
+    const higher = scoreRollPair(highDeltaHeld, putAt(95, expiry30))!;
+    expect(higher.warnings).toContain("higher_delta");
+    expect(higher.deltaChange).toBeGreaterThan(0);
+  });
+
+  it("is null for the same contract, the other right, or an unscored held leg", () => {
+    expect(scoreRollPair(held, putAt(95, expiry30))).toBeNull();
+    const call = all.find((B) => B.strategyKey === "covered_call")!;
+    expect(scoreRollPair(held, call)).toBeNull();
+    const unscored = scoreOne(leg(), []);
+    expect(unscored.unscoredReason).not.toBeNull();
+    expect(scoreRollPair(unscored, putAt(90, expiry30))).toBeNull();
   });
 });

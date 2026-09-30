@@ -7,8 +7,9 @@ import { loadDayQuotesStatus, type DayQuotesStatus } from "../lib/daySignalsStor
 import { fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
 import { uncompensatedShareRefreshIntervalMs, type SignalCandidate, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
 import { accountRefreshIntervalMs, candidateContractKey, candidateContractRef, contractKey, liveFrameIntervalMs, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
-import { createChainCellResolver, scoreTickerWithExclusions, type SignalsChainCell } from "../lib/signalsChain.js";
+import { createChainCellResolver, scoreSignalContract, scoreTickerWithExclusions, type SignalContractScore, type SignalsChainCell } from "../lib/signalsChain.js";
 import { rollCandidateKey, type HeldLegScore, type RollSignalCandidate } from "../lib/rollSignalCandidates.js";
+import { loadCapturedDeltas } from "../lib/signalsChainStore.js";
 import { loadAccountContext, loadDayQuotesAsLiveQuotes, loadSignalsUniverseTicker, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "../lib/signalSettingsStore.js";
 import type { AccountContext, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
@@ -61,9 +62,16 @@ export interface SignalsQuotesFrame {
   heldLegs: Record<string, HeldLegScore>;
   /** Rolls whose held leg and replacement were both requested, by rollCandidateKey. */
   rolls: Record<string, RollSignalCandidate>;
+  /**
+   * Each pinned contract (an order under review) scored live exactly like GET /signals/:symbol/contract: filters lifted, its
+   * rolls against the held legs of the same right. A pinned held-leg contract only gets its line (see heldLegs).
+   */
+  pinned: Record<string, SignalContractScore>;
 }
 
 export const signalsQuotesMaxContracts = 60;
+/** Contracts an order under review depends on (the pick and, for a roll, the held leg): their lines come on top of the on-screen ones. */
+export const signalsQuotesMaxPinned = 4;
 const contractKeyPattern = /^\d{4}-\d{2}-\d{2}\|\d+(\.\d+)?\|[CP]$/;
 
 export const dayQuotesStatusRefreshIntervalMs = 30_000;
@@ -82,6 +90,8 @@ export interface SignalsProducerDependencies {
   streamLivePrices(contracts: PriceContract[], onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void, signal: AbortSignal): Promise<void>;
   streamOptionQuotes(symbol: string, contracts: ContractRef[], onUpdate: (quotes: LiveOptionQuote[]) => void, signal: AbortSignal): Promise<void>;
   computeUncompensatedShares(candidates: SignalCandidate[], spotPrice: number, slices: SignalSurfaceSlice[]): Promise<Map<string, number | null>>;
+  /** IBKR's own delta per contract key from the capture the inputs came from (the fallback for a pinned contract without a live delta). */
+  loadCapturedDeltas(inputs: TickerSignalsInputs): Promise<Map<string, number>>;
   now(): Date;
 }
 
@@ -99,6 +109,7 @@ export const defaultSignalsProducerDependencies: SignalsProducerDependencies = {
   streamLivePrices: streamPooledPrices,
   streamOptionQuotes: streamSignalsOptionQuotes,
   computeUncompensatedShares: (candidates, spotPrice, slices) => computeUncompensatedSharesInWorker(candidates, spotPrice, slices),
+  loadCapturedDeltas: async (inputs) => (inputs.header ? loadCapturedDeltas(inputs.header.snapshotId, null) : new Map<string, number>()),
   now: () => new Date(),
 };
 
@@ -132,17 +143,21 @@ function parseTickerParameters(rawParameters: unknown): Record<string, string> {
   return expiry === undefined ? { symbol: symbol.toUpperCase() } : { symbol: symbol.toUpperCase(), expiry };
 }
 
-/** `contracts`: comma-separated expiry|strike|right keys, at most signalsQuotesMaxContracts (an empty list is allowed: nothing on screen). */
+/** `contracts`: comma-separated expiry|strike|right keys, at most signalsQuotesMaxContracts (an empty list is allowed: nothing on screen). `pinned`: the same keys, at most signalsQuotesMaxPinned, omitted when empty. */
 function parseQuotesParameters(rawParameters: unknown): Record<string, string> {
   const parameters = readParameterObject(rawParameters);
-  const unknownField = Object.keys(parameters).find((key) => key !== "symbol" && key !== "contracts");
+  const unknownField = Object.keys(parameters).find((key) => key !== "symbol" && key !== "contracts" && key !== "pinned");
   if (unknownField) throw new StreamRequestError(400, `Unknown parameter: ${unknownField}.`);
   const symbol = parameters.symbol;
   if (typeof symbol !== "string" || !symbolPattern.test(symbol)) throw new StreamRequestError(400, "symbol is required.");
   const contracts = parameters.contracts;
   if (!Array.isArray(contracts) || contracts.some((key) => typeof key !== "string" || !contractKeyPattern.test(key))) throw new StreamRequestError(400, "contracts must be a list of expiry|strike|right keys.");
   if (contracts.length > signalsQuotesMaxContracts) throw new StreamRequestError(400, `At most ${signalsQuotesMaxContracts} contracts.`);
-  return { symbol: symbol.toUpperCase(), contracts: [...new Set(contracts as string[])].join(",") };
+  const pinned = parameters.pinned ?? [];
+  if (!Array.isArray(pinned) || pinned.some((key) => typeof key !== "string" || !contractKeyPattern.test(key))) throw new StreamRequestError(400, "pinned must be a list of expiry|strike|right keys.");
+  if (pinned.length > signalsQuotesMaxPinned) throw new StreamRequestError(400, `At most ${signalsQuotesMaxPinned} pinned contracts.`);
+  const pinnedKeys = [...new Set(pinned as string[])];
+  return { symbol: symbol.toUpperCase(), contracts: [...new Set(contracts as string[])].join(","), ...(pinnedKeys.length > 0 ? { pinned: pinnedKeys.join(",") } : {}) };
 }
 
 function parseContractKey(key: string): ContractRef {
@@ -155,9 +170,18 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
 }
 
-/** Coalesces dirty marks into at most one flush per interval; the first mark after a quiet spell flushes at once. */
-function createThrottledFlush(intervalMs: number, flush: () => void, signal: AbortSignal, lastFlushAt: number): { markDirty(): void } {
+/** How long a stream waits for the live price before emitting its first frame anyway (at the snapshot spot). */
+export const firstFramePriceGraceMs = 1_500;
+
+/**
+ * Coalesces dirty marks into at most one flush per interval; the first mark after a quiet spell flushes at once.
+ * With `holdFirstFrameMs` nothing is flushed until `release()` (the live price arrived) or that grace elapses, so a
+ * stream never opens with a frame scored at the stale snapshot spot that the price then corrects a second later.
+ */
+function createThrottledFlush(intervalMs: number, flush: () => void, signal: AbortSignal, lastFlushAt: number, holdFirstFrameMs?: number): { markDirty(): void; release(): boolean } {
   let timer: NodeJS.Timeout | null = null;
+  let held = holdFirstFrameMs !== undefined;
+  let holdTimer: NodeJS.Timeout | null = null;
   const run = () => {
     timer = null;
     lastFlushAt = Date.now();
@@ -167,17 +191,30 @@ function createThrottledFlush(intervalMs: number, flush: () => void, signal: Abo
     "abort",
     () => {
       if (timer) clearTimeout(timer);
+      if (holdTimer) clearTimeout(holdTimer);
       timer = null;
+      holdTimer = null;
     },
     { once: true },
   );
+  /** Ends the hold with the first frame; false when there was no hold to end (the caller then marks dirty as usual). */
+  const release = () => {
+    if (!held || signal.aborted) return false;
+    held = false;
+    if (holdTimer) clearTimeout(holdTimer);
+    holdTimer = null;
+    run();
+    return true;
+  };
+  if (held) holdTimer = setTimeout(release, holdFirstFrameMs);
   return {
     markDirty() {
-      if (signal.aborted || timer) return;
+      if (signal.aborted || timer || held) return;
       const elapsed = Date.now() - lastFlushAt;
       if (elapsed >= intervalMs) run();
       else timer = setTimeout(run, intervalMs - elapsed);
     },
+    release,
   };
 }
 
@@ -258,7 +295,8 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
         const frame: SignalsScreenFrame = { type: "signalsScreen", at: deps.now().toISOString(), rows: [...states.values()].map((state) => toScreenRow(state.scored)), dayQuotes: { loop: deps.daySignalsLoopStatus(), status: dayQuotesStatus } };
         emit(frame);
       };
-      const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now());
+      // First frame waits until every ticker has its live price (see createThrottledFlush): scored at the stale snapshot spot the rows would flash wrong grades.
+      const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now(), firstFramePriceGraceMs);
 
       // One pooled option line per ticker on its best contract (approved 2026-09-24), moved whenever "best" changes.
       const syncBestLine = (state: TickerState) => {
@@ -288,7 +326,6 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
           .catch((error) => console.error(`signalsScreen ${state.ticker.symbol}: best-contract live quote failed`, error));
       };
       for (const state of states.values()) syncBestLine(state);
-      emitFrame();
 
       const refreshDayQuotesStatus = async () => {
         const status = await deps.loadDayQuotesStatus();
@@ -353,6 +390,8 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
               syncBestLine(state);
               changed = true;
             }
+            const everyTickerPriced = [...states.values()].every((state) => state.spot !== null);
+            if (everyTickerPriced && frames.release()) return;
             if (changed) frames.markDirty();
           },
           signal,
@@ -391,15 +430,16 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
         const frame: SignalsTickerFrame = { type: "signalsTicker", at: deps.now().toISOString(), signals: scored, uncompensatedAsOf };
         emit(frame);
       };
-      emitFrame();
-      const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now());
-
+      // First frame waits for the live price (see createThrottledFlush): scored at the stale snapshot spot it would flash wrong grades.
+      const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now(), firstFramePriceGraceMs);
 
       // Monte Carlo: now, then every 5 s but only after a >= 0.5% spot move (never overlapping).
       let simulationInFlight = false;
+      // Simulated at the live spot: at the snapshot spot it would give a wrong drift that the first price then corrects (after the grace with no price, the snapshot spot is all there is).
+      let priceGraceElapsed = false;
       const refreshUncompensatedShare = async () => {
         if (simulationInFlight || signal.aborted || scored.candidates.length === 0) return;
-        const spotForSimulation = spot ?? inputs.header?.underlyingPrice ?? null;
+        const spotForSimulation = spot ?? (priceGraceElapsed ? (inputs.header?.underlyingPrice ?? null) : null);
         if (spotForSimulation === null || !shouldRefreshUncompensatedShare(lastSimulatedSpot, spotForSimulation)) return;
         simulationInFlight = true;
         try {
@@ -416,9 +456,19 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
           simulationInFlight = false;
         }
       };
-      void refreshUncompensatedShare();
+      const priceGraceTimer = setTimeout(() => {
+        priceGraceElapsed = true;
+        void refreshUncompensatedShare();
+      }, firstFramePriceGraceMs);
       const simulationTimer = setInterval(() => void refreshUncompensatedShare(), uncompensatedShareRefreshIntervalMs);
-      signal.addEventListener("abort", () => clearInterval(simulationTimer), { once: true });
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(priceGraceTimer);
+          clearInterval(simulationTimer);
+        },
+        { once: true },
+      );
 
       const unsubscribeDayQuotes = deps.onDayQuotesUpdated((tickerId) => {
         if (tickerId !== ticker.tickerId || !inputs.header || signal.aborted) return;
@@ -459,7 +509,8 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
             spot = price;
             priceSource = source;
             rescore();
-            frames.markDirty();
+            if (lastSimulatedSpot === null) void refreshUncompensatedShare();
+            if (!frames.release()) frames.markDirty();
           },
           signal,
         )
@@ -475,35 +526,87 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
     parseParameters: parseQuotesParameters,
     async run(parameters, _context, emit, signal) {
       const symbol = parameters.symbol!;
-      const contractKeys = parameters.contracts ? parameters.contracts.split(",") : [];
+      const onScreenKeys = parameters.contracts ? parameters.contracts.split(",") : [];
+      const pinnedKeys = parameters.pinned ? parameters.pinned.split(",") : [];
+      // Every line this stream holds: what is on screen plus what the order under review depends on.
+      const contractKeys = [...new Set([...onScreenKeys, ...pinnedKeys])];
       const ticker = await deps.loadSignalsUniverseTicker(symbol);
       if (!ticker) throw new StreamRequestError(404, `${symbol} is not on the shortlist and has no open short option leg.`);
       const [inputs, account, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadSignalSettings()]);
+      const capturedDeltaByContract = pinnedKeys.length > 0 ? await deps.loadCapturedDeltas(inputs) : new Map<string, number>();
       if (signal.aborted) return;
       const requested = new Set(contractKeys);
       let spot: number | null = null;
       let priceSource: SignalsPriceSource = "snapshot";
       let liveQuotes: LiveOptionQuote[] = [];
+      // UncompensatedShare of the pinned candidates: the ticker stream's throttle (a worker run, only after a >= 0.5% spot move), never a per-frame simulation.
+      let pinnedUncompensatedByContract = new Map<string, number | null>();
+      let pinnedLastSimulatedSpot: number | null = null;
+      let latestPinnedCandidates: SignalCandidate[] = [];
 
       const emitFrame = () => {
         const overrides = liveOverrides(inputs, spot, priceSource);
         const scoring = scoreTickerWithExclusions(inputs, account, settings, overrides ? { ...overrides, liveQuotes } : undefined);
         const cellFor = createChainCellResolver(scoring, new Map());
-        const frame: SignalsQuotesFrame = { type: "signalsQuotes", at: deps.now().toISOString(), spotPrice: scoring.scored.spotPrice, contractKeys, cells: {}, candidates: {}, heldLegs: {}, rolls: {} };
+        const frame: SignalsQuotesFrame = { type: "signalsQuotes", at: deps.now().toISOString(), spotPrice: scoring.scored.spotPrice, contractKeys, cells: {}, candidates: {}, heldLegs: {}, rolls: {}, pinned: {} };
         for (const key of contractKeys) {
           const cell = cellFor(parseContractKey(key));
           if (cell.state !== "not_captured") frame.cells[key] = cell;
         }
         for (const candidate of scoring.scored.candidates) if (requested.has(candidateContractKey(candidate))) frame.candidates[candidateContractKey(candidate)] = candidate;
         const heldKeyByLegId = new Map(scoring.scored.heldLegs.map((leg) => [leg.legId, contractKey(leg)]));
+        const heldKeys = new Set(heldKeyByLegId.values());
         for (const leg of scoring.scored.heldLegs) if (requested.has(contractKey(leg))) frame.heldLegs[leg.legId] = leg;
         for (const roll of scoring.scored.rolls) {
           if (requested.has(heldKeyByLegId.get(roll.legId) ?? "") && requested.has(candidateContractKey(roll.replacement))) frame.rolls[rollCandidateKey(roll)] = roll;
         }
+        const liveSpot = spot === null ? null : { spotPrice: spot, priceSource };
+        latestPinnedCandidates = [];
+        for (const key of pinnedKeys) {
+          if (heldKeys.has(key)) continue;
+          const contract = parseContractKey(key);
+          const liveQuote = liveQuotes.find((quote) => contractKey(quote) === key);
+          const pinnedScore = scoreSignalContract({
+            inputs,
+            account,
+            settings,
+            contract,
+            liveQuote: liveQuote && (liveQuote.bid !== null || liveQuote.ask !== null || (liveQuote.delta ?? null) !== null) ? { bid: liveQuote.bid, ask: liveQuote.ask, delta: liveQuote.delta ?? null, quotedAt: liveQuote.quotedAt ?? frame.at } : null,
+            liveSpot,
+            capturedDelta: capturedDeltaByContract.get(key) ?? null,
+            uncompensatedByContract: pinnedUncompensatedByContract,
+          });
+          frame.pinned[key] = pinnedScore;
+          if (pinnedScore.scored) latestPinnedCandidates.push(pinnedScore);
+        }
         emit(frame);
+        void refreshPinnedUncompensatedShare();
       };
-      emitFrame();
-      const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now());
+
+      let pinnedSimulationInFlight = false;
+      const refreshPinnedUncompensatedShare = async () => {
+        const spotForSimulation = spot ?? inputs.header?.underlyingPrice ?? null;
+        if (pinnedSimulationInFlight || signal.aborted || latestPinnedCandidates.length === 0 || spotForSimulation === null) return;
+        const missingResult = latestPinnedCandidates.some((candidate) => !pinnedUncompensatedByContract.has(candidateContractKey(candidate)));
+        if (!missingResult && !shouldRefreshUncompensatedShare(pinnedLastSimulatedSpot, spotForSimulation)) return;
+        pinnedSimulationInFlight = true;
+        try {
+          const results = await deps.computeUncompensatedShares(latestPinnedCandidates, spotForSimulation, inputs.slices);
+          if (signal.aborted) return;
+          pinnedUncompensatedByContract = results;
+          frames.markDirty();
+        } catch (error) {
+          console.error(`signalsQuotes ${symbol}: UncompensatedShare simulation failed`, error);
+          // No result for these candidates: record empty ones so the next frame does not retry in a loop.
+          pinnedUncompensatedByContract = new Map(latestPinnedCandidates.map((candidate) => [candidateContractKey(candidate), null]));
+        } finally {
+          pinnedLastSimulatedSpot = spotForSimulation;
+          pinnedSimulationInFlight = false;
+        }
+      };
+
+      // First frame waits for the live price (see createThrottledFlush): scored at the stale snapshot spot it would flash wrong grades.
+      const frames = createThrottledFlush(liveFrameIntervalMs, emitFrame, signal, Date.now(), firstFramePriceGraceMs);
 
       // The stock line is shared with the ticker stream's through the pool: no extra IBKR line.
       const pricesTask = deps
@@ -516,7 +619,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
             if (spot === price && priceSource === source) return;
             spot = price;
             priceSource = source;
-            frames.markDirty();
+            if (!frames.release()) frames.markDirty();
           },
           signal,
         )

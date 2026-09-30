@@ -23,7 +23,7 @@ export async function loadTickerBySymbol(symbol: string): Promise<SignalsTickerR
 }
 
 /** IBKR's own delta per contract from one capture, keyed by contractKey; optionally one expiry only. */
-async function loadCapturedDeltas(snapshotId: string, expiryIso: string | null): Promise<Map<string, number>> {
+export async function loadCapturedDeltas(snapshotId: string, expiryIso: string | null): Promise<Map<string, number>> {
   const query = db("option_quote_snapshots").where({ snapshot_id: snapshotId }).whereNotNull("delta");
   if (expiryIso) query.where({ expiry: expiryIso });
   const rows: { expiry: string; strike: string; right: "C" | "P"; delta: string }[] = await query.select(db.raw("expiry::text as expiry"), "strike", db.raw('option_right as "right"'), "delta");

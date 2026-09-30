@@ -329,6 +329,8 @@ async function main(): Promise<void> {
     // snapshot already written above, so it's isolated in its own try/catch.
     const optionLegRows = legRows.filter((leg) => leg.legType === "option" && leg.optionType && leg.strikePrice && leg.expiryDate);
     let greeksSnapshotted = 0;
+    let greeksError: string | null = null;
+    const legsWithGreeks = new Set<string>();
     if (optionLegRows.length > 0) {
       try {
         const greeksContracts: GreeksContract[] = optionLegRows.map((leg) => ({
@@ -338,7 +340,7 @@ async function main(): Promise<void> {
           strike: Number(leg.strikePrice),
           right: leg.optionType === "call" ? OptionType.Call : OptionType.Put,
         }));
-        const greeksByLegId = await fetchLiveGreeks(greeksContracts);
+        const greeksByLegId = await fetchLiveGreeks(greeksContracts, "lastClose");
         for (const leg of optionLegRows) {
           const greeks = greeksByLegId[leg.legId];
           if (!greeks || (greeks.delta === null && greeks.gamma === null && greeks.vega === null && greeks.theta === null)) continue;
@@ -354,12 +356,20 @@ async function main(): Promise<void> {
             .onConflict(["position_leg_id", "snapshot_date"])
             .merge();
           greeksSnapshotted++;
+          legsWithGreeks.add(leg.legId);
         }
         console.log(`Snapshotted greeks for ${greeksSnapshotted}/${optionLegRows.length} open option leg(s) for ${snapshotDate}.`);
       } catch (error) {
-        console.error(`Greeks snapshot failed for ${snapshotDate}: ${error instanceof Error ? error.message : error}`);
+        greeksError = error instanceof Error ? error.message : String(error);
+        console.error(`Greeks snapshot failed for ${snapshotDate}: ${greeksError}`);
       }
     }
+    // A night with no greeks saved leaves the position cards' Delta/Gamma blank after hours: the run is recorded as a failure (P&L rows stay written).
+    const legsWithoutGreeks = optionLegRows.filter((leg) => !legsWithGreeks.has(leg.legId));
+    const greeksFailure =
+      legsWithoutGreeks.length === 0
+        ? null
+        : `greeks saved for ${greeksSnapshotted}/${optionLegRows.length} open option leg(s) for ${snapshotDate} (missing: ${legsWithoutGreeks.map((leg) => `${leg.symbol} ${leg.optionType} ${Number(leg.strikePrice)} ${leg.expiryDate}`).join(", ")})${greeksError ? `. Error: ${greeksError}` : ""}`;
     return {
       details: {
         accountSnapshot: accountSnapshotWritten,
@@ -367,10 +377,14 @@ async function main(): Promise<void> {
         openPositionCount: legsByPositionId.size,
         snapshotted,
         skipped,
+        greeksSnapshotted,
+        greeksExpected: optionLegRows.length,
+        greeksError,
       },
       notify: accountSnapshotWritten
         ? undefined
         : `⚠️ daily_pnl_snapshot: account-level PnL failed for ${snapshotDate} (${accountSnapshotError}). Position-level snapshots (${snapshotted}/${legsByPositionId.size}) were still written.`,
+      failureMessage: greeksFailure ?? undefined,
     };
   });
 }

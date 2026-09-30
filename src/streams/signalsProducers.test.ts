@@ -5,7 +5,7 @@ import type { SignalQuote, SignalSurfaceSlice } from "../lib/signalCandidates.js
 import { candidateContractKey, contractKey, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import type { SignalsTickerRow } from "../lib/signalsStore.js";
 import type { TickerSignalsInputs } from "../lib/signalsTypes.js";
-import { createSignalsProducers, type SignalsQuotesFrame, type SignalsProducerDependencies, type SignalsScreenFrame, type SignalsTickerFrame } from "./signalsProducers.js";
+import { createSignalsProducers, firstFramePriceGraceMs, type SignalsQuotesFrame, type SignalsProducerDependencies, type SignalsScreenFrame, type SignalsTickerFrame } from "./signalsProducers.js";
 import { StreamRequestError } from "./streamProtocol.js";
 
 const forward = 100;
@@ -122,6 +122,7 @@ function createHarness(): Harness {
       monteCarloCalls.push({ spotPrice, candidateCount: candidates.length });
       return new Map(candidates.map((candidate) => [candidateContractKey(candidate), 42]));
     },
+    loadCapturedDeltas: async () => new Map([["2026-10-21|95|P", -0.17]]),
     now: () => new Date(),
   };
   return {
@@ -140,13 +141,15 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("signalsScreen producer", () => {
-  it("emits every ticker at snapshot prices immediately, then coalesces live re-scores to one frame per second", async () => {
+  it("with no live price it emits every ticker at snapshot prices once the grace is over, then coalesces live re-scores to one frame per second", async () => {
     const harness = createHarness();
     const { signalsScreen } = createSignalsProducers(harness.deps);
     const frames: SignalsScreenFrame[] = [];
     const abort = new AbortController();
     const run = signalsScreen.run({}, { userId: "u" }, (frame) => frames.push(frame as SignalsScreenFrame), abort.signal);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs - 1);
+    expect(frames).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
 
     expect(frames).toHaveLength(1);
     const aaoiRow = frames[0]!.rows.find((row) => row.symbol === "AAOI")!;
@@ -183,19 +186,36 @@ describe("signalsScreen producer", () => {
     expect(frames).toHaveLength(3);
   });
 
+  it("holds its first frame until every ticker has a live price, then emits at once (a partial set waits for the grace)", async () => {
+    const harness = createHarness();
+    const { signalsScreen } = createSignalsProducers(harness.deps);
+    const frames: SignalsScreenFrame[] = [];
+    const abort = new AbortController();
+    void signalsScreen.run({}, { userId: "u" }, (frame) => frames.push(frame as SignalsScreenFrame), abort.signal);
+    await vi.advanceTimersByTimeAsync(300);
+    harness.priceUpdates.push({ AAOI: 103 }, false);
+    expect(frames).toHaveLength(0);
+    harness.priceUpdates.push({ AAOI: 103, HOOD: 120 }, false);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.rows.find((row) => row.symbol === "AAOI")).toMatchObject({ spotPrice: 103, priceSource: "frozen" });
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs); // the grace timer adds nothing
+    expect(frames).toHaveLength(1);
+    abort.abort();
+  });
+
   it("refreshes free cash every 60 s and re-scores put executability (a covered call ships both legs in one order, so shares never block it)", async () => {
     const harness = createHarness();
     const { signalsScreen } = createSignalsProducers(harness.deps);
     const frames: SignalsScreenFrame[] = [];
     const abort = new AbortController();
     void signalsScreen.run({}, { userId: "u" }, (frame) => frames.push(frame as SignalsScreenFrame), abort.signal);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
     const bestBefore = frames[0]!.rows.find((row) => row.symbol === "AAOI")!.best!;
     expect(bestBefore.executable).toBe(true);
 
     harness.account.freeCash = 0;
     harness.freeShares.value = 0;
-    await vi.advanceTimersByTimeAsync(59_000);
+    await vi.advanceTimersByTimeAsync(58_000);
     expect(frames).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1_100);
     expect(frames).toHaveLength(2);
@@ -225,7 +245,7 @@ describe("signalsScreen producer", () => {
     const frames: SignalsScreenFrame[] = [];
     const abort = new AbortController();
     void signalsScreen.run({}, { userId: "u" }, (frame) => frames.push(frame as SignalsScreenFrame), abort.signal);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
     // AAOI is scored, HOOD has no snapshot: exactly one line, on AAOI's best contract.
     expect(harness.optionSubscriptions).toHaveLength(1);
     const best = frames[0]!.rows.find((row) => row.symbol === "AAOI")!.best!;
@@ -255,7 +275,7 @@ describe("signalsScreen producer", () => {
     const frames: SignalsScreenFrame[] = [];
     const abort = new AbortController();
     void signalsScreen.run({ bestContractLines: "false" }, { userId: "u" }, (frame) => frames.push(frame as SignalsScreenFrame), abort.signal);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
     const best = frames[0]!.rows.find((row) => row.symbol === "AAOI")!.best!;
     expect(best.quoteSource).toBe("snapshot");
 
@@ -277,7 +297,7 @@ describe("signalsScreen producer", () => {
     const frames: SignalsScreenFrame[] = [];
     const abort = new AbortController();
     void signalsScreen.run({}, { userId: "u" }, (frame) => frames.push(frame as SignalsScreenFrame), abort.signal);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
     const abortListenersAtStart = getEventListeners(abort.signal, "abort").length;
     const first = frames[0]!.rows.find((row) => row.symbol === "AAOI")!.best!;
     const firstRef: ContractRef = { expiry: first.expiry, strike: first.strike, right: first.strategyKey === "covered_call" ? "C" : "P" };
@@ -331,29 +351,50 @@ describe("signalsTicker producer", () => {
     await expect(signalsTicker.run({ symbol: "NVDA" }, { userId: "u" }, () => {}, new AbortController().signal)).rejects.toMatchObject({ httpStatus: 404 });
   });
 
-  it("first frame at snapshot prices, holds no option lines (only the stock), then fills the Monte Carlo", async () => {
+  it("holds its first frame for the live price; with none it goes out at the snapshot prices after the grace, holding no option lines (only the stock)", async () => {
     const harness = createHarness();
     const { signalsTicker } = createSignalsProducers(harness.deps);
     const frames: SignalsTickerFrame[] = [];
     const abort = new AbortController();
     void signalsTicker.run({ symbol: "AAOI", expiry: "2026-11-20" }, { userId: "u" }, (frame) => frames.push(frame as SignalsTickerFrame), abort.signal);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs - 1);
+    expect(frames).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
 
     expect(frames).toHaveLength(1);
     const first = frames[0]!;
     expect(first.signals.candidates).toHaveLength(4);
     expect(first.signals.priceSource).toBe("snapshot");
+    // The Monte Carlo waits for a price too (with none it runs at the snapshot spot once the grace is over); its frame follows.
     expect(first.uncompensatedAsOf).toBeNull();
-    expect(first.signals.candidates.every((c) => c.uncompensatedSharePercent === null)).toBe(true);
-    // Option lines belong to the signalsQuotes stream (what is on screen); this one holds none.
-    expect(harness.optionSubscriptions).toEqual([]);
-
-    // The Monte Carlo ran once at the snapshot spot; its frame arrives after the 1 s throttle.
     expect(harness.monteCarloCalls).toEqual([{ spotPrice: forward, candidateCount: 4 }]);
     await vi.advanceTimersByTimeAsync(1000);
     expect(frames).toHaveLength(2);
     expect(frames[1]!.uncompensatedAsOf).toEqual({ spotPrice: forward, at: expect.any(String) });
     expect(frames[1]!.signals.candidates.every((c) => c.uncompensatedSharePercent === 42)).toBe(true);
+    // Option lines belong to the signalsQuotes stream (what is on screen); this one holds none.
+    expect(harness.optionSubscriptions).toEqual([]);
+    abort.abort();
+  });
+
+  it("emits its first frame as soon as the live price arrives, never one at the stale snapshot spot before it", async () => {
+    const harness = createHarness();
+    const { signalsTicker } = createSignalsProducers(harness.deps);
+    const frames: SignalsTickerFrame[] = [];
+    const abort = new AbortController();
+    void signalsTicker.run({ symbol: "AAOI" }, { userId: "u" }, (frame) => frames.push(frame as SignalsTickerFrame), abort.signal);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(frames).toHaveLength(0);
+    harness.priceUpdates.push({ AAOI: 103 }, true);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.signals.spotPrice).toBe(103);
+    expect(frames[0]!.signals.priceSource).toBe("live");
+    // The Monte Carlo ran at the live spot (never at the snapshot's) and its result is the only later frame; the grace timer adds none.
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
+    expect(harness.monteCarloCalls).toEqual([{ spotPrice: 103, candidateCount: expect.any(Number) }]);
+    expect(frames.every((frame) => frame.signals.priceSource === "live")).toBe(true);
+    expect(frames).toHaveLength(2);
+    expect(frames[1]!.uncompensatedAsOf).toEqual({ spotPrice: 103, at: expect.any(String) });
     abort.abort();
   });
 
@@ -363,6 +404,8 @@ describe("signalsTicker producer", () => {
     const frames: SignalsTickerFrame[] = [];
     const abort = new AbortController();
     void signalsTicker.run({ symbol: "AAOI" }, { userId: "u" }, (frame) => frames.push(frame as SignalsTickerFrame), abort.signal);
+    await vi.advanceTimersByTimeAsync(0);
+    harness.priceUpdates.push({ AAOI: forward }, true);
     await vi.advanceTimersByTimeAsync(1000);
     expect(harness.monteCarloCalls).toHaveLength(1);
 
@@ -386,11 +429,11 @@ describe("signalsTicker producer", () => {
 });
 
 describe("signalsQuotes producer (what the modal has on screen)", () => {
-  const run = (harness: Harness, contracts: string[]) => {
+  const run = (harness: Harness, contracts: string[], pinned?: string[]) => {
     const { signalsQuotes } = createSignalsProducers(harness.deps);
     const frames: SignalsQuotesFrame[] = [];
     const abort = new AbortController();
-    void signalsQuotes.run(signalsQuotes.parseParameters({ symbol: "AAOI", contracts }), { userId: "u" }, (frame) => frames.push(frame as SignalsQuotesFrame), abort.signal);
+    void signalsQuotes.run(signalsQuotes.parseParameters({ symbol: "AAOI", contracts, ...(pinned ? { pinned } : {}) }), { userId: "u" }, (frame) => frames.push(frame as SignalsQuotesFrame), abort.signal);
     return { frames, abort };
   };
 
@@ -400,13 +443,16 @@ describe("signalsQuotes producer (what the modal has on screen)", () => {
     expect(signalsQuotes.parseParameters({ symbol: "AAOI", contracts: [] })).toEqual({ symbol: "AAOI", contracts: "" });
     expect(() => signalsQuotes.parseParameters({ symbol: "AAOI", contracts: ["20261021|90|P"] })).toThrow(StreamRequestError);
     expect(() => signalsQuotes.parseParameters({ symbol: "AAOI", contracts: "2026-10-21|90|P" })).toThrow(StreamRequestError);
+    expect(signalsQuotes.parseParameters({ symbol: "AAOI", contracts: [], pinned: ["2026-10-21|95|P", "2026-10-21|95|P"] })).toEqual({ symbol: "AAOI", contracts: "", pinned: "2026-10-21|95|P" });
+    expect(() => signalsQuotes.parseParameters({ symbol: "AAOI", contracts: [], pinned: ["nope"] })).toThrow(StreamRequestError);
+    expect(() => signalsQuotes.parseParameters({ symbol: "AAOI", contracts: [], pinned: Array.from({ length: 5 }, (_, index) => `2026-10-21|${index + 1}|P`) })).toThrow(StreamRequestError);
     expect(() => signalsQuotes.parseParameters({ symbol: "AAOI", contracts: Array.from({ length: 61 }, (_, index) => `2026-10-21|${index}|P`) })).toThrow(StreamRequestError);
   });
 
   it("subscribes exactly the requested contracts and re-scores them live; a contract the snapshot never stored gets a cell once quoted", async () => {
     const harness = createHarness();
     const { frames, abort } = run(harness, ["2026-10-21|90|P", "2026-10-21|95|P"]);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
     expect(harness.optionSubscriptions.map((subscription) => subscription.contracts.map(contractKey))).toEqual([["2026-10-21|90|P", "2026-10-21|95|P"]]);
     const before = frames[0]!.candidates["2026-10-21|90|P"]!;
     expect(before.quoteSource).toBe("snapshot");
@@ -427,10 +473,50 @@ describe("signalsQuotes producer (what the modal has on screen)", () => {
     expect(harness.optionSubscriptions[0]!.aborted()).toBe(true);
   });
 
+  it("a pinned contract gets its own line on top of the on-screen ones and is scored live like the contract endpoint, Monte Carlo included", async () => {
+    const harness = createHarness();
+    const { frames, abort } = run(harness, ["2026-10-21|90|P"], ["2026-10-21|95|P", "2026-10-21|90|P"]);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
+    expect(harness.optionSubscriptions.map((subscription) => subscription.contracts.map(contractKey))).toEqual([["2026-10-21|90|P", "2026-10-21|95|P"]]);
+    // Nothing quoted yet for the contract the snapshot never stored: unscored, with the capture's delta.
+    expect(frames[0]!.pinned["2026-10-21|95|P"]).toMatchObject({ scored: false, delta: -0.17 });
+
+    const fresh95 = quoteAt(95, "P", "2026-10-21", years30);
+    harness.quoteUpdates.push([{ expiry: "2026-10-21", strike: 95, right: "P", bid: fresh95.bid, ask: fresh95.ask, delta: -0.19 }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    const scoredFrame = frames.at(-1)!;
+    expect(scoredFrame.pinned["2026-10-21|95|P"]).toMatchObject({ scored: true, quoteSource: "live", bid: fresh95.bid });
+    // The simulation runs in the worker once for the pinned candidates (the 90 put and the 95 put), then its result lands in a later frame.
+    expect(harness.monteCarloCalls.at(-1)).toEqual({ spotPrice: forward, candidateCount: 2 });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(frames.at(-1)!.pinned["2026-10-21|95|P"]).toMatchObject({ scored: true, uncompensatedSharePercent: 42 });
+
+    // A new quote at the same spot re-scores the pinned contract without another simulation.
+    const callsBefore = harness.monteCarloCalls.length;
+    harness.quoteUpdates.push([{ expiry: "2026-10-21", strike: 95, right: "P", bid: fresh95.bid! * 0.9, ask: fresh95.ask, delta: -0.19 }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(frames.at(-1)!.pinned["2026-10-21|95|P"]).toMatchObject({ scored: true, bid: fresh95.bid! * 0.9 });
+    expect(harness.monteCarloCalls).toHaveLength(callsBefore);
+    abort.abort();
+  });
+
+  it("holds its first frame for the live price, so nothing is ever scored at the stale snapshot spot", async () => {
+    const harness = createHarness();
+    const { frames, abort } = run(harness, ["2026-10-21|90|P"]);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(frames).toHaveLength(0);
+    harness.priceUpdates.push({ AAOI: 103 }, true);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.spotPrice).toBe(103);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
+    expect(frames).toHaveLength(1);
+    abort.abort();
+  });
+
   it("holds no option line for an empty list (nothing on screen)", async () => {
     const harness = createHarness();
     const { frames, abort } = run(harness, []);
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
     expect(harness.optionSubscriptions).toEqual([]);
     expect(frames[0]!.cells).toEqual({});
     abort.abort();

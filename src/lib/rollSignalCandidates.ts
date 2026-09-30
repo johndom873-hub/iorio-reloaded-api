@@ -26,6 +26,8 @@ export const assignmentRiskDeltaThreshold = 0.5;
 export const decayedFractionOfEntryCredit = 0.5;
 
 export type RollSignalFlag = "near_expiry" | "assignment_risk" | "decayed";
+/** What makes a roll fall outside the list's hard filters (a chain pick may still be ordered): a net debit at the mid, or a riskier (higher |delta|) contract. */
+export type RollSignalWarning = "debit" | "higher_delta";
 export type HeldLegUnscoredReason = "no_slice" | "no_quote" | "no_forecast";
 
 /** An open short option leg as the inputs loader reads it from position_legs. */
@@ -80,13 +82,15 @@ export interface RollSignalCandidate {
   netRollEdgeDollarsPerContract: number;
   /** netRollEdgeDollarsPerContract × quantity. */
   netRollEdgeDollars: number;
-  /** mid(B) − mid(A), per share; always > 0 here (credit rolls only). */
+  /** mid(B) − mid(A), per share; positive unless the warnings say "debit". */
   netCreditPerShare: number;
-  /** |delta(B)| − |delta(A)|; never positive here (lower-delta filter). */
+  /** |delta(B)| − |delta(A)|; positive only with the "higher_delta" warning. */
   deltaChange: number;
   /** dollarRisk(B) − dollarRisk(A), per contract. */
   dollarRiskChange: number;
   flags: RollSignalFlag[];
+  /** Always empty for the list (those are hard filters); set only for a roll to a contract the user picked on the chain. */
+  warnings: RollSignalWarning[];
   grade: SignalGrade;
 }
 
@@ -181,36 +185,47 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
   });
 }
 
+/**
+ * Formula 3j for one (held leg, replacement) pair, with no hard filters: the two the list applies come back as warnings
+ * instead. Null when the pair cannot be scored (held leg unscored, other strategy, or the same contract).
+ */
+export function scoreRollPair(leg: HeldLegScore, replacement: SignalCandidate): RollSignalCandidate | null {
+  if (leg.unscoredReason !== null || leg.edge === null || leg.frictionVolatility === null || leg.vega === null || leg.delta === null || leg.mid === null || leg.dollarRisk === null) return null;
+  if (replacement.strategyKey !== leg.strategyKey) return null;
+  if (replacement.expiry === leg.expiry && replacement.strike === leg.strike) return null;
+  const holdAndCloseVolatility = leg.edge + leg.frictionVolatility;
+  const holdAndCloseDollars = holdAndCloseVolatility * leg.vega * 100;
+  const netCreditPerShare = (replacement.bid + replacement.ask) / 2 - leg.mid;
+  const netRollEdge = replacement.netEdge - holdAndCloseVolatility;
+  const netRollEdgeDollarsPerContract = replacement.edgeDollars - holdAndCloseDollars;
+  const warnings: RollSignalWarning[] = [];
+  if (!(netCreditPerShare > 0)) warnings.push("debit"); // debit "rescue" rolls are not listed, only pickable on the chain
+  if (Math.abs(replacement.delta) > Math.abs(leg.delta)) warnings.push("higher_delta");
+  return {
+    legId: leg.legId,
+    positionId: leg.positionId,
+    strategyKey: leg.strategyKey,
+    quantity: leg.quantity,
+    replacement,
+    netRollEdge,
+    netRollEdgeDollarsPerContract,
+    netRollEdgeDollars: netRollEdgeDollarsPerContract * leg.quantity,
+    netCreditPerShare,
+    deltaChange: Math.abs(replacement.delta) - Math.abs(leg.delta),
+    dollarRiskChange: replacement.dollarRisk - leg.dollarRisk,
+    flags: leg.flags,
+    warnings,
+    grade: gradeForNetEdge(netRollEdge),
+  };
+}
+
 /** Every (held leg, replacement) pair passing the hard filters, graded and sorted by net roll Edge $ (then vol points). */
 export function buildRollCandidates(heldLegs: HeldLegScore[], candidates: SignalCandidate[]): RollSignalCandidate[] {
   const rolls: RollSignalCandidate[] = [];
   for (const leg of heldLegs) {
-    if (leg.unscoredReason !== null || leg.edge === null || leg.frictionVolatility === null || leg.vega === null || leg.delta === null || leg.mid === null || leg.dollarRisk === null) continue;
-    const holdAndCloseVolatility = leg.edge + leg.frictionVolatility;
-    const holdAndCloseDollars = holdAndCloseVolatility * leg.vega * 100;
     for (const replacement of candidates) {
-      if (replacement.strategyKey !== leg.strategyKey) continue;
-      if (replacement.expiry === leg.expiry && replacement.strike === leg.strike) continue;
-      if (Math.abs(replacement.delta) > Math.abs(leg.delta)) continue; // never into a riskier contract
-      const netCreditPerShare = (replacement.bid + replacement.ask) / 2 - leg.mid;
-      if (!(netCreditPerShare > 0)) continue; // credit rolls only (debit "rescue" rolls are separate, deferred work)
-      const netRollEdge = replacement.netEdge - holdAndCloseVolatility;
-      const netRollEdgeDollarsPerContract = replacement.edgeDollars - holdAndCloseDollars;
-      rolls.push({
-        legId: leg.legId,
-        positionId: leg.positionId,
-        strategyKey: leg.strategyKey,
-        quantity: leg.quantity,
-        replacement,
-        netRollEdge,
-        netRollEdgeDollarsPerContract,
-        netRollEdgeDollars: netRollEdgeDollarsPerContract * leg.quantity,
-        netCreditPerShare,
-        deltaChange: Math.abs(replacement.delta) - Math.abs(leg.delta),
-        dollarRiskChange: replacement.dollarRisk - leg.dollarRisk,
-        flags: leg.flags,
-        grade: gradeForNetEdge(netRollEdge),
-      });
+      const roll = scoreRollPair(leg, replacement);
+      if (roll && roll.warnings.length === 0) rolls.push(roll);
     }
   }
   return rolls.sort((a, b) => b.netRollEdgeDollars - a.netRollEdgeDollars || b.netRollEdge - a.netRollEdge);

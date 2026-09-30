@@ -35,8 +35,16 @@ export interface Greeks {
 // to arrive.
 const snapshotTimeoutMs = 6_000;
 
-function requestLiveGreeks(ib: IBApi, allocateReqId: () => number, contracts: GreeksContract[]): Promise<Record<string, Greeks>> {
-  requestRealtimeMarketData(ib);
+/**
+ * "realtime": live greeks, only while the market is open (closed: nothing arrives, callers fall back to the saved snapshot).
+ * "lastClose": IBKR's FROZEN type, which always answers with the last session's close whether or not the market is open
+ * (measured 2026-09-30) and never with live values: for the nightly snapshot that saves the day's close.
+ */
+export type GreeksSource = "realtime" | "lastClose";
+
+function requestLiveGreeks(ib: IBApi, allocateReqId: () => number, contracts: GreeksContract[], source: GreeksSource): Promise<Record<string, Greeks>> {
+  if (source === "lastClose") ib.reqMarketDataType(MarketDataType.FROZEN);
+  else requestRealtimeMarketData(ib);
 
   const greeksByKey = new Map<string, Greeks>();
   const reqIdToContract = new Map<number, GreeksContract>();
@@ -158,19 +166,19 @@ function requestLiveGreeks(ib: IBApi, allocateReqId: () => number, contracts: Gr
  * across requests, no per-call connect cost) and falls back to a one-shot
  * connection only when the shared one isn't available.
  */
-export async function fetchLiveGreeks(contracts: GreeksContract[]): Promise<Record<string, Greeks>> {
+export async function fetchLiveGreeks(contracts: GreeksContract[], source: GreeksSource = "realtime"): Promise<Record<string, Greeks>> {
   if (contracts.length === 0) return {};
   const holder = `snapshot:greeks:${randomUUID()}`;
   const reservation = await reserveMarketDataLines(holder, contracts.length, snapshotReservationTtlSeconds);
   if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, `a ${contracts.length}-contract greeks snapshot`, contracts.length));
   try {
-    return await fetchLiveGreeksFromIbkr(contracts);
+    return await fetchLiveGreeksFromIbkr(contracts, source);
   } finally {
     releaseMarketDataLines(holder).catch((error) => console.warn(`Failed to release IBKR market data line reservation ${holder}: ${error instanceof Error ? error.message : error}`));
   }
 }
 
-async function fetchLiveGreeksFromIbkr(contracts: GreeksContract[]): Promise<Record<string, Greeks>> {
+async function fetchLiveGreeksFromIbkr(contracts: GreeksContract[], source: GreeksSource): Promise<Record<string, Greeks>> {
 
   let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
   try {
@@ -184,7 +192,7 @@ async function fetchLiveGreeksFromIbkr(contracts: GreeksContract[]): Promise<Rec
   if (borrowed) {
     const { ib, release } = borrowed;
     try {
-      return await requestLiveGreeks(ib, () => sharedReadConnection.allocateReqId(), contracts);
+      return await requestLiveGreeks(ib, () => sharedReadConnection.allocateReqId(), contracts, source);
     } finally {
       release();
     }
@@ -194,7 +202,7 @@ async function fetchLiveGreeksFromIbkr(contracts: GreeksContract[]): Promise<Rec
   const { ib } = connection;
   try {
     let nextReqId = 20_000;
-    return await requestLiveGreeks(ib, () => nextReqId++, contracts);
+    return await requestLiveGreeks(ib, () => nextReqId++, contracts, source);
   } finally {
     connection.disconnect();
   }

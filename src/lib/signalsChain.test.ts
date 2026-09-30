@@ -238,10 +238,29 @@ describe("scoreSignalContract", () => {
       const right = candidate.strategyKey === "covered_call" ? "C" : "P";
       const result = score({ expiry: candidate.expiry, strike: candidate.strike, right });
       const uncompensated = computeUncompensatedByContract([candidate], forward, inputs().slices, pathCount).get(candidateContractKey(candidate)) ?? null;
-      const { scored: isScored, right: resultRight, isCandidate, notCandidateReason, spotPrice, priceSource, ...asCandidate } = result as Extract<typeof result, { scored: true }>;
+      const { scored: isScored, right: resultRight, isCandidate, notCandidateReason, spotPrice, priceSource, rolls, ...asCandidate } = result as Extract<typeof result, { scored: true }>;
+      expect(rolls).toEqual([]);
       expect({ isScored, resultRight, isCandidate, notCandidateReason, spotPrice, priceSource }).toEqual({ isScored: true, resultRight: right, isCandidate: true, notCandidateReason: null, spotPrice: forward, priceSource: "snapshot" });
       expect(asCandidate).toEqual({ ...candidate, uncompensatedSharePercent: uncompensated });
     }
+  });
+
+  it("scores the contract as a roll target for each open short leg of the same right, filters lifted into warnings", () => {
+    const heldPut = { legId: "leg-put", positionId: "pos-1", strategyKey: "cash_secured_put" as const, expiry: near, strike: 95, right: "P" as const, quantity: 2, entryPrice: 1.5, entryAtIso: "2026-09-10T14:00:00Z" };
+    const heldCall = { ...heldPut, legId: "leg-call", strategyKey: "covered_call" as const, strike: 105, right: "C" as const };
+    const withHeld = { inputs: inputs({ openShortLegs: [heldPut, heldCall] }) };
+    const result = score({ expiry: near, strike: 90, right: "P" }, withHeld);
+    if (!result.scored) throw new Error("expected a scored contract");
+    expect(result.rolls.map((roll) => roll.legId)).toEqual(["leg-put"]);
+    const roll = result.rolls[0]!;
+    const { rolls: ignored, scored: ignoredScored, right: ignoredRight, isCandidate, notCandidateReason, spotPrice, priceSource, ...replacement } = result;
+    expect(roll.replacement).toEqual(replacement);
+    // Same-expiry lower strike: cheaper than the held put, so a debit -- but lower delta, so no delta warning.
+    expect(roll.warnings).toEqual(["debit"]);
+    expect(roll.netCreditPerShare).toBeLessThan(0);
+    // A contract of the other right rolls only the call leg.
+    const callResult = score({ expiry: near, strike: 110, right: "C" }, withHeld);
+    expect(callResult.scored && callResult.rolls.map((entry) => entry.legId)).toEqual(["leg-call"]);
   });
 
   it("parity holds at a live spot too", () => {

@@ -1,5 +1,6 @@
 import { calendarDaysUntilExpiry, captureMaximumDaysToExpiry, captureMinimumDaysToExpiry } from "./optionChainCaptureWindow.js";
 import { formatShortDate } from "./formatShortDate.js";
+import { scoreRollPair, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import type { SignalCandidate, SignalContractExclusion, SignalGrade, SignalQuote, SignalQuoteSource, SignalStrategyKey } from "./signalCandidates.js";
 import { candidateContractKey, computeUncompensatedByContract, contractKey, mergeLiveQuotes, scoreTicker, type ContractRef, type LiveScoringOverrides } from "./signalsLiveScoring.js";
 import type { SignalSettings } from "./signalSettingsStore.js";
@@ -238,6 +239,8 @@ export interface SignalContractContext {
 /** Scored exactly like a candidate: a SignalCandidate the order form takes unchanged. */
 export interface ScoredSignalContract extends SignalCandidate, SignalContractContext {
   scored: true;
+  /** This contract as the replacement for each open short leg of the same right that can be scored (Formula 3j; filters become warnings). */
+  rolls: RollSignalCandidate[];
 }
 
 /** No Signals score (no surface for the expiry, in the money, spans earnings, no two-sided quote, ...): the quote alone. */
@@ -277,6 +280,11 @@ export interface ScoreSignalContractInput {
   capturedDelta: number | null;
   /** Monte Carlo path count override (tests). */
   uncompensatedSharePathCount?: number;
+  /**
+   * The streaming caller's own throttled Monte Carlo results by contract key: when given, no simulation runs here (a
+   * contract without a result yet scores with a null UncompensatedShare).
+   */
+  uncompensatedByContract?: Map<string, number | null>;
 }
 
 const filtersLifted = { maxNetDelta: Number.POSITIVE_INFINITY, minAnnualizedYieldPct: Number.NEGATIVE_INFINITY };
@@ -302,12 +310,20 @@ export function scoreSignalContract(input: ScoreSignalContractInput): SignalCont
   const context = (isCandidate: boolean, notCandidateReason: string | null): SignalContractContext => ({ right: contract.right, isCandidate, notCandidateReason, spotPrice, priceSource });
   const withMonteCarlo = (candidate: SignalCandidate): SignalCandidate => {
     if (spotPrice === null) return candidate;
+    if (input.uncompensatedByContract) return { ...candidate, uncompensatedSharePercent: input.uncompensatedByContract.get(key) ?? null };
     const byContract = computeUncompensatedByContract([candidate], spotPrice, inputs.slices, input.uncompensatedSharePathCount);
     return { ...candidate, uncompensatedSharePercent: byContract.get(key) ?? null };
   };
 
+  const rollsFor = (scored: TickerSignals, replacement: SignalCandidate): RollSignalCandidate[] =>
+    scored.heldLegs.flatMap((heldLeg) => (heldLeg.right === contract.right ? [scoreRollPair(heldLeg, replacement)] : [])).filter((roll): roll is RollSignalCandidate => roll !== null);
+  const scoredContract = (scored: TickerSignals, candidate: SignalCandidate, contractContext: SignalContractContext): ScoredSignalContract => {
+    const replacement = withMonteCarlo(candidate);
+    return { ...replacement, ...contractContext, scored: true, rolls: rollsFor(scored, replacement) };
+  };
+
   const candidate = matching(withSettings.scored);
-  if (candidate) return { ...withMonteCarlo(candidate), ...context(true, null), scored: true };
+  if (candidate) return scoredContract(withSettings.scored, candidate, context(true, null));
 
   const exclusion = withSettings.exclusions.get(key);
   const scoringQuote = withSettings.scoringQuotes.find((quote) => contractKey(quote) === key) ?? null;
@@ -324,7 +340,7 @@ export function scoreSignalContract(input: ScoreSignalContractInput): SignalCont
 
   const lifted = scoreTickerWithExclusions(withContract, input.account, { ...input.settings, ...filtersLifted }, live);
   const liftedCandidate = matching(lifted.scored);
-  if (liftedCandidate) return { ...withMonteCarlo(liftedCandidate), ...context(false, reason), scored: true };
+  if (liftedCandidate) return scoredContract(lifted.scored, liftedCandidate, context(false, reason));
 
   const bid = liveTwoSided?.bid ?? scoringQuote?.bid ?? null;
   const ask = liveTwoSided?.ask ?? scoringQuote?.ask ?? null;
