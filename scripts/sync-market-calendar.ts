@@ -1,16 +1,16 @@
-// Populates market_calendar from MarketData.app's free market-status
-// endpoint (https://api.marketdata.app/v1/markets/status/ -- requires a
-// free-tier API token, no credit card; confirmed live via direct curl
-// 2026-09-01). Run this whenever the table's forward coverage is running
-// low -- there's no scheduled job for it since NYSE only needs a fresh
-// pull every year or so (holidays are published ~2 years out).
+// Keeps market_calendar populated from MarketData.app's free market-status
+// endpoint (https://api.marketdata.app/v1/markets/status/, free-tier API token
+// in MARKETDATA_API_TOKEN). Runs daily from Heroku Scheduler and can be run by hand.
 //
-// Usage:
+// Usage (dev):
 //   npm run sync-market-calendar
 //   npm run sync-market-calendar -- --days=730   (default: 400 days ahead)
+// Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
+//   node dist/scripts/sync-market-calendar.js
 
 import { db } from "../src/db/connection.js";
 import { requireEnvironmentVariable } from "../src/config/env.js";
+import { runJob } from "../src/lib/runJob.js";
 
 const TRAILING_DAYS = 30;
 const DEFAULT_LOOKAHEAD_DAYS = 400;
@@ -32,40 +32,43 @@ function toDateString(date: Date): string {
 }
 
 async function main(): Promise<void> {
-  const apiToken = requireEnvironmentVariable("MARKETDATA_API_TOKEN");
-  const lookaheadDays = parseLookaheadDays();
+  await runJob("market_calendar_sync", async () => {
+    const apiToken = requireEnvironmentVariable("MARKETDATA_API_TOKEN");
+    const lookaheadDays = parseLookaheadDays();
 
-  const now = new Date();
-  const from = toDateString(new Date(now.getTime() - TRAILING_DAYS * 24 * 60 * 60 * 1000));
-  const to = toDateString(new Date(now.getTime() + lookaheadDays * 24 * 60 * 60 * 1000));
+    const now = new Date();
+    const from = toDateString(new Date(now.getTime() - TRAILING_DAYS * 24 * 60 * 60 * 1000));
+    const to = toDateString(new Date(now.getTime() + lookaheadDays * 24 * 60 * 60 * 1000));
 
-  const url = `https://api.marketdata.app/v1/markets/status/?from=${from}&to=${to}`;
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${apiToken}` },
-    signal: AbortSignal.timeout(30_000),
+    const url = `https://api.marketdata.app/v1/markets/status/?from=${from}&to=${to}`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`MarketData.app HTTP ${response.status}`);
+    const data = (await response.json()) as MarketStatusResponse;
+    if (data.s !== "ok") throw new Error(`MarketData.app returned status "${data.s}": ${data.errmsg ?? "no error message"}`);
+
+    const dates = data.date ?? [];
+    const statuses = data.status ?? [];
+    if (dates.length === 0) throw new Error("MarketData.app returned no dates for the requested range");
+
+    let written = 0;
+    for (let i = 0; i < dates.length; i++) {
+      const dateValue = dates[i];
+      if (dateValue === undefined) continue;
+      const calendarDate = toDateString(new Date(dateValue * 1000));
+      const isOpen = statuses[i] === "open";
+      await db("market_calendar")
+        .insert({ calendar_date: calendarDate, is_open: isOpen })
+        .onConflict("calendar_date")
+        .merge(["is_open"]);
+      written++;
+    }
+
+    console.log(`market_calendar synced: ${written} day(s) from ${from} to ${to}.`);
+    return { details: { daysWritten: written, from, to } };
   });
-  if (!response.ok) throw new Error(`MarketData.app HTTP ${response.status}`);
-  const data = (await response.json()) as MarketStatusResponse;
-  if (data.s !== "ok") throw new Error(`MarketData.app returned status "${data.s}": ${data.errmsg ?? "no error message"}`);
-
-  const dates = data.date ?? [];
-  const statuses = data.status ?? [];
-  if (dates.length === 0) throw new Error("MarketData.app returned no dates for the requested range");
-
-  let written = 0;
-  for (let i = 0; i < dates.length; i++) {
-    const dateValue = dates[i];
-    if (dateValue === undefined) continue;
-    const calendarDate = toDateString(new Date(dateValue * 1000));
-    const isOpen = statuses[i] === "open";
-    await db("market_calendar")
-      .insert({ calendar_date: calendarDate, is_open: isOpen })
-      .onConflict("calendar_date")
-      .merge(["is_open"]);
-    written++;
-  }
-
-  console.log(`market_calendar synced: ${written} day(s) from ${from} to ${to}.`);
 }
 
 main()
