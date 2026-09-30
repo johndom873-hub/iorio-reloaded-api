@@ -122,7 +122,7 @@ function createHarness(): Harness {
       monteCarloCalls.push({ spotPrice, candidateCount: candidates.length });
       return new Map(candidates.map((candidate) => [candidateContractKey(candidate), 42]));
     },
-    loadCapturedDeltas: async () => new Map([["2026-10-21|95|P", -0.17]]),
+    loadCapturedDeltas: async () => new Map([["2026-10-21|95|P", -0.17], ["2026-10-21|100|P", -0.52]]),
     now: () => new Date(),
   };
   return {
@@ -471,6 +471,27 @@ describe("signalsQuotes producer (what the modal has on screen)", () => {
     expect(Object.keys(last.candidates).every((key) => key.startsWith("2026-10-21|9"))).toBe(true); // only what was asked for
     abort.abort();
     expect(harness.optionSubscriptions[0]!.aborted()).toBe(true);
+  });
+
+  it("a filtered cell shows the capture's delta without a pin, then takes the streamed IBKR delta once the line carries one", async () => {
+    const harness = createHarness();
+    const { frames, abort } = run(harness, ["2026-10-21|100|P"]);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
+    expect(frames[0]!.cells["2026-10-21|100|P"]).toBeUndefined(); // not in the snapshot, no quote yet
+
+    const stored100 = quoteAt(100, "P", "2026-10-21", years30);
+    harness.quoteUpdates.push([{ expiry: "2026-10-21", strike: 100, right: "P", bid: stored100.bid, ask: stored100.ask }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(frames.at(-1)!.cells["2026-10-21|100|P"]).toMatchObject({ state: "filtered", delta: -0.52 });
+
+    harness.quoteUpdates.push([{ expiry: "2026-10-21", strike: 100, right: "P", bid: stored100.bid, ask: stored100.ask, delta: -0.55 }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(frames.at(-1)!.cells["2026-10-21|100|P"]).toMatchObject({ state: "filtered", delta: -0.55 });
+
+    harness.quoteUpdates.push([{ expiry: "2026-10-21", strike: 100, right: "P", bid: stored100.bid, ask: stored100.ask, delta: null }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(frames.at(-1)!.cells["2026-10-21|100|P"]).toMatchObject({ state: "filtered", delta: -0.52 });
+    abort.abort();
   });
 
   it("a pinned contract gets its own line on top of the on-screen ones and is scored live like the contract endpoint, Monte Carlo included", async () => {

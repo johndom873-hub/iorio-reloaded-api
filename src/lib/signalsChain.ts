@@ -147,8 +147,8 @@ export interface ChainCellScoring {
   exclusions: Map<string, SignalContractExclusion>;
 }
 
-/** Pure: how one contract shows in the chain (candidate / filtered with the reason / not captured), from one scoring run. Shared by the REST chain and the live stream so both draw a cell the same way. */
-export function createChainCellResolver(scoring: ChainCellScoring | null, capturedDeltaByContract: Map<string, number>): (ref: ContractRef) => SignalsChainCell {
+/** Pure: how one contract shows in the chain (candidate / filtered with the reason / not captured), from one scoring run. A filtered cell's delta is the streamed IBKR delta, else the scoring's, else the capture's. Shared by the REST chain and the live stream so both draw a cell the same way. */
+export function createChainCellResolver(scoring: ChainCellScoring | null, capturedDeltaByContract: Map<string, number>, liveDeltaByContract: Map<string, number> = new Map()): (ref: ContractRef) => SignalsChainCell {
   const candidatesByKey = new Map((scoring?.scored.candidates ?? []).map((candidate) => [candidateContractKey(candidate), candidate]));
   const quotesByKey = new Map((scoring?.scoringQuotes ?? []).map((quote) => [contractKey(quote), quote]));
   const unscoredReason = scoring?.scored.unscoredReason ?? null;
@@ -166,7 +166,7 @@ export function createChainCellResolver(scoring: ChainCellScoring | null, captur
       state: "filtered",
       bid: quote.bid,
       ask: quote.ask,
-      delta: exclusionDelta(exclusion) ?? capturedDeltaByContract.get(key) ?? null,
+      delta: liveDeltaByContract.get(key) ?? exclusionDelta(exclusion) ?? capturedDeltaByContract.get(key) ?? null,
       quoteSource: quote.source ?? "snapshot",
       quotedAt: quote.quotedAt ?? null,
       grade: null,

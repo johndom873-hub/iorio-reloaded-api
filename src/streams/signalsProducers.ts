@@ -545,7 +545,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       const ticker = await deps.loadSignalsUniverseTicker(symbol);
       if (!ticker) throw new StreamRequestError(404, `${symbol} is not on the shortlist and has no open short option leg.`);
       const [inputs, account, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadSignalSettings()]);
-      const capturedDeltaByContract = pinnedKeys.length > 0 ? await deps.loadCapturedDeltas(inputs) : new Map<string, number>();
+      const capturedDeltaByContract = await deps.loadCapturedDeltas(inputs);
       if (signal.aborted) return;
       const requested = new Set(contractKeys);
       let spot: number | null = null;
@@ -559,7 +559,9 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       const emitFrame = () => {
         const overrides = liveOverrides(inputs, spot, priceSource);
         const scoring = scoreTickerWithExclusions(inputs, account, settings, overrides ? { ...overrides, liveQuotes } : undefined);
-        const cellFor = createChainCellResolver(scoring, new Map());
+        const liveDeltaByContract = new Map<string, number>();
+        for (const quote of liveQuotes) if (quote.delta !== null && quote.delta !== undefined) liveDeltaByContract.set(contractKey(quote), quote.delta);
+        const cellFor = createChainCellResolver(scoring, capturedDeltaByContract, liveDeltaByContract);
         const frame: SignalsQuotesFrame = { type: "signalsQuotes", at: deps.now().toISOString(), spotPrice: scoring.scored.spotPrice, contractKeys, cells: {}, candidates: {}, heldLegs: {}, rolls: {}, pinned: {} };
         for (const key of contractKeys) {
           const cell = cellFor(parseContractKey(key));
