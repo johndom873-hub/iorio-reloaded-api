@@ -132,53 +132,55 @@ function unscored(leg: OpenShortLeg, reason: HeldLegUnscoredReason, partial: Par
   };
 }
 
-/** Scores every open short leg through the same surface, forecast and friction as a new-trade candidate; ITM legs included. */
+/** The held leg's quote and what it implies without any surface: what a roll needs to price the close, so an unscored leg with a real quote still carries it. */
+function heldLegQuoteFields(leg: OpenShortLeg, quote: { bid: number; ask: number; source?: SignalQuoteSource; quotedAt?: string }, spotPrice: number): { bid: number; ask: number; mid: number; dollarRisk: number; quoteSource: SignalQuoteSource; quotedAt: string | null } {
+  const mid = (quote.bid + quote.ask) / 2;
+  const capitalAtRisk = leg.strategyKey === "covered_call" ? spotPrice : leg.strike;
+  return { bid: quote.bid, ask: quote.ask, mid, dollarRisk: capitalAtRisk * 100 - mid, quoteSource: quote.source ?? "snapshot", quotedAt: quote.quotedAt ?? null };
+}
+
+/** Scores every open short leg through the same surface, forecast and friction as a new-trade candidate; ITM legs included. An unscored leg with a two-sided quote keeps its bid, ask and mid (a roll can still be priced at the quotes). */
 export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput): HeldLegScore[] {
   const slicesByExpiry = new Map(input.slices.map((slice) => [slice.expiry, slice]));
   const quotesByKey = new Map(input.quotes.map((quote) => [`${quote.expiry}|${quote.strike}|${quote.right}`, quote]));
   return legs.map((leg) => {
     const slice = slicesByExpiry.get(leg.expiry);
-    if (!slice || slice.status !== "ok" || !slice.parameters || !(slice.yearsToExpiry > 0)) return unscored(leg, "no_slice");
+    const rawQuote = quotesByKey.get(heldLegContractKey(leg));
+    const twoSidedQuote = rawQuote && rawQuote.bid !== null && rawQuote.ask !== null && rawQuote.bid > 0 && rawQuote.ask > rawQuote.bid ? { ...rawQuote, bid: rawQuote.bid, ask: rawQuote.ask } : null;
+    const quoteFields = twoSidedQuote ? heldLegQuoteFields(leg, twoSidedQuote, input.spotPrice) : null;
+    if (!slice || slice.status !== "ok" || !slice.parameters || !(slice.yearsToExpiry > 0)) return unscored(leg, "no_slice", { ...quoteFields });
     const dte = Math.round(slice.yearsToExpiry * annualDays);
-    const quote = quotesByKey.get(heldLegContractKey(leg));
     const flagsWithoutQuote: RollSignalFlag[] = dte <= nearExpiryDaysThreshold ? ["near_expiry"] : [];
-    if (!quote || quote.bid === null || quote.ask === null || !(quote.bid > 0) || !(quote.ask > quote.bid)) return unscored(leg, "no_quote", { dte, flags: flagsWithoutQuote });
-    if (!input.forecast) return unscored(leg, "no_forecast", { dte, bid: quote.bid, ask: quote.ask, mid: (quote.bid + quote.ask) / 2, flags: flagsWithoutQuote });
+    if (!twoSidedQuote || !quoteFields) return unscored(leg, "no_quote", { dte, flags: flagsWithoutQuote });
+    if (!input.forecast) return unscored(leg, "no_forecast", { ...quoteFields, dte, flags: flagsWithoutQuote });
 
     const isCall = leg.right === "C";
     const logMoneyness = Math.log(leg.strike / slice.forwardPrice);
     const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
-    if (!(totalVariance > 0)) return unscored(leg, "no_slice", { dte, flags: flagsWithoutQuote });
+    if (!(totalVariance > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
     const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry) + (input.ivShiftByExpiry?.get(leg.expiry) ?? 0);
-    if (!(surfaceIv > 0)) return unscored(leg, "no_slice", { dte, flags: flagsWithoutQuote });
-    const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: leg.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv });
+    if (!(surfaceIv > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
+    const friction = computeFrictionCost({ bid: twoSidedQuote.bid, ask: twoSidedQuote.ask, forward: slice.forwardPrice, strike: leg.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv });
     if (!friction) return unscored(leg, "no_quote", { dte, flags: flagsWithoutQuote });
 
-    const mid = (quote.bid + quote.ask) / 2;
     const delta = blackScholesDelta(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
     const vega = blackScholesVega(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv);
     const edge = surfaceIv - input.forecast.volatility;
     const flags: RollSignalFlag[] = [...flagsWithoutQuote];
     if (Math.abs(delta) >= assignmentRiskDeltaThreshold) flags.push("assignment_risk");
-    if (leg.entryPrice > 0 && mid <= leg.entryPrice * decayedFractionOfEntryCredit) flags.push("decayed");
-    const capitalAtRisk = leg.strategyKey === "covered_call" ? input.spotPrice : leg.strike;
+    if (leg.entryPrice > 0 && quoteFields.mid <= leg.entryPrice * decayedFractionOfEntryCredit) flags.push("decayed");
     return {
       ...leg,
+      ...quoteFields,
       dte,
       delta,
-      bid: quote.bid,
-      ask: quote.ask,
-      mid,
       surfaceImpliedVolatility: surfaceIv,
-      midImpliedVolatility: impliedVolatilityFromMid(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, quote.bid, quote.ask, isCall),
+      midImpliedVolatility: impliedVolatilityFromMid(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, twoSidedQuote.bid, twoSidedQuote.ask, isCall),
       edge,
       frictionVolatility: friction.frictionVolatility,
       vega,
       holdEdgeDollars: edge * vega * 100,
       closeCostDollars: friction.frictionVolatility * vega * 100,
-      dollarRisk: capitalAtRisk * 100 - mid,
-      quoteSource: quote.source ?? "snapshot",
-      quotedAt: quote.quotedAt ?? null,
       flags,
       unscoredReason: null,
     };

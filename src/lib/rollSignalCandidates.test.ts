@@ -146,6 +146,29 @@ describe("scoreHeldLegs", () => {
     expect(scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast: null, slices, quotes: otmQuotes })[0]!.unscoredReason).toBe("no_forecast");
     expect(heldLegContractKey(leg())).toBe(`${expiry30}|95|P`);
   });
+
+  it("keeps a real two-sided quote on a leg that is unscored for another reason, so a roll can still be priced at the quotes", () => {
+    const putQuote = { ...otmQuotes.find((q) => q.expiry === expiry30 && q.strike === 95 && q.right === "P")!, source: "day" as const, quotedAt: "2026-09-24T15:00:00Z" };
+    const midOfPut = (putQuote.bid! + putQuote.ask!) / 2;
+
+    const rejectedFit = scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast, slices: [{ ...slices[0]!, status: "poor_fit" }, slices[1]!], quotes: [putQuote] })[0]!;
+    expect(rejectedFit.unscoredReason).toBe("no_slice");
+    expect(rejectedFit).toMatchObject({ bid: putQuote.bid, ask: putQuote.ask, quoteSource: "day", quotedAt: "2026-09-24T15:00:00Z", edge: null, delta: null });
+    expect(rejectedFit.mid).toBeCloseTo(midOfPut, 12);
+    expect(rejectedFit.dollarRisk).toBeCloseTo(95 * 100 - midOfPut, 9);
+
+    const coveredCall = leg({ strategyKey: "covered_call", right: "C", strike: 105 });
+    const callQuote = otmQuotes.find((q) => q.expiry === expiry30 && q.strike === 105 && q.right === "C")!;
+    const noSlice = scoreHeldLegs([coveredCall], { spotPrice: 98, riskFreeRate: rate, forecast, slices: [], quotes: [callQuote] })[0]!;
+    expect(noSlice.unscoredReason).toBe("no_slice");
+    expect(noSlice.dollarRisk).toBeCloseTo(98 * 100 - (callQuote.bid! + callQuote.ask!) / 2, 9);
+
+    const noForecast = scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast: null, slices, quotes: [putQuote] })[0]!;
+    expect(noForecast).toMatchObject({ unscoredReason: "no_forecast", bid: putQuote.bid, ask: putQuote.ask, quoteSource: "day" });
+
+    expect(scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast, slices: [], quotes: [] })[0]).toMatchObject({ unscoredReason: "no_slice", bid: null, ask: null, mid: null, dollarRisk: null });
+    expect(scoreRollPair(rejectedFit, candidates()[0]!)).toBeNull();
+  });
 });
 
 describe("buildRollCandidates", () => {
