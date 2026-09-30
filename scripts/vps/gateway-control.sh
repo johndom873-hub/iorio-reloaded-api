@@ -51,7 +51,8 @@ api_answers() {
 }
 
 two_factor_prompt_since() {
-  docker logs --since "$1" "$CONTAINER" 2>&1 | grep -q "Second Factor Authentication initiated"
+  # No `grep -q`: an early exit SIGPIPEs docker logs and pipefail would report the prompt as absent.
+  docker logs --since "$1" "$CONTAINER" 2>&1 | grep "Second Factor Authentication initiated" >/dev/null
 }
 
 fresh_login() {

@@ -157,7 +157,9 @@ else
     if ! systemctl is-active --quiet "$SYSTEMD_UNIT"; then
       break
     fi
-    if journalctl "_PID=\$NEW_PID" --no-pager 2>/dev/null | grep -qF "$STARTUP_SUCCESS_MARKER"; then
+    # No \`grep -q\`: it exits at the first match while journalctl is still writing, journalctl dies of
+    # SIGPIPE (141), and pipefail then turns a found marker into a failed check.
+    if journalctl "_PID=\$NEW_PID" --no-pager 2>/dev/null | grep -F "$STARTUP_SUCCESS_MARKER" >/dev/null; then
       HEALTHY=1
       break
     fi
