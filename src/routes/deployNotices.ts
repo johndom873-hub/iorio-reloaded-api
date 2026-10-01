@@ -1,6 +1,5 @@
 import type { Request, Response } from "express";
 import { announceWebDynoStart, type ReleaseIdentity } from "../lib/webDynoStartNotice.js";
-import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { secretsMatch } from "../lib/secretsMatch.js";
 
 // Lets the frontend app's server announce its own start through the API, so both services use the same
@@ -14,14 +13,12 @@ const frontendSubject = "App";
 
 interface DeployNoticeDependencies {
   readExpectedSecret: () => string | undefined;
-  announce: (input: { subject: string; environmentLabel: string; current: ReleaseIdentity | null }) => Promise<unknown>;
-  readEnvironmentLabel: () => string;
+  announce: (input: { subject: string; current: ReleaseIdentity | null }) => Promise<unknown>;
 }
 
 const defaultDependencies: DeployNoticeDependencies = {
   readExpectedSecret: () => process.env.DEPLOY_NOTICE_SECRET,
   announce: announceWebDynoStart,
-  readEnvironmentLabel: readAppEnvironment,
 };
 
 function readReleaseIdentity(body: unknown): ReleaseIdentity | null {
@@ -40,7 +37,7 @@ export function createDeployNoticeHandler(dependencies: DeployNoticeDependencies
       response.sendStatus(401);
       return;
     }
-    await dependencies.announce({ subject: frontendSubject, environmentLabel: dependencies.readEnvironmentLabel(), current: readReleaseIdentity(request.body) });
+    await dependencies.announce({ subject: frontendSubject, current: readReleaseIdentity(request.body) });
     response.sendStatus(204);
   };
 }

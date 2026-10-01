@@ -4,7 +4,7 @@ import express from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createDeployNoticeHandler } from "./deployNotices.js";
 
-const announced: { subject: string; environmentLabel: string; current: unknown }[] = [];
+const announced: { subject: string; current: unknown }[] = [];
 let expectedSecret: string | undefined;
 let server: Server;
 let baseUrl: string;
@@ -19,7 +19,6 @@ beforeAll(async () => {
       announce: async (input) => {
         announced.push(input);
       },
-      readEnvironmentLabel: () => "staging",
     }),
   );
   await new Promise<void>((resolve) => {
@@ -47,7 +46,7 @@ describe("POST /deploy-notices", () => {
   it("announces the App's release with the right secret", async () => {
     const response = await post({ releaseVersion: "v70", commitSha: "986951b5aaaa" }, "the-shared-secret");
     expect(response.status).toBe(204);
-    expect(announced).toEqual([{ subject: "App", environmentLabel: "staging", current: { releaseVersion: "v70", commitSha: "986951b5aaaa" } }]);
+    expect(announced).toEqual([{ subject: "App", current: { releaseVersion: "v70", commitSha: "986951b5aaaa" } }]);
   });
 
   it("announces a start without release metadata as unknown instead of failing", async () => {

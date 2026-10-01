@@ -37,16 +37,7 @@ app.listen(port, () => {
   // A killed process (out of memory, a Heroku platform restart) can never send its own alert, so every
   // start announces itself: an unexpected restart or a crash loop shows up as repeated messages.
   Promise.resolve()
-    .then(() => {
-      // A start notice must not be lost because the environment label is unreadable: say so in the message instead.
-      let environmentLabel: string;
-      try {
-        environmentLabel = readAppEnvironment();
-      } catch (error) {
-        environmentLabel = `environment unreadable: ${error instanceof Error ? error.message : error}`;
-      }
-      return announceWebDynoStart({ subject: "API", environmentLabel });
-    })
+    .then(() => announceWebDynoStart({ subject: "API" }))
     .catch((error) => console.error(`Could not send the start notice: ${error instanceof Error ? error.message : error}`));
   startNotificationBroadcaster();
   startStalePendingOrderSweep();
