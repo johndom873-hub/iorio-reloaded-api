@@ -8,8 +8,7 @@ import { installShutdownHandler } from "./lib/installShutdownHandler.js";
 import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
 import { startOpsMonitor } from "./lib/opsMonitor.js";
-import { notifyTelegramTracked } from "./lib/undeliveredAlerts.js";
-import { buildWebDynoStartNotice } from "./lib/webDynoStartNotice.js";
+import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
 
 installShutdownHandler("web");
@@ -46,7 +45,7 @@ app.listen(port, () => {
       } catch (error) {
         environmentLabel = `environment unreadable: ${error instanceof Error ? error.message : error}`;
       }
-      return notifyTelegramTracked(buildWebDynoStartNotice({ commit: process.env.HEROKU_SLUG_COMMIT, releaseVersion: process.env.HEROKU_RELEASE_VERSION, environmentLabel }));
+      return announceWebDynoStart({ subject: "API", environmentLabel });
     })
     .catch((error) => console.error(`Could not send the start notice: ${error instanceof Error ? error.message : error}`));
   startNotificationBroadcaster();
