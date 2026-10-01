@@ -110,17 +110,18 @@ export function truncateCycleInputAsOf(input: CycleInput, baselineDate: string, 
   };
 }
 
-const bucketKeys: CycleBucket[] = ["csp", "unstructured", "cc"];
+const bucketKeys: CycleBucket[] = ["csp", "unstructured", "cc", "hedge"];
 
 function openMarkTotal(cycle: Cycle | undefined, bucket: CycleBucket): number {
   if (!cycle) return 0;
-  return cycle.timeline.filter((row) => row.at === null && row.bucket === bucket).reduce((sum, row) => sum + row.premium + row.stock, 0);
+  // Open-leg marks, plus the cost of a hedge option still held (a bought option's price is not a realized loss).
+  return cycle.timeline.filter((row) => (row.at === null || row.unrealized === true) && row.bucket === bucket).reduce((sum, row) => sum + row.premium + row.stock, 0);
 }
 
 export async function computeCyclePeriodPnl(): Promise<CyclePeriodPnl> {
   const emptyBucket = (): BucketPeriodPnl => ({ day: 0, week: 0, month: 0, year: 0, realizedYear: 0, unrealizedYear: 0 });
   const result: CyclePeriodPnl = {
-    buckets: { csp: emptyBucket(), unstructured: emptyBucket(), cc: emptyBucket() },
+    buckets: { csp: emptyBucket(), unstructured: emptyBucket(), cc: emptyBucket(), hedge: emptyBucket() },
     excludedByPeriod: { day: [], week: [], month: [], year: [] },
   };
   const baselineDates = await loadBaselineDates();

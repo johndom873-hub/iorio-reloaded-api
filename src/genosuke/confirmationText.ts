@@ -27,6 +27,7 @@ export interface PositionForCard {
 const strategyLabels: Record<string, string> = {
   covered_call: "covered call",
   cash_secured_put: "cash-secured put",
+  hedge: "hedge",
   unstructured: "unstructured",
 };
 

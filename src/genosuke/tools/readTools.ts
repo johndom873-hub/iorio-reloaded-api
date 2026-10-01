@@ -15,8 +15,8 @@ import { annotateLegOpenState } from "../confirmationText.js";
 import type { GenosukeTool } from "./types.js";
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
-// The blotter route (unlike shortlist) also accepts "unstructured".
-const blotterStrategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "unstructured"] };
+// The blotter route (unlike shortlist) also accepts "hedge" and "unstructured".
+const blotterStrategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "hedge", "unstructured"] };
 
 export const readTools: GenosukeTool[] = [
   {
@@ -38,7 +38,7 @@ export const readTools: GenosukeTool[] = [
     // No strategy filter on purpose: given one, the model queried only covered_call and
     // cash_secured_put and reported "1 open position", hiding the unstructured ones
     // (verified on staging 2026-09-21 — it ignored a prompt rule and a widened enum).
-    description: "List ALL open or closed positions across every strategy (covered_call, cash_secured_put and unstructured — bare stock and anything fitting neither strategy). Each includes its legs (entry/exit prices, strike, expiry) and computed realizedPnl/capitalAtRisk.",
+    description: "List ALL open or closed positions across every strategy (covered_call, cash_secured_put, hedge — a long option bought outside the app — and unstructured — bare stock and anything fitting none of those). Each includes its legs (entry/exit prices, strike, expiry) and computed realizedPnl/capitalAtRisk.",
     tier: "read",
     parameters: {
       type: "object",

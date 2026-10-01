@@ -111,7 +111,13 @@ export const positionSelect = `
     -- and showed "–" for EXP $/% on those rows — same bug class already
     -- fixed for Stock P&L display 2026-08-30, see positionHasStockLeg's
     -- doc comment in positionPnl.ts. Fixed 2026-09-24.
+    -- A hedge (long option) can lose at most the premium paid, not the strike (approved 2026-10-01).
     CASE
+      WHEN p.strategy_key = 'hedge' THEN (
+        SELECT SUM(pl.entry_price * pl.multiplier * pl.quantity)
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'option'
+      )
       WHEN EXISTS (
         SELECT 1 FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.exit_at IS NULL
@@ -128,6 +134,11 @@ export const positionSelect = `
     -- the same option contract), because the P&L it divides includes their realized result. capitalAtRisk
     -- itself stays the capital exposed NOW (EXP $, EXP %, Pulse exposure).
     CASE
+      WHEN p.strategy_key = 'hedge' THEN (
+        SELECT SUM(pl.entry_price * pl.multiplier * pl.quantity)
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'option'
+      )
       WHEN EXISTS (
         SELECT 1 FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.exit_at IS NULL

@@ -11,13 +11,14 @@ import { fetchPositionEvents } from "../lib/positionEvents.js";
 
 // The known strategy buckets the Dashboard breaks P&L/allocation down by —
 // "unstructured" folds leftover legs that didn't cleanly resolve into a CC
-// or CSP, "residual" is whatever's left after subtracting all three known
+// or CSP, "hedge" is the long options bought outside the app (approved
+// 2026-10-01), "residual" is whatever's left after subtracting all four known
 // buckets from the trusted account-level total (interest, dividends, fees
 // not tied to a specific trade, cash deposits/withdrawals — none of which
 // this platform captures individually yet, decided 2026-08-28).
-const knownStrategyKeys = ["covered_call", "cash_secured_put", "unstructured"] as const;
+const knownStrategyKeys = ["covered_call", "cash_secured_put", "unstructured", "hedge"] as const;
 // The Dashboard's P&L cards use the fair cycle attribution (cyclePeriodPnl.ts), whose buckets are named differently.
-const cycleBucketByStrategyKey = { covered_call: "cc", cash_secured_put: "csp", unstructured: "unstructured" } as const;
+const cycleBucketByStrategyKey = { covered_call: "cc", cash_secured_put: "csp", unstructured: "unstructured", hedge: "hedge" } as const;
 
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
@@ -181,7 +182,7 @@ dashboardRouter.get("/portfolio", async (_request, response) => {
     computeCashLockedInCsps(),
   ]);
 
-  const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0 };
+  const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0, hedge: 0 };
   for (const row of exposures) {
     if (row.strategyKey in byStrategy) byStrategy[row.strategyKey] = (byStrategy[row.strategyKey] ?? 0) + row.exposure;
   }
@@ -193,6 +194,7 @@ dashboardRouter.get("/portfolio", async (_request, response) => {
     coveredCalls: byStrategy.covered_call,
     cashSecuredPuts: byStrategy.cash_secured_put,
     unstructured: byStrategy.unstructured,
+    hedge: byStrategy.hedge,
     availableCash,
   });
 });
@@ -228,7 +230,7 @@ dashboardRouter.get("/portfolio/stream", async (request, response) => {
   try {
     await streamPositionExposures(
       serializeAsyncCalls(async (exposures) => {
-        const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0 };
+        const byStrategy: Record<string, number> = { covered_call: 0, cash_secured_put: 0, unstructured: 0, hedge: 0 };
         for (const row of exposures) {
           if (row.strategyKey in byStrategy) byStrategy[row.strategyKey] = (byStrategy[row.strategyKey] ?? 0) + row.exposure;
         }
@@ -236,6 +238,7 @@ dashboardRouter.get("/portfolio/stream", async (request, response) => {
           coveredCalls: byStrategy.covered_call,
           cashSecuredPuts: byStrategy.cash_secured_put,
           unstructured: byStrategy.unstructured,
+          hedge: byStrategy.hedge,
           availableCash,
         });
       }),
@@ -285,6 +288,7 @@ dashboardRouter.get("/period-pnl-by-strategy", async (_request, response) => {
     coveredCalls: rows.covered_call,
     cashSecuredPuts: rows.cash_secured_put,
     unstructured: rows.unstructured,
+    hedge: rows.hedge,
     residual,
     total: accountTotal,
   });
@@ -330,13 +334,15 @@ dashboardRouter.get("/history", async (request, response) => {
     const coveredCalls = strategiesForDay.covered_call ?? 0;
     const cashSecuredPuts = strategiesForDay.cash_secured_put ?? 0;
     const unstructured = strategiesForDay.unstructured ?? 0;
+    const hedge = strategiesForDay.hedge ?? 0;
     const dailyPnl = row.dailyPnl === null ? null : Number(row.dailyPnl);
     return {
       ...row,
       coveredCalls,
       cashSecuredPuts,
       unstructured,
-      residual: dailyPnl === null ? null : dailyPnl - coveredCalls - cashSecuredPuts - unstructured,
+      hedge,
+      residual: dailyPnl === null ? null : dailyPnl - coveredCalls - cashSecuredPuts - unstructured - hedge,
     };
   });
 

@@ -221,12 +221,12 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
   // priced at entry (open) or exit (close) instead of a live quote — a
   // CSP's collateral (strike × multiplier × qty) is never its own
   // position_legs row, so it's added explicitly alongside the option leg's
-  // own value. Also covers "unstructured" (approved 2026-09-08) — the same
+  // own value. Also covers "hedge" (a long option: its value is just price x quantity x multiplier) and "unstructured" (approved 2026-09-08) — the same
   // sum-across-legs formula already handles a stock-only leftover position
   // (quantity × price) and the rare naked-call anomaly without any extra
   // cases; it was excluded before only because no one had asked for it yet.
   function fullMarketValueFor(positionLegs: LegRow[], strategyKey: string, atClose: boolean): number | null {
-    if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put" && strategyKey !== "unstructured") return null;
+    if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put" && strategyKey !== "unstructured" && strategyKey !== "hedge") return null;
     if (atClose && positionLegs.some((leg) => leg.exitPrice === null)) return null;
 
     return positionLegs.reduce((sum, leg) => {

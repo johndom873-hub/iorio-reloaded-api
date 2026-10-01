@@ -108,6 +108,30 @@ describe("deriveCloseLiveState", () => {
     expect(state.blockReason).toContain("No open wheel cycle was found for ABC");
   });
 
+  describe("hedge (long call)", () => {
+    const longCallLeg: CloseLiveLeg = { id: "hedge-leg", legType: "option", side: "long", quantity: 2, multiplier: 100, entryPrice: 4, label: "$82C 2028-06-16" };
+    const hedgeCycleInput = (): CycleInput => ({
+      optionLegs: [
+        {
+          id: "hedge-leg", positionId: "pos-hedge", side: "long", optionType: "call", strike: 82, quantity: 2, multiplier: 100, entryPrice: 4,
+          entryAt: new Date("2026-09-20T15:00:00Z"), exitPrice: null, exitAt: null, closingCommission: 0, hasClosingTrade: false, expiryDate: "2028-06-16", expiryClose: null,
+        },
+      ],
+      stockLegs: [],
+      stockTrades: [],
+      dailyCloses: new Map([["2026-09-25", 80]]),
+      lastPrice: { date: "2026-09-25", price: 80 },
+      openPositionPremiumPnl: new Map(),
+    });
+
+    it("closes against its own hedge cycle and marks the long call at the live mid", () => {
+      const state = stateFor({ positionId: "pos-hedge", legs: [longCallLeg], cycleInput: hedgeCycleInput(), stockQuote: null, optionQuotesByLegId: { "hedge-leg": { bid: 4.9, ask: 5.1, last: 5 } } });
+      expect(state.blockReason).toBeNull();
+      // Bought at 4.00, now mid 5.00: (5 - 4) x 2 x 100 = +200 on the hedge cycle (premium -800, mark adjustment +1000).
+      expect(state.cycleTotal).toBeCloseTo(200);
+    });
+  });
+
   describe("covered call (stock + short call)", () => {
     const legs = [stockLeg, shortCallLeg];
 

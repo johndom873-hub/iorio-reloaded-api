@@ -445,6 +445,16 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
       (p) => p.contract.secType === SecType.OPT && p.contract.right === OptionType.Put && p.quantity < 0,
     );
 
+    // A long option is never part of a wheel: one hedge position per distinct contract, handled before
+    // (and independent of) the stock / short-call pairing below, exactly like the short puts. Left in
+    // the pairing it would merge with leftover shares into one unstructured position, or (when a covered
+    // call is present) never get a leg at all and trip the reconciliation check every 10 minutes.
+    const longOptionLegs = positionsForSymbol.filter((p) => p.contract.secType === SecType.OPT && p.quantity > 0);
+    const sortedLongOptionLegs = [...longOptionLegs].sort((a, b) => (a.contract.conId ?? 0) - (b.contract.conId ?? 0));
+    for (const longOptionLeg of sortedLongOptionLegs) {
+      await upsertHedgePosition(symbol, longOptionLeg);
+    }
+
     // One position per distinct short put contract (mirrors
     // upsertSplitCoveredCallPosition's covered-call fix below) -- sorted for
     // a stable, deterministic split across reconciliation runs.
@@ -476,13 +486,13 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
       // rather than silently absorbed into one of the covered calls above.
       await upsertLeftoverStockPosition(symbol, stockLeg, stockLeg.quantity - totalShortCallShares);
     } else {
-      const nonPutLegs = positionsForSymbol.filter((p) => !shortPutLegs.includes(p));
+      const nonPutLegs = positionsForSymbol.filter((p) => !shortPutLegs.includes(p) && !longOptionLegs.includes(p));
       if (nonPutLegs.length > 0) {
         // Doesn't cleanly pair — surfaced, not hidden (approved 2026-08-24).
         // Stock-only leftover has two known causes (see
         // determineLeftoverStockReason); any short call present alongside it
-        // is a naked/uncovered call, which nothing in this app should ever
-        // produce — always an unknown-cause anomaly.
+        // is a naked/uncovered call (long options are hedges, handled above),
+        // which nothing in this app should ever produce — always an unknown-cause anomaly.
         const hasCallLeg = nonPutLegs.some((p) => p.contract.secType === SecType.OPT);
         const reason = hasCallLeg ? "unknown" : await determineLeftoverStockReason(symbol);
         const synced = await upsertUnstructuredPosition(
@@ -944,6 +954,35 @@ async function upsertSplitCashSecuredPutPosition(symbol: string, putLeg: IbkrHel
     }
   }
   await upsertPositionLeg(positionId!, putLeg, "short");
+}
+
+// One hedge position per distinct long option contract (approved 2026-10-01: a long option bought
+// directly at IBKR, e.g. the long TLT call that hedges the cash-secured puts, is its own strategy
+// instead of "unstructured"). Position and leg are created from what IBKR holds; the leg's own
+// quantity/cost sync and closing run through the same shared paths as every other leg.
+async function upsertHedgePosition(symbol: string, optionLeg: IbkrHeldPosition): Promise<void> {
+  const conId = String(optionLeg.contract.conId);
+  const existingLeg = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").first();
+  let positionId = existingLeg?.position_id as string | undefined;
+
+  if (!positionId) {
+    const ticker = await db("tickers").where({ symbol }).first();
+    if (!ticker) {
+      console.warn(`reconcileHeldPositions: no tickers row for ${symbol} — skipping sync until it's added via the Screener.`);
+      return;
+    }
+    const [newPosition] = await db("positions").insert({ strategy_key: "hedge", ticker_id: ticker.id, status: "open" }).returning(["id"]);
+    positionId = newPosition.id;
+    await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
+  } else {
+    // Labels are immutable (see reconcileHeldPositions): a long option sitting on another strategy's
+    // position can only be older data, so report it instead of relabelling.
+    const owner = await db("positions").where({ id: positionId }).first("strategy_key");
+    if (owner?.strategy_key !== "hedge") {
+      console.warn(`upsertHedgePosition(${symbol}): long option leg ${existingLeg!.id} sits on position ${positionId} labelled ${owner?.strategy_key} — left as-is.`);
+    }
+  }
+  await upsertPositionLeg(positionId!, optionLeg, "long");
 }
 
 // Stock beyond what the sold calls for this symbol actually need — should

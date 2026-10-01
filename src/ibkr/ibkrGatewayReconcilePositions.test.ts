@@ -54,6 +54,10 @@ function heldShortOption(symbol: string, conId: number, right: OptionType, strik
   };
 }
 
+function heldLongOption(symbol: string, conId: number, right: OptionType, strike: number, expiryIsoDate: string, avgCostPerContract: number, contracts = 1): IbkrHeldPosition {
+  return { ...heldShortOption(symbol, conId, right, strike, expiryIsoDate, avgCostPerContract, contracts), quantity: contracts };
+}
+
 async function insertPosition(tickerId: string, strategyKey: string, unstructuredReason: string | null = null): Promise<string> {
   const [position] = await testDb("positions").insert({ strategy_key: strategyKey, ticker_id: tickerId, status: "open", unstructured_reason: unstructuredReason }).returning(["id"]);
   return position.id;
@@ -525,5 +529,99 @@ describe("reconcileHeldPositions — shares sold in several fills keep their qua
       [2, true, 0.8],
       [3, false, null],
     ]);
+  });
+});
+
+describe("reconcileHeldPositions — long options are hedges", () => {
+  it("a long call alone becomes one hedge position with a long leg at the per-share cost, not an unstructured position", async () => {
+    const ticker = await createTicker();
+    const callConId = (nextConId += 1);
+    await runPass([heldLongOption(ticker.symbol, callConId, OptionType.Call, 82, isoDateDaysFromToday(600), 391.8, 110)]);
+    await runPass([heldLongOption(ticker.symbol, callConId, OptionType.Call, 82, isoDateDaysFromToday(600), 391.8, 110)]);
+
+    const positions = await positionsFor(ticker.id);
+    expect(positions.map((position) => position.strategy_key)).toEqual(["hedge"]);
+    expect(positions[0]!.unstructured_reason).toBeNull();
+    const legs = await legsFor(positions[0]!.id);
+    expect(legs).toHaveLength(1);
+    expect(legs[0]).toMatchObject({ leg_type: "option", side: "long", quantity: 110, option_type: "call" });
+    expect(Number(legs[0]!.entry_price)).toBeCloseTo(3.918, 4);
+    expect(await anomaliesFor(positions[0]!.id)).toHaveLength(0);
+  });
+
+  it("shares plus a long call (a CSP was assigned): the shares stay a leftover-stock position and the call stays its own hedge", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const held = [heldStock(ticker.symbol, stockConId, 100, 80), heldLongOption(ticker.symbol, callConId, OptionType.Call, 82, isoDateDaysFromToday(600), 400)];
+    await runPass(held);
+    await runPass(held);
+
+    const positions = await positionsFor(ticker.id);
+    expect(positions.map((position) => position.strategy_key).sort()).toEqual(["hedge", "unstructured"]);
+    const hedge = positions.find((position) => position.strategy_key === "hedge")!;
+    const unstructured = positions.find((position) => position.strategy_key === "unstructured")!;
+    expect((await legsFor(hedge.id)).map((leg) => leg.leg_type)).toEqual(["option"]);
+    expect((await legsFor(unstructured.id)).map((leg) => leg.leg_type)).toEqual(["stock"]);
+  });
+
+  it("shares, a covered call and a long call: the covered call pairs with the shares and the long call keeps its own leg", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const shortCallConId = (nextConId += 1);
+    const longCallConId = (nextConId += 1);
+    const held = [
+      heldStock(ticker.symbol, stockConId, 100, 80),
+      heldShortOption(ticker.symbol, shortCallConId, OptionType.Call, 85, isoDateDaysFromToday(20), 50),
+      heldLongOption(ticker.symbol, longCallConId, OptionType.Call, 82, isoDateDaysFromToday(600), 400),
+    ];
+    await runPass(held);
+    await runPass(held);
+
+    const positions = await positionsFor(ticker.id);
+    expect(positions.map((position) => position.strategy_key).sort()).toEqual(["covered_call", "hedge"]);
+    const openLegConIds = (await testDb("position_legs").whereIn("position_id", positions.map((position) => position.id)).whereNull("exit_at")).map((leg) => leg.ibkr_contract_id);
+    expect(openLegConIds).toContain(String(longCallConId));
+  });
+
+  it("a long call alongside a short put: both stay their own position", async () => {
+    const ticker = await createTicker();
+    const putConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const held = [
+      heldShortOption(ticker.symbol, putConId, OptionType.Put, 81, isoDateDaysFromToday(30), 80),
+      heldLongOption(ticker.symbol, callConId, OptionType.Call, 82, isoDateDaysFromToday(600), 400),
+    ];
+    await runPass(held);
+    await runPass(held);
+
+    const positions = await positionsFor(ticker.id);
+    expect(positions.map((position) => position.strategy_key).sort()).toEqual(["cash_secured_put", "hedge"]);
+  });
+
+  it("a hedge sold at IBKR closes with its exit price from the closing fill", async () => {
+    const ticker = await createTicker();
+    const callConId = (nextConId += 1);
+    await runPass([heldLongOption(ticker.symbol, callConId, OptionType.Call, 82, isoDateDaysFromToday(600), 400)]);
+    const [position] = await positionsFor(ticker.id);
+    const [leg] = await legsFor(position!.id);
+    await insertClosingFill(leg!.id, 1, 5.5, 1, "sell");
+    await runPass([]);
+
+    const closed = (await legsFor(position!.id))[0]!;
+    expect(closed.exit_at).not.toBeNull();
+    expect(Number(closed.exit_price)).toBeCloseTo(5.5, 4);
+    expect((await positionsFor(ticker.id))[0]!.status).toBe("closed");
+  });
+
+  it("a naked short call is still flagged, and only that", async () => {
+    const ticker = await createTicker();
+    const callConId = (nextConId += 1);
+    await runPass([heldShortOption(ticker.symbol, callConId, OptionType.Call, 85, isoDateDaysFromToday(20), 50)]);
+    const [position] = await positionsFor(ticker.id);
+    expect(position!.strategy_key).toBe("unstructured");
+    const anomalies = await testDb("platform_anomalies").where({ anomaly_type: "naked_call_detected" }).where("detail", "like", `${ticker.symbol}:%`);
+    expect(anomalies).toHaveLength(1);
+    await testDb("platform_anomalies").where({ anomaly_type: "naked_call_detected" }).where("detail", "like", `${ticker.symbol}:%`).del();
   });
 });

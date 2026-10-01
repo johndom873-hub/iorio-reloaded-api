@@ -5,8 +5,9 @@ import { requireAuth } from "../middleware/requireAuth.js";
 export const tradeBlotterRouter = Router();
 tradeBlotterRouter.use(requireAuth);
 
-// The two named strategies plus "unstructured" (positions not opened under a strategy; shown as "Other" in the UI filter).
-const validStrategyKeys = ["covered_call", "cash_secured_put", "unstructured"];
+// The two named strategies, "hedge" (a long option bought outside the app) and "unstructured" (positions not
+// opened under a strategy; shown as "Other" in the UI filter).
+const validStrategyKeys = ["covered_call", "cash_secured_put", "hedge", "unstructured"];
 
 // P&L is computed here at read time, not stored on trades.realized_pnl —
 // that column is reserved for IBKR's own CommissionReport.realizedPNL
