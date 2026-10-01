@@ -4,6 +4,8 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
 import { findOrCreateTicker, addTickerToShortlist, UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
 import { fetchAndStoreFiveYearHistory, getLatestBackfillRun, startTickerBackfill } from "../ibkr/tickerBackfillPipeline.js";
+import { topUpDailyBars } from "../ibkr/priceBarCache.js";
+import { loadDailyBarsStatus } from "../lib/dailyBarsStatus.js";
 import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
 import { staleBackfillRunMinutes } from "../lib/tickerBackfillSteps.js";
 import { loadShortlistDataReadiness } from "../lib/shortlistDataReadiness.js";
@@ -52,19 +54,8 @@ shortlistRouter.get("/", async (_request, response) => {
       -- A 'partial' run means some pipeline step (calendar/chain-strikes/snapshot) failed -- surfaced so
       -- the Actions menu can offer a full-pipeline retry, not just the narrower price-history-only one.
       CASE WHEN b.status = 'partial' THEN true ELSE false END AS "backfillNeedsRetry",
-      hb.first_bar::text AS "historyStartDate",
       -- Remove is disabled in the Actions menu while this is above zero (DELETE below enforces the same).
-      op.open_position_count::int AS "openPositionCount",
-      -- Flagged when there is less than ~5 years of daily bars AND no pipeline run has ever completed the
-      -- history step (a ticker that IPO'd recently can never reach 5 years, so a successful run clears the flag).
-      CASE
-        WHEN hb.first_bar IS NULL OR hb.first_bar > (current_date - interval '5 years' + interval '14 days')
-          THEN NOT EXISTS (
-            SELECT 1 FROM ticker_backfill_runs r
-            WHERE r.ticker_id = t.id AND r.steps @> '[{"key":"history","status":"done"}]'::jsonb
-          )
-        ELSE false
-      END AS "historyIncomplete"
+      op.open_position_count::int AS "openPositionCount"
     FROM shortlist_entries se
     JOIN tickers t ON t.id = se.ticker_id
     LEFT JOIN LATERAL (
@@ -74,11 +65,6 @@ shortlistRouter.get("/", async (_request, response) => {
       ORDER BY started_at DESC
       LIMIT 1
     ) b ON true
-    LEFT JOIN LATERAL (
-      SELECT min(trading_date) AS first_bar
-      FROM daily_price_bars
-      WHERE ticker_id = t.id
-    ) hb ON true
     LEFT JOIN LATERAL (
       SELECT count(*) AS open_position_count
       FROM positions
@@ -98,11 +84,11 @@ shortlistRouter.get("/", async (_request, response) => {
   response.json(rows);
 });
 
-// Manual re-trigger for the Shortlist Actions dropdown's "Backfill Earnings" item -- same
+// Manual re-trigger for the Shortlist Actions dropdown's "Populate Earnings" item -- same
 // captureHistoricalEarnings the new-ticker pipeline calls automatically, exposed here for an
 // already-shortlisted ticker whose earnings history is thin. No-ops (written: 0, skippedEtf: true) for
 // an ETF; the frontend also greys the menu item out so this is a defense-in-depth check, not the only one.
-shortlistRouter.post("/:tickerId/backfill-earnings", async (request, response) => {
+shortlistRouter.post("/:tickerId/populate-earnings", async (request, response) => {
   const ticker = await db("tickers").where({ id: request.params.tickerId as string }).first();
   if (!ticker) {
     response.status(404).json({ error: "Ticker not found." });
@@ -112,41 +98,44 @@ shortlistRouter.post("/:tickerId/backfill-earnings", async (request, response) =
   response.json(result);
 });
 
-// Manual re-trigger for the Shortlist Actions dropdown's "Backfill Price History" item. Scoped to just
-// the history step -- fetchAndStoreFiveYearHistory only, its own IBKR connection opened and closed here.
-// Deliberately NOT startTickerBackfill/retryTickerBackfill: that runs the full 4-step new-ticker pipeline
-// (history + calendar/dividends + chain-strike warmup + first snapshot), which is correct for onboarding
-// a brand-new ticker but was wrong here -- clicking "Backfill Price History" on an existing ticker was
-// silently also re-fetching its calendar and warming its option-chain strikes, neither of which the
-// button claims to do (Marcelo caught this live, 2026-09-23: the progress modal it opened showed all 4
-// steps running). Matches "Backfill Earnings" above in being a single-purpose action with no side effects
-// outside its own name.
-// Streamed (2026-09-24, see streamedResponse.ts): two sequential 5-year
-// historical requests can pass Heroku's 30 s router timeout.
-shortlistRouter.post("/:tickerId/backfill-price-history", async (request, response) => {
+// The Shortlist Actions dropdown's "Populate Daily Bars" item: looks at what is stored and does what is
+// needed (see dailyBarsStatus.ts) -- the full five years when history is missing or incomplete, only the
+// missing sessions when the newest bar is behind, nothing when current. Scoped to daily bars: deliberately
+// NOT startTickerBackfill/retryTickerBackfill, whose full 4-step new-ticker pipeline (history +
+// calendar/dividends + chain-strike warmup + first snapshot) is right for onboarding but wrong for a
+// single-purpose action. The plan is re-decided here from the database, not taken from the client.
+// Streamed (see streamedResponse.ts): two sequential historical requests can pass Heroku's 30 s router timeout.
+shortlistRouter.post("/:tickerId/populate-daily-bars", async (request, response) => {
   const ticker = await db("tickers").where({ id: request.params.tickerId as string }).first();
   if (!ticker) {
     response.status(404).json({ error: "Ticker not found." });
     return;
   }
   await respondWithStreamedResult(response, async () => {
-    const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "backfill-price-history");
+    const { dailyBarsPlan } = await loadDailyBarsStatus(ticker.id);
+    if (dailyBarsPlan === "none") return { status: 200, body: { plan: dailyBarsPlan } };
+    const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "populate-daily-bars");
     try {
-      const result = await fetchAndStoreFiveYearHistory(connection, ticker.id, ticker.symbol, { reqId: nextReqIdFor(connection.ib, () => 1) });
-      return { status: 200, body: result };
+      const reqId = nextReqIdFor(connection.ib, () => 1);
+      const result =
+        dailyBarsPlan === "full"
+          ? await fetchAndStoreFiveYearHistory(connection, ticker.id, ticker.symbol, { reqId })
+          : await topUpDailyBars(connection, ticker.id, ticker.symbol, reqId);
+      invalidatePricePerformanceSnapshot();
+      return { status: 200, body: { plan: dailyBarsPlan, ...result } };
     } finally {
       connection.disconnect();
     }
   });
 });
 
-// Manual re-trigger for the Shortlist Actions dropdown's "Refresh Option Chain" item -- re-runs
+// Manual re-trigger for the Shortlist Actions dropdown's "Populate Option Chain" item -- re-runs
 // refreshStoredOptionChain for this ticker only, same expiries+strikes fetch the nightly capture
 // does, without touching history/earnings/calendar. Returns the updated per-expiry strike counts so
 // the row can update without a full list reload. Streamed (2026-09-24, see
 // streamedResponse.ts): one wildcard contract-details request per expiry at
 // ~4.5s each, sequential, passes Heroku's 30s router timeout past 6 expiries.
-shortlistRouter.post("/:tickerId/refresh-option-chain", async (request, response) => {
+shortlistRouter.post("/:tickerId/populate-option-chain", async (request, response) => {
   const ticker = await db("tickers").where({ id: request.params.tickerId as string }).first();
   if (!ticker) {
     response.status(404).json({ error: "Ticker not found." });
@@ -157,7 +146,7 @@ shortlistRouter.post("/:tickerId/refresh-option-chain", async (request, response
     return;
   }
   await respondWithStreamedResult(response, async () => {
-    const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "refresh-option-chain");
+    const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "populate-option-chain");
     try {
       const refresh = await refreshStoredOptionChain(
         connection.ib,

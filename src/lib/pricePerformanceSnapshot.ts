@@ -74,8 +74,6 @@ export interface PricePerformanceMeta {
   expectedSessionDate: string;
   isDataCurrent: boolean;
   behindSymbols: string[];
-  /** Tickers a manual refresh would actually fetch: latest completed bar older than completedThroughDate. */
-  refreshableSymbols: string[];
 }
 
 export interface PricePerformanceSnapshot {
@@ -100,17 +98,10 @@ export function percentChange(current: number, reference: number | null): number
   return ((current - reference) / reference) * 100;
 }
 
-/** Pure freshness rule, exported for tests: which tickers are behind, and which a refresh would fetch. */
-export function classifyFreshness(
-  latestDateBySymbol: Record<string, string>,
-  completedThroughDate: string,
-  expectedSessionDate: string,
-): { behindSymbols: string[]; refreshableSymbols: string[] } {
+/** Pure freshness rule, exported for tests: which tickers' latest completed bar predates the expected session. */
+export function classifyFreshness(latestDateBySymbol: Record<string, string>, expectedSessionDate: string): { behindSymbols: string[] } {
   const symbols = Object.keys(latestDateBySymbol).sort();
-  return {
-    behindSymbols: symbols.filter((symbol) => latestDateBySymbol[symbol]! < expectedSessionDate),
-    refreshableSymbols: symbols.filter((symbol) => latestDateBySymbol[symbol]! < completedThroughDate),
-  };
+  return { behindSymbols: symbols.filter((symbol) => latestDateBySymbol[symbol]! < expectedSessionDate) };
 }
 
 // The old fragment, unchanged except that "latest" is now the newest bar AT OR
@@ -220,7 +211,6 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
 
   const freshness = classifyFreshness(
     Object.fromEntries(rawRows.map((row) => [row.symbol, row.latestDate])),
-    completedThroughDate,
     expectedSessionDate,
   );
 
@@ -270,7 +260,6 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       expectedSessionDate,
       isDataCurrent: freshness.behindSymbols.length === 0,
       behindSymbols: freshness.behindSymbols,
-      refreshableSymbols: freshness.refreshableSymbols,
     },
   };
 }
@@ -279,7 +268,7 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
 // caps the load at one database pass per minute; the underlying data changes
 // once a day, so a minute of lag (including right after the 16:00 ET cutoff
 // moves) is far below anything a user could notice. Explicitly dropped after a
-// refresh completes, and never carried across an Eastern calendar date.
+// populate-daily-bars run, and never carried across an Eastern calendar date.
 const snapshotTtlMs = 60_000;
 let cachedSnapshot: { snapshot: PricePerformanceSnapshot; computedAtMs: number; sessionDateAtCompute: string } | null = null;
 let snapshotInFlight: Promise<PricePerformanceSnapshot> | null = null;

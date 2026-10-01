@@ -3,12 +3,13 @@ import { loadVolatilityForecast } from "./volatilityForecastStore.js";
 import { loadDividendCadenceUnknown, loadEarningsDatesForForecastWindow, loadNextEarningsDate } from "./signalsStore.js";
 import { easternDateIso } from "./marketSessionStatus.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
+import { loadDailyBarsStatus, type DailyBarsStatus } from "./dailyBarsStatus.js";
 
 // Backs the Shortlist screen's data-sanity-check columns (redesigned 2026-09-23, replacing the old
 // IV/volume columns): per ticker, everything the Signals pipeline actually reads before it can score a
 // candidate, so a gap here explains directly why a ticker is thin or unscored on the Signals screen.
 
-export interface ShortlistDataReadiness {
+export interface ShortlistDataReadiness extends DailyBarsStatus {
   dailyBarCount: number;
   /** From the same split guard Signals itself uses (volatilityForecastStore.ts) -- independent of whether an option-chain snapshot exists yet. */
   suspectedSplitDateIso: string | null;
@@ -29,7 +30,8 @@ export interface ShortlistDataReadiness {
 export async function loadShortlistDataReadiness(tickerId: string, sector: string | null, now: Date = new Date()): Promise<ShortlistDataReadiness> {
   const todayIso = easternDateIso(now);
 
-  const [barCountRow, forecastSelection, earningsDatesIso, nextEarningsDateIso, dividendHistoryCountRow, dividendCadenceUnknown, chainCountRow, latestSnapshot, storedOptionChain] = await Promise.all([
+  const [dailyBarsStatus, barCountRow, forecastSelection, earningsDatesIso, nextEarningsDateIso, dividendHistoryCountRow, dividendCadenceUnknown, chainCountRow, latestSnapshot, storedOptionChain] = await Promise.all([
+    loadDailyBarsStatus(tickerId, now),
     db("daily_price_bars").where({ ticker_id: tickerId }).count<{ count: string }[]>("* as count"),
     loadVolatilityForecast(tickerId, todayIso),
     loadEarningsDatesForForecastWindow(tickerId),
@@ -54,6 +56,7 @@ export async function loadShortlistDataReadiness(tickerId: string, sector: strin
   }
 
   return {
+    ...dailyBarsStatus,
     dailyBarCount: Number(barCountRow[0]?.count ?? 0),
     suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso,
     earningsCount: earningsDatesIso.length,

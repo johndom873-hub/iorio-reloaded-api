@@ -3,7 +3,6 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { streamPooledStockPrices } from "../ibkr/pricePool.js";
 import { getPricePerformanceSnapshot } from "../lib/pricePerformanceSnapshot.js";
-import { getPriceBarsRefreshStatus, startPriceBarsRefresh } from "../lib/priceBarsRefresh.js";
 
 export const pricePerformanceRouter = Router();
 pricePerformanceRouter.use(requireAuth);
@@ -17,21 +16,7 @@ pricePerformanceRouter.use(requireAuth);
 pricePerformanceRouter.get("/", async (_request, response) => {
   const snapshot = await getPricePerformanceSnapshot();
   response.setHeader("Cache-Control", "private, no-cache");
-  response.json({
-    tickers: snapshot.tickers,
-    meta: {
-      ...snapshot.meta,
-      refresh: { ...getPriceBarsRefreshStatus(), refreshableSymbolCount: snapshot.meta.refreshableSymbols.length },
-    },
-  });
-});
-
-// The page's explicit "Refresh daily data" button — the only way this screen
-// can cause an IBKR read. Returns at once (202) and works in the background;
-// open pages reload on the job_completed notification. See priceBarsRefresh.ts.
-pricePerformanceRouter.post("/refresh", async (request, response) => {
-  const result = await startPriceBarsRefresh(request.session.userId!);
-  response.status(result.status === "started" ? 202 : 200).json(result);
+  response.json({ tickers: snapshot.tickers, meta: snapshot.meta });
 });
 
 // Live current price only, for every shortlisted ticker — nothing else. The
