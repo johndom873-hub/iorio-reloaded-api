@@ -178,18 +178,14 @@ async function loadLatestRunPerExpectedJob(): Promise<DigestJobLine[]> {
   });
 }
 
-// Read once: readGitSha forks git synchronously, which must not happen every minute on the web dyno.
-let cachedGitSha: string | null | undefined;
-
 async function writeHeartbeat(startedAtMs: number, tickNumber: number): Promise<void> {
-  if (cachedGitSha === undefined) cachedGitSha = readGitSha();
   await db("worker_health")
     .insert({
       process_name: opsMonitorProcessName,
       connected: true,
       uptime_ms: Date.now() - startedAtMs,
       total_reconnects: tickNumber,
-      git_sha: cachedGitSha,
+      git_sha: readGitSha(),
       app_environment: readAppEnvironment(),
       updated_at: db.fn.now(),
     })
