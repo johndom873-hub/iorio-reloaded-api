@@ -1,4 +1,5 @@
 import { environmentRouter } from "./routes/environment.js";
+import { handleDeployNotice } from "./routes/deployNotices.js";
 import express from "express";
 import cors from "cors";
 import { environment } from "./config/env.js";
@@ -61,6 +62,8 @@ app.use("/environment", environmentRouter);
 // Telegram calls this directly (no session) — authenticated by the shared
 // secret header checked inside the handler instead.
 app.post("/genosuke/webhook", handleGenosukeWebhook);
+// The frontend app announces its own start here (shared secret header, no session).
+app.post("/deploy-notices", handleDeployNotice);
 app.use("/genosuke/preferences", genosukePreferencesRouter);
 app.use("/auth", authRouter);
 app.use("/screener", screenerRouter);
