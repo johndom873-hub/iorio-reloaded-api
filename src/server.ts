@@ -9,6 +9,7 @@ import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
 import { startOpsMonitor } from "./lib/opsMonitor.js";
 import { notifyTelegramTracked } from "./lib/undeliveredAlerts.js";
+import { buildWebDynoStartNotice } from "./lib/webDynoStartNotice.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
 
 installShutdownHandler("web");
@@ -45,7 +46,7 @@ app.listen(port, () => {
       } catch (error) {
         environmentLabel = `environment unreadable: ${error instanceof Error ? error.message : error}`;
       }
-      return notifyTelegramTracked(`🟢 API web dyno started (commit ${process.env.HEROKU_SLUG_COMMIT?.slice(0, 7) ?? "unknown"}, ${environmentLabel}).`);
+      return notifyTelegramTracked(buildWebDynoStartNotice({ commit: process.env.HEROKU_SLUG_COMMIT, releaseVersion: process.env.HEROKU_RELEASE_VERSION, environmentLabel }));
     })
     .catch((error) => console.error(`Could not send the start notice: ${error instanceof Error ? error.message : error}`));
   startNotificationBroadcaster();
