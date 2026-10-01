@@ -758,7 +758,7 @@ Plain-language: the Positions table has a new Cycle P&L column, the profit or lo
 - Decisions (Marcelo): standalone home-screen web app meta added to `index.html` (`viewport-fit=cover`, `apple-mobile-web-app-capable`, black-translucent status bar) with safe-area padding on the Pulse header/bottom and the mobile navbar; phone Pulse link in the mobile badges row opens in the same tab, and Pulse's brand mark links back to `/`; Positions summary exposure % = Σ capital at risk ÷ account value; node LED rules: DB worst of its bands, Gateway red when not connected / amber when reconnects or in-flight orders hit warn, IBKR red while account data fails, others green once their health call answered.
 - Verified with Playwright at 440×956 and 1440×900 (desktop unchanged); `tsc` and `oxlint` clean. Not yet checked on a real iPhone (safe-area insets are 0 in Chrome).
 
-## Pulse "Keep live in background" switch (built and tested locally 2026-10-01, not pushed)
+## Pulse "Keep live in background" switch (built and tested locally 2026-10-01, pushed to staging)
 
 *In plain terms:* Pulse has a switch in its header that keeps prices and P&L updating while the browser tab is in the background. It is off by default, and each browser remembers its own choice. While it is off, the app behaves as before: a hidden tab drops its IBKR price lines after 2 seconds.
 
