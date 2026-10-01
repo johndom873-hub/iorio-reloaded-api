@@ -268,7 +268,7 @@ export async function loadRoadmapCounts(now: Date = new Date()): Promise<Roadmap
       .orderBy("past_earnings")
       .first<{ past_earnings: string } | undefined>(),
     // Open orders only: a roll's fill is a different friction sample (two legs, one combo), so it is counted apart (decided 2026-09-24).
-    db("order_requests").whereNotNull("signal_snapshot").where("request_type", "like", "open_%").whereIn("status", ["filled", "partially_filled"]).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
+    db("order_requests").whereNotNull("signal_snapshot").where("request_type", "like", "open_%").whereIn("status", ["filled", "partially_filled", "cancelled_partially_filled"]).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
   ]);
   return {
     snapshotNights,

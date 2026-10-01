@@ -765,6 +765,15 @@ Plain-language: the Positions table has a new Cycle P&L column, the profit or lo
 - App repo: `setHiddenTabPauseDisabled` / `isTabLive` in `api/streamMultiplexer.ts`, `hooks/useKeepLiveInBackground.ts` (localStorage `pulse.keepLiveInBackground`), `components/pulse/KeepLiveSwitch.tsx`; Pulse's polls follow the same gate. The override applies only while Pulse is mounted, so other pages in the same tab keep the normal hidden-tab pause.
 - Verified with Playwright (desktop + 390 px): off sends unsubscribes when hidden and resubscribes on show, on sends none, the setting survives a reload, and leaving Pulse restores the pause. `tsc` and `oxlint` clean.
 
+## Positions: Today's Orders card, "new" tag, cancelled-after-partial-fill status (built and tested locally 2026-10-01, not pushed)
+
+*In plain terms:* under the positions table there is a new "Today's Orders" card listing every order whose last update was today (New York time), newest first, with what was ordered, what filled and at what price, commission, who requested it, and its status. Orders still working from an earlier day always show too. A small "new" tag sits beside the ticker of any position opened or rolled today. An order that IBKR cancelled after part of it had filled used to be recorded as "partially filled", the same as one still working; it now has its own status, "Cancelled after partly filling".
+
+- API: `GET /positions/orders/today` (`lib/todaysOrders.ts`, 6 tests incl. the New York day boundary); one row per order, fills matched per leg from `trades` via `source_order_request_id`. Close/roll legs copied from a position store the expiry as an ISO timestamp, opening legs as YYYYMMDD; both are normalised before matching.
+- New status `cancelled_partially_filled` (migration `20261001000002`): the worker used to test "some filled, some remaining" before "Cancelled", so a cancel or DAY expiry after a partial fill was never recorded and the row kept blocking new orders on that position. Fixed in `ibkr/ibkrGatewayOrderStatus.ts` (+ the startup reconcile). Touches `ibkrGatewayWorker.ts`: needs the worker deployed to take effect. Existing `partially_filled` rows resolve on the next reconnect.
+- App: `TodaysOrdersCard`, `NewPositionTag` (`.iorio-new-tag`, 0.6rem), shared `useOrderCancellation` (also used by the Trade Blotter), `positionHasLegEnteredTodayEastern` (any leg entered today ET, so a same-day roll counts).
+- Verified with Playwright (desktop + 390 px, light + dark): fills, cancel flow with DB check, tag colours. Not checked against live IBKR (no market data locally).
+
 ## Misc UI, 2026-09-24
 - Positions: replaced the separate P(Δ)/P(D2) probability columns with a single Net Δ (the short leg's raw signed delta) — `df99158`.
 - Pulse Latest Events: added a `job_started` event type alongside `job_completed` (muted gray text, same `ibkr_health_check` exclusion `job_completed` already has) — `7526eb5`.

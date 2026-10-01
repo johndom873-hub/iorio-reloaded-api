@@ -25,6 +25,7 @@ import { reconcileHeldPositions, type ReconciliationDependencies } from "./ibkr/
 import { replayRecentIbkrExecutions } from "./ibkr/ibkrGatewayReplayRecentExecutions.js";
 import { fetchIbkrOpenOrders } from "./ibkr/ibkrGatewayFetchOpenOrders.js";
 import { fetchIbkrCompletedOrders } from "./ibkr/ibkrGatewayFetchCompletedOrders.js";
+import { requestStatusForOrderStatusEvent } from "./ibkr/ibkrGatewayOrderStatus.js";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { notifyTelegram } from "./lib/notifyTelegram.js";
 import { clearDownState, notifyDownThrottled } from "./lib/throttledAlert.js";
@@ -462,14 +463,7 @@ async function listenForOrderRequests(): Promise<void> {
 
 // Truly final statuses only — partially_filled deliberately excluded, since
 // that order can still receive further fills or a cancellation.
-const finalOrderRequestStatuses = ["filled", "cancelled", "rejected", "error"];
-
-function orderStatusToRequestStatus(status: string): string | null {
-  if (status === "Filled") return "filled";
-  if (status === "Cancelled" || status === "ApiCancelled") return "cancelled";
-  if (status === "Submitted" || status === "PreSubmitted") return "submitted";
-  return null;
-}
+const finalOrderRequestStatuses = ["filled", "cancelled", "cancelled_partially_filled", "rejected", "error"];
 
 function setupOrderTrackingListeners(): void {
   const ib = persistentIbkrConnection.getIb();
@@ -477,7 +471,7 @@ function setupOrderTrackingListeners(): void {
 
   ib.on(EventName.orderStatus, (orderId, status, filled, remaining, _avgFillPrice, permId) => {
     publishPulse("ibkr-gateway").catch(() => {});
-    const requestStatus = filled > 0 && remaining > 0 ? "partially_filled" : orderStatusToRequestStatus(status);
+    const requestStatus = requestStatusForOrderStatusEvent(status, filled, remaining);
     if (!requestStatus) return;
     // permId is globally unique forever, unlike ibkr_order_id, which resets
     // and gets reused after every Gateway/worker restart — found 2026-08-27
@@ -858,8 +852,13 @@ async function reconcileStaleOrderRequests(): Promise<void> {
     if (liveOrderIds.has(row.ibkr_order_id)) continue;
 
     const completedStatus = row.ibkr_perm_id ? completedStatusByPermId.get(row.ibkr_perm_id) : undefined;
-    const resolvedStatus = completedStatus ? orderStatusToRequestStatus(completedStatus) : null;
-    if (resolvedStatus === "filled" || resolvedStatus === "cancelled") {
+    const completedRequestStatus = completedStatus ? requestStatusForOrderStatusEvent(completedStatus, 0, 0) : null;
+    if (completedRequestStatus === "filled" || completedRequestStatus === "cancelled") {
+      // The completed-orders list doesn't say whether a cancelled order had partly filled; its recorded executions do.
+      const resolvedStatus =
+        completedRequestStatus === "cancelled" && (await executedOutcomeForOrderRequest(row.id, row.payload)) === "partially_filled"
+          ? "cancelled_partially_filled"
+          : completedRequestStatus;
       await db("order_requests").where({ id: row.id }).update({ status: resolvedStatus, updated_at: db.fn.now() });
       console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${resolvedStatus}" from IBKR's completed orders (permId ${row.ibkr_perm_id}).`);
       await publishNotification({ type: "order_status", orderId: row.id });

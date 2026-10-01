@@ -24,6 +24,8 @@ import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathFor
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
 import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
+import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
+import { fetchTodaysOrders } from "../lib/todaysOrders.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
 
@@ -1182,6 +1184,11 @@ positionsRouter.get("/orders", async (request, response) => {
   response.json((await query).map(serializeOrderRequest));
 });
 
+// Registered before /orders/:id so "today" isn't read as an order id.
+positionsRouter.get("/orders/today", async (_request, response) => {
+  response.json(await fetchTodaysOrders());
+});
+
 positionsRouter.get("/orders/:id", async (request, response) => {
   const orderRequest = await orderRequestsWithNames().where("orq.id", request.params.id).first();
   if (!orderRequest) {
@@ -1372,9 +1379,6 @@ const adaptivePriorities = new Set(["Urgent", "Normal", "Patient"]);
 // Approved 2026-09-24: a built order must be confirmed within this long.
 export const pendingConfirmationMaxAgeMs = 15 * 60 * 1000;
 
-// Statuses that mean an order is still on its way to, or working at, IBKR.
-const activeOrderStatuses = ["pending_confirmation", "confirmed", "submitted", "partially_filled", "cancel_requested"] as const;
-
 interface ActiveOrderConflict {
   orderId: string;
   status: string;
@@ -1405,7 +1409,7 @@ async function findActiveOrderConflict(
 ): Promise<ActiveOrderConflict | null> {
   if (!target.positionId) return null;
   const rows: { id: string; status: string; request_type: string; payload: OrderRequestPayload }[] = await executor("order_requests")
-    .whereIn("status", [...activeOrderStatuses])
+    .whereIn("status", [...activeOrderRequestStatuses])
     .where({ related_position_id: target.positionId })
     .modify((builder) => {
       if (target.excludeOrderId) builder.whereNot({ id: target.excludeOrderId });
@@ -1418,7 +1422,7 @@ async function findActiveOrderConflict(
 /** Shares that in-flight covered-call open orders on this symbol are already writing against without buying (option contracts × 100 minus their stock leg). */
 async function sharesCommittedByInFlightCoveredCalls(symbol: string): Promise<number> {
   const rows: { payload: OrderRequestPayload }[] = await db("order_requests")
-    .whereIn("status", [...activeOrderStatuses])
+    .whereIn("status", [...activeOrderRequestStatuses])
     .where("request_type", "like", "open_%")
     .whereRaw("payload->>'symbol' = ?", [symbol])
     .whereRaw("payload->>'strategyKey' = ?", ["covered_call"])

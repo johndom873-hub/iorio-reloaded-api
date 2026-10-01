@@ -84,8 +84,8 @@ tradeBlotterRouter.get("/", async (request, response) => {
     params,
   );
 
-  // Real fills (above) only ever exist for a `filled`/`partially_filled`
-  // order_requests row — everything else (still pending confirmation,
+  // Real fills (above) only ever exist for a `filled`/`partially_filled`/
+  // `cancelled_partially_filled` order_requests row — everything else (still pending confirmation,
   // confirmed and awaiting the worker, submitted and awaiting a fill,
   // cancelling, cancelled, rejected, errored) has no trades row at all, so
   // the Trade Blotter previously showed nothing for an order until it fully
