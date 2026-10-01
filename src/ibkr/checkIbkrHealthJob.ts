@@ -82,7 +82,8 @@ async function findOtherRunningJobName(): Promise<string | null> {
 }
 
 async function previousHealthCheckProbeFailed(): Promise<boolean> {
-  const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).orderBy("started_at", "desc").first("details", "error_message");
+  // The current run's own row is already in job_runs as "running" (runJob inserts it first): skip it, or this never sees a prior failure.
+  const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).whereNot({ status: "running" }).orderBy("started_at", "desc").first("details", "error_message");
   if (!row) return false;
   const probe = (row.details as { probe?: { failed?: boolean } } | null)?.probe;
   return probe?.failed === true || String(row.error_message ?? "").includes("reqHistoricalData failed");
