@@ -87,6 +87,11 @@ jobs:
           VULN_COUNT=$(jq '(.metadata.vulnerabilities.critical // 0) + (.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.moderate // 0)' /tmp/audit.json 2>/dev/null || echo 0)
           echo "vuln_count=$VULN_COUNT" >> $GITHUB_OUTPUT
 
+          # Same check as the Heroku build gate (heroku-postbuild): high/critical in runtime dependencies
+          npm audit --omit=dev --json 2>/dev/null > /tmp/audit-gate.json || true
+          GATE_COUNT=$(jq '(.metadata.vulnerabilities.critical // 0) + (.metadata.vulnerabilities.high // 0)' /tmp/audit-gate.json 2>/dev/null || echo 0)
+          echo "gate_count=$GATE_COUNT" >> $GITHUB_OUTPUT
+
           if [ "${VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
             DETAILS=$(jq -r '
               .vulnerabilities
@@ -112,6 +117,7 @@ jobs:
           COMMIT_MSG: ${{ steps.heroku.outputs.commit_msg }}
           APP: ${{ steps.heroku.outputs.heroku_app }}
           VULN_COUNT: ${{ steps.audit.outputs.vuln_count }}
+          GATE_COUNT: ${{ steps.audit.outputs.gate_count }}
           DETAILS: ${{ steps.audit.outputs.details }}
         run: |
           NL=$'\n'
@@ -120,6 +126,8 @@ jobs:
             TEXT="✅ ${APP} deployed${NL}${NL}v${RELEASE} (${SHORT_SHA}) - ${COMMIT_MSG}"
           elif [ "$STATUS" = "failed" ]; then
             TEXT="❌ ${APP} build failed — not deployed${NL}${NL}(${SHORT_SHA}) - ${COMMIT_MSG}${NL}${NL}Check Heroku build logs for details."
+          elif [ "${GATE_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            TEXT="🛑 ${APP} deploy blocked by the vulnerability audit — not deployed${NL}${NL}(${SHORT_SHA}) - ${COMMIT_MSG}${NL}${NL}${GATE_COUNT} high/critical in runtime dependencies. Old release still running. Run npm audit fix and push again."
           else
             TEXT="⏱️ ${APP} deploy timed out${NL}${NL}(${SHORT_SHA}) - ${COMMIT_MSG}"
           fi
