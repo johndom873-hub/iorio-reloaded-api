@@ -1,5 +1,26 @@
 import { db } from "../db/connection.js";
 
+export type PositionEventLeg = PositionEvent["legs"][number];
+
+/**
+ * An "Opened" line lists what was opened. A leg that partial closes carved into slices (same contract, same entry price) is still one
+ * leg there, so its quantities are added (approved 2026-10-01). A "Closed" line keeps the slices apart: each exited at its own price.
+ */
+export function mergeSlicedLegsForOpenedEvent(legs: PositionEventLeg[]): PositionEventLeg[] {
+  const mergedByContract = new Map<string, PositionEventLeg>();
+  for (const leg of legs) {
+    const contractKey = [leg.legType, leg.side, leg.optionType, leg.strikePrice, leg.expiryDate, leg.entryPrice].join("|");
+    const merged = mergedByContract.get(contractKey);
+    if (!merged) {
+      mergedByContract.set(contractKey, { ...leg });
+      continue;
+    }
+    merged.quantity += leg.quantity;
+    if (merged.exitPrice !== leg.exitPrice) merged.exitPrice = null;
+  }
+  return [...mergedByContract.values()];
+}
+
 // Reconstructs a human-readable position lifecycle feed from data that's
 // already persisted (positions/position_legs/trades) — no new events table
 // needed, confirmed 2026-08-28 (see PROGRESS.md). close_reason and
@@ -250,7 +271,7 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
         netCashEffect: isUnstructured ? null : netCashEffectFor(positionLegs),
         fullMarketValue: fullMarketValueFor(positionLegs, position.strategyKey, false),
         attributedTo: openAttributionByPositionId.get(position.id) ?? null,
-        legs: legSummaries(positionLegs),
+        legs: mergeSlicedLegsForOpenedEvent(legSummaries(positionLegs)),
       });
     }
 

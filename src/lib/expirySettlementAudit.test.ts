@@ -55,10 +55,21 @@ describe("buildExpiryAuditFailureMessage", () => {
     expect(buildExpiryAuditFailureMessage([skipped("TLT put $81 assigned: stock chain is still open", true)])).toBeUndefined();
   });
 
-  it("lists the actionable skips and ignores informational ones next to them", () => {
-    const message = buildExpiryAuditFailureMessage([skipped("TLT put $81 assigned: stock chain is still open", true), skipped("AAOI put $107 (expiry 20260925): no daily bar for the expiry date")]);
-    expect(message).toBe("1 expired leg(s) need review or could not be audited, AAOI put $107 (expiry 20260925) - no daily bar for the expiry date");
+  it("lists the actionable skips as one block per leg and ignores informational ones next to them", () => {
+    const message = buildExpiryAuditFailureMessage([
+      skipped("TLT put $81 (exp 2026-09-25) — assigned, stock chain is still open", true),
+      { ...skipped("AAOI put $107 (exp 2026-08-28) — no daily bar"), headline: "AAOI put $107 (exp 2026-08-28)", detail: "no daily bar for the expiry date" },
+      { ...skipped("HOOD put $120 (exp 2026-09-25) — chain share total does not equal 200"), headline: "HOOD put $120 (exp 2026-09-25)", detail: "assigned, chain share total does not equal 200 — manual review" },
+    ]);
+    expect(message).toBe(
+      "2 expired leg(s) need review or could not be audited\n\nAAOI put $107 (exp 2026-08-28)\nno daily bar for the expiry date\n\nHOOD put $120 (exp 2026-09-25)\nassigned, chain share total does not equal 200 — manual review",
+    );
     expect(message).not.toContain("): ");
+  });
+
+  it("is identical for identical input, so the throttled alert does not re-send", () => {
+    const actions = [{ ...skipped("x"), headline: "A put $1 (exp 2026-01-01)", detail: "needs review" }];
+    expect(buildExpiryAuditFailureMessage(actions)).toBe(buildExpiryAuditFailureMessage(actions));
   });
 });
 

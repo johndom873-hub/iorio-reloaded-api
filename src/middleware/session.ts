@@ -2,6 +2,8 @@ import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { environment, requireEnvironmentVariable } from "../config/env.js";
 import { databaseConnectionBudget } from "../config/databaseConnectionBudget.js";
+import { postgresSslOption } from "../config/databaseSsl.js";
+import { readAppEnvironment } from "../lib/appEnvironment.js";
 
 const PgSessionStore = connectPgSimple(session);
 
@@ -16,7 +18,7 @@ export const sessionMiddleware = session({
     conObject: {
       connectionString: environment.databaseUrl,
       max: databaseConnectionBudget.sessionStorePoolMax,
-      ...(environment.nodeEnvironment === "production" ? { ssl: { rejectUnauthorized: false } } : {}),
+      ssl: postgresSslOption(),
     },
     tableName: "session",
     createTableIfMissing: false,
@@ -33,7 +35,8 @@ export const sessionMiddleware = session({
   saveUninitialized: false,
   cookie: {
     httpOnly: true,
-    secure: environment.nodeEnvironment === "production",
+    // Staging and production are served over HTTPS; only local development is plain http.
+    secure: readAppEnvironment() !== "development",
     // app.ioriore.com and api.ioriore.com share a parent domain, so this
     // counts as same-site for cookie purposes — "lax" works and is
     // stronger CSRF protection than "none". (Was "none" in production

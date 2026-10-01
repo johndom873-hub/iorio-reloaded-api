@@ -33,7 +33,7 @@ const marketDataLinesEnabled = ibkrMarketDataLinesEnabled();
 if (!marketDataLinesEnabled) console.log("IBKR market-data lines disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false): live quotes, option chains and the Day Signals loop will not open lines.");
 
 app.listen(port, () => {
-  console.log(`Iorio Reloaded API listening on port ${port} (${environment.nodeEnvironment})`);
+  console.log(`Iorio Reloaded API listening on port ${port} (${readAppEnvironment()})`);
   // A killed process (out of memory, a Heroku platform restart) can never send its own alert, so every
   // start announces itself: an unexpected restart or a crash loop shows up as repeated messages.
   Promise.resolve()

@@ -7,6 +7,7 @@ import { publishNotification } from "../lib/notificationChannel.js";
 import { readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "../lib/expirySettlementAudit.js";
 import { classifyOptionLegRetirement, type OptionLegRetirementEvidence } from "../lib/optionLegRetirement.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { carveClosedSliceFromPartialClose, exitFromClosingFills } from "../lib/partialCloseSlice.js";
 
 // What this module needs from the worker process itself. Injected so the pass can run against a
 // database without the worker's IBKR connection, execution buffer or Telegram plumbing (the
@@ -387,12 +388,11 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number): P
   for (const leg of legsNoLongerHeld) {
     closedLegCount += 1;
 
-    const lastClosingTrade = await db("trades")
-      .where({ position_leg_id: leg.id, is_closing_trade: true })
-      .orderBy("executed_at", "desc")
-      .first();
+    // The exit is the weighted average of every closing fill still on this leg (earlier partial closes
+    // were already carved into their own closed legs, see upsertPositionLeg), not just the last fill.
+    const closingFillExit = await exitFromClosingFills(leg.id);
 
-    const expiredWithoutTrade = !lastClosingTrade && leg.is_expired_option;
+    const expiredWithoutTrade = !closingFillExit && leg.is_expired_option;
     if (expiredWithoutTrade) positionIdsWithExpiredLeg.add(leg.position_id);
 
     // A covered call's stock leg is never actually sold just because its
@@ -408,7 +408,7 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number): P
     // no real closing trade exists and a sibling option leg on the same
     // position has already expired.
     let isRetainedCoveredCallStock = false;
-    if (leg.leg_type === "stock" && !lastClosingTrade) {
+    if (leg.leg_type === "stock" && !closingFillExit) {
       const expiredSiblingOptionLeg = await db("position_legs")
         .where({ position_id: leg.position_id, leg_type: "option" })
         .whereNotNull("expiry_date")
@@ -420,11 +420,11 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number): P
     await db("position_legs")
       .where({ id: leg.id })
       .update({
-        exit_price: lastClosingTrade?.price ?? (expiredWithoutTrade ? 0 : isRetainedCoveredCallStock ? leg.entry_price : null),
-        exit_at: lastClosingTrade?.executed_at ?? db.fn.now(),
+        exit_price: closingFillExit?.exitPrice ?? (expiredWithoutTrade ? 0 : isRetainedCoveredCallStock ? leg.entry_price : null),
+        exit_at: closingFillExit?.exitAt ?? db.fn.now(),
       });
     console.log(
-      `Reconciliation #${passId}: closed leg ${leg.id} (position ${leg.position_id}, conId ${leg.ibkr_contract_id}) — ${lastClosingTrade ? `matched closing trade @ ${lastClosingTrade.price}` : expiredWithoutTrade ? "expired worthless, no trade" : isRetainedCoveredCallStock ? "stock retained past sibling option's expiry, no trade -- closed at entry price" : "no trade, not past expiry (ambiguous close)"}.`,
+      `Reconciliation #${passId}: closed leg ${leg.id} (position ${leg.position_id}, conId ${leg.ibkr_contract_id}) — ${closingFillExit ? `matched closing trade(s) @ ${closingFillExit.exitPrice}` : expiredWithoutTrade ? "expired worthless, no trade" : isRetainedCoveredCallStock ? "stock retained past sibling option's expiry, no trade -- closed at entry price" : "no trade, not past expiry (ambiguous close)"}.`,
     );
 
     const remainingOpenLegs = await db("position_legs").where({ position_id: leg.position_id }).whereNull("exit_at");
@@ -534,8 +534,10 @@ async function notifyPositionExpired(positionId: string, closeReason: string): P
   if (position.strategyKey !== "covered_call" && position.strategyKey !== "cash_secured_put") return;
 
   const realizedPnl = Number(position.realizedPnl);
-  const capitalAtRisk = position.capitalAtRisk === null ? null : Number(position.capitalAtRisk);
-  const realizedPnlPercent = capitalAtRisk && capitalAtRisk !== 0 ? (realizedPnl / capitalAtRisk) * 100 : null;
+  // Over the capital the whole realized P&L was earned on (capitalDeployed, approved 2026-10-01), not capitalAtRisk: a position
+  // closed in slices has its last slice's collateral as exposure but all of its slices' result as P&L.
+  const capitalDeployed = position.capitalDeployed === null ? null : Number(position.capitalDeployed);
+  const realizedPnlPercent = capitalDeployed && capitalDeployed !== 0 ? (realizedPnl / capitalDeployed) * 100 : null;
   const assigned = closeReason === "assigned";
 
   const message = formatPositionExpiredMessage({
@@ -606,6 +608,11 @@ async function upsertPositionLeg(
     // IBKR's `position` event always reports the CURRENT total holding +
     // blended average cost for this conId, never an increment, so it's
     // always safe to overwrite while the leg is still open.
+    //
+    // Shares that left while others remain are carved into their own closed leg BEFORE the overwrite
+    // below, or their quantity would be lost from realized P&L (see partialCloseSlice.ts).
+    const carvedSliceId = await carveClosedSliceFromPartialClose(existing, trueQuantity);
+    if (carvedSliceId) console.log(`Reconciliation #${currentPassId}: leg ${existing.id} partially closed — closed shares carved into leg ${carvedSliceId}.`);
     if (Number(existing.quantity) !== trueQuantity || Number(existing.entry_price) !== ibkrEntryPrice) {
       await db("position_legs").where({ id: existing.id }).update({ quantity: trueQuantity, entry_price: ibkrEntryPrice });
     }

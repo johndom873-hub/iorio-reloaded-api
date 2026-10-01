@@ -4,6 +4,7 @@ import { EventName, OrderAction, OrderType, SecType, TimeInForce } from "@stoqey
 import type { CommissionReport, Contract, ComboLeg, Execution, Order as IbkrOrder } from "@stoqey/ib";
 import { db } from "./db/connection.js";
 import { environment } from "./config/env.js";
+import { postgresSslOption } from "./config/databaseSsl.js";
 import { detectTradingModeFromAccountIds } from "./lib/detectTradingModeFromAccountIds.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
 import { readGitSha } from "./lib/readGitSha.js";
@@ -356,7 +357,7 @@ async function connectOrderRequestsListener(): Promise<PgClient> {
   for (;;) {
     const client = new PgClient({
       connectionString: environment.databaseUrl,
-      ssl: environment.nodeEnvironment === "production" ? { rejectUnauthorized: false } : undefined,
+      ssl: postgresSslOption(),
     });
     try {
       await client.connect();

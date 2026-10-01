@@ -97,6 +97,31 @@ async function insertClosingTrade(legId: string, price: number, executedAt: Date
   });
 }
 
+async function insertClosingFill(legId: string, quantity: number, price: number, secondsFromBase: number, side: "buy" | "sell" = "sell"): Promise<void> {
+  const executedAt = new Date(Date.UTC(2026, 8, 28, 14, 0, secondsFromBase));
+  await testDb("trades").insert({
+    position_leg_id: legId,
+    ibkr_exec_id: `reconcile-test-fill-${legId}-${secondsFromBase}`,
+    side,
+    quantity,
+    price,
+    executed_at: executedAt,
+    is_closing_trade: true,
+  });
+}
+
+async function closedAndOpenQuantities(positionId: string): Promise<{ closed: number[]; open: number[] }> {
+  const legs = await testDb("position_legs").where({ position_id: positionId }).orderBy("exit_at", "asc");
+  return {
+    closed: legs.filter((leg) => leg.exit_at !== null).map((leg) => leg.quantity),
+    open: legs.filter((leg) => leg.exit_at === null).map((leg) => leg.quantity),
+  };
+}
+
+function realizedStockPnl(legs: { quantity: number; entry_price: string; exit_price: string | null }[]): number {
+  return legs.filter((leg) => leg.exit_price !== null).reduce((sum, leg) => sum + (Number(leg.exit_price) - Number(leg.entry_price)) * leg.quantity, 0);
+}
+
 async function runPass(held: IbkrHeldPosition[]): Promise<void> {
   passCounter += 1;
   await reconcileHeldPositions(held, passCounter, dependencies);
@@ -386,5 +411,119 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(positions.map((position) => position.strategy_key).sort()).toEqual(["covered_call", "unstructured"]);
     expect(positions.find((position) => position.id === coveredCallId)!.strategy_key).toBe("covered_call");
     expect(positions.filter((position) => position.status === "open")).toHaveLength(1);
+  });
+});
+
+describe("reconcileHeldPositions — shares sold in several fills keep their quantity in realized P&L", () => {
+  it("COHR: 200 shares sold as 80 / 80 / 40 become three closed legs whose quantities add back to 200", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const positionId = await insertPosition(ticker.id, "unstructured", "leftover_stock");
+    const legId = await insertStockLeg(positionId, stockConId, 200, 318.8219);
+
+    await insertClosingFill(legId, 80, 279.8, 0);
+    await runPass([heldStock(ticker.symbol, stockConId, 120, 318.8219)]);
+    expect(await closedAndOpenQuantities(positionId)).toEqual({ closed: [80], open: [120] });
+
+    await insertClosingFill(legId, 80, 279.95, 5);
+    await runPass([heldStock(ticker.symbol, stockConId, 40, 318.8219)]);
+    expect(await closedAndOpenQuantities(positionId)).toEqual({ closed: [80, 80], open: [40] });
+
+    await insertClosingFill(legId, 40, 279.82, 15);
+    await runPass([]);
+    const legs = await legsFor(positionId);
+    expect(legs.map((leg) => leg.quantity).sort((a, b) => a - b)).toEqual([40, 80, 80]);
+    expect(legs.every((leg) => leg.exit_at !== null)).toBe(true);
+    expect(legs.every((leg) => Number(leg.entry_price) === 318.8219)).toBe(true);
+    expect(realizedStockPnl(legs)).toBeCloseTo(80 * (279.8 - 318.8219) + 80 * (279.95 - 318.8219) + 40 * (279.82 - 318.8219), 2);
+    // Each closing trade now belongs to the leg it closed, so per-leg commissions follow their own shares.
+    const tradeCountsPerLeg = await Promise.all(legs.map((leg) => testDb("trades").where({ position_leg_id: leg.id, is_closing_trade: true }).count({ total: "id" }).first()));
+    expect(tradeCountsPerLeg.map((row) => Number(row!.total))).toEqual([1, 1, 1]);
+  });
+
+  it("HOOD: 200 shares sold as 100 + 100 across two passes close as 100 + 100", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const positionId = await insertPosition(ticker.id, "unstructured", "leftover_stock");
+    const legId = await insertStockLeg(positionId, stockConId, 200, 118.5974);
+
+    await insertClosingFill(legId, 100, 118.75, 0);
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 118.5974)]);
+    await insertClosingFill(legId, 100, 118.75, 3);
+    await runPass([]);
+
+    const legs = await legsFor(positionId);
+    expect(legs.map((leg) => leg.quantity)).toEqual([100, 100]);
+    expect(realizedStockPnl(legs)).toBeCloseTo(200 * (118.75 - 118.5974), 2);
+  });
+
+  it("all fills landing between two passes: one leg keeps the full quantity and exits at the fills' weighted average", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const positionId = await insertPosition(ticker.id, "unstructured", "leftover_stock");
+    const legId = await insertStockLeg(positionId, stockConId, 200, 318.8219);
+
+    await insertClosingFill(legId, 80, 279.8, 0);
+    await insertClosingFill(legId, 80, 279.95, 5);
+    await insertClosingFill(legId, 40, 279.82, 15);
+    await runPass([]);
+
+    const legs = await legsFor(positionId);
+    expect(legs).toHaveLength(1);
+    expect(legs[0]!.quantity).toBe(200);
+    expect(Number(legs[0]!.exit_price)).toBe(279.864);
+  });
+
+  it("a closing fill the held report does not confirm yet is not attributed to any shares", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const positionId = await insertPosition(ticker.id, "unstructured", "leftover_stock");
+    const legId = await insertStockLeg(positionId, stockConId, 200, 118.5974);
+
+    await insertClosingFill(legId, 100, 118.75, 0);
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 118.5974)]);
+    expect(await closedAndOpenQuantities(positionId)).toEqual({ closed: [], open: [200] });
+
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 118.5974)]);
+    expect(await closedAndOpenQuantities(positionId)).toEqual({ closed: [100], open: [100] });
+  });
+
+  it("a drop in the held quantity with no closing fill is only synced, never carved", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const positionId = await insertPosition(ticker.id, "unstructured", "leftover_stock");
+    await insertStockLeg(positionId, stockConId, 200, 118.5974);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 118.5974)]);
+    expect(await closedAndOpenQuantities(positionId)).toEqual({ closed: [], open: [100] });
+  });
+
+  it("the same pass run again carves nothing twice", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const positionId = await insertPosition(ticker.id, "unstructured", "leftover_stock");
+    const legId = await insertStockLeg(positionId, stockConId, 200, 118.5974);
+
+    await insertClosingFill(legId, 100, 118.75, 0);
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 118.5974)]);
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 118.5974)]);
+    expect(await closedAndOpenQuantities(positionId)).toEqual({ closed: [100], open: [100] });
+  });
+
+  it("a short put bought back 2 contracts at a time out of 5: the closed contracts carry their own quantity and exit price", async () => {
+    const ticker = await createTicker();
+    const putConId = (nextConId += 1);
+    const positionId = await insertPosition(ticker.id, "cash_secured_put");
+    const legId = await insertShortOptionLeg(positionId, putConId, "put", 100, isoDateDaysFromToday(7), 2.0);
+    await testDb("position_legs").where({ id: legId }).update({ quantity: 5 });
+
+    await insertClosingFill(legId, 2, 0.8, 0, "buy");
+    await runPass([heldShortOption(ticker.symbol, putConId, OptionType.Put, 100, isoDateDaysFromToday(7), 200, 3)]);
+
+    const legs = await testDb("position_legs").where({ position_id: positionId }).orderBy("exit_at", "asc");
+    expect(legs.map((leg) => [leg.quantity, leg.exit_at !== null, leg.exit_price === null ? null : Number(leg.exit_price)])).toEqual([
+      [2, true, 0.8],
+      [3, false, null],
+    ]);
   });
 });

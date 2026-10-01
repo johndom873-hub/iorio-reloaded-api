@@ -1,5 +1,6 @@
 import { Client as PgClient } from "pg";
 import { environment } from "../config/env.js";
+import { postgresSslOption } from "../config/databaseSsl.js";
 import { appNotificationsChannel, type AppNotification } from "./notificationChannel.js";
 
 // Web-dyno-only: holds one dedicated Postgres LISTEN connection (knex's
@@ -29,7 +30,7 @@ export function broadcastToLocalSubscribers(notification: AppNotification): void
 async function connect(attempt = 0): Promise<void> {
   const client = new PgClient({
     connectionString: environment.databaseUrl,
-    ssl: environment.nodeEnvironment === "production" ? { rejectUnauthorized: false } : undefined,
+    ssl: postgresSslOption(),
   });
 
   client.on("notification", (message) => {
