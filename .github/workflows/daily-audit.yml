@@ -1,0 +1,58 @@
+name: Daily Dependency Audit
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # midnight UTC
+  workflow_dispatch:       # allow manual trigger from GitHub Actions tab
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit dependencies
+        id: audit
+        run: |
+          set +e
+          npm audit --audit-level=high --json > /tmp/audit.json
+          EXIT=$?
+          set -e
+          echo "exit_code=$EXIT" >> $GITHUB_OUTPUT
+          echo "critical=$(jq '.metadata.vulnerabilities.critical // 0' /tmp/audit.json)" >> $GITHUB_OUTPUT
+          echo "high=$(jq '.metadata.vulnerabilities.high // 0' /tmp/audit.json)" >> $GITHUB_OUTPUT
+          DETAILS=$(jq -r '
+            (.vulnerabilities // {})
+            | to_entries[]
+            | select(.value.severity == "critical" or .value.severity == "high")
+            | "• \(.key) (\(.value.severity))"
+          ' /tmp/audit.json | head -10)
+          {
+            echo "details<<EOF_DELIM"
+            echo "$DETAILS"
+            echo "EOF_DELIM"
+          } >> $GITHUB_OUTPUT
+
+      - name: Send Telegram alert
+        if: steps.audit.outputs.exit_code != '0'
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CRITICAL: ${{ steps.audit.outputs.critical }}
+          HIGH: ${{ steps.audit.outputs.high }}
+          DETAILS: ${{ steps.audit.outputs.details }}
+        run: |
+          NL=$'\n'
+          TEXT="⚠️ iorio-reloaded-api${NL}${NL}${CRITICAL} critical, ${HIGH} high vulnerabilities found.${NL}${DETAILS}${NL}${NL}Run npm audit fix locally and push to deploy the fix."
+          PAYLOAD=$(jq -n --arg chat_id "$CHAT_ID" --arg text "$TEXT" \
+            '{chat_id: $chat_id, text: $text}')
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
