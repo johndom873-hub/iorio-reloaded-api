@@ -13,6 +13,7 @@ import { readExpirySettlementMode } from "./lib/expirySettlementAudit.js";
 import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
 import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
 import {
+  buildContractFromConId,
   buildLegContract,
   computeNetLimitPrice,
   type AdaptivePriority,
@@ -165,7 +166,7 @@ async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Con
 
   if (payload.legs.length === 1) {
     const leg = payload.legs[0]!;
-    const contract = { ...buildLegContract(leg), conId: conIds[0]! };
+    const contract = buildContractFromConId(leg, conIds[0]!);
     const order: IbkrOrder = {
       action: leg.action,
       orderType: OrderType.LMT,

@@ -38,10 +38,21 @@ export interface OrderRequestPayload {
   adaptivePriority?: AdaptivePriority;
 }
 
+const ibkrExpiryPattern = /^\d{8}$/;
+
+/** The description of every option leg whose expiry is not IBKR's YYYYMMDD, or null when all are fine. */
+export function findMalformedOptionExpiry(legs: OrderLegPayload[]): string | null {
+  const malformedLeg = legs.find((leg) => leg.role === "option" && !ibkrExpiryPattern.test(leg.expiry ?? ""));
+  return malformedLeg ? `${malformedLeg.symbol} option leg has expiry "${malformedLeg.expiry}", expected YYYYMMDD` : null;
+}
+
+/** Contract used to look a leg's conId up: the full option description, so its expiry must already be YYYYMMDD. */
 export function buildLegContract(leg: OrderLegPayload): Contract {
   if (leg.role === "stock") {
     return { symbol: leg.symbol, secType: SecType.STK, exchange: "SMART", currency: "USD" };
   }
+  const malformedExpiry = findMalformedOptionExpiry([leg]);
+  if (malformedExpiry) throw new Error(malformedExpiry);
   return {
     symbol: leg.symbol,
     secType: SecType.OPT,
@@ -51,6 +62,21 @@ export function buildLegContract(leg: OrderLegPayload): Contract {
     strike: leg.strike,
     right: leg.right === "C" ? OptionType.Call : OptionType.Put,
     multiplier: 100,
+  };
+}
+
+/**
+ * Contract sent with a single-leg order once the conId is known: the conId alone identifies the
+ * contract, so no expiry/strike/right/multiplier goes along for IBKR to validate (a malformed
+ * expiry next to a valid conId is rejected with error 10330).
+ */
+export function buildContractFromConId(leg: OrderLegPayload, conId: number): Contract {
+  return {
+    conId,
+    symbol: leg.symbol,
+    secType: leg.role === "stock" ? SecType.STK : SecType.OPT,
+    exchange: "SMART",
+    currency: "USD",
   };
 }
 

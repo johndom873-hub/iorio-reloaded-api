@@ -18,7 +18,7 @@ import { fetchPricesPoolFirst, streamPooledPrices, subscribeToPooledPrice } from
 import type { PositionExposureRow } from "../lib/positionExposure.js";
 import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
-import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
+import { findMalformedOptionExpiry, type OrderLegPayload, type OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning, type EconomicCalendarWarningEvent } from "../ibkr/calendarConflict.js";
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
@@ -118,6 +118,13 @@ function roundToCents(price: number): number {
 // resolve one or more contract ids" error, well after the human had
 // already confirmed it. Normalize (strip separators) and validate up
 // front so a malformed date is rejected immediately with a clear message.
+// position_legs.expiry_date is a Postgres date, which pg hands back as a JS Date -- JSON then makes it
+// "2026-10-02T00:00:00.000Z" (and a day earlier on a server west/east of UTC), not IBKR's YYYYMMDD.
+// Legs that feed an order payload select it through this column instead.
+function expiryYyyymmddColumn() {
+  return db.raw("to_char(expiry_date, 'YYYYMMDD') as \"expiryYyyymmdd\"");
+}
+
 function normalizeExpiryDate(raw: string): string | null {
   const digitsOnly = raw.replace(/[^0-9]/g, "");
   return /^\d{8}$/.test(digitsOnly) ? digitsOnly : null;
@@ -1653,7 +1660,10 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     }
   }
 
-  const closingLeg = await db("position_legs").where({ id: closeLegId, position_id: position.id }).first();
+  const closingLeg = await db("position_legs")
+    .select("*", expiryYyyymmddColumn())
+    .where({ id: closeLegId, position_id: position.id })
+    .first();
   if (!closingLeg) {
     response.status(404).json({ error: "Leg not found on this position." });
     return;
@@ -1699,7 +1709,7 @@ positionsRouter.post("/:id/roll", async (request, response) => {
       quantity: closingLeg.quantity,
       unitPrice: roundToCents(closeLimitPrice),
       strike: Number(closingLeg.strike_price),
-      expiry: closingLeg.expiry_date,
+      expiry: closingLeg.expiryYyyymmdd,
       right,
       ibkrContractId: closingLeg.ibkr_contract_id ?? undefined,
       positionLegId: closingLeg.id,
@@ -1715,6 +1725,11 @@ positionsRouter.post("/:id/roll", async (request, response) => {
       right,
     },
   ];
+  const malformedExpiry = findMalformedOptionExpiry(legs);
+  if (malformedExpiry) {
+    response.status(500).json({ error: `Order not built: ${malformedExpiry}.` });
+    return;
+  }
   const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey: position.strategy_key, legs };
 
   const [orderRequest] = await db("order_requests")
@@ -1846,7 +1861,7 @@ positionsRouter.post("/:id/close", async (request, response) => {
     }
   }
 
-  const existingLegs = await db("position_legs").where({ position_id: position.id, exit_at: null });
+  const existingLegs = await db("position_legs").select("*", expiryYyyymmddColumn()).where({ position_id: position.id, exit_at: null });
   const existingLegIds = new Set(existingLegs.map((leg) => leg.id));
   const providedLegIds = new Set(legs.map((leg) => leg.legId));
   const isUnstructured = position.strategy_key === "unstructured";
@@ -1930,11 +1945,16 @@ positionsRouter.post("/:id/close", async (request, response) => {
     quantity: quantityForLeg(leg),
     unitPrice: roundToCents(limitPriceByLegId.get(leg.id)!),
     strike: leg.strike_price ? Number(leg.strike_price) : undefined,
-    expiry: leg.expiry_date ?? undefined,
+    expiry: leg.expiryYyyymmdd ?? undefined,
     right: leg.option_type === "call" ? "C" : leg.option_type === "put" ? "P" : undefined,
     ibkrContractId: leg.ibkr_contract_id ?? undefined,
     positionLegId: leg.id,
   }));
+  const malformedExpiry = findMalformedOptionExpiry(orderLegs);
+  if (malformedExpiry) {
+    response.status(500).json({ error: `Order not built: ${malformedExpiry}.` });
+    return;
+  }
   const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey: position.strategy_key, legs: orderLegs };
 
   const [orderRequest] = await db("order_requests")
