@@ -42,6 +42,7 @@ import { candidateContractKey, scoreTicker, type LiveOptionQuote } from "./signa
 import { loadAccountContext, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "./signalSettingsStore.js";
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
+import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 
 // The Day Signals refresh loop (design agreed 2026-09-24, PROGRESS.md "DAY
 // SIGNALS"). Lives in the web dyno as a background service, gated by
@@ -159,19 +160,6 @@ function spotFromQuote(quote: WindowQuote): number | null {
   return quote.last ?? (quote.bid !== null && quote.ask !== null ? (quote.bid + quote.ask) / 2 : null);
 }
 
-function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) return resolve();
-    const timer = setTimeout(done, ms);
-    function done() {
-      signal.removeEventListener("abort", done);
-      clearTimeout(timer);
-      resolve();
-    }
-    signal.addEventListener("abort", done, { once: true });
-  });
-}
-
 export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   now: () => new Date(),
   isMarketOpen: async (now) => (await computeMarketSessionStatus(now)).state === "open",
@@ -225,6 +213,18 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   reportFailure: reportBackgroundFailure,
   reportRecovery: reportBackgroundRecovery,
 };
+
+// Logged: the first cycle of a run, every thirtieth after it (~10 minutes at a ~20 s cycle), and any cycle
+// that did not go cleanly. A line for every cycle would flood the log.
+export const cycleLogEveryNthCycle = 30;
+export const slowCycleLogThresholdMs = 60_000;
+
+export function shouldLogCycle(cycle: { cycleNumber: number; settled: number; total: number; durationMs: number; disconnected?: boolean; aborted?: boolean }): boolean {
+  if (cycle.disconnected || cycle.aborted) return true;
+  if (cycle.settled < cycle.total) return true;
+  if (cycle.durationMs >= slowCycleLogThresholdMs) return true;
+  return cycle.cycleNumber % cycleLogEveryNthCycle === 1;
+}
 
 export class DaySignalsLoop {
   private status: DaySignalsLoopStatus;
@@ -488,7 +488,9 @@ export class DaySignalsLoop {
       await flush();
       await tickerWorkChain;
       this.status.lastCycleDurationMs = this.deps.now().getTime() - startedAt.getTime();
-      console.log(`day signals loop: cycle ${cycleNumber} — ${result.settled}/${windowContracts.length} settled in ${Math.round(this.status.lastCycleDurationMs / 1000)}s${result.disconnected ? " (disconnected)" : ""}${result.aborted ? " (aborted)" : ""}`);
+      if (shouldLogCycle({ cycleNumber, settled: result.settled, total: windowContracts.length, durationMs: this.status.lastCycleDurationMs, disconnected: result.disconnected, aborted: result.aborted })) {
+        console.log(`day signals loop: cycle ${cycleNumber} — ${result.settled}/${windowContracts.length} settled in ${Math.round(this.status.lastCycleDurationMs / 1000)}s${result.disconnected ? " (disconnected)" : ""}${result.aborted ? " (aborted)" : ""}`);
+      }
       return result;
     } finally {
       clearInterval(flushTimer);

@@ -94,7 +94,7 @@ systemHealthRouter.get("/presence", async (_request, response) => {
 // (20 on Essential-1), falling back to the server's max_connections where the
 // role is unlimited (local dev). Postgres can't report the plan's storage
 // limit, so that comes from DB_PLAN_MAX_SIZE_BYTES (see .env.example).
-systemHealthRouter.get("/db", async (_request, response) => {
+async function loadDbHealth() {
   const maxDatabaseSizeBytes = requireEnvironmentVariable("DB_PLAN_MAX_SIZE_BYTES");
   const result = await db.raw(`
     SELECT
@@ -103,7 +103,11 @@ systemHealthRouter.get("/db", async (_request, response) => {
          FROM pg_roles WHERE rolname = current_user) AS "maxConnections",
       pg_database_size(current_database()) AS "databaseSizeBytes"
   `);
-  response.json({ ...result.rows[0], maxDatabaseSizeBytes, responseTime: dbQueryTimingStats() });
+  return { ...result.rows[0], maxDatabaseSizeBytes, responseTime: dbQueryTimingStats() };
+}
+
+systemHealthRouter.get("/db", async (_request, response) => {
+  response.json(await loadDbHealth());
 });
 
 // IBKR's primaryExch codes aren't the names traders actually say — captured
@@ -144,16 +148,20 @@ systemHealthRouter.get("/day-signals", async (_request, response) => {
 // practice — auth is chat-level only (one shared Telegram chat, see
 // genosuke/bot.ts's header comment), so there's genuinely only ever one
 // chat_id in this deployment; not a bug.
-systemHealthRouter.get("/genosuke", async (_request, response) => {
+async function loadGenosukeHealth() {
   const result = await db.raw(`
     SELECT
       (SELECT count(*) FROM genosuke_chat_messages WHERE role = 'assistant' AND created_at >= current_date) AS "messagesToday",
       (SELECT count(DISTINCT chat_id) FROM genosuke_chat_messages WHERE created_at >= now() - interval '24 hours') AS "activeSessions"
   `);
-  response.json({
+  return {
     ...result.rows[0],
     llm: { model: process.env.GENOSUKE_MODEL ?? null, ...llmStats.stats() },
-  });
+  };
+}
+
+systemHealthRouter.get("/genosuke", async (_request, response) => {
+  response.json(await loadGenosukeHealth());
 });
 
 // Heroku web-dyno node stats — request rate (requestRateTracker.ts
@@ -162,15 +170,19 @@ systemHealthRouter.get("/genosuke", async (_request, response) => {
 // presenceTracker's counter) and labeled as such below, not a true count of
 // every SSE endpoint in the app (positions/greeks/pnl, risk-limits/exposure,
 // ticker-detail streams are separate connections this doesn't see).
-systemHealthRouter.get("/web-dyno", async (_request, response) => {
-  response.json({
+function loadWebDynoHealth() {
+  return {
     requestsPerMinute: requestRateStats().requestsPerMinute,
     uptimeSeconds: Math.round(process.uptime()),
     processStartedAt,
     notificationStreamConnections: presenceTracker.totalConnectionCount(),
     // Stream multiplexer (streams/streamMultiplexer.ts): open tab connections and the live subscriptions on them, by kind.
     streamMultiplexer: getStreamMultiplexerStats(),
-  });
+  };
+}
+
+systemHealthRouter.get("/web-dyno", (_request, response) => {
+  response.json(loadWebDynoHealth());
 });
 
 // Gateway node stats — read from worker_health, upserted every ~45s by
@@ -179,7 +191,7 @@ systemHealthRouter.get("/web-dyno", async (_request, response) => {
 // reads, not a pg_notify event). orderCount is NOT sourced from the worker
 // at all — it's a plain web-dyno query against order_requests, no round
 // trip needed.
-systemHealthRouter.get("/gateway", async (_request, response) => {
+async function loadGatewayHealth() {
   const [health, orderCountResult, reservations] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
     db("order_requests").whereIn("status", ["confirmed", "submitted", "cancel_requested"]).count("* as count").first(),
@@ -187,11 +199,10 @@ systemHealthRouter.get("/gateway", async (_request, response) => {
   ]);
 
   if (!health) {
-    response.json({ connected: false, staleOrMissing: true, inFlightOrderCount: Number(orderCountResult?.count ?? 0) });
-    return;
+    return { connected: false, staleOrMissing: true, inFlightOrderCount: Number(orderCountResult?.count ?? 0) };
   }
 
-  response.json({
+  return {
     connected: health.connected,
     uptimeMs: health.uptime_ms !== null ? Number(health.uptime_ms) : null,
     totalReconnects: health.total_reconnects,
@@ -203,5 +214,34 @@ systemHealthRouter.get("/gateway", async (_request, response) => {
     // Day Signals, one-off snapshots), against the shared budget — see summarizeMarketDataLineUsage.
     marketDataLines: summarizeMarketDataLineUsage(reservations, marketDataPoolSnapshot().openLineCount),
     staleOrMissing: false,
+  };
+}
+
+systemHealthRouter.get("/gateway", async (_request, response) => {
+  response.json(await loadGatewayHealth());
+});
+
+// The Pulse page's five health readings in one request instead of five (it polls every 30 s, and
+// every request is a router log line). A reading that fails comes back as null so one failing
+// query does not blank the others; the individual routes above stay for an older front end.
+systemHealthRouter.get("/summary", async (_request, response) => {
+  const [db, genosuke, webDyno, gateway, presence] = await Promise.allSettled([
+    loadDbHealth(),
+    loadGenosukeHealth(),
+    loadWebDynoHealth(),
+    loadGatewayHealth(),
+    fetchPresenceOverview().then((users) => ({ users })),
+  ]);
+  const valueOrNull = <T>(result: PromiseSettledResult<T>, name: string): T | null => {
+    if (result.status === "fulfilled") return result.value;
+    console.error(`system-health/summary: ${name} failed`, result.reason);
+    return null;
+  };
+  response.json({
+    db: valueOrNull(db, "db"),
+    genosuke: valueOrNull(genosuke, "genosuke"),
+    webDyno: valueOrNull(webDyno, "webDyno"),
+    gateway: valueOrNull(gateway, "gateway"),
+    presence: valueOrNull(presence, "presence"),
   });
 });

@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { fetchPricesPoolFirst, streamPooledPrices } from "../ibkr/pricePool.js";
 import { dedupeInFlight } from "./dedupeInFlight.js";
+import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 
 // Position "exposure"/"value" = full market value across every open leg
 // (stock + option together), option legs priced as a liability — the
@@ -195,6 +196,30 @@ export async function computeTickerExposure(symbol: string): Promise<number> {
   return computeExposureRows(positions, legs, pricesByKey).reduce((sum, row) => sum + row.exposure, 0);
 }
 
+/** While no position is open, the stream stays up and re-reads this often (an empty reading each time, so the caller can refresh its account figures). */
+export const noOpenPositionsRecheckIntervalMs = 60_000;
+
+/**
+ * Loads open positions; while there are none, calls `onEmpty`, waits `recheckIntervalMs` and loads again.
+ * Returns the first non-empty load, or null if `signal` aborts first. Ending instead would make every browser
+ * re-subscribe on its backoff, re-running the caller's setup (an IBKR account read) each time.
+ */
+export async function waitForOpenPositions<T extends { positions: unknown[] }>(
+  load: () => Promise<T>,
+  onEmpty: () => void,
+  recheckIntervalMs: number,
+  signal: AbortSignal,
+): Promise<T | null> {
+  for (;;) {
+    const loaded = await load();
+    if (signal.aborted) return null;
+    if (loaded.positions.length > 0) return loaded;
+    onEmpty();
+    await sleepUnlessAborted(recheckIntervalMs, signal);
+    if (signal.aborted) return null;
+  }
+}
+
 /**
  * Live-upgrading variant for the SSE-backed Dashboard/Risk & Limits screens
  * (approved 2026-09-09): emits exposure rows computed from FROZEN prices
@@ -203,11 +228,9 @@ export async function computeTickerExposure(symbol: string): Promise<number> {
  * for the FROZEN-then-REALTIME mechanics.
  */
 export async function streamPositionExposures(onUpdate: (rows: PositionExposureRow[]) => void, signal: AbortSignal): Promise<void> {
-  const { positions, legs } = await resolveOpenPositionsAndLegs();
-  if (positions.length === 0) {
-    onUpdate([]);
-    return;
-  }
+  const open = await waitForOpenPositions(resolveOpenPositionsAndLegs, () => onUpdate([]), noOpenPositionsRecheckIntervalMs, signal);
+  if (open === null) return;
+  const { positions, legs } = open;
 
   // Hold the first reading until every leg has a price or the frozen phase
   // has ended (approved 2026-09-19). Without this, legs not yet priced fall

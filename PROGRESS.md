@@ -351,6 +351,15 @@ Plain language: closing the NBIS put on staging (10-01, three tries) was rejecte
 - **Fix:** Close and Roll select `to_char(expiry_date, 'YYYYMMDD')`; single-leg orders now send the conId alone (`buildContractFromConId`); `findMalformedOptionExpiry` rejects a bad expiry when the order is built (HTTP 500) and `buildLegContract` throws on one.
 - **Verified:** conId 910602043 = NBIS 2026-10-02 $230 put (reqContractDetails); paper `whatIf` order reproduced 10330 with the old shape and was accepted with conId-only; Close and Roll routes store `YYYYMMDD`; suite 930/930.
 
+## Prod log review 2026-10-02 (24 h): fixes built, not pushed
+Plain language: reading yesterday's production logs showed one real bug and several noisy spots. Nothing was broken for users; one nightly job never shut down, and a few screens made more requests than needed.
+- **P&L snapshot job never exited** (api): it kept the shared IBKR connection open until Heroku cycled it after 24 h. Cleanup now calls `sharedReadConnection.shutdown()`, like the capture job.
+- **Pulse health polling** (api + app): one `GET /system-health/summary` replaces five requests every 30 s; a reading that fails comes back null and the screen keeps the last good one. The individual routes stay for an older front end, so promote the API before the app.
+- **Stream client** (app): a subscribe is no longer sent on a connection silent for over 30 s (the server drops it first; it answered 404 and the client then reconnected anyway).
+- **Quieter logs** (api): the per-cycle Day Signals line is logged for the first cycle, every 30th and any abnormal cycle; dotenv's banner is silenced in the migration step.
+- **Exposure stream with no open positions** (api): it used to end at once, so every browser re-subscribed every ~30 s and each run read the IBKR account summary. It now stays up, re-sends an empty reading every 60 s (re-reading the account figures each time) and carries on into live prices when a position opens. Tests: idle loop, handler refresh rule (mutation-checked).
+- **Not fixed (prod, `2215d16`):** the git-SHA warning once a minute is fixed on main (`da3a224`), clears on the next promotion.
+
 ## Open decisions — Juan's Iorio Upgrades feedback (2026-08-24)
 Full IBKR trading-book/depth visibility, full option chain w/ all bid-ask, richer trade tab, and a new upcoming-events tab. Broken into independently-decidable pieces:
 - [x] **Order confirmation needs real-time prices and the live option chain (Juan) — built, corrected 2026-09-25.** This was stale: `OrderReviewPanel.tsx` has had a live-streaming "Live Quote" card (bid/ask/greeks/IV via genuine SSE) since app commit `e9e8d07` (2026-08-25) — a month before this checkbox's own "unblocked 2026-09-14" note was even added.

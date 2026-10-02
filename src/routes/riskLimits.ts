@@ -248,6 +248,23 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
   });
 });
 
+async function loadExposureAccountContext() {
+  const [accountResult, cashLockedInCsps] = await Promise.all([
+    fetchAccountSummary()
+      .then((account) => ({ account, accountDataError: null as string | null }))
+      .catch((error) => ({
+        account: null,
+        accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.",
+      })),
+    computeCashLockedInCsps(),
+  ]);
+  const { account, accountDataError } = accountResult;
+  const totalAccountValue = account?.netLiquidationValue ?? null;
+  const availableCash =
+    account?.totalCashValue !== null && account?.totalCashValue !== undefined ? account.totalCashValue - cashLockedInCsps : null;
+  return { account, accountDataError, totalAccountValue, availableCash };
+}
+
 // SSE live-upgrading sibling of GET /exposure (approved 2026-09-09). Fetches
 // account summary once up front (see /dashboard/portfolio/stream's matching
 // comment for why), then streams exposure-derived aggregates: a
@@ -258,24 +275,12 @@ export async function streamExposureHandler(request: Request, response: Response
   // Account data and the price stream are independent — started together
   // (2026-09-19) so the ~1s account fetch overlaps the stream's own setup
   // instead of delaying it. Every reading awaits this before sending.
-  const accountContextPromise = Promise.all([
-    fetchAccountSummary()
-      .then((account) => ({ account, accountDataError: null as string | null }))
-      .catch((error) => ({
-        account: null,
-        accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.",
-      })),
-    computeCashLockedInCsps(),
-  ]).then(([accountResult, cashLockedInCsps]) => {
-    const { account, accountDataError } = accountResult;
-    const totalAccountValue = account?.netLiquidationValue ?? null;
-    const availableCash =
-      account?.totalCashValue !== null && account?.totalCashValue !== undefined ? account.totalCashValue - cashLockedInCsps : null;
-    return { account, accountDataError, totalAccountValue, availableCash };
-  });
+  let accountContextPromise = loadExposureAccountContext();
   // Handled below inside the stream callback; this only stops a failure from
   // being reported as unhandled if the client disconnects before any reading.
   accountContextPromise.catch(() => {});
+  let isFirstReading = true;
+  let previousReadingWasEmpty = false;
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -297,6 +302,12 @@ export async function streamExposureHandler(request: Request, response: Response
   try {
     await streamPositionExposures(
       serializeAsyncCalls(async (exposures) => {
+        // With no open position the stream re-sends an empty reading every minute (streamPositionExposures); the
+        // account figures are all that moves on it, so they are re-read for each of those, and for the first
+        // reading after a position opens.
+        if (!isFirstReading && (exposures.length === 0 || previousReadingWasEmpty)) accountContextPromise = loadExposureAccountContext();
+        isFirstReading = false;
+        previousReadingWasEmpty = exposures.length === 0;
         const { account, accountDataError, totalAccountValue, availableCash } = await accountContextPromise;
         const concentrationByTicker = groupByKey(exposures, (row) => row.symbol).map((row) => ({ symbol: row.key, notionalValue: row.notionalValue }));
         const concentrationBySector = groupByKey(exposures, (row) => row.sector).map((row) => ({ sector: row.key, notionalValue: row.notionalValue }));

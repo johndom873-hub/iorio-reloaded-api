@@ -7,7 +7,7 @@ import { postgresSslOption } from "../config/databaseSsl.js";
 // Knex changes its working directory to this file's folder before running,
 // so dotenv's default CWD-relative lookup won't find the project root .env.
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-loadDotenv({ path: path.join(projectRoot, ".env") });
+loadDotenv({ path: path.join(projectRoot, ".env"), quiet: true });
 
 const sharedConfig: Partial<Knex.Config> = {
   client: "pg",

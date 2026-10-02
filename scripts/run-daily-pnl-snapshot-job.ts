@@ -58,6 +58,7 @@ import { fetchAccountSummary } from "../src/ibkr/fetchAccountSummary.js";
 import { fetchFlexCashTransactions } from "../src/ibkr/fetchFlexCashTransactions.js";
 import { fetchLiveGreeks, type GreeksContract } from "../src/ibkr/fetchLiveGreeks.js";
 import { fetchDailyClosingPrices } from "../src/ibkr/fetchDailyClosingPrices.js";
+import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
 import type { PriceContract } from "../src/ibkr/fetchLivePrices.js";
 import { previousOpenSessionDate, easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
@@ -408,4 +409,9 @@ async function main(): Promise<void> {
   });
 }
 
-runScript("run-daily-pnl-snapshot-job", main, () => db.destroy());
+// fetchAccountSummary reads through the lazy shared IBKR connection, which otherwise keeps this
+// one-off process alive until Heroku cycles it after 24 hours (see shutdown()).
+runScript("run-daily-pnl-snapshot-job", main, async () => {
+  await sharedReadConnection.shutdown();
+  await db.destroy();
+});

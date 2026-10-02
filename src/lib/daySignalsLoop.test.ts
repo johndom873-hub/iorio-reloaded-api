@@ -1,7 +1,7 @@
 import type { IBApi } from "@stoqey/ib";
 import { describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { DaySignalsLoop, daySignalsLoopLineHolder, type DaySignalsLoopDependencies } from "./daySignalsLoop.js";
+import { DaySignalsLoop, daySignalsLoopLineHolder, shouldLogCycle, slowCycleLogThresholdMs, type DaySignalsLoopDependencies } from "./daySignalsLoop.js";
 import type { WindowContract, WindowQuote } from "../ibkr/daySignalsQuoteWindow.js";
 import type { SignalGrade, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
@@ -724,5 +724,25 @@ describe("DaySignalsLoop", () => {
 
   it("uses the agreed holder name for its reservation", () => {
     expect(daySignalsLoopLineHolder).toBe("daySignalsLoop");
+  });
+});
+
+describe("shouldLogCycle", () => {
+  const cleanCycle = { settled: 136, total: 136, durationMs: 20_000 };
+
+  it("logs the first cycle, then only every thirtieth", () => {
+    const loggedCycles = Array.from({ length: 62 }, (_, index) => index + 1).filter((cycleNumber) => shouldLogCycle({ ...cleanCycle, cycleNumber }));
+    expect(loggedCycles).toEqual([1, 31, 61]);
+  });
+
+  it("logs a cycle that did not settle every contract, was disconnected or aborted", () => {
+    expect(shouldLogCycle({ ...cleanCycle, cycleNumber: 5, settled: 135 })).toBe(true);
+    expect(shouldLogCycle({ ...cleanCycle, cycleNumber: 5, disconnected: true })).toBe(true);
+    expect(shouldLogCycle({ ...cleanCycle, cycleNumber: 5, aborted: true })).toBe(true);
+  });
+
+  it("logs a slow cycle at exactly the threshold but not just under it", () => {
+    expect(shouldLogCycle({ ...cleanCycle, cycleNumber: 5, durationMs: slowCycleLogThresholdMs })).toBe(true);
+    expect(shouldLogCycle({ ...cleanCycle, cycleNumber: 5, durationMs: slowCycleLogThresholdMs - 1 })).toBe(false);
   });
 });
