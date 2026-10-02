@@ -66,10 +66,13 @@ interface OpenPositionRow {
   sector: string;
 }
 
-async function resolveOpenPositionsAndLegs(): Promise<{ positions: OpenPositionRow[]; legs: OpenLegRow[] }> {
+async function resolveOpenPositionsAndLegs(symbol?: string): Promise<{ positions: OpenPositionRow[]; legs: OpenLegRow[] }> {
   const positions: OpenPositionRow[] = await db("positions as p")
     .join("tickers as t", "t.id", "p.ticker_id")
     .where("p.status", "open")
+    .modify((builder) => {
+      if (symbol !== undefined) builder.where("t.symbol", symbol);
+    })
     .select("p.id as positionId", "p.strategy_key as strategyKey", "t.symbol", db.raw("COALESCE(NULLIF(t.sector, ''), 'Unknown') AS sector"));
 
   if (positions.length === 0) return { positions, legs: [] };
@@ -78,6 +81,9 @@ async function resolveOpenPositionsAndLegs(): Promise<{ positions: OpenPositionR
     .join("positions as p", "p.id", "pl.position_id")
     .join("tickers as t", "t.id", "p.ticker_id")
     .where("p.status", "open")
+    .modify((builder) => {
+      if (symbol !== undefined) builder.where("t.symbol", symbol);
+    })
     .whereNull("pl.exit_at")
     .select(
       "pl.position_id as positionId",
@@ -160,6 +166,28 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
   }
 
   return computeExposureRows(positions, legs, pricesByKey);
+}
+
+// How long the order-limits check waits for a leg's price before valuing that leg at its entry price. A leg that never
+// ticks (a thin LEAP) otherwise holds the whole snapshot to its 6 s ceiling, and the check runs on every form edit,
+// every 10 s of an open Order Review and on confirm.
+const tickerExposurePriceTimeoutMs = 1_500;
+
+/**
+ * One ticker's total exposure, for the Signals order-limits check: only that ticker's open legs are priced (pool
+ * first, then a snapshot capped at tickerExposurePriceTimeoutMs), so another ticker's illiquid leg cannot stall it.
+ */
+export async function computeTickerExposure(symbol: string): Promise<number> {
+  const { positions, legs } = await resolveOpenPositionsAndLegs(symbol);
+  if (positions.length === 0) return 0;
+
+  let pricesByKey: Record<string, number | null> = {};
+  try {
+    pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { snapshotTimeoutMs: tickerExposurePriceTimeoutMs });
+  } catch {
+    // Leave pricesByKey empty — every leg falls back to entry_price in computeExposureRows.
+  }
+  return computeExposureRows(positions, legs, pricesByKey).reduce((sum, row) => sum + row.exposure, 0);
 }
 
 /**

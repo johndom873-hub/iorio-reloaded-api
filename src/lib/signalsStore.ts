@@ -237,10 +237,15 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
   return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
 }
 
-/** The Day Signals loop's quotes for one ticker, only when they belong to the snapshot date being scored (contracts that errored carry no quote). */
-export async function loadDayQuotesAsLiveQuotes(tickerId: string, snapshotTradingDateIso: string): Promise<LiveOptionQuote[]> {
+/**
+ * The Day Signals loop's quotes for one ticker, only when they belong to the snapshot date being scored and were received
+ * during today's session (US/Eastern): before the new day's snapshot lands, the loop's rows from the previous session's close
+ * still match the (previous-day) snapshot date, and would otherwise price an order from yesterday. Contracts that errored carry no quote.
+ */
+export async function loadDayQuotesAsLiveQuotes(tickerId: string, snapshotTradingDateIso: string, now: Date = new Date()): Promise<LiveOptionQuote[]> {
+  const todayEastern = easternDateIso(now);
   const rows = await loadDayQuotesForTicker(tickerId, snapshotTradingDateIso);
-  return rows.filter((row) => row.errorCode === null).map((row) => ({ expiry: row.expiry, strike: row.strike, right: row.right, bid: row.bid, ask: row.ask, quotedAt: row.quotedAt }));
+  return rows.filter((row) => row.errorCode === null && easternDateIso(new Date(row.quotedAt)) === todayEastern).map((row) => ({ expiry: row.expiry, strike: row.strike, right: row.right, bid: row.bid, ask: row.ask, quotedAt: row.quotedAt }));
 }
 
 /** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). Includes the raw

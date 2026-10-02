@@ -1,12 +1,12 @@
 import { peekPooledQuote, subscribeToPooledQuote, waitForFirstReading } from "./marketDataPool.js";
-import { fetchLivePrices, type PriceContract } from "./fetchLivePrices.js";
+import { fetchLivePrices, type FetchLivePricesOptions, type PriceContract } from "./fetchLivePrices.js";
 
 /**
  * One-shot prices, pool first (2026-09-24): a contract some open screen is
  * already streaming is read from the pool with no IBKR request; only the
  * rest go out as a (budgeted) snapshot. Same shape as fetchLivePrices.
  */
-export async function fetchPricesPoolFirst(contracts: PriceContract[]): Promise<Record<string, number | null>> {
+export async function fetchPricesPoolFirst(contracts: PriceContract[], options: FetchLivePricesOptions = {}): Promise<Record<string, number | null>> {
   const pricesByKey: Record<string, number | null> = {};
   const notPooled: PriceContract[] = [];
   for (const contract of contracts) {
@@ -14,7 +14,7 @@ export async function fetchPricesPoolFirst(contracts: PriceContract[]): Promise<
     if (pooled !== null) pricesByKey[contract.key] = pooled;
     else notPooled.push(contract);
   }
-  if (notPooled.length > 0) Object.assign(pricesByKey, await fetchLivePrices(notPooled));
+  if (notPooled.length > 0) Object.assign(pricesByKey, await fetchLivePrices(notPooled, options));
   return pricesByKey;
 }
 

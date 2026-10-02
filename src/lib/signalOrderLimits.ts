@@ -1,6 +1,6 @@
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
-import { computeCashLockedInCsps, computePositionExposures, type PositionExposureRow } from "./positionExposure.js";
+import { computeCashLockedInCsps, computeTickerExposure } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
 import type { SignalStrategyKey } from "./signalCandidates.js";
 import { loadSignalSettings } from "./signalSettingsStore.js";
@@ -34,8 +34,6 @@ export interface SignalOrderLimitsInput {
   strike: number;
   /** Underlying stock price, used only for a covered call's share-shortfall notional. Omit to read the pool, then fetch a live price. */
   spotPrice?: number;
-  /** Current per-position exposures when the caller already streams them (the Order Review quote stream); omit to compute them. */
-  exposures?: PositionExposureRow[];
   /**
    * Roll Signals: the strike of the short leg this order closes. A roll re-uses the closed leg's notional, so
    * only the difference counts -- a covered-call roll adds nothing (the shares are already held), a
@@ -79,14 +77,14 @@ async function computeOrderNotional(input: SignalOrderLimitsInput, spotPrice: nu
 export async function evaluateSignalOrderLimits(input: SignalOrderLimitsInput): Promise<SignalOrderLimitsResult> {
   let account: Awaited<ReturnType<typeof fetchAccountSummary>>;
   let cashLockedInCsps: number;
-  let exposures: Awaited<ReturnType<typeof computePositionExposures>>;
+  let existingTickerExposure: number;
   let settings: Awaited<ReturnType<typeof loadSignalSettings>>;
   let spotPrice: number | null;
   try {
-    [account, cashLockedInCsps, exposures, settings, spotPrice] = await Promise.all([
+    [account, cashLockedInCsps, existingTickerExposure, settings, spotPrice] = await Promise.all([
       fetchAccountSummary(),
       computeCashLockedInCsps(),
-      input.exposures ?? computePositionExposures(),
+      computeTickerExposure(input.symbol),
       loadSignalSettings(),
       resolveSpotPrice(input),
     ]);
@@ -113,7 +111,6 @@ export async function evaluateSignalOrderLimits(input: SignalOrderLimitsInput): 
     reasons.push(`This order is ${formatPct(positionSharePct)} of portfolio value, above the ${settings.maxPositionPctOfPortfolio}% max position size.`);
   }
 
-  const existingTickerExposure = exposures.filter((row) => row.symbol === input.symbol).reduce((sum, row) => sum + row.exposure, 0);
   const concentrationAfterPct = (existingTickerExposure + orderNotional) / totalPortfolioValue;
   if (concentrationAfterPct * 100 > settings.maxConcentrationPerTickerPct) {
     reasons.push(`${input.symbol} would be ${formatPct(concentrationAfterPct)} of portfolio value, above the ${settings.maxConcentrationPerTickerPct}% max concentration per ticker.`);

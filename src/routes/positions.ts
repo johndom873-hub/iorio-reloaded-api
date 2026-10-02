@@ -15,7 +15,6 @@ import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { computeLegSuccessProbabilities, type SuccessProbabilityLeg } from "../lib/positionSuccessProbability.js";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { fetchPricesPoolFirst, streamPooledPrices, subscribeToPooledPrice } from "../ibkr/pricePool.js";
-import type { PositionExposureRow } from "../lib/positionExposure.js";
 import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import { findMalformedOptionExpiry, type OrderLegPayload, type OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
@@ -24,6 +23,7 @@ import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathFor
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
 import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
+import { findNonLiveSnapshotQuoteReason } from "../lib/signalSnapshotLiveQuotes.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { fetchTodaysOrders } from "../lib/todaysOrders.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
@@ -982,7 +982,7 @@ async function requireExistingTicker(symbolInput: string): Promise<{ id: string;
 // there),// still-unenforced copy of these same-named settings (see PROGRESS.md).
 async function evaluateSignalOrderLimitsForOrderRequest(
   orderRequest: { signal_snapshot: unknown; payload: OrderRequestPayload; request_type: string },
-  live: { exposures?: PositionExposureRow[]; spotPrice?: number } = {},
+  live: { spotPrice?: number } = {},
 ): Promise<{ blocked: boolean; reasons: string[] } | null> {
   if (orderRequest.signal_snapshot === null || orderRequest.signal_snapshot === undefined) return null;
   const requestType = orderRequest.request_type as string;
@@ -1004,7 +1004,6 @@ async function evaluateSignalOrderLimitsForOrderRequest(
     quantity: optionLeg.quantity,
     strike: optionLeg.strike,
     spotPrice: live.spotPrice,
-    exposures: live.exposures,
     rollFromStrike: closeLeg?.strike,
   });
 }
@@ -1153,6 +1152,11 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(400).json({ error: signalSnapshot.error });
     return;
   }
+  const nonLiveQuoteReason = findNonLiveSnapshotQuoteReason(signalSnapshot.value);
+  if (nonLiveQuoteReason) {
+    response.status(409).json({ error: nonLiveQuoteReason });
+    return;
+  }
 
   const [orderRequest] = await db("order_requests")
     .insert({
@@ -1254,9 +1258,9 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
   const abortController = new AbortController();
   request.on("close", () => abortController.abort());
 
-  // Re-checks read exposures through computePositionExposures (pool first,
-  // snapshot only for unpooled legs) rather than subscribing every open leg
-  // for the panel's lifetime (2026-09-24). Only the order's underlying is
+  // Re-checks read the order's ticker exposure through computeTickerExposure (pool
+  // first, a short snapshot only for unpooled legs) rather than subscribing every
+  // open leg for the panel's lifetime (2026-09-24). Only the order's underlying is
   // pooled here, for the covered-call shortfall notional.
   let latestSpotPrice: number | undefined;
   const signalLimitsTimer = latestSignalLimits
@@ -1617,6 +1621,11 @@ positionsRouter.post("/:id/roll", async (request, response) => {
   const snapshot = readSignalSnapshot(signalSnapshot);
   if (!snapshot.ok) {
     response.status(400).json({ error: snapshot.error });
+    return;
+  }
+  const nonLiveQuoteReason = findNonLiveSnapshotQuoteReason(snapshot.value);
+  if (nonLiveQuoteReason) {
+    response.status(409).json({ error: nonLiveQuoteReason });
     return;
   }
 

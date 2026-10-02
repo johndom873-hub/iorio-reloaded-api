@@ -16,6 +16,8 @@ export interface FetchLivePricesOptions {
   priorityLines?: boolean;
   /** Called with the symbols whose price was filled from a stored last-known-good/daily close because IBKR sent no last. */
   onFallbackPriceUsed?: (symbols: string[]) => void;
+  /** Overrides the 6 s snapshot ceiling: legs still without a price when it elapses come back null. */
+  snapshotTimeoutMs?: number;
 }
 
 export interface PriceContract {
@@ -45,7 +47,7 @@ const snapshotTimeoutMs = 6_000;
 // why both are accepted.
 const lastTickTypes = [4, 68];
 
-function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: PriceContract[]): Promise<Record<string, number | null>> {
+function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: PriceContract[], timeoutMs: number): Promise<Record<string, number | null>> {
   // FROZEN, not REALTIME — same reasoning as streamLivePrices' phase 1 below:
   // FROZEN returns the last known price immediately rather than gating on a
   // live trade occurring during the snapshot window, which a quiet option
@@ -118,7 +120,7 @@ function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: Pr
       }
 
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, snapshotTimeoutMs);
+        const timer = setTimeout(resolve, timeoutMs);
         onAllReceived = () => {
           clearTimeout(timer);
           resolve();
@@ -148,7 +150,7 @@ function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: Pr
  * across requests, no per-call connect cost) and falls back to a one-shot
  * connection only when the shared one isn't available.
  */
-async function fetchLivePricesFromIbkr(contracts: PriceContract[]): Promise<Record<string, number | null>> {
+async function fetchLivePricesFromIbkr(contracts: PriceContract[], timeoutMs: number): Promise<Record<string, number | null>> {
   if (contracts.length === 0) return {};
 
   let borrowed: Awaited<ReturnType<typeof sharedReadConnection.borrow>> | null = null;
@@ -163,7 +165,7 @@ async function fetchLivePricesFromIbkr(contracts: PriceContract[]): Promise<Reco
   if (borrowed) {
     const { ib, release } = borrowed;
     try {
-      return await requestLivePrices(ib, () => sharedReadConnection.allocateReqId(), contracts);
+      return await requestLivePrices(ib, () => sharedReadConnection.allocateReqId(), contracts, timeoutMs);
     } finally {
       release();
     }
@@ -173,7 +175,7 @@ async function fetchLivePricesFromIbkr(contracts: PriceContract[]): Promise<Reco
   const { ib } = connection;
   try {
     let nextReqId = 30_000;
-    return await requestLivePrices(ib, () => nextReqId++, contracts);
+    return await requestLivePrices(ib, () => nextReqId++, contracts, timeoutMs);
   } finally {
     connection.disconnect();
   }
@@ -214,7 +216,7 @@ export async function fetchLivePrices(contracts: PriceContract[], options: Fetch
   const reservation = await reserveMarketDataLines(holder, contracts.length, snapshotReservationTtlSeconds, { priority: options.priorityLines ?? false });
   if (!reservation.ok) throw new Error(describeMarketDataLineShortage(reservation, `a ${contracts.length}-contract price snapshot`, contracts.length));
   try {
-    const [prices, fallback] = await Promise.all([fetchLivePricesFromIbkr(contracts), loadFallbackStockPrices(stockSymbolsOf(contracts))]);
+    const [prices, fallback] = await Promise.all([fetchLivePricesFromIbkr(contracts, options.snapshotTimeoutMs ?? snapshotTimeoutMs), loadFallbackStockPrices(stockSymbolsOf(contracts))]);
     recordRealStockPrices(contracts, prices, "frozen");
     const { filled, fallbackSymbols } = fillStockGaps(contracts, prices, fallback);
     if (fallbackSymbols.length > 0) options.onFallbackPriceUsed?.(fallbackSymbols);
