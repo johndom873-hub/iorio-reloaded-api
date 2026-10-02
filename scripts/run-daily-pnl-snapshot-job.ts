@@ -63,6 +63,7 @@ import type { PriceContract } from "../src/ibkr/fetchLivePrices.js";
 import { previousOpenSessionDate, easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
+import { assignFlowsToSnapshots } from "../src/lib/flexCashFlowAssignment.js";
 
 interface OpenPositionLegRow {
   positionId: string;
@@ -80,6 +81,7 @@ interface OpenPositionLegRow {
 
 interface RecentAccountSnapshotRow {
   snapshotDate: string;
+  capturedAt: Date;
   netLiquidationValue: string | null;
   netCashFlow: string | null;
 }
@@ -92,12 +94,13 @@ interface RecentAccountSnapshotRow {
  * that's needed to compute today's own delta too.
  */
 async function reconcileCashFlows(snapshotDate: string): Promise<void> {
-  const cashFlowByDate = await fetchFlexCashTransactions();
+  const flexCashFlows = await fetchFlexCashTransactions();
 
   const recentRows: RecentAccountSnapshotRow[] = await db.raw(
     `
     SELECT
       to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate",
+      captured_at AS "capturedAt",
       net_liquidation_value AS "netLiquidationValue",
       net_cash_flow AS "netCashFlow"
     FROM account_pnl_snapshots
@@ -106,6 +109,12 @@ async function reconcileCashFlows(snapshotDate: string): Promise<void> {
     `,
     [snapshotDate],
   ).then((result) => result.rows);
+
+  // A flow belongs to the first snapshot captured after it happened, not to its calendar date (flexCashFlowAssignment.ts).
+  const cashFlowByDate = assignFlowsToSnapshots(
+    flexCashFlows,
+    recentRows.map((row) => ({ snapshotDate: row.snapshotDate, capturedAt: new Date(row.capturedAt) })),
+  );
 
   for (let i = 1; i < recentRows.length; i++) {
     const row = recentRows[i];
@@ -222,6 +231,7 @@ async function main(): Promise<void> {
             realized_pnl: ledgerPnl.realizedPnl,
             unrealized_pnl: ledgerPnl.unrealizedPnl,
             net_liquidation_value: accountSummary.netLiquidationValue,
+            captured_at: db.fn.now(),
           })
           .onConflict(["snapshot_date"])
           .merge();

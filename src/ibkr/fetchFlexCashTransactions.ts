@@ -2,10 +2,10 @@ import { XMLParser } from "fast-xml-parser";
 import { db } from "../db/connection.js";
 import { findFlexAccountProblem } from "../lib/flexStatementAccountGuard.js";
 import { workerProcessName } from "../lib/workerHeartbeatLiveness.js";
+import { extractExternalCashFlows, type FlexCashFlow, type FlexTransferRow } from "../lib/flexCashFlowAssignment.js";
 import { FlexRateLimitError, isFlexRateLimitResponse, retryOnFlexRateLimit } from "../lib/retryOnFlexRateLimit.js";
 
 const flexWebServiceBaseUrl = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService";
-const depositWithdrawalType = "Deposits & Withdrawals";
 const statementPollIntervalMs = 5_000;
 const statementPollTimeoutMs = 120_000;
 
@@ -30,6 +30,9 @@ interface FlexStatementXml {
   accountId?: string;
   CashTransactions?: {
     CashTransaction?: CashTransactionXml | CashTransactionXml[];
+  };
+  Transfers?: {
+    Transfer?: FlexTransferRow | FlexTransferRow[];
   };
 }
 
@@ -123,17 +126,20 @@ async function assertStatementsAreForWorkerAccount(statements: FlexStatementXml[
  * Flex Query reports, which run on IBKR's end-of-day statement pipeline
  * and lag up to ~12 hours behind (confirmed via IBKR's own docs, 2026-08-20).
  * So "today" often won't have data yet; the Flex Query itself is configured
- * with a several-day lookback window (set on IBKR's side, not here) so this
+ * with a 30-day lookback window (set on IBKR's side, not here) so this
  * naturally returns recent days too — see run-daily-pnl-snapshot-job.ts's
  * reconcileCashFlows, which re-checks and retroactively corrects recent
  * days' daily_pnl as their Flex data arrives.
  *
- * Returns net deposit/withdrawal amount per date (YYYY-MM-DD), summing
- * only "Deposits & Withdrawals"-type transactions — dividends, interest,
- * and fees are real trading-adjacent P&L, not external cash flow, and are
- * deliberately excluded.
+ * Returns every external cash movement in the report: "Deposits & Withdrawals"
+ * rows of the Cash Transactions section, and cash rows of the Transfers section
+ * (that is where a transfer between linked accounts appears, confirmed on the
+ * live account 2026-10-02). Dividends, interest, and fees are real
+ * trading-adjacent P&L, not external cash flow, and are deliberately excluded.
+ * Transfers of securities are not handled (decided 2026-10-02: none made yet).
+ * Which snapshot each flow belongs to is decided by flexCashFlowAssignment.ts.
  */
-export async function fetchFlexCashTransactions(): Promise<Map<string, number>> {
+export async function fetchFlexCashTransactions(): Promise<FlexCashFlow[]> {
   const token = requireEnvironmentVariable("IBKR_FLEX_TOKEN");
   const queryId = requireEnvironmentVariable("IBKR_FLEX_QUERY_ID");
 
@@ -141,19 +147,5 @@ export async function fetchFlexCashTransactions(): Promise<Map<string, number>> 
   const statements = await pollFlexStatement(token, referenceCode);
   await assertStatementsAreForWorkerAccount(statements);
 
-  const transactions = statements.flatMap((statement) => {
-    const statementTransactions = statement.CashTransactions?.CashTransaction ?? [];
-    return Array.isArray(statementTransactions) ? statementTransactions : [statementTransactions];
-  });
-
-  const netFlowByDate = new Map<string, number>();
-  for (const transaction of transactions) {
-    if (transaction.type !== depositWithdrawalType) continue;
-    const amount = Number(transaction.amount);
-    if (Number.isNaN(amount)) continue;
-    const dateKey = transaction.dateTime.slice(0, 8); // YYYYMMDD
-    const isoDate = `${dateKey.slice(0, 4)}-${dateKey.slice(4, 6)}-${dateKey.slice(6, 8)}`;
-    netFlowByDate.set(isoDate, (netFlowByDate.get(isoDate) ?? 0) + amount);
-  }
-  return netFlowByDate;
+  return extractExternalCashFlows(statements);
 }

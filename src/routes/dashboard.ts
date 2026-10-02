@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
-import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
+import { easternDateIso, previousOpenSessionDate } from "../lib/marketSessionStatus.js";
+import { summarizePerformance, type PerformanceSnapshotRow } from "../lib/performanceReturns.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps, computePositionExposures, streamPositionExposures } from "../lib/positionExposure.js";
@@ -128,6 +129,30 @@ dashboardRouter.get("/summary", async (_request, response) => {
     },
     strategyBreakdown,
   });
+});
+
+// Time-weighted performance (MTD, per calendar month and year, since inception, CAGR) from the nightly snapshots,
+// with deposits, withdrawals and transfers between linked accounts removed via net_cash_flow. Formula in
+// lib/performanceReturns.ts. Computed per request: a few hundred rows a year, no stored figures to drift.
+dashboardRouter.get("/performance", async (_request, response) => {
+  const snapshotRows: { snapshotDate: string; netLiquidationValue: string | null; netCashFlow: string | null }[] = await db
+    .raw(
+      `
+      SELECT
+        to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate",
+        net_liquidation_value AS "netLiquidationValue",
+        net_cash_flow AS "netCashFlow"
+      FROM account_pnl_snapshots
+      ORDER BY snapshot_date ASC
+      `,
+    )
+    .then((result) => result.rows);
+  const performanceRows: PerformanceSnapshotRow[] = snapshotRows.map((snapshotRow) => ({
+    snapshotDate: snapshotRow.snapshotDate,
+    netLiquidationValue: snapshotRow.netLiquidationValue === null ? null : Number(snapshotRow.netLiquidationValue),
+    netCashFlow: snapshotRow.netCashFlow === null ? null : Number(snapshotRow.netCashFlow),
+  }));
+  response.json(summarizePerformance(performanceRows, easternDateIso(new Date())));
 });
 
 // Lightweight shared source for "total account value" used by EXP%
