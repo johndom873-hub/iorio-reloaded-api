@@ -136,6 +136,28 @@ describe("expiry settlement audit — assigned shares blended with shares alread
   });
 });
 
+describe("expiry settlement audit — legs the worker already writes at the true cost", () => {
+  it("a stock leg already at the put's strike needs no correction and is not reported", async () => {
+    const tickerId = await createTicker();
+    const putExitAt = daysAgo(2);
+    const { positionId: putPositionId } = await insertAssignedPut(tickerId, 295.83, putExitAt);
+    const leftoverPositionId = await insertPosition(tickerId, "unstructured", "closed_via_app");
+    await insertStockLeg(leftoverPositionId, 100, 317.5, new Date(putExitAt.getTime() + 8_000), 279.864, daysAgo(1));
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    expect(result.actions.filter((action) => action.positionId === putPositionId)).toEqual([]);
+  });
+
+  it("a blended leg already at the true blended cost needs no correction and is not reported", async () => {
+    const tickerId = await createTicker();
+    const { putPositionId, blendedLegId } = await seedBlendedAssignment(tickerId, 200, 322.4955);
+
+    const result = await runExpirySettlementAudit("apply", testDb);
+    expect(result.actions.filter((action) => action.positionId === putPositionId)).toEqual([]);
+    expect(Number((await testDb("position_legs").where({ id: blendedLegId }).first()).entry_price)).toBe(322.4955);
+  });
+});
+
 describe("expiry settlement audit — acknowledged legs", () => {
   it("a leg a person has acknowledged is neither examined nor reported; the same leg unacknowledged is", async () => {
     const tickerId = await createTicker();

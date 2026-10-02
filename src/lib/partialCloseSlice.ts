@@ -56,15 +56,20 @@ export async function exitFromClosingFills(legId: string, database: Knex = db): 
   return { exitPrice: weightedAverageFillPrice(fills), exitAt: fills[fills.length - 1]!.executedAt };
 }
 
+/** The cost per share of the shares these fills sold, when it differs from the parent leg's entry; null keeps the parent's. */
+export type SoldSharesEntryPriceLookup = (soldFills: ClosingFill[], database: Knex) => Promise<number | null>;
+
 /**
  * Call BEFORE overwriting an open leg's quantity with IBKR's new holding. When the holding dropped and
  * closing fills explain (some of) the drop, the closed shares become their own closed leg. Returns the
- * new leg's id, or null when nothing was carved (no drop, or no closing fill that fits yet).
+ * new leg's id, or null when nothing was carved (no drop, or no closing fill that fits yet). The slice
+ * takes the parent's entry unless soldSharesEntryPrice knows the sold lot's own cost (FIFO sells the oldest lot).
  */
 export async function carveClosedSliceFromPartialClose(
   leg: { id: string; quantity: number },
   heldQuantity: number,
   database: Knex = db,
+  soldSharesEntryPrice?: SoldSharesEntryPriceLookup,
 ): Promise<string | null> {
   const droppedQuantity = Number(leg.quantity) - heldQuantity;
   if (droppedQuantity <= 0) return null;
@@ -75,9 +80,11 @@ export async function carveClosedSliceFromPartialClose(
 
     const parentLeg = await transaction("position_legs").where({ id: leg.id }).first();
     const { id: _parentId, ...parentColumns } = parentLeg;
+    const soldEntryPrice = soldSharesEntryPrice ? await soldSharesEntryPrice(chosenFills, transaction) : null;
     const [slice] = await transaction("position_legs")
       .insert({
         ...parentColumns,
+        entry_price: soldEntryPrice ?? parentColumns.entry_price,
         quantity: chosenFills.reduce((sum, fill) => sum + fill.quantity, 0),
         exit_price: weightedAverageFillPrice(chosenFills),
         exit_at: chosenFills[chosenFills.length - 1]!.executedAt,

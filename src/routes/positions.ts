@@ -1795,6 +1795,8 @@ positionsRouter.post("/:id/recovery-path", async (request, response) => {
             symbol: result.symbol,
             shares: result.shares,
             entryPrice: result.entryPrice,
+            costBasisPerShare: result.costBasisPerShare,
+            costBasisSource: result.costBasisSource,
             currentPrice: result.currentPrice,
             unrealizedLoss: result.unrealizedLoss,
             contractsAvailable: result.contractsAvailable,

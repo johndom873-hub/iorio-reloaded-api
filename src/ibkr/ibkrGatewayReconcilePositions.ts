@@ -6,8 +6,9 @@ import { formatPositionExpiredMessage } from "../lib/formatPositionExpiredMessag
 import { publishNotification } from "../lib/notificationChannel.js";
 import { readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "../lib/expirySettlementAudit.js";
 import { classifyOptionLegRetirement, type OptionLegRetirementEvidence } from "../lib/optionLegRetirement.js";
-import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { optionPastExpirySql } from "../lib/optionExpiryClock.js";
 import { carveClosedSliceFromPartialClose, exitFromClosingFills } from "../lib/partialCloseSlice.js";
+import { soldFillsEntryPrice, verifyHeldStockCostBasis } from "../lib/stockCostBasisLedger.js";
 
 // What this module needs from the worker process itself. Injected so the pass can run against a
 // database without the worker's IBKR connection, execution buffer or Telegram plumbing (the
@@ -78,9 +79,13 @@ async function logPlatformAnomaly(
 // exactly one of two known causes: a covered call's short call expired
 // worthless (its own close_reason already recorded that), or a
 // cash-secured put got assigned (same). Looked up by the most recently
-// closed covered_call/cash_secured_put position on this ticker — if
-// neither matches, this is a genuinely unexplained appearance of stock and
-// gets logged as a platform anomaly rather than silently labeled.
+// closed covered_call/cash_secured_put position on this ticker, but only one
+// closed within leftoverStockCauseWindowMinutes (positions close in the same
+// pass, or the one before, that the shares appear) — if neither matches, this
+// is a genuinely unexplained appearance of stock and gets logged as a
+// platform anomaly rather than silently labeled.
+const leftoverStockCauseWindowMinutes = 30;
+
 async function determineLeftoverStockReason(symbol: string): Promise<string> {
   const ticker = await db("tickers").where({ symbol }).first();
   if (!ticker) return "unknown";
@@ -95,7 +100,7 @@ async function determineLeftoverStockReason(symbol: string): Promise<string> {
     .join("positions as p", "p.id", "pl.position_id")
     .where({ "p.ticker_id": ticker.id, "p.status": "open", "pl.leg_type": "option", "pl.option_type": "call", "pl.side": "short" })
     .andWhere((builder) =>
-      builder.whereNotNull("pl.exit_at").orWhereRaw("pl.expiry_date <= (now() at time zone 'America/New_York')::date"),
+      builder.whereNotNull("pl.exit_at").orWhereRaw(optionPastExpirySql("pl.expiry_date")),
     )
     .whereNotExists(db("trades as t").whereRaw("t.position_leg_id = pl.id").where("t.is_closing_trade", true))
     .first("pl.id");
@@ -104,7 +109,7 @@ async function determineLeftoverStockReason(symbol: string): Promise<string> {
   const recentClosed = await db("positions")
     .where({ ticker_id: ticker.id })
     .whereIn("strategy_key", ["covered_call", "cash_secured_put"])
-    .whereNotNull("closed_at")
+    .whereRaw(`closed_at >= now() - interval '${leftoverStockCauseWindowMinutes} minutes'`)
     .orderBy("closed_at", "desc")
     .first();
 
@@ -237,7 +242,7 @@ type StructureChangeVerdict = "confirmed" | "still_open" | "ambiguous" | "roll_i
 // closing trade is an IBKR held-report gap, and a call bought back moments ago
 // is a roll whose new call has not been reported yet.
 async function judgeStructureChange(optionLegs: OptionLegRetirementRow[]): Promise<StructureChangeVerdict> {
-  const retirement = classifyOptionLegRetirement(optionLegs, easternIsoDate());
+  const retirement = classifyOptionLegRetirement(optionLegs);
   if (retirement !== "settled") return retirement;
   const rollInProgress = optionLegs.some(
     (leg) => leg.hasClosingTrade && leg.exitAt !== null && Date.now() - new Date(leg.exitAt).getTime() < tradeRetirementSettleGraceMs,
@@ -376,7 +381,7 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number): P
   const openLegs = await db("position_legs")
     .whereNull("exit_at")
     .whereNotNull("ibkr_contract_id")
-    .select("*", db.raw("(leg_type = 'option' AND expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE) AS is_expired_option"));
+    .select("*", db.raw(`(leg_type = 'option' AND expiry_date IS NOT NULL AND ${optionPastExpirySql("expiry_date")}) AS is_expired_option`));
 
   const legsNoLongerHeld = openLegs.filter((leg) => !heldConIds.has(Number(leg.ibkr_contract_id)));
   console.log(
@@ -412,7 +417,7 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number): P
       const expiredSiblingOptionLeg = await db("position_legs")
         .where({ position_id: leg.position_id, leg_type: "option" })
         .whereNotNull("expiry_date")
-        .andWhere("expiry_date", "<=", db.raw("CURRENT_DATE"))
+        .whereRaw(optionPastExpirySql("expiry_date"))
         .first();
       isRetainedCoveredCallStock = expiredSiblingOptionLeg !== undefined;
     }
@@ -569,6 +574,29 @@ async function notifyPositionExpired(positionId: string, closeReason: string): P
   await publishNotification({ type: "position_closed", positionId: position.id, symbol: position.symbol, message });
 }
 
+const entryPriceDecimals = 4;
+const roundToEntryPrice = (value: number): number => Number(value.toFixed(entryPriceDecimals));
+
+// Last unverified reason logged per stock conId, so a ticker that stays unverified does not log every pass.
+const loggedCostBasisReasonByConId = new Map<string, string>();
+
+// A held long stock position's entry price when the ticker's trades ledger reproduces IBKR's holding
+// (shares and average cost): IBKR's average cost with the premium of assigned puts taken back out of it
+// (see stockCostBasisLedger.ts). null when it cannot be verified, and the caller keeps IBKR's own value.
+async function verifiedStockEntryPrice(tickerId: string, held: IbkrHeldPosition): Promise<number | null> {
+  const conId = String(held.contract.conId);
+  const { verdict, hasRecentPutSettlement } = await verifyHeldStockCostBasis(tickerId, Math.abs(held.quantity), held.avgCost);
+  if (verdict.verified) {
+    loggedCostBasisReasonByConId.delete(conId);
+    return verdict.adjustedEntryPrice;
+  }
+  if (hasRecentPutSettlement && loggedCostBasisReasonByConId.get(conId) !== verdict.reason) {
+    loggedCostBasisReasonByConId.set(conId, verdict.reason);
+    console.warn(`Reconciliation #${currentPassId}: ${held.contract.symbol} stock cost basis not verified (${verdict.reason}); keeping IBKR's average cost ${held.avgCost}.`);
+  }
+  return null;
+}
+
 // Insert-or-update for a single position_legs row against one IBKR-held
 // contract. Shared by upsertUnstructuredPosition (looks up an existing leg
 // by conId alone, which stays safe there since that path never splits one
@@ -604,6 +632,8 @@ async function upsertPositionLeg(
   const ibkrEntryPrice = contract.secType === SecType.STK ? held.avgCost : held.avgCost / (contract.multiplier || 100);
   const entryPrice = entryPriceOverride ?? ibkrEntryPrice;
   const trueQuantity = quantityOverride ?? Math.abs(held.quantity);
+  const stockTickerId: string | undefined =
+    contract.secType === SecType.STK && side === "long" ? (await db("positions").where({ id: positionId }).first("ticker_id"))?.ticker_id : undefined;
 
   const lookupQuery = db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at");
   if (scopeLookupToPosition) lookupQuery.where({ position_id: positionId });
@@ -621,10 +651,19 @@ async function upsertPositionLeg(
     //
     // Shares that left while others remain are carved into their own closed leg BEFORE the overwrite
     // below, or their quantity would be lost from realized P&L (see partialCloseSlice.ts).
-    const carvedSliceId = await carveClosedSliceFromPartialClose(existing, trueQuantity);
+    //
+    // A stock entry is IBKR's average cost corrected for assigned-put premium when the trades ledger verifies it
+    // (verifiedStockEntryPrice); the sold shares' own lot cost goes onto the carved slice the same way.
+    const carvedSliceId = await carveClosedSliceFromPartialClose(
+      existing,
+      trueQuantity,
+      db,
+      stockTickerId === undefined ? undefined : (soldFills, database) => soldFillsEntryPrice(stockTickerId, soldFills, Math.abs(held.quantity), held.avgCost, database),
+    );
     if (carvedSliceId) console.log(`Reconciliation #${currentPassId}: leg ${existing.id} partially closed — closed shares carved into leg ${carvedSliceId}.`);
-    if (Number(existing.quantity) !== trueQuantity || Number(existing.entry_price) !== ibkrEntryPrice) {
-      await db("position_legs").where({ id: existing.id }).update({ quantity: trueQuantity, entry_price: ibkrEntryPrice });
+    const syncedEntryPrice = (stockTickerId === undefined ? null : await verifiedStockEntryPrice(stockTickerId, held)) ?? ibkrEntryPrice;
+    if (Number(existing.quantity) !== trueQuantity || Number(existing.entry_price) !== roundToEntryPrice(syncedEntryPrice)) {
+      await db("position_legs").where({ id: existing.id }).update({ quantity: trueQuantity, entry_price: syncedEntryPrice });
     }
     return;
   }
@@ -670,6 +709,12 @@ async function upsertPositionLeg(
   // only ever opens 1 option + 100 shares at a time; splitting only matters
   // for pre-existing multi-strike data), not fully solved here.
   await dependencies.drainPendingOpeningExecutions(conId, newLeg!.id);
+
+  // The assignment fill is in `trades` only after the drain above, so a new stock leg's verified entry is computed here.
+  const verifiedEntryPrice = stockTickerId === undefined ? null : await verifiedStockEntryPrice(stockTickerId, held);
+  if (verifiedEntryPrice !== null && verifiedEntryPrice !== roundToEntryPrice(entryPrice)) {
+    await db("position_legs").where({ id: newLeg!.id }).update({ entry_price: verifiedEntryPrice });
+  }
 }
 
 // Held legs that don't pair into a covered call or a cash-secured put

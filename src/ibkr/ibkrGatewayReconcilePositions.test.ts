@@ -15,14 +15,19 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { reconcileHeldPositions, closeReasonStockRolledIntoCoveredCall } = await import("./ibkrGatewayReconcilePositions.js");
+const { isOptionPastExpiry, optionPastExpirySql } = await import("../lib/optionExpiryClock.js");
 
 const testDb: Knex = db;
 const telegramMessages: string[] = [];
+// A test sets this to simulate the worker saving a buffered opening fill onto a leg right after the leg is created.
+let drainPendingOpeningExecutionsHook: ((conId: string, newLegId: string) => Promise<void>) | undefined;
 const dependencies = {
   notifyTelegram: async (message: string) => {
     telegramMessages.push(message);
   },
-  drainPendingOpeningExecutions: async () => {},
+  drainPendingOpeningExecutions: async (conId: string, newLegId: string) => {
+    await drainPendingOpeningExecutionsHook?.(conId, newLegId);
+  },
 };
 
 const createdTickerIds: string[] = [];
@@ -623,5 +628,174 @@ describe("reconcileHeldPositions — long options are hedges", () => {
     const anomalies = await testDb("platform_anomalies").where({ anomaly_type: "naked_call_detected" }).where("detail", "like", `${ticker.symbol}:%`);
     expect(anomalies).toHaveLength(1);
     await testDb("platform_anomalies").where({ anomaly_type: "naked_call_detected" }).where("detail", "like", `${ticker.symbol}:%`).del();
+  });
+});
+
+async function insertStockTrade(legId: string, side: "buy" | "sell", quantity: number, price: number, commission: number | null, executedAt: Date): Promise<void> {
+  await testDb("trades").insert({
+    position_leg_id: legId,
+    ibkr_exec_id: `reconcile-test-ledger-${legId}-${side}-${quantity}-${executedAt.getTime()}`,
+    side,
+    quantity,
+    price,
+    commission,
+    executed_at: executedAt,
+    is_closing_trade: side === "sell",
+  });
+}
+
+async function rowVersion(legId: string): Promise<string> {
+  return (await testDb.raw("SELECT xmin::text AS version FROM position_legs WHERE id = ?", [legId])).rows[0].version;
+}
+
+/** A closed cash-secured-put position whose short put ended in the money with no closing trade (assigned). */
+async function insertAssignedPutPosition(tickerId: string, strike: number, premiumPerShare: number, exitedAt: Date): Promise<void> {
+  const [position] = await testDb("positions").insert({ strategy_key: "cash_secured_put", ticker_id: tickerId, status: "closed", closed_at: exitedAt, close_reason: "assigned" }).returning(["id"]);
+  const putLegId = await insertShortOptionLeg(position.id, (nextConId += 1), "put", strike, isoDateDaysFromToday(-3), premiumPerShare);
+  await testDb("position_legs").where({ id: putLegId }).update({ exit_at: exitedAt, exit_price: 0 });
+}
+
+describe("reconcileHeldPositions — stock entry is the true cost when the trades ledger reproduces IBKR's holding", () => {
+  it("assigned put with its fill saved: the new stock leg is at the strike on the first pass, and an unchanged leg is not rewritten on later passes", async () => {
+    const ticker = await createTicker();
+    const putConId = (nextConId += 1);
+    const stockConId = (nextConId += 1);
+    const cspId = await insertPosition(ticker.id, "cash_secured_put");
+    await insertShortOptionLeg(cspId, putConId, "put", 120, isoDateDaysFromToday(-1), 1.4026);
+    drainPendingOpeningExecutionsHook = async (_conId, newLegId) => insertStockTrade(newLegId, "buy", 100, 120, null, new Date(Date.now() - 45_000));
+
+    const held = [heldStock(ticker.symbol, stockConId, 100, 118.59739)];
+    await runPass(held);
+    drainPendingOpeningExecutionsHook = undefined;
+
+    const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
+    const [stockLeg] = await legsFor(leftover.id);
+    expect(Number(stockLeg!.entry_price)).toBe(120);
+
+    const versionBefore = await rowVersion(stockLeg!.id);
+    await runPass(held);
+    expect(Number((await legsFor(leftover.id))[0]!.entry_price)).toBe(120);
+    expect(await rowVersion(stockLeg!.id)).toBe(versionBefore);
+  });
+
+  it("no assignment fill recorded: IBKR's average cost is kept, rounded to four decimals, and not rewritten every pass", async () => {
+    const ticker = await createTicker();
+    const putConId = (nextConId += 1);
+    const stockConId = (nextConId += 1);
+    const cspId = await insertPosition(ticker.id, "cash_secured_put");
+    await insertShortOptionLeg(cspId, putConId, "put", 120, isoDateDaysFromToday(-1), 1.4026);
+
+    const held = [heldStock(ticker.symbol, stockConId, 100, 118.59739)];
+    await runPass(held);
+    const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
+    const [stockLeg] = await legsFor(leftover.id);
+    expect(Number(stockLeg!.entry_price)).toBe(118.5974);
+
+    const versionBefore = await rowVersion(stockLeg!.id);
+    await runPass(held);
+    expect(await rowVersion(stockLeg!.id)).toBe(versionBefore);
+  });
+
+  it("the fill is saved after the leg exists: the next pass corrects the entry", async () => {
+    const ticker = await createTicker();
+    const putConId = (nextConId += 1);
+    const stockConId = (nextConId += 1);
+    const cspId = await insertPosition(ticker.id, "cash_secured_put");
+    await insertShortOptionLeg(cspId, putConId, "put", 120, isoDateDaysFromToday(-1), 1.4026);
+
+    const held = [heldStock(ticker.symbol, stockConId, 100, 118.5974)];
+    await runPass(held);
+    const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
+    const [stockLeg] = await legsFor(leftover.id);
+    expect(Number(stockLeg!.entry_price)).toBe(118.5974);
+
+    await insertStockTrade(stockLeg!.id, "buy", 100, 120, null, new Date(Date.now() - 30_000));
+    await runPass(held);
+    expect(Number((await legsFor(leftover.id))[0]!.entry_price)).toBe(120);
+  });
+
+  it("shares held before the assignment merge into IBKR's blended cost, and the true blended cost is stored (COHR)", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    await insertAssignedPutPosition(ticker.id, 317.5, 7.3471, new Date(Date.now() - 60_000));
+    const positionId = await insertPosition(ticker.id, "unstructured", "leftover_stock");
+    const legId = await insertStockLeg(positionId, stockConId, 200, 318.8219);
+    await insertStockTrade(legId, "buy", 100, 327.48, 1.0903, new Date(Date.now() - 86_400_000 * 5));
+    await insertStockTrade(legId, "buy", 100, 317.5, null, new Date(Date.now() - 90_000));
+
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 318.8219)]);
+    expect(Number((await legsFor(positionId))[0]!.entry_price)).toBeCloseTo(322.4955, 3);
+  });
+});
+
+describe("reconcileHeldPositions — a partial sale of mixed lots is priced at the lot FIFO sold", () => {
+  async function seedMixedLots(ticker: { id: string; symbol: string }, stockConId: number) {
+    await insertAssignedPutPosition(ticker.id, 107, 2.3468, new Date("2026-09-26T01:45:30Z"));
+    const positionId = await insertPosition(ticker.id, "unstructured", "leftover_stock");
+    const legId = await insertStockLeg(positionId, stockConId, 200, 106.1571);
+    await insertStockTrade(legId, "buy", 100, 107.65, 1.09, new Date("2026-09-20T15:10:46Z"));
+    await insertStockTrade(legId, "buy", 100, 107, null, new Date("2026-09-26T01:44:46Z"));
+    await insertClosingFill(legId, 100, 107.1, 0);
+    return positionId;
+  }
+
+  it("100 of 200 shares sold when IBKR reports the remaining lot's own cost: the slice carries the older lot's cost, the remainder the true cost of the assigned lot", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const positionId = await seedMixedLots(ticker, stockConId);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 104.6532)]);
+
+    const legs = await legsFor(positionId);
+    const slice = legs.find((leg) => leg.exit_at !== null)!;
+    const remainder = legs.find((leg) => leg.exit_at === null)!;
+    expect(Number(slice.entry_price)).toBeCloseTo(107.6609, 4);
+    expect(Number(slice.exit_price)).toBeCloseTo(107.1, 4);
+    expect(remainder.quantity).toBe(100);
+    expect(Number(remainder.entry_price)).toBe(107);
+  });
+
+  it("IBKR keeps a flat average instead: the ledger is not verified, so the slice and remainder keep today's values", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const positionId = await seedMixedLots(ticker, stockConId);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 106.1571)]);
+
+    const legs = await legsFor(positionId);
+    expect(legs.map((leg) => Number(leg.entry_price))).toEqual([106.1571, 106.1571]);
+  });
+});
+
+describe("reconcileHeldPositions — what a leftover-stock position is blamed on", () => {
+  async function leftoverReasonAfterPutClosed(minutesAgo: number): Promise<string> {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    await insertAssignedPutPosition(ticker.id, 50, 0.5, new Date(Date.now() - minutesAgo * 60_000));
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 49.5)]);
+    await testDb("platform_anomalies").where({ anomaly_type: "unexplained_leftover_stock" }).where("detail", "like", `${ticker.symbol}:%`).del();
+    return (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!.unstructured_reason;
+  }
+
+  it("shares appearing right after a put was assigned are blamed on the assignment", async () => {
+    expect(await leftoverReasonAfterPutClosed(10)).toBe("csp_assigned_stock");
+  });
+
+  it("shares appearing hours after the last closed put are not blamed on it", async () => {
+    expect(await leftoverReasonAfterPutClosed(120)).toBe("unknown");
+  });
+});
+
+describe("option expiry clock", () => {
+  it("the SQL rule and the TypeScript rule agree for yesterday, today and tomorrow (Eastern)", async () => {
+    const eastern = (offsetDays: number) => {
+      const date = new Date(Date.now() + offsetDays * 86_400_000);
+      return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(date);
+    };
+    for (const offsetDays of [-1, 0, 1]) {
+      const expiry = eastern(offsetDays);
+      const sqlResult = (await testDb.raw(`SELECT ${optionPastExpirySql("?::date")} AS past`, [expiry])).rows[0].past;
+      expect(sqlResult, `expiry ${expiry}`).toBe(isOptionPastExpiry(expiry));
+    }
   });
 });

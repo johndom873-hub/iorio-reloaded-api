@@ -5,12 +5,13 @@ import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } f
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
 import { loadStrategyTargetWindow } from "../lib/strategySettings.js";
 import { scanRecoveryPathCoveredCallCandidates, type CoveredCallCandidate } from "./scanRecoveryPathCoveredCallCandidates.js";
+import { fetchBreakEvenByPositionId } from "../lib/cycleBreakEvenQueries.js";
 
 const SHARES_PER_CONTRACT = 100;
 const daysPerMonth = 30;
 
 export interface RecoveryProjectionInput {
-  entryPrice: number;
+  costBasisPerShare: number;
   currentPrice: number;
   shares: number;
   contractsAvailable: number;
@@ -25,11 +26,18 @@ export interface RecoveryProjection {
 
 /** Pure arithmetic of the approved formula (see the header of evaluateRecoveryPathForPosition below). */
 export function computeRecoveryProjection(input: RecoveryProjectionInput): RecoveryProjection {
-  const { entryPrice, currentPrice, shares, contractsAvailable, candidate } = input;
-  const unrealizedLoss = Math.max(0, entryPrice - currentPrice) * shares;
+  const { costBasisPerShare, currentPrice, shares, contractsAvailable, candidate } = input;
+  const unrealizedLoss = Math.max(0, costBasisPerShare - currentPrice) * shares;
   const monthlyPremium = candidate && candidate.dte > 0 ? candidate.premium * SHARES_PER_CONTRACT * contractsAvailable * (daysPerMonth / candidate.dte) : null;
   const monthsToRecover = monthlyPremium !== null && monthlyPremium > 0 ? Math.ceil(unrealizedLoss / monthlyPremium) : null;
   return { unrealizedLoss, monthlyPremium, monthsToRecover };
+}
+
+export type RecoveryCostBasisSource = "cycle_break_even" | "entry_price";
+
+/** The cycle break-even already nets the premium collected on the shares, so it is the cost to recover; the average entry price is only the fallback when the cycle cannot be trusted. */
+export function chooseRecoveryCostBasis(entryPrice: number, cycleBreakEven: number | null): { costBasisPerShare: number; costBasisSource: RecoveryCostBasisSource } {
+  return cycleBreakEven === null ? { costBasisPerShare: entryPrice, costBasisSource: "entry_price" } : { costBasisPerShare: cycleBreakEven, costBasisSource: "cycle_break_even" };
 }
 
 export type RecoveryPathEvaluation =
@@ -42,6 +50,8 @@ export type RecoveryPathEvaluation =
       symbol: string;
       shares: number;
       entryPrice: number;
+      costBasisPerShare: number;
+      costBasisSource: RecoveryCostBasisSource;
       currentPrice: number;
       unrealizedLoss: number;
       contractsAvailable: number;
@@ -57,7 +67,9 @@ export type RecoveryPathEvaluation =
  * "Recovery Path Formula" proposal, approved by Marcelo 2026-08-31, premium
  * scaled to a 30-day month 2026-09-24 (a 45-DTE candidate's premium is not a
  * monthly figure; the old formula treated it as one):
- *   unrealized loss = max(0, entry price − current price) × shares
+ *   unrealized loss = max(0, cost basis − current price) × shares, where the cost basis is the position's cycle break-even per
+ *     share (premium already collected on the shares is netted out; approved 2026-10-02), or the average entry price when the
+ *     cycle break-even is unavailable
  *   monthly premium = top-ranked live covered-call candidate's premium × 100 × contracts available × (30 ÷ candidate DTE)
  *   months to recover = ceil(unrealized loss ÷ monthly premium)
  * The candidate comes from scanRecoveryPathCoveredCallCandidates (the
@@ -85,6 +97,8 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
   const shares = legs.reduce((sum, leg) => sum + Number(leg.quantity), 0);
   if (shares <= 0) return { status: "no_shares" };
   const entryPrice = legs.reduce((sum, leg) => sum + Number(leg.quantity) * Number(leg.entryPrice), 0) / shares;
+  const cycleBreakEven = (await fetchBreakEvenByPositionId([positionRow.tickerId])).get(positionId)?.breakEven ?? null;
+  const { costBasisPerShare, costBasisSource } = chooseRecoveryCostBasis(entryPrice, cycleBreakEven);
 
   const targetWindow = await loadStrategyTargetWindow("covered_call");
   if (!targetWindow) return { status: "no_settings" };
@@ -113,7 +127,7 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
         : [];
     const candidate = candidates[0] ?? null;
 
-    const { unrealizedLoss, monthlyPremium, monthsToRecover } = computeRecoveryProjection({ entryPrice, currentPrice, shares, contractsAvailable, candidate });
+    const { unrealizedLoss, monthlyPremium, monthsToRecover } = computeRecoveryProjection({ costBasisPerShare, currentPrice, shares, contractsAvailable, candidate });
 
     const rationale =
       contractsAvailable < 1
@@ -127,6 +141,8 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
       symbol: positionRow.symbol,
       shares,
       entryPrice,
+      costBasisPerShare,
+      costBasisSource,
       currentPrice,
       unrealizedLoss,
       contractsAvailable,

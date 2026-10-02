@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { classifyOptionLegRetirement } from "./optionLegRetirement.js";
 
-const today = "2026-09-24";
+// 17:00 Eastern on 2026-09-24, after that day's option expiry close.
+const today = new Date("2026-09-24T21:00:00Z");
 
 describe("classifyOptionLegRetirement", () => {
   it("is still_open while any option leg has no exit", () => {
@@ -20,8 +21,13 @@ describe("classifyOptionLegRetirement", () => {
     expect(classifyOptionLegRetirement([{ exitAt: "2026-09-19T02:00:00Z", expiryDate: "2026-09-18", hasClosingTrade: false }], today)).toBe("settled");
   });
 
-  it("treats expiry on the current Eastern trading date as settled", () => {
+  it("treats expiry on the current Eastern trading date as settled once the 16:00 close has passed", () => {
     expect(classifyOptionLegRetirement([{ exitAt: new Date("2026-09-24T21:00:00Z"), expiryDate: "2026-09-24", hasClosingTrade: false }], today)).toBe("settled");
+  });
+
+  it("is ambiguous on the expiry date before the 16:00 close: the contract is still tradable, so its absence is a report gap", () => {
+    const morning = new Date("2026-09-24T14:00:00Z");
+    expect(classifyOptionLegRetirement([{ exitAt: morning, expiryDate: "2026-09-24", hasClosingTrade: false }], morning)).toBe("ambiguous");
   });
 
   it("is settled when a retired leg was closed by a real trade before expiry", () => {
