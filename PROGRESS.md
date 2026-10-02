@@ -358,6 +358,12 @@ Plain language: closing the NBIS put on staging (10-01, three tries) was rejecte
 - **Fix:** Close and Roll select `to_char(expiry_date, 'YYYYMMDD')`; single-leg orders now send the conId alone (`buildContractFromConId`); `findMalformedOptionExpiry` rejects a bad expiry when the order is built (HTTP 500) and `buildLegContract` throws on one.
 - **Verified:** conId 910602043 = NBIS 2026-10-02 $230 put (reqContractDetails); paper `whatIf` order reproduced 10330 with the old shape and was accepted with conId-only; Close and Roll routes store `YYYYMMDD`; suite 930/930.
 
+## Market status badge in the top bar (built and verified 2026-10-02, not pushed)
+Plain language: every page's top bar now shows whether the market is Pre-Market, Open, After-Hours or Closed, with a live countdown to the next change ("closes in 6h 12m"; weekends read "2d 14h"). Closed is grey on purpose, not red like Pulse, so it never looks like an alarm next to the red LIVE chip. Mockup approved: https://claude.ai/artifact/9wVxAVeESdVf8JMGAeVA7V
+- **API:** `GET /system-health/market-status` also returns `nextChangeAt` (ISO) so the browser can tick the countdown itself; `label` unchanged (Pulse still uses it). New `marketSessionStatus.test.ts`.
+- **App:** `MarketStatusBadge` in the top bar's centre slot (phone: its own row under the env chips); `useMarketStatus` hook moved out of Pulse and refetches right after the session boundary; `formatCountdownUntil` in formatters. Below 1200 px the "Live data restricted" pill shrinks to its icon.
+- **Deploy order:** API first (the app needs `nextChangeAt`).
+
 ## Prod log review 2026-10-02 (24 h): fixes built, not pushed
 Plain language: reading yesterday's production logs showed one real bug and several noisy spots. Nothing was broken for users; one nightly job never shut down, and a few screens made more requests than needed.
 - **P&L snapshot job never exited** (api): it kept the shared IBKR connection open until Heroku cycled it after 24 h. Cleanup now calls `sharedReadConnection.shutdown()`, like the capture job.

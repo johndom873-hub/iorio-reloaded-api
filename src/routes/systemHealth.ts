@@ -134,7 +134,7 @@ systemHealthRouter.get("/market-status", async (_request, response) => {
   const exchangeNames = [...new Set(rows.map((row) => displayExchangeName(row.primaryExchange)))].sort();
   const status = await computeMarketSessionStatus();
 
-  response.json({ exchanges: exchangeNames.length > 0 ? exchangeNames : ["US Markets"], state: status.state, label: status.label });
+  response.json({ exchanges: exchangeNames.length > 0 ? exchangeNames : ["US Markets"], state: status.state, label: status.label, nextChangeAt: status.nextChangeAt });
 });
 
 // Day Signals: the refresh loop's state (in-process; null when this process isn't running it),
