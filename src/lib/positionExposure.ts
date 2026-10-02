@@ -148,6 +148,11 @@ function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegRow[], p
   }));
 }
 
+// The one-shot exposures (Dashboard, Risk & Limits) stop waiting this long after the last leg price arrived: a leg that
+// never ticks (no last trade at all) is valued at its entry price either way, and used to hold them to the 6 s ceiling.
+// A grace after the latest arrival, not a flat cap, so a slow leg that is still pricing is not cut off.
+const exposurePriceSettleGraceMs = 1_000;
+
 // Pool first (2026-09-24): legs already held by an open Positions/Pulse/
 // Dashboard stream are priced from the pool with no IBKR request at all;
 // only legs nobody has pooled fall back to a one-shot snapshot. The Signals
@@ -160,7 +165,7 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
 
   let pricesByKey: Record<string, number | null> = {};
   try {
-    pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs));
+    pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { settleGraceMs: exposurePriceSettleGraceMs });
   } catch {
     // Leave pricesByKey empty — every leg falls back to entry_price below.
   }
