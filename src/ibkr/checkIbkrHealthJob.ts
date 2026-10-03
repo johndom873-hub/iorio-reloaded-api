@@ -10,7 +10,7 @@ import { db } from "../db/connection.js";
 import { reportDaySignalsLoopLiveness } from "../lib/daySignalsLiveness.js";
 import { reportOpsMonitorLiveness } from "../lib/opsMonitorLiveness.js";
 import { reportWorkerHeartbeat } from "../lib/workerHeartbeatLiveness.js";
-import { probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
+import { liveDataProbeSymbol, probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
 import { blockedAfterReloginMessage, blockedRestartDeferredMessage, competingLiveSessionSurvivedRestart, reportCompetingLiveSession } from "../lib/competingLiveSessionAlert.js";
 
 // Confirmed 2026-08-27: reqHistoricalData can silently hang (no data, no
@@ -20,7 +20,7 @@ import { blockedAfterReloginMessage, blockedRestartDeferredMessage, competingLiv
 // this health check ever noticing, since it only checked the handshake.
 // SPY is used as a fixed, always-listed probe symbol independent of
 // whatever's on the shortlist.
-const HISTORICAL_DATA_PROBE_SYMBOL = "SPY";
+const HISTORICAL_DATA_PROBE_SYMBOL = liveDataProbeSymbol;
 
 interface HistoricalDataCheckResult {
   healthy: boolean;

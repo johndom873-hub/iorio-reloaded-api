@@ -5,7 +5,7 @@ import { planPoolCapacity, type PoolCapacityEntry } from "./marketDataPoolCapaci
 import { loadFallbackStockPrices } from "../lib/priceService.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 import type { PriceContract } from "./fetchLivePrices.js";
-import { competingLiveSessionErrorCode } from "./probeCompetingLiveSession.js";
+import { competingLiveSessionErrorCode, liveDataProbeSymbol, probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
 import { broadcastToLocalSubscribers } from "../lib/notificationBroadcaster.js";
 import type { MarketDataFeedRefusal } from "../lib/notificationChannel.js";
 
@@ -190,6 +190,14 @@ let restricted = false;
 // Pushed to every open tab at once, and read by /environment/details for tabs
 // opened later. In-process state: correct while one web dyno serves both.
 let feedRefusal: MarketDataFeedRefusal | null = null;
+// A real price on a pooled contract clears the refusal, but with the market closed none arrives (bid/ask are
+// -1, only the close tick comes), so a one-off 10197 push would otherwise hold the flag until the next open.
+// While it is set the pool therefore re-probes with a fresh subscription and clears it once that gets a price.
+// The probe's own 10197 can't re-set the flag: the error listener ignores request ids the pool doesn't own.
+// Each probe holds one transient market-data line (up to 5 s) the budget did not grant, same as the health check's.
+const refusalRecheckIntervalMs = 60_000;
+let refusalRecheckTimer: ReturnType<typeof setInterval> | null = null;
+let refusalRecheckInFlight = false;
 
 export function marketDataFeedRefusal(): MarketDataFeedRefusal | null {
   return feedRefusal;
@@ -200,6 +208,37 @@ function setFeedRefusal(value: MarketDataFeedRefusal | null): void {
   feedRefusal = value;
   console.log(value ? `marketDataPool: IBKR refused market data (code ${value.code}): ${value.message}` : "marketDataPool: market data flowing again after a refusal.");
   broadcastToLocalSubscribers({ type: "market_data_feed", refusal: value });
+  if (value) startRefusalRecheck();
+  else stopRefusalRecheck();
+}
+
+function startRefusalRecheck(): void {
+  if (refusalRecheckTimer !== null) return;
+  refusalRecheckTimer = setInterval(() => void recheckFeedRefusal(), refusalRecheckIntervalMs);
+  refusalRecheckTimer.unref?.();
+}
+
+function stopRefusalRecheck(): void {
+  if (refusalRecheckTimer === null) return;
+  clearInterval(refusalRecheckTimer);
+  refusalRecheckTimer = null;
+}
+
+async function recheckFeedRefusal(): Promise<void> {
+  const refusalBeingChecked = feedRefusal;
+  if (refusalBeingChecked === null || refusalRecheckInFlight) return;
+  refusalRecheckInFlight = true;
+  try {
+    const borrowed = await sharedLiveConnection.borrow();
+    // The probe re-sends reqMarketDataType(REALTIME), the value this connection is fixed to, so it changes nothing.
+    const probeResult = await probeCompetingLiveSession(borrowed.ib, sharedLiveConnection.allocateReqId(), liveDataProbeSymbol);
+    // "blocked" and "unknown" (no price and no 10197 in time) both leave the flag set until the next probe.
+    if (probeResult === "flowing" && feedRefusal === refusalBeingChecked) setFeedRefusal(null);
+  } catch {
+    // Connection unavailable: no information, the next tick tries again.
+  } finally {
+    refusalRecheckInFlight = false;
+  }
 }
 
 /** Live subscribers right now — for the health/observability endpoint. */

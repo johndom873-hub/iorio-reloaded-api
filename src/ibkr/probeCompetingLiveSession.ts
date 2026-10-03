@@ -14,6 +14,8 @@ import { EventName, MarketDataType, Stock, type IBApi } from "@stoqey/ib";
 // which callers must treat as no information (neither alert nor clear).
 export const competingLiveSessionErrorCode = 10197;
 const probeTimeoutMs = 5_000;
+// A fixed, always-listed symbol, independent of whatever is on the shortlist or open in a screen.
+export const liveDataProbeSymbol = "SPY";
 
 export type CompetingLiveSessionProbeResult = "blocked" | "flowing" | "unknown";
 
