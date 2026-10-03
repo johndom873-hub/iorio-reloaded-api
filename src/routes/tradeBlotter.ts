@@ -16,6 +16,8 @@ const validStrategyKeys = ["covered_call", "cash_secured_put", "hedge", "unstruc
 // closing trades get a figure; an opening trade hasn't realized anything
 // yet. Formula approved 2026-08-20: (exit - entry) * qty * multiplier,
 // sign-flipped for short legs since a short profits when price falls.
+// Value (approved 2026-10-02): price * quantity * multiplier, unsigned, per fill. For an option that is the
+// premium transacted in dollars; for stock, the dollar value of the shares. Not the option's notional (strike * 100).
 tradeBlotterRouter.get("/", async (request, response) => {
   const strategyKey = request.query.strategy as string | undefined;
   const symbol = (request.query.symbol as string | undefined)?.trim().toUpperCase();
@@ -56,6 +58,7 @@ tradeBlotterRouter.get("/", async (request, response) => {
       tr.side,
       tr.quantity,
       tr.price,
+      tr.price * tr.quantity * pl.multiplier AS value,
       tr.commission,
       tr.executed_at AS "executedAt",
       tr.is_closing_trade AS "isClosingTrade",
@@ -137,6 +140,7 @@ tradeBlotterRouter.get("/", async (request, response) => {
       leg->>'action' AS action,
       (leg->>'quantity')::numeric AS quantity,
       (leg->>'unitPrice')::numeric AS "unitPrice",
+      (leg->>'unitPrice')::numeric * (leg->>'quantity')::numeric * (CASE WHEN leg->>'role' = 'option' THEN 100 ELSE 1 END) AS value,
       NULLIF(leg->>'strike', '') AS strike,
       NULLIF(leg->>'expiry', '') AS expiry,
       NULLIF(leg->>'right', '') AS "optionType"
