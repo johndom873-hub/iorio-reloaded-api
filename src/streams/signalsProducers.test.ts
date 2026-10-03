@@ -114,7 +114,7 @@ function createHarness(): Harness {
     loadDayQuotesStatus: async () => ({ tradingDateIso: "2026-09-21", quoteCount: dayQuotes.rows.length, oldestQuotedAt: null, newestQuotedAt: null, expiryCount: 1, tickerCount: 1 }),
     daySignalsLoopStatus: () => ({ state: "running", reason: "test", stateSince: "2026-09-22T14:00:00.000Z", tradingDateIso: "2026-09-21", cycleNumber: 3, cycleStartedAt: null, lastCycleDurationMs: 1000, contractsInPool: 4, lastError: null }),
     loadAccountContext: async () => ({ freeCash: account.freeCash }),
-    loadSignalSettings: async () => ({ maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 }),
+    loadSignalSettings: async () => ({ maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5 }),
     fetchAvailableUncoveredShares: async () => freeShares.value,
     streamLivePrices: async (_contracts, onUpdate, signal) => {
       priceCallback = onUpdate;

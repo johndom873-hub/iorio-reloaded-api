@@ -1,5 +1,6 @@
 import { blackScholesDelta, sviTotalVariance } from "./impliedVolatilitySurface.js";
-import { blackScholesVega, computeFrictionCost } from "./optionFriction.js";
+import { blackScholesVega, commissionPerContractDollars as flatCommissionPerContractDollars, computeFrictionCost } from "./optionFriction.js";
+import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
 import { gradeForNetEdge, impliedVolatilityFromMid, type SignalCandidate, type SignalGrade, type SignalQuote, type SignalQuoteSource, type SignalStrategyKey, type SignalSurfaceSlice } from "./signalCandidates.js";
 import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
 
@@ -102,6 +103,8 @@ export interface HeldLegScoringInput {
   /** Merged quotes (live > day > snapshot), including contracts the new-trade candidate build ignores (the ITM side). */
   quotes: SignalQuote[];
   ivShiftByExpiry?: Map<string, number>;
+  /** Commission per contract for the buy-back, estimated for the leg's own size; flat $0.68 when omitted. */
+  commissionEstimator?: CommissionEstimator;
 }
 
 export function heldLegContractKey(leg: Pick<OpenShortLeg, "expiry" | "strike" | "right">): string {
@@ -160,7 +163,7 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
     if (!(totalVariance > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
     const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry) + (input.ivShiftByExpiry?.get(leg.expiry) ?? 0);
     if (!(surfaceIv > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
-    const friction = computeFrictionCost({ bid: twoSidedQuote.bid, ask: twoSidedQuote.ask, forward: slice.forwardPrice, strike: leg.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv });
+    const friction = computeFrictionCost({ bid: twoSidedQuote.bid, ask: twoSidedQuote.ask, forward: slice.forwardPrice, strike: leg.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: (input.commissionEstimator ?? flatCommissionEstimator).perContractDollars("buy", leg.quantity) });
     if (!friction) return unscored(leg, "no_quote", { dte, flags: flagsWithoutQuote });
 
     const delta = blackScholesDelta(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
@@ -191,10 +194,41 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
  * Formula 3j for one (held leg, replacement) pair, with no hard filters: the two the list applies come back as warnings
  * instead. Null when the pair cannot be scored (held leg unscored, other strategy, or the same contract).
  */
-export function scoreRollPair(leg: HeldLegScore, replacement: SignalCandidate): RollSignalCandidate | null {
+/**
+ * The replacement as the roll will trade it (approved 2026-10-02): a candidate is scored at the size the setup form
+ * defaults to, but a roll sells the held leg's whole quantity, so its commission term is re-estimated at that size.
+ *   net Edge' = net Edge - (c_leg - c_scored) / 100 / vega     (c = estimated commission per contract)
+ * Every field derived from the commission moves with it; a same-size roll comes back unchanged.
+ */
+export function recostReplacementCommission(replacement: SignalCandidate, contracts: number, estimator: CommissionEstimator): SignalCandidate {
+  const scoredCommission = replacement.commissionPerContractDollars ?? flatCommissionPerContractDollars;
+  const legCommission = estimator.perContractDollars("sell", contracts);
+  const extraCommissionDollars = legCommission - scoredCommission; // per contract
+  if (extraCommissionDollars === 0) return replacement;
+  const extraCommissionVolatility = extraCommissionDollars / 100 / replacement.vega;
+  const netEdge = replacement.netEdge - extraCommissionVolatility;
+  const netEdgeAtMid = replacement.netEdgeAtMid - extraCommissionVolatility;
+  const edgeDollars = replacement.edgeDollars - extraCommissionDollars;
+  const edgeDollarsAtMid = replacement.edgeDollarsAtMid - extraCommissionDollars;
+  return {
+    ...replacement,
+    commissionPerContractDollars: legCommission,
+    frictionVolatility: replacement.frictionVolatility + extraCommissionVolatility,
+    netEdge,
+    netEdgeAtMid,
+    edgeDollars,
+    edgeDollarsAtMid,
+    riskAdjustedRatio: edgeDollars / replacement.dollarRisk,
+    riskAdjustedRatioAtMid: edgeDollarsAtMid / replacement.dollarRisk,
+    grade: gradeForNetEdge(netEdge),
+  };
+}
+
+export function scoreRollPair(leg: HeldLegScore, scoredReplacement: SignalCandidate, commissionEstimator: CommissionEstimator = flatCommissionEstimator): RollSignalCandidate | null {
   if (leg.unscoredReason !== null || leg.edge === null || leg.frictionVolatility === null || leg.vega === null || leg.delta === null || leg.mid === null || leg.dollarRisk === null) return null;
-  if (replacement.strategyKey !== leg.strategyKey) return null;
-  if (replacement.expiry === leg.expiry && replacement.strike === leg.strike) return null;
+  if (scoredReplacement.strategyKey !== leg.strategyKey) return null;
+  if (scoredReplacement.expiry === leg.expiry && scoredReplacement.strike === leg.strike) return null;
+  const replacement = recostReplacementCommission(scoredReplacement, leg.quantity, commissionEstimator);
   const holdAndCloseVolatility = leg.edge + leg.frictionVolatility;
   const holdAndCloseDollars = holdAndCloseVolatility * leg.vega * 100;
   const netCreditPerShare = (replacement.bid + replacement.ask) / 2 - leg.mid;
@@ -222,11 +256,11 @@ export function scoreRollPair(leg: HeldLegScore, replacement: SignalCandidate): 
 }
 
 /** Every (held leg, replacement) pair passing the hard filters, graded and sorted by net roll Edge $ (then vol points). */
-export function buildRollCandidates(heldLegs: HeldLegScore[], candidates: SignalCandidate[]): RollSignalCandidate[] {
+export function buildRollCandidates(heldLegs: HeldLegScore[], candidates: SignalCandidate[], commissionEstimator?: CommissionEstimator): RollSignalCandidate[] {
   const rolls: RollSignalCandidate[] = [];
   for (const leg of heldLegs) {
     for (const replacement of candidates) {
-      const roll = scoreRollPair(leg, replacement);
+      const roll = scoreRollPair(leg, replacement, commissionEstimator);
       if (roll && roll.warnings.length === 0) rolls.push(roll);
     }
   }

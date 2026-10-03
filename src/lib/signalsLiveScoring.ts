@@ -265,6 +265,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       maxNetDelta: settings.maxNetDelta,
       minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
       ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
+      commissionEstimator: settings.commissionEstimator,
       onContractExcluded: observer?.onContractExcluded,
     }),
   );
@@ -282,8 +283,9 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     slices,
     quotes,
     ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
+    commissionEstimator: settings.commissionEstimator,
   });
-  const rolls = buildRollCandidates(heldLegs, candidates);
+  const rolls = buildRollCandidates(heldLegs, candidates, settings.commissionEstimator);
 
   return {
     ...withCaveats(null),

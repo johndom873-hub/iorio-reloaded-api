@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, computeFrictionCost } from "./optionFriction.js";
 import { buildSignalCandidates, gradeForNetEdge, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { assignmentRiskDeltaThreshold, buildRollCandidates, scoreRollPair, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs, type OpenShortLeg } from "./rollSignalCandidates.js";
+import { buildCommissionEstimator } from "./commissionEstimate.js";
+import { assignmentRiskDeltaThreshold, buildRollCandidates, recostReplacementCommission, scoreRollPair, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs, type OpenShortLeg } from "./rollSignalCandidates.js";
 
 // Formula 3j (approved 2026-09-24). Fixtures mirror signalsLiveScoring.test.ts: one
 // SVI surface, a 30-day and a 60-day slice with the SAME implied volatility at every
@@ -283,5 +284,35 @@ describe("scoreRollPair", () => {
     const unscored = scoreOne(leg(), []);
     expect(unscored.unscoredReason).not.toBeNull();
     expect(scoreRollPair(unscored, putAt(90, expiry30))).toBeNull();
+  });
+
+  describe("commission at the held leg's size (approved 2026-10-02)", () => {
+    // 10 sell orders of 5+ contracts at $1.00 a contract: a bucket the flat $0.68 does not match.
+    const largeSizeEstimator = buildCommissionEstimator(Array.from({ length: 10 }, () => ({ side: "sell" as const, contracts: 6, commissionDollars: 6 })));
+    const replacement = buildRollCandidates([held], all)[0]!.replacement;
+
+    it("leaves a replacement unchanged when the leg's size estimates the same commission", () => {
+      expect(recostReplacementCommission(replacement, 1, largeSizeEstimator)).toBe(replacement);
+    });
+
+    it("re-prices the commission term at the leg's size and moves every derived field with it", () => {
+      const recosted = recostReplacementCommission(replacement, 6, largeSizeEstimator);
+      const extraDollars = 1.0 - 0.68;
+      expect(recosted.commissionPerContractDollars).toBe(1.0);
+      expect(recosted.netEdge).toBeCloseTo(replacement.netEdge - extraDollars / 100 / replacement.vega, 12);
+      expect(recosted.edgeDollars).toBeCloseTo(replacement.edgeDollars - extraDollars, 10);
+      expect(recosted.netEdgeAtMid).toBeCloseTo(replacement.netEdgeAtMid - extraDollars / 100 / replacement.vega, 12);
+      expect(recosted.frictionVolatility).toBeCloseTo(replacement.frictionVolatility + extraDollars / 100 / replacement.vega, 12);
+      expect(recosted.riskAdjustedRatio).toBeCloseTo(recosted.edgeDollars / recosted.dollarRisk, 12);
+      expect(recosted.grade).toBe(gradeForNetEdge(recosted.netEdge));
+    });
+
+    it("scoreRollPair carries the re-priced replacement into net roll Edge", () => {
+      const sixContractHeld = { ...held, quantity: 6 };
+      const flat = scoreRollPair(sixContractHeld, replacement)!;
+      const sized = scoreRollPair(sixContractHeld, replacement, largeSizeEstimator)!;
+      expect(sized.netRollEdge).toBeCloseTo(flat.netRollEdge - (1.0 - 0.68) / 100 / replacement.vega, 12);
+      expect(sized.replacement.commissionPerContractDollars).toBe(1.0);
+    });
   });
 });

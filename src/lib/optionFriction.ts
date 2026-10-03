@@ -11,8 +11,9 @@ import type { VolatilityEdge } from "./volatilityEdge.js";
 // expiry); closing early and rolling carry their own costs, handled in the roll logic.
 //
 // λ = 1.0 (Marcelo's choice, against the 0.5 recommendation): the whole half-spread
-// is charged, i.e. a fill at the bid. c = $0.68 per contract, the mean of the 94 option
-// trades stored in `trades` (0.07 volatility points in the typical alert region).
+// is charged, i.e. a fill at the bid. c = the estimated commission per contract (commissionEstimate.ts,
+// trailing fills by side and size); the flat $0.68 below, the mean of the first 94 option trades
+// stored in `trades` (0.07 volatility points in the typical alert region), is the fallback.
 // Measured on the real AAOI chain, 21 Sep 2026, the half-spread alone is ~5 volatility
 // points for |delta| 0.15–0.30 at 20–60 days.
 
@@ -38,6 +39,8 @@ export interface FrictionInput {
   riskFreeRate: number;
   /** Fitted implied volatility at the strike (annualized decimal). */
   impliedVolatility: number;
+  /** Estimated commission in dollars per contract; the flat commissionPerContractDollars when omitted. */
+  commissionPerContractDollars?: number;
 }
 
 export interface FrictionCost {
@@ -55,7 +58,7 @@ export function computeFrictionCost(input: FrictionInput): FrictionCost | null {
   const vega = blackScholesVega(input.forward, input.strike, input.yearsToExpiry, input.riskFreeRate, input.impliedVolatility);
   if (!(vega > 0) || !Number.isFinite(vega)) return null;
   const spreadVolatility = (spreadShareCharged * (ask - bid)) / 2 / vega;
-  const commissionVolatility = commissionPerContractDollars / sharesPerContract / vega;
+  const commissionVolatility = (input.commissionPerContractDollars ?? commissionPerContractDollars) / sharesPerContract / vega;
   return { frictionVolatility: spreadVolatility + commissionVolatility, spreadVolatility, commissionVolatility };
 }
 

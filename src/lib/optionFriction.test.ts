@@ -68,3 +68,12 @@ describe("computeNetEdge", () => {
     expect(computeNetEdge(edge, wide)).toBeLessThan(0);
   });
 });
+
+describe("estimated commission override", () => {
+  it("uses the given per-contract commission instead of the flat rate", () => {
+    const flat = computeFrictionCost(base)!;
+    const estimated = computeFrictionCost({ ...base, commissionPerContractDollars: 1.36 })!;
+    expect(estimated.commissionVolatility).toBeCloseTo(flat.commissionVolatility * 2, 12);
+    expect(estimated.spreadVolatility).toBe(flat.spreadVolatility);
+  });
+});

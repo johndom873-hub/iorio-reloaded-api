@@ -3,6 +3,12 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
 import { loadTickerBySymbol } from "../lib/signalsChainStore.js";
+import { OrderAction } from "@stoqey/ib";
+import { findMalformedOptionExpiry, type OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
+import { fetchWhatIfCommissionRange } from "../ibkr/ibkrWhatIfCommission.js";
+import { loadCommissionEstimator } from "../lib/commissionEstimate.js";
+import { buildOrderCommissionPreview } from "../lib/orderCommissionPreview.js";
+import { loadSignalSettings } from "../lib/signalSettingsStore.js";
 
 export const signalSettingsRouter = Router();
 signalSettingsRouter.use(requireAuth);
@@ -14,6 +20,7 @@ const settingsFields = [
   "max_position_pct_of_portfolio",
   "max_concentration_per_ticker_pct",
   "min_cash_reserve_pct",
+  "commission_warn_share_of_premium_pct",
 ] as const;
 
 function validateSettingsPayload(payload: Record<string, unknown>): string | null {
@@ -33,6 +40,7 @@ function validateSettingsPayload(payload: Record<string, unknown>): string | nul
     "max_position_pct_of_portfolio",
     "max_concentration_per_ticker_pct",
     "min_cash_reserve_pct",
+    "commission_warn_share_of_premium_pct",
   ] as const;
   for (const field of percentageFields) {
     if (p[field] < 0 || p[field] > 100) return `${field} must be between 0 and 100.`;
@@ -131,4 +139,63 @@ signalSettingsRouter.get("/order-limits-check", async (request, response) => {
     rollFromStrike: parsedRollFromStrike,
   });
   response.json(result);
+});
+
+const maxPreviewLegs = 4;
+
+/** The legs of an order about to be set up, or the reason they are unusable. Never trusts the body's shape. */
+function parseCommissionPreviewLegs(body: unknown): { legs: OrderLegPayload[] } | { error: string } {
+  const rawLegs = (body as { legs?: unknown } | null)?.legs;
+  if (!Array.isArray(rawLegs) || rawLegs.length === 0 || rawLegs.length > maxPreviewLegs) return { error: `legs must be a list of 1 to ${maxPreviewLegs} legs.` };
+  const legs: OrderLegPayload[] = [];
+  for (const raw of rawLegs as Record<string, unknown>[]) {
+    const { role, action, symbol, quantity, unitPrice, strike, expiry, right } = raw ?? {};
+    if (role !== "stock" && role !== "option") return { error: "Each leg needs role stock or option." };
+    if (action !== OrderAction.BUY && action !== OrderAction.SELL) return { error: "Each leg needs action BUY or SELL." };
+    if (typeof symbol !== "string" || !symbol.trim()) return { error: "Each leg needs a symbol." };
+    if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity <= 0) return { error: "Each leg needs a positive whole quantity." };
+    if (typeof unitPrice !== "number" || !(unitPrice > 0)) return { error: "Each leg needs a positive unitPrice." };
+    if (role === "option") {
+      if (typeof strike !== "number" || !(strike > 0)) return { error: "Each option leg needs a positive strike." };
+      if (right !== "C" && right !== "P") return { error: "Each option leg needs right C or P." };
+    }
+    legs.push({ role, action, symbol: symbol.trim().toUpperCase(), quantity, unitPrice, ...(role === "option" ? { strike: strike as number, expiry: expiry as string, right: right as "C" | "P" } : {}) });
+  }
+  const malformedExpiry = findMalformedOptionExpiry(legs);
+  if (malformedExpiry) return { error: malformedExpiry };
+  if (new Set(legs.map((leg) => leg.symbol)).size > 1) return { error: "All legs must be on the same symbol." };
+  return { legs };
+}
+
+// Commission shown in the order setup (approved 2026-10-02): IBKR's what-if for this exact order, the
+// trailing-fills estimate when IBKR cannot answer. Called once per setup form and again only when its
+// quantity or fill priority changes -- never per Signals row. Read-only: the what-if order is never worked.
+signalSettingsRouter.post("/commission-preview", async (request, response) => {
+  const parsed = parseCommissionPreviewLegs(request.body);
+  if ("error" in parsed) {
+    response.status(400).json({ error: parsed.error });
+    return;
+  }
+  const ticker = await loadTickerBySymbol(parsed.legs[0]!.symbol);
+  if (!ticker) {
+    response.status(400).json({ error: "Unknown symbol." });
+    return;
+  }
+  const [settings, estimator, whatIf] = await Promise.all([
+    loadSignalSettings(),
+    loadCommissionEstimator(),
+    fetchWhatIfCommissionRange(parsed.legs).then(
+      (range) => ({ range, failureReason: null }),
+      (error: unknown) => ({ range: null, failureReason: error instanceof Error ? error.message : String(error) }),
+    ),
+  ]);
+  response.json(
+    buildOrderCommissionPreview({
+      legs: parsed.legs,
+      whatIfCommission: whatIf.range,
+      whatIfFailureReason: whatIf.failureReason,
+      estimator,
+      warnThresholdPct: settings.commissionWarnSharePctOfPremium,
+    }),
+  );
 });

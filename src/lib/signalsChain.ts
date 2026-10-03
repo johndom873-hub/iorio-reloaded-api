@@ -319,7 +319,7 @@ export function scoreSignalContract(input: ScoreSignalContractInput): SignalCont
   };
 
   const rollsFor = (scored: TickerSignals, replacement: SignalCandidate): RollSignalCandidate[] =>
-    scored.heldLegs.flatMap((heldLeg) => (heldLeg.right === contract.right ? [scoreRollPair(heldLeg, replacement)] : [])).filter((roll): roll is RollSignalCandidate => roll !== null);
+    scored.heldLegs.flatMap((heldLeg) => (heldLeg.right === contract.right ? [scoreRollPair(heldLeg, replacement, input.settings.commissionEstimator)] : [])).filter((roll): roll is RollSignalCandidate => roll !== null);
   const scoredContract = (scored: TickerSignals, candidate: SignalCandidate, contractContext: SignalContractContext): ScoredSignalContract => {
     const replacement = withMonteCarlo(candidate);
     return { ...replacement, ...contractContext, scored: true, rolls: rollsFor(scored, replacement) };

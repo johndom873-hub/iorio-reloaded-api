@@ -25,7 +25,7 @@ function quoteAt(strike: number, right: "C" | "P", volatility = surfaceIvAt(stri
   return { expiry, strike, right, bid: mid * 0.98, ask: mid * 1.02, source: "snapshot" };
 }
 const strikes: [number, "C" | "P"][] = [[80, "P"], [85, "P"], [90, "P"], [95, "P"], [105, "C"], [110, "C"]];
-const settings = { maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 };
+const settings = { maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5 };
 
 function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsInputs {
   return {

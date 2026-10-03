@@ -1,5 +1,6 @@
 import { blackScholesDelta, impliedVolatilityFromPrice, sviTotalVariance, type RawSviParameters, type SviSliceStatus } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, computeFrictionCost, computeNetEdge } from "./optionFriction.js";
+import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
 import { computeUncompensatedShare, type UncompensatedShareOptions } from "./uncompensatedShare.js";
 import { expirySpansEarnings, expirySpansEventDate, type RealizedVolatilityForecast } from "./volatilityEdge.js";
 
@@ -90,6 +91,8 @@ export interface SignalCandidatesInput {
   exclusionTally?: CandidateExclusionTally;
   /** Formula 3h (approved 2026-09-24): per-expiry parallel shift added to the surface IV, from computeExpiryIvShifts. */
   ivShiftByExpiry?: Map<string, number>;
+  /** Commission per contract charged inside friction, estimated for the order size the setup form would default to; flat $0.68 when omitted. */
+  commissionEstimator?: CommissionEstimator;
   /** When given, told about every quote that did not become a candidate and why (the Signals chain grid). Never changes which contracts are candidates. */
   onContractExcluded?: (quote: SignalQuote, exclusion: SignalContractExclusion) => void;
 }
@@ -122,6 +125,8 @@ export interface SignalCandidate {
   forecastVolatility: number;
   edge: number;
   frictionVolatility: number;
+  /** Commission per contract inside frictionVolatility; absent on a candidate built before it was recorded (the flat rate applies). */
+  commissionPerContractDollars?: number;
   netEdge: number;
   /** net Edge x vega x 100 (Marcelo approved 2026-09-22). */
   edgeDollars: number;
@@ -217,6 +222,9 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
   const candidates: SignalCandidate[] = [];
 
   const tally = input.exclusionTally;
+  // The size the order setup defaults to (SignalOrderSetupForm): the free shares' worth of calls, one put.
+  const commissionEstimator = input.commissionEstimator ?? flatCommissionEstimator;
+  const coveredCallContracts = input.freeShares >= 100 ? Math.floor(input.freeShares / 100) : 1;
   const exclude = (quote: SignalQuote, exclusion: SignalContractExclusion) => input.onContractExcluded?.(quote, exclusion);
   for (const quote of input.quotes) {
     const slice = slicesByExpiry.get(quote.expiry);
@@ -269,7 +277,8 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       exclude(quote, { kind: "above_max_delta", delta, maxNetDelta: input.maxNetDelta });
       continue;
     }
-    const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: quote.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv });
+    const commissionPerContract = commissionEstimator.perContractDollars("sell", isCall ? coveredCallContracts : 1);
+    const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: quote.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: commissionPerContract });
     if (!friction) {
       exclude(quote, { kind: "no_friction", delta });
       continue;
@@ -327,6 +336,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       forecastVolatility: input.forecast!.volatility,
       edge: edge!,
       frictionVolatility: friction.frictionVolatility,
+      commissionPerContractDollars: commissionPerContract,
       netEdge,
       edgeDollars,
       vega,
