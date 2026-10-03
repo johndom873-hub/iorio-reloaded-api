@@ -82,7 +82,7 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     symbol,
     companyName: null,
     sector: null,
-    header: { snapshotId: `snap-${symbol}`, tradingDateIso, capturedAt: `${tradingDateIso}T14:00:00Z`, underlyingPrice: forward, riskFreeRatePercent: rate * 100 },
+    header: { snapshotId: `snap-${symbol}`, tradingDateIso, capturedAt: `${tradingDateIso}T14:00:00Z`, underlyingPrice: forward, riskFreeRatePercent: rate * 100, fitCompletedAt: "2026-09-21T14:06:00Z", fitIssue: null },
     slices: [slice("2026-10-21", years30)],
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30)],
     dayQuotes: [],

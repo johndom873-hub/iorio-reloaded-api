@@ -60,13 +60,22 @@ function buildInsertRows(snapshotId: string, expiries: FittedExpiry[]): Record<s
   }));
 }
 
-/** Replaces the snapshot's fits in one transaction, so a re-fit is never half-saved. */
+/**
+ * Replaces the snapshot's fits in one transaction, so a re-fit is never half-saved, and marks the snapshot analysed
+ * in the same transaction (fit_completed_at), so the Signals screen never sees fits without the mark or the mark without fits.
+ */
 export async function saveSurfaceFits(snapshotId: string, expiries: FittedExpiry[]): Promise<void> {
   await db.transaction(async (transaction) => {
     await transaction("option_surface_fits").where({ snapshot_id: snapshotId }).delete();
     const rows = buildInsertRows(snapshotId, expiries);
     if (rows.length > 0) await transaction("option_surface_fits").insert(rows);
+    await transaction("option_chain_snapshots").where({ id: snapshotId }).update({ fit_completed_at: db.fn.now(), fit_issue: null });
   });
+}
+
+/** The fit finished with this snapshot without producing a surface (skipped or errored): analysed, with the reason. */
+export async function markSurfaceFitIssue(snapshotId: string, issue: string): Promise<void> {
+  await db("option_chain_snapshots").where({ id: snapshotId }).update({ fit_completed_at: db.fn.now(), fit_issue: issue });
 }
 
 async function loadHeaders(tradingDate: string, symbols?: string[]): Promise<SnapshotHeaderRow[]> {
@@ -112,6 +121,9 @@ function describeOutcome(outcome: SurfaceFitOutcome): string {
   return `${ok}/${outcome.expiries.length} expiries ok`;
 }
 
+/** Prefix of fit_issue when the fit threw; any other fit_issue is a skip reason (no_spot_price, no_risk_free_rate, no_quotes). */
+export const surfaceFitErrorIssuePrefix = "error: ";
+
 /** Fits and stores the surface for every complete/partial snapshot of a trading date (optionally only some symbols). */
 export async function fitAndStoreSurfacesForDate(tradingDate: string, onEvent: (event: SurfaceFitRunEvent) => void = () => {}, symbols?: string[]): Promise<SurfaceFitRunResult> {
   const headers = await loadHeaders(tradingDate, symbols);
@@ -130,6 +142,7 @@ export async function fitAndStoreSurfacesForDate(tradingDate: string, onEvent: (
       });
       if (outcome.kind === "skipped") {
         result.tickersSkipped++;
+        await markSurfaceFitIssue(header.snapshotId, outcome.reason);
         onEvent({ symbol: header.symbol, outcome: "skipped", detail: describeOutcome(outcome), skipReason: outcome.reason });
         continue;
       }
@@ -142,7 +155,10 @@ export async function fitAndStoreSurfacesForDate(tradingDate: string, onEvent: (
       onEvent({ symbol: header.symbol, outcome: "fitted", detail: describeOutcome(outcome) });
     } catch (error) {
       result.tickersFailed++;
-      onEvent({ symbol: header.symbol, outcome: "error", detail: error instanceof Error ? error.message : String(error) });
+      const detail = error instanceof Error ? error.message : String(error);
+      // The fit is over for this snapshot either way: it must not stay "Analysing" on the screen.
+      await markSurfaceFitIssue(header.snapshotId, `${surfaceFitErrorIssuePrefix}${detail}`.slice(0, 500)).catch(() => {});
+      onEvent({ symbol: header.symbol, outcome: "error", detail });
     }
   }
   return result;

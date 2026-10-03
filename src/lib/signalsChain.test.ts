@@ -53,7 +53,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     symbol: "TEST",
     companyName: "Test Co",
     sector: null,
-    header: { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100 },
+    header: { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100, fitCompletedAt: "2026-09-21T14:06:00Z", fitIssue: null },
     slices: [slice(near, years30), slice(far, years60)],
     quotes: [...nearQuotes, quoteAt(85, "P", far, years60), quoteAt(115, "C", far, years60)],
     dayQuotes: [],
@@ -212,12 +212,19 @@ describe("assembleSignalsChain", () => {
     expect(putAt85(inputs({ dayQuotes: [dayQuote] }))).toMatchObject({ state: "candidate", quoteSource: "day", bid: dayQuote.bid, ask: dayQuote.ask });
   });
 
-  it("marks quoted contracts of an unscored ticker as filtered with the ticker's reason", () => {
+  it("marks quoted contracts of an unscored ticker as unscored (not filtered) with the ticker's reason", () => {
     const chain = chainFor(inputs({ forecast: null }), near);
     expect(chain.unscoredReason).toBe("no_forecast");
     expect(chain.expiries.every((entry) => !entry.hasCandidate)).toBe(true);
     const put90 = chain.strikes.find((entry) => entry.strike === 90)!.put;
-    expect(put90).toMatchObject({ state: "filtered", reason: "No volatility forecast for this ticker" });
+    expect(put90).toMatchObject({ state: "unscored", reason: "No volatility forecast for this ticker" });
+  });
+
+  it("a snapshot still being analysed shows its quoted contracts as unscored with the pending reason", () => {
+    const base = inputs();
+    const chain = chainFor(inputs({ header: { ...base.header!, fitCompletedAt: null }, slices: [] }), near);
+    expect(chain.unscoredReason).toBe("analysing");
+    expect(chain.strikes.find((entry) => entry.strike === 90)!.put).toMatchObject({ state: "unscored", reason: "Snapshot saved, surface fit pending" });
   });
 
   it("still returns the whole grid, all not_captured, for a ticker with no snapshot", () => {

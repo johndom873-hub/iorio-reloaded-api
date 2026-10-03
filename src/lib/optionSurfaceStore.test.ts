@@ -12,7 +12,7 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { fitAndStoreSurfacesForDate } = await import("./optionSurfaceStore.js");
-const { loadSlices } = await import("./signalsStore.js");
+const { loadSlices, loadLatestSnapshot, loadSnapshotVersions } = await import("./signalsStore.js");
 const testDb: Knex = db;
 
 const tradingDate = "2026-09-21";
@@ -76,3 +76,75 @@ describe("surface fits, against the database", () => {
     expect(legacy).toMatchObject({ forwardPrice: 100.5, fitUnderlyingPrice: null });
   });
 });
+
+describe("fit completion mark (Analysing vs analysed)", () => {
+  const markDate = "2026-09-22";
+  let markTickerId = "";
+  let markSymbol = "";
+
+  beforeAll(async () => {
+    markSymbol = `FM${Date.now() % 100_000}`;
+    const [ticker] = await testDb("tickers").insert({ symbol: markSymbol, company_name: "Fit Mark Test Co", sector: "Technology" }).returning("id");
+    markTickerId = ticker.id;
+  });
+
+  afterAll(async () => {
+    await testDb("option_chain_snapshots").where({ ticker_id: markTickerId }).del();
+    await testDb("tickers").where({ id: markTickerId }).del();
+  });
+
+  async function insertSnapshot(overrides: Record<string, unknown> = {}): Promise<string> {
+    await testDb("option_chain_snapshots").where({ ticker_id: markTickerId }).del();
+    const [row] = await testDb("option_chain_snapshots")
+      .insert({ ticker_id: markTickerId, trading_date: markDate, captured_at: new Date(), underlying_price: 100, risk_free_rate_percent: 4, status: "complete", ...overrides })
+      .returning("id");
+    return row.id;
+  }
+
+  it("a freshly saved snapshot is pending, and fitting it stamps fit_completed_at and moves its version token", async () => {
+    const id = await insertSnapshot();
+    expect((await loadLatestSnapshot(markTickerId))).toMatchObject({ snapshotId: id, fitCompletedAt: null, fitIssue: null });
+    const pendingVersion = (await loadSnapshotVersions([markTickerId])).get(markTickerId);
+    expect(pendingVersion).toBe(`${id}|pending`);
+
+    const years = yearsBetweenIsoDates(markDate, expiry);
+    const forward = computeForwardPrice(100, 0.04, years);
+    const rows = Array.from({ length: 41 }, (_, index) => 80 + index).flatMap((strike) =>
+      (["C", "P"] as const).map((right) => {
+        const volatility = Math.sqrt(sviTotalVariance(truth, Math.log(strike / forward)) / years);
+        const mid = blackScholesPriceOnForward(forward, strike, years, 0.04, volatility, right === "C");
+        return { snapshot_id: id, expiry, strike, option_right: right, bid: mid * 0.985, ask: mid * 1.015, underlying_price: 100 };
+      }),
+    );
+    await testDb("option_quote_snapshots").insert(rows);
+
+    await fitAndStoreSurfacesForDate(markDate, () => {}, [markSymbol]);
+    const analysed = await loadLatestSnapshot(markTickerId);
+    expect(analysed!.fitCompletedAt).not.toBeNull();
+    expect(analysed!.fitIssue).toBeNull();
+    const fittedVersion = (await loadSnapshotVersions([markTickerId])).get(markTickerId);
+    expect(fittedVersion).not.toBe(pendingVersion);
+    expect(fittedVersion).toMatch(new RegExp(`^${id}\\|\\d{4}-`));
+  });
+
+  it("a snapshot the fit skips is analysed too, carrying the skip reason (so it never stays Analysing)", async () => {
+    await insertSnapshot(); // no quote rows
+    const result = await fitAndStoreSurfacesForDate(markDate, () => {}, [markSymbol]);
+    expect(result).toMatchObject({ tickersSkipped: 1, tickersFitted: 0 });
+    expect(await loadLatestSnapshot(markTickerId)).toMatchObject({ fitIssue: "no_quotes" });
+    expect((await loadLatestSnapshot(markTickerId))!.fitCompletedAt).not.toBeNull();
+  });
+
+  it("a snapshot without a spot price records that as the issue", async () => {
+    await insertSnapshot({ underlying_price: null });
+    await fitAndStoreSurfacesForDate(markDate, () => {}, [markSymbol]);
+    expect(await loadLatestSnapshot(markTickerId)).toMatchObject({ fitIssue: "no_spot_price" });
+  });
+
+  it("loadSnapshotVersions skips tickers with no usable snapshot and answers an empty list without a query", async () => {
+    await testDb("option_chain_snapshots").where({ ticker_id: markTickerId }).del();
+    expect((await loadSnapshotVersions([markTickerId])).size).toBe(0);
+    expect((await loadSnapshotVersions([])).size).toBe(0);
+  });
+});
+

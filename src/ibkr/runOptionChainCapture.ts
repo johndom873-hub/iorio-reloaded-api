@@ -30,6 +30,7 @@ import {
   type SnapshotCoverage,
 } from "../lib/optionChainCaptureCoverage.js";
 import { saveOptionChainSnapshot } from "../lib/optionChainSnapshotStore.js";
+import { fitAndStoreSurfacesForDate } from "../lib/optionSurfaceStore.js";
 import { excludeTickersBeingPrepared } from "../lib/tickersBeingPrepared.js";
 import { describeMarketDataLineShortage, releaseMarketDataLines, renewMarketDataLineReservation, reserveMarketDataLines, type LineReservationResult } from "./marketDataLineBudget.js";
 
@@ -295,6 +296,10 @@ export async function saveCapturedSnapshot(prepared: PreparedTicker, quotes: Cap
     },
     quotes,
   );
+  // Analyse the ticker right away (about a second) so the Signals screen goes from "Analysing" to scored ticker by ticker
+  // instead of waiting for the whole universe. A failure here is not a capture failure: the fit job that follows the
+  // capture fits (and reports on) every snapshot still unanalysed.
+  await fitAndStoreSurfacesForDate(todayIso, () => {}, [prepared.ticker.symbol]).catch((error: unknown) => console.warn(`${prepared.ticker.symbol}: immediate surface fit failed, the fit job will retry it: ${error instanceof Error ? error.message : error}`));
   return coverage;
 }
 

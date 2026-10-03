@@ -6,7 +6,22 @@ import type { ElevatedVolatilityFlag, SkewMeasure } from "./tiltMeasures.js";
 import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
 import type { HeldLegScore, OpenShortLeg, RollSignalCandidate } from "./rollSignalCandidates.js";
 
-export type SignalsUnscoredReason = "no_snapshot" | "no_surface_fit" | "no_forecast" | "suspected_split";
+/** "analysing": today's snapshot is saved but its surface fit has not finished yet (a pending state, not a problem). */
+export type SignalsUnscoredReason = "no_snapshot" | "analysing" | "no_surface_fit" | "no_forecast" | "suspected_split";
+
+/** The facts behind an unscored reason, so the screen can say what the issue is rather than only that there is one. */
+export type SignalsUnscoredDetail =
+  | { kind: "analysing"; snapshotCapturedAt: string }
+  | {
+      kind: "fit";
+      /** Expiries the fit produced a slice for, by fit status (ok, poor_fit, insufficient_points, ...). Empty when the fit produced none. */
+      sliceStatusCounts: Record<string, number>;
+      expiryCount: number;
+      /** Why the fit produced nothing: a skip reason (no_spot_price, no_risk_free_rate, no_quotes) or "error: <message>"; null when it ran and no slice was usable. */
+      fitIssue: string | null;
+    }
+  | { kind: "forecast"; dailyBarCount: number; barsNeeded: number }
+  | { kind: "split"; splitDateIso: string };
 export type SignalsPriceSource = "live" | "frozen" | "snapshot";
 
 export interface SnapshotHeader {
@@ -15,6 +30,10 @@ export interface SnapshotHeader {
   capturedAt: string;
   underlyingPrice: number | null;
   riskFreeRatePercent: number | null;
+  /** When the surface fit finished with this snapshot (usable surface or not); null while it is still pending. */
+  fitCompletedAt: string | null;
+  /** Why the fit produced nothing for this snapshot (skip reason or "error: ..."), when it did not. */
+  fitIssue: string | null;
 }
 
 export interface PreviousClose {
@@ -121,6 +140,8 @@ export interface TickerSignals {
   ivShiftByExpiry: Record<string, ExpiryIvShiftSummary>;
   quoteSourceCounts: QuoteSourceCounts;
   unscoredReason: SignalsUnscoredReason | null;
+  /** What is behind unscoredReason (null for no_snapshot, which needs no detail). */
+  unscoredDetail: SignalsUnscoredDetail | null;
   /** Set when the ticker was scored but no candidate survived: why, so the screen can say so. */
   noCandidatesReason: SignalsNoCandidatesReason | null;
 }

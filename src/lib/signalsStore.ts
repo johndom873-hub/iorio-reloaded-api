@@ -101,10 +101,33 @@ export async function loadLatestSnapshot(tickerId: string): Promise<SnapshotHead
     .where({ ticker_id: tickerId })
     .whereIn("status", ["complete", "partial"])
     .orderBy("trading_date", "desc")
-    .select("id as snapshotId", db.raw('trading_date::text as "tradingDateIso"'), "captured_at as capturedAt", "underlying_price as underlyingPrice", "risk_free_rate_percent as riskFreeRatePercent")
+    .select("id as snapshotId", db.raw('trading_date::text as "tradingDateIso"'), "captured_at as capturedAt", "underlying_price as underlyingPrice", "risk_free_rate_percent as riskFreeRatePercent", "fit_completed_at as fitCompletedAt", "fit_issue as fitIssue")
     .first();
   if (!row) return null;
-  return { snapshotId: row.snapshotId, tradingDateIso: row.tradingDateIso, capturedAt: row.capturedAt, underlyingPrice: row.underlyingPrice === null ? null : Number(row.underlyingPrice), riskFreeRatePercent: row.riskFreeRatePercent === null ? null : Number(row.riskFreeRatePercent) };
+  return {
+    snapshotId: row.snapshotId,
+    tradingDateIso: row.tradingDateIso,
+    capturedAt: row.capturedAt,
+    underlyingPrice: row.underlyingPrice === null ? null : Number(row.underlyingPrice),
+    riskFreeRatePercent: row.riskFreeRatePercent === null ? null : Number(row.riskFreeRatePercent),
+    fitCompletedAt: row.fitCompletedAt === null ? null : new Date(row.fitCompletedAt).toISOString(),
+    fitIssue: row.fitIssue,
+  };
+}
+
+/**
+ * One cheap read for the live streams' change check: per ticker, a token that changes whenever its latest usable snapshot
+ * changes or its surface fit finishes. A ticker with no snapshot has no entry.
+ */
+export async function loadSnapshotVersions(tickerIds: string[]): Promise<Map<string, string>> {
+  if (tickerIds.length === 0) return new Map();
+  const rows: { tickerId: string; snapshotId: string; fitCompletedAt: Date | null }[] = await db("option_chain_snapshots")
+    .whereIn("ticker_id", tickerIds)
+    .whereIn("status", ["complete", "partial"])
+    .distinctOn("ticker_id")
+    .orderBy([{ column: "ticker_id" }, { column: "trading_date", order: "desc" }])
+    .select("ticker_id as tickerId", "id as snapshotId", "fit_completed_at as fitCompletedAt");
+  return new Map(rows.map((row) => [row.tickerId, `${row.snapshotId}|${row.fitCompletedAt === null ? "pending" : new Date(row.fitCompletedAt).toISOString()}`]));
 }
 
 export async function loadSlices(snapshotId: string): Promise<SignalSurfaceSlice[]> {

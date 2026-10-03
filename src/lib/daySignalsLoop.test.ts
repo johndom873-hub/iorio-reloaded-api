@@ -33,7 +33,7 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
     symbol: "AAA",
     companyName: null,
     sector: null,
-    header: { snapshotId: "s1", tradingDateIso, capturedAt: `${tradingDateIso}T14:00:00Z`, underlyingPrice: forward, riskFreeRatePercent: rate * 100 },
+    header: { snapshotId: "s1", tradingDateIso, capturedAt: `${tradingDateIso}T14:00:00Z`, underlyingPrice: forward, riskFreeRatePercent: rate * 100, fitCompletedAt: "2026-09-21T14:06:00Z", fitIssue: null },
     slices: [slice],
     quotes: strikes.map(([strike, right]) => quoteAt(strike, right)),
     dayQuotes,

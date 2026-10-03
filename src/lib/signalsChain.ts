@@ -13,7 +13,8 @@ import type { AccountContext, SignalsPriceSource, SignalsUnscoredReason, TickerS
 // way a candidate is scored, with the Signals tab filters lifted. Both run
 // the unchanged scoreTicker; nothing here computes a score of its own.
 
-export type SignalsChainCellState = "candidate" | "filtered" | "not_captured";
+/** unscored: the ticker itself has no score (or is still being analysed), so no contract is graded; filtered: quoted but left out by Signals. */
+export type SignalsChainCellState = "candidate" | "filtered" | "unscored" | "not_captured";
 
 export interface SignalsChainCell {
   state: SignalsChainCellState;
@@ -60,6 +61,7 @@ export interface SignalsChain {
 
 const unscoredTickerReasons: Record<SignalsUnscoredReason, string> = {
   no_snapshot: "No option chain capture for this ticker yet",
+  analysing: "Snapshot saved, surface fit pending",
   no_surface_fit: "No volatility surface for this ticker today",
   no_forecast: "No volatility forecast for this ticker",
   suspected_split: "Volatility forecast held back (suspected stock split)",
@@ -147,7 +149,7 @@ export interface ChainCellScoring {
   exclusions: Map<string, SignalContractExclusion>;
 }
 
-/** Pure: how one contract shows in the chain (candidate / filtered with the reason / not captured), from one scoring run. A filtered cell's delta is the streamed IBKR delta, else the scoring's, else the capture's. Shared by the REST chain and the live stream so both draw a cell the same way. */
+/** Pure: how one contract shows in the chain (candidate / filtered with the reason / unscored ticker / not captured), from one scoring run. A filtered cell's delta is the streamed IBKR delta, else the scoring's, else the capture's. Shared by the REST chain and the live stream so both draw a cell the same way. */
 export function createChainCellResolver(scoring: ChainCellScoring | null, capturedDeltaByContract: Map<string, number>, liveDeltaByContract: Map<string, number> = new Map()): (ref: ContractRef) => SignalsChainCell {
   const candidatesByKey = new Map((scoring?.scored.candidates ?? []).map((candidate) => [candidateContractKey(candidate), candidate]));
   const quotesByKey = new Map((scoring?.scoringQuotes ?? []).map((quote) => [contractKey(quote), quote]));
@@ -161,9 +163,10 @@ export function createChainCellResolver(scoring: ChainCellScoring | null, captur
     const quote = quotesByKey.get(key);
     if (!quote) return notCapturedCell;
     const exclusion = scoring?.exclusions.get(key);
+    // A ticker with no score has no per-contract exclusions to report: its cells say so, instead of claiming the Signals settings removed them.
     const reason = exclusion ? describeContractExclusion(exclusion) : unscoredReason ? describeUnscoredTicker(unscoredReason) : "Not a Signals candidate";
     return {
-      state: "filtered",
+      state: unscoredReason ? "unscored" : "filtered",
       bid: quote.bid,
       ask: quote.ask,
       delta: liveDeltaByContract.get(key) ?? exclusionDelta(exclusion) ?? capturedDeltaByContract.get(key) ?? null,

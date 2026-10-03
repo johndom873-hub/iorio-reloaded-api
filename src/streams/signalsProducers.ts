@@ -11,7 +11,7 @@ import { accountRefreshIntervalMs, candidateContractKey, candidateContractRef, c
 import { createChainCellResolver, scoreSignalContract, scoreTickerWithExclusions, type SignalContractScore, type SignalsChainCell } from "../lib/signalsChain.js";
 import { rollCandidateKey, type HeldLegScore, type RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import { loadCapturedDeltas } from "../lib/signalsChainStore.js";
-import { loadAccountContext, loadDayQuotesAsLiveQuotes, loadSignalsUniverseTicker, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
+import { loadAccountContext, loadDayQuotesAsLiveQuotes, loadSignalsUniverseTicker, loadSignalsUniverseTickers, loadSnapshotVersions, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import { loadSignalSettings, type SignalSettings } from "../lib/signalSettingsStore.js";
 import type { AccountContext, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { computeUncompensatedSharesInWorker } from "../lib/uncompensatedShareWorkerPool.js";
@@ -88,10 +88,20 @@ const contractKeyPattern = /^\d{4}-\d{2}-\d{2}\|\d+(\.\d+)?\|[CP]$/;
 
 export const dayQuotesStatusRefreshIntervalMs = 30_000;
 
+/**
+ * How often a stream asks whether a ticker's snapshot or fit changed (a capture saving a ticker, its fit finishing). The inputs are
+ * loaded once when a stream opens, so without this a stream opened mid-capture keeps the half-finished state for its whole life.
+ * One mechanism for every change, chosen over the job_completed notification (approved 2026-10-03): a notification is at-most-once
+ * and only fires when a whole job ends, while this also shows each ticker as it lands.
+ */
+export const snapshotChangePollIntervalMs = 10_000;
+
 export interface SignalsProducerDependencies {
   loadSignalsUniverseTickers(): Promise<SignalsTickerRow[]>;
   loadSignalsUniverseTicker(symbol: string): Promise<SignalsTickerRow | null>;
   loadTickerSignalsInputs(ticker: SignalsTickerRow): Promise<TickerSignalsInputs>;
+  /** Per ticker id, a token that changes when its latest usable snapshot or its fit status changes (no entry: no snapshot). */
+  loadSnapshotVersions(tickerIds: string[]): Promise<Map<string, string>>;
   loadDayQuotes(ticker: SignalsTickerRow, snapshotTradingDateIso: string): Promise<LiveOptionQuote[]>;
   onDayQuotesUpdated(listener: (tickerId: string) => void): () => void;
   loadDayQuotesStatus(): Promise<DayQuotesStatus>;
@@ -111,6 +121,7 @@ export const defaultSignalsProducerDependencies: SignalsProducerDependencies = {
   loadSignalsUniverseTickers,
   loadSignalsUniverseTicker,
   loadTickerSignalsInputs,
+  loadSnapshotVersions,
   loadDayQuotes: (ticker, snapshotTradingDateIso) => loadDayQuotesAsLiveQuotes(ticker.tickerId, snapshotTradingDateIso),
   onDayQuotesUpdated,
   loadDayQuotesStatus,
@@ -273,12 +284,16 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       const [tickers, initialAccount, settings, initialDayQuotesStatus] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadAccountContext(), deps.loadSignalSettings(), deps.loadDayQuotesStatus()]);
       let account = initialAccount;
       let dayQuotesStatus = initialDayQuotesStatus;
+      // Read before the inputs: a change landing between the two reads is then picked up by the first poll instead of being missed.
+      const initialVersions = await deps.loadSnapshotVersions(tickers.map((ticker) => ticker.tickerId));
       const inputsList = await Promise.all(tickers.map((ticker) => deps.loadTickerSignalsInputs(ticker)));
       if (signal.aborted) return;
 
       interface TickerState {
         ticker: SignalsTickerRow;
         inputs: TickerSignalsInputs;
+        /** The snapshot/fit token the inputs were loaded under (see loadSnapshotVersions). */
+        snapshotVersion: string | null;
         spot: number | null;
         priceSource: SignalsPriceSource;
         /**
@@ -295,7 +310,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       const statesByTickerId = new Map<string, TickerState>();
       tickers.forEach((ticker, index) => {
         const inputs = inputsList[index]!;
-        const state: TickerState = { ticker, inputs, spot: null, priceSource: "snapshot", liveQuotes: new Map(), bestLine: null, scored: scoreTicker(inputs, account, settings) };
+        const state: TickerState = { ticker, inputs, snapshotVersion: initialVersions.get(ticker.tickerId) ?? null, spot: null, priceSource: "snapshot", liveQuotes: new Map(), bestLine: null, scored: scoreTicker(inputs, account, settings) };
         states.set(ticker.symbol, state);
         statesByTickerId.set(ticker.tickerId, state);
       });
@@ -366,6 +381,29 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       signal.addEventListener("abort", unsubscribeDayQuotes, { once: true });
 
       startPeriodicRefresh(
+        snapshotChangePollIntervalMs,
+        async () => {
+          const versions = await deps.loadSnapshotVersions(tickers.map((ticker) => ticker.tickerId));
+          const changed = [...states.values()].filter((state) => (versions.get(state.ticker.tickerId) ?? null) !== state.snapshotVersion);
+          if (changed.length === 0) return;
+          await Promise.all(
+            changed.map(async (state) => {
+              const version = versions.get(state.ticker.tickerId) ?? null;
+              const reloaded = await deps.loadTickerSignalsInputs(state.ticker);
+              if (signal.aborted) return;
+              state.inputs = reloaded;
+              state.snapshotVersion = version;
+              rescore(state);
+              syncBestLine(state);
+            }),
+          );
+          if (!signal.aborted) frames.markDirty();
+        },
+        signal,
+        "signalsScreen snapshot changes",
+      );
+
+      startPeriodicRefresh(
         accountRefreshIntervalMs,
         async () => {
           const [refreshedAccount, freeSharesList] = await Promise.all([deps.loadAccountContext(), Promise.all(tickers.map((ticker) => deps.fetchAvailableUncoveredShares(ticker.tickerId)))]);
@@ -422,9 +460,11 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       const symbol = parameters.symbol!;
       const ticker = await deps.loadSignalsUniverseTicker(symbol);
       if (!ticker) throw new StreamRequestError(404, `${symbol} is not on the shortlist and has no open short option leg.`);
+      const initialVersions = await deps.loadSnapshotVersions([ticker.tickerId]); // before the inputs, see the screen stream
       const [initialInputs, initialAccount, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadSignalSettings()]);
       if (signal.aborted) return;
       let inputs = initialInputs;
+      let snapshotVersion = initialVersions.get(ticker.tickerId) ?? null;
       let account = initialAccount;
       let spot: number | null = null;
       let priceSource: SignalsPriceSource = "snapshot";
@@ -495,6 +535,25 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
           .catch((error) => reportStreamFailure("day-quotes-reload", `signalsTicker ${symbol}: day quotes reload failed`, error));
       });
       signal.addEventListener("abort", unsubscribeDayQuotes, { once: true });
+
+      startPeriodicRefresh(
+        snapshotChangePollIntervalMs,
+        async () => {
+          const version = (await deps.loadSnapshotVersions([ticker.tickerId])).get(ticker.tickerId) ?? null;
+          if (version === snapshotVersion) return;
+          const reloaded = await deps.loadTickerSignalsInputs(ticker);
+          if (signal.aborted) return;
+          inputs = reloaded;
+          snapshotVersion = version;
+          lastSimulatedSpot = null; // a new surface invalidates the last Monte Carlo and its per-contract results
+          uncompensatedByContract = new Map<string, number | null>();
+          rescore();
+          void refreshUncompensatedShare();
+          frames.markDirty();
+        },
+        signal,
+        `signalsTicker ${symbol} snapshot changes`,
+      );
 
       startPeriodicRefresh(
         accountRefreshIntervalMs,

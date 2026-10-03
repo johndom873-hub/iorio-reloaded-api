@@ -38,7 +38,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     symbol: "TEST",
     companyName: "Test Co",
     sector: null,
-    header: { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100 },
+    header: { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100, fitCompletedAt: "2026-09-21T14:06:00Z", fitIssue: null },
     slices: [slice("2026-10-21", years30), slice("2026-11-20", years60)],
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)],
     dayQuotes: [],
@@ -171,6 +171,33 @@ describe("scoreTicker", () => {
     const split = scoreTicker(inputs({ forecast: null, suspectedSplitDateIso: "2026-09-15" }), account, permissiveSettings);
     expect(split.unscoredReason).toBe("suspected_split");
     expect(split.caveats.map((caveat) => caveat.id)).toContain("suspected_split");
+  });
+
+  it("a snapshot whose fit has not finished is Analysing (pending, with no problem implied), ahead of every fit and forecast check", () => {
+    const base = inputs();
+    const pending = scoreTicker(inputs({ header: { ...base.header!, fitCompletedAt: null }, slices: [], forecast: null }), account, permissiveSettings);
+    expect(pending.unscoredReason).toBe("analysing");
+    expect(pending.unscoredDetail).toEqual({ kind: "analysing", snapshotCapturedAt: "2026-09-21T14:00:00Z" });
+    expect(pending.best).toBeNull();
+    expect(pending.candidates).toEqual([]);
+  });
+
+  it("says what is behind each unscored reason", () => {
+    const base = inputs();
+    expect(scoreTicker(inputs({ header: null }), account, permissiveSettings).unscoredDetail).toBeNull();
+    // The fit ran and nothing was usable: slice counts by status, no issue of its own.
+    const poor = scoreTicker(inputs({ slices: [slice("2026-10-21", years30, { status: "poor_fit" as never }), slice("2026-11-20", years60, { status: "poor_fit" as never }), slice("2026-12-18", years60, { status: "insufficient_points" as never })] }), account, permissiveSettings);
+    expect(poor.unscoredDetail).toEqual({ kind: "fit", sliceStatusCounts: { poor_fit: 2, insufficient_points: 1 }, expiryCount: 3, fitIssue: null });
+    // The fit skipped the snapshot: its reason travels with the header.
+    const skipped = scoreTicker(inputs({ header: { ...base.header!, fitIssue: "no_quotes" }, slices: [] }), account, permissiveSettings);
+    expect(skipped.unscoredDetail).toEqual({ kind: "fit", sliceStatusCounts: {}, expiryCount: 0, fitIssue: "no_quotes" });
+    // A header with no rate and no issue of its own is named from the header.
+    const noRate = scoreTicker(inputs({ header: { ...base.header!, riskFreeRatePercent: null } }), account, permissiveSettings);
+    expect(noRate.unscoredReason).toBe("no_surface_fit");
+    expect(noRate.unscoredDetail).toMatchObject({ kind: "fit", fitIssue: "no_risk_free_rate" });
+    expect(scoreTicker(inputs({ forecast: null, dailyBarCount: 18 }), account, permissiveSettings).unscoredDetail).toEqual({ kind: "forecast", dailyBarCount: 18, barsNeeded: 22 });
+    expect(scoreTicker(inputs({ forecast: null, suspectedSplitDateIso: "2026-09-15" }), account, permissiveSettings).unscoredDetail).toEqual({ kind: "split", splitDateIso: "2026-09-15" });
+    expect(scoreTicker(inputs(), account, permissiveSettings).unscoredDetail).toBeNull();
   });
 
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {

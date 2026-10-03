@@ -2,10 +2,10 @@ import { getEventListeners } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "../lib/impliedVolatilitySurface.js";
 import type { SignalQuote, SignalSurfaceSlice } from "../lib/signalCandidates.js";
-import { candidateContractKey, contractKey, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
+import { candidateContractKey, contractKey, liveFrameIntervalMs, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import type { SignalsTickerRow } from "../lib/signalsStore.js";
 import type { TickerSignalsInputs } from "../lib/signalsTypes.js";
-import { createSignalsProducers, firstFramePriceGraceMs, type SignalsQuotesFrame, type SignalsProducerDependencies, type SignalsScreenFrame, type SignalsTickerFrame } from "./signalsProducers.js";
+import { createSignalsProducers, firstFramePriceGraceMs, snapshotChangePollIntervalMs, type SignalsQuotesFrame, type SignalsProducerDependencies, type SignalsScreenFrame, type SignalsTickerFrame } from "./signalsProducers.js";
 import { StreamRequestError } from "./streamProtocol.js";
 
 const forward = 100;
@@ -39,7 +39,7 @@ const hood: SignalsTickerRow = { tickerId: "id-hood", symbol: "HOOD", companyNam
 function inputsFor(ticker: SignalsTickerRow, withSnapshot: boolean, freeShares = 200): TickerSignalsInputs {
   return {
     ...ticker,
-    header: withSnapshot ? { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100 } : null,
+    header: withSnapshot ? { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100, fitCompletedAt: "2026-09-21T14:06:00Z", fitIssue: null } : null,
     slices: withSnapshot ? [slice("2026-10-21", years30), slice("2026-11-20", years60)] : [],
     quotes: withSnapshot ? [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)] : [],
     dayQuotes: [],
@@ -78,6 +78,8 @@ interface Harness {
   monteCarloCalls: { spotPrice: number; candidateCount: number }[];
   account: { freeCash: number };
   freeShares: { value: number };
+  /** What the snapshot-change poll reads, and what loadTickerSignalsInputs hands out: tests change these to simulate a capture/fit landing. */
+  snapshots: { versions: Map<string, string>; inputsLoads: string[]; analysing: Set<string> };
 }
 
 function createHarness(): Harness {
@@ -90,11 +92,17 @@ function createHarness(): Harness {
   const monteCarloCalls: Harness["monteCarloCalls"] = [];
   const account = { freeCash: 1_000_000 };
   const freeShares = { value: 200 };
+  const snapshots: Harness["snapshots"] = { versions: new Map(), inputsLoads: [], analysing: new Set() };
   const untilAbort = (signal: AbortSignal) => new Promise<void>((resolve) => (signal.aborted ? resolve() : signal.addEventListener("abort", () => resolve(), { once: true })));
   const deps: SignalsProducerDependencies = {
     loadSignalsUniverseTickers: async () => [aaoi, hood],
     loadSignalsUniverseTicker: async (symbol) => (symbol === "AAOI" ? aaoi : symbol === "HOOD" ? hood : null),
-    loadTickerSignalsInputs: async (ticker) => inputsFor(ticker, ticker.symbol === "AAOI", freeShares.value),
+    loadTickerSignalsInputs: async (ticker) => {
+      snapshots.inputsLoads.push(ticker.symbol);
+      const inputs = inputsFor(ticker, ticker.symbol === "AAOI", freeShares.value);
+      return snapshots.analysing.has(ticker.symbol) && inputs.header ? { ...inputs, header: { ...inputs.header, fitCompletedAt: null }, slices: [] } : inputs;
+    },
+    loadSnapshotVersions: async (tickerIds) => new Map([...snapshots.versions].filter(([tickerId]) => tickerIds.includes(tickerId))),
     loadDayQuotes: async () => {
       dayQuotes.loads += 1;
       return dayQuotes.rows;
@@ -134,6 +142,7 @@ function createHarness(): Harness {
     monteCarloCalls,
     account,
     freeShares,
+    snapshots,
   };
 }
 
@@ -540,6 +549,78 @@ describe("signalsQuotes producer (what the modal has on screen)", () => {
     await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
     expect(harness.optionSubscriptions).toEqual([]);
     expect(frames[0]!.cells).toEqual({});
+    abort.abort();
+  });
+});
+
+describe("snapshot-change poll (a stream opened mid-capture must not stay half-finished)", () => {
+  it("screen: a ticker opened while its fit is pending is Analysing, and becomes scored on the first poll after its fit lands, without reloading the others", async () => {
+    const harness = createHarness();
+    harness.snapshots.analysing.add("AAOI");
+    harness.snapshots.versions.set("id-aaoi", "snap-1|pending");
+    harness.snapshots.versions.set("id-hood", "snap-h|2026-09-22T14:00:00.000Z");
+    const { signalsScreen } = createSignalsProducers(harness.deps);
+    const frames: SignalsScreenFrame[] = [];
+    const abort = new AbortController();
+    void signalsScreen.run({}, { userId: "u" }, (frame) => frames.push(frame as SignalsScreenFrame), abort.signal);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
+    expect(frames.at(-1)!.rows.find((row) => row.symbol === "AAOI")).toMatchObject({ unscoredReason: "analysing", best: null, unscoredDetail: { kind: "analysing" } });
+    expect(harness.snapshots.inputsLoads).toEqual(["AAOI", "HOOD"]);
+
+    // Nothing changed: a poll reloads nothing.
+    await vi.advanceTimersByTimeAsync(snapshotChangePollIntervalMs);
+    expect(harness.snapshots.inputsLoads).toEqual(["AAOI", "HOOD"]);
+
+    // The fit lands: the next poll reloads only AAOI and the row is scored.
+    harness.snapshots.analysing.delete("AAOI");
+    harness.snapshots.versions.set("id-aaoi", "snap-1|2026-09-22T14:01:00.000Z");
+    await vi.advanceTimersByTimeAsync(snapshotChangePollIntervalMs);
+    await vi.advanceTimersByTimeAsync(liveFrameIntervalMs);
+    expect(harness.snapshots.inputsLoads).toEqual(["AAOI", "HOOD", "AAOI"]);
+    const aaoi = frames.at(-1)!.rows.find((row) => row.symbol === "AAOI")!;
+    expect(aaoi.unscoredReason).toBeNull();
+    expect(aaoi.best).not.toBeNull();
+    abort.abort();
+  });
+
+  it("screen: a stream that opened before the capture picks up the new snapshot of a ticker and keeps polling", async () => {
+    const harness = createHarness();
+    harness.snapshots.versions.set("id-aaoi", "snap-old|2026-09-21T14:00:00.000Z");
+    const { signalsScreen } = createSignalsProducers(harness.deps);
+    const frames: SignalsScreenFrame[] = [];
+    const abort = new AbortController();
+    void signalsScreen.run({}, { userId: "u" }, (frame) => frames.push(frame as SignalsScreenFrame), abort.signal);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
+    expect(harness.snapshots.inputsLoads).toEqual(["AAOI", "HOOD"]);
+    harness.snapshots.versions.set("id-aaoi", "snap-new|pending");
+    harness.snapshots.analysing.add("AAOI");
+    await vi.advanceTimersByTimeAsync(snapshotChangePollIntervalMs);
+    await vi.advanceTimersByTimeAsync(liveFrameIntervalMs);
+    expect(frames.at(-1)!.rows.find((row) => row.symbol === "AAOI")!.unscoredReason).toBe("analysing");
+    harness.snapshots.analysing.delete("AAOI");
+    harness.snapshots.versions.set("id-aaoi", "snap-new|2026-09-22T14:01:00.000Z");
+    await vi.advanceTimersByTimeAsync(snapshotChangePollIntervalMs);
+    await vi.advanceTimersByTimeAsync(liveFrameIntervalMs);
+    expect(frames.at(-1)!.rows.find((row) => row.symbol === "AAOI")!.unscoredReason).toBeNull();
+    abort.abort();
+  });
+
+  it("ticker stream: reloads its inputs when the snapshot version changes", async () => {
+    const harness = createHarness();
+    harness.snapshots.analysing.add("AAOI");
+    harness.snapshots.versions.set("id-aaoi", "snap-1|pending");
+    const { signalsTicker } = createSignalsProducers(harness.deps);
+    const frames: SignalsTickerFrame[] = [];
+    const abort = new AbortController();
+    void signalsTicker.run({ symbol: "AAOI" }, { userId: "u" }, (frame) => frames.push(frame as SignalsTickerFrame), abort.signal);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
+    expect(frames.at(-1)!.signals.unscoredReason).toBe("analysing");
+    harness.snapshots.analysing.delete("AAOI");
+    harness.snapshots.versions.set("id-aaoi", "snap-1|2026-09-22T14:01:00.000Z");
+    await vi.advanceTimersByTimeAsync(snapshotChangePollIntervalMs);
+    await vi.advanceTimersByTimeAsync(liveFrameIntervalMs);
+    expect(frames.at(-1)!.signals.unscoredReason).toBeNull();
+    expect(frames.at(-1)!.signals.best).not.toBeNull();
     abort.abort();
   });
 });

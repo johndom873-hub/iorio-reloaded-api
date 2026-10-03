@@ -4,7 +4,8 @@ import { buildRollCandidates, pickBestRoll, scoreHeldLegs, type HeldLegScore, ty
 import { buildTickerCaveats } from "./signalsRoadmap.js";
 import type { SignalSettings } from "./signalSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
-import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsNoCandidatesReason, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
+import { minimumBarsForAnyForecast } from "./volatilityEdge.js";
+import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsNoCandidatesReason, SignalsPriceSource, SignalsScreenRow, SignalsUnscoredDetail, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
 
 // Pure re-scoring for the Signals live layer (stage 2, decisions with Marcelo 2026-09-22):
 // the fitted surface stays the 10:00 snapshot and follows the live spot by sticky
@@ -178,7 +179,7 @@ export interface ScoreTickerObserver {
 export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: SignalSettings, live?: LiveScoringOverrides, observer?: ScoreTickerObserver): TickerSignals {
   const { header } = inputs;
   const spotPrice = live?.spotPrice ?? header?.underlyingPrice ?? null;
-  const base: Omit<TickerSignals, "unscoredReason"> = {
+  const base: Omit<TickerSignals, "unscoredReason" | "unscoredDetail"> = {
     tickerId: inputs.tickerId,
     symbol: inputs.symbol,
     companyName: inputs.companyName,
@@ -216,15 +217,22 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     quoteSourceCounts: { live: 0, day: 0, snapshot: 0 },
     noCandidatesReason: null,
   };
-  const withCaveats = (unscoredReason: TickerSignals["unscoredReason"]): TickerSignals => ({
+  const withCaveats = (unscoredReason: TickerSignals["unscoredReason"], unscoredDetail: SignalsUnscoredDetail | null = null): TickerSignals => ({
     ...base,
     unscoredReason,
+    unscoredDetail,
     caveats: buildTickerCaveats({ unscoredReason, suspectedSplitDateIso: inputs.suspectedSplitDateIso, dailyBarCount: inputs.dailyBarCount, dividendCadenceUnknown: inputs.dividendCadenceUnknown, snapshotDateIso: base.snapshotDateIso }, inputs.todayEasternIso),
   });
 
   if (!header) return withCaveats("no_snapshot");
-  if (base.fittedSliceCount === 0 || header.underlyingPrice === null || header.riskFreeRatePercent === null) return withCaveats("no_surface_fit");
-  if (!inputs.forecast) return withCaveats(inputs.suspectedSplitDateIso !== null ? "suspected_split" : "no_forecast");
+  // Saved but not yet analysed: pending, not a problem (the fit finishes within seconds of the capture).
+  if (header.fitCompletedAt === null) return withCaveats("analysing", { kind: "analysing", snapshotCapturedAt: header.capturedAt });
+  if (base.fittedSliceCount === 0 || header.underlyingPrice === null || header.riskFreeRatePercent === null) return withCaveats("no_surface_fit", describeFitIssue(inputs));
+  if (!inputs.forecast) {
+    return inputs.suspectedSplitDateIso !== null
+      ? withCaveats("suspected_split", { kind: "split", splitDateIso: inputs.suspectedSplitDateIso })
+      : withCaveats("no_forecast", { kind: "forecast", dailyBarCount: inputs.dailyBarCount, barsNeeded: minimumBarsForAnyForecast });
+  }
   if (spotPrice === null) return withCaveats("no_snapshot");
 
   const todaySlices = rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso);
@@ -290,6 +298,16 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     quoteSourceCounts: countQuoteSources(candidates),
     noCandidatesReason: candidates.length > 0 ? null : describeNoCandidates(exclusionTally, inputs.earningsDatesIso, header.tradingDateIso, settings),
   };
+}
+
+/** Pure: what the fit left behind for a snapshot with no usable surface: slice counts by status, plus why the fit produced nothing when it did not run to the end. */
+export function describeFitIssue(inputs: Pick<TickerSignalsInputs, "slices" | "header">): SignalsUnscoredDetail {
+  const sliceStatusCounts: Record<string, number> = {};
+  for (const slice of inputs.slices) sliceStatusCounts[slice.status] = (sliceStatusCounts[slice.status] ?? 0) + 1;
+  const header = inputs.header;
+  // A header gap names the cause when the fit left no issue of its own.
+  const headerIssue = header ? (header.underlyingPrice === null ? "no_spot_price" : header.riskFreeRatePercent === null ? "no_risk_free_rate" : null) : null;
+  return { kind: "fit", sliceStatusCounts, expiryCount: inputs.slices.length, fitIssue: header?.fitIssue ?? headerIssue };
 }
 
 /** Pure: turns the builder's exclusion tally into the reason a scored ticker shows no candidates. */
