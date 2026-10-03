@@ -518,6 +518,7 @@ Everything below is real, working code, verified end-to-end (migrations against 
 
 ## Screen list (finalized, 10 screens + shared modals, all built)
 General (cross-strategy): Dashboard, Positions, Trade Blotter, System Health, Risk & Limits, Screener, Price Performance, Calendar (added 2026-08-31).
+- **Expired-worthless options priced at 0 (2026-10-03, approved by Marcelo):** IBKR reports no mark for an option that expires worthless, so every expiry Friday the job skipped those positions and alerted (09-25: 7, 10-02: 8; in-the-money legs always had a mark). `src/lib/expiredOptionWorthlessPrice.ts`: an unpriced option leg past its 16:00 ET expiry gets 0 only if the expiry-day close in `daily_price_bars` is out of the money (close at the strike counts as worthless, as in the settlement audit); in the money or no bar stays unpriced, skipped and alerted. An IBKR mark is never overridden. Not yet deployed.
 Strategy-specific (tabs within the screen): Trade Alerts.
 Standalone/chromeless (own tab, no sidebar/topbar): Iorio Pulse (added 2026-09-13) — real-time ops-room dashboard, see the entry at the top of this file.
 Shared modal: Ticker Detail (live pricing/chart/option chain w/ Greeks, platform-wide — not yet showing position/strike/entry markers on the chart) — consolidated 2026-08-31 to also show the symbol's open positions (legs, payoff diagram, one card per open position; the price target/close-trigger fields were removed 2026-09-11) and closed-position history in one place; the separate Position Detail modal was folded in and no longer exists.

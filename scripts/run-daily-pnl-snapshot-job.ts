@@ -64,6 +64,7 @@ import { previousOpenSessionDate, easternDateIso } from "../src/lib/marketSessio
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 import { assignFlowsToSnapshots } from "../src/lib/flexCashFlowAssignment.js";
+import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthlessPrice.js";
 
 interface OpenPositionLegRow {
   positionId: string;
@@ -288,7 +289,13 @@ async function main(): Promise<void> {
       skipped = legsByPositionId.size;
       problems.push(`position price fetch failed, no position snapshots for ${snapshotDate} - ${describeError(reason).split("\n")[0]}`);
     } else {
-      const pricesByLegId = pricesByLegIdResult.value;
+      const expiredOptionCandidateLegs = legRows.flatMap((leg) =>
+        leg.legType === "option" && leg.optionType !== null && leg.strikePrice !== null && leg.expiryDate !== null
+          ? [{ legId: leg.legId, symbol: leg.symbol, optionType: leg.optionType, strike: Number(leg.strikePrice), expiryYyyymmdd: leg.expiryDate }]
+          : [],
+      );
+      const { pricesByLegId, filledLegIds: worthlessExpiredLegIds } = await fillWorthlessExpiredOptionPrices(expiredOptionCandidateLegs, pricesByLegIdResult.value);
+      if (worthlessExpiredLegIds.length > 0) console.log(`Priced ${worthlessExpiredLegIds.length} option leg(s) at 0: expired out of the money, so IBKR reports no mark.`);
       for (const [positionId, legs] of legsByPositionId) {
         let unrealizedPnl = 0;
         let premiumPnl = 0;
