@@ -80,8 +80,9 @@ export class PlutoAgent {
   }
 
   async start(): Promise<void> {
-    // The first housekeeping tick borrows the IBKR connection while it is still connecting; the default 3 s
-    // borrow timeout made the day's first session-close read fail every boot.
+    // The agent's own copy of the live connection: its outage alerts are its own, not the web dyno's.
+    sharedLiveConnection.setLabel("Pluto live");
+    // The first ticks borrow the IBKR connection while it is still connecting; the default 3 s borrow timeout is too short.
     sharedLiveConnection.setBorrowTimeoutMs(30_000);
     this.settings = await loadPlutoSettings();
     this.marketWatch.updateSettings(this.settings);

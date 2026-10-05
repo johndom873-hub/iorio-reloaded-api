@@ -106,7 +106,7 @@ interface SharedConnectionOptions {
 }
 
 class SharedReadConnection {
-  constructor(private readonly options: SharedConnectionOptions) {}
+  constructor(private options: SharedConnectionOptions) {}
 
   private ib: IBApi | null = null;
   private tunnel: IbkrTunnel | null = null;
@@ -135,6 +135,14 @@ class SharedReadConnection {
    */
   setBorrowTimeoutMs(timeoutMs: number): void {
     this.borrowTimeoutMs = timeoutMs;
+  }
+
+  /**
+   * For another process holding its own copy of this connection (the Pluto agent): its log lines and outage alerts
+   * (keyed shared-ibkr:<label>) must not share the web dyno's alert state. Call before the first borrow.
+   */
+  setLabel(label: string): void {
+    this.options = { ...this.options, label };
   }
 
   /**
