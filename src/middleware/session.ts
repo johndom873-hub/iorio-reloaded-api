@@ -49,5 +49,11 @@ export const sessionMiddleware = session({
 declare module "express-session" {
   interface SessionData {
     userId: string;
+    // How the session was authenticated; see isAuthenticatedSession. "password" is only issued while PASSKEY_LOGIN=off.
+    authMethod: "password" | "passkey" | "service_password";
+    // Set by a correct password while passkeys are required: allows registering a first passkey, nothing else.
+    pendingPasskeyEnrollment: { userId: string; expiresAt: number };
+    // The one outstanding WebAuthn challenge for this browser session; consumed by the matching verify call.
+    passkeyChallenge: { purpose: "registration" | "login"; value: string; expiresAt: number };
   }
 }

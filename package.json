@@ -40,6 +40,7 @@
     "release-phase:worker-deploy": "node dist/scripts/run-release-phase-worker-deploy.js"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^14.0.3",
     "@stoqey/ib": "^1.6.6",
     "argon2": "^0.45.1",
     "connect-pg-simple": "^10.0.0",

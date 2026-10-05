@@ -10,6 +10,7 @@ import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
 import { startOpsMonitor } from "./lib/opsMonitor.js";
 import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
+import { validatePasskeyConfiguration } from "./config/passkeyLoginMode.js";
 
 installShutdownHandler("web");
 
@@ -31,6 +32,9 @@ if (daySignalsLoopFlag !== "true" && daySignalsLoopFlag !== "false") {
 // first reservation — see ibkrMarketDataLinesEnabled() in config/env.ts.
 const marketDataLinesEnabled = ibkrMarketDataLinesEnabled();
 if (!marketDataLinesEnabled) console.log("IBKR market-data lines disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false): live quotes, option chains and the Day Signals loop will not open lines.");
+
+// Validated at boot like the flags above: a missing PASSKEY_LOGIN would otherwise surface as a 500 on the first request.
+validatePasskeyConfiguration();
 
 app.listen(port, () => {
   console.log(`Iorio Reloaded API listening on port ${port} (${readAppEnvironment()})`);
