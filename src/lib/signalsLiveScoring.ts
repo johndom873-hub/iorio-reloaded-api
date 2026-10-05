@@ -2,7 +2,7 @@ import { sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurfa
 import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { buildRollCandidates, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
-import type { SignalSettings } from "./signalSettingsStore.js";
+import type { TradingSettings } from "./tradingSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
 import { minimumBarsForAnyForecast } from "./volatilityEdge.js";
 import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsNoCandidatesReason, SignalsPriceSource, SignalsScreenRow, SignalsUnscoredDetail, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
@@ -176,7 +176,7 @@ export interface ScoreTickerObserver {
 }
 
 /** Scores one ticker from its loaded inputs; `live` re-reads the snapshot at the live spot and merges live quotes. */
-export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: SignalSettings, live?: LiveScoringOverrides, observer?: ScoreTickerObserver): TickerSignals {
+export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: TradingSettings, live?: LiveScoringOverrides, observer?: ScoreTickerObserver): TickerSignals {
   const { header } = inputs;
   const spotPrice = live?.spotPrice ?? header?.underlyingPrice ?? null;
   const base: Omit<TickerSignals, "unscoredReason" | "unscoredDetail"> = {
@@ -262,7 +262,8 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       snapshotDateIso: header.tradingDateIso,
       freeShares: inputs.freeShares,
       freeCash: account.freeCash,
-      maxNetDelta: settings.maxNetDelta,
+      deltaTargetMin: settings.deltaTargetMin,
+      deltaTargetMax: settings.deltaTargetMax,
       minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
       ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
       commissionEstimator: settings.commissionEstimator,
@@ -317,9 +318,9 @@ export function describeNoCandidates(
   tally: CandidateExclusionTally,
   earningsDatesIso: string[],
   snapshotDateIso: string,
-  settings: { minAnnualizedYieldPct: number; maxNetDelta: number },
+  settings: { minAnnualizedYieldPct: number; deltaTargetMin: number; deltaTargetMax: number },
 ): SignalsNoCandidatesReason {
-  const filtered = tally.aboveMaxDeltaCount + tally.belowMinYieldCount > 0;
+  const filtered = tally.belowMinDeltaCount + tally.aboveMaxDeltaCount + tally.belowMinYieldCount > 0;
   // Strictly after the snapshot, as expirySpansEarnings counts it.
   const nextEarnings = [...earningsDatesIso].sort().find((dateIso) => dateIso > snapshotDateIso) ?? null;
   return {
@@ -327,11 +328,13 @@ export function describeNoCandidates(
     surfaceFitRejectedExpiries: [...tally.surfaceFitRejectedExpiries].sort(),
     spansEarningsExpiries: [...tally.spansEarningsExpiries].sort(),
     earningsDateIso: tally.spansEarningsExpiries.size > 0 ? nextEarnings : null,
+    belowMinDeltaCount: tally.belowMinDeltaCount,
     aboveMaxDeltaCount: tally.aboveMaxDeltaCount,
     belowMinYieldCount: tally.belowMinYieldCount,
     bestAnnualizedYieldPct: tally.bestAnnualizedYieldPct,
     minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
-    maxNetDelta: settings.maxNetDelta,
+    deltaTargetMin: settings.deltaTargetMin,
+    deltaTargetMax: settings.deltaTargetMax,
   };
 }
 

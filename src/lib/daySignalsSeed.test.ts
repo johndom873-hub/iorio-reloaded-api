@@ -103,7 +103,7 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     todayEasternIso: tradingDateIso,
   };
 }
-const settings = { maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5 };
+const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5 };
 
 function seedDependencies(overrides: Partial<DaySignalsSeedDependencies> = {}) {
   const replaceDaySignalPool = vi.fn(async () => {});
@@ -116,7 +116,7 @@ function seedDependencies(overrides: Partial<DaySignalsSeedDependencies> = {}) {
     // RICH: surface IV (~20%) well above a 10% forecast -> positive edge; CHEAP: forecast 80% -> all Avoid; OLD: yesterday's snapshot.
     loadTickerSignalsInputs: async (ticker) => (ticker.symbol === "RICH" ? inputsFor("RICH", "2026-09-24", 0.1) : ticker.symbol === "CHEAP" ? inputsFor("CHEAP", "2026-09-24", 0.8) : inputsFor("OLD", "2026-09-23", 0.1)),
     loadAccountContext: async () => ({ freeCash: 50_000 }),
-    loadSignalSettings: async () => settings,
+    loadTradingSettings: async () => settings,
     replaceDaySignalPool,
     now: () => new Date("2026-09-24T14:40:00Z"),
     ...overrides,

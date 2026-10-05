@@ -76,7 +76,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
   };
 }
 const account = { freeCash: 1_000_000 };
-const settings = { maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 0.35, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5 };
+const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 0.35, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5 };
 const pathCount = 200;
 
 describe("buildSignalCandidates exclusion reporting", () => {
@@ -92,7 +92,8 @@ describe("buildSignalCandidates exclusion reporting", () => {
     snapshotDateIso: "2026-09-21",
     freeShares: 0,
     freeCash: 1_000_000,
-    maxNetDelta: 0.3,
+    deltaTargetMin: 0,
+    deltaTargetMax: 0.3,
     minAnnualizedYieldPct: 0,
   };
 
@@ -141,11 +142,105 @@ describe("scoreTicker with an observer", () => {
 
 describe("describeContractExclusion", () => {
   it("reads as plain words with absolute delta and percent yields", () => {
-    expect(describeContractExclusion({ kind: "above_max_delta", delta: -0.4712, maxNetDelta: 0.35 })).toBe("Δ 0.47 is over your max Δ 0.35");
+    expect(describeContractExclusion({ kind: "above_max_delta", delta: -0.4712, deltaTargetMax: 0.35 })).toBe("Δ 0.47 is over your max Δ 0.35");
     expect(describeContractExclusion({ kind: "below_min_yield", delta: 0.1, annualizedYieldPct: 12.34, minAnnualizedYieldPct: 20 })).toBe("Yield 12.3%/yr is under your min 20%/yr");
     expect(describeContractExclusion({ kind: "spans_earnings", earningsDateIso: "2026-10-15" })).toBe("Expiry spans earnings on Oct 15");
     expect(describeContractExclusion({ kind: "in_the_money" })).toBe("In the money — Signals only sells out-of-the-money contracts");
     expect(describeContractExclusion({ kind: "surface_fit_rejected", sliceStatus: "butterfly_arbitrage" })).toBe("This expiry's volatility surface fit was rejected (butterfly arbitrage)");
+  });
+});
+
+describe("describeContractExclusion: the delta band", () => {
+  it("below_min_delta reads with the absolute delta and the configured minimum to two decimals", () => {
+    expect(describeContractExclusion({ kind: "below_min_delta", delta: -0.12, deltaTargetMin: 0.2 })).toBe("Δ 0.12 is under your min Δ 0.20");
+    expect(describeContractExclusion({ kind: "below_min_delta", delta: 0.0449, deltaTargetMin: 0.3 })).toBe("Δ 0.04 is under your min Δ 0.30");
+  });
+
+  it("above_max_delta reads with the absolute delta and the configured maximum to two decimals, for a call or a put", () => {
+    expect(describeContractExclusion({ kind: "above_max_delta", delta: 0.4712, deltaTargetMax: 0.3 })).toBe("Δ 0.47 is over your max Δ 0.30");
+    expect(describeContractExclusion({ kind: "above_max_delta", delta: -0.4712, deltaTargetMax: 0.35 })).toBe("Δ 0.47 is over your max Δ 0.35");
+  });
+
+  it("the two band messages are different sentences (under min vs over max)", () => {
+    const under = describeContractExclusion({ kind: "below_min_delta", delta: 0.1, deltaTargetMin: 0.2 });
+    const over = describeContractExclusion({ kind: "above_max_delta", delta: 0.5, deltaTargetMax: 0.3 });
+    expect(under).toContain("under your min");
+    expect(under).not.toContain("over your max");
+    expect(over).toContain("over your max");
+    expect(over).not.toContain("under your min");
+  });
+});
+
+describe("the delta band in the chain view", () => {
+  // A band of exactly one candidate's delta on each side, found from the unrestricted scoring so no delta is hard-coded.
+  const unrestricted = scoreTicker(inputs(), account, { ...settings, deltaTargetMin: 0, deltaTargetMax: 1 });
+  const byDelta = [...unrestricted.candidates].sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta));
+  const lowest = byDelta[0]!;
+  const highest = byDelta[byDelta.length - 1]!;
+  const keyOf = (candidate: { expiry: string; strike: number; strategyKey: string }) => `${candidate.expiry}|${candidate.strike}|${candidate.strategyKey === "covered_call" ? "C" : "P"}`;
+  const rightOf = (candidate: { strategyKey: string }) => (candidate.strategyKey === "covered_call" ? ("C" as const) : ("P" as const));
+
+  it("the fixture spans several different deltas, so the tests below mean something", () => {
+    expect(byDelta.length).toBeGreaterThanOrEqual(3);
+    expect(Math.abs(highest.delta)).toBeGreaterThan(Math.abs(lowest.delta) + 0.05);
+  });
+
+  it("reports below_min_delta for contracts under the minimum and above_max_delta for those over the maximum, each with the configured bound", () => {
+    const middleDelta = Math.abs(byDelta[Math.floor(byDelta.length / 2)]!.delta);
+    const band = { ...settings, deltaTargetMin: middleDelta - 0.0001, deltaTargetMax: middleDelta + 0.0001 };
+    const { exclusions, scored } = scoreTickerWithExclusions(inputs(), account, band);
+    const belowKey = keyOf(lowest);
+    const aboveKey = keyOf(highest);
+    expect(exclusions.get(belowKey)).toEqual({ kind: "below_min_delta", delta: lowest.delta, deltaTargetMin: band.deltaTargetMin });
+    expect(exclusions.get(aboveKey)).toEqual({ kind: "above_max_delta", delta: highest.delta, deltaTargetMax: band.deltaTargetMax });
+    expect(scored.candidates.length).toBeGreaterThanOrEqual(1);
+    for (const candidate of scored.candidates) expect(Math.abs(candidate.delta)).toBeGreaterThanOrEqual(band.deltaTargetMin);
+  });
+
+  it("a contract exactly at either bound of the band stays a candidate", () => {
+    const atMin = scoreTicker(inputs(), account, { ...settings, deltaTargetMin: Math.abs(lowest.delta), deltaTargetMax: 1 });
+    expect(atMin.candidates.map(candidateContractKey)).toContain(candidateContractKey(lowest));
+    const atMax = scoreTicker(inputs(), account, { ...settings, deltaTargetMin: 0, deltaTargetMax: Math.abs(highest.delta) });
+    expect(atMax.candidates.map(candidateContractKey)).toContain(candidateContractKey(highest));
+    const justAboveMin = scoreTicker(inputs(), account, { ...settings, deltaTargetMin: Math.abs(lowest.delta) + 1e-6, deltaTargetMax: 1 });
+    expect(justAboveMin.candidates.map(candidateContractKey)).not.toContain(candidateContractKey(lowest));
+  });
+
+  it("a contract under the minimum is not a candidate but is still scored, with the lifted-filter score and the min-delta reason", () => {
+    const strict = { ...settings, deltaTargetMin: Math.abs(lowest.delta) + 0.01, deltaTargetMax: 1 };
+    const result = scoreSignalContract({ inputs: inputs(), account, settings: strict, contract: { expiry: lowest.expiry, strike: lowest.strike, right: rightOf(lowest) }, liveQuote: null, liveSpot: null, capturedDelta: null, uncompensatedSharePathCount: pathCount });
+    expect(result.scored).toBe(true);
+    expect(result.isCandidate).toBe(false);
+    expect(result.notCandidateReason).toBe(`Δ ${Math.abs(lowest.delta).toFixed(2)} is under your min Δ ${strict.deltaTargetMin.toFixed(2)}`);
+    // The score is the one the contract gets with the band lifted: same net edge, grade and delta as in the unrestricted scoring.
+    expect(result.scored && result.netEdge).toBe(lowest.netEdge);
+    expect(result.scored && result.grade).toBe(lowest.grade);
+    expect(result.scored && result.delta).toBe(lowest.delta);
+  });
+
+  it("the same contract inside the band is a candidate with no reason", () => {
+    const result = scoreSignalContract({ inputs: inputs(), account, settings: { ...settings, deltaTargetMin: 0, deltaTargetMax: 1 }, contract: { expiry: lowest.expiry, strike: lowest.strike, right: rightOf(lowest) }, liveQuote: null, liveSpot: null, capturedDelta: null, uncompensatedSharePathCount: pathCount });
+    expect(result.isCandidate).toBe(true);
+    expect(result.notCandidateReason).toBeNull();
+  });
+
+  it("a contract over the maximum gets the over-max reason and is scored with the band lifted, even when the minimum is above zero", () => {
+    const strict = { ...settings, deltaTargetMin: Math.abs(lowest.delta), deltaTargetMax: Math.abs(highest.delta) - 0.01 };
+    const result = scoreSignalContract({ inputs: inputs(), account, settings: strict, contract: { expiry: highest.expiry, strike: highest.strike, right: rightOf(highest) }, liveQuote: null, liveSpot: null, capturedDelta: null, uncompensatedSharePathCount: pathCount });
+    expect(result.isCandidate).toBe(false);
+    expect(result.notCandidateReason).toBe(`Δ ${Math.abs(highest.delta).toFixed(2)} is over your max Δ ${strict.deltaTargetMax.toFixed(2)}`);
+    expect(result.scored && result.netEdge).toBe(highest.netEdge);
+  });
+
+  it("a minimum above every delta leaves no candidates but the chain view still scores every contract with the filters lifted", () => {
+    const impossible = { ...settings, deltaTargetMin: 0.99, deltaTargetMax: 1 };
+    expect(scoreTicker(inputs(), account, impossible).candidates).toHaveLength(0);
+    for (const candidate of byDelta) {
+      const result = scoreSignalContract({ inputs: inputs(), account, settings: impossible, contract: { expiry: candidate.expiry, strike: candidate.strike, right: rightOf(candidate) }, liveQuote: null, liveSpot: null, capturedDelta: null, uncompensatedSharePathCount: pathCount });
+      expect(result.scored).toBe(true);
+      expect(result.isCandidate).toBe(false);
+      expect(result.notCandidateReason).toMatch(/is under your min Δ 0\.99$/);
+    }
   });
 });
 
@@ -284,7 +379,7 @@ describe("scoreSignalContract", () => {
     expect(result.scored).toBe(true);
     expect(result.isCandidate).toBe(false);
     expect(result.notCandidateReason).toMatch(/is over your max Δ 0\.35$/);
-    const lifted = scoreTicker(inputs(), account, { ...settings, maxNetDelta: 1 }).candidates.find((candidate) => candidate.strike === 100 && candidate.expiry === near)!;
+    const lifted = scoreTicker(inputs(), account, { ...settings, deltaTargetMax: 1 }).candidates.find((candidate) => candidate.strike === 100 && candidate.expiry === near)!;
     expect(result.scored && result.netEdge).toBe(lifted.netEdge);
     expect(result.scored && result.grade).toBe(lifted.grade);
   });

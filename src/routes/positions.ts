@@ -1,4 +1,3 @@
-import { fetchTradingBlockedReason } from "../lib/tradingGate.js";
 import { Router, type Request, type Response } from "express";
 import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
@@ -22,7 +21,10 @@ import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning, type
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
-import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
+import { evaluateOrderGates, evaluateOrderLimitsForOrderRequest } from "../lib/orderGates.js";
+import { evaluateCloseGateForPosition } from "../lib/closeGate.js";
+import { withOrderConfirmationLock } from "../lib/orderConfirmationLock.js";
+import { loadRecoveryTargetWindow } from "../lib/recoveryTargetWindow.js";
 import { findNonLiveSnapshotQuoteReason } from "../lib/signalSnapshotLiveQuotes.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { fetchTodaysOrders } from "../lib/todaysOrders.js";
@@ -98,15 +100,10 @@ function validateCoveredCallCoverage(stockShares: number, shortCallCoveredShares
   return null;
 }
 
-// IBKR's minimum price variation is a penny for both US equities and
-// equity options priced under $3 (nickels above that, but this codebase
-// hasn't needed to special-case it yet). A combo/BAG order's net limit
-// price is the sum of its legs' unitPrices (computeNetLimitPrice), so a
-// leg with a stray third decimal (e.g. a $0.375 option premium) silently
-// produces an invalid net price even when each leg looks fine on its own.
-// Real bug found 2026-08-24: a DRAM buy-write was rejected with IBKR error
-// 110 because the option leg's model-picked mid-price (0.375) pushed the
-// combo's net price to 52.885.
+// Prices go to IBKR on a one-cent grid. SMART-routed US options and combos accept any cent price, also above $3 on
+// non-penny classes (what-if orders on paper, 2026-10-05); the per-exchange rule tables that list nickels and dimes do
+// not apply to SMART. A third decimal is rejected with error 110, and a combo's net price is the sum of its legs'
+// unitPrices (computeNetLimitPrice), so every leg is rounded here, not just the total.
 function roundToCents(price: number): number {
   return Math.round(price * 100) / 100;
 }
@@ -976,38 +973,6 @@ async function requireExistingTicker(symbolInput: string): Promise<{ id: string;
   return (await db("tickers").where({ symbol: normalizedSymbol }).first()) ?? null;
 }
 
-// Shared by the confirm-step hard gate and the order's live quote-stream
-// compliance check below -- only ever runs for an order that actually came
-// from the Signals order-setup flow (signal_snapshot is only ever set
-// there),// still-unenforced copy of these same-named settings (see PROGRESS.md).
-async function evaluateSignalOrderLimitsForOrderRequest(
-  orderRequest: { signal_snapshot: unknown; payload: OrderRequestPayload; request_type: string },
-  live: { spotPrice?: number } = {},
-): Promise<{ blocked: boolean; reasons: string[] } | null> {
-  if (orderRequest.signal_snapshot === null || orderRequest.signal_snapshot === undefined) return null;
-  const requestType = orderRequest.request_type as string;
-  const isRoll = requestType === "roll_leg";
-  if (!requestType.startsWith("open_") && !isRoll) return null;
-  const payload = orderRequest.payload;
-  if (payload.strategyKey !== "covered_call" && payload.strategyKey !== "cash_secured_put") return null;
-  // A Signals roll (Roll Signals, 2026-09-24) is one combo with two option legs: the close leg carries
-  // positionLegId, the open leg does not. Only the strike difference adds notional (signalOrderLimits.ts).
-  const optionLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && !leg.positionLegId) : payload.legs.find((leg) => leg.role === "option");
-  const closeLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && leg.positionLegId) : undefined;
-  if (!optionLeg || !optionLeg.strike || (isRoll && !closeLeg?.strike)) return null;
-  const ticker = await requireExistingTicker(payload.symbol);
-  if (!ticker) return null;
-  return evaluateSignalOrderLimits({
-    strategyKey: payload.strategyKey,
-    symbol: ticker.symbol,
-    tickerId: ticker.id,
-    quantity: optionLeg.quantity,
-    strike: optionLeg.strike,
-    spotPrice: live.spotPrice,
-    rollFromStrike: closeLeg?.strike,
-  });
-}
-
 interface OpenOrderRequestBody {
   symbol?: string;
   strategyKey?: string;
@@ -1037,8 +1002,8 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(400).json({ error: "A valid strategyKey is required." });
     return;
   }
-  if (!option || typeof option.quantity !== "number" || option.quantity <= 0) {
-    response.status(400).json({ error: "A positive option contract quantity is required." });
+  if (!option || !Number.isInteger(option.quantity) || option.quantity <= 0) {
+    response.status(400).json({ error: "A positive whole number of option contracts is required." });
     return;
   }
   if (typeof option.limitPrice !== "number" || !(option.limitPrice > 0)) {
@@ -1059,8 +1024,8 @@ positionsRouter.post("/orders", async (request, response) => {
   // so a caller that includes a zeroed-out/placeholder stock leg for a
   // strategy that doesn't need one isn't rejected for it.
   if (strategyKey === "covered_call" && stock !== undefined) {
-    if (typeof stock.quantity !== "number" || stock.quantity <= 0) {
-      response.status(400).json({ error: "stock.quantity must be a positive number when stock is provided." });
+    if (!Number.isInteger(stock.quantity) || stock.quantity <= 0) {
+      response.status(400).json({ error: "stock.quantity must be a positive whole number of shares when stock is provided." });
       return;
     }
     if (typeof stock.limitPrice !== "number" || stock.limitPrice < 0) {
@@ -1235,19 +1200,17 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
   }
 
   const isOpeningOrder = Boolean(payload.strategyKey) && (orderRequest.request_type as string).startsWith("open_");
-  const strategySettings = isOpeningOrder
-    ? await db("strategy_settings").where({ strategy_key: payload.strategyKey }).first()
-    : null;
+  const deltaBand = isOpeningOrder ? await loadRecoveryTargetWindow() : null;
 
   // Re-evaluated periodically, not on every quote tick -- 10s keeps the
   // Order Review panel's block/unblock verdict close to live without
   // hammering the account summary on every sub-second option quote. Only
-  // ever set for a Signals order (see evaluateSignalOrderLimitsForOrderRequest);
-  // null otherwise. The re-evaluations are fed from the market-data pool
+  // set for every opening or rolling order (see evaluateOrderLimitsForOrderRequest);
+  // null for a close. The re-evaluations are fed from the market-data pool
   // (2026-09-24): every open leg and the order's underlying are pooled for
   // this stream's lifetime below, so no re-evaluation opens IBKR snapshots.
   const signalLimitsRefreshIntervalMs = 10_000;
-  let latestSignalLimits = await evaluateSignalOrderLimitsForOrderRequest(orderRequest);
+  let latestSignalLimits = await evaluateOrderLimitsForOrderRequest(orderRequest);
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -1265,7 +1228,7 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
   let latestSpotPrice: number | undefined;
   const signalLimitsTimer = latestSignalLimits
     ? setInterval(() => {
-        evaluateSignalOrderLimitsForOrderRequest(orderRequest, { spotPrice: latestSpotPrice })
+        evaluateOrderLimitsForOrderRequest(orderRequest, { spotPrice: latestSpotPrice })
           .then((result) => {
             latestSignalLimits = result;
           })
@@ -1296,17 +1259,7 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
       optionLeg.strike,
       optionLeg.right === "C" ? OptionType.Call : OptionType.Put,
       (quote) => {
-        const compliance = isOpeningOrder
-          ? checkDeltaCompliance(
-              quote.delta,
-              strategySettings?.delta_target_min !== undefined && strategySettings?.delta_target_min !== null
-                ? Number(strategySettings.delta_target_min)
-                : null,
-              strategySettings?.delta_target_max !== undefined && strategySettings?.delta_target_max !== null
-                ? Number(strategySettings.delta_target_max)
-                : null,
-            )
-          : null;
+        const compliance = isOpeningOrder ? checkDeltaCompliance(quote.delta, deltaBand?.deltaTargetMin ?? null, deltaBand?.deltaTargetMax ?? null) : null;
         send({ type: "quote", data: { ...quote, compliance, signalLimits: latestSignalLimits } });
       },
       abortController.signal,
@@ -1447,6 +1400,18 @@ async function sharesCommittedByInFlightCoveredCalls(symbol: string): Promise<nu
   return committed;
 }
 
+// What the order gate says about a built order right now, without confirming it: the same evaluation the confirm
+// step runs (orderGates.ts), so a client -- Genosuke's card above all -- can show the blocks and warnings first.
+positionsRouter.get("/orders/:id/gates", async (request, response) => {
+  const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
+  if (!orderRequest) {
+    response.status(404).json({ error: "Order not found." });
+    return;
+  }
+  const { blocks, warnings, evaluatedAt } = await evaluateOrderGates(orderRequest);
+  response.json({ blocks, warnings, evaluatedAt });
+});
+
 positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
   if (!orderRequest) {
@@ -1490,23 +1455,22 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     return;
   }
 
-  // Fail-closed account binding (Phase B WP2): no order is confirmed unless the trading worker recently
-  // reported that it is bound to this environment's IBKR account. The order stays pending_confirmation.
-  const tradingBlockedReason = await fetchTradingBlockedReason();
-  if (tradingBlockedReason) {
-    response.status(409).json({ error: tradingBlockedReason });
-    return;
-  }
-
-  const signalLimits = await evaluateSignalOrderLimitsForOrderRequest(orderRequest);
-  if (signalLimits?.blocked) {
-    response.status(409).json({ error: signalLimits.reasons.join(" ") });
-    return;
-  }
-
-  let wonRace: boolean;
+  // The one gate every order passes, whatever its origin (approved 2026-10-05; see orderGates.ts): fail-closed
+  // account binding (Phase B WP2), the position limits for opens and rolls, the delta band for opens, the close
+  // gate for closes. The order stays pending_confirmation when any of them blocks.
+  // Judged and committed under one lock (orderConfirmationLock.ts): two orders confirmed at the same instant take turns, so the second
+  // sees the first as in flight and cannot slip under a limit only one of them fits under.
+  let blockedReasons: string[] = [];
+  let wonRace = false;
   try {
-    wonRace = await runConfirmTransaction();
+    await withOrderConfirmationLock(async (transaction) => {
+      const gateEvaluation = await evaluateOrderGates(orderRequest);
+      if (gateEvaluation.blocks.length > 0) {
+        blockedReasons = gateEvaluation.blocks;
+        return;
+      }
+      wonRace = await confirmWithinTransaction(transaction, gateEvaluation);
+    });
   } catch (error) {
     if (error instanceof ActiveOrderConflictError) {
       response.status(409).json({ error: error.message });
@@ -1514,13 +1478,16 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     }
     throw error;
   }
+  if (blockedReasons.length > 0) {
+    response.status(409).json({ error: blockedReasons.join(" ") });
+    return;
+  }
 
   const updated = await orderRequestsWithNames().where("orq.id", orderRequest.id).first();
   if (wonRace) await publishNotification({ type: "order_status", orderId: orderRequest.id });
   response.json(serializeOrderRequest(updated));
 
-  function runConfirmTransaction(): Promise<boolean> {
-  return db.transaction(async (trx) => {
+  async function confirmWithinTransaction(trx: Knex.Transaction, gateEvaluation: Awaited<ReturnType<typeof evaluateOrderGates>>): Promise<boolean> {
     // Re-checked inside the transaction (2026-09-24): building already
     // refuses a second order for a position with one in flight,
     // but two rows built before either was confirmed could both confirm.
@@ -1533,13 +1500,12 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     // actually flips the row does.
     const updatedRows = await trx("order_requests")
       .where({ id: orderRequest.id, status: "pending_confirmation" })
-      .update({ status: "confirmed", payload, updated_at: trx.fn.now() })
+      .update({ status: "confirmed", payload, gate_evaluation: JSON.stringify(gateEvaluation), updated_at: trx.fn.now() })
       .returning(["id"]);
     if (updatedRows.length === 0) return false;
 
     await trx.raw("SELECT pg_notify(?, ?)", [orderRequestsChannel, orderRequest.id]);
     return true;
-  });
   }
 });
 
@@ -1638,12 +1604,12 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     typeof newLeg.strikePrice !== "number" ||
     newLeg.strikePrice <= 0 ||
     !newLeg.expiryDate ||
-    typeof newLeg.quantity !== "number" ||
+    !Number.isInteger(newLeg.quantity) ||
     newLeg.quantity <= 0 ||
     typeof newLeg.limitPrice !== "number" ||
     !(newLeg.limitPrice > 0)
   ) {
-    response.status(400).json({ error: "newLeg requires strikePrice, expiryDate, quantity, and a positive limitPrice (the new leg is sold, never for $0)." });
+    response.status(400).json({ error: "newLeg requires strikePrice, expiryDate, a positive whole-number quantity, and a positive limitPrice (the new leg is sold, never for $0)." });
     return;
   }
   const normalizedNewLegExpiry = normalizeExpiryDate(newLeg.expiryDate);
@@ -1967,6 +1933,14 @@ positionsRouter.post("/:id/close", async (request, response) => {
     return;
   }
   const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey: position.strategy_key, legs: orderLegs };
+
+  // The same verdict the Close form's live stream shows -- regular session open, live two-sided quotes on every leg, a
+  // consistent open wheel cycle -- refused here too, so no API caller (Genosuke included) can close what the form would not let a human close.
+  const closeGate = await evaluateCloseGateForPosition(position.id);
+  if (closeGate.blocked) {
+    response.status(409).json({ error: closeGate.reason });
+    return;
+  }
 
   const [orderRequest] = await db("order_requests")
     .insert({

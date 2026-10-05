@@ -64,7 +64,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
 const account = { freeCash: 1_000_000 };
 // No test in this file is about the Signals tab's own limits (see signalCandidates.test.ts and
 // signalOrderLimits.test.ts for those) -- wide open here so every existing candidate stays in.
-const permissiveSettings = { maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5 };
+const permissiveSettings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5 };
 
 describe("computeAtmImpliedVolatility", () => {
   it("reads the slice nearest 30 days (with >= 14 days left) at log-moneyness 0", () => {
@@ -203,7 +203,7 @@ describe("scoreTicker", () => {
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {
     const in1 = inputs();
     const scored = scoreTicker(in1, account, permissiveSettings);
-    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEventDatesIso: [], snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash, maxNetDelta: permissiveSettings.maxNetDelta, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct }));
+    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEventDatesIso: [], snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct }));
     expect(scored.candidates).toEqual(direct);
     expect(scored.unscoredReason).toBeNull();
     expect(scored.priceSource).toBe("snapshot");
@@ -277,7 +277,7 @@ describe("scoreTicker", () => {
 });
 
 describe("noCandidatesReason", () => {
-  const settings = { minAnnualizedYieldPct: 50, maxNetDelta: 0.3 };
+  const settings = { minAnnualizedYieldPct: 50, deltaTargetMax: 0.3 };
 
   it("is null when the ticker has candidates, or is unscored", () => {
     expect(scoreTicker(inputs(), account, permissiveSettings).noCandidatesReason).toBeNull();
@@ -315,19 +315,69 @@ describe("noCandidatesReason", () => {
 describe("describeNoCandidates", () => {
   it("is 'filtered' whenever any contract hit a Signals tab filter, even alongside fit rejections", () => {
     const tally = { ...emptyCandidateExclusionTally(), surfaceFitRejectedExpiries: new Set(["2026-10-21"]), aboveMaxDeltaCount: 2 };
-    const reason = describeNoCandidates(tally, [], "2026-09-21", { minAnnualizedYieldPct: 50, maxNetDelta: 0.3 });
+    const reason = describeNoCandidates(tally, [], "2026-09-21", { minAnnualizedYieldPct: 50, deltaTargetMin: 0, deltaTargetMax: 0.3 });
     expect(reason.kind).toBe("filtered");
     expect(reason.aboveMaxDeltaCount).toBe(2);
-    expect(reason.maxNetDelta).toBe(0.3);
+    expect(reason.deltaTargetMax).toBe(0.3);
     expect(reason.earningsDateIso).toBeNull(); // no expiry spanned earnings
   });
 
   it("sorts the expiry lists", () => {
     const tally = { ...emptyCandidateExclusionTally(), surfaceFitRejectedExpiries: new Set(["2026-10-23", "2026-10-02"]), spansEarningsExpiries: new Set(["2026-12-18", "2026-10-30"]) };
-    const reason = describeNoCandidates(tally, ["2026-10-22"], "2026-09-28", { minAnnualizedYieldPct: 50, maxNetDelta: 0.3 });
+    const reason = describeNoCandidates(tally, ["2026-10-22"], "2026-09-28", { minAnnualizedYieldPct: 50, deltaTargetMin: 0, deltaTargetMax: 0.3 });
     expect(reason.surfaceFitRejectedExpiries).toEqual(["2026-10-02", "2026-10-23"]);
     expect(reason.spansEarningsExpiries).toEqual(["2026-10-30", "2026-12-18"]);
     expect(reason.earningsDateIso).toBe("2026-10-22");
+  });
+});
+
+describe("describeNoCandidates: the delta band", () => {
+  const band = { minAnnualizedYieldPct: 50, deltaTargetMin: 0.2, deltaTargetMax: 0.3 };
+
+  it("is 'filtered' when the only thing that dropped contracts was the minimum delta", () => {
+    const tally = { ...emptyCandidateExclusionTally(), belowMinDeltaCount: 3 };
+    const reason = describeNoCandidates(tally, [], "2026-09-21", band);
+    expect(reason.kind).toBe("filtered");
+    expect(reason.belowMinDeltaCount).toBe(3);
+    expect(reason.aboveMaxDeltaCount).toBe(0);
+    expect(reason.belowMinYieldCount).toBe(0);
+  });
+
+  it("is 'nothing_scorable' when nothing hit any filter, minimum delta included", () => {
+    const reason = describeNoCandidates(emptyCandidateExclusionTally(), [], "2026-09-21", band);
+    expect(reason.kind).toBe("nothing_scorable");
+    expect(reason.belowMinDeltaCount).toBe(0);
+  });
+
+  it("carries the new belowMinDeltaCount and the whole band (deltaTargetMin and deltaTargetMax) in the reason, and no maxNetDelta", () => {
+    const tally = { ...emptyCandidateExclusionTally(), belowMinDeltaCount: 2, aboveMaxDeltaCount: 5, belowMinYieldCount: 1, bestAnnualizedYieldPct: 12.5 };
+    const reason = describeNoCandidates(tally, [], "2026-09-21", band);
+    expect(reason).toMatchObject({ kind: "filtered", belowMinDeltaCount: 2, aboveMaxDeltaCount: 5, belowMinYieldCount: 1, bestAnnualizedYieldPct: 12.5, minAnnualizedYieldPct: 50, deltaTargetMin: 0.2, deltaTargetMax: 0.3 });
+    expect(reason).not.toHaveProperty("maxNetDelta");
+  });
+
+  it("is 'filtered' for each of the three filters on its own", () => {
+    for (const field of ["belowMinDeltaCount", "aboveMaxDeltaCount", "belowMinYieldCount"] as const) {
+      expect(describeNoCandidates({ ...emptyCandidateExclusionTally(), [field]: 1 }, [], "2026-09-21", band).kind).toBe("filtered");
+    }
+  });
+});
+
+describe("noCandidatesReason with a delta band", () => {
+  it("a minimum above every delta ends with no candidates, kind 'filtered' and every contract counted as below the minimum", () => {
+    const scored = scoreTicker(inputs(), account, { ...permissiveSettings, deltaTargetMin: 0.99, deltaTargetMax: 1 });
+    expect(scored.candidates).toHaveLength(0);
+    expect(scored.noCandidatesReason).toMatchObject({ kind: "filtered", belowMinDeltaCount: 4, aboveMaxDeltaCount: 0, deltaTargetMin: 0.99, deltaTargetMax: 1 });
+  });
+
+  it("a maximum below every delta counts them as above the maximum, not below the minimum", () => {
+    const scored = scoreTicker(inputs(), account, { ...permissiveSettings, deltaTargetMin: 0, deltaTargetMax: 0.0001 });
+    expect(scored.candidates).toHaveLength(0);
+    expect(scored.noCandidatesReason).toMatchObject({ kind: "filtered", belowMinDeltaCount: 0, aboveMaxDeltaCount: 4, deltaTargetMax: 0.0001 });
+  });
+
+  it("a band that keeps some contracts has no reason at all", () => {
+    expect(scoreTicker(inputs(), account, { ...permissiveSettings, deltaTargetMin: 0, deltaTargetMax: 1 }).noCandidatesReason).toBeNull();
   });
 });
 

@@ -8,7 +8,7 @@ import { formatIsoDateAsExpiry } from "./optionChainSnapshotStore.js";
 import { assembleSignalsChain, scoreSignalContract, scoreTickerWithExclusions, type SignalContractLiveQuote, type SignalContractScore, type SignalsChain } from "./signalsChain.js";
 import { contractKey, type ContractRef } from "./signalsLiveScoring.js";
 import { loadAccountContext, loadSignalsUniverseTicker, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
-import { loadSignalSettings } from "./signalSettingsStore.js";
+import { loadTradingSettings } from "./tradingSettingsStore.js";
 import type { SignalsPriceSource } from "./signalsTypes.js";
 
 // DB/IBKR side of the Signals chain grid and the any-contract scorer (signalsChain.ts holds the pure logic).
@@ -37,7 +37,7 @@ export type LiveSpot = { spotPrice: number; priceSource: SignalsPriceSource } | 
  * candidate flags (insufficient_cash), which the grid does not show, so no IBKR account request is made here.
  */
 export async function loadSignalsChain(ticker: SignalsTickerRow, requestedExpiry: string | null, liveSpot: LiveSpot): Promise<SignalsChain> {
-  const [universeTicker, storedChain, inputs, settings] = await Promise.all([loadSignalsUniverseTicker(ticker.symbol), loadStoredOptionChain(ticker.tickerId), loadTickerSignalsInputs(ticker), loadSignalSettings()]);
+  const [universeTicker, storedChain, inputs, settings] = await Promise.all([loadSignalsUniverseTicker(ticker.symbol), loadStoredOptionChain(ticker.tickerId), loadTickerSignalsInputs(ticker), loadTradingSettings()]);
   const capturedDeltaByContract = inputs.header ? await loadCapturedDeltas(inputs.header.snapshotId, null) : new Map<string, number>();
   const scoring = { inputs, ...scoreTickerWithExclusions(inputs, { freeCash: 0 }, settings, liveSpot ?? undefined) };
   return assembleSignalsChain({ symbol: ticker.symbol, inSignalsUniverse: universeTicker !== null, strikesByExpiry: storedChain.strikesByExpiry, todayEasternIso: inputs.todayEasternIso, requestedExpiry, scoring, capturedDeltaByContract });
@@ -67,7 +67,7 @@ export async function fetchSignalContractLiveQuote(symbol: string, contract: Con
 }
 
 export async function loadSignalContractScore(ticker: SignalsTickerRow, contract: ContractRef, liveSpot: LiveSpot): Promise<SignalContractScore> {
-  const [inputs, settings, account, liveQuote] = await Promise.all([loadTickerSignalsInputs(ticker), loadSignalSettings(), loadAccountContext(), fetchSignalContractLiveQuote(ticker.symbol, contract)]);
+  const [inputs, settings, account, liveQuote] = await Promise.all([loadTickerSignalsInputs(ticker), loadTradingSettings(), loadAccountContext(), fetchSignalContractLiveQuote(ticker.symbol, contract)]);
   const capturedDelta = inputs.header ? ((await loadCapturedDeltas(inputs.header.snapshotId, contract.expiry)).get(contractKey(contract)) ?? null) : null;
   return scoreSignalContract({ inputs, account, settings, contract, liveQuote, liveSpot, capturedDelta });
 }

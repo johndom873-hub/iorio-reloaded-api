@@ -148,7 +148,7 @@ export interface TickerSignals {
 
 /**
  * Why a scored ticker has no candidates. "filtered": contracts were scorable but every one failed the
- * Signals tab filters (min yield / max delta). "nothing_scorable": no contract got that far.
+ * trading-settings filters (min yield / max delta). "nothing_scorable": no contract got that far.
  */
 export interface SignalsNoCandidatesReason {
   kind: "filtered" | "nothing_scorable";
@@ -157,12 +157,14 @@ export interface SignalsNoCandidatesReason {
   /** Expiries excluded because they span an earnings date, and the first such date. */
   spansEarningsExpiries: string[];
   earningsDateIso: string | null;
+  belowMinDeltaCount: number;
   aboveMaxDeltaCount: number;
   belowMinYieldCount: number;
   /** Highest annualised yield (%) among contracts that reached the yield check; null if none did. */
   bestAnnualizedYieldPct: number | null;
   minAnnualizedYieldPct: number;
-  maxNetDelta: number;
+  deltaTargetMin: number;
+  deltaTargetMax: number;
 }
 
 /** One Signals-screen row: a TickerSignals without the candidate and roll lists (the modal fetches those per ticker); heldLegs, bestRoll and rollCount stay for the badge. */

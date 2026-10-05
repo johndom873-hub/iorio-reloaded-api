@@ -17,25 +17,25 @@ export function checkDeltaCompliance(
   deltaTargetMax: number | null,
 ): DeltaComplianceResult {
   if (deltaTargetMin === null || deltaTargetMax === null) {
-    return { compliant: false, reason: "No delta screening range is configured for this strategy." };
+    return { compliant: false, reason: "No delta band is configured in the trading settings." };
   }
   if (delta === null) {
     return {
       compliant: false,
-      reason: "Live delta isn't available yet — can't verify this trade against the strategy's screening range.",
+      reason: "Live delta isn't available yet — can't verify this trade against the delta band.",
     };
   }
   const magnitude = Math.abs(delta);
   if (magnitude < deltaTargetMin) {
     return {
       compliant: false,
-      reason: `Delta has drifted to ${magnitude.toFixed(2)}, below the strategy's ${deltaTargetMin}–${deltaTargetMax} target range.`,
+      reason: `Delta has drifted to ${magnitude.toFixed(2)}, below the ${deltaTargetMin}–${deltaTargetMax} delta band.`,
     };
   }
   if (magnitude > deltaTargetMax) {
     return {
       compliant: false,
-      reason: `Delta has drifted to ${magnitude.toFixed(2)}, above the strategy's ${deltaTargetMin}–${deltaTargetMax} target range.`,
+      reason: `Delta has drifted to ${magnitude.toFixed(2)}, above the ${deltaTargetMin}–${deltaTargetMax} delta band.`,
     };
   }
   return { compliant: true, reason: null };

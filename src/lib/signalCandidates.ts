@@ -8,7 +8,7 @@ import { expirySpansEarnings, expirySpansEventDate, type RealizedVolatilityForec
 // option_surface_fits) + that day's raw quotes into graded, tradable candidates.
 // Approved 2026-09-22 (mockup): structural filters (OTM side, two-sided quote,
 // >=1 day to expiry, a slice with status 'ok') plus, since 2026-09-24, two
-// Signals-tab settings (max net delta, min annualised yield) — DTE window,
+// trading settings (delta band, min annualised yield) — DTE window,
 // spread or open interest still don't narrow the list; those show up as
 // columns/flags instead. Delta and the surface-vs-mid IV comparison are both
 // computed here (not read from IBKR's own tick-13 delta/IV), so every
@@ -83,9 +83,10 @@ export interface SignalCandidatesInput {
   freeShares: number;
   /** Free cash available to secure a put. */
   freeCash: number;
-  /** Signals tab setting: candidates with |delta| above this are filtered out. */
-  maxNetDelta: number;
-  /** Signals tab setting: candidates with annualised yield (as a %) below this are filtered out. */
+  /** Trading settings delta band: candidates with |delta| outside deltaTargetMin..deltaTargetMax are filtered out. */
+  deltaTargetMin: number;
+  deltaTargetMax: number;
+  /** Trading settings: candidates with annualised yield (as a %) below this are filtered out. */
   minAnnualizedYieldPct: number;
   /** When given, records why quotes were dropped (for a ticker that ends with no candidates). */
   exclusionTally?: CandidateExclusionTally;
@@ -106,7 +107,8 @@ export type SignalContractExclusion =
   | { kind: "no_two_sided_quote" }
   | { kind: "spans_earnings"; earningsDateIso: string | null }
   | { kind: "no_surface_volatility" }
-  | { kind: "above_max_delta"; delta: number; maxNetDelta: number }
+  | { kind: "below_min_delta"; delta: number; deltaTargetMin: number }
+  | { kind: "above_max_delta"; delta: number; deltaTargetMax: number }
   | { kind: "no_friction"; delta: number }
   | { kind: "no_forecast"; delta: number }
   | { kind: "below_min_yield"; delta: number; annualizedYieldPct: number; minAnnualizedYieldPct: number };
@@ -207,13 +209,14 @@ function median(values: number[]): number {
 export interface CandidateExclusionTally {
   surfaceFitRejectedExpiries: Set<string>;
   spansEarningsExpiries: Set<string>;
+  belowMinDeltaCount: number;
   aboveMaxDeltaCount: number;
   belowMinYieldCount: number;
   bestAnnualizedYieldPct: number | null;
 }
 
 export function emptyCandidateExclusionTally(): CandidateExclusionTally {
-  return { surfaceFitRejectedExpiries: new Set(), spansEarningsExpiries: new Set(), aboveMaxDeltaCount: 0, belowMinYieldCount: 0, bestAnnualizedYieldPct: null };
+  return { surfaceFitRejectedExpiries: new Set(), spansEarningsExpiries: new Set(), belowMinDeltaCount: 0, aboveMaxDeltaCount: 0, belowMinYieldCount: 0, bestAnnualizedYieldPct: null };
 }
 
 /** Builds every structurally-eligible candidate for a ticker. Ungraded (grade is a placeholder "avoid" until gradeSignalCandidates runs). */
@@ -271,10 +274,15 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     }
     const midIv = impliedVolatilityFromMid(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, quote.bid, quote.ask, isCall);
     const delta = blackScholesDelta(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
-    if (Math.abs(delta) > input.maxNetDelta) {
-      // Signals tab max net delta (approved 2026-09-24)
+    if (Math.abs(delta) < input.deltaTargetMin) {
+      // The delta band is one setting for Signals, the order gate and Recovery Path (approved 2026-10-05).
+      if (tally) tally.belowMinDeltaCount += 1;
+      exclude(quote, { kind: "below_min_delta", delta, deltaTargetMin: input.deltaTargetMin });
+      continue;
+    }
+    if (Math.abs(delta) > input.deltaTargetMax) {
       if (tally) tally.aboveMaxDeltaCount += 1;
-      exclude(quote, { kind: "above_max_delta", delta, maxNetDelta: input.maxNetDelta });
+      exclude(quote, { kind: "above_max_delta", delta, deltaTargetMax: input.deltaTargetMax });
       continue;
     }
     const commissionPerContract = commissionEstimator.perContractDollars("sell", isCall ? coveredCallContracts : 1);
@@ -302,7 +310,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     const annualizedYield = (premium / capitalAtRisk) * (annualDays / dte);
     if (tally) tally.bestAnnualizedYieldPct = Math.max(tally.bestAnnualizedYieldPct ?? -Infinity, annualizedYield * 100);
     if (annualizedYield * 100 < input.minAnnualizedYieldPct) {
-      // Signals tab min annualised yield (approved 2026-09-24)
+      // trading settings: min annualised yield
       if (tally) tally.belowMinYieldCount += 1;
       exclude(quote, { kind: "below_min_yield", delta, annualizedYieldPct: annualizedYield * 100, minAnnualizedYieldPct: input.minAnnualizedYieldPct });
       continue;

@@ -96,5 +96,7 @@ export function buildContractFromConId(leg: OrderLegPayload, conId: number): Con
  * plan doc's verification step 3.
  */
 export function computeNetLimitPrice(legs: OrderLegPayload[]): number {
-  return legs.reduce((sum, leg) => sum + (leg.action === OrderAction.BUY ? leg.unitPrice : -leg.unitPrice), 0);
+  const netPrice = legs.reduce((sum, leg) => sum + (leg.action === OrderAction.BUY ? leg.unitPrice : -leg.unitPrice), 0);
+  // Cents, always: IBKR rejects a sub-cent combo price with error 110, and accepts any cent price (checked with what-if combos on paper).
+  return Math.round(netPrice * 100) / 100;
 }

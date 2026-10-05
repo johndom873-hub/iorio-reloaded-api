@@ -2,7 +2,7 @@ import { OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
-import type { StrategyTargetWindow } from "../lib/strategySettings.js";
+import type { RecoveryTargetWindow } from "../lib/recoveryTargetWindow.js";
 import { fetchCalendarConflictContext, findCalendarConflict } from "./calendarConflict.js";
 import { daysBetween, loadStoredOptionChain, parseExpiry, type ExpiryStrikes, type OptionQuote } from "./fetchOptionChain.js";
 import { quoteContracts } from "./quoteContracts.js";
@@ -114,7 +114,7 @@ export function filterStrikesByArchivedCallDelta(expiryStrikes: ExpiryStrikes[],
  * chain (the nightly capture), quotes from quoteContracts (pool first).
  * Used by the recovery-path projection, which only needs the top candidate.
  */
-export async function scanRecoveryPathCoveredCallCandidates(ib: IBApi, symbol: string, tickerId: string, spotPrice: number, targetWindow: StrategyTargetWindow): Promise<CoveredCallCandidate[]> {
+export async function scanRecoveryPathCoveredCallCandidates(ib: IBApi, symbol: string, tickerId: string, spotPrice: number, targetWindow: RecoveryTargetWindow): Promise<CoveredCallCandidate[]> {
   const chain = await loadStoredOptionChain(tickerId);
   if (chain.strikesByExpiry.size === 0) {
     console.warn(`${symbol}: option chain not prepared yet (no stored strike grids) — no covered-call candidates.`);
@@ -135,7 +135,7 @@ export async function scanRecoveryPathCoveredCallCandidates(ib: IBApi, symbol: s
 
 function rankCoveredCallCandidates(
   quotes: OptionQuote[],
-  targetWindow: StrategyTargetWindow,
+  targetWindow: RecoveryTargetWindow,
   spotPrice: number,
   expiryHasCalendarConflict: (expiryIso: string) => boolean,
   calendarUnverified: boolean,

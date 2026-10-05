@@ -1,92 +1,25 @@
 import { Router } from "express";
-import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { evaluateSignalOrderLimits } from "../lib/signalOrderLimits.js";
+import { evaluateOrderLimits } from "../lib/orderLimits.js";
 import { loadTickerBySymbol } from "../lib/signalsChainStore.js";
 import { OrderAction } from "@stoqey/ib";
 import { findMalformedOptionExpiry, type OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchWhatIfCommissionRange } from "../ibkr/ibkrWhatIfCommission.js";
 import { loadCommissionEstimator } from "../lib/commissionEstimate.js";
 import { buildOrderCommissionPreview } from "../lib/orderCommissionPreview.js";
-import { loadSignalSettings } from "../lib/signalSettingsStore.js";
+import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
 
-export const signalSettingsRouter = Router();
-signalSettingsRouter.use(requireAuth);
-
-const settingsFields = [
-  "max_delta_drift_pct",
-  "min_annualized_yield_pct",
-  "max_net_delta",
-  "max_position_pct_of_portfolio",
-  "max_concentration_per_ticker_pct",
-  "min_cash_reserve_pct",
-  "commission_warn_share_of_premium_pct",
-] as const;
-
-function validateSettingsPayload(payload: Record<string, unknown>): string | null {
-  for (const field of settingsFields) {
-    const value = payload[field];
-    if (typeof value !== "number" || Number.isNaN(value)) {
-      return `${field} must be a number.`;
-    }
-  }
-  const p = payload as Record<(typeof settingsFields)[number], number>;
-
-  if (p.max_net_delta < 0 || p.max_net_delta > 1) return "max_net_delta must be between 0 and 1.";
-
-  const percentageFields = [
-    "max_delta_drift_pct",
-    "min_annualized_yield_pct",
-    "max_position_pct_of_portfolio",
-    "max_concentration_per_ticker_pct",
-    "min_cash_reserve_pct",
-    "commission_warn_share_of_premium_pct",
-  ] as const;
-  for (const field of percentageFields) {
-    if (p[field] < 0 || p[field] > 100) return `${field} must be between 0 and 100.`;
-  }
-
-  return null;
-}
-
-signalSettingsRouter.get("/", async (_request, response) => {
-  const row = await db("signal_settings as ss")
-    .leftJoin("users as u", "u.id", "ss.updated_by_user_id")
-    .select("ss.*", "u.display_name as updated_by_display_name")
-    .first();
-  response.json(row ?? null);
-});
-
-signalSettingsRouter.put("/", async (request, response) => {
-  const validationError = validateSettingsPayload(request.body ?? {});
-  if (validationError) {
-    response.status(400).json({ error: validationError });
-    return;
-  }
-
-  const body = request.body as Record<string, number>;
-  const updatePayload: Record<string, number> = {};
-  for (const field of settingsFields) {
-    updatePayload[field] = body[field] as number;
-  }
-
-  const [row] = await db("signal_settings")
-    .update({ ...updatePayload, updated_at: db.fn.now(), updated_by_user_id: request.session.userId })
-    .returning("*");
-
-  if (!row) {
-    response.status(404).json({ error: "No signal_settings row found." });
-    return;
-  }
-  response.json(row);
-});
+// Order-time checks used by the order setup forms: the position limits and the commission preview.
+// Both run for any order (Signals, the chain, the position form); the limits are the single set in trading_settings.
+export const orderChecksRouter = Router();
+orderChecksRouter.use(requireAuth);
 
 // Single shared evaluation of the three blocking limits (max position %,
 // max concentration per ticker %, min cash reserve %) -- called by the
 // Order Setup card as the user edits contract quantity (debounced), and
 // reused as-is by the confirm-step hard gate and the order's live quote-
 // stream compliance check (positions.ts). Approved 2026-09-24.
-signalSettingsRouter.get("/order-limits-check", async (request, response) => {
+orderChecksRouter.get("/limits", async (request, response) => {
   const { symbol, strategyKey, quantity, strike, spotPrice, rollFromStrike } = request.query;
   if (typeof symbol !== "string" || !symbol.trim()) {
     response.status(400).json({ error: "symbol is required." });
@@ -98,8 +31,8 @@ signalSettingsRouter.get("/order-limits-check", async (request, response) => {
   }
   const parsedQuantity = Number(quantity);
   const parsedStrike = Number(strike);
-  if (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0) {
-    response.status(400).json({ error: "quantity must be a positive number." });
+  if (!Number.isInteger(parsedQuantity) || parsedQuantity <= 0) {
+    response.status(400).json({ error: "quantity must be a positive whole number of contracts." });
     return;
   }
   if (!Number.isFinite(parsedStrike) || parsedStrike <= 0) {
@@ -122,14 +55,14 @@ signalSettingsRouter.get("/order-limits-check", async (request, response) => {
     return;
   }
 
-  // rollFromStrike marks a roll (Roll Signals): the order only adds the strike difference's notional, see signalOrderLimits.ts.
+  // rollFromStrike marks a roll (Roll Signals): the order only adds the strike difference's notional, see orderLimits.ts.
   const parsedRollFromStrike = rollFromStrike === undefined ? undefined : Number(rollFromStrike);
   if (parsedRollFromStrike !== undefined && (!Number.isFinite(parsedRollFromStrike) || parsedRollFromStrike <= 0)) {
     response.status(400).json({ error: "rollFromStrike must be a positive number." });
     return;
   }
 
-  const result = await evaluateSignalOrderLimits({
+  const result = await evaluateOrderLimits({
     strategyKey,
     symbol: ticker.symbol,
     tickerId: ticker.tickerId,
@@ -170,7 +103,7 @@ function parseCommissionPreviewLegs(body: unknown): { legs: OrderLegPayload[] } 
 // Commission shown in the order setup (approved 2026-10-02): IBKR's what-if for this exact order, the
 // trailing-fills estimate when IBKR cannot answer. Called once per setup form and again only when its
 // quantity or fill priority changes -- never per Signals row. Read-only: the what-if order is never worked.
-signalSettingsRouter.post("/commission-preview", async (request, response) => {
+orderChecksRouter.post("/commission-preview", async (request, response) => {
   const parsed = parseCommissionPreviewLegs(request.body);
   if ("error" in parsed) {
     response.status(400).json({ error: parsed.error });
@@ -182,7 +115,7 @@ signalSettingsRouter.post("/commission-preview", async (request, response) => {
     return;
   }
   const [settings, estimator, whatIf] = await Promise.all([
-    loadSignalSettings(),
+    loadTradingSettings(),
     loadCommissionEstimator(),
     fetchWhatIfCommissionRange(parsed.legs).then(
       (range) => ({ range, failureReason: null }),

@@ -40,7 +40,7 @@ import type { SignalGrade } from "./signalCandidates.js";
 import { rollCandidateKey, type HeldLegScore } from "./rollSignalCandidates.js";
 import { candidateContractKey, scoreTicker, type LiveOptionQuote } from "./signalsLiveScoring.js";
 import { loadAccountContext, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
-import { loadSignalSettings, type SignalSettings } from "./signalSettingsStore.js";
+import { loadTradingSettings, type TradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 
@@ -135,7 +135,7 @@ export interface DaySignalsLoopDependencies {
   replaceTickerPool(tickerId: string, tradingDateIso: string, snapshotId: string, expiries: DaySignalExpirySeed[], seededAt: Date): Promise<boolean>;
   loadTickerSignalsInputs(ticker: SignalsTickerRow): Promise<TickerSignalsInputs>;
   loadAccountContext(): Promise<AccountContext>;
-  loadSignalSettings(): Promise<SignalSettings>;
+  loadTradingSettings(): Promise<TradingSettings>;
   loadLastGrades(tickerId: string, tradingDateIso: string): Promise<Map<string, SignalGrade | null>>;
   updateDayQuoteGrades(tickerId: string, grades: { expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[]): Promise<void>;
   notifyUpgrade(upgrade: SignalUpgrade): Promise<void>;
@@ -183,7 +183,7 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   saveRerankState: saveDayRerankState,
   loadTickerSignalsInputs,
   loadAccountContext,
-  loadSignalSettings,
+  loadTradingSettings,
   loadLastGrades: async (tickerId, tradingDateIso) => new Map((await loadDayQuotesForTicker(tickerId, tradingDateIso)).map((row) => [`${row.expiry}|${row.strike}|${row.right}`, row.lastGrade])),
   updateDayQuoteGrades,
   notifyUpgrade: notifySignalUpgrade,
@@ -377,7 +377,7 @@ export class DaySignalsLoop {
     const cycleNumber = ++this.status.cycleNumber;
     const startedAt = this.deps.now();
     this.status.cycleStartedAt = startedAt.toISOString();
-    const [settings, account] = await Promise.all([this.deps.loadSignalSettings(), this.deps.loadAccountContext()]);
+    const [settings, account] = await Promise.all([this.deps.loadTradingSettings(), this.deps.loadAccountContext()]);
 
     // Spot pass: every pooled ticker's stock first, so the contract set below follows the live price.
     const spotByTicker = new Map<string, number | null>();
@@ -578,7 +578,7 @@ export class DaySignalsLoop {
   }
 
   /** One-off discovery for a ticker whose spot moved: quote the capture's contract set at the new spot across all its fitted expiries, score, and re-pick the pooled expiries (open legs' expiries always stay). */
-  private async rerankTicker(ib: IBApi, context: DayTickerContractContext, spot: number, tradingDateIso: string, settings: SignalSettings, account: AccountContext, signal: AbortSignal): Promise<"changed" | "unchanged" | "disconnected"> {
+  private async rerankTicker(ib: IBApi, context: DayTickerContractContext, spot: number, tradingDateIso: string, settings: TradingSettings, account: AccountContext, signal: AbortSignal): Promise<"changed" | "unchanged" | "disconnected"> {
     try {
       const inputs = await this.deps.loadTickerSignalsInputs({ tickerId: context.tickerId, symbol: context.symbol, companyName: null, sector: null });
       if (!inputs.header || inputs.header.tradingDateIso !== tradingDateIso || context.atmImpliedVolatility === null) return "unchanged";
@@ -636,7 +636,7 @@ export class DaySignalsLoop {
     this.lastNotifiedAtByKey.set(key, this.deps.now().getTime());
   }
 
-  private async rescoreTicker(ticker: SignalsTickerRow, tradingDateIso: string, spot: number | null, settings: SignalSettings, account: AccountContext, newContractKeys: Set<string>): Promise<void> {
+  private async rescoreTicker(ticker: SignalsTickerRow, tradingDateIso: string, spot: number | null, settings: TradingSettings, account: AccountContext, newContractKeys: Set<string>): Promise<void> {
     try {
       const [inputs, lastGrades, lastRollGrades] = await Promise.all([this.deps.loadTickerSignalsInputs(ticker), this.deps.loadLastGrades(ticker.tickerId, tradingDateIso), this.deps.loadLastRollGrades(ticker.tickerId, tradingDateIso)]);
       if (!inputs.header || inputs.header.tradingDateIso !== tradingDateIso) return;

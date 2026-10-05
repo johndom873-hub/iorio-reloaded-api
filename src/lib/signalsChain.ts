@@ -3,14 +3,14 @@ import { formatShortDate } from "./formatShortDate.js";
 import { scoreRollPair, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import type { SignalCandidate, SignalContractExclusion, SignalGrade, SignalQuote, SignalQuoteSource, SignalStrategyKey } from "./signalCandidates.js";
 import { candidateContractKey, computeUncompensatedByContract, contractKey, mergeLiveQuotes, scoreTicker, type ContractRef, type LiveScoringOverrides } from "./signalsLiveScoring.js";
-import type { SignalSettings } from "./signalSettingsStore.js";
+import type { TradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, SignalsPriceSource, SignalsUnscoredReason, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
 
 // The Signals ticker modal's full option chain (mockup approved 2026-09-29):
 // every listed strike of an expiry, calls and puts, each cell a Signals
 // candidate, a quoted contract Signals excluded (with the reason), or a
 // contract the capture never quoted. Plus scoring ONE arbitrary contract the
-// way a candidate is scored, with the Signals tab filters lifted. Both run
+// way a candidate is scored, with the trading-settings filters lifted. Both run
 // the unchanged scoreTicker; nothing here computes a score of its own.
 
 /** unscored: the ticker itself has no score (or is still being analysed), so no contract is graded; filtered: quoted but left out by Signals. */
@@ -88,8 +88,10 @@ export function describeContractExclusion(exclusion: SignalContractExclusion): s
       return exclusion.earningsDateIso ? `Expiry spans earnings on ${formatShortDate(exclusion.earningsDateIso)}` : "Expiry spans an earnings date";
     case "no_surface_volatility":
       return "The volatility surface gives no volatility at this strike";
+    case "below_min_delta":
+      return `Δ ${Math.abs(exclusion.delta).toFixed(2)} is under your min Δ ${exclusion.deltaTargetMin.toFixed(2)}`;
     case "above_max_delta":
-      return `Δ ${Math.abs(exclusion.delta).toFixed(2)} is over your max Δ ${exclusion.maxNetDelta.toFixed(2)}`;
+      return `Δ ${Math.abs(exclusion.delta).toFixed(2)} is over your max Δ ${exclusion.deltaTargetMax.toFixed(2)}`;
     case "no_friction":
       return "Friction cost could not be computed for this quote";
     case "no_forecast":
@@ -108,7 +110,7 @@ function exclusionDelta(exclusion: SignalContractExclusion | undefined): number 
 export function scoreTickerWithExclusions(
   inputs: TickerSignalsInputs,
   account: AccountContext,
-  settings: SignalSettings,
+  settings: TradingSettings,
   live?: LiveScoringOverrides,
 ): { scored: TickerSignals; scoringQuotes: SignalQuote[]; exclusions: Map<string, SignalContractExclusion> } {
   // A ticker that stops before candidate building (no snapshot / fit / forecast) still shows its stored quotes, day quotes first.
@@ -230,7 +232,7 @@ export function assembleSignalsChain(input: AssembleSignalsChainInput): SignalsC
 
 export interface SignalContractContext {
   right: "C" | "P";
-  /** Passes today's Signals tab filters too (it is one of the modal's candidates). */
+  /** Passes today's trading-settings filters too (it is one of the modal's candidates). */
   isCandidate: boolean;
   /** Why it is not a candidate (or not scored); null for a candidate. */
   notCandidateReason: string | null;
@@ -274,7 +276,7 @@ export interface SignalContractLiveQuote {
 export interface ScoreSignalContractInput {
   inputs: TickerSignalsInputs;
   account: AccountContext;
-  settings: SignalSettings;
+  settings: TradingSettings;
   contract: ContractRef;
   /** One pooled live reading of the contract; null when lines are off, the market is closed or none arrived. */
   liveQuote: SignalContractLiveQuote | null;
@@ -290,10 +292,10 @@ export interface ScoreSignalContractInput {
   uncompensatedByContract?: Map<string, number | null>;
 }
 
-const filtersLifted = { maxNetDelta: Number.POSITIVE_INFINITY, minAnnualizedYieldPct: Number.NEGATIVE_INFINITY };
+const filtersLifted = { deltaTargetMin: 0, deltaTargetMax: Number.POSITIVE_INFINITY, minAnnualizedYieldPct: Number.NEGATIVE_INFINITY };
 
 /**
- * Pure (apart from the Monte Carlo): scores one contract through scoreTicker, first with the real Signals tab settings (a hit is a
+ * Pure (apart from the Monte Carlo): scores one contract through scoreTicker, first with the real trading settings (a hit is a
  * candidate, identical to the modal's), then with max delta / min yield lifted. Anything the builder still excludes comes back
  * unscored with its reason. A contract missing from the capture gets an empty snapshot row so the day/live merge can fill it.
  */

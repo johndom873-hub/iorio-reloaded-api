@@ -3,7 +3,7 @@ import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { db } from "../db/connection.js";
 import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "./sharedReadConnection.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
-import { loadStrategyTargetWindow } from "../lib/strategySettings.js";
+import { loadRecoveryTargetWindow } from "../lib/recoveryTargetWindow.js";
 import { scanRecoveryPathCoveredCallCandidates, type CoveredCallCandidate } from "./scanRecoveryPathCoveredCallCandidates.js";
 import { fetchBreakEvenByPositionId } from "../lib/cycleBreakEvenQueries.js";
 
@@ -73,7 +73,7 @@ export type RecoveryPathEvaluation =
  *   monthly premium = top-ranked live covered-call candidate's premium × 100 × contracts available × (30 ÷ candidate DTE)
  *   months to recover = ceil(unrealized loss ÷ monthly premium)
  * The candidate comes from scanRecoveryPathCoveredCallCandidates (the
- * delta/DTE window configured for covered_call in strategy_settings).
+ * delta band and expiry window in trading_settings).
  * Read-only, writes nothing. Borrows the shared read connection, or opens
  * its own short-lived one.
  */
@@ -100,7 +100,7 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
   const cycleBreakEven = (await fetchBreakEvenByPositionId([positionRow.tickerId])).get(positionId)?.breakEven ?? null;
   const { costBasisPerShare, costBasisSource } = chooseRecoveryCostBasis(entryPrice, cycleBreakEven);
 
-  const targetWindow = await loadStrategyTargetWindow("covered_call");
+  const targetWindow = await loadRecoveryTargetWindow();
   if (!targetWindow) return { status: "no_settings" };
 
   // FROZEN, not REALTIME — this is just an estimate, and it needs to work

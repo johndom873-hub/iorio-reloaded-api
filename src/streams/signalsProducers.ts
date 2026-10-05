@@ -12,7 +12,7 @@ import { createChainCellResolver, scoreSignalContract, scoreTickerWithExclusions
 import { rollCandidateKey, type HeldLegScore, type RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import { loadCapturedDeltas } from "../lib/signalsChainStore.js";
 import { loadAccountContext, loadDayQuotesAsLiveQuotes, loadSignalsUniverseTicker, loadSignalsUniverseTickers, loadSnapshotVersions, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
-import { loadSignalSettings, type SignalSettings } from "../lib/signalSettingsStore.js";
+import { loadTradingSettings, type TradingSettings } from "../lib/tradingSettingsStore.js";
 import type { AccountContext, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { computeUncompensatedSharesInWorker } from "../lib/uncompensatedShareWorkerPool.js";
 import type { StreamProducer } from "./streamProducers.js";
@@ -107,7 +107,7 @@ export interface SignalsProducerDependencies {
   loadDayQuotesStatus(): Promise<DayQuotesStatus>;
   daySignalsLoopStatus(): DaySignalsLoopStatus | null;
   loadAccountContext(): Promise<AccountContext>;
-  loadSignalSettings(): Promise<SignalSettings>;
+  loadTradingSettings(): Promise<TradingSettings>;
   fetchAvailableUncoveredShares(tickerId: string): Promise<number>;
   streamLivePrices(contracts: PriceContract[], onUpdate: (prices: Record<string, number | null>, status: { frozenPhaseComplete: boolean }) => void, signal: AbortSignal): Promise<void>;
   streamOptionQuotes(symbol: string, contracts: ContractRef[], onUpdate: (quotes: LiveOptionQuote[]) => void, signal: AbortSignal): Promise<void>;
@@ -127,7 +127,7 @@ export const defaultSignalsProducerDependencies: SignalsProducerDependencies = {
   loadDayQuotesStatus,
   daySignalsLoopStatus,
   loadAccountContext,
-  loadSignalSettings,
+  loadTradingSettings,
   fetchAvailableUncoveredShares,
   streamLivePrices: streamPooledPrices,
   streamOptionQuotes: streamSignalsOptionQuotes,
@@ -281,7 +281,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
     parseParameters: parseScreenParameters,
     async run(parameters, _context, emit, signal) {
       const bestContractLines = parameters.bestContractLines !== "false";
-      const [tickers, initialAccount, settings, initialDayQuotesStatus] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadAccountContext(), deps.loadSignalSettings(), deps.loadDayQuotesStatus()]);
+      const [tickers, initialAccount, settings, initialDayQuotesStatus] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadAccountContext(), deps.loadTradingSettings(), deps.loadDayQuotesStatus()]);
       let account = initialAccount;
       let dayQuotesStatus = initialDayQuotesStatus;
       // Read before the inputs: a change landing between the two reads is then picked up by the first poll instead of being missed.
@@ -461,7 +461,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       const ticker = await deps.loadSignalsUniverseTicker(symbol);
       if (!ticker) throw new StreamRequestError(404, `${symbol} is not on the shortlist and has no open short option leg.`);
       const initialVersions = await deps.loadSnapshotVersions([ticker.tickerId]); // before the inputs, see the screen stream
-      const [initialInputs, initialAccount, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadSignalSettings()]);
+      const [initialInputs, initialAccount, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadTradingSettings()]);
       if (signal.aborted) return;
       let inputs = initialInputs;
       let snapshotVersion = initialVersions.get(ticker.tickerId) ?? null;
@@ -603,7 +603,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
       const contractKeys = [...new Set([...onScreenKeys, ...pinnedKeys])];
       const ticker = await deps.loadSignalsUniverseTicker(symbol);
       if (!ticker) throw new StreamRequestError(404, `${symbol} is not on the shortlist and has no open short option leg.`);
-      const [inputs, account, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadSignalSettings()]);
+      const [inputs, account, settings] = await Promise.all([deps.loadTickerSignalsInputs(ticker), deps.loadAccountContext(), deps.loadTradingSettings()]);
       const capturedDeltaByContract = await deps.loadCapturedDeltas(inputs);
       if (signal.aborted) return;
       const requested = new Set(contractKeys);

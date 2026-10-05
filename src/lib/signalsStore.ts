@@ -9,7 +9,7 @@ import { computeUncompensatedByContract, scoreTicker, toScreenRow, type LiveOpti
 import { loadDayQuotesForTicker } from "./daySignalsStore.js";
 import { loadUpcomingMajorMacroEvents } from "./macroEventCalendar.js";
 import type { RoadmapCounts } from "./signalsRoadmap.js";
-import { loadSignalSettings } from "./signalSettingsStore.js";
+import { loadTradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, TickerSignalsDetail, TickerSignalsInputs } from "./signalsTypes.js";
 import { loadVolatilityForecast } from "./volatilityForecastStore.js";
 import type { OpenShortLeg } from "./rollSignalCandidates.js";
@@ -274,7 +274,7 @@ export async function loadDayQuotesAsLiveQuotes(tickerId: string, snapshotTradin
 /** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). Includes the raw
  * fitted-surface slices (unscaled by live spot) for the volatility-surface modal. */
 export async function loadTickerSignals(ticker: SignalsTickerRow, accountContext: AccountContext, options: { withUncompensatedShare?: boolean } = {}): Promise<TickerSignalsDetail> {
-  const [inputs, settings] = await Promise.all([loadTickerSignalsInputs(ticker), loadSignalSettings()]);
+  const [inputs, settings] = await Promise.all([loadTickerSignalsInputs(ticker), loadTradingSettings()]);
   const scored = scoreTicker(inputs, accountContext, settings);
   if (!options.withUncompensatedShare || !inputs.header?.underlyingPrice || scored.candidates.length === 0) return { ...scored, slices: inputs.slices };
   const uncompensatedByContract = computeUncompensatedByContract(scored.candidates, inputs.header.underlyingPrice, inputs.slices);
@@ -308,7 +308,7 @@ export async function loadRoadmapCounts(now: Date = new Date()): Promise<Roadmap
 
 /** The whole Signals screen at snapshot prices: one account-context fetch shared across every ticker, no candidate lists. */
 export async function loadSignalsScreen(): Promise<SignalsScreenRow[]> {
-  const [tickers, accountContext, settings] = await Promise.all([loadSignalsUniverseTickers(), loadAccountContext(), loadSignalSettings()]);
+  const [tickers, accountContext, settings] = await Promise.all([loadSignalsUniverseTickers(), loadAccountContext(), loadTradingSettings()]);
   const inputs = await Promise.all(tickers.map((ticker) => loadTickerSignalsInputs(ticker)));
   return inputs.map((tickerInputs) => toScreenRow(scoreTicker(tickerInputs, accountContext, settings)));
 }

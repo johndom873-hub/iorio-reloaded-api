@@ -95,3 +95,10 @@ export function buildOrderCommissionPreview(input: {
     netCreditAfterCommissionDollars: netPremiumDollars - commissionDollars,
   };
 }
+
+/** The warning the order setup forms show under the commission rows, or null when there is none (same wording as the web form). */
+export function describeCommissionWarning(preview: Pick<OrderCommissionPreview, "warn" | "netPremiumDollars" | "commissionSharePctOfPremium" | "warnThresholdPct">): string | null {
+  if (!preview.warn) return null;
+  if (preview.netPremiumDollars <= 0 || preview.commissionSharePctOfPremium === null) return "This order has no net premium to cover the commission.";
+  return `Commission is ${preview.commissionSharePctOfPremium.toFixed(1)}% of the premium, above your ${preview.warnThresholdPct}% warning level.`;
+}

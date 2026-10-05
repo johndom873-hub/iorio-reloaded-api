@@ -68,7 +68,8 @@ function candidates(quotes = otmQuotes): SignalCandidate[] {
       snapshotDateIso,
       freeShares: 0,
       freeCash: 1_000_000,
-      maxNetDelta: 1,
+      deltaTargetMin: 0,
+      deltaTargetMax: 1,
       minAnnualizedYieldPct: 0,
     }),
   );

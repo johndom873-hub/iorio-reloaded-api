@@ -1,7 +1,7 @@
 import type { SignalCandidate } from "./signalCandidates.js";
 import { scoreTicker } from "./signalsLiveScoring.js";
 import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
-import { loadSignalSettings, type SignalSettings } from "./signalSettingsStore.js";
+import { loadTradingSettings, type TradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 import { replaceDaySignalPool, type DaySignalExpirySeed, type DaySignalTickerSeed } from "./daySignalsStore.js";
 
@@ -42,7 +42,7 @@ export interface DaySignalsSeedDependencies {
   loadSignalsUniverseTickers(): Promise<SignalsTickerRow[]>;
   loadTickerSignalsInputs(ticker: SignalsTickerRow): Promise<TickerSignalsInputs>;
   loadAccountContext(): Promise<AccountContext>;
-  loadSignalSettings(): Promise<SignalSettings>;
+  loadTradingSettings(): Promise<TradingSettings>;
   replaceDaySignalPool(tradingDateIso: string, seeds: DaySignalTickerSeed[], seededAt: Date): Promise<void>;
   now(): Date;
 }
@@ -51,7 +51,7 @@ export const defaultDaySignalsSeedDependencies: DaySignalsSeedDependencies = {
   loadSignalsUniverseTickers,
   loadTickerSignalsInputs,
   loadAccountContext,
-  loadSignalSettings,
+  loadTradingSettings,
   replaceDaySignalPool,
   now: () => new Date(),
 };
@@ -78,7 +78,7 @@ export function buildSeedFailureMessage(result: DaySignalsSeedResult): string | 
 }
 
 export async function seedDaySignals(tradingDateIso: string, deps: DaySignalsSeedDependencies = defaultDaySignalsSeedDependencies): Promise<DaySignalsSeedResult> {
-  const [tickers, settings] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadSignalSettings()]);
+  const [tickers, settings] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadTradingSettings()]);
   // Free cash only affects the executable flag, never the ranking — a missing account summary must not block the seed.
   let accountContextUnavailable = false;
   const account = await deps.loadAccountContext().catch((error) => {

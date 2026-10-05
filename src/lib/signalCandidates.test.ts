@@ -47,7 +47,8 @@ function baseInput(overrides: Partial<SignalCandidatesInput> = {}): SignalCandid
     snapshotDateIso: "2026-09-21",
     freeShares: 0,
     freeCash: 1_000_000,
-    maxNetDelta: 1,
+    deltaTargetMin: 0,
+    deltaTargetMax: 1,
     minAnnualizedYieldPct: 0,
     ...overrides,
   };
@@ -247,10 +248,21 @@ describe("buildSignalCandidates: flags and executability", () => {
 });
 
 describe("buildSignalCandidates: Signals tab filters", () => {
-  it("drops a candidate whose |delta| exceeds maxNetDelta", () => {
+  it("drops a candidate whose |delta| exceeds deltaTargetMax", () => {
     const unrestricted = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }))[0]!;
-    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], maxNetDelta: Math.abs(unrestricted.delta) - 0.001 }))).toHaveLength(0);
-    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], maxNetDelta: Math.abs(unrestricted.delta) }))).toHaveLength(1);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], deltaTargetMax: Math.abs(unrestricted.delta) - 0.001 }))).toHaveLength(0);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], deltaTargetMax: Math.abs(unrestricted.delta) }))).toHaveLength(1);
+  });
+
+  it("drops a candidate whose |delta| is below deltaTargetMin, and counts it", () => {
+    const unrestricted = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }))[0]!;
+    const delta = Math.abs(unrestricted.delta);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], deltaTargetMin: delta + 0.001 }))).toHaveLength(0);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], deltaTargetMin: delta }))).toHaveLength(1);
+    const tally = emptyCandidateExclusionTally();
+    buildSignalCandidates(baseInput({ exclusionTally: tally, quotes: [quoteAt(90, "P")], deltaTargetMin: delta + 0.001 }));
+    expect(tally.belowMinDeltaCount).toBe(1);
+    expect(tally.aboveMaxDeltaCount).toBe(0);
   });
 
   it("drops a candidate whose annualised yield is below minAnnualizedYieldPct", () => {
@@ -258,6 +270,110 @@ describe("buildSignalCandidates: Signals tab filters", () => {
     const yieldPct = unrestricted.annualizedYield * 100;
     expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], minAnnualizedYieldPct: yieldPct + 1 }))).toHaveLength(0);
     expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], minAnnualizedYieldPct: yieldPct }))).toHaveLength(1);
+  });
+});
+
+describe("buildSignalCandidates: the delta band edge cases", () => {
+  const wideQuotes = [quoteAt(70, "P"), quoteAt(75, "P"), quoteAt(80, "P"), quoteAt(85, "P"), quoteAt(90, "P"), quoteAt(95, "P"), quoteAt(105, "C"), quoteAt(110, "C"), quoteAt(120, "C")];
+  const unrestricted = buildSignalCandidates(baseInput({ quotes: wideQuotes }));
+  const sortedMagnitudes = unrestricted.map((candidate) => Math.abs(candidate.delta)).sort((a, b) => a - b);
+
+  it("the fixture has nine distinct deltas, put and call, so the band cases below are not degenerate", () => {
+    expect(unrestricted).toHaveLength(9);
+    expect(new Set(sortedMagnitudes).size).toBe(9);
+    expect(unrestricted.some((candidate) => candidate.strategyKey === "covered_call")).toBe(true);
+    expect(unrestricted.some((candidate) => candidate.strategyKey === "cash_secured_put")).toBe(true);
+  });
+
+  for (const [label, quote] of [["put", quoteAt(90, "P")], ["call", quoteAt(110, "C")]] as const) {
+    it(`a ${label} exactly at either bound is kept, and a hair outside is dropped on the matching side`, () => {
+      const delta = Math.abs(buildSignalCandidates(baseInput({ quotes: [quote] }))[0]!.delta);
+      expect(buildSignalCandidates(baseInput({ quotes: [quote], deltaTargetMin: delta, deltaTargetMax: 1 }))).toHaveLength(1);
+      expect(buildSignalCandidates(baseInput({ quotes: [quote], deltaTargetMin: 0, deltaTargetMax: delta }))).toHaveLength(1);
+      expect(buildSignalCandidates(baseInput({ quotes: [quote], deltaTargetMin: delta + 1e-9, deltaTargetMax: 1 }))).toHaveLength(0);
+      expect(buildSignalCandidates(baseInput({ quotes: [quote], deltaTargetMin: 0, deltaTargetMax: delta - 1e-9 }))).toHaveLength(0);
+    });
+  }
+
+  it("a band whose min equals its max keeps exactly the contract with that delta and drops the rest, counted on both sides", () => {
+    const target = unrestricted[4]!;
+    const delta = Math.abs(target.delta);
+    const tally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: delta, deltaTargetMax: delta, exclusionTally: tally }));
+    expect(kept.map((candidate) => `${candidate.strike}${candidate.strategyKey}`)).toEqual([`${target.strike}${target.strategyKey}`]);
+    const below = sortedMagnitudes.filter((magnitude) => magnitude < delta).length;
+    const above = sortedMagnitudes.filter((magnitude) => magnitude > delta).length;
+    expect(tally.belowMinDeltaCount).toBe(below);
+    expect(tally.aboveMaxDeltaCount).toBe(above);
+    expect(below + above + 1).toBe(9);
+  });
+
+  it("a minimum of 0 is no lower bound: even the lowest-delta contract is kept, and nothing counts as below the minimum", () => {
+    const tally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0, deltaTargetMax: 1, exclusionTally: tally }));
+    expect(kept).toHaveLength(9);
+    expect(tally.belowMinDeltaCount).toBe(0);
+    expect(tally.aboveMaxDeltaCount).toBe(0);
+  });
+
+  it("a maximum of 1 is no upper bound: even the highest-delta contract is kept", () => {
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0, deltaTargetMax: 1 }));
+    expect(Math.max(...kept.map((candidate) => Math.abs(candidate.delta)))).toBe(sortedMagnitudes[8]);
+  });
+
+  it("counts drops in both directions and the three groups add up to every quote offered", () => {
+    const minimum = (sortedMagnitudes[1]! + sortedMagnitudes[2]!) / 2; // drops the 2 lowest
+    const maximum = (sortedMagnitudes[6]! + sortedMagnitudes[7]!) / 2; // drops the 2 highest
+    const tally = emptyCandidateExclusionTally();
+    const excluded: string[] = [];
+    const kept = buildSignalCandidates(
+      baseInput({ quotes: wideQuotes, deltaTargetMin: minimum, deltaTargetMax: maximum, exclusionTally: tally, onContractExcluded: (_quote, exclusion) => void excluded.push(exclusion.kind) }),
+    );
+    expect(tally.belowMinDeltaCount).toBe(2);
+    expect(tally.aboveMaxDeltaCount).toBe(2);
+    expect(kept).toHaveLength(5);
+    expect(tally.belowMinDeltaCount + tally.aboveMaxDeltaCount + kept.length).toBe(wideQuotes.length);
+    expect(excluded.filter((kind) => kind === "below_min_delta")).toHaveLength(2);
+    expect(excluded.filter((kind) => kind === "above_max_delta")).toHaveLength(2);
+    for (const candidate of kept) {
+      expect(Math.abs(candidate.delta)).toBeGreaterThanOrEqual(minimum);
+      expect(Math.abs(candidate.delta)).toBeLessThanOrEqual(maximum);
+    }
+  });
+
+  it("the exclusion carries the delta that was measured and the bound it broke", () => {
+    const minimum = sortedMagnitudes[4]! + 1e-6;
+    const maximum = sortedMagnitudes[5]! - 1e-6;
+    const exclusions = new Map<string, unknown>();
+    buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: minimum, deltaTargetMax: maximum, onContractExcluded: (quote, exclusion) => void exclusions.set(`${quote.strike}${quote.right}`, exclusion) }));
+    const lowest = unrestricted.find((candidate) => Math.abs(candidate.delta) === sortedMagnitudes[0])!;
+    const highest = unrestricted.find((candidate) => Math.abs(candidate.delta) === sortedMagnitudes[8])!;
+    const keyOf = (candidate: { strike: number; strategyKey: string }) => `${candidate.strike}${candidate.strategyKey === "covered_call" ? "C" : "P"}`;
+    expect(exclusions.get(keyOf(lowest))).toEqual({ kind: "below_min_delta", delta: lowest.delta, deltaTargetMin: minimum });
+    expect(exclusions.get(keyOf(highest))).toEqual({ kind: "above_max_delta", delta: highest.delta, deltaTargetMax: maximum });
+  });
+
+  it("the band is checked before the yield: a contract dropped for its delta is not also counted as below the minimum yield", () => {
+    const tally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0.99, deltaTargetMax: 1, minAnnualizedYieldPct: 1_000_000, exclusionTally: tally }));
+    expect(kept).toHaveLength(0);
+    expect(tally.belowMinDeltaCount).toBe(9);
+    expect(tally.belowMinYieldCount).toBe(0);
+    expect(tally.bestAnnualizedYieldPct).toBeNull(); // nothing reached the yield check
+  });
+
+  it("with the band wide open the minimum yield still applies on its own", () => {
+    const tally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0, deltaTargetMax: 1, minAnnualizedYieldPct: 1_000_000, exclusionTally: tally }));
+    expect(kept).toHaveLength(0);
+    expect(tally.belowMinDeltaCount).toBe(0);
+    expect(tally.belowMinYieldCount).toBe(9);
+  });
+
+  it("returns the same candidates whatever the band when every contract is inside it", () => {
+    const widest = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0, deltaTargetMax: 1 }));
+    const exactlyFitted = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: sortedMagnitudes[0]!, deltaTargetMax: sortedMagnitudes[8]! }));
+    expect(exactlyFitted).toEqual(widest);
   });
 });
 
@@ -282,7 +398,7 @@ describe("buildSignalCandidates: exclusion tally", () => {
     const deltas = unrestricted.map((c) => Math.abs(c.delta));
 
     const deltaTally = emptyCandidateExclusionTally();
-    buildSignalCandidates(baseInput({ exclusionTally: deltaTally, quotes: [quoteAt(90, "P"), quoteAt(95, "P")], maxNetDelta: Math.min(...deltas) }));
+    buildSignalCandidates(baseInput({ exclusionTally: deltaTally, quotes: [quoteAt(90, "P"), quoteAt(95, "P")], deltaTargetMax: Math.min(...deltas) }));
     expect(deltaTally.aboveMaxDeltaCount).toBe(1);
     expect(deltaTally.belowMinYieldCount).toBe(0);
 
