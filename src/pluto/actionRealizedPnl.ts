@@ -6,7 +6,8 @@ import { legRealizedPnlSql } from "../lib/legRealizedPnlSql.js";
 // stored copy; knex.raw reads ":name:" as an identifier, hence the positional binding). Attribution rule: a leg's realized P&L belongs to the Pluto action whose order
 // OPENED it; a leg Pluto only closed (a human opened it, e.g. Formula P1 shares) belongs to the
 // closing action. Rolls therefore split by leg: the roll action owns the leg it opened, the
-// closed leg stays with whichever action opened it. Legs still open contribute nothing yet.
+// closed leg stays with whichever action opened it. Legs still open contribute nothing yet. A partial close is
+// carved into its own closed leg (parent_leg_id), which belongs to whoever owns the leg it was carved from.
 
 export interface PlutoActionRealizedPnl {
   realizedPnl: number | null;
@@ -24,20 +25,26 @@ export async function loadRealizedPnlByActionId(actionIds: string[], connection:
       FROM pluto_actions a
       WHERE a.id = ANY(?::uuid[]) AND a.order_request_id IS NOT NULL
     ),
-    opened AS (
-      SELECT DISTINCT ao.action_id, tr.position_leg_id
+    opened_legs AS (
+      SELECT DISTINCT ao.action_id, tr.position_leg_id AS leg_id
       FROM action_orders ao
       JOIN trades tr ON tr.source_order_request_id = ao.order_request_id AND NOT tr.is_closing_trade
+    ),
+    opened AS (
+      SELECT DISTINCT o.action_id, pl.id AS position_leg_id
+      FROM opened_legs o
+      JOIN position_legs pl ON pl.id = o.leg_id OR pl.parent_leg_id = o.leg_id
     ),
     closed_by_pluto_only AS (
       SELECT DISTINCT ao.action_id, tr.position_leg_id
       FROM action_orders ao
       JOIN trades tr ON tr.source_order_request_id = ao.order_request_id AND tr.is_closing_trade
+      JOIN position_legs closed_leg ON closed_leg.id = tr.position_leg_id
       WHERE NOT EXISTS (
         SELECT 1
         FROM trades opening
         JOIN pluto_actions opener ON opener.order_request_id = opening.source_order_request_id
-        WHERE opening.position_leg_id = tr.position_leg_id AND NOT opening.is_closing_trade
+        WHERE opening.position_leg_id = COALESCE(closed_leg.parent_leg_id, closed_leg.id) AND NOT opening.is_closing_trade
       )
     ),
     owned_legs AS (

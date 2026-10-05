@@ -85,6 +85,8 @@ export async function carveClosedSliceFromPartialClose(
       .insert({
         ...parentColumns,
         entry_price: soldEntryPrice ?? parentColumns.entry_price,
+        // The leg this slice was carved from, so ownership by opener (e.g. a Pluto action's realized P&L) follows it.
+        parent_leg_id: leg.id,
         quantity: chosenFills.reduce((sum, fill) => sum + fill.quantity, 0),
         exit_price: weightedAverageFillPrice(chosenFills),
         exit_at: chosenFills[chosenFills.length - 1]!.executedAt,

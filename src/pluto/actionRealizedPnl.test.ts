@@ -101,6 +101,26 @@ describe("loadRealizedPnlByActionId", () => {
     expect(realized.has(blockedAction)).toBe(false);
   });
 
+  it("keeps a partial close of a Pluto-opened leg with its opener: the carved slice records its parent leg", async () => {
+    const { loadRealizedPnlByActionId } = await import("./actionRealizedPnl.js");
+    const { carveClosedSliceFromPartialClose } = await import("../lib/partialCloseSlice.js");
+    const positionId = await position();
+    const legId = await leg(positionId, { side: "short", entry: 2.0, exit: null, quantity: 2 });
+    const openOrder = await order();
+    const humanCloseOrder = await order();
+    await db("trades").insert({ position_leg_id: legId, ibkr_order_id: `t-open-${Date.now()}`, side: "sell", quantity: 2, price: 2.0, commission: 0, executed_at: db.fn.now(), is_closing_trade: false, source_order_request_id: openOrder });
+    await db("trades").insert({ position_leg_id: legId, ibkr_order_id: `t-close-${Date.now()}`, side: "buy", quantity: 1, price: 0.5, commission: 0, executed_at: db.fn.now(), is_closing_trade: true, source_order_request_id: humanCloseOrder });
+    const opener = await action(openOrder);
+
+    // A human bought back one of the two contracts: IBKR now holds 1, so reconciliation carves the closed one off.
+    const sliceId = await carveClosedSliceFromPartialClose({ id: legId, quantity: 2 }, 1, db);
+    expect(sliceId).not.toBeNull();
+    expect((await db("position_legs").where({ id: sliceId }).first("parent_leg_id")).parent_leg_id).toBe(legId);
+
+    const realized = await loadRealizedPnlByActionId([opener], db);
+    expect(realized.get(opener)).toEqual({ realizedPnl: 150, closedLegCount: 1, openLegCount: 1 });
+  });
+
   it("gives a Pluto-opened leg to its opener, not to the Pluto action that later closed it", async () => {
     const { loadRealizedPnlByActionId } = await import("./actionRealizedPnl.js");
     const positionId = await position();
