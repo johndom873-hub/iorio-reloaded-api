@@ -60,7 +60,7 @@ export async function up(knex: Knex): Promise<void> {
     table.decimal("confidence_floor", 4, 2).notNullable().defaultTo(0.6);
     table.integer("max_model_calls_per_session").notNullable().defaultTo(12);
     table.integer("consecutive_model_failures_breaker").notNullable().defaultTo(3);
-    table.text("prompt_version").notNullable().defaultTo("v1");
+    table.text("prompt_version").notNullable().defaultTo("v2");
     // Real-time triggers
     table.decimal("spot_move_trigger_pct", 6, 2).notNullable().defaultTo(1.5);
     table.integer("burst_lines").notNullable().defaultTo(10);

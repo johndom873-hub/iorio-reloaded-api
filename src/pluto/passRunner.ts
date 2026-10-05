@@ -241,6 +241,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const minutesToWindowEnd = (windowEnd[0]! * 60 + windowEnd[1]!) - easternMinutesOfDay(now);
   const { payload, offeredIds } = buildPlutoUserPayload({
     now,
+    spreadCostSharePct: tradingSettings.spreadCostChargedPct,
     todayEasternIso: checks.context.todayEasternIso,
     minutesToWindowEnd,
     spyDayChangePct,
@@ -385,7 +386,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   // 9. Execute through the real routes, then watch the order without holding the pass.
   const freshHeldLeg = chosenRoll ? fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll.roll.legId) ?? null : null;
   const signalsSnapshotShape = chosenOpen ? signalsSnapshotForOpen(freshCandidate) : signalsSnapshotForRoll(freshHeldLeg, freshRoll?.replacement ?? null);
-  const scoresSnapshot = { ...signalsSnapshotShape, version: `pluto-${plutoPromptVersion}`, candidateId: chosenId, contract: freshCandidate ?? freshRoll, ticker: { spotPrice: fresh.scored.spotPrice, snapshotDateIso: fresh.scored.snapshotDateIso, atmImpliedVolatility: fresh.scored.atmImpliedVolatility, forecast: fresh.scored.forecast, dayChangePercent: fresh.scored.dayChangePercent }, decision, plan: gates.plan, deterministicTopPick: topPickSummary };
+  const scoresSnapshot = { ...signalsSnapshotShape, version: `pluto-${plutoPromptVersion}`, candidateId: chosenId, contract: freshCandidate ?? freshRoll, ticker: { spreadShareCharged: fresh.scored.spreadShareCharged, spotPrice: fresh.scored.spotPrice, snapshotDateIso: fresh.scored.snapshotDateIso, atmImpliedVolatility: fresh.scored.atmImpliedVolatility, forecast: fresh.scored.forecast, dayChangePercent: fresh.scored.dayChangePercent }, decision, plan: gates.plan, deterministicTopPick: topPickSummary };
   const result = await executePlutoOrder(
     context.api,
     settings,

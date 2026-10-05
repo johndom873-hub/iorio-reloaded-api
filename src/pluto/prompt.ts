@@ -9,7 +9,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 // deterministic filter, the top few per ticker per strategy, short field names, no nulls.
 // Shortlist notes never enter the prompt (Marcelo, 2026-09-28).
 
-export const plutoPromptVersion = "v1";
+export const plutoPromptVersion = "v2";
 
 /** How many open candidates per ticker per strategy the model sees (best Edge $ first). */
 export const candidatesPerTickerPerStrategy = 3;
@@ -23,7 +23,7 @@ export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
     "Objective: maximise long-run risk-adjusted return. Doing nothing is the default and costs nothing; a trade must justify itself. Prefer no_trade whenever the evidence is mixed, the market looks stressed, or the model inputs look inconsistent with each other.",
     "",
     "What the numbers mean:",
-    "- edge_vp: fitted implied volatility minus the realized-volatility forecast, in volatility points. net_edge_vp subtracts friction (half-spread + commission). edge_dollars is net edge in dollars per contract. These are the headline mispricing signals; they are expected values with no variance term.",
+    "- edge_vp: fitted implied volatility minus the realized-volatility forecast, in volatility points. net_edge_vp subtracts friction: the share of the half-spread given in parameters.spread_cost_share_pct, plus the estimated commission. edge_dollars is net edge in dollars per contract. These are the headline mispricing signals; they are expected values with no variance term.",
     "- grade: strong (net edge >= 10 vp), good (5-10), weak (0-5). Only good or better reaches you.",
     "- ann_yield_pct: annualised premium yield on capital at risk; it scales with 1/sqrt(time) so very short-dated contracts look richest. Short-dated premium is real on average but tail-heavy.",
     "- surface_iv vs mid_iv: how far the contract's own market price sits from the fitted surface. A big gap means the surface may be wrong for that contract.",
@@ -122,6 +122,8 @@ export interface PlutoPromptInput {
   account: PlutoPromptAccountInput;
   settings: PlutoSettings;
   tickers: PlutoPromptTickerInput[];
+  /** Share of the half-spread that scoring charges as friction (trading_settings.spread_cost_charged_pct). */
+  spreadCostSharePct: number;
   recentDecisions: { at: string; verdict: string; candidateId: string | null; reason: string | null }[];
   trigger: { kind: string; detail: Record<string, unknown> };
 }
@@ -213,6 +215,7 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
       max_ticker_exposure_pct: input.settings.maxTickerExposurePct,
       max_order_notional_pct: input.settings.maxOrderNotionalPct,
       confidence_floor: input.settings.confidenceFloor,
+      spread_cost_share_pct: input.spreadCostSharePct,
     },
     tickers,
     recent_decisions: input.recentDecisions.length > 0 ? input.recentDecisions.map((entry) => stripUndefined({ at: entry.at, verdict: entry.verdict, candidate_id: entry.candidateId ?? undefined, reason: entry.reason ?? undefined })) : undefined,
