@@ -138,7 +138,7 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
     const id = rollCandidateId(scored.symbol, roll);
     const reasons: string[] = [];
     if (gradeRank[roll.grade] < gradeRank[input.settings.minGrade]) reasons.push(`roll grade ${roll.grade} below ${input.settings.minGrade}`);
-    if (roll.netRollEdgeDollars < input.settings.minEdgeDollars) reasons.push(`net roll Edge $${roll.netRollEdgeDollars.toFixed(0)} below $${input.settings.minEdgeDollars}`);
+    if (roll.netRollEdgeDollarsPerContract < input.settings.minEdgeDollars) reasons.push(`net roll Edge $${roll.netRollEdgeDollarsPerContract.toFixed(0)}/contract below $${input.settings.minEdgeDollars}`);
     // The replacement leg must be tradeable on its own terms, minus the grade/Edge $ rules already judged on the roll.
     const replacementReasons = rejectOpenCandidate({ ...roll.replacement, grade: "strong", edgeDollars: Number.MAX_SAFE_INTEGER }, context);
     reasons.push(...replacementReasons.map((reason) => `replacement: ${reason}`));

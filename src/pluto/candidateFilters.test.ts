@@ -127,6 +127,11 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
     const bad = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, replacement: candidate({ strike: 95, spreadPercent: 30 }) }] }) }));
     expect(bad.rejectedRolls[0]!.reasons).toEqual(["replacement: spread 30.0% above 15%"]);
   });
+  it("judges a roll's Edge $ per contract, not its total across the held quantity", () => {
+    const result = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, netRollEdgeDollarsPerContract: 20, netRollEdgeDollars: 40 }] }) }));
+    expect(result.eligibleRolls).toEqual([]);
+    expect(result.rejectedRolls[0]!.reasons).toEqual(["net roll Edge $20/contract below $30"]);
+  });
   it("the deterministic pick is Edge $ first, net Edge second", () => {
     const a = { id: "a", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ edgeDollars: 50, netEdge: 0.06 }) };
     const b = { id: "b", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ edgeDollars: 50, netEdge: 0.09 }) };
