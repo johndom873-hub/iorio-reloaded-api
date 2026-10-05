@@ -29,7 +29,7 @@ export interface ExpectedJob {
 export const chainCaptureSlotEastern = { hour: 10, minute: 0 };
 
 export const expectedScheduledJobs: ExpectedJob[] = [
-  { jobName: "option_chain_structure_refresh", zone: "utc", hour: 12, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 30, marketDaysOnly: true },
+  { jobName: "option_chain_structure_refresh", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 30, marketDaysOnly: true },
   { jobName: "option_chain_capture", zone: "eastern", hour: 10, minute: 0, startByGraceMinutes: 35, maxRunMinutes: 45, marketDaysOnly: true },
   { jobName: "option_surface_fit", zone: "eastern", hour: 10, minute: 0, startByGraceMinutes: 60, maxRunMinutes: 15, marketDaysOnly: true },
   { jobName: "day_signals_seed", zone: "eastern", hour: 10, minute: 0, startByGraceMinutes: 60, maxRunMinutes: 15, marketDaysOnly: true },

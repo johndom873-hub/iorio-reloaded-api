@@ -12,23 +12,23 @@ const recentHealthCheck = (now: string) => run("ibkr_health_check", new Date(utc
 
 describe("evaluateJobDeadlines", () => {
   it("reports a UTC-slot job that has not started once its grace has passed", () => {
-    const now = "2026-10-01T12:11:00Z";
+    const now = "2026-10-01T09:11:00Z";
     expect(keys(evaluate(now, [recentHealthCheck(now)]))).toEqual(["deadline:option_chain_structure_refresh:2026-10-01"]);
   });
 
   it("stays quiet before the deadline", () => {
-    const now = "2026-10-01T12:09:00Z";
+    const now = "2026-10-01T09:09:00Z";
     expect(evaluate(now, [recentHealthCheck(now)])).toEqual([]);
   });
 
   it("counts any run since the slot as started, including a failure (runJob already alerted it)", () => {
-    const now = "2026-10-01T12:30:00Z";
-    expect(evaluate(now, [recentHealthCheck(now), run("option_chain_structure_refresh", "2026-10-01T12:00:04Z", "failure")])).toEqual([]);
+    const now = "2026-10-01T09:30:00Z";
+    expect(evaluate(now, [recentHealthCheck(now), run("option_chain_structure_refresh", "2026-10-01T09:00:04Z", "failure")])).toEqual([]);
   });
 
   it("ignores yesterday's run", () => {
-    const now = "2026-10-01T12:30:00Z";
-    expect(keys(evaluate(now, [recentHealthCheck(now), run("option_chain_structure_refresh", "2026-09-30T12:00:04Z")]))).toContain("deadline:option_chain_structure_refresh:2026-10-01");
+    const now = "2026-10-01T09:30:00Z";
+    expect(keys(evaluate(now, [recentHealthCheck(now), run("option_chain_structure_refresh", "2026-09-30T09:00:04Z")]))).toContain("deadline:option_chain_structure_refresh:2026-10-01");
   });
 
   it("skips market-days-only jobs on a closed day but still checks the every-day ones", () => {

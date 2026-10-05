@@ -5,12 +5,12 @@
 // captures at 10:00 ET. Running this first means the 10:00 ET job reads
 // today's structure from the DB instead of re-fetching it from IBKR.
 //
-// One fixed-UTC Scheduler entry (12:00 UTC), unlike the ticks job's
+// One fixed-UTC Scheduler entry (09:00 UTC), unlike the ticks job's
 // DST-paired pair — this job isn't pinned to a specific ET time the way
 // "30 minutes after the open" is, so it doesn't need the two-slot trick:
-// 12:00 UTC is always well clear of IBKR Gateway's overnight restart and
-// comfortably ahead of the 10:00 ET ticks job (7:00 ET in winter, 8:00 ET in
-// summer — either way, hours of slack).
+// 09:00 UTC is always well clear of IBKR Gateway's 05:30 UTC restart and
+// ahead of the 6:00 ET pre-open readiness check (4:00 ET in winter, 5:00 ET in
+// summer), which reports on today's structure.
 //
 // Usage (dev):  npm run job:option-chain-structure
 // Usage (prod): node dist/scripts/run-option-chain-structure-job.js

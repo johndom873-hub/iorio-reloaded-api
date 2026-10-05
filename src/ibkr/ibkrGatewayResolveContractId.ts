@@ -36,7 +36,7 @@ export function resolveContractId(ib: IBApi, contract: Contract, reqId: number):
     }
 
     ib.on(EventName.contractDetails, onContractDetails);
-    ib.once(EventName.contractDetailsEnd, onEnd);
+    ib.on(EventName.contractDetailsEnd, onEnd);
     ib.on(EventName.error, onError);
     ib.reqContractDetails(reqId, contract);
   });

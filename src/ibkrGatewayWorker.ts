@@ -12,6 +12,7 @@ import { getCurrentAccountBinding, getExpectedAccountId, initializeAccountBindin
 import { readExpirySettlementMode } from "./lib/expirySettlementAudit.js";
 import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
 import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
+import { allocateContractResolutionRequestId } from "./ibkr/contractResolutionRequestIds.js";
 import {
   buildContractFromConId,
   buildLegContract,
@@ -137,14 +138,13 @@ async function resolveLegContractIds(
   legs: OrderLegPayload[],
 ): Promise<(number | null)[]> {
   if (!ib) return legs.map(() => null);
-  let reqId = 70_000;
   const results: (number | null)[] = [];
   for (const leg of legs) {
     if (leg.ibkrContractId) {
       results.push(leg.ibkrContractId);
       continue;
     }
-    results.push(await resolveContractId(ib, buildLegContract(leg), reqId++));
+    results.push(await resolveContractId(ib, buildLegContract(leg), allocateContractResolutionRequestId()));
   }
   return results;
 }

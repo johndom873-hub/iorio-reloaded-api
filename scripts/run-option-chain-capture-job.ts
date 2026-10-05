@@ -4,7 +4,7 @@
 //
 // Chain STRUCTURE (expiries + strike grids) is no longer refreshed here —
 // split off 2026-09-23 into run-option-chain-structure-job.ts, which runs
-// pre-market (12:00 UTC) since structure has no market-open dependency. This
+// pre-market (09:00 UTC) since structure has no market-open dependency. This
 // job reads that structure from the DB and only needs the market open for
 // the ticks themselves, hence the later window below.
 //
