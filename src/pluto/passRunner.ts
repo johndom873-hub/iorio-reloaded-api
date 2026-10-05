@@ -6,6 +6,8 @@ import { loadTradingSettings, type TradingSettings } from "../lib/tradingSetting
 import { scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
+import type { SignalCandidate } from "../lib/signalCandidates.js";
+import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
 import { loadPlutoBook } from "./book.js";
 import { deterministicTopPick, filterTickerForPluto, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { noTrade, parsePlutoDecision, reconcileAgreement, type PlutoDecision } from "./decisionSchema.js";
@@ -106,6 +108,19 @@ async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSetting
     if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description, cancelByMs }), result.orderId);
   }
   ticker.closeOffers = offers.filter((offer) => !offer.automatic);
+}
+
+/**
+ * The Signals snapshot fields the order routes check (signalSnapshotLiveQuotes.ts): an open records its contract
+ * as `candidate`, a roll as kind "roll" with `closeLeg` and `replacement`, each with the quote it is priced from,
+ * so a Pluto order is refused unless every quote is live and fresh, like any other Signals order.
+ */
+export function signalsSnapshotForOpen(candidate: SignalCandidate | null): { candidate: SignalCandidate | null } {
+  return { candidate };
+}
+
+export function signalsSnapshotForRoll(closeLeg: HeldLegScore | null, replacement: SignalCandidate | null): { kind: "roll"; closeLeg: HeldLegScore | null; replacement: SignalCandidate | null } {
+  return { kind: "roll", closeLeg, replacement };
 }
 
 export async function runPlutoPass(request: PassRequest, context: PassRunnerContext): Promise<PassSummary> {
@@ -299,9 +314,14 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const netEdgeAtDecision = chosenOpen ? chosenOpen.candidate.netEdge : chosenRoll!.roll.netRollEdge;
 
   // 8. Fresh re-score of the chosen contract only, then the post-model gates.
+  // A roll bursts the held leg too: its buyback is priced from it, and the order routes accept only live quotes for both legs.
+  const heldLegToRoll = chosenRoll ? owner.scored.heldLegs.find((leg) => leg.legId === chosenRoll.roll.legId) ?? null : null;
   const burstContracts = chosenOpen
     ? [{ expiry: chosenOpen.candidate.expiry, strike: chosenOpen.candidate.strike, right: chosenOpen.candidate.strategyKey === "covered_call" ? ("C" as const) : ("P" as const) }]
-    : [{ expiry: chosenRoll!.roll.replacement.expiry, strike: chosenRoll!.roll.replacement.strike, right: chosenRoll!.roll.replacement.strategyKey === "covered_call" ? ("C" as const) : ("P" as const) }];
+    : [
+        { expiry: chosenRoll!.roll.replacement.expiry, strike: chosenRoll!.roll.replacement.strike, right: chosenRoll!.roll.replacement.strategyKey === "covered_call" ? ("C" as const) : ("P" as const) },
+        ...(heldLegToRoll ? [{ expiry: heldLegToRoll.expiry, strike: heldLegToRoll.strike, right: heldLegToRoll.right }] : []),
+      ];
   const freshQuotes = await context.marketWatch.burst(owner.row.symbol, burstContracts);
   const fresh = await evaluateTicker(owner.row, settings, context, account, tradingSettings, true, Date.now(), freshQuotes);
   const freshCandidate = chosenOpen ? fresh.scored.candidates.find((candidate) => openCandidateId(owner.row.symbol, candidate) === chosenId) ?? null : null;
@@ -362,7 +382,9 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   await recordPlutoEvent("action_validated", { passId, actionId, symbol: owner.row.symbol, candidateId: chosenId, quantity: gates.plan!.quantity, limitPrice: gates.plan!.limitPrice, reasons: decision.reasons });
 
   // 9. Execute through the real routes, then watch the order without holding the pass.
-  const scoresSnapshot = { version: `pluto-${plutoPromptVersion}`, candidateId: chosenId, contract: freshCandidate ?? freshRoll, ticker: { spotPrice: fresh.scored.spotPrice, snapshotDateIso: fresh.scored.snapshotDateIso, atmImpliedVolatility: fresh.scored.atmImpliedVolatility, forecast: fresh.scored.forecast, dayChangePercent: fresh.scored.dayChangePercent }, decision, plan: gates.plan, deterministicTopPick: topPickSummary };
+  const freshHeldLeg = chosenRoll ? fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll.roll.legId) ?? null : null;
+  const signalsSnapshotShape = chosenOpen ? signalsSnapshotForOpen(freshCandidate) : signalsSnapshotForRoll(freshHeldLeg, freshRoll?.replacement ?? null);
+  const scoresSnapshot = { ...signalsSnapshotShape, version: `pluto-${plutoPromptVersion}`, candidateId: chosenId, contract: freshCandidate ?? freshRoll, ticker: { spotPrice: fresh.scored.spotPrice, snapshotDateIso: fresh.scored.snapshotDateIso, atmImpliedVolatility: fresh.scored.atmImpliedVolatility, forecast: fresh.scored.forecast, dayChangePercent: fresh.scored.dayChangePercent }, decision, plan: gates.plan, deterministicTopPick: topPickSummary };
   const result = await executePlutoOrder(
     context.api,
     settings,
