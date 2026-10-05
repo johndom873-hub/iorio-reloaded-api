@@ -37,6 +37,14 @@ describe("IBKR refusals", () => {
   });
 });
 
+describe("cancellationReasonForIbkrCancel on a half day", () => {
+  it("uses the day's stored close: an end after a 13:00 close is an expiry, not IBKR's own cancel", () => {
+    const createdMorning = new Date("2026-11-27T15:00:00Z"); // 10:00 ET (EST)
+    expect(cancellationReasonForIbkrCancel(createdMorning, new Date("2026-11-27T18:00:30Z"), "13:00")).toBe("expired_at_close");
+    expect(cancellationReasonForIbkrCancel(createdMorning, new Date("2026-11-27T18:00:30Z"))).toBe("cancelled_by_ibkr");
+  });
+});
+
 describe("cancellationReasonForIbkrCancel", () => {
   const createdMorning = new Date("2026-09-29T14:29:00Z"); // 10:29 ET (EDT)
   it("is an expiry at or after the 16:00 ET close of the order's own day", () => {

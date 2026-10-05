@@ -1,5 +1,4 @@
 import { EventName, SecType, type Contract, type IBApi } from "@stoqey/ib";
-import { sharedLiveConnection } from "./sharedReadConnection.js";
 
 /** One calendar day of an IBKR liquidHours/tradingHours string, in the contract's own time zone. */
 export interface SessionHours {
@@ -95,13 +94,9 @@ export function lookupContractHours(ib: IBApi, contract: Contract, reqId: number
 }
 
 /** SPY's liquid hours on the shared live connection: the US equities session schedule, half days included. */
-export async function fetchSpyLiquidHours(): Promise<SessionHours[]> {
-  const borrowed = await sharedLiveConnection.borrow();
-  try {
-    const hours = await lookupContractHours(borrowed.ib, { symbol: "SPY", secType: SecType.STK, exchange: "SMART", currency: "USD" }, sharedLiveConnection.allocateReqId());
-    if (hours.timeZoneId && !/US\/Eastern|America\/New_York/.test(hours.timeZoneId)) throw new Error(`SPY liquid hours are in ${hours.timeZoneId}, expected US/Eastern`);
-    return parseIbkrLiquidHours(hours.liquidHours);
-  } finally {
-    borrowed.release();
-  }
+/** SPY's liquid hours for the current week, read on the caller's IBKR connection. */
+export async function fetchSpyLiquidHours(ib: IBApi, reqId: number): Promise<SessionHours[]> {
+  const hours = await lookupContractHours(ib, { symbol: "SPY", secType: SecType.STK, exchange: "SMART", currency: "USD" }, reqId);
+  if (hours.timeZoneId && !/US\/Eastern|America\/New_York/.test(hours.timeZoneId)) throw new Error(`SPY liquid hours are in ${hours.timeZoneId}, expected US/Eastern`);
+  return parseIbkrLiquidHours(hours.liquidHours);
 }

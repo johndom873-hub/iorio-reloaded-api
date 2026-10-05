@@ -12,7 +12,7 @@ import { loadWorkingPlutoOrders, watchPlutoOrder } from "./executor.js";
 import { plutoEventsRetentionDays, pruneOldPlutoEvents, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRunnerContext } from "./passRunner.js";
-import { recordSessionCloseFromIbkr, resolvePlutoSession } from "./sessionSchedule.js";
+import { resolvePlutoSession } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease } from "./stateStore.js";
 import { isInsideTradingWindow } from "./systemChecks.js";
@@ -51,8 +51,6 @@ export class PlutoAgent {
   private readonly watches = new Set<Promise<unknown>>();
   private readonly watchedOrderIds = new Set<string>();
   private openingLookDoneFor: string | null = null;
-  private sessionCloseReadFor: string | null = null;
-  private sessionCloseWarnedFor: string | null = null;
   private watching = false;
   private stopped = false;
   private readonly startedAtMs = Date.now();
@@ -157,7 +155,6 @@ export class PlutoAgent {
     try {
       this.settings = await loadPlutoSettings();
       this.marketWatch.updateSettings(this.settings);
-      await this.readSessionCloseOncePerDay();
       await this.adoptWorkingOrders();
       await this.pruneEventsOncePerDay();
       await this.labelCandidateOutcomesOncePerDay();
@@ -240,24 +237,6 @@ export class PlutoAgent {
       if (pruned > 0) console.log(`Pluto: pruned ${pruned} timeline event(s) older than ${plutoEventsRetentionDays} days.`);
     } catch (error) {
       console.warn(`Pluto: event pruning failed — ${error instanceof Error ? error.message : error}`);
-    }
-  }
-
-  /** Today's close from IBKR's liquid hours, retried every housekeeping tick until it lands; warned once per day. */
-  private async readSessionCloseOncePerDay(): Promise<void> {
-    const todayIso = easternDateIso(new Date());
-    if (this.sessionCloseReadFor === todayIso) return;
-    try {
-      const result = await recordSessionCloseFromIbkr(new Date());
-      this.sessionCloseReadFor = todayIso;
-      await recordPlutoEvent("session_schedule", { dateIso: todayIso, closeTimeEt: result.todayCloseTimeEt, source: "ibkr_liquid_hours", datesWritten: result.datesWritten });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`Pluto: could not read the session close from IBKR — ${message}`);
-      if (this.sessionCloseWarnedFor !== todayIso) {
-        this.sessionCloseWarnedFor = todayIso;
-        await recordPlutoEvent("warning", { message: `session close not read from IBKR yet (${message}); trading waits for it` });
-      }
     }
   }
 

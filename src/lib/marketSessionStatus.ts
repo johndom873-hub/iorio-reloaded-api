@@ -77,8 +77,8 @@ export function hhmmParts(hhmm: string): { hour: number; minute: number } {
 
 export const regularCloseEt = `${String(REGULAR_CLOSE.hour).padStart(2, "0")}:${String(REGULAR_CLOSE.minute).padStart(2, "0")}`;
 
-// market_calendar.close_time (a Postgres time, "13:00:00") is written from IBKR's liquid hours
-// (see pluto/sessionSchedule.ts); NULL means the regular close.
+// market_calendar.close_time (a Postgres time, "13:00:00") is written from IBKR's liquid hours every trading
+// morning (lib/sessionCloseFromIbkr.ts, from the option-chain structure job); NULL means the regular close.
 export async function resolveSessionSchedule(dateIso: string): Promise<SessionSchedule> {
   const row = await db("market_calendar").where({ calendar_date: dateIso }).first();
   const closeTime = row?.close_time ? String(row.close_time).slice(0, 5) : null;

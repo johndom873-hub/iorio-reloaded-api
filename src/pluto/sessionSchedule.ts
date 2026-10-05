@@ -1,11 +1,10 @@
 import { db } from "../db/connection.js";
-import { fetchSpyLiquidHours, type SessionHours } from "../ibkr/fetchLiquidHours.js";
 import { easternDateIso, easternInstant, hhmmParts, resolveSessionSchedule, type SessionCloseSource } from "../lib/marketSessionStatus.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 // Today's session for Pluto (approved 2026-09-28): the close comes from IBKR's liquid hours for
-// SPY, read by the agent before the session and stored in market_calendar.close_time so every
-// screen sees half days too. The trading window ends `closeMarginMinutes` before the close and
+// SPY, read every trading morning by the option-chain structure job in every environment
+// (lib/sessionCloseFromIbkr.ts) and stored in market_calendar.close_time, so every screen sees half days too. The trading window ends `closeMarginMinutes` before the close and
 // working orders are cancelled `cancelMarginMinutes` before it, whatever the configured window.
 
 /** Window end is never later than this long before the session close (15:30 on a 16:00 day, 12:30 on a 13:00 day). */
@@ -73,23 +72,3 @@ export async function resolvePlutoSession(now: Date, settings: Pick<PlutoSetting
   };
 }
 
-/**
- * Reads SPY's liquid hours from IBKR and stores each day's close in market_calendar. is_open stays
- * MarketData.app's (a day IBKR lists as CLOSED is left alone); only days with hours are written.
- */
-export async function recordSessionCloseFromIbkr(now: Date = new Date(), fetchHours: () => Promise<SessionHours[]> = fetchSpyLiquidHours): Promise<{ todayCloseTimeEt: string | null; datesWritten: string[] }> {
-  const days = await fetchHours();
-  const readAt = now.toISOString();
-  const datesWritten: string[] = [];
-  for (const day of days) {
-    if (day.closed || day.closeHhmm === null) continue;
-    await db("market_calendar")
-      .insert({ calendar_date: day.dateIso, is_open: true, close_time: `${day.closeHhmm}:00`, close_time_source: "ibkr_liquid_hours", close_time_read_at: readAt })
-      .onConflict("calendar_date")
-      .merge(["close_time", "close_time_source", "close_time_read_at"]);
-    datesWritten.push(day.dateIso);
-  }
-  const todayIso = easternDateIso(now);
-  const today = days.find((day) => day.dateIso === todayIso);
-  return { todayCloseTimeEt: today && !today.closed ? today.closeHhmm : null, datesWritten };
-}

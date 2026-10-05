@@ -1,4 +1,4 @@
-import { easternDateIso, easternInstant } from "../lib/marketSessionStatus.js";
+import { easternDateIso, easternInstant, hhmmParts, regularCloseEt } from "../lib/marketSessionStatus.js";
 
 /** order_requests.status values the worker derives from IBKR's orderStatus event. */
 export type OrderRequestStatusFromIbkr = "filled" | "cancelled" | "cancelled_partially_filled" | "partially_filled" | "submitted" | "rejected";
@@ -40,13 +40,14 @@ export const ibkrOrderCanceledErrorCode = 202;
 
 /**
  * Why IBKR ended an order nobody asked to cancel. Every order goes out as a DAY order, so one created on an earlier
- * Eastern date, or ended at or after the 16:00 ET close, expired at the close. Earlier in the day it is IBKR's own cancel,
- * which includes the expiry on an early-close day (market_calendar records open days, not close times).
+ * Eastern date, or ended at or after that day's close, expired at the close. Earlier in the day it is IBKR's own cancel.
+ * `closeTimeEt` is the day's stored close (market_calendar.close_time, an early close on a half day), else 16:00.
  */
-export function cancellationReasonForIbkrCancel(orderCreatedAt: Date, endedAt: Date): "expired_at_close" | "cancelled_by_ibkr" {
+export function cancellationReasonForIbkrCancel(orderCreatedAt: Date, endedAt: Date, closeTimeEt: string = regularCloseEt): "expired_at_close" | "cancelled_by_ibkr" {
   const endedDateIso = easternDateIso(endedAt);
   if (easternDateIso(orderCreatedAt) < endedDateIso) return "expired_at_close";
-  return endedAt >= easternInstant(endedDateIso, 16, 0) ? "expired_at_close" : "cancelled_by_ibkr";
+  const close = hhmmParts(closeTimeEt);
+  return endedAt >= easternInstant(endedDateIso, close.hour, close.minute) ? "expired_at_close" : "cancelled_by_ibkr";
 }
 
 /** The text after "reason:" in an error 202 message, or null when IBKR gave none (a plain expiry or a requested cancel). */

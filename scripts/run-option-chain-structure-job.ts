@@ -19,6 +19,9 @@ import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { runOptionChainStructureRefresh } from "../src/ibkr/runOptionChainStructureRefresh.js";
+import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
+import { fetchSpyLiquidHours } from "../src/ibkr/fetchLiquidHours.js";
+import { recordSessionCloseFromIbkr } from "../src/lib/sessionCloseFromIbkr.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 
@@ -27,6 +30,23 @@ async function main(): Promise<void> {
     console.log("Skipping option_chain_structure_refresh — market closed today.");
     return;
   }
+
+  // Today's close (an early close on a half day) from IBKR, for every screen, order labels and Pluto, in every
+  // environment. Its own job run: a failure alerts on its own and never stops the structure refresh below.
+  await runJob(
+    "session_close_read",
+    async () => {
+      const connection = await connectToIbkrGateway();
+      try {
+        const result = await recordSessionCloseFromIbkr(() => fetchSpyLiquidHours(connection.ib, 1));
+        console.log(`Session close: today ${result.todayCloseTimeEt ?? "not listed"}; ${result.datesWritten.length} day(s) stored (${result.datesWritten.join(", ")}).`);
+        return { details: result, failureMessage: result.todayCloseTimeEt === null ? "IBKR's liquid hours did not list today's session" : undefined };
+      } finally {
+        connection.disconnect();
+      }
+    },
+    { triggeredBy: "scheduler" },
+  ).catch((error: unknown) => console.error(`session_close_read failed: ${error instanceof Error ? error.message : error}`));
 
   await runJob(
     "option_chain_structure_refresh",
