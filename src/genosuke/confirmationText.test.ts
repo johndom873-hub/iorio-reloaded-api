@@ -58,10 +58,14 @@ describe("close", () => {
 });
 
 describe("other cards", () => {
-  it("lists every risk setting instead of '5 other fields'", () => {
-    const card = buildRiskLimitsCard({ strategyKey: "cash_secured_put", delta_target_min: 0.2, delta_target_max: 0.3, dte_target_min: 20, dte_target_max: 45, max_position_pct_of_portfolio: 10, max_aggregate_collateral_pct: 60, max_concentration_per_ticker_pct: 15, max_concentration_per_sector_pct: 30, min_cash_reserve_pct: 20 });
-    expect(card).toContain("• Min cash reserve %: 20");
-    expect(card.split("\n")).toHaveLength(10);
+  it("shows only the settings being changed, each as old to new", () => {
+    const card = buildRiskLimitsCard({ minCashReservePct: 8, deltaTargetMax: 0.35 }, { minCashReservePct: 5, deltaTargetMax: 0.4, deltaTargetMin: 0.2 });
+    expect(card.split("\n")).toEqual(["Update the trading limits", "• Min cash reserve %: 5 → 8", "• Delta band max: 0.4 → 0.35"]);
+  });
+
+  it("shows a bare value when the current one is unknown or unchanged", () => {
+    expect(buildRiskLimitsCard({ minCashReservePct: 8 })).toContain("• Min cash reserve %: 8");
+    expect(buildRiskLimitsCard({ minCashReservePct: 8 }, { minCashReservePct: 8 })).toContain("• Min cash reserve %: 8");
   });
 });
 

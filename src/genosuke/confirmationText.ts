@@ -32,15 +32,15 @@ const strategyLabels: Record<string, string> = {
 };
 
 const riskSettingLabels: [string, string][] = [
-  ["delta_target_min", "Delta target min"],
-  ["delta_target_max", "Delta target max"],
-  ["dte_target_min", "DTE target min"],
-  ["dte_target_max", "DTE target max"],
-  ["max_position_pct_of_portfolio", "Max position % of portfolio"],
-  ["max_aggregate_collateral_pct", "Max aggregate collateral %"],
-  ["max_concentration_per_ticker_pct", "Max concentration per ticker %"],
-  ["max_concentration_per_sector_pct", "Max concentration per sector %"],
-  ["min_cash_reserve_pct", "Min cash reserve %"],
+  ["maxPositionPctOfPortfolio", "Max position % of portfolio"],
+  ["maxConcentrationPerTickerPct", "Max concentration per ticker %"],
+  ["minCashReservePct", "Min cash reserve %"],
+  ["deltaTargetMin", "Delta band min"],
+  ["deltaTargetMax", "Delta band max"],
+  ["recoveryDteMin", "Recovery Path DTE min"],
+  ["recoveryDteMax", "Recovery Path DTE max"],
+  ["minAnnualizedYieldPct", "Min annualized yield %"],
+  ["commissionWarnSharePctOfPremium", "Commission warning % of premium"],
 ];
 
 export function labelStrategy(strategyKey: string): string {
@@ -108,9 +108,12 @@ export function buildCloseCard(position: PositionForCard, requestedLegs: { legId
   return [positionHeading("Close", position), ...lines, "One combo order, sent to IBKR immediately when you tap Yes."].join("\n");
 }
 
-export function buildRiskLimitsCard(input: Record<string, unknown>): string {
-  const lines = riskSettingLabels.map(([key, label]) => `• ${label}: ${input[key]}`);
-  return [`Update ${labelStrategy(String(input.strategyKey))} risk settings`, ...lines].join("\n");
+/** The card for a trading-settings change: only the fields being changed, each as old → new when the current value is known. */
+export function buildRiskLimitsCard(changes: Record<string, unknown>, current: Record<string, unknown> = {}): string {
+  const lines = riskSettingLabels
+    .filter(([key]) => changes[key] !== undefined)
+    .map(([key, label]) => (current[key] !== undefined && current[key] !== changes[key] ? `• ${label}: ${current[key]} → ${changes[key]}` : `• ${label}: ${changes[key]}`));
+  return ["Update the trading limits", ...lines].join("\n");
 }
 
 /** Adds isOpen to each leg so the model never has to infer it from exitAt. Non-position values pass through. */

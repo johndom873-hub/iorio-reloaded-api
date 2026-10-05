@@ -12,7 +12,6 @@
 import { listWafRules } from "../../lib/cloudflareService.js";
 import { fetchLogsFromBetterStack, type LogSourceApp } from "../../lib/betterstackService.js";
 import { annotateLegOpenState } from "../confirmationText.js";
-import { summarizeGatewayReadiness, type EnvironmentDetailsForReadiness, type GatewayHealthForReadiness, type JobRunForReadiness } from "../gatewayReadinessSummary.js";
 import type { GenosukeTool } from "./types.js";
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
@@ -111,14 +110,14 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "get_risk_limits_settings",
-    description: "Per-strategy risk settings: delta/DTE targets, position/collateral/concentration caps, minimum cash reserve.",
+    description: "The trading limits and targets (one set for every strategy): max position %, max concentration per ticker %, min cash reserve %, the delta band, the Recovery Path DTE window, min annualized yield % and the commission warning %.",
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/risk-limits/settings"),
   },
   {
     name: "get_risk_exposure",
-    description: "Current exposure vs. the risk settings above — concentration by ticker/sector and live account summary from IBKR.",
+    description: "Current exposure — concentration by ticker/sector and live account summary from IBKR.",
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/risk-limits/exposure"),
@@ -147,17 +146,10 @@ export const readTools: GenosukeTool[] = [
   {
     name: "get_gateway_readiness",
     description:
-      "Can Iorio trade right now? One summary of the IBKR Gateway link, the trading worker (heartbeat, bound account), live-price status and the latest scheduled Gateway health check, with named problems. Use it for 'is Iorio ready', 'is the Gateway up' or before the market opens. If the live Gateway is down the usual cause is a login waiting for a phone approval: then offer resend_gateway_2fa.",
+      "Can Iorio trade right now? Runs the full pre-open readiness check (the same one sent to Telegram at 6:00 and 9:35 ET): configuration values, the trading worker and its bound account, an IBKR what-if order proving the order path, the account, the limits, orders left in flight, scheduled jobs, the Gateway health check, last session's data, live quotes, Telegram and the database. Returns ready true/false with the failing checks, warnings and passing checks. Takes up to about 30 seconds. Use stage 'open' only after 9:30 ET (it also needs a live option quote). If the live Gateway is down the usual cause is a login waiting for a phone approval: then offer resend_gateway_2fa.",
     tier: "read",
-    parameters: { type: "object", properties: {} },
-    execute: async (_input, api) => {
-      const [environmentDetails, gatewayHealth, latestJobRuns] = await Promise.all([
-        api.get<EnvironmentDetailsForReadiness>("/environment/details"),
-        api.get<GatewayHealthForReadiness>("/system-health/gateway"),
-        api.get<JobRunForReadiness[]>("/system-health/status"),
-      ]);
-      return summarizeGatewayReadiness({ environmentDetails, gatewayHealth, latestJobRuns });
-    },
+    parameters: { type: "object", properties: { stage: { type: "string", enum: ["pre_open", "open"] } } },
+    execute: (input, api) => api.get(`/system-health/readiness?stage=${input.stage === "open" ? "open" : "pre_open"}`),
   },
   {
     name: "list_job_runs",

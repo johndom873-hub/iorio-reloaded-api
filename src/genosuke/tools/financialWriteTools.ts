@@ -22,6 +22,8 @@
 // waits for an explicit Confirm click before calling the same endpoint).
 import type { GenosukeApiClient } from "../apiClient.js";
 import type { GenosukeTool } from "./types.js";
+import { tradingSettingsColumns } from "../../lib/tradingSettingsStore.js";
+import { confirmPreparedOrder, discardPreparedOrder, prepareOrderConfirmation, type PreparedOrder } from "../prepareOrderConfirmation.js";
 import {
   buildCloseCard,
   buildRiskLimitsCard,
@@ -48,6 +50,13 @@ async function buildAndConfirmOrder(api: GenosukeApiClient, path: string, body: 
     await api.post(`/positions/orders/${order.id}/cancel`, {}).catch(() => {});
     throw error;
   }
+}
+
+function buildOpenOrderCard(input: Record<string, unknown>): string {
+  const option = input.option as { quantity: unknown; strikePrice: unknown; expiryDate: unknown; limitPrice: unknown };
+  const stock = input.stock as { quantity: unknown; limitPrice: unknown } | undefined;
+  const stockPart = stock ? `BUY ${stock.quantity} sh @ ${stock.limitPrice} + ` : "";
+  return `Place order for ${input.symbol} (${input.strategyKey}): ${stockPart}SELL ${option.quantity}x $${option.strikePrice} exp ${option.expiryDate} @ ${option.limitPrice} — will be sent to IBKR immediately on confirm.`;
 }
 
 export const financialWriteTools: GenosukeTool[] = [
@@ -82,14 +91,10 @@ export const financialWriteTools: GenosukeTool[] = [
       },
       required: ["symbol", "strategyKey", "option"],
     },
-    describeForConfirmation: (input) => {
-      const option = input.option as { quantity: unknown; strikePrice: unknown; expiryDate: unknown; limitPrice: unknown };
-      const stock = input.stock as { quantity: unknown; limitPrice: unknown } | undefined;
-      const stockPart = stock ? `BUY ${stock.quantity} sh @ ${stock.limitPrice} + ` : "";
-      return `Place order for ${input.symbol} (${input.strategyKey}): ${stockPart}SELL ${option.quantity}x $${option.strikePrice} exp ${option.expiryDate} @ ${option.limitPrice} — will be sent to IBKR immediately on confirm.`;
-    },
+    prepareConfirmation: (input, api) => prepareOrderConfirmation(api, "/positions/orders", input, buildOpenOrderCard(input)),
+    discardPrepared: discardPreparedOrder,
     tracksOrderStatus: true,
-    execute: (input, api) => buildAndConfirmOrder(api, "/positions/orders", input),
+    execute: (input, api, prepared) => (prepared ? confirmPreparedOrder(api, prepared as PreparedOrder) : buildAndConfirmOrder(api, "/positions/orders", input)),
   },
   {
     name: "close_position",
@@ -111,51 +116,50 @@ export const financialWriteTools: GenosukeTool[] = [
       },
       required: ["positionId", "legs"],
     },
-    validateBeforeConfirmation: async (input, api) =>
-      validateCloseLegs(await fetchPositionForCard(api, input.positionId), (input.legs as { legId: string }[]) ?? []),
-    describeForConfirmation: async (input, api) =>
-      buildCloseCard(await fetchPositionForCard(api, input.positionId), (input.legs as { legId: string; limitPrice: unknown }[]) ?? []),
+    prepareConfirmation: async (input, api) => {
+      const position = await fetchPositionForCard(api, input.positionId);
+      const legs = (input.legs as { legId: string; limitPrice: unknown }[]) ?? [];
+      const problem = validateCloseLegs(position, legs);
+      if (problem) return { problem };
+      return prepareOrderConfirmation(api, `/positions/${input.positionId}/close`, { legs: input.legs }, buildCloseCard(position, legs));
+    },
+    discardPrepared: discardPreparedOrder,
     tracksOrderStatus: true,
-    execute: (input, api) => {
+    execute: (input, api, prepared) => {
+      if (prepared) return confirmPreparedOrder(api, prepared as PreparedOrder);
       const { positionId, legs } = input;
       return buildAndConfirmOrder(api, `/positions/${positionId}/close`, { legs });
     },
   },
   {
     name: "update_risk_limits",
-    description: "Update a strategy's risk settings (delta/DTE targets, position/collateral/concentration caps, minimum cash reserve). Governs the delta check on new orders and the recovery-path suggestion, not existing positions.",
+    description:
+      "Change the trading limits and targets (one set for every strategy): max position %, max concentration per ticker %, min cash reserve % (these block orders), the delta band (blocks new orders outside it, filters Signals and the recovery-path suggestion), the Recovery Path DTE window, min annualized yield % (Signals filter) and the commission warning %. Send only the fields to change; the rest keep their current values. Does not change existing positions.",
     tier: "financial-write",
     parameters: {
       type: "object",
       properties: {
-        strategyKey: strategyKeyEnum,
-        delta_target_min: { type: "number" },
-        delta_target_max: { type: "number" },
-        dte_target_min: { type: "number" },
-        dte_target_max: { type: "number" },
-        max_position_pct_of_portfolio: { type: "number" },
-        max_aggregate_collateral_pct: { type: "number" },
-        max_concentration_per_ticker_pct: { type: "number" },
-        max_concentration_per_sector_pct: { type: "number" },
-        min_cash_reserve_pct: { type: "number" },
+        maxPositionPctOfPortfolio: { type: "number" },
+        maxConcentrationPerTickerPct: { type: "number" },
+        minCashReservePct: { type: "number" },
+        deltaTargetMin: { type: "number" },
+        deltaTargetMax: { type: "number" },
+        recoveryDteMin: { type: "number" },
+        recoveryDteMax: { type: "number" },
+        minAnnualizedYieldPct: { type: "number" },
+        commissionWarnSharePctOfPremium: { type: "number" },
       },
-      required: [
-        "strategyKey",
-        "delta_target_min",
-        "delta_target_max",
-        "dte_target_min",
-        "dte_target_max",
-        "max_position_pct_of_portfolio",
-        "max_aggregate_collateral_pct",
-        "max_concentration_per_ticker_pct",
-        "max_concentration_per_sector_pct",
-        "min_cash_reserve_pct",
-      ],
     },
-    describeForConfirmation: (input) => buildRiskLimitsCard(input),
-    execute: (input, api) => {
-      const { strategyKey, ...settings } = input;
-      return api.put(`/risk-limits/settings/${strategyKey}`, settings);
+    validateBeforeConfirmation: async (input) => {
+      const unknownSettings = Object.keys(input).filter((name) => !(name in tradingSettingsColumns));
+      if (unknownSettings.length > 0) return `Unknown setting(s): ${unknownSettings.join(", ")}. Valid settings: ${Object.keys(tradingSettingsColumns).join(", ")}.`;
+      return Object.keys(input).length === 0 ? "Send at least one setting to change." : null;
+    },
+    describeForConfirmation: async (input, api) => buildRiskLimitsCard(input, await api.get<Record<string, unknown>>("/risk-limits/settings")),
+    execute: async (input, api) => {
+      // The route validates a complete set, so the unchanged fields are filled in from the current settings.
+      const { updatedAt: _updatedAt, updatedByDisplayName: _updatedBy, ...current } = await api.get<Record<string, unknown>>("/risk-limits/settings");
+      return api.put("/risk-limits/settings", { ...current, ...input });
     },
   },
 ];
