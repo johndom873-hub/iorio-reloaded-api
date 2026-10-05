@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega } from "./optionFriction.js";
-import { attachUncompensatedShare, buildSignalCandidates, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, wideSpreadThreshold, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { attachUncompensatedShare, buildSignalCandidates, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, wideSpreadThreshold, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedShare } from "./uncompensatedShare.js";
 
 const forward = 100;
@@ -47,8 +47,10 @@ function baseInput(overrides: Partial<SignalCandidatesInput> = {}): SignalCandid
     snapshotDateIso: "2026-09-21",
     freeShares: 0,
     freeCash: 1_000_000,
-    maxNetDelta: 1,
+    deltaTargetMin: 0,
+    deltaTargetMax: 1,
     minAnnualizedYieldPct: 0,
+    spreadShareCharged: 1,
     ...overrides,
   };
 }
@@ -120,16 +122,20 @@ describe("buildSignalCandidates: computed fields", () => {
     expect(put.annualizedYield).toBeCloseTo((premiumPut / 90) * (365 / put.dte), 6);
   });
 
-  it("net Edge at the mid concedes only the commission, and Edge $ at the mid follows from it", () => {
-    const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }))[0]!;
-    const commissionOnly = 0.68 / 100 / c.vega; // commissionPerContractDollars / sharesPerContract / vega
-    expect(c.netEdgeAtMid).toBeCloseTo(c.edge - commissionOnly, 12);
-    expect(c.netEdgeAtMid).toBeGreaterThan(c.netEdge); // no half-spread conceded
-    expect(c.edgeDollarsAtMid).toBeCloseTo(c.netEdgeAtMid * c.vega * 100, 10);
-    expect(c.vega).toBeCloseTo(blackScholesVega(forward, 90, 30 / 365, rate, c.surfaceImpliedVolatility), 12);
+  it("friction charges the spread share of the half-spread: 0 concedes only the commission, 0.5 sits halfway to a fill at the bid", () => {
+    const atBid = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spreadShareCharged: 1 }))[0]!;
+    const halfway = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spreadShareCharged: 0.5 }))[0]!;
+    const atMid = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spreadShareCharged: 0 }))[0]!;
+    const commissionOnly = 0.68 / 100 / atMid.vega; // commissionPerContractDollars / sharesPerContract / vega
+    const halfSpreadVolatility = (atMid.ask - atMid.bid) / 2 / atMid.vega;
+    expect(atMid.netEdge).toBeCloseTo(atMid.edge - commissionOnly, 12);
+    expect(atBid.netEdge).toBeCloseTo(atBid.edge - halfSpreadVolatility - commissionOnly, 12);
+    expect(halfway.netEdge).toBeCloseTo(halfway.edge - 0.5 * halfSpreadVolatility - commissionOnly, 12);
+    expect(halfway.edgeDollars).toBeCloseTo(halfway.netEdge * halfway.vega * 100, 10);
+    expect(atMid.vega).toBeCloseTo(blackScholesVega(forward, 90, 30 / 365, rate, atMid.surfaceImpliedVolatility), 12);
   });
 
-  it("dollar risk is max theoretical loss (strike or spot x 100, minus mid premium), and the risk-adjusted ratios follow from it", () => {
+  it("dollar risk is max theoretical loss (strike or spot x 100, minus mid premium), and the risk-adjusted ratio follows from it", () => {
     const call = buildSignalCandidates(baseInput({ quotes: [quoteAt(110, "C")], spotPrice: 100 }))[0]!;
     const put = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spotPrice: 100 }))[0]!;
     const premiumCall = (call.bid + call.ask) / 2;
@@ -137,7 +143,6 @@ describe("buildSignalCandidates: computed fields", () => {
     expect(call.dollarRisk).toBeCloseTo(100 * 100 - premiumCall, 10);
     expect(put.dollarRisk).toBeCloseTo(90 * 100 - premiumPut, 10);
     expect(put.riskAdjustedRatio).toBeCloseTo(put.edgeDollars / put.dollarRisk, 10);
-    expect(put.riskAdjustedRatioAtMid).toBeCloseTo(put.edgeDollarsAtMid / put.dollarRisk, 10);
   });
 
   it("does not run the Monte Carlo: uncompensated share is null until attached", () => {
@@ -247,10 +252,21 @@ describe("buildSignalCandidates: flags and executability", () => {
 });
 
 describe("buildSignalCandidates: Signals tab filters", () => {
-  it("drops a candidate whose |delta| exceeds maxNetDelta", () => {
+  it("drops a candidate whose |delta| exceeds deltaTargetMax", () => {
     const unrestricted = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }))[0]!;
-    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], maxNetDelta: Math.abs(unrestricted.delta) - 0.001 }))).toHaveLength(0);
-    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], maxNetDelta: Math.abs(unrestricted.delta) }))).toHaveLength(1);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], deltaTargetMax: Math.abs(unrestricted.delta) - 0.001 }))).toHaveLength(0);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], deltaTargetMax: Math.abs(unrestricted.delta) }))).toHaveLength(1);
+  });
+
+  it("drops a candidate whose |delta| is below deltaTargetMin, and counts it", () => {
+    const unrestricted = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }))[0]!;
+    const delta = Math.abs(unrestricted.delta);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], deltaTargetMin: delta + 0.001 }))).toHaveLength(0);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], deltaTargetMin: delta }))).toHaveLength(1);
+    const tally = emptyCandidateExclusionTally();
+    buildSignalCandidates(baseInput({ exclusionTally: tally, quotes: [quoteAt(90, "P")], deltaTargetMin: delta + 0.001 }));
+    expect(tally.belowMinDeltaCount).toBe(1);
+    expect(tally.aboveMaxDeltaCount).toBe(0);
   });
 
   it("drops a candidate whose annualised yield is below minAnnualizedYieldPct", () => {
@@ -258,6 +274,148 @@ describe("buildSignalCandidates: Signals tab filters", () => {
     const yieldPct = unrestricted.annualizedYield * 100;
     expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], minAnnualizedYieldPct: yieldPct + 1 }))).toHaveLength(0);
     expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], minAnnualizedYieldPct: yieldPct }))).toHaveLength(1);
+  });
+});
+
+describe("buildSignalCandidates: the delta band edge cases", () => {
+  const wideQuotes = [quoteAt(70, "P"), quoteAt(75, "P"), quoteAt(80, "P"), quoteAt(85, "P"), quoteAt(90, "P"), quoteAt(95, "P"), quoteAt(105, "C"), quoteAt(110, "C"), quoteAt(120, "C")];
+  const unrestricted = buildSignalCandidates(baseInput({ quotes: wideQuotes }));
+  const sortedMagnitudes = unrestricted.map((candidate) => Math.abs(candidate.delta)).sort((a, b) => a - b);
+
+  it("the fixture has nine distinct deltas, put and call, so the band cases below are not degenerate", () => {
+    expect(unrestricted).toHaveLength(9);
+    expect(new Set(sortedMagnitudes).size).toBe(9);
+    expect(unrestricted.some((candidate) => candidate.strategyKey === "covered_call")).toBe(true);
+    expect(unrestricted.some((candidate) => candidate.strategyKey === "cash_secured_put")).toBe(true);
+  });
+
+  for (const [label, quote] of [["put", quoteAt(90, "P")], ["call", quoteAt(110, "C")]] as const) {
+    it(`a ${label} exactly at either bound is kept, and a hair outside is dropped on the matching side`, () => {
+      const delta = Math.abs(buildSignalCandidates(baseInput({ quotes: [quote] }))[0]!.delta);
+      expect(buildSignalCandidates(baseInput({ quotes: [quote], deltaTargetMin: delta, deltaTargetMax: 1 }))).toHaveLength(1);
+      expect(buildSignalCandidates(baseInput({ quotes: [quote], deltaTargetMin: 0, deltaTargetMax: delta }))).toHaveLength(1);
+      expect(buildSignalCandidates(baseInput({ quotes: [quote], deltaTargetMin: delta + 1e-9, deltaTargetMax: 1 }))).toHaveLength(0);
+      expect(buildSignalCandidates(baseInput({ quotes: [quote], deltaTargetMin: 0, deltaTargetMax: delta - 1e-9 }))).toHaveLength(0);
+    });
+  }
+
+  it("a band whose min equals its max keeps exactly the contract with that delta and drops the rest, counted on both sides", () => {
+    const target = unrestricted[4]!;
+    const delta = Math.abs(target.delta);
+    const tally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: delta, deltaTargetMax: delta, exclusionTally: tally }));
+    expect(kept.map((candidate) => `${candidate.strike}${candidate.strategyKey}`)).toEqual([`${target.strike}${target.strategyKey}`]);
+    const below = sortedMagnitudes.filter((magnitude) => magnitude < delta).length;
+    const above = sortedMagnitudes.filter((magnitude) => magnitude > delta).length;
+    expect(tally.belowMinDeltaCount).toBe(below);
+    expect(tally.aboveMaxDeltaCount).toBe(above);
+    expect(below + above + 1).toBe(9);
+  });
+
+  it("a minimum of 0 is no lower bound: even the lowest-delta contract is kept, and nothing counts as below the minimum", () => {
+    const tally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0, deltaTargetMax: 1, exclusionTally: tally }));
+    expect(kept).toHaveLength(9);
+    expect(tally.belowMinDeltaCount).toBe(0);
+    expect(tally.aboveMaxDeltaCount).toBe(0);
+  });
+
+  it("a maximum of 1 is no upper bound: even the highest-delta contract is kept", () => {
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0, deltaTargetMax: 1 }));
+    expect(Math.max(...kept.map((candidate) => Math.abs(candidate.delta)))).toBe(sortedMagnitudes[8]);
+  });
+
+  it("counts drops in both directions and the three groups add up to every quote offered", () => {
+    const minimum = (sortedMagnitudes[1]! + sortedMagnitudes[2]!) / 2; // drops the 2 lowest
+    const maximum = (sortedMagnitudes[6]! + sortedMagnitudes[7]!) / 2; // drops the 2 highest
+    const tally = emptyCandidateExclusionTally();
+    const excluded: string[] = [];
+    const kept = buildSignalCandidates(
+      baseInput({ quotes: wideQuotes, deltaTargetMin: minimum, deltaTargetMax: maximum, exclusionTally: tally, onContractExcluded: (_quote, exclusion) => void excluded.push(exclusion.kind) }),
+    );
+    expect(tally.belowMinDeltaCount).toBe(2);
+    expect(tally.aboveMaxDeltaCount).toBe(2);
+    expect(kept).toHaveLength(5);
+    expect(tally.belowMinDeltaCount + tally.aboveMaxDeltaCount + kept.length).toBe(wideQuotes.length);
+    expect(excluded.filter((kind) => kind === "below_min_delta")).toHaveLength(2);
+    expect(excluded.filter((kind) => kind === "above_max_delta")).toHaveLength(2);
+    for (const candidate of kept) {
+      expect(Math.abs(candidate.delta)).toBeGreaterThanOrEqual(minimum);
+      expect(Math.abs(candidate.delta)).toBeLessThanOrEqual(maximum);
+    }
+  });
+
+  it("the exclusion carries the delta that was measured and the bound it broke", () => {
+    const minimum = sortedMagnitudes[4]! + 1e-6;
+    const maximum = sortedMagnitudes[5]! - 1e-6;
+    const exclusions = new Map<string, unknown>();
+    buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: minimum, deltaTargetMax: maximum, onContractExcluded: (quote, exclusion) => void exclusions.set(`${quote.strike}${quote.right}`, exclusion) }));
+    const lowest = unrestricted.find((candidate) => Math.abs(candidate.delta) === sortedMagnitudes[0])!;
+    const highest = unrestricted.find((candidate) => Math.abs(candidate.delta) === sortedMagnitudes[8])!;
+    const keyOf = (candidate: { strike: number; strategyKey: string }) => `${candidate.strike}${candidate.strategyKey === "covered_call" ? "C" : "P"}`;
+    expect(exclusions.get(keyOf(lowest))).toEqual({ kind: "below_min_delta", delta: lowest.delta, deltaTargetMin: minimum });
+    expect(exclusions.get(keyOf(highest))).toEqual({ kind: "above_max_delta", delta: highest.delta, deltaTargetMax: maximum });
+  });
+
+  it("the band is checked before the yield: a contract dropped for its delta is not also counted as below the minimum yield", () => {
+    const tally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0.99, deltaTargetMax: 1, minAnnualizedYieldPct: 1_000_000, exclusionTally: tally }));
+    expect(kept).toHaveLength(0);
+    expect(tally.belowMinDeltaCount).toBe(9);
+    expect(tally.belowMinYieldCount).toBe(0);
+    expect(tally.bestAnnualizedYieldPct).toBeNull(); // nothing reached the yield check
+  });
+
+  it("with the band wide open the minimum yield still applies on its own", () => {
+    const tally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0, deltaTargetMax: 1, minAnnualizedYieldPct: 1_000_000, exclusionTally: tally }));
+    expect(kept).toHaveLength(0);
+    expect(tally.belowMinDeltaCount).toBe(0);
+    expect(tally.belowMinYieldCount).toBe(9);
+  });
+
+  it("returns the same candidates whatever the band when every contract is inside it", () => {
+    const widest = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: 0, deltaTargetMax: 1 }));
+    const exactlyFitted = buildSignalCandidates(baseInput({ quotes: wideQuotes, deltaTargetMin: sortedMagnitudes[0]!, deltaTargetMax: sortedMagnitudes[8]! }));
+    expect(exactlyFitted).toEqual(widest);
+  });
+});
+
+describe("buildSignalCandidates: exclusion tally", () => {
+  it("records rejected-fit and earnings-spanning expiries, but not an expiry with no slice at all", () => {
+    const tally = emptyCandidateExclusionTally();
+    const later = slice30({ expiry: "2026-11-20", yearsToExpiry: 60 / 365 });
+    buildSignalCandidates(baseInput({
+      exclusionTally: tally,
+      slices: [slice30({ status: "poor_fit" }), later],
+      quotes: [quoteAt(90, "P"), quoteAt(85, "P", 0.04, "2026-11-20", 60 / 365), quoteAt(90, "P", 0.04, "2026-12-18", 90 / 365)],
+      earningsDatesIso: ["2026-11-05"],
+    }));
+    expect([...tally.surfaceFitRejectedExpiries]).toEqual(["2026-10-21"]);
+    expect([...tally.spansEarningsExpiries]).toEqual(["2026-11-20"]);
+    expect(tally.bestAnnualizedYieldPct).toBeNull(); // nothing reached the yield check
+  });
+
+  it("counts max-delta and min-yield drops and keeps the best yield seen, including ones that passed", () => {
+    const unrestricted = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P"), quoteAt(95, "P")] }));
+    const yields = unrestricted.map((c) => c.annualizedYield * 100);
+    const deltas = unrestricted.map((c) => Math.abs(c.delta));
+
+    const deltaTally = emptyCandidateExclusionTally();
+    buildSignalCandidates(baseInput({ exclusionTally: deltaTally, quotes: [quoteAt(90, "P"), quoteAt(95, "P")], deltaTargetMax: Math.min(...deltas) }));
+    expect(deltaTally.aboveMaxDeltaCount).toBe(1);
+    expect(deltaTally.belowMinYieldCount).toBe(0);
+
+    const yieldTally = emptyCandidateExclusionTally();
+    const kept = buildSignalCandidates(baseInput({ exclusionTally: yieldTally, quotes: [quoteAt(90, "P"), quoteAt(95, "P")], minAnnualizedYieldPct: Math.max(...yields) }));
+    expect(kept).toHaveLength(1);
+    expect(yieldTally.belowMinYieldCount).toBe(1);
+    expect(yieldTally.bestAnnualizedYieldPct).toBeCloseTo(Math.max(...yields), 10);
+  });
+
+  it("gives the same candidates with or without a tally", () => {
+    const input = baseInput({ quotes: [quoteAt(90, "P"), quoteAt(110, "C")] });
+    expect(buildSignalCandidates({ ...input, exclusionTally: emptyCandidateExclusionTally() })).toEqual(buildSignalCandidates(input));
   });
 });
 

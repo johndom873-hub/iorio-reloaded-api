@@ -17,8 +17,7 @@ const defaultEnrichmentTimeoutMs = 15_000;
 // Both real-time and delayed tick IDs are accepted for bid/ask/last —
 // requestRealtimeMarketData always *requests* REALTIME, but IBKR can still
 // substitute delayed data per-symbol on its own (see
-// [[project_ibkr_realtime_autofallback_to_delayed]] and the 2026-08-31
-// trade-alert outage this exact gap caused elsewhere); same pattern as
+// [[project_ibkr_realtime_autofallback_to_delayed]]); same pattern as
 // fetchLivePrices.ts/fetchTickerOverview.ts. The generic ticks below
 // (avg volume, option IV, open interest) have no separate delayed IDs.
 const BID_TICK = 1;

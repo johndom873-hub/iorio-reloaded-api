@@ -27,7 +27,7 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
     strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, dte: 18, delta: -0.22, bid: 2.0, ask: 2.1, spreadPercent: 4.9,
     openInterest: 1200, volume: 300, bidSize: 40, askSize: 35,
     surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, forecastVolatility: 0.5, edge: 0.12, frictionVolatility: 0.02, netEdge: 0.1, edgeDollars: 80, vega: 0.08,
-    netEdgeAtMid: 0.11, edgeDollarsAtMid: 88, dollarRisk: 9795, riskAdjustedRatio: 0.008, riskAdjustedRatioAtMid: 0.009, annualizedYield: 0.83, uncompensatedSharePercent: null,
+    dollarRisk: 9795, riskAdjustedRatio: 0.008, annualizedYield: 0.83, uncompensatedSharePercent: null,
     quoteSource: "day", quotedAt: new Date(now - 2 * 60_000).toISOString(), flags: [], executable: true, grade: "strong",
     ...overrides,
   };
@@ -65,7 +65,7 @@ describe("filterTickerForPluto — ticker level", () => {
     expect(filterTickerForPluto(input({ scored: scored({ forecast: { volatility: 0.5, windowDays: 21 } }) })).tickerBlocks[0]).toMatch(/not the 63-day/);
     expect(filterTickerForPluto(input({ scored: scored({ dayChangePercent: -7.2 }) })).tickerBlocks[0]).toMatch(/day change -7.2%/);
     expect(filterTickerForPluto(input({ scored: scored({ priceSource: "frozen" }) })).tickerBlocks[0]).toMatch(/not live/);
-    expect(filterTickerForPluto(input({ scored: scored({ unscoredReason: "stale_surface" }) })).tickerBlocks).toContain("not scored: stale_surface");
+    expect(filterTickerForPluto(input({ scored: scored({ unscoredReason: "no_surface_fit" }) })).tickerBlocks).toContain("not scored: no_surface_fit");
   });
   it("a blocked ticker evaluates nothing below it", () => {
     const result = filterTickerForPluto(input({ botEnabled: false }));
@@ -119,7 +119,7 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
   const roll: RollSignalCandidate = {
     legId: "leg1", positionId: "pos1", strategyKey: "cash_secured_put", quantity: 2,
     replacement: candidate({ expiry: "2026-10-16", strike: 95, grade: "weak", edgeDollars: 10 }),
-    netRollEdge: 0.07, netRollEdgeDollarsPerContract: 45, netRollEdgeDollars: 90, netCreditPerShare: 0.4, deltaChange: -0.03, dollarRiskChange: -500, flags: [], grade: "good",
+    netRollEdge: 0.07, netRollEdgeDollarsPerContract: 45, netRollEdgeDollars: 90, netCreditPerShare: 0.4, deltaChange: -0.03, dollarRiskChange: -500, flags: [], warnings: [], grade: "good",
   };
   it("judges a roll on its own grade and Edge $, and the replacement on every other dial", () => {
     const result = filterTickerForPluto(input({ scored: scored({ rolls: [roll] }) }));

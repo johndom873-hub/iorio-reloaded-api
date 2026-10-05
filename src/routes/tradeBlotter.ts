@@ -5,8 +5,9 @@ import { requireAuth } from "../middleware/requireAuth.js";
 export const tradeBlotterRouter = Router();
 tradeBlotterRouter.use(requireAuth);
 
-// The two named strategies plus "unstructured" (positions not opened under a strategy; shown as "Other" in the UI filter).
-const validStrategyKeys = ["covered_call", "cash_secured_put", "unstructured"];
+// The two named strategies, "hedge" (a long option bought outside the app) and "unstructured" (positions not
+// opened under a strategy; shown as "Other" in the UI filter).
+const validStrategyKeys = ["covered_call", "cash_secured_put", "hedge", "unstructured"];
 
 // P&L is computed here at read time, not stored on trades.realized_pnl —
 // that column is reserved for IBKR's own CommissionReport.realizedPNL
@@ -15,6 +16,8 @@ const validStrategyKeys = ["covered_call", "cash_secured_put", "unstructured"];
 // closing trades get a figure; an opening trade hasn't realized anything
 // yet. Formula approved 2026-08-20: (exit - entry) * qty * multiplier,
 // sign-flipped for short legs since a short profits when price falls.
+// Value (approved 2026-10-02): price * quantity * multiplier, unsigned, per fill. For an option that is the
+// premium transacted in dollars; for stock, the dollar value of the shares. Not the option's notional (strike * 100).
 tradeBlotterRouter.get("/", async (request, response) => {
   const strategyKey = request.query.strategy as string | undefined;
   const symbol = (request.query.symbol as string | undefined)?.trim().toUpperCase();
@@ -55,6 +58,7 @@ tradeBlotterRouter.get("/", async (request, response) => {
       tr.side,
       tr.quantity,
       tr.price,
+      tr.price * tr.quantity * pl.multiplier AS value,
       tr.commission,
       tr.executed_at AS "executedAt",
       tr.is_closing_trade AS "isClosingTrade",
@@ -85,8 +89,8 @@ tradeBlotterRouter.get("/", async (request, response) => {
     params,
   );
 
-  // Real fills (above) only ever exist for a `filled`/`partially_filled`
-  // order_requests row — everything else (still pending confirmation,
+  // Real fills (above) only ever exist for a `filled`/`partially_filled`/
+  // `cancelled_partially_filled` order_requests row — everything else (still pending confirmation,
   // confirmed and awaiting the worker, submitted and awaiting a fill,
   // cancelling, cancelled, rejected, errored) has no trades row at all, so
   // the Trade Blotter previously showed nothing for an order until it fully
@@ -124,9 +128,6 @@ tradeBlotterRouter.get("/", async (request, response) => {
       -- a real React key collision (rows silently dropped/duplicated).
       orq.id || ':' || leg_ordinality AS id,
       orq.status,
-      orq.filled_quantity AS "filledQuantity",
-      orq.remaining_quantity AS "remainingQuantity",
-      orq.ibkr_status AS "ibkrStatus",
       orq.ibkr_order_id AS "ibkrOrderId",
       orq.ibkr_perm_id AS "ibkrPermId",
       orq.error_message AS "errorMessage",
@@ -136,10 +137,12 @@ tradeBlotterRouter.get("/", async (request, response) => {
       orq.payload->>'strategyKey' AS "strategyKey",
       ru.display_name AS "requestedByDisplayName",
       cu.display_name AS "cancelledByDisplayName",
+      orq.cancellation_reason AS "cancellationReason",
       leg->>'role' AS "legRole",
       leg->>'action' AS action,
       (leg->>'quantity')::numeric AS quantity,
       (leg->>'unitPrice')::numeric AS "unitPrice",
+      (leg->>'unitPrice')::numeric * (leg->>'quantity')::numeric * (CASE WHEN leg->>'role' = 'option' THEN 100 ELSE 1 END) AS value,
       NULLIF(leg->>'strike', '') AS strike,
       NULLIF(leg->>'expiry', '') AS expiry,
       NULLIF(leg->>'right', '') AS "optionType"

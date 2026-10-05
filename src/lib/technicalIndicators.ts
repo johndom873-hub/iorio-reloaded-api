@@ -3,9 +3,8 @@
 // user's shared — reused as pure math only, not the doc's directional
 // buy/short scoring engine, which targets spot entries and doesn't fit
 // Iorio's premium-selling strategies. Consumed by streamTickerDetail.ts
-// (context on the Ticker Detail screen) and generateTradeAlertCandidates.ts
-// (Slice 2A rationale annotation) — never used to reorder or filter trade
-// alerts itself; see PROGRESS.md.
+// (the Signals modal's technicals panel) and priceTrends.ts (Price
+// Performance trend labels) — context only; see PROGRESS.md.
 //
 // Pure functions only — no DB/IBKR imports, so callers supply plain bar
 // arrays already read from daily_price_bars / intraday_price_bars. All bar
@@ -39,6 +38,16 @@ export function computeMovingAverages(closes: number[]): MovingAverages {
     ma25: meanOfLatest(closes, 25),
     ma99: meanOfLatest(closes, 99),
   };
+}
+
+// Uptrend/downtrend require spot and both MAs to agree on direction;
+// anything else (a MA crossover, or price sitting between them) is "mixed"
+// rather than forced into one bucket. Approved 2026-09-05.
+export function buildTrendLabel(spotPrice: number, movingAverages: MovingAverages): "uptrend" | "downtrend" | "mixed" | null {
+  if (movingAverages.ma25 === null || movingAverages.ma99 === null) return null;
+  if (spotPrice > movingAverages.ma25 && movingAverages.ma25 > movingAverages.ma99) return "uptrend";
+  if (spotPrice < movingAverages.ma25 && movingAverages.ma25 < movingAverages.ma99) return "downtrend";
+  return "mixed";
 }
 
 // 14-period RSI from the latest 15 closes (14 changes). Insufficient data

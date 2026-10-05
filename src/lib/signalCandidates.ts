@@ -1,5 +1,6 @@
 import { blackScholesDelta, impliedVolatilityFromPrice, sviTotalVariance, type RawSviParameters, type SviSliceStatus } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, computeFrictionCost, computeNetEdge } from "./optionFriction.js";
+import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
 import { computeUncompensatedShare, type UncompensatedShareOptions } from "./uncompensatedShare.js";
 import { expirySpansEarnings, expirySpansEventDate, type RealizedVolatilityForecast } from "./volatilityEdge.js";
 
@@ -7,7 +8,7 @@ import { expirySpansEarnings, expirySpansEventDate, type RealizedVolatilityForec
 // option_surface_fits) + that day's raw quotes into graded, tradable candidates.
 // Approved 2026-09-22 (mockup): structural filters (OTM side, two-sided quote,
 // >=1 day to expiry, a slice with status 'ok') plus, since 2026-09-24, two
-// Signals-tab settings (max net delta, min annualised yield) — DTE window,
+// trading settings (delta band, min annualised yield) — DTE window,
 // spread or open interest still don't narrow the list; those show up as
 // columns/flags instead. Delta and the surface-vs-mid IV comparison are both
 // computed here (not read from IBKR's own tick-13 delta/IV), so every
@@ -36,6 +37,8 @@ export interface SignalSurfaceSlice {
   kMax: number | null;
   yearsToExpiry: number;
   forwardPrice: number;
+  /** The underlying price forwardPrice is anchored to; null/absent on fits made before it was stored (anchored to the snapshot spot). */
+  fitUnderlyingPrice?: number | null;
   /** Fit-quality diagnostics, surfaced for the volatility-surface modal; not consumed by scoring. */
   pointCount: number;
   rmseVolatility: number | null;
@@ -85,13 +88,37 @@ export interface SignalCandidatesInput {
   freeShares: number;
   /** Free cash available to secure a put. */
   freeCash: number;
-  /** Signals tab setting: candidates with |delta| above this are filtered out. */
-  maxNetDelta: number;
-  /** Signals tab setting: candidates with annualised yield (as a %) below this are filtered out. */
+  /** Trading settings delta band: candidates with |delta| outside deltaTargetMin..deltaTargetMax are filtered out. */
+  deltaTargetMin: number;
+  deltaTargetMax: number;
+  /** Trading settings: candidates with annualised yield (as a %) below this are filtered out. */
   minAnnualizedYieldPct: number;
+  /** When given, records why quotes were dropped (for a ticker that ends with no candidates). */
+  exclusionTally?: CandidateExclusionTally;
   /** Formula 3h (approved 2026-09-24): per-expiry parallel shift added to the surface IV, from computeExpiryIvShifts. */
   ivShiftByExpiry?: Map<string, number>;
+  /** Commission per contract charged inside friction, estimated for the order size the setup form would default to; flat $0.68 when omitted. */
+  commissionEstimator?: CommissionEstimator;
+  /** λ (0..1): the share of the half-spread friction charges, from the Risk & Limits spread cost. */
+  spreadShareCharged: number;
+  /** When given, told about every quote that did not become a candidate and why (the Signals chain grid). Never changes which contracts are candidates. */
+  onContractExcluded?: (quote: SignalQuote, exclusion: SignalContractExclusion) => void;
 }
+
+/** Why one quote did not become a candidate, in the order buildSignalCandidates checks. */
+export type SignalContractExclusion =
+  | { kind: "no_surface_slice" }
+  | { kind: "surface_fit_rejected"; sliceStatus: SviSliceStatus }
+  | { kind: "expiring_today" }
+  | { kind: "in_the_money" }
+  | { kind: "no_two_sided_quote" }
+  | { kind: "spans_earnings"; earningsDateIso: string | null }
+  | { kind: "no_surface_volatility" }
+  | { kind: "below_min_delta"; delta: number; deltaTargetMin: number }
+  | { kind: "above_max_delta"; delta: number; deltaTargetMax: number }
+  | { kind: "no_friction"; delta: number }
+  | { kind: "no_forecast"; delta: number }
+  | { kind: "below_min_yield"; delta: number; annualizedYieldPct: number; minAnnualizedYieldPct: number };
 
 export interface SignalCandidate {
   strategyKey: SignalStrategyKey;
@@ -112,19 +139,16 @@ export interface SignalCandidate {
   forecastVolatility: number;
   edge: number;
   frictionVolatility: number;
+  /** Commission per contract inside frictionVolatility; absent on a candidate built before it was recorded (the flat rate applies). */
+  commissionPerContractDollars?: number;
   netEdge: number;
   /** net Edge x vega x 100 (Marcelo approved 2026-09-22). */
   edgeDollars: number;
   vega: number;
-  /** Best case for an Adaptive order that fills at the mid: only the commission is conceded. */
-  netEdgeAtMid: number;
-  edgeDollarsAtMid: number;
   /** Max theoretical loss per contract at the mid premium: strike*100-premium (CSP) or spot*100-premium (CC). Marcelo approved 2026-09-23. */
   dollarRisk: number;
   /** edgeDollars / dollarRisk. */
   riskAdjustedRatio: number;
-  /** edgeDollarsAtMid / dollarRisk. */
-  riskAdjustedRatioAtMid: number;
   annualizedYield: number;
   uncompensatedSharePercent: number | null;
   quoteSource: SignalQuoteSource;
@@ -188,52 +212,116 @@ function median(values: number[]): number {
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
+/** Why quotes were dropped by buildSignalCandidates, filled in when the caller passes one. */
+export interface CandidateExclusionTally {
+  surfaceFitRejectedExpiries: Set<string>;
+  spansEarningsExpiries: Set<string>;
+  belowMinDeltaCount: number;
+  aboveMaxDeltaCount: number;
+  belowMinYieldCount: number;
+  bestAnnualizedYieldPct: number | null;
+}
+
+export function emptyCandidateExclusionTally(): CandidateExclusionTally {
+  return { surfaceFitRejectedExpiries: new Set(), spansEarningsExpiries: new Set(), belowMinDeltaCount: 0, aboveMaxDeltaCount: 0, belowMinYieldCount: 0, bestAnnualizedYieldPct: null };
+}
+
 /** Builds every structurally-eligible candidate for a ticker. Ungraded (grade is a placeholder "avoid" until gradeSignalCandidates runs). */
 export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandidate[] {
   const slicesByExpiry = new Map(input.slices.map((slice) => [slice.expiry, slice]));
   const candidates: SignalCandidate[] = [];
 
+  const tally = input.exclusionTally;
+  // The size the order setup defaults to (SignalOrderSetupForm): the free shares' worth of calls, one put.
+  const commissionEstimator = input.commissionEstimator ?? flatCommissionEstimator;
+  const coveredCallContracts = input.freeShares >= 100 ? Math.floor(input.freeShares / 100) : 1;
+  const exclude = (quote: SignalQuote, exclusion: SignalContractExclusion) => input.onContractExcluded?.(quote, exclusion);
   for (const quote of input.quotes) {
     const slice = slicesByExpiry.get(quote.expiry);
-    if (!slice || slice.status !== "ok" || !slice.parameters || slice.kMin === null || slice.kMax === null) continue;
-    if (!(slice.yearsToExpiry > 0)) continue; // expiring today: excluded, same as the surface fitter -- also caught downstream by computeFrictionCost's vega guard, kept explicit for clarity
+    if (!slice || slice.status !== "ok" || !slice.parameters || slice.kMin === null || slice.kMax === null) {
+      // No slice at all is an expiry already past (dropped by the rebase) or an appended held-leg contract, not a rejected fit.
+      if (slice) tally?.surfaceFitRejectedExpiries.add(quote.expiry);
+      exclude(quote, slice ? { kind: "surface_fit_rejected", sliceStatus: slice.status } : { kind: "no_surface_slice" });
+      continue;
+    }
+    if (!(slice.yearsToExpiry > 0)) {
+      exclude(quote, { kind: "expiring_today" });
+      continue; // expiring today: excluded, same as the surface fitter -- also caught downstream by computeFrictionCost's vega guard, kept explicit for clarity
+    }
 
     const isCall = quote.right === "C";
-    if (isCall !== quote.strike >= slice.forwardPrice) continue; // OTM side only
-    if (quote.bid === null || quote.ask === null || !(quote.bid > 0) || !(quote.ask > quote.bid)) continue; // two-sided quote
+    if (isCall !== quote.strike >= slice.forwardPrice) {
+      exclude(quote, { kind: "in_the_money" });
+      continue; // OTM side only
+    }
+    if (quote.bid === null || quote.ask === null || !(quote.bid > 0) || !(quote.ask > quote.bid)) {
+      exclude(quote, { kind: "no_two_sided_quote" });
+      continue; // two-sided quote
+    }
     // Hard exclude, not a flag: don't offer a trade that spans a known earnings date (Marcelo 2026-09-23).
-    // Matches generateTradeAlertCandidates.ts's calendar-conflict exclusion. Only excludes when the calendar
+    // Only excludes when the calendar
     // is actually resolved -- an unresolved ticker can't tell true "no earnings" apart from "unchecked", so
     // it falls through to the earnings_calendar_unresolved flag below instead of being silently allowed.
-    if (input.earningsCalendarResolved && expirySpansEarnings(input.snapshotDateIso, quote.expiry, input.earningsDatesIso)) continue;
+    if (input.earningsCalendarResolved && expirySpansEarnings(input.snapshotDateIso, quote.expiry, input.earningsDatesIso)) {
+      tally?.spansEarningsExpiries.add(quote.expiry);
+      if (input.onContractExcluded) exclude(quote, { kind: "spans_earnings", earningsDateIso: [...input.earningsDatesIso].sort().find((dateIso) => dateIso > input.snapshotDateIso && dateIso <= quote.expiry) ?? null });
+      continue;
+    }
 
     const logMoneyness = Math.log(quote.strike / slice.forwardPrice);
     const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
-    if (!(totalVariance > 0)) continue;
+    if (!(totalVariance > 0)) {
+      exclude(quote, { kind: "no_surface_volatility" });
+      continue;
+    }
     const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry) + (input.ivShiftByExpiry?.get(quote.expiry) ?? 0);
-    if (!(surfaceIv > 0)) continue;
+    if (!(surfaceIv > 0)) {
+      exclude(quote, { kind: "no_surface_volatility" });
+      continue;
+    }
     const midIv = impliedVolatilityFromMid(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, quote.bid, quote.ask, isCall);
     const delta = blackScholesDelta(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
-    if (Math.abs(delta) > input.maxNetDelta) continue; // Signals tab max net delta (approved 2026-09-24)
-    const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: quote.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv });
-    if (!friction) continue;
+    if (Math.abs(delta) < input.deltaTargetMin) {
+      // The delta band is one setting for Signals, the order gate and Recovery Path (approved 2026-10-05).
+      if (tally) tally.belowMinDeltaCount += 1;
+      exclude(quote, { kind: "below_min_delta", delta, deltaTargetMin: input.deltaTargetMin });
+      continue;
+    }
+    if (Math.abs(delta) > input.deltaTargetMax) {
+      if (tally) tally.aboveMaxDeltaCount += 1;
+      exclude(quote, { kind: "above_max_delta", delta, deltaTargetMax: input.deltaTargetMax });
+      continue;
+    }
+    const commissionPerContract = commissionEstimator.perContractDollars("sell", isCall ? coveredCallContracts : 1);
+    const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: quote.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: commissionPerContract, spreadShareCharged: input.spreadShareCharged });
+    if (!friction) {
+      exclude(quote, { kind: "no_friction", delta });
+      continue;
+    }
     const edge = input.forecast ? surfaceIv - input.forecast.volatility : null;
     const netEdge = edge === null ? null : computeNetEdge({ impliedVolatility: surfaceIv, forecastVolatility: input.forecast!.volatility, forecastWindowDays: input.forecast!.windowDays, edge, insideFittedRange: true }, friction);
-    if (netEdge === null) continue; // no forecast: unscored, not shown as a candidate at all (caller shows the ticker as "Unscored")
+    if (netEdge === null) {
+      // no forecast: unscored, not shown as a candidate at all (caller shows the ticker as "Unscored")
+      exclude(quote, { kind: "no_forecast", delta });
+      continue;
+    }
     const vega = blackScholesVega(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv);
     const edgeDollars = netEdge * vega * 100;
-    const netEdgeAtMid = edge! - friction.commissionVolatility;
-    const edgeDollarsAtMid = netEdgeAtMid * vega * 100;
 
     const strategyKey: SignalStrategyKey = isCall ? "covered_call" : "cash_secured_put";
     const dte = Math.round(slice.yearsToExpiry * annualDays);
     const premium = (quote.bid + quote.ask) / 2;
     const capitalAtRisk = strategyKey === "covered_call" ? input.spotPrice : quote.strike;
     const annualizedYield = (premium / capitalAtRisk) * (annualDays / dte);
-    if (annualizedYield * 100 < input.minAnnualizedYieldPct) continue; // Signals tab min annualised yield (approved 2026-09-24)
+    if (tally) tally.bestAnnualizedYieldPct = Math.max(tally.bestAnnualizedYieldPct ?? -Infinity, annualizedYield * 100);
+    if (annualizedYield * 100 < input.minAnnualizedYieldPct) {
+      // trading settings: min annualised yield
+      if (tally) tally.belowMinYieldCount += 1;
+      exclude(quote, { kind: "below_min_yield", delta, annualizedYieldPct: annualizedYield * 100, minAnnualizedYieldPct: input.minAnnualizedYieldPct });
+      continue;
+    }
     const dollarRisk = capitalAtRisk * 100 - premium;
     const riskAdjustedRatio = edgeDollars / dollarRisk;
-    const riskAdjustedRatioAtMid = edgeDollarsAtMid / dollarRisk;
     const spreadPercent = ((quote.ask - quote.bid) / premium) * 100;
     const insideRange = logMoneyness >= slice.kMin && logMoneyness <= slice.kMax;
     const flags: SignalFlag[] = [];
@@ -264,14 +352,12 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       forecastVolatility: input.forecast!.volatility,
       edge: edge!,
       frictionVolatility: friction.frictionVolatility,
+      commissionPerContractDollars: commissionPerContract,
       netEdge,
       edgeDollars,
       vega,
-      netEdgeAtMid,
-      edgeDollarsAtMid,
       dollarRisk,
       riskAdjustedRatio,
-      riskAdjustedRatioAtMid,
       annualizedYield,
       uncompensatedSharePercent: null,
       quoteSource: quote.source ?? "snapshot",

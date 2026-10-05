@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 
 // Pluto's own orders are the order_requests rows carrying pluto_action_id. Pause always
@@ -45,7 +46,7 @@ export async function cancelPlutoOrders(userId: string | null, options: { includ
 export async function countPlutoWorkingOrders(): Promise<{ pending: number; working: number }> {
   const rows: { status: string; count: string }[] = await db("order_requests")
     .whereNotNull("pluto_action_id")
-    .whereIn("status", ["pending_confirmation", "confirmed", "submitted", "partially_filled", "cancel_requested"])
+    .whereIn("status", activeOrderRequestStatuses)
     .groupBy("status")
     .select("status")
     .count("* as count");

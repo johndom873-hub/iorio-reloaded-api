@@ -1,5 +1,6 @@
-import { EventName, MarketDataType, Stock } from "@stoqey/ib";
+import { EventName } from "@stoqey/ib";
 import { restartIbkrGatewayOnVps } from "./restartIbkrGatewayOnVps.js";
+import { describeLiveGatewayManualLoginHeadline, parseGatewayControlResultKind } from "./gatewayControlResult.js";
 import { checkWorkerOnVps } from "./checkWorkerOnVps.js";
 import { connectToIbkrGateway, type IbkrConnection } from "./connectIbkr.js";
 import { checkPositionReconciliation } from "./checkPositionReconciliation.js";
@@ -8,6 +9,10 @@ import { runJob } from "../lib/runJob.js";
 import { environment } from "../config/env.js";
 import { db } from "../db/connection.js";
 import { reportDaySignalsLoopLiveness } from "../lib/daySignalsLiveness.js";
+import { reportOpsMonitorLiveness } from "../lib/opsMonitorLiveness.js";
+import { reportWorkerHeartbeat } from "../lib/workerHeartbeatLiveness.js";
+import { liveDataProbeSymbol, probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
+import { blockedAfterReloginMessage, blockedRestartDeferredMessage, competingLiveSessionSurvivedRestart, reportCompetingLiveSession } from "../lib/competingLiveSessionAlert.js";
 
 // Confirmed 2026-08-27: reqHistoricalData can silently hang (no data, no
 // error event — just a timeout) while the connection handshake itself and
@@ -16,7 +21,7 @@ import { reportDaySignalsLoopLiveness } from "../lib/daySignalsLiveness.js";
 // this health check ever noticing, since it only checked the handshake.
 // SPY is used as a fixed, always-listed probe symbol independent of
 // whatever's on the shortlist.
-const HISTORICAL_DATA_PROBE_SYMBOL = "SPY";
+const HISTORICAL_DATA_PROBE_SYMBOL = liveDataProbeSymbol;
 
 interface HistoricalDataCheckResult {
   healthy: boolean;
@@ -56,49 +61,9 @@ function isCompetingSessionHistoricalDataError(errorMessage: string): boolean {
   return errorMessage.includes("(code 162)") && errorMessage.includes("different IP address");
 }
 
-// Confirmed 2026-08-31 (see PROGRESS.md): IBKR's shared-market-data paper
-// account cannot receive real-time quotes while its own live username
-// (johndom873) has an active session anywhere (Client Portal/TWS/mobile) —
-// error 10197 on every market-data request, with the Gateway connection
-// itself staying up and healthy throughout, so nothing else here would ever
-// catch it. Restarting the Gateway does not fix this — it's a live-session
-// state issue, not a Gateway problem — so this is reported as a notify-only
-// finding, the same pattern as position-reconciliation problems below.
-async function competingLiveSessionIsBlockingData(connection: IbkrConnection): Promise<boolean> {
-  return new Promise((resolve) => {
-    const reqId = 999_002;
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve(false);
-    }, 5_000);
-
-    function onError(_error: Error, code: number, id: number) {
-      if (id !== reqId || code !== 10197) return;
-      cleanup();
-      resolve(true);
-    }
-    function onMarketDataType(id: number) {
-      if (id !== reqId) return;
-      cleanup();
-      resolve(false);
-    }
-    function cleanup() {
-      clearTimeout(timer);
-      connection.ib.removeListener(EventName.error, onError);
-      connection.ib.removeListener(EventName.marketDataType, onMarketDataType);
-      connection.ib.cancelMktData(reqId);
-    }
-
-    connection.ib.on(EventName.error, onError);
-    connection.ib.on(EventName.marketDataType, onMarketDataType);
-    connection.ib.reqMarketDataType(MarketDataType.REALTIME);
-    connection.ib.reqMktData(reqId, new Stock(HISTORICAL_DATA_PROBE_SYMBOL, "SMART", "USD"), "", false, false);
-  });
-}
-
 // Evidence 2026-09-24 (job_runs since 2026-08-24): the SPY probe's "Historical
 // data timeout" fired 7 times in 3,648 runs, and the two most recent both
-// landed while the option-chain capture / trade-alert scan was mid-run on the
+// landed while a scheduled option scan was mid-run on the
 // same login — the check then restarted the Gateway underneath that scan and
 // reported "restart didn't recover it" because the load was still there.
 // So a probe timeout is not restart-worthy on its own. A restart is only
@@ -118,7 +83,8 @@ async function findOtherRunningJobName(): Promise<string | null> {
 }
 
 async function previousHealthCheckProbeFailed(): Promise<boolean> {
-  const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).orderBy("started_at", "desc").first("details", "error_message");
+  // The current run's own row is already in job_runs as "running" (runJob inserts it first): skip it, or this never sees a prior failure.
+  const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).whereNot({ status: "running" }).orderBy("started_at", "desc").first("details", "error_message");
   if (!row) return false;
   const probe = (row.details as { probe?: { failed?: boolean } } | null)?.probe;
   return probe?.failed === true || String(row.error_message ?? "").includes("reqHistoricalData failed");
@@ -241,6 +207,22 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
     const notifications: string[] = [];
     const farmStatusMessages: FarmStatusMessage[] = [];
 
+    // Independent checks (they only read the database), run FIRST: everything after this can throw during an IBKR
+    // outage or a VPS problem, and these two must not go blind exactly then.
+    const daySignalsProblem = await reportDaySignalsLoopLiveness().catch((error) => `Day Signals liveness check itself failed: ${error instanceof Error ? error.message : error}`);
+    const opsMonitorProblem = await reportOpsMonitorLiveness().catch((error) => `Ops monitor liveness check itself failed: ${error instanceof Error ? error.message : error}`);
+
+    // The worker heartbeat needs the systemd probe below to tell "hung" from "stopped" (and to give a just-restarted worker
+    // time to beat), so it runs after the probe; the finally guarantees it still runs when an earlier IBKR step throws,
+    // reporting the service state as unknown in that case.
+    let workerProbe: { active: boolean; restarted: boolean } | null = null;
+    let workerHeartbeatProblem: string | null | undefined;
+    const checkWorkerHeartbeat = async (): Promise<void> => {
+      if (workerHeartbeatProblem !== undefined) return;
+      workerHeartbeatProblem = await reportWorkerHeartbeat({ serviceActive: workerProbe ? workerProbe.active : null, restartedJustNow: workerProbe?.restarted ?? false }).catch((error) => `Worker heartbeat check itself failed: ${error instanceof Error ? error.message : error}`);
+    };
+
+    try {
     let connection = await tryConnect(farmStatusMessages);
     let gatewayOutput = "healthy";
     let probe: { failed: boolean; reason: string | null; restarted: boolean } = { failed: false, reason: null, restarted: false };
@@ -260,7 +242,9 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
 
       const reconnected = await tryConnect(farmStatusMessages);
       if (!reconnected) {
-        throw new Error(`IBKR Gateway ${problemDescription} and restart didn't recover it (script exit ${result.exitCode}): ${result.output.trim()}`);
+        const manualLoginHeadline = describeLiveGatewayManualLoginHeadline(parseGatewayControlResultKind(result.output), environment.ibkrTradingMode);
+        const diagnosis = manualLoginHeadline ?? `IBKR Gateway ${problemDescription} and restart didn't recover it`;
+        throw new Error(`${diagnosis} (script exit ${result.exitCode}): ${result.output.trim()}`);
       }
 
       // Previously this declared victory on the handshake alone — but the
@@ -335,6 +319,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       sshUsername: environment.ibkrTunnelSshUsername,
       sshPrivateKey: workerSshPrivateKey,
     });
+    workerProbe = workerCheck;
 
     if (workerCheck.restarted) {
       if (!workerCheck.active) {
@@ -344,14 +329,31 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       notifications.push(`⚠️ iorio-worker.service was inactive — restarted successfully, now active.`);
     }
 
-    const competingLiveSession = await competingLiveSessionIsBlockingData(connection);
-    if (competingLiveSession) {
-      notifications.push(
-        "⚠️ Real-time market data is currently blocked — IBKR error 10197 (competing live session). " +
-          "Someone is likely logged into johndom873 in Client Portal/TWS/mobile; ask them to log out. " +
-          "Not a Gateway problem, won't be fixed by a restart.",
-      );
+    // IBKR 10197 ("competing live session"): usually a stale Gateway session that only a fresh login
+    // clears (probeCompetingLiveSession.ts), so restart once per episode; if 10197 survives the fresh
+    // login, a real session on the live username is the likelier cause and the alert says so instead of
+    // restarting again. Alerts are state-based (once, hourly reminders, "flowing again").
+    let competingLiveSession = await probeCompetingLiveSession(connection.ib, 999_002, HISTORICAL_DATA_PROBE_SYMBOL);
+    let blockedMessage = blockedAfterReloginMessage;
+    let recoveredByRestart = false;
+    if (competingLiveSession === "blocked" && !(await competingLiveSessionSurvivedRestart())) {
+      const otherRunningJob = allowGatewayRestart ? await findOtherRunningJobName() : null;
+      if (!allowGatewayRestart) {
+        blockedMessage = blockedRestartDeferredMessage("restarts aren't allowed from the manual check while the market is open; the scheduled check will restart it");
+      } else if (otherRunningJob) {
+        blockedMessage = blockedRestartDeferredMessage(`${otherRunningJob} is running; the next check restarts the Gateway once it finishes`);
+      } else {
+        connection.disconnect();
+        connection = await restartAndReconnect("was refused real-time market data (IBKR 10197)");
+        competingLiveSession = await probeCompetingLiveSession(connection.ib, 999_003, HISTORICAL_DATA_PROBE_SYMBOL);
+        recoveredByRestart = competingLiveSession === "flowing";
+      }
     }
+    const sentRecovery = await reportCompetingLiveSession(competingLiveSession, blockedMessage).catch((error) => {
+      console.warn(`competing live session alert failed: ${error instanceof Error ? error.message : error}`);
+      return false;
+    });
+    if (recoveredByRestart && !sentRecovery) notifications.push("✅ Real-time market data is flowing again after the Gateway re-login (IBKR 10197: stale session).");
 
     const problems = await runReconciliationSafely(connection);
     connection.disconnect();
@@ -360,10 +362,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       notifications.push(reconciliationNotifyMessage(problems));
     }
 
-    // Alerts on its own (state-based, hourly reminders) rather than through this
-    // job's per-run notify, which would repeat every 10 minutes while it is down.
-    const daySignalsProblem = await reportDaySignalsLoopLiveness().catch((error) => `Day Signals liveness check itself failed: ${error instanceof Error ? error.message : error}`);
-
+    await checkWorkerHeartbeat();
     return {
       details: {
         output: gatewayOutput,
@@ -372,9 +371,14 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
         reconciliationProblems: problems,
         competingLiveSession,
         daySignalsProblem,
+        opsMonitorProblem,
+        workerHeartbeatProblem,
         farmStatusMessages,
       },
       notify: notifications.length > 0 ? notifications.join("\n\n") : undefined,
     };
+    } finally {
+      await checkWorkerHeartbeat();
+    }
   }, { failureAlertReminderIntervalMs: healthCheckFailureReminderIntervalMs, triggeredBy: options.triggeredBy, triggeredByUserId: options.triggeredByUserId });
 }

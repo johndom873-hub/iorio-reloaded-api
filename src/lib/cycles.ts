@@ -23,7 +23,7 @@
 // returned with `dataFlags` set instead of guessed: a missing expiry bar, an expiry
 // within $0.05 of the strike, or ledger shares that disagree with the stock legs.
 
-export type CycleBucket = "csp" | "unstructured" | "cc";
+export type CycleBucket = "csp" | "unstructured" | "cc" | "hedge";
 
 export interface CycleOptionLeg {
   id: string;
@@ -94,6 +94,8 @@ export interface CycleTimelineRow {
   strike: number | null;
   /** Underlying price: the real fill for a stock trade, else that date's daily close (the only stock price we store for option fills). */
   stockPrice: number | null;
+  /** The purchase of a hedge option that is still held: its cost is not a realized loss, it belongs with the open mark (unrealized). */
+  unrealized?: boolean;
 }
 
 interface RowMeta {
@@ -101,6 +103,7 @@ interface RowMeta {
   quantity: number;
   strike: number | null;
   stockPrice: number | null;
+  unrealized?: boolean;
 }
 
 export interface Cycle {
@@ -126,6 +129,11 @@ const marginalThreshold = 0.05;
 const easternDateFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" });
 function easternIsoDate(at: Date): string {
   return easternDateFormatter.format(at);
+}
+
+function optionLegBucket(leg: Pick<CycleOptionLeg, "side" | "optionType">): CycleBucket {
+  if (leg.side === "long") return "hedge";
+  return leg.optionType === "put" ? "csp" : "cc";
 }
 
 function newBucket(): BucketResult {
@@ -258,7 +266,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
   events.sort((a, b) => a.at - b.at);
 
   // 3. Bookkeeping: two share pools (owner buckets) each with a reference price for the next realized mark.
-  const buckets: Record<CycleBucket, BucketResult> = { csp: newBucket(), unstructured: newBucket(), cc: newBucket() };
+  const buckets: Record<CycleBucket, BucketResult> = { csp: newBucket(), unstructured: newBucket(), cc: newBucket(), hedge: newBucket() };
   const timeline: CycleTimelineRow[] = [];
   const pools = { unstructured: { shares: 0, ref: 0 }, cc: { shares: 0, ref: 0 } };
   let openCallShares = 0;
@@ -331,15 +339,17 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     // 3c. Premium rows and the open-call count.
     for (const event of group.filter((e) => e.kind === "optionOpen" || e.kind === "optionClose")) {
       const leg = event.leg!;
-      const bucket: CycleBucket = leg.optionType === "put" ? "csp" : "cc";
+      const bucket = optionLegBucket(leg);
       const sign = leg.side === "short" ? 1 : -1;
       const contractShares = leg.quantity * leg.multiplier;
       const optionMeta: RowMeta = { instrument: "option", quantity: contractShares, strike: leg.strike, stockPrice: closeFor(event.at) };
+      if (event.kind === "optionOpen" && leg.side === "long" && leg.exitAt === null) optionMeta.unrealized = true;
       if (event.kind === "optionOpen") {
         const credit = sign * leg.entryPrice * contractShares;
         netPremium += credit;
         addRow(event.at, `${sign === 1 ? "Sold" : "Bought"} ${leg.optionType} @ ${leg.entryPrice.toFixed(2)}`, bucket, credit, 0, optionMeta);
-        if (leg.optionType === "put") buckets.csp.capital += leg.strike * contractShares;
+        if (leg.side === "long") buckets.hedge.capital += leg.entryPrice * contractShares; // a hedge risks the premium it cost
+        else if (leg.optionType === "put") buckets.csp.capital += leg.strike * contractShares;
         if (leg.optionType === "call" && leg.side === "short") openCallShares += contractShares;
       } else {
         const debit = leg.exitPrice === null ? 0 : -sign * leg.exitPrice * contractShares - leg.closingCommission;
@@ -397,11 +407,14 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
         dataFlags.push(`no option mark for the open ${legs[0]!.optionType} $${legs[0]!.strike}`);
         continue;
       }
-      const snapshotPremiumPnl = openPositionPremiumPnl.get(positionId);
+      // No nightly mark yet: a short stays at its credit ("expires worthless"); a hedge is carried at what it cost
+      // (P&L 0), or the day it is bought would book its whole premium as a loss.
+      const isHedgePosition = legs.every((leg) => leg.side === "long");
+      const snapshotPremiumPnl = openPositionPremiumPnl.get(positionId) ?? (isHedgePosition ? 0 : undefined);
       if (snapshotPremiumPnl === undefined) continue; // stays at credit
       const credit = legs.reduce((sum, leg) => sum + (leg.side === "short" ? 1 : -1) * leg.entryPrice * leg.quantity * leg.multiplier, 0);
       const adjustment = snapshotPremiumPnl - credit;
-      const bucket: CycleBucket = legs[0]!.optionType === "put" ? "csp" : "cc";
+      const bucket = optionLegBucket(legs[0]!);
       netPremium += adjustment;
       addRow(null, `Open ${legs[0]!.optionType} marked to market`, bucket, adjustment, 0, {
         instrument: "option",
@@ -417,8 +430,8 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
   if (isOpen && sharesHeld !== legShares) dataFlags.push(`ledger says ${sharesHeld} sh held but the open stock legs total ${legShares} sh`);
   if (!isOpen && sharesHeld !== 0) dataFlags.push(`cycle closed with ${sharesHeld} sh unaccounted for in the ledger (missing fills)`);
 
-  for (const bucket of ["csp", "unstructured", "cc"] as const) buckets[bucket].total = buckets[bucket].premium + buckets[bucket].stock;
-  const total = buckets.csp.total + buckets.unstructured.total + buckets.cc.total;
+  for (const bucket of ["csp", "unstructured", "cc", "hedge"] as const) buckets[bucket].total = buckets[bucket].premium + buckets[bucket].stock;
+  const total = buckets.csp.total + buckets.unstructured.total + buckets.cc.total + buckets.hedge.total;
 
   // Break-even (open cycle), pro-rata (confirmed by Marcelo 2026-09-19): (cost of every share acquired - net premium) / shares acquired,
   // with the open call counted at its credit ("if it expires worthless"), i.e. without the mark-to-market row.
@@ -435,7 +448,8 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       sharesAcquired += event.shares;
     }
   }
-  const breakEvenPremium = timeline.filter((row) => !(row.at === null && row.label.startsWith("Open "))).reduce((sum, row) => sum + row.premium, 0);
+  // A hedge's cost is not premium earned on the shares, so its rows (purchase, mark, sale) stay out of the break-even.
+  const breakEvenPremium = timeline.filter((row) => row.bucket !== "hedge" && !(row.at === null && row.label.startsWith("Open "))).reduce((sum, row) => sum + row.premium, 0);
   const breakEvenPerShare = isOpen && sharesHeld > 0 && sharesAcquired > 0 && dataFlags.length === 0 ? (acquisitionCost - breakEvenPremium) / sharesAcquired : null;
 
   return {

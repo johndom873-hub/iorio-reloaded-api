@@ -73,3 +73,64 @@ describe("put assignment fills", () => {
     expect(cycle.dataFlags).toEqual([]);
   });
 });
+
+describe("hedge (long option) legs", () => {
+  const hedgeLeg = (overrides: Partial<CycleOptionLeg> = {}): CycleOptionLeg => ({
+    id: "hedge-leg", positionId: "pos-hedge", side: "long", optionType: "call", strike: 82, quantity: 110, multiplier: 100, entryPrice: 3.918,
+    entryAt: new Date("2026-09-20T14:00:00Z"), exitPrice: null, exitAt: null, closingCommission: 0, hasClosingTrade: false,
+    expiryDate: "2028-06-16", expiryClose: null, ...overrides,
+  });
+  const hedgeCost = 3.918 * 110 * 100;
+  const baseInput = (optionLegs: CycleOptionLeg[], openPositionPremiumPnl = new Map<string, number>()): CycleInput => ({
+    optionLegs, stockLegs: [], stockTrades: [], dailyCloses: new Map([["2026-09-25", 110]]), lastPrice: { date: "2026-09-25", price: 110 }, openPositionPremiumPnl,
+  });
+
+  it("a symbol with only a hedge has one cycle, open from the purchase, whose P&L is the mark minus the cost, all in the hedge bucket", () => {
+    const cycles = deriveCycles(baseInput([hedgeLeg()], new Map([["pos-hedge", 1465.28]])));
+    expect(cycles).toHaveLength(1);
+    const cycle = cycles[0]!;
+    expect(cycle.status).toBe("open");
+    expect(cycle.buckets.hedge.capital).toBeCloseTo(hedgeCost, 2);
+    expect(cycle.buckets.hedge.total).toBeCloseTo(1465.28, 2);
+    expect(cycle.buckets.cc.total).toBe(0);
+    expect(cycle.buckets.csp.total).toBe(0);
+    expect(cycle.total).toBeCloseTo(1465.28, 2);
+  });
+
+  it("a hedge with no nightly mark yet is carried at its cost, not booked as a total loss", () => {
+    const cycle = deriveCycles(baseInput([hedgeLeg()]))[0]!;
+    expect(cycle.buckets.hedge.total).toBeCloseTo(0, 6);
+  });
+
+  it("flags the purchase of a held hedge as unrealized, so its cost and its mark are reported together", () => {
+    const cycle = deriveCycles(baseInput([hedgeLeg()], new Map([["pos-hedge", 1465.28]])))[0]!;
+    const unrealizedRows = cycle.timeline.filter((row) => row.at === null || row.unrealized === true);
+    expect(unrealizedRows).toHaveLength(2);
+    expect(unrealizedRows.reduce((sum, row) => sum + row.premium, 0)).toBeCloseTo(1465.28, 2);
+    const closed = deriveCycles(baseInput([hedgeLeg({ exitAt: new Date("2026-09-25T20:00:00Z"), exitPrice: 5 })]))[0]!;
+    expect(closed.timeline.some((row) => row.unrealized === true)).toBe(false);
+  });
+
+  it("sold at 5.00: the cycle closes with (5.00 - 3.918) x 11,000 realized", () => {
+    const cycle = deriveCycles(baseInput([hedgeLeg({ exitAt: new Date("2026-09-25T20:00:00Z"), exitPrice: 5, hasClosingTrade: true })]))[0]!;
+    expect(cycle.status).toBe("closed");
+    expect(cycle.buckets.hedge.total).toBeCloseTo((5 - 3.918) * 11000, 2);
+  });
+
+  it("an expired-worthless hedge realises the full premium as a loss", () => {
+    const cycle = deriveCycles(baseInput([hedgeLeg({ exitAt: new Date("2026-09-25T20:00:00Z"), exitPrice: 0 })]))[0]!;
+    expect(cycle.status).toBe("closed");
+    expect(cycle.buckets.hedge.total).toBeCloseTo(-hedgeCost, 2);
+  });
+
+  it("never enters the break-even of shares held in the same cycle", () => {
+    const withShares = (legs: CycleOptionLeg[]): CycleInput => ({
+      ...baseInput(legs),
+      stockLegs: [{ positionId: "pos-stock", quantity: 100, entryAt: new Date("2026-09-20T14:00:00Z"), exitAt: null }],
+      stockTrades: [{ at: new Date("2026-09-20T14:00:00Z"), side: "buy", quantity: 100, price: 100, commission: 0 }],
+    });
+    const without = deriveCycles(withShares([]))[0]!;
+    const withHedge = deriveCycles(withShares([hedgeLeg()]))[0]!;
+    expect(withHedge.breakEvenPerShare).toBeCloseTo(without.breakEvenPerShare!, 6);
+  });
+});

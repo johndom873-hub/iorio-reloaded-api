@@ -23,14 +23,18 @@ export function computeOpenCycleMarks(symbol: string, input: CycleInput): OpenCy
   const openCycle = deriveCycles(input).find((cycle) => cycle.status === "open");
   if (!openCycle) return null;
 
+  // What the total was computed with when the position has no nightly mark: a short sits at its credit, a hedge (long
+  // options only) at its cost, i.e. a P&L of 0 (see deriveOneCycle).
   const creditByPositionId = new Map<string, number>();
+  const hedgePositionIds = new Set(input.optionLegs.filter((leg) => leg.exitAt === null && leg.side === "long").map((leg) => leg.positionId));
+  for (const leg of input.optionLegs) if (leg.exitAt === null && leg.side === "short") hedgePositionIds.delete(leg.positionId);
   for (const leg of input.optionLegs) {
     if (leg.exitAt !== null) continue;
     const credit = (leg.side === "short" ? 1 : -1) * leg.entryPrice * leg.quantity * leg.multiplier;
     creditByPositionId.set(leg.positionId, (creditByPositionId.get(leg.positionId) ?? 0) + credit);
   }
   const optionMarks: Record<string, number> = {};
-  for (const [positionId, credit] of creditByPositionId) optionMarks[positionId] = input.openPositionPremiumPnl.get(positionId) ?? credit;
+  for (const [positionId, credit] of creditByPositionId) optionMarks[positionId] = input.openPositionPremiumPnl.get(positionId) ?? (hedgePositionIds.has(positionId) ? 0 : credit);
 
   return {
     symbol,

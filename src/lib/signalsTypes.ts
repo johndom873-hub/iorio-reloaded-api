@@ -6,8 +6,22 @@ import type { ElevatedVolatilityFlag, SkewMeasure } from "./tiltMeasures.js";
 import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
 import type { HeldLegScore, OpenShortLeg, RollSignalCandidate } from "./rollSignalCandidates.js";
 
-/** "stale_surface" (gap fix 8, 2026-09-28): the newest surface is older than the previous open session, so nothing is graded. */
-export type SignalsUnscoredReason = "no_snapshot" | "no_surface_fit" | "no_forecast" | "suspected_split" | "stale_surface";
+/** "analysing": today's snapshot is saved but its surface fit has not finished yet (a pending state, not a problem). */
+export type SignalsUnscoredReason = "no_snapshot" | "analysing" | "no_surface_fit" | "no_forecast" | "suspected_split";
+
+/** The facts behind an unscored reason, so the screen can say what the issue is rather than only that there is one. */
+export type SignalsUnscoredDetail =
+  | { kind: "analysing"; snapshotCapturedAt: string }
+  | {
+      kind: "fit";
+      /** Expiries the fit produced a slice for, by fit status (ok, poor_fit, insufficient_points, ...). Empty when the fit produced none. */
+      sliceStatusCounts: Record<string, number>;
+      expiryCount: number;
+      /** Why the fit produced nothing: a skip reason (no_spot_price, no_risk_free_rate, no_quotes) or "error: <message>"; null when it ran and no slice was usable. */
+      fitIssue: string | null;
+    }
+  | { kind: "forecast"; dailyBarCount: number; barsNeeded: number }
+  | { kind: "split"; splitDateIso: string };
 export type SignalsPriceSource = "live" | "frozen" | "snapshot";
 
 export interface SnapshotHeader {
@@ -16,6 +30,10 @@ export interface SnapshotHeader {
   capturedAt: string;
   underlyingPrice: number | null;
   riskFreeRatePercent: number | null;
+  /** When the surface fit finished with this snapshot (usable surface or not); null while it is still pending. */
+  fitCompletedAt: string | null;
+  /** Why the fit produced nothing for this snapshot (skip reason or "error: ..."), when it did not. */
+  fitIssue: string | null;
 }
 
 export interface PreviousClose {
@@ -37,12 +55,6 @@ export interface TickerSignalsInputs {
   forecast: RealizedVolatilityForecast | null;
   /** Trading date the split guard flagged when it left the ticker without a forecast; null otherwise. */
   suspectedSplitDateIso: string | null;
-  /**
-   * Surface max age (gap fix 8, 2026-09-28): the previous open session's date. A snapshot older than this
-   * is not graded (unscoredReason "stale_surface"); one from exactly this date is scored with the
-   * stale_surface caveat, as before. Omitted = no cap (tests, ad-hoc builders).
-   */
-  oldestAcceptableSnapshotDateIso?: string;
   earningsDatesIso: string[];
   /** False when the ticker has never resolved to a TradingView symbol -- earningsDatesIso is necessarily
    * empty either way, so this is what actually tells the guard "no earnings scheduled" from "unchecked". */
@@ -125,9 +137,36 @@ export interface TickerSignals {
   freeShares: number;
   freeCash: number;
   dayQuotesAsOf: DayQuotesAsOf | null;
+  /** λ (0..1) the scores were computed with: the share of the half-spread charged as friction (Risk & Limits spread cost). */
+  spreadShareCharged: number;
   ivShiftByExpiry: Record<string, ExpiryIvShiftSummary>;
   quoteSourceCounts: QuoteSourceCounts;
   unscoredReason: SignalsUnscoredReason | null;
+  /** What is behind unscoredReason (null for no_snapshot, which needs no detail). */
+  unscoredDetail: SignalsUnscoredDetail | null;
+  /** Set when the ticker was scored but no candidate survived: why, so the screen can say so. */
+  noCandidatesReason: SignalsNoCandidatesReason | null;
+}
+
+/**
+ * Why a scored ticker has no candidates. "filtered": contracts were scorable but every one failed the
+ * trading-settings filters (min yield / max delta). "nothing_scorable": no contract got that far.
+ */
+export interface SignalsNoCandidatesReason {
+  kind: "filtered" | "nothing_scorable";
+  /** Expiries (YYYY-MM-DD) whose surface slice was not usable (poor fit, too few points). */
+  surfaceFitRejectedExpiries: string[];
+  /** Expiries excluded because they span an earnings date, and the first such date. */
+  spansEarningsExpiries: string[];
+  earningsDateIso: string | null;
+  belowMinDeltaCount: number;
+  aboveMaxDeltaCount: number;
+  belowMinYieldCount: number;
+  /** Highest annualised yield (%) among contracts that reached the yield check; null if none did. */
+  bestAnnualizedYieldPct: number | null;
+  minAnnualizedYieldPct: number;
+  deltaTargetMin: number;
+  deltaTargetMax: number;
 }
 
 /** One Signals-screen row: a TickerSignals without the candidate and roll lists (the modal fetches those per ticker); heldLegs, bestRoll and rollCount stay for the badge. */

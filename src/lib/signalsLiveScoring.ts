@@ -1,10 +1,11 @@
 import { sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
-import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { buildRollCandidates, heldLegContractKey, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
+import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { buildRollCandidates, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
-import type { SignalSettings } from "./signalSettingsStore.js";
+import type { TradingSettings } from "./tradingSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
-import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsPriceSource, SignalsScreenRow, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
+import { minimumBarsForAnyForecast } from "./volatilityEdge.js";
+import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsNoCandidatesReason, SignalsPriceSource, SignalsScreenRow, SignalsUnscoredDetail, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
 
 // Pure re-scoring for the Signals live layer (stage 2, decisions with Marcelo 2026-09-22):
 // the fitted surface stays the 10:00 snapshot and follows the live spot by sticky
@@ -16,7 +17,6 @@ import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSo
 
 export const liveFrameIntervalMs = 1_000;
 export const accountRefreshIntervalMs = 60_000;
-export const liveQuoteMaxContracts = 40;
 
 export interface ContractRef {
   expiry: string; // ISO date
@@ -29,6 +29,8 @@ export interface LiveOptionQuote extends ContractRef {
   ask: number | null;
   /** ISO time the quote was received; the pooled live path leaves it unset (the frame's `at` is the time). */
   quotedAt?: string;
+  /** IBKR's own delta, only where the source carries it (the pooled option line does). */
+  delta?: number | null;
 }
 
 export interface LiveScoringOverrides {
@@ -52,11 +54,14 @@ export function computeDayChangePercent(spotPrice: number | null, previousClose:
   return (spotPrice / previousClose.close - 1) * 100;
 }
 
-/** Sticky moneyness: the 10:00 surface is re-read at the live spot by moving every expiry's forward in proportion. */
+/**
+ * Sticky moneyness: the 10:00 surface is re-read at the live spot by moving every expiry's forward in proportion to the underlying
+ * price that forward is anchored to (its own `fitUnderlyingPrice`, else the snapshot spot for fits that predate it). At the snapshot
+ * spot itself the slices are returned as fitted, quotes and forward being consistent as captured.
+ */
 export function scaleSlicesToLiveSpot(slices: SignalSurfaceSlice[], snapshotSpot: number, liveSpot: number): SignalSurfaceSlice[] {
   if (!(snapshotSpot > 0) || !(liveSpot > 0) || liveSpot === snapshotSpot) return slices;
-  const ratio = liveSpot / snapshotSpot;
-  return slices.map((slice) => ({ ...slice, forwardPrice: slice.forwardPrice * ratio }));
+  return slices.map((slice) => ({ ...slice, forwardPrice: slice.forwardPrice * (liveSpot / (slice.fitUnderlyingPrice ?? snapshotSpot)) }));
 }
 
 /**
@@ -74,8 +79,8 @@ export function mergeLiveQuotes(snapshotQuotes: SignalQuote[], liveQuotes: LiveO
 }
 
 /**
- * A held leg's contract is not always in the 10:00 snapshot (an ITM leg before the capture learned to include
- * open legs, or one outside the strike window), and mergeLiveQuotes only replaces snapshot rows. This appends
+ * A wanted contract is not always in the 10:00 snapshot (a held leg outside the strike window, or a contract that
+ * only became out-of-the-money after the price moved), and mergeLiveQuotes only replaces snapshot rows. This appends
  * a fresh quote for any wanted contract the merged list lacks, live first, then day.
  */
 export function appendMissingContractQuotes(quotes: SignalQuote[], wanted: ContractRef[], dayQuotes: LiveOptionQuote[], liveQuotes: LiveOptionQuote[]): SignalQuote[] {
@@ -163,11 +168,19 @@ export function rebaseSlicesToToday(slices: SignalSurfaceSlice[], todayEasternIs
   return rebased;
 }
 
+/** Read-only hooks into one scoreTicker run (the Signals chain grid and the any-contract scorer); never change the result. */
+export interface ScoreTickerObserver {
+  /** The merged quotes candidates were built from (snapshot, then day, then live), when the ticker got that far. */
+  onScoringQuotes?(quotes: SignalQuote[]): void;
+  onContractExcluded?: SignalCandidatesInput["onContractExcluded"];
+}
+
 /** Scores one ticker from its loaded inputs; `live` re-reads the snapshot at the live spot and merges live quotes. */
-export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: SignalSettings, live?: LiveScoringOverrides): TickerSignals {
+export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: TradingSettings, live?: LiveScoringOverrides, observer?: ScoreTickerObserver): TickerSignals {
   const { header } = inputs;
   const spotPrice = live?.spotPrice ?? header?.underlyingPrice ?? null;
-  const base: Omit<TickerSignals, "unscoredReason"> = {
+  const spreadShareCharged = settings.spreadCostChargedPct / 100;
+  const base: Omit<TickerSignals, "unscoredReason" | "unscoredDetail"> = {
     tickerId: inputs.tickerId,
     symbol: inputs.symbol,
     companyName: inputs.companyName,
@@ -182,7 +195,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     candidates: [],
     best: null,
     gradeCounts: { strong: 0, good: 0, weak: 0, avoid: 0 },
-    heldLegs: scoreHeldLegs(inputs.openShortLegs, { spotPrice: spotPrice ?? 0, riskFreeRate: 0, forecast: null, slices: [], quotes: [] }),
+    heldLegs: scoreHeldLegs(inputs.openShortLegs, { spotPrice: spotPrice ?? 0, riskFreeRate: 0, forecast: null, slices: [], quotes: [], spreadShareCharged }),
     rolls: [],
     bestRoll: null,
     rollCount: 0,
@@ -201,20 +214,27 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     freeShares: inputs.freeShares,
     freeCash: account.freeCash,
     dayQuotesAsOf: summarizeDayQuotes(inputs.dayQuotes),
+    spreadShareCharged,
     ivShiftByExpiry: {},
     quoteSourceCounts: { live: 0, day: 0, snapshot: 0 },
+    noCandidatesReason: null,
   };
-  const withCaveats = (unscoredReason: TickerSignals["unscoredReason"]): TickerSignals => ({
+  const withCaveats = (unscoredReason: TickerSignals["unscoredReason"], unscoredDetail: SignalsUnscoredDetail | null = null): TickerSignals => ({
     ...base,
     unscoredReason,
+    unscoredDetail,
     caveats: buildTickerCaveats({ unscoredReason, suspectedSplitDateIso: inputs.suspectedSplitDateIso, dailyBarCount: inputs.dailyBarCount, dividendCadenceUnknown: inputs.dividendCadenceUnknown, snapshotDateIso: base.snapshotDateIso }, inputs.todayEasternIso),
   });
 
   if (!header) return withCaveats("no_snapshot");
-  // Surface max age (gap fix 8, 2026-09-28): older than the previous open session is not graded at all.
-  if (inputs.oldestAcceptableSnapshotDateIso !== undefined && base.snapshotDateIso !== null && base.snapshotDateIso < inputs.oldestAcceptableSnapshotDateIso) return withCaveats("stale_surface");
-  if (base.fittedSliceCount === 0 || header.underlyingPrice === null || header.riskFreeRatePercent === null) return withCaveats("no_surface_fit");
-  if (!inputs.forecast) return withCaveats(inputs.suspectedSplitDateIso !== null ? "suspected_split" : "no_forecast");
+  // Saved but not yet analysed: pending, not a problem (the fit finishes within seconds of the capture).
+  if (header.fitCompletedAt === null) return withCaveats("analysing", { kind: "analysing", snapshotCapturedAt: header.capturedAt });
+  if (base.fittedSliceCount === 0 || header.underlyingPrice === null || header.riskFreeRatePercent === null) return withCaveats("no_surface_fit", describeFitIssue(inputs));
+  if (!inputs.forecast) {
+    return inputs.suspectedSplitDateIso !== null
+      ? withCaveats("suspected_split", { kind: "split", splitDateIso: inputs.suspectedSplitDateIso })
+      : withCaveats("no_forecast", { kind: "forecast", dailyBarCount: inputs.dailyBarCount, barsNeeded: minimumBarsForAnyForecast });
+  }
   if (spotPrice === null) return withCaveats("no_snapshot");
 
   const todaySlices = rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso);
@@ -223,12 +243,16 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const withDayQuotes = mergeLiveQuotes(inputs.quotes, inputs.dayQuotes, "day");
   const mergedQuotes = live?.liveQuotes ? mergeLiveQuotes(withDayQuotes, live.liveQuotes, "live") : withDayQuotes;
   const heldLegRefs: ContractRef[] = inputs.openShortLegs.map((leg) => ({ expiry: leg.expiry, strike: leg.strike, right: leg.right }));
-  const quotes = appendMissingContractQuotes(mergedQuotes, heldLegRefs, inputs.dayQuotes, live?.liveQuotes ?? []);
+  // Contracts the loop or the modal quoted that the 10:00 snapshot never stored (the price moved past the capture window) are scored too.
+  const quotes = appendMissingContractQuotes(mergedQuotes, [...heldLegRefs, ...inputs.dayQuotes, ...(live?.liveQuotes ?? [])], inputs.dayQuotes, live?.liveQuotes ?? []);
   const riskFreeRate = header.riskFreeRatePercent / 100;
   const ivShifts = computeExpiryIvShifts(slices, quotes, riskFreeRate);
+  observer?.onScoringQuotes?.(quotes);
 
+  const exclusionTally = emptyCandidateExclusionTally();
   let candidates = gradeSignalCandidates(
     buildSignalCandidates({
+      exclusionTally,
       spotPrice,
       riskFreeRate,
       forecast: inputs.forecast,
@@ -240,9 +264,13 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       snapshotDateIso: header.tradingDateIso,
       freeShares: inputs.freeShares,
       freeCash: account.freeCash,
-      maxNetDelta: settings.maxNetDelta,
+      deltaTargetMin: settings.deltaTargetMin,
+      deltaTargetMax: settings.deltaTargetMax,
       minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
       ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
+      commissionEstimator: settings.commissionEstimator,
+      spreadShareCharged,
+      onContractExcluded: observer?.onContractExcluded,
     }),
   );
   // settings.maxDeltaDriftPct is deliberately not applied: the drift share is only known for the open
@@ -259,8 +287,10 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     slices,
     quotes,
     ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
+    commissionEstimator: settings.commissionEstimator,
+    spreadShareCharged,
   });
-  const rolls = buildRollCandidates(heldLegs, candidates);
+  const rolls = buildRollCandidates(heldLegs, candidates, settings.commissionEstimator);
 
   return {
     ...withCaveats(null),
@@ -273,6 +303,42 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     rollCount: countRollableLegs(rolls),
     ivShiftByExpiry: Object.fromEntries([...ivShifts].map(([expiry, entry]) => [expiry, { shiftVolatilityPoints: entry.shift * 100, quoteCount: entry.quoteCount }])),
     quoteSourceCounts: countQuoteSources(candidates),
+    noCandidatesReason: candidates.length > 0 ? null : describeNoCandidates(exclusionTally, inputs.earningsDatesIso, header.tradingDateIso, settings),
+  };
+}
+
+/** Pure: what the fit left behind for a snapshot with no usable surface: slice counts by status, plus why the fit produced nothing when it did not run to the end. */
+export function describeFitIssue(inputs: Pick<TickerSignalsInputs, "slices" | "header">): SignalsUnscoredDetail {
+  const sliceStatusCounts: Record<string, number> = {};
+  for (const slice of inputs.slices) sliceStatusCounts[slice.status] = (sliceStatusCounts[slice.status] ?? 0) + 1;
+  const header = inputs.header;
+  // A header gap names the cause when the fit left no issue of its own.
+  const headerIssue = header ? (header.underlyingPrice === null ? "no_spot_price" : header.riskFreeRatePercent === null ? "no_risk_free_rate" : null) : null;
+  return { kind: "fit", sliceStatusCounts, expiryCount: inputs.slices.length, fitIssue: header?.fitIssue ?? headerIssue };
+}
+
+/** Pure: turns the builder's exclusion tally into the reason a scored ticker shows no candidates. */
+export function describeNoCandidates(
+  tally: CandidateExclusionTally,
+  earningsDatesIso: string[],
+  snapshotDateIso: string,
+  settings: { minAnnualizedYieldPct: number; deltaTargetMin: number; deltaTargetMax: number },
+): SignalsNoCandidatesReason {
+  const filtered = tally.belowMinDeltaCount + tally.aboveMaxDeltaCount + tally.belowMinYieldCount > 0;
+  // Strictly after the snapshot, as expirySpansEarnings counts it.
+  const nextEarnings = [...earningsDatesIso].sort().find((dateIso) => dateIso > snapshotDateIso) ?? null;
+  return {
+    kind: filtered ? "filtered" : "nothing_scorable",
+    surfaceFitRejectedExpiries: [...tally.surfaceFitRejectedExpiries].sort(),
+    spansEarningsExpiries: [...tally.spansEarningsExpiries].sort(),
+    earningsDateIso: tally.spansEarningsExpiries.size > 0 ? nextEarnings : null,
+    belowMinDeltaCount: tally.belowMinDeltaCount,
+    aboveMaxDeltaCount: tally.aboveMaxDeltaCount,
+    belowMinYieldCount: tally.belowMinYieldCount,
+    bestAnnualizedYieldPct: tally.bestAnnualizedYieldPct,
+    minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
+    deltaTargetMin: settings.deltaTargetMin,
+    deltaTargetMax: settings.deltaTargetMax,
   };
 }
 
@@ -292,31 +358,6 @@ export function candidateContractRef(candidate: SignalCandidate): ContractRef {
   return { expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" };
 }
 
-/**
- * The contracts the modal subscribes to live quotes for: every open short leg's contract first (Roll Signals,
- * one line per leg), then the selected expiry's candidates, capped in total at liveQuoteMaxContracts
- * (Marcelo 2026-09-24 — every other expiry rides on the Day Signals quotes).
- */
-export function selectLiveQuoteContracts(candidates: SignalCandidate[], selectedExpiry: string | null, heldLegs: ContractRef[] = [], options = { maxContracts: liveQuoteMaxContracts }): ContractRef[] {
-  const selected: ContractRef[] = [];
-  const seen = new Set<string>();
-  for (const leg of heldLegs) {
-    const key = heldLegContractKey(leg);
-    if (seen.has(key) || selected.length >= options.maxContracts) continue;
-    seen.add(key);
-    selected.push({ expiry: leg.expiry, strike: leg.strike, right: leg.right });
-  }
-  if (!selectedExpiry) return selected;
-  for (const candidate of candidates) {
-    if (candidate.expiry !== selectedExpiry || selected.length >= options.maxContracts) continue;
-    const ref = candidateContractRef(candidate);
-    const key = contractKey(ref);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    selected.push(ref);
-  }
-  return selected;
-}
 
 export function toScreenRow(signals: TickerSignals): SignalsScreenRow {
   const { candidates: _candidates, rolls: _rolls, ...row } = signals;

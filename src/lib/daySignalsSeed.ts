@@ -1,7 +1,7 @@
 import type { SignalCandidate } from "./signalCandidates.js";
 import { scoreTicker } from "./signalsLiveScoring.js";
 import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
-import { loadSignalSettings, type SignalSettings } from "./signalSettingsStore.js";
+import { loadTradingSettings, type TradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 import { replaceDaySignalPool, type DaySignalExpirySeed, type DaySignalTickerSeed } from "./daySignalsStore.js";
 
@@ -42,7 +42,7 @@ export interface DaySignalsSeedDependencies {
   loadSignalsUniverseTickers(): Promise<SignalsTickerRow[]>;
   loadTickerSignalsInputs(ticker: SignalsTickerRow): Promise<TickerSignalsInputs>;
   loadAccountContext(): Promise<AccountContext>;
-  loadSignalSettings(): Promise<SignalSettings>;
+  loadTradingSettings(): Promise<TradingSettings>;
   replaceDaySignalPool(tradingDateIso: string, seeds: DaySignalTickerSeed[], seededAt: Date): Promise<void>;
   now(): Date;
 }
@@ -51,7 +51,7 @@ export const defaultDaySignalsSeedDependencies: DaySignalsSeedDependencies = {
   loadSignalsUniverseTickers,
   loadTickerSignalsInputs,
   loadAccountContext,
-  loadSignalSettings,
+  loadTradingSettings,
   replaceDaySignalPool,
   now: () => new Date(),
 };
@@ -65,17 +65,29 @@ export interface DaySignalsSeedResult {
   symbolsWithoutPool: string[];
   /** Symbols skipped because their latest snapshot is not today's. */
   symbolsWithoutTodaySnapshot: string[];
+  /** True when the account summary could not be read: free cash was taken as 0, so every candidate is marked non-executable. */
+  accountContextUnavailable: boolean;
+}
+
+/** One line for the job alert when the seed ran but its pool is missing tickers or is scored without the account, or undefined when clean. */
+export function buildSeedFailureMessage(result: DaySignalsSeedResult): string | undefined {
+  const problems: string[] = [];
+  if (result.symbolsWithoutTodaySnapshot.length > 0) problems.push(`no snapshot for today, so no Day Signals pool: ${result.symbolsWithoutTodaySnapshot.join(", ")}`);
+  if (result.accountContextUnavailable) problems.push("account summary unavailable, so free cash was taken as 0 and every candidate is marked non-executable");
+  return problems.length > 0 ? problems.join("; ") : undefined;
 }
 
 export async function seedDaySignals(tradingDateIso: string, deps: DaySignalsSeedDependencies = defaultDaySignalsSeedDependencies): Promise<DaySignalsSeedResult> {
-  const [tickers, settings] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadSignalSettings()]);
+  const [tickers, settings] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadTradingSettings()]);
   // Free cash only affects the executable flag, never the ranking — a missing account summary must not block the seed.
+  let accountContextUnavailable = false;
   const account = await deps.loadAccountContext().catch((error) => {
     console.warn(`day signals seed: account context unavailable (${error instanceof Error ? error.message : error}) — seeding without it`);
+    accountContextUnavailable = true;
     return { freeCash: 0 };
   });
 
-  const result: DaySignalsSeedResult = { tradingDateIso, tickersScored: 0, tickersPooled: 0, expiriesPooled: 0, symbolsWithoutPool: [], symbolsWithoutTodaySnapshot: [] };
+  const result: DaySignalsSeedResult = { tradingDateIso, tickersScored: 0, tickersPooled: 0, expiriesPooled: 0, symbolsWithoutPool: [], symbolsWithoutTodaySnapshot: [], accountContextUnavailable };
   const seeds: DaySignalTickerSeed[] = [];
   for (const ticker of tickers) {
     const inputs = await deps.loadTickerSignalsInputs(ticker);

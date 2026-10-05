@@ -2,7 +2,7 @@ import { db } from "../db/connection.js";
 import type { InternalApiClient } from "../lib/internalApiClient.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { computePositionExposures } from "../lib/positionExposure.js";
-import { loadSignalSettings } from "../lib/signalSettingsStore.js";
+import { loadTradingSettings, type TradingSettings } from "../lib/tradingSettingsStore.js";
 import { scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
@@ -85,12 +85,12 @@ function burstContractsFor(scored: TickerSignals, filtered: PlutoTickerFilterRes
   return ranked.slice(0, settings.burstLines).map((candidate) => ({ expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" }));
 }
 
-async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, context: PassRunnerContext, account: { freeCash: number }, signalSettings: Awaited<ReturnType<typeof loadSignalSettings>>, botEnabled: boolean, nowMs: number, extraLiveQuotes: LiveOptionQuote[] = []): Promise<EvaluatedTicker> {
+async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, context: PassRunnerContext, account: { freeCash: number }, tradingSettings: TradingSettings, botEnabled: boolean, nowMs: number, extraLiveQuotes: LiveOptionQuote[] = []): Promise<EvaluatedTicker> {
   const inputs = await loadTickerSignalsInputs(row);
   const watched = context.marketWatch.snapshot(row.symbol);
   const spot = watched?.last ?? null;
   const live = spot !== null ? { spotPrice: spot, priceSource: "live" as const, liveQuotes: extraLiveQuotes } : undefined;
-  const scored = scoreTicker(inputs, account, signalSettings, live);
+  const scored = scoreTicker(inputs, account, tradingSettings, live);
   const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled });
   return { row, inputs, scored, filtered, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [] };
 }
@@ -159,17 +159,17 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const enabledRows = await loadEnabledTickerRows();
   const rows = request.symbols.length > 0 ? enabledRows.filter((row) => request.symbols.includes(row.symbol)) : enabledRows;
   if (rows.length === 0) return skip("no enabled tickers to evaluate", checks.checks);
-  const [account, signalSettings] = await Promise.all([loadAccountContext(), loadSignalSettings()]);
+  const [account, tradingSettings] = await Promise.all([loadAccountContext(), loadTradingSettings()]);
 
   // 3. Score, burst the promising ones, re-score with live quotes, filter.
   const evaluated: EvaluatedTicker[] = [];
   for (const row of rows) {
-    let ticker = await evaluateTicker(row, settings, context, account, signalSettings, true, nowMs);
+    let ticker = await evaluateTicker(row, settings, context, account, tradingSettings, true, nowMs);
     if (ticker.filtered.tickerBlocks.length === 0) {
       const contracts = burstContractsFor(ticker.scored, ticker.filtered, settings);
       if (contracts.length > 0) {
         const liveQuotes = await context.marketWatch.burst(row.symbol, contracts);
-        if (liveQuotes.length > 0) ticker = await evaluateTicker(row, settings, context, account, signalSettings, true, Date.now(), liveQuotes);
+        if (liveQuotes.length > 0) ticker = await evaluateTicker(row, settings, context, account, tradingSettings, true, Date.now(), liveQuotes);
       }
     }
     if (marketStress) {
@@ -303,7 +303,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     ? [{ expiry: chosenOpen.candidate.expiry, strike: chosenOpen.candidate.strike, right: chosenOpen.candidate.strategyKey === "covered_call" ? ("C" as const) : ("P" as const) }]
     : [{ expiry: chosenRoll!.roll.replacement.expiry, strike: chosenRoll!.roll.replacement.strike, right: chosenRoll!.roll.replacement.strategyKey === "covered_call" ? ("C" as const) : ("P" as const) }];
   const freshQuotes = await context.marketWatch.burst(owner.row.symbol, burstContracts);
-  const fresh = await evaluateTicker(owner.row, settings, context, account, signalSettings, true, Date.now(), freshQuotes);
+  const fresh = await evaluateTicker(owner.row, settings, context, account, tradingSettings, true, Date.now(), freshQuotes);
   const freshCandidate = chosenOpen ? fresh.scored.candidates.find((candidate) => openCandidateId(owner.row.symbol, candidate) === chosenId) ?? null : null;
   const freshRoll = chosenRoll ? fresh.scored.rolls.find((roll) => rollCandidateId(owner.row.symbol, roll) === chosenId) ?? null : null;
   const slicesByExpiry = new Map(fresh.inputs.slices.map((slice) => [slice.expiry, slice]));
@@ -378,7 +378,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   async function runChosenClose(ticker: EvaluatedTicker, offer: CloseOffer): Promise<PassSummary> {
     // Re-derive the offer fresh: the cycle P&L, the quote and the leg's edge can all have moved.
     const watched = context.marketWatch.snapshot(ticker.row.symbol);
-    const freshScored = (await evaluateTicker(ticker.row, settings, context, account, signalSettings, true, Date.now())).scored;
+    const freshScored = (await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now())).scored;
     const rebuilt = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: freshScored.heldLegs, rolls: freshScored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso });
     const freshOffer = rebuilt.offers.find((entry) => entry.id === offer.id) ?? null;
     const gateResults: PlutoGateResult[] = [

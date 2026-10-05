@@ -22,7 +22,7 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
   return {
     strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, dte: 18, delta: -0.22, bid: 2.0, ask: 2.1, spreadPercent: 4.9, openInterest: 1200, volume: 300, bidSize: 40, askSize: 35,
     surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, forecastVolatility: 0.5, edge: 0.12, frictionVolatility: 0.02, netEdge: 0.1, edgeDollars: 80, vega: 0.08,
-    netEdgeAtMid: 0.11, edgeDollarsAtMid: 88, dollarRisk: 9795, riskAdjustedRatio: 0.008, riskAdjustedRatioAtMid: 0.009, annualizedYield: 0.83, uncompensatedSharePercent: null,
+    dollarRisk: 9795, riskAdjustedRatio: 0.008, annualizedYield: 0.83, uncompensatedSharePercent: null,
     quoteSource: "live", quotedAt: null, flags: [], executable: true, grade: "strong", ...overrides,
   };
 }
@@ -107,7 +107,7 @@ describe("runPostModelGates — covered calls and rolls", () => {
     expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350, spotPrice: null } })).plan).toEqual({ quantity: 3, limitPrice: 2.05, notional: 0, fullSizeQuantity: 3 });
   });
   it("a roll keeps the held quantity, ignores the tier, and only counts a strike increase as notional", () => {
-    const roll: RollSignalCandidate = { legId: "leg1", positionId: "p1", strategyKey: "cash_secured_put", quantity: 3, replacement: candidate({ strike: 95 }), netRollEdge: 0.07, netRollEdgeDollarsPerContract: 40, netRollEdgeDollars: 120, netCreditPerShare: 0.4, deltaChange: -0.02, dollarRiskChange: -500, flags: [], grade: "good" };
+    const roll: RollSignalCandidate = { legId: "leg1", positionId: "p1", strategyKey: "cash_secured_put", quantity: 3, replacement: candidate({ strike: 95 }), netRollEdge: 0.07, netRollEdgeDollarsPerContract: 40, netRollEdgeDollars: 120, netCreditPerShare: 0.4, deltaChange: -0.02, dollarRiskChange: -500, flags: [], warnings: [], grade: "good" };
     const decision: PlutoDecision = { ...trade, actionKind: "roll", candidateId: "HOOD:roll:leg1:2026-10-16:95", sizeTier: "half" };
     const output = runPostModelGates(input({ decision, candidate: null, roll, netEdgeAtDecision: 0.07 }));
     expect(failed(output)).toEqual([]);

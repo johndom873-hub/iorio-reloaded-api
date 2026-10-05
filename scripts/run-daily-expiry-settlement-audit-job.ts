@@ -14,10 +14,12 @@
 //   npm run job:expiry-settlement-audit
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-daily-expiry-settlement-audit-job.js
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import "dotenv/config";
 import { db } from "../src/db/connection.js";
 import { runJob } from "../src/lib/runJob.js";
-import { readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "../src/lib/expirySettlementAudit.js";
+import { buildExpiryAuditFailureMessage, readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySettlement } from "../src/lib/expirySettlementAudit.js";
 
 async function main() {
   const mode = readExpirySettlementMode();
@@ -30,13 +32,12 @@ async function main() {
     return {
       details: { mode, legsExamined: result.legsExamined, corrections: changes.length, skipped: skipped.map((action) => action.description), pnlDelta },
       notify,
+      // Skipped legs that need someone (no expiry bar, share-count mismatch, untracked shares, a call too close to
+      // call) leave realized P&L wrong until fixed, so the nightly run is recorded as a failure every night they
+      // persist. A chain that is merely still open is a waiting state, not a problem, and is left out.
+      failureMessage: buildExpiryAuditFailureMessage(skipped),
     };
   });
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("run-daily-expiry-settlement-audit-job", main, () => db.destroy());

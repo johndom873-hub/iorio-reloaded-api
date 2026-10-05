@@ -23,6 +23,8 @@
 // close, or with anything genuinely in flight is the exact risk this guard exists to catch.
 // Production ABORTS the release on any of those; staging only WARNS and proceeds (see
 // releaseDeployGuard.ts) -- else every daytime push during active staging development would fail.
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import "dotenv/config";
 import { db } from "../src/db/connection.js";
 import { environment, requireEnvironmentVariable } from "../src/config/env.js";
@@ -148,9 +150,4 @@ Release ABORTED — the API was NOT deployed either. This is not a failure, it's
   process.exitCode = 1;
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("run-release-phase-worker-deploy", main, () => db.destroy());

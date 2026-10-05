@@ -37,25 +37,12 @@ export interface OptionQuote {
 // connection's own ask reasonable. pickExpiries sorts ascending and takes
 // the first N, so the nearest (weekly/intra-weekly) expiries are always the
 // ones kept if more than 4 exist in the window.
-//
-// mustIncludeStrikes/alertStrikesByExpiry (see prepareOptionChainStrikes)
-// spend from this same 48-line budget rather than adding to it — regression
-// found 2026-09-15: an earlier version of this file unioned must-include
-// expiries/strikes on top of the line-count target, which could push a given
-// connection's subscription count past IBKR's actual 100-line cap. Contracts
-// requested past that cap never receive tickPrice/tickOptionComputation
-// ticks, so their bid/ask/delta stayed null forever and their yield
-// silently rendered blank — while the must-include strikes themselves (early
-// in subscription order) kept working, which is what made it look like only
-// "regular" strikes were affected.
 const defaultMinDaysToExpiry = 0;
 const defaultMaxDaysToExpiry = 60;
 const maxExpiries = 4;
 const strikesPerSide = 3;
 const quoteTimeoutMs = 8_000;
 
-// Exported for reuse by the trade-alert candidate generator, which needs
-// its own per-strategy DTE window instead of this file's fixed one.
 export function parseExpiry(expiry: string): Date {
   return new Date(`${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}T00:00:00Z`);
 }
@@ -81,6 +68,13 @@ export function daysBetween(from: Date, to: Date): number {
 // sharing the same connection.
 let nextLookupReqId = 5_000;
 
+/**
+ * An IBKR contract-definition request that never answered. It cannot be cancelled (the API has no
+ * cancel for reqContractDetails/reqSecDefOptParams), so it stays queued in the Gateway's session and
+ * everything sent after it waits behind it — callers should stop sending, not carry on.
+ */
+export class IbkrLookupTimeoutError extends Error {}
+
 export async function lookupOptionParams(
   ib: IBApi,
   symbol: string,
@@ -91,7 +85,7 @@ export async function lookupOptionParams(
     let lastError: string | null = null;
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error(lastError ?? `secDefOptParams timeout for ${symbol}`));
+      reject(new IbkrLookupTimeoutError(lastError ?? `secDefOptParams timeout for ${symbol}`));
     }, 10_000);
     function cleanup() {
       clearTimeout(timer);
@@ -220,7 +214,7 @@ export function lookupExpiryStrikes(ib: IBApi, symbol: string, expiry: string): 
         let contractCount = 0;
         const timer = setTimeout(() => {
           cleanup();
-          reject(new Error(`strike grid lookup for ${symbol} ${expiry} timed out after ${expiryStrikesTimeoutMs / 1000}s`));
+          reject(new IbkrLookupTimeoutError(`strike grid lookup for ${symbol} ${expiry} timed out after ${expiryStrikesTimeoutMs / 1000}s`));
         }, expiryStrikesTimeoutMs);
 
         function onDetails(id: number, details: ContractDetails) {
@@ -265,7 +259,8 @@ export function lookupExpiryStrikes(ib: IBApi, symbol: string, expiry: string): 
 
 export interface OptionChainRefreshTimings {
   optionParamsMs: number;
-  expiries: { expiry: string; strikeCount: number; elapsedMs: number }[];
+  /** reused: the stored grid was fresh enough and no IBKR lookup was made for this expiry. */
+  expiries: { expiry: string; strikeCount: number; elapsedMs: number; reused?: boolean }[];
   totalMs: number;
 }
 
@@ -275,25 +270,45 @@ export interface StoredOptionChainRefresh {
   timings: OptionChainRefreshTimings;
 }
 
+export interface StoredGridReuse {
+  /** A stored grid younger than this is reused instead of looked up again. */
+  maxAgeDays: number;
+  /** A stored grid is only reused while spot sits inside its strike range; null = decide on age alone. */
+  spotPrice: number | null;
+}
+
+/** Pure: whether a stored strike grid can stand in for a fresh wildcard lookup. */
+export function canReuseStoredGrid(stored: { strikes: number[]; fetchedAt: Date } | undefined, reuse: StoredGridReuse, now: Date): boolean {
+  if (!stored || stored.strikes.length === 0) return false;
+  if (now.getTime() - stored.fetchedAt.getTime() > reuse.maxAgeDays * 86_400_000) return false;
+  if (reuse.spotPrice === null) return true;
+  return reuse.spotPrice >= Math.min(...stored.strikes) && reuse.spotPrice <= Math.max(...stored.strikes);
+}
+
 /**
  * The one place chain structure is fetched from IBKR: every listed expiry
  * (reqSecDefOptParams), then the real strike grid for each expiry inside the
  * 0-90 DTE capture window, one wildcard at a time, each stored as soon as it
- * lands so a failure part-way keeps the expiries already done. Always
- * refreshes — the nightly capture is the schedule, there is no TTL.
+ * lands so a failure part-way keeps the expiries already done.
+ *
+ * With `reuse` (the daily structure job), a stored grid that is still fresh is
+ * kept instead of looked up: a run of ~180 back-to-back wildcard lookups got
+ * throttled by IBKR, stalling the whole Gateway session. Without it
+ * (new-ticker warmup, the shortlist route), every expiry is looked up.
+ *
+ * option_chain_params (whose fetched_at is what the capture checks as "today's
+ * structure") is written last, so a ticker interrupted part-way never looks
+ * complete.
  */
 export async function refreshStoredOptionChain(
   ib: IBApi,
   ticker: { tickerId: string; symbol: string; contractId: number },
   todayIso: string,
+  reuse?: StoredGridReuse,
 ): Promise<StoredOptionChainRefresh> {
   const startedAt = Date.now();
   const { expirations } = await lookupOptionParams(ib, ticker.symbol, ticker.contractId);
   const optionParamsMs = Date.now() - startedAt;
-  await db("option_chain_params")
-    .insert({ ticker_id: ticker.tickerId, expirations, fetched_at: new Date() })
-    .onConflict("ticker_id")
-    .merge();
 
   const expiriesInWindow = expirations
     .filter((expiry) => {
@@ -304,12 +319,22 @@ export async function refreshStoredOptionChain(
 
   const strikesByExpiry = new Map<string, number[]>();
   const expiryTimings: OptionChainRefreshTimings["expiries"] = [];
-  const storedGrids = new Map<string, number[]>(
-    (await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).select("expiry", "strikes")).map((row: { expiry: string; strikes: number[] }) => [String(row.expiry).slice(0, 10).replaceAll("-", ""), row.strikes]),
+  const storedGrids = new Map<string, { strikes: number[]; fetchedAt: Date }>(
+    (await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).select("expiry", "strikes", "fetched_at")).map((row: { expiry: string; strikes: (string | number)[]; fetched_at: Date }) => [
+      String(row.expiry).slice(0, 10).replaceAll("-", ""),
+      { strikes: row.strikes.map(Number), fetchedAt: new Date(row.fetched_at) },
+    ]),
   );
+  const now = new Date();
   for (const expiry of expiriesInWindow) {
+    const storedGrid = storedGrids.get(expiry);
+    if (reuse && canReuseStoredGrid(storedGrid, reuse, now)) {
+      strikesByExpiry.set(expiry, storedGrid!.strikes);
+      expiryTimings.push({ expiry, strikeCount: storedGrid!.strikes.length, elapsedMs: 0, reused: true });
+      continue;
+    }
     const lookup = await lookupExpiryStrikes(ib, ticker.symbol, expiry);
-    const stored = storedGrids.get(expiry) ?? [];
+    const stored = storedGrid?.strikes ?? [];
     // An empty lookup (IBKR error 200 / no definitions right now) must not
     // replace a grid we already have (2026-09-24): downstream, an empty grid
     // means "no contracts" and the next alert refresh expires everything.
@@ -332,19 +357,12 @@ export async function refreshStoredOptionChain(
   if (expiriesInWindow.length > 0) {
     await db("option_chain_expiry_strikes").where({ ticker_id: ticker.tickerId }).whereNotIn("expiry", expiriesInWindow).delete();
   }
+  await db("option_chain_params")
+    .insert({ ticker_id: ticker.tickerId, expirations, fetched_at: new Date() })
+    .onConflict("ticker_id")
+    .merge();
 
   return { expirations, strikesByExpiry, timings: { optionParamsMs, expiries: expiryTimings, totalMs: Date.now() - startedAt } };
-}
-
-// mustIncludeStrikes (approved 2026-08-26): a pending trade alert's strike
-// has to show up in the chain even when it's well outside the plain
-// near-the-money window — a covered-call alert can sit 20+ points OTM on a
-// low-delta strike, which the standard ±strikesPerSide trim would otherwise
-// silently drop. They come from real quotes (an alert or a held leg), so
-// they are unioned in as-is rather than checked against the stored grid.
-function pickExpiryStrikes(gridStrikes: number[], spotPrice: number, mustIncludeStrikes: number[], nearTheMoneyCountPerSide: number): number[] {
-  const nearTheMoney = pickStrikes(gridStrikes, spotPrice, nearTheMoneyCountPerSide);
-  return Array.from(new Set([...nearTheMoney, ...mustIncludeStrikes])).sort((a, b) => a - b);
 }
 
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
@@ -364,60 +382,13 @@ export interface ExpiryStrikes {
 // Reads chain structure from the DB only (see StoredOptionChain) — no IBKR
 // call, so it costs a couple of Postgres reads regardless of how many
 // expiries are shown. spotPrice picks the near-the-money strikes.
-export async function prepareOptionChainStrikes(
-  symbol: string,
-  spotPrice: number,
-  dteRange: { min: number; max: number } = { min: defaultMinDaysToExpiry, max: defaultMaxDaysToExpiry },
-  // Approved 2026-08-26: every pending trade alert's strike must show up in
-  // the chain, even ones the near-the-money window alone would trim away
-  // (see pickExpiryStrikes). Keyed by expiry in the same YYYYMMDD shape used
-  // everywhere else in this file.
-  alertStrikesByExpiry: Map<string, number[]> = new Map(),
-): Promise<ExpiryStrikes[]> {
+export async function prepareOptionChainStrikes(symbol: string, spotPrice: number): Promise<ExpiryStrikes[]> {
   const tickerId = await resolveTickerId(symbol);
   const stored = tickerId ? await loadStoredOptionChain(tickerId) : null;
   if (!stored || stored.strikesByExpiry.size === 0) {
     throw new Error(`Option chain for ${symbol} is not prepared yet — it is stored by the nightly chain capture, or when the ticker is added to the Shortlist.`);
   }
-  const { expirations } = stored;
-
-  // A pending alert's/held position's expiry has to be browsable even if
-  // maxExpiries' trim would otherwise cut it — same "every must-include
-  // strike must be visible" requirement as mustIncludeStrikes below, one
-  // level up (expiries, not just strikes within an already-kept expiry).
-  // Must-include expiries always survive; only the remaining slots up to
-  // maxExpiries are filled with the nearest regular expiries, so this no
-  // longer just appends on top of maxExpiries (see the file-level budget
-  // comment). The one accepted edge case: more must-include expiries than
-  // maxExpiries for a single ticker at once goes over budget rather than
-  // dropping one of them — showing every held position/alert wins over the
-  // line-count margin in that rare situation.
-  const mustExpiries = Array.from(alertStrikesByExpiry.keys()).sort();
-  const regularExpiries = pickExpiries(expirations, dteRange).filter((expiry) => !alertStrikesByExpiry.has(expiry));
-  const remainingExpirySlots = Math.max(0, maxExpiries - mustExpiries.length);
-  const chosenExpiries = Array.from(new Set([...mustExpiries, ...regularExpiries.slice(0, remainingExpirySlots)])).sort();
-
-  // Spend the shared 96-line budget: reserve slots for must-include strikes
-  // first (counted pre-validation — a couple of lines' slack either way
-  // doesn't threaten the 96/100 margin), then split whatever's left evenly
-  // across the chosen expiries for the normal near-the-money picks, never
-  // exceeding the default strikesPerSide. This is what keeps must-include
-  // strikes from just piling on top of the budget the way the regression
-  // did — see the file-level comment.
-  const totalStrikeSlots = maxExpiries * strikesPerSide * 2;
-  const mustSlotsUsed = chosenExpiries.reduce((sum, expiry) => sum + (alertStrikesByExpiry.get(expiry)?.length ?? 0), 0);
-  const remainingSlotsForNearTheMoney = Math.max(0, totalStrikeSlots - mustSlotsUsed);
-  const nearTheMoneyCountPerSide =
-    chosenExpiries.length === 0
-      ? strikesPerSide
-      : Math.min(strikesPerSide, Math.floor(remainingSlotsForNearTheMoney / (chosenExpiries.length * 2)));
-
-  // A must-include expiry outside the stored 0-90 DTE window has no grid; its
-  // must-include strikes (a held leg, a pending alert) still show on their own.
-  return chosenExpiries
-    .map((expiry) => ({
-      expiry,
-      strikes: pickExpiryStrikes(stored.strikesByExpiry.get(expiry) ?? [], spotPrice, alertStrikesByExpiry.get(expiry) ?? [], nearTheMoneyCountPerSide),
-    }))
-    .filter(({ strikes: expiryStrikes }) => expiryStrikes.length > 0);
+  return pickExpiries(stored.expirations, { min: defaultMinDaysToExpiry, max: defaultMaxDaysToExpiry })
+    .map((expiry) => ({ expiry, strikes: pickStrikes(stored.strikesByExpiry.get(expiry) ?? [], spotPrice) }))
+    .filter(({ strikes }) => strikes.length > 0);
 }

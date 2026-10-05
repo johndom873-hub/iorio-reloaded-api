@@ -10,13 +10,16 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-daily-calendar-capture-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
+import { buildCalendarCaptureFailureMessage, selectAlertWorthyUnresolved, type CalendarFetchFailure, type UnresolvedTicker } from "../src/lib/calendarCaptureOutcome.js";
 import { runJob } from "../src/lib/runJob.js";
 import {
   fetchDividendEvents,
   fetchEarningsEvents,
   fetchEconomicCalendarEvents,
-  resolveTradingViewTicker,
+  resolveTradingViewTickerDetailed,
   upsertDividendEvents,
   upsertEarningsEvents,
 } from "../src/lib/tradingviewCalendarService.js";
@@ -24,6 +27,7 @@ import {
 interface TickerRow {
   id: string;
   symbol: string;
+  sector: string | null;
 }
 
 const LOOKAHEAD_DAYS = 90;
@@ -36,7 +40,7 @@ async function main(): Promise<void> {
   await runJob("daily_calendar_capture", async () => {
     const tickers: TickerRow[] = await db.raw(
       `
-      SELECT DISTINCT t.id, t.symbol
+      SELECT DISTINCT t.id, t.symbol, t.sector
       FROM tickers t
       WHERE EXISTS (SELECT 1 FROM shortlist_entries se WHERE se.ticker_id = t.id AND se.removed_at IS NULL)
          OR EXISTS (SELECT 1 FROM positions p WHERE p.ticker_id = t.id AND p.status = 'open')
@@ -52,16 +56,19 @@ async function main(): Promise<void> {
     // resolveTradingViewTicker) and split out any ticker TradingView
     // couldn't match, so one bad symbol doesn't drop the whole batch.
     const tvTickerByTickerId = new Map<string, string>();
-    const unresolved: string[] = [];
+    const unresolvedTickers: UnresolvedTicker[] = [];
     for (const ticker of tickers) {
-      const tvTicker = await resolveTradingViewTicker(ticker.id, ticker.symbol);
-      if (tvTicker) tvTickerByTickerId.set(ticker.id, tvTicker);
-      else unresolved.push(ticker.symbol);
+      const resolution = await resolveTradingViewTickerDetailed(ticker.id, ticker.symbol);
+      if ("reason" in resolution) unresolvedTickers.push({ symbol: ticker.symbol, sector: ticker.sector, reason: resolution.reason });
+      else tvTickerByTickerId.set(ticker.id, resolution.tvTicker);
     }
+    const unresolved = unresolvedTickers.map((ticker) => ticker.symbol);
 
     const tickerIdByTvTicker = new Map(Array.from(tvTickerByTickerId.entries()).map(([id, tv]) => [tv, id]));
     const tvTickers = Array.from(tvTickerByTickerId.values());
 
+    const fetchFailures: CalendarFetchFailure[] = [];
+    const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
     let earningsWritten = 0;
     let dividendsWritten = 0;
     try {
@@ -69,6 +76,7 @@ async function main(): Promise<void> {
       earningsWritten = await upsertEarningsEvents(earningsRows, tickerIdByTvTicker);
     } catch (error) {
       console.error("daily_calendar_capture: earnings fetch failed", error);
+      fetchFailures.push({ source: "earnings", message: describeError(error) });
     }
 
     try {
@@ -76,6 +84,7 @@ async function main(): Promise<void> {
       dividendsWritten = await upsertDividendEvents(dividendRows, tickerIdByTvTicker);
     } catch (error) {
       console.error("daily_calendar_capture: dividends fetch failed", error);
+      fetchFailures.push({ source: "dividends", message: describeError(error) });
     }
 
     let economicWritten = 0;
@@ -103,6 +112,7 @@ async function main(): Promise<void> {
       }
     } catch (error) {
       console.error("daily_calendar_capture: economic calendar fetch failed", error);
+      fetchFailures.push({ source: "economic calendar", message: describeError(error) });
     }
 
     console.log(
@@ -118,14 +128,12 @@ async function main(): Promise<void> {
         earningsWritten,
         dividendsWritten,
         economicWritten,
+        fetchFailures,
       },
+      // Recorded as a failure (runJob alerts) instead of a success with stale rows: the earnings dates gate trades.
+      failureMessage: buildCalendarCaptureFailureMessage({ tickerCount: tickers.length, fetchFailures, unresolvedSymbols: selectAlertWorthyUnresolved(unresolvedTickers) }),
     };
   });
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("run-daily-calendar-capture-job", main, () => db.destroy());

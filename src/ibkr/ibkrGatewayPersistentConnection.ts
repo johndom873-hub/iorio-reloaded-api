@@ -2,6 +2,7 @@ import { IBApi, EventName, type ErrorCode } from "@stoqey/ib";
 import { environment } from "../config/env.js";
 import { openIbkrTunnel, type IbkrTunnel } from "./ibkrGatewayTunnel.js";
 import { ibkrGatewayPortByTradingMode, ibkrMessagesPerSecondBudget } from "./constants.js";
+import { UnplannedDropTracker } from "../lib/gatewayDropTracker.js";
 
 // Every other IBKR call site (connectIbkr.ts) opens a connection per request
 // and closes it when done — fine for one-shot reads, but real-time order
@@ -35,6 +36,7 @@ class PersistentIbkrConnection {
   private nextOrderId: number | null = null;
   private connectedSince: number | null = null;
   private totalReconnects = 0;
+  private unplannedDropTracker = new UnplannedDropTracker();
   private lastSystemStatusCode: number | null = null;
   private lastSystemStatusAt: number | null = null;
   // Sent by Gateway during the handshake; kept across reconnects so the last
@@ -181,6 +183,7 @@ class PersistentIbkrConnection {
     this.tunnel?.close();
     this.tunnel = null;
     this.totalReconnects++;
+    this.unplannedDropTracker.recordDrop(Date.now());
 
     const lastStatus =
       this.lastSystemStatusCode !== null
@@ -213,12 +216,13 @@ class PersistentIbkrConnection {
    * (since 2026-09-13) upserted into worker_health there too for Iorio
    * Pulse's Gateway node — see that file's comment on the upsert interval.
    */
-  getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; disconnectedSinceMs: number | null; totalReconnects: number; lastSystemStatusCode: number | null; clientId: number; managedAccountIds: string[] } {
+  getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; disconnectedSinceMs: number | null; totalReconnects: number; unplannedDropsLast24h: number; lastSystemStatusCode: number | null; clientId: number; managedAccountIds: string[] } {
     return {
       connected: this.ib !== null,
       uptimeMs: this.connectedSince ? Date.now() - this.connectedSince : null,
       disconnectedSinceMs: this.disconnectedSince,
       totalReconnects: this.totalReconnects,
+      unplannedDropsLast24h: this.unplannedDropTracker.countInLast24Hours(Date.now()),
       lastSystemStatusCode: this.lastSystemStatusCode,
       clientId: workerClientId,
       managedAccountIds: this.managedAccountIds,

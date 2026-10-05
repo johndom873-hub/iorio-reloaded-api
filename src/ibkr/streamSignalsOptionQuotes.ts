@@ -11,8 +11,8 @@ export async function streamSignalsOptionQuotes(symbol: string, contracts: Contr
   if (contracts.length === 0 || signal.aborted) return;
 
   const ibkrContracts = contracts.map((contract) => ({ symbol, expiry: formatIsoDateAsExpiry(contract.expiry), strike: contract.strike, right: contract.right === "C" ? OptionType.Call : OptionType.Put }));
-  const toLiveQuotes = (quotes: { expiry: string; strike: number; right: OptionType; bid: number | null; ask: number | null }[]): LiveOptionQuote[] =>
-    quotes.map((quote) => ({ expiry: formatExpiryAsIsoDate(quote.expiry), strike: quote.strike, right: quote.right === OptionType.Call ? "C" : "P", bid: quote.bid, ask: quote.ask }));
+  const toLiveQuotes = (quotes: { expiry: string; strike: number; right: OptionType; bid: number | null; ask: number | null; delta: number | null }[]): LiveOptionQuote[] =>
+    quotes.map((quote) => ({ expiry: formatExpiryAsIsoDate(quote.expiry), strike: quote.strike, right: quote.right === OptionType.Call ? "C" : "P", bid: quote.bid, ask: quote.ask, delta: quote.delta }));
 
   const initial = await streamPooledOptionQuotes(ibkrContracts, (quotes) => onUpdate(toLiveQuotes(quotes)), signal);
   onUpdate(toLiveQuotes(initial));

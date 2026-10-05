@@ -31,9 +31,15 @@ interface SymbolSearchResult {
 // TradingView has no match -- the caller just skips that ticker for
 // calendar capture, same graceful-degradation pattern as the rest of this
 // codebase's IBKR calls.
-export async function resolveTradingViewTicker(tickerId: string, symbol: string): Promise<string | null> {
+export type TradingViewResolution =
+  | { tvTicker: string }
+  | { tvTicker: null; reason: "no_match" }
+  | { tvTicker: null; reason: "lookup_error"; detail: string };
+
+/** Like resolveTradingViewTicker, but says WHY a ticker did not resolve: TradingView has no such stock (normal for an ETF) versus the lookup itself failing (worth an alert). */
+export async function resolveTradingViewTickerDetailed(tickerId: string, symbol: string): Promise<TradingViewResolution> {
   const existing = await db("tickers").where({ id: tickerId }).first("tradingview_ticker");
-  if (existing?.tradingview_ticker) return existing.tradingview_ticker;
+  if (existing?.tradingview_ticker) return { tvTicker: existing.tradingview_ticker };
 
   try {
     const params = new URLSearchParams({ text: symbol, hl: "1", exchange: "", lang: "en", search_type: "stocks", domain: "production" });
@@ -54,16 +60,20 @@ export async function resolveTradingViewTicker(tickerId: string, symbol: string)
     const best =
       exactMatches.find((r) => r.type === "stock" && r.country === "US" && r.is_primary_listing) ??
       exactMatches.find((r) => r.type === "stock" && r.country === "US");
-    if (!best) return null;
+    if (!best) return { tvTicker: null, reason: "no_match" };
 
     const cleanSymbol = best.symbol.replace(/<\/?em>/g, "");
     const tvTicker = `${best.exchange}:${cleanSymbol}`;
     await db("tickers").where({ id: tickerId }).update({ tradingview_ticker: tvTicker });
-    return tvTicker;
+    return { tvTicker };
   } catch (error) {
     console.error(`resolveTradingViewTicker: symbol-search failed for ${symbol}`, error);
-    return null;
+    return { tvTicker: null, reason: "lookup_error", detail: error instanceof Error ? error.message : String(error) };
   }
+}
+
+export async function resolveTradingViewTicker(tickerId: string, symbol: string): Promise<string | null> {
+  return (await resolveTradingViewTickerDetailed(tickerId, symbol)).tvTicker;
 }
 
 const EARNINGS_COLUMNS = [

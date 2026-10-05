@@ -3,13 +3,13 @@ import { isRegularDividendCadence } from "./impliedVolatilitySurface.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
-import { easternDateIso, previousOpenSessionDate } from "./marketSessionStatus.js";
+import { easternDateIso } from "./marketSessionStatus.js";
 import type { SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedByContract, scoreTicker, toScreenRow, type LiveOptionQuote } from "./signalsLiveScoring.js";
 import { loadDayQuotesForTicker } from "./daySignalsStore.js";
 import { loadUpcomingMajorMacroEvents } from "./macroEventCalendar.js";
 import type { RoadmapCounts } from "./signalsRoadmap.js";
-import { loadSignalSettings } from "./signalSettingsStore.js";
+import { loadTradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, TickerSignalsDetail, TickerSignalsInputs } from "./signalsTypes.js";
 import { loadVolatilityForecast } from "./volatilityForecastStore.js";
 import type { OpenShortLeg } from "./rollSignalCandidates.js";
@@ -20,7 +20,7 @@ import type { DailyOhlcvBar } from "./realizedVolatility.js";
 // inputs once (loadTickerSignalsInputs); scoring itself is the pure scoreTicker in
 // signalsLiveScoring.ts, so the REST routes and the live producers score the exact
 // same way. Shares out for a covered call, and cash out for a cash-secured put, use
-// the same live account/position queries the existing Trade Alerts flow uses.
+// the same live account/position queries the order-limit checks use.
 
 export async function loadAccountContext(): Promise<AccountContext> {
   const [account, cashLockedInCsps] = await Promise.all([fetchAccountSummary(), computeCashLockedInCsps()]);
@@ -101,10 +101,33 @@ export async function loadLatestSnapshot(tickerId: string): Promise<SnapshotHead
     .where({ ticker_id: tickerId })
     .whereIn("status", ["complete", "partial"])
     .orderBy("trading_date", "desc")
-    .select("id as snapshotId", db.raw('trading_date::text as "tradingDateIso"'), "captured_at as capturedAt", "underlying_price as underlyingPrice", "risk_free_rate_percent as riskFreeRatePercent")
+    .select("id as snapshotId", db.raw('trading_date::text as "tradingDateIso"'), "captured_at as capturedAt", "underlying_price as underlyingPrice", "risk_free_rate_percent as riskFreeRatePercent", "fit_completed_at as fitCompletedAt", "fit_issue as fitIssue")
     .first();
   if (!row) return null;
-  return { snapshotId: row.snapshotId, tradingDateIso: row.tradingDateIso, capturedAt: row.capturedAt, underlyingPrice: row.underlyingPrice === null ? null : Number(row.underlyingPrice), riskFreeRatePercent: row.riskFreeRatePercent === null ? null : Number(row.riskFreeRatePercent) };
+  return {
+    snapshotId: row.snapshotId,
+    tradingDateIso: row.tradingDateIso,
+    capturedAt: row.capturedAt,
+    underlyingPrice: row.underlyingPrice === null ? null : Number(row.underlyingPrice),
+    riskFreeRatePercent: row.riskFreeRatePercent === null ? null : Number(row.riskFreeRatePercent),
+    fitCompletedAt: row.fitCompletedAt === null ? null : new Date(row.fitCompletedAt).toISOString(),
+    fitIssue: row.fitIssue,
+  };
+}
+
+/**
+ * One cheap read for the live streams' change check: per ticker, a token that changes whenever its latest usable snapshot
+ * changes or its surface fit finishes. A ticker with no snapshot has no entry.
+ */
+export async function loadSnapshotVersions(tickerIds: string[]): Promise<Map<string, string>> {
+  if (tickerIds.length === 0) return new Map();
+  const rows: { tickerId: string; snapshotId: string; fitCompletedAt: Date | null }[] = await db("option_chain_snapshots")
+    .whereIn("ticker_id", tickerIds)
+    .whereIn("status", ["complete", "partial"])
+    .distinctOn("ticker_id")
+    .orderBy([{ column: "ticker_id" }, { column: "trading_date", order: "desc" }])
+    .select("ticker_id as tickerId", "id as snapshotId", "fit_completed_at as fitCompletedAt");
+  return new Map(rows.map((row) => [row.tickerId, `${row.snapshotId}|${row.fitCompletedAt === null ? "pending" : new Date(row.fitCompletedAt).toISOString()}`]));
 }
 
 export async function loadSlices(snapshotId: string): Promise<SignalSurfaceSlice[]> {
@@ -115,6 +138,7 @@ export async function loadSlices(snapshotId: string): Promise<SignalSurfaceSlice
       "status",
       "years_to_expiry as yearsToExpiry",
       "forward_price as forwardPrice",
+      "underlying_price as fitUnderlyingPrice",
       "k_min as kMin",
       "k_max as kMax",
       "param_a as a",
@@ -134,6 +158,7 @@ export async function loadSlices(snapshotId: string): Promise<SignalSurfaceSlice
     status: row.status,
     yearsToExpiry: Number(row.yearsToExpiry),
     forwardPrice: Number(row.forwardPrice),
+    fitUnderlyingPrice: row.fitUnderlyingPrice === null ? null : Number(row.fitUnderlyingPrice),
     kMin: row.kMin === null ? null : Number(row.kMin),
     kMax: row.kMax === null ? null : Number(row.kMax),
     parameters: row.a === null ? null : { a: Number(row.a), b: Number(row.b), rho: Number(row.rho), m: Number(row.m), sigma: Number(row.sigma) },
@@ -224,7 +249,7 @@ export async function loadOpenShortLegs(tickerId: string): Promise<OpenShortLeg[
 /** Everything scoring needs for one ticker, from the DB only (no IBKR). Loaded once per REST call or stream start. */
 export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {
   const todayEastern = easternDateIso(now);
-  const [bars, nextEarningsDateIso, earningsDatesIso, earningsCalendarResolved, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs, oldestAcceptableSnapshotDateIso] = await Promise.all([
+  const [bars, nextEarningsDateIso, earningsDatesIso, earningsCalendarResolved, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs] = await Promise.all([
     loadBarsForTilt(ticker.tickerId, todayEastern),
     loadNextEarningsDate(ticker.tickerId, todayEastern),
     loadEarningsDatesForForecastWindow(ticker.tickerId),
@@ -236,7 +261,6 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
     loadDividendCadenceUnknown(ticker.tickerId, todayEastern),
     loadUpcomingMajorMacroEvents(),
     loadOpenShortLegs(ticker.tickerId),
-    previousOpenSessionDate(todayEastern),
   ]);
   const momentum = computeMomentum(bars.map((bar) => bar.close));
   const elevatedVolatility = computeElevatedVolatilityFlag(bars);
@@ -245,19 +269,24 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
     ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
     : [[], [], { forecast: null, suspectedSplitDateIso: null }, []];
 
-  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern, oldestAcceptableSnapshotDateIso };
+  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
 }
 
-/** The Day Signals loop's quotes for one ticker, only when they belong to the snapshot date being scored (contracts that errored carry no quote). */
-export async function loadDayQuotesAsLiveQuotes(tickerId: string, snapshotTradingDateIso: string): Promise<LiveOptionQuote[]> {
+/**
+ * The Day Signals loop's quotes for one ticker, only when they belong to the snapshot date being scored and were received
+ * during today's session (US/Eastern): before the new day's snapshot lands, the loop's rows from the previous session's close
+ * still match the (previous-day) snapshot date, and would otherwise price an order from yesterday. Contracts that errored carry no quote.
+ */
+export async function loadDayQuotesAsLiveQuotes(tickerId: string, snapshotTradingDateIso: string, now: Date = new Date()): Promise<LiveOptionQuote[]> {
+  const todayEastern = easternDateIso(now);
   const rows = await loadDayQuotesForTicker(tickerId, snapshotTradingDateIso);
-  return rows.filter((row) => row.errorCode === null).map((row) => ({ expiry: row.expiry, strike: row.strike, right: row.right, bid: row.bid, ask: row.ask, quotedAt: row.quotedAt }));
+  return rows.filter((row) => row.errorCode === null && easternDateIso(new Date(row.quotedAt)) === todayEastern).map((row) => ({ expiry: row.expiry, strike: row.strike, right: row.right, bid: row.bid, ask: row.ask, quotedAt: row.quotedAt }));
 }
 
 /** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). Includes the raw
  * fitted-surface slices (unscaled by live spot) for the volatility-surface modal. */
 export async function loadTickerSignals(ticker: SignalsTickerRow, accountContext: AccountContext, options: { withUncompensatedShare?: boolean } = {}): Promise<TickerSignalsDetail> {
-  const [inputs, settings] = await Promise.all([loadTickerSignalsInputs(ticker), loadSignalSettings()]);
+  const [inputs, settings] = await Promise.all([loadTickerSignalsInputs(ticker), loadTradingSettings()]);
   const scored = scoreTicker(inputs, accountContext, settings);
   if (!options.withUncompensatedShare || !inputs.header?.underlyingPrice || scored.candidates.length === 0) return { ...scored, slices: inputs.slices };
   const uncompensatedByContract = computeUncompensatedByContract(scored.candidates, inputs.header.underlyingPrice, inputs.slices);
@@ -279,7 +308,7 @@ export async function loadRoadmapCounts(now: Date = new Date()): Promise<Roadmap
       .orderBy("past_earnings")
       .first<{ past_earnings: string } | undefined>(),
     // Open orders only: a roll's fill is a different friction sample (two legs, one combo), so it is counted apart (decided 2026-09-24).
-    db("order_requests").whereNotNull("signal_snapshot").where("request_type", "like", "open_%").whereIn("status", ["filled", "partially_filled"]).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
+    db("order_requests").whereNotNull("signal_snapshot").where("request_type", "like", "open_%").whereIn("status", ["filled", "partially_filled", "cancelled_partially_filled"]).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
   ]);
   return {
     snapshotNights,
@@ -291,7 +320,7 @@ export async function loadRoadmapCounts(now: Date = new Date()): Promise<Roadmap
 
 /** The whole Signals screen at snapshot prices: one account-context fetch shared across every ticker, no candidate lists. */
 export async function loadSignalsScreen(): Promise<SignalsScreenRow[]> {
-  const [tickers, accountContext, settings] = await Promise.all([loadSignalsUniverseTickers(), loadAccountContext(), loadSignalSettings()]);
+  const [tickers, accountContext, settings] = await Promise.all([loadSignalsUniverseTickers(), loadAccountContext(), loadTradingSettings()]);
   const inputs = await Promise.all(tickers.map((ticker) => loadTickerSignalsInputs(ticker)));
   return inputs.map((tickerInputs) => toScreenRow(scoreTicker(tickerInputs, accountContext, settings)));
 }

@@ -8,7 +8,6 @@ import { runJob } from "./runJob.js";
 const DAILY_JOB_NAMES = [
   "daily_market_data_capture",
   "daily_pnl_snapshot",
-  "trade_alert_generation",
   "daily_calendar_capture",
   "daily_screener_scan",
   // Runs 11:00 PM UTC every day (weekends too), so it has always run by this check.
@@ -17,6 +16,8 @@ const DAILY_JOB_NAMES = [
   "option_chain_capture",
   "option_surface_fit",
   "day_signals_seed",
+  // Scheduled for 7:00 PM UTC every day (weekends too).
+  "market_calendar_sync",
 ] as const;
 const IBKR_HEALTH_CHECK_JOB_NAME = "ibkr_health_check";
 const IBKR_HEALTH_CHECK_WINDOW_MS = 30 * 60 * 1000;

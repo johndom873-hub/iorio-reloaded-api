@@ -1,7 +1,9 @@
-import { formatShortDate } from "./formatTradeAlertMessage.js";
+import type { AssignmentRiskAlertState } from "./daySignalsStore.js";
+import { formatShortDate } from "./formatShortDate.js";
 import { publishNotification } from "./notificationChannel.js";
+import { notifyTelegram } from "./notifyTelegram.js";
 import { goodCutVolatilityPoints, strongCutVolatilityPoints, type SignalCandidate, type SignalGrade } from "./signalCandidates.js";
-import type { RollSignalCandidate } from "./rollSignalCandidates.js";
+import { assignmentRiskDeltaThreshold, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 
 // Upward grade transitions only, from any tier including Avoid, one message per
 // contract per transition. Two guards against alert flooding, both approved
@@ -116,6 +118,7 @@ export async function notifyRollSignalUpgrade(upgrade: RollSignalUpgrade): Promi
       legId: roll.legId,
       heldStrike: upgrade.held.strike,
       heldExpiry: upgrade.held.expiry,
+      heldDte: upgrade.held.dte,
       strike: roll.replacement.strike,
       expiry: roll.replacement.expiry,
       dte: roll.replacement.dte,
@@ -127,5 +130,69 @@ export async function notifyRollSignalUpgrade(upgrade: RollSignalUpgrade): Promi
     });
   } catch (error) {
     console.error(`day signals: could not notify the ${upgrade.symbol} roll upgrade: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+// Assignment-risk alert (approved 2026-09-29, replacing the old once-a-day
+// check): after the loop re-scores a ticker, every held short leg whose
+// |delta| has reached assignmentRiskAlertAbsoluteDelta alerts once, then stays
+// quiet until |delta| falls below assignmentRiskRearmAbsoluteDelta (re-armed),
+// and never alerts more than once per Eastern trading day. State lives on
+// position_legs (daySignalsStore.ts's AssignmentRiskAlertState).
+
+/** |delta| at which a held short leg is at risk of assignment — the same threshold as the Roll Signals assignment_risk flag. */
+export const assignmentRiskAlertAbsoluteDelta = assignmentRiskDeltaThreshold;
+/** |delta| a flagged leg must fall below before it can alert again. */
+export const assignmentRiskRearmAbsoluteDelta = 0.45;
+
+export type AssignmentRiskAlertDecision = "alert" | "rearm" | "none";
+
+/** Pure: what to do with one held leg's freshly scored delta, given its stored alert state and today's Eastern trading date. */
+export function decideAssignmentRiskAlert(delta: number, state: AssignmentRiskAlertState, tradingDateIso: string): AssignmentRiskAlertDecision {
+  const absoluteDelta = Math.abs(delta);
+  const flagged = state.notifiedAt !== null;
+  if (flagged) return absoluteDelta < assignmentRiskRearmAbsoluteDelta ? "rearm" : "none";
+  if (absoluteDelta < assignmentRiskAlertAbsoluteDelta) return "none";
+  return state.lastAlertTradingDateIso === tradingDateIso ? "none" : "alert";
+}
+
+export interface AssignmentRiskAlert {
+  symbol: string;
+  leg: HeldLegScore & { delta: number };
+  spotPrice: number | null;
+}
+
+export function formatAssignmentRiskMessage(alert: AssignmentRiskAlert): string {
+  const { leg } = alert;
+  const direction = leg.right === "C" ? "above" : "below";
+  const dte = leg.dte === null ? "" : ` (${leg.dte} DTE)`;
+  const spot = alert.spotPrice === null ? "" : ` · spot $${alert.spotPrice.toFixed(2)}`;
+  return [
+    `⚠️ ${alert.symbol} — Assignment risk (spot ${direction} strike)`,
+    `$${leg.strike.toFixed(2)}${leg.right} exp ${formatShortDate(leg.expiry)}${dte} · Δ${leg.delta.toFixed(2)}${spot}`,
+    `Open: Signals → ${alert.symbol} → Your positions`,
+  ].join("\n");
+}
+
+/** Telegram plus the persisted app notification (Latest Events + toast). Never throws: a notification failure must not stop the refresh loop. */
+export async function notifyAssignmentRisk(alert: AssignmentRiskAlert): Promise<void> {
+  const { leg } = alert;
+  await notifyTelegram(formatAssignmentRiskMessage(alert));
+  try {
+    await publishNotification({
+      type: "assignment_risk",
+      symbol: alert.symbol,
+      strategyKey: leg.strategyKey,
+      positionId: leg.positionId,
+      legId: leg.legId,
+      right: leg.right,
+      strike: leg.strike,
+      expiry: leg.expiry,
+      dte: leg.dte,
+      delta: leg.delta,
+      spotPrice: alert.spotPrice,
+    });
+  } catch (error) {
+    console.error(`day signals: could not publish the ${alert.symbol} assignment-risk notification: ${error instanceof Error ? error.message : error}`);
   }
 }

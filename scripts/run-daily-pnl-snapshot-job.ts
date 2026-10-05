@@ -49,6 +49,8 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-daily-pnl-snapshot-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { OptionType } from "@stoqey/ib";
 import { db } from "../src/db/connection.js";
 import { fetchAccountLedgerPnl } from "../src/ibkr/fetchAccountLedgerPnl.js";
@@ -56,10 +58,13 @@ import { fetchAccountSummary } from "../src/ibkr/fetchAccountSummary.js";
 import { fetchFlexCashTransactions } from "../src/ibkr/fetchFlexCashTransactions.js";
 import { fetchLiveGreeks, type GreeksContract } from "../src/ibkr/fetchLiveGreeks.js";
 import { fetchDailyClosingPrices } from "../src/ibkr/fetchDailyClosingPrices.js";
+import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
 import type { PriceContract } from "../src/ibkr/fetchLivePrices.js";
 import { previousOpenSessionDate, easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
+import { assignFlowsToSnapshots } from "../src/lib/flexCashFlowAssignment.js";
+import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthlessPrice.js";
 
 interface OpenPositionLegRow {
   positionId: string;
@@ -77,6 +82,7 @@ interface OpenPositionLegRow {
 
 interface RecentAccountSnapshotRow {
   snapshotDate: string;
+  capturedAt: Date;
   netLiquidationValue: string | null;
   netCashFlow: string | null;
 }
@@ -89,12 +95,13 @@ interface RecentAccountSnapshotRow {
  * that's needed to compute today's own delta too.
  */
 async function reconcileCashFlows(snapshotDate: string): Promise<void> {
-  const cashFlowByDate = await fetchFlexCashTransactions();
+  const flexCashFlows = await fetchFlexCashTransactions();
 
   const recentRows: RecentAccountSnapshotRow[] = await db.raw(
     `
     SELECT
       to_char(snapshot_date, 'YYYY-MM-DD') AS "snapshotDate",
+      captured_at AS "capturedAt",
       net_liquidation_value AS "netLiquidationValue",
       net_cash_flow AS "netCashFlow"
     FROM account_pnl_snapshots
@@ -104,12 +111,22 @@ async function reconcileCashFlows(snapshotDate: string): Promise<void> {
     [snapshotDate],
   ).then((result) => result.rows);
 
+  // A flow belongs to the first snapshot captured after it happened, not to its calendar date (flexCashFlowAssignment.ts).
+  const cashFlowByDate = assignFlowsToSnapshots(
+    flexCashFlows,
+    recentRows.map((row) => ({ snapshotDate: row.snapshotDate, capturedAt: new Date(row.capturedAt) })),
+  );
+
   for (let i = 1; i < recentRows.length; i++) {
     const row = recentRows[i];
     const previousRow = recentRows[i - 1];
     if (!row || !previousRow) continue;
-    const newCashFlow = cashFlowByDate.get(row.snapshotDate) ?? 0;
     const storedCashFlow = row.netCashFlow === null ? null : Number(row.netCashFlow);
+    const flexCashFlow = cashFlowByDate.get(row.snapshotDate);
+    // A date the Flex report has no entry for is not evidence that the flow was zero (the report's
+    // window may be shorter than these 10 days): never zero a deposit or withdrawal already stored.
+    if (flexCashFlow === undefined && storedCashFlow !== null && storedCashFlow !== 0) continue;
+    const newCashFlow = flexCashFlow ?? 0;
     if (storedCashFlow === newCashFlow) continue;
     if (row.netLiquidationValue === null || previousRow.netLiquidationValue === null) continue;
 
@@ -128,6 +145,9 @@ async function main(): Promise<void> {
   }
   await runJob("daily_pnl_snapshot", async () => {
     const snapshotDate = new Date().toISOString().slice(0, 10);
+    // Everything that went wrong tonight, returned as the run's failureMessage so runJob alerts once with all of it.
+    const problems: string[] = [];
+    const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
     const legRows: OpenPositionLegRow[] = await db.raw(
       `
@@ -212,10 +232,17 @@ async function main(): Promise<void> {
             realized_pnl: ledgerPnl.realizedPnl,
             unrealized_pnl: ledgerPnl.unrealizedPnl,
             net_liquidation_value: accountSummary.netLiquidationValue,
+            captured_at: db.fn.now(),
           })
           .onConflict(["snapshot_date"])
           .merge();
         accountSnapshotWritten = true;
+        const missingAccountValues = [
+          accountSummary.netLiquidationValue == null ? "net liquidation" : null,
+          ledgerPnl.realizedPnl == null ? "realized P&L" : null,
+          ledgerPnl.unrealizedPnl == null ? "unrealized P&L" : null,
+        ].filter((name): name is string => name !== null);
+        if (missingAccountValues.length > 0) problems.push(`account snapshot for ${snapshotDate} was saved without ${missingAccountValues.join(", ")}`);
         console.log(
           `Account PnL: realized=${ledgerPnl.realizedPnl} unrealized=${ledgerPnl.unrealizedPnl} netLiq=${accountSummary.netLiquidationValue}`,
         );
@@ -234,13 +261,13 @@ async function main(): Promise<void> {
       try {
         await reconcileCashFlows(snapshotDate);
       } catch (error) {
-        console.error(`Cash-flow reconciliation failed: ${error instanceof Error ? error.message : error}`);
+        console.error(`Cash-flow reconciliation failed: ${describeError(error)}`);
+        problems.push(`Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error).split("\n")[0]}`);
       }
+      if (!accountSnapshotWritten) problems.push(`account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`);
       return {
         details: { accountSnapshot: accountSnapshotWritten, accountSnapshotError, openPositionCount: 0 },
-        notify: accountSnapshotWritten
-          ? undefined
-          : `⚠️ daily_pnl_snapshot: account-level PnL failed for ${snapshotDate} (${accountSnapshotError}). No open positions, so nothing else to snapshot today.`,
+        failureMessage: problems.length > 0 ? problems.join("; ") : undefined,
       };
     }
 
@@ -253,14 +280,22 @@ async function main(): Promise<void> {
 
     let snapshotted = 0;
     let skipped = 0;
+    const skippedSymbols: string[] = [];
     if (pricesByLegIdResult.status === "rejected") {
       const reason = pricesByLegIdResult.reason;
       console.error(
         `Live price fetch failed, skipping all position-level snapshots for ${snapshotDate}: ${reason instanceof Error ? reason.message : reason}`,
       );
       skipped = legsByPositionId.size;
+      problems.push(`position price fetch failed, no position snapshots for ${snapshotDate} - ${describeError(reason).split("\n")[0]}`);
     } else {
-      const pricesByLegId = pricesByLegIdResult.value;
+      const expiredOptionCandidateLegs = legRows.flatMap((leg) =>
+        leg.legType === "option" && leg.optionType !== null && leg.strikePrice !== null && leg.expiryDate !== null
+          ? [{ legId: leg.legId, symbol: leg.symbol, optionType: leg.optionType, strike: Number(leg.strikePrice), expiryYyyymmdd: leg.expiryDate }]
+          : [],
+      );
+      const { pricesByLegId, filledLegIds: worthlessExpiredLegIds } = await fillWorthlessExpiredOptionPrices(expiredOptionCandidateLegs, pricesByLegIdResult.value);
+      if (worthlessExpiredLegIds.length > 0) console.log(`Priced ${worthlessExpiredLegIds.length} option leg(s) at 0: expired out of the money, so IBKR reports no mark.`);
       for (const [positionId, legs] of legsByPositionId) {
         let unrealizedPnl = 0;
         let premiumPnl = 0;
@@ -288,6 +323,7 @@ async function main(): Promise<void> {
 
         if (!hasAllPrices) {
           console.warn(`Skipping position ${positionId} — missing live price for at least one leg.`);
+          skippedSymbols.push(legs[0]?.symbol ?? positionId);
           skipped++;
           continue;
         }
@@ -309,6 +345,7 @@ async function main(): Promise<void> {
     }
 
     console.log(`Snapshotted ${snapshotted}/${legsByPositionId.size} open position(s) for ${snapshotDate} (${skipped} skipped).`);
+    if (skippedSymbols.length > 0) problems.push(`${skippedSymbols.length} of ${legsByPositionId.size} positions skipped for a missing price: ${skippedSymbols.join(", ")}`);
 
     // Runs after both captures above are already written — its own
     // runtime (Flex API, up to 120s) must no longer sit between the
@@ -320,7 +357,8 @@ async function main(): Promise<void> {
     try {
       await reconcileCashFlows(snapshotDate);
     } catch (error) {
-      console.error(`Cash-flow reconciliation failed: ${error instanceof Error ? error.message : error}`);
+      console.error(`Cash-flow reconciliation failed: ${describeError(error)}`);
+      problems.push(`Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error).split("\n")[0]}`);
     }
 
     // Greeks, same nightly cadence as the P&L snapshot above — piggybacks on
@@ -329,6 +367,8 @@ async function main(): Promise<void> {
     // snapshot already written above, so it's isolated in its own try/catch.
     const optionLegRows = legRows.filter((leg) => leg.legType === "option" && leg.optionType && leg.strikePrice && leg.expiryDate);
     let greeksSnapshotted = 0;
+    let greeksError: string | null = null;
+    const legsWithGreeks = new Set<string>();
     if (optionLegRows.length > 0) {
       try {
         const greeksContracts: GreeksContract[] = optionLegRows.map((leg) => ({
@@ -338,7 +378,7 @@ async function main(): Promise<void> {
           strike: Number(leg.strikePrice),
           right: leg.optionType === "call" ? OptionType.Call : OptionType.Put,
         }));
-        const greeksByLegId = await fetchLiveGreeks(greeksContracts);
+        const greeksByLegId = await fetchLiveGreeks(greeksContracts, "lastClose");
         for (const leg of optionLegRows) {
           const greeks = greeksByLegId[leg.legId];
           if (!greeks || (greeks.delta === null && greeks.gamma === null && greeks.vega === null && greeks.theta === null)) continue;
@@ -354,12 +394,22 @@ async function main(): Promise<void> {
             .onConflict(["position_leg_id", "snapshot_date"])
             .merge();
           greeksSnapshotted++;
+          legsWithGreeks.add(leg.legId);
         }
         console.log(`Snapshotted greeks for ${greeksSnapshotted}/${optionLegRows.length} open option leg(s) for ${snapshotDate}.`);
       } catch (error) {
-        console.error(`Greeks snapshot failed for ${snapshotDate}: ${error instanceof Error ? error.message : error}`);
+        greeksError = error instanceof Error ? error.message : String(error);
+        console.error(`Greeks snapshot failed for ${snapshotDate}: ${greeksError}`);
       }
     }
+    // A night with no greeks saved leaves the position cards' Delta/Gamma blank after hours: the run is recorded as a failure (P&L rows stay written).
+    const legsWithoutGreeks = optionLegRows.filter((leg) => !legsWithGreeks.has(leg.legId));
+    const greeksFailure =
+      legsWithoutGreeks.length === 0
+        ? null
+        : `greeks saved for ${greeksSnapshotted}/${optionLegRows.length} open option leg(s) for ${snapshotDate} (missing: ${legsWithoutGreeks.map((leg) => `${leg.symbol} ${leg.optionType} ${Number(leg.strikePrice)} ${leg.expiryDate}`).join(", ")})${greeksError ? `. Error: ${greeksError}` : ""}`;
+    if (!accountSnapshotWritten) problems.push(`account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`);
+    if (greeksFailure) problems.push(greeksFailure);
     return {
       details: {
         accountSnapshot: accountSnapshotWritten,
@@ -367,17 +417,18 @@ async function main(): Promise<void> {
         openPositionCount: legsByPositionId.size,
         snapshotted,
         skipped,
+        greeksSnapshotted,
+        greeksExpected: optionLegRows.length,
+        greeksError,
       },
-      notify: accountSnapshotWritten
-        ? undefined
-        : `⚠️ daily_pnl_snapshot: account-level PnL failed for ${snapshotDate} (${accountSnapshotError}). Position-level snapshots (${snapshotted}/${legsByPositionId.size}) were still written.`,
+      failureMessage: problems.length > 0 ? problems.join("; ") : undefined,
     };
   });
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+// fetchAccountSummary reads through the lazy shared IBKR connection, which otherwise keeps this
+// one-off process alive until Heroku cycles it after 24 hours (see shutdown()).
+runScript("run-daily-pnl-snapshot-job", main, async () => {
+  await sharedReadConnection.shutdown();
+  await db.destroy();
+});

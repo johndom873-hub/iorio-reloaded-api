@@ -1,9 +1,13 @@
+import { EventEmitter } from "node:events";
+import { EventName } from "@stoqey/ib";
 import { describe, expect, it, vi } from "vitest";
 import type { SnapshotCoverage } from "../lib/optionChainCaptureCoverage.js";
 import type { StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import {
+  buildCaptureFailureMessage,
   prepareTicker,
   runOptionChainCapture,
+  type OptionChainCaptureResult,
   type OptionChainCaptureDependencies,
   type OptionChainCaptureEvent,
   type PrepareTickerDependencies,
@@ -11,8 +15,24 @@ import {
   type UniverseTicker,
 } from "./runOptionChainCapture.js";
 
-const fakeIb = {} as never;
+// An EventEmitter: the run listens for the connection dropping.
+const fakeIb = new EventEmitter() as never;
 const today = "2026-09-21";
+const emptySettleStats = () => ({
+  intervalMs: 0,
+  minInFlight: null,
+  maxInFlight: null,
+  lineBusyMs: 0,
+  timedOutLineMs: 0,
+  settled: 0,
+  timedOut: 0,
+  errored: 0,
+  holdMsP50: null,
+  holdMsP90: null,
+  holdMsMax: null,
+  lastField: { price: 0, delta: 0, openInterest: 0 },
+  missingOnTimeout: { price: 0, delta: 0, openInterest: 0 },
+});
 const ticker = (symbol: string, contractId: number | null = 1): UniverseTicker => ({ tickerId: `id-${symbol}`, symbol, contractId });
 
 // --- prepareTicker ---------------------------------------------------------
@@ -56,6 +76,19 @@ describe("prepareTicker", () => {
     );
     expect([...new Set(prepared.contracts.map((contract) => contract.expiry))]).toEqual(["20260921", "20261220"]);
     expect(prepared.contracts.every((contract) => typeof contract.expiry === "string" && contract.expiry.length === 8)).toBe(true);
+  });
+
+  it("stores both rights at every strike within 3% of spot (the put-call parity forward needs several pairs) and only the OTM side further out", async () => {
+    const prepared = await prepareTicker(fakeIb, ticker("AAA"), today, prepareDependencies({ refreshStoredOptionChain: async () => storedChain(["20261016"]) })); // spot 100, strikes 60..140
+    const keys = new Set(prepared.contracts.map((contract) => `${contract.strike}${contract.right}`));
+    for (const strike of [98, 99, 100, 101, 102]) {
+      expect(keys.has(`${strike}C`)).toBe(true);
+      expect(keys.has(`${strike}P`)).toBe(true);
+    }
+    expect(keys.has("95C")).toBe(false);
+    expect(keys.has("95P")).toBe(true);
+    expect(keys.has("105P")).toBe(false);
+    expect(keys.has("105C")).toBe(true);
   });
 
   it("always captures every open short leg's exact contract, ITM or outside the window, once, and never a past expiry (Roll Signals)", async () => {
@@ -158,7 +191,7 @@ function runDependencies(overrides: Partial<OptionChainCaptureDependencies> = {}
     connect: async () => ({ ib: fakeIb, disconnect }),
     fetchSpotPrices: async (symbols) => Object.fromEntries(symbols.map((symbol) => [symbol, 100])),
     prepareTicker: async (_ib, universeTicker) => preparedFor(universeTicker),
-    openQuoteWindow: () => ({ capture: async () => [], close: vi.fn(), inFlightCount: () => 0 }),
+    openQuoteWindow: () => ({ capture: async () => [], close: vi.fn(), inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
     saveSnapshot: async () => coverage(10, 10),
     saveFailedSnapshot,
     lineReservation,
@@ -197,6 +230,21 @@ describe("runOptionChainCapture", () => {
     expect(failing.lineReservation.release).toHaveBeenCalledTimes(1);
   });
 
+  it("captures only the requested symbols, and neither reserves lines nor waits for the pool when the caller already holds them (retry rounds)", async () => {
+    const { dependencies, lineReservation } = runDependencies({ loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")] });
+    const waitForPoolShedding = vi.fn(async () => {});
+    const fetchSpotPrices = vi.fn(async (symbols: string[]) => Object.fromEntries(symbols.map((symbol) => [symbol, 100])));
+    const events: OptionChainCaptureEvent[] = [];
+    const result = await runOptionChainCapture((event) => events.push(event), { ...dependencies, waitForPoolShedding, fetchSpotPrices }, { symbols: ["BBB", "CCC"], linesAlreadyHeld: true });
+    expect(result.tickersAttempted).toBe(2);
+    expect(events.filter((event) => event.type === "tickerStart").map((event) => (event as { symbol: string }).symbol)).toEqual(["BBB", "CCC"]);
+    // Fresh spots for just the retried tickers, so a retry is never priced off the first pass's stale spot.
+    expect(fetchSpotPrices).toHaveBeenCalledWith(["BBB", "CCC"], expect.any(Function));
+    expect(lineReservation.reserve).not.toHaveBeenCalled();
+    expect(lineReservation.release).not.toHaveBeenCalled();
+    expect(waitForPoolShedding).not.toHaveBeenCalled();
+  });
+
   it("refuses to run when the priority reservation is rejected", async () => {
     const { dependencies, lineReservation } = runDependencies();
     lineReservation.reserve.mockResolvedValue({ ok: false, availableLines: 10, priorityLinesHeld: 80 });
@@ -207,9 +255,32 @@ describe("runOptionChainCapture", () => {
     const { dependencies, disconnect } = runDependencies();
     const events: OptionChainCaptureEvent[] = [];
     const result = await runOptionChainCapture((event) => events.push(event), dependencies);
-    expect(result).toEqual({ tickersAttempted: 2, tickersComplete: 2, tickersPartial: 0, tickersFailed: 0, recapturedSymbols: [] });
+    expect(result).toMatchObject({ tickersAttempted: 2, tickersComplete: 2, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: false, fallbackSpotSymbols: [] });
     expect(events.filter((event) => event.type === "tickerStart").map((event) => (event as { symbol: string }).symbol)).toEqual(["AAA", "BBB"]);
     expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops when the IBKR connection drops mid-run instead of subscribing the rest on a dead socket", async () => {
+    const ib = new EventEmitter();
+    const close = vi.fn();
+    const saveFailedSnapshot = vi.fn(async () => {});
+    const prepareTicker = vi.fn(async (_ib: unknown, universeTicker: UniverseTicker) => {
+      // The connection drops while the second ticker is being prepared (a Gateway restart).
+      if (universeTicker.symbol === "BBB") ib.emit(EventName.disconnected);
+      return preparedFor(universeTicker);
+    });
+    const { dependencies, disconnect, lineReservation } = runDependencies({
+      loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
+      connect: async () => ({ ib: ib as never, disconnect }),
+      prepareTicker: prepareTicker as never,
+      openQuoteWindow: () => ({ capture: async () => [], close, inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+    });
+    await expect(runOptionChainCapture(undefined, { ...dependencies, saveFailedSnapshot })).rejects.toThrow("IBKR connection lost mid-run; not captured: CCC");
+    expect(prepareTicker).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalled();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(lineReservation.release).toHaveBeenCalledWith("optionChainCapture");
+    expect(ib.listenerCount(EventName.disconnected)).toBe(0);
   });
 
   it("passes today's Eastern date and the risk-free rate as a percent to the capture", async () => {
@@ -220,6 +291,64 @@ describe("runOptionChainCapture", () => {
     const noRate = vi.fn(async () => coverage(10, 10));
     await runOptionChainCapture(undefined, runDependencies({ saveSnapshot: noRate, getRiskFreeRate: async () => null, loadUniverse: async () => [ticker("AAA")] }).dependencies);
     expect(noRate).toHaveBeenCalledWith(expect.anything(), [], "2026-09-21", null, expect.any(Number));
+  });
+
+  it("collects the tickers whose spot came from a stored fallback", async () => {
+    const fetchSpotPrices = vi.fn(async (symbols: string[], onFallbackPriceUsed?: (symbols: string[]) => void) => {
+      onFallbackPriceUsed?.(["BBB"]);
+      return Object.fromEntries(symbols.map((symbol) => [symbol, 100]));
+    });
+    const result = await runOptionChainCapture(undefined, runDependencies({ fetchSpotPrices }).dependencies);
+    expect(result.fallbackSpotSymbols).toEqual(["BBB"]);
+  });
+
+  it("lists weak snapshots (thin quotes, delayed data) and keeps healthy real-time ones out", async () => {
+    const realTimeQuote = { sawRealTimeTicks: true, sawDelayedTicks: false } as never;
+    const delayedQuote = { sawRealTimeTicks: false, sawDelayedTicks: true } as never;
+    const coverages: Record<string, SnapshotCoverage> = { AAA: coverage(100, 100), BBB: { ...coverage(100, 100), contractsWithTwoSidedQuote: 60 }, CCC: coverage(100, 100) };
+    const quotesBySymbol: Record<string, never[]> = { AAA: [realTimeQuote], BBB: [realTimeQuote], CCC: [delayedQuote] };
+    const { dependencies } = runDependencies({
+      loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
+      openQuoteWindow: () => ({ capture: async (symbol: string) => quotesBySymbol[symbol]!, close: vi.fn(), inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+      saveSnapshot: async (prepared) => coverages[prepared.ticker.symbol]!,
+    });
+    const result = await runOptionChainCapture(undefined, dependencies);
+    expect(result.qualityProblems).toEqual(["BBB: two-sided quotes 60% (min 75%)", "CCC: market data type delayed"]);
+  });
+
+  it("flags the run when no risk-free rate was available", async () => {
+    const withRate = await runOptionChainCapture(undefined, runDependencies({ loadUniverse: async () => [ticker("AAA")] }).dependencies);
+    expect(withRate.riskFreeRateUnavailable).toBe(false);
+    const withoutRate = await runOptionChainCapture(undefined, runDependencies({ getRiskFreeRate: async () => null, loadUniverse: async () => [ticker("AAA")] }).dependencies);
+    expect(withoutRate.riskFreeRateUnavailable).toBe(true);
+  });
+
+  describe("buildCaptureFailureMessage", () => {
+    const cleanResult: OptionChainCaptureResult = { tickersAttempted: 9, tickersComplete: 9, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: false, fallbackSpotSymbols: [], qualityProblems: [] };
+
+    it("is undefined for a clean run", () => {
+      expect(buildCaptureFailureMessage(cleanResult)).toBeUndefined();
+    });
+
+    it("names the missing risk-free rate", () => {
+      expect(buildCaptureFailureMessage({ ...cleanResult, riskFreeRateUnavailable: true })).toContain("risk-free rate unavailable");
+    });
+
+    it("reports failed tickers and a missing rate together", () => {
+      const message = buildCaptureFailureMessage({ ...cleanResult, tickersComplete: 7, tickersFailed: 2, failedSymbols: ["AAA", "BBB"], riskFreeRateUnavailable: true });
+      expect(message).toBe("2 of 9 tickers not captured: AAA, BBB; risk-free rate unavailable (FRED fetch failed and none is stored), so the snapshots were saved without it and no surface can be fitted");
+    });
+
+    it("reports an empty universe, fallback spots and weak snapshots", () => {
+      expect(buildCaptureFailureMessage({ ...cleanResult, tickersAttempted: 0 })).toBe("no tickers to capture (shortlist and open positions are both empty)");
+      const message = buildCaptureFailureMessage({ ...cleanResult, fallbackSpotSymbols: ["AAA", "BBB"], qualityProblems: ["CCC: partial (60% of contracts got a tick)", "DDD: market data type delayed"] });
+      expect(message).toBe("spot price came from a stored fallback, not live: AAA, BBB; weak snapshots: CCC: partial (60% of contracts got a tick), DDD: market data type delayed");
+    });
+
+    it("never contains the '): ' sequence that truncates the Telegram alert", () => {
+      expect(buildCaptureFailureMessage({ ...cleanResult, tickersFailed: 1, failedSymbols: ["AAA"], riskFreeRateUnavailable: true })).not.toContain("): ");
+      expect(buildCaptureFailureMessage({ ...cleanResult, fallbackSpotSymbols: ["AAA"], qualityProblems: ["BBB: two-sided quotes 60% (min 75%)"] })).not.toContain("): ");
+    });
   });
 
   it("records a failed ticker, keeps going with the rest, and still disconnects", async () => {
@@ -293,7 +422,7 @@ describe("runOptionChainCapture", () => {
     const { dependencies } = runDependencies({ saveSnapshot, loadUniverse: async () => [ticker("AAA")] });
     const result = await runOptionChainCapture(undefined, dependencies);
     expect(saveSnapshot).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ tickersFailed: 1, recapturedSymbols: [] });
+    expect(result).toMatchObject({ tickersFailed: 1, failedSymbols: expect.any(Array), recapturedSymbols: [] });
   });
 
   it("skips the re-capture entirely once the job has used up its 45-minute budget", async () => {
@@ -326,7 +455,7 @@ describe("runOptionChainCapture", () => {
     const { dependencies } = runDependencies({
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
       fetchSpotPrices,
-      openQuoteWindow: () => ({ capture, close: vi.fn(), inFlightCount: () => 0 }),
+      openQuoteWindow: () => ({ capture, close: vi.fn(), inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       saveSnapshot: async () => (++saves <= 3 ? coverage(10, 2) : coverage(10, 10)),
     });
     const run = runOptionChainCapture(undefined, dependencies);
@@ -335,7 +464,7 @@ describe("runOptionChainCapture", () => {
     resolveAll();
     const result = await run;
     expect(fetchSpotPrices).toHaveBeenCalledTimes(1);
-    expect(fetchSpotPrices).toHaveBeenCalledWith(["AAA", "BBB", "CCC"]);
+    expect(fetchSpotPrices).toHaveBeenCalledWith(["AAA", "BBB", "CCC"], expect.any(Function));
     expect(result).toMatchObject({ tickersComplete: 3, recapturedSymbols: ["AAA", "BBB", "CCC"] });
   });
 
@@ -363,7 +492,7 @@ describe("runOptionChainCapture", () => {
       return [];
     });
     const { dependencies } = runDependencies({
-      openQuoteWindow: () => ({ capture, close, inFlightCount: () => 0 }),
+      openQuoteWindow: () => ({ capture, close, inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       prepareTicker: async (_ib, universeTicker) => {
         order.push(`prepare:${universeTicker.symbol}`);
         return preparedFor(universeTicker);
@@ -377,7 +506,32 @@ describe("runOptionChainCapture", () => {
 
   it("handles an empty universe", async () => {
     const { dependencies, disconnect } = runDependencies({ loadUniverse: async () => [] });
-    expect(await runOptionChainCapture(undefined, dependencies)).toEqual({ tickersAttempted: 0, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, recapturedSymbols: [] });
+    expect(await runOptionChainCapture(undefined, dependencies)).toEqual({ tickersAttempted: 0, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: false, fallbackSpotSymbols: [], qualityProblems: [] });
     expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("describeCaptureLineUsage", () => {
+  it("reports lines in use, the time-weighted average, hold times and where line time went", async () => {
+    const { describeCaptureLineUsage } = await import("./runOptionChainCapture.js");
+    const line = describeCaptureLineUsage("Capture window", 50, {
+      ...emptySettleStats(),
+      intervalMs: 10_000,
+      minInFlight: 48,
+      maxInFlight: 50,
+      lineBusyMs: 495_000,
+      timedOutLineMs: 72_000,
+      settled: 101,
+      timedOut: 9,
+      holdMsP50: 3_900,
+      holdMsP90: 7_200,
+      holdMsMax: 8_000,
+      lastField: { price: 6, delta: 15, openInterest: 80 },
+      missingOnTimeout: { price: 0, delta: 2, openInterest: 9 },
+    });
+    expect(line).toBe(
+      "Capture window: lines 50/50 now, min 48 max 50, avg in use 49.5 over 10.0s; 110 released, held p50 3.9s p90 7.2s max 8.0s; " +
+        "101 full data (waited last on price 6, delta 15, OI 80), 9 timed out holding 72.0s of line time (missing price 0, delta 2, OI 9), 0 errored.",
+    );
   });
 });

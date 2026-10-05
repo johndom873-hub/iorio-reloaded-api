@@ -15,8 +15,8 @@ import { annotateLegOpenState } from "../confirmationText.js";
 import type { GenosukeTool } from "./types.js";
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
-// The blotter route (unlike alerts/shortlist) also accepts "unstructured".
-const blotterStrategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "unstructured"] };
+// The blotter route (unlike shortlist) also accepts "hedge" and "unstructured".
+const blotterStrategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "hedge", "unstructured"] };
 
 export const readTools: GenosukeTool[] = [
   {
@@ -38,7 +38,7 @@ export const readTools: GenosukeTool[] = [
     // No strategy filter on purpose: given one, the model queried only covered_call and
     // cash_secured_put and reported "1 open position", hiding the unstructured ones
     // (verified on staging 2026-09-21 — it ignored a prompt rule and a widened enum).
-    description: "List ALL open or closed positions across every strategy (covered_call, cash_secured_put and unstructured — bare stock and anything fitting neither strategy). Each includes its legs (entry/exit prices, strike, expiry) and computed realizedPnl/capitalAtRisk.",
+    description: "List ALL open or closed positions across every strategy (covered_call, cash_secured_put, hedge — a long option bought outside the app — and unstructured — bare stock and anything fitting none of those). Each includes its legs (entry/exit prices, strike, expiry) and computed realizedPnl/capitalAtRisk.",
     tier: "read",
     parameters: {
       type: "object",
@@ -79,29 +79,10 @@ export const readTools: GenosukeTool[] = [
   {
     name: "get_ticker_quote",
     description:
-      "Stock price and option chain for a symbol — including one with no open position and no trade alert (e.g. picking parameters for a manual order). Always returns lastKnownClose (yesterday's-or-earlier daily close, works anytime). live.pricing/live.optionChain (bid/ask/strikes/premiums) are only populated during US market hours — check liveUnavailableReason before assuming live data exists, and never invent a bid/ask/premium if live is null.",
+      "Stock price and option chain for a symbol — including one with no open position (e.g. picking parameters for a manual order). Always returns lastKnownClose (yesterday's-or-earlier daily close, works anytime). live.pricing/live.optionChain (bid/ask/strikes/premiums) are only populated during US market hours — check liveUnavailableReason before assuming live data exists, and never invent a bid/ask/premium if live is null.",
     tier: "read",
     parameters: { type: "object", properties: { symbol: { type: "string" } }, required: ["symbol"] },
     execute: (input, api) => api.get(`/tickers/${String(input.symbol).toUpperCase()}/quote`),
-  },
-  {
-    name: "list_trade_alerts",
-    description: "List trade alert suggestions (new_trade or roll) by status.",
-    tier: "read",
-    parameters: {
-      type: "object",
-      properties: {
-        status: { type: "string", enum: ["pending", "approved", "rejected", "modified", "expired"], description: "Defaults to pending if omitted." },
-        strategyKey: strategyKeyEnum,
-      },
-    },
-    execute: (input, api) => {
-      const params = new URLSearchParams();
-      if (input.status) params.set("status", String(input.status));
-      if (input.strategyKey) params.set("strategy", String(input.strategyKey));
-      const query = params.toString();
-      return api.get(`/trade-alerts${query ? `?${query}` : ""}`);
-    },
   },
   {
     name: "list_trades",
@@ -129,14 +110,14 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "get_risk_limits_settings",
-    description: "Per-strategy risk settings: delta/DTE targets, position/collateral/concentration caps, minimum cash reserve.",
+    description: "The trading limits and targets (one set for every strategy): max position %, max concentration per ticker %, min cash reserve %, the delta band, the Recovery Path DTE window, min annualized yield % and the commission warning %.",
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/risk-limits/settings"),
   },
   {
     name: "get_risk_exposure",
-    description: "Current exposure vs. the risk settings above — concentration by ticker/sector and live account summary from IBKR.",
+    description: "Current exposure — concentration by ticker/sector and live account summary from IBKR.",
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/risk-limits/exposure"),
@@ -157,10 +138,18 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "get_system_health_status",
-    description: "Latest run status per scheduled job (daily market data, P&L snapshot, trade alerts, IBKR health check, watchdog).",
+    description: "Latest run status per scheduled job (daily market data, P&L snapshot, option chain capture/fit, Day Signals seed, IBKR health check, watchdog).",
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/system-health/status"),
+  },
+  {
+    name: "get_gateway_readiness",
+    description:
+      "Can Iorio trade right now? Runs the full pre-open readiness check (the same one sent to Telegram at 6:00 and 9:35 ET): configuration values, the trading worker and its bound account, an IBKR what-if order proving the order path, the account, the limits, orders left in flight, scheduled jobs, the Gateway health check, last session's data, live quotes, Telegram and the database. Returns ready true/false with the failing checks, warnings and passing checks. Takes up to about 30 seconds. Use stage 'open' only after 9:30 ET (it also needs a live option quote). If the live Gateway is down the usual cause is a login waiting for a phone approval: then offer resend_gateway_2fa.",
+    tier: "read",
+    parameters: { type: "object", properties: { stage: { type: "string", enum: ["pre_open", "open"] } } },
+    execute: (input, api) => api.get(`/system-health/readiness?stage=${input.stage === "open" ? "open" : "pre_open"}`),
   },
   {
     name: "list_job_runs",

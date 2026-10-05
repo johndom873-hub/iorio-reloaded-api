@@ -7,86 +7,13 @@ import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { fetchTradingHalt, setTradingHalt, type TradingHalt } from "../lib/platformControls.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
+import { loadTradingSettingsForEditing, saveTradingSettings, validateTradingSettingsInput, type TradingSettingsInput } from "../lib/tradingSettingsStore.js";
 
 export const riskLimitsRouter = Router();
 riskLimitsRouter.use(requireAuth);
 
-// v1 strategy scope — matches shortlist.ts.
-const validStrategyKeys = ["covered_call", "cash_secured_put"];
-
-const settingsFields = [
-  "delta_target_min",
-  "delta_target_max",
-  "dte_target_min",
-  "dte_target_max",
-  "max_position_pct_of_portfolio",
-  "max_aggregate_collateral_pct",
-  "max_concentration_per_ticker_pct",
-  "max_concentration_per_sector_pct",
-  "min_cash_reserve_pct",
-] as const;
-
-// Only meaningful for covered_call — governs delta selection when the
-// account already owns enough shares of the ticker to write against (see
-// fetchAvailableUncoveredShares). cash_secured_put has no "existing
-// position" concept and leaves these columns null.
-const existingPositionDeltaFields = ["delta_target_min_existing_position", "delta_target_max_existing_position"] as const;
-
-function validateSettingsPayload(strategyKey: string, payload: Record<string, unknown>, stored: Record<string, unknown> | undefined): string | null {
-  for (const field of settingsFields) {
-    const value = payload[field];
-    if (typeof value !== "number" || Number.isNaN(value)) {
-      return `${field} must be a number.`;
-    }
-  }
-  const p = payload as Record<(typeof settingsFields)[number], number>;
-  // Omitted existing-position fields keep their stored values (2026-09-24):
-  // the assistant's update_risk_limits tool never sends them, and every
-  // covered-call update from it was rejected after the human had approved.
-  if (strategyKey === "covered_call") {
-    for (const field of existingPositionDeltaFields) {
-      if (payload[field] === undefined && stored && stored[field] !== null && stored[field] !== undefined) payload[field] = Number(stored[field]);
-    }
-  }
-
-  if (p.delta_target_min < 0 || p.delta_target_max > 1) return "Delta targets must be between 0 and 1.";
-  if (p.delta_target_min > p.delta_target_max) return "delta_target_min cannot exceed delta_target_max.";
-  if (p.dte_target_min < 0) return "dte_target_min cannot be negative.";
-  if (p.dte_target_min > p.dte_target_max) return "dte_target_min cannot exceed dte_target_max.";
-
-  if (strategyKey === "covered_call") {
-    for (const field of existingPositionDeltaFields) {
-      const value = payload[field];
-      if (typeof value !== "number" || Number.isNaN(value)) {
-        return `${field} must be a number.`;
-      }
-    }
-    const pe = payload as Record<(typeof existingPositionDeltaFields)[number], number>;
-    if (pe.delta_target_min_existing_position < 0 || pe.delta_target_max_existing_position > 1) {
-      return "Existing-position delta targets must be between 0 and 1.";
-    }
-    if (pe.delta_target_min_existing_position > pe.delta_target_max_existing_position) {
-      return "delta_target_min_existing_position cannot exceed delta_target_max_existing_position.";
-    }
-  }
-
-  const percentageFields = [
-    "max_position_pct_of_portfolio",
-    "max_aggregate_collateral_pct",
-    "max_concentration_per_ticker_pct",
-    "max_concentration_per_sector_pct",
-    "min_cash_reserve_pct",
-  ] as const;
-  for (const field of percentageFields) {
-    if (p[field] < 0 || p[field] > 100) return `${field} must be between 0 and 100.`;
-  }
-
-  return null;
-}
-
-// The trading halt (kill switch, gap fix 1 for Pluto, 2026-09-28): one switch that stops every
-// order origin at confirm and in the worker. Any signed-in user may flip it — the UI puts a confirm
-// modal in front, the API only requires a reason when halting so the audit trail says why.
+// The trading halt (kill switch): one switch that stops every order origin at confirm and in the worker. Any signed-in user may
+// flip it -- the UI puts a confirm modal in front, the API only requires a reason when halting so the audit trail says why.
 const tradingHaltReasonMaxLength = 300;
 
 function serializeTradingHalt(halt: TradingHalt) {
@@ -134,85 +61,21 @@ riskLimitsRouter.put("/trading-halt", async (request: Request, response: Respons
   response.json(serializeTradingHalt(halt));
 });
 
+// The single set of trading limits and targets (table trading_settings, one row). Approved 2026-10-05: replaces the
+// per-strategy copies that were never enforced and the separate Signals-tab limits.
 riskLimitsRouter.get("/settings", async (_request, response) => {
-  const rows = await db("strategy_settings as ss")
-    .leftJoin("users as u", "u.id", "ss.updated_by_user_id")
-    .select("ss.*", "u.display_name as updated_by_display_name")
-    .orderBy("ss.strategy_key");
-  response.json(rows);
+  response.json(await loadTradingSettingsForEditing());
 });
 
-function buildUpdatePayload(strategyKey: string, body: Record<string, number>): Record<string, number> {
-  const updatePayload: Record<string, number> = {};
-  for (const field of settingsFields) updatePayload[field] = body[field] as number;
-  if (strategyKey === "covered_call") {
-    for (const field of existingPositionDeltaFields) updatePayload[field] = body[field] as number;
-  }
-  return updatePayload;
-}
-
-riskLimitsRouter.put("/settings/:strategyKey", async (request, response) => {
-  const { strategyKey } = request.params;
-  if (!validStrategyKeys.includes(strategyKey)) {
-    response.status(400).json({ error: "Unknown strategyKey." });
-    return;
-  }
-
-  const stored = await db("strategy_settings").where({ strategy_key: strategyKey }).first();
-  const body = { ...(request.body ?? {}) } as Record<string, unknown>;
-  const validationError = validateSettingsPayload(strategyKey, body, stored);
+riskLimitsRouter.put("/settings", async (request, response) => {
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  const validationError = validateTradingSettingsInput(body);
   if (validationError) {
     response.status(400).json({ error: validationError });
     return;
   }
-
-  const [row] = await db("strategy_settings")
-    .where({ strategy_key: strategyKey })
-    .update({ ...buildUpdatePayload(strategyKey, body as Record<string, number>), updated_at: db.fn.now(), updated_by_user_id: request.session.userId })
-    .returning("*");
-
-  if (!row) {
-    response.status(404).json({ error: "No strategy_settings row for this strategyKey." });
-    return;
-  }
-  response.json(row);
-});
-
-// Both strategies in ONE transaction (2026-09-24): the Risk & Limits form
-// saves both at once, and two separate PUTs could leave one saved and the
-// other rejected. Body: { covered_call: {...}, cash_secured_put: {...} }.
-riskLimitsRouter.put("/settings", async (request, response) => {
-  const body = (request.body ?? {}) as Record<string, Record<string, unknown> | undefined>;
-  const entries = validStrategyKeys.filter((strategyKey) => body[strategyKey] !== undefined);
-  if (entries.length === 0) {
-    response.status(400).json({ error: "Send at least one of covered_call / cash_secured_put." });
-    return;
-  }
-  const storedRows = await db("strategy_settings").whereIn("strategy_key", entries);
-  const payloads: Record<string, Record<string, number>> = {};
-  for (const strategyKey of entries) {
-    const payload = { ...(body[strategyKey] ?? {}) } as Record<string, unknown>;
-    const validationError = validateSettingsPayload(strategyKey, payload, storedRows.find((row) => row.strategy_key === strategyKey));
-    if (validationError) {
-      response.status(400).json({ error: `${strategyKey}: ${validationError}` });
-      return;
-    }
-    payloads[strategyKey] = buildUpdatePayload(strategyKey, payload as Record<string, number>);
-  }
-
-  const rows = await db.transaction(async (trx) => {
-    const updated = [];
-    for (const strategyKey of entries) {
-      const [row] = await trx("strategy_settings")
-        .where({ strategy_key: strategyKey })
-        .update({ ...payloads[strategyKey], updated_at: trx.fn.now(), updated_by_user_id: request.session.userId })
-        .returning("*");
-      if (!row) throw new Error(`No strategy_settings row for ${strategyKey}.`);
-      updated.push(row);
-    }
-    return updated;
-  });
-  response.json(rows);
+  await saveTradingSettings(body as TradingSettingsInput, request.session.userId!);
+  response.json(await loadTradingSettingsForEditing());
 });
 
 // Approved 2026-08-25: every concentration/allocation % on this page and
@@ -301,6 +164,23 @@ riskLimitsRouter.get("/exposure", async (_request, response) => {
   });
 });
 
+async function loadExposureAccountContext() {
+  const [accountResult, cashLockedInCsps] = await Promise.all([
+    fetchAccountSummary()
+      .then((account) => ({ account, accountDataError: null as string | null }))
+      .catch((error) => ({
+        account: null,
+        accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.",
+      })),
+    computeCashLockedInCsps(),
+  ]);
+  const { account, accountDataError } = accountResult;
+  const totalAccountValue = account?.netLiquidationValue ?? null;
+  const availableCash =
+    account?.totalCashValue !== null && account?.totalCashValue !== undefined ? account.totalCashValue - cashLockedInCsps : null;
+  return { account, accountDataError, totalAccountValue, availableCash };
+}
+
 // SSE live-upgrading sibling of GET /exposure (approved 2026-09-09). Fetches
 // account summary once up front (see /dashboard/portfolio/stream's matching
 // comment for why), then streams exposure-derived aggregates: a
@@ -311,24 +191,12 @@ export async function streamExposureHandler(request: Request, response: Response
   // Account data and the price stream are independent — started together
   // (2026-09-19) so the ~1s account fetch overlaps the stream's own setup
   // instead of delaying it. Every reading awaits this before sending.
-  const accountContextPromise = Promise.all([
-    fetchAccountSummary()
-      .then((account) => ({ account, accountDataError: null as string | null }))
-      .catch((error) => ({
-        account: null,
-        accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR.",
-      })),
-    computeCashLockedInCsps(),
-  ]).then(([accountResult, cashLockedInCsps]) => {
-    const { account, accountDataError } = accountResult;
-    const totalAccountValue = account?.netLiquidationValue ?? null;
-    const availableCash =
-      account?.totalCashValue !== null && account?.totalCashValue !== undefined ? account.totalCashValue - cashLockedInCsps : null;
-    return { account, accountDataError, totalAccountValue, availableCash };
-  });
+  let accountContextPromise = loadExposureAccountContext();
   // Handled below inside the stream callback; this only stops a failure from
   // being reported as unhandled if the client disconnects before any reading.
   accountContextPromise.catch(() => {});
+  let isFirstReading = true;
+  let previousReadingWasEmpty = false;
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -350,6 +218,12 @@ export async function streamExposureHandler(request: Request, response: Response
   try {
     await streamPositionExposures(
       serializeAsyncCalls(async (exposures) => {
+        // With no open position the stream re-sends an empty reading every minute (streamPositionExposures); the
+        // account figures are all that moves on it, so they are re-read for each of those, and for the first
+        // reading after a position opens.
+        if (!isFirstReading && (exposures.length === 0 || previousReadingWasEmpty)) accountContextPromise = loadExposureAccountContext();
+        isFirstReading = false;
+        previousReadingWasEmpty = exposures.length === 0;
         const { account, accountDataError, totalAccountValue, availableCash } = await accountContextPromise;
         const concentrationByTicker = groupByKey(exposures, (row) => row.symbol).map((row) => ({ symbol: row.key, notionalValue: row.notionalValue }));
         const concentrationBySector = groupByKey(exposures, (row) => row.sector).map((row) => ({ sector: row.key, notionalValue: row.notionalValue }));

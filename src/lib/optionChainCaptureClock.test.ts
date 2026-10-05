@@ -18,9 +18,11 @@ describe("isWithinChainCaptureClockWindow", () => {
     expect(isWithinChainCaptureClockWindow(at("2026-12-01T15:30:00Z"))).toBe(false);
   });
 
-  it("rejects the wrong Scheduler slot for the season (14:00 UTC in winter is 9:00 ET; 15:00 UTC in summer is 11:00 ET)", () => {
+  it("rejects the wrong Scheduler slot for the season (14:00 UTC in winter is 9:00 ET; 15:00 UTC in summer is 11:00 ET), and the old 9:30 ET slots", () => {
     expect(isWithinChainCaptureClockWindow(at("2026-12-01T14:00:00Z"))).toBe(false);
     expect(isWithinChainCaptureClockWindow(at("2026-09-21T15:00:00Z"))).toBe(false);
+    expect(isWithinChainCaptureClockWindow(at("2026-09-21T13:30:00Z"))).toBe(false);
+    expect(isWithinChainCaptureClockWindow(at("2026-12-01T14:30:00Z"))).toBe(false);
   });
 
   it("handles the daylight-saving switch days themselves (2026-03-08 spring forward, 2026-11-01 fall back)", () => {

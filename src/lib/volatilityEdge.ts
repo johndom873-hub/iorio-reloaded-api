@@ -17,6 +17,8 @@ import { sviTotalVariance, type RawSviParameters, type SviSliceStatus } from "./
 
 export const primaryForecastWindowDays = 63;
 export const fallbackForecastWindowDays = 21;
+/** Daily bars needed for any forecast at all: the shorter window plus the prior close. */
+export const minimumBarsForAnyForecast = fallbackForecastWindowDays + 1;
 
 export interface RealizedVolatilityForecast {
   /** Annualized, as a decimal (0.45 = 45%). */
@@ -85,7 +87,7 @@ export function expirySpansEventDate(snapshotDateIso: string, expiryIso: string,
   return eventDatesIso.some((eventDate) => eventDate > snapshotDateIso && eventDate <= expiryIso);
 }
 
-/** Earnings-specific name for expirySpansEventDate (hard exclusion in Signals and Trade Alerts). */
+/** Earnings-specific name for expirySpansEventDate (hard exclusion in Signals). */
 export function expirySpansEarnings(snapshotDateIso: string, expiryIso: string, earningsDatesIso: string[]): boolean {
   return expirySpansEventDate(snapshotDateIso, expiryIso, earningsDatesIso);
 }

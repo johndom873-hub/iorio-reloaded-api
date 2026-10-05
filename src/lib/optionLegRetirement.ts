@@ -5,6 +5,8 @@
 // trade or is past its expiry. A leg that vanished with neither is IBKR's held-positions
 // report having a transient gap (observed around expiry/settlement), not a real change.
 
+import { isOptionPastExpiry } from "./optionExpiryClock.js";
+
 export interface OptionLegRetirementEvidence {
   exitAt: Date | string | null;
   expiryDate: string | null;
@@ -13,9 +15,9 @@ export interface OptionLegRetirementEvidence {
 
 export type OptionLegRetirement = "still_open" | "settled" | "ambiguous";
 
-export function classifyOptionLegRetirement(legs: OptionLegRetirementEvidence[], todayEasternIsoDate: string): OptionLegRetirement {
+export function classifyOptionLegRetirement(legs: OptionLegRetirementEvidence[], now: Date = new Date()): OptionLegRetirement {
   if (legs.length === 0) return "settled";
   if (legs.some((leg) => leg.exitAt === null)) return "still_open";
-  const everyLegSettled = legs.every((leg) => leg.hasClosingTrade || (leg.expiryDate !== null && leg.expiryDate <= todayEasternIsoDate));
+  const everyLegSettled = legs.every((leg) => leg.hasClosingTrade || (leg.expiryDate !== null && isOptionPastExpiry(leg.expiryDate, now)));
   return everyLegSettled ? "settled" : "ambiguous";
 }

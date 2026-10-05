@@ -1,4 +1,5 @@
 import { environmentRouter } from "./routes/environment.js";
+import { handleDeployNotice } from "./routes/deployNotices.js";
 import express from "express";
 import cors from "cors";
 import { environment } from "./config/env.js";
@@ -19,10 +20,9 @@ import { plutoRouter } from "./routes/pluto.js";
 import { screenerRouter } from "./routes/screener.js";
 import { shortlistRouter } from "./routes/shortlist.js";
 import { signalsRouter } from "./routes/signals.js";
-import { signalSettingsRouter } from "./routes/signalSettings.js";
+import { orderChecksRouter } from "./routes/orderChecks.js";
 import { systemHealthRouter } from "./routes/systemHealth.js";
 import { tickerDetailRouter } from "./routes/tickerDetail.js";
-import { tradeAlertsRouter } from "./routes/tradeAlerts.js";
 import { tradeBlotterRouter } from "./routes/tradeBlotter.js";
 import { requestRateMiddleware } from "./lib/requestRateTracker.js";
 import { errorHandler } from "./middleware/errorHandler.js";
@@ -63,6 +63,8 @@ app.use("/environment", environmentRouter);
 // Telegram calls this directly (no session) — authenticated by the shared
 // secret header checked inside the handler instead.
 app.post("/genosuke/webhook", handleGenosukeWebhook);
+// The frontend app announces its own start here (shared secret header, no session).
+app.post("/deploy-notices", handleDeployNotice);
 app.use("/genosuke/preferences", genosukePreferencesRouter);
 app.use("/auth", authRouter);
 app.use("/screener", screenerRouter);
@@ -75,9 +77,8 @@ app.use("/positions", positionsRouter);
 app.use("/notifications", notificationsRouter);
 app.use("/stream", createStreamMultiplexerRouter({ producers: streamProducers }));
 app.use("/trade-blotter", tradeBlotterRouter);
-app.use("/trade-alerts", tradeAlertsRouter);
 app.use("/signals", signalsRouter);
-app.use("/signal-settings", signalSettingsRouter);
+app.use("/order-checks", orderChecksRouter);
 app.use("/system-health", systemHealthRouter);
 app.use("/calendar-events", calendarEventsRouter);
 app.use("/dashboard", dashboardRouter);

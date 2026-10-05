@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { positionSelect } from "../lib/positionQueries.js";
 
 // Pluto's book: the open positions its own orders created (order_requests.pluto_action_id →
@@ -55,13 +56,13 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
     // Read from the orders themselves, not the action's outcome, which is only written when the watcher next polls.
     db("pluto_actions as pa")
       .join("order_requests as orq", "orq.pluto_action_id", "pa.id")
-      .where((query) => query.where("orq.filled_quantity", ">", 0).orWhereIn("orq.status", ["filled", "partially_filled"]))
+      .whereExists(db("trades as tr").whereRaw("tr.source_order_request_id = orq.id"))
       .groupBy("pa.symbol")
       .select("pa.symbol")
       .max("pa.created_at as last_at"),
     db("order_requests as orq")
       .whereNotNull("orq.pluto_action_id")
-      .whereIn("orq.status", ["pending_confirmation", "confirmed", "submitted", "partially_filled", "cancel_requested"])
+      .whereIn("orq.status", activeOrderRequestStatuses)
       .select(db.raw("orq.payload->>'symbol' as symbol")),
   ]);
   const openPositions: PlutoBookPosition[] = (positionRows.rows as { id: string; symbol: string; sector: string | null; strategyKey: string; capitalAtRisk: string | null }[]).map((row) => ({

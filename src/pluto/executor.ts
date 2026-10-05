@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import { InternalApiClient, InternalApiError } from "../lib/internalApiClient.js";
-import { isOrderRequestFinal } from "../lib/orderRequestStatus.js";
+import { finalOrderRequestStatuses, isFinalOrderRequestStatus } from "../lib/orderRequestStatuses.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
@@ -22,9 +22,6 @@ interface OrderRequestResponse {
   status: string;
   payload?: { legs?: { role: "stock" | "option"; action: string; unitPrice: number }[] };
   errorMessage: string | null;
-  ibkrStatus?: string | null;
-  filledQuantity?: number | null;
-  remainingQuantity?: number | null;
 }
 
 export interface ExecuteOpenInput {
@@ -285,13 +282,11 @@ export function referenceForAdoptedOrder(action: { kind: string; symbol: string;
 
 /** Pluto orders IBKR may still be working: everything with a pluto_action_id that is not final. */
 export async function loadWorkingPlutoOrders(): Promise<AdoptableOrder[]> {
-  const rows: { id: string; status: string; ibkr_status: string | null; created_at: Date; action_id: string; kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs: unknown }[] = await db("order_requests as o")
+  const rows: { id: string; status: string; created_at: Date; action_id: string; kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs: unknown }[] = await db("order_requests as o")
     .join("pluto_actions as a", "a.id", "o.pluto_action_id")
-    .whereNotIn("o.status", ["filled", "cancelled", "rejected", "error"])
-    .select("o.id", "o.status", "o.ibkr_status", "o.created_at", "a.id as action_id", "a.kind", "a.symbol", "a.reference_bid", "a.reference_mid", "a.limit_price", "a.quantity", "a.contract", "a.reference_other_legs");
-  return rows
-    .filter((row) => !isOrderRequestFinal({ status: row.status, ibkr_status: row.ibkr_status }))
-    .map((row) => {
+    .whereNotIn("o.status", finalOrderRequestStatuses)
+    .select("o.id", "o.status", "o.created_at", "a.id as action_id", "a.kind", "a.symbol", "a.reference_bid", "a.reference_mid", "a.limit_price", "a.quantity", "a.contract", "a.reference_other_legs");
+  return rows.map((row) => {
       const { description, ...reference } = referenceForAdoptedOrder(row);
       return { orderId: row.id, actionId: row.action_id, symbol: row.symbol, kind: row.kind, createdAtMs: new Date(row.created_at).getTime(), reference, description };
     });
@@ -366,15 +361,16 @@ export async function watchPlutoOrder(
       console.warn(`Pluto watch: could not read order ${input.orderId} — ${error instanceof Error ? error.message : error}`);
       continue;
     }
-    if (isOrderRequestFinal({ status: order.status, ibkr_status: order.ibkrStatus ?? null })) {
+    if (isFinalOrderRequestStatus(order.status)) {
       const outcome = order.status as PlutoActionOutcome;
       // Pessimistic bracket (design 2026-09-28): the P&L difference had the order filled at the worse side of
       // the market it was placed into (the bid for a sell, the ask for a buy) instead of where it did fill —
       // on the net for a combo (compareFillsWithReference).
-      const fills = order.status === "filled" || order.status === "partially_filled" ? await loadOrderFills(input.orderId) : [];
+      const filledStatus = order.status === "filled" || order.status === "cancelled_partially_filled";
+      const fills = filledStatus ? await loadOrderFills(input.orderId) : [];
       const comparison = fills.length > 0 ? compareFillsWithReference(input.reference, fills) : null;
       // The status can land a moment before the executions are written: give them a few polls.
-      if ((order.status === "filled" || order.status === "partially_filled") && comparison === null && missingFillPolls++ < 3) continue;
+      if (filledStatus && comparison === null && missingFillPolls++ < 3) continue;
       const fillPrice = comparison?.chosenLegFillPrice ?? null;
       const impliedFillPrice = comparison ? impliedChosenLegPrice(input.reference, otherLegOrderPrices(input.reference, order.payload?.legs ?? []), fills) : null;
       const pessimisticPnl = comparison?.pessimisticPnl ?? null;

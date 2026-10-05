@@ -3,12 +3,14 @@ import {
   computeSnapshotCoverage,
   deriveMarketDataType,
   deriveSnapshotStatus,
+  describeSnapshotQualityProblems,
   isTickerStarved,
   optionChainCaptureBatchSize,
   recaptureMaximumElapsedMs,
   shouldRecaptureStarvedTicker,
   splitIntoBatches,
   type CoverageQuoteInput,
+  type SnapshotCoverage,
 } from "./optionChainCaptureCoverage.js";
 import { buildQuoteRows, formatExpiryAsIsoDate, type OptionQuoteToStore } from "./optionChainSnapshotStore.js";
 
@@ -162,5 +164,32 @@ describe("formatExpiryAsIsoDate and buildQuoteRows", () => {
     const rows = buildQuoteRows("snap-1", [stored({ bid: null }), stored({ strike: 105, right: "C" }), stored({ bid: 1.3 })]);
     expect(rows).toHaveLength(2);
     expect(rows.find((row) => row.option_right === "P")).toMatchObject({ bid: 1.3 });
+  });
+});
+
+describe("describeSnapshotQualityProblems", () => {
+  const coverageOf = (requested: number, anyTick: number, twoSided: number, impliedVolatility: number): SnapshotCoverage => ({
+    contractsRequested: requested,
+    contractsWithAnyTick: anyTick,
+    contractsWithTwoSidedQuote: twoSided,
+    contractsWithImpliedVolatility: impliedVolatility,
+  });
+
+  it("is empty for a healthy real-time snapshot, including exactly at the floors", () => {
+    expect(describeSnapshotQualityProblems(coverageOf(100, 100, 95, 90), "real_time")).toEqual([]);
+    expect(describeSnapshotQualityProblems(coverageOf(100, 100, 75, 70), "real_time")).toEqual([]);
+  });
+
+  it("names each weakness: partial status, thin quotes, thin IV, non-real-time data", () => {
+    expect(describeSnapshotQualityProblems(coverageOf(100, 60, 74, 69), "delayed")).toEqual([
+      "partial (60% of contracts got a tick)",
+      "two-sided quotes 74% (min 75%)",
+      "implied volatility 69% (min 70%)",
+      "market data type delayed",
+    ]);
+  });
+
+  it("does not pile coverage complaints on a failed snapshot, which is reported as failed already", () => {
+    expect(describeSnapshotQualityProblems(coverageOf(100, 0, 0, 0), "unknown")).toEqual([]);
   });
 });

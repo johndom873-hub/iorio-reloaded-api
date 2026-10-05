@@ -13,24 +13,34 @@ export type AppNotification =
   | { type: "position_closed"; positionId: string; symbol: string; message: string }
   | { type: "position_opened"; positionId: string; symbol: string }
   // Iorio Pulse's live System Events feed / topology pulses — see
-  // presenceTracker.ts (presence) and the publish call sites in runJob.ts,
-  // runTradeAlertGeneration.ts, and genosuke/bot.ts.
+  // presenceTracker.ts (presence) and the publish call sites in runJob.ts
+  // and genosuke/bot.ts.
   | { type: "job_started"; jobName: string }
   | { type: "job_completed"; jobName: string; status: "success" | "failure" }
-  | { type: "alert_generated"; strategyKey: string; symbol: string; annualizedYield: number }
   // Day Signals: a pooled contract's grade went up between two refresh cycles (daySignalsNotifications.ts).
   | { type: "signal_upgraded"; symbol: string; strategyKey: string; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netEdge: number; edgeDollars: number; annualizedYield: number }
   // Roll Signals: a (held leg, replacement) roll's grade went up between two refresh cycles.
-  | { type: "roll_signal_upgraded"; symbol: string; strategyKey: string; legId: string; heldStrike: number; heldExpiry: string; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netRollEdge: number; netRollEdgeDollars: number; netCreditPerShare: number }
+  | { type: "roll_signal_upgraded"; symbol: string; strategyKey: string; legId: string; heldStrike: number; heldExpiry: string; heldDte: number | null; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netRollEdge: number; netRollEdgeDollars: number; netCreditPerShare: number }
+  // Day Signals: a held short leg's |delta| reached the assignment-risk threshold (daySignalsNotifications.ts).
+  | { type: "assignment_risk"; symbol: string; strategyKey: string; positionId: string; legId: string; right: "C" | "P"; strike: number; expiry: string; dte: number | null; delta: number; spotPrice: number | null }
   | { type: "genosuke_reply"; preview: string }
   | { type: "trading_halt_changed"; enabled: boolean; reason: string | null; byDisplayName: string | null }
-  // Pluto's timeline (pluto_events): the Pluto screen updates live from these.
+  // Pluto's timeline (pluto_events): the Pluto screen updates live from these. Never persisted (see below).
   | { type: "pluto_event"; eventId: number; eventType: string; occurredAt: string; payload: Record<string, unknown> }
   | { type: "presence"; onlineUserIds: string[] }
   // Animation-only signal for the Pulse topology map's otherwise-silent lines
   // (see pulseEmitter.ts / publishPulse below) — never persisted, never shown
   // in Latest Events.
-  | { type: "pulse"; edgeId: PulseEdgeId };
+  | { type: "pulse"; edgeId: PulseEdgeId }
+  // Live price pool (marketDataPool.ts): IBKR started or stopped refusing market data. Web-dyno-local, never persisted.
+  | { type: "market_data_feed"; refusal: MarketDataFeedRefusal | null };
+
+export interface MarketDataFeedRefusal {
+  code: number;
+  message: string;
+  /** ISO time of the first refusal. */
+  since: string;
+}
 
 export type PulseEdgeId = "ibkr-gateway" | "heroku-browser" | "heroku-db" | "genosuke-db" | "genosuke-llm";
 
@@ -44,7 +54,8 @@ export async function publishNotification(notification: AppNotification): Promis
 
   // "presence" is online/offline state, not a loggable event — Latest Events
   // has nothing to show for it.
-  if (notification.type === "presence" || notification.type === "pulse") return;
+  // Pluto's timeline has its own table (pluto_events); storing it here too would push real history out of Latest Events.
+  if (notification.type === "presence" || notification.type === "pulse" || notification.type === "pluto_event") return;
 
   // ibkr_health_check runs every ~10 minutes and is never shown in Latest
   // Events (fetchRecentNotificationEvents filters it out, and so does the
@@ -100,7 +111,7 @@ export interface RecentNotificationEventWithOrder {
   notification: AppNotification;
   occurredAt: string;
   /** Only on order_status events: the order's current status and payload (null if the order no longer exists). */
-  order?: { status: string; payload: unknown } | null;
+  order?: { status: string; payload: unknown; cancellationReason: string | null } | null;
 }
 
 /**
@@ -110,13 +121,28 @@ export interface RecentNotificationEventWithOrder {
  * authenticated requests per Pulse load that exhausted Postgres connections
  * (2026-09-19).
  */
+/**
+ * Pure: keeps only the newest order_status event per order (input newest first). Each status change
+ * publishes one, but a row shows the order's current status, so older ones read as duplicates.
+ */
+export function keepNewestEventPerOrder<T extends { notification: AppNotification }>(eventsNewestFirst: T[]): T[] {
+  const seenOrderIds = new Set<string>();
+  return eventsNewestFirst.filter((event) => {
+    if (event.notification.type !== "order_status") return true;
+    if (seenOrderIds.has(event.notification.orderId)) return false;
+    seenOrderIds.add(event.notification.orderId);
+    return true;
+  });
+}
+
 export async function fetchRecentNotificationEventsWithOrders(limit: number): Promise<RecentNotificationEventWithOrder[]> {
-  const events = await fetchRecentNotificationEvents(limit);
+  // Read the whole retained window (small) so collapsing orders still leaves `limit` rows.
+  const events = keepNewestEventPerOrder(await fetchRecentNotificationEvents(notificationEventsRetentionCount)).slice(0, limit);
   const orderIds = [...new Set(events.flatMap((event) => (event.notification.type === "order_status" ? [event.notification.orderId] : [])))];
   if (orderIds.length === 0) return events;
 
-  const orderRows: { id: string; status: string; payload: unknown }[] = await db("order_requests").whereIn("id", orderIds).select("id", "status", "payload");
-  const orderById = new Map(orderRows.map((row) => [row.id, { status: row.status, payload: row.payload }]));
+  const orderRows: { id: string; status: string; payload: unknown; cancellation_reason: string | null }[] = await db("order_requests").whereIn("id", orderIds).select("id", "status", "payload", "cancellation_reason");
+  const orderById = new Map(orderRows.map((row) => [row.id, { status: row.status, payload: row.payload, cancellationReason: row.cancellation_reason }]));
   return events.map((event) =>
     event.notification.type === "order_status" ? { ...event, order: orderById.get(event.notification.orderId) ?? null } : event,
   );

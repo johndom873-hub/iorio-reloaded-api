@@ -3,18 +3,19 @@ import { getBestKnownStockPrice } from "../lib/priceService.js";
 import { db } from "../db/connection.js";
 import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "./sharedReadConnection.js";
 import { lookupPricingSnapshot } from "./fetchTickerOverview.js";
-import { generateTradeAlertCandidates, type AlertCandidate } from "./generateTradeAlertCandidates.js";
-import { toSettings } from "./runTradeAlertGeneration.js";
+import { loadRecoveryTargetWindow } from "../lib/recoveryTargetWindow.js";
+import { scanRecoveryPathCoveredCallCandidates, type CoveredCallCandidate } from "./scanRecoveryPathCoveredCallCandidates.js";
+import { fetchBreakEvenByPositionId } from "../lib/cycleBreakEvenQueries.js";
 
 const SHARES_PER_CONTRACT = 100;
 const daysPerMonth = 30;
 
 export interface RecoveryProjectionInput {
-  entryPrice: number;
+  costBasisPerShare: number;
   currentPrice: number;
   shares: number;
   contractsAvailable: number;
-  candidate: Pick<AlertCandidate, "premium" | "dte"> | null;
+  candidate: Pick<CoveredCallCandidate, "premium" | "dte"> | null;
 }
 
 export interface RecoveryProjection {
@@ -25,11 +26,18 @@ export interface RecoveryProjection {
 
 /** Pure arithmetic of the approved formula (see the header of evaluateRecoveryPathForPosition below). */
 export function computeRecoveryProjection(input: RecoveryProjectionInput): RecoveryProjection {
-  const { entryPrice, currentPrice, shares, contractsAvailable, candidate } = input;
-  const unrealizedLoss = Math.max(0, entryPrice - currentPrice) * shares;
+  const { costBasisPerShare, currentPrice, shares, contractsAvailable, candidate } = input;
+  const unrealizedLoss = Math.max(0, costBasisPerShare - currentPrice) * shares;
   const monthlyPremium = candidate && candidate.dte > 0 ? candidate.premium * SHARES_PER_CONTRACT * contractsAvailable * (daysPerMonth / candidate.dte) : null;
   const monthsToRecover = monthlyPremium !== null && monthlyPremium > 0 ? Math.ceil(unrealizedLoss / monthlyPremium) : null;
   return { unrealizedLoss, monthlyPremium, monthsToRecover };
+}
+
+export type RecoveryCostBasisSource = "cycle_break_even" | "entry_price";
+
+/** The cycle break-even already nets the premium collected on the shares, so it is the cost to recover; the average entry price is only the fallback when the cycle cannot be trusted. */
+export function chooseRecoveryCostBasis(entryPrice: number, cycleBreakEven: number | null): { costBasisPerShare: number; costBasisSource: RecoveryCostBasisSource } {
+  return cycleBreakEven === null ? { costBasisPerShare: entryPrice, costBasisSource: "entry_price" } : { costBasisPerShare: cycleBreakEven, costBasisSource: "cycle_break_even" };
 }
 
 export type RecoveryPathEvaluation =
@@ -42,10 +50,12 @@ export type RecoveryPathEvaluation =
       symbol: string;
       shares: number;
       entryPrice: number;
+      costBasisPerShare: number;
+      costBasisSource: RecoveryCostBasisSource;
       currentPrice: number;
       unrealizedLoss: number;
       contractsAvailable: number;
-      candidate: AlertCandidate | null;
+      candidate: CoveredCallCandidate | null;
       monthlyPremium: number | null;
       monthsToRecover: number | null;
       rationale: string;
@@ -57,14 +67,15 @@ export type RecoveryPathEvaluation =
  * "Recovery Path Formula" proposal, approved by Marcelo 2026-08-31, premium
  * scaled to a 30-day month 2026-09-24 (a 45-DTE candidate's premium is not a
  * monthly figure; the old formula treated it as one):
- *   unrealized loss = max(0, entry price − current price) × shares
+ *   unrealized loss = max(0, cost basis − current price) × shares, where the cost basis is the position's cycle break-even per
+ *     share (premium already collected on the shares is netted out; approved 2026-10-02), or the average entry price when the
+ *     cycle break-even is unavailable
  *   monthly premium = top-ranked live covered-call candidate's premium × 100 × contracts available × (30 ÷ candidate DTE)
  *   months to recover = ceil(unrealized loss ÷ monthly premium)
- * Reuses generateTradeAlertCandidates (same delta/DTE window already
- * configured for covered_call) rather than a separate recommendation
- * engine, per the approved proposal. Read-only, writes nothing — same
- * pattern as evaluateRollForPosition.ts. Opens its own short-lived IBKR
- * connection.
+ * The candidate comes from scanRecoveryPathCoveredCallCandidates (the
+ * delta band and expiry window in trading_settings).
+ * Read-only, writes nothing. Borrows the shared read connection, or opens
+ * its own short-lived one.
  */
 export async function evaluateRecoveryPathForPosition(positionId: string): Promise<RecoveryPathEvaluation> {
   const positionRow = await db("positions as p")
@@ -86,16 +97,17 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
   const shares = legs.reduce((sum, leg) => sum + Number(leg.quantity), 0);
   if (shares <= 0) return { status: "no_shares" };
   const entryPrice = legs.reduce((sum, leg) => sum + Number(leg.quantity) * Number(leg.entryPrice), 0) / shares;
+  const cycleBreakEven = (await fetchBreakEvenByPositionId([positionRow.tickerId])).get(positionId)?.breakEven ?? null;
+  const { costBasisPerShare, costBasisSource } = chooseRecoveryCostBasis(entryPrice, cycleBreakEven);
 
-  const settingsRow = await db("strategy_settings").where({ strategy_key: "covered_call" }).first();
-  if (!settingsRow) return { status: "no_settings" };
-  const settings = toSettings(settingsRow);
+  const targetWindow = await loadRecoveryTargetWindow();
+  if (!targetWindow) return { status: "no_settings" };
 
   // FROZEN, not REALTIME — this is just an estimate, and it needs to work
   // outside market hours too (REALTIME's snapshot never completes with no
   // live trades to gate on). Runs on sharedReadConnection, not
   // sharedLiveConnection: that one is pinned to REALTIME for the life of the
-  // connection for the Ticker Detail modal's long-lived streams, and
+  // connection for the Signals ticker modal's long-lived streams, and
   // changing type on a connection with subscriptions outstanding has been
   // seen to silently stop them (see requestMarketData.ts's
   // marketDataTypeManagedConnections comment). sharedReadConnection's
@@ -111,11 +123,11 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
     const contractsAvailable = Math.floor(shares / SHARES_PER_CONTRACT);
     const candidates =
       contractsAvailable >= 1
-        ? await generateTradeAlertCandidates(connection, positionRow.symbol, positionRow.tickerId, "covered_call", settings, { spotPrice: currentPrice })
+        ? await scanRecoveryPathCoveredCallCandidates(connection.ib, positionRow.symbol, positionRow.tickerId, currentPrice, targetWindow)
         : [];
     const candidate = candidates[0] ?? null;
 
-    const { unrealizedLoss, monthlyPremium, monthsToRecover } = computeRecoveryProjection({ entryPrice, currentPrice, shares, contractsAvailable, candidate });
+    const { unrealizedLoss, monthlyPremium, monthsToRecover } = computeRecoveryProjection({ costBasisPerShare, currentPrice, shares, contractsAvailable, candidate });
 
     const rationale =
       contractsAvailable < 1
@@ -129,6 +141,8 @@ export async function evaluateRecoveryPathForPosition(positionId: string): Promi
       symbol: positionRow.symbol,
       shares,
       entryPrice,
+      costBasisPerShare,
+      costBasisSource,
       currentPrice,
       unrealizedLoss,
       contractsAvailable,

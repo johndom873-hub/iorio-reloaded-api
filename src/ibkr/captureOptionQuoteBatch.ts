@@ -4,12 +4,9 @@ import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 
 // Quote collector for the nightly option-chain archive (IORIO Signal Engine,
-// Phase 0). Deliberately a NEW module rather than a change to
-// fetchQuotesForContracts (fetchOptionChain.ts), which trade-alert generation
-// and the Ticker Detail chain depend on: that one ignores bid/ask sizes, open
+// Phase 0). Captures what a plain live quote ignores — bid/ask sizes, open
 // interest, volume, the option's model price and the underlying price the
-// model used — all needed for the archive — and altering it risks live alerts.
-// Same subscription pattern, wider capture.
+// model used — all needed for the archive.
 //
 // Streaming reqMktData, one subscription per contract, with generic tick 101
 // requested for open interest. The caller must keep a batch to the agreed ~60
@@ -151,6 +148,43 @@ export interface CaptureQuoteWindow {
   close(): void;
   /** Contracts subscribed right now — for logs and tests. */
   inFlightCount(): number;
+  /** How contracts used their lines since the previous call (then resets) — for the periodic progress log. */
+  drainSettleStats(): CaptureSettleStats;
+  /** The same, since the window opened — for the end-of-run summary. */
+  wholeRunSettleStats(): CaptureSettleStats;
+}
+
+type SettleField = "price" | "delta" | "openInterest";
+
+export interface CaptureSettleStats {
+  /** Length of the period these stats cover (since the previous drain). */
+  intervalMs: number;
+  /** Lines subscribed, lowest and highest seen during the period (sampled on every subscribe and release). */
+  minInFlight: number | null;
+  maxInFlight: number | null;
+  /** Line-time held by contracts released during the period; ÷ intervalMs = average lines in use. */
+  lineBusyMs: number;
+  /** The part of lineBusyMs held by contracts that timed out without the full field set. */
+  timedOutLineMs: number;
+  /** Settled with the full field set (price, delta, open interest). */
+  settled: number;
+  /** Held the line for the whole timeout without the full field set. */
+  timedOut: number;
+  errored: number;
+  /** How long each released contract held its line, subscribe to release (every outcome). */
+  holdMsP50: number | null;
+  holdMsP90: number | null;
+  holdMsMax: number | null;
+  /** On full-set contracts, the field that arrived last (what the line was waiting for). */
+  lastField: Record<SettleField, number>;
+  /** On timed-out contracts, the fields that never arrived. */
+  missingOnTimeout: Record<SettleField, number>;
+}
+
+/** Pure: nearest-rank percentile of an ascending list; null when empty. */
+export function percentileOfSorted(sortedValues: number[], percentile: number): number | null {
+  if (sortedValues.length === 0) return null;
+  return sortedValues[Math.min(sortedValues.length - 1, Math.max(0, Math.ceil((percentile / 100) * sortedValues.length) - 1))]!;
 }
 
 interface WindowGroup {
@@ -164,6 +198,9 @@ interface WindowPending {
   quote: CapturedOptionQuote;
   group: WindowGroup;
   timer: ReturnType<typeof setTimeout>;
+  subscribedAt: number;
+  /** When each settle field first arrived (ms since epoch), for drainSettleStats. */
+  arrivedAt: Record<SettleField, number | null>;
 }
 
 function emptyCapturedQuote(contract: OptionContractRequest): CapturedOptionQuote {
@@ -196,6 +233,74 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
   const queue: { contract: OptionContractRequest; group: WindowGroup }[] = [];
   const pending = new Map<number, WindowPending>();
   let closed = false;
+  const emptyFieldCounts = (): Record<SettleField, number> => ({ price: 0, delta: 0, openInterest: 0 });
+  const freshStats = () => ({
+    periodStartedAt: Date.now(),
+    holdsMs: [] as number[],
+    minInFlight: null as number | null,
+    maxInFlight: null as number | null,
+    timedOutLineMs: 0,
+    settled: 0,
+    timedOut: 0,
+    errored: 0,
+    lastField: emptyFieldCounts(),
+    missingOnTimeout: emptyFieldCounts(),
+  });
+  let intervalStats = freshStats();
+  const wholeRunStats = freshStats();
+
+  function sampleInFlight(): void {
+    const count = pending.size;
+    for (const stats of [intervalStats, wholeRunStats]) {
+      stats.minInFlight = stats.minInFlight === null ? count : Math.min(stats.minInFlight, count);
+      stats.maxInFlight = stats.maxInFlight === null ? count : Math.max(stats.maxInFlight, count);
+    }
+  }
+
+  function summarize(stats: ReturnType<typeof freshStats>): CaptureSettleStats {
+    const sortedHolds = [...stats.holdsMs].sort((a, b) => a - b);
+    return {
+      intervalMs: Date.now() - stats.periodStartedAt,
+      minInFlight: stats.minInFlight,
+      maxInFlight: stats.maxInFlight,
+      lineBusyMs: sortedHolds.reduce((sum, holdMs) => sum + holdMs, 0),
+      timedOutLineMs: stats.timedOutLineMs,
+      settled: stats.settled,
+      timedOut: stats.timedOut,
+      errored: stats.errored,
+      holdMsP50: percentileOfSorted(sortedHolds, 50),
+      holdMsP90: percentileOfSorted(sortedHolds, 90),
+      holdMsMax: sortedHolds.at(-1) ?? null,
+      lastField: { ...stats.lastField },
+      missingOnTimeout: { ...stats.missingOnTimeout },
+    };
+  }
+
+  function noteArrivals(entry: WindowPending): void {
+    const now = Date.now();
+    const { quote, arrivedAt } = entry;
+    if (arrivedAt.price === null && ((quote.bid !== null && quote.ask !== null) || quote.last !== null)) arrivedAt.price = now;
+    if (arrivedAt.delta === null && quote.delta !== null) arrivedAt.delta = now;
+    if (arrivedAt.openInterest === null && quote.openInterest !== null) arrivedAt.openInterest = now;
+  }
+
+  function recordSettle(entry: WindowPending, timedOut: boolean): void {
+    const holdMs = Date.now() - entry.subscribedAt;
+    const fields = Object.entries(entry.arrivedAt) as [SettleField, number | null][];
+    const [lastField] = fields.reduce((latest, current) => ((current[1] ?? 0) > (latest[1] ?? 0) ? current : latest));
+    for (const stats of [intervalStats, wholeRunStats]) {
+      stats.holdsMs.push(holdMs);
+      if (entry.quote.errorCode !== null) stats.errored += 1;
+      else if (timedOut) {
+        stats.timedOut += 1;
+        stats.timedOutLineMs += holdMs;
+        for (const [field, at] of fields) if (at === null) stats.missingOnTimeout[field] += 1;
+      } else {
+        stats.settled += 1;
+        stats.lastField[lastField] += 1;
+      }
+    }
+  }
 
   function markTick(quote: CapturedOptionQuote, tickType: number): void {
     quote.receivedAnyTick = true;
@@ -203,9 +308,10 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     if (delayedTickTypes.has(tickType)) quote.sawDelayedTicks = true;
   }
 
-  function settle(reqId: number): void {
+  function settle(reqId: number, timedOut = false): void {
     const entry = pending.get(reqId);
     if (!entry) return;
+    recordSettle(entry, timedOut);
     clearTimeout(entry.timer);
     pending.delete(reqId);
     try {
@@ -215,22 +321,31 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     }
     entry.group.remaining -= 1;
     if (entry.group.remaining === 0) entry.group.resolve(entry.group.quotes);
+    sampleInFlight();
     pump();
   }
 
   function checkSettled(reqId: number): void {
     const entry = pending.get(reqId);
-    if (entry && isSettled(entry.quote)) settle(reqId);
+    if (!entry) return;
+    noteArrivals(entry);
+    if (isSettled(entry.quote)) settle(reqId);
   }
 
   function pump(): void {
     if (closed) return;
+    if (queue.length === 0) return;
+    pumpContracts();
+    sampleInFlight();
+  }
+
+  function pumpContracts(): void {
     while (pending.size < options.concurrency && queue.length > 0) {
       const { contract, group } = queue.shift()!;
       const reqId = nextReqIdFor(ib, () => nextFallbackReqId++);
       const quote = emptyCapturedQuote(contract);
       group.quotes.push(quote);
-      pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId), timeoutMs) });
+      pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId, true), timeoutMs), subscribedAt: Date.now(), arrivedAt: { price: null, delta: null, openInterest: null } });
       const right = contract.right === "C" ? OptionType.Call : OptionType.Put;
       try {
         ib.reqMktData(reqId, new Option(group.symbol, contract.expiry, contract.strike, right, "SMART"), openInterestGenericTickList, false, false);
@@ -340,5 +455,12 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       ib.removeListener(EventName.error, onError);
     },
     inFlightCount: () => pending.size,
+    drainSettleStats() {
+      const drained = summarize(intervalStats);
+      intervalStats = freshStats();
+      intervalStats.minInFlight = intervalStats.maxInFlight = pending.size;
+      return drained;
+    },
+    wholeRunSettleStats: () => summarize(wholeRunStats),
   };
 }

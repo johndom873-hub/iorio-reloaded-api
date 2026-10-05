@@ -7,11 +7,9 @@ export interface DeltaComplianceResult {
   reason: string | null;
 }
 
-// Same Math.abs()/inclusive-bounds convention as generateTradeAlertCandidates.ts's
-// rankCandidates (approved 2026-08-20) — reused, not reimplemented, so "in band"
-// means the same thing here as it does for trade-alert screening. There it's a
-// silent filter (out-of-band candidates are just skipped); here the result drives
-// a user-facing block, so null/missing-threshold cases need an explicit reason
+// Math.abs() of the delta against inclusive bounds (the convention approved
+// 2026-08-20, same as the recovery-path candidate scan). The result drives a
+// user-facing block, so null/missing-threshold cases need an explicit reason
 // rather than silently failing closed with no explanation.
 export function checkDeltaCompliance(
   delta: number | null,
@@ -19,25 +17,25 @@ export function checkDeltaCompliance(
   deltaTargetMax: number | null,
 ): DeltaComplianceResult {
   if (deltaTargetMin === null || deltaTargetMax === null) {
-    return { compliant: false, reason: "No delta screening range is configured for this strategy." };
+    return { compliant: false, reason: "No delta band is configured in the trading settings." };
   }
   if (delta === null) {
     return {
       compliant: false,
-      reason: "Live delta isn't available yet — can't verify this trade against the strategy's screening range.",
+      reason: "Live delta isn't available yet — can't verify this trade against the delta band.",
     };
   }
   const magnitude = Math.abs(delta);
   if (magnitude < deltaTargetMin) {
     return {
       compliant: false,
-      reason: `Delta has drifted to ${magnitude.toFixed(2)}, below the strategy's ${deltaTargetMin}–${deltaTargetMax} target range.`,
+      reason: `Delta has drifted to ${magnitude.toFixed(2)}, below the ${deltaTargetMin}–${deltaTargetMax} delta band.`,
     };
   }
   if (magnitude > deltaTargetMax) {
     return {
       compliant: false,
-      reason: `Delta has drifted to ${magnitude.toFixed(2)}, above the strategy's ${deltaTargetMin}–${deltaTargetMax} target range.`,
+      reason: `Delta has drifted to ${magnitude.toFixed(2)}, above the ${deltaTargetMin}–${deltaTargetMax} delta band.`,
     };
   }
   return { compliant: true, reason: null };

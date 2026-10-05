@@ -22,18 +22,9 @@ import { OpenRouterAdapter } from "./openRouterAdapter.js";
 import { chatOnce } from "./chat.js";
 import { loadRecentHistory, appendHistory } from "./chatHistoryStore.js";
 import { takeConfirmation } from "./confirmations.js";
+import { startOrderFollowUp } from "./orderFollowUp.js";
 import { TOOLS_BY_NAME } from "./tools/index.js";
 import { publishNotification } from "../lib/notificationChannel.js";
-
-const ORDER_POLL_INTERVAL_MS = 5000;
-const ORDER_POLL_TIMEOUT_MS = 5 * 60 * 1000;
-const ORDER_TERMINAL_STATUSES = new Set(["filled", "partially_filled", "cancelled", "rejected", "error"]);
-
-interface OrderRequestRow {
-  id: string;
-  status: string;
-  errorMessage: string | null;
-}
 
 let started = false;
 let runtime: { config: GenosukeConfig; telegram: TelegramApi; api: GenosukeApiClient; adapter: OpenRouterAdapter } | null = null;
@@ -71,6 +62,12 @@ function detectAddressing(msg: NonNullable<TelegramUpdate["message"]>): string |
   return null;
 }
 
+// The quote is added for the bot's own messages too: scheduled alerts come from the same bot but never enter the chat
+// history, so a bare "ready" replying to a "Gateway needs a manual login" alert would reach the model with no context.
+export function prefixWithQuotedMessage(question: string, quotedText: string | undefined): string {
+  return quotedText ? `[Replying to this message: "${quotedText.slice(0, 2000)}"]\n\n${question}` : question;
+}
+
 async function handleMessage(
   msg: NonNullable<TelegramUpdate["message"]>,
   config: GenosukeConfig,
@@ -91,8 +88,7 @@ async function handleMessage(
     return;
   }
 
-  const quotedText = msg.reply_to_message?.from?.id !== botId ? msg.reply_to_message?.text : null;
-  const userMessage = quotedText ? `[Replying to this message: "${quotedText.slice(0, 2000)}"]\n\n${question}` : question;
+  const userMessage = prefixWithQuotedMessage(question, msg.reply_to_message?.text);
 
   const messages = await loadRecentHistory(chatId);
   const fromIndex = messages.length;
@@ -120,45 +116,11 @@ async function handleMessage(
   }
 }
 
-function describeOrderOutcome(order: OrderRequestRow): string {
-  switch (order.status) {
-    case "filled":
-      return "✅ Order filled — IBKR confirmed the trade.";
-    case "partially_filled":
-      return "⚠️ Order partially filled — check the Trade Blotter for the remaining quantity.";
-    case "cancelled":
-      return "Order was cancelled at IBKR — nothing was filled.";
-    case "rejected":
-      return `⛔ Order rejected by IBKR: ${order.errorMessage ?? "no reason given"}.`;
-    case "error":
-      return `❌ Order failed: ${order.errorMessage ?? "unknown error"}.`;
-    default:
-      return `Order status: ${order.status}.`;
-  }
-}
-
-// create_position/roll_position/close_position only confirm synchronously —
-// the actual IBKR transmission happens async in ibkrGatewayWorker.ts via Postgres
-// LISTEN/NOTIFY (see positions.ts's /orders/:id/confirm), so the
-// "confirmed" status right after Yes isn't the real outcome; contract
-// resolution or IBKR itself can still reject it seconds later. Polls until
-// a terminal status and sends a second message with what actually happened.
-async function pollOrderAndFollowUp(chatId: string, orderId: string, telegram: TelegramApi, api: GenosukeApiClient): Promise<void> {
-  const deadline = Date.now() + ORDER_POLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, ORDER_POLL_INTERVAL_MS));
-    let order: OrderRequestRow;
-    try {
-      order = await api.get<OrderRequestRow>(`/positions/orders/${orderId}`);
-    } catch {
-      continue; // transient API hiccup — keep polling until the timeout
-    }
-    if (ORDER_TERMINAL_STATUSES.has(order.status)) {
-      await telegram.sendMessage(chatId, describeOrderOutcome(order));
-      return;
-    }
-  }
-  await telegram.sendMessage(chatId, "Still haven't heard back from IBKR on that order after 5 minutes — check the Trade Blotter, or ask me again shortly.");
+// A confirmation card is resolved by a button tap, which the chat history never sees: without the reply stored
+// there, the model believes the card is still waiting and refuses to send a fresh one.
+async function replyAndRecord(telegram: TelegramApi, chatId: string, text: string): Promise<void> {
+  await telegram.sendMessage(chatId, text);
+  await appendHistory(chatId, [{ role: "assistant", content: text }], 0).catch((error) => console.error("Genosuke: could not record the reply in the chat history", error));
 }
 
 async function handleCallbackQuery(
@@ -195,30 +157,32 @@ async function handleCallbackQuery(
   }
 
   if (action === "cancel") {
+    await TOOLS_BY_NAME.get(confirmation.toolName)?.discardPrepared?.(confirmation.prepared, api).catch(() => {});
     await telegram.answerCallbackQuery(callbackQuery.id, "Cancelled.");
-    await telegram.sendMessage(chatId, "Cancelled — no action taken.");
+    await replyAndRecord(telegram, chatId, "Cancelled — no action taken.");
     return;
   }
 
   await telegram.answerCallbackQuery(callbackQuery.id, "Confirmed.");
   const tool = TOOLS_BY_NAME.get(confirmation.toolName);
   if (!tool) {
-    await telegram.sendMessage(chatId, `Error: tool "${confirmation.toolName}" no longer exists.`);
+    await replyAndRecord(telegram, chatId, `Error: tool "${confirmation.toolName}" no longer exists.`);
     return;
   }
 
   try {
-    const result = await tool.execute(confirmation.input, api);
+    const result = await tool.execute(confirmation.input, api, confirmation.prepared);
     const description = confirmation.description;
     if (tool.tracksOrderStatus && typeof (result as { id?: unknown })?.id === "string") {
-      await telegram.sendMessage(chatId, `Sent to IBKR:\n${description}\nI'll follow up once it's placed or if anything fails.`);
-      pollOrderAndFollowUp(chatId, (result as { id: string }).id, telegram, api).catch((error) => console.error("Genosuke: order poll failed", error));
+      await replyAndRecord(telegram, chatId, `Sent to IBKR:\n${description}\nI'll tell you when it is placed, and again when it fills or ends.`);
+    } else if (tool.describeResult) {
+      await replyAndRecord(telegram, chatId, tool.describeResult(result));
     } else {
-      await telegram.sendMessage(chatId, `Done:\n${description}`);
+      await replyAndRecord(telegram, chatId, `Done:\n${description}`);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await telegram.sendMessage(chatId, `That failed: ${message}`);
+    await replyAndRecord(telegram, chatId, `That failed: ${message}`);
   }
 }
 
@@ -247,6 +211,7 @@ export function startGenosuke(): void {
 
       await telegram.setWebhook(config.webhookUrl, config.webhookSecret);
       console.info(`Genosuke: webhook registered at ${config.webhookUrl}`);
+      startOrderFollowUp(telegram, config.telegramChatId, config.serviceUsername);
     } catch (error) {
       console.error("Genosuke: failed to start", error instanceof Error ? error.message : error);
     }

@@ -1,6 +1,6 @@
 // Financial-consequence write tools — every one of these has a real effect
-// on the trading record (a position gets created/rolled/closed, an alert
-// gets rejected, risk settings that govern future trade generation change).
+// on the trading record (a position gets created/closed, risk settings
+// change).
 // None of these execute on the model's say-so alone: the bot loop (see
 // bot.ts) intercepts any call to a tool in this tier, sends a Telegram
 // inline Yes/Cancel confirmation built from describeForConfirmation(), and
@@ -12,9 +12,9 @@
 // Since 2026-08-24, iorio places REAL orders against IBKR (still the paper
 // account) — see PROGRESS.md's "IBKR is the source of truth" decision. The
 // old claim here ("blast radius of a mistake is a bad database record, not
-// an actual fill") is no longer true: create_position/roll_position/
-// close_position now build an order via POST /positions/orders (or
-// /:id/roll, /:id/close) and immediately confirm it via
+// an actual fill") is no longer true: create_position/close_position now
+// build an order via POST /positions/orders (or /:id/close) and
+// immediately confirm it via
 // POST /positions/orders/:id/confirm, which transmits the order to IBKR.
 // The Telegram Yes/Cancel tap IS the human confirmation gate for that
 // transmit step — there's no second in-app confirmation for the bot path,
@@ -22,13 +22,12 @@
 // waits for an explicit Confirm click before calling the same endpoint).
 import type { GenosukeApiClient } from "../apiClient.js";
 import type { GenosukeTool } from "./types.js";
+import { tradingSettingsColumns } from "../../lib/tradingSettingsStore.js";
+import { confirmPreparedOrder, discardPreparedOrder, prepareOrderConfirmation, type PreparedOrder } from "../prepareOrderConfirmation.js";
 import {
-  buildCloseCard,
-  buildRejectAlertCard,
   buildRiskLimitsCard,
-  buildRollCard,
+  buildTradingHaltCard,
   validateCloseLegs,
-  validateRollCloseLeg,
   type PositionForCard,
 } from "../confirmationText.js";
 
@@ -57,7 +56,7 @@ export const financialWriteTools: GenosukeTool[] = [
   {
     name: "create_position",
     description:
-      "Open a new position by placing a real order with IBKR — either approving a pending Trade Alert (pass sourceAlertId; strongly preferred when one exists, since the alert's suggested strike/expiry/premium is already validated against the live option chain) or a fully manual entry (higher risk of a typo'd strike/price — the human confirmation step is the safety net here). Builds and immediately confirms the order — nothing further is needed after the human taps Yes.",
+      "Open a new position by placing a real order with IBKR (the human confirmation step is the safety net against a typo'd strike/price). Builds and immediately confirms the order — nothing further is needed after the human taps Yes.",
     tier: "financial-write",
     parameters: {
       type: "object",
@@ -67,7 +66,7 @@ export const financialWriteTools: GenosukeTool[] = [
         stock: {
           type: "object",
           description:
-            "Buy-write stock leg — used for covered_call only. For cash_secured_put, omit this field entirely (do not pass it with zeros or placeholder values — cash_secured_put never has a stock leg, and the server ignores this field for that strategy regardless). For covered_call, never ask the human how many shares or what stock price to use: compute quantity yourself as option.quantity * 100 and limitPrice as the current stock price (from get_ticker_quote or the source alert's spot price, rounded to the nearest cent) — pass it here so the human sees the real stock leg on the Yes/Cancel confirmation before it's sent to IBKR. If omitted, the server will auto-fill the same 100-shares-per-contract default using its own live quote, but the human then won't see the stock leg in the confirmation text, so only rely on that fallback if no price source is available. Only ask the human explicitly if they want deliberate over-coverage (more shares than the calls need) or a stock limit different from market.",
+            "Buy-write stock leg — used for covered_call only. For cash_secured_put, omit this field entirely (do not pass it with zeros or placeholder values — cash_secured_put never has a stock leg, and the server ignores this field for that strategy regardless). For covered_call, never ask the human how many shares or what stock price to use: compute quantity yourself as option.quantity * 100 and limitPrice as the current stock price (from get_ticker_quote, rounded to the nearest cent) — pass it here so the human sees the real stock leg on the Yes/Cancel confirmation before it's sent to IBKR. If omitted, the server will auto-fill the same 100-shares-per-contract default using its own live quote, but the human then won't see the stock leg in the confirmation text, so only rely on that fallback if no price source is available. Only ask the human explicitly if they want deliberate over-coverage (more shares than the calls need) or a stock limit different from market.",
           properties: { quantity: { type: "number" }, limitPrice: { type: "number" } },
           required: ["quantity", "limitPrice"],
         },
@@ -82,57 +81,13 @@ export const financialWriteTools: GenosukeTool[] = [
           },
           required: ["quantity", "limitPrice", "strikePrice", "expiryDate"],
         },
-        sourceAlertId: { type: "string", description: "If approving a pending Trade Alert, its id — links the alert and marks it approved." },
       },
       required: ["symbol", "strategyKey", "option"],
     },
-    describeForConfirmation: (input) => {
-      const option = input.option as { quantity: unknown; strikePrice: unknown; expiryDate: unknown; limitPrice: unknown };
-      const stock = input.stock as { quantity: unknown; limitPrice: unknown } | undefined;
-      const stockPart = stock ? `BUY ${stock.quantity} sh @ ${stock.limitPrice} + ` : "";
-      return `Place order for ${input.symbol} (${input.strategyKey}): ${stockPart}SELL ${option.quantity}x $${option.strikePrice} exp ${option.expiryDate} @ ${option.limitPrice}${input.sourceAlertId ? " (approving pending alert)" : " (manual entry)"} — will be sent to IBKR immediately on confirm.`;
-    },
+    prepareConfirmation: (input, api) => prepareOrderConfirmation(api, "/positions/orders", input),
+    discardPrepared: discardPreparedOrder,
     tracksOrderStatus: true,
-    execute: (input, api) => buildAndConfirmOrder(api, "/positions/orders", input),
-  },
-  {
-    name: "roll_position",
-    description:
-      "Roll one short option leg on an open position by placing a real atomic combo order with IBKR (buy back the existing leg, sell the new one, in one order) — tied to a pending roll-type Trade Alert. Only valid for a pending alert of alertType 'roll' — get its details from list_trade_alerts/get_position first. Builds and immediately confirms the order.",
-    tier: "financial-write",
-    parameters: {
-      type: "object",
-      properties: {
-        positionId: { type: "string" },
-        sourceAlertId: { type: "string" },
-        closeLegId: { type: "string", description: "The existing option leg being closed." },
-        closeLimitPrice: { type: "number", description: "Max price willing to pay to buy back the closing leg." },
-        newLeg: {
-          type: "object",
-          properties: {
-            strikePrice: { type: "number" },
-            expiryDate: { type: "string" },
-            quantity: { type: "number" },
-            limitPrice: { type: "number", description: "Min premium willing to accept for the new leg." },
-          },
-          required: ["strikePrice", "expiryDate", "quantity", "limitPrice"],
-        },
-      },
-      required: ["positionId", "sourceAlertId", "closeLegId", "closeLimitPrice", "newLeg"],
-    },
-    validateBeforeConfirmation: async (input, api) => validateRollCloseLeg(await fetchPositionForCard(api, input.positionId), String(input.closeLegId)),
-    describeForConfirmation: async (input, api) =>
-      buildRollCard(
-        await fetchPositionForCard(api, input.positionId),
-        String(input.closeLegId),
-        input.closeLimitPrice,
-        input.newLeg as { strikePrice: unknown; expiryDate: unknown; quantity: unknown; limitPrice: unknown },
-      ),
-    tracksOrderStatus: true,
-    execute: (input, api) => {
-      const { positionId, ...body } = input;
-      return buildAndConfirmOrder(api, `/positions/${positionId}/roll`, body);
-    },
+    execute: (input, api, prepared) => (prepared ? confirmPreparedOrder(api, prepared as PreparedOrder) : buildAndConfirmOrder(api, "/positions/orders", input)),
   },
   {
     name: "close_position",
@@ -154,62 +109,80 @@ export const financialWriteTools: GenosukeTool[] = [
       },
       required: ["positionId", "legs"],
     },
-    validateBeforeConfirmation: async (input, api) =>
-      validateCloseLegs(await fetchPositionForCard(api, input.positionId), (input.legs as { legId: string }[]) ?? []),
-    describeForConfirmation: async (input, api) =>
-      buildCloseCard(await fetchPositionForCard(api, input.positionId), (input.legs as { legId: string; limitPrice: unknown }[]) ?? []),
+    prepareConfirmation: async (input, api) => {
+      const position = await fetchPositionForCard(api, input.positionId);
+      const legs = (input.legs as { legId: string; limitPrice: unknown }[]) ?? [];
+      const problem = validateCloseLegs(position, legs);
+      if (problem) return { problem };
+      return prepareOrderConfirmation(api, `/positions/${input.positionId}/close`, { legs: input.legs });
+    },
+    discardPrepared: discardPreparedOrder,
     tracksOrderStatus: true,
-    execute: (input, api) => {
+    execute: (input, api, prepared) => {
+      if (prepared) return confirmPreparedOrder(api, prepared as PreparedOrder);
       const { positionId, legs } = input;
       return buildAndConfirmOrder(api, `/positions/${positionId}/close`, { legs });
     },
   },
   {
-    name: "reject_trade_alert",
-    description: "Reject a pending Trade Alert. This is the only status change this tool supports — approving happens via create_position/roll_position with sourceAlertId instead, so the actual order terms are always confirmed first.",
-    tier: "financial-write",
-    parameters: { type: "object", properties: { alertId: { type: "string" } }, required: ["alertId"] },
-    describeForConfirmation: async (input, api) => {
-      const pendingAlerts = await api.get<{ id: string; symbol: string; strategyKey: string; alertType: string }[]>("/trade-alerts?status=pending");
-      return buildRejectAlertCard(pendingAlerts.find((alert) => alert.id === input.alertId), String(input.alertId));
-    },
-    execute: (input, api) => api.patch(`/trade-alerts/${input.alertId}`, { status: "rejected" }),
-  },
-  {
     name: "update_risk_limits",
-    description: "Update a strategy's risk settings (delta/DTE targets, position/collateral/concentration caps, minimum cash reserve). Governs future Trade Alert generation, not existing positions.",
+    description:
+      "Change the trading limits and targets (one set for every strategy): max position %, max concentration per ticker %, min cash reserve % (these block orders), the delta band (blocks new orders outside it, filters Signals and the recovery-path suggestion), the Recovery Path DTE window, min annualized yield % (Signals filter), the commission warning %, and the limit-price check (an order is refused when a leg's limit is worse than the live mid by more than max(priceCheckMaxDeviationPct % of the mid, priceCheckMinToleranceDollars $)), and the Signals spread cost (spreadCostChargedPct: the % of the half-spread Signals charges as friction, 0 = a fill at the mid, 100 = a fill at the bid), and the unfilled-order cancel (orderUnfilledCancelMinutes: whole minutes an order may rest unfilled at IBKR before it is cancelled, 0 = never). Send only the fields to change; the rest keep their current values. Does not change existing positions.",
     tier: "financial-write",
     parameters: {
       type: "object",
       properties: {
-        strategyKey: strategyKeyEnum,
-        delta_target_min: { type: "number" },
-        delta_target_max: { type: "number" },
-        dte_target_min: { type: "number" },
-        dte_target_max: { type: "number" },
-        max_position_pct_of_portfolio: { type: "number" },
-        max_aggregate_collateral_pct: { type: "number" },
-        max_concentration_per_ticker_pct: { type: "number" },
-        max_concentration_per_sector_pct: { type: "number" },
-        min_cash_reserve_pct: { type: "number" },
+        maxPositionPctOfPortfolio: { type: "number" },
+        maxConcentrationPerTickerPct: { type: "number" },
+        minCashReservePct: { type: "number" },
+        deltaTargetMin: { type: "number" },
+        deltaTargetMax: { type: "number" },
+        recoveryDteMin: { type: "number" },
+        recoveryDteMax: { type: "number" },
+        minAnnualizedYieldPct: { type: "number" },
+        commissionWarnSharePctOfPremium: { type: "number" },
+        priceCheckMaxDeviationPct: { type: "number" },
+        priceCheckMinToleranceDollars: { type: "number" },
+        spreadCostChargedPct: { type: "number" },
+        orderUnfilledCancelMinutes: { type: "number" },
       },
-      required: [
-        "strategyKey",
-        "delta_target_min",
-        "delta_target_max",
-        "dte_target_min",
-        "dte_target_max",
-        "max_position_pct_of_portfolio",
-        "max_aggregate_collateral_pct",
-        "max_concentration_per_ticker_pct",
-        "max_concentration_per_sector_pct",
-        "min_cash_reserve_pct",
-      ],
     },
-    describeForConfirmation: (input) => buildRiskLimitsCard(input),
-    execute: (input, api) => {
-      const { strategyKey, ...settings } = input;
-      return api.put(`/risk-limits/settings/${strategyKey}`, settings);
+    validateBeforeConfirmation: async (input) => {
+      const unknownSettings = Object.keys(input).filter((name) => !(name in tradingSettingsColumns));
+      if (unknownSettings.length > 0) return `Unknown setting(s): ${unknownSettings.join(", ")}. Valid settings: ${Object.keys(tradingSettingsColumns).join(", ")}.`;
+      return Object.keys(input).length === 0 ? "Send at least one setting to change." : null;
     },
+    describeForConfirmation: async (input, api) => buildRiskLimitsCard(input, await api.get<Record<string, unknown>>("/risk-limits/settings")),
+    execute: async (input, api) => {
+      // The route validates a complete set, so the unchanged fields are filled in from the current settings.
+      const { updatedAt: _updatedAt, updatedByDisplayName: _updatedBy, ...current } = await api.get<Record<string, unknown>>("/risk-limits/settings");
+      return api.put("/risk-limits/settings", { ...current, ...input });
+    },
+  },
+  {
+    name: "set_trading_halt",
+    description:
+      "The trading kill switch. enabled=true HALTS all trading: no order from any origin (screens, Genosuke, bots) reaches IBKR until it is resumed; orders already working at IBKR are not cancelled and cancels still work. enabled=false RESUMES trading. A reason is required to halt (say what the human told you, in their words). Use it when the human asks to stop, halt or pause trading, or to resume it.",
+    tier: "financial-write",
+    parameters: {
+      type: "object",
+      properties: {
+        enabled: { type: "boolean", description: "true = halt all trading, false = resume." },
+        reason: { type: "string", description: "Why. Required when halting (at most 300 characters); optional when resuming." },
+      },
+      required: ["enabled"],
+    },
+    validateBeforeConfirmation: async (input) => {
+      if (typeof input.enabled !== "boolean") return "enabled must be true (halt) or false (resume).";
+      if (input.enabled && (typeof input.reason !== "string" || input.reason.trim() === "")) return "A reason is required to halt trading: ask the human why.";
+      if (typeof input.reason === "string" && input.reason.length > 300) return "The reason must be at most 300 characters.";
+      return null;
+    },
+    describeForConfirmation: (input) => buildTradingHaltCard(input.enabled === true, input.reason),
+    describeResult: (result) =>
+      (result as { enabled?: boolean } | null)?.enabled === true
+        ? "🛑 Trading is HALTED. No order will reach IBKR until it is resumed."
+        : "✅ Trading is resumed: orders reach IBKR again.",
+    execute: (input, api) => api.put("/risk-limits/trading-halt", { enabled: input.enabled, reason: typeof input.reason === "string" && input.reason.trim() !== "" ? input.reason.trim() : null }),
   },
 ];

@@ -1,14 +1,14 @@
 import { OptionType } from "@stoqey/ib";
-import { db } from "../db/connection.js";
 import { subscribeToPooledQuote, waitForFirstReading } from "../ibkr/marketDataPool.js";
 import { checkDeltaCompliance, type DeltaComplianceResult } from "../ibkr/streamOrderLegQuote.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
+import { loadRecoveryTargetWindow } from "./recoveryTargetWindow.js";
 
-// Server-side delta band (gap fix 5 for Pluto, 2026-09-28). The Order Review panel has gated
-// Confirm on the option leg's live delta being inside the strategy's screening range since
-// 2026-08-27, but only in the browser. This runs the same check at the real transmit point,
-// with the panel's exact semantics: opening orders only, fail closed when the delta is not
-// available, the same checkDeltaCompliance the quote stream feeds the panel.
+// The delta band at the real transmit point (and at order preview, for every origin). The Order Review panel has
+// gated Confirm on the option leg's live delta being inside the band since 2026-08-27, but only in the browser;
+// this runs the same check on the server with the panel's exact semantics: opening orders only, fail closed when
+// the delta is not available, the same checkDeltaCompliance the quote stream feeds the panel. The band is the
+// single one in trading_settings (the same band Signals and the Recovery Path scan use).
 
 export interface OrderRequestForDeltaBand {
   request_type: string;
@@ -26,9 +26,12 @@ export async function evaluateDeltaBandForOrderRequest(orderRequest: OrderReques
   const { payload } = orderRequest;
   const optionLeg = payload.legs.find((leg) => leg.role === "option")!;
 
-  const strategySettings = await db("strategy_settings").where({ strategy_key: payload.strategyKey }).first();
-  const deltaTargetMin = strategySettings?.delta_target_min !== undefined && strategySettings?.delta_target_min !== null ? Number(strategySettings.delta_target_min) : null;
-  const deltaTargetMax = strategySettings?.delta_target_max !== undefined && strategySettings?.delta_target_max !== null ? Number(strategySettings.delta_target_max) : null;
+  let band: { deltaTargetMin: number; deltaTargetMax: number } | null;
+  try {
+    band = await loadRecoveryTargetWindow();
+  } catch {
+    band = null;
+  }
 
   let delta: number | null = null;
   let unsubscribe: (() => void) | null = null;
@@ -43,9 +46,9 @@ export async function evaluateDeltaBandForOrderRequest(orderRequest: OrderReques
     );
     await settled;
   } catch (error) {
-    return { compliant: false, reason: `Live delta could not be read (${error instanceof Error ? error.message : String(error)}) — can't verify this trade against the strategy's screening range.` };
+    return { compliant: false, reason: `Live delta could not be read (${error instanceof Error ? error.message : String(error)}) — can't verify this trade against the delta band.` };
   } finally {
     unsubscribe?.();
   }
-  return checkDeltaCompliance(delta, deltaTargetMin, deltaTargetMax);
+  return checkDeltaCompliance(delta, band?.deltaTargetMin ?? null, band?.deltaTargetMax ?? null);
 }

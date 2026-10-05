@@ -26,7 +26,7 @@ export async function fetchBreakEvenByPositionId(tickerIds: string[]): Promise<M
        FROM position_legs pl
        JOIN positions p ON p.id = pl.position_id
        LEFT JOIN daily_price_bars b ON b.ticker_id = p.ticker_id AND b.trading_date = pl.expiry_date
-       WHERE pl.leg_type = 'option' AND p.ticker_id = ANY(?)`,
+       WHERE pl.leg_type = 'option' AND pl.side = 'short' AND p.ticker_id = ANY(?)`,
       [uniqueTickerIds],
     ),
     db.raw(
@@ -44,7 +44,8 @@ export async function fetchBreakEvenByPositionId(tickerIds: string[]): Promise<M
        GROUP BY p.ticker_id`,
       [uniqueTickerIds],
     ),
-    db.raw(`SELECT p.id, p.ticker_id AS "tickerId" FROM positions p WHERE p.status = 'open' AND p.ticker_id = ANY(?)`, [uniqueTickerIds]),
+    // A hedge has no break-even, and its long leg stays out of the wheel's ledger above.
+    db.raw(`SELECT p.id, p.ticker_id AS "tickerId" FROM positions p WHERE p.status = 'open' AND p.strategy_key <> 'hedge' AND p.ticker_id = ANY(?)`, [uniqueTickerIds]),
   ]);
 
   const openStockSharesByTicker = new Map<string, number>(openStockRows.rows.map((row: any) => [row.tickerId, Number(row.shares)]));

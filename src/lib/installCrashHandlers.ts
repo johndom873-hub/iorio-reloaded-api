@@ -31,7 +31,7 @@ export function installCrashHandlers(processName: string): void {
     console.error(`[FATAL ${kind}] ${processName} at ${timestamp} (uptime ${uptimeSeconds}s)\n${err.stack ?? err.message}`);
 
     const summary = `🔥 ${processName} crashed (${kind}) after ${uptimeSeconds}s uptime:\n${err.message}\n\nFull stack trace in the logs.`;
-    withTimeout(notifyTelegram(summary), notifyTimeoutMs).finally(() => process.exit(1));
+    withTimeout(notifyTelegram(summary).then(() => undefined), notifyTimeoutMs).finally(() => process.exit(1));
   }
 
   process.on("uncaughtException", (error) => handleFatal("uncaughtException", error));

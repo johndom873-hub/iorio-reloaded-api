@@ -16,6 +16,8 @@ export type MarketSessionState = "pre-market" | "open" | "after-hours" | "closed
 export interface MarketSessionStatus {
   state: MarketSessionState;
   label: string;
+  /** ISO instant the countdown in `label` runs to, so a client can keep ticking it down between polls. */
+  nextChangeAt: string;
 }
 
 export function easternDateIso(instant: Date): string {
@@ -121,21 +123,21 @@ export async function computeMarketSessionStatus(now: Date = new Date()): Promis
   const afterHoursEnd = easternInstant(dateIso, AFTER_HOURS_END.hour, AFTER_HOURS_END.minute);
 
   if (todayIsOpen && now >= preMarketStart && now < regularOpen) {
-    return { state: "pre-market", label: formatCountdown(regularOpen.getTime() - now.getTime(), "opens in") };
+    return { state: "pre-market", label: formatCountdown(regularOpen.getTime() - now.getTime(), "opens in"), nextChangeAt: regularOpen.toISOString() };
   }
   if (todayIsOpen && now >= regularOpen && now < regularClose) {
-    return { state: "open", label: formatCountdown(regularClose.getTime() - now.getTime(), "closes in") };
+    return { state: "open", label: formatCountdown(regularClose.getTime() - now.getTime(), "closes in"), nextChangeAt: regularClose.toISOString() };
   }
   if (todayIsOpen && now >= regularClose && now < afterHoursEnd) {
-    return { state: "after-hours", label: formatCountdown(afterHoursEnd.getTime() - now.getTime(), "closes in") };
+    return { state: "after-hours", label: formatCountdown(afterHoursEnd.getTime() - now.getTime(), "closes in"), nextChangeAt: afterHoursEnd.toISOString() };
   }
   if (todayIsOpen && now < preMarketStart) {
-    return { state: "closed", label: formatCountdown(regularOpen.getTime() - now.getTime(), "opens in") };
+    return { state: "closed", label: formatCountdown(regularOpen.getTime() - now.getTime(), "opens in"), nextChangeAt: regularOpen.toISOString() };
   }
 
   const nextDateIso = await nextOpenDateAfter(dateIso);
   const nextOpen = easternInstant(nextDateIso, REGULAR_OPEN.hour, REGULAR_OPEN.minute);
-  return { state: "closed", label: formatCountdown(nextOpen.getTime() - now.getTime(), "opens in") };
+  return { state: "closed", label: formatCountdown(nextOpen.getTime() - now.getTime(), "opens in"), nextChangeAt: nextOpen.toISOString() };
 }
 
 function previousCalendarDate(dateIso: string): string {

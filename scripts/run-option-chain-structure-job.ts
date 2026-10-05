@@ -5,16 +5,18 @@
 // captures at 10:00 ET. Running this first means the 10:00 ET job reads
 // today's structure from the DB instead of re-fetching it from IBKR.
 //
-// One fixed-UTC Scheduler entry (12:00 UTC), unlike the ticks job's
+// One fixed-UTC Scheduler entry (09:00 UTC), unlike the ticks job's
 // DST-paired pair — this job isn't pinned to a specific ET time the way
 // "30 minutes after the open" is, so it doesn't need the two-slot trick:
-// 12:00 UTC is always well clear of IBKR Gateway's overnight restart and
-// comfortably ahead of the 10:00 ET ticks job (7:00 ET in winter, 8:00 ET in
-// summer — either way, hours of slack).
+// 09:00 UTC is always well clear of IBKR Gateway's 05:30 UTC restart and
+// ahead of the 6:00 ET pre-open readiness check (4:00 ET in winter, 5:00 ET in
+// summer), which reports on today's structure.
 //
 // Usage (dev):  npm run job:option-chain-structure
 // Usage (prod): node dist/scripts/run-option-chain-structure-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { runOptionChainStructureRefresh } from "../src/ibkr/runOptionChainStructureRefresh.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
@@ -32,25 +34,32 @@ async function main(): Promise<void> {
       const result = await runOptionChainStructureRefresh((event) => {
         if (event.type === "tickerDone") {
           const slowest = event.timings.expiries.reduce((max, expiry) => Math.max(max, expiry.elapsedMs), 0);
+          const reused = event.timings.expiries.filter((expiry) => expiry.reused).length;
           console.log(
-            `${event.symbol}: structure refreshed in ${(event.timings.totalMs / 1000).toFixed(1)}s (expiries ${event.timings.optionParamsMs}ms; ${event.expiryCount} strike grids, ${event.strikeCount} strikes total, slowest ${slowest}ms).`,
+            `${event.symbol}: structure refreshed in ${(event.timings.totalMs / 1000).toFixed(1)}s (expiries ${event.timings.optionParamsMs}ms; ${event.expiryCount} strike grids, ${event.expiryCount - reused} looked up, ${reused} reused; ${event.strikeCount} strikes total, slowest ${slowest}ms).`,
           );
-        } else {
+        } else if (event.type === "tickerError") {
           console.warn(`${event.symbol}: structure refresh failed — ${event.message}`);
+        } else {
+          console.warn(`Stopping after ${event.afterSymbol}'s IBKR timeout (the request stays queued in the Gateway; sending more would stall it). Not attempted: ${event.skippedSymbols.join(", ")}.`);
         }
       });
-      console.log(`Structure refresh: ${result.tickersComplete} complete, ${result.tickersFailed} failed of ${result.tickersAttempted}.`);
-      return { details: { ...result } };
+      console.log(
+        `Structure refresh: ${result.tickersComplete} complete, ${result.tickersFailed} failed, ${result.skippedSymbols.length} skipped of ${result.tickersAttempted} (${result.gridLookups} grid lookups, ${result.gridsReused} reused).`,
+      );
+      const incomplete = [...result.failedSymbols, ...result.skippedSymbols];
+      return {
+        details: { ...result },
+        failureMessage:
+          result.tickersAttempted === 0
+            ? "no tickers to refresh (shortlist and open positions are both empty)"
+            : incomplete.length > 0
+              ? `${incomplete.length} of ${result.tickersAttempted} tickers have no structure today, so the capture skips them: ${incomplete.join(", ")}`
+              : undefined,
+      };
     },
     { triggeredBy: "scheduler" },
   );
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await db.destroy();
-  });
+runScript("run-option-chain-structure-job", main, () => db.destroy());

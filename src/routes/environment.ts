@@ -7,6 +7,7 @@ import { fetchTradingHalt } from "../lib/platformControls.js";
 import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { daySignalsLoopLineHolder } from "../lib/daySignalsLoop.js";
+import { marketDataFeedRefusal } from "../ibkr/marketDataPool.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 
 // Feeds the top-bar environment badges (PAPER / LIVE / STAGING / DEV / TRADING BLOCKED).
@@ -22,7 +23,7 @@ environmentRouter.get("/", (_request, response) => {
 environmentRouter.get("/details", requireAuth, async (_request, response) => {
   const apiEnvironment = readAppEnvironment();
   // The Day Signals loop holds its priority lines for the whole session (Marcelo 2026-09-24): that is
-  // normal operation, not a restriction, so only the chain capture / trade-alert scan drive the banner.
+  // normal operation, not a restriction, so only the chain capture drives the banner.
   const [workerRow, marketDataRestriction, tradingHalt] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
     loadMarketDataLineRestriction({ excludeHolders: [daySignalsLoopLineHolder] }),
@@ -33,7 +34,7 @@ environmentRouter.get("/details", requireAuth, async (_request, response) => {
     environment: apiEnvironment,
     tradingMode: environment.ibkrTradingMode,
     trading,
-    // The operator kill switch (Risk & Limits → Trading halt). `trading.state` is "halted" while on.
+    // The operator kill switch (Risk & Limits, Trading halt). `trading.state` is "halted" while it is on.
     tradingHalt: {
       enabled: tradingHalt.enabled,
       reason: tradingHalt.reason,
@@ -44,6 +45,8 @@ environmentRouter.get("/details", requireAuth, async (_request, response) => {
     marketDataRestriction,
     // False when IBKR_MARKET_DATA_LINES_ENABLED=false — the top bar's "Real-time data disabled" state.
     marketDataLinesEnabled: ibkrMarketDataLinesEnabled(),
+    // Non-null while IBKR refuses the live pool's data (10197; see marketDataPool.ts) — the top bar's "Live prices stopped" state.
+    marketDataFeedRefusal: marketDataFeedRefusal(),
     worker: workerRow
       ? {
           gitSha: workerRow.git_sha ? String(workerRow.git_sha).slice(0, 7) : null,

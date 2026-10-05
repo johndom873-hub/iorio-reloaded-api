@@ -67,7 +67,7 @@ async function loadNextEvents(tickerId: string) {
   };
 }
 
-// Ticker Detail modal's price bar can be opened for any ticker, not just
+// Signals ticker modal's price bar can be opened for any ticker, not just
 // shortlisted/open-position ones the nightly job:daily-calendar-capture
 // covers -- so a ticker with no captured rows yet is fetched from
 // TradingView on the spot (same call the shortlist-add flow uses) rather

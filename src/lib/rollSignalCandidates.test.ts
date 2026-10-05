@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, computeFrictionCost } from "./optionFriction.js";
 import { buildSignalCandidates, gradeForNetEdge, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { assignmentRiskDeltaThreshold, buildRollCandidates, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs, type OpenShortLeg } from "./rollSignalCandidates.js";
+import { buildCommissionEstimator } from "./commissionEstimate.js";
+import { assignmentRiskDeltaThreshold, buildRollCandidates, recostReplacementCommission, scoreRollPair, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs, type OpenShortLeg } from "./rollSignalCandidates.js";
 
 // Formula 3j (approved 2026-09-24). Fixtures mirror signalsLiveScoring.test.ts: one
 // SVI surface, a 30-day and a 60-day slice with the SAME implied volatility at every
@@ -67,8 +68,10 @@ function candidates(quotes = otmQuotes): SignalCandidate[] {
       snapshotDateIso,
       freeShares: 0,
       freeCash: 1_000_000,
-      maxNetDelta: 1,
+      deltaTargetMin: 0,
+      deltaTargetMax: 1,
       minAnnualizedYieldPct: 0,
+      spreadShareCharged: 1,
     }),
   );
 }
@@ -87,7 +90,7 @@ const leg = (overrides: Partial<OpenShortLeg> = {}): OpenShortLeg => ({
 });
 
 function scoreOne(theLeg: OpenShortLeg, quotes: SignalQuote[] = otmQuotes) {
-  return scoreHeldLegs([theLeg], { spotPrice: forward, riskFreeRate: rate, forecast, slices, quotes })[0]!;
+  return scoreHeldLegs([theLeg], { spotPrice: forward, riskFreeRate: rate, forecast, slices, quotes, spreadShareCharged: 1 })[0]!;
 }
 
 describe("scoreHeldLegs", () => {
@@ -96,7 +99,7 @@ describe("scoreHeldLegs", () => {
     expect(held.unscoredReason).toBeNull();
     const iv = surfaceIvAt(95, expiry30);
     const quote = otmQuotes.find((q) => q.expiry === expiry30 && q.strike === 95 && q.right === "P")!;
-    const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward, strike: 95, yearsToExpiry: years30, riskFreeRate: rate, impliedVolatility: iv })!;
+    const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward, strike: 95, yearsToExpiry: years30, riskFreeRate: rate, impliedVolatility: iv, spreadShareCharged: 1 })!;
     expect(held.surfaceImpliedVolatility).toBeCloseTo(iv, 12);
     expect(held.edge).toBeCloseTo(iv - forecast.volatility, 12);
     expect(held.frictionVolatility).toBeCloseTo(friction.frictionVolatility, 12);
@@ -127,12 +130,12 @@ describe("scoreHeldLegs", () => {
     const iv = Math.sqrt(sviTotalVariance(shortSlice.parameters!, Math.log(95 / forward)) / shortSlice.yearsToExpiry);
     const mid = blackScholesPriceOnForward(forward, 95, shortSlice.yearsToExpiry, rate, iv, false);
     const quote: SignalQuote = { expiry: "2026-10-10", strike: 95, right: "P", bid: mid * 0.98, ask: mid * 1.02, source: "day", quotedAt: "2026-09-24T15:00:00Z" };
-    const held = scoreHeldLegs([leg({ expiry: "2026-10-10", entryPrice: mid / decayedFractionOfEntryCredit + 0.01 })], { spotPrice: forward, riskFreeRate: rate, forecast, slices: [shortSlice], quotes: [quote] })[0]!;
+    const held = scoreHeldLegs([leg({ expiry: "2026-10-10", entryPrice: mid / decayedFractionOfEntryCredit + 0.01 })], { spotPrice: forward, riskFreeRate: rate, forecast, slices: [shortSlice], quotes: [quote], spreadShareCharged: 1 })[0]!;
     expect(held.dte).toBeLessThanOrEqual(nearExpiryDaysThreshold);
     expect(held.flags).toEqual(["near_expiry", "decayed"]);
     expect(held.quoteSource).toBe("day");
     expect(held.quotedAt).toBe("2026-09-24T15:00:00Z");
-    const notDecayed = scoreHeldLegs([leg({ expiry: "2026-10-10", entryPrice: mid })], { spotPrice: forward, riskFreeRate: rate, forecast, slices: [shortSlice], quotes: [quote] })[0]!;
+    const notDecayed = scoreHeldLegs([leg({ expiry: "2026-10-10", entryPrice: mid })], { spotPrice: forward, riskFreeRate: rate, forecast, slices: [shortSlice], quotes: [quote], spreadShareCharged: 1 })[0]!;
     expect(notDecayed.flags).toEqual(["near_expiry"]);
   });
 
@@ -143,8 +146,31 @@ describe("scoreHeldLegs", () => {
     expect(noQuote.dte).toBe(30);
     const oneSided = scoreOne(leg(), [...otmQuotes.filter((q) => !(q.strike === 95 && q.expiry === expiry30)), { expiry: expiry30, strike: 95, right: "P", bid: 1.2, ask: null }]);
     expect(oneSided.unscoredReason).toBe("no_quote");
-    expect(scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast: null, slices, quotes: otmQuotes })[0]!.unscoredReason).toBe("no_forecast");
+    expect(scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast: null, slices, quotes: otmQuotes, spreadShareCharged: 1 })[0]!.unscoredReason).toBe("no_forecast");
     expect(heldLegContractKey(leg())).toBe(`${expiry30}|95|P`);
+  });
+
+  it("keeps a real two-sided quote on a leg that is unscored for another reason, so a roll can still be priced at the quotes", () => {
+    const putQuote = { ...otmQuotes.find((q) => q.expiry === expiry30 && q.strike === 95 && q.right === "P")!, source: "day" as const, quotedAt: "2026-09-24T15:00:00Z" };
+    const midOfPut = (putQuote.bid! + putQuote.ask!) / 2;
+
+    const rejectedFit = scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast, slices: [{ ...slices[0]!, status: "poor_fit" }, slices[1]!], quotes: [putQuote], spreadShareCharged: 1 })[0]!;
+    expect(rejectedFit.unscoredReason).toBe("no_slice");
+    expect(rejectedFit).toMatchObject({ bid: putQuote.bid, ask: putQuote.ask, quoteSource: "day", quotedAt: "2026-09-24T15:00:00Z", edge: null, delta: null });
+    expect(rejectedFit.mid).toBeCloseTo(midOfPut, 12);
+    expect(rejectedFit.dollarRisk).toBeCloseTo(95 * 100 - midOfPut, 9);
+
+    const coveredCall = leg({ strategyKey: "covered_call", right: "C", strike: 105 });
+    const callQuote = otmQuotes.find((q) => q.expiry === expiry30 && q.strike === 105 && q.right === "C")!;
+    const noSlice = scoreHeldLegs([coveredCall], { spotPrice: 98, riskFreeRate: rate, forecast, slices: [], quotes: [callQuote], spreadShareCharged: 1 })[0]!;
+    expect(noSlice.unscoredReason).toBe("no_slice");
+    expect(noSlice.dollarRisk).toBeCloseTo(98 * 100 - (callQuote.bid! + callQuote.ask!) / 2, 9);
+
+    const noForecast = scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast: null, slices, quotes: [putQuote], spreadShareCharged: 1 })[0]!;
+    expect(noForecast).toMatchObject({ unscoredReason: "no_forecast", bid: putQuote.bid, ask: putQuote.ask, quoteSource: "day" });
+
+    expect(scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast, slices: [], quotes: [], spreadShareCharged: 1 })[0]).toMatchObject({ unscoredReason: "no_slice", bid: null, ask: null, mid: null, dollarRisk: null });
+    expect(scoreRollPair(rejectedFit, candidates()[0]!)).toBeNull();
   });
 });
 
@@ -225,5 +251,69 @@ describe("buildRollCandidates", () => {
     expect(heldCall.dollarRisk).toBeCloseTo(forward * 100 - heldCall.mid!, 9);
     const callRolls = buildRollCandidates([heldCall], all);
     expect(callRolls.every((roll) => roll.replacement.strategyKey === "covered_call")).toBe(true);
+  });
+});
+
+describe("scoreRollPair", () => {
+  const held = scoreOne(leg());
+  const all = candidates();
+  const putAt = (strike: number, expiry: string) => all.find((B) => B.strategyKey === "cash_secured_put" && B.strike === strike && B.expiry === expiry)!;
+
+  it("is Formula 3j with no warnings for a listed roll, and buildRollCandidates returns exactly those pairs", () => {
+    const listed = buildRollCandidates([held], all);
+    expect(listed.length).toBeGreaterThan(0);
+    for (const roll of listed) {
+      expect(scoreRollPair(held, roll.replacement)).toEqual(roll);
+      expect(roll.warnings).toEqual([]);
+    }
+  });
+
+  it("turns the list's two hard filters into warnings instead of dropping the pair", () => {
+    const debit = scoreRollPair(held, putAt(90, expiry30))!; // cheaper, lower delta
+    expect(debit.warnings).toEqual(["debit"]);
+    expect(debit.netCreditPerShare).toBeLessThan(0);
+    expect(debit.netRollEdge).toBeCloseTo(debit.replacement.netEdge - held.edge! - held.frictionVolatility!, 12);
+    const highDeltaHeld = scoreOne(leg({ strike: 90 }));
+    const higher = scoreRollPair(highDeltaHeld, putAt(95, expiry30))!;
+    expect(higher.warnings).toContain("higher_delta");
+    expect(higher.deltaChange).toBeGreaterThan(0);
+  });
+
+  it("is null for the same contract, the other right, or an unscored held leg", () => {
+    expect(scoreRollPair(held, putAt(95, expiry30))).toBeNull();
+    const call = all.find((B) => B.strategyKey === "covered_call")!;
+    expect(scoreRollPair(held, call)).toBeNull();
+    const unscored = scoreOne(leg(), []);
+    expect(unscored.unscoredReason).not.toBeNull();
+    expect(scoreRollPair(unscored, putAt(90, expiry30))).toBeNull();
+  });
+
+  describe("commission at the held leg's size (approved 2026-10-02)", () => {
+    // 10 sell orders of 5+ contracts at $1.00 a contract: a bucket the flat $0.68 does not match.
+    const largeSizeEstimator = buildCommissionEstimator(Array.from({ length: 10 }, () => ({ side: "sell" as const, contracts: 6, commissionDollars: 6 })));
+    const replacement = buildRollCandidates([held], all)[0]!.replacement;
+
+    it("leaves a replacement unchanged when the leg's size estimates the same commission", () => {
+      expect(recostReplacementCommission(replacement, 1, largeSizeEstimator)).toBe(replacement);
+    });
+
+    it("re-prices the commission term at the leg's size and moves every derived field with it", () => {
+      const recosted = recostReplacementCommission(replacement, 6, largeSizeEstimator);
+      const extraDollars = 1.0 - 0.68;
+      expect(recosted.commissionPerContractDollars).toBe(1.0);
+      expect(recosted.netEdge).toBeCloseTo(replacement.netEdge - extraDollars / 100 / replacement.vega, 12);
+      expect(recosted.edgeDollars).toBeCloseTo(replacement.edgeDollars - extraDollars, 10);
+      expect(recosted.frictionVolatility).toBeCloseTo(replacement.frictionVolatility + extraDollars / 100 / replacement.vega, 12);
+      expect(recosted.riskAdjustedRatio).toBeCloseTo(recosted.edgeDollars / recosted.dollarRisk, 12);
+      expect(recosted.grade).toBe(gradeForNetEdge(recosted.netEdge));
+    });
+
+    it("scoreRollPair carries the re-priced replacement into net roll Edge", () => {
+      const sixContractHeld = { ...held, quantity: 6 };
+      const flat = scoreRollPair(sixContractHeld, replacement)!;
+      const sized = scoreRollPair(sixContractHeld, replacement, largeSizeEstimator)!;
+      expect(sized.netRollEdge).toBeCloseTo(flat.netRollEdge - (1.0 - 0.68) / 100 / replacement.vega, 12);
+      expect(sized.replacement.commissionPerContractDollars).toBe(1.0);
+    });
   });
 });

@@ -24,18 +24,19 @@ const MAX_ITERATIONS = 8;
 // without letting one call bloat the whole context window.
 const TOOL_RESULT_SIZE_LIMIT = 20_000;
 
-const SYSTEM_PROMPT = `You are Genosuke, a Telegram assistant for Iorio Reloaded — a covered-calls / cash-secured-puts options trading platform for one two-person team (Marce and Juan). You have direct read access to positions, trade alerts, the trade blotter, risk settings, and the shortlist, and can take some actions on request.
+const SYSTEM_PROMPT = `You are Genosuke, a Telegram assistant for Iorio Reloaded — a covered-calls / cash-secured-puts options trading platform for one two-person team (Marce and Juan). You have direct read access to positions, the trade blotter, risk settings, and the shortlist, and can take some actions on request.
 
 Ground rules:
 - Telegram doesn't render markdown here — reply in plain text, no headers/bold/bullets asterisks.
 - Keep replies short: 1-4 sentences for a simple question. Only go longer if the user is asking for a real breakdown (e.g. "summarize my open positions").
 - Never fabricate a number. Every figure you state must come from a tool call in this conversation — if you don't have it, call the right tool or say you don't have it.
 - Dates/times you receive are ISO or already formatted — don't reformat them into a different convention than what you were given.
-- Some tools have a financial consequence (creating/rolling/closing a position, rejecting an alert, changing risk settings). Calling one of those tools does NOT execute it — it sends the user a Yes/Cancel confirmation card in Telegram, with the order details and its own Yes/Cancel buttons, and only executes if they tap Yes. That card already tells the user what you're about to do, so after calling one of these tools, reply with nothing else in that turn — don't restate the confirmation in a separate message. Don't call the tool again in the same turn, and don't claim the action is done until you separately see it confirmed.
-- Each leg in a position result has isOpen. Close and roll orders use ONLY legs with isOpen: true — never a leg that has already expired or been closed (exitAt set), and a close must include every open leg. For an unstructured position holding only stock, that means selling just the shares.
-- When asked what positions we hold, list every open position, including strategy "unstructured" (bare stock and anything that fits neither strategy) — call list_positions (it returns every strategy in one call). Never report only covered calls and puts as if they were everything.
-- Position IDs from earlier in the conversation can be stale (rolled or closed since). Before any close or roll, and whenever a position lookup fails, call list_positions again and find the position by symbol — never ask the user to re-request the positions list, and never give up on a lookup error without re-fetching first. Only ask the user if the fresh list has zero or several matches.
-- If a request is ambiguous (which position, which strategy, which alert) ask one clarifying question rather than guessing on something with real financial consequence.
+- Some tools have a financial consequence (creating/closing a position, changing risk settings, halting or resuming all trading). Calling one of those tools does NOT execute it — it sends the user a Yes/Cancel confirmation card in Telegram, with the order details and its own Yes/Cancel buttons, and only executes if they tap Yes. That card already tells the user what you're about to do, so after calling one of these tools, reply with nothing else in that turn — don't restate the confirmation in a separate message. Don't call the tool again in the same turn, and don't claim the action is done until you separately see it confirmed. Before the card is sent, the platform checks the order against the same limits the web app uses (position size, exposure per ticker, cash reserve, the delta band, whether a close is allowed right now). If the tool instead returns an error saying the order was blocked or could not be built, nothing was placed: tell the user the exact reason in plain words and do not retry with changed numbers unless they ask. Warnings the platform found are already listed on the card.
+- You cannot roll a position: rolls are placed from the app's Signals screen. If asked to roll, say so.
+- Each leg in a position result has isOpen. Close orders use ONLY legs with isOpen: true — never a leg that has already expired or been closed (exitAt set), and a close must include every open leg. For an unstructured position holding only stock, that means selling just the shares.
+- When asked what positions we hold, list every open position, including strategy "hedge" (a long option held as a hedge) and "unstructured" (bare stock and anything that fits none of the strategies) — call list_positions (it returns every strategy in one call). Never report only covered calls and puts as if they were everything.
+- Position IDs from earlier in the conversation can be stale (rolled or closed since). Before any close, and whenever a position lookup fails, call list_positions again and find the position by symbol — never ask the user to re-request the positions list, and never give up on a lookup error without re-fetching first. Only ask the user if the fresh list has zero or several matches.
+- If a request is ambiguous (which position, which strategy) ask one clarifying question rather than guessing on something with real financial consequence.
 - Only two strategies are supported, and every order needs a specific set of fields — never guess a missing one or fill it with a placeholder:
   - covered_call: a stock leg (100 shares/contract by default, computed by you, not the human) + a short call (contracts, limit price, strike, expiry).
   - cash_secured_put: a short put only (contracts, limit price, strike, expiry) — no stock leg. Never send a stock leg, zeroed or otherwise, for this strategy.
@@ -105,23 +106,38 @@ export async function chatOnce({ messages, userMessage, chatId, adapter, api, te
         if (!tool) return { id, content: `Error: unknown tool "${name}".` };
 
         if (tool.tier === "financial-write" || tool.tier === "infra-write") {
-          // Provably-wrong requests (e.g. closing an already-expired leg) go back to the model
-          // as an error so it can retry — no card, no wasted tap. A failed lookup never blocks
-          // the gate: the card falls back to the raw input, and the route still validates on Yes.
-          try {
-            const problem = await tool.validateBeforeConfirmation?.(input, api);
-            if (problem) return { id, content: `Error: ${problem}` };
-          } catch (error) {
-            console.error(`Genosuke: pre-confirmation check for "${name}" failed`, error);
-          }
           let description: string;
-          try {
-            description = (await tool.describeForConfirmation?.(input, api)) ?? name;
-          } catch (error) {
-            console.error(`Genosuke: could not build the readable card for "${name}"`, error);
-            description = `${name} ${JSON.stringify(input)}`;
+          let prepared: unknown;
+          if (tool.prepareConfirmation) {
+            // The order is built and its gates read BEFORE the card, so the human sees the same blocks and warnings as the web order review.
+            // A block (or any failure) goes back to the model as an error: no card, nothing left confirmable.
+            try {
+              const result = await tool.prepareConfirmation(input, api);
+              if (result.problem !== undefined) return { id, content: `Error: ${result.problem}` };
+              description = result.description;
+              prepared = result.prepared;
+            } catch (error) {
+              console.error(`Genosuke: preparing "${name}" failed`, error);
+              return { id, content: `Error: ${error instanceof Error ? error.message : String(error)}` };
+            }
+          } else {
+            // Provably-wrong requests (e.g. closing an already-expired leg) go back to the model
+            // as an error so it can retry — no card, no wasted tap. A failed lookup never blocks
+            // the gate: the card falls back to the raw input, and the route still validates on Yes.
+            try {
+              const problem = await tool.validateBeforeConfirmation?.(input, api);
+              if (problem) return { id, content: `Error: ${problem}` };
+            } catch (error) {
+              console.error(`Genosuke: pre-confirmation check for "${name}" failed`, error);
+            }
+            try {
+              description = (await tool.describeForConfirmation?.(input, api)) ?? name;
+            } catch (error) {
+              console.error(`Genosuke: could not build the readable card for "${name}"`, error);
+              description = `${name} ${JSON.stringify(input)}`;
+            }
           }
-          const confirmation = createConfirmation(chatId, name, input, description);
+          const confirmation = createConfirmation(chatId, name, input, description, prepared);
           await telegram.sendMessage(chatId, `Confirm:\n${description}`, {
             buttons: [
               [

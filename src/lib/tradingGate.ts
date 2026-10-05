@@ -27,9 +27,8 @@ export interface TradingStatus {
 }
 
 /**
- * "halted" = the operator kill switch is on (platform_controls.trading_halt, gap fix 1 for Pluto,
- * 2026-09-28) — it outranks everything else because it is the one state a human chose; "offline" =
- * no fresh heartbeat (never reported, or stale); "blocked" = the worker is there but not allowed to trade.
+ * "halted" = the operator kill switch is on (platform_controls.trading_halt) -- it outranks everything else because it is the
+ * one state a human chose; "offline" = no fresh heartbeat (never reported, or stale); "blocked" = the worker is there but not allowed to trade.
  */
 export function classifyTradingStatus(row: WorkerHealthForTradingGate | undefined, apiEnvironment: string, nowMs: number = Date.now(), halt?: TradingHalt): TradingStatus {
   const haltReason = halt ? describeTradingHaltBlock(halt, nowMs) : null;
@@ -55,7 +54,7 @@ export function findTradingBlockedReason(row: WorkerHealthForTradingGate | undef
   return classifyTradingStatus(row, apiEnvironment, nowMs, halt).reason;
 }
 
-/** Halt first, then the worker heartbeat/binding. A failed halt read throws — the caller's 500 is the fail-closed outcome. */
+/** Halt first, then the worker heartbeat and binding. A failed halt read throws: the caller's 500 is the fail-closed outcome. */
 export async function fetchTradingBlockedReason(): Promise<string | null> {
   const [row, halt] = await Promise.all([db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(), fetchTradingHalt()]);
   return findTradingBlockedReason(row, readAppEnvironment(), Date.now(), halt);

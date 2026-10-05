@@ -16,6 +16,8 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/check-ibkr-health.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { runIbkrHealthCheckJob } from "../src/ibkr/checkIbkrHealthJob.js";
 import { db } from "../src/db/connection.js";
 
@@ -52,9 +54,4 @@ async function main(): Promise<void> {
   await runIbkrHealthCheckJob();
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("check-ibkr-health", main, () => db.destroy());

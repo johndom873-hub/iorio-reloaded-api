@@ -10,7 +10,7 @@ export interface PlutoTodayCounters {
   costTodayUsd: number;
 }
 
-const actionOutcomesThatCount = ["order_built", "confirmed", "filled", "partially_filled", "cancelled", "rejected", "error"];
+const actionOutcomesThatCount = ["order_built", "confirmed", "filled", "partially_filled", "cancelled", "cancelled_partially_filled", "rejected", "error"];
 
 export async function loadPlutoTodayCounters(now: Date = new Date()): Promise<PlutoTodayCounters> {
   const todayIso = easternDateIso(now);

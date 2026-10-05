@@ -30,6 +30,11 @@ import { requireEnvironmentVariable } from "../config/env.js";
 //     their transfer successors get entry_price = strike, but ONLY when the
 //     chain ends closed — the worker re-syncs an open leg's entry_price to
 //     IBKR's average cost every pass, so an open chain is reported, not edited.
+//     When the assigned shares merged with shares already held (a covered call that
+//     expired with its shares retained, then a put assigned) IBKR reports ONE leg at the
+//     blended cost, so the target is the blended cost with the put priced at the strike
+//     (see expectBlendedAssignmentEntries); approved 2026-10-01.
+// A leg with settlement_audit_acknowledged_at set is left out entirely (reviewed by hand).
 
 export type ExpirySettlementMode = "dry_run" | "apply";
 
@@ -41,6 +46,11 @@ export interface ExpirySettlementAction {
    * right-after-expiry notification) correlate a "marginal_call" back to the specific closed
    * position it's about, without parsing the description text. */
   positionId: string;
+  /** For a "skipped" or "marginal_call" item: which leg it is, and what needs a person. `description` is the two joined, for logs. */
+  headline?: string;
+  detail?: string;
+  /** A "skipped" item that is a normal waiting state (an assigned stock chain that is still open), not something anyone must fix: it never fails the nightly run. */
+  informational?: boolean;
   /** Realized P&L this correction adds, when it can be stated. */
   pnlDelta?: number;
 }
@@ -99,6 +109,15 @@ function money(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
+function legHeadline(leg: ExpiredShortOptionLeg): string {
+  return `${leg.symbol} ${leg.optionType} $${leg.strike} (exp ${leg.expiryDate})`;
+}
+
+function reviewAction(kind: "skipped" | "marginal_call", leg: ExpiredShortOptionLeg, detail: string, informational?: boolean): ExpirySettlementAction {
+  const headline = legHeadline(leg);
+  return { kind, symbol: leg.symbol, positionId: leg.positionId, headline, detail, description: `${headline} — ${detail}`, informational };
+}
+
 async function loadExpiredShortOptionLegs(database: Knex): Promise<ExpiredShortOptionLeg[]> {
   const result = await database.raw(`
     SELECT pl.id, pl.position_id AS "positionId", p.ticker_id AS "tickerId", t.symbol,
@@ -112,6 +131,7 @@ async function loadExpiredShortOptionLegs(database: Knex): Promise<ExpiredShortO
     WHERE pl.leg_type = 'option' AND pl.side = 'short'
       AND pl.expiry_date < (now() AT TIME ZONE 'America/New_York')::date
       AND pl.exit_at IS NOT NULL AND (pl.exit_price = 0 OR pl.exit_price IS NULL)
+      AND pl.settlement_audit_acknowledged_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade)
     ORDER BY pl.expiry_date, t.symbol, pl.strike_price
   `);
@@ -149,12 +169,7 @@ async function correctCallAway(database: Knex, leg: ExpiredShortOptionLeg, mode:
     return;
   }
   if (candidateShares !== calledAwayShares) {
-    actions.push({
-      kind: "skipped",
-      symbol: leg.symbol,
-      positionId: leg.positionId,
-      description: `${leg.symbol} call $${leg.strike} ITM at expiry covers ${calledAwayShares} sh but the position's uncorrected stock legs total ${candidateShares} sh — needs manual review`,
-    });
+    actions.push(reviewAction("skipped", leg, `ITM at expiry, covers ${calledAwayShares} sh but the position's uncorrected stock legs total ${candidateShares} sh — needs manual review`));
     return;
   }
 
@@ -172,12 +187,78 @@ async function correctCallAway(database: Knex, leg: ExpiredShortOptionLeg, mode:
   await setCloseReasonAssigned(database, leg, mode, actions);
 }
 
+export interface BlendedAssignmentInput {
+  strike: number;
+  /** Premium received per share on the assigned put. */
+  premiumPerShare: number;
+  assignedShares: number;
+  /** Shares that were already held and merged with the assigned ones, and their average cost. */
+  otherShares: number;
+  otherSharesEntryPrice: number;
+}
+
+/**
+ * What IBKR's blended average cost is (the put's premium baked into the assigned shares' cost, which the put leg also keeps
+ * as premium, so it counts twice) and what it should be (the assigned shares priced at the strike). Rounded to the 4 decimals
+ * entry_price stores.
+ */
+export function expectBlendedAssignmentEntries(input: BlendedAssignmentInput): { uncorrectedEntry: number; correctedEntry: number } {
+  const totalShares = input.assignedShares + input.otherShares;
+  const blend = (assignedSharePrice: number) => Number(((input.otherSharesEntryPrice * input.otherShares + assignedSharePrice * input.assignedShares) / totalShares).toFixed(4));
+  return { uncorrectedEntry: blend(input.strike - input.premiumPerShare), correctedEntry: blend(input.strike) };
+}
+
+/**
+ * The single stock leg (or its slices) holding assigned shares merged with shares carried over from a covered call that
+ * expired with them retained. Positive evidence only: the legs entered together with the put's close, an earlier leg handed
+ * its shares over at its own entry price right before, the share counts add up, and the entry price is exactly the blended cost
+ * (still uncorrected) or exactly the corrected one (already fixed). Anything else is not claimed.
+ */
+async function findBlendedAssignmentLegs(
+  database: Knex,
+  leg: ExpiredShortOptionLeg,
+  assignedShares: number,
+): Promise<{ legs: StockLegRow[]; targetEntry: number; totalShares: number; otherShares: number; otherSharesEntryPrice: number } | null> {
+  const candidates: StockLegRow[] = (
+    await database.raw(
+      `SELECT pl.id, pl.quantity, pl.entry_price::float AS "entryPrice", pl.exit_price::float AS "exitPrice", pl.exit_at AS "exitAt", pl.entry_at AS "entryAt"
+       FROM position_legs pl JOIN positions p ON p.id = pl.position_id
+       WHERE p.ticker_id = ? AND pl.leg_type = 'stock' AND pl.side = 'long'
+         AND pl.entry_at BETWEEN ?::timestamptz - interval '${assignmentEntryWindowMinutes} minutes' AND ?::timestamptz + interval '${assignmentEntryWindowMinutes} minutes'`,
+      [leg.tickerId, leg.exitAt, leg.exitAt],
+    )
+  ).rows;
+  if (candidates.length === 0) return null;
+  const totalShares = candidates.reduce((sum, candidate) => sum + candidate.quantity, 0);
+  const earliestEntryAt = new Date(Math.min(...candidates.map((candidate) => new Date(candidate.entryAt).getTime())));
+
+  const handedOverLegs: StockLegRow[] = (
+    await database.raw(
+      `SELECT pl.id, pl.quantity, pl.entry_price::float AS "entryPrice", pl.exit_price::float AS "exitPrice", pl.exit_at AS "exitAt", pl.entry_at AS "entryAt"
+       FROM position_legs pl JOIN positions p ON p.id = pl.position_id
+       WHERE p.ticker_id = ? AND pl.leg_type = 'stock' AND pl.side = 'long' AND pl.exit_at IS NOT NULL
+         AND abs(pl.exit_price - pl.entry_price) < 0.0001
+         AND abs(extract(epoch FROM pl.exit_at - ?::timestamptz)) <= ${transferWindowSeconds}`,
+      [leg.tickerId, earliestEntryAt],
+    )
+  ).rows.filter((handedOver: StockLegRow) => !candidates.some((candidate) => candidate.id === handedOver.id));
+  const otherShares = handedOverLegs.reduce((sum, handedOver) => sum + handedOver.quantity, 0);
+  if (otherShares === 0 || totalShares - otherShares !== assignedShares) return null;
+
+  const otherSharesEntryPrice = Number((handedOverLegs.reduce((sum, handedOver) => sum + handedOver.entryPrice * handedOver.quantity, 0) / otherShares).toFixed(4));
+  const { uncorrectedEntry, correctedEntry } = expectBlendedAssignmentEntries({ strike: leg.strike, premiumPerShare: leg.entryPrice, assignedShares, otherShares, otherSharesEntryPrice });
+  const candidateEntry = Number((candidates.reduce((sum, candidate) => sum + candidate.entryPrice * candidate.quantity, 0) / totalShares).toFixed(4));
+  const matchesExpectation = (expected: number) => Math.abs(candidateEntry - expected) <= entryToleranceCents;
+  if (!matchesExpectation(uncorrectedEntry) && !matchesExpectation(correctedEntry)) return null;
+  return { legs: candidates, targetEntry: correctedEntry, totalShares, otherShares, otherSharesEntryPrice };
+}
+
 async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, mode: ExpirySettlementMode, actions: ExpirySettlementAction[]): Promise<void> {
   await setCloseReasonAssigned(database, leg, mode, actions);
 
   const assignedShares = leg.quantity * leg.multiplier;
   const expectedPremiumAdjustedEntry = leg.strike - leg.entryPrice;
-  const firstLegs: StockLegRow[] = (
+  let firstLegs: StockLegRow[] = (
     await database.raw(
       `SELECT pl.id, pl.quantity, pl.entry_price::float AS "entryPrice", pl.exit_price::float AS "exitPrice", pl.exit_at AS "exitAt", pl.entry_at AS "entryAt"
        FROM position_legs pl JOIN positions p ON p.id = pl.position_id
@@ -188,13 +269,28 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
       [leg.tickerId, leg.exitAt, leg.exitAt, expectedPremiumAdjustedEntry, entryToleranceCents, leg.strike, entryToleranceCents],
     )
   ).rows;
+  // The entry every assigned-share leg in the chain should end up at: the put's strike, or the blended cost when the assigned shares merged
+  // with shares already held.
+  let targetEntry = leg.strike;
+  let expectedChainShares = assignedShares;
+  let blendedWith: { otherShares: number; otherSharesEntryPrice: number } | null = null;
   if (firstLegs.length === 0) {
-    actions.push({
-      kind: "skipped",
-      symbol: leg.symbol,
-      positionId: leg.positionId,
-      description: `${leg.symbol} put $${leg.strike} ITM at expiry (${money(leg.expiryClose!)}) but no stock leg entered at strike − premium (${money(expectedPremiumAdjustedEntry)}) — assigned shares not tracked as a leg; manual review`,
-    });
+    const blended = await findBlendedAssignmentLegs(database, leg, assignedShares);
+    if (blended) {
+      firstLegs = blended.legs;
+      targetEntry = blended.targetEntry;
+      expectedChainShares = blended.totalShares;
+      blendedWith = blended;
+    }
+  }
+  if (firstLegs.length === 0) {
+    actions.push(
+      reviewAction(
+        "skipped",
+        leg,
+        `ITM at expiry (${money(leg.expiryClose!)}) but no stock leg entered at strike − premium (${money(expectedPremiumAdjustedEntry)}) — assigned shares not tracked as a leg; manual review`,
+      ),
+    );
     return;
   }
 
@@ -215,22 +311,25 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
     chain.push(...successors);
   }
 
-  const chainTotalIsAssignedShares = firstLegs.reduce((sum, stockLeg) => sum + stockLeg.quantity, 0) === assignedShares;
+  const chainTotalIsAssignedShares = firstLegs.reduce((sum, stockLeg) => sum + stockLeg.quantity, 0) === expectedChainShares;
   const chainEndsOpen = chain.some((stockLeg) => stockLeg.exitAt === null);
-  if (!chainTotalIsAssignedShares || chainEndsOpen) {
-    actions.push({
-      kind: "skipped",
-      symbol: leg.symbol,
-      positionId: leg.positionId,
-      description: chainEndsOpen
-        ? `${leg.symbol} put $${leg.strike} assigned: stock chain is still open (worker re-syncs its entry to IBKR average cost) — cost basis handled in the cycle view, not edited`
-        : `${leg.symbol} put $${leg.strike} assigned: chain share total does not equal ${assignedShares} — manual review`,
-    });
+  const chainSkip = classifyAssignedChainSkip(chainTotalIsAssignedShares, chainEndsOpen);
+  if (chainSkip !== null) {
+    actions.push(
+      reviewAction(
+        "skipped",
+        leg,
+        chainSkip === "informational"
+          ? "assigned, stock chain is still open (worker re-syncs its entry to IBKR average cost) — cost basis handled in the cycle view, not edited"
+          : `assigned, chain share total does not equal ${expectedChainShares}${chainEndsOpen ? " (and the chain is still open)" : ""} — manual review`,
+        chainSkip === "informational",
+      ),
+    );
     return;
   }
 
   for (const stockLeg of chain) {
-    if (Math.abs(stockLeg.entryPrice - leg.strike) < 0.0001) continue; // already corrected
+    if (Math.abs(stockLeg.entryPrice - targetEntry) < 0.0001) continue; // already corrected
     // A leg closed at exit == entry is a strategy handoff (or a retained/called-away leg not yet priced): keep
     // exit == entry so its zero P&L stays zero and the call-away step can still recognise it. A real exit keeps
     // its price, so the stock P&L drops by the premium that used to be baked into the cost.
@@ -240,12 +339,12 @@ async function correctPutAssignment(database: Knex, leg: ExpiredShortOptionLeg, 
       kind: "put_assigned_stock_entry",
       symbol: leg.symbol,
       positionId: leg.positionId,
-      description: `${leg.symbol} assigned stock leg: entry ${money(stockLeg.entryPrice)} -> ${money(leg.strike)} (put strike)${exitEqualsEntry ? ", exit moved with it (handoff)" : ""}`,
-      pnlDelta: hasRealExit ? -(leg.strike - stockLeg.entryPrice) * stockLeg.quantity : 0,
+      description: `${leg.symbol} assigned stock leg: entry ${money(stockLeg.entryPrice)} -> ${money(targetEntry)} (${blendedWith ? `put strike blended with the ${blendedWith.otherShares} sh already held at ${money(blendedWith.otherSharesEntryPrice)}` : "put strike"})${exitEqualsEntry ? ", exit moved with it (handoff)" : ""}`,
+      pnlDelta: hasRealExit ? -(targetEntry - stockLeg.entryPrice) * stockLeg.quantity : 0,
     });
     if (mode === "apply") {
-      const update: Record<string, number> = { entry_price: leg.strike };
-      if (exitEqualsEntry) update.exit_price = leg.strike;
+      const update: Record<string, number> = { entry_price: targetEntry };
+      if (exitEqualsEntry) update.exit_price = targetEntry;
       await database("position_legs").where({ id: stockLeg.id }).update(update);
     }
   }
@@ -278,16 +377,15 @@ async function findAndCorrect(database: Knex): Promise<Omit<ExpirySettlementResu
       });
       await database("position_legs").where({ id: leg.id }).update({ exit_price: 0 });
     }
-    if (leg.expiryClose === null) continue; // no bar for the expiry date (yet) — retried on the next run
+    if (leg.expiryClose === null) {
+      // No bar for the expiry date (yet): retried on the next run, but flagged so a bar that never arrives is not silent.
+      actions.push(reviewAction("skipped", leg, "no daily bar for the expiry date, so assignment could not be checked"));
+      continue;
+    }
     const distanceInTheMoney = leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose;
     if (distanceInTheMoney <= 0) continue; // OTM: worthless is right
     if (distanceInTheMoney < marginalThreshold) {
-      actions.push({
-        kind: "marginal_call",
-        symbol: leg.symbol,
-        positionId: leg.positionId,
-        description: `${leg.symbol} ${leg.optionType} $${leg.strike} finished only ${money(distanceInTheMoney)} in the money (close ${money(leg.expiryClose)}) — too close to call, manual review`,
-      });
+      actions.push(reviewAction("marginal_call", leg, `finished only ${money(distanceInTheMoney)} in the money (close ${money(leg.expiryClose)}) — too close to call, manual review`));
       continue;
     }
     if (leg.optionType === "call") await correctCallAway(database, leg, "apply", actions);
@@ -340,4 +438,27 @@ export function summarizeExpirySettlement(mode: ExpirySettlementMode, result: Ex
         changes.map((action) => `• ${action.description}`).join("\n") +
         (skipped.length > 0 ? `\n${skipped.length} item(s) need manual review (see job log).` : "");
   return { changes, skipped, pnlDelta, notify };
+}
+
+/**
+ * The nightly job alert for the skipped legs that need someone, or undefined when there are none (informational waiting
+ * states are ignored): a summary line, then one block per leg (its identity, then what to do). Plain text — Telegram
+ * escapes the whole message — and constant between runs while nothing changes, so the throttled alert does not re-send.
+ * Free of "): " so it survives Telegram's failure summary.
+ */
+export function buildExpiryAuditFailureMessage(skipped: ExpirySettlementAction[]): string | undefined {
+  const needsAttention = skipped.filter((action) => !action.informational);
+  if (needsAttention.length === 0) return undefined;
+  const blocks = needsAttention.map((action) => (action.headline && action.detail ? `${action.headline}\n${action.detail}` : action.description));
+  return `${needsAttention.length} expired leg(s) need review or could not be audited\n\n${blocks.join("\n\n")}`.replaceAll("): ", ") - ");
+}
+
+/**
+ * Why an assigned put's stock chain cannot be corrected automatically, or null when it can. A chain that matches the assigned
+ * shares but is still open is a normal waiting state ("informational": it never fails the nightly run); a share-total mismatch,
+ * open or not, needs someone.
+ */
+export function classifyAssignedChainSkip(chainTotalIsAssignedShares: boolean, chainEndsOpen: boolean): "informational" | "needs_review" | null {
+  if (!chainTotalIsAssignedShares) return "needs_review";
+  return chainEndsOpen ? "informational" : null;
 }

@@ -27,10 +27,8 @@ interface PlatformControlRow {
 }
 
 function toTradingHalt(row: PlatformControlRow | undefined): TradingHalt {
-  // Fail closed only on the enforcement side: a missing row (migration not yet
-  // applied) reads as "no halt" here, and the callers that must fail closed check
-  // separately whether the table answered at all.
-  if (!row) return { enabled: false, reason: null, setByUserId: null, setByDisplayName: null, setAt: null };
+  // Fails closed: the migration seeds this row, so a missing row means the switch's state cannot be known and trading stays halted.
+  if (!row) return { enabled: true, reason: "the trading-halt switch row is missing from platform_controls", setByUserId: null, setByDisplayName: null, setAt: null };
   return {
     enabled: Boolean(row.enabled),
     reason: row.reason ?? null,

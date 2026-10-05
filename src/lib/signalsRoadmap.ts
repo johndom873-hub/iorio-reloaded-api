@@ -165,16 +165,7 @@ export function buildTickerCaveats(inputs: TickerCaveatInputs, todayIso: string)
       eta: { kind: "text", text: "Scored on the next refresh after the backfill" },
     });
   }
-  if (inputs.unscoredReason === "stale_surface" && inputs.snapshotDateIso !== null) {
-    caveats.push({
-      id: "stale_surface",
-      title: `Not scored: the newest surface is from ${inputs.snapshotDateIso}`,
-      summary: `That surface is more than one trading session old (max age approved 2026-09-28), so nothing is graded from it — a re-timed surface that old no longer describes the market.`,
-      needs: "Today's capture to run",
-      status: "waiting_on_next_run",
-      eta: { kind: "text", text: "Next capture" },
-    });
-  } else if (inputs.snapshotDateIso !== null && inputs.snapshotDateIso !== todayIso) {
+  if (inputs.snapshotDateIso !== null && inputs.snapshotDateIso !== todayIso) {
     caveats.push({
       id: "stale_surface",
       title: `Scored on a stale surface: ${inputs.snapshotDateIso}`,

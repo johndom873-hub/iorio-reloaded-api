@@ -1,6 +1,7 @@
 import { db } from "../db/connection.js";
 import { fetchNewTickerData } from "./fetchNewTickerData.js";
 import { startTickerBackfill, type TickerBackfillRun } from "./tickerBackfillPipeline.js";
+import { invalidatePricePerformanceSnapshot } from "../lib/pricePerformanceSnapshot.js";
 
 export interface FindOrCreateTickerResult {
   ticker: { id: string; symbol: string; company_name: string | null; sector: string | null };
@@ -99,6 +100,8 @@ export async function addTickerToShortlist(
       notes: notes ?? null,
     })
     .returning("*");
+  // Price Performance caches its table for a minute; its live stream reads the shortlist directly.
+  invalidatePricePerformanceSnapshot();
 
   // The entry is already saved; a backfill that cannot start must not read
   // as "add failed" (2026-09-24). Reported as null — the row shows no run.

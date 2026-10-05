@@ -59,8 +59,8 @@ type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
 /**
  * One-shot pricing snapshot — for callers that need a single point-in-time
- * price and move on programmatically (trade alert generation/refresh, the
- * New Position live-quote stream), not a long-lived UI screen. See
+ * price and move on programmatically (the recovery path, the assistant's
+ * quote lookup), not a long-lived UI screen. See
  * streamPricingUpdates below for the continuous version the Ticker Detail
  * modal uses instead.
  *
@@ -134,8 +134,7 @@ async function lookupPricingSnapshotUnbudgeted(connection: IbkrConnection, symbo
       // Accepts both — real-time entitlement enabled 2026-08-31 sends
       // real-time tick types regardless of what reqMarketDataType() requests; an
       // accept-delayed-only filter here silently produced null spot prices
-      // for every ticker from that point on (see fetchOptionChain.ts's
-      // matching comment on the trade-alert outage this caused).
+      // for every ticker from that point on.
       if (tickType === 1 || tickType === 66) pricing.bid = value;
       if (tickType === 2 || tickType === 67) pricing.ask = value;
       if (tickType === 4 || tickType === 68) {

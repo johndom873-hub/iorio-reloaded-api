@@ -7,17 +7,17 @@ export interface RestartIbkrGatewayOptions {
   sshPrivateKey: Buffer;
 }
 
-// Restarts the IBKR Gateway container on the VPS over SSH — see
-// restart-gateway.sh's own header comment for why this always restarts
-// unconditionally rather than checking first. Only invoked by
-// checkIbkrHealthJob.ts after its own real IBKR API handshake already
-// confirmed the Gateway is unreachable.
+// Recovers the IBKR Gateway on the VPS over SSH. The key's forced command fixes the action and the
+// environment (`gateway-control.sh recover paper|live`): a session-preserving restart first, and
+// only on paper a cold restart as the fallback — live never gets one, since that needs a 2FA approval.
+// Only invoked by checkIbkrHealthJob.ts after its own real IBKR API handshake already confirmed the
+// Gateway is unreachable (or the historical-data probe failed twice).
 export function restartIbkrGatewayOnVps(options: RestartIbkrGatewayOptions): Promise<ForcedCommandSshResult> {
   return runForcedCommandSsh({
     ...options,
-    // restart-gateway.sh polls for login completion (up to 60s) plus a
-    // settle buffer and restart/log overhead — margin above that worst case.
-    timeoutMs: 120_000,
+    // The script waits up to 60s for the Gateway to go down and 240s for it to come back (the paper
+    // cold-restart fallback adds up to 90s more); a normal session restart finishes in about 1-2 minutes.
+    timeoutMs: 420_000,
     timeoutMessage: "Timed out running IBKR Gateway restart script on VPS.",
   });
 }

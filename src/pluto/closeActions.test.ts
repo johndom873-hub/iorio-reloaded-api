@@ -42,7 +42,7 @@ describe("Formula P2 — short-leg buyback", () => {
     legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, right: "P", quantity: 2, entryPrice: 2.4, entryAtIso: "2026-09-10T14:00:00Z",
     dte: 18, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42, edge: -0.05, frictionVolatility: 0.01, vega: 0.05, holdEdgeDollars: -25, closeCostDollars: 5, dollarRisk: 9948, quoteSource: "day", quotedAt: "2026-09-28T15:00:00Z", flags: [], unscoredReason: null,
   };
-  const roll = (grade: RollSignalCandidate["grade"]): RollSignalCandidate => ({ legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", quantity: 2, replacement: {} as never, netRollEdge: 0.01, netRollEdgeDollarsPerContract: 5, netRollEdgeDollars: 10, netCreditPerShare: 0.1, deltaChange: -0.01, dollarRiskChange: 0, flags: [], grade });
+  const roll = (grade: RollSignalCandidate["grade"]): RollSignalCandidate => ({ legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", quantity: 2, replacement: {} as never, netRollEdge: 0.01, netRollEdgeDollarsPerContract: 5, netRollEdgeDollars: 10, netCreditPerShare: 0.1, deltaChange: -0.01, dollarRiskChange: 0, flags: [], warnings: [], grade });
   const base = { symbol: "HOOD", leg, rolls: [], settings, singleLegPosition: true };
 
   it("offers the buyback at the mid when holding has negative net value and the ask locks a profit", () => {

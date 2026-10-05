@@ -1,3 +1,4 @@
+import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 
@@ -6,6 +7,34 @@ import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 // the worker's post-close Telegram notification (ibkrGatewayWorker.ts) — see
 // positions.ts's own header comment for the approved realizedPnl/
 // capitalAtRisk formulas (2026-08-21).
+// The option leg's strike collateral (a position with no open stock leg): the open leg if there is one, else the latest.
+const optionCollateralSql = `
+        SELECT pl.strike_price * pl.multiplier * pl.quantity
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'option'
+        ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
+        LIMIT 1
+      `;
+
+// The same collateral summed over every leg of the contract that leg is (same strike, expiry and type): a short put bought back a few
+// contracts at a time leaves closed slices of one contract, and the P&L they realized is earned on all of them. A rolled-away leg
+// is a different contract and stays out. Approved 2026-10-01 (the option half of capitalDeployed).
+const optionDeployedSql = `
+        SELECT SUM(same_contract.strike_price * same_contract.multiplier * same_contract.quantity)
+        FROM position_legs same_contract
+        JOIN (
+          SELECT pl.strike_price, pl.expiry_date, pl.option_type
+          FROM position_legs pl
+          WHERE pl.position_id = p.id AND pl.leg_type = 'option'
+          ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
+          LIMIT 1
+        ) chosen
+          ON same_contract.strike_price = chosen.strike_price
+          AND same_contract.expiry_date IS NOT DISTINCT FROM chosen.expiry_date
+          AND same_contract.option_type = chosen.option_type
+        WHERE same_contract.position_id = p.id AND same_contract.leg_type = 'option'
+      `;
+
 export const positionSelect = `
   SELECT
     p.id,
@@ -82,7 +111,13 @@ export const positionSelect = `
     -- and showed "–" for EXP $/% on those rows — same bug class already
     -- fixed for Stock P&L display 2026-08-30, see positionHasStockLeg's
     -- doc comment in positionPnl.ts. Fixed 2026-09-24.
+    -- A hedge (long option) can lose at most the premium paid, not the strike (approved 2026-10-01).
     CASE
+      WHEN p.strategy_key = 'hedge' THEN (
+        SELECT SUM(pl.entry_price * pl.multiplier * pl.quantity)
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'option'
+      )
       WHEN EXISTS (
         SELECT 1 FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.exit_at IS NULL
@@ -92,14 +127,28 @@ export const positionSelect = `
         WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.exit_at IS NULL
         LIMIT 1
       )
-      ELSE (
-        SELECT pl.strike_price * pl.multiplier * pl.quantity
+      ELSE (${optionCollateralSql})
+    END AS "capitalAtRisk",
+    -- The base for P&L %, approved 2026-10-01: the same as capitalAtRisk, except that it also counts what
+    -- partial closes already carved off (closed stock slices while shares are still held; closed slices of
+    -- the same option contract), because the P&L it divides includes their realized result. capitalAtRisk
+    -- itself stays the capital exposed NOW (EXP $, EXP %, Pulse exposure).
+    CASE
+      WHEN p.strategy_key = 'hedge' THEN (
+        SELECT SUM(pl.entry_price * pl.multiplier * pl.quantity)
         FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.leg_type = 'option'
-        ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
-        LIMIT 1
       )
-    END AS "capitalAtRisk"
+      WHEN EXISTS (
+        SELECT 1 FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.exit_at IS NULL
+      ) THEN (
+        SELECT SUM(pl.entry_price * pl.quantity)
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'stock'
+      )
+      ELSE (${optionDeployedSql})
+    END AS "capitalDeployed"
   FROM positions p
   JOIN tickers t ON t.id = p.ticker_id
 `;
@@ -130,6 +179,8 @@ export interface PositionRow {
   realizedPremiumPnl: string;
   realizedStockPnl: string;
   capitalAtRisk: string | null;
+  /** Base for P&L %: capitalAtRisk plus what partial closes already carved off (sold stock slices, closed slices of the same option contract). */
+  capitalDeployed: string | null;
   closeReason: string | null;
   unstructuredReason: string | null;
 }
@@ -156,13 +207,15 @@ export async function fetchAvailableUncoveredShares(tickerId: string): Promise<n
   return Number(result?.total ?? 0);
 }
 
-// Which strategies already have an open position on this ticker — used to
-// suppress new-trade candidate generation for a strategy that already has
-// exposure here (the ticker's own roll scan is what should surface it
-// instead). See generateTradeAlertCandidatesForTicker.
-export async function fetchOpenPositionStrategyKeys(tickerId: string): Promise<Set<string>> {
-  const rows: { strategyKey: string }[] = await db("positions")
-    .where({ ticker_id: tickerId, status: "open" })
-    .distinct("strategy_key as strategyKey");
-  return new Set(rows.map((r) => r.strategyKey));
+// Number of open positions on a ticker. A shortlist entry can't be removed
+// while this is above zero: the nightly chain capture and Day Signals (roll
+// signals included) cover shortlisted tickers only, so dropping the ticker
+// would orphan a live position.
+export async function countOpenPositionsForTicker(tickerId: string, trx: Knex = db): Promise<number> {
+  const result = await trx("positions").where({ ticker_id: tickerId, status: "open" }).count({ total: "*" }).first();
+  return Number(result?.total ?? 0);
+}
+
+export function describeOpenPositionsBlockingRemoval(openPositionCount: number): string {
+  return `${openPositionCount} open position${openPositionCount === 1 ? "" : "s"} on this ticker. Close ${openPositionCount === 1 ? "it" : "them"} before removing.`;
 }

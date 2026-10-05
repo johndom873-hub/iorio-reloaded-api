@@ -10,13 +10,14 @@ import type { VolatilityEdge } from "./volatilityEdge.js";
 // points of edge given up to trade this contract. Entry cost only (sold and held to
 // expiry); closing early and rolling carry their own costs, handled in the roll logic.
 //
-// λ = 1.0 (Marcelo's choice, against the 0.5 recommendation): the whole half-spread
-// is charged, i.e. a fill at the bid. c = $0.68 per contract, the mean of the 94 option
-// trades stored in `trades` (0.07 volatility points in the typical alert region).
+// λ = the Risk & Limits spread cost, default 0.5 (Marcelo 2026-10-05). Orders go out as limits at the
+// mid, which never fill worse than the mid, but a fill tends to come once the price has moved toward the
+// limit, up to half a spread below the fair price at that moment: λ is the expected share of that half-spread. c = the estimated commission per contract (commissionEstimate.ts,
+// trailing fills by side and size); the flat $0.68 below, the mean of the first 94 option trades
+// stored in `trades` (0.07 volatility points in the typical alert region), is the fallback.
 // Measured on the real AAOI chain, 21 Sep 2026, the half-spread alone is ~5 volatility
 // points for |delta| 0.15–0.30 at 20–60 days.
 
-export const spreadShareCharged = 1.0;
 export const commissionPerContractDollars = 0.68;
 export const sharesPerContract = 100;
 
@@ -38,6 +39,10 @@ export interface FrictionInput {
   riskFreeRate: number;
   /** Fitted implied volatility at the strike (annualized decimal). */
   impliedVolatility: number;
+  /** Estimated commission in dollars per contract; the flat commissionPerContractDollars when omitted. */
+  commissionPerContractDollars?: number;
+  /** λ: the share of the half-spread charged (0..1), from the Risk & Limits spread cost. */
+  spreadShareCharged: number;
 }
 
 export interface FrictionCost {
@@ -54,8 +59,8 @@ export function computeFrictionCost(input: FrictionInput): FrictionCost | null {
   if (!(input.forward > 0) || !(input.strike > 0) || !(input.yearsToExpiry > 0) || !(input.impliedVolatility > 0)) return null;
   const vega = blackScholesVega(input.forward, input.strike, input.yearsToExpiry, input.riskFreeRate, input.impliedVolatility);
   if (!(vega > 0) || !Number.isFinite(vega)) return null;
-  const spreadVolatility = (spreadShareCharged * (ask - bid)) / 2 / vega;
-  const commissionVolatility = commissionPerContractDollars / sharesPerContract / vega;
+  const spreadVolatility = (input.spreadShareCharged * (ask - bid)) / 2 / vega;
+  const commissionVolatility = (input.commissionPerContractDollars ?? commissionPerContractDollars) / sharesPerContract / vega;
   return { frictionVolatility: spreadVolatility + commissionVolatility, spreadVolatility, commissionVolatility };
 }
 

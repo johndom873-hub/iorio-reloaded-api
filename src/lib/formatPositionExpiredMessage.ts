@@ -1,7 +1,7 @@
 // Telegram message for a position that fully closed via option expiry (see
 // ibkrGatewayWorker.ts's reconcilePositionsFromIbkr — the "no closing trade
 // found, past expiry" path, which is the only trigger for this message).
-// Plain-text style matching formatTradeAlertMessage.ts, not HTML tags —
+// Plain-text style like the other Telegram messages, not HTML tags —
 // notifyTelegram HTML-escapes the whole message before sending.
 export interface PositionExpiredLegSummary {
   legType: "stock" | "option";

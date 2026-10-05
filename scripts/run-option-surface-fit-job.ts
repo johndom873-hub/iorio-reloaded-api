@@ -7,6 +7,8 @@
 // Usage: npm run job:option-surface-fit [-- --date YYYY-MM-DD] [-- SYMBOL ...]
 // Default date = today's Eastern date. Prod: node dist/scripts/run-option-surface-fit-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { runOptionSurfaceFitJob } from "../src/lib/runOptionSurfaceFitJob.js";
@@ -21,9 +23,4 @@ async function main(): Promise<void> {
   await runOptionSurfaceFitJob(tradingDate, { symbols, triggeredBy: "manual" });
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("run-option-surface-fit-job", main, () => db.destroy());

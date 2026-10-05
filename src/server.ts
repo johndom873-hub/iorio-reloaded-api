@@ -1,14 +1,17 @@
+import "./lib/installWebCrashAlert.js";
 import { app } from "./app.js";
 import { environment, ibkrMarketDataLinesEnabled, requireEnvironmentVariable } from "./config/env.js";
 import { startStalePendingOrderSweep } from "./lib/stalePendingOrders.js";
 import { startGenosuke } from "./genosuke/bot.js";
 import { sharedLiveConnection, sharedReadConnection } from "./ibkr/sharedReadConnection.js";
-import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { installShutdownHandler } from "./lib/installShutdownHandler.js";
 import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
+import { startOpsMonitor } from "./lib/opsMonitor.js";
+import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
+import { readAppEnvironment } from "./lib/appEnvironment.js";
+import { validatePasskeyConfiguration } from "./config/passkeyLoginMode.js";
 
-installCrashHandlers("web");
 installShutdownHandler("web");
 
 // Only the web dyno gets a $PORT from Heroku — read lazily here rather than
@@ -30,8 +33,16 @@ if (daySignalsLoopFlag !== "true" && daySignalsLoopFlag !== "false") {
 const marketDataLinesEnabled = ibkrMarketDataLinesEnabled();
 if (!marketDataLinesEnabled) console.log("IBKR market-data lines disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false): live quotes, option chains and the Day Signals loop will not open lines.");
 
+// Validated at boot like the flags above: a missing PASSKEY_LOGIN would otherwise surface as a 500 on the first request.
+validatePasskeyConfiguration();
+
 app.listen(port, () => {
-  console.log(`Iorio Reloaded API listening on port ${port} (${environment.nodeEnvironment})`);
+  console.log(`Iorio Reloaded API listening on port ${port} (${readAppEnvironment()})`);
+  // A killed process (out of memory, a Heroku platform restart) can never send its own alert, so every
+  // start announces itself: an unexpected restart or a crash loop shows up as repeated messages.
+  Promise.resolve()
+    .then(() => announceWebDynoStart({ subject: "API" }))
+    .catch((error) => console.error(`Could not send the start notice: ${error instanceof Error ? error.message : error}`));
   startNotificationBroadcaster();
   startStalePendingOrderSweep();
   // Open the shared IBKR read and live connections now (2026-09-19) rather than on the
@@ -52,6 +63,7 @@ app.listen(port, () => {
   // self-authenticating API client (genosuke/apiClient.ts) has a live
   // server to call.
   startGenosuke();
+  startOpsMonitor();
   if (daySignalsLoopFlag === "true") startDaySignalsLoop();
   else console.log("Day Signals loop disabled (DAY_SIGNALS_LOOP_ENABLED=false).");
 });

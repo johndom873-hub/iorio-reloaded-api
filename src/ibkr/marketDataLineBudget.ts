@@ -10,8 +10,7 @@ import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 // probe) that aren't worth coordinating here — see PROGRESS.md.
 //
 // Priority reservations (approved 2026-09-24): the 10:00 ET chain capture
-// and the scheduled trade-alert scan (runTradeAlertGeneration.ts) reserve
-// their lines with `priority: true`. A priority reservation only has
+// and the Day Signals loop reserve their lines with `priority: true`. A priority reservation only has
 // to fit alongside other priority reservations, and its lines are subtracted
 // from what every non-priority holder may take — so live screens can never
 // starve the capture; they get whatever is left ("Fit" variant) and the live
@@ -114,13 +113,49 @@ export async function loadMarketDataLineRestriction(options: { excludeHolders?: 
   return { priorityLines: rows.reduce((sum, row) => sum + row.lines, 0), holders: rows.map((row) => row.holder) };
 }
 
-/** One sentence for a failed reservation, naming the scheduled scan (chain capture or trade-alert scan) when it's the reason. */
+/** One sentence for a failed reservation, naming the scheduled scan (chain capture) when it's the reason. */
 export function describeMarketDataLineShortage(result: LineReservationResult, what: string, linesNeeded: number): string {
   if (result.disabled) {
     return `IBKR market-data lines are disabled in this environment (IBKR_MARKET_DATA_LINES_ENABLED=false) — ${what} needs ${linesNeeded} lines.`;
   }
   if (result.priorityLinesHeld > 0) {
-    return `IBKR market data is restricted while a scheduled scan runs (the 10:00 ET chain capture or the trade-alert scan; ${result.priorityLinesHeld} lines reserved for it) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again after.`;
+    return `IBKR market data is restricted while a scheduled scan runs (the 10:00 ET chain capture; ${result.priorityLinesHeld} lines reserved for it) — ${what} needs ${linesNeeded} lines, ${result.availableLines} available. Try again after.`;
   }
   return `IBKR market data is busy (another live view) — ${what} needs ${linesNeeded} lines, only ${result.availableLines} available. Try again shortly.`;
+}
+
+export interface MarketDataLineUsage {
+  inUse: number;
+  budget: number;
+  byUse: { label: string; lines: number }[];
+}
+
+// Holder name prefix (before the first ":") → what the lines are for, as shown on Pulse.
+const lineHolderLabels: Record<string, string> = {
+  marketDataPool: "Screens",
+  optionChainCapture: "Chain capture",
+  daySignalsLoop: "Day Signals",
+  optionQuote: "Option quotes",
+  snapshot: "Snapshots",
+};
+
+/**
+ * Pure: lines in use across every process sharing the IBKR login. The live pool counts the lines it
+ * really has open (it can hold fewer than it reserved); every other holder fills its reservation for
+ * as long as it holds it (the capture keeps its window full, snapshots reserve exactly their size).
+ */
+export function summarizeMarketDataLineUsage(reservations: { holder: string; lines: number }[], poolOpenLines: number): MarketDataLineUsage {
+  const linesByLabel = new Map<string, number>([["Screens", poolOpenLines]]);
+  for (const { holder, lines } of reservations) {
+    const prefix = holder.split(":")[0]!;
+    if (prefix === "marketDataPool") continue;
+    const label = lineHolderLabels[prefix] ?? prefix;
+    linesByLabel.set(label, (linesByLabel.get(label) ?? 0) + lines);
+  }
+  const byUse = [...linesByLabel].map(([label, lines]) => ({ label, lines })).filter((use) => use.lines > 0);
+  return { inUse: byUse.reduce((sum, use) => sum + use.lines, 0), budget: totalMarketDataLineBudget, byUse };
+}
+
+export async function loadActiveMarketDataLineReservations(): Promise<{ holder: string; lines: number }[]> {
+  return db("ibkr_market_data_line_reservations").where("expires_at", ">", db.fn.now()).select("holder", "lines");
 }

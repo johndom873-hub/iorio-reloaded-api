@@ -3,12 +3,14 @@ import {
   checkCalendarArbitrage,
   computeForwardPrice,
   fitSviSlice,
+  parityImpliedForward,
   projectDividendSchedule,
   yearsBetweenIsoDates,
   type FitPointDropCounts,
   type SurfaceQuote,
   type SviSliceFit,
 } from "./impliedVolatilitySurface.js";
+import { median } from "./statistics.js";
 
 // Fits every expiry of one ticker's chain snapshot (Formula 3b) and runs the
 // calendar-arbitrage check between neighbouring fitted expiries. Pure: the DB
@@ -17,6 +19,8 @@ import {
 export interface SurfaceSnapshotQuote extends SurfaceQuote {
   /** ISO date YYYY-MM-DD. */
   expiry: string;
+  /** The underlying's price when this quote was taken; null/absent when the tick carried none. */
+  underlyingPrice?: number | null;
 }
 
 export interface SurfaceSnapshotInput {
@@ -35,6 +39,8 @@ export interface FittedExpiry {
   expiry: string;
   yearsToExpiry: number;
   forwardPrice: number;
+  /** The underlying price the forward is anchored to (the quotes' median underlying, else the snapshot spot): live scoring rescales the forward from it. */
+  underlyingPrice: number;
   slice: SviSliceFit;
   dropped: FitPointDropCounts;
   /** Calendar check against the previous expiry that produced a fit (0 / 0 for the first). */
@@ -45,6 +51,15 @@ export interface FittedExpiry {
 export type SurfaceFitOutcome =
   | { kind: "fitted"; expiries: FittedExpiry[] }
   | { kind: "skipped"; reason: "no_spot_price" | "no_risk_free_rate" | "no_quotes" };
+
+/**
+ * The underlying price the quotes were taken at (median across the expiry's quotes), or null when none carries one. The snapshot's own
+ * spot is read once before the quotes arrive, so on a fast mover it can sit far enough from them to split calls from puts at a short expiry.
+ */
+function underlyingPriceOfQuotes(quotes: SurfaceSnapshotQuote[]): number | null {
+  const prices = quotes.flatMap((quote) => (quote.underlyingPrice !== null && quote.underlyingPrice !== undefined && quote.underlyingPrice > 0 ? [quote.underlyingPrice] : []));
+  return prices.length === 0 ? null : median(prices);
+}
 
 export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOutcome {
   if (input.spotPrice === null || !(input.spotPrice > 0)) return { kind: "skipped", reason: "no_spot_price" };
@@ -66,9 +81,12 @@ export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOu
   for (const expiry of expiries) {
     const yearsToExpiry = yearsBetweenIsoDates(input.tradingDate, expiry);
     if (!(yearsToExpiry > 0)) continue; // expiring today: no time value to fit
-    const forwardPrice = computeForwardPrice(input.spotPrice, riskFreeRate, yearsToExpiry, dividends);
+    const expiryQuotes = input.quotes.filter((quote) => quote.expiry === expiry);
+    const underlyingPrice = underlyingPriceOfQuotes(expiryQuotes) ?? input.spotPrice;
+    const spotBasedForward = computeForwardPrice(underlyingPrice, riskFreeRate, yearsToExpiry, dividends);
+    const forwardPrice = parityImpliedForward(expiryQuotes, spotBasedForward, yearsToExpiry, riskFreeRate) ?? spotBasedForward;
     const { points, dropped } = buildSviFitPoints(
-      input.quotes.filter((quote) => quote.expiry === expiry),
+      expiryQuotes,
       forwardPrice,
       yearsToExpiry,
       riskFreeRate,
@@ -82,7 +100,7 @@ export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOu
       if (previousWithFit) ({ checks: calendarChecks, violations: calendarViolations } = checkCalendarArbitrage([previousWithFit, current]));
       previousWithFit = current;
     }
-    fitted.push({ expiry, yearsToExpiry, forwardPrice, slice, dropped, calendarChecks, calendarViolations });
+    fitted.push({ expiry, yearsToExpiry, forwardPrice, underlyingPrice, slice, dropped, calendarChecks, calendarViolations });
   }
   return { kind: "fitted", expiries: fitted };
 }

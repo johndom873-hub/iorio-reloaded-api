@@ -84,7 +84,7 @@ fi
 # (if present) before dropping the DB, then upsert it back in by id after the pull.
 # Note: pg:pull's own --exclude-table-data=public.users can't be used for this —
 # it leaves users empty at restore time, which fails FK constraints on other
-# tables' rows (shortlist_entries, trade_alerts) that reference prod's real user
+# tables' rows (shortlist_entries, order_requests) that reference prod's real user
 # ids. Pulling users fully, then upserting the local backup over it by id,
 # preserves login credentials without deleting any row other tables reference.
 USERS_BACKUP_FILE=$(mktemp)

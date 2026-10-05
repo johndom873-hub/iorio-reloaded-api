@@ -142,7 +142,7 @@ describe("stream multiplexer routes", () => {
       kinds: string[];
     };
     expect(handshake.protocolVersion).toBe(1);
-    expect(handshake.kinds).toEqual(expect.arrayContaining(["greeks", "pnl", "exposure", "pricePerformancePrices", "tradeAlertPrices", "notifications", "pulses"]));
+    expect(handshake.kinds).toEqual(expect.arrayContaining(["greeks", "pnl", "exposure", "pricePerformancePrices", "stockPrices", "notifications", "pulses"]));
   });
 
   it("opens with a hello frame, then subscribe -> data -> unsubscribe works end to end", async () => {

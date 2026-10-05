@@ -3,6 +3,7 @@ import { db } from "../db/connection.js";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { fetchPricesPoolFirst, streamPooledPrices } from "../ibkr/pricePool.js";
 import { dedupeInFlight } from "./dedupeInFlight.js";
+import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 
 // Position "exposure"/"value" = full market value across every open leg
 // (stock + option together), option legs priced as a liability — the
@@ -66,10 +67,13 @@ interface OpenPositionRow {
   sector: string;
 }
 
-async function resolveOpenPositionsAndLegs(): Promise<{ positions: OpenPositionRow[]; legs: OpenLegRow[] }> {
+async function resolveOpenPositionsAndLegs(symbol?: string): Promise<{ positions: OpenPositionRow[]; legs: OpenLegRow[] }> {
   const positions: OpenPositionRow[] = await db("positions as p")
     .join("tickers as t", "t.id", "p.ticker_id")
     .where("p.status", "open")
+    .modify((builder) => {
+      if (symbol !== undefined) builder.where("t.symbol", symbol);
+    })
     .select("p.id as positionId", "p.strategy_key as strategyKey", "t.symbol", db.raw("COALESCE(NULLIF(t.sector, ''), 'Unknown') AS sector"));
 
   if (positions.length === 0) return { positions, legs: [] };
@@ -78,6 +82,9 @@ async function resolveOpenPositionsAndLegs(): Promise<{ positions: OpenPositionR
     .join("positions as p", "p.id", "pl.position_id")
     .join("tickers as t", "t.id", "p.ticker_id")
     .where("p.status", "open")
+    .modify((builder) => {
+      if (symbol !== undefined) builder.where("t.symbol", symbol);
+    })
     .whereNull("pl.exit_at")
     .select(
       "pl.position_id as positionId",
@@ -142,6 +149,11 @@ function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegRow[], p
   }));
 }
 
+// The one-shot exposures (Dashboard, Risk & Limits) stop waiting this long after the last leg price arrived: a leg that
+// never ticks (no last trade at all) is valued at its entry price either way, and used to hold them to the 6 s ceiling.
+// A grace after the latest arrival, not a flat cap, so a slow leg that is still pricing is not cut off.
+const exposurePriceSettleGraceMs = 1_000;
+
 // Pool first (2026-09-24): legs already held by an open Positions/Pulse/
 // Dashboard stream are priced from the pool with no IBKR request at all;
 // only legs nobody has pooled fall back to a one-shot snapshot. The Signals
@@ -154,12 +166,58 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
 
   let pricesByKey: Record<string, number | null> = {};
   try {
-    pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs));
+    pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { settleGraceMs: exposurePriceSettleGraceMs });
   } catch {
     // Leave pricesByKey empty — every leg falls back to entry_price below.
   }
 
   return computeExposureRows(positions, legs, pricesByKey);
+}
+
+// How long the order-limits check waits for a leg's price before valuing that leg at its entry price. A leg that never
+// ticks (a thin LEAP) otherwise holds the whole snapshot to its 6 s ceiling, and the check runs on every form edit,
+// every 10 s of an open Order Review and on confirm.
+const tickerExposurePriceTimeoutMs = 1_500;
+
+/**
+ * One ticker's total exposure, for the Signals order-limits check: only that ticker's open legs are priced (pool
+ * first, then a snapshot capped at tickerExposurePriceTimeoutMs), so another ticker's illiquid leg cannot stall it.
+ */
+export async function computeTickerExposure(symbol: string): Promise<number> {
+  const { positions, legs } = await resolveOpenPositionsAndLegs(symbol);
+  if (positions.length === 0) return 0;
+
+  let pricesByKey: Record<string, number | null> = {};
+  try {
+    pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { snapshotTimeoutMs: tickerExposurePriceTimeoutMs });
+  } catch {
+    // Leave pricesByKey empty — every leg falls back to entry_price in computeExposureRows.
+  }
+  return computeExposureRows(positions, legs, pricesByKey).reduce((sum, row) => sum + row.exposure, 0);
+}
+
+/** While no position is open, the stream stays up and re-reads this often (an empty reading each time, so the caller can refresh its account figures). */
+export const noOpenPositionsRecheckIntervalMs = 60_000;
+
+/**
+ * Loads open positions; while there are none, calls `onEmpty`, waits `recheckIntervalMs` and loads again.
+ * Returns the first non-empty load, or null if `signal` aborts first. Ending instead would make every browser
+ * re-subscribe on its backoff, re-running the caller's setup (an IBKR account read) each time.
+ */
+export async function waitForOpenPositions<T extends { positions: unknown[] }>(
+  load: () => Promise<T>,
+  onEmpty: () => void,
+  recheckIntervalMs: number,
+  signal: AbortSignal,
+): Promise<T | null> {
+  for (;;) {
+    const loaded = await load();
+    if (signal.aborted) return null;
+    if (loaded.positions.length > 0) return loaded;
+    onEmpty();
+    await sleepUnlessAborted(recheckIntervalMs, signal);
+    if (signal.aborted) return null;
+  }
 }
 
 /**
@@ -170,11 +228,9 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
  * for the FROZEN-then-REALTIME mechanics.
  */
 export async function streamPositionExposures(onUpdate: (rows: PositionExposureRow[]) => void, signal: AbortSignal): Promise<void> {
-  const { positions, legs } = await resolveOpenPositionsAndLegs();
-  if (positions.length === 0) {
-    onUpdate([]);
-    return;
-  }
+  const open = await waitForOpenPositions(resolveOpenPositionsAndLegs, () => onUpdate([]), noOpenPositionsRecheckIntervalMs, signal);
+  if (open === null) return;
+  const { positions, legs } = open;
 
   // Hold the first reading until every leg has a price or the frozen phase
   // has ended (approved 2026-09-19). Without this, legs not yet priced fall

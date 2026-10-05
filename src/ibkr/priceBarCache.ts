@@ -16,7 +16,7 @@ const minDailyBarsForIndicators = 99;
 type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 
 /**
- * Cache-then-delta-fetch layer for the Ticker Detail modal's chart, approved
+ * Cache-then-delta-fetch layer for the Signals ticker modal's chart, approved
  * 2026-08-27 (see PROGRESS.md "Chart bar caching"). Historical bars for past
  * dates never change, so once a ticker/bar-size combo has been fetched once,
  * repeat views only need to top up with whatever's new since the last cached
@@ -352,9 +352,44 @@ async function readCachedBarsOnly(tickerId: string, range: ChartRange): Promise<
   return readIntradayBars(tickerId, cfg.barSize, subtractDuration(new Date(), cfg.fullDuration));
 }
 
+export interface DailyBarsTopUpResult {
+  barCount: number;
+  firstTradingDate: string | null;
+  lastTradingDate: string | null;
+}
+
+// Fetches one daily-bar window (price, plus IV best-effort) and upserts it. Best-effort IV: a failed IV
+// fetch shouldn't block the price bars; it falls back to no IV data for this pass rather than throwing,
+// and the COALESCE-on-merge in upsertDailyBars keeps already-cached values from being clobbered.
+async function fetchAndUpsertDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, fetchDuration: string, reqId: number): Promise<PriceBar[]> {
+  const freshBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, fetchDuration, reqId);
+  const freshIvBars = await fetchHistoricalBarsRaw(
+    connection,
+    symbol,
+    BarSizeSetting.DAYS_ONE,
+    fetchDuration,
+    nextReqIdFor(connection.ib, () => reqId + 1000),
+    WhatToShow.OPTION_IMPLIED_VOLATILITY,
+  ).catch(() => []);
+  await upsertDailyBars(tickerId, freshBars, ivBarsToDateMap(freshIvBars));
+  return freshBars;
+}
+
+/**
+ * The shortlist's "Populate Daily Bars" top-up: fetches everything from the newest stored bar to today
+ * (sized by the gap, see dailyTopUpDurationFor) and upserts it, so every missing session is filled, not just one.
+ */
+export async function topUpDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<DailyBarsTopUpResult> {
+  const latestCached = await getLatestDailyBarDate(tickerId);
+  const fetchDuration = latestCached ? dailyTopUpDurationFor(latestCached, new Date()) : dailyBackfillDuration;
+  const bars = await fetchAndUpsertDailyBars(connection, tickerId, symbol, fetchDuration, reqId);
+  const tradingDates = bars.map((bar) => new Date(bar.time * 1000).toISOString().slice(0, 10)).sort();
+  return { barCount: bars.length, firstTradingDate: tradingDates[0] ?? null, lastTradingDate: tradingDates[tradingDates.length - 1] ?? null };
+}
+
 /**
  * Chart bars for one range, cached — call on an already-open connection
- * (the Ticker Detail SSE stream's shared connection). See
+ * (the ticker detail SSE stream's shared connection). See
  * fetchCachedPriceBars below for the open-own-connection variant the plain
  * /chart route uses for range switches after the modal is already open.
  *
@@ -374,20 +409,7 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
     const latestCached = await getLatestDailyBarDate(tickerId);
     if (!latestCached || (!isFreshEnoughToSkipLiveFetch(symbol, range) && !(await dailyBarsAreCurrent(latestCached)))) {
       const fetchDuration = latestCached ? dailyTopUpDurationFor(latestCached, new Date()) : dailyBackfillDuration;
-      const freshBars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, fetchDuration, reqId);
-      // Best-effort — a failed IV fetch shouldn't block the price bars this
-      // chart actually needs; falls back to no IV data for this pass rather
-      // than throwing, same COALESCE-on-merge protection as the daily job
-      // covers a partial/failed fetch not clobbering already-cached values.
-      const freshIvBars = await fetchHistoricalBarsRaw(
-        connection,
-        symbol,
-        BarSizeSetting.DAYS_ONE,
-        fetchDuration,
-        nextReqIdFor(connection.ib, () => reqId + 1000),
-        WhatToShow.OPTION_IMPLIED_VOLATILITY,
-      ).catch(() => []);
-      await upsertDailyBars(tickerId, freshBars, ivBarsToDateMap(freshIvBars));
+      await fetchAndUpsertDailyBars(connection, tickerId, symbol, fetchDuration, reqId);
       markLiveFetched(symbol, range);
     }
 
@@ -466,7 +488,7 @@ export interface IvChartPoint {
 }
 
 /**
- * IV history for the TickerDetailModal chart (approved 2026-08-31 — see
+ * IV history for the Signals ticker modal chart (approved 2026-08-31 — see
  * PROGRESS.md and lib/ivMetrics.ts). Daily-only, unlike the price chart's
  * six intraday ranges: IBKR's OPTION_IMPLIED_VOLATILITY historical series is
  * one blended value per day, so there's no intraday IV to show — 1Y/5Y/All

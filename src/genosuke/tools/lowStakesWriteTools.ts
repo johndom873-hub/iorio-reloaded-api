@@ -21,7 +21,8 @@ export const lowStakesWriteTools: GenosukeTool[] = [
   },
   {
     name: "remove_shortlist_ticker",
-    description: "Remove a ticker from a strategy's shortlist (soft-delete). Use the shortlist entry id from list_shortlist, not the ticker id.",
+    description:
+      "Remove a ticker from a strategy's shortlist (soft-delete). Use the shortlist entry id from list_shortlist, not the ticker id. Refused (409) while the ticker has an open position — it must be closed first.",
     tier: "low-stakes-write",
     parameters: { type: "object", properties: { entryId: { type: "string" } }, required: ["entryId"] },
     execute: (input, api) => api.delete(`/shortlist/${input.entryId}`),
@@ -32,14 +33,6 @@ export const lowStakesWriteTools: GenosukeTool[] = [
     tier: "low-stakes-write",
     parameters: { type: "object", properties: { entryId: { type: "string" }, notes: { type: "string" } }, required: ["entryId", "notes"] },
     execute: (input, api) => api.patch(`/shortlist/${input.entryId}`, { notes: input.notes }),
-  },
-  {
-    name: "refresh_trade_alert",
-    description:
-      "Re-quotes a pending trade alert's exact contract(s) against live IBKR data (not a re-run of the ranked candidate scan) — use this to validate a specific alert from the overnight scan is still accurate before recommending it. Only works on a pending alert; fails if IBKR has no live quote right now (e.g. outside market hours).",
-    tier: "low-stakes-write",
-    parameters: { type: "object", properties: { alertId: { type: "string" } }, required: ["alertId"] },
-    execute: (input, api) => api.post(`/trade-alerts/${input.alertId}/refresh`, {}),
   },
   {
     name: "trigger_ibkr_health_check",

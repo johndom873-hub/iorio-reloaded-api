@@ -11,6 +11,7 @@
     "dev": "tsx watch src/server.ts",
     "dev:worker": "tsx watch src/ibkrGatewayWorker.ts",
     "build": "tsc -p tsconfig.json",
+    "heroku-postbuild": "npm audit --audit-level=high --omit=dev && npm run build",
     "start": "node --max-old-space-size=384 dist/src/server.js",
     "agent": "node --max-old-space-size=384 dist/src/plutoAgent.js",
     "agent:dev": "tsx src/plutoAgent.ts",
@@ -30,7 +31,6 @@
     "job:daily-screener-scan": "tsx scripts/run-daily-screener-scan-job.ts",
     "job:daily-calendar-capture": "tsx scripts/run-daily-calendar-capture-job.ts",
     "job:daily-pnl-snapshot": "tsx scripts/run-daily-pnl-snapshot-job.ts",
-    "job:trade-alerts": "tsx scripts/run-trade-alert-generation-job.ts",
     "job:option-chain-structure": "tsx scripts/run-option-chain-structure-job.ts",
     "job:option-chain-capture": "tsx scripts/run-option-chain-capture-job.ts",
     "job:option-surface-fit": "tsx scripts/run-option-surface-fit-job.ts",
@@ -45,6 +45,7 @@
     "release-phase:worker-deploy": "node dist/scripts/run-release-phase-worker-deploy.js"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^14.0.3",
     "@stoqey/ib": "^1.6.6",
     "argon2": "^0.45.1",
     "connect-pg-simple": "^10.0.0",

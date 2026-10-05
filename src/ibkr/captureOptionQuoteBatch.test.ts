@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { IBApi } from "@stoqey/ib";
 import { EventName } from "@stoqey/ib";
 import { describe, expect, it, vi } from "vitest";
-import { openCaptureQuoteWindow, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
+import { openCaptureQuoteWindow, percentileOfSorted, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
 
 // A stand-in for the IBKR socket: the collector only calls on/removeListener
 // (EventEmitter) and reqMktData/cancelMktData, so ticks are emitted by hand.
@@ -102,5 +102,57 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
     expect(await window.capture("TEST", [])).toEqual([]);
     expect(ib.reqMktData).not.toHaveBeenCalled();
     window.close();
+  });
+
+  it("measures lines in use and how long each contract held its line, per interval and for the whole run", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const ib = new FakeIb();
+      const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 2, timeoutMs: 8_000 });
+      const pending = window.capture("TEST", [put100, call105]);
+      const [first, second] = [ib.reqIdForContract(0), ib.reqIdForContract(1)];
+      await vi.advanceTimersByTimeAsync(500);
+      for (const reqId of [first, second]) {
+        ib.emit(EventName.tickPrice, reqId, 1, 1.1, {});
+        ib.emit(EventName.tickPrice, reqId, 2, 1.2, {});
+      }
+      await vi.advanceTimersByTimeAsync(500);
+      for (const reqId of [first, second]) ib.emit(EventName.tickOptionComputation, reqId, 13, 0, 0.6, -0.3, 1.1, 0, 0.04, 0.09, -0.05, 101);
+      await vi.advanceTimersByTimeAsync(3_000);
+      ib.emit(EventName.tickSize, first, 28, 1520); // open interest arrives last; the second contract never gets it
+      await vi.advanceTimersByTimeAsync(4_000); // the second contract's 8 s timeout
+      await pending;
+      const expected = {
+        intervalMs: 8_000,
+        minInFlight: 0,
+        maxInFlight: 2,
+        lineBusyMs: 12_000,
+        timedOutLineMs: 8_000,
+        settled: 1,
+        timedOut: 1,
+        errored: 0,
+        holdMsP50: 4_000,
+        holdMsP90: 8_000,
+        holdMsMax: 8_000,
+        lastField: { price: 0, delta: 0, openInterest: 1 },
+        missingOnTimeout: { price: 0, delta: 0, openInterest: 1 },
+      };
+      expect(window.drainSettleStats()).toEqual(expected);
+      expect(window.drainSettleStats()).toMatchObject({ settled: 0, timedOut: 0, lineBusyMs: 0, holdMsP50: null, minInFlight: 0, maxInFlight: 0 });
+      expect(window.wholeRunSettleStats()).toEqual(expected);
+      window.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("percentileOfSorted", () => {
+  it("returns the nearest-rank percentile, or null for no values", () => {
+    expect(percentileOfSorted([], 50)).toBeNull();
+    expect(percentileOfSorted([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 50)).toBe(5);
+    expect(percentileOfSorted([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 90)).toBe(9);
+    expect(percentileOfSorted([7], 90)).toBe(7);
   });
 });

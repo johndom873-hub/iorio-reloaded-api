@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
+import { buildSeedFailureMessage, seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
 import type { SignalCandidate, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 
@@ -82,7 +82,7 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     symbol,
     companyName: null,
     sector: null,
-    header: { snapshotId: `snap-${symbol}`, tradingDateIso, capturedAt: `${tradingDateIso}T14:00:00Z`, underlyingPrice: forward, riskFreeRatePercent: rate * 100 },
+    header: { snapshotId: `snap-${symbol}`, tradingDateIso, capturedAt: `${tradingDateIso}T14:00:00Z`, underlyingPrice: forward, riskFreeRatePercent: rate * 100, fitCompletedAt: "2026-09-21T14:06:00Z", fitIssue: null },
     slices: [slice("2026-10-21", years30)],
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30)],
     dayQuotes: [],
@@ -103,7 +103,7 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     todayEasternIso: tradingDateIso,
   };
 }
-const settings = { maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 };
+const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100, orderUnfilledCancelMinutes: 15 };
 
 function seedDependencies(overrides: Partial<DaySignalsSeedDependencies> = {}) {
   const replaceDaySignalPool = vi.fn(async () => {});
@@ -116,7 +116,7 @@ function seedDependencies(overrides: Partial<DaySignalsSeedDependencies> = {}) {
     // RICH: surface IV (~20%) well above a 10% forecast -> positive edge; CHEAP: forecast 80% -> all Avoid; OLD: yesterday's snapshot.
     loadTickerSignalsInputs: async (ticker) => (ticker.symbol === "RICH" ? inputsFor("RICH", "2026-09-24", 0.1) : ticker.symbol === "CHEAP" ? inputsFor("CHEAP", "2026-09-24", 0.8) : inputsFor("OLD", "2026-09-23", 0.1)),
     loadAccountContext: async () => ({ freeCash: 50_000 }),
-    loadSignalSettings: async () => settings,
+    loadTradingSettings: async () => settings,
     replaceDaySignalPool,
     now: () => new Date("2026-09-24T14:40:00Z"),
     ...overrides,
@@ -128,7 +128,7 @@ describe("seedDaySignals", () => {
   it("pools only tickers with today's snapshot and a positive candidate, and replaces the whole pool in one call", async () => {
     const { deps, replaceDaySignalPool } = seedDependencies();
     const result = await seedDaySignals("2026-09-24", deps);
-    expect(result).toEqual({ tradingDateIso: "2026-09-24", tickersScored: 2, tickersPooled: 1, expiriesPooled: 1, symbolsWithoutPool: ["CHEAP"], symbolsWithoutTodaySnapshot: ["OLD"] });
+    expect(result).toEqual({ tradingDateIso: "2026-09-24", tickersScored: 2, tickersPooled: 1, expiriesPooled: 1, symbolsWithoutPool: ["CHEAP"], symbolsWithoutTodaySnapshot: ["OLD"], accountContextUnavailable: false });
     expect(replaceDaySignalPool).toHaveBeenCalledTimes(1);
     const [tradingDateIso, seeds, seededAt] = replaceDaySignalPool.mock.calls[0]! as unknown as [string, { tickerId: string; snapshotId: string; expiries: { expiry: string; rank: number }[] }[], Date];
     expect(tradingDateIso).toBe("2026-09-24");
@@ -154,5 +154,22 @@ describe("seedDaySignals", () => {
     const result = await seedDaySignals("2026-09-24", deps);
     expect(result.tickersPooled).toBe(0);
     expect(replaceDaySignalPool).toHaveBeenCalledWith("2026-09-24", [], expect.any(Date));
+  });
+});
+
+describe("seed failure reporting", () => {
+  it("flags an unavailable account summary", async () => {
+    const { deps } = seedDependencies({ loadAccountContext: async () => { throw new Error("no IBKR"); } });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await seedDaySignals("2026-09-24", deps);
+    expect(result.accountContextUnavailable).toBe(true);
+    expect(buildSeedFailureMessage(result)).toContain("account summary unavailable");
+  });
+
+  it("names tickers without today's snapshot and is silent when everything is present", async () => {
+    const { deps } = seedDependencies();
+    const result = await seedDaySignals("2026-09-24", deps);
+    expect(buildSeedFailureMessage(result)).toBe("no snapshot for today, so no Day Signals pool: OLD");
+    expect(buildSeedFailureMessage({ ...result, symbolsWithoutTodaySnapshot: [], accountContextUnavailable: false })).toBeUndefined();
   });
 });

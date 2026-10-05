@@ -1,10 +1,10 @@
 import { easternDateIso, easternInstant } from "./marketSessionStatus.js";
 
 // Heroku Scheduler only fires at fixed UTC times, but the capture is meant to
-// run at 10:00 ET (30 minutes after the open, once opening-auction noise has
-// settled — decided 2026-09-21). 10:00 ET is 14:00 UTC during EDT and 15:00
-// UTC during EST, so the job is scheduled at BOTH 14:00 and 15:00 UTC and
-// exits unless it is currently 10:00-10:30 ET — exactly one of the two does
+// run 30 minutes after the market open, 10:00 ET (moved from 9:30 on 2026-09-30:
+// quotes in the first minutes after the open swing too hard to fit a surface).
+// 10:00 ET is 14:00 UTC during EDT and 15:00 UTC during EST, so the job is
+// scheduled at BOTH 14:00 and 15:00 UTC and exits unless it is currently 10:00-10:30 ET — exactly one of the two does
 // the real work every day of the year, with no manual change at the daylight
 // saving switch.
 //

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSignalCandidates, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, contractKey, countGrades, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, selectLiveQuoteContracts, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
+import { buildSignalCandidates, emptyCandidateExclusionTally, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, countGrades, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 
 const forward = 100;
@@ -38,7 +38,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     symbol: "TEST",
     companyName: "Test Co",
     sector: null,
-    header: { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100 },
+    header: { snapshotId: "s1", tradingDateIso: "2026-09-21", capturedAt: "2026-09-21T14:00:00Z", underlyingPrice: forward, riskFreeRatePercent: rate * 100, fitCompletedAt: "2026-09-21T14:06:00Z", fitIssue: null },
     slices: [slice("2026-10-21", years30), slice("2026-11-20", years60)],
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)],
     dayQuotes: [],
@@ -64,7 +64,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
 const account = { freeCash: 1_000_000 };
 // No test in this file is about the Signals tab's own limits (see signalCandidates.test.ts and
 // signalOrderLimits.test.ts for those) -- wide open here so every existing candidate stays in.
-const permissiveSettings = { maxDeltaDriftPct: 100, minAnnualizedYieldPct: 0, maxNetDelta: 1, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 };
+const permissiveSettings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100, orderUnfilledCancelMinutes: 15 };
 
 describe("computeAtmImpliedVolatility", () => {
   it("reads the slice nearest 30 days (with >= 14 days left) at log-moneyness 0", () => {
@@ -112,20 +112,6 @@ describe("rebaseSlicesToToday (stale snapshot)", () => {
     expect(stalePut.dte).toBe(29);
     expect(stalePut.surfaceImpliedVolatility).toBeCloseTo(todayPut.surfaceImpliedVolatility, 12);
   });
-
-  // Surface max age (gap fix 8, 2026-09-28): the previous open session is the oldest snapshot still graded.
-  it("scores a snapshot from the previous open session, but not one older than that", () => {
-    const previousSession = scoreTicker(inputs({ todayEasternIso: "2026-09-22", oldestAcceptableSnapshotDateIso: "2026-09-21" }), account, permissiveSettings);
-    expect(previousSession.unscoredReason).toBeNull();
-    expect(previousSession.candidates.length).toBeGreaterThan(0);
-    expect(previousSession.caveats.map((caveat) => caveat.id)).toContain("stale_surface");
-
-    const tooOld = scoreTicker(inputs({ todayEasternIso: "2026-09-23", oldestAcceptableSnapshotDateIso: "2026-09-22" }), account, permissiveSettings);
-    expect(tooOld.unscoredReason).toBe("stale_surface");
-    expect(tooOld.candidates).toEqual([]);
-    const caveat = tooOld.caveats.find((entry) => entry.id === "stale_surface");
-    expect(caveat?.title).toBe("Not scored: the newest surface is from 2026-09-21");
-  });
 });
 
 describe("computeDayChangePercent", () => {
@@ -146,6 +132,12 @@ describe("scaleSlicesToLiveSpot (sticky moneyness)", () => {
     expect(scaled[0]!.forwardPrice).toBeCloseTo(100.5 * 1.05, 10);
     expect(scaled[1]!.forwardPrice).toBeCloseTo(101.2 * 1.05, 10);
     expect(scaled[0]!.parameters).toBe(params); // surface itself untouched
+  });
+  it("scales from each slice's own anchor when it has one, and from the snapshot spot when it does not", () => {
+    const scaled = scaleSlicesToLiveSpot([slice("a", years30, { forwardPrice: 101, fitUnderlyingPrice: 101 }), slice("b", years60, { forwardPrice: 101.2, fitUnderlyingPrice: null }), slice("c", years60, { forwardPrice: 102 })], 100, 105);
+    expect(scaled[0]!.forwardPrice).toBeCloseTo(101 * (105 / 101), 10);
+    expect(scaled[1]!.forwardPrice).toBeCloseTo(101.2 * 1.05, 10);
+    expect(scaled[2]!.forwardPrice).toBeCloseTo(102 * 1.05, 10);
   });
   it("returns the same array when the spot has not moved or the inputs are unusable", () => {
     const slices = [slice("a", years30)];
@@ -181,10 +173,37 @@ describe("scoreTicker", () => {
     expect(split.caveats.map((caveat) => caveat.id)).toContain("suspected_split");
   });
 
+  it("a snapshot whose fit has not finished is Analysing (pending, with no problem implied), ahead of every fit and forecast check", () => {
+    const base = inputs();
+    const pending = scoreTicker(inputs({ header: { ...base.header!, fitCompletedAt: null }, slices: [], forecast: null }), account, permissiveSettings);
+    expect(pending.unscoredReason).toBe("analysing");
+    expect(pending.unscoredDetail).toEqual({ kind: "analysing", snapshotCapturedAt: "2026-09-21T14:00:00Z" });
+    expect(pending.best).toBeNull();
+    expect(pending.candidates).toEqual([]);
+  });
+
+  it("says what is behind each unscored reason", () => {
+    const base = inputs();
+    expect(scoreTicker(inputs({ header: null }), account, permissiveSettings).unscoredDetail).toBeNull();
+    // The fit ran and nothing was usable: slice counts by status, no issue of its own.
+    const poor = scoreTicker(inputs({ slices: [slice("2026-10-21", years30, { status: "poor_fit" as never }), slice("2026-11-20", years60, { status: "poor_fit" as never }), slice("2026-12-18", years60, { status: "insufficient_points" as never })] }), account, permissiveSettings);
+    expect(poor.unscoredDetail).toEqual({ kind: "fit", sliceStatusCounts: { poor_fit: 2, insufficient_points: 1 }, expiryCount: 3, fitIssue: null });
+    // The fit skipped the snapshot: its reason travels with the header.
+    const skipped = scoreTicker(inputs({ header: { ...base.header!, fitIssue: "no_quotes" }, slices: [] }), account, permissiveSettings);
+    expect(skipped.unscoredDetail).toEqual({ kind: "fit", sliceStatusCounts: {}, expiryCount: 0, fitIssue: "no_quotes" });
+    // A header with no rate and no issue of its own is named from the header.
+    const noRate = scoreTicker(inputs({ header: { ...base.header!, riskFreeRatePercent: null } }), account, permissiveSettings);
+    expect(noRate.unscoredReason).toBe("no_surface_fit");
+    expect(noRate.unscoredDetail).toMatchObject({ kind: "fit", fitIssue: "no_risk_free_rate" });
+    expect(scoreTicker(inputs({ forecast: null, dailyBarCount: 18 }), account, permissiveSettings).unscoredDetail).toEqual({ kind: "forecast", dailyBarCount: 18, barsNeeded: 22 });
+    expect(scoreTicker(inputs({ forecast: null, suspectedSplitDateIso: "2026-09-15" }), account, permissiveSettings).unscoredDetail).toEqual({ kind: "split", splitDateIso: "2026-09-15" });
+    expect(scoreTicker(inputs(), account, permissiveSettings).unscoredDetail).toBeNull();
+  });
+
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {
     const in1 = inputs();
     const scored = scoreTicker(in1, account, permissiveSettings);
-    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEventDatesIso: [], snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash, maxNetDelta: permissiveSettings.maxNetDelta, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct }));
+    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEventDatesIso: [], snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct, spreadShareCharged: permissiveSettings.spreadCostChargedPct / 100 }));
     expect(scored.candidates).toEqual(direct);
     expect(scored.unscoredReason).toBeNull();
     expect(scored.priceSource).toBe("snapshot");
@@ -257,6 +276,111 @@ describe("scoreTicker", () => {
   });
 });
 
+describe("noCandidatesReason", () => {
+  const settings = { minAnnualizedYieldPct: 50, deltaTargetMax: 0.3 };
+
+  it("is null when the ticker has candidates, or is unscored", () => {
+    expect(scoreTicker(inputs(), account, permissiveSettings).noCandidatesReason).toBeNull();
+    expect(scoreTicker(inputs({ forecast: null }), account, permissiveSettings).noCandidatesReason).toBeNull();
+  });
+
+  it("is 'filtered' with the best yield when every contract is under the min yield (the TLT case)", () => {
+    const scored = scoreTicker(inputs(), account, { ...permissiveSettings, minAnnualizedYieldPct: 10_000 });
+    expect(scored.candidates).toHaveLength(0);
+    const reason = scored.noCandidatesReason!;
+    expect(reason.kind).toBe("filtered");
+    expect(reason.belowMinYieldCount).toBe(4);
+    expect(reason.minAnnualizedYieldPct).toBe(10_000);
+    expect(reason.bestAnnualizedYieldPct).toBeGreaterThan(0);
+    expect(reason.bestAnnualizedYieldPct).toBeLessThan(10_000);
+  });
+
+  it("is 'nothing_scorable' when the near slice failed its fit and the far expiry spans earnings (the NBIS case)", () => {
+    const scored = scoreTicker(
+      inputs({ slices: [slice("2026-10-21", years30, { status: "poor_fit" as never }), slice("2026-11-20", years60)], earningsDatesIso: ["2026-09-21", "2026-11-05"] }),
+      account,
+      permissiveSettings,
+    );
+    expect(scored.unscoredReason).toBeNull();
+    expect(scored.noCandidatesReason).toMatchObject({
+      kind: "nothing_scorable",
+      surfaceFitRejectedExpiries: ["2026-10-21"],
+      spansEarningsExpiries: ["2026-11-20"],
+      earningsDateIso: "2026-11-05", // not the snapshot-day date, which spans nothing
+      bestAnnualizedYieldPct: null,
+    });
+  });
+});
+
+describe("describeNoCandidates", () => {
+  it("is 'filtered' whenever any contract hit a Signals tab filter, even alongside fit rejections", () => {
+    const tally = { ...emptyCandidateExclusionTally(), surfaceFitRejectedExpiries: new Set(["2026-10-21"]), aboveMaxDeltaCount: 2 };
+    const reason = describeNoCandidates(tally, [], "2026-09-21", { minAnnualizedYieldPct: 50, deltaTargetMin: 0, deltaTargetMax: 0.3 });
+    expect(reason.kind).toBe("filtered");
+    expect(reason.aboveMaxDeltaCount).toBe(2);
+    expect(reason.deltaTargetMax).toBe(0.3);
+    expect(reason.earningsDateIso).toBeNull(); // no expiry spanned earnings
+  });
+
+  it("sorts the expiry lists", () => {
+    const tally = { ...emptyCandidateExclusionTally(), surfaceFitRejectedExpiries: new Set(["2026-10-23", "2026-10-02"]), spansEarningsExpiries: new Set(["2026-12-18", "2026-10-30"]) };
+    const reason = describeNoCandidates(tally, ["2026-10-22"], "2026-09-28", { minAnnualizedYieldPct: 50, deltaTargetMin: 0, deltaTargetMax: 0.3 });
+    expect(reason.surfaceFitRejectedExpiries).toEqual(["2026-10-02", "2026-10-23"]);
+    expect(reason.spansEarningsExpiries).toEqual(["2026-10-30", "2026-12-18"]);
+    expect(reason.earningsDateIso).toBe("2026-10-22");
+  });
+});
+
+describe("describeNoCandidates: the delta band", () => {
+  const band = { minAnnualizedYieldPct: 50, deltaTargetMin: 0.2, deltaTargetMax: 0.3 };
+
+  it("is 'filtered' when the only thing that dropped contracts was the minimum delta", () => {
+    const tally = { ...emptyCandidateExclusionTally(), belowMinDeltaCount: 3 };
+    const reason = describeNoCandidates(tally, [], "2026-09-21", band);
+    expect(reason.kind).toBe("filtered");
+    expect(reason.belowMinDeltaCount).toBe(3);
+    expect(reason.aboveMaxDeltaCount).toBe(0);
+    expect(reason.belowMinYieldCount).toBe(0);
+  });
+
+  it("is 'nothing_scorable' when nothing hit any filter, minimum delta included", () => {
+    const reason = describeNoCandidates(emptyCandidateExclusionTally(), [], "2026-09-21", band);
+    expect(reason.kind).toBe("nothing_scorable");
+    expect(reason.belowMinDeltaCount).toBe(0);
+  });
+
+  it("carries the new belowMinDeltaCount and the whole band (deltaTargetMin and deltaTargetMax) in the reason, and no maxNetDelta", () => {
+    const tally = { ...emptyCandidateExclusionTally(), belowMinDeltaCount: 2, aboveMaxDeltaCount: 5, belowMinYieldCount: 1, bestAnnualizedYieldPct: 12.5 };
+    const reason = describeNoCandidates(tally, [], "2026-09-21", band);
+    expect(reason).toMatchObject({ kind: "filtered", belowMinDeltaCount: 2, aboveMaxDeltaCount: 5, belowMinYieldCount: 1, bestAnnualizedYieldPct: 12.5, minAnnualizedYieldPct: 50, deltaTargetMin: 0.2, deltaTargetMax: 0.3 });
+    expect(reason).not.toHaveProperty("maxNetDelta");
+  });
+
+  it("is 'filtered' for each of the three filters on its own", () => {
+    for (const field of ["belowMinDeltaCount", "aboveMaxDeltaCount", "belowMinYieldCount"] as const) {
+      expect(describeNoCandidates({ ...emptyCandidateExclusionTally(), [field]: 1 }, [], "2026-09-21", band).kind).toBe("filtered");
+    }
+  });
+});
+
+describe("noCandidatesReason with a delta band", () => {
+  it("a minimum above every delta ends with no candidates, kind 'filtered' and every contract counted as below the minimum", () => {
+    const scored = scoreTicker(inputs(), account, { ...permissiveSettings, deltaTargetMin: 0.99, deltaTargetMax: 1 });
+    expect(scored.candidates).toHaveLength(0);
+    expect(scored.noCandidatesReason).toMatchObject({ kind: "filtered", belowMinDeltaCount: 4, aboveMaxDeltaCount: 0, deltaTargetMin: 0.99, deltaTargetMax: 1 });
+  });
+
+  it("a maximum below every delta counts them as above the maximum, not below the minimum", () => {
+    const scored = scoreTicker(inputs(), account, { ...permissiveSettings, deltaTargetMin: 0, deltaTargetMax: 0.0001 });
+    expect(scored.candidates).toHaveLength(0);
+    expect(scored.noCandidatesReason).toMatchObject({ kind: "filtered", belowMinDeltaCount: 0, aboveMaxDeltaCount: 4, deltaTargetMax: 0.0001 });
+  });
+
+  it("a band that keeps some contracts has no reason at all", () => {
+    expect(scoreTicker(inputs(), account, { ...permissiveSettings, deltaTargetMin: 0, deltaTargetMax: 1 }).noCandidatesReason).toBeNull();
+  });
+});
+
 describe("computeUncompensatedByContract", () => {
   it("keys every candidate and agrees with attaching directly at the same path count", () => {
     const in1 = inputs();
@@ -279,39 +403,6 @@ describe("shouldRefreshUncompensatedShare", () => {
     expect(shouldRefreshUncompensatedShare(100, 100.5)).toBe(true);
     expect(shouldRefreshUncompensatedShare(100, 99.5)).toBe(true);
     expect(shouldRefreshUncompensatedShare(100, 99.6)).toBe(false);
-  });
-});
-
-describe("selectLiveQuoteContracts", () => {
-  const candidate = (expiry: string, strike: number, strategyKey: SignalCandidate["strategyKey"], edgeDollars: number): SignalCandidate =>
-    ({ strategyKey, expiry, strike, edgeDollars, netEdge: edgeDollars / 10 }) as SignalCandidate;
-  const list = [
-    candidate("2026-10-21", 90, "cash_secured_put", 5),
-    candidate("2026-10-21", 110, "covered_call", 1),
-    candidate("2026-11-20", 85, "cash_secured_put", 50),
-    candidate("2026-11-20", 115, "covered_call", 40),
-    candidate("2026-12-18", 80, "cash_secured_put", 30),
-  ];
-
-  it("takes the selected expiry's candidates only, without duplicates (other expiries ride on day quotes)", () => {
-    expect(selectLiveQuoteContracts(list, "2026-10-21").map(contractKey)).toEqual(["2026-10-21|90|P", "2026-10-21|110|C"]);
-    expect(selectLiveQuoteContracts([...list, candidate("2026-10-21", 90, "cash_secured_put", 5)], "2026-10-21")).toHaveLength(2);
-  });
-  it("caps the total at maxContracts", () => {
-    expect(selectLiveQuoteContracts(list, "2026-11-20", [], { maxContracts: 1 }).map(contractKey)).toEqual(["2026-11-20|85|P"]);
-  });
-  it("opens no lines without a selected expiry", () => {
-    expect(selectLiveQuoteContracts(list, null)).toEqual([]);
-  });
-  it("puts every open short leg's contract first (Roll Signals), deduplicated against the expiry's candidates, inside the cap", () => {
-    const held = [
-      { expiry: "2026-10-21", strike: 90, right: "P" as const },
-      { expiry: "2026-12-18", strike: 120, right: "C" as const },
-      { expiry: "2026-12-18", strike: 120, right: "C" as const },
-    ];
-    expect(selectLiveQuoteContracts(list, "2026-10-21", held).map(contractKey)).toEqual(["2026-10-21|90|P", "2026-12-18|120|C", "2026-10-21|110|C"]);
-    expect(selectLiveQuoteContracts(list, null, held).map(contractKey)).toEqual(["2026-10-21|90|P", "2026-12-18|120|C"]);
-    expect(selectLiveQuoteContracts(list, "2026-10-21", held, { maxContracts: 1 }).map(contractKey)).toEqual(["2026-10-21|90|P"]);
   });
 });
 
@@ -388,6 +479,20 @@ describe("day quotes and the intraday IV shift (formula 3h)", () => {
       permissiveSettings,
     );
     expect(scored.ivShiftByExpiry[expiry]).toBeUndefined();
+  });
+});
+
+describe("scoreTicker with day quotes outside the snapshot (price moved past the capture window)", () => {
+  it("scores a day-quoted put the snapshot never stored, and never invents one without a two-sided quote", () => {
+    const fresh = quoteAt(95, "P", "2026-10-21", years30);
+    const dayQuote = { expiry: "2026-10-21", strike: 95, right: "P" as const, bid: fresh.bid, ask: fresh.ask, quotedAt: "2026-09-21T15:00:00Z" };
+    const withDay = scoreTicker(inputs({ dayQuotes: [dayQuote] }), account, permissiveSettings);
+    const scored = withDay.candidates.find((candidate) => candidateContractKey(candidate) === "2026-10-21|95|P");
+    expect(scored).toBeDefined();
+    expect(scored!.quoteSource).toBe("day");
+
+    const oneSided = scoreTicker(inputs({ dayQuotes: [{ ...dayQuote, bid: null }] }), account, permissiveSettings);
+    expect(oneSided.candidates.some((candidate) => candidateContractKey(candidate) === "2026-10-21|95|P")).toBe(false);
   });
 });
 

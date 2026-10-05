@@ -37,7 +37,6 @@ export function ibkrMarketDataLinesEnabled(): boolean {
 }
 
 export const environment = {
-  nodeEnvironment: process.env.NODE_ENV ?? "development",
   databaseUrl: requireEnvironmentVariable("DATABASE_URL"),
   testDatabaseUrl: process.env.TEST_DATABASE_URL,
   frontendOrigin: requireEnvironmentVariable("FRONTEND_ORIGIN"),

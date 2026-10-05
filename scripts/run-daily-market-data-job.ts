@@ -14,6 +14,8 @@
 // Usage (prod, via Heroku Scheduler — tsx isn't in the prod slug):
 //   node dist/scripts/run-daily-market-data-job.js
 
+import "../src/lib/installScriptCrashAlert.js";
+import { runScript } from "../src/lib/runScript.js";
 import { EventName, WhatToShow } from "@stoqey/ib";
 import type { IbkrConnection } from "../src/ibkr/connectIbkr.js";
 import { normalizeBarVolume } from "../src/lib/normalizeBarVolume.js";
@@ -23,6 +25,8 @@ import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "../src/i
 import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
 import { lookupLatestDailyBar } from "../src/ibkr/fetchTickerOverview.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
+import { assessDailyBar, buildMarketDataFailureMessage, type TickerProblem } from "../src/lib/marketDataJobOutcome.js";
+import { lastCompletedSessionDate } from "../src/lib/marketSessionStatus.js";
 import { runJob } from "../src/lib/runJob.js";
 
 interface TickerRow {
@@ -36,10 +40,8 @@ let nextReqId = 1;
 // backoff between retries — approved 2026-08-25 after a run where all 14
 // tickers failed identically (a suspected transient IBKR historical-data
 // outage around market close), and a single immediate retry wasn't enough
-// to clear it. This job starts 22:00 UTC (moved from 21:00 on 2026-09-24);
-// Trade Alert generation only runs once/day, at 1:30 PM UTC, so it always
-// consumes this job's *previous* evening's data, not same-day. On a bad
-// night the retries can overlap the 22:30 UTC P&L snapshot; both only make
+// to clear it. This job starts 22:00 UTC (moved from 21:00 on 2026-09-24).
+// On a bad night the retries can overlap the 22:30 UTC P&L snapshot; both only make
 // historical/snapshot requests (no market-data lines), so that is tolerable.
 // Retries are still capped by wall-clock budget rather than just attempt
 // count, so a bad run doesn't retry indefinitely into the next day's jobs.
@@ -56,11 +58,18 @@ function sleep(ms: number): Promise<void> {
 // batch and lost every ticker after it alphabetically, before this
 // try/catch existed) must not take down the rest of the batch, matching
 // the per-ticker resilience already used elsewhere (captureMarketDataSnapshot
-// itself never throws). Returns true/false rather than throwing so the
-// caller can track and retry failures.
-async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snapshotDate: string): Promise<boolean> {
+// itself never throws). Returns an outcome rather than throwing so the
+// caller can track and retry failures. A "failed" outcome is worth a retry (no bar, or the wrong
+// session's bar); softProblems (no IV) are reported but not retried, since a brand-new ticker
+// with no IV history would otherwise burn all five attempts every night.
+type TickerCaptureOutcome = { kind: "ok"; softProblems: string[] } | { kind: "failed"; problem: string };
+
+async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snapshotDate: string, expectedSessionDate: string): Promise<TickerCaptureOutcome> {
   try {
     const snapshot = await captureMarketDataSnapshot(connection, nextReqId++, ticker.symbol);
+    const softProblems: string[] = [];
+    if (snapshot.impliedVolatility === null) softProblems.push("no IV in the snapshot");
+    // A timed-out snapshot has null fields: keep whatever good value is already stored for the day.
     await db("market_data_snapshots")
       .insert({
         ticker_id: ticker.id,
@@ -69,20 +78,24 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
         avg_option_volume: snapshot.avgOptionVolume,
       })
       .onConflict(["ticker_id", "snapshot_date"])
-      .merge();
+      .merge({
+        implied_volatility: db.raw("COALESCE(excluded.implied_volatility, market_data_snapshots.implied_volatility)"),
+        avg_option_volume: db.raw("COALESCE(excluded.avg_option_volume, market_data_snapshots.avg_option_volume)"),
+      });
 
     const bar = await lookupLatestDailyBar(connection, ticker.symbol, nextReqId++);
-    // Best-effort — the daily IV bar isn't guaranteed the same day the price
-    // bar is (e.g. a brand-new ticker with no IV history yet), and a miss
-    // here shouldn't fail the whole ticker capture since price data is the
-    // higher-priority half of this job.
+    // The daily IV bar isn't guaranteed the same day the price bar is (e.g. a brand-new
+    // ticker with no IV history yet), so a miss doesn't fail the ticker (price data is the
+    // higher-priority half of this job) but it is reported: IV rank and percentile rot without it.
     const ivBar = await lookupLatestDailyBar(connection, ticker.symbol, nextReqId++, WhatToShow.OPTION_IMPLIED_VOLATILITY).catch(() => null);
-    if (bar) {
-      const tradingDate = new Date(bar.time * 1000).toISOString().slice(0, 10);
+    if (ivBar === null) softProblems.push("no IV history bar");
+    const barTradingDate = bar ? new Date(bar.time * 1000).toISOString().slice(0, 10) : null;
+    const barProblem = assessDailyBar(barTradingDate, expectedSessionDate);
+    if (bar && barTradingDate) {
       await db("daily_price_bars")
         .insert({
           ticker_id: ticker.id,
-          trading_date: tradingDate,
+          trading_date: barTradingDate,
           open_price: bar.open,
           high_price: bar.high,
           low_price: bar.low,
@@ -102,12 +115,13 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
     }
 
     console.log(
-      `${ticker.symbol}: IV=${snapshot.impliedVolatility ?? "n/a"} avgOptVolume=${snapshot.avgOptionVolume ?? "n/a"} bar=${bar ? `${bar.close}` : "n/a"}`,
+      `${ticker.symbol}: IV=${snapshot.impliedVolatility ?? "n/a"} avgOptVolume=${snapshot.avgOptionVolume ?? "n/a"} bar=${bar ? `${bar.close}` : "n/a"}${barProblem ? ` (${barProblem})` : ""}`,
     );
-    return true;
+    return barProblem ? { kind: "failed", problem: barProblem } : { kind: "ok", softProblems };
   } catch (error) {
-    console.warn(`${ticker.symbol}: capture failed — ${error instanceof Error ? error.message : error}`);
-    return false;
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`${ticker.symbol}: capture failed — ${message}`);
+    return { kind: "failed", problem: message };
   }
 }
 
@@ -129,7 +143,7 @@ async function main(): Promise<void> {
 
     if (tickers.length === 0) {
       console.log("No shortlisted tickers or open positions — nothing to capture.");
-      return { details: { tickerCount: 0, succeeded: 0 } };
+      return { details: { tickerCount: 0, succeeded: 0 }, failureMessage: buildMarketDataFailureMessage({ tickerCount: 0, failed: [], missingIv: [], attempts: 0, bailedOnBudget: false }) };
     }
 
     console.log(`Connecting to IBKR Gateway to capture ${tickers.length} ticker(s)...`);
@@ -145,6 +159,9 @@ async function main(): Promise<void> {
     });
 
     const snapshotDate = new Date().toISOString().slice(0, 10);
+    const expectedSessionDate = await lastCompletedSessionDate();
+    const failureByTickerId = new Map<string, TickerProblem>();
+    const missingIvBySymbol = new Map<string, TickerProblem>();
     const jobStart = Date.now();
     let succeeded = 0;
     let remaining = tickers;
@@ -157,7 +174,7 @@ async function main(): Promise<void> {
           const backoff = RETRY_BACKOFF_MS[attempt - 1]!;
           if (Date.now() - jobStart + backoff > RETRY_BUDGET_MS) {
             console.log(
-              `Stopping retries — waiting ${backoff / 1000}s would exceed the ${RETRY_BUDGET_MS / 60_000}min retry budget before Trade Alert generation runs.`,
+              `Stopping retries — waiting ${backoff / 1000}s would exceed the ${RETRY_BUDGET_MS / 60_000}min retry budget.`,
             );
             bailedOnBudget = true;
             break;
@@ -168,9 +185,16 @@ async function main(): Promise<void> {
 
         const stillFailed: TickerRow[] = [];
         for (const ticker of remaining) {
-          const ok = await captureTicker(connection, ticker, snapshotDate);
-          if (ok) succeeded++;
-          else stillFailed.push(ticker);
+          const outcome = await captureTicker(connection, ticker, snapshotDate, expectedSessionDate);
+          if (outcome.kind === "ok") {
+            succeeded++;
+            failureByTickerId.delete(ticker.id);
+            if (outcome.softProblems.length > 0) missingIvBySymbol.set(ticker.symbol, { symbol: ticker.symbol, problem: outcome.softProblems.join(" and ") });
+            else missingIvBySymbol.delete(ticker.symbol);
+          } else {
+            failureByTickerId.set(ticker.id, { symbol: ticker.symbol, problem: outcome.problem });
+            stillFailed.push(ticker);
+          }
         }
         remaining = stillFailed;
         attempt++;
@@ -184,18 +208,17 @@ async function main(): Promise<void> {
       `Captured ${succeeded}/${tickers.length} ticker(s) for ${snapshotDate} after ${attempt} attempt(s) (${failed} still failed${bailedOnBudget ? ", retries stopped early on time budget" : ""}).`,
     );
     return {
-      details: { tickerCount: tickers.length, succeeded, failed, attempts: attempt, bailedOnBudget, failedSymbols: remaining.map((t) => t.symbol) },
-      notify:
-        failed > 0
-          ? `⚠️ Daily market data capture: ${failed}/${tickers.length} ticker(s) failed after ${attempt} attempt(s) (${remaining.map((t) => t.symbol).join(", ")}).`
-          : undefined,
+      details: { tickerCount: tickers.length, succeeded, failed, attempts: attempt, bailedOnBudget, failedSymbols: remaining.map((t) => t.symbol), missingIvSymbols: [...missingIvBySymbol.keys()] },
+      // Recorded as a failure (runJob alerts), not a success with a notify: the bars feed Signals.
+      failureMessage: buildMarketDataFailureMessage({
+        tickerCount: tickers.length,
+        failed: remaining.map((ticker) => failureByTickerId.get(ticker.id) ?? { symbol: ticker.symbol, problem: "unknown" }),
+        missingIv: [...missingIvBySymbol.values()],
+        attempts: attempt,
+        bailedOnBudget,
+      }),
     };
   });
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+runScript("run-daily-market-data-job", main, () => db.destroy());

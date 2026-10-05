@@ -1,12 +1,12 @@
 import { peekPooledQuote, subscribeToPooledQuote, waitForFirstReading } from "./marketDataPool.js";
-import { fetchLivePrices, type PriceContract } from "./fetchLivePrices.js";
+import { fetchLivePrices, type FetchLivePricesOptions, type PriceContract } from "./fetchLivePrices.js";
 
 /**
  * One-shot prices, pool first (2026-09-24): a contract some open screen is
  * already streaming is read from the pool with no IBKR request; only the
  * rest go out as a (budgeted) snapshot. Same shape as fetchLivePrices.
  */
-export async function fetchPricesPoolFirst(contracts: PriceContract[]): Promise<Record<string, number | null>> {
+export async function fetchPricesPoolFirst(contracts: PriceContract[], options: FetchLivePricesOptions = {}): Promise<Record<string, number | null>> {
   const pricesByKey: Record<string, number | null> = {};
   const notPooled: PriceContract[] = [];
   for (const contract of contracts) {
@@ -14,14 +14,14 @@ export async function fetchPricesPoolFirst(contracts: PriceContract[]): Promise<
     if (pooled !== null) pricesByKey[contract.key] = pooled;
     else notPooled.push(contract);
   }
-  if (notPooled.length > 0) Object.assign(pricesByKey, await fetchLivePrices(notPooled));
+  if (notPooled.length > 0) Object.assign(pricesByKey, await fetchLivePrices(notPooled, options));
   return pricesByKey;
 }
 
 // Thin price-shaped view over marketDataPool.ts (the one real pool — see its
 // header comment) — kept as its own file/signatures so every consumer
 // migrated before the 2026-09-24 pool merge (positions.ts, positionExposure.ts,
-// tradeAlerts.ts, signalsProducers.ts, pricePerformance.ts) needed zero
+// signalsProducers.ts, pricePerformance.ts) needed zero
 // changes when price and greeks pooling were unified into one subscription
 // per contract.
 export async function subscribeToPooledPrice(contract: PriceContract, onUpdate: (price: number | null) => void): Promise<() => void> {
@@ -82,7 +82,7 @@ export async function streamPooledPrices(
   }
 }
 
-/** Thin convenience wrapper of streamPooledPrices for stock-only symbol lists (Price Performance, Trade Alerts, Signals list) — no frozenPhaseComplete status needed by any of those callers. */
+/** Thin convenience wrapper of streamPooledPrices for stock-only symbol lists (Price Performance, the stock price stream, Signals list) — no frozenPhaseComplete status needed by any of those callers. */
 export async function streamPooledStockPrices(symbols: string[], onUpdate: (pricesBySymbol: Record<string, number | null>) => void, signal: AbortSignal): Promise<void> {
   if (symbols.length === 0) return;
   await streamPooledPrices(
