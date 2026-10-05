@@ -1054,6 +1054,7 @@ async function main(): Promise<void> {
         connected: health.connected,
         uptime_ms: health.uptimeMs,
         total_reconnects: health.totalReconnects,
+        unplanned_drops_last_24h: health.unplannedDropsLast24h,
         last_system_status_code: health.lastSystemStatusCode,
         client_id: health.clientId,
         git_sha: workerGitSha,

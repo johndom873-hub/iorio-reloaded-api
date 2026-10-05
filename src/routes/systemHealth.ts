@@ -224,6 +224,8 @@ async function loadGatewayHealth() {
     tradingHalted: tradingHalt.enabled,
     uptimeMs: health.uptime_ms !== null ? Number(health.uptime_ms) : null,
     totalReconnects: health.total_reconnects,
+    // Absent on a row written by a worker that predates the column; Pulse then shows no drop count.
+    unplannedDropsLast24h: health.unplanned_drops_last_24h ?? null,
     lastSystemStatusCode: health.last_system_status_code,
     clientId: health.client_id,
     updatedAt: health.updated_at,
