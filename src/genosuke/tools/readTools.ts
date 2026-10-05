@@ -12,6 +12,7 @@
 import { listWafRules } from "../../lib/cloudflareService.js";
 import { fetchLogsFromBetterStack, type LogSourceApp } from "../../lib/betterstackService.js";
 import { annotateLegOpenState } from "../confirmationText.js";
+import { summarizeGatewayReadiness, type EnvironmentDetailsForReadiness, type GatewayHealthForReadiness, type JobRunForReadiness } from "../gatewayReadinessSummary.js";
 import type { GenosukeTool } from "./types.js";
 
 const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
@@ -142,6 +143,21 @@ export const readTools: GenosukeTool[] = [
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/system-health/status"),
+  },
+  {
+    name: "get_gateway_readiness",
+    description:
+      "Can Iorio trade right now? One summary of the IBKR Gateway link, the trading worker (heartbeat, bound account), live-price status and the latest scheduled Gateway health check, with named problems. Use it for 'is Iorio ready', 'is the Gateway up' or before the market opens. If the live Gateway is down the usual cause is a login waiting for a phone approval: then offer resend_gateway_2fa.",
+    tier: "read",
+    parameters: { type: "object", properties: {} },
+    execute: async (_input, api) => {
+      const [environmentDetails, gatewayHealth, latestJobRuns] = await Promise.all([
+        api.get<EnvironmentDetailsForReadiness>("/environment/details"),
+        api.get<GatewayHealthForReadiness>("/system-health/gateway"),
+        api.get<JobRunForReadiness[]>("/system-health/status"),
+      ]);
+      return summarizeGatewayReadiness({ environmentDetails, gatewayHealth, latestJobRuns });
+    },
   },
   {
     name: "list_job_runs",

@@ -71,6 +71,12 @@ function detectAddressing(msg: NonNullable<TelegramUpdate["message"]>): string |
   return null;
 }
 
+// The quote is added for the bot's own messages too: scheduled alerts come from the same bot but never enter the chat
+// history, so a bare "ready" replying to a "Gateway needs a manual login" alert would reach the model with no context.
+export function prefixWithQuotedMessage(question: string, quotedText: string | undefined): string {
+  return quotedText ? `[Replying to this message: "${quotedText.slice(0, 2000)}"]\n\n${question}` : question;
+}
+
 async function handleMessage(
   msg: NonNullable<TelegramUpdate["message"]>,
   config: GenosukeConfig,
@@ -91,8 +97,7 @@ async function handleMessage(
     return;
   }
 
-  const quotedText = msg.reply_to_message?.from?.id !== botId ? msg.reply_to_message?.text : null;
-  const userMessage = quotedText ? `[Replying to this message: "${quotedText.slice(0, 2000)}"]\n\n${question}` : question;
+  const userMessage = prefixWithQuotedMessage(question, msg.reply_to_message?.text);
 
   const messages = await loadRecentHistory(chatId);
   const fromIndex = messages.length;

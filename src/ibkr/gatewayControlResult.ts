@@ -13,6 +13,22 @@ const freshLoginMessageByResultKind: Record<string, string> = {
   restart_failed: "The Gateway container could not be restarted. Check the VPS.",
 };
 
+// The only recover outcomes that mean "the live login is waiting for the owner": the API is down with no
+// session to restart (needs_manual_login), or the restart landed on a 2FA prompt (waiting_for_2fa).
+const recoverResultKindsNeedingPhoneApproval = new Set(["needs_manual_login", "waiting_for_2fa"]);
+
+/**
+ * Replaces the health check's generic "restart didn't recover it" headline on the LIVE Gateway when the fix is a
+ * manual login; null otherwise. It is the headline, not an appended line, because runJob cuts a thrown message at
+ * its first "): " for Telegram: it must stay before that marker, so it never contains one. Constant text per call, so
+ * the hourly reminder stays stable between runs. No push has been sent at this point (recover never starts a login),
+ * so the owner replies to the alert and Genosuke's resend_gateway_2fa sends it.
+ */
+export function describeLiveGatewayManualLoginHeadline(recoverResultKind: string | null, tradingMode: "paper" | "live"): string | null {
+  if (tradingMode !== "live" || recoverResultKind === null || !recoverResultKindsNeedingPhoneApproval.has(recoverResultKind)) return null;
+  return "IBKR live Gateway is not logged in and needs a manual login (most likely IBKR's weekly session expiry). No 2FA push has been sent yet: reply to this message when your phone is ready and Genosuke will send one (confirm with Yes), then approve it within about 3 minutes";
+}
+
 export function describeFreshLoginResult(resultKind: string): string {
   return freshLoginMessageByResultKind[resultKind] ?? `The VPS script returned an unexpected result: ${resultKind}.`;
 }

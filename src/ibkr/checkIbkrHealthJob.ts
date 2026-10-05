@@ -1,5 +1,6 @@
 import { EventName } from "@stoqey/ib";
 import { restartIbkrGatewayOnVps } from "./restartIbkrGatewayOnVps.js";
+import { describeLiveGatewayManualLoginHeadline, parseGatewayControlResultKind } from "./gatewayControlResult.js";
 import { checkWorkerOnVps } from "./checkWorkerOnVps.js";
 import { connectToIbkrGateway, type IbkrConnection } from "./connectIbkr.js";
 import { checkPositionReconciliation } from "./checkPositionReconciliation.js";
@@ -238,7 +239,9 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
 
       const reconnected = await tryConnect(farmStatusMessages);
       if (!reconnected) {
-        throw new Error(`IBKR Gateway ${problemDescription} and restart didn't recover it (script exit ${result.exitCode}): ${result.output.trim()}`);
+        const manualLoginHeadline = describeLiveGatewayManualLoginHeadline(parseGatewayControlResultKind(result.output), environment.ibkrTradingMode);
+        const diagnosis = manualLoginHeadline ?? `IBKR Gateway ${problemDescription} and restart didn't recover it`;
+        throw new Error(`${diagnosis} (script exit ${result.exitCode}): ${result.output.trim()}`);
       }
 
       // Previously this declared victory on the handshake alone — but the
