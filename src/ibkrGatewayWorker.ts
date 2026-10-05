@@ -39,6 +39,7 @@ import { publishNotification, publishPulse } from "./lib/notificationChannel.js"
 import { endOrderIfPlacementBlocked } from "./lib/orderPlacementEnforcement.js";
 import { endOrderIfLimitPriceUnsafe } from "./ibkr/ibkrGatewayLimitPriceCheck.js";
 import { captureExecutionQuote } from "./ibkr/ibkrGatewayExecutionQuotes.js";
+import { requestCancelOfUnfilledOrders } from "./ibkr/ibkrGatewayUnfilledOrderSweep.js";
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
 
@@ -316,7 +317,7 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
     // cancelled. Zero rows changed means someone else moved it; do not place.
     const claimed = await db("order_requests")
       .where({ id: orderRequestId, status: "confirmed" })
-      .update({ status: "submitted", ibkr_order_id: ibkrOrderId, updated_at: db.fn.now() })
+      .update({ status: "submitted", ibkr_order_id: ibkrOrderId, placed_at: db.fn.now(), updated_at: db.fn.now() })
       .returning("id");
     if (claimed.length === 0) {
       console.log(`processOrderRequest(${orderRequestId}): no longer confirmed (cancelled or already taken) — not placing.`);
@@ -471,6 +472,11 @@ async function listenForOrderRequests(): Promise<void> {
     try {
       const stuck = await db("order_requests").whereIn("status", ["confirmed", "cancel_requested"]).select("id", "status");
       for (const row of stuck) await handleOrderRequestNotification(row.id, row.status);
+      for (const id of await requestCancelOfUnfilledOrders()) {
+        console.log(`Order ${id} has rested unfilled at IBKR past the Risk & Limits limit — cancelling.`);
+        await publishNotification({ type: "order_status", orderId: id }).catch(() => {});
+        await handleOrderRequestNotification(id, "cancel_requested");
+      }
       await alertOnStaleOrderRequests();
     } catch (error) {
       console.error(`order_requests poll fallback failed: ${error instanceof Error ? error.message : error}`);
@@ -536,6 +542,8 @@ function setupOrderTrackingListeners(): void {
           status: requestStatus,
           updated_at: db.fn.now(),
           ...(permId ? { ibkr_perm_id: permId } : {}),
+          // A fill that beat the sweep's cancel: the order is filled, not cancelled for lack of one.
+          ...(requestStatus === "filled" ? { cancellation_reason: null } : {}),
         })
         .returning(["id"]);
       if (rows[0] && (requestStatus === "cancelled" || requestStatus === "cancelled_partially_filled")) await recordIbkrCancellationReason(rows[0].id, connection);

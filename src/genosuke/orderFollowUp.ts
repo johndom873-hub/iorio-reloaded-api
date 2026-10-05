@@ -52,10 +52,12 @@ export function describeOrderUpdate(order: OrderNoticeInput, fills: OrderFill[])
       return withFills(`✅ ${order.symbol} order filled — IBKR confirmed the trade:`, fills);
     case "cancelled":
       if (order.cancellationReason === "expired_at_close") return `${order.symbol} order expired unfilled at the market close (orders are day orders) — nothing was filled.`;
+      if (order.cancellationReason === "not_filled_in_time") return `${order.symbol} order was cancelled after resting unfilled past the time limit — nothing was filled.`;
       if (order.cancellationReason === "not_confirmed_in_time") return `${order.symbol} order was never confirmed and was cancelled after 15 minutes — nothing was sent to IBKR.`;
       return `${order.symbol} order was cancelled at IBKR${order.errorMessage ? ` (${order.errorMessage})` : ""} — nothing was filled.`;
     case "cancelled_partially_filled":
       if (order.cancellationReason === "expired_at_close") return withFills(`⚠️ ${order.symbol} order expired at the market close after partly filling. What was filled:`, fills);
+      if (order.cancellationReason === "not_filled_in_time") return withFills(`⚠️ ${order.symbol} order was cancelled past the time limit after partly filling. What was filled:`, fills);
       return withFills(`⚠️ ${order.symbol} order was cancelled at IBKR after partly filling. What was filled:`, fills);
     case "rejected":
       return `❌ IBKR rejected the ${order.symbol} order: ${order.errorMessage ?? "no reason given"}.`;

@@ -14,6 +14,8 @@ import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { computeLegSuccessProbabilities, type SuccessProbabilityLeg } from "../lib/positionSuccessProbability.js";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { fetchPricesPoolFirst, streamPooledPrices, subscribeToPooledPrice } from "../ibkr/pricePool.js";
+import { peekPooledQuote } from "../ibkr/marketDataPool.js";
+import { stockLegLimitPrice } from "../lib/stockLegLimit.js";
 import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import { findMalformedOptionExpiry, type OrderLegPayload, type OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
@@ -1075,7 +1077,8 @@ positionsRouter.post("/orders", async (request, response) => {
         });
         return;
       }
-      resolvedStock = { quantity: shortfall, limitPrice: roundToCents(price) };
+      // The mid of the pooled bid/ask when a screen streams this stock (the Signals modal does), else the last price.
+      resolvedStock = { quantity: shortfall, limitPrice: roundToCents(stockLegLimitPrice(peekPooledQuote({ key: "stock", legType: "stock", symbol: ticker.symbol }), price).price) };
     }
     // else: already-held uncovered shares fully cover this contract count — no stock leg needed at all.
   }

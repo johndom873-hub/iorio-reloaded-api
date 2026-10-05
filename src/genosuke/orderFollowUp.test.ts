@@ -9,6 +9,8 @@ describe("describeOrderUpdate", () => {
     expect(describeOrderUpdate(order("cancelled", null, "expired_at_close"), [])).toContain("expired unfilled at the market close");
     expect(describeOrderUpdate(order("cancelled_partially_filled", null, "expired_at_close"), [putFill])).toContain("expired at the market close after partly filling");
     expect(describeOrderUpdate(order("cancelled", null, "not_confirmed_in_time"), [])).toContain("never confirmed");
+    expect(describeOrderUpdate(order("cancelled", null, "not_filled_in_time"), [])).toContain("past the time limit");
+    expect(describeOrderUpdate(order("cancelled_partially_filled", null, "not_filled_in_time"), [putFill])).toContain("past the time limit after partly filling");
     expect(describeOrderUpdate(order("cancelled", "IBKR: Not enough buying power", "cancelled_by_ibkr"), [])).toContain("(IBKR: Not enough buying power)");
   });
 

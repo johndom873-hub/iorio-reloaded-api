@@ -64,7 +64,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
 const account = { freeCash: 1_000_000 };
 // No test in this file is about the Signals tab's own limits (see signalCandidates.test.ts and
 // signalOrderLimits.test.ts for those) -- wide open here so every existing candidate stays in.
-const permissiveSettings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100 };
+const permissiveSettings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100, orderUnfilledCancelMinutes: 15 };
 
 describe("computeAtmImpliedVolatility", () => {
   it("reads the slice nearest 30 days (with >= 14 days left) at log-moneyness 0", () => {

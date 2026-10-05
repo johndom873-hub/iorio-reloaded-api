@@ -14,6 +14,7 @@ const validInput: TradingSettingsInput = {
   priceCheckMaxDeviationPct: 10,
   priceCheckMinToleranceDollars: 0.05,
   spreadCostChargedPct: 50,
+  orderUnfilledCancelMinutes: 15,
 };
 
 describe("validateTradingSettingsInput", () => {
@@ -48,6 +49,15 @@ describe("validateTradingSettingsInput", () => {
     expect(validateTradingSettingsInput({ ...validInput, spreadCostChargedPct: 100 })).toBeNull();
   });
 
+  it("accepts 0 (never) to 1440 whole minutes for the unfilled-order cancel and rejects the rest", () => {
+    expect(validateTradingSettingsInput({ ...validInput, orderUnfilledCancelMinutes: 0 })).toBeNull();
+    expect(validateTradingSettingsInput({ ...validInput, orderUnfilledCancelMinutes: 1440 })).toBeNull();
+    const refusal = "orderUnfilledCancelMinutes must be a whole number of minutes between 0 and 1440.";
+    expect(validateTradingSettingsInput({ ...validInput, orderUnfilledCancelMinutes: 1441 })).toBe(refusal);
+    expect(validateTradingSettingsInput({ ...validInput, orderUnfilledCancelMinutes: -1 })).toBe(refusal);
+    expect(validateTradingSettingsInput({ ...validInput, orderUnfilledCancelMinutes: 7.5 })).toBe(refusal);
+  });
+
   it("rejects an invalid delta band", () => {
     expect(validateTradingSettingsInput({ ...validInput, deltaTargetMax: 1.2 })).toBe("The delta band must be between 0 and 1.");
     expect(validateTradingSettingsInput({ ...validInput, deltaTargetMin: 0.5, deltaTargetMax: 0.4 })).toBe("deltaTargetMin cannot exceed deltaTargetMax.");
@@ -75,6 +85,7 @@ describe("mapTradingSettingsRow", () => {
       price_check_max_deviation_pct: "10.00",
       price_check_min_tolerance_dollars: "0.05",
       spread_cost_charged_pct: "50.00",
+      order_unfilled_cancel_minutes: 15,
     });
     expect(mapped).toEqual(validInput);
   });

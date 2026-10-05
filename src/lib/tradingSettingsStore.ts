@@ -27,6 +27,8 @@ export interface TradingSettings {
   priceCheckMinToleranceDollars: number;
   /** Signals friction charges this percentage of the half-spread: the expected give-up of a mid-limit order (0 = always the mid, 100 = always the bid). */
   spreadCostChargedPct: number;
+  /** The worker cancels an order that has rested unfilled at IBKR this many minutes (whole minutes; 0 = never). */
+  orderUnfilledCancelMinutes: number;
   /** Trailing-fills commission estimate used by scoring; absent (flat $0.68) wherever settings are built without a database. */
   commissionEstimator?: CommissionEstimator;
 }
@@ -44,6 +46,7 @@ export const tradingSettingsColumns = {
   priceCheckMaxDeviationPct: "price_check_max_deviation_pct",
   priceCheckMinToleranceDollars: "price_check_min_tolerance_dollars",
   spreadCostChargedPct: "spread_cost_charged_pct",
+  orderUnfilledCancelMinutes: "order_unfilled_cancel_minutes",
 } as const;
 
 export type TradingSettingsInput = Record<keyof typeof tradingSettingsColumns, number>;
@@ -54,6 +57,7 @@ const maximumDteDays = 2_147_483_647;
 const percentageFields = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
 
 const maximumToleranceDollars = 1000;
+const maximumUnfilledCancelMinutes = 1440;
 
 /** Pure: the reason a settings payload cannot be saved, or null. The database enforces the same ranges as a last line. */
 export function validateTradingSettingsInput(input: Record<string, unknown>): string | null {
@@ -65,6 +69,7 @@ export function validateTradingSettingsInput(input: Record<string, unknown>): st
   for (const field of percentageFields) {
     if (settings[field] < 0 || settings[field] > 100) return `${field} must be between 0 and 100.`;
   }
+  if (!Number.isInteger(settings.orderUnfilledCancelMinutes) || settings.orderUnfilledCancelMinutes < 0 || settings.orderUnfilledCancelMinutes > maximumUnfilledCancelMinutes) return `orderUnfilledCancelMinutes must be a whole number of minutes between 0 and ${maximumUnfilledCancelMinutes}.`;
   if (settings.priceCheckMinToleranceDollars < 0 || settings.priceCheckMinToleranceDollars > maximumToleranceDollars) return `priceCheckMinToleranceDollars must be between 0 and ${maximumToleranceDollars}.`;
   if (settings.deltaTargetMin < 0 || settings.deltaTargetMax > 1) return "The delta band must be between 0 and 1.";
   if (settings.deltaTargetMin > settings.deltaTargetMax) return "deltaTargetMin cannot exceed deltaTargetMax.";
@@ -92,6 +97,7 @@ export function mapTradingSettingsRow(row: TradingSettingsRow): Omit<TradingSett
     priceCheckMaxDeviationPct: Number(row.price_check_max_deviation_pct),
     priceCheckMinToleranceDollars: Number(row.price_check_min_tolerance_dollars),
     spreadCostChargedPct: Number(row.spread_cost_charged_pct),
+    orderUnfilledCancelMinutes: Number(row.order_unfilled_cancel_minutes),
   };
 }
 
@@ -117,6 +123,13 @@ export async function saveTradingSettings(input: TradingSettingsInput, userId: s
   for (const [field, column] of Object.entries(tradingSettingsColumns)) update[column] = input[field as keyof TradingSettingsInput];
   const updatedRows = await db("trading_settings").update({ ...update, updated_at: db.fn.now(), updated_by_user_id: userId });
   if (updatedRows !== 1) throw new Error("No trading_settings row found.");
+}
+
+/** Just the unfilled-order cancel limit, for the worker's sweep (which must not pay for the commission estimator). */
+export async function loadOrderUnfilledCancelMinutes(): Promise<number> {
+  const row = await db("trading_settings").first("order_unfilled_cancel_minutes");
+  if (!row) throw new Error("No trading_settings row found.");
+  return Number(row.order_unfilled_cancel_minutes);
 }
 
 /** Just the limit-price check tolerance, for the order paths that must not pay for the commission estimator (the worker's placement step). */

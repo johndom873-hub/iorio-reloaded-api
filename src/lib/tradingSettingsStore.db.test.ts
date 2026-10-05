@@ -32,6 +32,7 @@ const knownValues = {
   price_check_max_deviation_pct: 10,
   price_check_min_tolerance_dollars: 0.05,
   spread_cost_charged_pct: 50,
+  order_unfilled_cancel_minutes: 15,
   updated_by_user_id: null,
   updated_at: new Date("2026-01-01T00:00:00.000Z"),
 };
@@ -88,6 +89,7 @@ const completeInput = {
   priceCheckMaxDeviationPct: 12.5,
   priceCheckMinToleranceDollars: 0.1,
   spreadCostChargedPct: 25,
+  orderUnfilledCancelMinutes: 20,
 };
 
 describe("the seeded trading_settings row", () => {
@@ -109,6 +111,7 @@ describe("the seeded trading_settings row", () => {
       priceCheckMaxDeviationPct: 10,
       priceCheckMinToleranceDollars: 0.05,
       spreadCostChargedPct: 50,
+      orderUnfilledCancelMinutes: 15,
     });
     for (const value of Object.values(numbers)) expect(typeof value).toBe("number");
     expect(typeof commissionEstimator?.perContractDollars).toBe("function");
@@ -158,6 +161,7 @@ describe("loadTradingSettingsForEditing", () => {
         "priceCheckMinToleranceDollars",
         "recoveryDteMax",
         "recoveryDteMin",
+        "orderUnfilledCancelMinutes",
         "spreadCostChargedPct",
         "updatedAt",
         "updatedByDisplayName",

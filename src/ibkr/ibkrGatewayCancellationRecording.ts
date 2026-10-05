@@ -11,8 +11,9 @@ export type ExecutedOutcome = "filled" | "partially_filled" | "none";
 
 /** For a row IBKR just ended as cancelled: why, unless a user asked for the cancel (cancelled_by_user_id says so already). */
 export async function recordIbkrCancellationReason(orderRequestId: string, connection: Knex = db, now: Date = new Date()): Promise<void> {
-  const row: { created_at: Date; cancelled_by_user_id: string | null } | undefined = await connection("order_requests").where({ id: orderRequestId }).first("created_at", "cancelled_by_user_id");
-  if (!row || row.cancelled_by_user_id) return;
+  const row: { created_at: Date; cancelled_by_user_id: string | null; cancellation_reason: string | null } | undefined = await connection("order_requests").where({ id: orderRequestId }).first("created_at", "cancelled_by_user_id", "cancellation_reason");
+  // A reason already set (the unfilled-order sweep's) is the real one; the clock-based guess must not replace it.
+  if (!row || row.cancelled_by_user_id || row.cancellation_reason) return;
   await connection("order_requests").where({ id: orderRequestId }).update({ cancellation_reason: cancellationReasonForIbkrCancel(new Date(row.created_at), now) });
 }
 

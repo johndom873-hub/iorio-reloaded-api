@@ -92,10 +92,10 @@ describe("the tool set", () => {
     expect(risk.tracksOrderStatus).toBeUndefined();
   });
 
-  it("update_risk_limits takes the twelve settings of the single set, none required, and nothing per strategy", () => {
+  it("update_risk_limits takes the thirteen settings of the single set, none required, and nothing per strategy", () => {
     const parameters = toolNamed("update_risk_limits").parameters as { properties: Record<string, unknown>; required?: string[] };
     expect(Object.keys(parameters.properties).sort()).toEqual(
-      ["commissionWarnSharePctOfPremium", "deltaTargetMax", "deltaTargetMin", "maxConcentrationPerTickerPct", "maxPositionPctOfPortfolio", "minAnnualizedYieldPct", "minCashReservePct", "priceCheckMaxDeviationPct", "priceCheckMinToleranceDollars", "recoveryDteMax", "recoveryDteMin", "spreadCostChargedPct"].sort(),
+      ["commissionWarnSharePctOfPremium", "deltaTargetMax", "deltaTargetMin", "maxConcentrationPerTickerPct", "maxPositionPctOfPortfolio", "minAnnualizedYieldPct", "minCashReservePct", "priceCheckMaxDeviationPct", "priceCheckMinToleranceDollars", "recoveryDteMax", "recoveryDteMin", "spreadCostChargedPct", "orderUnfilledCancelMinutes"].sort(),
     );
     expect(parameters.required).toBeUndefined();
     expect(parameters.properties).not.toHaveProperty("strategyKey");

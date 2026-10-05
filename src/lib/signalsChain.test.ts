@@ -76,7 +76,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
   };
 }
 const account = { freeCash: 1_000_000 };
-const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 0.35, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100 };
+const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 0.35, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100, orderUnfilledCancelMinutes: 15 };
 const pathCount = 200;
 
 describe("buildSignalCandidates exclusion reporting", () => {
