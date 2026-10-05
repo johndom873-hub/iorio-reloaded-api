@@ -854,6 +854,28 @@ describe("Pluto's book follows shares that leave a Pluto position (position_shar
     expect(await plutoBookPositionIds()).toContain(newCoveredCall.id);
   });
 
+  it("a Pluto put assigned 200 shares, one call sold on them: the 100 shares left over stay in Pluto's book", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const plutoPutId = await insertPosition(ticker.id, "cash_secured_put");
+    const plutoPutLegId = await insertShortOptionLeg(plutoPutId, (nextConId += 1), "put", 40, isoDateDaysFromToday(-1), 0.9);
+    await fillFromPlutoOrder(plutoPutLegId, ticker.symbol, 0.9);
+    // The assignment pass delivers 200 shares to a stock-only position linked to the put.
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 39.1)]);
+    const assigned = (await positionsFor(ticker.id)).find((position) => position.status === "open")!;
+    expect(await plutoBookPositionIds()).toContain(assigned.id);
+
+    // One call is sold: 100 shares move under it, the other 100 are split out into a new stock-only position.
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 39.1), heldShortOption(ticker.symbol, (nextConId += 1), OptionType.Call, 45, isoDateDaysFromToday(20), 80)]);
+    const open = (await positionsFor(ticker.id)).filter((position) => position.status === "open");
+    const coveredCall = open.find((position) => position.strategy_key === "covered_call")!;
+    const leftover = open.find((position) => position.strategy_key === "unstructured")!;
+    expect(leftover.id).not.toBe(assigned.id);
+    const bookIds = await plutoBookPositionIds();
+    expect(bookIds).toContain(coveredCall.id);
+    expect(bookIds).toContain(leftover.id);
+  });
+
   it("a Pluto put is assigned: the delivered shares are in Pluto's book; a human's put assigned on another ticker is not", async () => {
     const plutoTicker = await createTicker();
     const plutoPutId = await insertPosition(plutoTicker.id, "cash_secured_put");

@@ -33,6 +33,8 @@ let dependencies: ReconciliationDependencies;
 let currentPassId = 0;
 let heldStockSharesBySymbol = new Map<string, number>();
 let legsHandedOffThisPass = 0;
+/** Positions that handed stock off this pass, by symbol: the source of any leftover shares split out after them. */
+let stockHandoffSourcesThisPass = new Map<string, Set<string>>();
 // Positions whose just-expired short leg finished within the audit's marginal ITM/OTM threshold
 // this pass — the audit left the assignment call as "manual review" rather than deciding it, so
 // notifyPositionExpired flags the message as unverified instead of stating it as fact.
@@ -287,6 +289,9 @@ async function handOffOpenStockLegs(positionId: string, symbol: string, toDescri
     await db("position_legs").where({ id: leg.id }).update({ exit_at: db.fn.now(), exit_price: leg.entry_price });
     entryPriceByConId.set(String(leg.ibkr_contract_id), Number(leg.entry_price));
     legsHandedOffThisPass += 1;
+    const sources = stockHandoffSourcesThisPass.get(symbol) ?? new Set<string>();
+    sources.add(positionId);
+    stockHandoffSourcesThisPass.set(symbol, sources);
     console.log(
       `Reconciliation #${currentPassId}: ${symbol} — handed off stock leg ${leg.id} (${leg.quantity} sh @ ${leg.entry_price}) from position ${positionId} ${toDescription}.`,
     );
@@ -336,6 +341,7 @@ export async function reconcileHeldPositions(held: IbkrHeldPosition[], passId: n
   dependencies = deps;
   currentPassId = passId;
   legsHandedOffThisPass = 0;
+  stockHandoffSourcesThisPass = new Map();
   marginalCallPositionIds = new Set();
   pendingExpiryNotifications = [];
 
@@ -1124,5 +1130,8 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
     await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
     console.log(`upsertLeftoverStockPosition(${symbol}): created new unstructured position ${positionId} for ${leftoverShares} leftover shares.`);
   }
+  // Shares beyond what the sold calls need were split out of whatever handed its stock off this pass (e.g. a leftover
+  // position whose shares just moved under a new covered call): record those as the leftover's source too.
+  for (const sourcePositionId of stockHandoffSourcesThisPass.get(symbol) ?? []) await recordShareSource(positionId!, sourcePositionId);
   await upsertPositionLeg(positionId!, stockLeg, "long", leftoverShares, true);
 }
