@@ -7,6 +7,7 @@ import { fetchTradingHalt } from "../lib/platformControls.js";
 import { loadMarketDataLineRestriction } from "../ibkr/marketDataLineBudget.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { daySignalsLoopLineHolder } from "../lib/daySignalsLoop.js";
+import { plutoLineHolder } from "../pluto/marketWatch.js";
 import { marketDataFeedRefusal } from "../ibkr/marketDataPool.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 
@@ -22,11 +23,11 @@ environmentRouter.get("/", (_request, response) => {
 
 environmentRouter.get("/details", requireAuth, async (_request, response) => {
   const apiEnvironment = readAppEnvironment();
-  // The Day Signals loop holds its priority lines for the whole session (Marcelo 2026-09-24): that is
+  // The Day Signals loop and Pluto hold their priority lines for the whole session (Marcelo 2026-09-24): that is
   // normal operation, not a restriction, so only the chain capture drives the banner.
   const [workerRow, marketDataRestriction, tradingHalt] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
-    loadMarketDataLineRestriction({ excludeHolders: [daySignalsLoopLineHolder] }),
+    loadMarketDataLineRestriction({ excludeHolders: [daySignalsLoopLineHolder, plutoLineHolder] }),
     fetchTradingHalt(),
   ]);
   const trading = classifyTradingStatus(workerRow, apiEnvironment, Date.now(), tradingHalt);
