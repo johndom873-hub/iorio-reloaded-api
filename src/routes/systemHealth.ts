@@ -15,6 +15,7 @@ import { dbQueryTimingStats } from "../lib/dbQueryTimingTracker.js";
 import { requireEnvironmentVariable } from "../config/env.js";
 import { daySignalsLoopStatus } from "../lib/daySignalsLoop.js";
 import { loadDayQuotesStatus } from "../lib/daySignalsStore.js";
+import { fetchTradingHalt } from "../lib/platformControls.js";
 import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
 import { loadActiveMarketDataLineReservations, loadMarketDataLineRestriction, summarizeMarketDataLineUsage } from "../ibkr/marketDataLineBudget.js";
 
@@ -206,18 +207,21 @@ systemHealthRouter.get("/web-dyno", (_request, response) => {
 // at all — it's a plain web-dyno query against order_requests, no round
 // trip needed.
 async function loadGatewayHealth() {
-  const [health, orderCountResult, reservations] = await Promise.all([
+  const [health, orderCountResult, reservations, tradingHalt] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
     db("order_requests").whereIn("status", ["confirmed", "submitted", "cancel_requested"]).count("* as count").first(),
     loadActiveMarketDataLineReservations(),
+    fetchTradingHalt(),
   ]);
 
   if (!health) {
-    return { connected: false, staleOrMissing: true, inFlightOrderCount: Number(orderCountResult?.count ?? 0) };
+    return { connected: false, staleOrMissing: true, inFlightOrderCount: Number(orderCountResult?.count ?? 0), tradingHalted: tradingHalt.enabled };
   }
 
   return {
     connected: health.connected,
+    // The operator kill switch (platform_controls.trading_halt): the Pulse Gateway card's "Trading" row.
+    tradingHalted: tradingHalt.enabled,
     uptimeMs: health.uptime_ms !== null ? Number(health.uptime_ms) : null,
     totalReconnects: health.total_reconnects,
     lastSystemStatusCode: health.last_system_status_code,

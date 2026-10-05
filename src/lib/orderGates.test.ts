@@ -68,5 +68,7 @@ describe("combineOrderGateVerdicts", () => {
 
   it("blocks an unreadable delta band even without a reason text", () => {
     expect(combineOrderGateVerdicts({ ...clear, deltaBand: { compliant: false, reason: null } }).blocks).toEqual(["The delta band could not be verified."]);
+    expect(combineOrderGateVerdicts({ ...clear, priceCheck: { blocked: true, reasons: ["price a", "price b"], legs: [] } }).blocks).toEqual(["price a", "price b"]);
+    expect(combineOrderGateVerdicts({ ...clear, priceCheck: { blocked: false, reasons: [], legs: [] } }).blocks).toEqual([]);
   });
 });

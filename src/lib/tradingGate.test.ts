@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { classifyTradingStatus, findTradingBlockedReason, type WorkerHealthForTradingGate } from "./tradingGate.js";
+import type { TradingHalt } from "./platformControls.js";
 
 const now = Date.parse("2026-09-22T10:00:00Z");
 const healthyRow: WorkerHealthForTradingGate = {
@@ -46,5 +47,29 @@ describe("classifyTradingStatus", () => {
     expect(classifyTradingStatus(healthyRow, "production", now).state).toBe("blocked");
     expect(classifyTradingStatus({ ...healthyRow, account_binding_status: null }, "staging", now).state).toBe("blocked");
     expect(classifyTradingStatus({ ...healthyRow, account_binding_status: "mismatch", account_binding_reason: "x" }, "staging", now).state).toBe("blocked");
+  });
+});
+
+describe("the trading halt (kill switch)", () => {
+  const haltOff: TradingHalt = { enabled: false, reason: null, setByUserId: null, setByDisplayName: null, setAt: null };
+  const haltOn: TradingHalt = { enabled: true, reason: "IBKR data looks wrong", setByUserId: "u1", setByDisplayName: "Marce", setAt: new Date(now - 5 * 60_000) };
+
+  it("changes nothing while off", () => {
+    expect(classifyTradingStatus(healthyRow, "staging", now, haltOff)).toEqual({ state: "ok", reason: null });
+    expect(classifyTradingStatus(undefined, "staging", now, haltOff).state).toBe("offline");
+  });
+  it("outranks a healthy worker and names who, when and why", () => {
+    expect(classifyTradingStatus(healthyRow, "staging", now, haltOn)).toEqual({
+      state: "halted",
+      reason: "Trading is halted — switched off by Marce 5m ago: IBKR data looks wrong",
+    });
+  });
+  it("outranks an offline or blocked worker too", () => {
+    expect(classifyTradingStatus(undefined, "staging", now, haltOn).state).toBe("halted");
+    expect(classifyTradingStatus(healthyRow, "production", now, haltOn).state).toBe("halted");
+  });
+  it("reads sensibly without a setter or a reason", () => {
+    const anonymous: TradingHalt = { enabled: true, reason: null, setByUserId: null, setByDisplayName: null, setAt: null };
+    expect(findTradingBlockedReason(healthyRow, "staging", now, anonymous)).toBe("Trading is halted — switched off by an operator.");
   });
 });

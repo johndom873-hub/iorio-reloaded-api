@@ -103,7 +103,7 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     todayEasternIso: tradingDateIso,
   };
 }
-const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5 };
+const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05 };
 
 function seedDependencies(overrides: Partial<DaySignalsSeedDependencies> = {}) {
   const replaceDaySignalPool = vi.fn(async () => {});

@@ -36,6 +36,8 @@ const knownRow = {
   recovery_dte_max: 45,
   min_annualized_yield_pct: 50,
   commission_warn_share_of_premium_pct: 5,
+  price_check_max_deviation_pct: 10,
+  price_check_min_tolerance_dollars: 0.05,
   updated_by_user_id: null,
   updated_at: new Date("2026-01-01T00:00:00.000Z"),
 };
@@ -50,10 +52,12 @@ const validPayload = {
   recoveryDteMax: 60,
   minAnnualizedYieldPct: 35,
   commissionWarnSharePctOfPremium: 6,
+  priceCheckMaxDeviationPct: 15,
+  priceCheckMinToleranceDollars: 0.1,
 };
 
 const fieldNames = Object.keys(validPayload) as (keyof typeof validPayload)[];
-const percentageFieldNames = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium"] as const;
+const percentageFieldNames = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct"] as const;
 
 beforeAll(async () => {
   originalRow = await testDb("trading_settings").first();
@@ -134,6 +138,8 @@ function validPayloadFromRow(row: typeof knownRow) {
     recoveryDteMax: row.recovery_dte_max,
     minAnnualizedYieldPct: row.min_annualized_yield_pct,
     commissionWarnSharePctOfPremium: row.commission_warn_share_of_premium_pct,
+    priceCheckMaxDeviationPct: row.price_check_max_deviation_pct,
+    priceCheckMinToleranceDollars: row.price_check_min_tolerance_dollars,
   };
 }
 
@@ -155,6 +161,8 @@ describe("PUT /risk-limits/settings: a valid save", () => {
     expect(row.recovery_dte_max).toBe(60);
     expect(Number(row.min_annualized_yield_pct)).toBe(35);
     expect(Number(row.commission_warn_share_of_premium_pct)).toBe(6);
+    expect(Number(row.price_check_max_deviation_pct)).toBe(15);
+    expect(Number(row.price_check_min_tolerance_dollars)).toBe(0.1);
     expect(row.updated_by_user_id).toBe(userId);
     // And a fresh GET agrees with what the PUT returned.
     expect((await call("GET", "/risk-limits/settings")).json).toEqual(response.json);
@@ -189,6 +197,8 @@ describe("PUT /risk-limits/settings: a valid save", () => {
       recoveryDteMax: 0,
       minAnnualizedYieldPct: 100,
       commissionWarnSharePctOfPremium: 0,
+      priceCheckMaxDeviationPct: 100,
+      priceCheckMinToleranceDollars: 1000,
     };
     const response = await call("PUT", "/risk-limits/settings", boundary);
     expect(response.status).toBe(200);
@@ -256,13 +266,18 @@ describe("PUT /risk-limits/settings: every validation failure is a 400 with the 
     expect(await readRow()).toEqual(before);
   });
 
-  it("rejects a percentage of 101 or -1 for each of the five percentage fields", async () => {
+  it("rejects a percentage of 101 or -1 for each of the six percentage fields", async () => {
     for (const field of percentageFieldNames) {
       await expectRejected({ ...validPayload, [field]: 101 }, `${field} must be between 0 and 100.`);
       await expectRejected({ ...validPayload, [field]: -1 }, `${field} must be between 0 and 100.`);
       await expectRejected({ ...validPayload, [field]: 100.01 }, `${field} must be between 0 and 100.`);
       await expectRejected({ ...validPayload, [field]: -0.01 }, `${field} must be between 0 and 100.`);
     }
+  });
+
+  it("rejects a limit-price dollar floor below 0 or above 1000", async () => {
+    await expectRejected({ ...validPayload, priceCheckMinToleranceDollars: -0.01 }, "priceCheckMinToleranceDollars must be between 0 and 1000.");
+    await expectRejected({ ...validPayload, priceCheckMinToleranceDollars: 1000.01 }, "priceCheckMinToleranceDollars must be between 0 and 1000.");
   });
 
   it("rejects a number too large for a double (it parses to Infinity) as not a number", async () => {

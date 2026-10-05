@@ -11,6 +11,7 @@ import { readAppEnvironment } from "./appEnvironment.js";
 import { lastCompletedSessionDate } from "./marketSessionStatus.js";
 import { loadUndeliveredAlerts } from "./undeliveredAlerts.js";
 import { loadTradingSettingsForEditing } from "./tradingSettingsStore.js";
+import { fetchTradingHalt, type TradingHalt } from "./platformControls.js";
 import {
   configurationExpectationsFor,
   evaluateAccount,
@@ -23,6 +24,7 @@ import {
   evaluateOrderHygiene,
   evaluateOrderPath,
   evaluateSettings,
+  evaluateTradingHalt,
   evaluateUndeliveredAlerts,
   evaluateWorker,
   type AccountFigures,
@@ -60,6 +62,7 @@ export interface ReadinessDependencies {
   readEnvironment(): Record<string, string | undefined>;
   loadWorkerRow(): Promise<WorkerHealthRow | null>;
   loadSettings(): Promise<TradingSettingsFigures>;
+  loadTradingHalt(): Promise<TradingHalt>;
   loadAccount(): Promise<AccountFigures>;
   /** A real listed option from the latest stored chain: the contract the order path and the live option quote are probed with. */
   loadProbeContract(): Promise<ProbeContract | null>;
@@ -114,6 +117,7 @@ export async function collectReadinessChecks(stage: ReadinessStage, now: Date, d
   const groups = await Promise.all([
     guarded("Configuration", async () => (expectations ? evaluateConfiguration(dependencies.readEnvironment(), expectations) : { name: "Configuration", status: "warn", detail: `no expected values are defined for the ${dependencies.appEnvironment} environment` })),
     guarded("Trading worker", async () => evaluateWorker(await withTimeout(dependencies.loadWorkerRow(), "the worker heartbeat"), now, { appEnvironment: dependencies.appEnvironment, accountId })),
+    guarded("Trading halt", async () => evaluateTradingHalt(await dependencies.loadTradingHalt(), now)),
     guarded("Trading settings", async () => evaluateSettings(await settingsPromise)),
     guarded("Account", async () => {
       const account = await withTimeout(dependencies.loadAccount(), "the IBKR account summary").catch(() => null);
@@ -182,6 +186,7 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
       };
     },
     loadSettings: () => loadTradingSettingsForEditing(),
+    loadTradingHalt: () => fetchTradingHalt(),
     loadAccount: async () => {
       const summary = await fetchAccountSummary();
       return { netLiquidationValue: summary.netLiquidationValue, totalCashValue: summary.totalCashValue, buyingPower: summary.buyingPower, excessLiquidity: summary.excessLiquidity };

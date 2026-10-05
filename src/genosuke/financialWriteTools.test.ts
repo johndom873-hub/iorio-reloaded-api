@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenosukeApiClient } from "./apiClient.js";
-import { buildCloseCard, type PositionForCard } from "./confirmationText.js";
+import type { PositionForCard } from "./confirmationText.js";
 import { createConfirmation, takeConfirmation } from "./confirmations.js";
 import { financialWriteTools } from "./tools/financialWriteTools.js";
 import type { GenosukeTool } from "./tools/types.js";
@@ -34,11 +34,30 @@ const callInput = {
   option: { quantity: 2, limitPrice: 1.1, strikePrice: 55, expiryDate: "20261016" },
 };
 
+/** The order the server builds for an open request: what it stores, which can differ from what the model asked for. */
+function builtOpenOrder(body: unknown, extraStockShares?: number) {
+  const input = body as { symbol: string; strategyKey: string; stock?: { quantity: number; limitPrice: number }; option: { quantity: number; limitPrice: number; strikePrice: number; expiryDate: string } };
+  const legs: Record<string, unknown>[] = [];
+  const stockShares = input.stock?.quantity ?? extraStockShares;
+  if (input.strategyKey === "covered_call" && stockShares) legs.push({ role: "stock", action: "BUY", symbol: input.symbol, quantity: stockShares, unitPrice: input.stock?.limitPrice ?? 48.2 });
+  legs.push({
+    role: "option",
+    action: "SELL",
+    symbol: input.symbol,
+    quantity: input.option.quantity,
+    unitPrice: input.option.limitPrice,
+    strike: input.option.strikePrice,
+    expiry: input.option.expiryDate,
+    right: input.strategyKey === "covered_call" ? "C" : "P",
+  });
+  return { id: "order-1", requestType: input.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", payload: { symbol: input.symbol, strategyKey: input.strategyKey, legs } };
+}
+
 /** Handlers for a built order that passes the gate with the given warnings. */
-function openHandlers(options: { blocks?: string[]; warnings?: string[]; confirmFails?: boolean } = {}) {
+function openHandlers(options: { blocks?: string[]; warnings?: string[]; confirmFails?: boolean; serverFilledShares?: number } = {}) {
   return {
-    post: (path: string) => {
-      if (path === "/positions/orders") return { id: "order-1", payload: { legs: [{ role: "option" }] } };
+    post: (path: string, body?: unknown) => {
+      if (path === "/positions/orders") return builtOpenOrder(body, options.serverFilledShares);
       if (path === "/order-checks/commission-preview") return noCommissionWarning;
       if (path.endsWith("/confirm")) {
         if (options.confirmFails) throw new Error("Trading is blocked");
@@ -51,8 +70,13 @@ function openHandlers(options: { blocks?: string[]; warnings?: string[]; confirm
 }
 
 describe("the tool set", () => {
-  it("lists create_position, close_position and update_risk_limits as financial-write tools", () => {
-    expect(financialWriteTools.map((tool) => `${tool.name}:${tool.tier}`)).toEqual(["create_position:financial-write", "close_position:financial-write", "update_risk_limits:financial-write"]);
+  it("lists create_position, close_position, update_risk_limits and set_trading_halt as financial-write tools", () => {
+    expect(financialWriteTools.map((tool) => `${tool.name}:${tool.tier}`)).toEqual([
+      "create_position:financial-write",
+      "close_position:financial-write",
+      "update_risk_limits:financial-write",
+      "set_trading_halt:financial-write",
+    ]);
   });
 
   it("the two order tools prepare a confirmation and track the order; update_risk_limits does neither", () => {
@@ -68,10 +92,10 @@ describe("the tool set", () => {
     expect(risk.tracksOrderStatus).toBeUndefined();
   });
 
-  it("update_risk_limits takes the nine settings of the single set, none required, and nothing per strategy", () => {
+  it("update_risk_limits takes the eleven settings of the single set, none required, and nothing per strategy", () => {
     const parameters = toolNamed("update_risk_limits").parameters as { properties: Record<string, unknown>; required?: string[] };
     expect(Object.keys(parameters.properties).sort()).toEqual(
-      ["commissionWarnSharePctOfPremium", "deltaTargetMax", "deltaTargetMin", "maxConcentrationPerTickerPct", "maxPositionPctOfPortfolio", "minAnnualizedYieldPct", "minCashReservePct", "recoveryDteMax", "recoveryDteMin"].sort(),
+      ["commissionWarnSharePctOfPremium", "deltaTargetMax", "deltaTargetMin", "maxConcentrationPerTickerPct", "maxPositionPctOfPortfolio", "minAnnualizedYieldPct", "minCashReservePct", "priceCheckMaxDeviationPct", "priceCheckMinToleranceDollars", "recoveryDteMax", "recoveryDteMin"].sort(),
     );
     expect(parameters.required).toBeUndefined();
     expect(parameters.properties).not.toHaveProperty("strategyKey");
@@ -81,11 +105,11 @@ describe("the tool set", () => {
 describe("create_position", () => {
   const tool = toolNamed("create_position");
 
-  it("prepareConfirmation builds the order, reads its gates and returns the base card with the built order's id", async () => {
+  it("prepareConfirmation builds the order, reads its gates and returns the card of the BUILT order with its id", async () => {
     const { api, paths, calls } = fakeApi(openHandlers());
     const result = await tool.prepareConfirmation!(putInput, api);
     expect(result).toEqual({
-      description: "Place order for AAOI (cash_secured_put): SELL 2x $50 exp 20261016 @ 1.35 — will be sent to IBKR immediately on confirm.",
+      description: "Place order for AAOI (cash-secured put)\n• SELL 2 put $50 exp 2026-10-16, limit 1.35\nOne limit order, sent to IBKR immediately when you tap Yes.",
       prepared: { orderId: "order-1" },
     });
     expect(paths()).toEqual(["POST /positions/orders", "GET /positions/orders/order-1/gates", "POST /order-checks/commission-preview"]);
@@ -95,14 +119,25 @@ describe("create_position", () => {
   it("the card of a covered call shows the stock leg too", async () => {
     const { api } = fakeApi(openHandlers());
     const result = await tool.prepareConfirmation!(callInput, api);
-    expect((result as { description: string }).description).toBe("Place order for AAOI (covered_call): BUY 200 sh @ 48.2 + SELL 2x $55 exp 20261016 @ 1.1 — will be sent to IBKR immediately on confirm.");
+    expect((result as { description: string }).description).toBe(
+      "Place order for AAOI (covered call)\n• BUY 200 shares, limit 48.20\n• SELL 2 call $55 exp 2026-10-16, limit 1.10\nOne combo order, sent to IBKR immediately when you tap Yes.",
+    );
+  });
+
+  it("the card shows a stock leg the SERVER added although the model sent none (what is confirmed is what is shown)", async () => {
+    const { api } = fakeApi(openHandlers({ serverFilledShares: 200 }));
+    const { stock: _omitted, ...callInputWithoutStock } = callInput;
+    const result = await tool.prepareConfirmation!(callInputWithoutStock, api);
+    const description = (result as { description: string }).description;
+    expect(description).toContain("• BUY 200 shares, limit 48.20");
+    expect(description).toContain("One combo order");
   });
 
   it("adds the gate's warnings under the base card", async () => {
     const { api } = fakeApi(openHandlers({ warnings: ["1 economic event before expiry: 2026-10-07 FOMC."] }));
     const result = (await tool.prepareConfirmation!(putInput, api)) as { description: string };
     expect(result.description.split("\n\n")[1]).toBe("⚠ Warnings:\n• 1 economic event before expiry: 2026-10-07 FOMC.");
-    expect(result.description.startsWith("Place order for AAOI")).toBe(true);
+    expect(result.description.startsWith("Place order for AAOI (cash-secured put)")).toBe(true);
   });
 
   it("a gate block gives a problem (no card) and cancels the order that was built", async () => {
@@ -174,7 +209,11 @@ describe("close_position", () => {
       post: (path: string) => {
         if (path === "/positions/pos-1/close") {
           if (options.closeBuildFails) throw new Error(options.closeBuildFails);
-          return { id: "close-order-1", payload: { legs: [{ role: "option" }] } };
+          return {
+            id: "close-order-1",
+            requestType: "close_position",
+            payload: { symbol: "AAOI", strategyKey: "cash_secured_put", legs: [{ role: "option", action: "BUY", symbol: "AAOI", quantity: 2, unitPrice: 0.5, strike: 50, expiry: "20261016", right: "P", positionLegId: "leg-1" }] },
+          };
         }
         if (path === "/order-checks/commission-preview") return noCommissionWarning;
         if (path.endsWith("/confirm")) return { id: "close-order-1", status: "confirmed" };
@@ -186,7 +225,10 @@ describe("close_position", () => {
   it("prepareConfirmation builds the close with the model's legs and returns the close card with the built order's id", async () => {
     const { api, paths, calls } = fakeApi(closeHandlers());
     const result = await tool.prepareConfirmation!(closeInput, api);
-    expect(result).toEqual({ description: buildCloseCard(position, closeInput.legs), prepared: { orderId: "close-order-1" } });
+    expect(result).toEqual({
+      description: "Close AAOI (cash-secured put)\n• BUY BACK 2 put $50 exp 2026-10-16, limit 0.50\nOne limit order, sent to IBKR immediately when you tap Yes.",
+      prepared: { orderId: "close-order-1" },
+    });
     expect(paths()).toEqual(["GET /positions/pos-1", "POST /positions/pos-1/close", "GET /positions/orders/close-order-1/gates", "POST /order-checks/commission-preview"]);
     expect(calls[1]!.body).toEqual({ legs: closeInput.legs });
   });
@@ -378,5 +420,50 @@ describe("confirmations: prepared state and single use", () => {
     createConfirmation("chat-1", "create_position", {}, "NEW");
     vi.setSystemTime(new Date("2026-10-05T12:00:00Z")); // even if the clock were wound back, the swept card is gone
     expect(takeConfirmation(old.id)).toBeNull();
+  });
+});
+
+describe("set_trading_halt", () => {
+  const tool = toolNamed("set_trading_halt");
+
+  it("is a confirmed (card) tool that neither prepares an order nor tracks one", () => {
+    expect(tool.tier).toBe("financial-write");
+    expect(tool.prepareConfirmation).toBeUndefined();
+    expect(tool.tracksOrderStatus).toBeUndefined();
+    expect((tool.parameters as { required: string[] }).required).toEqual(["enabled"]);
+  });
+
+  it("refuses to send a card for halting without a reason, for a bad enabled, or for a reason over 300 characters", async () => {
+    const { api } = fakeApi({});
+    expect(await tool.validateBeforeConfirmation!({ enabled: true }, api)).toContain("reason is required");
+    expect(await tool.validateBeforeConfirmation!({ enabled: true, reason: "   " }, api)).toContain("reason is required");
+    expect(await tool.validateBeforeConfirmation!({ enabled: "yes" }, api)).toContain("true (halt) or false (resume)");
+    expect(await tool.validateBeforeConfirmation!({ enabled: true, reason: "x".repeat(301) }, api)).toContain("at most 300");
+    expect(await tool.validateBeforeConfirmation!({ enabled: true, reason: "x".repeat(300) }, api)).toBeNull();
+  });
+
+  it("allows resuming with or without a reason", async () => {
+    const { api } = fakeApi({});
+    expect(await tool.validateBeforeConfirmation!({ enabled: false }, api)).toBeNull();
+    expect(await tool.validateBeforeConfirmation!({ enabled: false, reason: "data is fine again" }, api)).toBeNull();
+  });
+
+  it("the card says plainly what halting and resuming do", async () => {
+    const { api } = fakeApi({});
+    expect(await tool.describeForConfirmation!({ enabled: true, reason: "IBKR data looks wrong" }, api)).toBe(
+      "HALT ALL TRADING: no order from any origin reaches IBKR until it is resumed (cancels still work). Reason: IBKR data looks wrong",
+    );
+    expect(await tool.describeForConfirmation!({ enabled: false }, api)).toBe("RESUME TRADING: orders reach IBKR again from every origin.");
+    expect(await tool.describeForConfirmation!({ enabled: false, reason: "fixed" }, api)).toBe("RESUME TRADING: orders reach IBKR again from every origin. Reason: fixed");
+  });
+
+  it("execute puts the switch with a trimmed reason (null when none) and the result is worded for the human", async () => {
+    const { api, calls } = fakeApi({ put: () => ({ enabled: true, reason: "r" }) });
+    const halted = await tool.execute({ enabled: true, reason: "  IBKR data looks wrong " }, api);
+    expect(calls[0]).toEqual({ method: "PUT", path: "/risk-limits/trading-halt", body: { enabled: true, reason: "IBKR data looks wrong" } });
+    expect(tool.describeResult!(halted)).toContain("HALTED");
+    await tool.execute({ enabled: false }, api);
+    expect(calls[1]!.body).toEqual({ enabled: false, reason: null });
+    expect(tool.describeResult!({ enabled: false })).toContain("resumed");
   });
 });

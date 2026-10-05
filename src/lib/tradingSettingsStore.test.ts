@@ -11,6 +11,8 @@ const validInput: TradingSettingsInput = {
   recoveryDteMax: 14,
   minAnnualizedYieldPct: 50,
   commissionWarnSharePctOfPremium: 5,
+  priceCheckMaxDeviationPct: 10,
+  priceCheckMinToleranceDollars: 0.05,
 };
 
 describe("validateTradingSettingsInput", () => {
@@ -28,6 +30,14 @@ describe("validateTradingSettingsInput", () => {
   it("rejects percentages outside 0-100", () => {
     expect(validateTradingSettingsInput({ ...validInput, maxConcentrationPerTickerPct: 101 })).toBe("maxConcentrationPerTickerPct must be between 0 and 100.");
     expect(validateTradingSettingsInput({ ...validInput, minCashReservePct: -1 })).toBe("minCashReservePct must be between 0 and 100.");
+  });
+
+  it("rejects a price-check deviation outside 0-100 and a dollar floor outside 0-1000", () => {
+    expect(validateTradingSettingsInput({ ...validInput, priceCheckMaxDeviationPct: 100.5 })).toBe("priceCheckMaxDeviationPct must be between 0 and 100.");
+    expect(validateTradingSettingsInput({ ...validInput, priceCheckMaxDeviationPct: -1 })).toBe("priceCheckMaxDeviationPct must be between 0 and 100.");
+    expect(validateTradingSettingsInput({ ...validInput, priceCheckMinToleranceDollars: -0.01 })).toBe("priceCheckMinToleranceDollars must be between 0 and 1000.");
+    expect(validateTradingSettingsInput({ ...validInput, priceCheckMinToleranceDollars: 1000.01 })).toBe("priceCheckMinToleranceDollars must be between 0 and 1000.");
+    expect(validateTradingSettingsInput({ ...validInput, priceCheckMaxDeviationPct: 0, priceCheckMinToleranceDollars: 0 })).toBeNull();
   });
 
   it("rejects an invalid delta band", () => {
@@ -54,6 +64,8 @@ describe("mapTradingSettingsRow", () => {
       recovery_dte_max: 14,
       min_annualized_yield_pct: "50.00",
       commission_warn_share_of_premium_pct: "5.00",
+      price_check_max_deviation_pct: "10.00",
+      price_check_min_tolerance_dollars: "0.05",
     });
     expect(mapped).toEqual(validInput);
   });

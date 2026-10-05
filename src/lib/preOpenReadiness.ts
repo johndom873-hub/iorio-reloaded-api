@@ -1,4 +1,5 @@
 import { workerHeartbeatStaleAfterSeconds } from "./tradingGate.js";
+import { describeTradingHaltBlock, type TradingHalt } from "./platformControls.js";
 import type { InvariantResult } from "./dataInvariants.js";
 import { easternInstant } from "./marketSessionStatus.js";
 
@@ -175,6 +176,15 @@ export function evaluateAccount(account: AccountFigures | null, maxPositionPctOf
     parts.push(`largest cash-secured put the ${maxPositionPctOfPortfolio}% position limit allows: strike $${Math.floor(largestSingleContractStrike)} (1 contract)`);
   }
   return check("Account", account.buyingPower === null || account.totalCashValue === null ? "warn" : "ok", parts.join(", "));
+}
+
+// --- The operator kill switch ---
+
+/** A halt left on overnight is the one thing that makes the market-open answer "NOT READY" for a reason nothing in the system will fix by itself. */
+export function evaluateTradingHalt(halt: TradingHalt, now: Date): ReadinessCheck {
+  const blockedReason = describeTradingHaltBlock(halt, now.getTime());
+  if (!blockedReason) return check("Trading halt", "ok", "trading is not halted");
+  return check("Trading halt", "fail", `${blockedReason} Every order is refused until someone resumes trading (Risk & Limits, or ask Genosuke)`);
 }
 
 // --- The limits and targets (the settings you edit) ---

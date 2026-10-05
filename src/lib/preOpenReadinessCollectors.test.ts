@@ -15,6 +15,7 @@ function healthyDependencies(overrides: Partial<ReadinessDependencies> = {}): Re
     readEnvironment: () => ({ ...secrets, APP_ENVIRONMENT: "production", IBKR_TRADING_MODE: "live", IBKR_EXPECTED_ACCOUNT_ID: "U21518308", IBKR_MARKET_DATA_LINES_ENABLED: "true", DAY_SIGNALS_LOOP_ENABLED: "true", EXPIRY_SETTLEMENT_MODE: "apply", GENOSUKE_ENABLED: "true" }),
     loadWorkerRow: async () => ({ updatedAt: new Date(now.getTime() - 20_000), connected: true, appEnvironment: "production", accountBindingStatus: "ok", accountBindingReason: null, ibkrAccountIds: ["U21518308"], detectedTradingMode: "live", configuredTradingMode: "live", gitSha: "abc1234" }),
     loadSettings: async () => ({ maxPositionPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4, recoveryDteMin: 1, recoveryDteMax: 14, minAnnualizedYieldPct: 50, commissionWarnSharePctOfPremium: 5 }),
+    loadTradingHalt: async () => ({ enabled: false, reason: null, setByUserId: null, setByDisplayName: null, setAt: null }),
     loadAccount: async () => ({ netLiquidationValue: 100_000, totalCashValue: 60_000, buyingPower: 200_000, excessLiquidity: 50_000 }),
     loadProbeContract: async () => probeContract,
     probeOrderPath: async (contract) => {
@@ -44,7 +45,7 @@ describe("collectReadinessChecks", () => {
   it("produces a check for every area, all green for a healthy production before the open", async () => {
     const checks = await collectReadinessChecks("pre_open", now, healthyDependencies());
     expect(checks.filter((entry) => entry.status !== "ok")).toEqual([]);
-    for (const name of ["Configuration", "Trading worker", "Trading settings", "Account", "Order path", "Open orders", "Scheduled jobs", "Gateway health check", "Data", "Market data", "Live stock quote", "Telegram", "Database", "Release"]) {
+    for (const name of ["Configuration", "Trading worker", "Trading halt", "Trading settings", "Account", "Order path", "Open orders", "Scheduled jobs", "Gateway health check", "Data", "Market data", "Live stock quote", "Telegram", "Database", "Release"]) {
       expect(byName(checks, name).length, name).toBeGreaterThan(0);
     }
     expect(checks.some((entry) => entry.name === "Live option quote")).toBe(false);
@@ -56,6 +57,31 @@ describe("collectReadinessChecks", () => {
     const checks = await collectReadinessChecks("open", now, dependencies);
     expect(dependencies.calls).toEqual(expect.arrayContaining(["probeOrderPath:SPY", "marketData:open:SPY"]));
     expect(checks.find((entry) => entry.name === "Live option quote")).toMatchObject({ status: "ok" });
+  });
+
+  it("a trading halt left on is a failing check that names who, why and how to resume; a halt that cannot be read fails too", async () => {
+    const halted = await collectReadinessChecks(
+      "pre_open",
+      now,
+      healthyDependencies({ loadTradingHalt: async () => ({ enabled: true, reason: "IBKR data looks wrong", setByUserId: "u1", setByDisplayName: "Marce", setAt: new Date(now.getTime() - 60 * 60_000) }) }),
+    );
+    const haltCheck = halted.find((entry) => entry.name === "Trading halt");
+    expect(haltCheck).toMatchObject({ status: "fail" });
+    expect(haltCheck?.detail).toContain("switched off by Marce 1h");
+    expect(haltCheck?.detail).toContain("IBKR data looks wrong");
+    expect(haltCheck?.detail).toContain("Risk & Limits");
+    expect(halted.filter((entry) => entry.status === "fail").map((entry) => entry.name)).toEqual(["Trading halt"]);
+
+    const unreadable = await collectReadinessChecks(
+      "pre_open",
+      now,
+      healthyDependencies({
+        loadTradingHalt: async () => {
+          throw new Error("relation platform_controls does not exist");
+        },
+      }),
+    );
+    expect(unreadable.find((entry) => entry.name === "Trading halt")).toEqual({ name: "Trading halt", status: "fail", detail: "could not be read: relation platform_controls does not exist" });
   });
 
   it("turns a reading that throws into a failing check and still runs every other check", async () => {

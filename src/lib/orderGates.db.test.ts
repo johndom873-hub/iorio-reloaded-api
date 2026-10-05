@@ -39,6 +39,10 @@ vi.mock("../ibkr/marketDataPool.js", () => ({
   },
 }));
 
+// The limit-price check reads the same pool; its own figures are covered in limitPriceCheck.test.ts and limitPriceCheckGate.test.ts.
+const evaluateLimitPriceCheckMock = vi.fn();
+vi.mock("./limitPriceCheckGate.js", () => ({ evaluateLimitPriceCheckForOrderRequest: (...args: unknown[]) => evaluateLimitPriceCheckMock(...args) }));
+
 const loadRecoveryTargetWindowMock = vi.fn();
 vi.mock("./recoveryTargetWindow.js", () => ({ loadRecoveryTargetWindow: (...args: unknown[]) => loadRecoveryTargetWindowMock(...args) }));
 
@@ -67,6 +71,7 @@ beforeEach(() => {
   fetchTradingBlockedReasonMock.mockReset().mockResolvedValue(null);
   evaluateOrderLimitsMock.mockReset().mockResolvedValue(clearLimits);
   evaluateCloseGateForPositionMock.mockReset().mockResolvedValue({ blocked: false, reason: null, cycleTotal: 12.5 });
+  evaluateLimitPriceCheckMock.mockReset().mockResolvedValue({ blocked: false, reasons: [], legs: [] });
   subscribeToPooledQuoteMock.mockReset().mockImplementation(async (_contract: unknown, onUpdate: (quote: { delta: number | null }) => void) => {
     onUpdate({ delta: -0.25 });
     return () => {};
@@ -313,11 +318,28 @@ describe("evaluateOrderGates: concurrency and result shape", () => {
     expect(new Date(result.evaluatedAt).getTime()).toBeLessThanOrEqual(after);
   });
 
+  it("the limit-price check's reasons join the blocks, and its per-leg figures are stored in the verdict", async () => {
+    const ticker = await createTicker();
+    const priceCheck = { blocked: true, reasons: ["Limit price 0.12 for SELL 2 X $90 put is 1.08 below the live mid 1.20."], legs: [{ description: "SELL 2 X $90 put", ok: false }] };
+    evaluateLimitPriceCheckMock.mockResolvedValue(priceCheck);
+    evaluateOrderLimitsMock.mockResolvedValue({ blocked: true, reasons: ["too big"] });
+    const result = await evaluateOrderGates({ id: "o1", request_type: "open_cash_secured_put", payload: putOpenPayload(ticker.symbol) });
+    expect(result.blocks).toEqual(["too big", ...priceCheck.reasons]);
+    expect(result.priceCheck).toEqual(priceCheck);
+  });
+
+  it("runs the limit-price check for a close too, with the order's own payload", async () => {
+    const ticker = await createTicker();
+    const payload = putOpenPayload(ticker.symbol);
+    await evaluateOrderGates({ id: "c1", request_type: "close_position", related_position_id: "p1", payload });
+    expect(evaluateLimitPriceCheckMock).toHaveBeenCalledWith(expect.objectContaining({ request_type: "close_position", payload }));
+  });
+
   it("the result is JSON-serialisable with every verdict (this is what is stored as gate_evaluation)", async () => {
     const ticker = await createTicker();
     const result = await evaluateOrderGates({ id: "o1", request_type: "open_cash_secured_put", payload: putOpenPayload(ticker.symbol) });
     const roundTripped = JSON.parse(JSON.stringify(result));
-    expect(Object.keys(roundTripped).sort()).toEqual(["blocks", "closeGate", "deltaBand", "evaluatedAt", "limits", "tradingBlockedReason", "warnings"]);
+    expect(Object.keys(roundTripped).sort()).toEqual(["blocks", "closeGate", "deltaBand", "evaluatedAt", "limits", "priceCheck", "tradingBlockedReason", "warnings"]);
   });
 
   it("propagates a failure of the trading-gate lookup instead of returning a verdict, so nothing can be confirmed on it", async () => {

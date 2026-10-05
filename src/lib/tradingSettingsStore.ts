@@ -21,6 +21,10 @@ export interface TradingSettings {
   minAnnualizedYieldPct: number;
   /** Order setup warns when the order's commission is above this percentage of its premium. */
   commissionWarnSharePctOfPremium: number;
+  /** Limit-price check: an order's limit may be worse than the live mid by at most this share of the mid... */
+  priceCheckMaxDeviationPct: number;
+  /** ...or this many dollars, whichever is larger (so a cheap option is not blocked on a rounding difference). */
+  priceCheckMinToleranceDollars: number;
   /** Trailing-fills commission estimate used by scoring; absent (flat $0.68) wherever settings are built without a database. */
   commissionEstimator?: CommissionEstimator;
 }
@@ -35,6 +39,8 @@ export const tradingSettingsColumns = {
   recoveryDteMax: "recovery_dte_max",
   minAnnualizedYieldPct: "min_annualized_yield_pct",
   commissionWarnSharePctOfPremium: "commission_warn_share_of_premium_pct",
+  priceCheckMaxDeviationPct: "price_check_max_deviation_pct",
+  priceCheckMinToleranceDollars: "price_check_min_tolerance_dollars",
 } as const;
 
 export type TradingSettingsInput = Record<keyof typeof tradingSettingsColumns, number>;
@@ -42,7 +48,9 @@ export type TradingSettingsInput = Record<keyof typeof tradingSettingsColumns, n
 /** The column is a 32-bit integer; a window beyond this would be refused by the database as a server error instead of a clear message. */
 const maximumDteDays = 2_147_483_647;
 
-const percentageFields = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium"] as const;
+const percentageFields = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct"] as const;
+
+const maximumToleranceDollars = 1000;
 
 /** Pure: the reason a settings payload cannot be saved, or null. The database enforces the same ranges as a last line. */
 export function validateTradingSettingsInput(input: Record<string, unknown>): string | null {
@@ -54,6 +62,7 @@ export function validateTradingSettingsInput(input: Record<string, unknown>): st
   for (const field of percentageFields) {
     if (settings[field] < 0 || settings[field] > 100) return `${field} must be between 0 and 100.`;
   }
+  if (settings.priceCheckMinToleranceDollars < 0 || settings.priceCheckMinToleranceDollars > maximumToleranceDollars) return `priceCheckMinToleranceDollars must be between 0 and ${maximumToleranceDollars}.`;
   if (settings.deltaTargetMin < 0 || settings.deltaTargetMax > 1) return "The delta band must be between 0 and 1.";
   if (settings.deltaTargetMin > settings.deltaTargetMax) return "deltaTargetMin cannot exceed deltaTargetMax.";
   if (!Number.isInteger(settings.recoveryDteMin) || !Number.isInteger(settings.recoveryDteMax)) return "The Recovery Path DTE window must be whole days.";
@@ -77,6 +86,8 @@ export function mapTradingSettingsRow(row: TradingSettingsRow): Omit<TradingSett
     recoveryDteMax: Number(row.recovery_dte_max),
     minAnnualizedYieldPct: Number(row.min_annualized_yield_pct),
     commissionWarnSharePctOfPremium: Number(row.commission_warn_share_of_premium_pct),
+    priceCheckMaxDeviationPct: Number(row.price_check_max_deviation_pct),
+    priceCheckMinToleranceDollars: Number(row.price_check_min_tolerance_dollars),
   };
 }
 
@@ -102,4 +113,11 @@ export async function saveTradingSettings(input: TradingSettingsInput, userId: s
   for (const [field, column] of Object.entries(tradingSettingsColumns)) update[column] = input[field as keyof TradingSettingsInput];
   const updatedRows = await db("trading_settings").update({ ...update, updated_at: db.fn.now(), updated_by_user_id: userId });
   if (updatedRows !== 1) throw new Error("No trading_settings row found.");
+}
+
+/** Just the limit-price check tolerance, for the order paths that must not pay for the commission estimator (the worker's placement step). */
+export async function loadPriceCheckTolerance(): Promise<{ maxDeviationPct: number; minToleranceDollars: number }> {
+  const row = await db("trading_settings").first("price_check_max_deviation_pct", "price_check_min_tolerance_dollars");
+  if (!row) throw new Error("No trading_settings row found.");
+  return { maxDeviationPct: Number(row.price_check_max_deviation_pct), minToleranceDollars: Number(row.price_check_min_tolerance_dollars) };
 }

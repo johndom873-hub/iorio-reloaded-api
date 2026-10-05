@@ -1,14 +1,15 @@
 import type { GenosukeApiClient } from "./apiClient.js";
 import type { PreparedConfirmation } from "./tools/types.js";
 import { describeCommissionWarning, type OrderCommissionPreview } from "../lib/orderCommissionPreview.js";
+import { buildOrderCard, type BuiltOrderForCard } from "./confirmationText.js";
 
-// Genosuke's order card is built from the real order (approved 2026-10-05): the order is built first, the gate that
-// confirm will run is read, and the card carries the same warnings the web order review shows. Any block means no
+// Genosuke's order card is built from the real order (approved 2026-10-05): the order is built first, the card lists the legs and limit
+// prices the server actually built (not what the model asked for), the gate that confirm will run is read, and the card carries the same
+// warnings the web order review shows. Any block means no
 // card, no confirmable order left behind, and the reason goes back to the model to tell the human.
 
-interface BuiltOrder {
+interface BuiltOrder extends BuiltOrderForCard {
   id: string;
-  payload: { legs: unknown[] };
 }
 
 interface OrderGateSummary {
@@ -24,7 +25,7 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export async function prepareOrderConfirmation(api: GenosukeApiClient, buildPath: string, buildBody: unknown, baseCard: string): Promise<PreparedConfirmation> {
+export async function prepareOrderConfirmation(api: GenosukeApiClient, buildPath: string, buildBody: unknown): Promise<PreparedConfirmation> {
   let order: BuiltOrder;
   try {
     order = await api.post<BuiltOrder>(buildPath, buildBody);
@@ -54,6 +55,7 @@ export async function prepareOrderConfirmation(api: GenosukeApiClient, buildPath
     // The web form shows "commission unavailable" here and still lets the order through; the card does the same.
   }
 
+  const baseCard = buildOrderCard(order);
   const description = warnings.length > 0 ? `${baseCard}\n\n⚠ Warnings:\n${warnings.map((warning) => `• ${warning}`).join("\n")}` : baseCard;
   return { description, prepared: { orderId: order.id } satisfies PreparedOrder };
 }

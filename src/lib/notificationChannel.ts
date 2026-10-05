@@ -24,6 +24,7 @@ export type AppNotification =
   // Day Signals: a held short leg's |delta| reached the assignment-risk threshold (daySignalsNotifications.ts).
   | { type: "assignment_risk"; symbol: string; strategyKey: string; positionId: string; legId: string; right: "C" | "P"; strike: number; expiry: string; dte: number | null; delta: number; spotPrice: number | null }
   | { type: "genosuke_reply"; preview: string }
+  | { type: "trading_halt_changed"; enabled: boolean; reason: string | null; byDisplayName: string | null }
   | { type: "presence"; onlineUserIds: string[] }
   // Animation-only signal for the Pulse topology map's otherwise-silent lines
   // (see pulseEmitter.ts / publishPulse below) — never persisted, never shown

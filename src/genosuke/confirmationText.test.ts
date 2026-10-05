@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   annotateLegOpenState,
-  buildCloseCard,
+  buildOrderCard,
+  buildTradingHaltCard,
   buildRiskLimitsCard,
   toIsoExpiry,
   validateCloseLegs,
@@ -30,30 +31,89 @@ describe("close", () => {
     expect(validateCloseLegs(aaoi, [])).toContain("left out: stock-leg");
   });
 
-  it("accepts a close of exactly the open legs, and the card sells only the shares", () => {
+  it("accepts a close of exactly the open legs", () => {
     expect(validateCloseLegs(aaoi, [{ legId: "stock-leg" }])).toBeNull();
-    expect(buildCloseCard(aaoi, [{ legId: "stock-leg", limitPrice: 105.17 }])).toBe(
-      "Close AAOI (unstructured)\n• SELL 100 shares, limit 105.17\nOne combo order, sent to IBKR immediately when you tap Yes.",
-    );
   });
 
   it("refuses to close an already-closed position", () => {
     expect(validateCloseLegs({ ...aaoi, status: "closed" }, [{ legId: "stock-leg" }])).toContain("already closed");
   });
+});
 
-  it("buys back a short option and sells a long stock leg in a covered-call close", () => {
-    const coveredCall: PositionForCard = {
-      symbol: "SPCX",
-      strategyKey: "covered_call",
-      status: "open",
-      legs: [
-        { id: "c", legType: "option", side: "short", quantity: 2, optionType: "call", strikePrice: 152.5, expiryDate: "2026-09-25", exitAt: null },
-        { id: "s", legType: "stock", side: "long", quantity: 200, optionType: null, strikePrice: null, expiryDate: null, exitAt: null },
-      ],
-    };
-    const card = buildCloseCard(coveredCall, [{ legId: "c", limitPrice: 0.5 }, { legId: "s", limitPrice: 151 }]);
+describe("buildOrderCard (from the order the server built)", () => {
+  it("an opening put: one limit order with the option leg and its limit", () => {
+    expect(
+      buildOrderCard({
+        requestType: "open_cash_secured_put",
+        payload: { symbol: "AAOI", strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", quantity: 2, unitPrice: 1.35, strike: 50, expiry: "20261016", right: "P" }] },
+      }),
+    ).toBe("Place order for AAOI (cash-secured put)\n• SELL 2 put $50 exp 2026-10-16, limit 1.35\nOne limit order, sent to IBKR immediately when you tap Yes.");
+  });
+
+  it("a buy-write lists BOTH legs, including a stock leg the server added, as one combo", () => {
+    const card = buildOrderCard({
+      requestType: "open_covered_call",
+      payload: {
+        symbol: "AAOI",
+        strategyKey: "covered_call",
+        legs: [
+          { role: "stock", action: "BUY", quantity: 200, unitPrice: 48.2 },
+          { role: "option", action: "SELL", quantity: 2, unitPrice: 1.1, strike: 55, expiry: "20261016", right: "C" },
+        ],
+      },
+    });
+    expect(card.split("\n")).toEqual([
+      "Place order for AAOI (covered call)",
+      "• BUY 200 shares, limit 48.20",
+      "• SELL 2 call $55 exp 2026-10-16, limit 1.10",
+      "One combo order, sent to IBKR immediately when you tap Yes.",
+    ]);
+  });
+
+  it("a close buys back a short option and sells the long shares", () => {
+    const card = buildOrderCard({
+      requestType: "close_position",
+      payload: {
+        symbol: "SPCX",
+        strategyKey: "covered_call",
+        legs: [
+          { role: "option", action: "BUY", quantity: 2, unitPrice: 0.5, strike: 152.5, expiry: "20260925", right: "C", positionLegId: "c" },
+          { role: "stock", action: "SELL", quantity: 200, unitPrice: 151, positionLegId: "s" },
+        ],
+      },
+    });
+    expect(card.split("\n")[0]).toBe("Close SPCX (covered call)");
     expect(card).toContain("• BUY BACK 2 call $152.5 exp 2026-09-25, limit 0.50");
     expect(card).toContain("• SELL 200 shares, limit 151.00");
+    expect(card).toContain("One combo order");
+  });
+
+  it("a roll is headed Roll, and a BUY of an option that closes nothing stays a plain BUY", () => {
+    const card = buildOrderCard({
+      requestType: "roll_leg",
+      payload: {
+        symbol: "DRAM",
+        strategyKey: "cash_secured_put",
+        legs: [
+          { role: "option", action: "BUY", quantity: 1, unitPrice: 0.4, strike: 60, expiry: "20261016", right: "P", positionLegId: "old" },
+          { role: "option", action: "SELL", quantity: 1, unitPrice: 0.9, strike: 61.5, expiry: "20261113", right: "P" },
+        ],
+      },
+    });
+    expect(card.split("\n")[0]).toBe("Roll DRAM (cash-secured put)");
+    expect(card).toContain("• BUY BACK 1 put $60 exp 2026-10-16, limit 0.40");
+    expect(card).toContain("• SELL 1 put $61.5 exp 2026-11-13, limit 0.90");
+    const plainBuy = buildOrderCard({ requestType: "open_cash_secured_put", payload: { symbol: "X", legs: [{ role: "option", action: "BUY", quantity: 1, unitPrice: 1, strike: 10, expiry: "20261016", right: "P" }] } });
+    expect(plainBuy).toContain("• BUY 1 put $10");
+    expect(plainBuy.split("\n")[0]).toBe("Place order for X");
+  });
+});
+
+describe("buildTradingHaltCard", () => {
+  it("halts with the reason, resumes with or without one", () => {
+    expect(buildTradingHaltCard(true, "stop")).toBe("HALT ALL TRADING: no order from any origin reaches IBKR until it is resumed (cancels still work). Reason: stop");
+    expect(buildTradingHaltCard(false, undefined)).toBe("RESUME TRADING: orders reach IBKR again from every origin.");
+    expect(buildTradingHaltCard(false, "  ")).toBe("RESUME TRADING: orders reach IBKR again from every origin.");
   });
 });
 
@@ -61,6 +121,14 @@ describe("other cards", () => {
   it("shows only the settings being changed, each as old to new", () => {
     const card = buildRiskLimitsCard({ minCashReservePct: 8, deltaTargetMax: 0.35 }, { minCashReservePct: 5, deltaTargetMax: 0.4, deltaTargetMin: 0.2 });
     expect(card.split("\n")).toEqual(["Update the trading limits", "• Min cash reserve %: 5 → 8", "• Delta band max: 0.4 → 0.35"]);
+  });
+
+  it("labels the limit-price check settings", () => {
+    expect(buildRiskLimitsCard({ priceCheckMaxDeviationPct: 15, priceCheckMinToleranceDollars: 0.1 }, { priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05 }).split("\n")).toEqual([
+      "Update the trading limits",
+      "• Limit-price check: max % off the live mid: 10 → 15",
+      "• Limit-price check: minimum allowance $: 0.05 → 0.1",
+    ]);
   });
 
   it("shows a bare value when the current one is unknown or unchanged", () => {

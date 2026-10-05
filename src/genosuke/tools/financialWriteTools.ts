@@ -25,8 +25,8 @@ import type { GenosukeTool } from "./types.js";
 import { tradingSettingsColumns } from "../../lib/tradingSettingsStore.js";
 import { confirmPreparedOrder, discardPreparedOrder, prepareOrderConfirmation, type PreparedOrder } from "../prepareOrderConfirmation.js";
 import {
-  buildCloseCard,
   buildRiskLimitsCard,
+  buildTradingHaltCard,
   validateCloseLegs,
   type PositionForCard,
 } from "../confirmationText.js";
@@ -50,13 +50,6 @@ async function buildAndConfirmOrder(api: GenosukeApiClient, path: string, body: 
     await api.post(`/positions/orders/${order.id}/cancel`, {}).catch(() => {});
     throw error;
   }
-}
-
-function buildOpenOrderCard(input: Record<string, unknown>): string {
-  const option = input.option as { quantity: unknown; strikePrice: unknown; expiryDate: unknown; limitPrice: unknown };
-  const stock = input.stock as { quantity: unknown; limitPrice: unknown } | undefined;
-  const stockPart = stock ? `BUY ${stock.quantity} sh @ ${stock.limitPrice} + ` : "";
-  return `Place order for ${input.symbol} (${input.strategyKey}): ${stockPart}SELL ${option.quantity}x $${option.strikePrice} exp ${option.expiryDate} @ ${option.limitPrice} — will be sent to IBKR immediately on confirm.`;
 }
 
 export const financialWriteTools: GenosukeTool[] = [
@@ -91,7 +84,7 @@ export const financialWriteTools: GenosukeTool[] = [
       },
       required: ["symbol", "strategyKey", "option"],
     },
-    prepareConfirmation: (input, api) => prepareOrderConfirmation(api, "/positions/orders", input, buildOpenOrderCard(input)),
+    prepareConfirmation: (input, api) => prepareOrderConfirmation(api, "/positions/orders", input),
     discardPrepared: discardPreparedOrder,
     tracksOrderStatus: true,
     execute: (input, api, prepared) => (prepared ? confirmPreparedOrder(api, prepared as PreparedOrder) : buildAndConfirmOrder(api, "/positions/orders", input)),
@@ -121,7 +114,7 @@ export const financialWriteTools: GenosukeTool[] = [
       const legs = (input.legs as { legId: string; limitPrice: unknown }[]) ?? [];
       const problem = validateCloseLegs(position, legs);
       if (problem) return { problem };
-      return prepareOrderConfirmation(api, `/positions/${input.positionId}/close`, { legs: input.legs }, buildCloseCard(position, legs));
+      return prepareOrderConfirmation(api, `/positions/${input.positionId}/close`, { legs: input.legs });
     },
     discardPrepared: discardPreparedOrder,
     tracksOrderStatus: true,
@@ -134,7 +127,7 @@ export const financialWriteTools: GenosukeTool[] = [
   {
     name: "update_risk_limits",
     description:
-      "Change the trading limits and targets (one set for every strategy): max position %, max concentration per ticker %, min cash reserve % (these block orders), the delta band (blocks new orders outside it, filters Signals and the recovery-path suggestion), the Recovery Path DTE window, min annualized yield % (Signals filter) and the commission warning %. Send only the fields to change; the rest keep their current values. Does not change existing positions.",
+      "Change the trading limits and targets (one set for every strategy): max position %, max concentration per ticker %, min cash reserve % (these block orders), the delta band (blocks new orders outside it, filters Signals and the recovery-path suggestion), the Recovery Path DTE window, min annualized yield % (Signals filter), the commission warning %, and the limit-price check (an order is refused when a leg's limit is worse than the live mid by more than max(priceCheckMaxDeviationPct % of the mid, priceCheckMinToleranceDollars $)). Send only the fields to change; the rest keep their current values. Does not change existing positions.",
     tier: "financial-write",
     parameters: {
       type: "object",
@@ -148,6 +141,8 @@ export const financialWriteTools: GenosukeTool[] = [
         recoveryDteMax: { type: "number" },
         minAnnualizedYieldPct: { type: "number" },
         commissionWarnSharePctOfPremium: { type: "number" },
+        priceCheckMaxDeviationPct: { type: "number" },
+        priceCheckMinToleranceDollars: { type: "number" },
       },
     },
     validateBeforeConfirmation: async (input) => {
@@ -161,5 +156,31 @@ export const financialWriteTools: GenosukeTool[] = [
       const { updatedAt: _updatedAt, updatedByDisplayName: _updatedBy, ...current } = await api.get<Record<string, unknown>>("/risk-limits/settings");
       return api.put("/risk-limits/settings", { ...current, ...input });
     },
+  },
+  {
+    name: "set_trading_halt",
+    description:
+      "The trading kill switch. enabled=true HALTS all trading: no order from any origin (screens, Genosuke, bots) reaches IBKR until it is resumed; orders already working at IBKR are not cancelled and cancels still work. enabled=false RESUMES trading. A reason is required to halt (say what the human told you, in their words). Use it when the human asks to stop, halt or pause trading, or to resume it.",
+    tier: "financial-write",
+    parameters: {
+      type: "object",
+      properties: {
+        enabled: { type: "boolean", description: "true = halt all trading, false = resume." },
+        reason: { type: "string", description: "Why. Required when halting (at most 300 characters); optional when resuming." },
+      },
+      required: ["enabled"],
+    },
+    validateBeforeConfirmation: async (input) => {
+      if (typeof input.enabled !== "boolean") return "enabled must be true (halt) or false (resume).";
+      if (input.enabled && (typeof input.reason !== "string" || input.reason.trim() === "")) return "A reason is required to halt trading: ask the human why.";
+      if (typeof input.reason === "string" && input.reason.length > 300) return "The reason must be at most 300 characters.";
+      return null;
+    },
+    describeForConfirmation: (input) => buildTradingHaltCard(input.enabled === true, input.reason),
+    describeResult: (result) =>
+      (result as { enabled?: boolean } | null)?.enabled === true
+        ? "🛑 Trading is HALTED. No order will reach IBKR until it is resumed."
+        : "✅ Trading is resumed: orders reach IBKR again.",
+    execute: (input, api) => api.put("/risk-limits/trading-halt", { enabled: input.enabled, reason: typeof input.reason === "string" && input.reason.trim() !== "" ? input.reason.trim() : null }),
   },
 ];

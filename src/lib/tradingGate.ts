@@ -1,6 +1,7 @@
 import { db } from "../db/connection.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { formatDurationHuman } from "./formatDurationHuman.js";
+import { describeTradingHaltBlock, fetchTradingHalt, type TradingHalt } from "./platformControls.js";
 
 // API-side half of the account-binding gate (Phase B work package 2): refuse to confirm an
 // order (409, instant feedback in the UI and Genosuke) unless the trading worker has recently
@@ -17,7 +18,7 @@ export interface WorkerHealthForTradingGate {
   account_binding_reason: string | null;
 }
 
-export type TradingState = "ok" | "blocked" | "offline";
+export type TradingState = "ok" | "blocked" | "offline" | "halted";
 
 export interface TradingStatus {
   state: TradingState;
@@ -25,8 +26,13 @@ export interface TradingStatus {
   reason: string | null;
 }
 
-/** "offline" = no fresh heartbeat (never reported, or stale); "blocked" = the worker is there but not allowed to trade. */
-export function classifyTradingStatus(row: WorkerHealthForTradingGate | undefined, apiEnvironment: string, nowMs: number = Date.now()): TradingStatus {
+/**
+ * "halted" = the operator kill switch is on (platform_controls.trading_halt) -- it outranks everything else because it is the
+ * one state a human chose; "offline" = no fresh heartbeat (never reported, or stale); "blocked" = the worker is there but not allowed to trade.
+ */
+export function classifyTradingStatus(row: WorkerHealthForTradingGate | undefined, apiEnvironment: string, nowMs: number = Date.now(), halt?: TradingHalt): TradingStatus {
+  const haltReason = halt ? describeTradingHaltBlock(halt, nowMs) : null;
+  if (haltReason) return { state: "halted", reason: haltReason };
   if (!row) return { state: "offline", reason: "Trading is blocked: the trading worker has never reported in." };
   const secondsSinceHeartbeat = Math.round((nowMs - new Date(row.updated_at).getTime()) / 1000);
   if (secondsSinceHeartbeat > workerHeartbeatStaleAfterSeconds) {
@@ -44,11 +50,12 @@ export function classifyTradingStatus(row: WorkerHealthForTradingGate | undefine
   return { state: "ok", reason: null };
 }
 
-export function findTradingBlockedReason(row: WorkerHealthForTradingGate | undefined, apiEnvironment: string, nowMs: number = Date.now()): string | null {
-  return classifyTradingStatus(row, apiEnvironment, nowMs).reason;
+export function findTradingBlockedReason(row: WorkerHealthForTradingGate | undefined, apiEnvironment: string, nowMs: number = Date.now(), halt?: TradingHalt): string | null {
+  return classifyTradingStatus(row, apiEnvironment, nowMs, halt).reason;
 }
 
+/** Halt first, then the worker heartbeat and binding. A failed halt read throws: the caller's 500 is the fail-closed outcome. */
 export async function fetchTradingBlockedReason(): Promise<string | null> {
-  const row = await db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first();
-  return findTradingBlockedReason(row, readAppEnvironment());
+  const [row, halt] = await Promise.all([db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(), fetchTradingHalt()]);
+  return findTradingBlockedReason(row, readAppEnvironment(), Date.now(), halt);
 }

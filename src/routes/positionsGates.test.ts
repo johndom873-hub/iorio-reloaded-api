@@ -30,6 +30,9 @@ vi.mock("../lib/closeGate.js", () => ({ evaluateCloseGateForPosition: (...args: 
 const publishNotificationMock = vi.fn();
 vi.mock("../lib/notificationChannel.js", () => ({ publishNotification: (...args: unknown[]) => publishNotificationMock(...args) }));
 
+const evaluateLimitPriceCheckMock = vi.fn();
+vi.mock("../lib/limitPriceCheckGate.js", () => ({ evaluateLimitPriceCheckForOrderRequest: (...args: unknown[]) => evaluateLimitPriceCheckMock(...args) }));
+
 const fetchEconomicCalendarWarningEventsMock = vi.fn();
 vi.mock("../ibkr/calendarConflict.js", async () => {
   const actual = await vi.importActual<typeof import("../ibkr/calendarConflict.js")>("../ibkr/calendarConflict.js");
@@ -117,6 +120,7 @@ beforeEach(() => {
   evaluateOrderLimitsMock.mockReset().mockResolvedValue(clearLimits);
   evaluateDeltaBandMock.mockReset().mockImplementation(async (order: { request_type: string }) => (order.request_type.startsWith("open_") ? { compliant: true, reason: null } : null));
   evaluateCloseGateForPositionMock.mockReset().mockResolvedValue({ blocked: false, reason: null, cycleTotal: 7 });
+  evaluateLimitPriceCheckMock.mockReset().mockResolvedValue({ blocked: false, reasons: [], legs: [] });
   publishNotificationMock.mockReset().mockResolvedValue(undefined);
   fetchEconomicCalendarWarningEventsMock.mockReset().mockResolvedValue([]);
   fetchPricesPoolFirstMock.mockReset().mockResolvedValue({ stock: 100 });
@@ -388,6 +392,7 @@ describe("POST /positions/orders/:id/confirm", () => {
     ["the trading gate", () => fetchTradingBlockedReasonMock.mockResolvedValue("Trading is blocked: wrong account."), "Trading is blocked: wrong account."],
     ["the position limits", () => evaluateOrderLimitsMock.mockResolvedValue({ blocked: true, reasons: ["too big"] }), "too big"],
     ["the delta band", () => evaluateDeltaBandMock.mockResolvedValue({ compliant: false, reason: "Delta is out of band." }), "Delta is out of band."],
+    ["the limit-price check", () => evaluateLimitPriceCheckMock.mockResolvedValue({ blocked: true, reasons: ["Limit price 0.12 is 1.08 below the live mid 1.20."], legs: [] }), "Limit price 0.12 is 1.08 below the live mid 1.20."],
     ["a delta band that could not be verified", () => evaluateDeltaBandMock.mockResolvedValue({ compliant: false, reason: null }), "The delta band could not be verified."],
   ];
   for (const [label, arrange, expectedError] of singleBlocks) {

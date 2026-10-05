@@ -29,6 +29,8 @@ const knownValues = {
   recovery_dte_max: 45,
   min_annualized_yield_pct: 50,
   commission_warn_share_of_premium_pct: 5,
+  price_check_max_deviation_pct: 10,
+  price_check_min_tolerance_dollars: 0.05,
   updated_by_user_id: null,
   updated_at: new Date("2026-01-01T00:00:00.000Z"),
 };
@@ -82,6 +84,8 @@ const completeInput = {
   recoveryDteMax: 60,
   minAnnualizedYieldPct: 40,
   commissionWarnSharePctOfPremium: 7.5,
+  priceCheckMaxDeviationPct: 12.5,
+  priceCheckMinToleranceDollars: 0.1,
 };
 
 describe("the seeded trading_settings row", () => {
@@ -100,6 +104,8 @@ describe("the seeded trading_settings row", () => {
       recoveryDteMax: 45,
       minAnnualizedYieldPct: 50,
       commissionWarnSharePctOfPremium: 5,
+      priceCheckMaxDeviationPct: 10,
+      priceCheckMinToleranceDollars: 0.05,
     });
     for (const value of Object.values(numbers)) expect(typeof value).toBe("number");
     expect(typeof commissionEstimator?.perContractDollars).toBe("function");
@@ -145,6 +151,8 @@ describe("loadTradingSettingsForEditing", () => {
         "maxPositionPctOfPortfolio",
         "minAnnualizedYieldPct",
         "minCashReservePct",
+        "priceCheckMaxDeviationPct",
+        "priceCheckMinToleranceDollars",
         "recoveryDteMax",
         "recoveryDteMin",
         "updatedAt",
@@ -225,6 +233,18 @@ describe("database constraints on trading_settings", () => {
     "min_annualized_yield_pct",
     "commission_warn_share_of_premium_pct",
   ];
+
+  it("the limit-price check columns are range checked: deviation 0-100, dollar floor 0-1000, edges accepted", async () => {
+    for (const [column, badValues, edgeValues] of [
+      ["price_check_max_deviation_pct", [-0.01, 100.01], [0, 100]],
+      ["price_check_min_tolerance_dollars", [-0.01, 1000.01], [0, 1000]],
+    ] as const) {
+      for (const badValue of badValues) {
+        await expect(testDb("trading_settings").update({ [column]: badValue })).rejects.toMatchObject({ code: "23514", constraint: "trading_settings_price_check_in_range" });
+      }
+      for (const edgeValue of edgeValues) await testDb("trading_settings").update({ [column]: edgeValue });
+    }
+  });
 
   for (const column of percentageColumns) {
     it(`${column} below 0 or above 100 is rejected, 0 and 100 are accepted`, async () => {

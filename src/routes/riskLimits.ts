@@ -4,10 +4,62 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps, computePositionExposures, streamPositionExposures, type PositionExposureRow } from "../lib/positionExposure.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
+import { fetchTradingHalt, setTradingHalt, type TradingHalt } from "../lib/platformControls.js";
+import { publishNotification } from "../lib/notificationChannel.js";
+import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { loadTradingSettingsForEditing, saveTradingSettings, validateTradingSettingsInput, type TradingSettingsInput } from "../lib/tradingSettingsStore.js";
 
 export const riskLimitsRouter = Router();
 riskLimitsRouter.use(requireAuth);
+
+// The trading halt (kill switch): one switch that stops every order origin at confirm and in the worker. Any signed-in user may
+// flip it -- the UI puts a confirm modal in front, the API only requires a reason when halting so the audit trail says why.
+const tradingHaltReasonMaxLength = 300;
+
+function serializeTradingHalt(halt: TradingHalt) {
+  return {
+    enabled: halt.enabled,
+    reason: halt.reason,
+    setByDisplayName: halt.setByDisplayName,
+    setAt: halt.setAt ? halt.setAt.toISOString() : null,
+  };
+}
+
+riskLimitsRouter.get("/trading-halt", async (_request, response) => {
+  response.json(serializeTradingHalt(await fetchTradingHalt()));
+});
+
+riskLimitsRouter.put("/trading-halt", async (request: Request, response: Response) => {
+  const enabled = request.body?.enabled;
+  if (typeof enabled !== "boolean") {
+    response.status(400).json({ error: "enabled must be true or false." });
+    return;
+  }
+  const rawReason = request.body?.reason;
+  if (rawReason !== undefined && rawReason !== null && typeof rawReason !== "string") {
+    response.status(400).json({ error: "reason must be text." });
+    return;
+  }
+  const reason = typeof rawReason === "string" && rawReason.trim() !== "" ? rawReason.trim() : null;
+  if (enabled && !reason) {
+    response.status(400).json({ error: "A reason is required to halt trading." });
+    return;
+  }
+  if (reason && reason.length > tradingHaltReasonMaxLength) {
+    response.status(400).json({ error: `reason must be at most ${tradingHaltReasonMaxLength} characters.` });
+    return;
+  }
+
+  const halt = await setTradingHalt({ enabled, reason, userId: request.session.userId as string });
+  await publishNotification({ type: "trading_halt_changed", enabled: halt.enabled, reason: halt.reason, byDisplayName: halt.setByDisplayName });
+  // Written to the ops channel as an audit line; notifyTelegram never throws.
+  await notifyTelegram(
+    halt.enabled
+      ? `🛑 TRADING HALTED by ${halt.setByDisplayName ?? "an operator"}: ${halt.reason ?? "(no reason given)"}. No order from any origin reaches IBKR until it is lifted (Risk & Limits → Trading halt).`
+      : `✅ Trading halt lifted by ${halt.setByDisplayName ?? "an operator"}${halt.reason ? `: ${halt.reason}` : "."}`,
+  );
+  response.json(serializeTradingHalt(halt));
+});
 
 // The single set of trading limits and targets (table trading_settings, one row). Approved 2026-10-05: replaces the
 // per-strategy copies that were never enforced and the separate Signals-tab limits.

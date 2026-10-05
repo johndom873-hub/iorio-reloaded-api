@@ -19,16 +19,21 @@ function fakeApi(handlers: { post?: Handler; get?: Handler }) {
   return { api, calls };
 }
 
-const builtOrder = { id: "order-1", payload: { legs: [{ role: "option" }] } };
+const builtOrder = {
+  id: "order-1",
+  requestType: "open_cash_secured_put",
+  payload: { symbol: "AAOI", strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", quantity: 2, unitPrice: 1.35, strike: 50, expiry: "20261016", right: "P" }] },
+};
+const builtCard = "Place order for AAOI (cash-secured put)\n• SELL 2 put $50 exp 2026-10-16, limit 1.35\nOne limit order, sent to IBKR immediately when you tap Yes.";
 const noCommissionWarning = { warn: false, netPremiumDollars: 100, commissionSharePctOfPremium: 1, warnThresholdPct: 5 };
 
 describe("prepareOrderConfirmation", () => {
-  it("returns the plain card and the built order's id when nothing blocks and nothing warns", async () => {
+  it("returns the card of the built order and its id when nothing blocks and nothing warns", async () => {
     const { api } = fakeApi({
       post: (path) => (path === "/order-checks/commission-preview" ? noCommissionWarning : builtOrder),
       get: () => ({ blocks: [], warnings: [] }),
     });
-    expect(await prepareOrderConfirmation(api, "/positions/orders", {}, "CARD")).toEqual({ description: "CARD", prepared: { orderId: "order-1" } });
+    expect(await prepareOrderConfirmation(api, "/positions/orders", {})).toEqual({ description: builtCard, prepared: { orderId: "order-1" } });
   });
 
   it("puts the gate's warnings and the commission warning on the card", async () => {
@@ -36,7 +41,7 @@ describe("prepareOrderConfirmation", () => {
       post: (path) => (path === "/order-checks/commission-preview" ? { warn: true, netPremiumDollars: 100, commissionSharePctOfPremium: 8, warnThresholdPct: 5 } : builtOrder),
       get: () => ({ blocks: [], warnings: ["1 economic event before expiry: 2026-10-07 FOMC."] }),
     });
-    const result = await prepareOrderConfirmation(api, "/positions/orders", {}, "CARD");
+    const result = await prepareOrderConfirmation(api, "/positions/orders", {});
     expect(result).toMatchObject({ description: expect.stringContaining("⚠ Warnings:") });
     const description = (result as { description: string }).description;
     expect(description).toContain("• 1 economic event before expiry: 2026-10-07 FOMC.");
@@ -45,7 +50,7 @@ describe("prepareOrderConfirmation", () => {
 
   it("cancels the built order and returns the reasons when the gate blocks", async () => {
     const { api, calls } = fakeApi({ post: () => builtOrder, get: () => ({ blocks: ["too big", "delta out of band"], warnings: [] }) });
-    const result = await prepareOrderConfirmation(api, "/positions/orders", {}, "CARD");
+    const result = await prepareOrderConfirmation(api, "/positions/orders", {});
     expect(result).toEqual({ problem: "Blocked, nothing was placed: too big delta out of band" });
     expect(calls).toContain("POST /positions/orders/order-1/cancel");
   });
@@ -56,7 +61,7 @@ describe("prepareOrderConfirmation", () => {
         throw new Error("Unknown symbol");
       },
     });
-    const result = await prepareOrderConfirmation(api, "/positions/orders", {}, "CARD");
+    const result = await prepareOrderConfirmation(api, "/positions/orders", {});
     expect(result).toEqual({ problem: "The order could not be built, nothing was placed: Unknown symbol" });
     expect(calls).toEqual(["POST /positions/orders"]);
   });
@@ -68,7 +73,7 @@ describe("prepareOrderConfirmation", () => {
         throw new Error("timeout");
       },
     });
-    const result = await prepareOrderConfirmation(api, "/positions/orders", {}, "CARD");
+    const result = await prepareOrderConfirmation(api, "/positions/orders", {});
     expect(result).toMatchObject({ problem: expect.stringContaining("nothing was placed") });
     expect(calls).toContain("POST /positions/orders/order-1/cancel");
   });
@@ -81,7 +86,7 @@ describe("prepareOrderConfirmation", () => {
       },
       get: () => ({ blocks: [], warnings: [] }),
     });
-    expect(await prepareOrderConfirmation(api, "/positions/orders", {}, "CARD")).toMatchObject({ description: "CARD" });
+    expect(await prepareOrderConfirmation(api, "/positions/orders", {})).toMatchObject({ description: builtCard });
   });
 });
 

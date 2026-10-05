@@ -41,6 +41,8 @@ const riskSettingLabels: [string, string][] = [
   ["recoveryDteMax", "Recovery Path DTE max"],
   ["minAnnualizedYieldPct", "Min annualized yield %"],
   ["commissionWarnSharePctOfPremium", "Commission warning % of premium"],
+  ["priceCheckMaxDeviationPct", "Limit-price check: max % off the live mid"],
+  ["priceCheckMinToleranceDollars", "Limit-price check: minimum allowance $"],
 ];
 
 export function labelStrategy(strategyKey: string): string {
@@ -99,13 +101,50 @@ export function validateCloseLegs(position: PositionForCard, requestedLegs: { le
   return `Close not sent for confirmation: ${problems.join("; ")}. A close must include exactly the position's currently-open legs (isOpen: true): ${correctLegs}. Retry with only those.`;
 }
 
-export function buildCloseCard(position: PositionForCard, requestedLegs: { legId: string; limitPrice: unknown }[]): string {
-  const legsById = new Map(position.legs.map((leg) => [leg.id, leg]));
-  const lines = requestedLegs.map(({ legId, limitPrice }) => {
-    const leg = legsById.get(legId);
-    return leg ? `• ${closingVerb(leg)} ${describeLegContract(leg)}, limit ${formatLimitPrice(limitPrice)}` : `• unknown leg ${legId}, limit ${formatLimitPrice(limitPrice)}`;
-  });
-  return [positionHeading("Close", position), ...lines, "One combo order, sent to IBKR immediately when you tap Yes."].join("\n");
+/** One leg of an order as the server built it (the payload stored on the order_requests row). */
+export interface BuiltOrderLeg {
+  role: "stock" | "option";
+  action: string;
+  quantity: number;
+  unitPrice: number;
+  strike?: number;
+  expiry?: string;
+  right?: "C" | "P";
+  /** Set on a leg that closes an existing position leg. */
+  positionLegId?: string;
+}
+
+export interface BuiltOrderForCard {
+  requestType: string;
+  payload: { symbol: string; strategyKey?: string; legs: BuiltOrderLeg[] };
+}
+
+function describeBuiltLeg(leg: BuiltOrderLeg): string {
+  const verb = leg.role === "option" && leg.action === "BUY" && leg.positionLegId ? "BUY BACK" : leg.action;
+  const what =
+    leg.role === "stock"
+      ? `${leg.quantity} shares`
+      : `${leg.quantity} ${leg.right === "C" ? "call" : "put"} $${leg.strike} exp ${leg.expiry ? toIsoExpiry(leg.expiry) : "?"}`;
+  return `• ${verb} ${what}, limit ${formatLimitPrice(leg.unitPrice)}`;
+}
+
+/**
+ * The card for an order, written from the order the server actually built (the legs and limit prices that will be sent), never from what
+ * the model asked for: whatever the server filled in (a covered call's buy-write stock leg, a rounded price) is on the card.
+ */
+export function buildOrderCard(order: BuiltOrderForCard): string {
+  const { requestType, payload } = order;
+  const verb = requestType === "close_position" ? "Close" : requestType === "roll_leg" ? "Roll" : "Place order for";
+  const heading = `${verb} ${payload.symbol}${payload.strategyKey ? ` (${labelStrategy(payload.strategyKey)})` : ""}`;
+  const shape = payload.legs.length > 1 ? "One combo order" : "One limit order";
+  return [heading, ...payload.legs.map(describeBuiltLeg), `${shape}, sent to IBKR immediately when you tap Yes.`].join("\n");
+}
+
+/** The card for the trading halt switch. */
+export function buildTradingHaltCard(enabled: boolean, reason: unknown): string {
+  return enabled
+    ? `HALT ALL TRADING: no order from any origin reaches IBKR until it is resumed (cancels still work). Reason: ${reason}`
+    : `RESUME TRADING: orders reach IBKR again from every origin.${typeof reason === "string" && reason.trim() !== "" ? ` Reason: ${reason}` : ""}`;
 }
 
 /** The card for a trading-settings change: only the fields being changed, each as old → new when the current value is known. */

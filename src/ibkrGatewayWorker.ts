@@ -33,6 +33,8 @@ import { notifyTelegram } from "./lib/notifyTelegram.js";
 import { clearDownState, notifyDownThrottled } from "./lib/throttledAlert.js";
 import { formatDurationHuman } from "./lib/formatDurationHuman.js";
 import { publishNotification, publishPulse } from "./lib/notificationChannel.js";
+import { endOrderIfPlacementBlocked } from "./lib/orderPlacementEnforcement.js";
+import { endOrderIfLimitPriceUnsafe } from "./ibkr/ibkrGatewayLimitPriceCheck.js";
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
 
@@ -248,16 +250,26 @@ async function processCancelRequest(orderRequestId: string): Promise<void> {
 }
 
 async function processOrderRequest(orderRequestId: string): Promise<void> {
+  const orderRequest = await db("order_requests").where({ id: orderRequestId, status: "confirmed" }).first();
+  if (!orderRequest) return; // already processed, cancelled, or not actually confirmed
+
+  const payload = orderRequest.payload as OrderRequestPayload;
+
+  // The worker's own last check (orderPlacementGuard.ts, 2026-10-05): the trading halt as it is NOW, a stored gate verdict from the
+  // confirm step with no blocks, and no more than maximumConfirmedOrderAgeMs between that verdict and now. Run before the connection
+  // check on purpose: an order that expired while the Gateway was down is ended here, not left to fire when the connection returns.
+  const placementBlock = await endOrderIfPlacementBlocked(orderRequest);
+  if (placementBlock) {
+    console.error(`processOrderRequest(${orderRequestId}): ${placementBlock.reason}`);
+    if (placementBlock.ended) await notifyTelegramWithTimeout(`🛑 Order for ${payload.symbol} (id ${orderRequestId}) was NOT sent to IBKR.\n${placementBlock.reason}`);
+    return;
+  }
+
   const ib = persistentIbkrConnection.getIb();
   if (!ib) {
     console.error(`processOrderRequest(${orderRequestId}): no IBKR connection — order not sent, will retry on the next LISTEN/poll cycle.`);
     return;
   }
-
-  const orderRequest = await db("order_requests").where({ id: orderRequestId, status: "confirmed" }).first();
-  if (!orderRequest) return; // already processed, cancelled, or not actually confirmed
-
-  const payload = orderRequest.payload as OrderRequestPayload;
 
   // Fail-closed account binding (Phase B WP2). "pending" (just reconnected, accounts not reported yet) leaves the
   // order confirmed for the next poll cycle; a real mismatch errors it for good so a stale limit price can never
@@ -272,6 +284,14 @@ async function processOrderRequest(orderRequestId: string): Promise<void> {
     console.error(`processOrderRequest(${orderRequestId}): ${message}`);
     await db("order_requests").where({ id: orderRequestId }).update({ status: "error", error_message: message, updated_at: db.fn.now() });
     await notifyTelegramWithTimeout(`🛑 Order for ${payload.symbol} (id ${orderRequestId}) was NOT sent to IBKR.\n${message}`);
+    return;
+  }
+  // The limit-price check, repeated from a real-time snapshot on this connection: one snapshot per leg (no streaming line is held),
+  // requested and released within this call. See ibkrGatewayLimitPriceCheck.ts. Fail closed.
+  const priceBlock = await endOrderIfLimitPriceUnsafe(orderRequest, ib);
+  if (priceBlock) {
+    console.error(`processOrderRequest(${orderRequestId}): ${priceBlock.reason}`);
+    if (priceBlock.ended) await notifyTelegramWithTimeout(`🛑 Order for ${payload.symbol} (id ${orderRequestId}) was NOT sent to IBKR.\n${priceBlock.reason}`);
     return;
   }
   console.log(`processOrderRequest(${orderRequestId}): building order for ${payload.symbol}, ${payload.legs.length} leg(s).`);

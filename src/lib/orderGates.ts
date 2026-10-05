@@ -3,6 +3,8 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import type { DeltaComplianceResult } from "../ibkr/streamOrderLegQuote.js";
 import { evaluateCloseGateForPosition, type CloseGateVerdict } from "./closeGate.js";
 import { evaluateDeltaBandForOrderRequest } from "./deltaBandGate.js";
+import { evaluateLimitPriceCheckForOrderRequest } from "./limitPriceCheckGate.js";
+import type { PriceCheckResult } from "./limitPriceCheck.js";
 import { evaluateOrderLimits, type OrderLimitsResult, type OrderLimitsStrategyKey } from "./orderLimits.js";
 import { fetchTradingBlockedReason } from "./tradingGate.js";
 
@@ -16,6 +18,7 @@ import { fetchTradingBlockedReason } from "./tradingGate.js";
 //   open_* and roll    the three limits (max position, per-ticker concentration, min cash reserve), counting orders still working
 //   open_* only        the delta band, from a live delta (fails closed when no live delta can be read)
 //   close_position     the close gate (session open, live two-sided quotes on every leg, consistent wheel cycle)
+//   every order        the limit-price check: each leg's limit against its own live mid (limitPriceCheck.ts)
 // A close is not limit-checked: it only reduces exposure.
 
 export interface OrderRequestForGates {
@@ -33,6 +36,8 @@ export interface OrderGateResult {
   limits: OrderLimitsResult | null;
   deltaBand: DeltaComplianceResult | null;
   closeGate: CloseGateVerdict | null;
+  /** The limit-price check, with the live quotes it saw on each leg; null when the order has no legs. */
+  priceCheck: PriceCheckResult | null;
   tradingBlockedReason: string | null;
   evaluatedAt: string;
 }
@@ -80,6 +85,7 @@ export function combineOrderGateVerdicts(parts: {
   limits: OrderLimitsResult | null;
   deltaBand: DeltaComplianceResult | null;
   closeGate: CloseGateVerdict | null;
+  priceCheck?: PriceCheckResult | null;
   warnings: string[];
 }): { blocks: string[]; warnings: string[] } {
   const blocks: string[] = [];
@@ -87,17 +93,19 @@ export function combineOrderGateVerdicts(parts: {
   if (parts.limits?.blocked) blocks.push(...parts.limits.reasons);
   if (parts.deltaBand && !parts.deltaBand.compliant) blocks.push(parts.deltaBand.reason ?? "The delta band could not be verified.");
   if (parts.closeGate?.blocked) blocks.push(parts.closeGate.reason ?? "Closing is blocked.");
+  if (parts.priceCheck?.blocked) blocks.push(...parts.priceCheck.reasons);
   return { blocks, warnings: parts.warnings };
 }
 
 export async function evaluateOrderGates(orderRequest: OrderRequestForGates): Promise<OrderGateResult> {
   const closeGateWanted = orderRequest.request_type === "close_position" && Boolean(orderRequest.related_position_id);
-  const [tradingBlockedReason, limits, deltaBand, closeGate] = await Promise.all([
+  const [tradingBlockedReason, limits, deltaBand, closeGate, priceCheck] = await Promise.all([
     fetchTradingBlockedReason(),
     evaluateOrderLimitsForOrderRequest(orderRequest),
     evaluateDeltaBandForOrderRequest(orderRequest),
     closeGateWanted ? evaluateCloseGateForPosition(orderRequest.related_position_id!) : Promise.resolve(null),
+    evaluateLimitPriceCheckForOrderRequest(orderRequest),
   ]);
-  const combined = combineOrderGateVerdicts({ tradingBlockedReason, limits, deltaBand, closeGate, warnings: describeCalendarWarnings(orderRequest) });
-  return { ...combined, limits, deltaBand, closeGate, tradingBlockedReason, evaluatedAt: new Date().toISOString() };
+  const combined = combineOrderGateVerdicts({ tradingBlockedReason, limits, deltaBand, closeGate, priceCheck, warnings: describeCalendarWarnings(orderRequest) });
+  return { ...combined, limits, deltaBand, closeGate, priceCheck, tradingBlockedReason, evaluatedAt: new Date().toISOString() };
 }
