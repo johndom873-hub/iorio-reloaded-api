@@ -9,6 +9,8 @@ import { fetchPresenceOverview } from "../lib/userLastSeen.js";
 import * as llmStats from "../genosuke/llmStats.js";
 import { requestRateStats, processStartedAt } from "../lib/requestRateTracker.js";
 import { computeMarketSessionStatus } from "../lib/marketSessionStatus.js";
+import { collectReadinessChecks, createDefaultReadinessDependencies } from "../lib/preOpenReadinessCollectors.js";
+import { summarizeReadiness } from "../lib/preOpenReadiness.js";
 import { dbQueryTimingStats } from "../lib/dbQueryTimingTracker.js";
 import { requireEnvironmentVariable } from "../config/env.js";
 import { daySignalsLoopStatus } from "../lib/daySignalsLoop.js";
@@ -72,6 +74,18 @@ systemHealthRouter.post("/check-ibkr", async (request, response) => {
     }
     const result = await db.raw(`${jobRunSelect} WHERE job_name = 'ibkr_health_check' ORDER BY started_at DESC LIMIT 1`);
     return { status: 200, body: result.rows[0] ?? null };
+  });
+});
+
+// The pre-open readiness check on demand (the same checks the 6:00 ET and 9:35 ET runs send to Telegram, without sending anything):
+// "can Iorio trade right now?". Streamed like check-ibkr: the order-path and live-quote probes can take well over a few seconds.
+systemHealthRouter.get("/readiness", async (request, response) => {
+  const stage = request.query.stage === "open" ? "open" : "pre_open";
+  await respondWithStreamedResult(response, async () => {
+    const checkedAt = new Date();
+    const verdict = summarizeReadiness(await collectReadinessChecks(stage, checkedAt, createDefaultReadinessDependencies()));
+    const { signature: _signature, ...readable } = verdict;
+    return { status: 200, body: { stage, checkedAt: checkedAt.toISOString(), ...readable } };
   });
 });
 

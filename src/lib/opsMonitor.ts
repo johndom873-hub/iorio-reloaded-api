@@ -9,6 +9,7 @@ import { reportBackgroundFailure } from "./backgroundFailureAlert.js";
 import { clearUndeliveredAlerts, loadUndeliveredAlerts, notifyTelegramTracked } from "./undeliveredAlerts.js";
 import { opsMonitorProcessName } from "./opsMonitorLiveness.js";
 import { notifyDownThrottled } from "./throttledAlert.js";
+import { pruneOldReadinessState, runPreOpenReadinessIfDue } from "./preOpenReadinessRunner.js";
 
 // Runs inside the web dyno on a timer, so it does not depend on Heroku Scheduler (the thing it
 // watches). Every minute it (1) writes a heartbeat that the 10-minute ibkr_health_check verifies
@@ -84,7 +85,7 @@ async function loadRecentRuns(now: Date): Promise<JobRunSummary[]> {
   return rows.map((row) => ({ jobName: row.job_name, startedAt: new Date(row.started_at), status: row.status }));
 }
 
-async function findDeadlineProblems(now: Date) {
+export async function findDeadlineProblems(now: Date) {
   const runs = await loadRecentRuns(now);
   const openByDate = new Map<string, boolean>();
   for (const dateIso of new Set([now.toISOString().slice(0, 10), easternDateIso(now)])) openByDate.set(dateIso, await resolveIsOpenDay(dateIso));
@@ -164,7 +165,7 @@ export async function sendMorningDigestIfDue(now: Date = new Date()): Promise<bo
   return true;
 }
 
-async function loadLatestRunPerExpectedJob(): Promise<DigestJobLine[]> {
+export async function loadLatestRunPerExpectedJob(): Promise<DigestJobLine[]> {
   const jobNames = expectedScheduledJobs.map((job) => job.jobName);
   const rows: { job_name: string; started_at: Date; status: DigestJobLine["status"]; error_message: string | null }[] = await db("job_runs")
     .whereIn("job_name", jobNames)
@@ -210,8 +211,16 @@ export function startOpsMonitor(): void {
     try {
       await writeHeartbeat(startedAtMs, tickNumber);
       await reportJobDeadlines(now);
+      // Its own guard: a failing readiness check must not stop the deadline alerts and the digest, and must itself be reported.
+      await runPreOpenReadinessIfDue(now).catch((error) => {
+        console.error(`ops monitor: readiness check failed — ${error instanceof Error ? error.message : error}`);
+        reportBackgroundFailure("ops-monitor:readiness", `The pre-open readiness check hit an error and may not have run: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
+      });
       await sendMorningDigestIfDue(now);
-      if (tickNumber % 60 === 0) await pruneOldAlertState(now);
+      if (tickNumber % 60 === 0) {
+        await pruneOldAlertState(now);
+        await pruneOldReadinessState(now);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`ops monitor: tick failed — ${message}`);
