@@ -8,8 +8,8 @@ import type { PlutoSettings } from "./settingsStore.js";
 // is trusted: the chosen candidate is re-scored on fresh quotes and re-filtered by the caller,
 // and this module re-derives everything else — confidence, drift, capacity, the quantity (code
 // sizes; the model only picked a tier) and the limit price. Pure, so every rule is unit-tested.
-// The existing route gates (halt, delta band, Signals limits, close gate) run again at build and
-// confirm, on top of this.
+// The platform's order gate (halt, limits from trading_settings including working orders, delta band, close gate,
+// limit-price check) runs again at build and confirm, and in the worker before placement, on top of this.
 
 export interface PostModelBookInput {
   netLiquidationValue: number;

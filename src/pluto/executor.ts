@@ -12,10 +12,13 @@ import { tripPlutoBreaker } from "./stateStore.js";
 
 // Execution (design round 3, items 6 and 22): the agent never writes an order row itself. It builds
 // through the same routes the screens use — POST /positions/orders or /positions/:id/roll — with the
-// scores snapshot and its pluto_action_id, confirms with Adaptive Normal, then watches the order and
-// cancels it if IBKR has not filled it within the timeout. Every route gate (halt, delta band, limits,
-// active-order conflict, 15-minute staleness) runs on the way, and a refusal is a blocked action, never
-// a retry. An order error or rejection trips the order_error breaker: a human looks before Pluto acts again.
+// scores snapshot (live, fresh quotes only) and its pluto_action_id, confirms (Adaptive Normal on a single
+// leg; a combo is a plain net-limit order), then watches the order and cancels it before the session close
+// (the platform's unfilled-order sweep cancels it sooner when it sits unfilled). The order gate every order
+// passes (halt, account binding, limits including working orders, delta band, close gate, limit-price check,
+// active-order conflict, 15-minute staleness) runs on the way and again in the worker before placement; a
+// refusal at the routes is a blocked action, never a retry. An order error or rejection (the worker's
+// refusals included) trips the order_error breaker: a human looks before Pluto acts again.
 
 interface OrderRequestResponse {
   id: string;
