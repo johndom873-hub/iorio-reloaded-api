@@ -348,8 +348,9 @@ export async function watchPlutoOrder(
   const now = options.now ?? (() => Date.now());
   // An adopted order (agent restarted while it was working) keeps its original clock.
   const startedAt = input.startedAtMs ?? now();
-  // Unfilled orders are cancelled after the configured minutes, or before the session close if that comes first.
-  const cancelAtMs = Math.min(startedAt + settings.unfilledCancelMinutes * 60_000, input.cancelByMs ?? Number.POSITIVE_INFINITY);
+  // The platform's unfilled-order sweep (Risk & Limits) cancels an order left unfilled too long, Pluto's included
+  // (Marcelo 2026-10-05). Pluto only adds the cancel shortly before the session close, which the sweep does not know.
+  const cancelAtMs = input.cancelByMs ?? Number.POSITIVE_INFINITY;
   let cancelRequested = false;
   let missingFillPolls = 0;
   for (;;) {
@@ -399,7 +400,7 @@ export async function watchPlutoOrder(
     }
     if (!cancelRequested && now() > cancelAtMs) {
       cancelRequested = true;
-      const why = input.cancelByMs !== null && input.cancelByMs !== undefined && cancelAtMs === input.cancelByMs ? "session close approaching" : `unfilled after ${settings.unfilledCancelMinutes} min`;
+      const why = "session close approaching";
       try {
         await api.post(`/positions/orders/${input.orderId}/cancel`, {});
         await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: `${why} — cancel requested` });

@@ -50,7 +50,6 @@ export async function up(knex: Knex): Promise<void> {
     table.decimal("daily_loss_breaker_pct", 6, 2).notNullable().defaultTo(2);
     table.decimal("spy_stress_breaker_pct", 6, 2).notNullable().defaultTo(3);
     // Execution
-    table.integer("unfilled_cancel_minutes").notNullable().defaultTo(20);
     table.decimal("max_edge_drift_vp", 6, 2).notNullable().defaultTo(1);
     table.integer("ticker_cooldown_sessions").notNullable().defaultTo(1);
     // Model

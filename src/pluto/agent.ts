@@ -33,7 +33,7 @@ export const plutoProcessName = "pluto_agent";
 // not warrant a forced pass (and its model call).
 export const settingsFieldsThatNeverChangeADecision = new Set([
   "telegramVerbosity", "crashLoopRestartsPerHour", "messageRateLimitPerSecond", "burstLines", "burstSettleSeconds",
-  "coalescingWindowSeconds", "callTimeoutSeconds", "maxEnabledTickers", "unfilledCancelMinutes", "promptVersion",
+  "coalescingWindowSeconds", "callTimeoutSeconds", "maxEnabledTickers", "promptVersion",
 ]);
 
 export class PlutoAgent {
