@@ -38,6 +38,7 @@ const knownRow = {
   commission_warn_share_of_premium_pct: 5,
   price_check_max_deviation_pct: 10,
   price_check_min_tolerance_dollars: 0.05,
+  spread_cost_charged_pct: 50,
   updated_by_user_id: null,
   updated_at: new Date("2026-01-01T00:00:00.000Z"),
 };
@@ -54,10 +55,11 @@ const validPayload = {
   commissionWarnSharePctOfPremium: 6,
   priceCheckMaxDeviationPct: 15,
   priceCheckMinToleranceDollars: 0.1,
+  spreadCostChargedPct: 40,
 };
 
 const fieldNames = Object.keys(validPayload) as (keyof typeof validPayload)[];
-const percentageFieldNames = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct"] as const;
+const percentageFieldNames = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
 
 beforeAll(async () => {
   originalRow = await testDb("trading_settings").first();
@@ -140,6 +142,7 @@ function validPayloadFromRow(row: typeof knownRow) {
     commissionWarnSharePctOfPremium: row.commission_warn_share_of_premium_pct,
     priceCheckMaxDeviationPct: row.price_check_max_deviation_pct,
     priceCheckMinToleranceDollars: row.price_check_min_tolerance_dollars,
+    spreadCostChargedPct: row.spread_cost_charged_pct,
   };
 }
 
@@ -163,6 +166,7 @@ describe("PUT /risk-limits/settings: a valid save", () => {
     expect(Number(row.commission_warn_share_of_premium_pct)).toBe(6);
     expect(Number(row.price_check_max_deviation_pct)).toBe(15);
     expect(Number(row.price_check_min_tolerance_dollars)).toBe(0.1);
+    expect(Number(row.spread_cost_charged_pct)).toBe(40);
     expect(row.updated_by_user_id).toBe(userId);
     // And a fresh GET agrees with what the PUT returned.
     expect((await call("GET", "/risk-limits/settings")).json).toEqual(response.json);
@@ -199,6 +203,7 @@ describe("PUT /risk-limits/settings: a valid save", () => {
       commissionWarnSharePctOfPremium: 0,
       priceCheckMaxDeviationPct: 100,
       priceCheckMinToleranceDollars: 1000,
+      spreadCostChargedPct: 0,
     };
     const response = await call("PUT", "/risk-limits/settings", boundary);
     expect(response.status).toBe(200);

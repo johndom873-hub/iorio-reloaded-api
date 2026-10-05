@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { blackScholesVega, commissionPerContractDollars, computeFrictionCost, computeNetEdge, sharesPerContract, spreadShareCharged, type FrictionInput } from "./optionFriction.js";
+import { blackScholesVega, commissionPerContractDollars, computeFrictionCost, computeNetEdge, sharesPerContract, type FrictionInput } from "./optionFriction.js";
 import type { VolatilityEdge } from "./volatilityEdge.js";
 
 // Reference values computed independently in Python (vega also cross-checked by a central finite difference of the Black-Scholes price).
-const base: FrictionInput = { bid: 3.85, ask: 3.97, forward: 100, strike: 105, yearsToExpiry: 0.25, riskFreeRate: 0.04, impliedVolatility: 0.3 };
+const base: FrictionInput = { bid: 3.85, ask: 3.97, forward: 100, strike: 105, yearsToExpiry: 0.25, riskFreeRate: 0.04, impliedVolatility: 0.3, spreadShareCharged: 1 };
 
 describe("blackScholesVega", () => {
   it("matches the independent reference", () => {
@@ -17,8 +17,7 @@ describe("blackScholesVega", () => {
 });
 
 describe("approved parameters", () => {
-  it("charges the whole half-spread and a $0.68 commission per 100-share contract", () => {
-    expect(spreadShareCharged).toBe(1);
+  it("charges a $0.68 commission per 100-share contract", () => {
     expect(commissionPerContractDollars).toBe(0.68);
     expect(sharesPerContract).toBe(100);
   });
@@ -31,6 +30,16 @@ describe("computeFrictionCost", () => {
     expect(friction.commissionVolatility).toBeCloseTo(0.00035528148652563726, 10);
     expect(friction.frictionVolatility).toBeCloseTo(0.0034901181323400863, 10);
     expect(friction.frictionVolatility).toBeCloseTo(friction.spreadVolatility + friction.commissionVolatility, 15);
+  });
+
+  it("charges the spread share of the half-spread (λ): half of it at 0.5, only the commission at 0", () => {
+    const full = computeFrictionCost(base)!;
+    const half = computeFrictionCost({ ...base, spreadShareCharged: 0.5 })!;
+    const none = computeFrictionCost({ ...base, spreadShareCharged: 0 })!;
+    expect(half.spreadVolatility).toBeCloseTo(full.spreadVolatility / 2, 15);
+    expect(none.spreadVolatility).toBe(0);
+    expect(none.frictionVolatility).toBeCloseTo(full.commissionVolatility, 15);
+    expect(half.commissionVolatility).toBe(full.commissionVolatility);
   });
 
   it("grows with the spread and shrinks as vega grows", () => {

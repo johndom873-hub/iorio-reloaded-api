@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { describeOrderUpdate, sendDueOrderNotices, type OrderFill, type OrderFollowUpDependencies, type OrderNoticeInput } from "./orderFollowUp.js";
 
-const order = (status: string, errorMessage: string | null = null): OrderNoticeInput => ({ id: "o1", status, errorMessage, symbol: "AAOI" });
+const order = (status: string, errorMessage: string | null = null, cancellationReason: string | null = null): OrderNoticeInput => ({ id: "o1", status, errorMessage, cancellationReason, symbol: "AAOI" });
 const putFill: OrderFill = { side: "sell", quantity: 2, price: 1.35, optionType: "put", strikePrice: 50, expiryDate: "2026-10-16" };
 
 describe("describeOrderUpdate", () => {
+  it("says a day order expired at the close, or was never confirmed, instead of a plain cancel", () => {
+    expect(describeOrderUpdate(order("cancelled", null, "expired_at_close"), [])).toContain("expired unfilled at the market close");
+    expect(describeOrderUpdate(order("cancelled_partially_filled", null, "expired_at_close"), [putFill])).toContain("expired at the market close after partly filling");
+    expect(describeOrderUpdate(order("cancelled", null, "not_confirmed_in_time"), [])).toContain("never confirmed");
+    expect(describeOrderUpdate(order("cancelled", "IBKR: Not enough buying power", "cancelled_by_ibkr"), [])).toContain("(IBKR: Not enough buying power)");
+  });
+
   it("says the order is working when IBKR accepts it", () => {
     expect(describeOrderUpdate(order("submitted"), [])).toContain("Working at IBKR");
   });

@@ -13,6 +13,7 @@ const validInput: TradingSettingsInput = {
   commissionWarnSharePctOfPremium: 5,
   priceCheckMaxDeviationPct: 10,
   priceCheckMinToleranceDollars: 0.05,
+  spreadCostChargedPct: 50,
 };
 
 describe("validateTradingSettingsInput", () => {
@@ -38,6 +39,13 @@ describe("validateTradingSettingsInput", () => {
     expect(validateTradingSettingsInput({ ...validInput, priceCheckMinToleranceDollars: -0.01 })).toBe("priceCheckMinToleranceDollars must be between 0 and 1000.");
     expect(validateTradingSettingsInput({ ...validInput, priceCheckMinToleranceDollars: 1000.01 })).toBe("priceCheckMinToleranceDollars must be between 0 and 1000.");
     expect(validateTradingSettingsInput({ ...validInput, priceCheckMaxDeviationPct: 0, priceCheckMinToleranceDollars: 0 })).toBeNull();
+  });
+
+  it("rejects a spread cost outside 0-100 and accepts both ends", () => {
+    expect(validateTradingSettingsInput({ ...validInput, spreadCostChargedPct: 100.5 })).toBe("spreadCostChargedPct must be between 0 and 100.");
+    expect(validateTradingSettingsInput({ ...validInput, spreadCostChargedPct: -1 })).toBe("spreadCostChargedPct must be between 0 and 100.");
+    expect(validateTradingSettingsInput({ ...validInput, spreadCostChargedPct: 0 })).toBeNull();
+    expect(validateTradingSettingsInput({ ...validInput, spreadCostChargedPct: 100 })).toBeNull();
   });
 
   it("rejects an invalid delta band", () => {
@@ -66,6 +74,7 @@ describe("mapTradingSettingsRow", () => {
       commission_warn_share_of_premium_pct: "5.00",
       price_check_max_deviation_pct: "10.00",
       price_check_min_tolerance_dollars: "0.05",
+      spread_cost_charged_pct: "50.00",
     });
     expect(mapped).toEqual(validInput);
   });

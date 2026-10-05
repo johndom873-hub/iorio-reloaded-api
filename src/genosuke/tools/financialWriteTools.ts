@@ -127,7 +127,7 @@ export const financialWriteTools: GenosukeTool[] = [
   {
     name: "update_risk_limits",
     description:
-      "Change the trading limits and targets (one set for every strategy): max position %, max concentration per ticker %, min cash reserve % (these block orders), the delta band (blocks new orders outside it, filters Signals and the recovery-path suggestion), the Recovery Path DTE window, min annualized yield % (Signals filter), the commission warning %, and the limit-price check (an order is refused when a leg's limit is worse than the live mid by more than max(priceCheckMaxDeviationPct % of the mid, priceCheckMinToleranceDollars $)). Send only the fields to change; the rest keep their current values. Does not change existing positions.",
+      "Change the trading limits and targets (one set for every strategy): max position %, max concentration per ticker %, min cash reserve % (these block orders), the delta band (blocks new orders outside it, filters Signals and the recovery-path suggestion), the Recovery Path DTE window, min annualized yield % (Signals filter), the commission warning %, and the limit-price check (an order is refused when a leg's limit is worse than the live mid by more than max(priceCheckMaxDeviationPct % of the mid, priceCheckMinToleranceDollars $)), and the Signals spread cost (spreadCostChargedPct: the % of the half-spread Signals charges as friction, 0 = a fill at the mid, 100 = a fill at the bid). Send only the fields to change; the rest keep their current values. Does not change existing positions.",
     tier: "financial-write",
     parameters: {
       type: "object",
@@ -143,6 +143,7 @@ export const financialWriteTools: GenosukeTool[] = [
         commissionWarnSharePctOfPremium: { type: "number" },
         priceCheckMaxDeviationPct: { type: "number" },
         priceCheckMinToleranceDollars: { type: "number" },
+        spreadCostChargedPct: { type: "number" },
       },
     },
     validateBeforeConfirmation: async (input) => {

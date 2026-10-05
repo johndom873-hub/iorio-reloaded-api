@@ -13,7 +13,8 @@ import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
 //                = netEdge(B) − netEdge(A) − 2·friction(A)
 //   netRollEdge$ = netEdge(B)·vega(B)·100 − (edge(A) + friction(A))·vega(A)·100   (per contract)
 //
-// The held leg is bought back at the ask, so its friction is a cost again,
+// The held leg is bought back with a limit at its mid, charged the same share of
+// the half-spread as a sale (optionFriction.ts), so its friction is a cost again,
 // never a credit. The commission sits inside every friction term already
 // (optionFriction.ts), so there is no separate commission line. Each dollar
 // component is weighted by its own leg's vega. Grades reuse the Net Edge cut
@@ -105,6 +106,8 @@ export interface HeldLegScoringInput {
   ivShiftByExpiry?: Map<string, number>;
   /** Commission per contract for the buy-back, estimated for the leg's own size; flat $0.68 when omitted. */
   commissionEstimator?: CommissionEstimator;
+  /** λ (0..1): the share of the half-spread friction charges, from the Risk & Limits spread cost. */
+  spreadShareCharged: number;
 }
 
 export function heldLegContractKey(leg: Pick<OpenShortLeg, "expiry" | "strike" | "right">): string {
@@ -163,7 +166,7 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
     if (!(totalVariance > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
     const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry) + (input.ivShiftByExpiry?.get(leg.expiry) ?? 0);
     if (!(surfaceIv > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
-    const friction = computeFrictionCost({ bid: twoSidedQuote.bid, ask: twoSidedQuote.ask, forward: slice.forwardPrice, strike: leg.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: (input.commissionEstimator ?? flatCommissionEstimator).perContractDollars("buy", leg.quantity) });
+    const friction = computeFrictionCost({ bid: twoSidedQuote.bid, ask: twoSidedQuote.ask, forward: slice.forwardPrice, strike: leg.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: (input.commissionEstimator ?? flatCommissionEstimator).perContractDollars("buy", leg.quantity), spreadShareCharged: input.spreadShareCharged });
     if (!friction) return unscored(leg, "no_quote", { dte, flags: flagsWithoutQuote });
 
     const delta = blackScholesDelta(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
@@ -207,19 +210,14 @@ export function recostReplacementCommission(replacement: SignalCandidate, contra
   if (extraCommissionDollars === 0) return replacement;
   const extraCommissionVolatility = extraCommissionDollars / 100 / replacement.vega;
   const netEdge = replacement.netEdge - extraCommissionVolatility;
-  const netEdgeAtMid = replacement.netEdgeAtMid - extraCommissionVolatility;
   const edgeDollars = replacement.edgeDollars - extraCommissionDollars;
-  const edgeDollarsAtMid = replacement.edgeDollarsAtMid - extraCommissionDollars;
   return {
     ...replacement,
     commissionPerContractDollars: legCommission,
     frictionVolatility: replacement.frictionVolatility + extraCommissionVolatility,
     netEdge,
-    netEdgeAtMid,
     edgeDollars,
-    edgeDollarsAtMid,
     riskAdjustedRatio: edgeDollars / replacement.dollarRisk,
-    riskAdjustedRatioAtMid: edgeDollarsAtMid / replacement.dollarRisk,
     grade: gradeForNetEdge(netEdge),
   };
 }

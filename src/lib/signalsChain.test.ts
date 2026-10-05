@@ -76,7 +76,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
   };
 }
 const account = { freeCash: 1_000_000 };
-const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 0.35, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05 };
+const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 0.35, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100 };
 const pathCount = 200;
 
 describe("buildSignalCandidates exclusion reporting", () => {
@@ -95,6 +95,7 @@ describe("buildSignalCandidates exclusion reporting", () => {
     deltaTargetMin: 0,
     deltaTargetMax: 0.3,
     minAnnualizedYieldPct: 0,
+    spreadShareCharged: 1,
   };
 
   it("never changes the candidates, and reports every other quote exactly once", () => {

@@ -108,7 +108,7 @@ export interface RecentNotificationEventWithOrder {
   notification: AppNotification;
   occurredAt: string;
   /** Only on order_status events: the order's current status and payload (null if the order no longer exists). */
-  order?: { status: string; payload: unknown } | null;
+  order?: { status: string; payload: unknown; cancellationReason: string | null } | null;
 }
 
 /**
@@ -138,8 +138,8 @@ export async function fetchRecentNotificationEventsWithOrders(limit: number): Pr
   const orderIds = [...new Set(events.flatMap((event) => (event.notification.type === "order_status" ? [event.notification.orderId] : [])))];
   if (orderIds.length === 0) return events;
 
-  const orderRows: { id: string; status: string; payload: unknown }[] = await db("order_requests").whereIn("id", orderIds).select("id", "status", "payload");
-  const orderById = new Map(orderRows.map((row) => [row.id, { status: row.status, payload: row.payload }]));
+  const orderRows: { id: string; status: string; payload: unknown; cancellation_reason: string | null }[] = await db("order_requests").whereIn("id", orderIds).select("id", "status", "payload", "cancellation_reason");
+  const orderById = new Map(orderRows.map((row) => [row.id, { status: row.status, payload: row.payload, cancellationReason: row.cancellation_reason }]));
   return events.map((event) =>
     event.notification.type === "order_status" ? { ...event, order: orderById.get(event.notification.orderId) ?? null } : event,
   );

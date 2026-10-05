@@ -65,6 +65,7 @@ function serializeOrderRequest(row: Record<string, unknown>) {
     requestedByDisplayName: row.requested_by_display_name,
     cancelledByUserId: row.cancelled_by_user_id,
     cancelledByDisplayName: row.cancelled_by_display_name,
+    cancellationReason: row.cancellation_reason ?? null,
     calendarWarning: row.calendar_warning,
     calendarWarningEvents: row.calendar_warning_events ?? null,
     riskFreeRate: row.risk_free_rate,

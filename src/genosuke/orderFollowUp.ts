@@ -26,6 +26,8 @@ export interface OrderNoticeInput {
   id: string;
   status: string;
   errorMessage: string | null;
+  /** Why it ended cancelled when no user cancelled it (order_requests.cancellation_reason). */
+  cancellationReason: string | null;
   symbol: string;
 }
 
@@ -49,8 +51,11 @@ export function describeOrderUpdate(order: OrderNoticeInput, fills: OrderFill[])
     case "filled":
       return withFills(`✅ ${order.symbol} order filled — IBKR confirmed the trade:`, fills);
     case "cancelled":
-      return `${order.symbol} order was cancelled at IBKR — nothing was filled.`;
+      if (order.cancellationReason === "expired_at_close") return `${order.symbol} order expired unfilled at the market close (orders are day orders) — nothing was filled.`;
+      if (order.cancellationReason === "not_confirmed_in_time") return `${order.symbol} order was never confirmed and was cancelled after 15 minutes — nothing was sent to IBKR.`;
+      return `${order.symbol} order was cancelled at IBKR${order.errorMessage ? ` (${order.errorMessage})` : ""} — nothing was filled.`;
     case "cancelled_partially_filled":
+      if (order.cancellationReason === "expired_at_close") return withFills(`⚠️ ${order.symbol} order expired at the market close after partly filling. What was filled:`, fills);
       return withFills(`⚠️ ${order.symbol} order was cancelled at IBKR after partly filling. What was filled:`, fills);
     case "rejected":
       return `❌ IBKR rejected the ${order.symbol} order: ${order.errorMessage ?? "no reason given"}.`;
@@ -95,7 +100,7 @@ export function createDatabaseDependencies(serviceUsername: string, send: (text:
         .whereRaw("orq.genosuke_notified_status is distinct from orq.status")
         .whereRaw(`orq.created_at > now() - interval '${followUpWindowHours} hours'`)
         .orderBy("orq.updated_at")
-        .select("orq.id", "orq.status", "orq.error_message as errorMessage", db.raw("orq.payload->>'symbol' as symbol"));
+        .select("orq.id", "orq.status", "orq.error_message as errorMessage", "orq.cancellation_reason as cancellationReason", db.raw("orq.payload->>'symbol' as symbol"));
       return rows;
     },
     loadFills: async (orderId) => {

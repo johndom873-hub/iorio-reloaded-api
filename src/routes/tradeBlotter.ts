@@ -136,6 +136,7 @@ tradeBlotterRouter.get("/", async (request, response) => {
       orq.payload->>'strategyKey' AS "strategyKey",
       ru.display_name AS "requestedByDisplayName",
       cu.display_name AS "cancelledByDisplayName",
+      orq.cancellation_reason AS "cancellationReason",
       leg->>'role' AS "legRole",
       leg->>'action' AS action,
       (leg->>'quantity')::numeric AS quantity,

@@ -26,6 +26,8 @@ export interface TodaysOrder {
   updatedAt: string;
   requestedByDisplayName: string | null;
   cancelledByDisplayName: string | null;
+  /** Why it ended cancelled when no user cancelled it: expired_at_close, cancelled_by_ibkr or not_confirmed_in_time. */
+  cancellationReason: string | null;
   errorMessage: string | null;
   ibkrOrderId: number | null;
   ibkrPermId: number | null;
@@ -46,6 +48,7 @@ export interface TodaysOrderRow {
   updated_at: Date;
   requested_by_display_name: string | null;
   cancelled_by_display_name: string | null;
+  cancellation_reason: string | null;
   error_message: string | null;
   ibkr_order_id: number | null;
   ibkr_perm_id: number | null;
@@ -115,6 +118,7 @@ export function buildTodaysOrders(orderRows: TodaysOrderRow[], fillRows: TodaysO
       updatedAt: row.updated_at.toISOString(),
       requestedByDisplayName: row.requested_by_display_name,
       cancelledByDisplayName: row.cancelled_by_display_name,
+      cancellationReason: row.cancellation_reason,
       errorMessage: row.error_message,
       ibkrOrderId: row.ibkr_order_id,
       ibkrPermId: row.ibkr_perm_id,
@@ -147,6 +151,7 @@ export async function fetchTodaysOrders(now: Date = new Date()): Promise<TodaysO
       "orq.created_at",
       "orq.updated_at",
       "orq.error_message",
+      "orq.cancellation_reason",
       "orq.ibkr_order_id",
       "orq.ibkr_perm_id",
       "ru.display_name as requested_by_display_name",

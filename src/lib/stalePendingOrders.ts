@@ -14,7 +14,7 @@ export async function cancelStalePendingConfirmations(): Promise<number> {
   const rows: { id: string }[] = await db("order_requests")
     .where({ status: "pending_confirmation" })
     .where("created_at", "<", cutoff)
-    .update({ status: "cancelled", error_message: "Not confirmed within 15 minutes — cancelled automatically (limit prices would be stale).", updated_at: db.fn.now() })
+    .update({ status: "cancelled", cancellation_reason: "not_confirmed_in_time", error_message: "Not confirmed within 15 minutes — cancelled automatically (limit prices would be stale).", updated_at: db.fn.now() })
     .returning(["id"]);
   for (const row of rows) {
     await publishNotification({ type: "order_status", orderId: row.id }).catch(() => {});

@@ -43,6 +43,7 @@ const riskSettingLabels: [string, string][] = [
   ["commissionWarnSharePctOfPremium", "Commission warning % of premium"],
   ["priceCheckMaxDeviationPct", "Limit-price check: max % off the live mid"],
   ["priceCheckMinToleranceDollars", "Limit-price check: minimum allowance $"],
+  ["spreadCostChargedPct", "Signals spread cost % of the half-spread"],
 ];
 
 export function labelStrategy(strategyKey: string): string {

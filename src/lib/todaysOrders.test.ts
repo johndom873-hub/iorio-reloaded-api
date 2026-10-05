@@ -35,6 +35,7 @@ function orderRow(id: string, payload: OrderRequestPayload, status = "filled") {
     updated_at: new Date("2026-10-01T14:05:00Z"),
     requested_by_display_name: "Marce",
     cancelled_by_display_name: null,
+    cancellation_reason: null,
     error_message: null,
     ibkr_order_id: 7,
     ibkr_perm_id: 99,

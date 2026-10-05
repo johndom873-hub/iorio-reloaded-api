@@ -50,6 +50,7 @@ function baseInput(overrides: Partial<SignalCandidatesInput> = {}): SignalCandid
     deltaTargetMin: 0,
     deltaTargetMax: 1,
     minAnnualizedYieldPct: 0,
+    spreadShareCharged: 1,
     ...overrides,
   };
 }
@@ -121,16 +122,20 @@ describe("buildSignalCandidates: computed fields", () => {
     expect(put.annualizedYield).toBeCloseTo((premiumPut / 90) * (365 / put.dte), 6);
   });
 
-  it("net Edge at the mid concedes only the commission, and Edge $ at the mid follows from it", () => {
-    const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }))[0]!;
-    const commissionOnly = 0.68 / 100 / c.vega; // commissionPerContractDollars / sharesPerContract / vega
-    expect(c.netEdgeAtMid).toBeCloseTo(c.edge - commissionOnly, 12);
-    expect(c.netEdgeAtMid).toBeGreaterThan(c.netEdge); // no half-spread conceded
-    expect(c.edgeDollarsAtMid).toBeCloseTo(c.netEdgeAtMid * c.vega * 100, 10);
-    expect(c.vega).toBeCloseTo(blackScholesVega(forward, 90, 30 / 365, rate, c.surfaceImpliedVolatility), 12);
+  it("friction charges the spread share of the half-spread: 0 concedes only the commission, 0.5 sits halfway to a fill at the bid", () => {
+    const atBid = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spreadShareCharged: 1 }))[0]!;
+    const halfway = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spreadShareCharged: 0.5 }))[0]!;
+    const atMid = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spreadShareCharged: 0 }))[0]!;
+    const commissionOnly = 0.68 / 100 / atMid.vega; // commissionPerContractDollars / sharesPerContract / vega
+    const halfSpreadVolatility = (atMid.ask - atMid.bid) / 2 / atMid.vega;
+    expect(atMid.netEdge).toBeCloseTo(atMid.edge - commissionOnly, 12);
+    expect(atBid.netEdge).toBeCloseTo(atBid.edge - halfSpreadVolatility - commissionOnly, 12);
+    expect(halfway.netEdge).toBeCloseTo(halfway.edge - 0.5 * halfSpreadVolatility - commissionOnly, 12);
+    expect(halfway.edgeDollars).toBeCloseTo(halfway.netEdge * halfway.vega * 100, 10);
+    expect(atMid.vega).toBeCloseTo(blackScholesVega(forward, 90, 30 / 365, rate, atMid.surfaceImpliedVolatility), 12);
   });
 
-  it("dollar risk is max theoretical loss (strike or spot x 100, minus mid premium), and the risk-adjusted ratios follow from it", () => {
+  it("dollar risk is max theoretical loss (strike or spot x 100, minus mid premium), and the risk-adjusted ratio follows from it", () => {
     const call = buildSignalCandidates(baseInput({ quotes: [quoteAt(110, "C")], spotPrice: 100 }))[0]!;
     const put = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spotPrice: 100 }))[0]!;
     const premiumCall = (call.bid + call.ask) / 2;
@@ -138,7 +143,6 @@ describe("buildSignalCandidates: computed fields", () => {
     expect(call.dollarRisk).toBeCloseTo(100 * 100 - premiumCall, 10);
     expect(put.dollarRisk).toBeCloseTo(90 * 100 - premiumPut, 10);
     expect(put.riskAdjustedRatio).toBeCloseTo(put.edgeDollars / put.dollarRisk, 10);
-    expect(put.riskAdjustedRatioAtMid).toBeCloseTo(put.edgeDollarsAtMid / put.dollarRisk, 10);
   });
 
   it("does not run the Monte Carlo: uncompensated share is null until attached", () => {

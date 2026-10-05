@@ -94,6 +94,8 @@ export interface SignalCandidatesInput {
   ivShiftByExpiry?: Map<string, number>;
   /** Commission per contract charged inside friction, estimated for the order size the setup form would default to; flat $0.68 when omitted. */
   commissionEstimator?: CommissionEstimator;
+  /** λ (0..1): the share of the half-spread friction charges, from the Risk & Limits spread cost. */
+  spreadShareCharged: number;
   /** When given, told about every quote that did not become a candidate and why (the Signals chain grid). Never changes which contracts are candidates. */
   onContractExcluded?: (quote: SignalQuote, exclusion: SignalContractExclusion) => void;
 }
@@ -133,15 +135,10 @@ export interface SignalCandidate {
   /** net Edge x vega x 100 (Marcelo approved 2026-09-22). */
   edgeDollars: number;
   vega: number;
-  /** Best case for an Adaptive order that fills at the mid: only the commission is conceded. */
-  netEdgeAtMid: number;
-  edgeDollarsAtMid: number;
   /** Max theoretical loss per contract at the mid premium: strike*100-premium (CSP) or spot*100-premium (CC). Marcelo approved 2026-09-23. */
   dollarRisk: number;
   /** edgeDollars / dollarRisk. */
   riskAdjustedRatio: number;
-  /** edgeDollarsAtMid / dollarRisk. */
-  riskAdjustedRatioAtMid: number;
   annualizedYield: number;
   uncompensatedSharePercent: number | null;
   quoteSource: SignalQuoteSource;
@@ -286,7 +283,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       continue;
     }
     const commissionPerContract = commissionEstimator.perContractDollars("sell", isCall ? coveredCallContracts : 1);
-    const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: quote.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: commissionPerContract });
+    const friction = computeFrictionCost({ bid: quote.bid, ask: quote.ask, forward: slice.forwardPrice, strike: quote.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: commissionPerContract, spreadShareCharged: input.spreadShareCharged });
     if (!friction) {
       exclude(quote, { kind: "no_friction", delta });
       continue;
@@ -300,8 +297,6 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     }
     const vega = blackScholesVega(slice.forwardPrice, quote.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv);
     const edgeDollars = netEdge * vega * 100;
-    const netEdgeAtMid = edge! - friction.commissionVolatility;
-    const edgeDollarsAtMid = netEdgeAtMid * vega * 100;
 
     const strategyKey: SignalStrategyKey = isCall ? "covered_call" : "cash_secured_put";
     const dte = Math.round(slice.yearsToExpiry * annualDays);
@@ -317,7 +312,6 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     }
     const dollarRisk = capitalAtRisk * 100 - premium;
     const riskAdjustedRatio = edgeDollars / dollarRisk;
-    const riskAdjustedRatioAtMid = edgeDollarsAtMid / dollarRisk;
     const spreadPercent = ((quote.ask - quote.bid) / premium) * 100;
     const insideRange = logMoneyness >= slice.kMin && logMoneyness <= slice.kMax;
     const flags: SignalFlag[] = [];
@@ -348,11 +342,8 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       netEdge,
       edgeDollars,
       vega,
-      netEdgeAtMid,
-      edgeDollarsAtMid,
       dollarRisk,
       riskAdjustedRatio,
-      riskAdjustedRatioAtMid,
       annualizedYield,
       uncompensatedSharePercent: null,
       quoteSource: quote.source ?? "snapshot",

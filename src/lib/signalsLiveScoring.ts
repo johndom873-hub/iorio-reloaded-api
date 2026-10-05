@@ -179,6 +179,7 @@ export interface ScoreTickerObserver {
 export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: TradingSettings, live?: LiveScoringOverrides, observer?: ScoreTickerObserver): TickerSignals {
   const { header } = inputs;
   const spotPrice = live?.spotPrice ?? header?.underlyingPrice ?? null;
+  const spreadShareCharged = settings.spreadCostChargedPct / 100;
   const base: Omit<TickerSignals, "unscoredReason" | "unscoredDetail"> = {
     tickerId: inputs.tickerId,
     symbol: inputs.symbol,
@@ -194,7 +195,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     candidates: [],
     best: null,
     gradeCounts: { strong: 0, good: 0, weak: 0, avoid: 0 },
-    heldLegs: scoreHeldLegs(inputs.openShortLegs, { spotPrice: spotPrice ?? 0, riskFreeRate: 0, forecast: null, slices: [], quotes: [] }),
+    heldLegs: scoreHeldLegs(inputs.openShortLegs, { spotPrice: spotPrice ?? 0, riskFreeRate: 0, forecast: null, slices: [], quotes: [], spreadShareCharged }),
     rolls: [],
     bestRoll: null,
     rollCount: 0,
@@ -213,6 +214,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     freeShares: inputs.freeShares,
     freeCash: account.freeCash,
     dayQuotesAsOf: summarizeDayQuotes(inputs.dayQuotes),
+    spreadShareCharged,
     ivShiftByExpiry: {},
     quoteSourceCounts: { live: 0, day: 0, snapshot: 0 },
     noCandidatesReason: null,
@@ -267,6 +269,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       minAnnualizedYieldPct: settings.minAnnualizedYieldPct,
       ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
       commissionEstimator: settings.commissionEstimator,
+      spreadShareCharged,
       onContractExcluded: observer?.onContractExcluded,
     }),
   );
@@ -285,6 +288,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     quotes,
     ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
     commissionEstimator: settings.commissionEstimator,
+    spreadShareCharged,
   });
   const rolls = buildRollCandidates(heldLegs, candidates, settings.commissionEstimator);
 

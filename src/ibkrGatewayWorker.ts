@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Client as PgClient } from "pg";
 import { EventName, OrderAction, OrderType, SecType, TimeInForce } from "@stoqey/ib";
 import type { CommissionReport, Contract, ComboLeg, Execution, Order as IbkrOrder } from "@stoqey/ib";
+import type { Knex } from "knex";
 import { db } from "./db/connection.js";
 import { environment } from "./config/env.js";
 import { postgresSslOption } from "./config/databaseSsl.js";
@@ -27,7 +28,9 @@ import { reconcileHeldPositions, type ReconciliationDependencies } from "./ibkr/
 import { replayRecentIbkrExecutions } from "./ibkr/ibkrGatewayReplayRecentExecutions.js";
 import { fetchIbkrOpenOrders } from "./ibkr/ibkrGatewayFetchOpenOrders.js";
 import { fetchIbkrCompletedOrders } from "./ibkr/ibkrGatewayFetchCompletedOrders.js";
-import { requestStatusForOrderStatusEvent } from "./ibkr/ibkrGatewayOrderStatus.js";
+import { ibkrOrderCanceledErrorCode, requestStatusForOrderStatusEvent } from "./ibkr/ibkrGatewayOrderStatus.js";
+import { recordIbkrCancellationReason, recordIbkrOrderCanceled, workingOrderRequestStatuses, type ExecutedOutcome } from "./ibkr/ibkrGatewayCancellationRecording.js";
+import { easternDateIso } from "./lib/marketSessionStatus.js";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { notifyTelegram } from "./lib/notifyTelegram.js";
 import { clearDownState, notifyDownThrottled } from "./lib/throttledAlert.js";
@@ -35,6 +38,7 @@ import { formatDurationHuman } from "./lib/formatDurationHuman.js";
 import { publishNotification, publishPulse } from "./lib/notificationChannel.js";
 import { endOrderIfPlacementBlocked } from "./lib/orderPlacementEnforcement.js";
 import { endOrderIfLimitPriceUnsafe } from "./ibkr/ibkrGatewayLimitPriceCheck.js";
+import { captureExecutionQuote } from "./ibkr/ibkrGatewayExecutionQuotes.js";
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
 
@@ -519,20 +523,26 @@ function setupOrderTrackingListeners(): void {
     // through even on a same-status callback, or the permId collision guard
     // above never gets wired up for an order that goes straight from
     // "submitted" to "submitted" until it fills.
-    db("order_requests")
-      .where({ ibkr_order_id: orderId })
-      .whereNotIn("status", finalOrderRequestStatuses)
-      .andWhere((builder) => (permId ? builder.whereNull("ibkr_perm_id").orWhere("ibkr_perm_id", permId) : builder))
-      .andWhere((builder) => {
-        builder.whereNot("status", requestStatus);
-        if (permId) builder.orWhereNull("ibkr_perm_id");
-      })
-      .update({
-        status: requestStatus,
-        updated_at: db.fn.now(),
-        ...(permId ? { ibkr_perm_id: permId } : {}),
-      })
-      .returning(["id"])
+    const applyStatus = async (connection: Knex): Promise<{ id: string }[]> => {
+      const rows: { id: string }[] = await connection("order_requests")
+        .where({ ibkr_order_id: orderId })
+        .whereNotIn("status", finalOrderRequestStatuses)
+        .andWhere((builder) => (permId ? builder.whereNull("ibkr_perm_id").orWhere("ibkr_perm_id", permId) : builder))
+        .andWhere((builder) => {
+          builder.whereNot("status", requestStatus);
+          if (permId) builder.orWhereNull("ibkr_perm_id");
+        })
+        .update({
+          status: requestStatus,
+          updated_at: db.fn.now(),
+          ...(permId ? { ibkr_perm_id: permId } : {}),
+        })
+        .returning(["id"]);
+      if (rows[0] && (requestStatus === "cancelled" || requestStatus === "cancelled_partially_filled")) await recordIbkrCancellationReason(rows[0].id, connection);
+      return rows;
+    };
+    // A cancel's status and reason commit together, so nothing reading the row (Genosuke's follow-up) sees one without the other.
+    (requestStatus === "cancelled" || requestStatus === "cancelled_partially_filled" ? db.transaction(applyStatus) : applyStatus(db))
       .then(async (rows) => {
         if (!rows[0]) return;
         await publishNotification({ type: "order_status", orderId: rows[0].id });
@@ -542,6 +552,7 @@ function setupOrderTrackingListeners(): void {
 
   ib.on(EventName.execDetails, (_reqId, contract, execution) => {
     recordExecution(contract, execution).catch((error) => console.error(`Failed to record execution: ${error}`));
+    captureExecutionQuote(ib, contract, execution).catch((error) => console.error(`Failed to capture the quote at execution ${execution.execId}: ${error}`));
   });
 
   // Commissions arrive on their own event, keyed by execId, usually right
@@ -570,6 +581,13 @@ function setupOrderTrackingListeners(): void {
     if (reqId === -1) return;
     if (code === 399 || (code >= 2100 && code <= 2169)) {
       console.log(`Order ${reqId} informational message: ${code} ${error.message}`);
+      return;
+    }
+    if (code === ibkrOrderCanceledErrorCode) {
+      recordIbkrOrderCanceled(reqId, error.message, {
+        executedOutcome: executedOutcomeForOrderRequest,
+        notify: (orderRequestId) => publishNotification({ type: "order_status", orderId: orderRequestId }),
+      }).catch((dbError) => console.error(`Failed to record IBKR cancel for ${reqId}: ${dbError}`));
       return;
     }
     db("order_requests")
@@ -828,7 +846,6 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
 // rows link back through source_order_request_id, written by recordExecution
 // via the permId lookup — which is why the execution replay and the position
 // reconciliation both run before this on every connect).
-type ExecutedOutcome = "filled" | "partially_filled" | "none";
 
 async function executedOutcomeForOrderRequest(orderRequestId: string, payload: OrderRequestPayload): Promise<ExecutedOutcome> {
   const executedRows: { legType: "stock" | "option"; executed: string }[] = await db("trades as tr")
@@ -859,10 +876,10 @@ async function reconcileStaleOrderRequests(): Promise<void> {
   const ib = persistentIbkrConnection.getIb();
   if (!ib) return;
 
-  const staleCandidates: { id: string; ibkr_order_id: number; ibkr_perm_id: number | null; payload: OrderRequestPayload }[] = await db("order_requests")
-    .whereIn("status", ["submitted", "partially_filled", "cancel_requested"])
+  const staleCandidates: { id: string; ibkr_order_id: number; ibkr_perm_id: number | null; payload: OrderRequestPayload; created_at: Date }[] = await db("order_requests")
+    .whereIn("status", workingOrderRequestStatuses)
     .whereNotNull("ibkr_order_id")
-    .select("id", "ibkr_order_id", "ibkr_perm_id", "payload");
+    .select("id", "ibkr_order_id", "ibkr_perm_id", "payload", "created_at");
   if (staleCandidates.length === 0) return;
 
   const [openOrders, completedOrders] = await Promise.all([fetchIbkrOpenOrders(ib), fetchIbkrCompletedOrders(ib)]);
@@ -880,16 +897,26 @@ async function reconcileStaleOrderRequests(): Promise<void> {
         completedRequestStatus === "cancelled" && (await executedOutcomeForOrderRequest(row.id, row.payload)) === "partially_filled"
           ? "cancelled_partially_filled"
           : completedRequestStatus;
-      await db("order_requests").where({ id: row.id }).update({ status: resolvedStatus, updated_at: db.fn.now() });
+      await db.transaction(async (transaction) => {
+        await transaction("order_requests").where({ id: row.id }).update({ status: resolvedStatus, updated_at: db.fn.now() });
+        if (resolvedStatus !== "filled") await recordIbkrCancellationReason(row.id, transaction);
+      });
       console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${resolvedStatus}" from IBKR's completed orders (permId ${row.ibkr_perm_id}).`);
       await publishNotification({ type: "order_status", orderId: row.id });
       continue;
     }
 
+    // A DAY order from an earlier session cannot still be working: IBKR expired it at that session's close, even when
+    // a Gateway restart since has dropped it from the completed-orders list.
+    const expiredDayOrder = easternDateIso(new Date(row.created_at)) < easternDateIso(new Date());
     const executed = await executedOutcomeForOrderRequest(row.id, row.payload);
-    if (executed !== "none") {
-      await db("order_requests").where({ id: row.id }).update({ status: executed, updated_at: db.fn.now() });
-      console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${executed}" from its recorded executions.`);
+    if (executed !== "none" || expiredDayOrder) {
+      const resolvedStatus = !expiredDayOrder ? executed : executed === "filled" ? "filled" : executed === "partially_filled" ? "cancelled_partially_filled" : "cancelled";
+      await db.transaction(async (transaction) => {
+        await transaction("order_requests").where({ id: row.id }).update({ status: resolvedStatus, updated_at: db.fn.now() });
+        if (resolvedStatus === "cancelled" || resolvedStatus === "cancelled_partially_filled") await recordIbkrCancellationReason(row.id, transaction);
+      });
+      console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${resolvedStatus}" from its recorded executions${expiredDayOrder ? " (a DAY order from an earlier session)" : ""}.`);
       await publishNotification({ type: "order_status", orderId: row.id });
       continue;
     }

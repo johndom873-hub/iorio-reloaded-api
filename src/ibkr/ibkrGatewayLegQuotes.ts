@@ -1,4 +1,4 @@
-import { EventName, MarketDataType, type IBApi } from "@stoqey/ib";
+import { EventName, MarketDataType, type Contract, type IBApi } from "@stoqey/ib";
 import { buildLegContract, type OrderLegPayload } from "./ibkrGatewayOrderPayload.js";
 import { allocateQuoteSnapshotRequestId } from "./quoteSnapshotRequestIds.js";
 
@@ -29,14 +29,20 @@ export interface LegQuoteSnapshotResult {
 
 type SnapshotApi = Pick<IBApi, "on" | "removeListener" | "reqMarketDataType" | "reqMktData" | "cancelMktData">;
 
-export function fetchLegQuoteSnapshots(
-  ib: SnapshotApi,
-  legs: OrderLegPayload[],
-  options: { timeoutMs?: number; allocateRequestId?: () => number } = {},
-): Promise<LegQuoteSnapshotResult> {
+export interface QuoteSnapshotOptions {
+  timeoutMs?: number;
+  allocateRequestId?: () => number;
+}
+
+export function fetchLegQuoteSnapshots(ib: SnapshotApi, legs: OrderLegPayload[], options: QuoteSnapshotOptions = {}): Promise<LegQuoteSnapshotResult> {
+  return fetchContractQuoteSnapshots(ib, legs.map(buildLegContract), options);
+}
+
+/** The same one-shot real-time snapshot for contracts IBKR already identified (e.g. an execution's conId + SMART). */
+export function fetchContractQuoteSnapshots(ib: SnapshotApi, contracts: Contract[], options: QuoteSnapshotOptions = {}): Promise<LegQuoteSnapshotResult> {
   const timeoutMs = options.timeoutMs ?? legQuoteSnapshotTimeoutMs;
   const allocateRequestId = options.allocateRequestId ?? allocateQuoteSnapshotRequestId;
-  const quotes: LegQuoteSnapshot[] = legs.map(() => ({ bid: null, ask: null }));
+  const quotes: LegQuoteSnapshot[] = contracts.map(() => ({ bid: null, ask: null }));
   const notes: string[] = [];
   const legIndexByRequestId = new Map<number, number>();
   const pending = new Set<number>();
@@ -82,11 +88,11 @@ export function fetchLegQuoteSnapshots(
     try {
       // Connection-wide, and the worker connection holds no other subscription, so asking for real-time here disturbs nothing.
       ib.reqMarketDataType(MarketDataType.REALTIME);
-      for (const [index, leg] of legs.entries()) {
+      for (const [index, contract] of contracts.entries()) {
         const requestId = allocateRequestId();
         legIndexByRequestId.set(requestId, index);
         pending.add(requestId);
-        ib.reqMktData(requestId, buildLegContract(leg), "", true, false);
+        ib.reqMktData(requestId, contract, "", true, false);
       }
       if (pending.size > 0) {
         await new Promise<void>((resolve) => {

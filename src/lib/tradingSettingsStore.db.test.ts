@@ -31,6 +31,7 @@ const knownValues = {
   commission_warn_share_of_premium_pct: 5,
   price_check_max_deviation_pct: 10,
   price_check_min_tolerance_dollars: 0.05,
+  spread_cost_charged_pct: 50,
   updated_by_user_id: null,
   updated_at: new Date("2026-01-01T00:00:00.000Z"),
 };
@@ -86,6 +87,7 @@ const completeInput = {
   commissionWarnSharePctOfPremium: 7.5,
   priceCheckMaxDeviationPct: 12.5,
   priceCheckMinToleranceDollars: 0.1,
+  spreadCostChargedPct: 25,
 };
 
 describe("the seeded trading_settings row", () => {
@@ -106,6 +108,7 @@ describe("the seeded trading_settings row", () => {
       commissionWarnSharePctOfPremium: 5,
       priceCheckMaxDeviationPct: 10,
       priceCheckMinToleranceDollars: 0.05,
+      spreadCostChargedPct: 50,
     });
     for (const value of Object.values(numbers)) expect(typeof value).toBe("number");
     expect(typeof commissionEstimator?.perContractDollars).toBe("function");
@@ -155,6 +158,7 @@ describe("loadTradingSettingsForEditing", () => {
         "priceCheckMinToleranceDollars",
         "recoveryDteMax",
         "recoveryDteMin",
+        "spreadCostChargedPct",
         "updatedAt",
         "updatedByDisplayName",
       ].sort(),

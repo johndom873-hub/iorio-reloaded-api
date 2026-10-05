@@ -25,6 +25,8 @@ export interface TradingSettings {
   priceCheckMaxDeviationPct: number;
   /** ...or this many dollars, whichever is larger (so a cheap option is not blocked on a rounding difference). */
   priceCheckMinToleranceDollars: number;
+  /** Signals friction charges this percentage of the half-spread: the expected give-up of a mid-limit order (0 = always the mid, 100 = always the bid). */
+  spreadCostChargedPct: number;
   /** Trailing-fills commission estimate used by scoring; absent (flat $0.68) wherever settings are built without a database. */
   commissionEstimator?: CommissionEstimator;
 }
@@ -41,6 +43,7 @@ export const tradingSettingsColumns = {
   commissionWarnSharePctOfPremium: "commission_warn_share_of_premium_pct",
   priceCheckMaxDeviationPct: "price_check_max_deviation_pct",
   priceCheckMinToleranceDollars: "price_check_min_tolerance_dollars",
+  spreadCostChargedPct: "spread_cost_charged_pct",
 } as const;
 
 export type TradingSettingsInput = Record<keyof typeof tradingSettingsColumns, number>;
@@ -48,7 +51,7 @@ export type TradingSettingsInput = Record<keyof typeof tradingSettingsColumns, n
 /** The column is a 32-bit integer; a window beyond this would be refused by the database as a server error instead of a clear message. */
 const maximumDteDays = 2_147_483_647;
 
-const percentageFields = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct"] as const;
+const percentageFields = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
 
 const maximumToleranceDollars = 1000;
 
@@ -88,6 +91,7 @@ export function mapTradingSettingsRow(row: TradingSettingsRow): Omit<TradingSett
     commissionWarnSharePctOfPremium: Number(row.commission_warn_share_of_premium_pct),
     priceCheckMaxDeviationPct: Number(row.price_check_max_deviation_pct),
     priceCheckMinToleranceDollars: Number(row.price_check_min_tolerance_dollars),
+    spreadCostChargedPct: Number(row.spread_cost_charged_pct),
   };
 }
 

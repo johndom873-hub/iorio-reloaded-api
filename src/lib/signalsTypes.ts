@@ -137,6 +137,8 @@ export interface TickerSignals {
   freeShares: number;
   freeCash: number;
   dayQuotesAsOf: DayQuotesAsOf | null;
+  /** λ (0..1) the scores were computed with: the share of the half-spread charged as friction (Risk & Limits spread cost). */
+  spreadShareCharged: number;
   ivShiftByExpiry: Record<string, ExpiryIvShiftSummary>;
   quoteSourceCounts: QuoteSourceCounts;
   unscoredReason: SignalsUnscoredReason | null;
