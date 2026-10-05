@@ -389,6 +389,45 @@ describe("PASSKEY_LOGIN=required: service account", () => {
     expect((await client.get("/protected")).status).toBe(401);
   });
 
+  describe("through the router with the service login secret (Pluto on its own dyno)", () => {
+    const secret = "s".repeat(40);
+    const routed = (extra: Record<string, string> = {}) => ({ "X-Forwarded-For": "203.0.113.9", ...extra });
+    let previousSecret: string | undefined;
+    beforeEach(() => {
+      previousSecret = process.env.SERVICE_LOGIN_SECRET;
+      process.env.SERVICE_LOGIN_SECRET = secret;
+    });
+    afterEach(() => {
+      if (previousSecret === undefined) delete process.env.SERVICE_LOGIN_SECRET;
+      else process.env.SERVICE_LOGIN_SECRET = previousSecret;
+    });
+
+    it("signs a service account in with its password plus the right secret, and the session works", async () => {
+      const client = browser();
+      const login = await client.post("/auth/login", { username: serviceUsername, password }, routed({ "X-Service-Login-Secret": secret }));
+      expect(login.status).toBe(200);
+      expect(login.body).toMatchObject({ id: serviceUserId });
+      expect((await client.get("/protected")).status).toBe(200);
+    });
+
+    it("refuses a wrong or missing secret", async () => {
+      expect((await browser().post("/auth/login", { username: serviceUsername, password }, routed({ "X-Service-Login-Secret": "x".repeat(40) }))).status).toBe(401);
+      expect((await browser().post("/auth/login", { username: serviceUsername, password }, routed())).status).toBe(401);
+    });
+
+    it("refuses when the configured secret is too short to trust", async () => {
+      process.env.SERVICE_LOGIN_SECRET = "short";
+      expect((await browser().post("/auth/login", { username: serviceUsername, password }, routed({ "X-Service-Login-Secret": "short" }))).status).toBe(401);
+    });
+
+    it("never lets a regular user skip the passkey with the secret", async () => {
+      const client = browser();
+      const login = await client.post("/auth/login", { username: regularUsername, password }, routed({ "X-Service-Login-Secret": secret }));
+      expect(login.body).toEqual({ status: "passkey_enrollment_required" });
+      expect((await client.get("/protected")).status).toBe(401);
+    });
+  });
+
   it("does not let a regular user skip the passkey by omitting X-Forwarded-For", async () => {
     const client = browser();
     const login = await enrolWithPassword(client);

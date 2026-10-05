@@ -59,7 +59,7 @@ export class PlutoAgent {
   private readonly context: PassRunnerContext;
 
   constructor(private readonly config: PlutoConfig) {
-    this.api = new InternalApiClient({ apiBaseUrl: config.apiBaseUrl, serviceUsername: config.serviceUsername, serviceUserPassword: config.serviceUserPassword, label: "Pluto" });
+    this.api = new InternalApiClient({ apiBaseUrl: config.apiBaseUrl, serviceUsername: config.serviceUsername, serviceUserPassword: config.serviceUserPassword, serviceLoginSecret: config.serviceLoginSecret, label: "Pluto" });
     this.marketWatch = new PlutoMarketWatch({} as PlutoSettings);
     this.context = {
       api: this.api,

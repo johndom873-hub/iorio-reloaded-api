@@ -15,6 +15,8 @@ export interface InternalApiClientConfig {
   apiBaseUrl: string;
   serviceUsername: string;
   serviceUserPassword: string;
+  /** Sent as X-Service-Login-Secret by a bot that reaches the API through the router (serviceLoginSecret.ts); loopback bots omit it. */
+  serviceLoginSecret?: string;
   /** Name used in log lines and error messages, e.g. "Genosuke" or "Pluto". */
   label: string;
 }
@@ -52,7 +54,7 @@ export class InternalApiClient {
       // X-Forwarded-Proto, which app.ts's trust-proxy setting honors — a loopback call bypasses
       // the router, so without this header Express drops the Set-Cookie entirely. Harmless for
       // a call that really does travel over https.
-      headers: { "Content-Type": "application/json", "X-Forwarded-Proto": "https" },
+      headers: { "Content-Type": "application/json", "X-Forwarded-Proto": "https", ...(this.config.serviceLoginSecret ? { "X-Service-Login-Secret": this.config.serviceLoginSecret } : {}) },
       body: JSON.stringify({ username: this.config.serviceUsername, password: this.config.serviceUserPassword }),
     });
     if (!response.ok) {
