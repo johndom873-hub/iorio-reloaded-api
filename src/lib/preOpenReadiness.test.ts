@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { InvariantResult } from "./dataInvariants.js";
+import { expectedScheduledJobs } from "./jobDeadlines.js";
 import {
   buildReadinessMessage,
   configurationExpectationsFor,
@@ -11,6 +12,7 @@ import {
   evaluateDataChecks,
   evaluateHealthCheck,
   evaluateJobs,
+  nonGatingScheduledJobs,
   evaluateMarketData,
   evaluateOrderHygiene,
   evaluateOrderPath,
@@ -196,10 +198,38 @@ describe("evaluateJobs and evaluateHealthCheck", () => {
     expect(evaluateJobs([run("a", "success"), run("b", "success")], [])).toMatchObject({ status: "ok", detail: expect.stringContaining("2 jobs") });
   });
   it("fails on a failed latest run (first line of the error) and on a job due but not started", () => {
-    const result = evaluateJobs([run("daily_pnl_snapshot", "failure", "FRED timed out\nstack"), run("b", "success")], ["option_chain_structure_refresh"]);
+    const result = evaluateJobs([run("daily_market_data_capture", "failure", "FRED timed out\nstack"), run("b", "success")], ["option_chain_structure_refresh"]);
     expect(result.status).toBe("fail");
-    expect(result.detail).toContain("failed: daily_pnl_snapshot (FRED timed out)");
+    expect(result.detail).toContain("failed: daily_market_data_capture (FRED timed out)");
     expect(result.detail).toContain("not started although due: option_chain_structure_refresh");
+  });
+  it("only warns when the failed or missing job is reporting / advisory data, naming it every time", () => {
+    const failedSnapshot = evaluateJobs([run("daily_pnl_snapshot", "failure", "8 of 12 positions skipped for a missing price: COIN\nstack"), run("b", "success")], []);
+    expect(failedSnapshot.status).toBe("warn");
+    expect(failedSnapshot.detail).toContain("failed: daily_pnl_snapshot (8 of 12 positions skipped for a missing price: COIN)");
+    expect(failedSnapshot.detail).toContain("none of these blocks trading");
+    expect(evaluateJobs([run("daily_calendar_capture", "failure", "TradingView 503")], []).status).toBe("warn");
+    expect(evaluateJobs([run("daily_screener_scan", "failure", "no scans")], []).status).toBe("warn");
+    const missingSnapshot = evaluateJobs([run("daily_pnl_snapshot", "success")], ["daily_pnl_snapshot"]);
+    expect(missingSnapshot.status).toBe("warn");
+    expect(missingSnapshot.detail).toContain("not started although due: daily_pnl_snapshot");
+  });
+  it("leaves the order ready when only reporting jobs failed, and not ready when a trading job did", () => {
+    const readyWithWarning = summarizeReadiness([evaluateJobs([run("daily_pnl_snapshot", "failure", "skipped")], [])]);
+    expect(readyWithWarning.ready).toBe(true);
+    expect(readyWithWarning.warnings).toHaveLength(1);
+    expect(summarizeReadiness([evaluateJobs([run("market_calendar_sync", "failure", "boom")], [])]).ready).toBe(false);
+  });
+  it("still fails on a trading job and lists the reporting failure beside it as not blocking", () => {
+    const result = evaluateJobs([run("option_chain_capture", "failure", "no chain"), run("daily_pnl_snapshot", "failure", "skipped")], []);
+    expect(result.status).toBe("fail");
+    expect(result.detail).toContain("failed: option_chain_capture (no chain)");
+    expect(result.detail).toContain("not blocking: failed: daily_pnl_snapshot (skipped)");
+  });
+  it("treats a job nobody classified as blocking, and only classifies jobs that exist", () => {
+    expect(evaluateJobs([run("some_new_job", "failure", "x")], []).status).toBe("fail");
+    const scheduledNames = new Set(expectedScheduledJobs.map((job) => job.jobName));
+    for (const jobName of nonGatingScheduledJobs) expect(scheduledNames.has(jobName)).toBe(true);
   });
   it("warns for a job that never ran, and treats a still-running job as not failing", () => {
     expect(evaluateJobs([run("a", null)], []).status).toBe("warn");

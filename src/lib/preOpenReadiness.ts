@@ -227,12 +227,34 @@ export interface LatestJobRun {
   errorMessage: string | null;
 }
 
+// Jobs whose output is reporting or advisory data, never an input to placing or checking an order: the Dashboard and cycle
+// P&L history, the screener's candidate list, and the earnings / ex-dividend / macro warnings (whose data is checked on its
+// own as warn-only invariants). A failed or missing run of one is a "look at" warning; any other job, including one not
+// listed here, stays blocking, so a new job is safe by default.
+export const nonGatingScheduledJobs: ReadonlySet<string> = new Set(["daily_pnl_snapshot", "daily_screener_scan", "daily_calendar_capture"]);
+
 export function evaluateJobs(latestRuns: LatestJobRun[], dueButMissing: string[]): ReadinessCheck {
-  const failed = latestRuns.filter((run) => run.status === "failure").map((run) => `${run.jobName}${run.errorMessage ? ` (${run.errorMessage.split("\n")[0]!.slice(0, 120)})` : ""}`);
+  const failedRuns = latestRuns.filter((run) => run.status === "failure");
+  const describeFailedRun = (run: LatestJobRun) => `failed: ${run.jobName}${run.errorMessage ? ` (${run.errorMessage.split("\n")[0]!.slice(0, 120)})` : ""}`;
+  const describeMissingRun = (jobName: string) => `not started although due: ${jobName}`;
   const neverRun = latestRuns.filter((run) => run.status === null).map((run) => run.jobName);
-  const problems = [...failed.map((name) => `failed: ${name}`), ...dueButMissing.map((name) => `not started although due: ${name}`)];
-  if (problems.length > 0) return check("Scheduled jobs", "fail", problems.join("; "));
-  if (neverRun.length > 0) return check("Scheduled jobs", "warn", `never run: ${neverRun.join(", ")}`);
+
+  const blockingProblems = [
+    ...failedRuns.filter((run) => !nonGatingScheduledJobs.has(run.jobName)).map(describeFailedRun),
+    ...dueButMissing.filter((jobName) => !nonGatingScheduledJobs.has(jobName)).map(describeMissingRun),
+  ];
+  const nonBlockingProblems = [
+    ...failedRuns.filter((run) => nonGatingScheduledJobs.has(run.jobName)).map(describeFailedRun),
+    ...dueButMissing.filter((jobName) => nonGatingScheduledJobs.has(jobName)).map(describeMissingRun),
+  ];
+  if (blockingProblems.length > 0) {
+    const alsoNotBlocking = nonBlockingProblems.length > 0 ? `; not blocking: ${nonBlockingProblems.join("; ")}` : "";
+    return check("Scheduled jobs", "fail", `${blockingProblems.join("; ")}${alsoNotBlocking}`);
+  }
+  const warnings = [...nonBlockingProblems, ...(neverRun.length > 0 ? [`never run: ${neverRun.join(", ")}`] : [])];
+  if (warnings.length > 0) {
+    return check("Scheduled jobs", "warn", `${warnings.join("; ")}${nonBlockingProblems.length > 0 ? " (none of these blocks trading)" : ""}`);
+  }
   return check("Scheduled jobs", "ok", `latest run of each of ${latestRuns.length} jobs succeeded`);
 }
 
