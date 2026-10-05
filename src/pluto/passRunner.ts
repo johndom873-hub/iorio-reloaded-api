@@ -8,7 +8,7 @@ import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
-import { loadPlutoBook } from "./book.js";
+import { loadInFlightNotionals, loadPlutoBook } from "./book.js";
 import { deterministicTopPick, filterTickerForPluto, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { noTrade, parsePlutoDecision, reconcileAgreement, type PlutoDecision } from "./decisionSchema.js";
 import { executePlutoClose, executePlutoOrder, watchPlutoOrder } from "./executor.js";
@@ -332,7 +332,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     ...(freshCandidate ? rejectOpenCandidate(freshCandidate, { scored: fresh.scored, slicesByExpiry, settings, nowMs: Date.now() }) : chosenOpen ? ["the chosen contract is no longer a candidate"] : []),
     ...(chosenRoll && !freshRoll ? ["the chosen roll is no longer a candidate"] : []),
   ];
-  const exposures = await computePositionExposures();
+  const [exposures, inFlight] = await Promise.all([computePositionExposures(), loadInFlightNotionals(owner.row.symbol)]);
   const sector = owner.row.sector ?? null;
   const gates = runPostModelGates({
     decision,
@@ -346,6 +346,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       netLiquidationValue: checks.context.netLiquidationValue ?? 0,
       freeCash: account.freeCash,
       committedDollars: book.committedDollars,
+      inFlight,
       openPositionCount: book.openPositions.length,
       existingTickerExposure: exposures.filter((row) => row.symbol === owner.row.symbol).reduce((sum, row) => sum + row.exposure, 0),
       existingSectorExposure: sector === null ? 0 : exposures.filter((row) => row.sector === sector).reduce((sum, row) => sum + row.exposure, 0),

@@ -16,6 +16,11 @@ export interface PostModelBookInput {
   freeCash: number;
   /** Capital Pluto's own open positions already commit. */
   committedDollars: number;
+  /**
+   * Notional of orders confirmed but not yet done (the same statuses and formula as the order gate's limits): every
+   * origin's, this symbol's, and Pluto's own. Room is sized net of them, so Pluto never sizes what the gate would refuse.
+   */
+  inFlight: { totalNotional: number; tickerNotional: number; plutoNotional: number };
   openPositionCount: number;
   /** Every open position's exposure on this symbol and sector, humans' included (computePositionExposures). */
   existingTickerExposure: number;
@@ -79,11 +84,11 @@ export interface SizingRoom {
 export function computeSizingRoom(settings: PlutoSettings, book: PostModelBookInput, sectorKnown: boolean): SizingRoom {
   const nlv = book.netLiquidationValue;
   return {
-    budgetRoom: (nlv * settings.capitalBudgetPct) / 100 - book.committedDollars,
+    budgetRoom: (nlv * settings.capitalBudgetPct) / 100 - book.committedDollars - book.inFlight.plutoNotional,
     orderCap: (nlv * settings.maxOrderNotionalPct) / 100,
-    tickerRoom: (nlv * settings.maxTickerExposurePct) / 100 - book.existingTickerExposure,
+    tickerRoom: (nlv * settings.maxTickerExposurePct) / 100 - book.existingTickerExposure - book.inFlight.tickerNotional,
     sectorRoom: sectorKnown && settings.maxSectorExposurePct < 100 ? (nlv * settings.maxSectorExposurePct) / 100 - book.existingSectorExposure : Number.POSITIVE_INFINITY,
-    cashRoom: book.freeCash - (nlv * settings.minCashReservePct) / 100,
+    cashRoom: book.freeCash - book.inFlight.totalNotional - (nlv * settings.minCashReservePct) / 100,
   };
 }
 

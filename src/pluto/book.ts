@@ -1,5 +1,7 @@
 import { db } from "../db/connection.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
+import { computeInFlightOrderNotional } from "../lib/orderLimits.js";
+import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { positionSelect } from "../lib/positionQueries.js";
 
 // Pluto's book: the open positions its own orders created (order_requests.pluto_action_id →
@@ -79,4 +81,20 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
     lastFilledActionAtBySymbol: new Map((lastFilledActions as { symbol: string; last_at: Date | string }[]).map((row) => [row.symbol, new Date(row.last_at)])),
     workingOrderSymbols: new Set((workingOrders as { symbol: string | null }[]).map((row) => row.symbol).filter((symbol): symbol is string => Boolean(symbol))),
   };
+}
+
+/** Statuses the order gate counts as in flight (orderLimits.ts): confirmed and not yet done. */
+const inFlightOrderStatuses = ["confirmed", "submitted", "partially_filled", "cancel_requested"];
+
+/** In-flight order notional, the order gate's way: every origin's, one symbol's, and Pluto's own. */
+export async function loadInFlightNotionals(symbol: string): Promise<{ totalNotional: number; tickerNotional: number; plutoNotional: number }> {
+  const rows: { request_type: string; payload: OrderRequestPayload; pluto_action_id: string | null }[] = await db("order_requests").whereIn("status", inFlightOrderStatuses).select("request_type", "payload", "pluto_action_id");
+  const totals = { totalNotional: 0, tickerNotional: 0, plutoNotional: 0 };
+  for (const row of rows) {
+    const notional = computeInFlightOrderNotional(row.request_type, row.payload);
+    totals.totalNotional += notional;
+    if (row.payload.symbol === symbol) totals.tickerNotional += notional;
+    if (row.pluto_action_id !== null) totals.plutoNotional += notional;
+  }
+  return totals;
 }
