@@ -376,7 +376,7 @@ function serializeDecision(row: Record<string, unknown>) {
 
 function serializeAction(row: Record<string, unknown>, realized?: PlutoActionRealizedPnl, orderRequest?: PlutoActionOrderRequest) {
   const num = (value: unknown) => (value === null || value === undefined ? null : Number(value));
-  const exposureInput = { kind: String(row.kind), contract: (row.contract as Record<string, unknown> | null) ?? null, quantity: num(row.quantity), limitPrice: num(row.limit_price), fillPrice: num(row.fill_price) };
+  const exposureInput = { kind: String(row.kind), outcome: String(row.outcome), contract: (row.contract as Record<string, unknown> | null) ?? null, quantity: num(row.quantity), limitPrice: num(row.limit_price), fillPrice: num(row.fill_price) };
   return {
     id: row.id,
     passId: row.pass_id,
@@ -400,6 +400,8 @@ function serializeAction(row: Record<string, unknown>, realized?: PlutoActionRea
     pessimisticPnl: num(row.pessimistic_pnl),
     // EXP $ the order adds (or, negative, releases), the way Positions counts exposure; null without an order.
     exposureDollars: computePlutoActionExposure(exposureInput, orderRequest ?? null),
+    // Contracts (shares for a share sale) the order's trades filled so far; null before any fill or without an order.
+    filledQuantity: orderRequest?.filledQuantity ?? null,
     // Derived at read time from the legs this action opened (see pluto/actionRealizedPnl.ts); the column is not read.
     realizedPnl: realized?.realizedPnl ?? null,
     closedLegCount: realized?.closedLegCount ?? 0,
