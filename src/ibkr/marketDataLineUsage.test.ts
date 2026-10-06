@@ -17,5 +17,6 @@ describe("summarizeMarketDataLineUsage", () => {
 
   it("leaves out uses holding nothing, and names an unknown holder by its prefix", () => {
     expect(summarizeMarketDataLineUsage([{ holder: "newJob:x", lines: 2 }], 0)).toEqual({ inUse: 2, budget: 90, byUse: [{ label: "newJob", lines: 2 }] });
+    expect(summarizeMarketDataLineUsage([{ holder: "pluto_agent", lines: 12 }], 0).byUse).toContainEqual({ label: "Pluto", lines: 12 });
   });
 });

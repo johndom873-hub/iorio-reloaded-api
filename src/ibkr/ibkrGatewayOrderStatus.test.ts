@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cancellationReasonForIbkrCancel, ibkrCancelReasonText, requestStatusForOrderStatusEvent } from "./ibkrGatewayOrderStatus.js";
+import { cancellationReasonForIbkrCancel, ibkrCancelReasonText, requestStatusForIbkrRejection, requestStatusForOrderStatusEvent } from "./ibkrGatewayOrderStatus.js";
 
 describe("requestStatusForOrderStatusEvent", () => {
   it("records a cancel after a partial fill as its own status instead of leaving it partially_filled", () => {
@@ -21,8 +21,27 @@ describe("requestStatusForOrderStatusEvent", () => {
     expect(requestStatusForOrderStatusEvent("Filled", 100, 0)).toBe("filled");
     expect(requestStatusForOrderStatusEvent("Submitted", 0, 100)).toBe("submitted");
     expect(requestStatusForOrderStatusEvent("PreSubmitted", 0, 100)).toBe("submitted");
-    expect(requestStatusForOrderStatusEvent("Inactive", 0, 100)).toBeNull();
     expect(requestStatusForOrderStatusEvent("PendingCancel", 0, 100)).toBeNull();
+  });
+});
+
+describe("IBKR refusals", () => {
+  it("ends an Inactive order as rejected, or as a cancel after a partial fill when part of it filled", () => {
+    expect(requestStatusForOrderStatusEvent("Inactive", 0, 100)).toBe("rejected");
+    expect(requestStatusForOrderStatusEvent("Inactive", 40, 60)).toBe("cancelled_partially_filled");
+  });
+  it("never hides fills behind a rejection", () => {
+    expect(requestStatusForIbkrRejection("submitted")).toBe("rejected");
+    expect(requestStatusForIbkrRejection("cancel_requested")).toBe("rejected");
+    expect(requestStatusForIbkrRejection("partially_filled")).toBe("cancelled_partially_filled");
+  });
+});
+
+describe("cancellationReasonForIbkrCancel on a half day", () => {
+  it("uses the day's stored close: an end after a 13:00 close is an expiry, not IBKR's own cancel", () => {
+    const createdMorning = new Date("2026-11-27T15:00:00Z"); // 10:00 ET (EST)
+    expect(cancellationReasonForIbkrCancel(createdMorning, new Date("2026-11-27T18:00:30Z"), "13:00")).toBe("expired_at_close");
+    expect(cancellationReasonForIbkrCancel(createdMorning, new Date("2026-11-27T18:00:30Z"))).toBe("cancelled_by_ibkr");
   });
 });
 

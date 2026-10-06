@@ -80,7 +80,8 @@ tradeBlotterRouter.get("/", async (request, response) => {
       pl.strike_price AS "strikePrice",
       to_char(pl.expiry_date, 'YYYY-MM-DD') AS "expiryDate",
       t.symbol,
-      ru.display_name AS "requestedByDisplayName"
+      ru.display_name AS "requestedByDisplayName",
+      orq.id AS "sourceOrderRequestId"
     FROM trades tr
     JOIN position_legs pl ON pl.id = tr.position_leg_id
     JOIN positions p ON p.id = pl.position_id

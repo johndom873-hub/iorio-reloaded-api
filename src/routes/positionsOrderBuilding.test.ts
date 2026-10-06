@@ -660,7 +660,7 @@ describe("GET /positions/orders, /orders/today and /orders/:id", () => {
     expect(Object.keys(response.json).sort()).toEqual(
       [
         "calendarWarning", "calendarWarningEvents", "cancellationReason", "cancelledByDisplayName", "cancelledByUserId", "createdAt", "errorMessage", "ibkrOrderId", "id",
-        "payload", "relatedPositionId", "requestType", "requestedByDisplayName", "requestedByUserId", "riskFreeRate", "status", "updatedAt",
+        "payload", "plutoActionId", "relatedPositionId", "requestType", "requestedByDisplayName", "requestedByUserId", "riskFreeRate", "status", "updatedAt",
       ].sort(),
     );
   });

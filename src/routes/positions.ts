@@ -72,6 +72,7 @@ function serializeOrderRequest(row: Record<string, unknown>) {
     calendarWarning: row.calendar_warning,
     calendarWarningEvents: row.calendar_warning_events ?? null,
     riskFreeRate: row.risk_free_rate,
+    plutoActionId: row.pluto_action_id ?? null,
   };
 }
 
@@ -885,6 +886,18 @@ interface OpenOrderRequestBody {
 
 // A snapshot is a plain object of modest size; the shape itself is the app's (SignalOrderSnapshot) and is not re-validated here.
 const maximumSignalSnapshotBytes = 16_384;
+// Pluto's origin marker (2026-09-28): the agent builds orders through these routes like any other
+// client and tags them with the pluto_actions row they came from, so the ledger, the pause
+// button and the Pluto screen can find them. Validated to an existing action; never inferred.
+async function readPlutoActionId(body: { plutoActionId?: unknown }): Promise<{ ok: true; value: string | null } | { ok: false; error: string }> {
+  const raw = body.plutoActionId;
+  if (raw === undefined || raw === null || raw === "") return { ok: true, value: null };
+  if (typeof raw !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) return { ok: false, error: "plutoActionId must be a uuid." };
+  const action = await db("pluto_actions").where({ id: raw }).first("id");
+  if (!action) return { ok: false, error: "plutoActionId does not match a Pluto action." };
+  return { ok: true, value: raw };
+}
+
 function readSignalSnapshot(raw: unknown): { ok: true; value: Record<string, unknown> | null } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, value: null };
   if (typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "signalSnapshot must be an object." };
@@ -1024,6 +1037,11 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(400).json({ error: signalSnapshot.error });
     return;
   }
+  const plutoActionId = await readPlutoActionId(request.body as { plutoActionId?: unknown });
+  if (!plutoActionId.ok) {
+    response.status(400).json({ error: plutoActionId.error });
+    return;
+  }
   const nonLiveQuoteReason = findNonLiveSnapshotQuoteReason(signalSnapshot.value);
   if (nonLiveQuoteReason) {
     response.status(409).json({ error: nonLiveQuoteReason });
@@ -1035,6 +1053,7 @@ positionsRouter.post("/orders", async (request, response) => {
       requested_by_user_id: request.session.userId,
       request_type: strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put",
       payload: JSON.stringify(payload),
+      pluto_action_id: plutoActionId.value,
       signal_snapshot: signalSnapshot.value === null ? null : JSON.stringify(signalSnapshot.value),
     })
     .returning("*");
@@ -1608,6 +1627,11 @@ positionsRouter.post("/:id/roll", async (request, response) => {
   }
   const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey: position.strategy_key, legs };
 
+  const rollPlutoActionId = await readPlutoActionId(request.body as { plutoActionId?: unknown });
+  if (!rollPlutoActionId.ok) {
+    response.status(400).json({ error: rollPlutoActionId.error });
+    return;
+  }
   const [orderRequest] = await db("order_requests")
     .insert({
       requested_by_user_id: request.session.userId,
@@ -1615,6 +1639,7 @@ positionsRouter.post("/:id/roll", async (request, response) => {
       payload: JSON.stringify(payload),
       related_position_id: position.id,
       signal_snapshot: snapshot.value === null ? null : JSON.stringify(snapshot.value),
+      pluto_action_id: rollPlutoActionId.value,
     })
     .returning("*");
 
@@ -1835,6 +1860,11 @@ positionsRouter.post("/:id/close", async (request, response) => {
   }
   const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey: position.strategy_key, legs: orderLegs };
 
+  const closePlutoActionId = await readPlutoActionId(request.body as { plutoActionId?: unknown });
+  if (!closePlutoActionId.ok) {
+    response.status(400).json({ error: closePlutoActionId.error });
+    return;
+  }
   // The same verdict the Close form's live stream shows -- regular session open, live two-sided quotes on every leg, a
   // consistent open wheel cycle -- refused here too, so no API caller (Genosuke included) can close what the form would not let a human close.
   const closeGate = await evaluateCloseGateForPosition(position.id);
@@ -1849,6 +1879,7 @@ positionsRouter.post("/:id/close", async (request, response) => {
       request_type: "close_position",
       payload: JSON.stringify(payload),
       related_position_id: position.id,
+      pluto_action_id: closePlutoActionId.value,
     })
     .returning("*");
 

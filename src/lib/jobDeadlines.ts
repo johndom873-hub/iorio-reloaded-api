@@ -31,6 +31,8 @@ export const chainCaptureSlotEastern = { hour: 10, minute: 0 };
 
 export const expectedScheduledJobs: ExpectedJob[] = [
   { jobName: "option_chain_structure_refresh", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 30, marketDaysOnly: true },
+  // Runs first inside the same Scheduler entry (run-option-chain-structure-job), so it shares its start time.
+  { jobName: "session_close_read", zone: "utc", hour: 9, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 5, marketDaysOnly: true },
   { jobName: "option_chain_capture", zone: "eastern", hour: 10, minute: 0, startByGraceMinutes: 35, maxRunMinutes: 45, marketDaysOnly: true },
   { jobName: "option_surface_fit", zone: "eastern", hour: 10, minute: 0, startByGraceMinutes: 60, maxRunMinutes: 15, marketDaysOnly: true },
   { jobName: "day_signals_seed", zone: "eastern", hour: 10, minute: 0, startByGraceMinutes: 60, maxRunMinutes: 15, marketDaysOnly: true },

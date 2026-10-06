@@ -125,6 +125,17 @@ describe("handleOrderStatusEvent", () => {
     expect(notifications).toEqual([]);
   });
 
+  it("Inactive ends a submitted order as rejected with an explanation, or cancelled_partially_filled after a partial fill", async () => {
+    const plain = await insertOrder();
+    await handleOrderStatusEvent(event(plain.ibkrOrderId, "Inactive", 0, 1), dependencies);
+    const plainRow = await rowOf(plain.id);
+    expect(plainRow.status).toBe("rejected");
+    expect(plainRow.error_message).toBeTruthy();
+    const partial = await insertOrder({ status: "partially_filled", created_at: daysAgo(2) });
+    await handleOrderStatusEvent(event(partial.ibkrOrderId, "Inactive", 1, 1), dependencies);
+    expect((await rowOf(partial.id)).status).toBe("cancelled_partially_filled");
+  });
+
   it("moves a submitted order to partially_filled when some but not all has filled, and publishes one notification", async () => {
     const { id, ibkrOrderId } = await insertOrder();
     await handleOrderStatusEvent(event(ibkrOrderId, "Submitted", 1, 2), dependencies);
@@ -249,11 +260,23 @@ describe("handleOrderErrorEvent", () => {
     }
   });
 
-  it("flips a submitted order to error with IBKR's code and text, and publishes it", async () => {
+  it("an IBKR refusal (201) ends a submitted order as rejected with IBKR's code and text, and publishes it", async () => {
     const { id, ibkrOrderId } = await insertOrder();
     await handleOrderErrorEvent(new Error("Order rejected - reason: price outside limits"), 201, ibkrOrderId, dependencies);
-    expect(await rowOf(id)).toMatchObject({ status: "error", error_message: "IBKR error 201: Order rejected - reason: price outside limits" });
+    expect(await rowOf(id)).toMatchObject({ status: "rejected", error_message: "IBKR error 201: Order rejected - reason: price outside limits" });
     expect(notifications).toEqual([{ type: "order_status", orderId: id }]);
+  });
+
+  it("a refusal after a partial fill keeps the fill: cancelled_partially_filled with a cancellation reason", async () => {
+    const { id, ibkrOrderId } = await insertOrder({ status: "partially_filled", created_at: daysAgo(2) });
+    await handleOrderErrorEvent(new Error("Order rejected"), 201, ibkrOrderId, dependencies);
+    expect(await rowOf(id)).toMatchObject({ status: "cancelled_partially_filled", error_message: "IBKR error 201: Order rejected", cancellation_reason: "expired_at_close" });
+  });
+
+  it("an error code that is not a refusal still ends a submitted order as error", async () => {
+    const { id, ibkrOrderId } = await insertOrder();
+    await handleOrderErrorEvent(new Error("Unknown problem"), 10_999, ibkrOrderId, dependencies);
+    expect((await rowOf(id)).status).toBe("error");
   });
 
   it("leaves an order that is not submitted alone (an old error naming a reused id)", async () => {
@@ -415,6 +438,21 @@ describe("reconcileStaleOrderRequests", () => {
     await run({ completed: [{ permId: plainPermId, status: "Cancelled" }, { permId: partialPermId, status: "Cancelled" }] });
     expect(await rowOf(plain.id)).toMatchObject({ status: "cancelled", cancellation_reason: "expired_at_close" });
     expect(await rowOf(partial.id)).toMatchObject({ status: "cancelled_partially_filled" });
+  });
+
+  it("settles a completed Inactive order as rejected, or cancelled_partially_filled when it had executions", async () => {
+    const plainPermId = nextPermId();
+    const plain = await insertOrder({ ibkr_perm_id: plainPermId });
+    const partialPermId = nextPermId();
+    const partial = await insertOrder({ ibkr_perm_id: partialPermId, created_at: daysAgo(2) });
+    const stock = await createLeg("long", nextConId(), "stock");
+    await insertTrade(stock.legId, partial.id, 100);
+    await run({ completed: [{ permId: plainPermId, status: "Inactive" }, { permId: partialPermId, status: "Inactive" }] });
+    const plainRow = await rowOf(plain.id);
+    expect(plainRow.status).toBe("rejected");
+    expect(plainRow.error_message).toBeTruthy();
+    expect(plainRow.cancellation_reason).toBeNull();
+    expect(await rowOf(partial.id)).toMatchObject({ status: "cancelled_partially_filled", cancellation_reason: "expired_at_close" });
   });
 
   it("never matches the completed list on the session-scoped order id: an order with no permId is not settled from it", async () => {

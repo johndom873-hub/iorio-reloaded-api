@@ -61,6 +61,11 @@ export interface SignalQuote {
   source?: SignalQuoteSource;
   /** When a day/live quote was received (ISO); absent for the snapshot. */
   quotedAt?: string;
+  /** Liquidity from the 10:00 capture (gap fix 9, 2026-09-28): open interest, session volume, bid/ask sizes. Day/live quotes keep the snapshot's values. */
+  openInterest?: number | null;
+  volume?: number | null;
+  bidSize?: number | null;
+  askSize?: number | null;
 }
 
 export interface SignalCandidatesInput {
@@ -124,6 +129,11 @@ export interface SignalCandidate {
   bid: number;
   ask: number;
   spreadPercent: number;
+  /** Liquidity (gap fix 9, 2026-09-28): from the 10:00 snapshot; null when the capture had no tick for it. Not a filter on the human side. */
+  openInterest: number | null;
+  volume: number | null;
+  bidSize: number | null;
+  askSize: number | null;
   surfaceImpliedVolatility: number;
   midImpliedVolatility: number | null;
   forecastVolatility: number;
@@ -333,6 +343,10 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       bid: quote.bid,
       ask: quote.ask,
       spreadPercent,
+      openInterest: quote.openInterest ?? null,
+      volume: quote.volume ?? null,
+      bidSize: quote.bidSize ?? null,
+      askSize: quote.askSize ?? null,
       surfaceImpliedVolatility: surfaceIv,
       midImpliedVolatility: midIv,
       forecastVolatility: input.forecast!.volatility,

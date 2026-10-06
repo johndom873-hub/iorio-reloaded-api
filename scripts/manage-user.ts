@@ -8,7 +8,7 @@
 //   npm run manage-user -- set-password <username> <newPassword>
 //   npm run manage-user -- list
 //   npm run manage-user -- reset-passkeys <username>   (deletes their passkeys; their password then lets them enrol a new one)
-//   npm run manage-user -- set-service-account <username> <true|false>   (Genosuke's user: password sign-in from inside the dyno only)
+//   npm run manage-user -- set-service-account <username> <true|false>   (Genosuke: password sign-in from inside the dyno; Pluto: also through the router with SERVICE_LOGIN_SECRET)
 
 import { db } from "../src/db/connection.js";
 import { hashPassword } from "../src/lib/auth.js";

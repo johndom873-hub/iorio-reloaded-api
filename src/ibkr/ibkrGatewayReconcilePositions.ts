@@ -33,6 +33,8 @@ let dependencies: ReconciliationDependencies;
 let currentPassId = 0;
 let heldStockSharesBySymbol = new Map<string, number>();
 let legsHandedOffThisPass = 0;
+/** Positions that handed stock off this pass, by symbol: the source of any leftover shares split out after them. */
+let stockHandoffSourcesThisPass = new Map<string, Set<string>>();
 // Positions whose just-expired short leg finished within the audit's marginal ITM/OTM threshold
 // this pass — the audit left the assignment call as "manual review" rather than deciding it, so
 // notifyPositionExpired flags the message as unverified instead of stating it as fact.
@@ -257,6 +259,29 @@ async function judgeStructureChange(optionLegs: OptionLegRetirementRow[]): Promi
 // and the caller re-creates the leg on the successor at that same price so
 // the cost basis carries across unchanged. Returns the entry price per conId
 // for exactly that.
+/** Records that `positionId` received shares from `sourcePositionId` (position_share_sources); idempotent. */
+async function recordShareSource(positionId: string, sourcePositionId: string): Promise<void> {
+  if (positionId === sourcePositionId) return;
+  await db("position_share_sources").insert({ position_id: positionId, source_position_id: sourcePositionId }).onConflict(["position_id", "source_position_id"]).ignore();
+}
+
+// An assigned put delivers its shares with no handoff to follow: link the stock position to the most
+// recently assigned put on the ticker, when that put closed after (or within an hour before) the stock
+// position opened — an older assignment's shares are not these.
+async function recordAssignedPutShareSource(symbol: string, positionId: string): Promise<void> {
+  const position = await db("positions").where({ id: positionId }).first("ticker_id", "opened_at");
+  if (!position) return;
+  const assignedPut = await db("positions")
+    .where({ ticker_id: position.ticker_id, strategy_key: "cash_secured_put", close_reason: "assigned" })
+    .whereNotNull("closed_at")
+    .orderBy("closed_at", "desc")
+    .first("id", "closed_at");
+  if (!assignedPut) return;
+  if (new Date(assignedPut.closed_at).getTime() < new Date(position.opened_at).getTime() - 60 * 60_000) return;
+  await recordShareSource(positionId, assignedPut.id);
+  console.log(`Reconciliation #${currentPassId}: ${symbol} — stock position ${positionId} records its shares as delivered by assigned put position ${assignedPut.id}.`);
+}
+
 async function handOffOpenStockLegs(positionId: string, symbol: string, toDescription: string): Promise<Map<string, number>> {
   const openStockLegs = await db("position_legs").where({ position_id: positionId, leg_type: "stock" }).whereNull("exit_at");
   const entryPriceByConId = new Map<string, number>();
@@ -264,6 +289,9 @@ async function handOffOpenStockLegs(positionId: string, symbol: string, toDescri
     await db("position_legs").where({ id: leg.id }).update({ exit_at: db.fn.now(), exit_price: leg.entry_price });
     entryPriceByConId.set(String(leg.ibkr_contract_id), Number(leg.entry_price));
     legsHandedOffThisPass += 1;
+    const sources = stockHandoffSourcesThisPass.get(symbol) ?? new Set<string>();
+    sources.add(positionId);
+    stockHandoffSourcesThisPass.set(symbol, sources);
     console.log(
       `Reconciliation #${currentPassId}: ${symbol} — handed off stock leg ${leg.id} (${leg.quantity} sh @ ${leg.entry_price}) from position ${positionId} ${toDescription}.`,
     );
@@ -313,6 +341,7 @@ export async function reconcileHeldPositions(held: IbkrHeldPosition[], passId: n
   dependencies = deps;
   currentPassId = passId;
   legsHandedOffThisPass = 0;
+  stockHandoffSourcesThisPass = new Map();
   marginalCallPositionIds = new Set();
   pendingExpiryNotifications = [];
 
@@ -753,10 +782,12 @@ async function upsertUnstructuredPosition(
   }
 
   const handoffEntryPriceByConId = new Map<string, number>();
+  const shareSourcePositionIds: string[] = [];
   for (const foreign of foreignPositions) {
     const { optionLegs } = verdicts.get(foreign.id)!;
     const handedOff = await handOffOpenStockLegs(foreign.id, symbol, "to a leftover-stock position");
     for (const [conId, entryPrice] of handedOff) handoffEntryPriceByConId.set(conId, entryPrice);
+    if (handedOff.size > 0) shareSourcePositionIds.push(foreign.id);
     const remainingOpenLegs = await db("position_legs").where({ position_id: foreign.id }).whereNull("exit_at");
     if (remainingOpenLegs.length === 0) {
       const expiredWithoutTrade = optionLegs.some((leg) => leg.exitAt !== null && !leg.hasClosingTrade);
@@ -784,6 +815,9 @@ async function upsertUnstructuredPosition(
       await db("positions").where({ id: positionId }).update({ unstructured_reason: unstructuredReason });
     }
   }
+
+  for (const sourcePositionId of shareSourcePositionIds) await recordShareSource(positionId!, sourcePositionId);
+  if (unstructuredReason === "csp_assigned_stock") await recordAssignedPutShareSource(symbol, positionId!);
 
   for (const leg of legs) {
     const conId = String(leg.held.contract.conId);
@@ -921,6 +955,7 @@ async function upsertSplitCoveredCallPosition(
     if (ownStockLeg && sourcePosition?.strategy_key === "unstructured") continue;
     const handedOff = await handOffOpenStockLegs(candidate.position_id, symbol, `to covered call position ${positionId}`);
     if (!ownStockLeg && handoffEntryPrice === undefined) handoffEntryPrice = handedOff.get(stockConId);
+    if (handedOff.size > 0) await recordShareSource(positionId!, candidate.position_id);
 
     const remainingOpenLegs = await db("position_legs").where({ position_id: candidate.position_id }).whereNull("exit_at");
     if (remainingOpenLegs.length === 0) {
@@ -1095,5 +1130,8 @@ async function upsertLeftoverStockPosition(symbol: string, stockLeg: IbkrHeldPos
     await publishNotification({ type: "position_opened", positionId: positionId!, symbol });
     console.log(`upsertLeftoverStockPosition(${symbol}): created new unstructured position ${positionId} for ${leftoverShares} leftover shares.`);
   }
+  // Shares beyond what the sold calls need were split out of whatever handed its stock off this pass (e.g. a leftover
+  // position whose shares just moved under a new covered call): record those as the leftover's source too.
+  for (const sourcePositionId of stockHandoffSourcesThisPass.get(symbol) ?? []) await recordShareSource(positionId!, sourcePositionId);
   await upsertPositionLeg(positionId!, stockLeg, "long", leftoverShares, true);
 }

@@ -16,6 +16,9 @@ vi.mock("../db/connection.js", async () => {
 const { db } = await import("../db/connection.js");
 const { reconcileHeldPositions, closeReasonStockRolledIntoCoveredCall } = await import("./ibkrGatewayReconcilePositions.js");
 const { isOptionPastExpiry, optionPastExpirySql } = await import("../lib/optionExpiryClock.js");
+// Pluto's book is tested here too: a reconciliation pass closes every open leg it is not given, so the
+// Pluto-book scenarios live beside the other tests that run passes.
+const { loadPlutoBook } = await import("../pluto/book.js");
 
 const testDb: Knex = db;
 const telegramMessages: string[] = [];
@@ -33,6 +36,8 @@ const dependencies = {
 const createdTickerIds: string[] = [];
 let nextConId = 900_000_000 + (Date.now() % 1_000_000);
 let passCounter = 0;
+let plutoTestUserId: string | null = null;
+let plutoTestPassId: string | null = null;
 
 function isoDateDaysFromToday(days: number): string {
   const date = new Date();
@@ -144,6 +149,10 @@ async function legsFor(positionId: string) {
   return testDb("position_legs").where({ position_id: positionId }).orderBy("entry_at", "asc");
 }
 
+async function shareSourcesOf(positionId: string): Promise<string[]> {
+  return (await testDb("position_share_sources").where({ position_id: positionId }).select("source_position_id")).map((row) => row.source_position_id);
+}
+
 async function anomaliesFor(positionId: string) {
   return testDb("platform_anomalies").where({ position_id: positionId });
 }
@@ -157,11 +166,14 @@ afterAll(async () => {
     const positionIds = (await testDb("positions").whereIn("ticker_id", createdTickerIds).select("id")).map((row) => row.id);
     await testDb("platform_anomalies").whereIn("position_id", positionIds).del();
     await testDb("trades").whereIn("position_leg_id", testDb("position_legs").whereIn("position_id", positionIds).select("id")).del();
+    if (plutoTestUserId) await testDb("order_requests").where({ requested_by_user_id: plutoTestUserId }).del();
+    if (plutoTestPassId) await testDb("pluto_passes").where({ id: plutoTestPassId }).del();
     await testDb("position_legs").whereIn("position_id", positionIds).del();
     await testDb("positions").whereIn("id", positionIds).del();
     await testDb("daily_price_bars").whereIn("ticker_id", createdTickerIds).del();
     await testDb("tickers").whereIn("id", createdTickerIds).del();
   }
+  if (plutoTestUserId) await testDb("users").where({ id: plutoTestUserId }).del();
   await testDb.destroy();
 });
 
@@ -191,6 +203,7 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(Number(stockLeg.quantity)).toBe(100);
     expect(Number(stockLeg.entry_price)).toBeCloseTo(80.9113, 4);
     expect(telegramMessages.some((message) => message.toLowerCase().includes("assigned"))).toBe(true);
+    expect(await shareSourcesOf(leftover.id)).toEqual([cspId]);
   });
 
   it("leftover stock gets a call sold against it: a new covered call takes the shares at their carried cost, the leftover position closes as rolled", async () => {
@@ -225,6 +238,7 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(callLeg.option_type).toBe("call");
     expect(Number(callLeg.entry_price)).toBeCloseTo(1.5, 4);
     expect(await anomaliesFor(leftoverId)).toHaveLength(0);
+    expect(await shareSourcesOf(coveredCall.id)).toEqual([leftoverId]);
 
     // Same holdings again: nothing changes.
     await runPass(held);
@@ -299,6 +313,7 @@ describe("reconcileHeldPositions — every structure change is its own position"
     const [newStockLeg] = await legsFor(leftover.id);
     expect(Number(newStockLeg.entry_price)).toBeCloseTo(107.66, 4);
     expect(newStockLeg.exit_at).toBeNull();
+    expect(await shareSourcesOf(leftover.id)).toEqual([coveredCallId]);
     expect(telegramMessages).toHaveLength(1);
     expect(telegramMessages[0]!.toLowerCase()).not.toContain("assigned");
   });
@@ -403,6 +418,7 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(newLegs.filter((leg) => leg.exit_at === null)).toHaveLength(2);
     expect(Number(newLegs.find((leg) => leg.leg_type === "stock")!.entry_price)).toBeCloseTo(50, 4);
     expect(Number(newLegs.find((leg) => leg.leg_type === "option")!.strike_price)).toBe(60);
+    expect(await shareSourcesOf(newCoveredCall.id)).toEqual([oldCoveredCallId]);
   });
 
   it("never rewrites a position's strategy_key in place", async () => {
@@ -797,5 +813,84 @@ describe("option expiry clock", () => {
       const sqlResult = (await testDb.raw(`SELECT ${optionPastExpirySql("?::date")} AS past`, [expiry])).rows[0].past;
       expect(sqlResult, `expiry ${expiry}`).toBe(isOptionPastExpiry(expiry));
     }
+  });
+});
+
+describe("Pluto's book follows shares that leave a Pluto position (position_share_sources)", () => {
+  /** Marks a leg as opened by a Pluto order: an action, an order carrying its id, and the opening fill. */
+  async function fillFromPlutoOrder(legId: string, symbol: string, price: number): Promise<void> {
+    if (!plutoTestUserId) {
+      const [user] = await testDb("users").insert({ username: `reconcile-pluto-${Date.now()}`, display_name: "Pluto book test", password_hash: "x" }).returning(["id"]);
+      plutoTestUserId = user.id;
+      const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "pluto-book" }), model_called: false }).returning(["id"]);
+      plutoTestPassId = pass.id;
+    }
+    const [action] = await testDb("pluto_actions").insert({ pass_id: plutoTestPassId, kind: "open_cash_secured_put", symbol, outcome: "filled" }).returning(["id"]);
+    const [order] = await testDb("order_requests").insert({ requested_by_user_id: plutoTestUserId, request_type: "open_position", payload: JSON.stringify({ symbol, legs: [] }), status: "filled", pluto_action_id: action.id }).returning(["id"]);
+    await testDb("trades").insert({ position_leg_id: legId, ibkr_exec_id: `pluto-book-${legId}`, side: "sell", quantity: 1, price, executed_at: new Date(Date.now() - 86_400_000), is_closing_trade: false, source_order_request_id: order.id });
+  }
+
+  async function plutoBookPositionIds(): Promise<string[]> {
+    return (await loadPlutoBook()).openPositions.map((position) => position.positionId);
+  }
+
+  it("a Pluto covered call expires: the leftover shares stay in Pluto's book, and so does a covered call later written on them", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    await insertStockLeg(coveredCallId, stockConId, 100, 50);
+    const callLegId = await insertShortOptionLeg(coveredCallId, (nextConId += 1), "call", 55, isoDateDaysFromToday(-1), 1.2);
+    await fillFromPlutoOrder(callLegId, ticker.symbol, 1.2);
+    expect(await plutoBookPositionIds()).toContain(coveredCallId);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 50)]);
+    const leftover = (await positionsFor(ticker.id)).find((position) => position.status === "open")!;
+    expect(leftover.id).not.toBe(coveredCallId);
+    expect(await plutoBookPositionIds()).toContain(leftover.id);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 50), heldShortOption(ticker.symbol, (nextConId += 1), OptionType.Call, 58, isoDateDaysFromToday(20), 90)]);
+    const newCoveredCall = (await positionsFor(ticker.id)).find((position) => position.status === "open")!;
+    expect(newCoveredCall.id).not.toBe(leftover.id);
+    expect(await plutoBookPositionIds()).toContain(newCoveredCall.id);
+  });
+
+  it("a Pluto put assigned 200 shares, one call sold on them: the 100 shares left over stay in Pluto's book", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const plutoPutId = await insertPosition(ticker.id, "cash_secured_put");
+    const plutoPutLegId = await insertShortOptionLeg(plutoPutId, (nextConId += 1), "put", 40, isoDateDaysFromToday(-1), 0.9);
+    await fillFromPlutoOrder(plutoPutLegId, ticker.symbol, 0.9);
+    // The assignment pass delivers 200 shares to a stock-only position linked to the put.
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 39.1)]);
+    const assigned = (await positionsFor(ticker.id)).find((position) => position.status === "open")!;
+    expect(await plutoBookPositionIds()).toContain(assigned.id);
+
+    // One call is sold: 100 shares move under it, the other 100 are split out into a new stock-only position.
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 39.1), heldShortOption(ticker.symbol, (nextConId += 1), OptionType.Call, 45, isoDateDaysFromToday(20), 80)]);
+    const open = (await positionsFor(ticker.id)).filter((position) => position.status === "open");
+    const coveredCall = open.find((position) => position.strategy_key === "covered_call")!;
+    const leftover = open.find((position) => position.strategy_key === "unstructured")!;
+    expect(leftover.id).not.toBe(assigned.id);
+    const bookIds = await plutoBookPositionIds();
+    expect(bookIds).toContain(coveredCall.id);
+    expect(bookIds).toContain(leftover.id);
+  });
+
+  it("a Pluto put is assigned: the delivered shares are in Pluto's book; a human's put assigned on another ticker is not", async () => {
+    const plutoTicker = await createTicker();
+    const plutoPutId = await insertPosition(plutoTicker.id, "cash_secured_put");
+    const plutoPutLegId = await insertShortOptionLeg(plutoPutId, (nextConId += 1), "put", 40, isoDateDaysFromToday(-1), 0.9);
+    await fillFromPlutoOrder(plutoPutLegId, plutoTicker.symbol, 0.9);
+    const humanTicker = await createTicker();
+    const humanPutId = await insertPosition(humanTicker.id, "cash_secured_put");
+    await insertShortOptionLeg(humanPutId, (nextConId += 1), "put", 40, isoDateDaysFromToday(-1), 0.9);
+
+    await runPass([heldStock(plutoTicker.symbol, (nextConId += 1), 100, 39.1), heldStock(humanTicker.symbol, (nextConId += 1), 100, 39.1)]);
+
+    const plutoShares = (await positionsFor(plutoTicker.id)).find((position) => position.status === "open")!;
+    const humanShares = (await positionsFor(humanTicker.id)).find((position) => position.status === "open")!;
+    const bookIds = await plutoBookPositionIds();
+    expect(bookIds).toContain(plutoShares.id);
+    expect(bookIds).not.toContain(humanShares.id);
   });
 });

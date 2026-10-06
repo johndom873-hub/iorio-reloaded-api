@@ -137,6 +137,7 @@ const lineHolderLabels: Record<string, string> = {
   daySignalsLoop: "Day Signals",
   optionQuote: "Option quotes",
   snapshot: "Snapshots",
+  pluto_agent: "Pluto",
 };
 
 /**

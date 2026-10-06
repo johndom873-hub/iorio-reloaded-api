@@ -2,7 +2,8 @@ import type { CommissionReport, Contract, Execution, IBApi } from "@stoqey/ib";
 import type { Knex } from "knex";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
 import type { AppNotification } from "../lib/notificationChannel.js";
-import { ibkrOrderCanceledErrorCode, requestStatusForOrderStatusEvent } from "./ibkrGatewayOrderStatus.js";
+import { finalOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
+import { ibkrInactiveOrderMessage, ibkrOrderCanceledErrorCode, ibkrOrderRejectionErrorCodes, requestStatusForIbkrRejection, requestStatusForOrderStatusEvent } from "./ibkrGatewayOrderStatus.js";
 import { recordIbkrCancellationReason, recordIbkrOrderCanceled, workingOrderRequestStatuses, type ExecutedOutcome } from "./ibkrGatewayCancellationRecording.js";
 import type { OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
 import { parseIbkrExecutionTime } from "./ibkrGatewayParseExecutionTime.js";
@@ -13,8 +14,6 @@ import type { fetchIbkrOpenOrders } from "./ibkrGatewayFetchOpenOrders.js";
 // that become the trades ledger, and the sweep that settles orders IBKR no longer lists. Kept apart from
 // ibkrGatewayWorker.ts (which starts the worker as soon as it is imported) with every collaborator passed in, so each
 // status transition and ledger write can be tested against a real database and no Gateway.
-
-export const finalOrderRequestStatuses = ["filled", "cancelled", "cancelled_partially_filled", "rejected", "error"];
 
 export interface OrderTrackingDependencies {
   db: Knex;
@@ -64,6 +63,7 @@ export function handleOrderStatusEvent(event: OrderStatusEvent, dependencies: Or
         ...(permId ? { ibkr_perm_id: permId } : {}),
         // A fill that beat the sweep's cancel: the order is filled, not cancelled for lack of one.
         ...(requestStatus === "filled" ? { cancellation_reason: null } : {}),
+        ...(event.status === "Inactive" ? { error_message: ibkrInactiveOrderMessage } : {}),
       })
       .returning(["id"]);
     if (rows[0] && isCancel) await recordIbkrCancellationReason(rows[0].id, connection);
@@ -97,6 +97,9 @@ export function handleOrderErrorEvent(error: Error, code: number, reqId: number,
       notify: (orderRequestId) => dependencies.publishNotification({ type: "order_status", orderId: orderRequestId }),
     }).catch((dbError) => console.error(`Failed to record IBKR cancel for ${reqId}: ${dbError}`));
   }
+  if (ibkrOrderRejectionErrorCodes.has(code)) {
+    return recordIbkrOrderRejection(reqId, `IBKR error ${code}: ${error.message}`, dependencies).catch((dbError) => console.error(`Failed to record IBKR refusal for ${reqId}: ${dbError}`));
+  }
   return db("order_requests")
     .where({ ibkr_order_id: reqId, status: "submitted" })
     .update({ status: "error", error_message: `IBKR error ${code}: ${error.message}`, updated_at: db.fn.now() })
@@ -107,6 +110,20 @@ export function handleOrderErrorEvent(error: Error, code: number, reqId: number,
       await dependencies.publishNotification({ type: "order_status", orderId: rows[0].id });
     })
     .catch((dbError) => console.error(`Failed to record order error for ${reqId}: ${dbError}`));
+}
+
+/** An IBKR refusal (ibkrOrderRejectionErrorCodes) ends a working order as rejected, or as a cancel after a partial fill. */
+async function recordIbkrOrderRejection(ibkrOrderId: number, errorMessage: string, dependencies: OrderTrackingDependencies): Promise<void> {
+  const { db } = dependencies;
+  const row = await db("order_requests").where({ ibkr_order_id: ibkrOrderId }).whereIn("status", workingOrderRequestStatuses).orderBy("created_at", "desc").first("id", "status");
+  if (!row) return;
+  const nextStatus = requestStatusForIbkrRejection(row.status);
+  await db.transaction(async (transaction) => {
+    await transaction("order_requests").where({ id: row.id }).update({ status: nextStatus, error_message: errorMessage, updated_at: db.fn.now() });
+    if (nextStatus === "cancelled_partially_filled") await recordIbkrCancellationReason(row.id, transaction);
+  });
+  console.error(`Order ${ibkrOrderId} ${nextStatus}: ${errorMessage}`);
+  await dependencies.publishNotification({ type: "order_status", orderId: row.id });
 }
 
 /**
@@ -165,15 +182,17 @@ export async function reconcileStaleOrderRequests(dependencies: StaleOrderReconc
 
     const completedStatus = row.ibkr_perm_id ? completedStatusByPermId.get(row.ibkr_perm_id) : undefined;
     const completedRequestStatus = completedStatus ? requestStatusForOrderStatusEvent(completedStatus, 0, 0) : null;
-    if (completedRequestStatus === "filled" || completedRequestStatus === "cancelled") {
-      // The completed-orders list doesn't say whether a cancelled order had partly filled; its recorded executions do.
+    if (completedRequestStatus === "filled" || completedRequestStatus === "cancelled" || completedRequestStatus === "rejected") {
+      // The completed-orders list doesn't say whether a cancelled (or Inactive) order had partly filled; its recorded executions do.
       const resolvedStatus =
-        completedRequestStatus === "cancelled" && (await executedOutcomeForOrderRequest(row.id, row.payload, db)) === "partially_filled"
+        completedRequestStatus !== "filled" && (await executedOutcomeForOrderRequest(row.id, row.payload, db)) === "partially_filled"
           ? "cancelled_partially_filled"
           : completedRequestStatus;
       await db.transaction(async (transaction) => {
-        await transaction("order_requests").where({ id: row.id }).update({ status: resolvedStatus, updated_at: db.fn.now() });
-        if (resolvedStatus !== "filled") await recordIbkrCancellationReason(row.id, transaction);
+        await transaction("order_requests")
+          .where({ id: row.id })
+          .update({ status: resolvedStatus, updated_at: db.fn.now(), ...(resolvedStatus === "rejected" ? { error_message: ibkrInactiveOrderMessage } : {}) });
+        if (resolvedStatus === "cancelled" || resolvedStatus === "cancelled_partially_filled") await recordIbkrCancellationReason(row.id, transaction);
       });
       console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${resolvedStatus}" from IBKR's completed orders (permId ${row.ibkr_perm_id}).`);
       await dependencies.publishNotification({ type: "order_status", orderId: row.id });

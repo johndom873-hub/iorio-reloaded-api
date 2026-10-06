@@ -4,6 +4,7 @@ import { readPasskeyLoginMode } from "../config/passkeyLoginMode.js";
 import { verifyPassword } from "../lib/auth.js";
 import { clearLoginFailures, clientAddress, isLoginThrottled, recordLoginFailure } from "../lib/loginFailureThrottle.js";
 import { userHasUsedPasskey } from "../lib/passkeys.js";
+import { isValidServiceLoginSecret, serviceLoginSecretHeader } from "../lib/serviceLoginSecret.js";
 import { isAuthenticatedSession, regenerateSession } from "../lib/sessionAuthentication.js";
 import { passkeyAuthRouter } from "./authPasskeys.js";
 
@@ -52,8 +53,9 @@ authRouter.post("/login", async (request, response) => {
   // Passkeys required. A password alone never signs anyone in; it either opens enrolment of a first passkey or is refused.
   if (user.is_service_account) {
     // Genosuke signs in over the dyno's own loopback. The Heroku router always adds X-Forwarded-For, so a request that
-    // carries it came from the internet and may not use a service account's password.
-    if (request.headers["x-forwarded-for"] !== undefined) {
+    // carries it came from the internet and may not use a service account's password, unless it also carries the
+    // service login secret (Pluto, on its own dyno; serviceLoginSecret.ts).
+    if (request.headers["x-forwarded-for"] !== undefined && !isValidServiceLoginSecret(request.headers[serviceLoginSecretHeader], process.env.SERVICE_LOGIN_SECRET)) {
       recordLoginFailure(address, now);
       response.status(401).json({ error: "Invalid username or password." });
       return;

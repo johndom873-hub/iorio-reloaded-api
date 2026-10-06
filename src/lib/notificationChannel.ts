@@ -25,6 +25,8 @@ export type AppNotification =
   | { type: "assignment_risk"; symbol: string; strategyKey: string; positionId: string; legId: string; right: "C" | "P"; strike: number; expiry: string; dte: number | null; delta: number; spotPrice: number | null }
   | { type: "genosuke_reply"; preview: string }
   | { type: "trading_halt_changed"; enabled: boolean; reason: string | null; byDisplayName: string | null }
+  // Pluto's timeline (pluto_events): the Pluto screen updates live from these. Never persisted (see below).
+  | { type: "pluto_event"; eventId: number; eventType: string; occurredAt: string; payload: Record<string, unknown> }
   | { type: "presence"; onlineUserIds: string[] }
   // Animation-only signal for the Pulse topology map's otherwise-silent lines
   // (see pulseEmitter.ts / publishPulse below) — never persisted, never shown
@@ -52,7 +54,8 @@ export async function publishNotification(notification: AppNotification): Promis
 
   // "presence" is online/offline state, not a loggable event — Latest Events
   // has nothing to show for it.
-  if (notification.type === "presence" || notification.type === "pulse") return;
+  // Pluto's timeline has its own table (pluto_events); storing it here too would push real history out of Latest Events.
+  if (notification.type === "presence" || notification.type === "pulse" || notification.type === "pluto_event") return;
 
   // ibkr_health_check runs every ~10 minutes and is never shown in Latest
   // Events (fetchRecentNotificationEvents filters it out, and so does the

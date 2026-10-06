@@ -1,3 +1,5 @@
+import { loadPlutoSettings } from "../pluto/settingsStore.js";
+import { recordPlutoEvent } from "../pluto/ledger.js";
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
@@ -49,6 +51,9 @@ shortlistRouter.get("/", async (_request, response) => {
       t.symbol,
       t.company_name AS "companyName",
       NULLIF(t.sector, '') AS sector,
+      se.bot_enabled AS "botEnabled",
+      se.bot_enabled_changed_at AS "botEnabledChangedAt",
+      bu.display_name AS "botEnabledChangedBy",
       CASE WHEN b.status = 'running' AND b.started_at > now() - make_interval(mins => ${staleBackfillRunMinutes}) THEN 'preparing' ELSE NULL END AS "backfillStatus",
       b.progress_percent AS "backfillProgressPercent",
       -- A 'partial' run means some pipeline step (calendar/chain-strikes/snapshot) failed -- surfaced so
@@ -58,6 +63,7 @@ shortlistRouter.get("/", async (_request, response) => {
       op.open_position_count::int AS "openPositionCount"
     FROM shortlist_entries se
     JOIN tickers t ON t.id = se.ticker_id
+    LEFT JOIN users bu ON bu.id = se.bot_enabled_changed_by_user_id
     LEFT JOIN LATERAL (
       SELECT status, started_at, progress_percent
       FROM ticker_backfill_runs
@@ -284,6 +290,39 @@ shortlistRouter.patch("/:id", async (request, response) => {
     return;
   }
   response.json({ notes: entry.notes });
+});
+
+// Pluto's per-ticker allow flag (design 2026-09-28): default off, any user may flip it, audited on
+// the row, capped by pluto_settings.max_enabled_tickers because every enabled ticker costs one
+// IBKR market-data line on Pluto's own connection.
+shortlistRouter.patch("/:id/bot-enabled", async (request, response) => {
+  const enabled = request.body?.enabled;
+  if (typeof enabled !== "boolean") {
+    response.status(400).json({ error: "enabled must be true or false." });
+    return;
+  }
+  const userId = request.session.userId as string;
+  const result = await db.transaction(async (trx) => {
+    const entry = await trx("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").where("se.id", request.params.id).whereNull("se.removed_at").first("se.id", "se.bot_enabled", "t.symbol");
+    if (!entry) return { status: 404 as const, error: "Entry not found or already removed." };
+    if (Boolean(entry.bot_enabled) === enabled) return { status: 200 as const, symbol: entry.symbol as string, changed: false };
+    if (enabled) {
+      const settings = await loadPlutoSettings(trx);
+      const enabledCount = await trx("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0));
+      if (enabledCount >= settings.maxEnabledTickers) return { status: 409 as const, error: `Pluto already has ${enabledCount} enabled tickers, the maximum (${settings.maxEnabledTickers}). Disable one first or raise the cap on the Pluto screen.` };
+    }
+    await trx("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: enabled, bot_enabled_changed_by_user_id: userId, bot_enabled_changed_at: trx.fn.now() });
+    return { status: 200 as const, symbol: entry.symbol as string, changed: true };
+  });
+  if (result.status !== 200) {
+    response.status(result.status).json({ error: result.error });
+    return;
+  }
+  if (result.changed) {
+    const user = await db("users").where({ id: userId }).first("display_name");
+    await recordPlutoEvent(enabled ? "ticker_enabled" : "ticker_disabled", { symbol: result.symbol, by: user?.display_name ?? "an operator" });
+  }
+  response.json({ botEnabled: enabled });
 });
 
 shortlistRouter.delete("/:id", async (request, response) => {

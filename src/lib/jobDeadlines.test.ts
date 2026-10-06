@@ -13,7 +13,7 @@ const recentHealthCheck = (now: string) => run("ibkr_health_check", new Date(utc
 describe("evaluateJobDeadlines", () => {
   it("reports a UTC-slot job that has not started once its grace has passed", () => {
     const now = "2026-10-01T09:11:00Z";
-    expect(keys(evaluate(now, [recentHealthCheck(now)]))).toEqual(["deadline:option_chain_structure_refresh:2026-10-01"]);
+    expect(keys(evaluate(now, [recentHealthCheck(now)]))).toEqual(["deadline:option_chain_structure_refresh:2026-10-01", "deadline:session_close_read:2026-10-01"]);
   });
 
   it("stays quiet before the deadline", () => {
@@ -23,7 +23,7 @@ describe("evaluateJobDeadlines", () => {
 
   it("counts any run since the slot as started, including a failure (runJob already alerted it)", () => {
     const now = "2026-10-01T09:30:00Z";
-    expect(evaluate(now, [recentHealthCheck(now), run("option_chain_structure_refresh", "2026-10-01T09:00:04Z", "failure")])).toEqual([]);
+    expect(evaluate(now, [recentHealthCheck(now), run("session_close_read", "2026-10-01T09:00:02Z", "success"), run("option_chain_structure_refresh", "2026-10-01T09:00:04Z", "failure")])).toEqual([]);
   });
 
   it("ignores yesterday's run", () => {

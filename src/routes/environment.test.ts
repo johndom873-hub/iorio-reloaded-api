@@ -227,13 +227,13 @@ describe("GET /environment/details", () => {
     expect(json.trading.reason).toContain("IBKR data looks wrong");
   });
 
-  it("passes the market-data line restriction through and asks for it without the Day Signals loop's own holder", async () => {
+  it("passes the market-data line restriction through and asks for it without the Day Signals loop's and Pluto's own holders", async () => {
     const restriction = { priorityLines: 60, holders: ["optionChainCapture"] };
     loadMarketDataLineRestrictionMock.mockResolvedValue(restriction);
 
     const { json } = await call("/details");
     expect(json.marketDataRestriction).toEqual(restriction);
-    expect(loadMarketDataLineRestrictionMock).toHaveBeenCalledWith({ excludeHolders: ["daySignalsLoop"] });
+    expect(loadMarketDataLineRestrictionMock).toHaveBeenCalledWith({ excludeHolders: ["daySignalsLoop", "pluto_agent"] });
   });
 
   it("passes the market-data feed refusal through", async () => {

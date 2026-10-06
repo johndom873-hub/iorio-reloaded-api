@@ -28,7 +28,8 @@ export async function loadAccountContext(): Promise<AccountContext> {
   return { freeCash: Math.max(0, totalCashValue - cashLockedInCsps) };
 }
 
-async function loadBarsForTilt(tickerId: string, asOfDateIso: string): Promise<DailyOhlcvBar[]> {
+/** Stored daily bars up to and including `asOfDateIso`, oldest first (the tilt measures and Pluto's move context). */
+export async function loadBarsForTilt(tickerId: string, asOfDateIso: string): Promise<DailyOhlcvBar[]> {
   const rows: { tradingDate: string; open: string | null; high: string | null; low: string | null; close: string | null; volume: string | null }[] = await db("daily_price_bars")
     .where({ ticker_id: tickerId })
     .whereRaw("trading_date::text <= ?", [asOfDateIso])
@@ -174,8 +175,20 @@ export async function loadSlices(snapshotId: string): Promise<SignalSurfaceSlice
 export async function loadQuotes(snapshotId: string): Promise<SignalQuote[]> {
   const rows = await db("option_quote_snapshots")
     .where({ snapshot_id: snapshotId })
-    .select(db.raw('expiry::text as expiry'), "strike", db.raw('option_right as "right"'), "bid", "ask");
-  return rows.map((row) => ({ expiry: row.expiry, strike: Number(row.strike), right: row.right, bid: row.bid === null ? null : Number(row.bid), ask: row.ask === null ? null : Number(row.ask), source: "snapshot" as const }));
+    .select(db.raw('expiry::text as expiry'), "strike", db.raw('option_right as "right"'), "bid", "ask", "open_interest", "volume", "bid_size", "ask_size");
+  const toCount = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
+  return rows.map((row) => ({
+    expiry: row.expiry,
+    strike: Number(row.strike),
+    right: row.right,
+    bid: row.bid === null ? null : Number(row.bid),
+    ask: row.ask === null ? null : Number(row.ask),
+    source: "snapshot" as const,
+    openInterest: toCount(row.open_interest),
+    volume: toCount(row.volume),
+    bidSize: toCount(row.bid_size),
+    askSize: toCount(row.ask_size),
+  }));
 }
 
 export interface SignalsTickerRow {

@@ -159,11 +159,14 @@ export function reconciliationNotifyMessage(problems: string[]): string {
  * blows up (e.g. a query error), that's reported as a finding too rather
  * than failing the whole health-check job over it.
  */
+/** Starts the one "problem" recorded when reconciliation could not run at all (not a discrepancy). */
+export const reconciliationRunFailedPrefix = "Reconciliation check itself failed";
+
 export async function runReconciliationSafely(connection: IbkrConnection): Promise<string[]> {
   try {
     return await checkPositionReconciliation(connection.ib);
   } catch (error) {
-    return [`Reconciliation check itself failed: ${error instanceof Error ? error.message : error}`];
+    return [`${reconciliationRunFailedPrefix}: ${error instanceof Error ? error.message : error}`];
   }
 }
 
