@@ -1,4 +1,6 @@
 import { db } from "../db/connection.js";
+import { formatEasternDateTime } from "./easternIsoDate.js";
+import { easternDayStart } from "./marketSessionStatus.js";
 import { runJob } from "./runJob.js";
 
 // Every job with a daily Heroku Scheduler entry (all before this 11:30 PM UTC
@@ -38,14 +40,15 @@ const STUCK_RUNNING_THRESHOLD_MS = 30 * 60 * 1000;
 export async function runWatchdogCheck(): Promise<void> {
   await runJob("watchdog", async () => {
     const now = new Date();
-    const todayUtcMidnight = new Date(now.toISOString().slice(0, 10) + "T00:00:00.000Z");
+    // "Today" is the US trading day (Eastern): a late rerun of yesterday's job after UTC midnight must not count as today's run.
+    const todayStart = easternDayStart(now);
 
     const problems: string[] = [];
 
     const dailyJobRuns = await db("job_runs")
       .select("job_name")
       .whereIn("job_name", DAILY_JOB_NAMES)
-      .where("started_at", ">=", todayUtcMidnight)
+      .where("started_at", ">=", todayStart)
       .groupBy("job_name");
     const jobNamesThatRanToday = new Set(dailyJobRuns.map((row) => row.job_name as string));
     for (const jobName of DAILY_JOB_NAMES) {
@@ -67,7 +70,7 @@ export async function runWatchdogCheck(): Promise<void> {
       .where("status", "running")
       .where("started_at", "<", new Date(now.getTime() - STUCK_RUNNING_THRESHOLD_MS));
     for (const stuckJob of stuckRunningJobs) {
-      problems.push(`${stuckJob.job_name} has been stuck in "running" since ${(stuckJob.started_at as Date).toISOString()}`);
+      problems.push(`${stuckJob.job_name} has been stuck in "running" since ${formatEasternDateTime(stuckJob.started_at as Date)}`);
     }
 
     if (problems.length === 0) {

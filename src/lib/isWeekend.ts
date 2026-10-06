@@ -1,41 +1,17 @@
-import { db } from "../db/connection.js";
+import { easternDateIso, resolveIsOpenDay } from "./marketSessionStatus.js";
 
 /**
- * Scheduled jobs all key off US market activity, which is closed
- * Saturday/Sunday regardless of timezone — Heroku Scheduler times are UTC,
- * and the US market weekend lines up with the UTC calendar weekend, so no
- * timezone conversion is needed here.
+ * Whether the US market is closed on the Eastern calendar day `now` falls on (weekend or market_calendar holiday).
+ * Scheduled jobs gate on this before doing any work.
  *
- * Weekday-only, deliberately: this has no market_calendar awareness, so it
- * still fires (wrongly) on a US market holiday like Labor Day. Every job
- * that gates on "is today a trading day" should call isMarketClosedToday()
- * below instead — this stays exported only as that function's fallback and
- * for any caller that genuinely wants a pure weekday check.
- */
-export function isWeekend(date: Date = new Date()): boolean {
-  const day = date.getUTCDay();
-  return day === 0 || day === 6;
-}
-
-/**
- * The holiday-aware version of isWeekend(), backed by market_calendar (see
- * strategyPeriodPnl.ts's day_start CTE for the same table used the same
- * way). Found 2026-09-08: every scheduled job gated on isWeekend() alone
- * still ran on Labor Day 2026-09-07 (a Monday, so not caught by a weekday
- * check) even though market_calendar already correctly had it marked
- * is_open=false — daily_pnl_snapshot's run that day burned an IBKR round
- * trip and wrote a snapshot with 0/4 positions priced (market closed, no
- * live quotes), harmless that time only because it degraded gracefully.
+ * The day is the Eastern one, not the UTC one: between 00:00 UTC and ~04:00 UTC (08:00-12:00 SGT) the UTC date is
+ * already the next day while it is still the previous evening in New York, so a late or manual rerun there would be
+ * judged against the wrong day. At the Scheduler slots themselves (09:00-23:30 UTC, i.e. 04:00-19:30 ET) the two
+ * dates are the same, so scheduled runs are unaffected.
  *
- * Falls back to the plain weekday check if market_calendar has no row for
- * today (not synced far enough ahead, per sync-market-calendar.ts's own
- * "no scheduled job for it" comment) — matches a weekend correctly either
- * way and never wrongly skips a real trading day, at the cost of still
- * missing an un-synced holiday until someone re-runs the sync script.
+ * market_calendar decides when it has a row for the day; otherwise it is a plain weekday check (see resolveIsOpenDay),
+ * which matches a weekend correctly and never wrongly skips a real trading day.
  */
-export async function isMarketClosedToday(): Promise<boolean> {
-  const today = new Date().toISOString().slice(0, 10);
-  const row = await db("market_calendar").where({ calendar_date: today }).first();
-  if (row) return !row.is_open;
-  return isWeekend();
+export async function isMarketClosedToday(now: Date = new Date()): Promise<boolean> {
+  return !(await resolveIsOpenDay(easternDateIso(now)));
 }

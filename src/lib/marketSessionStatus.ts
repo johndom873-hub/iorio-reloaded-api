@@ -45,6 +45,11 @@ export function easternInstant(dateIso: string, hour: number, minute: number): D
   return new Date(Date.UTC(year, month - 1, day, 0, utcMinutesSinceMidnight));
 }
 
+/** 00:00 ET of the Eastern calendar day `at` falls on: "today" for jobs that must have run since the US day began. */
+export function easternDayStart(at: Date): Date {
+  return easternInstant(easternDateIso(at), 0, 0);
+}
+
 function isWeekday(dateIso: string): boolean {
   const day = new Date(`${dateIso}T12:00:00Z`).getUTCDay();
   return day >= 1 && day <= 5;

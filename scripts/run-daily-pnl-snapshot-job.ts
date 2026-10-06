@@ -60,7 +60,7 @@ import { fetchLiveGreeks, type GreeksContract } from "../src/ibkr/fetchLiveGreek
 import { fetchDailyClosingPrices } from "../src/ibkr/fetchDailyClosingPrices.js";
 import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
 import type { PriceContract } from "../src/ibkr/fetchLivePrices.js";
-import { previousOpenSessionDate, easternDateIso } from "../src/lib/marketSessionStatus.js";
+import { previousOpenSessionDate, lastCompletedSessionDate } from "../src/lib/marketSessionStatus.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
 import { assignFlowsToSnapshots } from "../src/lib/flexCashFlowAssignment.js";
@@ -144,7 +144,9 @@ async function main(): Promise<void> {
     return;
   }
   await runJob("daily_pnl_snapshot", async () => {
-    const snapshotDate = new Date().toISOString().slice(0, 10);
+    // The session this snapshot belongs to (newest one whose 16:00 ET close has passed), not the UTC calendar date: a late or
+    // manual rerun after 00:00 UTC is still the previous evening in New York and must be filed under that session.
+    const snapshotDate = await lastCompletedSessionDate();
     // Everything that went wrong tonight, returned as the run's failureMessage so runJob alerts once with all of it.
     const problems: string[] = [];
     const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -195,7 +197,7 @@ async function main(): Promise<void> {
     const [accountSummaryResult, ledgerPnlResult, pricesByLegIdResult] = await Promise.allSettled([
       fetchAccountSummary(),
       fetchAccountLedgerPnl(),
-      priceContracts.length > 0 ? fetchDailyClosingPrices(priceContracts, easternDateIso(new Date())) : Promise.resolve({} as Record<string, number | null>),
+      priceContracts.length > 0 ? fetchDailyClosingPrices(priceContracts, snapshotDate) : Promise.resolve({} as Record<string, number | null>),
     ]);
 
     let accountSnapshotWritten = false;
