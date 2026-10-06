@@ -3,6 +3,7 @@ import { evaluateCloseGateForPosition } from "../lib/closeGate.js";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoCloseActionOffer } from "./prompt.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { formatSignedDollars } from "../lib/formatSignedDollars.js";
 
 // Formulas P1 and P2 (approved 2026-09-28) as deterministic offers. The model never invents a
 // close: code decides which closes are even on the table, the model chooses among them (or the
@@ -174,12 +175,12 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
   if (leg.unscoredReason) return { offer: null, reason: `held leg not scored: ${leg.unscoredReason}` };
   if (!input.singleLegPosition) return { offer: null, reason: "buybacks are limited to single-leg positions for now" };
   if (leg.holdEdgeDollars === null || leg.closeCostDollars === null) return { offer: null, reason: "no hold edge / close cost" };
-  if (leg.holdEdgeDollars - leg.closeCostDollars >= 0) return { offer: null, reason: `holding still offers ${(leg.holdEdgeDollars - leg.closeCostDollars).toFixed(0)}/contract net of closing` };
+  if (leg.holdEdgeDollars - leg.closeCostDollars >= 0) return { offer: null, reason: `holding is still worth ${formatSignedDollars(leg.holdEdgeDollars - leg.closeCostDollars, 0)} per contract more than buying back, after closing costs` };
   if (input.rolls.some((roll) => roll.legId === leg.legId && roll.grade !== "avoid")) return { offer: null, reason: "a credit roll grades Weak or better" };
   if (leg.dte === null || leg.dte < settings.buybackMinDte) return { offer: null, reason: `DTE ${leg.dte ?? "unknown"} below ${settings.buybackMinDte}` };
   if (leg.ask === null || leg.bid === null || !(leg.ask > 0) || leg.ask < leg.bid) return { offer: null, reason: "no live two-sided quote on the held leg" };
   const pnlAtAsk = (entryPremium - leg.ask) * leg.quantity * 100;
-  if (pnlAtAsk <= 0) return { offer: null, reason: `buying back at the ask would realise ${pnlAtAsk.toFixed(0)}` };
+  if (pnlAtAsk <= 0) return { offer: null, reason: pnlAtAsk < 0 ? `buying back at the ask would lose ${formatSignedDollars(-pnlAtAsk, 0)}` : "buying back at the ask would only break even" };
   const limitPrice = Math.round(((leg.bid + leg.ask) / 2) * 100) / 100;
   return {
     offer: {

@@ -52,14 +52,14 @@ describe("Formula P2 — short-leg buyback", () => {
     expect(offer!.cycle_pnl).toBeCloseTo((2.4 - 0.55) * 200, 6);
   });
   it("is withheld when holding still has value, a roll grades Weak or better, DTE is too short, or the ask would realise a loss", () => {
-    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, holdEdgeDollars: 20 } }).reason).toMatch(/holding still offers/);
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, holdEdgeDollars: 20 } }).reason).toBe("holding is still worth $15 per contract more than buying back, after closing costs");
     expect(evaluateShortLegBuyback({ ...base, rolls: [roll("weak")] }).reason).toMatch(/credit roll/);
     expect(evaluateShortLegBuyback({ ...base, rolls: [roll("avoid")] }).offer).not.toBeNull();
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, dte: 1 } }).reason).toMatch(/DTE 1 below 2/);
-    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.6, bid: 2.5 } }).reason).toMatch(/would realise/);
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.6, bid: 2.5 } }).reason).toMatch(/^buying back at the ask would lose \$\d+$/);
     // Recorded 2.40, but we set 2.00 on the leg in a combo: an ask of 2.20 is a loss on what we really received.
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.2, bid: 2.1 } }).offer).not.toBeNull();
-    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.2, bid: 2.1 }, orderedEntryPremium: 2.0 }).reason).toMatch(/would realise -40/);
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.2, bid: 2.1 }, orderedEntryPremium: 2.0 }).reason).toBe("buying back at the ask would lose $40");
   });
   it("is limited to single-leg positions and needs a scored leg with a live quote", () => {
     expect(evaluateShortLegBuyback({ ...base, singleLegPosition: false }).reason).toMatch(/single-leg/);
