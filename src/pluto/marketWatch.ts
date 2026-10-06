@@ -1,6 +1,6 @@
 import { OptionType } from "@stoqey/ib";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
-import { releaseMarketDataLines, reserveMarketDataLines } from "../ibkr/marketDataLineBudget.js";
+import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { subscribeToPooledQuote, type PooledQuote } from "../ibkr/marketDataPool.js";
 import type { LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import type { PlutoSettings } from "./settingsStore.js";
@@ -12,7 +12,6 @@ import type { PlutoSettings } from "./settingsStore.js";
 // Option quotes are never streamed continuously: the contracts about to be decided on get a short burst.
 
 export const plutoLineHolder = "pluto_agent";
-const lineReservationTtlSeconds = 120;
 
 export interface WatchedStock {
   symbol: string;
@@ -26,8 +25,6 @@ export interface WatchedStock {
 export class PlutoMarketWatch {
   private readonly stocks = new Map<string, WatchedStock>();
   private readonly unsubscribers = new Map<string, () => void>();
-  private renewTimer: ReturnType<typeof setInterval> | null = null;
-  private linesHeld = 0;
 
   constructor(private settings: PlutoSettings) {}
 
@@ -45,22 +42,18 @@ export class PlutoMarketWatch {
     return ((spy.last - spy.previousClose) / spy.previousClose) * 100;
   }
 
-  /** Reserves lines for the given symbols (+ SPY + the burst pool) and (re)subscribes their stock lines. */
+  /**
+   * Subscribes one stock line per symbol plus SPY. The lines are booked by this process's quote pool, under
+   * Pluto's own priority row, for exactly what is subscribed: these stock lines all session, and a burst's
+   * option lines only while the burst runs. Short of lines, the pool pauses option lines first, so a burst
+   * gets fewer quotes before any stock line pauses.
+   */
   async watch(symbols: string[]): Promise<{ ok: boolean; detail: string }> {
-    const wanted = new Set([...symbols, "SPY"]);
-    const linesNeeded = wanted.size + this.settings.burstLines;
-    const reservation = await reserveMarketDataLines(plutoLineHolder, linesNeeded, lineReservationTtlSeconds, { priority: true });
-    if (!reservation.ok) {
+    if (!ibkrMarketDataLinesEnabled()) {
       await this.stop();
-      return { ok: false, detail: reservation.disabled ? "IBKR market-data lines are disabled in this environment" : `only ${reservation.availableLines} IBKR lines free, Pluto needs ${linesNeeded}` };
+      return { ok: false, detail: "IBKR market-data lines are disabled in this environment" };
     }
-    this.linesHeld = linesNeeded;
-    if (!this.renewTimer) {
-      this.renewTimer = setInterval(() => {
-        reserveMarketDataLines(plutoLineHolder, this.linesHeld, lineReservationTtlSeconds, { priority: true }).catch((error) => console.warn(`Pluto lines: renew failed — ${error instanceof Error ? error.message : error}`));
-      }, (lineReservationTtlSeconds * 1000) / 3);
-      this.renewTimer.unref?.();
-    }
+    const wanted = new Set([...symbols, "SPY"]);
     for (const symbol of [...this.stocks.keys()]) {
       if (!wanted.has(symbol)) {
         this.unsubscribers.get(symbol)?.();
@@ -75,7 +68,7 @@ export class PlutoMarketWatch {
       const unsubscribe = await subscribeToPooledQuote({ key: `pluto-stock-${symbol}`, legType: "stock", symbol }, (quote) => this.onStockQuote(stock, quote));
       this.unsubscribers.set(symbol, unsubscribe);
     }
-    return { ok: true, detail: `${wanted.size} stock lines + ${this.settings.burstLines} burst lines reserved` };
+    return { ok: true, detail: `${wanted.size} stock lines; a quote burst adds up to ${this.settings.burstLines} more for ${this.settings.burstSettleSeconds} s` };
   }
 
   private onStockQuote(stock: WatchedStock, quote: PooledQuote): void {
@@ -112,16 +105,8 @@ export class PlutoMarketWatch {
   }
 
   async stop(): Promise<void> {
-    if (this.renewTimer) {
-      clearInterval(this.renewTimer);
-      this.renewTimer = null;
-    }
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
     this.unsubscribers.clear();
     this.stocks.clear();
-    if (this.linesHeld > 0) {
-      this.linesHeld = 0;
-      await releaseMarketDataLines(plutoLineHolder).catch((error) => console.warn(`Pluto lines: release failed — ${error instanceof Error ? error.message : error}`));
-    }
   }
 }

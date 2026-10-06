@@ -45,7 +45,20 @@ import type { MarketDataFeedRefusal } from "../lib/notificationChannel.js";
 // it back, at which point every pooled contract is silently re-subscribed
 // here with no caller-visible interruption (live-tested 2026-09-24 against
 // a forced disconnect, single- and multi-subscriber).
-const reservationHolder = "marketDataPool";
+let reservationHolder = "marketDataPool";
+let reservationPriority = false;
+
+/**
+ * Books this process's pooled lines under its own ledger row. Every process that runs the pool writes one
+ * row per holder name, so a second process (the Pluto agent) must not share the web dyno's
+ * "marketDataPool" row: the two would overwrite each other's count, and either one emptying its pool
+ * would delete the other's booking. Call once at process start, before the first subscription.
+ */
+export function configureMarketDataPoolReservation(options: { holder: string; priority: boolean }): void {
+  if (entriesByPoolKey.size > 0) throw new Error("configureMarketDataPoolReservation must run before the first pooled subscription");
+  reservationHolder = options.holder;
+  reservationPriority = options.priority;
+}
 const reservationTtlSeconds = 90;
 // Also how quickly a capture-window restriction is noticed and shed for, and
 // how quickly paused contracts resume afterwards.
@@ -366,11 +379,11 @@ async function reconcile(): Promise<void> {
       return;
     }
     let allowed = desired;
-    const result = await reserveMarketDataLines(reservationHolder, desired, reservationTtlSeconds);
+    const result = await reserveMarketDataLines(reservationHolder, desired, reservationTtlSeconds, { priority: reservationPriority });
     if (!result.ok) {
       allowed = result.availableLines;
       // Hold exactly what fits so the budget reflects the pool's real footprint.
-      if (allowed > 0) await reserveMarketDataLines(reservationHolder, allowed, reservationTtlSeconds);
+      if (allowed > 0) await reserveMarketDataLines(reservationHolder, allowed, reservationTtlSeconds, { priority: reservationPriority });
       else await releaseMarketDataLines(reservationHolder);
     }
     applyCapacityPlan(allowed);

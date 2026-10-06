@@ -183,7 +183,7 @@ export class PlutoAgent {
       const enabled: { symbol: string }[] = await db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").where("se.bot_enabled", true).select("t.symbol");
       const symbols = enabled.map((row) => row.symbol).sort();
       const result = await this.marketWatch.watch(symbols);
-      if (result.ok !== this.watching) await recordPlutoEvent("lines_changed", { held: result.ok ? symbols.length + 1 + this.settings.burstLines : 0, detail: result.detail });
+      if (result.ok !== this.watching) await recordPlutoEvent("lines_changed", { held: result.ok ? symbols.length + 1 : 0, detail: result.detail });
       this.watching = result.ok;
       if (!result.ok) return;
 

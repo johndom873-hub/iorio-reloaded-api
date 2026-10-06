@@ -17,6 +17,7 @@ const poolHarness = vi.hoisted(() => ({
   reserveFailsWith: null as Error | null,
   reserveDelayMs: 0,
   reserveCalls: [] as Array<{ holder: string; lines: number; ttlSeconds: number }>,
+  reservePriorities: [] as boolean[],
   releaseCalls: [] as string[],
   reservesInFlight: 0,
   maxReservesInFlight: 0,
@@ -37,8 +38,9 @@ vi.mock("./sharedReadConnection.js", () => ({
   },
 }));
 vi.mock("./marketDataLineBudget.js", () => ({
-  reserveMarketDataLines: async (holder: string, lines: number, ttlSeconds: number) => {
+  reserveMarketDataLines: async (holder: string, lines: number, ttlSeconds: number, options: { priority?: boolean } = {}) => {
     poolHarness.reserveCalls.push({ holder, lines, ttlSeconds });
+    poolHarness.reservePriorities.push(options.priority ?? false);
     poolHarness.reservesInFlight += 1;
     poolHarness.maxReservesInFlight = Math.max(poolHarness.maxReservesInFlight, poolHarness.reservesInFlight);
     try {
@@ -94,6 +96,7 @@ beforeEach(() => {
   poolHarness.reserveFailsWith = null;
   poolHarness.reserveDelayMs = 0;
   poolHarness.reserveCalls.length = 0;
+  poolHarness.reservePriorities.length = 0;
   poolHarness.releaseCalls.length = 0;
   poolHarness.reservesInFlight = 0;
   poolHarness.maxReservesInFlight = 0;
@@ -451,6 +454,40 @@ describe("peekPooledQuote", () => {
     expect(pool.peekPooledQuote(optionAlpha)).toMatchObject({ last: 2.5 });
     expect(pool.peekPooledQuote({ ...optionAlpha, key: "other", strike: 55 })).toBeNull();
     expect(pool.peekPooledQuote({ ...optionAlpha, key: "other", right: OptionType.Put })).toBeNull();
+  });
+});
+
+describe("configureMarketDataPoolReservation", () => {
+  it("books the web dyno's pool as a non-priority marketDataPool row by default", async () => {
+    const pool = await loadPool();
+    await pool.subscribeToPooledQuote(stockAlpha, () => {});
+    await settle();
+    expect(poolHarness.reserveCalls.map((call) => call.holder)).toEqual(["marketDataPool"]);
+    expect(poolHarness.reservePriorities).toEqual([false]);
+  });
+
+  it("books another process's pool under its own holder at the configured priority, sized to what is subscribed", async () => {
+    const pool = await loadPool();
+    pool.configureMarketDataPoolReservation({ holder: "pluto_agent", priority: true });
+    await pool.subscribeToPooledQuote(stockAlpha, () => {});
+    await settle();
+    const unsubscribeOption = await pool.subscribeToPooledQuote(optionAlpha, () => {});
+    await settle();
+    expect(poolHarness.reserveCalls.map((call) => [call.holder, call.lines])).toEqual([["pluto_agent", 1], ["pluto_agent", 2]]);
+    expect(poolHarness.reservePriorities).toEqual([true, true]);
+
+    unsubscribeOption();
+    await vi.advanceTimersByTimeAsync(pool.unsubscribeGraceMs);
+    await settle();
+    expect(poolHarness.reserveCalls.at(-1)).toMatchObject({ holder: "pluto_agent", lines: 1 });
+    expect(poolHarness.reservePriorities.at(-1)).toBe(true);
+    expect(poolHarness.releaseCalls).toEqual([]);
+  });
+
+  it("refuses to change the holder once the pool has a subscription", async () => {
+    const pool = await loadPool();
+    await pool.subscribeToPooledQuote(stockAlpha, () => {});
+    expect(() => pool.configureMarketDataPoolReservation({ holder: "pluto_agent", priority: true })).toThrow(/before the first pooled subscription/);
   });
 });
 

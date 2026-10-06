@@ -3,6 +3,8 @@ import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { db } from "./db/connection.js";
 import { PlutoAgent } from "./pluto/agent.js";
 import { decidePlutoStart } from "./pluto/config.js";
+import { configureMarketDataPoolReservation } from "./ibkr/marketDataPool.js";
+import { plutoLineHolder } from "./pluto/marketWatch.js";
 
 // Pluto's process entry (Procfile `agent`). The existence layer decides whether this process
 // does anything at all; when it declines, the process exits cleanly so a scaled-up dyno in the
@@ -16,6 +18,9 @@ if (!decision.start) {
   await db.destroy();
   process.exit(0);
 }
+
+// Pluto's quote pool books its own priority row in the line ledger, never the web dyno's.
+configureMarketDataPoolReservation({ holder: plutoLineHolder, priority: true });
 
 const agent = new PlutoAgent(decision.config);
 let stopping = false;
