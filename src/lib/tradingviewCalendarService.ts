@@ -24,6 +24,22 @@ interface SymbolSearchResult {
   is_primary_listing?: boolean;
 }
 
+// TradingView types a foreign company's US-listed ADR (NOK, BSBR) as "dr", not "stock", and gives it no
+// is_primary_listing flag. Both types carry the earnings and dividend fields the scanner is queried for.
+const US_LISTING_TYPES = ["stock", "dr"];
+const MAJOR_US_EXCHANGES = ["NYSE", "NASDAQ", "AMEX"];
+
+/**
+ * The US listing to use among exact-symbol matches, or undefined when there is none. Ranked: a common stock over an ADR,
+ * then the primary listing, then a major exchange over an overnight/OTC venue (BOATS also lists the same ADRs).
+ */
+function pickPreferredUsListing(exactMatches: SymbolSearchResult[]): SymbolSearchResult | undefined {
+  const preferenceScore = (result: SymbolSearchResult): number =>
+    US_LISTING_TYPES.indexOf(result.type) * 4 + (result.is_primary_listing ? 0 : 2) + (MAJOR_US_EXCHANGES.includes(result.exchange) ? 0 : 1);
+  const candidates = exactMatches.filter((result) => result.country === "US" && US_LISTING_TYPES.includes(result.type));
+  return candidates.sort((first, second) => preferenceScore(first) - preferenceScore(second))[0];
+}
+
 // Resolves a bare symbol (e.g. "AAPL") to TradingView's "EXCHANGE:SYMBOL"
 // format (e.g. "NASDAQ:AAPL") via TradingView's public symbol-search
 // endpoint, and caches the result on tickers.tradingview_ticker so this
@@ -57,9 +73,7 @@ export async function resolveTradingViewTickerDetailed(tickerId: string, symbol:
     // "stock"/US row) silently fell through to an unrelated company (SMHI —
     // SEACOR Marine Holdings) instead of correctly resolving to null.
     const exactMatches = results.filter((r) => r.symbol.replace(/<\/?em>/g, "").toUpperCase() === symbol.toUpperCase());
-    const best =
-      exactMatches.find((r) => r.type === "stock" && r.country === "US" && r.is_primary_listing) ??
-      exactMatches.find((r) => r.type === "stock" && r.country === "US");
+    const best = pickPreferredUsListing(exactMatches);
     if (!best) return { tvTicker: null, reason: "no_match" };
 
     const cleanSymbol = best.symbol.replace(/<\/?em>/g, "");
