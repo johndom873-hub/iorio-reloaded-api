@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import knexLibrary, { type Knex } from "knex";
 import { OptionType } from "@stoqey/ib";
+import { underlyingStockPriceKey } from "../lib/positionOrderRules.js";
 
 // The real positionsRouter on a small express app against the test database, for the read routes (listing, cycles, pulse history), the P&L and
 // Greeks routes (REST and SSE) and the quote streams. Every IBKR / pool boundary is mocked: the SSE producers are scripted, so nothing
@@ -759,40 +760,42 @@ describe("GET /positions/pnl", () => {
   it("marks a covered call to live prices: stock +500, short call -100, total +400, market value 5500", async () => {
     const { positionId, legIds, symbol } = await createPosition("covered_call", [longStock(100, { entryPrice: 50 }), shortCall(1, { entryPrice: 2 })]);
     const [stockLegId, callLegId] = legIds;
-    fetchPricesPoolFirstMock.mockResolvedValue({ [stockLegId!]: 55, [callLegId!]: 3 });
+    fetchPricesPoolFirstMock.mockResolvedValue({ [stockLegId!]: 55, [callLegId!]: 3, [underlyingStockPriceKey(symbol)]: 55 });
     const response = await call("GET", `/positions/pnl?positionIds=${positionId}`);
     expect(response.status).toBe(200);
-    expect(response.json).toEqual({ [positionId]: { unrealizedPnl: 400, unrealizedPremiumPnl: -100, unrealizedStockPnl: 500, stockMarketValue: 5500, asOfDate: null } });
+    expect(response.json).toEqual({ [positionId]: { unrealizedPnl: 400, unrealizedPremiumPnl: -100, unrealizedStockPnl: 500, stockMarketValue: 5500, underlyingPrice: 55, asOfDate: null } });
 
     const contracts = (fetchPricesPoolFirstMock.mock.calls[0]![0] as { key: string }[]).sort((first, second) => first.key.localeCompare(second.key));
     expect(contracts).toEqual(
       [
         { key: stockLegId, legType: "stock", symbol },
         { key: callLegId, legType: "option", symbol, expiry: "20300118", strike: 55, right: OptionType.Call },
+        { key: underlyingStockPriceKey(symbol), legType: "stock", symbol },
       ].sort((first, second) => String(first.key).localeCompare(String(second.key))),
     );
   });
 
   it("marks a short put: entry 2.00, now 0.50, 2 contracts = +300, with no stock value", async () => {
-    const { positionId, legIds } = await createPosition("cash_secured_put", [shortPut(2, { entryPrice: 2 })]);
-    fetchPricesPoolFirstMock.mockResolvedValue({ [legIds[0]!]: 0.5 });
+    const { positionId, legIds, symbol } = await createPosition("cash_secured_put", [shortPut(2, { entryPrice: 2 })]);
+    fetchPricesPoolFirstMock.mockResolvedValue({ [legIds[0]!]: 0.5, [underlyingStockPriceKey(symbol)]: 26.82 });
     const response = await call("GET", `/positions/pnl?positionIds=${positionId}`);
-    expect(response.json[positionId]).toEqual({ unrealizedPnl: 300, unrealizedPremiumPnl: 300, unrealizedStockPnl: 0, stockMarketValue: 0, asOfDate: null });
+    // No stock leg, yet the underlying stock is priced: a CSP's Price must tick like a covered call's.
+    expect(response.json[positionId]).toEqual({ unrealizedPnl: 300, unrealizedPremiumPnl: 300, unrealizedStockPnl: 0, stockMarketValue: 0, underlyingPrice: 26.82, asOfDate: null });
   });
 
   it("prices only the legs still open: a rolled-away leg is not re-marked", async () => {
-    const { positionId, legIds } = await createPosition("cash_secured_put", [shortPut(1, { strikePrice: 85, entryPrice: 1, exitPrice: 0.2, exitAt: new Date() }), shortPut(1, { entryPrice: 2 })]);
+    const { positionId, legIds, symbol } = await createPosition("cash_secured_put", [shortPut(1, { strikePrice: 85, entryPrice: 1, exitPrice: 0.2, exitAt: new Date() }), shortPut(1, { entryPrice: 2 })]);
     fetchPricesPoolFirstMock.mockResolvedValue({ [legIds[1]!]: 1 });
     const response = await call("GET", `/positions/pnl?positionIds=${positionId}`);
-    expect((fetchPricesPoolFirstMock.mock.calls[0]![0] as { key: string }[]).map((contract) => contract.key)).toEqual([legIds[1]]);
+    expect((fetchPricesPoolFirstMock.mock.calls[0]![0] as { key: string }[]).map((contract) => contract.key)).toEqual([legIds[1], underlyingStockPriceKey(symbol)]);
     expect(response.json[positionId].unrealizedPnl).toBe(100);
   });
 
   it("reads 0 for a position with no open legs, closed or unknown", async () => {
     const closed = await createPosition("cash_secured_put", [shortPut(1, { exitPrice: 0.2, exitAt: new Date() })], { status: "closed" });
     const response = await call("GET", `/positions/pnl?positionIds=${closed.positionId},${missingId}`);
-    expect(response.json[closed.positionId]).toEqual({ unrealizedPnl: 0, unrealizedPremiumPnl: 0, unrealizedStockPnl: 0, stockMarketValue: 0, asOfDate: null });
-    expect(response.json[missingId]).toEqual({ unrealizedPnl: 0, unrealizedPremiumPnl: 0, unrealizedStockPnl: 0, stockMarketValue: 0, asOfDate: null });
+    expect(response.json[closed.positionId]).toEqual({ unrealizedPnl: 0, unrealizedPremiumPnl: 0, unrealizedStockPnl: 0, stockMarketValue: 0, underlyingPrice: null, asOfDate: null });
+    expect(response.json[missingId]).toEqual({ unrealizedPnl: 0, unrealizedPremiumPnl: 0, unrealizedStockPnl: 0, stockMarketValue: 0, underlyingPrice: null, asOfDate: null });
   });
 
   it("falls back to the latest nightly snapshot for a position with a leg that has no live price, never to a partial live sum", async () => {
@@ -804,7 +807,7 @@ describe("GET /positions/pnl", () => {
     // The stock leg is priced, the call is not: the stock's gain alone would pass for the whole position's.
     fetchPricesPoolFirstMock.mockResolvedValue({ [legIds[0]!]: 55, [legIds[1]!]: null });
     const response = await call("GET", `/positions/pnl?positionIds=${positionId}`);
-    expect(response.json[positionId]).toEqual({ unrealizedPnl: 222.5, unrealizedPremiumPnl: 22.5, unrealizedStockPnl: 200, stockMarketValue: null, asOfDate: "2026-09-02" });
+    expect(response.json[positionId]).toEqual({ unrealizedPnl: 222.5, unrealizedPremiumPnl: 22.5, unrealizedStockPnl: 200, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-09-02" });
   });
 
   it("keeps the split null when the snapshot predates it, and answers all-null with no snapshot at all", async () => {
@@ -812,8 +815,8 @@ describe("GET /positions/pnl", () => {
     const withNothing = await createPosition("cash_secured_put", [shortPut(1)]);
     await testDb("position_pnl_snapshots").insert({ position_id: withOldSnapshot.positionId, snapshot_date: "2026-08-01", unrealized_pnl: -40, premium_pnl: null, stock_pnl: null });
     const response = await call("GET", `/positions/pnl?positionIds=${withOldSnapshot.positionId},${withNothing.positionId}`);
-    expect(response.json[withOldSnapshot.positionId]).toEqual({ unrealizedPnl: -40, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, asOfDate: "2026-08-01" });
-    expect(response.json[withNothing.positionId]).toEqual({ unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, asOfDate: null });
+    expect(response.json[withOldSnapshot.positionId]).toEqual({ unrealizedPnl: -40, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-08-01" });
+    expect(response.json[withNothing.positionId]).toEqual({ unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: null });
   });
 
   it("answers per position: one live, one from its snapshot", async () => {
@@ -842,7 +845,7 @@ describe("GET /positions/pnl", () => {
 });
 
 describe("GET /positions/pnl/stream", () => {
-  const emptyResult = { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, asOfDate: null };
+  const emptyResult = { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: null };
 
   it("opens the stream, sends one empty frame and ends when no position ids are given", async () => {
     const { headers, status, events } = await readServerSentEvents("/positions/pnl/stream");
@@ -857,36 +860,38 @@ describe("GET /positions/pnl/stream", () => {
     const { positionId, legIds, symbol } = await createPosition("covered_call", [longStock(100, { entryPrice: 50 }), shortCall(1, { entryPrice: 2 })]);
     const [stockLegId, callLegId] = legIds;
     streamPooledPricesMock.mockImplementation(async (_contracts: unknown, onUpdate: (prices: unknown) => void, signal: AbortSignal) => {
-      onUpdate({ [stockLegId!]: 55, [callLegId!]: 3 });
+      onUpdate({ [stockLegId!]: 55, [callLegId!]: 3, [underlyingStockPriceKey(symbol)]: 55 });
       await waitForAbort(signal);
     });
     const { events } = await readServerSentEvents(`/positions/pnl/stream?positionIds=${positionId}`, 1);
-    expect(events).toEqual([{ [positionId]: { unrealizedPnl: 400, unrealizedPremiumPnl: -100, unrealizedStockPnl: 500, stockMarketValue: 5500, asOfDate: null } }]);
+    expect(events).toEqual([{ [positionId]: { unrealizedPnl: 400, unrealizedPremiumPnl: -100, unrealizedStockPnl: 500, stockMarketValue: 5500, underlyingPrice: 55, asOfDate: null } }]);
     expect(recordUnrealizedPnlSampleMock).toHaveBeenCalledWith(positionId, 400);
     const contracts = (streamPooledPricesMock.mock.calls[0]![0] as { key: string }[]).sort((first, second) => first.key.localeCompare(second.key));
     expect(contracts).toEqual(
       [
         { key: stockLegId, legType: "stock", symbol },
         { key: callLegId, legType: "option", symbol, expiry: "20300118", strike: 55, right: OptionType.Call },
+        { key: underlyingStockPriceKey(symbol), legType: "stock", symbol },
       ].sort((first, second) => String(first.key).localeCompare(String(second.key))),
     );
   });
 
   it("starts from the nightly snapshot when the first prices are incomplete, replaces it once every leg is priced, and never regresses", async () => {
-    const { positionId, legIds } = await createPosition("covered_call", [longStock(100, { entryPrice: 50 }), shortCall(1, { entryPrice: 2 })]);
+    const { positionId, legIds, symbol } = await createPosition("covered_call", [longStock(100, { entryPrice: 50 }), shortCall(1, { entryPrice: 2 })]);
     const [stockLegId, callLegId] = legIds;
+    const underlyingKey = underlyingStockPriceKey(symbol);
     await testDb("position_pnl_snapshots").insert({ position_id: positionId, snapshot_date: "2026-09-02", unrealized_pnl: 222.5, premium_pnl: 22.5, stock_pnl: 200 });
     streamPooledPricesMock.mockImplementation(async (_contracts: unknown, onUpdate: (prices: unknown) => void, signal: AbortSignal) => {
       onUpdate({ [stockLegId!]: 55 });
-      onUpdate({ [stockLegId!]: 55, [callLegId!]: 3 });
-      onUpdate({ [stockLegId!]: 56 });
+      onUpdate({ [stockLegId!]: 55, [callLegId!]: 3, [underlyingKey]: 55 });
+      onUpdate({ [stockLegId!]: 56, [underlyingKey]: 56 });
       await waitForAbort(signal);
     });
     const { events } = await readServerSentEvents(`/positions/pnl/stream?positionIds=${positionId}`, 3);
-    expect(events[0]).toEqual({ [positionId]: { unrealizedPnl: 222.5, unrealizedPremiumPnl: 22.5, unrealizedStockPnl: 200, stockMarketValue: null, asOfDate: "2026-09-02" } });
-    expect(events[1]).toEqual({ [positionId]: { unrealizedPnl: 400, unrealizedPremiumPnl: -100, unrealizedStockPnl: 500, stockMarketValue: 5500, asOfDate: null } });
-    // The third frame has no call price: the position keeps its last complete figure instead of dropping to null.
-    expect(events[2]).toEqual(events[1]);
+    expect(events[0]).toEqual({ [positionId]: { unrealizedPnl: 222.5, unrealizedPremiumPnl: 22.5, unrealizedStockPnl: 200, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-09-02" } });
+    expect(events[1]).toEqual({ [positionId]: { unrealizedPnl: 400, unrealizedPremiumPnl: -100, unrealizedStockPnl: 500, stockMarketValue: 5500, underlyingPrice: 55, asOfDate: null } });
+    // The third frame has no call price: the position keeps its last complete P&L instead of dropping to null, while the stock price still ticks.
+    expect(events[2]).toEqual({ [positionId]: { ...events[1][positionId], underlyingPrice: 56 } });
   });
 
   it("keeps the premium and stock split null on the first frame when the snapshot predates it", async () => {
@@ -897,7 +902,23 @@ describe("GET /positions/pnl/stream", () => {
       await waitForAbort(signal);
     });
     const { events } = await readServerSentEvents(`/positions/pnl/stream?positionIds=${positionId}`, 1);
-    expect(events[0]).toEqual({ [positionId]: { unrealizedPnl: -40, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, asOfDate: "2026-08-01" } });
+    expect(events[0]).toEqual({ [positionId]: { unrealizedPnl: -40, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: "2026-08-01" } });
+  });
+
+  it("keeps ticking a cash-secured put's stock price while its option has no price, and never regresses it to null", async () => {
+    const { positionId, legIds, symbol } = await createPosition("cash_secured_put", [shortPut(1)]);
+    const underlyingKey = underlyingStockPriceKey(symbol);
+    streamPooledPricesMock.mockImplementation(async (_contracts: unknown, onUpdate: (prices: unknown) => void, signal: AbortSignal) => {
+      onUpdate({ [legIds[0]!]: null, [underlyingKey]: 26.82 });
+      onUpdate({ [legIds[0]!]: null, [underlyingKey]: 26.9 });
+      onUpdate({ [legIds[0]!]: null, [underlyingKey]: null });
+      await waitForAbort(signal);
+    });
+    const { events } = await readServerSentEvents(`/positions/pnl/stream?positionIds=${positionId}`, 3);
+    expect(events.map((event) => event[positionId].underlyingPrice)).toEqual([26.82, 26.9, 26.9]);
+    expect(events.map((event) => event[positionId].unrealizedPnl)).toEqual([null, null, null]);
+    const contracts = streamPooledPricesMock.mock.calls[0]![0] as { key: string; legType: string; symbol: string }[];
+    expect(contracts).toContainEqual({ key: underlyingKey, legType: "stock", symbol });
   });
 
   it("sends nulls for a position with neither complete prices nor a snapshot, and keeps a later incomplete update null", async () => {

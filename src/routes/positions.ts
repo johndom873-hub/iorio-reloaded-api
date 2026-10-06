@@ -32,7 +32,7 @@ import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { fetchTodaysOrders } from "../lib/todaysOrders.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
-import { computeUnrealizedPnlByPosition, normalizeExpiryDate, roundToCents, sumSharesCommittedByCoveredCallPayloads, validateCoveredCallCoverage } from "../lib/positionOrderRules.js";
+import { computeUnderlyingStockPriceByPosition, computeUnrealizedPnlByPosition, normalizeExpiryDate, roundToCents, sumSharesCommittedByCoveredCallPayloads, underlyingStockPriceKey, validateCoveredCallCoverage } from "../lib/positionOrderRules.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -517,11 +517,29 @@ export interface UnrealizedPnlResult {
   // null whenever live pricing is unavailable, even if unrealizedPnl itself
   // fell back to a snapshot.
   stockMarketValue: number | null;
+  // The position's underlying stock price (last trade), whatever the strategy:
+  // priced from the pool beside the legs, so a position with no stock leg (a
+  // cash-secured put, a hedge, any future structure) ticks like a covered call.
+  // Never taken from the snapshot fallback; null until the stock has a quote.
+  underlyingPrice: number | null;
   // Set only when unrealizedPnl came from position_pnl_snapshots instead of
   // a live IBKR quote (see the fallback note below) — the date that
   // snapshot was captured, so the UI can label it "as of <date>" rather
   // than implying a live number.
   asOfDate: string | null;
+}
+
+// One stock quote request per distinct symbol among the positions' legs, plus
+// each position's symbol. Pooled by contract, so a covered call's own stock leg
+// shares the same IBKR line: this adds no market-data line for it.
+function buildUnderlyingStockPriceRequests(legRows: Array<{ positionId: string; symbol: string }>): {
+  underlyingContracts: PriceContract[];
+  symbolByPositionId: Record<string, string>;
+} {
+  const symbolByPositionId: Record<string, string> = {};
+  for (const leg of legRows) symbolByPositionId[leg.positionId] = leg.symbol;
+  const underlyingContracts = [...new Set(Object.values(symbolByPositionId))].map((symbol): PriceContract => ({ key: underlyingStockPriceKey(symbol), legType: "stock", symbol }));
+  return { underlyingContracts, symbolByPositionId };
 }
 
 // On-demand unrealized P&L for open positions — mirrors /greeks's shape
@@ -580,6 +598,8 @@ positionsRouter.get("/pnl", async (request, response) => {
     strike: leg.strikePrice ? Number(leg.strikePrice) : undefined,
     right: leg.optionType === "call" ? OptionType.Call : leg.optionType === "put" ? OptionType.Put : undefined,
   }));
+  const { underlyingContracts, symbolByPositionId } = buildUnderlyingStockPriceRequests(legRows);
+  priceContracts.push(...underlyingContracts);
   // A total connection failure (Gateway unreachable) must fall through to
   // the position_pnl_snapshots fallback below, same as a per-contract null
   // price does -- not 500 the whole route. fetchLivePrices throws instead
@@ -593,6 +613,7 @@ positionsRouter.get("/pnl", async (request, response) => {
   }
 
   const { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId } = computeUnrealizedPnlByPosition(positionIds, legRows, pricesByLegId);
+  const underlyingPriceByPositionId = computeUnderlyingStockPriceByPosition(positionIds, symbolByPositionId, pricesByLegId);
 
   const positionIdsMissingLive = positionIds.filter((id) => unrealizedByPositionId[id] === null);
   const fallbackByPositionId = new Map<
@@ -633,6 +654,7 @@ positionsRouter.get("/pnl", async (request, response) => {
         unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null,
         unrealizedStockPnl: stockByPositionId[positionId] ?? null,
         stockMarketValue: stockMarketValueByPositionId[positionId] ?? null,
+        underlyingPrice: underlyingPriceByPositionId[positionId] ?? null,
         asOfDate: null,
       };
       continue;
@@ -648,9 +670,10 @@ positionsRouter.get("/pnl", async (request, response) => {
           unrealizedStockPnl: fallback.stockPnl === null ? null : Number(fallback.stockPnl),
           // position_pnl_snapshots stores PnL deltas only, never market value.
           stockMarketValue: null,
+          underlyingPrice: underlyingPriceByPositionId[positionId] ?? null,
           asOfDate: fallback.snapshotDate,
         }
-      : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, asOfDate: null };
+      : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: underlyingPriceByPositionId[positionId] ?? null, asOfDate: null };
   }
 
   response.json(result);
@@ -697,6 +720,9 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
     right: leg.optionType === "call" ? OptionType.Call : leg.optionType === "put" ? OptionType.Put : undefined,
   }));
 
+  const { underlyingContracts, symbolByPositionId } = buildUnderlyingStockPriceRequests(legRows);
+  priceContracts.push(...underlyingContracts);
+
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
   response.setHeader("Connection", "keep-alive");
@@ -739,6 +765,12 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
       priceContracts,
       serializeAsyncCalls(async (pricesByLegId) => {
         const { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId } = computeUnrealizedPnlByPosition(positionIds, legRows, pricesByLegId);
+        const underlyingPriceByPositionId = computeUnderlyingStockPriceByPosition(positionIds, symbolByPositionId, pricesByLegId);
+        // Applied to every position on every event, including one whose P&L is still null or on its snapshot
+        // fallback, so the stock price ticks regardless of the legs. Like the P&L it never regresses to null.
+        const applyUnderlyingPrices = () => {
+          for (const [positionId, result] of Object.entries(lastGoodResult)) result.underlyingPrice = underlyingPriceByPositionId[positionId] ?? result.underlyingPrice;
+        };
 
         if (!isFirstEvent) {
           for (const positionId of positionIds) {
@@ -749,9 +781,11 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
               unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null,
               unrealizedStockPnl: stockByPositionId[positionId] ?? null,
               stockMarketValue: stockMarketValueByPositionId[positionId] ?? null,
+              underlyingPrice: lastGoodResult[positionId]?.underlyingPrice ?? null,
               asOfDate: null,
             };
           }
+          applyUnderlyingPrices();
           send(lastGoodResult);
           for (const [positionId, result] of Object.entries(lastGoodResult)) recordUnrealizedPnlSample(positionId, result.unrealizedPnl);
           return;
@@ -795,6 +829,7 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
               unrealizedPremiumPnl: premiumByPositionId[positionId] ?? null,
               unrealizedStockPnl: stockByPositionId[positionId] ?? null,
               stockMarketValue: stockMarketValueByPositionId[positionId] ?? null,
+              underlyingPrice: null,
               asOfDate: null,
             };
             continue;
@@ -806,10 +841,12 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
                 unrealizedPremiumPnl: fallback.premiumPnl === null ? null : Number(fallback.premiumPnl),
                 unrealizedStockPnl: fallback.stockPnl === null ? null : Number(fallback.stockPnl),
                 stockMarketValue: null,
+                underlyingPrice: null,
                 asOfDate: fallback.snapshotDate,
               }
-            : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, asOfDate: null };
+            : { unrealizedPnl: null, unrealizedPremiumPnl: null, unrealizedStockPnl: null, stockMarketValue: null, underlyingPrice: null, asOfDate: null };
         }
+        applyUnderlyingPrices();
         send(lastGoodResult);
         for (const [positionId, result] of Object.entries(lastGoodResult)) recordUnrealizedPnlSample(positionId, result.unrealizedPnl);
       }),

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { OrderLegPayload, OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import {
+  computeUnderlyingStockPriceByPosition,
   computeUnrealizedPnlByPosition,
   normalizeExpiryDate,
   roundToCents,
   sumSharesCommittedByCoveredCallPayloads,
+  underlyingStockPriceKey,
   validateCoveredCallCoverage,
   type OpenLegForUnrealizedPnl,
 } from "./positionOrderRules.js";
@@ -345,5 +347,17 @@ describe("computeUnrealizedPnlByPosition", () => {
     computeUnrealizedPnlByPosition(["P1"], legs, prices);
     expect(JSON.stringify(legs)).toBe(legsBefore);
     expect(prices).toEqual({ L1: 0.5 });
+  });
+});
+
+describe("computeUnderlyingStockPriceByPosition", () => {
+  it("prices every position from its symbol's underlying quote, whatever legs it holds", () => {
+    const prices = { [underlyingStockPriceKey("BMNR")]: 26.82, [underlyingStockPriceKey("TLT")]: 90.1, L1: 0.5 };
+    expect(computeUnderlyingStockPriceByPosition(["P1", "P2", "P3"], { P1: "BMNR", P2: "TLT", P3: "BMNR" }, prices)).toEqual({ P1: 26.82, P2: 90.1, P3: 26.82 });
+  });
+
+  it("is null for a symbol with no quote yet, a null quote, or a position with no symbol", () => {
+    const prices = { [underlyingStockPriceKey("NOQUOTE")]: null };
+    expect(computeUnderlyingStockPriceByPosition(["P1", "P2", "P3"], { P1: "NOQUOTE", P2: "ABSENT" }, prices)).toEqual({ P1: null, P2: null, P3: null });
   });
 });

@@ -110,3 +110,26 @@ export function computeUnrealizedPnlByPosition(
   }
   return { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId };
 }
+
+/** Price-request key of a symbol's underlying stock quote: never collides with a leg id, so the pool prices it beside the legs. */
+export function underlyingStockPriceKey(symbol: string): string {
+  return `underlying:${symbol}`;
+}
+
+/**
+ * Each position's underlying stock price, from the quote requested under underlyingStockPriceKey(its symbol).
+ * Strategy-agnostic: a cash-secured put, hedge or any future structure with no stock leg gets the same live price a
+ * covered call does. A position with no symbol or no quote yet is null.
+ */
+export function computeUnderlyingStockPriceByPosition(
+  positionIds: string[],
+  symbolByPositionId: Record<string, string>,
+  pricesByKey: Record<string, number | null>,
+): Record<string, number | null> {
+  const underlyingPriceByPositionId: Record<string, number | null> = {};
+  for (const positionId of positionIds) {
+    const symbol = symbolByPositionId[positionId];
+    underlyingPriceByPositionId[positionId] = symbol === undefined ? null : (pricesByKey[underlyingStockPriceKey(symbol)] ?? null);
+  }
+  return underlyingPriceByPositionId;
+}
