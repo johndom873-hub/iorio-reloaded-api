@@ -37,7 +37,14 @@ describe("Pluto schema", () => {
     const settings = await db("pluto_settings");
     expect(settings).toHaveLength(1);
     expect(settings[0].model_id).toBe("openai/gpt-6-luna");
-    expect(Number(settings[0].capital_budget_pct)).toBe(30);
+    // Approved 2026-10-06 for the $1M paper account: budget 50 %, order size 10 % of it, 15 positions, $1/day, 20 calls.
+    expect(Number(settings[0].capital_budget_pct)).toBe(50);
+    expect(Number(settings[0].order_size_pct_of_budget)).toBe(10);
+    expect(settings[0].max_open_positions).toBe(15);
+    expect(Number(settings[0].daily_cost_ceiling_usd)).toBe(1);
+    expect(settings[0].max_model_calls_per_session).toBe(20);
+    expect(settings[0].prompt_version).toBe("v3");
+    expect(settings[0].day_signals_poll_seconds).toBe(1);
     await expect(db("pluto_settings").insert({ id: 2 })).rejects.toThrow();
 
     const state = await db("pluto_state");

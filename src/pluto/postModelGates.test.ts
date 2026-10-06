@@ -6,13 +6,13 @@ import { computeSizingRoom, midLimitPrice, runPostModelGates, type PostModelBook
 import type { PlutoSettings } from "./settingsStore.js";
 
 const settings: PlutoSettings = {
-  capitalBudgetPct: 30, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, maxOrderNotionalPct: 10, minCashReservePct: 5,
+  capitalBudgetPct: 50, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeDollars: 30, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxAbsDayChangePct: 6,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
   maxEdgeDriftVp: 1, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
   modelId: "openai/gpt-6-luna", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 3, confidenceFloor: 0.6, maxModelCallsPerSession: 12, consecutiveModelFailuresBreaker: 3, promptVersion: "v1",
-  spotMoveTriggerPct: 1.5, burstLines: 10, burstSettleSeconds: 4, coalescingWindowSeconds: 20, perTickerModelCooldownMinutes: 10, globalMinCallIntervalSeconds: 60, maxEnabledTickers: 15, messageRateLimitPerSecond: 8,
+  daySignalsPollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, perTickerModelCooldownMinutes: 10, globalMinCallIntervalSeconds: 60, maxEnabledTickers: 15, messageRateLimitPerSecond: 8,
   crashLoopRestartsPerHour: 3, telegramVerbosity: "actions",
   unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50, buybackMinDte: 2,
   updatedAt: "2026-09-28T00:00:00.000Z", updatedByUserId: null,
@@ -29,10 +29,10 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
 
 const book: PostModelBookInput = {
   netLiquidationValue: 1_000_000, freeCash: 600_000, committedDollars: 50_000, inFlight: { totalNotional: 0, tickerNotional: 0, plutoNotional: 0 }, openPositionCount: 2, existingTickerExposure: 20_000, existingSectorExposure: 100_000, freeShares: 0,
-  workingOrderOnSymbol: false, lastFilledActionAt: null, nowMs: Date.parse("2026-09-28T16:00:00Z"), spotPrice: 110,
+  workingOrderOnSymbol: false, lastFilledActionAt: null, nowMs: Date.parse("2026-09-28T16:00:00Z"), spotPrice: 110, sameContractConflict: null,
 };
 
-const trade: PlutoDecision = { decision: "trade", actionKind: "open_cash_secured_put", candidateId: "HOOD:cash_secured_put:2026-10-16:100", sizeTier: "full", confidence: 0.8, reasons: ["r"], risksAcknowledged: [], systemConcerns: [] };
+const trade: PlutoDecision = { decision: "trade", actionKind: "open_cash_secured_put", candidateId: "HOOD:cash_secured_put:2026-10-16:100", confidence: 0.8, reasons: ["r"], risksAcknowledged: [], systemConcerns: [] };
 
 function input(overrides: Partial<PostModelGateInput> = {}): PostModelGateInput {
   return { decision: trade, candidate: candidate(), roll: null, freshRejectionReasons: [], netEdgeAtDecision: 0.1, settings, book, sector: "Financial", ...overrides };
@@ -43,20 +43,26 @@ function failed(output: ReturnType<typeof runPostModelGates>): string[] {
 }
 
 describe("runPostModelGates — a clean cash-secured put", () => {
-  it("passes every gate and sizes from the tightest room", () => {
+  it("passes every gate and sizes to the standard order size", () => {
     const output = runPostModelGates(input());
     expect(failed(output)).toEqual([]);
-    // budget room 250k, order cap 100k, ticker room 80k, cash room 550k → 80k / 10k = 8; volume share 20% of 300 = 60 → 8
-    expect(output.plan).toEqual({ quantity: 8, limitPrice: 2.05, notional: 80_000, fullSizeQuantity: 8 });
+    // order size 1M × 50% × 10% = 50k; budget room 450k, ticker room 80k, cash room 550k → 50k / 10k = 5; volume share 60 → 5
+    expect(output.plan).toEqual({ quantity: 5, limitPrice: 2.05, notional: 50_000, fullSizeQuantity: 5 });
   });
-  it("halves on the half tier, rounding down", () => {
-    expect(runPostModelGates(input({ decision: { ...trade, sizeTier: "half" } })).plan?.quantity).toBe(4);
-    const tiny = runPostModelGates(input({ decision: { ...trade, sizeTier: "half" }, book: { ...book, freeCash: 60_000 } }));
-    // cash room 10k → 1 contract full, half rounds to 0
-    expect(failed(tiny)).toEqual(["size_tier"]);
+  it("the order size is NLV × capital budget % × order size %", () => {
+    expect(computeSizingRoom(settings, book, false).orderCap).toBe(50_000);
+    expect(computeSizingRoom({ ...settings, capitalBudgetPct: 30, orderSizePctOfBudget: 20 }, book, false).orderCap).toBe(60_000);
+    expect(computeSizingRoom(settings, { ...book, netLiquidationValue: 1_100_000 }, false).orderCap).toBe(55_000);
+  });
+  it("a tighter limit than the order size wins, and contracts round down", () => {
+    // cash room 64k − 50k reserve = 14k → 1 contract
+    expect(runPostModelGates(input({ book: { ...book, freeCash: 64_000 } })).plan?.quantity).toBe(1);
+    // a $600 strike costs 60k a contract: more than the 50k order size → nothing
+    expect(failed(runPostModelGates(input({ candidate: candidate({ strike: 600 }) })))).toEqual(["sizing"]);
   });
   it("the volume share caps the quantity", () => {
     expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).plan?.quantity).toBe(4);
+    expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).gates.find((gate) => gate.gate === "sizing")?.detail).toBe("order size $50000, budget left $450000, ticker room $80000, cash room $550000 → 5 contract(s) at $10000 each; volume share allows 4 → $40000");
     expect(failed(runPostModelGates(input({ candidate: candidate({ volume: 3 }) })))).toEqual(["sizing"]);
   });
 });
@@ -93,6 +99,12 @@ describe("runPostModelGates — the gates", () => {
     // sector room 110k − 100k = 10k → 1 contract
     expect(capped.plan?.quantity).toBe(1);
   });
+  it("refuses a contract that is already held or has a working order, puts and calls alike", () => {
+    const held = runPostModelGates(input({ book: { ...book, sameContractConflict: "open position on HOOD 2026-10-16 $100 (call)" } }));
+    expect(failed(held)).toEqual(["same_contract"]);
+    expect(held.gates.find((gate) => gate.gate === "same_contract")?.detail).toBe("open position on HOOD 2026-10-16 $100 (call)");
+    expect(runPostModelGates(input()).gates.find((gate) => gate.gate === "same_contract")).toEqual({ gate: "same_contract", ok: true, detail: "no open position or working order on 2026-10-16 $100" });
+  });
   it("lists every failing gate, not just the first", () => {
     expect(failed(runPostModelGates(input({ decision: { ...trade, confidence: 0.1 }, book: { ...book, workingOrderOnSymbol: true } })))).toEqual(["confidence_floor", "working_order"]);
   });
@@ -102,21 +114,19 @@ describe("runPostModelGates — covered calls and rolls", () => {
   it("a covered call uses free shares first, then buy-writes sized like a put from the tightest room", () => {
     const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22 });
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
-    // 350 free shares → 3 covered; room 80k / (110 × 100) = 7 buy-writes → 10 contracts, 7 × 11,000 bought
-    expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350 } })).plan).toEqual({ quantity: 10, limitPrice: 2.05, notional: 77_000, fullSizeQuantity: 10 });
+    // 350 free shares → 3 covered; order size 50k / (110 × 100) = 4 buy-writes → 7 contracts, 4 × 11,000 bought
+    expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350 } })).plan).toEqual({ quantity: 7, limitPrice: 2.05, notional: 44_000, fullSizeQuantity: 7 });
     // no free shares at all: a pure buy-write
-    expect(runPostModelGates(input({ decision, candidate: call })).plan).toEqual({ quantity: 7, limitPrice: 2.05, notional: 77_000, fullSizeQuantity: 7 });
-    // half of 10 = 5: the 3 covered contracts are free, 2 are bought
-    expect(runPostModelGates(input({ decision: { ...decision, sizeTier: "half" }, candidate: call, book: { ...book, freeShares: 350 } })).plan).toEqual({ quantity: 5, limitPrice: 2.05, notional: 22_000, fullSizeQuantity: 10 });
+    expect(runPostModelGates(input({ decision, candidate: call })).plan).toEqual({ quantity: 4, limitPrice: 2.05, notional: 44_000, fullSizeQuantity: 4 });
     // no room and no shares → nothing
     const none = runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 80, freeCash: 40_000 } }));
     expect(failed(none)).toEqual(["sizing"]);
     // no live spot: free shares only
     expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350, spotPrice: null } })).plan).toEqual({ quantity: 3, limitPrice: 2.05, notional: 0, fullSizeQuantity: 3 });
   });
-  it("a roll keeps the held quantity, ignores the tier, and only counts a strike increase as notional", () => {
+  it("a roll keeps the held quantity and only counts a strike increase as notional", () => {
     const roll: RollSignalCandidate = { legId: "leg1", positionId: "p1", strategyKey: "cash_secured_put", quantity: 3, replacement: candidate({ strike: 95 }), netRollEdge: 0.07, netRollEdgeDollarsPerContract: 40, netRollEdgeDollars: 120, netCreditPerShare: 0.4, deltaChange: -0.02, dollarRiskChange: -500, flags: [], warnings: [], grade: "good" };
-    const decision: PlutoDecision = { ...trade, actionKind: "roll", candidateId: "HOOD:roll:leg1:2026-10-16:95", sizeTier: "half" };
+    const decision: PlutoDecision = { ...trade, actionKind: "roll", candidateId: "HOOD:roll:leg1:2026-10-16:95" };
     const output = runPostModelGates(input({ decision, candidate: null, roll, netEdgeAtDecision: 0.07 }));
     expect(failed(output)).toEqual([]);
     expect(output.plan).toEqual({ quantity: 3, limitPrice: 2.05, notional: 0, fullSizeQuantity: 3 });

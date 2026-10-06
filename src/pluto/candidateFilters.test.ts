@@ -10,13 +10,13 @@ const now = Date.parse("2026-09-28T15:00:00Z"); // 11:00 ET
 const today = "2026-09-28";
 
 const settings: PlutoSettings = {
-  capitalBudgetPct: 30, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, maxOrderNotionalPct: 10, minCashReservePct: 5,
+  capitalBudgetPct: 30, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeDollars: 30, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxAbsDayChangePct: 6,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
   maxEdgeDriftVp: 1, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
   modelId: "openai/gpt-6-luna", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 3, confidenceFloor: 0.6, maxModelCallsPerSession: 12, consecutiveModelFailuresBreaker: 3, promptVersion: "v1",
-  spotMoveTriggerPct: 1.5, burstLines: 10, burstSettleSeconds: 4, coalescingWindowSeconds: 20, perTickerModelCooldownMinutes: 10, globalMinCallIntervalSeconds: 60, maxEnabledTickers: 15, messageRateLimitPerSecond: 8,
+  daySignalsPollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, perTickerModelCooldownMinutes: 10, globalMinCallIntervalSeconds: 60, maxEnabledTickers: 15, messageRateLimitPerSecond: 8,
   crashLoopRestartsPerHour: 3, telegramVerbosity: "actions",
   unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50, buybackMinDte: 2,
   updatedAt: "2026-09-28T00:00:00.000Z", updatedByUserId: null,

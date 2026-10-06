@@ -1,18 +1,16 @@
 // The model's output contract (design round 3, item 24, approved 2026-09-28). The model never
-// authors a strike, an expiry, a quantity or a price: it names one of the ids the pass offered,
-// a size tier, and its reasons. Anything that does not parse against this schema is a no_trade.
+// authors a strike, an expiry, a quantity, a size or a price: it names one of the ids the round offered and
+// its reasons; code sizes every order to the standard order size. Anything that does not parse is a no_trade.
 // The JSON schema is sent to OpenRouter as a strict response_format AND re-validated here —
 // server-side enforcement varies by model, client-side validation does not.
 
 export type PlutoDecisionVerdict = "trade" | "no_trade" | "abstain_system_concern";
 export type PlutoDecisionActionKind = "open_covered_call" | "open_cash_secured_put" | "roll" | "close_shares" | "close_leg";
-export type PlutoSizeTier = "full" | "half";
 
 export interface PlutoDecision {
   decision: PlutoDecisionVerdict;
   actionKind: PlutoDecisionActionKind | null;
   candidateId: string | null;
-  sizeTier: PlutoSizeTier | null;
   confidence: number;
   reasons: string[];
   risksAcknowledged: string[];
@@ -22,12 +20,11 @@ export interface PlutoDecision {
 export const plutoDecisionJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["decision", "action_kind", "candidate_id", "size_tier", "confidence", "reasons", "risks_acknowledged", "system_concerns"],
+  required: ["decision", "action_kind", "candidate_id", "confidence", "reasons", "risks_acknowledged", "system_concerns"],
   properties: {
     decision: { type: "string", enum: ["trade", "no_trade", "abstain_system_concern"] },
     action_kind: { type: ["string", "null"], enum: ["open_covered_call", "open_cash_secured_put", "roll", "close_shares", "close_leg", null] },
     candidate_id: { type: ["string", "null"] },
-    size_tier: { type: ["string", "null"], enum: ["full", "half", null] },
     confidence: { type: "number", minimum: 0, maximum: 1 },
     reasons: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 5 },
     risks_acknowledged: { type: "array", items: { type: "string" }, maxItems: 10 },
@@ -37,7 +34,6 @@ export const plutoDecisionJsonSchema = {
 
 const verdicts = new Set<string>(["trade", "no_trade", "abstain_system_concern"]);
 const actionKinds = new Set<string>(["open_covered_call", "open_cash_secured_put", "roll", "close_shares", "close_leg"]);
-const sizeTiers = new Set<string>(["full", "half"]);
 
 export type ParsedPlutoDecision = { ok: true; decision: PlutoDecision } | { ok: false; error: string };
 
@@ -69,8 +65,6 @@ export function parsePlutoDecision(rawText: string, offeredIds: ReadonlySet<stri
   if (actionKind !== null && (typeof actionKind !== "string" || !actionKinds.has(actionKind))) return { ok: false, error: "action_kind is not a known kind" };
   const candidateId = object.candidate_id ?? null;
   if (candidateId !== null && typeof candidateId !== "string") return { ok: false, error: "candidate_id must be a string or null" };
-  const sizeTier = object.size_tier ?? null;
-  if (sizeTier !== null && (typeof sizeTier !== "string" || !sizeTiers.has(sizeTier))) return { ok: false, error: "size_tier must be full, half or null" };
   const confidence = object.confidence;
   if (typeof confidence !== "number" || Number.isNaN(confidence) || confidence < 0 || confidence > 1) return { ok: false, error: "confidence must be a number between 0 and 1" };
   const reasons = stringArray(object.reasons, "reasons", 5, 1);
@@ -84,7 +78,6 @@ export function parsePlutoDecision(rawText: string, offeredIds: ReadonlySet<stri
     if (actionKind === null) return { ok: false, error: "a trade needs an action_kind" };
     if (candidateId === null) return { ok: false, error: "a trade needs a candidate_id" };
     if (!offeredIds.has(candidateId)) return { ok: false, error: `candidate_id ${candidateId} was not offered this pass` };
-    if (sizeTier === null) return { ok: false, error: "a trade needs a size_tier" };
     const expectedKind = kindFromCandidateId(candidateId);
     if (expectedKind && expectedKind !== actionKind) return { ok: false, error: `action_kind ${actionKind} does not match candidate ${candidateId}` };
   }
@@ -95,7 +88,6 @@ export function parsePlutoDecision(rawText: string, offeredIds: ReadonlySet<stri
       decision: decision as PlutoDecisionVerdict,
       actionKind: (decision === "trade" ? actionKind : null) as PlutoDecisionActionKind | null,
       candidateId: decision === "trade" ? (candidateId as string) : null,
-      sizeTier: decision === "trade" ? (sizeTier as PlutoSizeTier) : null,
       confidence,
       reasons,
       risksAcknowledged: risks,
@@ -125,19 +117,18 @@ function extractJsonObject(text: string): string {
   return trimmed.slice(start, end + 1);
 }
 
-/** Two calls agree when they reach the same verdict on the same candidate; the smaller size tier is taken. */
+/** Two calls agree when they reach the same verdict on the same candidate. */
 export function reconcileAgreement(first: PlutoDecision, second: PlutoDecision): { agreed: boolean; decision: PlutoDecision; detail: string } {
   if (first.decision !== second.decision) return { agreed: false, decision: noTrade(`calls disagree on the verdict (${first.decision} vs ${second.decision})`), detail: "verdict mismatch" };
   if (first.decision !== "trade") return { agreed: true, decision: first, detail: `both ${first.decision}` };
   if (first.candidateId !== second.candidateId) return { agreed: false, decision: noTrade(`calls disagree on the candidate (${first.candidateId} vs ${second.candidateId})`), detail: "candidate mismatch" };
-  const sizeTier: PlutoSizeTier = first.sizeTier === "half" || second.sizeTier === "half" ? "half" : "full";
   return {
     agreed: true,
-    decision: { ...first, sizeTier, confidence: Math.min(first.confidence, second.confidence), reasons: first.reasons, risksAcknowledged: [...new Set([...first.risksAcknowledged, ...second.risksAcknowledged])] },
-    detail: `both trade ${first.candidateId} (${sizeTier})`,
+    decision: { ...first, confidence: Math.min(first.confidence, second.confidence), reasons: first.reasons, risksAcknowledged: [...new Set([...first.risksAcknowledged, ...second.risksAcknowledged])] },
+    detail: `both trade ${first.candidateId}`,
   };
 }
 
 export function noTrade(reason: string): PlutoDecision {
-  return { decision: "no_trade", actionKind: null, candidateId: null, sizeTier: null, confidence: 1, reasons: [reason], risksAcknowledged: [], systemConcerns: [] };
+  return { decision: "no_trade", actionKind: null, candidateId: null, confidence: 1, reasons: [reason], risksAcknowledged: [], systemConcerns: [] };
 }

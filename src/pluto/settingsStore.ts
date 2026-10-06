@@ -17,7 +17,8 @@ export interface PlutoSettings {
   maxSectorExposurePct: number;
   maxOpenPositions: number;
   maxActionsPerSession: number;
-  maxOrderNotionalPct: number;
+  /** The standard order: this share of Pluto's capital budget (budget = capitalBudgetPct of NLV). */
+  orderSizePctOfBudget: number;
   minCashReservePct: number;
   // Candidate quality
   minGrade: PlutoGrade;
@@ -57,11 +58,11 @@ export interface PlutoSettings {
   maxModelCallsPerSession: number;
   consecutiveModelFailuresBreaker: number;
   promptVersion: string;
-  // Real-time triggers
-  spotMoveTriggerPct: number;
+  // Real-time
+  /** How often the loop checks the Day Signals table for contracts quoted since Pluto last analysed them. */
+  daySignalsPollSeconds: number;
   burstLines: number;
   burstSettleSeconds: number;
-  coalescingWindowSeconds: number;
   perTickerModelCooldownMinutes: number;
   globalMinCallIntervalSeconds: number;
   maxEnabledTickers: number;
@@ -86,7 +87,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   maxSectorExposurePct: { column: "max_sector_exposure_pct", kind: "number", min: 0, max: 100 },
   maxOpenPositions: { column: "max_open_positions", kind: "integer", min: 0 },
   maxActionsPerSession: { column: "max_actions_per_session", kind: "integer", min: 0 },
-  maxOrderNotionalPct: { column: "max_order_notional_pct", kind: "number", min: 0, max: 100 },
+  orderSizePctOfBudget: { column: "order_size_pct_of_budget", kind: "number", min: 0, max: 100 },
   minCashReservePct: { column: "min_cash_reserve_pct", kind: "number", min: 0, max: 100 },
   minGrade: { column: "min_grade", kind: "text", oneOf: ["strong", "good", "weak"] },
   minEdgeDollars: { column: "min_edge_dollars", kind: "number", min: 0 },
@@ -119,10 +120,9 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   maxModelCallsPerSession: { column: "max_model_calls_per_session", kind: "integer", min: 0 },
   consecutiveModelFailuresBreaker: { column: "consecutive_model_failures_breaker", kind: "integer", min: 1 },
   promptVersion: { column: "prompt_version", kind: "text" },
-  spotMoveTriggerPct: { column: "spot_move_trigger_pct", kind: "number", min: 0 },
+  daySignalsPollSeconds: { column: "day_signals_poll_seconds", kind: "integer", min: 1 },
   burstLines: { column: "burst_lines", kind: "integer", min: 1 },
   burstSettleSeconds: { column: "burst_settle_seconds", kind: "integer", min: 1 },
-  coalescingWindowSeconds: { column: "coalescing_window_seconds", kind: "integer", min: 0 },
   perTickerModelCooldownMinutes: { column: "per_ticker_model_cooldown_minutes", kind: "integer", min: 0 },
   globalMinCallIntervalSeconds: { column: "global_min_call_interval_seconds", kind: "integer", min: 0 },
   maxEnabledTickers: { column: "max_enabled_tickers", kind: "integer", min: 0 },

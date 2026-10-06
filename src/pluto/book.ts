@@ -3,6 +3,7 @@ import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { computeInFlightOrderNotional } from "../lib/orderLimits.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { positionSelect } from "../lib/positionQueries.js";
+import type { OccupiedContract } from "./candidateFilters.js";
 
 // Pluto's book: the open positions its own orders created (order_requests.pluto_action_id →
 // trades.source_order_request_id → position_legs → positions) or that received shares from them
@@ -97,4 +98,37 @@ export async function loadInFlightNotionals(symbol: string): Promise<{ totalNoti
     if (row.pluto_action_id !== null) totals.plutoNotional += notional;
   }
   return totals;
+}
+
+function describeContract(symbol: string, expiry: string, strike: number, right: string | null): string {
+  const kind = right === "call" || right === "C" ? "call" : right === "put" || right === "P" ? "put" : "option";
+  return `${symbol} ${expiry} $${strike} ${kind}`;
+}
+
+/**
+ * Every contract on the symbol already taken: open option legs (anyone's, human or Pluto) and the option legs of
+ * orders still active (any origin). Expiry as YYYY-MM-DD, the way candidates carry it.
+ */
+export async function loadOccupiedContracts(symbol: string): Promise<OccupiedContract[]> {
+  const [legs, orders] = await Promise.all([
+    db("position_legs as pl")
+      .join("positions as p", "p.id", "pl.position_id")
+      .join("tickers as t", "t.id", "p.ticker_id")
+      .where("t.symbol", symbol)
+      .where("pl.leg_type", "option")
+      .whereNull("pl.exit_at")
+      .select(db.raw("to_char(pl.expiry_date, 'YYYY-MM-DD') as expiry"), "pl.strike_price as strike", "pl.option_type as right"),
+    db("order_requests").whereIn("status", activeOrderRequestStatuses).whereRaw("payload->>'symbol' = ?", [symbol]).select("payload"),
+  ]);
+  const occupied: OccupiedContract[] = (legs as { expiry: string | null; strike: string | null; right: string | null }[])
+    .filter((leg) => leg.expiry !== null && leg.strike !== null)
+    .map((leg) => ({ expiry: leg.expiry!, strike: Number(leg.strike), detail: `open position on ${describeContract(symbol, leg.expiry!, Number(leg.strike), leg.right)}` }));
+  for (const { payload } of orders as { payload: OrderRequestPayload }[]) {
+    for (const leg of payload.legs ?? []) {
+      if (leg.role !== "option" || !leg.expiry || leg.strike === undefined || leg.strike === null) continue;
+      const expiry = /^\d{8}$/.test(leg.expiry) ? `${leg.expiry.slice(0, 4)}-${leg.expiry.slice(4, 6)}-${leg.expiry.slice(6, 8)}` : leg.expiry;
+      occupied.push({ expiry, strike: Number(leg.strike), detail: `working order on ${describeContract(symbol, expiry, Number(leg.strike), leg.right ?? null)}` });
+    }
+  }
+  return occupied;
 }

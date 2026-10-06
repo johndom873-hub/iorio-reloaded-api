@@ -105,15 +105,15 @@ export function plutoDecisionFromJev(answers: Record<string, JevAnswer>, offered
   const concern = answers.system_concern;
   const concernProbability = concern && concern.type === "noul" ? concern.noul : null;
   if (!action || action.type !== "choice") {
-    return { decision: "no_trade", actionKind: null, candidateId: null, sizeTier: null, confidence: 0, reasons: ["jev: no choice answer"], risksAcknowledged: [], systemConcerns: [] };
+    return { decision: "no_trade", actionKind: null, candidateId: null, confidence: 0, reasons: ["jev: no choice answer"], risksAcknowledged: [], systemConcerns: [] };
   }
   const probability = action.probabilities[action.choice] ?? 0;
   const summary = `jev: ${action.choice} p=${probability.toFixed(2)} confidence=${action.confidence.toFixed(2)}${concernProbability !== null ? ` stand_aside=${concernProbability.toFixed(2)}` : ""}`;
   if (concernProbability !== null && concernProbability >= 0.5) {
-    return { decision: "abstain_system_concern", actionKind: null, candidateId: null, sizeTier: null, confidence: concernProbability, reasons: [summary], risksAcknowledged: [], systemConcerns: [`jev stand-aside probability ${concernProbability.toFixed(2)}`] };
+    return { decision: "abstain_system_concern", actionKind: null, candidateId: null, confidence: concernProbability, reasons: [summary], risksAcknowledged: [], systemConcerns: [`jev stand-aside probability ${concernProbability.toFixed(2)}`] };
   }
   if (action.choice === "no_trade" || !offeredIds.has(action.choice)) {
-    return { decision: "no_trade", actionKind: null, candidateId: null, sizeTier: null, confidence: action.confidence, reasons: [summary], risksAcknowledged: [], systemConcerns: [] };
+    return { decision: "no_trade", actionKind: null, candidateId: null, confidence: action.confidence, reasons: [summary], risksAcknowledged: [], systemConcerns: [] };
   }
-  return { decision: "trade", actionKind: kindFromCandidateId(action.choice), candidateId: action.choice, sizeTier: "full", confidence: action.confidence, reasons: [summary], risksAcknowledged: [], systemConcerns: [] };
+  return { decision: "trade", actionKind: kindFromCandidateId(action.choice), candidateId: action.choice, confidence: action.confidence, reasons: [summary], risksAcknowledged: [], systemConcerns: [] };
 }

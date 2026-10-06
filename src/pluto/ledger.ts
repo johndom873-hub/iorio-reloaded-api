@@ -6,7 +6,12 @@ import { publishNotification } from "../lib/notificationChannel.js";
 // concrete outcome (including "no_trade"), and a timeline of events. Writers only; the
 // routes read.
 
-export type PlutoTrigger = "opening_look" | "spot_move" | "grade_crossing" | "day_quotes" | "held_leg" | "manual" | "housekeeping" | "settings_changed";
+/**
+ * What started an analysis round. day_signals_update is relabelled grade_crossing or held_leg when that is what
+ * changed; the rest run without a new quote: the day's first analysis, a settings change, an order ending, a ticker's
+ * cooldown ending, a position closing.
+ */
+export type PlutoTrigger = "opening_analysis" | "day_signals_update" | "grade_crossing" | "held_leg" | "settings_changed" | "order_ended" | "cooldown_ended" | "position_closed" | "manual";
 
 export interface PlutoSystemCheck {
   ok: boolean;

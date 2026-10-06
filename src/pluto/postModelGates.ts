@@ -7,7 +7,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 // Post-model validation (design round 3, item 21, approved 2026-09-28). Nothing the model said
 // is trusted: the chosen candidate is re-scored on fresh quotes and re-filtered by the caller,
 // and this module re-derives everything else — confidence, drift, capacity, the quantity (code
-// sizes; the model only picked a tier) and the limit price. Pure, so every rule is unit-tested.
+// sizes in dollars from the standard order size) and the limit price. Pure, so every rule is unit-tested.
 // The platform's order gate (halt, limits from trading_settings including working orders, delta band, close gate,
 // limit-price check) runs again at build and confirm, and in the worker before placement, on top of this.
 
@@ -33,6 +33,12 @@ export interface PostModelBookInput {
   /** When Pluto last acted on this symbol with an order that filled (fully or partly); null if never. */
   lastFilledActionAt: Date | null;
   nowMs: number;
+  /**
+   * An open position (anyone's) or a working order on the same ticker, expiry and strike, puts and calls alike
+   * (Marcelo, 2026-10-06): the platform keeps one position per contract, so a second order would merge into it.
+   * Null when the contract is free; otherwise what occupies it, for the gate's detail.
+   */
+  sameContractConflict: string | null;
 }
 
 export interface PostModelGateInput {
@@ -75,6 +81,7 @@ export function midLimitPrice(bid: number, ask: number): number {
 
 export interface SizingRoom {
   budgetRoom: number;
+  /** The standard order size: NLV × capital budget % × order size % (Marcelo, 2026-10-06). */
   orderCap: number;
   tickerRoom: number;
   sectorRoom: number;
@@ -85,7 +92,7 @@ export function computeSizingRoom(settings: PlutoSettings, book: PostModelBookIn
   const nlv = book.netLiquidationValue;
   return {
     budgetRoom: (nlv * settings.capitalBudgetPct) / 100 - book.committedDollars - book.inFlight.plutoNotional,
-    orderCap: (nlv * settings.maxOrderNotionalPct) / 100,
+    orderCap: (((nlv * settings.capitalBudgetPct) / 100) * settings.orderSizePctOfBudget) / 100,
     tickerRoom: (nlv * settings.maxTickerExposurePct) / 100 - book.existingTickerExposure - book.inFlight.tickerNotional,
     sectorRoom: sectorKnown && settings.maxSectorExposurePct < 100 ? (nlv * settings.maxSectorExposurePct) / 100 - book.existingSectorExposure : Number.POSITIVE_INFINITY,
     cashRoom: book.freeCash - book.inFlight.totalNotional - (nlv * settings.minCashReservePct) / 100,
@@ -93,8 +100,8 @@ export function computeSizingRoom(settings: PlutoSettings, book: PostModelBookIn
 }
 
 function describeRoom(room: SizingRoom): string {
-  const parts = [`budget ${room.budgetRoom.toFixed(0)}`, `order cap ${room.orderCap.toFixed(0)}`, `ticker ${room.tickerRoom.toFixed(0)}`, `cash ${room.cashRoom.toFixed(0)}`];
-  if (Number.isFinite(room.sectorRoom)) parts.push(`sector ${room.sectorRoom.toFixed(0)}`);
+  const parts = [`order size $${room.orderCap.toFixed(0)}`, `budget left $${room.budgetRoom.toFixed(0)}`, `ticker room $${room.tickerRoom.toFixed(0)}`, `cash room $${room.cashRoom.toFixed(0)}`];
+  if (Number.isFinite(room.sectorRoom)) parts.push(`sector room $${room.sectorRoom.toFixed(0)}`);
   return parts.join(", ");
 }
 
@@ -131,8 +138,9 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
       : `last filled Pluto action on this symbol ${Math.floor(minutesSinceLastFill)} min ago (cooldown ${settings.tickerCooldownMinutes} min)`,
   );
   if (!isRoll) gate("open_positions_cap", book.openPositionCount < settings.maxOpenPositions, `${book.openPositionCount} of ${settings.maxOpenPositions} open Pluto positions`);
+  gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${candidate.expiry} $${candidate.strike}`);
 
-  // Sizing — code sizes (design item 4); the model only picked full or half.
+  // Sizing in dollars: the standard order size, less only where a tighter limit binds; contracts follow from it.
   const room = computeSizingRoom(settings, book, input.sector !== null);
   const liquidityCap = volumeCap(candidate.volume, settings);
   let fullSizeQuantity: number;
@@ -148,7 +156,7 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
     const byRoom = Math.floor(Math.max(0, roomDollars) / unitNotional);
     fullSizeQuantity = Math.min(byRoom, liquidityCap);
-    gate("sizing", fullSizeQuantity >= 1, `room allows ${byRoom} contract(s) (${describeRoom(room)}), volume share allows ${liquidityCap}`);
+    gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at $${unitNotional.toFixed(0)} each; volume share allows ${liquidityCap} → $${(fullSizeQuantity * unitNotional).toFixed(0)}`);
   } else {
     // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
     // contract is a buy-write that buys 100 shares at the live spot, sized from the same room as a put.
@@ -165,11 +173,9 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
       gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${coveredByShares} contract(s), room allows ${buyWriteContracts} buy-write contract(s) at ${book.spotPrice.toFixed(2)} (${describeRoom(room)}), volume share allows ${liquidityCap}`);
     }
     // Only the shares actually bought count as notional: the free-share contracts commit no new cash.
-    const plannedQuantity = decision.sizeTier === "half" ? Math.floor(fullSizeQuantity / 2) : fullSizeQuantity;
-    unitNotional = plannedQuantity > 0 ? (Math.max(0, plannedQuantity - coveredByShares) * unitNotional) / plannedQuantity : 0;
+    unitNotional = fullSizeQuantity > 0 ? (Math.max(0, fullSizeQuantity - coveredByShares) * unitNotional) / fullSizeQuantity : 0;
   }
-  const quantity = decision.sizeTier === "half" && !isRoll ? Math.floor(fullSizeQuantity / 2) : fullSizeQuantity;
-  if (fullSizeQuantity >= 1) gate("size_tier", quantity >= 1, quantity >= 1 ? `${decision.sizeTier} size = ${quantity} contract(s)` : "half size rounds down to zero contracts");
+  const quantity = fullSizeQuantity;
 
   const limitPrice = midLimitPrice(candidate.bid, candidate.ask);
   gate("limit_price", limitPrice >= candidate.bid && limitPrice <= candidate.ask && limitPrice > 0, `mid ${limitPrice.toFixed(2)} inside ${candidate.bid.toFixed(2)}–${candidate.ask.toFixed(2)}`);

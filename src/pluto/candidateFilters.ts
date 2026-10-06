@@ -49,6 +49,23 @@ export interface PlutoTickerFilterInput {
   todayEasternIso: string;
   nowMs: number;
   botEnabled: boolean;
+  /** Contracts on this ticker already held (by anyone) or with a working order: Pluto never opens a second position on one. */
+  occupiedContracts?: OccupiedContract[];
+}
+
+/** A contract on the ticker that is already taken: an open option leg (anyone's) or a leg of a working order. */
+export interface OccupiedContract {
+  expiry: string;
+  strike: number;
+  detail: string;
+}
+
+/**
+ * One position per ticker, expiry and strike, puts and calls alike (Marcelo, 2026-10-06): the platform keeps one
+ * position per contract, so a second order on a held contract would merge into it, possibly a human's.
+ */
+export function findSameContractConflict(occupied: OccupiedContract[], expiry: string, strike: number): string | null {
+  return occupied.find((entry) => entry.expiry === expiry && Math.abs(entry.strike - strike) < 0.0001)?.detail ?? null;
 }
 
 export function openCandidateId(symbol: string, candidate: Pick<SignalCandidate, "strategyKey" | "expiry" | "strike">): string {
@@ -127,9 +144,12 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
   const slicesByExpiry = new Map(input.slices.map((slice) => [slice.expiry, slice]));
   const context = { scored, slicesByExpiry, settings: input.settings, nowMs: input.nowMs };
 
+  const occupied = input.occupiedContracts ?? [];
   for (const candidate of scored.candidates) {
     const id = openCandidateId(scored.symbol, candidate);
     const reasons = rejectOpenCandidate(candidate, context);
+    const conflict = findSameContractConflict(occupied, candidate.expiry, candidate.strike);
+    if (conflict) reasons.push(`same contract: ${conflict}`);
     if (reasons.length === 0) result.eligible.push({ id, kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate });
     else result.rejected.push({ id, reasons });
   }
@@ -142,6 +162,8 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
     // The replacement leg must be tradeable on its own terms, minus the grade/Edge $ rules already judged on the roll.
     const replacementReasons = rejectOpenCandidate({ ...roll.replacement, grade: "strong", edgeDollars: Number.MAX_SAFE_INTEGER }, context);
     reasons.push(...replacementReasons.map((reason) => `replacement: ${reason}`));
+    const conflict = findSameContractConflict(occupied, roll.replacement.expiry, roll.replacement.strike);
+    if (conflict) reasons.push(`replacement: same contract: ${conflict}`);
     if (reasons.length === 0) result.eligibleRolls.push({ id, kind: "roll", symbol: scored.symbol, roll });
     else result.rejectedRolls.push({ id, reasons });
   }

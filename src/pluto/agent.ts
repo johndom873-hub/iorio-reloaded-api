@@ -15,25 +15,27 @@ import { runPlutoPass, type PassRunnerContext } from "./passRunner.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease } from "./stateStore.js";
+import { findNewlyQuotedContracts, loadTodaysDaySignalQuoteStamps, rememberAnalysed } from "./daySignalsWatermark.js";
 import { isInsideTradingWindow } from "./systemChecks.js";
 
-// The Pluto agent process (design round 4, 2026-09-28). Event-driven, not a decision loop:
+// The Pluto agent process (design round 4, 2026-09-28; loop redesigned 2026-10-06):
 //   - boot: crash-loop and deploy detection pause the agent before it can act;
 //   - a 45 s heartbeat row (worker_health, process_name "pluto_agent") for the screen;
-//   - a 60 s housekeeping tick: settings, state, the watched stock lines, the opening look;
-//   - a 30 s day-quotes poll and spot-move triggers, both coalesced into one pass per window;
-//   - passes run one at a time; order watches outlive their pass.
+//   - a 60 s housekeeping tick: settings, state, the watched stock lines, the opening analysis;
+//   - one continuous loop: every daySignalsPollSeconds it reads the Day Signals table and analyses the tickers whose
+//     contracts carry a quote newer than the one Pluto last analysed; events that change a decision without a new
+//     quote (an order ending, a cooldown ending, a position closing, a settings change) queue a forced round;
+//   - rounds run one at a time, never overlapping; order watches outlive their round.
 
 const heartbeatIntervalMs = 45_000;
 const housekeepingIntervalMs = 60_000;
-const dayQuotesPollIntervalMs = 30_000;
 export const plutoProcessName = "pluto_agent";
 
 // Settings that shape how Pluto operates but never what it would decide: changing only these does
 // not warrant a forced pass (and its model call).
 export const settingsFieldsThatNeverChangeADecision = new Set([
   "telegramVerbosity", "crashLoopRestartsPerHour", "messageRateLimitPerSecond", "burstLines", "burstSettleSeconds",
-  "coalescingWindowSeconds", "callTimeoutSeconds", "maxEnabledTickers", "promptVersion",
+  "daySignalsPollSeconds", "callTimeoutSeconds", "maxEnabledTickers", "promptVersion",
 ]);
 
 export class PlutoAgent {
@@ -42,12 +44,13 @@ export class PlutoAgent {
   private settings: PlutoSettings | null = null;
   private timers: ReturnType<typeof setInterval>[] = [];
   private unsubscribeNotifications: (() => void) | null = null;
-  private coalesceTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingSymbols = new Set<string>();
-  private pendingTrigger: PlutoTrigger = "day_quotes";
-  private pendingDetail: Record<string, unknown> = {};
-  private pendingForce = false;
-  private passChain: Promise<unknown> = Promise.resolve();
+  /** quoted_at last analysed, per Day Signals contract. */
+  private readonly lastAnalysedQuotedAtMs = new Map<string, number>();
+  /** Forced rounds waiting for the loop, in arrival order; null symbols = every allowed ticker. */
+  private readonly forcedRounds: { trigger: PlutoTrigger; detail: Record<string, unknown>; symbols: string[] | null }[] = [];
+  private readonly cooldownTimers = new Set<ReturnType<typeof setTimeout>>();
+  private loopDone: Promise<void> = Promise.resolve();
+  private wakeLoop: (() => void) | null = null;
   private readonly watches = new Set<Promise<unknown>>();
   private readonly watchedOrderIds = new Set<string>();
   private openingLookDoneFor: string | null = null;
@@ -66,10 +69,11 @@ export class PlutoAgent {
       lastFingerprintBySymbol: new Map(),
       lastModelEvaluationAtBySymbol: new Map(),
       lastModelCallAtMs: { value: null },
-      trackWatch: (promise, orderId) => {
+      trackWatch: (promise, orderId, symbol) => {
         this.watches.add(promise);
         this.watchedOrderIds.add(orderId);
         promise
+          .then((result) => this.onOrderEnded(symbol, result))
           .catch((error) => console.error(`Pluto: order watch failed — ${error instanceof Error ? error.message : error}`))
           .finally(() => {
             this.watches.delete(promise);
@@ -91,17 +95,20 @@ export class PlutoAgent {
     await this.heartbeat();
     this.timers.push(setInterval(() => void this.heartbeat(), heartbeatIntervalMs));
     this.timers.push(setInterval(() => void this.housekeeping(), housekeepingIntervalMs));
-    this.timers.push(setInterval(() => void this.pollDayQuotes(), dayQuotesPollIntervalMs));
-    this.marketWatch.onSpotMove((trigger) => this.enqueue("spot_move", [trigger.symbol], { symbol: trigger.symbol, movePct: Math.round(trigger.movePct * 100) / 100, fromSpot: trigger.fromSpot, spot: trigger.spot }, false));
-    // A saved settings change is felt within the coalescing window, not at the next market trigger (Marcelo, 2026-09-28).
+    // A saved settings change, or a position closing (budget and capacity free up), is felt at the next round.
     startNotificationBroadcaster();
     this.unsubscribeNotifications = subscribeToNotifications((notification) => {
+      if (notification.type === "position_closed") {
+        this.queueForcedRound("position_closed", { symbol: notification.symbol, positionId: notification.positionId }, null);
+        return;
+      }
       if (notification.type !== "pluto_event" || notification.eventType !== "settings_changed") return;
       const fields = ((notification.payload.fields as { field: string }[] | undefined) ?? []).map((change) => change.field);
       if (fields.length > 0 && fields.every((field) => settingsFieldsThatNeverChangeADecision.has(field))) return;
-      this.enqueue("settings_changed", [], { fields, by: notification.payload.by ?? null }, true);
+      this.queueForcedRound("settings_changed", { fields, by: notification.payload.by ?? null }, null);
     });
     await this.housekeeping();
+    this.loopDone = this.runLoop();
     console.log("Pluto agent started.");
   }
 
@@ -111,9 +118,15 @@ export class PlutoAgent {
     const state = await loadPlutoState();
     const release = currentRelease();
     if (state.lastSeenRelease !== null && release !== null && state.lastSeenRelease !== release) {
-      await pausePluto("deploy");
-      await recordPlutoEvent("paused", { by: "agent", reason: "deploy", from: state.lastSeenRelease, to: release });
-      await notifyTelegram(`⏸️ Pluto paused after a deploy (${state.lastSeenRelease.slice(0, 7)} → ${release.slice(0, 7)}). Press Resume on the Pluto screen once you are happy with the release.`);
+      // A person's pause (and its reason) outranks the deploy pause: never let "resume once you're happy with the release"
+      // replace "paused by Juan" (Marcelo, 2026-10-06).
+      if (state.paused) {
+        await recordPlutoEvent("warning", { message: `new release ${release.slice(0, 7)} started while already paused (${state.pauseReason ?? "unknown reason"}); the existing pause is kept` });
+      } else {
+        await pausePluto("deploy");
+        await recordPlutoEvent("paused", { by: "agent", reason: "deploy", from: state.lastSeenRelease, to: release });
+        await notifyTelegram(`⏸️ Pluto paused after a deploy (${state.lastSeenRelease.slice(0, 7)} → ${release.slice(0, 7)}). Press Resume on the Pluto screen once you are happy with the release.`);
+      }
     }
     if (release !== null) await recordPlutoRelease(release);
     const recentStarts = await db("pluto_events").where({ type: "agent_started" }).where("occurred_at", ">", new Date(Date.now() - 60 * 60_000)).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0));
@@ -181,7 +194,7 @@ export class PlutoAgent {
         const fitToday = await db("option_chain_snapshots as s").join("option_surface_fits as f", "f.snapshot_id", "s.id").where("s.trading_date", todayIso).where("f.status", "ok").first("s.id");
         if (fitToday) {
           this.openingLookDoneFor = todayIso;
-          this.enqueue("opening_look", [], { date: todayIso }, true);
+          this.queueForcedRound("opening_analysis", { date: todayIso }, null);
         }
       }
     } catch (error) {
@@ -220,6 +233,7 @@ export class PlutoAgent {
         this.context.trackWatch(
           watchPlutoOrder(this.api, this.settings, { actionId: order.actionId, orderId: order.orderId, symbol: order.symbol, reference: order.reference, description: order.description, cancelByMs: session.cancelByMs, startedAtMs: order.createdAtMs }),
           order.orderId,
+          order.symbol,
         );
       }
       console.log(`Pluto: adopted ${orphans.length} working order(s) left from a previous process.`);
@@ -241,41 +255,77 @@ export class PlutoAgent {
     }
   }
 
-  private async pollDayQuotes(): Promise<void> {
-    if (this.stopped || !this.watching) return;
-    this.enqueue("day_quotes", [], {}, false);
-  }
-
-  /** Coalesces triggers into one pass per window; a forced trigger keeps the pass forced. */
-  private enqueue(trigger: PlutoTrigger, symbols: string[], detail: Record<string, unknown>, force: boolean): void {
+  /** Queues a round that runs even without a new Day Signals quote, and wakes the loop. */
+  private queueForcedRound(trigger: PlutoTrigger, detail: Record<string, unknown>, symbols: string[] | null): void {
     if (this.stopped) return;
-    for (const symbol of symbols) this.pendingSymbols.add(symbol);
-    if (force || trigger === "spot_move" || this.pendingTrigger === "day_quotes") {
-      this.pendingTrigger = force ? trigger : this.pendingTrigger === "spot_move" ? "spot_move" : trigger;
-      this.pendingDetail = { ...this.pendingDetail, ...detail };
-    }
-    this.pendingForce = this.pendingForce || force;
-    if (this.coalesceTimer) return;
-    const windowMs = (this.settings?.coalescingWindowSeconds ?? 20) * 1000;
-    this.coalesceTimer = setTimeout(() => {
-      this.coalesceTimer = null;
-      const request = { trigger: this.pendingTrigger, triggerDetail: this.pendingDetail, symbols: this.pendingTrigger === "spot_move" ? [...this.pendingSymbols] : [], force: this.pendingForce };
-      this.pendingSymbols.clear();
-      this.pendingTrigger = "day_quotes";
-      this.pendingDetail = {};
-      this.pendingForce = false;
-      this.passChain = this.passChain.then(() => this.runPassSafely(request));
-    }, windowMs);
+    // One pending "every ticker" round already covers any later one.
+    if (symbols === null && this.forcedRounds.some((round) => round.symbols === null)) return;
+    this.forcedRounds.push({ trigger, detail, symbols });
+    this.wakeLoop?.();
   }
 
-  private async runPassSafely(request: { trigger: PlutoTrigger; triggerDetail: Record<string, unknown>; symbols: string[]; force: boolean }): Promise<void> {
+  /** An order Pluto placed has ended: its budget and the ticker are free again, and a fill starts the ticker's cooldown. */
+  private onOrderEnded(symbol: string, result: unknown): void {
+    const outcome = (result as { outcome?: string } | null)?.outcome ?? "unknown";
+    this.queueForcedRound("order_ended", { symbol, outcome }, null);
+    const filled = outcome === "filled" || outcome === "partially_filled" || outcome === "cancelled_partially_filled";
+    const cooldownMinutes = this.settings?.tickerCooldownMinutes ?? 0;
+    if (!filled || cooldownMinutes <= 0) return;
+    const timer = setTimeout(() => {
+      this.cooldownTimers.delete(timer);
+      this.queueForcedRound("cooldown_ended", { symbol }, [symbol]);
+    }, cooldownMinutes * 60_000);
+    timer.unref?.();
+    this.cooldownTimers.add(timer);
+  }
+
+  /** The continuous loop: one round at a time, then a short wait that any queued event cuts short. */
+  private async runLoop(): Promise<void> {
+    while (!this.stopped) {
+      try {
+        await this.loopIteration();
+      } catch (error) {
+        console.error(`Pluto loop iteration failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
+      }
+      if (this.stopped) break;
+      const waitMs = Math.max(1, this.settings?.daySignalsPollSeconds ?? 1) * 1000;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, waitMs);
+        this.wakeLoop = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      this.wakeLoop = null;
+    }
+  }
+
+  private async loopIteration(): Promise<void> {
+    if (!this.watching) {
+      // Not allowed to act, outside the window, or no market data (housekeeping decides). Events queued meanwhile are
+      // moot: the first round once Pluto may act again analyses every contract quoted today anyway.
+      this.forcedRounds.length = 0;
+      return;
+    }
+    const forced = this.forcedRounds.shift();
+    if (forced) {
+      await this.runRoundSafely({ trigger: forced.trigger, triggerDetail: forced.detail, symbols: forced.symbols ?? [], force: true });
+      return;
+    }
+    const newlyQuoted = findNewlyQuotedContracts(await loadTodaysDaySignalQuoteStamps(), this.lastAnalysedQuotedAtMs);
+    if (newlyQuoted.symbols.length === 0) return;
+    await this.runRoundSafely({ trigger: "day_signals_update", triggerDetail: { symbols: newlyQuoted.symbols, contracts: newlyQuoted.contractCount }, symbols: newlyQuoted.symbols, force: false });
+    rememberAnalysed(newlyQuoted.stamps, this.lastAnalysedQuotedAtMs);
+  }
+
+  private async runRoundSafely(request: { trigger: PlutoTrigger; triggerDetail: Record<string, unknown>; symbols: string[]; force: boolean }): Promise<void> {
     if (this.stopped) return;
     try {
       const summary = await runPlutoPass(request, this.context);
-      console.log(`Pluto pass ${summary.passId} (${request.trigger}): ${summary.modelCalled ? `model called → ${summary.outcome}` : `skipped — ${summary.skippedReason}`}`);
+      console.log(`Pluto round ${summary.passId} (${request.trigger}): ${summary.modelCalled ? `model called → ${summary.outcome}` : `no model call — ${summary.skippedReason}`}`);
     } catch (error) {
-      console.error(`Pluto pass failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
-      await recordPlutoEvent("warning", { message: `pass failed: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
+      console.error(`Pluto round failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
+      await recordPlutoEvent("warning", { message: `analysis round failed: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
     }
   }
 
@@ -283,8 +333,9 @@ export class PlutoAgent {
     this.stopped = true;
     this.unsubscribeNotifications?.();
     for (const timer of this.timers) clearInterval(timer);
-    if (this.coalesceTimer) clearTimeout(this.coalesceTimer);
-    await this.passChain.catch(() => {});
+    for (const timer of this.cooldownTimers) clearTimeout(timer);
+    this.wakeLoop?.();
+    await this.loopDone.catch(() => {});
     await this.marketWatch.stop();
     await Promise.race([Promise.allSettled([...this.watches]), new Promise((resolve) => setTimeout(resolve, 10_000))]);
     await recordPlutoEvent("agent_stopped", {}).catch(() => {});

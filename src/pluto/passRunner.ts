@@ -8,9 +8,9 @@ import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
-import { loadInFlightNotionals, loadPlutoBook } from "./book.js";
-import { deterministicTopPick, filterTickerForPluto, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
-import { noTrade, parsePlutoDecision, reconcileAgreement, type PlutoDecision } from "./decisionSchema.js";
+import { loadInFlightNotionals, loadOccupiedContracts, loadPlutoBook } from "./book.js";
+import { deterministicTopPick, filterTickerForPluto, findSameContractConflict, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
+import { noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { executePlutoClose, executePlutoOrder, watchPlutoOrder } from "./executor.js";
 import { buildCloseOffersForTicker, type CloseOffer } from "./closeActions.js";
 import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
@@ -40,7 +40,7 @@ export interface PassRunnerContext {
   lastModelEvaluationAtBySymbol: Map<string, number>;
   lastModelCallAtMs: { value: number | null };
   /** Order watches the agent keeps alive after the pass returns. */
-  trackWatch: (promise: Promise<unknown>, orderId: string) => void;
+  trackWatch: (promise: Promise<unknown>, orderId: string, symbol: string) => void;
 }
 
 export interface PassRequest {
@@ -64,6 +64,7 @@ interface EvaluatedTicker {
   inputs: TickerSignalsInputs;
   scored: TickerSignals;
   filtered: PlutoTickerFilterResult;
+  occupiedContracts: OccupiedContract[];
   fingerprint: string;
   closeOffers: CloseOffer[];
 }
@@ -93,8 +94,9 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   const spot = watched?.last ?? null;
   const live = spot !== null ? { spotPrice: spot, priceSource: "live" as const, liveQuotes: extraLiveQuotes } : undefined;
   const scored = scoreTicker(inputs, account, tradingSettings, live);
-  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled });
-  return { row, inputs, scored, filtered, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [] };
+  const occupiedContracts = await loadOccupiedContracts(row.symbol);
+  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts });
+  return { row, inputs, scored, filtered, occupiedContracts, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [] };
 }
 
 /** Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here, the rest go to the model. */
@@ -105,7 +107,7 @@ async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSetting
     if (!offer.automatic) continue;
     const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: "odd lot below 100 shares at a positive cycle P&L (Formula P1)" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
     const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.limitPrice })), description: offer.description, reasons: ["automatic odd-lot close (Formula P1)"] });
-    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description, cancelByMs }), result.orderId);
+    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description, cancelByMs }), result.orderId, offer.symbol);
   }
   ticker.closeOffers = offers.filter((offer) => !offer.automatic);
 }
@@ -192,7 +194,6 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       ticker.filtered.eligible = [];
     }
     evaluated.push(ticker);
-    context.marketWatch.markEvaluated(row.symbol);
   }
   const previousSessionDateIso = await previousOpenSessionDate(checks.context.todayEasternIso);
   for (const ticker of evaluated) {
@@ -219,10 +220,10 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   if (context.lastModelCallAtMs.value !== null && nowMs - context.lastModelCallAtMs.value < settings.globalMinCallIntervalSeconds * 1000) {
     return skip(`global model-call interval (${settings.globalMinCallIntervalSeconds}s) not elapsed`, checks.checks);
   }
-  // The 30 s poll is only the messenger: name the pass after what actually moved (design round 4 triggers).
+  // A Day Signals update is only the messenger: name the round after what actually changed.
   let trigger: PlutoTrigger = request.trigger;
   let triggerDetail = request.triggerDetail;
-  if (request.trigger === "day_quotes" && changed.length > 0) {
+  if (request.trigger === "day_signals_update" && changed.length > 0) {
     const kinds = changed.map((ticker) => ({ symbol: ticker.row.symbol, kind: classifyFingerprintChange(context.lastFingerprintBySymbol.get(ticker.row.symbol), ticker.fingerprint) }));
     const heldLeg = kinds.filter((entry) => entry.kind === "held_leg").map((entry) => entry.symbol);
     const gradeCrossing = kinds.filter((entry) => entry.kind === "grade_crossing").map((entry) => entry.symbol);
@@ -265,28 +266,26 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const promptId = await ensurePlutoPrompt(settings.promptVersion, systemPrompt);
   const userPayload = JSON.stringify(payload);
 
-  // 6. Two calls that must agree (design item 7 / 25).
+  // 6. One call per decision (Marcelo, 2026-10-06: the deterministic gates are the second opinion; a second call doubled the cost).
   context.lastModelCallAtMs.value = nowMs;
   for (const ticker of evaluated) {
     context.lastFingerprintBySymbol.set(ticker.row.symbol, ticker.fingerprint);
     context.lastModelEvaluationAtBySymbol.set(ticker.row.symbol, nowMs);
   }
-  const calls = await Promise.all([1, 2].map((callIndex) => modelCall(callIndex)));
-  const servedModelIds = calls.map((call) => call.servedModelId).filter((id): id is string => id !== null);
-  const tokensIn = calls.reduce((sum, call) => sum + (call.tokensIn ?? 0), 0);
-  const tokensOut = calls.reduce((sum, call) => sum + (call.tokensOut ?? 0), 0);
-  const costUsd = calls.reduce((sum, call) => sum + (call.costUsd ?? 0), 0);
-  const failed = calls.find((call) => call.decision === null);
+  const call = await modelCall(1);
+  const servedModelIds = call.servedModelId ? [call.servedModelId] : [];
+  const tokensIn = call.tokensIn ?? 0;
+  const tokensOut = call.tokensOut ?? 0;
+  const costUsd = call.costUsd ?? 0;
   let decision: PlutoDecision;
   let agreementDetail: string;
-  if (failed) {
-    decision = noTrade(`model call ${failed.callIndex} failed: ${failed.error}`);
-    agreementDetail = "a call failed";
-    await recordPlutoEvent("model_failed", { passId, error: failed.error });
+  if (call.decision === null) {
+    decision = noTrade(`model call failed: ${call.error}`);
+    agreementDetail = "the call failed";
+    await recordPlutoEvent("model_failed", { passId, error: call.error });
   } else {
-    const reconciled = reconcileAgreement(calls[0]!.decision!, calls[1]!.decision!);
-    decision = reconciled.decision;
-    agreementDetail = reconciled.detail;
+    decision = call.decision;
+    agreementDetail = "single call";
   }
   await recordPlutoEvent("model_called", { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, agreement: agreementDetail, reasons: decision.reasons });
   await finishPlutoPass(passId, { inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, tokensIn, tokensOut, costUsd, servedModelIds });
@@ -334,6 +333,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     ...(chosenRoll && !freshRoll ? ["the chosen roll is no longer a candidate"] : []),
   ];
   const [exposures, inFlight] = await Promise.all([computePositionExposures(), loadInFlightNotionals(owner.row.symbol)]);
+  const freshContractForGate = freshCandidate ?? freshRoll?.replacement ?? null;
   const sector = owner.row.sector ?? null;
   const gates = runPostModelGates({
     decision,
@@ -356,6 +356,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       workingOrderOnSymbol: book.workingOrderSymbols.has(owner.row.symbol),
       lastFilledActionAt: book.lastFilledActionAtBySymbol.get(owner.row.symbol) ?? null,
       nowMs: Date.now(),
+      sameContractConflict: freshContractForGate ? findSameContractConflict(fresh.occupiedContracts, freshContractForGate.expiry, freshContractForGate.strike) : null,
     },
   });
   const contract = freshCandidate ?? freshRoll?.replacement ?? null;
@@ -369,7 +370,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     candidateScores: freshCandidate ?? freshRoll ?? null,
     deterministicTopPick: topPickSummary,
     gateResults,
-    sizeTier: decision.sizeTier,
+    sizeTier: null,
     quantity: gates.plan?.quantity ?? null,
     limitPrice: gates.plan?.limitPrice ?? null,
     outcome: gates.ok ? "validated" : "blocked",
@@ -395,7 +396,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       : { kind: "roll", actionId, symbol: owner.row.symbol, roll: freshRoll!, heldLeg: fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll!.roll.legId)!, plan: gates.plan!, decision, scoresSnapshot },
   );
   if (result.outcome === "confirmed" && result.orderId) {
-    context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: owner.row.symbol, reference: { price: contract!.bid, side: "sell", multiplier: 100, otherLegs: result.otherReferenceLegs }, description: result.detail, cancelByMs: checks.context.session.cancelByMs }), result.orderId);
+    context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: owner.row.symbol, reference: { price: contract!.bid, side: "sell", multiplier: 100, otherLegs: result.otherReferenceLegs }, description: result.detail, cancelByMs: checks.context.session.cancelByMs }), result.orderId, owner.row.symbol);
   }
   return { passId, modelCalled: true, skippedReason: null, outcome: result.outcome };
 
@@ -419,7 +420,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     }
     await recordPlutoEvent("action_validated", { passId, actionId, symbol: offer.symbol, candidateId: offer.id, quantity: freshOffer!.quantity, limitPrice: freshOffer!.limitPrice, reasons: decision.reasons });
     const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: freshOffer!.positionId, legs: freshOffer!.legIds.map((legId) => ({ legId, limitPrice: freshOffer!.limitPrice })), description: freshOffer!.description, reasons: decision.reasons });
-    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: freshOffer!.limitPrice, side: freshOffer!.side, multiplier: freshOffer!.multiplier }, description: freshOffer!.description, cancelByMs: checks.context.session.cancelByMs }), result.orderId);
+    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: freshOffer!.limitPrice, side: freshOffer!.side, multiplier: freshOffer!.multiplier }, description: freshOffer!.description, cancelByMs: checks.context.session.cancelByMs }), result.orderId, offer.symbol);
     return { passId, modelCalled: true, skippedReason: null, outcome: result.outcome };
   }
 
@@ -428,7 +429,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     const parsed = call.ok && call.rawText ? parsePlutoDecision(call.rawText, offeredIds) : null;
     const decisionOrNull = parsed && parsed.ok ? parsed.decision : null;
     const error = call.error ?? (parsed && !parsed.ok ? `invalid decision: ${parsed.error}` : null);
-    await recordPlutoDecision({ passId, callIndex, modelId: settings.modelId, servedModelId: call.servedModelId, promptId, inputPayload: callIndex === 1 ? payload : { sameAsCall: 1 }, rawOutput: call.rawText, parsedOutput: decisionOrNull ? { decision: decisionOrNull.decision, action_kind: decisionOrNull.actionKind, candidate_id: decisionOrNull.candidateId, size_tier: decisionOrNull.sizeTier, confidence: decisionOrNull.confidence, reasons: decisionOrNull.reasons, risks_acknowledged: decisionOrNull.risksAcknowledged, system_concerns: decisionOrNull.systemConcerns } : null, schemaValid: decisionOrNull !== null, latencyMs: call.latencyMs, tokensIn: call.tokensIn, tokensOut: call.tokensOut, costUsd: call.costUsd, error });
+    await recordPlutoDecision({ passId, callIndex, modelId: settings.modelId, servedModelId: call.servedModelId, promptId, inputPayload: callIndex === 1 ? payload : { sameAsCall: 1 }, rawOutput: call.rawText, parsedOutput: decisionOrNull ? { decision: decisionOrNull.decision, action_kind: decisionOrNull.actionKind, candidate_id: decisionOrNull.candidateId, confidence: decisionOrNull.confidence, reasons: decisionOrNull.reasons, risks_acknowledged: decisionOrNull.risksAcknowledged, system_concerns: decisionOrNull.systemConcerns } : null, schemaValid: decisionOrNull !== null, latencyMs: call.latencyMs, tokensIn: call.tokensIn, tokensOut: call.tokensOut, costUsd: call.costUsd, error });
     return { callIndex, decision: decisionOrNull, error, servedModelId: call.servedModelId, tokensIn: call.tokensIn, tokensOut: call.tokensOut, costUsd: call.costUsd };
   }
 }

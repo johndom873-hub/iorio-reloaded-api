@@ -7,8 +7,9 @@ import type { PlutoSettings } from "./settingsStore.js";
 
 // Pluto's own market data (design round 4, 2026-09-28): one stock line per enabled ticker plus SPY,
 // held for the session on Pluto's own IBKR connection (the shared live pool in this process), under a
-// priority reservation in the shared line ledger so the web dyno's screens shed to it. Option quotes
-// are never streamed continuously: a triggered ticker gets a short burst on a small pool of lines.
+// priority reservation in the shared line ledger so the web dyno's screens shed to it. The stock prices are inputs to
+// the analysis (and SPY to the stress check), never triggers: Day Signals updates drive the loop (Marcelo, 2026-10-06).
+// Option quotes are never streamed continuously: the contracts about to be decided on get a short burst.
 
 export const plutoLineHolder = "pluto_agent";
 const lineReservationTtlSeconds = 120;
@@ -19,35 +20,19 @@ export interface WatchedStock {
   bid: number | null;
   ask: number | null;
   previousClose: number | null;
-  /** Spot at the ticker's last Pluto evaluation; the spot-move trigger measures against it. */
-  evaluatedAtSpot: number | null;
   updatedAtMs: number | null;
 }
-
-export interface SpotMoveTrigger {
-  symbol: string;
-  spot: number;
-  fromSpot: number;
-  movePct: number;
-}
-
-export type SpotMoveListener = (trigger: SpotMoveTrigger) => void;
 
 export class PlutoMarketWatch {
   private readonly stocks = new Map<string, WatchedStock>();
   private readonly unsubscribers = new Map<string, () => void>();
   private renewTimer: ReturnType<typeof setInterval> | null = null;
   private linesHeld = 0;
-  private listener: SpotMoveListener | null = null;
 
   constructor(private settings: PlutoSettings) {}
 
   updateSettings(settings: PlutoSettings): void {
     this.settings = settings;
-  }
-
-  onSpotMove(listener: SpotMoveListener): void {
-    this.listener = listener;
   }
 
   snapshot(symbol: string): WatchedStock | null {
@@ -58,12 +43,6 @@ export class PlutoMarketWatch {
     const spy = this.stocks.get("SPY");
     if (!spy || spy.last === null || spy.previousClose === null || !(spy.previousClose > 0)) return null;
     return ((spy.last - spy.previousClose) / spy.previousClose) * 100;
-  }
-
-  /** Records the spot a ticker was just evaluated at, so the next trigger measures from here. */
-  markEvaluated(symbol: string): void {
-    const stock = this.stocks.get(symbol);
-    if (stock) stock.evaluatedAtSpot = stock.last;
   }
 
   /** Reserves lines for the given symbols (+ SPY + the burst pool) and (re)subscribes their stock lines. */
@@ -91,7 +70,7 @@ export class PlutoMarketWatch {
     }
     for (const symbol of wanted) {
       if (this.stocks.has(symbol)) continue;
-      const stock: WatchedStock = { symbol, last: null, bid: null, ask: null, previousClose: null, evaluatedAtSpot: null, updatedAtMs: null };
+      const stock: WatchedStock = { symbol, last: null, bid: null, ask: null, previousClose: null, updatedAtMs: null };
       this.stocks.set(symbol, stock);
       const unsubscribe = await subscribeToPooledQuote({ key: `pluto-stock-${symbol}`, legType: "stock", symbol }, (quote) => this.onStockQuote(stock, quote));
       this.unsubscribers.set(symbol, unsubscribe);
@@ -105,13 +84,6 @@ export class PlutoMarketWatch {
     stock.ask = quote.ask;
     if (quote.previousClose !== null) stock.previousClose = quote.previousClose;
     stock.updatedAtMs = Date.now();
-    if (stock.symbol === "SPY" || stock.last === null || !this.listener) return;
-    if (stock.evaluatedAtSpot === null) {
-      stock.evaluatedAtSpot = stock.last; // the first tick is the baseline, never a trigger
-      return;
-    }
-    const movePct = Math.abs((stock.last - stock.evaluatedAtSpot) / stock.evaluatedAtSpot) * 100;
-    if (movePct >= this.settings.spotMoveTriggerPct) this.listener({ symbol: stock.symbol, spot: stock.last, fromSpot: stock.evaluatedAtSpot, movePct });
   }
 
   /**
