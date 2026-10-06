@@ -8,7 +8,7 @@ import { db } from "../db/connection.js";
 
 export type PlutoGrade = "strong" | "good" | "weak";
 export type PlutoReasoningEffort = "low" | "medium" | "high";
-export type PlutoTelegramVerbosity = "actions" | "all" | "off";
+export type PlutoTelegramVerbosity = "actions" | "off";
 
 export interface PlutoSettings {
   // Capital
@@ -124,7 +124,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   maxEnabledTickers: { column: "max_enabled_tickers", kind: "integer", min: 0 },
   messageRateLimitPerSecond: { column: "message_rate_limit_per_second", kind: "integer", min: 1 },
   crashLoopRestartsPerHour: { column: "crash_loop_restarts_per_hour", kind: "integer", min: 1 },
-  telegramVerbosity: { column: "telegram_verbosity", kind: "text", oneOf: ["actions", "all", "off"] },
+  telegramVerbosity: { column: "telegram_verbosity", kind: "text", oneOf: ["actions", "off"] },
   unstructuredCloseMinPct: { column: "unstructured_close_min_pct", kind: "number", min: 0 },
   unstructuredCloseMinDollars: { column: "unstructured_close_min_dollars", kind: "number", min: 0 },
   buybackMinDte: { column: "buyback_min_dte", kind: "integer", min: 0 },

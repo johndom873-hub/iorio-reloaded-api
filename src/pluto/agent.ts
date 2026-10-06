@@ -4,7 +4,7 @@ import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { InternalApiClient } from "../lib/internalApiClient.js";
 import { startNotificationBroadcaster, subscribeToNotifications } from "../lib/notificationBroadcaster.js";
 import { computeMarketSessionStatus, easternDateIso } from "../lib/marketSessionStatus.js";
-import { notifyTelegram } from "../lib/notifyTelegram.js";
+import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
 import type { PlutoConfig } from "./config.js";
 import { labelExpiredCandidateOutcomes } from "./candidateOutcomes.js";
@@ -124,7 +124,7 @@ export class PlutoAgent {
       } else {
         await pausePluto("deploy");
         await recordPlutoEvent("paused", { by: "agent", reason: "deploy", from: state.lastSeenRelease, to: release });
-        await notifyTelegram(`⏸️ Pluto paused after a deploy (${state.lastSeenRelease.slice(0, 7)} → ${release.slice(0, 7)}). Press Resume on the Pluto screen once you are happy with the release.`);
+        await notifyPlutoTelegram(`⏸️ Pluto paused after a deploy (${state.lastSeenRelease.slice(0, 7)} → ${release.slice(0, 7)}). Press Resume on the Pluto screen once you are happy with the release.`);
       }
     }
     if (release !== null) await recordPlutoRelease(release);
@@ -134,7 +134,7 @@ export class PlutoAgent {
       if (!current.paused) {
         await pausePluto("crash_loop");
         await recordPlutoEvent("paused", { by: "agent", reason: "crash_loop", startsInLastHour: recentStarts });
-        await notifyTelegram(`⏸️ Pluto paused: ${recentStarts} agent starts in the last hour (crash loop?). Check the logs, then Resume on the Pluto screen.`);
+        await notifyPlutoTelegram(`⏸️ Pluto paused: ${recentStarts} agent starts in the last hour (crash loop?). Check the logs, then Resume on the Pluto screen.`);
       }
     }
   }

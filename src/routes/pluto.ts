@@ -4,7 +4,7 @@ import { loadRealizedPnlByActionId, type PlutoActionRealizedPnl } from "../pluto
 import { loadPlutoBook } from "../pluto/book.js";
 import { resolvePlutoSession } from "../pluto/sessionSchedule.js";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { notifyTelegram } from "../lib/notifyTelegram.js";
+import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
@@ -109,7 +109,7 @@ plutoRouter.put("/mode", async (request: Request, response: Response) => {
   const state = await setPlutoMode(mode);
   const who = await currentUserDisplayName(request);
   await recordPlutoEvent("mode_changed", { mode, by: who });
-  await notifyTelegram(mode === "on" ? `🪐 Pluto switched ON by ${who}${state.paused ? " (still paused — press Resume to let it act)" : ""}.` : `🪐 Pluto switched OFF by ${who}.`);
+  await notifyPlutoTelegram(mode === "on" ? `🪐 Pluto switched ON by ${who}${state.paused ? " (still paused — press Resume to let it act)" : ""}.` : `🪐 Pluto switched OFF by ${who}.`);
   response.json(state);
 });
 
@@ -120,7 +120,7 @@ plutoRouter.post("/pause", async (request: Request, response: Response) => {
   const state = await pausePluto("manual", { userId });
   const cancelled = await cancelPlutoOrders(userId, { includeWorking: cancelWorkingOrders });
   await recordPlutoEvent("paused", { by: who, cancelWorkingOrders, cancelledLocally: cancelled.cancelledLocally.length, cancelRequested: cancelled.cancelRequested.length });
-  await notifyTelegram(
+  await notifyPlutoTelegram(
     `⏸️ Pluto paused by ${who}.${cancelled.cancelledLocally.length > 0 ? ` Dropped ${cancelled.cancelledLocally.length} unsent order(s).` : ""}${cancelWorkingOrders ? ` Cancel requested for ${cancelled.cancelRequested.length} working order(s).` : ""}`,
   );
   response.json({ ...state, cancelled });
@@ -131,7 +131,7 @@ plutoRouter.post("/resume", async (request: Request, response: Response) => {
   try {
     const state = await resumePluto(currentUserId(request));
     await recordPlutoEvent("resumed", { by: who });
-    await notifyTelegram(`▶️ Pluto resumed by ${who}${state.mode === "off" ? " (mode is off, so it will not act until switched on)" : ""}.`);
+    await notifyPlutoTelegram(`▶️ Pluto resumed by ${who}${state.mode === "off" ? " (mode is off, so it will not act until switched on)" : ""}.`);
     response.json(state);
   } catch (error) {
     if (error instanceof PlutoStateError) {
@@ -152,7 +152,7 @@ plutoRouter.post("/breakers/:name/reset", async (request: Request, response: Res
   const who = await currentUserDisplayName(request);
   const state = await resetPlutoBreaker(name);
   await recordPlutoEvent("breaker_reset", { name, by: who });
-  await notifyTelegram(`🔧 Pluto breaker "${name}" reset by ${who}. Pluto stays paused until resumed.`);
+  await notifyPlutoTelegram(`🔧 Pluto breaker "${name}" reset by ${who}. Pluto stays paused until resumed.`);
   response.json(state);
 });
 
@@ -167,7 +167,7 @@ plutoRouter.put("/stress-override", async (request: Request, response: Response)
   const who = await currentUserDisplayName(request);
   const state = await setPlutoStressOverride(enabled ? todayIso : null, currentUserId(request));
   await recordPlutoEvent("stress_override_changed", { enabled, dateIso: todayIso, by: who });
-  await notifyTelegram(enabled ? `⚠️ Pluto: ${who} allowed new opens under SPY stress for ${todayIso}.` : `Pluto: ${who} removed today's SPY stress override.`);
+  await notifyPlutoTelegram(enabled ? `⚠️ Pluto: ${who} allowed new opens under SPY stress for ${todayIso}.` : `Pluto: ${who} removed today's SPY stress override.`);
   response.json(state);
 });
 

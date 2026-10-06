@@ -63,6 +63,21 @@ async function sendTelegramMessageOnce(telegramBotToken: string, telegramChatId:
   return false;
 }
 
+function telegramNotificationsDisabled(message: string): boolean {
+  // Local .env sets this so dev crashes/jobs never page the ops channel.
+  // Unset in Heroku and on the VPS worker, so those keep alerting. Only the
+  // exact value "true" (any case) disables — a typo must not silence prod.
+  if (process.env.TELEGRAM_NOTIFICATIONS_DISABLED?.trim().toLowerCase() !== "true") return false;
+  console.log("TELEGRAM_NOTIFICATIONS_DISABLED is set — skipping Telegram notification:", message);
+  return true;
+}
+
+async function sendWithOneRetry(telegramBotToken: string, telegramChatId: string, message: string): Promise<boolean> {
+  if (await sendTelegramMessageOnce(telegramBotToken, telegramChatId, message)) return true;
+  await new Promise((resolve) => setTimeout(resolve, telegramRetryDelayMs));
+  return sendTelegramMessageOnce(telegramBotToken, telegramChatId, message);
+}
+
 /**
  * Returns whether the message was delivered: true when sent, or when notifications are
  * disabled on purpose (local dev); false when Telegram is not configured or the send failed
@@ -70,22 +85,29 @@ async function sendTelegramMessageOnce(telegramBotToken: string, telegramChatId:
  * (undeliveredAlerts.ts); most callers ignore the result.
  */
 export async function notifyTelegram(message: string): Promise<boolean> {
-  // Local .env sets this so dev crashes/jobs never page the ops channel.
-  // Unset in Heroku and on the VPS worker, so those keep alerting. Only the
-  // exact value "true" (any case) disables — a typo must not silence prod.
-  if (process.env.TELEGRAM_NOTIFICATIONS_DISABLED?.trim().toLowerCase() === "true") {
-    console.log("TELEGRAM_NOTIFICATIONS_DISABLED is set — skipping Telegram notification:", message);
-    return true;
-  }
-
+  if (telegramNotificationsDisabled(message)) return true;
   const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
   const telegramChatId = process.env.TELEGRAM_CHAT_ID;
   if (!telegramBotToken || !telegramChatId) {
     console.warn("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — skipping Telegram notification:", message);
     return false;
   }
+  return sendWithOneRetry(telegramBotToken, telegramChatId, message);
+}
 
-  if (await sendTelegramMessageOnce(telegramBotToken, telegramChatId, message)) return true;
-  await new Promise((resolve) => setTimeout(resolve, telegramRetryDelayMs));
-  return sendTelegramMessageOnce(telegramBotToken, telegramChatId, message);
+/**
+ * Every Pluto message, from the agent and from the web dyno's Pluto routes: sent by Pluto's own bot
+ * (PLUTO_TELEGRAM_BOT_TOKEN, one bot per environment) into the same alerts group as everything else
+ * (TELEGRAM_CHAT_ID). Never falls back to the ops bot. The agent refuses to start without the token
+ * (pluto/config.ts); a web dyno without it (Pluto not set up there) skips with a warning.
+ */
+export async function notifyPlutoTelegram(message: string): Promise<boolean> {
+  if (telegramNotificationsDisabled(message)) return true;
+  const plutoBotToken = process.env.PLUTO_TELEGRAM_BOT_TOKEN;
+  const telegramChatId = process.env.TELEGRAM_CHAT_ID;
+  if (!plutoBotToken || !telegramChatId) {
+    console.warn("PLUTO_TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — skipping Pluto Telegram notification:", message);
+    return false;
+  }
+  return sendWithOneRetry(plutoBotToken, telegramChatId, message);
 }

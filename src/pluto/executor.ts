@@ -1,7 +1,7 @@
 import { db } from "../db/connection.js";
 import { InternalApiClient, InternalApiError } from "../lib/internalApiClient.js";
 import { finalOrderRequestStatuses, isFinalOrderRequestStatus } from "../lib/orderRequestStatuses.js";
-import { notifyTelegram } from "../lib/notifyTelegram.js";
+import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
@@ -139,7 +139,7 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
 
   await updatePlutoAction(input.actionId, { outcome: "confirmed" });
   await recordPlutoEvent("order_confirmed", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description });
-  if (settings.telegramVerbosity !== "off") await notifyTelegram(`🪐 Pluto sent an order: ${description}\n${input.decision.reasons.join(" ")}`);
+  if (settings.telegramVerbosity !== "off") await notifyPlutoTelegram(`🪐 Pluto sent an order: ${description}\n${input.decision.reasons.join(" ")}`);
   return { outcome: "confirmed", orderId: built.id, detail: description, otherReferenceLegs };
 
   async function blocked(action: ExecuteInput, reason: string, orderId: string | null = null): Promise<ExecuteResult> {
@@ -153,7 +153,7 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
     await recordPlutoEvent("order_outcome", { actionId: action.actionId, symbol: action.symbol, outcome: "error", reason });
     await tripPlutoBreaker("order_error", reason);
     await recordPlutoEvent("breaker_tripped", { name: "order_error", detail: reason });
-    await notifyTelegram(`🛑 Pluto breaker tripped (order_error): ${reason}. Pluto is paused until a human resets it.`);
+    await notifyPlutoTelegram(`🛑 Pluto breaker tripped (order_error): ${reason}. Pluto is paused until a human resets it.`);
     return { outcome: "error", orderId, detail: reason };
   }
 }
@@ -188,7 +188,7 @@ export async function executePlutoClose(api: InternalApiClient, settings: PlutoS
   }
   await updatePlutoAction(input.actionId, { outcome: "confirmed" });
   await recordPlutoEvent("order_confirmed", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description: input.description });
-  if (settings.telegramVerbosity !== "off") await notifyTelegram(`🪐 Pluto sent a close: ${input.description}\n${input.reasons.join(" ")}`);
+  if (settings.telegramVerbosity !== "off") await notifyPlutoTelegram(`🪐 Pluto sent a close: ${input.description}\n${input.reasons.join(" ")}`);
   return { outcome: "confirmed", orderId: built.id, detail: input.description };
 
   async function closeBlocked(reason: string, orderId: string | null = null): Promise<ExecuteResult> {
@@ -201,7 +201,7 @@ export async function executePlutoClose(api: InternalApiClient, settings: PlutoS
     await recordPlutoEvent("order_outcome", { actionId: input.actionId, symbol: input.symbol, outcome: "error", reason });
     await tripPlutoBreaker("order_error", reason);
     await recordPlutoEvent("breaker_tripped", { name: "order_error", detail: reason });
-    await notifyTelegram(`🛑 Pluto breaker tripped (order_error): ${reason}. Pluto is paused until a human resets it.`);
+    await notifyPlutoTelegram(`🛑 Pluto breaker tripped (order_error): ${reason}. Pluto is paused until a human resets it.`);
     return { outcome: "error", orderId, detail: reason };
   }
 }
@@ -384,7 +384,7 @@ export async function watchPlutoOrder(
         const detail = `${input.description}: ${order.errorMessage ?? outcome}`;
         await tripPlutoBreaker("order_error", detail);
         await recordPlutoEvent("breaker_tripped", { name: "order_error", detail });
-        await notifyTelegram(`🛑 Pluto breaker tripped (order_error): ${detail}. Pluto is paused until a human resets it.`);
+        await notifyPlutoTelegram(`🛑 Pluto breaker tripped (order_error): ${detail}. Pluto is paused until a human resets it.`);
       } else if (comparison !== null && comparison.slippagePct > settings.maxFillSlippagePct) {
         // Fill far from the reference (design breaker list): the market moved through the limit, or the limit
         // was wrong. Either way a human looks before the next order.
@@ -394,10 +394,10 @@ export async function watchPlutoOrder(
         const detail = `${input.description}: ${where} (${comparison.slippagePct.toFixed(1)}%${input.reference.otherLegs?.length ? " of the option's reference value" : ""} past it, limit ${settings.maxFillSlippagePct}%)`;
         await tripPlutoBreaker("fill_slippage", detail);
         await recordPlutoEvent("breaker_tripped", { name: "fill_slippage", detail });
-        await notifyTelegram(`🛑 Pluto breaker tripped (fill_slippage): ${detail}. Pluto is paused until a human resets it.`);
+        await notifyPlutoTelegram(`🛑 Pluto breaker tripped (fill_slippage): ${detail}. Pluto is paused until a human resets it.`);
       } else if (settings.telegramVerbosity !== "off") {
         const fillText = fillPrice === null ? "" : impliedFillPrice !== null ? ` (fill ${impliedFillPrice.toFixed(2)} implied by the net; IBKR split it as ${fillPrice.toFixed(2)})` : ` (avg fill ${fillPrice.toFixed(2)})`;
-        await notifyTelegram(`🪐 Pluto order ${outcome}: ${input.description}${fillText}`);
+        await notifyPlutoTelegram(`🪐 Pluto order ${outcome}: ${input.description}${fillText}`);
       }
       return { outcome, detail: order.errorMessage ?? outcome };
     }

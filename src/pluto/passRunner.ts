@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import type { InternalApiClient } from "../lib/internalApiClient.js";
-import { notifyTelegram } from "../lib/notifyTelegram.js";
+import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { computePositionExposures } from "../lib/positionExposure.js";
 import { loadTradingSettings, type TradingSettings } from "../lib/tradingSettingsStore.js";
 import { scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
@@ -160,7 +160,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     if (!before.breakers.daily_loss) {
       await tripPlutoBreaker("daily_loss", checks.checks.daily_loss.detail);
       await recordPlutoEvent("breaker_tripped", { name: "daily_loss", detail: checks.checks.daily_loss.detail });
-      await notifyTelegram(`🛑 Pluto breaker tripped (daily_loss): ${checks.checks.daily_loss.detail}. Pluto is paused until a human resets it.`);
+      await notifyPlutoTelegram(`🛑 Pluto breaker tripped (daily_loss): ${checks.checks.daily_loss.detail}. Pluto is paused until a human resets it.`);
     }
   }
   // A reconciliation discrepancy is a breaker too (design breaker list): IBKR and the book disagree.
@@ -169,7 +169,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     if (!before.breakers.reconciliation) {
       await tripPlutoBreaker("reconciliation", checks.checks.reconciliation.detail);
       await recordPlutoEvent("breaker_tripped", { name: "reconciliation", detail: checks.checks.reconciliation.detail });
-      await notifyTelegram(`🛑 Pluto breaker tripped (reconciliation): ${checks.checks.reconciliation.detail}. Pluto is paused until a human resets it.`);
+      await notifyPlutoTelegram(`🛑 Pluto breaker tripped (reconciliation): ${checks.checks.reconciliation.detail}. Pluto is paused until a human resets it.`);
     }
   }
   if (!checks.ok) return skip(checks.failures.join(" | "), checks.checks);
@@ -308,7 +308,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   if (decision.decision !== "trade") {
     await recordPlutoAction({ passId, kind: "no_trade", symbol: "—", tickerId: null, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: [], sizeTier: null, quantity: null, limitPrice: null, outcome: "no_trade", blockReason: decision.reasons.join(" "), referenceBid: null, referenceMid: null });
     await recordPlutoEvent("no_trade", { passId, verdict: decision.decision, reasons: decision.reasons, systemConcerns: decision.systemConcerns, deterministicTopPick: topPickSummary });
-    if (decision.decision === "abstain_system_concern" && settings.telegramVerbosity !== "off") await notifyTelegram(`🪐 Pluto abstained on a system concern: ${decision.systemConcerns.join("; ") || decision.reasons.join("; ")}`);
+    if (decision.decision === "abstain_system_concern" && settings.telegramVerbosity !== "off") await notifyPlutoTelegram(`🪐 Pluto abstained on a system concern: ${decision.systemConcerns.join("; ") || decision.reasons.join("; ")}`);
     return { passId, modelCalled: true, skippedReason: null, outcome: decision.decision };
   }
 
