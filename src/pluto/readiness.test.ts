@@ -48,35 +48,30 @@ describe("describePlutoReadinessOutcome", () => {
   const allPass = [ok("IBKR"), ok("API sign-in"), ok("OpenRouter")];
   const ibkrDown = [failed("IBKR", "no answer within 60 s"), ok("API sign-in"), ok("OpenRouter")];
 
-  it("sends nothing when the first run passes", () => {
-    expect(describePlutoReadinessOutcome("first", null, allPass)).toEqual({ signature: "", message: null, pause: false });
+  it("always posts the first run, listing every test, like the platform's 6:00 ET message", () => {
+    expect(describePlutoReadinessOutcome("first", null, allPass)).toEqual({ signature: "", message: "✅ Pluto pre-open check passed.\n✅ IBKR: fine\n✅ API sign-in: fine\n✅ OpenRouter: fine", pause: false });
+    const failedFirst = describePlutoReadinessOutcome("first", null, ibkrDown);
+    expect(failedFirst).toMatchObject({ signature: "IBKR", pause: false });
+    expect(failedFirst.message).toBe("⚠️ Pluto pre-open check failed.\n❌ IBKR: no answer within 60 s\n✅ API sign-in: fine\n✅ OpenRouter: fine\nRe-checking every 10 minutes. Pluto pauses at 9:20 ET if it still fails.");
   });
 
-  it("alerts at once when the first run fails, naming the test and its error, without pausing", () => {
-    const outcome = describePlutoReadinessOutcome("first", null, ibkrDown);
-    expect(outcome.signature).toBe("IBKR");
-    expect(outcome.pause).toBe(false);
-    expect(outcome.message).toContain("❌ IBKR: no answer within 60 s");
-    expect(outcome.message).toContain("Re-checking every 10 minutes. Pluto pauses at 9:20 ET if it still fails.");
-  });
-
-  it("stays quiet on a re-run with the same failures, and announces a change or recovery", () => {
+  it("stays quiet on a re-run with the same failures, and posts a change or a recovery", () => {
     expect(describePlutoReadinessOutcome("recheck", "IBKR", ibkrDown).message).toBeNull();
     expect(describePlutoReadinessOutcome("recheck", "IBKR", [failed("IBKR", "x"), failed("API sign-in", "401"), ok("OpenRouter")]).message).toContain("❌ API sign-in: 401");
-    expect(describePlutoReadinessOutcome("recheck", "IBKR", allPass).message).toContain("passes again");
+    expect(describePlutoReadinessOutcome("recheck", "IBKR", allPass).message).toMatch(/^✅ Pluto pre-open check passes again\./);
   });
 
-  it("pauses at the final run when anything still fails", () => {
+  it("always posts the 9:20 ET verdict: ready when every test passes", () => {
+    expect(describePlutoReadinessOutcome("final", "", allPass)).toEqual({ signature: "", message: "✅ Pluto ready for today (9:20 ET check).\n✅ IBKR: fine\n✅ API sign-in: fine\n✅ OpenRouter: fine", pause: false });
+    expect(describePlutoReadinessOutcome("final", null, allPass).message).toMatch(/^✅ Pluto ready for today/);
+  });
+
+  it("pauses at the final run when anything still fails, and says so", () => {
     const outcome = describePlutoReadinessOutcome("final", "IBKR", ibkrDown);
     expect(outcome.pause).toBe(true);
-    expect(outcome.message).toContain("still failing at 9:20 ET");
+    expect(outcome.message).toContain("the 9:20 ET check still fails, so Pluto is paused");
+    expect(outcome.message).toContain("❌ IBKR: no answer within 60 s");
     expect(outcome.message).toContain("Press Resume");
-  });
-
-  it("does not pause when the final run passes, and announces only a recovery", () => {
-    expect(describePlutoReadinessOutcome("final", "IBKR", allPass)).toMatchObject({ pause: false, message: expect.stringContaining("passes again") });
-    expect(describePlutoReadinessOutcome("final", "", allPass)).toEqual({ signature: "", message: null, pause: false });
-    expect(describePlutoReadinessOutcome("final", null, allPass)).toEqual({ signature: "", message: null, pause: false });
   });
 });
 

@@ -52,23 +52,25 @@ export function plutoReadinessSignature(results: PlutoReadinessResult[]): string
 const finalCheckEt = `${readinessSchedule.finalCheck.hour}:${String(readinessSchedule.finalCheck.minute).padStart(2, "0")} ET`;
 
 /**
- * Pure: what a run means. A first run alerts only on failure; a re-run only when the set of failing tests changed (including
- * back to all-passing); the final run pauses Pluto when anything still fails.
+ * Pure: what a run means, announced like the platform readiness check: the 6:00 ET first run and the 9:20 ET final run always
+ * post (passing or not); a re-run posts only when the set of failing tests changed (including back to all-passing). The final
+ * run pauses Pluto when anything still fails.
  */
 export function describePlutoReadinessOutcome(kind: PlutoReadinessRunKind, previousSignature: string | null, results: PlutoReadinessResult[]): { signature: string; message: string | null; pause: boolean } {
   const signature = plutoReadinessSignature(results);
-  const failingLines = results.filter((result) => !result.ok).map((result) => `❌ ${result.name}: ${result.detail}`).join("\n");
-  const failedMessage = `⚠️ Pluto pre-open check failed:\n${failingLines}\nRe-checking every ${readinessSchedule.preOpenRecheckMinutes} minutes. Pluto pauses at ${finalCheckEt} if it still fails.`;
-  const passesAgainMessage = "✅ Pluto pre-open check passes again: IBKR, API sign-in and OpenRouter are all fine.";
-  const hadFailures = previousSignature !== null && previousSignature !== "";
+  const resultLines = [...results.filter((result) => !result.ok).map((result) => `❌ ${result.name}: ${result.detail}`), ...results.filter((result) => result.ok).map((result) => `✅ ${result.name}: ${result.detail}`)].join("\n");
+  const failing = signature !== "";
+  const recheckNote = `Re-checking every ${readinessSchedule.preOpenRecheckMinutes} minutes. Pluto pauses at ${finalCheckEt} if it still fails.`;
 
   if (kind === "final") {
-    if (signature !== "") return { signature, message: `🛑 Pluto pre-open check still failing at ${finalCheckEt}:\n${failingLines}\nPluto is paused. Press Resume on the Pluto screen once it is fixed.`, pause: true };
-    return { signature, message: hadFailures ? passesAgainMessage : null, pause: false };
+    if (failing) return { signature, message: `🛑 Pluto not ready: the ${finalCheckEt} check still fails, so Pluto is paused.\n${resultLines}\nPress Resume on the Pluto screen once it is fixed.`, pause: true };
+    return { signature, message: `✅ Pluto ready for today (${finalCheckEt} check).\n${resultLines}`, pause: false };
   }
-  if (kind === "first") return { signature, message: signature === "" ? null : failedMessage, pause: false };
+  if (kind === "first") {
+    return { signature, message: failing ? `⚠️ Pluto pre-open check failed.\n${resultLines}\n${recheckNote}` : `✅ Pluto pre-open check passed.\n${resultLines}`, pause: false };
+  }
   if (signature === (previousSignature ?? "")) return { signature, message: null, pause: false };
-  return { signature, message: signature === "" ? passesAgainMessage : failedMessage, pause: false };
+  return { signature, message: failing ? `⚠️ Pluto pre-open check changed.\n${resultLines}\n${recheckNote}` : `✅ Pluto pre-open check passes again.\n${resultLines}`, pause: false };
 }
 
 export type PlutoReadinessProbe = () => Promise<string>;
