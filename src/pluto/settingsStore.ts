@@ -63,7 +63,6 @@ export interface PlutoSettings {
   burstLines: number;
   burstSettleSeconds: number;
   perTickerModelCooldownMinutes: number;
-  globalMinCallIntervalSeconds: number;
   maxEnabledTickers: number;
   messageRateLimitPerSecond: number;
   // Operational
@@ -122,7 +121,6 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   burstLines: { column: "burst_lines", kind: "integer", min: 1 },
   burstSettleSeconds: { column: "burst_settle_seconds", kind: "integer", min: 1 },
   perTickerModelCooldownMinutes: { column: "per_ticker_model_cooldown_minutes", kind: "integer", min: 0 },
-  globalMinCallIntervalSeconds: { column: "global_min_call_interval_seconds", kind: "integer", min: 0 },
   maxEnabledTickers: { column: "max_enabled_tickers", kind: "integer", min: 0 },
   messageRateLimitPerSecond: { column: "message_rate_limit_per_second", kind: "integer", min: 1 },
   crashLoopRestartsPerHour: { column: "crash_loop_restarts_per_hour", kind: "integer", min: 1 },

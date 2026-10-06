@@ -38,7 +38,6 @@ export interface PassRunnerContext {
   lastFingerprintBySymbol: Map<string, string>;
   /** Per-symbol time of the last model evaluation, for the per-ticker cooldown. */
   lastModelEvaluationAtBySymbol: Map<string, number>;
-  lastModelCallAtMs: { value: number | null };
   /** Order watches the agent keeps alive after the pass returns. */
   trackWatch: (promise: Promise<unknown>, orderId: string, symbol: string) => void;
 }
@@ -217,9 +216,6 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     return { passId, modelCalled: false, skippedReason: "nothing eligible", outcome: null };
   }
   if (!request.force && changed.length === 0) return skip("no material change since the model last looked", checks.checks);
-  if (context.lastModelCallAtMs.value !== null && nowMs - context.lastModelCallAtMs.value < settings.globalMinCallIntervalSeconds * 1000) {
-    return skip(`global model-call interval (${settings.globalMinCallIntervalSeconds}s) not elapsed`, checks.checks);
-  }
   // A Day Signals update is only the messenger: name the round after what actually changed.
   let trigger: PlutoTrigger = request.trigger;
   let triggerDetail = request.triggerDetail;
@@ -267,7 +263,6 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const userPayload = JSON.stringify(payload);
 
   // 6. One call per decision (Marcelo, 2026-10-06: the deterministic gates are the second opinion; a second call doubled the cost).
-  context.lastModelCallAtMs.value = nowMs;
   for (const ticker of evaluated) {
     context.lastFingerprintBySymbol.set(ticker.row.symbol, ticker.fingerprint);
     context.lastModelEvaluationAtBySymbol.set(ticker.row.symbol, nowMs);

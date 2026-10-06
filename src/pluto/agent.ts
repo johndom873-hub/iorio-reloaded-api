@@ -68,7 +68,6 @@ export class PlutoAgent {
       marketWatch: this.marketWatch,
       lastFingerprintBySymbol: new Map(),
       lastModelEvaluationAtBySymbol: new Map(),
-      lastModelCallAtMs: { value: null },
       trackWatch: (promise, orderId, symbol) => {
         this.watches.add(promise);
         this.watchedOrderIds.add(orderId);
