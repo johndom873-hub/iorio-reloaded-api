@@ -92,9 +92,12 @@ export async function chatOnce({ messages, userMessage, chatId, adapter, api, te
   while (iteration < MAX_ITERATIONS) {
     iteration++;
     const turn = await adapter.call({ systemText, messages, tools: toolDefinitions, maxTokens: 1024 });
-    adapter.appendAssistantMessage(messages, turn);
+    const finishesWithoutRunningTools = turn.isDone || turn.toolCalls.length === 0;
+    // Tool calls that will not be run must not be stored: an assistant message that names tool calls with no tool results after
+    // it makes every later call for this chat fail.
+    adapter.appendAssistantMessage(messages, finishesWithoutRunningTools ? { ...turn, toolCalls: [] } : turn);
 
-    if (turn.isDone || turn.toolCalls.length === 0) {
+    if (finishesWithoutRunningTools) {
       return { text: turn.textContent };
     }
 

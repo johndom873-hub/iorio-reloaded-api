@@ -33,7 +33,7 @@ let botUsername: string | null = null;
 
 // Returns the addressed question text (trigger stripped), or null if the
 // message isn't addressed to Genosuke at all.
-function detectAddressing(msg: NonNullable<TelegramUpdate["message"]>): string | null {
+export function detectAddressing(msg: NonNullable<TelegramUpdate["message"]>): string | null {
   const text = msg.text ?? "";
   const entities = msg.entities ?? [];
 
@@ -41,7 +41,8 @@ function detectAddressing(msg: NonNullable<TelegramUpdate["message"]>): string |
   if (command) {
     const rest = text.slice(command.offset + command.length).trim();
     const cmdText = text.slice(command.offset, command.offset + command.length).toLowerCase();
-    if (cmdText.startsWith("/ask")) return rest;
+    // "/ask" or "/ask@thisbot" only: not "/asking", and not a command addressed to another bot.
+    if (cmdText === "/ask" || cmdText === `/ask@${(botUsername ?? "").toLowerCase()}`) return rest;
   }
 
   const mention = entities.find(
@@ -68,7 +69,7 @@ export function prefixWithQuotedMessage(question: string, quotedText: string | u
   return quotedText ? `[Replying to this message: "${quotedText.slice(0, 2000)}"]\n\n${question}` : question;
 }
 
-async function handleMessage(
+export async function handleMessage(
   msg: NonNullable<TelegramUpdate["message"]>,
   config: GenosukeConfig,
   telegram: TelegramApi,
@@ -90,7 +91,14 @@ async function handleMessage(
 
   const userMessage = prefixWithQuotedMessage(question, msg.reply_to_message?.text);
 
-  const messages = await loadRecentHistory(chatId);
+  let messages: Awaited<ReturnType<typeof loadRecentHistory>>;
+  try {
+    messages = await loadRecentHistory(chatId);
+  } catch (error) {
+    console.error("Genosuke: could not load the chat history", error);
+    await telegram.sendMessage(chatId, "Sorry, hit an error answering that.", { replyToMessageId: msg.message_id });
+    return;
+  }
   const fromIndex = messages.length;
   try {
     const { text } = await chatOnce({ messages, userMessage, chatId, adapter, api, telegram });

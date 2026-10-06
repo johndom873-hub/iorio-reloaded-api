@@ -81,10 +81,12 @@ export interface FlexStatementCashSections {
   Transfers?: { Transfer?: FlexTransferRow | FlexTransferRow[] };
 }
 
-const depositWithdrawalType = "Deposits & Withdrawals";
+// Both spellings are accepted: the Flex XML spelling has not been confirmed against live data, and a missed deposit would
+// be counted as trading P&L.
+const depositWithdrawalTypes = new Set(["deposits & withdrawals", "deposits/withdrawals"]);
 
 /**
- * Every external cash movement in a parsed Flex report: "Deposits & Withdrawals" rows of the Cash Transactions section and
+ * Every external cash movement in a parsed Flex report: Deposits/Withdrawals rows of the Cash Transactions section and
  * cash rows of the Transfers section. Dividends, interest and fees are trading-adjacent P&L, not external flow.
  */
 export function extractExternalCashFlows(statements: FlexStatementCashSections[]): FlexCashFlow[] {
@@ -92,7 +94,7 @@ export function extractExternalCashFlows(statements: FlexStatementCashSections[]
   for (const statement of statements) {
     const transactions = [statement.CashTransactions?.CashTransaction ?? []].flat();
     for (const transaction of transactions) {
-      if (transaction.type !== depositWithdrawalType) continue;
+      if (!depositWithdrawalTypes.has(String(transaction.type).trim().toLowerCase())) continue;
       const amount = Number(transaction.amount);
       if (Number.isNaN(amount)) continue;
       cashFlows.push({ ...parseFlexDateTime(transaction.dateTime), amount });

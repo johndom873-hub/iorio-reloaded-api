@@ -31,7 +31,7 @@ export const readTools: GenosukeTool[] = [
     description: "Daily P&L / net liquidation value history, most recent first.",
     tier: "read",
     parameters: { type: "object", properties: { days: { type: "number", description: "How many days back, max 365. Defaults to a reasonable window if omitted." } } },
-    execute: (input, api) => api.get(`/dashboard/history${input.days ? `?days=${input.days}` : ""}`),
+    execute: (input, api) => api.get(`/dashboard/history${input.days ? `?days=${encodeURIComponent(String(input.days))}` : ""}`),
   },
   {
     name: "list_positions",
@@ -45,7 +45,7 @@ export const readTools: GenosukeTool[] = [
       properties: { status: { type: "string", enum: ["open", "closed"] } },
       required: ["status"],
     },
-    execute: async (input, api) => annotateLegOpenState(await api.get(`/positions?status=${String(input.status)}`)),
+    execute: async (input, api) => annotateLegOpenState(await api.get(`/positions?status=${encodeURIComponent(String(input.status))}`)),
   },
   {
     name: "get_position",
@@ -54,7 +54,7 @@ export const readTools: GenosukeTool[] = [
     parameters: { type: "object", properties: { positionId: { type: "string" } }, required: ["positionId"] },
     execute: async (input, api) => {
       try {
-        return annotateLegOpenState(await api.get(`/positions/${input.positionId}`));
+        return annotateLegOpenState(await api.get(`/positions/${encodeURIComponent(String(input.positionId))}`));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`${message} — the id may be stale or wrong; call list_positions for current position ids and retry with the right one.`);
@@ -67,11 +67,11 @@ export const readTools: GenosukeTool[] = [
     tier: "read",
     parameters: { type: "object", properties: { positionId: { type: "string" } }, required: ["positionId"] },
     execute: async (input, api) => {
-      const position = await api.get<{ legs: { id: string; legType: string; exitAt: string | null }[] }>(`/positions/${input.positionId}`);
+      const position = await api.get<{ legs: { id: string; legType: string; exitAt: string | null }[] }>(`/positions/${encodeURIComponent(String(input.positionId))}`);
       const optionLegIds = position.legs.filter((leg) => leg.legType === "option" && !leg.exitAt).map((leg) => leg.id);
       const [greeks, pnl] = await Promise.all([
         optionLegIds.length > 0 ? api.get(`/positions/greeks?legIds=${optionLegIds.join(",")}`) : Promise.resolve({}),
-        api.get(`/positions/pnl?positionIds=${input.positionId}`),
+        api.get(`/positions/pnl?positionIds=${encodeURIComponent(String(input.positionId))}`),
       ]);
       return { greeksByLegId: greeks, unrealizedPnl: (pnl as Record<string, unknown>)[String(input.positionId)] };
     },
@@ -82,7 +82,7 @@ export const readTools: GenosukeTool[] = [
       "Stock price and option chain for a symbol — including one with no open position (e.g. picking parameters for a manual order). Always returns lastKnownClose (yesterday's-or-earlier daily close, works anytime). live.pricing/live.optionChain (bid/ask/strikes/premiums) are only populated during US market hours — check liveUnavailableReason before assuming live data exists, and never invent a bid/ask/premium if live is null.",
     tier: "read",
     parameters: { type: "object", properties: { symbol: { type: "string" } }, required: ["symbol"] },
-    execute: (input, api) => api.get(`/tickers/${String(input.symbol).toUpperCase()}/quote`),
+    execute: (input, api) => api.get(`/tickers/${encodeURIComponent(String(input.symbol).toUpperCase())}/quote`),
   },
   {
     name: "list_trades",
@@ -127,7 +127,7 @@ export const readTools: GenosukeTool[] = [
     description: "The monitored-ticker shortlist for one strategy, with each ticker's latest IV, IV Rank, and avg option volume snapshot.",
     tier: "read",
     parameters: { type: "object", properties: { strategyKey: strategyKeyEnum }, required: ["strategyKey"] },
-    execute: (input, api) => api.get(`/shortlist?strategy=${input.strategyKey}`),
+    execute: (input, api) => api.get(`/shortlist?strategy=${encodeURIComponent(String(input.strategyKey))}`),
   },
   {
     name: "search_tickers",
@@ -156,7 +156,7 @@ export const readTools: GenosukeTool[] = [
     description: "Recent scheduled job run history (most recent first), across all jobs.",
     tier: "read",
     parameters: { type: "object", properties: { limit: { type: "number", description: "Max rows, defaults to a reasonable window, capped at 200." } } },
-    execute: (input, api) => api.get(`/system-health/jobs${input.limit ? `?limit=${input.limit}` : ""}`),
+    execute: (input, api) => api.get(`/system-health/jobs${input.limit ? `?limit=${encodeURIComponent(String(input.limit))}` : ""}`),
   },
   {
     name: "list_waf_rules",

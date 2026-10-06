@@ -38,6 +38,8 @@ export async function fetchAccountLedgerPnl(): Promise<AccountLedgerPnl> {
       function onUpdateAccountValue(key: string, value: string, currency: string, account: string) {
         accountName = account;
         if (currency !== "BASE") return;
+        // An empty string is "no value", not zero: Number("") is 0, which would record a figure IBKR never sent.
+        if (value.trim() === "") return;
         const numericValue = Number(value);
         if (Number.isNaN(numericValue)) return;
         if (key === "$LEDGER-RealizedPnL") ledger.realizedPnl = numericValue;

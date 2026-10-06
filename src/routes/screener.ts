@@ -68,9 +68,10 @@ screenerRouter.get("/", async (request, response) => {
   }
   if (filters.sector !== undefined && filters.sector.length > 0) query.whereIn("su.sector", filters.sector);
   if (filters.minIv !== undefined) query.where("su.implied_volatility", ">=", filters.minIv);
-  // Worst-case liquidity across both sides of the chain, not either side alone.
+  // Worst-case liquidity across both sides of the chain, not either side alone: a side with no open interest captured
+  // cannot show it meets the minimum, so such a row does not pass.
   if (filters.minOpenInterest !== undefined) {
-    query.whereRaw("LEAST(su.call_open_interest, su.put_open_interest) >= ?", [filters.minOpenInterest]);
+    query.where("su.call_open_interest", ">=", filters.minOpenInterest).where("su.put_open_interest", ">=", filters.minOpenInterest);
   }
   // Overlap, not containment: "matched any of the selected types", not "matched all of them".
   if (filters.matchedScanCodes !== undefined && filters.matchedScanCodes.length > 0) {
@@ -130,7 +131,7 @@ screenerRouter.get("/sectors", async (_request, response) => {
 // (shortlist.ts), reused here rather than duplicated.
 screenerRouter.post("/:symbol/shortlist", async (request, response) => {
   const symbol = request.params.symbol.trim().toUpperCase();
-  const { notes } = request.body as { notes?: string };
+  const { notes } = (request.body ?? {}) as { notes?: string };
 
   const candidate = await db("screener_universe").where({ symbol }).first();
   if (!candidate) {

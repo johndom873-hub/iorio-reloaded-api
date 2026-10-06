@@ -103,7 +103,7 @@ async function resolveOpenPositionsAndLegs(symbol?: string): Promise<{ positions
   return { positions, legs };
 }
 
-function legsToPriceContracts(legs: OpenLegRow[]): PriceContract[] {
+export function legsToPriceContracts(legs: OpenLegRow[]): PriceContract[] {
   return legs.map((leg, index) => ({
     key: String(index),
     legType: leg.legType,
@@ -122,7 +122,7 @@ function legsToPriceContracts(legs: OpenLegRow[]): PriceContract[] {
 // nothing, there's no "regress to null" risk the way greeks/pnl have to
 // guard against — every update only ever gets more accurate as more real
 // prices arrive.
-function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegRow[], pricesByKey: Record<string, number | null>): PositionExposureRow[] {
+export function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegRow[], pricesByKey: Record<string, number | null>): PositionExposureRow[] {
   const exposureByPositionId = new Map<string, number>();
   legs.forEach((leg, index) => {
     const price = pricesByKey[String(index)] ?? Number(leg.entryPrice);

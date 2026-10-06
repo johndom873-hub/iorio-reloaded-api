@@ -11,7 +11,7 @@ import { db } from "../db/connection.js";
 import { environment } from "../config/env.js";
 import { readPasskeyLoginMode, readPasskeyRelyingPartyId } from "../config/passkeyLoginMode.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
-import { clearLoginFailures, clientAddress, isLoginThrottled, recordLoginFailure } from "../lib/loginFailureThrottle.js";
+import { clearLoginFailures, clientAddress, describeClientAddress, isLoginThrottled, recordLoginFailure } from "../lib/loginFailureThrottle.js";
 import { findPasskeyByCredentialId, recordPasskeyUse, storeNewPasskey } from "../lib/passkeys.js";
 import { regenerateSession } from "../lib/sessionAuthentication.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
@@ -130,7 +130,7 @@ passkeyAuthRouter.post("/register/verify", async (request, response) => {
 
   // Any registration is worth a message: it is the one moment a stolen password could add an attacker's passkey.
   void notifyTelegram(
-    `🔑 Passkey registered for ${user.username} on ${readAppEnvironment()} (${credentialDeviceType}${credentialBackedUp ? ", synced" : ""}) from ${clientAddress(request)}. If this was not you or Juan, run: npm run manage-user -- reset-passkeys ${user.username}`,
+    `🔑 Passkey registered for ${user.username} on ${readAppEnvironment()} (${credentialDeviceType}${credentialBackedUp ? ", synced" : ""}) from ${describeClientAddress(request)}. If this was not you or Juan, run: npm run manage-user -- reset-passkeys ${user.username}`,
   );
   response.json({ status: "registered" });
 });

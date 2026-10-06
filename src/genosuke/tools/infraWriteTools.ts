@@ -17,6 +17,14 @@ import { describeFreshLoginResult } from "../../ibkr/gatewayControlResult.js";
 import { startFreshGatewayLoginOnVps } from "../../ibkr/startFreshGatewayLoginOnVps.js";
 import type { GenosukeTool } from "./types.js";
 
+const wafActions = ["block", "challenge", "js_challenge", "managed_challenge"];
+
+/** The card is built from these values and the service acts on them, so a missing or blank one is refused before any card is sent. */
+function missingText(input: Record<string, unknown>, ...names: string[]): string | null {
+  const missing = names.filter((name) => typeof input[name] !== "string" || (input[name] as string).trim() === "");
+  return missing.length > 0 ? `${missing.join(" and ")} must be a non-empty string.` : null;
+}
+
 export const infraWriteTools: GenosukeTool[] = [
   {
     name: "add_waf_rule",
@@ -32,6 +40,7 @@ export const infraWriteTools: GenosukeTool[] = [
       },
       required: ["expression", "description"],
     },
+    validateBeforeConfirmation: async (input) => missingText(input, "expression", "description") ?? (input.action === undefined || wafActions.includes(String(input.action)) ? null : `action must be one of ${wafActions.join(", ")}.`),
     describeForConfirmation: (input) => `Add Cloudflare WAF rule on ioriore.com: ${input.expression} → ${input.action ?? "block"} ("${input.description}")`,
     execute: (input) => addWafRule({ expression: String(input.expression), description: String(input.description), action: input.action as string | undefined }),
   },
@@ -41,6 +50,7 @@ export const infraWriteTools: GenosukeTool[] = [
       "Remove (unblock) a Cloudflare WAF custom rule on the ioriore.com zone by its rule id. Do NOT use this to unblock a single IP that was added via add_waf_rule/unblock_ip — those IPs share one merged rule, so deleting the rule by id would unblock every IP in it at once. Use unblock_ip for that instead. Call list_waf_rules first if you need to look up the id from a description.",
     tier: "infra-write",
     parameters: { type: "object", properties: { ruleId: { type: "string" } }, required: ["ruleId"] },
+    validateBeforeConfirmation: async (input) => missingText(input, "ruleId"),
     describeForConfirmation: (input) => `Remove Cloudflare WAF rule ${input.ruleId} on ioriore.com`,
     execute: (input) => removeWafRule(String(input.ruleId)),
   },
@@ -50,6 +60,7 @@ export const infraWriteTools: GenosukeTool[] = [
       "Remove a single IP from the shared IP blocklist rule created by add_waf_rule (removes just that IP, leaving other blocked IPs in place; deletes the rule entirely if it was the last IP). This is the correct way to unblock one IP — do not use remove_waf_rule for this.",
     tier: "infra-write",
     parameters: { type: "object", properties: { ip: { type: "string" } }, required: ["ip"] },
+    validateBeforeConfirmation: async (input) => missingText(input, "ip"),
     describeForConfirmation: (input) => `Unblock IP ${input.ip} on ioriore.com's Cloudflare WAF`,
     execute: (input) => unblockIp(String(input.ip)),
   },

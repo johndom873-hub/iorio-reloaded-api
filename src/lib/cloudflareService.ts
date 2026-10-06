@@ -214,15 +214,20 @@ export async function updateWafRule(ruleId: string, { expression, description, a
     action: action ?? current.action,
     expression: expression ?? current.expression,
     description: description ?? current.description,
+    // Sent explicitly like every other field: an omitted `enabled` is blanked to its default (on), which would silently
+    // switch a disabled rule back on whenever its expression or description is edited.
+    enabled: current.enabled ?? true,
     ...((actionParameters ?? current.action_parameters) ? { action_parameters: actionParameters ?? current.action_parameters } : {}),
   };
   await cloudflareRequest(`/zones/${zoneId}/rulesets/${ruleset.id}/rules/${ruleId}`, { method: "PATCH", body: JSON.stringify(merged) });
-  return { id: ruleId, description: merged.description, expression: merged.expression, action: merged.action, enabled: true };
+  return { id: ruleId, description: merged.description, expression: merged.expression, action: merged.action, enabled: merged.enabled };
 }
 
 export async function removeWafRule(ruleId: string): Promise<{ removed: string }> {
   const zoneId = requireEnvironmentVariable("CLOUDFLARE_ZONE_ID");
   const ruleset = await getCustomRuleset();
+  // A zone with no custom ruleset has no rules (its id is null), so there is nothing to delete and no valid URL to send.
+  if (!ruleset.rules.some((rule) => rule.id === ruleId)) throw new Error(`No WAF rule found with id ${ruleId}`);
   await cloudflareRequest(`/zones/${zoneId}/rulesets/${ruleset.id}/rules/${ruleId}`, { method: "DELETE" });
   return { removed: ruleId };
 }

@@ -212,7 +212,11 @@ export async function fetchHistoricalBarsRaw(
 
   return new Promise((resolve, reject) => {
     const bars: PriceBar[] = [];
-    const timer = setTimeout(() => reject(new Error(`Historical data timeout for ${symbol}`)), 20_000);
+    const timer = setTimeout(() => {
+      // Remove the listeners too: on a shared connection they would otherwise stay attached after the caller gave up.
+      cleanup();
+      reject(new Error(`Historical data timeout for ${symbol}`));
+    }, 20_000);
 
     function cleanup() {
       clearTimeout(timer);
@@ -290,7 +294,11 @@ export async function lookupLatestDailyBar(
 
   return new Promise((resolve, reject) => {
     const bars: PriceBar[] = [];
-    const timer = setTimeout(() => reject(new Error(`Historical data timeout for ${symbol}`)), 20_000);
+    const timer = setTimeout(() => {
+      // Remove the listeners too: on a shared connection they would otherwise stay attached after the caller gave up.
+      cleanup();
+      reject(new Error(`Historical data timeout for ${symbol}`));
+    }, 20_000);
 
     function cleanup() {
       clearTimeout(timer);

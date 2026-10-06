@@ -13,3 +13,5 @@ tmp/
 /*.jpg
 /*.jpeg
 .claude/settings.json
+
+coverage/

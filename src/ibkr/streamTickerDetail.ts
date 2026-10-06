@@ -132,6 +132,10 @@ export async function streamTickerDetail(
       .whereNull("se.removed_at")
       .first()
       .then((row) => row !== undefined);
+    // Both are started for every stream but only awaited by the overview section: on a stream without it, a failure here would be an
+    // unhandled rejection. The overview still awaits the originals and sees any error.
+    contractDetailsPromise.catch(() => {});
+    isShortlistedPromise.catch(() => {});
 
     // Approved 2026-09-19: the header price must equal the Positions table's. This connection's own pricing stream is
     // REALTIME-only, so on a closed market it never gets a last trade and only reports the PREVIOUS session's close

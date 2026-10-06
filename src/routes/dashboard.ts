@@ -325,13 +325,13 @@ dashboardRouter.get("/period-pnl-by-strategy", async (_request, response) => {
 // account total minus the three known buckets, same plug-figure logic as
 // /period-pnl-by-strategy.
 dashboardRouter.get("/events", async (request, response) => {
-  const limit = Math.min(Number(request.query.limit) || 40, 200);
+  const limit = Math.min(Math.max(Number(request.query.limit) || 40, 1), 200);
   const events = await fetchPositionEvents(limit);
   response.json(events);
 });
 
 dashboardRouter.get("/history", async (request, response) => {
-  const days = Math.min(Number(request.query.days) || defaultHistoryDays, 365);
+  const days = Math.min(Math.max(Number(request.query.days) || defaultHistoryDays, 1), 365);
 
   const [accountResult, strategySeries] = await Promise.all([
     db.raw(

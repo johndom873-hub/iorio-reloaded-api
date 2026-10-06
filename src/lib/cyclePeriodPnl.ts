@@ -1,7 +1,7 @@
 import { db } from "../db/connection.js";
 import { deriveCycles, type Cycle, type CycleBucket, type CycleInput } from "./cycles.js";
 import { loadCycleInputsForTickers } from "./cycleQueries.js";
-import { easternInstant } from "./marketSessionStatus.js";
+import { easternInstant, previousOpenSessionDate } from "./marketSessionStatus.js";
 
 // Dashboard "P&L by Period" / "P&L by Strategy (YTD)" on the fair cycle attribution (approved 2026-09-21; the same
 // CSP / N/S / CC buckets as the Positions scoreboard, see cycles.ts).
@@ -42,26 +42,29 @@ interface SnapshotMarks {
   unrealizedPnl: number;
 }
 
-const previousTradingDaySql = (boundary: string) => `COALESCE(
-  (SELECT MAX(calendar_date) FROM market_calendar WHERE calendar_date < ${boundary} AND is_open = true),
-  (${boundary} - (CASE EXTRACT(ISODOW FROM ${boundary}) WHEN 1 THEN 3 WHEN 7 THEN 2 ELSE 1 END)::int)
-)::text`;
-
-async function loadBaselineDates(): Promise<Record<CyclePeriod, string> | null> {
+// The boundaries are read in SQL (CURRENT_DATE, as the account card does); the previous trading day before each is resolved
+// by the same walk the Dashboard's Day card uses, so a gap in market_calendar can never put the two on different days.
+export async function loadBaselineDates(): Promise<Record<CyclePeriod, string> | null> {
   const result = await db.raw(`
     SELECT
-      CASE WHEN latest.d IS NULL THEN NULL ELSE ${previousTradingDaySql("latest.d")} END AS day,
-      ${previousTradingDaySql("date_trunc('week', CURRENT_DATE)::date")} AS week,
-      ${previousTradingDaySql("date_trunc('month', CURRENT_DATE)::date")} AS month,
-      ${previousTradingDaySql("date_trunc('year', CURRENT_DATE)::date")} AS year
+      latest.d::text AS "latestSnapshotDate",
+      date_trunc('week', CURRENT_DATE)::date::text AS "weekStart",
+      date_trunc('month', CURRENT_DATE)::date::text AS "monthStart",
+      date_trunc('year', CURRENT_DATE)::date::text AS "yearStart"
     FROM (SELECT MAX(snapshot_date) AS d FROM account_pnl_snapshots) latest
   `);
   const row = result.rows[0];
-  if (!row || row.day === null) return null;
-  return { day: row.day, week: row.week, month: row.month, year: row.year };
+  if (!row || row.latestSnapshotDate === null) return null;
+  const [day, week, month, year] = await Promise.all([
+    previousOpenSessionDate(row.latestSnapshotDate),
+    previousOpenSessionDate(row.weekStart),
+    previousOpenSessionDate(row.monthStart),
+    previousOpenSessionDate(row.yearStart),
+  ]);
+  return { day, week, month, year };
 }
 
-async function loadSnapshotMarksOn(dateIso: string): Promise<Map<string, SnapshotMarks>> {
+export async function loadSnapshotMarksOn(dateIso: string): Promise<Map<string, SnapshotMarks>> {
   const result = await db.raw(
     `SELECT position_id AS "positionId", premium_pnl::float AS "premiumPnl", unrealized_pnl::float AS "unrealizedPnl"
      FROM position_pnl_snapshots WHERE snapshot_date = ?`,
@@ -112,7 +115,7 @@ export function truncateCycleInputAsOf(input: CycleInput, baselineDate: string, 
 
 const bucketKeys: CycleBucket[] = ["csp", "unstructured", "cc", "hedge"];
 
-function openMarkTotal(cycle: Cycle | undefined, bucket: CycleBucket): number {
+export function openMarkTotal(cycle: Cycle | undefined, bucket: CycleBucket): number {
   if (!cycle) return 0;
   // Open-leg marks, plus the cost of a hedge option still held (a bought option's price is not a realized loss).
   return cycle.timeline.filter((row) => (row.at === null || row.unrealized === true) && row.bucket === bucket).reduce((sum, row) => sum + row.premium + row.stock, 0);

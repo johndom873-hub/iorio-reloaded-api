@@ -63,7 +63,9 @@ class PersistentIbkrConnection {
    * single order. Reset on reconnect via a fresh nextValidId.
    */
   getNextOrderId(): number {
-    if (this.nextOrderId === null) {
+    // The counter outlives a drop, but an id taken from it while disconnected belongs to a session that is gone and could
+    // not be placed on anything.
+    if (this.ib === null || this.nextOrderId === null) {
       throw new Error("No IBKR order id available yet — not connected.");
     }
     return this.nextOrderId++;
@@ -171,7 +173,15 @@ class PersistentIbkrConnection {
 
     ib.once(EventName.disconnected, () => this.handleDisconnect());
 
-    for (const listener of this.onConnectListeners) listener(ib);
+    // A listener that throws must not fail a connection that is up: connect() would reject with this.ib already set, and the
+    // retry would open a second session under the same client id.
+    for (const listener of this.onConnectListeners) {
+      try {
+        listener(ib);
+      } catch (error) {
+        console.error(`IBKR worker: an on-connect listener failed: ${error instanceof Error ? error.message : error}`);
+      }
+    }
   }
 
   private handleDisconnect(): void {

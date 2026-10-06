@@ -74,6 +74,8 @@ export async function fetchDailyClosingPrices(contracts: PriceContract[], sessio
     const accountDone = new Promise<void>((resolve) => (resolveAccountDone = resolve));
     let accountName: string | null = null;
 
+    const onAccountDownloadEnd = () => resolveAccountDone();
+
     const onUpdatePortfolio = (contract: Contract, position: number, marketPrice: number, _marketValue: number, _averageCost?: number, _unrealizedPnl?: number, _realizedPnl?: number, account?: string) => {
       if (account) accountName = account;
       portfolioMarks.push({ contract, position, marketPrice });
@@ -83,7 +85,7 @@ export async function fetchDailyClosingPrices(contracts: PriceContract[], sessio
     ib.on(EventName.error, onHistoricalError);
     if (optionContracts.length > 0) {
       ib.on(EventName.updatePortfolio, onUpdatePortfolio);
-      ib.on(EventName.accountDownloadEnd, () => resolveAccountDone());
+      ib.on(EventName.accountDownloadEnd, onAccountDownloadEnd);
     } else {
       resolveAccountDone();
     }
@@ -113,6 +115,7 @@ export async function fetchDailyClosingPrices(contracts: PriceContract[], sessio
       ib.removeListener(EventName.historicalData, onHistoricalData);
       ib.removeListener(EventName.error, onHistoricalError);
       ib.removeListener(EventName.updatePortfolio, onUpdatePortfolio);
+      ib.removeListener(EventName.accountDownloadEnd, onAccountDownloadEnd);
       if (optionContracts.length > 0 && accountName) ib.reqAccountUpdates(false, accountName);
     }
 

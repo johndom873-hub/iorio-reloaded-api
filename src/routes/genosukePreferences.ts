@@ -19,8 +19,8 @@ genosukePreferencesRouter.get("/", async (_request, response) => {
 });
 
 genosukePreferencesRouter.post("/", async (request, response) => {
-  const { content } = request.body as { content?: string };
-  if (!content || !content.trim()) {
+  const { content } = (request.body ?? {}) as { content?: unknown };
+  if (typeof content !== "string" || !content.trim()) {
     response.status(400).json({ error: "Content is required." });
     return;
   }

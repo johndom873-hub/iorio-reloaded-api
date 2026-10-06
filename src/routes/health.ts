@@ -11,6 +11,8 @@ healthRouter.get("/health", async (_request, response) => {
     await db.raw("select 1");
     response.json({ status: "ok" });
   } catch (error) {
-    response.status(503).json({ status: "error", message: (error as Error).message });
+    // The database's own error text can carry its host and port, and this route is public: log it, do not return it.
+    console.error(`Health check: database unreachable: ${(error as Error).message}`);
+    response.status(503).json({ status: "error", message: "Database unavailable." });
   }
 });

@@ -55,7 +55,9 @@ interface CashTransactionXml {
   dateTime: string;
 }
 
-const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
+// parseTagValue off: element text such as <ErrorCode>1019</ErrorCode> or a reference code with leading zeros must stay a string,
+// or the code comparisons below never match and the reference code sent back to IBKR is altered.
+const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "", parseTagValue: false });
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

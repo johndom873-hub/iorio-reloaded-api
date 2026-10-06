@@ -25,14 +25,14 @@ export const lowStakesWriteTools: GenosukeTool[] = [
       "Remove a ticker from a strategy's shortlist (soft-delete). Use the shortlist entry id from list_shortlist, not the ticker id. Refused (409) while the ticker has an open position — it must be closed first.",
     tier: "low-stakes-write",
     parameters: { type: "object", properties: { entryId: { type: "string" } }, required: ["entryId"] },
-    execute: (input, api) => api.delete(`/shortlist/${input.entryId}`),
+    execute: (input, api) => api.delete(`/shortlist/${encodeURIComponent(String(input.entryId))}`),
   },
   {
     name: "update_shortlist_notes",
     description: "Update the free-text notes on a shortlist entry.",
     tier: "low-stakes-write",
     parameters: { type: "object", properties: { entryId: { type: "string" }, notes: { type: "string" } }, required: ["entryId", "notes"] },
-    execute: (input, api) => api.patch(`/shortlist/${input.entryId}`, { notes: input.notes }),
+    execute: (input, api) => api.patch(`/shortlist/${encodeURIComponent(String(input.entryId))}`, { notes: input.notes }),
   },
   {
     name: "trigger_ibkr_health_check",
@@ -55,6 +55,6 @@ export const lowStakesWriteTools: GenosukeTool[] = [
       "Remove a previously saved preference. Pass the bracketed id shown next to it in the Preferences section of your system prompt, not the text itself.",
     tier: "low-stakes-write",
     parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
-    execute: (input, api) => api.delete(`/genosuke/preferences/${input.id}`),
+    execute: (input, api) => api.delete(`/genosuke/preferences/${encodeURIComponent(String(input.id))}`),
   },
 ];
