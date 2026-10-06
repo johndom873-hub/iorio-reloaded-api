@@ -32,6 +32,7 @@ import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { fetchTodaysOrders } from "../lib/todaysOrders.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
+import { computeUnrealizedPnlByPosition, normalizeExpiryDate, roundToCents, sumSharesCommittedByCoveredCallPayloads, validateCoveredCallCoverage } from "../lib/positionOrderRules.js";
 
 export const positionsRouter = Router();
 positionsRouter.use(requireAuth);
@@ -90,45 +91,11 @@ function orderRequestsWithNames() {
     .select("orq.*", "ru.display_name as requested_by_display_name", "cu.display_name as cancelled_by_display_name");
 }
 
-// Guards against a naked covered call — a short call leg must never cover
-// more shares than the position actually holds long. Approved 2026-08-24
-// after a real prod position (AAOI) was entered with a short call quantity
-// of 100 (contracts) against only 100 shares of stock — 99 contracts naked.
-// Over-coverage (more stock than the short calls need) is allowed; it's
-// conservative, not risky. Only applies to covered_call — cash_secured_put
-// has no stock leg to cover against.
-function validateCoveredCallCoverage(stockShares: number, shortCallCoveredShares: number): string | null {
-  if (shortCallCoveredShares > stockShares) {
-    return `Short call coverage (${shortCallCoveredShares} shares) exceeds stock held (${stockShares} shares) — this would leave the position naked.`;
-  }
-  return null;
-}
-
-// Prices go to IBKR on a one-cent grid. SMART-routed US options and combos accept any cent price, also above $3 on
-// non-penny classes (what-if orders on paper, 2026-10-05); the per-exchange rule tables that list nickels and dimes do
-// not apply to SMART. A third decimal is rejected with error 110, and a combo's net price is the sum of its legs'
-// unitPrices (computeNetLimitPrice), so every leg is rounded here, not just the total.
-function roundToCents(price: number): number {
-  return Math.round(price * 100) / 100;
-}
-
-// Real bug found 2026-08-24: a manual AAOI order was submitted with
-// expiryDate "2026-08-28" (dashes) instead of the "YYYYMMDD" the IBKR
-// contract lookup requires — resolveLegContractIds silently failed to
-// resolve the contract and the order died with a generic "could not
-// resolve one or more contract ids" error, well after the human had
-// already confirmed it. Normalize (strip separators) and validate up
-// front so a malformed date is rejected immediately with a clear message.
 // position_legs.expiry_date is a Postgres date, which pg hands back as a JS Date -- JSON then makes it
 // "2026-10-02T00:00:00.000Z" (and a day earlier on a server west/east of UTC), not IBKR's YYYYMMDD.
 // Legs that feed an order payload select it through this column instead.
 function expiryYyyymmddColumn() {
   return db.raw("to_char(expiry_date, 'YYYYMMDD') as \"expiryYyyymmdd\"");
-}
-
-function normalizeExpiryDate(raw: string): string | null {
-  const digitsOnly = raw.replace(/[^0-9]/g, "");
-  return /^\d{8}$/.test(digitsOnly) ? digitsOnly : null;
 }
 
 // realizedPnl/capitalAtRisk formulas approved 2026-08-21:
@@ -625,38 +592,7 @@ positionsRouter.get("/pnl", async (request, response) => {
     console.error("positions/pnl: fetchLivePrices failed, falling back to position_pnl_snapshots", error);
   }
 
-  const unrealizedByPositionId: Record<string, number | null> = {};
-  const premiumByPositionId: Record<string, number | null> = {};
-  const stockByPositionId: Record<string, number | null> = {};
-  const stockMarketValueByPositionId: Record<string, number | null> = {};
-  for (const positionId of positionIds) {
-    unrealizedByPositionId[positionId] = 0;
-    premiumByPositionId[positionId] = 0;
-    stockByPositionId[positionId] = 0;
-    stockMarketValueByPositionId[positionId] = 0;
-  }
-
-  for (const leg of legRows) {
-    if (unrealizedByPositionId[leg.positionId] === null) continue;
-    const currentPrice = pricesByLegId[leg.id];
-    if (currentPrice === null || currentPrice === undefined) {
-      unrealizedByPositionId[leg.positionId] = null;
-      premiumByPositionId[leg.positionId] = null;
-      stockByPositionId[leg.positionId] = null;
-      stockMarketValueByPositionId[leg.positionId] = null;
-      continue;
-    }
-    const sign = leg.side === "short" ? -1 : 1;
-    const entryPrice = Number(leg.entryPrice);
-    const legPnl = (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
-    unrealizedByPositionId[leg.positionId] = (unrealizedByPositionId[leg.positionId] ?? 0) + legPnl;
-    if (leg.legType === "option") {
-      premiumByPositionId[leg.positionId] = (premiumByPositionId[leg.positionId] ?? 0) + legPnl;
-    } else {
-      stockByPositionId[leg.positionId] = (stockByPositionId[leg.positionId] ?? 0) + legPnl;
-      stockMarketValueByPositionId[leg.positionId] = (stockMarketValueByPositionId[leg.positionId] ?? 0) + currentPrice * leg.quantity;
-    }
-  }
+  const { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId } = computeUnrealizedPnlByPosition(positionIds, legRows, pricesByLegId);
 
   const positionIdsMissingLive = positionIds.filter((id) => unrealizedByPositionId[id] === null);
   const fallbackByPositionId = new Map<
@@ -785,44 +721,6 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
     return;
   }
 
-  // Same P&L math as GET /pnl above, parameterized by whatever prices are
-  // known so far — called on every streamLivePrices update, including the
-  // frozen one.
-  function computeUnrealized(pricesByLegId: Record<string, number | null>) {
-    const unrealizedByPositionId: Record<string, number | null> = {};
-    const premiumByPositionId: Record<string, number | null> = {};
-    const stockByPositionId: Record<string, number | null> = {};
-    const stockMarketValueByPositionId: Record<string, number | null> = {};
-    for (const positionId of positionIds) {
-      unrealizedByPositionId[positionId] = 0;
-      premiumByPositionId[positionId] = 0;
-      stockByPositionId[positionId] = 0;
-      stockMarketValueByPositionId[positionId] = 0;
-    }
-    for (const leg of legRows) {
-      if (unrealizedByPositionId[leg.positionId] === null) continue;
-      const currentPrice = pricesByLegId[leg.id];
-      if (currentPrice === null || currentPrice === undefined) {
-        unrealizedByPositionId[leg.positionId] = null;
-        premiumByPositionId[leg.positionId] = null;
-        stockByPositionId[leg.positionId] = null;
-        stockMarketValueByPositionId[leg.positionId] = null;
-        continue;
-      }
-      const sign = leg.side === "short" ? -1 : 1;
-      const entryPrice = Number(leg.entryPrice);
-      const legPnl = (currentPrice - entryPrice) * leg.quantity * leg.multiplier * sign;
-      unrealizedByPositionId[leg.positionId] = (unrealizedByPositionId[leg.positionId] ?? 0) + legPnl;
-      if (leg.legType === "option") {
-        premiumByPositionId[leg.positionId] = (premiumByPositionId[leg.positionId] ?? 0) + legPnl;
-      } else {
-        stockByPositionId[leg.positionId] = (stockByPositionId[leg.positionId] ?? 0) + legPnl;
-        stockMarketValueByPositionId[leg.positionId] = (stockMarketValueByPositionId[leg.positionId] ?? 0) + currentPrice * leg.quantity;
-      }
-    }
-    return { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId };
-  }
-
   let isFirstEvent = true;
 
   // Holds whatever's the best-known result per position so far (fallback or
@@ -840,7 +738,7 @@ export async function streamPnlHandler(request: Request, response: Response): Pr
     await streamPooledPrices(
       priceContracts,
       serializeAsyncCalls(async (pricesByLegId) => {
-        const { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId } = computeUnrealized(pricesByLegId);
+        const { unrealizedByPositionId, premiumByPositionId, stockByPositionId, stockMarketValueByPositionId } = computeUnrealizedPnlByPosition(positionIds, legRows, pricesByLegId);
 
         if (!isFirstEvent) {
           for (const positionId of positionIds) {
@@ -1022,7 +920,8 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(400).json({ error: "A positive whole number of option contracts is required." });
     return;
   }
-  if (typeof option.limitPrice !== "number" || !(option.limitPrice > 0)) {
+  // Judged after rounding to cents: a price like 0.004 is sent to IBKR as 0.00, which the message below says is never allowed.
+  if (typeof option.limitPrice !== "number" || !(roundToCents(option.limitPrice) > 0)) {
     response.status(400).json({ error: "option.limitPrice must be a positive number — a short option is never sold for $0." });
     return;
   }
@@ -1040,6 +939,10 @@ positionsRouter.post("/orders", async (request, response) => {
   // so a caller that includes a zeroed-out/placeholder stock leg for a
   // strategy that doesn't need one isn't rejected for it.
   if (strategyKey === "covered_call" && stock !== undefined) {
+    if (stock === null || typeof stock !== "object") {
+      response.status(400).json({ error: "stock must be an object with quantity and limitPrice when provided." });
+      return;
+    }
     if (!Number.isInteger(stock.quantity) || stock.quantity <= 0) {
       response.status(400).json({ error: "stock.quantity must be a positive whole number of shares when stock is provided." });
       return;
@@ -1407,20 +1310,14 @@ async function findActiveOrderConflict(
 }
 
 /** Shares that in-flight covered-call open orders on this symbol are already writing against without buying (option contracts × 100 minus their stock leg). */
-async function sharesCommittedByInFlightCoveredCalls(symbol: string): Promise<number> {
+export async function sharesCommittedByInFlightCoveredCalls(symbol: string): Promise<number> {
   const rows: { payload: OrderRequestPayload }[] = await db("order_requests")
     .whereIn("status", [...activeOrderRequestStatuses])
     .where("request_type", "like", "open_%")
     .whereRaw("payload->>'symbol' = ?", [symbol])
     .whereRaw("payload->>'strategyKey' = ?", ["covered_call"])
     .select("payload");
-  let committed = 0;
-  for (const { payload } of rows) {
-    const optionContracts = payload.legs.filter((leg) => leg.role === "option").reduce((sum, leg) => sum + leg.quantity, 0);
-    const stockShares = payload.legs.filter((leg) => leg.role === "stock").reduce((sum, leg) => sum + leg.quantity, 0);
-    committed += Math.max(0, optionContracts * 100 - stockShares);
-  }
-  return committed;
+  return sumSharesCommittedByCoveredCallPayloads(rows.map((row) => row.payload));
 }
 
 // What the order gate says about a built order right now, without confirming it: the same evaluation the confirm
@@ -1630,7 +1527,7 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     !Number.isInteger(newLeg.quantity) ||
     newLeg.quantity <= 0 ||
     typeof newLeg.limitPrice !== "number" ||
-    !(newLeg.limitPrice > 0)
+    !(roundToCents(newLeg.limitPrice) > 0)
   ) {
     response.status(400).json({ error: "newLeg requires strikePrice, expiryDate, a positive whole-number quantity, and a positive limitPrice (the new leg is sold, never for $0)." });
     return;
@@ -1836,7 +1733,7 @@ positionsRouter.post("/:id/close", async (request, response) => {
     return;
   }
   for (const leg of legs) {
-    if (!leg.legId || typeof leg.limitPrice !== "number" || leg.limitPrice < 0) {
+    if (!leg || typeof leg !== "object" || !leg.legId || typeof leg.limitPrice !== "number" || leg.limitPrice < 0) {
       response.status(400).json({ error: "Each leg requires legId and a non-negative limitPrice." });
       return;
     }

@@ -1,8 +1,9 @@
 import { db } from "../db/connection.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { evaluateDataInvariants, loadDataInvariantInputs, type InvariantResult } from "./dataInvariants.js";
-import { expectedScheduledJobs, evaluateJobDeadlines, evaluatePendingJobs, runFallsInSlot, type JobRunSummary } from "./jobDeadlines.js";
+import { expectedScheduledJobs, evaluateJobDeadlines, evaluatePendingJobs, runFallsInSlot, scheduledInstant, slotDateIso, type JobRunSummary } from "./jobDeadlines.js";
 import { easternDateIso, easternInstant, resolveIsOpenDay } from "./marketSessionStatus.js";
+import { formatDateWithWeekday, formatEasternDateTime, formatEasternTime } from "./easternIsoDate.js";
 import { readGitSha } from "./readGitSha.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { reportBackgroundFailure } from "./backgroundFailureAlert.js";
@@ -35,45 +36,81 @@ export interface DigestJobLine {
   lastStartedAt: Date | null;
   status: "running" | "success" | "failure" | null;
   errorMessage: string | null;
+  /** When this job's slot falls today (Eastern day of the digest), or null when it has none. */
+  scheduledTodayAt?: Date | null;
 }
 
-/** Pure: the morning digest text. */
+/** Pure: the morning digest text. Every time in it is Eastern. */
 export function buildMorningDigest(input: {
   dateIso: string;
+  /** The moment the digest is built: decides which of today's slots are still to come. */
+  now: Date;
   jobs: DigestJobLine[];
   invariants: InvariantResult[];
   undelivered: { alertedAt: Date; message: string }[];
   /** Overdue or stuck jobs still open, from evaluateJobDeadlines. */
   deadlineProblems: string[];
-  /** Jobs whose slot today has begun but that have not started yet (deadline not passed): shown as pending, not as yesterday's green line. */
+  /** Jobs whose slot today has begun but that have not started yet (deadline not passed): shown as due, not as yesterday's green line. */
   pendingJobs?: string[];
 }): string {
-  const pendingJobs = input.pendingJobs ?? [];
-  const jobProblems = input.jobs.filter((job) => job.status !== "success");
-  const invariantProblems = input.invariants.filter((invariant) => !invariant.ok);
-  const problemCount = jobProblems.length + invariantProblems.length + input.undelivered.length + input.deadlineProblems.length;
+  const pendingJobs = new Set(input.pendingJobs ?? []);
+  const when = (instant: Date): string => formatEasternDateTime(instant, input.dateIso);
+  const ranToday = (job: DigestJobLine): boolean => job.lastStartedAt !== null && easternDateIso(job.lastStartedAt) === input.dateIso;
+  const slotLaterToday = (job: DigestJobLine): Date | null => (job.scheduledTodayAt && job.scheduledTodayAt > input.now && !ranToday(job) ? job.scheduledTodayAt : null);
+  const lastRunMark = (job: DigestJobLine): string => (job.lastStartedAt ? `${when(job.lastStartedAt)} ✅` : "never run");
+
+  const problemLines: string[] = [...input.deadlineProblems];
+  // Sorted by time before printing, so each list reads in the order things happen.
+  const ranTodayEntries: { at: Date; line: string }[] = [];
+  const dueLaterEntries: { at: Date; line: string }[] = [];
+  const otherLines: string[] = [];
+  let jobProblemCount = 0;
+  for (const job of input.jobs) {
+    const laterSlot = slotLaterToday(job);
+    if (job.status === null || job.lastStartedAt === null) {
+      jobProblemCount++;
+      problemLines.push(`❌ Job ${job.jobName}: never run`);
+    } else if (job.status === "running") {
+      jobProblemCount++;
+      problemLines.push(`⏳ Job ${job.jobName}: still running (started ${when(job.lastStartedAt)})`);
+    } else if (job.status === "failure") {
+      jobProblemCount++;
+      const reason = job.errorMessage ? ` — ${job.errorMessage.split("\n")[0]!.slice(0, 160)}` : "";
+      problemLines.push(`❌ Job ${job.jobName}: failed ${when(job.lastStartedAt)}${reason}${laterSlot ? ` · next run today ${formatEasternTime(laterSlot)}` : ""}`);
+    } else if (pendingJobs.has(job.jobName) && job.scheduledTodayAt) {
+      dueLaterEntries.push({ at: job.scheduledTodayAt, line: `⏳ ${job.jobName} was due ${formatEasternTime(job.scheduledTodayAt)}, not started yet (last run ${lastRunMark(job)})` });
+    } else if (ranToday(job)) {
+      ranTodayEntries.push({ at: job.lastStartedAt, line: `✅ ${job.jobName} ${formatEasternTime(job.lastStartedAt)}` });
+    } else if (laterSlot) {
+      dueLaterEntries.push({ at: laterSlot, line: `⏳ ${job.jobName} ${formatEasternTime(laterSlot)} (last run ${lastRunMark(job)})` });
+    } else {
+      otherLines.push(`✅ ${job.jobName}: last run ${when(job.lastStartedAt)}`);
+    }
+  }
+  const inTimeOrder = (entries: { at: Date; line: string }[]): string[] => [...entries].sort((first, second) => first.at.getTime() - second.at.getTime()).map((entry) => entry.line);
+  const ranTodayLines = inTimeOrder(ranTodayEntries);
+  const dueLaterLines = inTimeOrder(dueLaterEntries);
+  const failingChecks = input.invariants.filter((invariant) => !invariant.ok);
+  for (const invariant of failingChecks) problemLines.push(`❌ Data check, ${invariant.name}: ${invariant.detail}`);
+
+  const problemCount = jobProblemCount + failingChecks.length + input.undelivered.length + input.deadlineProblems.length;
+  const dayLabel = formatDateWithWeekday(input.dateIso);
   const header =
     problemCount > 0
-      ? `⚠️ Iorio morning check ${input.dateIso}: ${problemCount} problem(s)`
-      : pendingJobs.length > 0
-        ? `✅ Iorio morning check ${input.dateIso}: nothing wrong so far, still to run today: ${pendingJobs.join(", ")}`
-        : `✅ Iorio morning check ${input.dateIso}: all clear (${input.jobs.length} jobs, ${input.invariants.length} data checks)`;
+      ? `⚠️ Iorio morning check ${dayLabel}: ${problemCount} problem(s)`
+      : dueLaterLines.length > 0
+        ? `✅ Iorio morning check ${dayLabel}: nothing wrong so far, ${dueLaterLines.length} job(s) still due later today`
+        : `✅ Iorio morning check ${dayLabel}: all clear (${input.jobs.length} jobs, ${input.invariants.length} data checks)`;
 
-  const formatStartedAt = (instant: Date): string => instant.toISOString().slice(5, 16).replace("T", " ");
-  const jobLines = input.jobs.map((job) => {
-    if (pendingJobs.includes(job.jobName)) return `⏳ ${job.jobName}: not run yet today${job.lastStartedAt ? ` (last run ${formatStartedAt(job.lastStartedAt)} UTC)` : ""}`;
-    if (job.status === null || job.lastStartedAt === null) return `❌ ${job.jobName}: never run`;
-    const when = `${formatStartedAt(job.lastStartedAt)} UTC`;
-    if (job.status === "success") return `✅ ${job.jobName}: ${when}`;
-    if (job.status === "running") return `⏳ ${job.jobName}: still running (started ${when})`;
-    return `❌ ${job.jobName}: failed ${when}${job.errorMessage ? ` — ${job.errorMessage.split("\n")[0]!.slice(0, 160)}` : ""}`;
-  });
-  const invariantLines = input.invariants.map((invariant) => `${invariant.ok ? "✅" : "❌"} ${invariant.name}: ${invariant.detail}`);
+  const passingChecks = input.invariants.length - failingChecks.length;
   const sections = [header];
-  if (input.deadlineProblems.length > 0) sections.push(`Overdue or stuck\n${input.deadlineProblems.join("\n")}`);
-  sections.push(`Jobs (last run)\n${jobLines.join("\n")}`, `Data checks\n${invariantLines.join("\n")}`);
+  if (problemLines.length > 0) sections.push(`Problems\n${problemLines.join("\n")}`);
+  if (ranTodayLines.length > 0) sections.push(`Jobs that ran today\n${ranTodayLines.join("\n")}`);
+  if (dueLaterLines.length > 0) sections.push(`Jobs due later today\n${dueLaterLines.join("\n")}`);
+  if (otherLines.length > 0) sections.push(`Other jobs\n${otherLines.join("\n")}`);
+  sections.push(failingChecks.length === 0 ? `✅ Data checks: ${passingChecks} of ${input.invariants.length} passing` : `Data checks: ${passingChecks} of ${input.invariants.length} passing (the failing ones are under Problems)`);
   if (input.undelivered.length > 0) {
-    sections.push(`Alerts Telegram could not deliver\n${input.undelivered.map((alert) => `• ${formatStartedAt(alert.alertedAt)} UTC — ${alert.message.split("\n")[0]!.slice(0, 200)}`).join("\n")}`);
+    sections.push(`Alerts Telegram could not deliver\n${input.undelivered.map((alert) => `• ${when(alert.alertedAt)} — ${alert.message.split("\n")[0]!.slice(0, 200)}`).join("\n")}`);
   }
   return sections.join("\n\n");
 }
@@ -134,14 +171,14 @@ export async function sendMorningDigestIfDue(now: Date = new Date()): Promise<bo
 
   let clearableUndeliveredKeys: string[] = [];
   try {
-    const [inputs, latestRuns, allUndelivered, deadlines] = await Promise.all([loadDataInvariantInputs(now, dateIso), loadLatestRunPerExpectedJob(), loadUndeliveredAlerts(), findDeadlineProblems(now)]);
+    const [inputs, latestRuns, allUndelivered, deadlines] = await Promise.all([loadDataInvariantInputs(now, dateIso), loadLatestRunPerExpectedJob(now), loadUndeliveredAlerts(), findDeadlineProblems(now)]);
     // List (and later clear) at most this many: the digest is cut at Telegram's 4096-character limit, and an alert that was
     // cut off must not be cleared as if it had been shown. The rest are listed by the next digest.
     const undelivered = allUndelivered.slice(0, maxUndeliveredListed);
     const openDays = new Map<string, boolean>();
     for (const day of new Set([now.toISOString().slice(0, 10), dateIso])) openDays.set(day, await resolveIsOpenDay(day));
     const pendingJobs = evaluatePendingJobs({ now, runs: deadlines.runs, isOpenDay: (day) => openDays.get(day) ?? true, easternDateIsoOf: easternDateIso });
-    const digest = buildMorningDigest({ dateIso, jobs: latestRuns, invariants: evaluateDataInvariants(inputs), undelivered, deadlineProblems: deadlines.problems.map((problem) => problem.message), pendingJobs });
+    const digest = buildMorningDigest({ dateIso, now, jobs: latestRuns, invariants: evaluateDataInvariants(inputs), undelivered, deadlineProblems: deadlines.problems.map((problem) => problem.message), pendingJobs });
     // Plain send: the earlier undelivered alerts are only cleared once the digest that lists them was really delivered.
     const delivered = await notifyTelegram(digest);
     if (!delivered) {
@@ -165,7 +202,7 @@ export async function sendMorningDigestIfDue(now: Date = new Date()): Promise<bo
   return true;
 }
 
-export async function loadLatestRunPerExpectedJob(): Promise<DigestJobLine[]> {
+export async function loadLatestRunPerExpectedJob(now: Date = new Date()): Promise<DigestJobLine[]> {
   const jobNames = expectedScheduledJobs.map((job) => job.jobName);
   const rows: { job_name: string; started_at: Date; status: DigestJobLine["status"]; error_message: string | null }[] = await db("job_runs")
     .whereIn("job_name", jobNames)
@@ -175,7 +212,14 @@ export async function loadLatestRunPerExpectedJob(): Promise<DigestJobLine[]> {
   const byJobName = new Map(rows.map((row) => [row.job_name, row]));
   return jobNames.map((jobName) => {
     const row = byJobName.get(jobName);
-    return { jobName, lastStartedAt: row ? new Date(row.started_at) : null, status: row?.status ?? null, errorMessage: row?.error_message ?? null };
+    const job = expectedScheduledJobs.find((candidate) => candidate.jobName === jobName)!;
+    return {
+      jobName,
+      lastStartedAt: row ? new Date(row.started_at) : null,
+      status: row?.status ?? null,
+      errorMessage: row?.error_message ?? null,
+      scheduledTodayAt: scheduledInstant(job, slotDateIso(job, now, easternDateIso)),
+    };
   });
 }
 

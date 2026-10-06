@@ -77,7 +77,8 @@ export function runScannerSubscription(
     }
 
     connection.ib.on(EventName.scannerData, onScannerData);
-    connection.ib.once(EventName.scannerDataEnd, onScannerDataEnd);
+    // on, not once: another request's end marker must not consume the listener before this request's own arrives (finish removes it).
+    connection.ib.on(EventName.scannerDataEnd, onScannerDataEnd);
     connection.ib.on(EventName.error, onError);
 
     const marketCapAboveUsd = options.marketCapAboveUsd ?? defaultMarketCapAboveUsd;

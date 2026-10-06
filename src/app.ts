@@ -36,6 +36,11 @@ export const app = express();
 // this, Express can't tell the connection was actually HTTPS, and the
 // session cookie's `secure` flag would silently fail to be set.
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use((_request, response, next) => {
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  next();
+});
 
 app.use(
   cors({
@@ -82,6 +87,11 @@ app.use("/order-checks", orderChecksRouter);
 app.use("/system-health", systemHealthRouter);
 app.use("/calendar-events", calendarEventsRouter);
 app.use("/dashboard", dashboardRouter);
+
+// Same { error } JSON shape as every route, instead of Express's default HTML "Cannot GET /x" page.
+app.use((_request, response) => {
+  response.status(404).json({ error: "Not found." });
+});
 
 // Without this, an uncaught route error (e.g. an IBKR request that rejects)
 // falls through to Express's default handler, which returns plain text

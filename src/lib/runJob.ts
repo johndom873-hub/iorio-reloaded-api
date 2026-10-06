@@ -2,8 +2,19 @@ import { db } from "../db/connection.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { notifyTelegramTracked } from "./undeliveredAlerts.js";
 import { formatDurationHuman } from "./formatDurationHuman.js";
+import { formatEasternDateTime } from "./easternIsoDate.js";
 import { publishNotification } from "./notificationChannel.js";
 import { clearDownState, notifyDownThrottled } from "./throttledAlert.js";
+
+/** Telegram text when a new run finds the previous one still marked "running" long after it should have ended. Times are Eastern. */
+export function buildJobDiedMidRunMessage(jobName: string, previousRunStartedAt: Date): string {
+  return `⚠️ ${jobName} died mid-run: the run started ${formatEasternDateTime(previousRunStartedAt)} never finished (process killed or out of memory). A new run is starting.`;
+}
+
+/** Telegram text when a job succeeds after one or more failed attempts. Times are Eastern. */
+export function buildJobRecoveredMessage(jobName: string, attempts: string, failingSince: Date, downtime: string): string {
+  return `✅ ${jobName} recovered after ${attempts} (was down since ${formatEasternDateTime(failingSince)}, ~${downtime}).`;
+}
 
 export interface JobResult {
   details?: Record<string, unknown>;
@@ -180,7 +191,7 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
         finished_at: alreadyRunning.started_at,
         error_message: `Abandoned: still "running" after ${Math.round(ageMs / 1000)}s with no update -- likely a crashed process. Superseded by a new run.`,
       });
-    await notifyTelegramTracked(`⚠️ ${jobName} died mid-run: the run started ${new Date(alreadyRunning.started_at).toISOString()} never finished (process killed or out of memory). A new run is starting.`);
+    await notifyTelegramTracked(buildJobDiedMidRunMessage(jobName, new Date(alreadyRunning.started_at)));
   }
 
   const startedAt = new Date();
@@ -272,7 +283,7 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
   if (failureStreak) {
     const attempts = failureStreak.failureCount === 1 ? "1 failed attempt" : `${failureStreak.failureCount} failed attempts`;
     const downtime = formatDurationHuman(Date.now() - failureStreak.failingSince.getTime());
-    await notifyTelegramTracked(`✅ ${jobName} recovered after ${attempts} (was down since ${failureStreak.failingSince.toISOString()}, ~${downtime}).`);
+    await notifyTelegramTracked(buildJobRecoveredMessage(jobName, attempts, failureStreak.failingSince, downtime));
   }
 
   if (result.notify) {

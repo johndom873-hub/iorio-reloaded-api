@@ -37,7 +37,7 @@ const jobRunSelect = `
 `;
 
 systemHealthRouter.get("/jobs", async (request, response) => {
-  const limit = Math.min(Number(request.query.limit) || defaultJobsLimit, 200);
+  const limit = Math.min(Math.max(Number(request.query.limit) || defaultJobsLimit, 1), 200);
   const result = await db.raw(`${jobRunSelect} ORDER BY started_at DESC LIMIT ?`, [limit]);
   response.json(result.rows);
 });

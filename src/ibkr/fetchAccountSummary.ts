@@ -33,6 +33,8 @@ function requestAccountSummary(ib: IBApi, reqId: number): Promise<AccountSummary
 
     function onAccountSummary(id: number, _account: string, tag: string, value: string) {
       if (id !== reqId) return;
+      // An empty string is "no value", not zero: Number("") is 0, which would record a figure IBKR never sent.
+      if (value.trim() === "") return;
       const numericValue = Number(value);
       if (Number.isNaN(numericValue)) return;
       if (tag === "NetLiquidation") summary.netLiquidationValue = numericValue;

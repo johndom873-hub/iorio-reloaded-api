@@ -89,6 +89,9 @@ function enrichCandidateUnbudgeted(connection: IbkrConnection, reqId: number, sy
     const onTick = (tickReqId: number, field: TickType | undefined, value: number | undefined) => {
       if (tickReqId !== reqId || value === undefined) return;
       const fieldId = field as unknown as number;
+      // IBKR sends -1 for "no data" on a price tick: it is neither a price nor an arrival.
+      const isPriceTick = fieldId === BID_TICK || fieldId === DELAYED_BID_TICK || fieldId === ASK_TICK || fieldId === DELAYED_ASK_TICK || fieldId === LAST_TICK || fieldId === DELAYED_LAST_TICK;
+      if (isPriceTick && value < 0) return;
       if (fieldId === BID_TICK || fieldId === DELAYED_BID_TICK) bid = value;
       if (fieldId === ASK_TICK || fieldId === DELAYED_ASK_TICK) ask = value;
       if (fieldId === LAST_TICK || fieldId === DELAYED_LAST_TICK) result.lastPrice = value;

@@ -19,8 +19,8 @@ authRouter.get("/config", (_request, response) => {
 });
 
 authRouter.post("/login", async (request, response) => {
-  const { username, password } = request.body as { username?: string; password?: string };
-  if (!username || !password) {
+  const { username, password } = (request.body ?? {}) as { username?: unknown; password?: unknown };
+  if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
     response.status(400).json({ error: "Username and password are required." });
     return;
   }

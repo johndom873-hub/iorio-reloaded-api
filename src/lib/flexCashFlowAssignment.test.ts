@@ -117,6 +117,11 @@ describe("extractExternalCashFlows", () => {
     expect(flows[0]?.occurredAt?.toISOString()).toBe("2026-09-24T02:38:15.000Z");
   });
 
+  it("reads the Deposits/Withdrawals spelling too, ignoring case and surrounding spaces", () => {
+    const parsed = parse(`<FlexQueryResponse><FlexStatements><FlexStatement><CashTransactions><CashTransaction type="Deposits/Withdrawals" amount="2500" dateTime="20260925;101500" /><CashTransaction type=" deposits/withdrawals " amount="-500" dateTime="20260926;101500" /><CashTransaction type="Dividends" amount="9" dateTime="20260926;101500" /></CashTransactions></FlexStatement></FlexStatements></FlexQueryResponse>`);
+    expect(extractExternalCashFlows(parsed).map((flow) => flow.amount)).toEqual([2500, -500]);
+  });
+
   it("reads a Deposits & Withdrawals row, one or many, and a report with neither section", () => {
     const single = parse(`<FlexQueryResponse><FlexStatements><FlexStatement><CashTransactions><CashTransaction type="Deposits &amp; Withdrawals" amount="2500" dateTime="20260925;101500" /></CashTransactions></FlexStatement></FlexStatements></FlexQueryResponse>`);
     expect(extractExternalCashFlows(single).map((flowRow) => flowRow.amount)).toEqual([2_500]);

@@ -57,6 +57,7 @@ beforeAll(async () => {
   serviceUserId = inserted.find((row) => row.username === serviceUsername)!.id;
 
   const app = express();
+  app.set("trust proxy", 1);
   app.use(express.json());
   sessionStore = new session.MemoryStore();
   app.use(session({ store: sessionStore, secret: "test", resave: false, saveUninitialized: false }));

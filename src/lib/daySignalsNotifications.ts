@@ -1,4 +1,6 @@
+import { formatSignedDollars } from "./formatSignedDollars.js";
 import type { AssignmentRiskAlertState } from "./daySignalsStore.js";
+import { formatEasternTime } from "./easternIsoDate.js";
 import { formatShortDate } from "./formatShortDate.js";
 import { publishNotification } from "./notificationChannel.js";
 import { notifyTelegram } from "./notifyTelegram.js";
@@ -51,13 +53,13 @@ export interface SignalUpgrade {
 export function formatSignalUpgradeMessage(upgrade: SignalUpgrade): string {
   const { candidate } = upgrade;
   const contract = `${candidate.strategyKey === "covered_call" ? "Call" : "Put"} $${candidate.strike} · ${formatShortDate(candidate.expiry)} (${candidate.dte} DTE)`;
-  const quoteTime = upgrade.quotedAt ? new Date(upgrade.quotedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false }) : "n/a";
+  const quoteTime = upgrade.quotedAt ? formatEasternTime(new Date(upgrade.quotedAt)) : "n/a";
   return [
     `▲ Signal upgraded — ${upgrade.symbol}`,
     contract,
     `${gradeLabel[upgrade.previousGrade]} → ${gradeLabel[candidate.grade]}`,
     `Net Edge ${(candidate.netEdge * 100).toFixed(1)}vp · Edge $ ${candidate.edgeDollars.toFixed(0)} · yield ${(candidate.annualizedYield * 100).toFixed(0)}% ann.`,
-    `Spot $${upgrade.spotPrice.toFixed(2)} · quote ${quoteTime} ET (day quotes)`,
+    `Spot $${upgrade.spotPrice.toFixed(2)} · quote ${quoteTime} (day quotes)`,
     `Open: Signals → ${upgrade.symbol}`,
   ].join("\n");
 }
@@ -96,13 +98,13 @@ export interface RollSignalUpgrade {
 export function formatRollSignalUpgradeMessage(upgrade: RollSignalUpgrade): string {
   const { roll } = upgrade;
   const right = roll.strategyKey === "covered_call" ? "Call" : "Put";
-  const quoteTime = upgrade.quotedAt ? new Date(upgrade.quotedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false }) : "n/a";
+  const quoteTime = upgrade.quotedAt ? formatEasternTime(new Date(upgrade.quotedAt)) : "n/a";
   return [
     `▲ Roll signal upgraded — ${upgrade.symbol}`,
     `${right} $${upgrade.held.strike}${upgrade.held.dte === null ? "" : ` (${upgrade.held.dte} DTE)`} → ${right} $${roll.replacement.strike} · ${formatShortDate(roll.replacement.expiry)} (${roll.replacement.dte} DTE)`,
     `${gradeLabel[upgrade.previousGrade]} → ${gradeLabel[roll.grade]}`,
-    `Net roll Edge ${(roll.netRollEdge * 100).toFixed(1)}vp · ${roll.netRollEdgeDollars >= 0 ? "+" : "−"}$${Math.abs(roll.netRollEdgeDollars).toFixed(0)} for ${roll.quantity} contract${roll.quantity === 1 ? "" : "s"} · net credit $${roll.netCreditPerShare.toFixed(2)}/sh`,
-    `Spot $${upgrade.spotPrice.toFixed(2)} · quote ${quoteTime} ET (day quotes)`,
+    `Net roll Edge ${(roll.netRollEdge * 100).toFixed(1)}vp · ${formatSignedDollars(roll.netRollEdgeDollars, 0, true)} for ${roll.quantity} contract${roll.quantity === 1 ? "" : "s"} · net credit ${formatSignedDollars(roll.netCreditPerShare, 2)}/sh`,
+    `Spot $${upgrade.spotPrice.toFixed(2)} · quote ${quoteTime} (day quotes)`,
     `Open: Signals → ${upgrade.symbol} → Your positions`,
   ].join("\n");
 }

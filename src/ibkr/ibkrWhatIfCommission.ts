@@ -42,7 +42,7 @@ export function buildWhatIfOrder(legs: OrderLegPayload[], conIds: number[], acco
 // Order ids are per client id; a what-if never works an order, so these only need to be distinct among themselves on this connection.
 const nextWhatIfOrderIdByConnection = new WeakMap<IBApi, number>();
 
-async function allocateWhatIfOrderId(ib: IBApi): Promise<number> {
+export async function allocateWhatIfOrderId(ib: IBApi): Promise<number> {
   const known = nextWhatIfOrderIdByConnection.get(ib);
   if (known !== undefined) {
     nextWhatIfOrderIdByConnection.set(ib, known + 1);
@@ -66,7 +66,7 @@ async function allocateWhatIfOrderId(ib: IBApi): Promise<number> {
   return base;
 }
 
-function requestWhatIfCommissionRange(ib: IBApi, orderId: number, contract: Contract, order: Order): Promise<WhatIfCommissionRange> {
+export function requestWhatIfCommissionRange(ib: IBApi, orderId: number, contract: Contract, order: Order): Promise<WhatIfCommissionRange> {
   // The only door to placeOrder in this file: a real order must never be sent from the web process.
   if (order.whatIf !== true) throw new Error("Refusing to send a non-what-if order from the web process.");
   return new Promise((resolve, reject) => {

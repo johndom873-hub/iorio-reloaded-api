@@ -16,6 +16,15 @@ function requireIbkrTradingMode(): "paper" | "live" {
   return value;
 }
 
+function requirePortEnvironmentVariable(variableName: string): number {
+  const rawValue = requireEnvironmentVariable(variableName);
+  const port = Number(rawValue);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${variableName} must be a port number between 1 and 65535, got: ${rawValue}`);
+  }
+  return port;
+}
+
 export function requireBooleanEnvironmentVariable(variableName: string): boolean {
   const value = requireEnvironmentVariable(variableName);
   if (value !== "true" && value !== "false") {
@@ -42,7 +51,7 @@ export const environment = {
   frontendOrigin: requireEnvironmentVariable("FRONTEND_ORIGIN"),
   ibkrTradingMode: requireIbkrTradingMode(),
   ibkrTunnelSshHost: requireEnvironmentVariable("IBKR_TUNNEL_SSH_HOST"),
-  ibkrTunnelSshPort: Number(requireEnvironmentVariable("IBKR_TUNNEL_SSH_PORT")),
+  ibkrTunnelSshPort: requirePortEnvironmentVariable("IBKR_TUNNEL_SSH_PORT"),
   ibkrTunnelSshUsername: requireEnvironmentVariable("IBKR_TUNNEL_SSH_USERNAME"),
   ibkrTunnelSshPrivateKeyBase64: requireEnvironmentVariable("IBKR_TUNNEL_SSH_PRIVATE_KEY_BASE64"),
   ibkrGatewayHost: requireEnvironmentVariable("IBKR_GATEWAY_HOST"),

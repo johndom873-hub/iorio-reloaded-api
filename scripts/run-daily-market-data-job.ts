@@ -158,8 +158,10 @@ async function main(): Promise<void> {
       console.warn(`IBKR warning on reqId ${reqId}: ${error.message}`);
     });
 
-    const snapshotDate = new Date().toISOString().slice(0, 10);
+    // One date for both the stored rows and the daily-bar check: the newest session whose close has passed, not the UTC calendar
+    // date (a rerun after 00:00 UTC is still the previous evening in New York).
     const expectedSessionDate = await lastCompletedSessionDate();
+    const snapshotDate = expectedSessionDate;
     const failureByTickerId = new Map<string, TickerProblem>();
     const missingIvBySymbol = new Map<string, TickerProblem>();
     const jobStart = Date.now();

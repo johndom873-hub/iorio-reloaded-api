@@ -7,5 +7,11 @@ export default defineConfig({
     // global (it closes any open position with no open leg and any open leg missing from its held report), so concurrent files
     // sweep each other's rows and fail at random. Serial runs take ~14 s instead of ~3 s; never mask these failures with retries.
     fileParallelism: false,
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.ts"],
+      exclude: ["src/**/*.test.ts", "src/db/migrations/**"],
+      reporter: ["text-summary", "json-summary", "json"],
+    },
   },
 });

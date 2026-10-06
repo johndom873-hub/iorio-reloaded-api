@@ -53,12 +53,12 @@ type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
 const lastLiveFetchAtByKey = new Map<string, number>();
 const liveFetchFreshnessMs = 30_000;
 
-function isFreshEnoughToSkipLiveFetch(symbol: string, range: ChartRange): boolean {
+export function isFreshEnoughToSkipLiveFetch(symbol: string, range: ChartRange): boolean {
   const lastFetchedAt = lastLiveFetchAtByKey.get(`${symbol}:${range}`);
   return lastFetchedAt !== undefined && Date.now() - lastFetchedAt < liveFetchFreshnessMs;
 }
 
-function markLiveFetched(symbol: string, range: ChartRange): void {
+export function markLiveFetched(symbol: string, range: ChartRange): void {
   lastLiveFetchAtByKey.set(`${symbol}:${range}`, Date.now());
 }
 
@@ -83,31 +83,44 @@ const dailyBackfillDuration = "20 Y";
 const dailyTopUpMinimumDays = 5;
 const dailyTopUpMaximumDays = 365;
 
-function daysBetweenUtc(from: Date, to: Date): number {
+export function daysBetweenUtc(from: Date, to: Date): number {
   return Math.max(0, Math.ceil((to.getTime() - from.getTime()) / 86_400_000));
 }
 
-function dailyTopUpDurationFor(latestCached: Date, now: Date): string {
+export function dailyTopUpDurationFor(latestCached: Date, now: Date): string {
   const gapDays = daysBetweenUtc(latestCached, now);
   if (gapDays > dailyTopUpMaximumDays) return dailyBackfillDuration;
   return `${Math.max(dailyTopUpMinimumDays, gapDays + 2)} D`;
 }
 
-function intradayTopUpDurationFor(latestCached: Date, now: Date, configured: string, full: string): string {
+export function intradayTopUpDurationFor(latestCached: Date, now: Date, configured: string, full: string): string {
   const gapDays = daysBetweenUtc(latestCached, now);
   const configuredDays = Number(configured.trim().split(/\s+/)[0]);
   const fullDate = subtractDuration(now, full);
   if (latestCached <= fullDate) return full;
-  return `${Math.max(configuredDays, gapDays + 1)} D`;
+  // Never ask for more history than the full window: it is the longest request IBKR accepts for this bar size.
+  const topUpDays = Math.max(configuredDays, gapDays + 1);
+  return topUpDays >= daysBetweenUtc(fullDate, now) ? full : `${topUpDays} D`;
 }
 
-async function dailyBarsAreCurrent(latestCached: Date | null): Promise<boolean> {
+export async function dailyBarsAreCurrent(latestCached: Date | null): Promise<boolean> {
   if (!latestCached) return false;
   const lastSession = await lastCompletedSessionDate();
   return latestCached.toISOString().slice(0, 10) >= lastSession;
 }
 
-function subtractDuration(from: Date, duration: string): Date {
+/** Calendar months back, clamped to the target month's last day (31 March minus one month is 28 February, not 3 March). */
+function subtractCalendarMonths(from: Date, months: number): Date {
+  const result = new Date(from);
+  const dayOfMonth = result.getUTCDate();
+  result.setUTCDate(1);
+  result.setUTCMonth(result.getUTCMonth() - months);
+  const lastDayOfTargetMonth = new Date(Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0)).getUTCDate();
+  result.setUTCDate(Math.min(dayOfMonth, lastDayOfTargetMonth));
+  return result;
+}
+
+export function subtractDuration(from: Date, duration: string): Date {
   const match = duration.trim().match(/^(\d+)\s*([DWMY])$/i);
   if (!match) throw new Error(`Unrecognized IBKR duration string: ${duration}`);
   const amount = Number(match[1]);
@@ -115,8 +128,8 @@ function subtractDuration(from: Date, duration: string): Date {
   const result = new Date(from);
   if (unit === "D") result.setUTCDate(result.getUTCDate() - amount);
   else if (unit === "W") result.setUTCDate(result.getUTCDate() - amount * 7);
-  else if (unit === "M") result.setUTCMonth(result.getUTCMonth() - amount);
-  else if (unit === "Y") result.setUTCFullYear(result.getUTCFullYear() - amount);
+  else if (unit === "M") return subtractCalendarMonths(from, amount);
+  else if (unit === "Y") return subtractCalendarMonths(from, amount * 12);
   return result;
 }
 
@@ -160,7 +173,7 @@ async function readIntradayBars(tickerId: string, barSize: string, since: Date):
   }));
 }
 
-function toDateOnlyString(value: string | Date): string {
+export function toDateOnlyString(value: string | Date): string {
   return value instanceof Date ? value.toISOString().slice(0, 10) : value.slice(0, 10);
 }
 
@@ -264,7 +277,7 @@ export async function hasSufficientTickerHistory(tickerId: string): Promise<bool
   return totalBars >= minDailyBarsForIndicators && ivBars >= minDaysForIvPercentile;
 }
 
-function ivBarsToDateMap(ivBars: PriceBar[]): Map<string, number> {
+export function ivBarsToDateMap(ivBars: PriceBar[]): Map<string, number> {
   return new Map(ivBars.map((bar) => [new Date(bar.time * 1000).toISOString().slice(0, 10), bar.close]));
 }
 
@@ -327,16 +340,21 @@ async function readWeeklyResampledBars(tickerId: string, since: Date | null): Pr
 // and fetchCachedIvBars decide whether a live fetch is needed at all *before*
 // paying for the connect. A tickerId-less symbol always needs a live fetch
 // (no cache to read from).
-async function needsLiveFetch(tickerId: string | null, symbol: string, range: ChartRange): Promise<boolean> {
+export async function needsLiveFetch(tickerId: string | null, symbol: string, range: ChartRange): Promise<boolean> {
   if (!tickerId) return true;
-  if (range === "1Y" || range === "5Y" || range === "All") {
-    const latestCached = await getLatestDailyBarDate(tickerId);
-    if (!latestCached) return true;
-    if (isFreshEnoughToSkipLiveFetch(symbol, range)) return false;
-    return !(await dailyBarsAreCurrent(latestCached));
-  }
-  const cfg = intradayConfig[range];
-  const latestCached = await getLatestIntradayBarTime(tickerId, cfg.barSize);
+  if (range === "1Y" || range === "5Y" || range === "All") return dailyCacheNeedsRefresh(await getLatestDailyBarDate(tickerId), symbol, range);
+  return intradayCacheNeedsRefresh(await getLatestIntradayBarTime(tickerId, intradayConfig[range].barSize), symbol, range);
+}
+
+// The one rule for "does this range's cache need a live fetch", shared by needsLiveFetch (decides before connecting) and
+// getCachedChartBars (decides on an open connection), so the two can never disagree.
+async function dailyCacheNeedsRefresh(latestCached: Date | null, symbol: string, range: ChartRange): Promise<boolean> {
+  if (!latestCached) return true;
+  if (isFreshEnoughToSkipLiveFetch(symbol, range)) return false;
+  return !(await dailyBarsAreCurrent(latestCached));
+}
+
+function intradayCacheNeedsRefresh(latestCached: Date | null, symbol: string, range: ChartRange): boolean {
   return !latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range);
 }
 
@@ -407,7 +425,7 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
     }
 
     const latestCached = await getLatestDailyBarDate(tickerId);
-    if (!latestCached || (!isFreshEnoughToSkipLiveFetch(symbol, range) && !(await dailyBarsAreCurrent(latestCached)))) {
+    if (await dailyCacheNeedsRefresh(latestCached, symbol, range)) {
       const fetchDuration = latestCached ? dailyTopUpDurationFor(latestCached, new Date()) : dailyBackfillDuration;
       await fetchAndUpsertDailyBars(connection, tickerId, symbol, fetchDuration, reqId);
       markLiveFetched(symbol, range);
@@ -424,7 +442,7 @@ export async function getCachedChartBars(connection: IbkrConnection, symbol: str
   }
 
   const latestCached = await getLatestIntradayBarTime(tickerId, cfg.barSize);
-  if (!latestCached || !isFreshEnoughToSkipLiveFetch(symbol, range)) {
+  if (intradayCacheNeedsRefresh(latestCached, symbol, range)) {
     const fetchDuration = latestCached ? intradayTopUpDurationFor(latestCached, new Date(), cfg.topUpDuration, cfg.fullDuration) : cfg.fullDuration;
     const freshBars = await fetchHistoricalBarsRaw(connection, symbol, cfg.barSize, fetchDuration, reqId);
     await upsertIntradayBars(tickerId, cfg.barSize, freshBars);

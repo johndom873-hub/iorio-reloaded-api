@@ -40,7 +40,7 @@ import { reportBackgroundFailure, reportBackgroundRecovery } from "../lib/backgr
 // both. Each connection draws from its own range, all of them above the
 // one-shot connections' 0-999,999 (connectIbkr.ts) and the worker's fixed
 // 42, so none of them can ever collide with those.
-function pickClientId(rangeStart: number, rangeSize: number): number {
+export function pickClientId(rangeStart: number, rangeSize: number): number {
   return rangeStart + Math.floor(Math.random() * rangeSize);
 }
 
@@ -105,13 +105,14 @@ interface SharedConnectionOptions {
   fixedMarketDataType?: MarketDataType;
 }
 
-class SharedReadConnection {
+export class SharedReadConnection {
   constructor(private options: SharedConnectionOptions) {}
 
   private ib: IBApi | null = null;
   private tunnel: IbkrTunnel | null = null;
   private reconnectAttempt = 0;
   private reconnecting = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connecting: Promise<void> | null = null;
   private connectedSince: number | null = null;
   private disconnectedSince: number | null = null;
@@ -155,6 +156,9 @@ class SharedReadConnection {
    */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    // A pending reconnect must not fire after shutdown, and its timer would keep a one-shot script alive.
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     await this.connecting?.catch(() => {});
     this.ib?.disconnect();
     this.tunnel?.close();
@@ -182,14 +186,30 @@ class SharedReadConnection {
       return { ib, release: () => {} };
     }
 
-    if (!this.connecting) this.connecting = this.connect();
+    if (!this.connecting) {
+      if (this.reconnectTimer) {
+        // A reconnect is waiting out its backoff: the borrower brings that attempt forward instead of opening one of its own.
+        // Two connects would each open a tunnel and an IBKR login, and whichever settled last would overwrite this.ib and
+        // this.tunnel and leak the other's.
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+        this.startReconnectAttempt();
+      } else {
+        this.connecting = this.connect();
+      }
+    }
 
-    await Promise.race([
-      this.connecting,
-      new Promise<void>((_, reject) => {
-        setTimeout(() => reject(new Error(`Shared IBKR ${this.options.label} connection not ready within timeout.`)), this.borrowTimeoutMs);
-      }),
-    ]);
+    let borrowTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.connecting,
+        new Promise<void>((_, reject) => {
+          borrowTimeoutTimer = setTimeout(() => reject(new Error(`Shared IBKR ${this.options.label} connection not ready within timeout.`)), this.borrowTimeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(borrowTimeoutTimer);
+    }
 
     if (!this.ib) throw new Error(`Shared IBKR ${this.options.label} connection not ready.`);
     const ib = this.ib;
@@ -323,23 +343,21 @@ class SharedReadConnection {
       `IBKR shared ${this.options.label} connection dropped after ${uptimeMs !== null ? `${Math.round(uptimeMs / 1000)}s uptime` : "unknown uptime"} — reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}, lifetime reconnects=${this.totalReconnects}). Reads will fall back to one-shot connections until this recovers.`,
     );
 
-    setTimeout(() => {
-      this.reconnecting = false;
-      // Routed through this.connecting (not a bare this.connect() call) so a
-      // borrow() landing during this delay awaits this same attempt instead
-      // of starting its own — found 2026-09-23: borrow()'s own
-      // `if (!this.connecting) this.connecting = this.connect()` gate saw
-      // this.connecting as null during the gap between a disconnect and this
-      // scheduled retry firing, so it happily kicked off a second concurrent
-      // connect() (its own tunnel + IBKR login, its own clientId) that raced
-      // this one, and whichever settled last silently overwrote this.ib /
-      // this.tunnel, leaking the other one's tunnel and login open forever.
-      this.connecting = this.connect();
-      this.connecting.catch((error) => {
-        console.error(`IBKR shared ${this.options.label} connection reconnect failed: ${error instanceof Error ? error.message : error}`);
-        this.handleDisconnect();
-      });
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.startReconnectAttempt();
     }, delay);
+  }
+
+  /** Routed through this.connecting, so a borrow() landing during the attempt awaits it instead of starting its own. A failure schedules the next backoff. */
+  private startReconnectAttempt(): void {
+    this.reconnecting = false;
+    if (this.shuttingDown) return;
+    this.connecting = this.connect();
+    this.connecting.catch((error) => {
+      console.error(`IBKR shared ${this.options.label} connection reconnect failed: ${error instanceof Error ? error.message : error}`);
+      this.handleDisconnect();
+    });
   }
 }
 

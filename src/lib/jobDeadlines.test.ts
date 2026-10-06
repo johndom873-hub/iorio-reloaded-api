@@ -69,6 +69,28 @@ describe("evaluateJobDeadlines", () => {
   });
 });
 
+describe("alert text is in Eastern time", () => {
+  it("states the slot and deadline in ET, not UTC", () => {
+    const now = "2026-10-01T09:11:00Z";
+    const message = evaluate(now, [recentHealthCheck(now)])[0]?.message ?? "";
+    // 09:00 UTC is 05:00 ET (EDT); deadline 10 minutes later.
+    expect(message).toContain("has not started for 2026-10-01 (was due 05:00 ET, deadline passed at 05:10 ET)");
+    expect(message).not.toContain("UTC");
+  });
+
+  it("uses winter time after the clocks change", () => {
+    const now = "2026-11-03T09:11:00Z";
+    const message = evaluate(now, [recentHealthCheck(now)])[0]?.message ?? "";
+    expect(message).toContain("(was due 04:00 ET, deadline passed at 04:10 ET)");
+  });
+
+  it("gives the start of a stuck run as an Eastern date and time", () => {
+    const now = "2026-10-01T23:10:00Z";
+    const message = evaluate(now, [recentHealthCheck(now), run("daily_market_data_capture", "2026-10-01T22:00:05Z", "running")]).find((problem) => problem.alertKey.includes("stuck"))?.message ?? "";
+    expect(message).toContain("(started Thu 10-01 18:00 ET)");
+  });
+});
+
 describe("stuck runs and slot windows", () => {
   it("keeps reporting a run that is stuck across UTC midnight", () => {
     const stuck = run("daily_market_data_capture", "2026-10-01T22:00:05Z", "running");

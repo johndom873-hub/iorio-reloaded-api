@@ -1,3 +1,4 @@
+import { formatEasternDateTime, formatEasternTime } from "./easternIsoDate.js";
 import { easternInstant } from "./marketSessionStatus.js";
 
 // Deadline monitor (opsMonitor.ts): every scheduled job must have STARTED by a fixed time.
@@ -101,7 +102,7 @@ export function evaluateJobDeadlines(input: {
     if (input.now >= startByAt && jobRuns.length === 0) {
       problems.push({
         alertKey: `deadline:${job.jobName}:${dateIso}`,
-        message: `⏰ ${job.jobName} has not started for ${dateIso} (was due ${scheduledAt.toISOString().slice(11, 16)} UTC, deadline passed at ${startByAt.toISOString().slice(11, 16)} UTC). Check the Heroku Scheduler entry and the job's clock guard.`,
+        message: `⏰ ${job.jobName} has not started for ${input.easternDateIsoOf(scheduledAt)} (was due ${formatEasternTime(scheduledAt)}, deadline passed at ${formatEasternTime(startByAt)}). Check the Heroku Scheduler entry and the job's clock guard.`,
       });
     }
   }
@@ -115,7 +116,7 @@ export function evaluateJobDeadlines(input: {
         problems.push({
           alertKey: `deadline:${job.jobName}:stuck:${run.startedAt.toISOString()}`,
           // No live counter in the text: throttledAlert resends whenever the message changes, so a ticking number would page every minute.
-          message: `⏰ ${job.jobName} has been "running" for over ${job.maxRunMinutes} min (started ${run.startedAt.toISOString()}). The process may have been killed.`,
+          message: `⏰ ${job.jobName} has been "running" for over ${job.maxRunMinutes} min (started ${formatEasternDateTime(run.startedAt)}). The process may have been killed.`,
         });
       }
     }

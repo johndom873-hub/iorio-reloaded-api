@@ -25,7 +25,7 @@ shortlistRouter.use(requireAuth);
 // optionable stocks only. Registered before "/" so it doesn't collide with
 // the strategy-list route.
 shortlistRouter.get("/search", async (request, response) => {
-  const query = (request.query.q as string | undefined)?.trim();
+  const query = typeof request.query.q === "string" ? request.query.q.trim() : undefined;
   if (!query || query.length < 1) {
     response.json([]);
     return;
@@ -170,12 +170,12 @@ shortlistRouter.post("/:tickerId/populate-option-chain", async (request, respons
 });
 
 shortlistRouter.post("/", async (request, response) => {
-  const { symbol, notes } = request.body as {
+  const { symbol, notes } = (request.body ?? {}) as {
     symbol?: string;
     notes?: string;
   };
 
-  if (!symbol || !symbol.trim()) {
+  if (typeof symbol !== "string" || !symbol.trim()) {
     response.status(400).json({ error: "Symbol is required." });
     return;
   }

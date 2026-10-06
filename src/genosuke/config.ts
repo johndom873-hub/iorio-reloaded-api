@@ -41,6 +41,6 @@ export function loadGenosukeConfig(): GenosukeConfig | null {
     // process for IBKR config) doesn't require a $PORT that only the web
     // dyno gets. Safe here since this only ever runs inside the web
     // process, after app.listen has already bound $PORT.
-    apiBaseUrl: `http://127.0.0.1:${process.env.PORT}`,
+    apiBaseUrl: `http://127.0.0.1:${requireEnvironmentVariable("PORT")}`,
   };
 }

@@ -1,8 +1,6 @@
 import "dotenv/config";
 import { Client as PgClient } from "pg";
-import { EventName, OrderAction, OrderType, SecType, TimeInForce } from "@stoqey/ib";
-import type { CommissionReport, Contract, ComboLeg, Execution, Order as IbkrOrder } from "@stoqey/ib";
-import type { Knex } from "knex";
+import { EventName } from "@stoqey/ib";
 import { db } from "./db/connection.js";
 import { environment } from "./config/env.js";
 import { postgresSslOption } from "./config/databaseSsl.js";
@@ -12,26 +10,15 @@ import { readGitSha } from "./lib/readGitSha.js";
 import { getCurrentAccountBinding, getExpectedAccountId, initializeAccountBinding, startAccountBindingWatch } from "./ibkr/ibkrGatewayAccountBinding.js";
 import { readExpirySettlementMode } from "./lib/expirySettlementAudit.js";
 import { persistentIbkrConnection } from "./ibkr/ibkrGatewayPersistentConnection.js";
+import { cancelSubmittedOrder, placeConfirmedOrder, type OrderPlacementDependencies } from "./ibkr/ibkrGatewayOrderPlacement.js";
+import { createExecutionRecorder, handleOrderErrorEvent, handleOrderStatusEvent, reconcileStaleOrderRequests as reconcileStaleOrders } from "./ibkr/ibkrGatewayOrderTracking.js";
 import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
 import { allocateContractResolutionRequestId } from "./ibkr/contractResolutionRequestIds.js";
-import {
-  buildContractFromConId,
-  buildLegContract,
-  computeNetLimitPrice,
-  type AdaptivePriority,
-  type OrderLegPayload,
-  type OrderRequestPayload,
-} from "./ibkr/ibkrGatewayOrderPayload.js";
-import { parseIbkrExecutionTime } from "./ibkr/ibkrGatewayParseExecutionTime.js";
 import { fetchIbkrHeldPositions } from "./ibkr/ibkrGatewayFetchHeldPositions.js";
 import { reconcileHeldPositions, type ReconciliationDependencies } from "./ibkr/ibkrGatewayReconcilePositions.js";
 import { replayRecentIbkrExecutions } from "./ibkr/ibkrGatewayReplayRecentExecutions.js";
 import { fetchIbkrOpenOrders } from "./ibkr/ibkrGatewayFetchOpenOrders.js";
 import { fetchIbkrCompletedOrders } from "./ibkr/ibkrGatewayFetchCompletedOrders.js";
-import { finalOrderRequestStatuses } from "./lib/orderRequestStatuses.js";
-import { ibkrInactiveOrderMessage, ibkrOrderCanceledErrorCode, ibkrOrderRejectionErrorCodes, requestStatusForIbkrRejection, requestStatusForOrderStatusEvent } from "./ibkr/ibkrGatewayOrderStatus.js";
-import { recordIbkrCancellationReason, recordIbkrOrderCanceled, workingOrderRequestStatuses, type ExecutedOutcome } from "./ibkr/ibkrGatewayCancellationRecording.js";
-import { easternDateIso } from "./lib/marketSessionStatus.js";
 import { installCrashHandlers } from "./lib/installCrashHandlers.js";
 import { notifyTelegram } from "./lib/notifyTelegram.js";
 import { clearDownState, notifyDownThrottled } from "./lib/throttledAlert.js";
@@ -41,6 +28,7 @@ import { endOrderIfPlacementBlocked } from "./lib/orderPlacementEnforcement.js";
 import { endOrderIfLimitPriceUnsafe } from "./ibkr/ibkrGatewayLimitPriceCheck.js";
 import { captureExecutionQuote } from "./ibkr/ibkrGatewayExecutionQuotes.js";
 import { requestCancelOfUnfilledOrders } from "./ibkr/ibkrGatewayUnfilledOrderSweep.js";
+import { alertOnStaleOrderRequests } from "./ibkr/ibkrGatewayStaleOrderAlert.js";
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
 
@@ -107,13 +95,6 @@ const orderRequestsChannel = "order_requests_channel";
 const reconciliationIntervalMs = 60_000;
 const positionReqId = 1;
 
-// A row sitting in "confirmed"/"cancel_requested" this long without the
-// worker picking it up is never normal (processing is near-instant once
-// connected) -- treated as an incident, not a queue backlog. Chosen to be
-// comfortably longer than the 30s poll fallback plus a few IBKR reconnect
-// cycles, so a routine reconnect blip doesn't false-alarm.
-const staleOrderAlertThresholdMs = 5 * 60_000;
-
 const telegramNotifyTimeoutMs = 5_000;
 
 /** Never lets a hung Telegram call block startup/shutdown paths that must proceed regardless. */
@@ -121,223 +102,27 @@ function notifyTelegramWithTimeout(message: string): Promise<void> {
   return Promise.race([notifyTelegram(message).then(() => undefined), new Promise<void>((resolve) => setTimeout(resolve, telegramNotifyTimeoutMs))]);
 }
 
-function gcd(a: number, b: number): number {
-  return b === 0 ? a : gcd(b, a % b);
+// Order placement lives in ibkr/ibkrGatewayOrderPlacement.ts (testable without this process); this wires in the real collaborators.
+const orderPlacementDependencies: OrderPlacementDependencies = {
+  db,
+  getIb: () => persistentIbkrConnection.getIb(),
+  getNextOrderId: () => persistentIbkrConnection.getNextOrderId(),
+  getCurrentAccountBinding,
+  getExpectedAccountId,
+  endOrderIfPlacementBlocked,
+  endOrderIfLimitPriceUnsafe: (orderRequest, ib) => endOrderIfLimitPriceUnsafe(orderRequest, ib),
+  notify: notifyTelegramWithTimeout,
+  publishPulse,
+  resolveContractId,
+  allocateContractResolutionRequestId,
+};
+
+function processCancelRequest(orderRequestId: string): Promise<void> {
+  return cancelSubmittedOrder(orderRequestId, orderPlacementDependencies);
 }
 
-/**
- * IBKR's Adaptive algo, applied to single-leg orders only: IBKR documents it
- * as single-leg only ("not available for spread orders"), so a BAG combo is a
- * plain guaranteed limit order at its net price. It wraps the existing LMT
- * order rather than replacing it — the order type and lmtPrice are unchanged,
- * so the worst-case fill price is the limit; Adaptive only affects how IBKR
- * works the order to try for a better/faster fill within that limit. Priority
- * defaults to "Normal" (Marcelo's original 2026-08-31 call, to keep same-day
- * DAY-TIF fills likely) but is picked per-order from the Order Review screen
- * (Juan's 2026-09-02 ask) via payload.adaptivePriority.
- */
-function buildAdaptiveAlgoFields(priority: AdaptivePriority = "Normal"): Pick<IbkrOrder, "algoStrategy" | "algoParams"> {
-  return { algoStrategy: "Adaptive", algoParams: [{ tag: "adaptivePriority", value: priority }] };
-}
-
-/** Resolves every leg's conId (reusing a pre-resolved one where the payload already has it). */
-async function resolveLegContractIds(
-  ib: ReturnType<typeof persistentIbkrConnection.getIb>,
-  legs: OrderLegPayload[],
-): Promise<(number | null)[]> {
-  if (!ib) return legs.map(() => null);
-  const results: (number | null)[] = [];
-  for (const leg of legs) {
-    if (leg.ibkrContractId) {
-      results.push(leg.ibkrContractId);
-      continue;
-    }
-    results.push(await resolveContractId(ib, buildLegContract(leg), allocateContractResolutionRequestId()));
-  }
-  return results;
-}
-
-/**
- * Builds the IBKR Contract + Order for an order_requests row. A single leg
- * is a plain limit order; multiple legs become one atomic BAG combo order
- * (approved 2026-08-24 specifically to avoid a naked-exposure window — see
- * the plan doc's "Order atomicity" decision). This is the most
- * safety-critical piece of the whole redesign and needs real paper-account
- * verification (plan doc's verification step 3) before being trusted.
- */
-async function buildOrder(payload: OrderRequestPayload): Promise<{ contract: Contract; order: IbkrOrder } | null> {
-  const ib = persistentIbkrConnection.getIb();
-  if (!ib) return null;
-
-  const conIds = await resolveLegContractIds(ib, payload.legs);
-  if (conIds.some((conId) => conId === null)) return null;
-
-  if (payload.legs.length === 1) {
-    const leg = payload.legs[0]!;
-    const contract = buildContractFromConId(leg, conIds[0]!);
-    const order: IbkrOrder = {
-      action: leg.action,
-      orderType: OrderType.LMT,
-      lmtPrice: leg.unitPrice,
-      totalQuantity: leg.quantity,
-      tif: TimeInForce.DAY,
-      transmit: true,
-      ...buildAdaptiveAlgoFields(payload.adaptivePriority),
-    };
-    return { contract, order };
-  }
-
-  // Real bug found 2026-08-24 closing a real 3-contract covered call: using
-  // each leg's raw quantity as its ratio (300 shares : 3 contracts) isn't a
-  // valid IBKR combo ratio — IBKR rejected it outright ("error 321: Invalid
-  // leg ratio"). It only happened to work before because every order tested
-  // so far was exactly 1 contract (100 shares : 1 contract, already in
-  // lowest terms). IBKR combo ratios must be reduced to their smallest
-  // integer terms, with totalQuantity carrying the reduced-out common
-  // factor (the number of combo "units") — not always 1.
-  const legRatioGcd = payload.legs.map((leg) => leg.quantity).reduce((a, b) => gcd(a, b));
-  const comboLegs: ComboLeg[] = payload.legs.map((leg, index) => ({
-    conId: conIds[index]!,
-    ratio: leg.quantity / legRatioGcd,
-    action: leg.action,
-    exchange: "SMART",
-  }));
-  const contract: Contract = {
-    symbol: payload.symbol,
-    secType: SecType.BAG,
-    currency: "USD",
-    exchange: "SMART",
-    comboLegs,
-  };
-  // Convention for combo/BAG orders: the top-level order action is BUY, and
-  // each ComboLeg's own action + reduced ratio (set above) is what actually
-  // encodes which legs are bought vs. sold and in what proportion.
-  // totalQuantity is the number of combo "units" — legRatioGcd, not always 1.
-  const order: IbkrOrder = {
-    action: OrderAction.BUY,
-    orderType: OrderType.LMT,
-    lmtPrice: computeNetLimitPrice(payload.legs),
-    totalQuantity: legRatioGcd,
-    tif: TimeInForce.DAY,
-    transmit: true,
-  };
-  return { contract, order };
-}
-
-/**
- * Cancels an order already submitted to IBKR (route: POST
- * /orders/:id/cancel, which flips status to "cancel_requested" and NOTIFYs
- * this same channel). Only this process holds the persistent IBKR
- * connection, so only it can call ib.cancelOrder() — the existing
- * orderStatus listener (see setupOrderTrackingListeners) flips the row to
- * "cancelled" once IBKR confirms, same as every other terminal status.
- */
-async function processCancelRequest(orderRequestId: string): Promise<void> {
-  const ib = persistentIbkrConnection.getIb();
-  if (!ib) {
-    console.error(`processCancelRequest(${orderRequestId}): no IBKR connection — cancel not sent, will retry on the next LISTEN/poll cycle.`);
-    return;
-  }
-
-  const orderRequest = await db("order_requests").where({ id: orderRequestId, status: "cancel_requested" }).first();
-  if (!orderRequest) return; // already processed (cancelled/filled) or not actually requested
-
-  if (!orderRequest.ibkr_order_id) {
-    // Shouldn't happen — cancel_requested is only reachable from
-    // submitted/partially_filled, both of which have an ibkr_order_id — but
-    // fail safe rather than leaving the row stuck.
-    await db("order_requests")
-      .where({ id: orderRequestId })
-      .update({ status: "error", error_message: "cancel_requested with no ibkr_order_id.", updated_at: db.fn.now() });
-    return;
-  }
-
-  ib.cancelOrder(orderRequest.ibkr_order_id);
-}
-
-async function processOrderRequest(orderRequestId: string): Promise<void> {
-  const orderRequest = await db("order_requests").where({ id: orderRequestId, status: "confirmed" }).first();
-  if (!orderRequest) return; // already processed, cancelled, or not actually confirmed
-
-  const payload = orderRequest.payload as OrderRequestPayload;
-
-  // The worker's own last check (orderPlacementGuard.ts, 2026-10-05): the trading halt as it is NOW, a stored gate verdict from the
-  // confirm step with no blocks, and no more than maximumConfirmedOrderAgeMs between that verdict and now. Run before the connection
-  // check on purpose: an order that expired while the Gateway was down is ended here, not left to fire when the connection returns.
-  const placementBlock = await endOrderIfPlacementBlocked(orderRequest);
-  if (placementBlock) {
-    console.error(`processOrderRequest(${orderRequestId}): ${placementBlock.reason}`);
-    if (placementBlock.ended) await notifyTelegramWithTimeout(`🛑 Order for ${payload.symbol} (id ${orderRequestId}) was NOT sent to IBKR.\n${placementBlock.reason}`);
-    return;
-  }
-
-  const ib = persistentIbkrConnection.getIb();
-  if (!ib) {
-    console.error(`processOrderRequest(${orderRequestId}): no IBKR connection — order not sent, will retry on the next LISTEN/poll cycle.`);
-    return;
-  }
-
-  // Fail-closed account binding (Phase B WP2). "pending" (just reconnected, accounts not reported yet) leaves the
-  // order confirmed for the next poll cycle; a real mismatch errors it for good so a stale limit price can never
-  // fire later once the binding recovers.
-  const binding = getCurrentAccountBinding();
-  if (binding.status === "pending") {
-    console.log(`processOrderRequest(${orderRequestId}): account binding pending (${binding.reason}) — order left confirmed, will retry.`);
-    return;
-  }
-  if (binding.status === "mismatch") {
-    const message = `Trading blocked by account binding: ${binding.reason}`;
-    console.error(`processOrderRequest(${orderRequestId}): ${message}`);
-    await db("order_requests").where({ id: orderRequestId }).update({ status: "error", error_message: message, updated_at: db.fn.now() });
-    await notifyTelegramWithTimeout(`🛑 Order for ${payload.symbol} (id ${orderRequestId}) was NOT sent to IBKR.\n${message}`);
-    return;
-  }
-  // The limit-price check, repeated from a real-time snapshot on this connection: one snapshot per leg (no streaming line is held),
-  // requested and released within this call. See ibkrGatewayLimitPriceCheck.ts. Fail closed.
-  const priceBlock = await endOrderIfLimitPriceUnsafe(orderRequest, ib);
-  if (priceBlock) {
-    console.error(`processOrderRequest(${orderRequestId}): ${priceBlock.reason}`);
-    if (priceBlock.ended) await notifyTelegramWithTimeout(`🛑 Order for ${payload.symbol} (id ${orderRequestId}) was NOT sent to IBKR.\n${priceBlock.reason}`);
-    return;
-  }
-  console.log(`processOrderRequest(${orderRequestId}): building order for ${payload.symbol}, ${payload.legs.length} leg(s).`);
-  try {
-    const built = await buildOrder(payload);
-    if (!built) {
-      console.error(`processOrderRequest(${orderRequestId}): buildOrder returned null — could not resolve one or more contract ids.`);
-      await db("order_requests")
-        .where({ id: orderRequestId })
-        .update({ status: "error", error_message: "Could not resolve one or more contract ids.", updated_at: db.fn.now() });
-      return;
-    }
-
-    const ibkrOrderId = persistentIbkrConnection.getNextOrderId();
-    // Conditioned on the row still being "confirmed": a cancel that landed
-    // while buildOrder ran (2026-09-24) must win — otherwise this overwrote
-    // "cancelled" with "submitted" and placed an order the app said was
-    // cancelled. Zero rows changed means someone else moved it; do not place.
-    const claimed = await db("order_requests")
-      .where({ id: orderRequestId, status: "confirmed" })
-      .update({ status: "submitted", ibkr_order_id: ibkrOrderId, placed_at: db.fn.now(), updated_at: db.fn.now() })
-      .returning("id");
-    if (claimed.length === 0) {
-      console.log(`processOrderRequest(${orderRequestId}): no longer confirmed (cancelled or already taken) — not placing.`);
-      return;
-    }
-
-    console.log(`processOrderRequest(${orderRequestId}): placing IBKR order ${ibkrOrderId} (${payload.symbol}, lmtPrice=${built.order.lmtPrice}).`);
-    // Name the account on the order itself: if the Gateway session does not manage it, IBKR rejects the order.
-    built.order.account = getExpectedAccountId();
-    ib.placeOrder(ibkrOrderId, built.contract, built.order);
-    // Animation-only signal for Iorio Pulse's IBKR-Gateway line (never persisted).
-    publishPulse("ibkr-gateway").catch(() => {});
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await db("order_requests")
-      .where({ id: orderRequestId })
-      .update({ status: "error", error_message: message, updated_at: db.fn.now() });
-    await notifyTelegramWithTimeout(`🔥 Order request errored while placing with IBKR: ${payload.symbol} (id ${orderRequestId}).\n${message}`);
-  }
+function processOrderRequest(orderRequestId: string): Promise<void> {
+  return placeConfirmedOrder(orderRequestId, orderPlacementDependencies);
 }
 
 /**
@@ -434,34 +219,6 @@ async function attachOrderRequestsListener(): Promise<void> {
   console.log("order_requests LISTEN: connected and subscribed.");
 }
 
-async function alertOnStaleOrderRequests(): Promise<void> {
-  const thresholdCutoff = new Date(Date.now() - staleOrderAlertThresholdMs);
-
-  const newlyStale = await db("order_requests")
-    .whereIn("status", ["confirmed", "cancel_requested"])
-    .andWhere("created_at", "<", thresholdCutoff)
-    .whereNull("stale_alert_sent_at")
-    .select("id", "status", "created_at", "payload");
-  for (const row of newlyStale) {
-    const symbol = (row.payload as OrderRequestPayload | null)?.symbol ?? "unknown symbol";
-    const stuckMinutes = Math.round((Date.now() - new Date(row.created_at).getTime()) / 60_000);
-    await db("order_requests").where({ id: row.id }).update({ stale_alert_sent_at: db.fn.now() });
-    await notifyTelegramWithTimeout(
-      `⚠️ Order request stuck: ${symbol} (${row.status}) has not been picked up by the worker for ${stuckMinutes}+ minute(s) (id ${row.id}). Check the iorio-worker service on the VPS.`,
-    );
-  }
-
-  const nowResolved = await db("order_requests")
-    .whereNotIn("status", ["confirmed", "cancel_requested"])
-    .whereNotNull("stale_alert_sent_at")
-    .select("id", "status", "payload");
-  for (const row of nowResolved) {
-    const symbol = (row.payload as OrderRequestPayload | null)?.symbol ?? "unknown symbol";
-    await db("order_requests").where({ id: row.id }).update({ stale_alert_sent_at: null });
-    await notifyTelegramWithTimeout(`✅ Previously stuck order request resolved: ${symbol} is now "${row.status}" (id ${row.id}).`);
-  }
-}
-
 /** Postgres LISTEN/NOTIFY — the web dyno NOTIFYs this channel with the order_requests.id on confirm. */
 async function listenForOrderRequests(): Promise<void> {
   // Registered synchronously, independent of whether the LISTEN client below
@@ -478,7 +235,7 @@ async function listenForOrderRequests(): Promise<void> {
         await publishNotification({ type: "order_status", orderId: id }).catch(() => {});
         await handleOrderRequestNotification(id, "cancel_requested");
       }
-      await alertOnStaleOrderRequests();
+      await alertOnStaleOrderRequests({ notify: notifyTelegramWithTimeout, now: () => new Date() });
     } catch (error) {
       console.error(`order_requests poll fallback failed: ${error instanceof Error ? error.message : error}`);
     }
@@ -493,288 +250,44 @@ async function listenForOrderRequests(): Promise<void> {
   );
 }
 
-
-/** An IBKR refusal (ibkrOrderRejectionErrorCodes) ends a still-working order as rejected, or as a cancel after a partial fill. */
-async function recordIbkrOrderRejection(ibkrOrderId: number, errorMessage: string): Promise<void> {
-  const row = await db("order_requests").where({ ibkr_order_id: ibkrOrderId }).whereIn("status", workingOrderRequestStatuses).orderBy("created_at", "desc").first("id", "status");
-  if (!row) return;
-  const nextStatus = requestStatusForIbkrRejection(row.status);
-  await db.transaction(async (transaction) => {
-    await transaction("order_requests").where({ id: row.id }).update({ status: nextStatus, error_message: errorMessage, updated_at: db.fn.now() });
-    if (nextStatus === "cancelled_partially_filled") await recordIbkrCancellationReason(row.id, transaction);
-  });
-  console.error(`Order ${ibkrOrderId} ${nextStatus}: ${errorMessage}`);
-  await publishNotification({ type: "order_status", orderId: row.id });
-}
-
+// Truly final statuses only — partially_filled deliberately excluded, since
+// that order can still receive further fills or a cancellation.
 function setupOrderTrackingListeners(): void {
   const ib = persistentIbkrConnection.getIb();
   if (!ib) return;
 
   ib.on(EventName.orderStatus, (orderId, status, filled, remaining, _avgFillPrice, permId) => {
     publishPulse("ibkr-gateway").catch(() => {});
-    const requestStatus = requestStatusForOrderStatusEvent(status, filled, remaining);
-    if (!requestStatus) return;
-    // permId is globally unique forever, unlike ibkr_order_id, which resets
-    // and gets reused after every Gateway/worker restart — found 2026-08-27
-    // when a fill for reused id 5 matched both a stale two-day-old row and
-    // today's real order, flipping both to "filled". order_requests already
-    // had an ibkr_perm_id column (2026-08-24) for exactly this, just never
-    // wired up. Once a row has captured its permId, only let a further
-    // update through if this callback's permId still matches it, so a
-    // reused ibkr_order_id from a genuinely different order can't flip the
-    // wrong row. reconcileStaleOrderRequests (run on every connect) is the
-    // primary defense — this is a second layer for whatever it doesn't catch.
-    // Also excludes rows already in a final status: once a row is filled,
-    // cancelled, rejected, or errored, it should never change again, so a
-    // status event that still names its (by-then-reused) ibkr_order_id must
-    // belong to a different order.
-    //
-    // IBKR re-fires orderStatus with an unchanged status for an order that's
-    // just sitting unfilled (e.g. a resting multi-day limit order) — found
-    // 2026-09-22 from Pulse's Latest Events panel showing the same "Sent —"
-    // line repeated many times for one order. Without a real change to
-    // record, skip the write (and so the order_status notification below)
-    // unless the status itself is moving or this callback is the one
-    // capturing a not-yet-known permId — that capture still needs to go
-    // through even on a same-status callback, or the permId collision guard
-    // above never gets wired up for an order that goes straight from
-    // "submitted" to "submitted" until it fills.
-    const applyStatus = async (connection: Knex): Promise<{ id: string }[]> => {
-      const rows: { id: string }[] = await connection("order_requests")
-        .where({ ibkr_order_id: orderId })
-        .whereNotIn("status", finalOrderRequestStatuses)
-        .andWhere((builder) => (permId ? builder.whereNull("ibkr_perm_id").orWhere("ibkr_perm_id", permId) : builder))
-        .andWhere((builder) => {
-          builder.whereNot("status", requestStatus);
-          if (permId) builder.orWhereNull("ibkr_perm_id");
-        })
-        .update({
-          status: requestStatus,
-          updated_at: db.fn.now(),
-          ...(permId ? { ibkr_perm_id: permId } : {}),
-          // A fill that beat the sweep's cancel: the order is filled, not cancelled for lack of one.
-          ...(requestStatus === "filled" ? { cancellation_reason: null } : {}),
-          ...(status === "Inactive" ? { error_message: ibkrInactiveOrderMessage } : {}),
-        })
-        .returning(["id"]);
-      if (rows[0] && (requestStatus === "cancelled" || requestStatus === "cancelled_partially_filled")) await recordIbkrCancellationReason(rows[0].id, connection);
-      return rows;
-    };
-    // A cancel's status and reason commit together, so nothing reading the row (Genosuke's follow-up) sees one without the other.
-    (requestStatus === "cancelled" || requestStatus === "cancelled_partially_filled" ? db.transaction(applyStatus) : applyStatus(db))
-      .then(async (rows) => {
-        if (!rows[0]) return;
-        await publishNotification({ type: "order_status", orderId: rows[0].id });
-      })
-      .catch((error) => console.error(`Failed to update order_requests for order ${orderId}: ${error}`));
+    void handleOrderStatusEvent({ orderId, status, filled, remaining, permId }, orderTrackingDependencies);
   });
 
   ib.on(EventName.execDetails, (_reqId, contract, execution) => {
-    recordExecution(contract, execution).catch((error) => console.error(`Failed to record execution: ${error}`));
+    executionRecorder.recordExecution(contract, execution).catch((error) => console.error(`Failed to record execution: ${error}`));
     captureExecutionQuote(ib, contract, execution).catch((error) => console.error(`Failed to capture the quote at execution ${execution.execId}: ${error}`));
   });
 
-  // Commissions arrive on their own event, keyed by execId, usually right
-  // after execDetails (found 2026-09-19: nothing ever subscribed, so
-  // trades.commission was NULL on every trade). Also fires for replayed
+  // Commissions arrive on their own event, keyed by execId, usually right after execDetails; also fired for replayed
   // executions after a reconnect, which backfills whatever IBKR still returns.
   ib.on(EventName.commissionReport, (report) => {
-    recordCommission(report).catch((error) => console.error(`Failed to record commission: ${error}`));
+    executionRecorder.recordCommission(report).catch((error) => console.error(`Failed to record commission: ${error}`));
   });
 
-  // Found by real testing (2026-08-24): a rejected/errored order surfaces
-  // only as an EventName.error keyed by the order id, not an orderStatus
-  // event — without this listener a rejection vanished with zero trace
-  // anywhere (order_requests stuck at "submitted" forever, nothing in
-  // reqAllOpenOrders, no log line). informational connection-status notices
-  // (reqId -1) are excluded, same as connectIbkr.ts's handshake filtering.
-  //
-  // Also found by testing: not every EventName.error keyed by a real order
-  // id is a rejection — code 399 ("Order Message") is IBKR attaching an
-  // informational/warning notice to an order that was still accepted (e.g.
-  // "will not be placed at the exchange until <next session open>" outside
-  // market hours). IBKR's own convention is that the 2100-2169 range is
-  // informational "system messages" too. Treating these as fatal would
-  // flip a perfectly good queued order to "error".
+  // A rejected/errored order surfaces only as an error event keyed by the order id (see handleOrderErrorEvent).
   ib.on(EventName.error, (error, code, reqId) => {
-    if (reqId === -1) return;
-    if (code === 399 || (code >= 2100 && code <= 2169)) {
-      console.log(`Order ${reqId} informational message: ${code} ${error.message}`);
-      return;
-    }
-    if (code === ibkrOrderCanceledErrorCode) {
-      recordIbkrOrderCanceled(reqId, error.message, {
-        executedOutcome: executedOutcomeForOrderRequest,
-        notify: (orderRequestId) => publishNotification({ type: "order_status", orderId: orderRequestId }),
-      }).catch((dbError) => console.error(`Failed to record IBKR cancel for ${reqId}: ${dbError}`));
-      return;
-    }
-    if (ibkrOrderRejectionErrorCodes.has(code)) {
-      recordIbkrOrderRejection(reqId, `IBKR error ${code}: ${error.message}`).catch((dbError) => console.error(`Failed to record IBKR refusal for ${reqId}: ${dbError}`));
-      return;
-    }
-    db("order_requests")
-      .where({ ibkr_order_id: reqId, status: "submitted" })
-      .update({ status: "error", error_message: `IBKR error ${code}: ${error.message}`, updated_at: db.fn.now() })
-      .returning(["id"])
-      .then(async (rows) => {
-        if (!rows[0]) return;
-        console.error(`Order ${reqId} errored: ${code} ${error.message}`);
-        await publishNotification({ type: "order_status", orderId: rows[0].id });
-      })
-      .catch((dbError) => console.error(`Failed to record order error for ${reqId}: ${dbError}`));
+    void handleOrderErrorEvent(error, code, reqId, orderTrackingDependencies);
   });
 }
 
-/**
- * Real bug found 2026-08-24 testing against 3 genuine paper fills: an
- * opening execution (no position_leg exists yet — reconcilePositionsFromIbkr
- * hasn't created it) was silently dropped instead of ever being recorded,
- * leaving the Trade Blotter permanently empty for every opening trade. This
- * buffers that raw execution, keyed by conId, so upsertSyncedPosition can
- * drain it into a real trades row the moment it creates the matching leg —
- * using the actual per-fill execution data (execId, price, quantity), not a
- * synthesized one from IBKR's aggregate avgCost.
- */
-const pendingOpeningExecutions = new Map<string, { contract: Contract; execution: Execution }[]>();
-
-// Looked up by permId, not ibkr_order_id — ibkr_order_id resets and gets
-// reused after every Gateway/worker restart (see setupOrderTrackingListeners's
-// own comment on this), so matching a trade to its requester by order id
-// could attribute an old trade to whichever unrelated request later reused
-// that same id. permId is globally unique forever. Null if this execution's
-// order was placed outside the app (no order_requests row to find), which
-// is expected, not an error.
-async function lookupSourceOrderRequestId(execution: Execution): Promise<string | null> {
-  if (!execution.permId) return null;
-  const orderRequest = await db("order_requests").where({ ibkr_perm_id: execution.permId }).first("id");
-  return orderRequest?.id ?? null;
-}
-
-// A commission report can arrive before the trades row exists (the execution
-// is buffered until reconcilePositionsFromIbkr creates its leg). Hold it here
-// and apply it right after the row is inserted. In-memory only: a worker
-// restart in that gap loses it, but the post-reconnect execution replay
-// re-emits commission reports for recent fills, so it self-heals.
-const pendingCommissionsByExecId = new Map<string, number>();
-const maxPendingCommissions = 500;
-
-// IBKR sends Double.MAX_VALUE when a commission isn't known yet.
-function isRealCommission(value: number | undefined): value is number {
-  return value !== undefined && Number.isFinite(value) && value >= 0 && value < 1e9;
-}
-
-async function recordCommission(report: CommissionReport): Promise<void> {
-  if (!report.execId || !isRealCommission(report.commission)) return;
-  const updatedRowCount = await db("trades").where({ ibkr_exec_id: report.execId }).update({ commission: report.commission });
-  if (updatedRowCount > 0) {
-    pendingCommissionsByExecId.delete(report.execId);
-    return;
-  }
-  if (pendingCommissionsByExecId.size >= maxPendingCommissions) {
-    pendingCommissionsByExecId.delete(pendingCommissionsByExecId.keys().next().value!);
-  }
-  pendingCommissionsByExecId.set(report.execId, report.commission);
-}
-
-async function applyPendingCommission(execId: string): Promise<void> {
-  const commission = pendingCommissionsByExecId.get(execId);
-  if (commission === undefined) return;
-  await db("trades").where({ ibkr_exec_id: execId }).update({ commission });
-  pendingCommissionsByExecId.delete(execId);
-}
-
-async function insertOpeningTradeRow(positionLegId: string, contract: Contract, execution: Execution): Promise<void> {
-  if (!execution.execId) return;
-  await db("trades")
-    .insert({
-      position_leg_id: positionLegId,
-      ibkr_order_id: String(execution.orderId ?? ""),
-      ibkr_exec_id: execution.execId,
-      side: execution.side === "BOT" ? "buy" : "sell",
-      quantity: execution.shares ?? 0,
-      price: execution.price ?? 0,
-      executed_at: parseIbkrExecutionTime(execution.time) ?? new Date(),
-      is_closing_trade: false,
-      source_order_request_id: await lookupSourceOrderRequestId(execution),
-    })
-    .onConflict("ibkr_exec_id")
-    .ignore();
-  await applyPendingCommission(execution.execId);
-}
-
-/**
- * Idempotent by construction — trades.ibkr_exec_id is UNIQUE, and each
- * partial fill has its own distinct execId (see @stoqey/ib's Execution type
- * doc comment), so re-processing the same execDetails event (e.g. after a
- * reconnect) is safe: the insert is a no-op on conflict.
- */
-async function recordExecution(contract: Contract, execution: Execution): Promise<void> {
-  if (!execution.execId || !contract.conId) return;
-  if (getCurrentAccountBinding().status === "mismatch") {
-    console.log(`Execution ${execution.execId} ignored: account binding mismatch.`);
-    return;
-  }
-
-  const existing = await db("trades").where({ ibkr_exec_id: execution.execId }).first();
-  if (existing) return;
-
-  const conId = String(contract.conId);
-  const leg = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").first();
-
-  if (!leg) {
-    // Brand-new position-opening fill (or one placed outside the app
-    // entirely) — the leg doesn't exist yet because reconcilePositionsFromIbkr
-    // hasn't run since this fill. Buffer it; upsertSyncedPosition drains this
-    // once it creates the leg. (Real new-position creation/pairing itself
-    // still only happens there, since that pass has the full current-holdings
-    // picture needed to pair a stock leg with an option leg correctly.)
-    const buffered = pendingOpeningExecutions.get(conId) ?? [];
-    buffered.push({ contract, execution });
-    pendingOpeningExecutions.set(conId, buffered);
-    console.log(`Execution ${execution.execId} for conId ${conId} has no matching open leg yet — buffered for the next reconciliation pass.`);
-    return;
-  }
-
-  const isClosing = execution.side === "BOT" ? leg.side === "short" : leg.side === "long";
-  if (!isClosing) {
-    // An add-on fill to an already-tracked leg (e.g. bought more of an
-    // existing covered call's stock leg) — not a close, but still a real
-    // execution the Trade Blotter should show. The leg's own `quantity`
-    // doesn't get updated here (see upsertSyncedPosition for why) —
-    // trigger reconciliation now so that sync reflects promptly rather
-    // than waiting for the periodic 60s pass.
-    await insertOpeningTradeRow(leg.id, contract, execution);
+// The trades ledger: executions and commissions, plus what the position reconciliation drains into it (ibkr/ibkrGatewayOrderTracking.ts).
+const executionRecorder = createExecutionRecorder({
+  db,
+  isAccountBindingMismatch: () => getCurrentAccountBinding().status === "mismatch",
+  requestReconciliation: () => {
     reconcilePositionsFromIbkr().catch((error) => console.error(`Post-execution reconciliation failed: ${error}`));
-    return;
-  }
+  },
+});
 
-  // Record the trade only — do NOT flip position_legs.exit_at/exit_price
-  // here. Real bug found 2026-08-25 on a same-day HOOD test position: a
-  // single closing execution may only be a *partial* close (a 1-lot
-  // closing fill on a 3-lot leg previously marked the WHOLE leg closed,
-  // hiding the still-open 2-lot remainder — IBKR itself still held it).
-  // reconcilePositionsFromIbkr is now the sole place a leg gets closed,
-  // gated on IBKR reporting zero remaining holding for this conId — the
-  // only unambiguous "genuinely fully closed" signal, regardless of how
-  // many partial fills got there. Trigger it now so closing still reflects
-  // near-instantly rather than waiting for the periodic 60s pass.
-  await db("trades").insert({
-    position_leg_id: leg.id,
-    ibkr_order_id: String(execution.orderId ?? ""),
-    ibkr_exec_id: execution.execId,
-    side: execution.side === "BOT" ? "buy" : "sell",
-    quantity: execution.shares ?? 0,
-    price: execution.price ?? 0,
-    executed_at: parseIbkrExecutionTime(execution.time) ?? new Date(),
-    is_closing_trade: true,
-    source_order_request_id: await lookupSourceOrderRequestId(execution),
-  });
-  await applyPendingCommission(execution.execId);
-
-  reconcilePositionsFromIbkr().catch((error) => console.error(`Post-execution reconciliation failed: ${error}`));
-}
+const orderTrackingDependencies = { db, publishNotification };
 
 // Real bug found 2026-08-25 in a full-repo review: reconcilePositionsFromIbkr
 // is fired-and-forgotten from three places (post-execution twice, plus a 60s
@@ -794,14 +307,7 @@ let reconciliationPassCounter = 0;
 
 const reconciliationDependencies: ReconciliationDependencies = {
   notifyTelegram: notifyTelegramWithTimeout,
-  async drainPendingOpeningExecutions(conId, newLegId) {
-    const buffered = pendingOpeningExecutions.get(conId);
-    if (!buffered) return;
-    pendingOpeningExecutions.delete(conId);
-    for (const { contract, execution } of buffered) {
-      await insertOpeningTradeRow(newLegId, contract, execution);
-    }
-  },
+  drainPendingOpeningExecutions: (conId, newLegId) => executionRecorder.drainPendingOpeningExecutions(conId, newLegId),
 };
 
 async function reconcilePositionsFromIbkr(): Promise<void> {
@@ -866,99 +372,8 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
  * again on every reconnect, since a reused-id collision is only possible
  * right after a fresh session starts.
  */
-// What a non-open, non-completed row's own recorded executions say (trades
-// rows link back through source_order_request_id, written by recordExecution
-// via the permId lookup — which is why the execution replay and the position
-// reconciliation both run before this on every connect).
-
-async function executedOutcomeForOrderRequest(orderRequestId: string, payload: OrderRequestPayload): Promise<ExecutedOutcome> {
-  const executedRows: { legType: "stock" | "option"; executed: string }[] = await db("trades as tr")
-    .join("position_legs as pl", "pl.id", "tr.position_leg_id")
-    .where("tr.source_order_request_id", orderRequestId)
-    .groupBy("pl.leg_type")
-    .select("pl.leg_type as legType", db.raw("SUM(tr.quantity) AS executed"));
-  if (executedRows.length === 0) return "none";
-  const executedByLegType = new Map(executedRows.map((row) => [row.legType, Number(row.executed)]));
-  const everyLegFullyExecuted = payload.legs.every((leg) => (executedByLegType.get(leg.role) ?? 0) >= Math.abs(leg.quantity));
-  return everyLegFullyExecuted ? "filled" : "partially_filled";
-}
-
-/**
- * Rows still non-terminal locally whose order IBKR no longer lists as open.
- * Before 2026-09-24 every such row was flagged "error" — including orders
- * that simply FILLED while the worker was down (the fill's orderStatus event
- * was never received), which then also reverted the source alert to pending
- * and invited a duplicate order. Now, in order of authority:
- *   1. still open at IBKR → leave alone;
- *   2. IBKR's completed orders for this Gateway session (matched on permId,
- *      never on the session-scoped ibkr_order_id) → filled / cancelled;
- *   3. our own trades for this row (from the execution replay, which spans
- *      Gateway restarts within the day) → filled / partially_filled;
- *   4. otherwise → error, as before.
- */
-async function reconcileStaleOrderRequests(): Promise<void> {
-  const ib = persistentIbkrConnection.getIb();
-  if (!ib) return;
-
-  const staleCandidates: { id: string; ibkr_order_id: number; ibkr_perm_id: number | null; payload: OrderRequestPayload; created_at: Date }[] = await db("order_requests")
-    .whereIn("status", workingOrderRequestStatuses)
-    .whereNotNull("ibkr_order_id")
-    .select("id", "ibkr_order_id", "ibkr_perm_id", "payload", "created_at");
-  if (staleCandidates.length === 0) return;
-
-  const [openOrders, completedOrders] = await Promise.all([fetchIbkrOpenOrders(ib), fetchIbkrCompletedOrders(ib)]);
-  const liveOrderIds = new Set(openOrders.map((order) => order.orderId));
-  const completedStatusByPermId = new Map(completedOrders.filter((order) => order.permId).map((order) => [order.permId!, order.status]));
-
-  for (const row of staleCandidates) {
-    if (liveOrderIds.has(row.ibkr_order_id)) continue;
-
-    const completedStatus = row.ibkr_perm_id ? completedStatusByPermId.get(row.ibkr_perm_id) : undefined;
-    const completedRequestStatus = completedStatus ? requestStatusForOrderStatusEvent(completedStatus, 0, 0) : null;
-    if (completedRequestStatus === "filled" || completedRequestStatus === "cancelled" || completedRequestStatus === "rejected") {
-      // The completed-orders list doesn't say whether a cancelled (or Inactive) order had partly filled; its recorded executions do.
-      const resolvedStatus =
-        completedRequestStatus !== "filled" && (await executedOutcomeForOrderRequest(row.id, row.payload)) === "partially_filled"
-          ? "cancelled_partially_filled"
-          : completedRequestStatus;
-      await db.transaction(async (transaction) => {
-        await transaction("order_requests")
-          .where({ id: row.id })
-          .update({ status: resolvedStatus, updated_at: db.fn.now(), ...(resolvedStatus === "rejected" ? { error_message: ibkrInactiveOrderMessage } : {}) });
-        if (resolvedStatus === "cancelled" || resolvedStatus === "cancelled_partially_filled") await recordIbkrCancellationReason(row.id, transaction);
-      });
-      console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${resolvedStatus}" from IBKR's completed orders (permId ${row.ibkr_perm_id}).`);
-      await publishNotification({ type: "order_status", orderId: row.id });
-      continue;
-    }
-
-    // A DAY order from an earlier session cannot still be working: IBKR expired it at that session's close, even when
-    // a Gateway restart since has dropped it from the completed-orders list.
-    const expiredDayOrder = easternDateIso(new Date(row.created_at)) < easternDateIso(new Date());
-    const executed = await executedOutcomeForOrderRequest(row.id, row.payload);
-    if (executed !== "none" || expiredDayOrder) {
-      const resolvedStatus = !expiredDayOrder ? executed : executed === "filled" ? "filled" : executed === "partially_filled" ? "cancelled_partially_filled" : "cancelled";
-      await db.transaction(async (transaction) => {
-        await transaction("order_requests").where({ id: row.id }).update({ status: resolvedStatus, updated_at: db.fn.now() });
-        if (resolvedStatus === "cancelled" || resolvedStatus === "cancelled_partially_filled") await recordIbkrCancellationReason(row.id, transaction);
-      });
-      console.log(`reconcileStaleOrderRequests: row ${row.id} resolved to "${resolvedStatus}" from its recorded executions${expiredDayOrder ? " (a DAY order from an earlier session)" : ""}.`);
-      await publishNotification({ type: "order_status", orderId: row.id });
-      continue;
-    }
-
-    await db("order_requests")
-      .where({ id: row.id })
-      .update({
-        status: "error",
-        error_message:
-          "IBKR no longer reports this order as open, completed or executed (likely orphaned by a Gateway/worker restart) — its real status could not be confirmed. Check IBKR directly if this was a real order.",
-        ibkr_order_id: null,
-        updated_at: db.fn.now(),
-      });
-    console.warn(`reconcileStaleOrderRequests: flagged orphaned order_requests row ${row.id} (was ibkr_order_id ${row.ibkr_order_id}).`);
-    await publishNotification({ type: "order_status", orderId: row.id });
-  }
+function reconcileStaleOrderRequests(): Promise<void> {
+  return reconcileStaleOrders({ db, publishNotification, getIb: () => persistentIbkrConnection.getIb(), fetchIbkrOpenOrders, fetchIbkrCompletedOrders });
 }
 
 // A failed connect no longer crashes the worker (see start()'s comment), so a

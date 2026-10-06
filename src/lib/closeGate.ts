@@ -167,11 +167,17 @@ export async function evaluateCloseGateForPosition(positionId: string): Promise<
   } catch (error) {
     return { blocked: true, reason: `Closing is blocked: live quotes could not be read (${error instanceof Error ? error.message : String(error)}).`, cycleTotal: null };
   } finally {
-    for (const unsubscribe of unsubscribers) unsubscribe();
+    for (const unsubscribe of unsubscribers) {
+      try {
+        unsubscribe();
+      } catch (error) {
+        console.error(`Close gate: could not release a quote subscription: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 }
 
-function inputsForDerivation(inputs: CloseLiveInputs, optionQuotesByLegId: Record<string, CloseLiveQuote | null>, stockQuote: CloseLiveQuote | null) {
+export function inputsForDerivation(inputs: CloseLiveInputs, optionQuotesByLegId: Record<string, CloseLiveQuote | null>, stockQuote: CloseLiveQuote | null) {
   return {
     symbol: inputs.symbol,
     positionId: inputs.positionId,

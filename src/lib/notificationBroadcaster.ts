@@ -44,19 +44,31 @@ async function connect(attempt = 0): Promise<void> {
     subscribers.forEach((subscriber) => subscriber(notification));
   });
 
+  // One reconnect per client, however many ways it fails: a connection that errors twice, or errors after a failed connect,
+  // must not open two replacement listeners.
+  let reconnectRequested = false;
+  let listening = false;
+  const retireAndReconnect = () => {
+    if (reconnectRequested) return;
+    reconnectRequested = true;
+    client.end().catch(() => {});
+    // A connection that was listening and then dropped starts the backoff over; one that never got through keeps climbing it.
+    scheduleReconnect(listening ? 0 : attempt);
+  };
+
   client.on("error", (error) => {
     console.error(`notificationBroadcaster: LISTEN connection error: ${error.message}`);
-    client.end().catch(() => {});
-    scheduleReconnect(attempt);
+    retireAndReconnect();
   });
 
   try {
     await client.connect();
     await client.query(`LISTEN ${appNotificationsChannel}`);
+    listening = true;
     console.log("notificationBroadcaster: listening for app notifications.");
   } catch (error) {
     console.error(`notificationBroadcaster: failed to connect: ${error instanceof Error ? error.message : error}`);
-    scheduleReconnect(attempt);
+    retireAndReconnect();
   }
 }
 

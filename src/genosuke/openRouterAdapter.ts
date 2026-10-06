@@ -41,7 +41,7 @@ export interface ChatTurn {
   usage: { inputTokens: number; outputTokens: number };
 }
 
-function toOpenAIMessages(systemText: string, messages: ChatMessage[]): Record<string, unknown>[] {
+export function toOpenAIMessages(systemText: string, messages: ChatMessage[]): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [{ role: "system", content: systemText }];
 
   for (const msg of messages) {
@@ -67,19 +67,19 @@ function toOpenAIMessages(systemText: string, messages: ChatMessage[]): Record<s
   return out;
 }
 
-function toOpenAITools(tools: ToolDefinition[]): Record<string, unknown>[] {
+export function toOpenAITools(tools: ToolDefinition[]): Record<string, unknown>[] {
   return tools.map((t) => ({
     type: "function",
     function: { name: t.name, description: t.description, parameters: t.parameters },
   }));
 }
 
-interface OpenAiChoice {
+export interface OpenAiChoice {
   message: { content: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] };
   finish_reason: string;
 }
 
-function parseChoice(choice: OpenAiChoice): { textContent: string; toolCalls: ToolCall[]; isDone: boolean } {
+export function parseChoice(choice: OpenAiChoice): { textContent: string; toolCalls: ToolCall[]; isDone: boolean } {
   const toolCalls: ToolCall[] = (choice.message.tool_calls ?? []).map((tc) => ({
     id: tc.id,
     name: tc.function.name,
@@ -124,8 +124,9 @@ export class OpenRouterAdapter {
       throw new Error(`OpenRouter API ${response.status}: ${await response.text()}`);
     }
 
-    const json = (await response.json()) as { choices: OpenAiChoice[]; usage?: { prompt_tokens: number; completion_tokens: number } };
-    const choice = json.choices[0];
+    const json = (await response.json()) as { choices?: OpenAiChoice[]; error?: { message?: string }; usage?: { prompt_tokens: number; completion_tokens: number } };
+    if (json.error) throw new Error(`OpenRouter error: ${json.error.message ?? JSON.stringify(json.error)}`);
+    const choice = json.choices?.[0];
     if (!choice) throw new Error("OpenRouter response had no choices.");
     const { textContent, toolCalls, isDone } = parseChoice(choice);
     return {

@@ -72,12 +72,16 @@ export function openIbkrTunnel(options: OpenIbkrTunnelOptions): Promise<IbkrTunn
       });
 
       localServer.on("error", (error) => {
+        // The SSH session is already up at this point: end it, or every failure leaves one open.
+        sshClient.end();
         reject(error);
       });
 
       localServer.listen(0, "127.0.0.1", () => {
         const address = localServer.address();
         if (address === null || typeof address === "string") {
+          localServer.close();
+          sshClient.end();
           reject(new Error("Failed to determine local IBKR tunnel port"));
           return;
         }

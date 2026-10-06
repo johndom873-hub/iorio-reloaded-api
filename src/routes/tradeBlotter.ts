@@ -28,6 +28,11 @@ tradeBlotterRouter.get("/", async (request, response) => {
     response.status(400).json({ error: "Unknown strategy." });
     return;
   }
+  // A date the database cannot read would otherwise surface as a server error.
+  if ((from !== undefined && Number.isNaN(new Date(from).getTime())) || (to !== undefined && Number.isNaN(new Date(to).getTime()))) {
+    response.status(400).json({ error: "from and to must be valid dates." });
+    return;
+  }
 
   const conditions: string[] = [];
   const params: string[] = [];
