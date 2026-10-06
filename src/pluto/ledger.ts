@@ -86,6 +86,7 @@ export interface RecordPlutoDecisionInput {
   callIndex: number;
   modelId: string;
   servedModelId: string | null;
+  serviceTier?: string | null;
   inputPayload: unknown;
   rawOutput: string | null;
   parsedOutput: unknown | null;
@@ -106,6 +107,7 @@ export async function recordPlutoDecision(input: RecordPlutoDecisionInput): Prom
       call_index: input.callIndex,
       model_id: input.modelId,
       served_model_id: input.servedModelId,
+      service_tier: input.serviceTier ?? null,
       prompt_id: input.promptId ?? null,
       input_payload: JSON.stringify(input.inputPayload),
       raw_output: input.rawOutput,

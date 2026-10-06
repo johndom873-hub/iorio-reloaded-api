@@ -55,7 +55,6 @@ export interface PlutoSettings {
   callTimeoutSeconds: number;
   dailyCostCeilingUsd: number;
   confidenceFloor: number;
-  maxModelCallsPerSession: number;
   consecutiveModelFailuresBreaker: number;
   promptVersion: string;
   // Real-time
@@ -117,7 +116,6 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   callTimeoutSeconds: { column: "call_timeout_seconds", kind: "integer", min: 5 },
   dailyCostCeilingUsd: { column: "daily_cost_ceiling_usd", kind: "number", min: 0 },
   confidenceFloor: { column: "confidence_floor", kind: "number", min: 0, max: 1 },
-  maxModelCallsPerSession: { column: "max_model_calls_per_session", kind: "integer", min: 0 },
   consecutiveModelFailuresBreaker: { column: "consecutive_model_failures_breaker", kind: "integer", min: 1 },
   promptVersion: { column: "prompt_version", kind: "text" },
   daySignalsPollSeconds: { column: "day_signals_poll_seconds", kind: "integer", min: 1 },

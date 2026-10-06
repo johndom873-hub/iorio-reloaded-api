@@ -142,7 +142,6 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
 
   const counters = await loadPlutoTodayCounters(now);
   record("cost_ceiling", counters.costTodayUsd < settings.dailyCostCeilingUsd, `$${counters.costTodayUsd.toFixed(3)} of $${settings.dailyCostCeilingUsd} today`);
-  record("model_calls_cap", counters.modelCallsToday < settings.maxModelCallsPerSession, `${counters.modelCallsToday} of ${settings.maxModelCallsPerSession} calls today`);
   record("actions_cap", counters.actionsToday < settings.maxActionsPerSession, `${counters.actionsToday} of ${settings.maxActionsPerSession} actions today`);
   // Position reconciliation: the health-check job compares IBKR's holdings with the book and
   // stores what it found in job_runs.details.reconciliationProblems.

@@ -44,7 +44,7 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
     ...state,
     blockReason: describePlutoBlock(state),
     orders: working,
-    counters: { ...counters, maxActionsPerSession: settings.maxActionsPerSession, maxModelCallsPerSession: settings.maxModelCallsPerSession, dailyCostCeilingUsd: settings.dailyCostCeilingUsd },
+    counters: { ...counters, maxActionsPerSession: settings.maxActionsPerSession, dailyCostCeilingUsd: settings.dailyCostCeilingUsd },
     enabledTickers: { count: enabledCount, max: settings.maxEnabledTickers },
     session: await resolvePlutoSession(new Date(), settings),
     book: {
