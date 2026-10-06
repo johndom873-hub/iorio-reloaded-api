@@ -40,6 +40,7 @@ import { endOrderIfPlacementBlocked } from "./lib/orderPlacementEnforcement.js";
 import { endOrderIfLimitPriceUnsafe } from "./ibkr/ibkrGatewayLimitPriceCheck.js";
 import { captureExecutionQuote } from "./ibkr/ibkrGatewayExecutionQuotes.js";
 import { requestCancelOfUnfilledOrders } from "./ibkr/ibkrGatewayUnfilledOrderSweep.js";
+import { alertOnStaleOrderRequests } from "./ibkr/ibkrGatewayStaleOrderAlert.js";
 import { waitUntilDrained } from "./lib/waitUntilDrained.js";
 import { computeSourceClosureHash } from "./lib/computeSourceClosureHash.js";
 
@@ -105,13 +106,6 @@ installWorkerShutdownHandler();
 const orderRequestsChannel = "order_requests_channel";
 const reconciliationIntervalMs = 60_000;
 const positionReqId = 1;
-
-// A row sitting in "confirmed"/"cancel_requested" this long without the
-// worker picking it up is never normal (processing is near-instant once
-// connected) -- treated as an incident, not a queue backlog. Chosen to be
-// comfortably longer than the 30s poll fallback plus a few IBKR reconnect
-// cycles, so a routine reconnect blip doesn't false-alarm.
-const staleOrderAlertThresholdMs = 5 * 60_000;
 
 const telegramNotifyTimeoutMs = 5_000;
 
@@ -433,34 +427,6 @@ async function attachOrderRequestsListener(): Promise<void> {
   console.log("order_requests LISTEN: connected and subscribed.");
 }
 
-async function alertOnStaleOrderRequests(): Promise<void> {
-  const thresholdCutoff = new Date(Date.now() - staleOrderAlertThresholdMs);
-
-  const newlyStale = await db("order_requests")
-    .whereIn("status", ["confirmed", "cancel_requested"])
-    .andWhere("created_at", "<", thresholdCutoff)
-    .whereNull("stale_alert_sent_at")
-    .select("id", "status", "created_at", "payload");
-  for (const row of newlyStale) {
-    const symbol = (row.payload as OrderRequestPayload | null)?.symbol ?? "unknown symbol";
-    const stuckMinutes = Math.round((Date.now() - new Date(row.created_at).getTime()) / 60_000);
-    await db("order_requests").where({ id: row.id }).update({ stale_alert_sent_at: db.fn.now() });
-    await notifyTelegramWithTimeout(
-      `⚠️ Order request stuck: ${symbol} (${row.status}) has not been picked up by the worker for ${stuckMinutes}+ minute(s) (id ${row.id}). Check the iorio-worker service on the VPS.`,
-    );
-  }
-
-  const nowResolved = await db("order_requests")
-    .whereNotIn("status", ["confirmed", "cancel_requested"])
-    .whereNotNull("stale_alert_sent_at")
-    .select("id", "status", "payload");
-  for (const row of nowResolved) {
-    const symbol = (row.payload as OrderRequestPayload | null)?.symbol ?? "unknown symbol";
-    await db("order_requests").where({ id: row.id }).update({ stale_alert_sent_at: null });
-    await notifyTelegramWithTimeout(`✅ Previously stuck order request resolved: ${symbol} is now "${row.status}" (id ${row.id}).`);
-  }
-}
-
 /** Postgres LISTEN/NOTIFY — the web dyno NOTIFYs this channel with the order_requests.id on confirm. */
 async function listenForOrderRequests(): Promise<void> {
   // Registered synchronously, independent of whether the LISTEN client below
@@ -477,7 +443,7 @@ async function listenForOrderRequests(): Promise<void> {
         await publishNotification({ type: "order_status", orderId: id }).catch(() => {});
         await handleOrderRequestNotification(id, "cancel_requested");
       }
-      await alertOnStaleOrderRequests();
+      await alertOnStaleOrderRequests({ notify: notifyTelegramWithTimeout, now: () => new Date() });
     } catch (error) {
       console.error(`order_requests poll fallback failed: ${error instanceof Error ? error.message : error}`);
     }
