@@ -4,7 +4,9 @@ import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { computePositionExposures } from "../lib/positionExposure.js";
 import { loadTradingSettings, type TradingSettings } from "../lib/tradingSettingsStore.js";
 import { scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
-import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
+import { loadAccountContext, loadBarsForTilt, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
+import { computeIvMetrics } from "../lib/ivMetrics.js";
+import { computeMoveContext, type MoveContext } from "./moveContext.js";
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
@@ -96,6 +98,18 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   const occupiedContracts = await loadOccupiedContracts(row.symbol);
   const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts });
   return { row, inputs, scored, filtered, occupiedContracts, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [] };
+}
+
+/** The move-context block for the prompt: bars up to the last completed session, the forecast, today's move and IV rank. A failure costs the block, not the round. */
+async function loadMoveContext(ticker: EvaluatedTicker): Promise<MoveContext | null> {
+  try {
+    const [bars, ivMetrics] = await Promise.all([loadBarsForTilt(ticker.row.tickerId, ticker.inputs.todayEasternIso), computeIvMetrics(ticker.row.tickerId)]);
+    const completedBars = bars.filter((bar) => bar.tradingDate < ticker.inputs.todayEasternIso);
+    return computeMoveContext({ bars: completedBars, forecastVolatility: ticker.scored.forecast?.volatility ?? null, dayChangePct: ticker.scored.dayChangePercent, ivRank: ivMetrics.ivRank });
+  } catch (error) {
+    console.warn(`Pluto: move context for ${ticker.row.symbol} unavailable — ${error instanceof Error ? error.message : error}`);
+    return null;
+  }
 }
 
 /** Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here, the rest go to the model. */
@@ -233,7 +247,9 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const recentDecisions: { parsed_output: { decision?: string; candidate_id?: string | null; reasons?: string[] } | null; created_at: Date }[] = await db("pluto_decisions").whereNotNull("parsed_output").orderBy("created_at", "desc").limit(10).select("parsed_output", "created_at");
   const openPositionsBySymbol: Record<string, string[]> = {};
   for (const position of book.openPositions) (openPositionsBySymbol[position.symbol] ??= []).push(position.strategyKey);
-  const tickersForPrompt: PlutoPromptTickerInput[] = evaluated.map((ticker) => ({ scored: ticker.scored, eligible: ticker.filtered.eligible, eligibleRolls: ticker.filtered.eligibleRolls, closeActions: ticker.closeOffers }));
+  const tickersForPrompt: PlutoPromptTickerInput[] = await Promise.all(
+    evaluated.map(async (ticker) => ({ scored: ticker.scored, eligible: ticker.filtered.eligible, eligibleRolls: ticker.filtered.eligibleRolls, closeActions: ticker.closeOffers, moveContext: await loadMoveContext(ticker) })),
+  );
   const windowEnd = checks.context.session.windowEndEt.split(":").map(Number);
   const minutesToWindowEnd = (windowEnd[0]! * 60 + windowEnd[1]!) - easternMinutesOfDay(now);
   const { payload, offeredIds } = buildPlutoUserPayload({

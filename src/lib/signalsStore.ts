@@ -28,7 +28,8 @@ export async function loadAccountContext(): Promise<AccountContext> {
   return { freeCash: Math.max(0, totalCashValue - cashLockedInCsps) };
 }
 
-async function loadBarsForTilt(tickerId: string, asOfDateIso: string): Promise<DailyOhlcvBar[]> {
+/** Stored daily bars up to and including `asOfDateIso`, oldest first (the tilt measures and Pluto's move context). */
+export async function loadBarsForTilt(tickerId: string, asOfDateIso: string): Promise<DailyOhlcvBar[]> {
   const rows: { tradingDate: string; open: string | null; high: string | null; low: string | null; close: string | null; volume: string | null }[] = await db("daily_price_bars")
     .where({ ticker_id: tickerId })
     .whereRaw("trading_date::text <= ?", [asOfDateIso])
