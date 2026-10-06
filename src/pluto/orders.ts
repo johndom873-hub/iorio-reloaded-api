@@ -1,3 +1,4 @@
+import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { publishNotification } from "../lib/notificationChannel.js";
@@ -57,4 +58,36 @@ export async function countPlutoWorkingOrders(): Promise<{ pending: number; work
     else working += Number(row.count);
   }
   return { pending, working };
+}
+
+/** Pluto's orders IBKR may still be working (or that are still on their way there), newest first, for the status card. */
+export interface PlutoWorkingOrder {
+  actionId: string;
+  orderRequestId: string;
+  symbol: string;
+  kind: string;
+  contract: Record<string, unknown> | null;
+  quantity: number | null;
+  limitPrice: number | null;
+  status: string;
+  createdAt: string;
+}
+
+export async function loadPlutoWorkingOrders(connection: Knex = db): Promise<PlutoWorkingOrder[]> {
+  const rows: { action_id: string; order_request_id: string; symbol: string; kind: string; contract: Record<string, unknown> | null; quantity: number | null; limit_price: string | null; status: string; created_at: Date }[] = await connection("order_requests as orq")
+    .join("pluto_actions as pa", "pa.id", "orq.pluto_action_id")
+    .whereIn("orq.status", activeOrderRequestStatuses)
+    .orderBy("orq.created_at", "desc")
+    .select("pa.id as action_id", "orq.id as order_request_id", "pa.symbol", "pa.kind", "pa.contract", "pa.quantity", "pa.limit_price", "orq.status", "orq.created_at");
+  return rows.map((row) => ({
+    actionId: row.action_id,
+    orderRequestId: row.order_request_id,
+    symbol: row.symbol,
+    kind: row.kind,
+    contract: row.contract ?? null,
+    quantity: row.quantity === null ? null : Number(row.quantity),
+    limitPrice: row.limit_price === null ? null : Number(row.limit_price),
+    status: row.status,
+    createdAt: new Date(row.created_at).toISOString(),
+  }));
 }

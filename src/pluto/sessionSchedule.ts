@@ -29,6 +29,8 @@ export interface PlutoSession {
   cancelByEt: string;
   closeAtMs: number;
   cancelByMs: number;
+  windowStartAtMs: number;
+  windowEndAtMs: number;
 }
 
 function minutesOfDay(hhmm: string): number {
@@ -58,6 +60,9 @@ export async function resolvePlutoSession(now: Date, settings: Pick<PlutoSetting
   const close = hhmmParts(closeTimeEt);
   const closeAtMs = easternInstant(dateIso, close.hour, close.minute).getTime();
   const cancelByEt = hhmmFromMinutes(minutesOfDay(closeTimeEt) - cancelMarginMinutes);
+  const windowEndEt = effectiveWindowEndEt(settings.windowEndEt, closeTimeEt);
+  const windowStart = hhmmParts(settings.windowStartEt);
+  const windowEnd = hhmmParts(windowEndEt);
   return {
     dateIso,
     isOpen: schedule.isOpen,
@@ -65,10 +70,12 @@ export async function resolvePlutoSession(now: Date, settings: Pick<PlutoSetting
     closeSource,
     closeReadAt: schedule.closeReadAt,
     windowStartEt: settings.windowStartEt,
-    windowEndEt: effectiveWindowEndEt(settings.windowEndEt, closeTimeEt),
+    windowEndEt,
     cancelByEt,
     closeAtMs,
     cancelByMs: closeAtMs - cancelMarginMinutes * 60_000,
+    windowStartAtMs: easternInstant(dateIso, windowStart.hour, windowStart.minute).getTime(),
+    windowEndAtMs: easternInstant(dateIso, windowEnd.hour, windowEnd.minute).getTime(),
   };
 }
 

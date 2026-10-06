@@ -41,6 +41,8 @@ export interface CloseOffer extends PlutoCloseActionOffer {
   side: "sell" | "buy";
   multiplier: number;
   quantity: number;
+  /** The held option a buyback closes, recorded on the action so the screen can name it (close_leg only). */
+  contract?: { strategyKey: "covered_call" | "cash_secured_put"; expiry: string; strike: number; right: "C" | "P" };
 }
 
 export interface OpeningTradeForPremium {
@@ -194,6 +196,7 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
       side: "buy",
       multiplier: 100,
       quantity: leg.quantity,
+      contract: { strategyKey: leg.right === "C" ? "covered_call" : "cash_secured_put", expiry: leg.expiry, strike: leg.strike, right: leg.right },
     },
     reason: null,
   };

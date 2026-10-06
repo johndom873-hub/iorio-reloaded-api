@@ -118,7 +118,7 @@ async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSetting
   const { offers } = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: ticker.scored.heldLegs, rolls: ticker.scored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso });
   for (const offer of offers) {
     if (!offer.automatic) continue;
-    const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: "odd lot below 100 shares at a positive cycle P&L (Formula P1)" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
+    const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds, ...(offer.contract ?? {}) }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: "odd lot below 100 shares at a positive cycle P&L (Formula P1)" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
     const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.limitPrice })), description: offer.description, reasons: ["automatic odd-lot close (Formula P1)"] });
     if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description, cancelByMs }), result.orderId, offer.symbol);
   }
@@ -298,7 +298,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     decision = call.decision;
     agreementDetail = "single call";
   }
-  await recordPlutoEvent("model_called", { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, agreement: agreementDetail, reasons: decision.reasons });
+  await recordPlutoEvent("model_called", { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, confidence: decision.confidence, actionKind: decision.actionKind, agreement: agreementDetail, reasons: decision.reasons });
   await finishPlutoPass(passId, { inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, tokensIn, tokensOut, costUsd, servedModelIds });
   await recordPlutoPass();
 
@@ -377,7 +377,9 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     kind: chosenOpen ? chosenOpen.kind : "roll",
     symbol: owner.row.symbol,
     tickerId: owner.row.tickerId,
-    contract: contract ? { strategyKey: contract.strategyKey, expiry: contract.expiry, strike: contract.strike, legId: chosenRoll?.roll.legId } : null,
+    contract: contract
+      ? { strategyKey: contract.strategyKey, expiry: contract.expiry, strike: contract.strike, right: contract.strategyKey === "covered_call" ? "C" : "P", legId: chosenRoll?.roll.legId, ...(heldLegToRoll ? { fromStrike: heldLegToRoll.strike, fromExpiry: heldLegToRoll.expiry } : {}) }
+      : null,
     candidateScores: freshCandidate ?? freshRoll ?? null,
     deterministicTopPick: topPickSummary,
     gateResults,
@@ -424,7 +426,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       { gate: "working_order", ok: !book.workingOrderSymbols.has(ticker.row.symbol), detail: book.workingOrderSymbols.has(ticker.row.symbol) ? "a Pluto order on this symbol is already working" : "no working Pluto order on the symbol" },
     ];
     const ok = gateResults.every((gate) => gate.ok);
-    const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds }, candidateScores: (freshOffer ?? offer).detail, deterministicTopPick: topPickSummary, gateResults, sizeTier: null, quantity: (freshOffer ?? offer).quantity, limitPrice: (freshOffer ?? offer).limitPrice, outcome: ok ? "validated" : "blocked", blockReason: ok ? null : gateResults.filter((gate) => !gate.ok).map((gate) => `${gate.gate}: ${gate.detail}`).join(" | "), referenceBid: (freshOffer ?? offer).limitPrice, referenceMid: (freshOffer ?? offer).limitPrice });
+    const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds, ...(offer.contract ?? {}) }, candidateScores: (freshOffer ?? offer).detail, deterministicTopPick: topPickSummary, gateResults, sizeTier: null, quantity: (freshOffer ?? offer).quantity, limitPrice: (freshOffer ?? offer).limitPrice, outcome: ok ? "validated" : "blocked", blockReason: ok ? null : gateResults.filter((gate) => !gate.ok).map((gate) => `${gate.gate}: ${gate.detail}`).join(" | "), referenceBid: (freshOffer ?? offer).limitPrice, referenceMid: (freshOffer ?? offer).limitPrice });
     if (!ok) {
       await recordPlutoEvent("action_blocked", { passId, actionId, symbol: offer.symbol, candidateId: offer.id, stage: "post_model", failed: gateResults.filter((gate) => !gate.ok) });
       return { passId, modelCalled: true, skippedReason: null, outcome: "blocked" };

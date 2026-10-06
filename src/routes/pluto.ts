@@ -9,8 +9,10 @@ import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { recordPlutoEvent } from "../pluto/ledger.js";
-import { cancelPlutoOrders, countPlutoWorkingOrders } from "../pluto/orders.js";
-import { loadPlutoTodayCounters } from "../pluto/counters.js";
+import { cancelPlutoOrders, countPlutoWorkingOrders, loadPlutoWorkingOrders } from "../pluto/orders.js";
+import { loadPlutoOrdersTodayBreakdown, loadPlutoTodayCounters } from "../pluto/counters.js";
+import { computePlutoActionExposure, loadPlutoOrderRequestsByActionId, type PlutoActionOrderRequest } from "../pluto/actionExposure.js";
+import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 
 // The Pluto screen's API. Any signed-in user can operate every control (Marcelo, 2026-09-28:
 // both users share one access level); the UI puts confirm modals in front of the risky ones.
@@ -28,33 +30,58 @@ async function currentUserDisplayName(request: Request): Promise<string> {
 }
 
 plutoRouter.get("/state", async (_request: Request, response: Response) => {
-  const [state, settings, working, counters, agentHealth, enabledCount, book, lastSnapshot] = await Promise.all([
+  const [state, settings, working, counters, ordersToday, workingOrders, agentHealth, enabledCount, book, lastSnapshot, lastModeChange, lastCheckedPass, unfilledCancelMinutes] = await Promise.all([
     loadPlutoState(),
     loadPlutoSettings(),
     countPlutoWorkingOrders(),
     loadPlutoTodayCounters(),
+    loadPlutoOrdersTodayBreakdown(),
+    loadPlutoWorkingOrders(),
     db("worker_health").where({ process_name: "pluto_agent" }).first(),
     db("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
     loadPlutoBook(),
     db("account_pnl_snapshots").orderBy("snapshot_date", "desc").first("net_liquidation_value", "snapshot_date"),
+    db("pluto_events").where({ type: "mode_changed" }).orderBy("occurred_at", "desc").first("occurred_at", "payload"),
+    db("pluto_passes").whereNotNull("system_checks").orderBy("started_at", "desc").first("id", "started_at", "system_checks"),
+    loadOrderUnfilledCancelMinutes(),
   ]);
   // The book tile uses last night's NLV (no IBKR round trip on a screen load); the agent's passes use the live figure.
   const netLiquidationValue = lastSnapshot ? Number(lastSnapshot.net_liquidation_value) : null;
+  const session = await resolvePlutoSession(new Date(), settings);
+  const openPositionsBySymbol: Record<string, number> = {};
+  for (const position of book.openPositions) openPositionsBySymbol[position.symbol] = (openPositionsBySymbol[position.symbol] ?? 0) + 1;
+  const workingOrdersBySymbol: Record<string, number> = {};
+  for (const order of workingOrders) workingOrdersBySymbol[order.symbol] = (workingOrdersBySymbol[order.symbol] ?? 0) + 1;
   response.json({
     ...state,
     blockReason: describePlutoBlock(state),
+    modeChangedAt: lastModeChange ? new Date(lastModeChange.occurred_at).toISOString() : null,
+    modeChangedBy: (lastModeChange?.payload as { by?: string } | undefined)?.by ?? null,
     orders: working,
+    ordersToday,
+    workingOrders,
+    unfilledCancelMinutes,
     counters: { ...counters, maxActionsPerSession: settings.maxActionsPerSession, dailyCostCeilingUsd: settings.dailyCostCeilingUsd },
     enabledTickers: { count: enabledCount, max: settings.maxEnabledTickers },
-    session: await resolvePlutoSession(new Date(), settings),
+    session: {
+      ...session,
+      windowStartAt: new Date(session.windowStartAtMs).toISOString(),
+      windowEndAt: new Date(session.windowEndAtMs).toISOString(),
+      closeAt: new Date(session.closeAtMs).toISOString(),
+    },
+    // The newest analysis's pre-model checks: what currently holds Pluto back (worker offline, SPY stress…) between analyses.
+    lastChecks: lastCheckedPass ? { passId: lastCheckedPass.id, startedAt: new Date(lastCheckedPass.started_at).toISOString(), checks: lastCheckedPass.system_checks } : null,
     book: {
       committedDollars: book.committedDollars,
       openPositionCount: book.openPositions.length,
       openSymbols: [...book.openSymbols].sort(),
       workingOrderSymbols: [...book.workingOrderSymbols].sort(),
+      openPositionsBySymbol,
+      workingOrdersBySymbol,
       netLiquidationValue,
       netLiquidationValueAsOf: lastSnapshot ? String(lastSnapshot.snapshot_date).slice(0, 10) : null,
       capitalBudgetPct: settings.capitalBudgetPct,
+      orderSizePctOfBudget: settings.orderSizePctOfBudget,
       maxOpenPositions: settings.maxOpenPositions,
     },
     agent: agentHealth
@@ -243,13 +270,13 @@ plutoRouter.get("/passes", async (request: Request, response: Response) => {
     db("pluto_decisions").whereIn("pass_id", passIds).orderBy("call_index"),
     db("pluto_actions").whereIn("pass_id", passIds).orderBy("created_at"),
   ]);
-  const realized = await loadRealizedPnlByActionId(actions.map((action) => String(action.id)));
+  const [realized, orderRequests] = await Promise.all([loadRealizedPnlByActionId(actions.map((action) => String(action.id))), loadPlutoOrderRequestsByActionId(actions.map((action) => String(action.id)))]);
   response.json(
     rows.map((row) => ({
       ...serializePass(row),
       // Compact per-call summary for the Decisions card (the full input payload stays on GET /passes/:id).
-      decisions: decisions.filter((decision) => decision.pass_id === row.id).map((decision) => ({ callIndex: decision.call_index, servedModelId: decision.served_model_id ?? null, parsedOutput: decision.parsed_output ?? null, schemaValid: Boolean(decision.schema_valid), latencyMs: decision.latency_ms ?? null, costUsd: decision.cost_usd === null ? null : Number(decision.cost_usd), error: decision.error ?? null })),
-      actions: actions.filter((action) => action.pass_id === row.id).map((action) => serializeAction(action, realized.get(String(action.id)))),
+      decisions: decisions.filter((decision) => decision.pass_id === row.id).map((decision) => ({ callIndex: decision.call_index, servedModelId: decision.served_model_id ?? null, serviceTier: decision.service_tier ?? null, parsedOutput: decision.parsed_output ?? null, schemaValid: Boolean(decision.schema_valid), latencyMs: decision.latency_ms ?? null, tokensIn: decision.tokens_in ?? null, tokensOut: decision.tokens_out ?? null, costUsd: decision.cost_usd === null ? null : Number(decision.cost_usd), error: decision.error ?? null })),
+      actions: actions.filter((action) => action.pass_id === row.id).map((action) => serializeAction(action, realized.get(String(action.id)), orderRequests.get(String(action.id)))),
     })),
   );
 });
@@ -264,14 +291,14 @@ plutoRouter.get("/passes/:id", async (request: Request, response: Response) => {
     db("pluto_decisions").where({ pass_id: pass.id }).orderBy("call_index"),
     db("pluto_actions").where({ pass_id: pass.id }).orderBy("created_at"),
   ]);
-  const realized = await loadRealizedPnlByActionId(actions.map((action) => String(action.id)));
-  response.json({ ...serializePass(pass), decisions: decisions.map(serializeDecision), actions: actions.map((action) => serializeAction(action, realized.get(String(action.id)))) });
+  const [realized, orderRequests] = await Promise.all([loadRealizedPnlByActionId(actions.map((action) => String(action.id))), loadPlutoOrderRequestsByActionId(actions.map((action) => String(action.id)))]);
+  response.json({ ...serializePass(pass), decisions: decisions.map(serializeDecision), actions: actions.map((action) => serializeAction(action, realized.get(String(action.id)), orderRequests.get(String(action.id)))) });
 });
 
 plutoRouter.get("/actions", async (request: Request, response: Response) => {
   const rows = await db("pluto_actions").orderBy("created_at", "desc").limit(limitFrom(request, 100));
-  const realized = await loadRealizedPnlByActionId(rows.map((row) => String(row.id)));
-  response.json(rows.map((row) => serializeAction(row, realized.get(String(row.id)))));
+  const [realized, orderRequests] = await Promise.all([loadRealizedPnlByActionId(rows.map((row) => String(row.id))), loadPlutoOrderRequestsByActionId(rows.map((row) => String(row.id)))]);
+  response.json(rows.map((row) => serializeAction(row, realized.get(String(row.id)), orderRequests.get(String(row.id)))));
 });
 
 plutoRouter.get("/events", async (request: Request, response: Response) => {
@@ -321,6 +348,7 @@ function serializePass(row: Record<string, unknown>) {
     costUsd: row.cost_usd === null || row.cost_usd === undefined ? null : Number(row.cost_usd),
     servedModelIds: row.served_model_ids ?? [],
     settingsSnapshot: row.settings_snapshot ?? null,
+    promptVersion: (row.settings_snapshot as { promptVersion?: string } | null)?.promptVersion ?? null,
   };
 }
 
@@ -331,6 +359,7 @@ function serializeDecision(row: Record<string, unknown>) {
     callIndex: row.call_index,
     modelId: row.model_id,
     servedModelId: row.served_model_id ?? null,
+    serviceTier: row.service_tier ?? null,
     promptId: row.prompt_id ?? null,
     inputPayload: row.input_payload,
     rawOutput: row.raw_output ?? null,
@@ -345,8 +374,9 @@ function serializeDecision(row: Record<string, unknown>) {
   };
 }
 
-function serializeAction(row: Record<string, unknown>, realized?: PlutoActionRealizedPnl) {
+function serializeAction(row: Record<string, unknown>, realized?: PlutoActionRealizedPnl, orderRequest?: PlutoActionOrderRequest) {
   const num = (value: unknown) => (value === null || value === undefined ? null : Number(value));
+  const exposureInput = { kind: String(row.kind), contract: (row.contract as Record<string, unknown> | null) ?? null, quantity: num(row.quantity), limitPrice: num(row.limit_price), fillPrice: num(row.fill_price) };
   return {
     id: row.id,
     passId: row.pass_id,
@@ -368,6 +398,8 @@ function serializeAction(row: Record<string, unknown>, realized?: PlutoActionRea
     fillPrice: num(row.fill_price),
     impliedFillPrice: num(row.implied_fill_price),
     pessimisticPnl: num(row.pessimistic_pnl),
+    // EXP $ the order adds (or, negative, releases), the way Positions counts exposure; null without an order.
+    exposureDollars: computePlutoActionExposure(exposureInput, orderRequest ?? null),
     // Derived at read time from the legs this action opened (see pluto/actionRealizedPnl.ts); the column is not read.
     realizedPnl: realized?.realizedPnl ?? null,
     closedLegCount: realized?.closedLegCount ?? 0,
