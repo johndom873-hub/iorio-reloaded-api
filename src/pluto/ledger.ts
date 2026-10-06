@@ -231,6 +231,7 @@ export type PlutoEventType =
   | "session_schedule"
   | "stress_override_changed"
   | "order_adopted"
+  | "readiness_check"
   | "warning";
 
 /** Appends to the timeline and pushes a `pluto_event` notification so open screens update live. */

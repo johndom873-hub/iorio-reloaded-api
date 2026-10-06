@@ -108,6 +108,12 @@ export class InternalApiClient {
     return this.request<T>(path);
   }
 
+  /** Readiness checks: drops the cached session so the sign-in itself is exercised, then makes one read-only request. */
+  async verifySignIn(path: string): Promise<void> {
+    this.sessionCookie = null;
+    await this.request<unknown>(path);
+  }
+
   post<T>(path: string, body: unknown): Promise<T> {
     return this.request<T>(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   }

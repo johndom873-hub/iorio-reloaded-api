@@ -1,6 +1,7 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { isoDateFromDbDate } from "../lib/dbDate.js";
+import type { PlutoReadinessRecord } from "./readiness.js";
 
 // Pluto's runtime state: one row (pluto_state). Mode is off/on (Marcelo, 2026-09-28: no
 // other modes). Pause is a separate flag that overrides everything: manual (either user),
@@ -9,7 +10,7 @@ import { isoDateFromDbDate } from "../lib/dbDate.js";
 // Resume. The order gate is: mode on AND not paused AND no breaker tripped.
 
 export type PlutoMode = "off" | "on";
-export type PlutoPauseKind = "manual" | "deploy" | "crash_loop" | "breaker";
+export type PlutoPauseKind = "manual" | "deploy" | "crash_loop" | "readiness" | "breaker";
 
 export interface PlutoBreakerTrip {
   trippedAt: string;
@@ -19,7 +20,7 @@ export interface PlutoBreakerTrip {
 export interface PlutoState {
   mode: PlutoMode;
   paused: boolean;
-  /** "manual" | "deploy" | "crash_loop" | "breaker:<name>" */
+  /** "manual" | "deploy" | "crash_loop" | "readiness" | "breaker:<name>" */
   pauseReason: string | null;
   pausedByUserId: string | null;
   pausedByDisplayName: string | null;
@@ -30,6 +31,8 @@ export interface PlutoState {
   /** Eastern date on which the SPY stress check is overridden (screen switch), else null. */
   stressOverrideDate: string | null;
   stressOverrideByDisplayName: string | null;
+  /** The latest pre-open readiness run (readiness.ts); null until the first one. */
+  readiness: PlutoReadinessRecord | null;
   updatedAt: string;
 }
 
@@ -46,6 +49,7 @@ function rowToState(row: Record<string, unknown>): PlutoState {
     lastPassAt: row.last_pass_at ? new Date(row.last_pass_at as string).toISOString() : null,
     stressOverrideDate: isoDateFromDbDate(row.stress_override_date),
     stressOverrideByDisplayName: (row.stress_override_by_display_name as string | null) ?? null,
+    readiness: (row.readiness as PlutoReadinessRecord | null) ?? null,
     updatedAt: new Date(row.updated_at as string).toISOString(),
   };
 }
@@ -87,7 +91,7 @@ export async function pausePluto(kind: PlutoPauseKind, options: { userId?: strin
   return loadPlutoState();
 }
 
-/** Lifts a manual / deploy / crash-loop pause. Refuses while a breaker is tripped: reset the breaker first. */
+/** Lifts a manual / deploy / crash-loop / readiness pause. Refuses while a breaker is tripped: reset the breaker first. */
 export async function resumePluto(userId: string): Promise<PlutoState> {
   return db.transaction(async (trx) => {
     const current = await loadPlutoState(trx);
@@ -120,6 +124,10 @@ export async function resetPlutoBreaker(name: string): Promise<PlutoState> {
 
 export async function recordPlutoRelease(release: string): Promise<void> {
   await db("pluto_state").where({ id: 1 }).update({ last_seen_release: release, updated_at: db.fn.now() });
+}
+
+export async function savePlutoReadiness(record: PlutoReadinessRecord): Promise<void> {
+  await db("pluto_state").where({ id: 1 }).update({ readiness: JSON.stringify(record), updated_at: db.fn.now() });
 }
 
 export async function recordPlutoPass(): Promise<void> {

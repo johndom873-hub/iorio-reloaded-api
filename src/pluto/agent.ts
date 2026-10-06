@@ -3,7 +3,7 @@ import { sharedLiveConnection } from "../ibkr/sharedReadConnection.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { InternalApiClient } from "../lib/internalApiClient.js";
 import { startNotificationBroadcaster, subscribeToNotifications } from "../lib/notificationBroadcaster.js";
-import { computeMarketSessionStatus, easternDateIso } from "../lib/marketSessionStatus.js";
+import { computeMarketSessionStatus, easternDateIso, resolveIsOpenDay } from "../lib/marketSessionStatus.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
 import type { PlutoConfig } from "./config.js";
@@ -14,7 +14,9 @@ import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRunnerContext } from "./passRunner.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
-import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease } from "./stateStore.js";
+import { decidePlutoReadinessRun, describePlutoReadinessOutcome, runPlutoReadinessTests } from "./readiness.js";
+import { createPlutoReadinessProbes } from "./readinessProbes.js";
+import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease, savePlutoReadiness } from "./stateStore.js";
 import { findNewlyQuotedContracts, loadTodaysDaySignalQuoteStamps, rememberAnalysed } from "./daySignalsWatermark.js";
 import { isInsideTradingWindow } from "./systemChecks.js";
 
@@ -22,6 +24,7 @@ import { isInsideTradingWindow } from "./systemChecks.js";
 //   - boot: crash-loop and deploy detection pause the agent before it can act;
 //   - a 45 s heartbeat row (worker_health, process_name "pluto_agent") for the screen;
 //   - a 60 s housekeeping tick: settings, state, the watched stock lines, the opening analysis;
+//   - a 60 s readiness tick: the pre-open check (readiness.ts) on the platform readiness timetable;
 //   - one continuous loop: every daySignalsPollSeconds it reads the Day Signals table and analyses the tickers whose
 //     contracts carry a quote newer than the one Pluto last analysed; events that change a decision without a new
 //     quote (an order ending, a cooldown ending, a position closing, a settings change) queue a forced round;
@@ -29,6 +32,7 @@ import { isInsideTradingWindow } from "./systemChecks.js";
 
 const heartbeatIntervalMs = 45_000;
 const housekeepingIntervalMs = 60_000;
+const readinessIntervalMs = 60_000;
 export const plutoProcessName = "pluto_agent";
 
 // Settings that shape how Pluto operates but never what it would decide: changing only these does
@@ -55,6 +59,7 @@ export class PlutoAgent {
   private readonly watchedOrderIds = new Set<string>();
   private openingLookDoneFor: string | null = null;
   private watching = false;
+  private readinessInFlight = false;
   private stopped = false;
   private readonly startedAtMs = Date.now();
   private readonly context: PassRunnerContext;
@@ -94,6 +99,7 @@ export class PlutoAgent {
     await this.heartbeat();
     this.timers.push(setInterval(() => void this.heartbeat(), heartbeatIntervalMs));
     this.timers.push(setInterval(() => void this.housekeeping(), housekeepingIntervalMs));
+    this.timers.push(setInterval(() => void this.runReadinessIfDue(), readinessIntervalMs));
     // A saved settings change, or a position closing (budget and capacity free up), is felt at the next round.
     startNotificationBroadcaster();
     this.unsubscribeNotifications = subscribeToNotifications((notification) => {
@@ -107,6 +113,7 @@ export class PlutoAgent {
       this.queueForcedRound("settings_changed", { fields, by: notification.payload.by ?? null }, null);
     });
     await this.housekeeping();
+    void this.runReadinessIfDue();
     this.loopDone = this.runLoop();
     console.log("Pluto agent started.");
   }
@@ -198,6 +205,44 @@ export class PlutoAgent {
       }
     } catch (error) {
       console.error(`Pluto housekeeping failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  /**
+   * The pre-open readiness check (Marcelo, 2026-10-06): on open market days while Pluto is on, runs whatever readiness.ts says
+   * is due, stores the result, alerts on failure or recovery, and pauses at the final run if anything still fails. A run takes
+   * up to a minute (the IBKR test), so overlapping ticks are skipped.
+   */
+  private async runReadinessIfDue(): Promise<void> {
+    if (this.stopped || this.readinessInFlight) return;
+    this.readinessInFlight = true;
+    try {
+      const now = new Date();
+      const dateIso = easternDateIso(now);
+      const state = await loadPlutoState();
+      if (state.mode !== "on") return;
+      if (!(await resolveIsOpenDay(dateIso))) return;
+      const kind = decidePlutoReadinessRun(now, dateIso, state.readiness);
+      if (kind === null) return;
+      const settings = this.settings ?? (await loadPlutoSettings());
+      const results = await runPlutoReadinessTests(createPlutoReadinessProbes({ api: this.api, openRouterApiKey: this.config.openRouterApiKey, dailyCostCeilingUsd: settings.dailyCostCeilingUsd }));
+      const previousSignature = state.readiness?.dateIso === dateIso ? state.readiness.signature : null;
+      const outcome = describePlutoReadinessOutcome(kind, previousSignature, results);
+      await savePlutoReadiness({ dateIso, lastRunAt: new Date().toISOString(), lastRunKind: kind, signature: outcome.signature, finalDone: kind === "final", results });
+      await recordPlutoEvent("readiness_check", { kind, results });
+      if (outcome.pause) {
+        // Another pause (a person's, a deploy's) keeps its own reason; the alert still says the check failed.
+        const current = await loadPlutoState();
+        if (!current.paused) {
+          await pausePluto("readiness");
+          await recordPlutoEvent("paused", { by: "agent", reason: "readiness", failing: results.filter((result) => !result.ok).map((result) => result.name) });
+        }
+      }
+      if (outcome.message) await notifyPlutoTelegram(outcome.message);
+    } catch (error) {
+      console.error(`Pluto readiness check failed to run: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      this.readinessInFlight = false;
     }
   }
 
