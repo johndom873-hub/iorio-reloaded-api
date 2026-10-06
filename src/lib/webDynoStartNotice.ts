@@ -4,6 +4,8 @@ import { notifyTelegramTracked } from "./undeliveredAlerts.js";
 // The Telegram message a web dyno sends when it starts. It says WHICH kind of start this is, so nobody has to
 // compare release numbers by hand: a deploy/promotion (new commit), a release with the same code (a config
 // variable or settings change) or a plain restart (same release again: daily cycling, crash, manual restart).
+// The frontend ("App") is a stateless server on an Eco dyno that Heroku cycles, relocates and sleeps on its own, so a plain
+// restart of it sends nothing; deploys and configuration changes still do.
 // The environment is not in the text: staging and production post through different Telegram bots.
 // The release identity comes from Heroku's runtime-dyno-metadata feature; the previous one from deploy_notice_state.
 
@@ -11,6 +13,8 @@ export interface ReleaseIdentity {
   releaseVersion: string;
   commitSha: string;
 }
+
+const subjectsSilentOnPlainRestart = new Set(["App"]);
 
 // Shown as upper case ("App" is stored as "APP v110 ..."): the subject is also the deploy_notice_state key, so it stays as is.
 const displayName = (subject: string): string => subject.toUpperCase();
@@ -24,12 +28,12 @@ export function readReleaseIdentityFromEnvironment(environmentVariables: NodeJS.
 
 // Wording is deliberately short and version-only: the commit is stored (it is how a deploy is told from a
 // config change) but not shown, because what matters is that a new version came in.
-export function buildWebDynoStartNotice(input: { subject: string; previous: ReleaseIdentity | null; current: ReleaseIdentity | null }): string {
+export function buildWebDynoStartNotice(input: { subject: string; previous: ReleaseIdentity | null; current: ReleaseIdentity | null }): string | null {
   const { previous, current } = input;
   const name = displayName(input.subject);
   if (!current) return `🟢 ${name} started (version unknown).`;
   if (!previous) return `🟢 ${name} ${current.releaseVersion} started.`;
-  if (previous.releaseVersion === current.releaseVersion) return `🔄 ${name} restarted (still ${current.releaseVersion}).`;
+  if (previous.releaseVersion === current.releaseVersion) return subjectsSilentOnPlainRestart.has(input.subject) ? null : `🔄 ${name} restarted (still ${current.releaseVersion}).`;
   if (previous.commitSha !== current.commitSha) return `🚀 ${name} ${current.releaseVersion} deployed.`;
   return `⚙️ ${name} ${current.releaseVersion}: configuration change, same code as ${previous.releaseVersion}.`;
 }
@@ -39,7 +43,7 @@ export async function announceWebDynoStart(input: {
   subject: string;
   current?: ReleaseIdentity | null;
   notify?: (message: string) => Promise<void>;
-}): Promise<string> {
+}): Promise<string | null> {
   const { subject } = input;
   const current = input.current === undefined ? readReleaseIdentityFromEnvironment() : input.current;
   const notify = input.notify ?? notifyTelegramTracked;
@@ -65,6 +69,6 @@ export async function announceWebDynoStart(input: {
   const message = stateProblem
     ? `🟢 ${displayName(subject)} ${current ? `${current.releaseVersion} ` : ""}started (could not tell deploy from restart: ${stateProblem}).`
     : buildWebDynoStartNotice({ subject, previous, current });
-  await notify(message);
+  if (message !== null) await notify(message);
   return message;
 }

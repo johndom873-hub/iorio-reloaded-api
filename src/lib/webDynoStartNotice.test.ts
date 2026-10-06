@@ -14,6 +14,11 @@ describe("buildWebDynoStartNotice", () => {
     expect(buildWebDynoStartNotice({ subject: "API", previous: v208, current: v208 })).toBe("🔄 API restarted (still v208).");
   });
 
+  it("stays silent when the App restarts on the same release, but still reports its deploys and config changes", () => {
+    expect(buildWebDynoStartNotice({ subject: "App", previous: v208, current: v208 })).toBeNull();
+    expect(buildWebDynoStartNotice({ subject: "App", previous: v208, current: v209SameCode })).toBe("⚙️ APP v209: configuration change, same code as v208.");
+  });
+
   it("says configuration change, same code, when only the release number moved", () => {
     expect(buildWebDynoStartNotice({ subject: "API", previous: v208, current: v209SameCode })).toBe("⚙️ API v209: configuration change, same code as v208.");
   });
