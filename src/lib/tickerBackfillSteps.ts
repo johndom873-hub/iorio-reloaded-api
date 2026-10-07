@@ -42,6 +42,20 @@ export function updateStep(steps: BackfillStep[], key: BackfillStepKey, status: 
   return steps.map((step) => (step.key === key ? { ...step, status, message } : step));
 }
 
+/** The scope a run was created with, read back from its steps (only "full" has the history step). */
+export function scopeOfSteps(steps: BackfillStep[]): BackfillScope {
+  return steps.some((step) => step.key === "history") ? "full" : "option_chain";
+}
+
+/** A run cut off by a server restart: the step it was on and the ones it never reached are failed with the reason. */
+export function markUnfinishedStepsInterrupted(steps: BackfillStep[]): BackfillStep[] {
+  return steps.map((step) => {
+    if (step.status === "running") return { ...step, status: "failed", message: "Interrupted by a server restart." };
+    if (step.status === "pending") return { ...step, status: "failed", message: "Not started: the server restarted first." };
+    return step;
+  });
+}
+
 /** Final status once every step has finished: partial if any step failed. */
 export function deriveFinalRunStatus(steps: BackfillStep[]): Exclude<BackfillRunStatus, "running"> {
   return steps.some((step) => step.status === "failed") ? "partial" : "complete";

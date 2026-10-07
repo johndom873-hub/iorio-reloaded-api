@@ -387,13 +387,13 @@ describe("GET /shortlist", () => {
     expect(row).toMatchObject({ backfillStatus: "preparing", backfillProgressPercent: 50, backfillNeedsRetry: false });
   });
 
-  it("does not call a running backfill older than the stale window preparing", async () => {
+  it("does not call a running backfill older than the stale window preparing, and offers a retry for it", async () => {
     const ticker = await insertTicker();
     await insertEntry(ticker.id);
     await insertBackfillRun(ticker.id, "running", new Date(Date.now() - 31 * 60_000), 25);
 
     const row = ((await call("GET", "/")).json as any[]).find((entry) => entry.symbol === ticker.symbol);
-    expect(row).toMatchObject({ backfillStatus: null, backfillProgressPercent: 25, backfillNeedsRetry: false });
+    expect(row).toMatchObject({ backfillStatus: null, backfillProgressPercent: 25, backfillNeedsRetry: true });
   });
 
   it("offers a retry after a partial run and none after a complete one", async () => {
@@ -952,6 +952,7 @@ describe("backfill progress routes", () => {
       progressPercent: 100,
       startedAt: "2030-01-02T03:04:05.000Z",
       finishedAt: "2030-01-02T03:04:05.000Z",
+      resumedFromRunId: null,
     });
   });
 

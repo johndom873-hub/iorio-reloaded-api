@@ -58,7 +58,8 @@ shortlistRouter.get("/", async (_request, response) => {
       b.progress_percent AS "backfillProgressPercent",
       -- A 'partial' run means some pipeline step (calendar/chain-strikes/snapshot) failed -- surfaced so
       -- the Actions menu can offer a full-pipeline retry, not just the narrower price-history-only one.
-      CASE WHEN b.status = 'partial' THEN true ELSE false END AS "backfillNeedsRetry",
+      -- A 'running' run past the stale window is dead too (getLatestBackfillRun reports it as partial).
+      CASE WHEN b.status = 'partial' OR (b.status = 'running' AND b.started_at <= now() - make_interval(mins => ${staleBackfillRunMinutes})) THEN true ELSE false END AS "backfillNeedsRetry",
       -- Remove is disabled in the Actions menu while this is above zero (DELETE below enforces the same).
       op.open_position_count::int AS "openPositionCount"
     FROM shortlist_entries se

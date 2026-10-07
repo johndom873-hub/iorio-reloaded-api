@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import type { BackfillRunStatus, BackfillStep } from "../lib/tickerBackfillSteps.js";
+import { buildInitialBackfillSteps, updateStep, type BackfillRunStatus, type BackfillStep } from "../lib/tickerBackfillSteps.js";
 import {
   executeBackfillRun,
+  resumeInterruptedBackfillRuns,
   startTickerBackfill,
   waitForBackfillQueue,
   type BackfillRunStore,
@@ -14,7 +15,7 @@ import type { PreparedTicker } from "./runOptionChainCapture.js";
 
 // --- fakes -----------------------------------------------------------------
 
-function inMemoryStore() {
+function inMemoryStore(tickers: Record<string, { symbol: string; onShortlist: boolean }> = {}) {
   const runs = new Map<string, TickerBackfillRun>();
   const progressLog: { runId: string; percent: number }[] = [];
   let counter = 0;
@@ -23,11 +24,13 @@ function inMemoryStore() {
     closeRunning: async (tickerId) => {
       for (const run of runs.values()) if (run.tickerId === tickerId && run.status === "running") run.status = "partial";
     },
-    create: async (tickerId, steps) => {
-      const run: TickerBackfillRun = { id: `run-${++counter}`, tickerId, status: "running", steps, progressPercent: 0, startedAt: new Date().toISOString(), finishedAt: null };
+    create: async (tickerId, steps, resumedFromRunId) => {
+      const run: TickerBackfillRun = { id: `run-${++counter}`, tickerId, status: "running", steps, progressPercent: 0, startedAt: new Date().toISOString(), finishedAt: null, resumedFromRunId: resumedFromRunId ?? null };
       runs.set(run.id, run);
       return { ...run };
     },
+    listRunning: async () =>
+      [...runs.values()].filter((run) => run.status === "running").map((run) => ({ ...run, symbol: tickers[run.tickerId]?.symbol ?? run.tickerId, onShortlist: tickers[run.tickerId]?.onShortlist ?? true })),
     saveProgress: async (runId, steps) => {
       const run = runs.get(runId)!;
       run.steps = steps;
@@ -316,6 +319,79 @@ describe("startTickerBackfill", () => {
     expect((await store.getLatest("t2"))!.status).toBe("complete");
     expect(second.tickerId).toBe("t2");
     error.mockRestore();
+  });
+});
+
+// --- resumeInterruptedBackfillRuns -------------------------------------------
+
+describe("resumeInterruptedBackfillRuns", () => {
+  const cutOffDuringCalendar = () => updateStep(updateStep(buildInitialBackfillSteps(), "history", "done", "1253 daily bars"), "calendar", "running", null);
+
+  it("closes each run cut off by the restart as partial and starts it again, linked to the one it replaces", async () => {
+    const { store, runs } = inMemoryStore({ t1: { symbol: "TSLA", onShortlist: true } });
+    const interrupted = await store.create("t1", cutOffDuringCalendar());
+    const { workers: w } = workers();
+
+    const result = await resumeInterruptedBackfillRuns({ store, workers: w });
+    await waitForBackfillQueue();
+
+    expect(result).toEqual({ resumed: ["TSLA"], notResumed: [] });
+    const closed = runs.get(interrupted.id)!;
+    expect(closed.status).toBe("partial");
+    expect(statusOf(closed.steps)).toEqual({ history: "done", calendar: "failed", chain_warmup: "failed", first_snapshot: "failed" });
+    const restarted = (await store.getLatest("t1"))!;
+    expect(restarted.id).not.toBe(interrupted.id);
+    expect(restarted).toMatchObject({ status: "complete", resumedFromRunId: interrupted.id });
+    expect(w.fetchHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("restarts every interrupted ticker, one at a time, in the order they were first queued", async () => {
+    const { store } = inMemoryStore({ t1: { symbol: "TSLA", onShortlist: true }, t2: { symbol: "AAPL", onShortlist: true }, t3: { symbol: "AMD", onShortlist: true } });
+    for (const tickerId of ["t1", "t2", "t3"]) await store.create(tickerId, buildInitialBackfillSteps());
+    const order: string[] = [];
+    const { workers: w } = workers({
+      fetchHistory: async (_connection, _tickerId, symbol) => {
+        order.push(symbol);
+        return history;
+      },
+    });
+
+    expect((await resumeInterruptedBackfillRuns({ store, workers: w })).resumed).toEqual(["TSLA", "AAPL", "AMD"]);
+    await waitForBackfillQueue();
+    expect(order).toEqual(["TSLA", "AAPL", "AMD"]);
+  });
+
+  it("restarts an option-chain run with only the option-chain steps", async () => {
+    const { store } = inMemoryStore({ t1: { symbol: "NVDA", onShortlist: true } });
+    await store.create("t1", buildInitialBackfillSteps("option_chain"));
+    const { workers: w } = workers();
+
+    await resumeInterruptedBackfillRuns({ store, workers: w });
+    await waitForBackfillQueue();
+
+    expect(statusOf((await store.getLatest("t1"))!.steps)).toEqual({ chain_warmup: "done", first_snapshot: "skipped" });
+    expect(w.fetchHistory).not.toHaveBeenCalled();
+  });
+
+  it("closes but does not restart a run that was itself a restart, or one whose ticker left the shortlist", async () => {
+    const { store, runs } = inMemoryStore({ t1: { symbol: "TSLA", onShortlist: true }, t2: { symbol: "GONE", onShortlist: false } });
+    const alreadyResumed = await store.create("t1", buildInitialBackfillSteps(), "run-earlier");
+    const removed = await store.create("t2", buildInitialBackfillSteps());
+    const create = vi.spyOn(store, "create");
+    const { workers: w } = workers();
+
+    const result = await resumeInterruptedBackfillRuns({ store, workers: w });
+
+    expect(result).toEqual({ resumed: [], notResumed: [{ symbol: "TSLA", reason: "already_resumed_once" }, { symbol: "GONE", reason: "not_on_shortlist" }] });
+    expect(runs.get(alreadyResumed.id)!.status).toBe("partial");
+    expect(runs.get(removed.id)!.status).toBe("partial");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when no run was cut off", async () => {
+    const { store } = inMemoryStore();
+    const { workers: w } = workers();
+    expect(await resumeInterruptedBackfillRuns({ store, workers: w })).toEqual({ resumed: [], notResumed: [] });
   });
 });
 

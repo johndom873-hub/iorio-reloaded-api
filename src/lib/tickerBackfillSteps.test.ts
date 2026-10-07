@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildInitialBackfillSteps, type BackfillStep, computeProgressPercent, deriveFinalRunStatus, updateStep } from "./tickerBackfillSteps.js";
+import { buildInitialBackfillSteps, type BackfillStep, computeProgressPercent, deriveFinalRunStatus, markUnfinishedStepsInterrupted, scopeOfSteps, updateStep } from "./tickerBackfillSteps.js";
 
 describe("tickerBackfillSteps", () => {
   it("starts with four pending steps at 0%", () => {
@@ -31,5 +31,21 @@ describe("tickerBackfillSteps", () => {
     expect(deriveFinalRunStatus(steps)).toBe("complete");
     steps = updateStep(steps, "history", "failed", "x");
     expect(deriveFinalRunStatus(steps)).toBe("partial");
+  });
+  it("reads the scope back from the steps", () => {
+    expect(scopeOfSteps(buildInitialBackfillSteps("full"))).toBe("full");
+    expect(scopeOfSteps(buildInitialBackfillSteps("option_chain"))).toBe("option_chain");
+  });
+  it("an interrupted run fails its running and pending steps with the reason and keeps the finished ones", () => {
+    let steps = updateStep(buildInitialBackfillSteps(), "history", "done", "1253 daily bars");
+    steps = updateStep(steps, "calendar", "running", null);
+    const interrupted = markUnfinishedStepsInterrupted(steps);
+    expect(interrupted.map((step) => [step.status, step.message])).toEqual([
+      ["done", "1253 daily bars"],
+      ["failed", "Interrupted by a server restart."],
+      ["failed", "Not started: the server restarted first."],
+      ["failed", "Not started: the server restarted first."],
+    ]);
+    expect(deriveFinalRunStatus(interrupted)).toBe("partial");
   });
 });

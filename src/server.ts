@@ -11,6 +11,7 @@ import { startOpsMonitor } from "./lib/opsMonitor.js";
 import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
 import { validatePasskeyConfiguration } from "./config/passkeyLoginMode.js";
+import { resumeInterruptedBackfillRuns } from "./ibkr/tickerBackfillPipeline.js";
 
 installShutdownHandler("web");
 
@@ -45,6 +46,13 @@ app.listen(port, () => {
     .catch((error) => console.error(`Could not send the start notice: ${error instanceof Error ? error.message : error}`));
   startNotificationBroadcaster();
   startStalePendingOrderSweep();
+  // New-ticker setups queued in the process this one replaced died with it: close them and start them again.
+  resumeInterruptedBackfillRuns()
+    .then(({ resumed, notResumed }) => {
+      if (resumed.length > 0) console.log(`Restarted ticker setups cut off by the last restart: ${resumed.join(", ")}.`);
+      for (const { symbol, reason } of notResumed) console.log(`Ticker setup for ${symbol} was cut off by the last restart and not restarted (${reason}).`);
+    })
+    .catch((error) => console.error(`Could not restart interrupted ticker setups: ${error instanceof Error ? error.message : error}`));
   // Open the shared IBKR read and live connections now (2026-09-19) rather than on the
   // first request after a deploy/restart, which otherwise pays the full
   // ~5s tunnel + handshake itself. borrow() starts the connect and keeps it

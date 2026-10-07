@@ -14,6 +14,7 @@ const calls = vi.hoisted(() => ({
   startDaySignalsLoop: vi.fn(),
   startOpsMonitor: vi.fn(),
   announceWebDynoStart: vi.fn(),
+  resumeInterruptedBackfillRuns: vi.fn(),
   borrowRead: vi.fn(),
   borrowLive: vi.fn(),
 }));
@@ -27,6 +28,7 @@ vi.mock("./lib/notificationBroadcaster.js", () => ({ startNotificationBroadcaste
 vi.mock("./lib/daySignalsLoop.js", () => ({ startDaySignalsLoop: calls.startDaySignalsLoop }));
 vi.mock("./lib/opsMonitor.js", () => ({ startOpsMonitor: calls.startOpsMonitor }));
 vi.mock("./lib/webDynoStartNotice.js", () => ({ announceWebDynoStart: calls.announceWebDynoStart }));
+vi.mock("./ibkr/tickerBackfillPipeline.js", () => ({ resumeInterruptedBackfillRuns: calls.resumeInterruptedBackfillRuns }));
 vi.mock("./ibkr/sharedReadConnection.js", () => ({
   sharedReadConnection: { borrow: calls.borrowRead },
   sharedLiveConnection: { borrow: calls.borrowLive },
@@ -71,6 +73,7 @@ beforeEach(() => {
   calls.borrowRead.mockResolvedValue(undefined);
   calls.borrowLive.mockResolvedValue(undefined);
   calls.announceWebDynoStart.mockResolvedValue(undefined);
+  calls.resumeInterruptedBackfillRuns.mockResolvedValue({ resumed: [], notResumed: [] });
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -92,7 +95,7 @@ describe("server.ts boot validation", () => {
   it("does not start any background work before the port is bound", async () => {
     stubBootEnvironment();
     await importServer();
-    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startDaySignalsLoop, calls.announceWebDynoStart, calls.borrowRead, calls.borrowLive]) {
+    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startDaySignalsLoop, calls.announceWebDynoStart, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
       expect(started).not.toHaveBeenCalled();
     }
   });
@@ -145,7 +148,7 @@ describe("server.ts once the port is bound", () => {
     await importServer();
     runListenCallback();
     await vi.waitFor(() => expect(calls.announceWebDynoStart).toHaveBeenCalledWith({ subject: "API" }));
-    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startDaySignalsLoop, calls.borrowRead, calls.borrowLive]) {
+    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startDaySignalsLoop, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
       expect(started).toHaveBeenCalledTimes(1);
     }
   });
@@ -173,6 +176,27 @@ describe("server.ts once the port is bound", () => {
       expect(logged).toMatch(/shared IBKR read connection is still pending \(tunnel not ready\)/);
       expect(logged).toMatch(/shared IBKR live connection is still pending \(gateway not ready\)/);
     });
+    expect(calls.startOpsMonitor).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs which interrupted ticker setups it restarted and which it only closed", async () => {
+    stubBootEnvironment();
+    calls.resumeInterruptedBackfillRuns.mockResolvedValue({ resumed: ["TSLA", "AAPL"], notResumed: [{ symbol: "AMD", reason: "already_resumed_once" }] });
+    await importServer();
+    runListenCallback();
+    await vi.waitFor(() => {
+      const logged = vi.mocked(console.log).mock.calls.flat().join("\n");
+      expect(logged).toMatch(/Restarted ticker setups cut off by the last restart: TSLA, AAPL\./);
+      expect(logged).toMatch(/Ticker setup for AMD was cut off by the last restart and not restarted \(already_resumed_once\)\./);
+    });
+  });
+
+  it("survives a failed restart of interrupted ticker setups: it is logged, never thrown", async () => {
+    stubBootEnvironment();
+    calls.resumeInterruptedBackfillRuns.mockRejectedValue(new Error("database not ready"));
+    await importServer();
+    expect(() => runListenCallback()).not.toThrow();
+    await vi.waitFor(() => expect(vi.mocked(console.error).mock.calls.flat().join("\n")).toMatch(/Could not restart interrupted ticker setups: database not ready/));
     expect(calls.startOpsMonitor).toHaveBeenCalledTimes(1);
   });
 });
