@@ -4,7 +4,7 @@ import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { computePositionExposures } from "../lib/positionExposure.js";
 import { loadTradingSettings, type TradingSettings } from "../lib/tradingSettingsStore.js";
 import { scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
-import { loadAccountContext, loadBarsForTilt, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
+import { accountContextFromTotalCash, loadBarsForTilt, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
 import { computeMoveContext, type MoveContext } from "./moveContext.js";
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
@@ -21,7 +21,7 @@ import { easternMinutesOfDay } from "../lib/easternIsoDate.js";
 import { fetchPlutoAccountSummary } from "./accountSummaryCache.js";
 import { candidateSetFingerprint, classifyFingerprintChange, tickerFingerprint } from "./inputHash.js";
 import { ensurePlutoPrompt } from "./prompts.js";
-import { finishPlutoPass, recordPlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
+import { finishPlutoPass, type FinishPlutoPassInput, recordPlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { callPlutoModel } from "./modelClient.js";
 import { runPostModelGates } from "./postModelGates.js";
@@ -160,6 +160,27 @@ export function signalsSnapshotForRoll(closeLeg: HeldLegScore | null, replacemen
 export async function runPlutoPass(request: PassRequest, context: PassRunnerContext): Promise<PassSummary> {
   const settings = await loadPlutoSettings();
   const passId = await startPlutoPass(request.trigger, request.triggerDetail, settings);
+  let passFinished = false;
+  const finishPass = async (input: FinishPlutoPassInput) => {
+    passFinished = true;
+    await finishPlutoPass(passId, input);
+  };
+  try {
+    return await runStartedPass(request, context, settings, passId, finishPass);
+  } catch (error) {
+    // A pass already finished (a failure while recording its outcome) keeps what it recorded.
+    if (!passFinished) {
+      try {
+        await finishPlutoPass(passId, { skippedReason: `round failed: ${error instanceof Error ? error.message : String(error)}` });
+      } catch {
+        // The round's own error is the one worth reporting; the abandoned-pass sweep closes the row later.
+      }
+    }
+    throw error;
+  }
+}
+
+async function runStartedPass(request: PassRequest, context: PassRunnerContext, settings: PlutoSettings, passId: string, finishPass: (input: FinishPlutoPassInput) => Promise<void>): Promise<PassSummary> {
   // A round with no symbols of its own (opening look, settings change) looks at every enabled ticker: name them,
   // so the Event log's ticker filter finds the round.
   const enabledRows = await loadEnabledTickerRows();
@@ -169,7 +190,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const nowMs = now.getTime();
 
   const skip = async (reason: string, systemChecks?: Record<string, PlutoSystemCheck>): Promise<PassSummary> => {
-    await finishPlutoPass(passId, { skippedReason: reason, modelCalled: false, ...(systemChecks ? { systemChecks } : {}) });
+    await finishPass({ skippedReason: reason, modelCalled: false, ...(systemChecks ? { systemChecks } : {}) });
     await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason });
     await recordPlutoPass();
     return { passId, modelCalled: false, skippedReason: reason, outcome: null };
@@ -210,7 +231,8 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
 
   // 2. Universe (loaded above).
   if (rows.length === 0) return skip("no enabled tickers to evaluate", checks.checks);
-  const [account, tradingSettings] = await Promise.all([loadAccountContext(() => fetchPlutoAccountSummary()), loadTradingSettings()]);
+  // Free cash from the summary the system checks just read: a second fetch could time out on its own.
+  const [account, tradingSettings] = await Promise.all([accountContextFromTotalCash(checks.context.totalCashValue), loadTradingSettings()]);
 
   // 3. Score from the Day Signals data and filter; no quote burst yet (2026-10-07: bursting first cost 10 lines for 4 s on every
   // round, ~2,200 a session, only to find that nothing had changed or that the ticker was still cooling down).
@@ -244,7 +266,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const changed = evaluated.filter((ticker) => context.lastFingerprintBySymbol.get(ticker.row.symbol) !== lookedAtFingerprintBySymbol.get(ticker.row.symbol) && !coolingDown(ticker.row.symbol));
   const skipNothingEligible = async (reason: string) => {
     for (const ticker of evaluated) context.lastFingerprintBySymbol.set(ticker.row.symbol, lookedAtFingerprintBySymbol.get(ticker.row.symbol) ?? ticker.fingerprint);
-    await finishPlutoPass(passId, { candidateCount: 0, systemChecks: checks.checks, modelCalled: false, skippedReason: reason });
+    await finishPass({ candidateCount: 0, systemChecks: checks.checks, modelCalled: false, skippedReason: reason });
     await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason: "nothing eligible", tickers: evaluated.map((ticker) => ({ symbol: ticker.row.symbol, blocks: ticker.filtered.tickerBlocks, rejected: ticker.filtered.rejected.length })) });
     await recordPlutoPass();
     return { passId, modelCalled: false, skippedReason: "nothing eligible", outcome: null };
@@ -347,7 +369,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     agreementDetail = "single call";
   }
   await recordPlutoEvent("model_called", { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, confidence: decision.confidence, actionKind: decision.actionKind, agreement: agreementDetail, reasons: decision.reasons });
-  await finishPlutoPass(passId, { inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, tokensIn, tokensOut, costUsd, servedModelIds });
+  await finishPass({ inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, tokensIn, tokensOut, costUsd, servedModelIds });
   await recordPlutoPass();
   // The model's data concerns, per ticker (start / at most hourly / cleared), under the same switch as every Pluto message.
   // A failed call says nothing about the data, so it neither raises nor clears a concern.

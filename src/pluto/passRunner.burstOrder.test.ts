@@ -10,6 +10,7 @@ const harness = vi.hoisted(() => ({
   requotableIds: [] as string[],
   modelAnswer: null as Record<string, unknown> | null,
   blockedGates: [] as string[],
+  bookError: null as string | null,
 }));
 
 vi.mock("../db/connection.js", () => {
@@ -43,7 +44,7 @@ vi.mock("./systemChecks.js", () => ({
 vi.mock("../lib/signalsStore.js", () => ({
   loadSignalsUniverseTickers: async () => [{ tickerId: "t-aaa", symbol: "AAA", companyName: null, sector: null }],
   loadTickerSignalsInputs: async () => ({ slices: [], todayEasternIso: "2026-10-07" }),
-  loadAccountContext: async () => ({ freeCash: 500_000 }),
+  accountContextFromTotalCash: async () => ({ freeCash: 500_000 }),
   loadBarsForTilt: async () => [],
 }));
 vi.mock("../lib/signalsLiveScoring.js", () => ({
@@ -71,7 +72,11 @@ vi.mock("./candidateFilters.js", () => ({
   rejectTicker: () => [],
   rollCandidateId: () => "",
 }));
-vi.mock("./book.js", () => ({ loadPlutoBook: async () => ({ openPositions: [], committedDollars: 0 }), loadOccupiedContracts: async () => [], loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }) }));
+vi.mock("./book.js", () => ({
+  loadPlutoBook: async () => {
+    if (harness.bookError) throw new Error(harness.bookError);
+    return { openPositions: [], committedDollars: 0 };
+  }, loadOccupiedContracts: async () => [], loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }) }));
 vi.mock("./closeActions.js", () => ({ buildCloseOffersForTicker: async () => ({ offers: [] }) }));
 vi.mock("../lib/marketSessionStatus.js", () => ({ previousOpenSessionDate: async () => "2026-10-06" }));
 vi.mock("../lib/tradingSettingsStore.js", () => ({ loadTradingSettings: async () => ({ spreadCostChargedPct: 50 }) }));
@@ -120,6 +125,7 @@ beforeEach(() => {
   harness.requotableIds = [];
   harness.modelAnswer = null;
   harness.blockedGates.length = 0;
+  harness.bookError = null;
 });
 
 describe("runPlutoPass round order", () => {
@@ -164,6 +170,14 @@ describe("runPlutoPass round order", () => {
     expect(summary.skippedReason).toBe("waiting for today's opening look: no held position to manage");
     expect(harness.bursts).toEqual([]);
     expect(harness.modelCalls).toBe(0);
+  });
+
+  it("finishes the pass as failed when the round throws midway, and still throws", async () => {
+    const { finishPlutoPass } = await import("./ledger.js");
+    vi.mocked(finishPlutoPass).mockClear();
+    harness.bookError = "book unavailable";
+    await expect(runPlutoPass(dayRound, makeContext())).rejects.toThrow("book unavailable");
+    expect(vi.mocked(finishPlutoPass).mock.calls).toEqual([["pass-1", { skippedReason: "round failed: book unavailable" }]]);
   });
 
   it("never trades a ticker the model flagged in the same answer", async () => {

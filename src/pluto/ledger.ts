@@ -52,6 +52,17 @@ export async function pruneOldPlutoEvents(now: Date = new Date()): Promise<numbe
   return db("pluto_events").where("occurred_at", "<", new Date(now.getTime() - plutoEventsRetentionDays * 24 * 60 * 60 * 1000)).del();
 }
 
+/** A round still unfinished this long after it started was abandoned (a crash, a deploy): longer than any real round, and long enough that the old dyno can still finish its last one while the new one boots. */
+export const abandonedPassAfterMs = 10 * 60_000;
+
+/** Closes every pass that never finished and started more than abandonedPassAfterMs ago; returns how many. */
+export async function closeAbandonedPlutoPasses(now: Date = new Date()): Promise<number> {
+  return db("pluto_passes")
+    .whereNull("finished_at")
+    .where("started_at", "<", new Date(now.getTime() - abandonedPassAfterMs))
+    .update({ finished_at: db.fn.now(), skipped_reason: "abandoned (round never finished)" });
+}
+
 export interface FinishPlutoPassInput {
   inputHash?: string | null;
   candidateCount?: number;
