@@ -6,12 +6,16 @@
 // connections", code 53300 — seen 2026-09-19, see PROGRESS.md). Explicit
 // ceilings, budgeted for the worst case at the same moment:
 //
-//   web dyno         knex 4 + session store 3 + notification LISTEN 1  =  8
+//   web dyno         knex 4 + session store 2 + notification LISTEN 1  =  7
 //   VPS worker       knex 4 + its LISTEN clients (~2)                    =  6
 //   two scheduler jobs at once  knex 2 each                              =  4
-//                                                                   total 18
+//   Pluto agent      knex 2 + notification LISTEN 1                      =  3
+//                                                                   total 20
 //
-// leaving ~2 for psql / pg:pull. Two jobs overlap routinely: every daily
+// That worst case leaves nothing for psql / pg:pull (Marcelo, 2026-10-07: accepted; everything peaks together only
+// around the 10:00 ET capture, and 13 connections were in use on an ordinary morning). The agent runs one round at a
+// time, so 2 connections only queue a round's parallel reads; the session store issues one small query per request.
+// A larger plan is the fix once Pluto also runs on prod. Two jobs overlap routinely: every daily
 // Scheduler entry sits on a :00/:30 slot that the 10-minute IBKR health
 // check also fires on, and the 10:00 ET chain capture runs ~20 minutes.
 // A job script's queries are sequential, so 2 connections lose nothing
@@ -21,5 +25,6 @@
 export const databaseConnectionBudget = {
   knexPoolMax: 4,
   jobKnexPoolMax: 2,
-  sessionStorePoolMax: 3,
+  agentKnexPoolMax: 2,
+  sessionStorePoolMax: 2,
 } as const;
