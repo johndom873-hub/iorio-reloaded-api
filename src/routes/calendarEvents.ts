@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
+import { loadUpcomingMajorMacroEvents } from "../lib/macroEventCalendar.js";
 
 export const calendarEventsRouter = Router();
 calendarEventsRouter.use(requireAuth);
@@ -10,8 +11,8 @@ calendarEventsRouter.use(requireAuth);
 // actually used, checking what's coming up rather than auditing history.
 // Both tables are captured nightly by job:daily-calendar-capture, scoped to
 // shortlisted + open-position tickers for ticker_calendar_events (see
-// run-daily-calendar-capture-job.ts); economic_calendar_events is a
-// standalone US macro feed, not ticker-scoped.
+// run-daily-calendar-capture-job.ts); the major US macro events are not
+// ticker-scoped, and are the same list the Signals flag and Pluto read.
 calendarEventsRouter.get("/", async (_request, response) => {
   const tickerEvents = await db.raw(`
     SELECT
@@ -27,30 +28,11 @@ calendarEventsRouter.get("/", async (_request, response) => {
     ORDER BY tce.event_date ASC, t.symbol ASC
   `);
 
-  // Excludes Low (0) and Unrated (-1) importance -- TradingView's economic
-  // calendar is dominated by low-signal noise (bill auctions, minor
-  // regional indices); only Medium (1) and High (2) are worth surfacing
-  // here (approved 2026-08-31).
-  const economicEvents = await db.raw(`
-    SELECT
-      id,
-      title,
-      country,
-      category,
-      importance,
-      actual,
-      forecast,
-      previous,
-      event_at AS "eventAt"
-    FROM economic_calendar_events
-    WHERE event_at >= CURRENT_DATE
-      AND importance >= 1
-    ORDER BY event_at ASC
-  `);
+  const macroEvents = await loadUpcomingMajorMacroEvents();
 
   response.json({
     tickerEvents: tickerEvents.rows,
-    economicEvents: economicEvents.rows,
+    macroEvents,
   });
 });
 

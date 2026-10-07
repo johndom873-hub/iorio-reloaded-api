@@ -52,7 +52,7 @@ afterAll(async () => {
   const tickerIds = [...tickerIdBySymbol.values()];
   await testDb("ticker_calendar_events").whereIn("ticker_id", tickerIds).del();
   await testDb("tickers").whereIn("id", tickerIds).del();
-  await testDb("economic_calendar_events").where("external_id", "like", `${titlePrefix}%`).del();
+  await testDb("major_macro_events").where("event_key", "like", `${titlePrefix}%`).del();
   await testDb.destroy();
 });
 
@@ -82,16 +82,19 @@ async function insertTickerEvent(tickerId: string, eventType: string, daysFromTo
   });
 }
 
-async function insertEconomicEvent(slug: string, importance: number | null, hoursFromTodayMidnight: number, extra: Record<string, unknown> = {}) {
-  await testDb("economic_calendar_events").insert({
-    external_id: `${titlePrefix}-${slug}`,
+/** A major macro event `minutesFromEasternMidnight` after 00:00 ET today (negative = an earlier day). */
+async function insertMacroEvent(slug: string, minutesFromEasternMidnight: number) {
+  await testDb("major_macro_events").insert({
+    event_key: `${titlePrefix}-${slug}`,
     title: `${titlePrefix}-${slug}`,
-    country: "US",
-    importance,
-    event_at: testDb.raw("CURRENT_DATE::timestamptz + (?::int * interval '1 hour')", [hoursFromTodayMidnight]),
-    raw: {},
-    ...extra,
+    source: "fred",
+    event_at: testDb.raw("((CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date::timestamp AT TIME ZONE 'America/New_York') + (?::int * interval '1 minute')", [minutesFromEasternMidnight]),
   });
+}
+
+async function readEasternDateIso(daysFromToday: number): Promise<string> {
+  const result = await testDb.raw("SELECT to_char((CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + ?::int, 'YYYY-MM-DD') AS iso", [daysFromToday]);
+  return result.rows[0].iso;
 }
 
 async function call(path: string, options: { asUser?: string | null } = {}) {
@@ -152,52 +155,34 @@ describe("GET /calendar-events: ticker events", () => {
   });
 });
 
-describe("GET /calendar-events: economic events", () => {
+describe("GET /calendar-events: major macro events", () => {
   beforeAll(async () => {
-    await insertEconomicEvent("high-later", 2, 30, { category: "inflation", actual: 3.1, forecast: 3.0, previous: 2.9, country: "US" });
-    await insertEconomicEvent("medium-sooner", 1, 10, { country: "EU" });
-    await insertEconomicEvent("low", 0, 12);
-    await insertEconomicEvent("unrated", -1, 14);
-    await insertEconomicEvent("no-importance", null, 16);
-    await insertEconomicEvent("high-yesterday", 2, -2);
-    await insertEconomicEvent("high-at-midnight", 2, 0);
+    await insertMacroEvent("later", 3 * 24 * 60 + 14 * 60);
+    await insertMacroEvent("sooner", 24 * 60 + 8 * 60 + 30);
+    await insertMacroEvent("yesterday", -24 * 60 + 8 * 60 + 30);
+    await insertMacroEvent("earlier-today", 1);
   });
 
   const mine = async () => {
     const { json } = await call("/calendar-events");
-    return (json.economicEvents as { title: string }[]).filter((event) => event.title.startsWith(titlePrefix));
+    return (json.macroEvents as { title: string }[]).filter((event) => event.title.startsWith(titlePrefix));
   };
 
-  it("lists only medium and high importance events from the start of today on, soonest first", async () => {
-    expect((await mine()).map((event) => event.title.slice(titlePrefix.length + 1))).toEqual(["high-at-midnight", "medium-sooner", "high-later"]);
+  it("lists the events from the start of today (Eastern) on, soonest first", async () => {
+    expect((await mine()).map((event) => event.title.slice(titlePrefix.length + 1))).toEqual(["earlier-today", "sooner", "later"]);
   });
 
-  it("returns each event with its fields, numerics as text and the time as an ISO instant", async () => {
-    const event = ((await mine()) as any[]).find((row) => row.title === `${titlePrefix}-high-later`);
-    expect(event).toEqual({
-      id: expect.any(String),
-      title: `${titlePrefix}-high-later`,
-      country: "US",
-      category: "inflation",
-      importance: 2,
-      actual: "3.100000",
-      forecast: "3.000000",
-      previous: "2.900000",
-      eventAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
-    });
-  });
-
-  it("returns nulls for the figures that are not published yet", async () => {
-    const event = ((await mine()) as any[]).find((row) => row.title === `${titlePrefix}-medium-sooner`);
-    expect(event).toMatchObject({ country: "EU", category: null, actual: null, forecast: null, previous: null });
+  it("returns each event's Eastern date, release instant and title", async () => {
+    const event = ((await mine()) as any[]).find((row) => row.title === `${titlePrefix}-sooner`);
+    expect(event).toEqual({ dateIso: await readEasternDateIso(1), eventAtIso: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T(12|13):30:00Z$/), title: `${titlePrefix}-sooner` });
   });
 
   it("answers with both lists as arrays", async () => {
     const { status, json } = await call("/calendar-events");
     expect(status).toBe(200);
-    expect(Object.keys(json).sort()).toEqual(["economicEvents", "tickerEvents"]);
+    expect(Object.keys(json).sort()).toEqual(["macroEvents", "tickerEvents"]);
     expect(Array.isArray(json.tickerEvents)).toBe(true);
-    expect(Array.isArray(json.economicEvents)).toBe(true);
+    expect(Array.isArray(json.macroEvents)).toBe(true);
   });
 });
 

@@ -33,10 +33,10 @@ vi.mock("../lib/notificationChannel.js", () => ({ publishNotification: (...args:
 const evaluateLimitPriceCheckMock = vi.fn();
 vi.mock("../lib/limitPriceCheckGate.js", () => ({ evaluateLimitPriceCheckForOrderRequest: (...args: unknown[]) => evaluateLimitPriceCheckMock(...args) }));
 
-const fetchEconomicCalendarWarningEventsMock = vi.fn();
+const fetchMacroEventWarningEventsMock = vi.fn();
 vi.mock("../ibkr/calendarConflict.js", async () => {
   const actual = await vi.importActual<typeof import("../ibkr/calendarConflict.js")>("../ibkr/calendarConflict.js");
-  return { ...actual, fetchEconomicCalendarWarningEvents: (...args: unknown[]) => fetchEconomicCalendarWarningEventsMock(...args) };
+  return { ...actual, fetchMacroEventWarningEvents: (...args: unknown[]) => fetchMacroEventWarningEventsMock(...args) };
 });
 
 const fetchPricesPoolFirstMock = vi.fn();
@@ -122,7 +122,7 @@ beforeEach(() => {
   evaluateCloseGateForPositionMock.mockReset().mockResolvedValue({ blocked: false, reason: null, cycleTotal: 7 });
   evaluateLimitPriceCheckMock.mockReset().mockResolvedValue({ blocked: false, reasons: [], legs: [] });
   publishNotificationMock.mockReset().mockResolvedValue(undefined);
-  fetchEconomicCalendarWarningEventsMock.mockReset().mockResolvedValue([]);
+  fetchMacroEventWarningEventsMock.mockReset().mockResolvedValue([]);
   fetchPricesPoolFirstMock.mockReset().mockResolvedValue({ stock: 100 });
 });
 
@@ -239,10 +239,10 @@ describe("POST /positions/orders", () => {
 
   it("stores the economic-calendar events and one-line warning on the built order", async () => {
     const ticker = await createTicker();
-    fetchEconomicCalendarWarningEventsMock.mockResolvedValue([{ title: "FOMC Rate Decision", eventDate: "2026-11-04", importance: 3 }]);
+    fetchMacroEventWarningEventsMock.mockResolvedValue([{ title: "FOMC Rate Decision", eventDate: "2026-11-04" }]);
     const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "cash_secured_put", option: optionBody });
     expect(response.status).toBe(201);
-    expect(fetchEconomicCalendarWarningEventsMock).toHaveBeenCalledWith("20261120");
+    expect(fetchMacroEventWarningEventsMock).toHaveBeenCalledWith("20261120");
     const row = await orderRow(response.json.id);
     expect(row.calendar_warning_events).toEqual([{ title: "FOMC Rate Decision", eventDate: "2026-11-04" }]);
     expect(row.calendar_warning).toBe("1 economic event before expiry: FOMC Rate Decision (2026-11-04)");

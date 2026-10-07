@@ -46,7 +46,7 @@ export interface DataInvariantInputs {
   riskFreeRateFetchedAt: Date | null;
   marketCalendarDaysAhead: number;
   latestTickerCalendarCapturedAt: Date | null;
-  latestEconomicCalendarCapturedAt: Date | null;
+  latestMajorMacroEventsCapturedAt: Date | null;
   /** Earnings dates (YYYY-MM-DD) from earningsDatesLookbackDays ago on, per universe ticker. */
   earningsDatesBySymbol: Record<string, string[]>;
 }
@@ -114,7 +114,7 @@ export function evaluateDataInvariants(input: DataInvariantInputs): InvariantRes
   });
   for (const [name, capturedAt] of [
     ["Ticker calendar (earnings, dividends)", input.latestTickerCalendarCapturedAt],
-    ["Economic calendar", input.latestEconomicCalendarCapturedAt],
+    ["Major macro events", input.latestMajorMacroEventsCapturedAt],
   ] as const) {
     if (capturedAt === null) results.push({ name, ok: false, detail: "never captured" });
     else {
@@ -167,12 +167,13 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
     .groupBy("t.symbol")
     .select("t.symbol", db.raw("max(b.trading_date)::text as latest"));
 
-  const [poolRow, rateRow, calendarRow, tickerCalendarRow, economicCalendarRow, earningsRows] = await Promise.all([
+  const [poolRow, rateRow, calendarRow, tickerCalendarRow, majorMacroEventsRow, earningsRows] = await Promise.all([
     db("day_signal_expiries").whereRaw("trading_date::text = ?", [todayEasternIso]).count<{ count: string }[]>("* as count").first(),
     db("risk_free_rates").max<{ fetched_at: Date | null }[]>("fetched_at as fetched_at").first(),
     db("market_calendar").whereRaw("calendar_date > ?::date and calendar_date <= (?::date + ?::int)", [todayEasternIso, todayEasternIso, marketCalendarCoverageDays]).count<{ count: string }[]>("* as count").first(),
     db("ticker_calendar_events").max<{ captured_at: Date | null }[]>("captured_at as captured_at").first(),
-    db("economic_calendar_events").max<{ captured_at: Date | null }[]>("captured_at as captured_at").first(),
+    // The stalest source's latest capture: the election rows are rewritten daily, so a plain max would hide a source that stopped refreshing.
+    db.raw(`SELECT min(latest_captured_at) AS captured_at FROM (SELECT max(captured_at) AS latest_captured_at FROM major_macro_events GROUP BY event_key) AS per_source`).then((result: { rows: { captured_at: Date | null }[] }) => result.rows[0]),
     db("ticker_calendar_events as e")
       .join("tickers as t", "t.id", "e.ticker_id")
       .whereIn("e.ticker_id", universeTickerIds)
@@ -201,7 +202,7 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
     riskFreeRateFetchedAt: rateRow?.fetched_at ? new Date(rateRow.fetched_at) : null,
     marketCalendarDaysAhead: Number(calendarRow?.count ?? 0),
     latestTickerCalendarCapturedAt: tickerCalendarRow?.captured_at ? new Date(tickerCalendarRow.captured_at) : null,
-    latestEconomicCalendarCapturedAt: economicCalendarRow?.captured_at ? new Date(economicCalendarRow.captured_at) : null,
+    latestMajorMacroEventsCapturedAt: majorMacroEventsRow?.captured_at ? new Date(majorMacroEventsRow.captured_at) : null,
     earningsDatesBySymbol,
   };
 }

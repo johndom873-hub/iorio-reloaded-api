@@ -64,7 +64,6 @@ const {
   captureTickerCalendarEvents,
   fetchDividendEvents,
   fetchEarningsEvents,
-  fetchEconomicCalendarEvents,
   resolveTradingViewTicker,
   resolveTradingViewTickerDetailed,
   upsertDividendEvents,
@@ -523,42 +522,5 @@ describe("captureTickerCalendarEvents", () => {
     replyOnce({}, 500);
     await expect(captureTickerCalendarEvents("t1", "KO")).rejects.toThrow("scanner.tradingview.com HTTP 500");
     expect(insertCalls()).toHaveLength(0);
-  });
-});
-
-describe("fetchEconomicCalendarEvents", () => {
-  it("requests the window for the US by default and returns the events", async () => {
-    const events = [{ id: "e1", title: "CPI", country: "US", category: "inflation", importance: 1, actual: null, forecast: 0.3, previous: 0.2, date: "2026-10-14T12:30:00.000Z" }];
-    replyOnce({ result: events });
-    const outcome = await fetchEconomicCalendarEvents("2026-10-14T00:00:00.000Z", "2026-10-15T00:00:00.000Z");
-
-    const [url, init] = fetchMock.mock.calls[0]!;
-    const parsedUrl = new URL(url);
-    expect(parsedUrl.origin + parsedUrl.pathname).toBe("https://economic-calendar.tradingview.com/events");
-    expect(Object.fromEntries(parsedUrl.searchParams)).toEqual({ from: "2026-10-14T00:00:00.000Z", to: "2026-10-15T00:00:00.000Z", countries: "US" });
-    expect(init.headers).toMatchObject({ Origin: "https://www.tradingview.com" });
-    expect(init.signal).toBeInstanceOf(AbortSignal);
-    expect(outcome).toEqual(events);
-  });
-
-  it("passes a custom country list through", async () => {
-    replyOnce({ result: [] });
-    await fetchEconomicCalendarEvents("a", "b", "US,EU");
-    expect(new URL(fetchMock.mock.calls[0]![0]).searchParams.get("countries")).toBe("US,EU");
-  });
-
-  it("returns an empty list when the response has no result field", async () => {
-    replyOnce({});
-    expect(await fetchEconomicCalendarEvents("a", "b")).toEqual([]);
-  });
-
-  it("throws on an HTTP error", async () => {
-    replyOnce({}, 500);
-    await expect(fetchEconomicCalendarEvents("a", "b")).rejects.toThrow("economic-calendar.tradingview.com HTTP 500");
-  });
-
-  it("propagates a network failure", async () => {
-    fetchMock.mockRejectedValueOnce(new Error("timeout"));
-    await expect(fetchEconomicCalendarEvents("a", "b")).rejects.toThrow("timeout");
   });
 });

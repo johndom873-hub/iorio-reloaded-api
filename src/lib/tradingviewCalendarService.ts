@@ -1,12 +1,11 @@
 import { db } from "../db/connection.js";
 import { easternIsoDate } from "./easternIsoDate.js";
 
-// Earnings/dividend/economic-calendar data sourced from TradingView's
+// Earnings/dividend data sourced from TradingView's
 // public, unauthenticated endpoints -- same pattern already proven in
 // production by menaris-admin-api's tradingview-service.js (confirmed by
 // reading that repo's actual implementation, 2026-08-30) and independently
-// confirmed live via direct curl for the economic-calendar and
-// symbol-search endpoints below. No API key; plain browser-style headers.
+// confirmed live via direct curl for the symbol-search endpoint below. No API key; plain browser-style headers.
 // Undocumented -- can change shape without notice, same risk class as HTML
 // scraping but with a working precedent already running elsewhere.
 const tradingViewHeaders = {
@@ -263,28 +262,4 @@ export async function captureTickerCalendarEvents(tickerId: string, symbol: stri
   const dividendsWritten = await upsertDividendEvents(dividendRows, tickerIdByTvTicker);
 
   return { resolved: true, tvTicker, earningsWritten, dividendsWritten };
-}
-
-export interface EconomicCalendarEvent {
-  id: string;
-  title: string;
-  country: string;
-  category: string | null;
-  importance: number | null;
-  actual: number | null;
-  forecast: number | null;
-  previous: number | null;
-  date: string; // ISO timestamp
-}
-
-/** Macro economic calendar events (CPI, FOMC, etc.) for a country in [fromIso, toIso). US only by default -- not ticker-scoped. */
-export async function fetchEconomicCalendarEvents(fromIso: string, toIso: string, countries = "US"): Promise<EconomicCalendarEvent[]> {
-  const params = new URLSearchParams({ from: fromIso, to: toIso, countries });
-  const response = await fetch(`https://economic-calendar.tradingview.com/events?${params.toString()}`, {
-    headers: tradingViewHeaders,
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) throw new Error(`economic-calendar.tradingview.com HTTP ${response.status}`);
-  const data = (await response.json()) as { result?: EconomicCalendarEvent[] };
-  return data.result ?? [];
 }

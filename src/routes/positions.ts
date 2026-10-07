@@ -19,7 +19,7 @@ import { stockLegLimitPrice } from "../lib/stockLegLimit.js";
 import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { streamOrderLegQuote, checkDeltaCompliance } from "../ibkr/streamOrderLegQuote.js";
 import { findMalformedOptionExpiry, type OrderLegPayload, type OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
-import { fetchEconomicCalendarWarningEvents, formatEconomicCalendarWarning, type EconomicCalendarWarningEvent } from "../ibkr/calendarConflict.js";
+import { fetchMacroEventWarningEvents, formatMacroEventWarning, type MacroEventWarningEvent } from "../ibkr/calendarConflict.js";
 import { evaluateRecoveryPathForPosition } from "../ibkr/evaluateRecoveryPathForPosition.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { recordUnrealizedPnlSample, recordLegDeltaSample } from "../lib/pulseChartSampleCollector.js";
@@ -76,9 +76,9 @@ function serializeOrderRequest(row: Record<string, unknown>) {
   };
 }
 
-/** Both forms of the economic-calendar warning: the events (one per line in Order Review) and the one-line text. */
-function calendarWarningColumns(events: EconomicCalendarWarningEvent[]): { calendar_warning: string | null; calendar_warning_events: string | null } {
-  return { calendar_warning: formatEconomicCalendarWarning(events), calendar_warning_events: events.length > 0 ? JSON.stringify(events.map(({ title, eventDate }) => ({ title, eventDate }))) : null };
+/** Both forms of the macro-event warning: the events (one per line in Order Review) and the one-line text. */
+function calendarWarningColumns(events: MacroEventWarningEvent[]): { calendar_warning: string | null; calendar_warning_events: string | null } {
+  return { calendar_warning: formatMacroEventWarning(events), calendar_warning_events: events.length > 0 ? JSON.stringify(events.map(({ title, eventDate }) => ({ title, eventDate }))) : null };
 }
 
 // Joins in the requester/canceller's display name (e.g. "Marce", "Genosuke")
@@ -1100,7 +1100,7 @@ positionsRouter.post("/orders", async (request, response) => {
       ? `${excessUncoveredShares} uncovered share(s) of ${ticker.symbol} remain beyond what this order uses — worth checking whether an additional contract is worth selling.`
       : null;
   const [calendarWarningEvents, riskFreeRate] = await Promise.all([
-    fetchEconomicCalendarWarningEvents(normalizedExpiry),
+    fetchMacroEventWarningEvents(normalizedExpiry),
     getRiskFreeRate().catch(() => null), // Order Review's probability of profit uses the FRED risk-free rate (approved 2026-09-24)
   ]);
   // Persisted (2026-09-24, fixing a flash-and-vanish banner) before the
@@ -1681,7 +1681,7 @@ positionsRouter.post("/:id/roll", async (request, response) => {
     .returning("*");
 
   const [calendarWarningEvents, riskFreeRate] = await Promise.all([
-    fetchEconomicCalendarWarningEvents(normalizedNewLegExpiry),
+    fetchMacroEventWarningEvents(normalizedNewLegExpiry),
     getRiskFreeRate().catch(() => null),
   ]);
   // Persisted before notifying -- see the matching comment on POST /orders above.

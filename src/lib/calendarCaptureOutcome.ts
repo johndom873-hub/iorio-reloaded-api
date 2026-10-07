@@ -3,7 +3,8 @@
 // a trade through a report date: every such case is a failed run, on every run it persists.
 
 export interface CalendarFetchFailure {
-  source: "earnings" | "dividends" | "economic calendar";
+  /** "earnings", "dividends", or "major macro events, <source>". */
+  source: string;
   message: string;
 }
 

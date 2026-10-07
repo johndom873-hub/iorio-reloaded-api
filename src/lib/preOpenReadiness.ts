@@ -280,7 +280,7 @@ export function evaluateHealthCheck(latest: { startedAt: Date; status: "running"
 
 // --- Data produced by the jobs, for the previous session ---
 
-const warnOnlyInvariantNames = new Set(["Ticker calendar (earnings, dividends)", "Economic calendar"]);
+const warnOnlyInvariantNames = new Set(["Ticker calendar (earnings, dividends)", "Major macro events"]);
 
 /** The data checks of the morning digest, run against the session named in each check (the previous one until today's 10:00 ET capture has finished, then today). */
 export function evaluateDataChecks(invariants: InvariantResult[], dataSessionIso: string): ReadinessCheck[] {

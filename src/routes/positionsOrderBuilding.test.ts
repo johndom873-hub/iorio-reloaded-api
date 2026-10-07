@@ -25,10 +25,10 @@ vi.mock("../lib/closeGate.js", () => ({ evaluateCloseGateForPosition: (...args: 
 const publishNotificationMock = vi.fn();
 vi.mock("../lib/notificationChannel.js", () => ({ publishNotification: (...args: unknown[]) => publishNotificationMock(...args) }));
 
-const fetchEconomicCalendarWarningEventsMock = vi.fn();
+const fetchMacroEventWarningEventsMock = vi.fn();
 vi.mock("../ibkr/calendarConflict.js", async () => {
   const actual = await vi.importActual<typeof import("../ibkr/calendarConflict.js")>("../ibkr/calendarConflict.js");
-  return { ...actual, fetchEconomicCalendarWarningEvents: (...args: unknown[]) => fetchEconomicCalendarWarningEventsMock(...args) };
+  return { ...actual, fetchMacroEventWarningEvents: (...args: unknown[]) => fetchMacroEventWarningEventsMock(...args) };
 });
 
 const fetchPricesPoolFirstMock = vi.fn();
@@ -125,7 +125,7 @@ beforeEach(() => {
   notifiedOrderIds.length = 0;
   evaluateCloseGateForPositionMock.mockReset().mockResolvedValue({ blocked: false, reason: null, cycleTotal: 7 });
   publishNotificationMock.mockReset().mockResolvedValue(undefined);
-  fetchEconomicCalendarWarningEventsMock.mockReset().mockResolvedValue([]);
+  fetchMacroEventWarningEventsMock.mockReset().mockResolvedValue([]);
   fetchPricesPoolFirstMock.mockReset().mockResolvedValue({ stock: 100 });
   peekPooledQuoteMock.mockReset().mockReturnValue(null);
   getRiskFreeRateMock.mockReset().mockResolvedValue(0.04);
@@ -263,7 +263,7 @@ describe("POST /positions/orders: cash-secured put details", () => {
       const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "cash_secured_put", option: { ...optionBody, expiryDate } });
       expect(response.status).toBe(201);
       expect(response.json.payload.legs[0].expiry).toBe("20261120");
-      expect(fetchEconomicCalendarWarningEventsMock).toHaveBeenLastCalledWith("20261120");
+      expect(fetchMacroEventWarningEventsMock).toHaveBeenLastCalledWith("20261120");
     }
   });
 
@@ -997,7 +997,7 @@ describe("POST /positions/:id/roll", () => {
 
   it("builds a roll_leg combo for a short put: buy back the old leg, sell the new, with rounded prices and a normalized expiry", async () => {
     const { positionId, legIds, symbol } = await createPosition("cash_secured_put", [shortPut(2, { ibkrContractId: "777001" })]);
-    fetchEconomicCalendarWarningEventsMock.mockResolvedValue([{ title: "CPI", eventDate: "2026-12-10", importance: 2 }]);
+    fetchMacroEventWarningEventsMock.mockResolvedValue([{ title: "CPI", eventDate: "2026-12-10" }]);
     const response = await call("POST", `/positions/${positionId}/roll`, rollBody(legIds[0]));
     expect(response.status).toBe(201);
     expect(response.json).toMatchObject({ requestType: "roll_leg", status: "pending_confirmation", relatedPositionId: positionId, requestedByUserId: userId });
@@ -1009,7 +1009,7 @@ describe("POST /positions/:id/roll", () => {
         { role: "option", action: "SELL", symbol, quantity: 2, unitPrice: 2.51, strike: 95, expiry: "20261218", right: "P" },
       ],
     });
-    expect(fetchEconomicCalendarWarningEventsMock).toHaveBeenCalledWith("20261218");
+    expect(fetchMacroEventWarningEventsMock).toHaveBeenCalledWith("20261218");
     const row = await orderRow(response.json.id);
     expect(row.request_type).toBe("roll_leg");
     expect(row.related_position_id).toBe(positionId);

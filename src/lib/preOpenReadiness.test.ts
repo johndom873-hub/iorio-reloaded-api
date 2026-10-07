@@ -248,7 +248,7 @@ describe("evaluateDataChecks", () => {
   const invariants: InvariantResult[] = [
     { name: "Today's option-chain snapshots", ok: true, detail: "9 complete" },
     { name: "Surface fits", ok: false, detail: "no fitted expiry for AAOI" },
-    { name: "Economic calendar", ok: false, detail: "captured 40 h ago" },
+    { name: "Major macro events", ok: false, detail: "captured 40 h ago" },
   ];
   it("names the session being judged, fails real problems and only warns for the calendars", () => {
     const checks = evaluateDataChecks(invariants, "2026-10-02");

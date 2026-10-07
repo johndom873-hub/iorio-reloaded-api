@@ -4,7 +4,7 @@ const database = vi.hoisted(() => {
   const state = {
     tickerRow: undefined as { tradingview_ticker: string | null } | undefined,
     eventRows: [] as { eventType: string; eventDate: string }[],
-    economicRows: [] as unknown[],
+    macroEventRows: [] as unknown[],
     calls: [] as { table: string; operations: [string, ...unknown[]][] }[],
   };
   const builderFor = (table: string) => {
@@ -22,7 +22,7 @@ const database = vi.hoisted(() => {
       return Promise.resolve(state.tickerRow);
     };
     builder.then = (resolve: (rows: unknown) => unknown, reject: (error: unknown) => unknown) =>
-      Promise.resolve(table === "ticker_calendar_events" ? state.eventRows : state.economicRows).then(resolve, reject);
+      Promise.resolve(table === "ticker_calendar_events" ? state.eventRows : state.macroEventRows).then(resolve, reject);
     return builder;
   };
   const db = Object.assign((table: string) => builderFor(table), { raw: (sql: string) => ({ rawSql: sql }) });
@@ -32,9 +32,9 @@ vi.mock("../db/connection.js", () => ({ db: database.db }));
 
 import {
   fetchCalendarConflictContext,
-  fetchEconomicCalendarWarningEvents,
+  fetchMacroEventWarningEvents,
   findCalendarConflict,
-  formatEconomicCalendarWarning,
+  formatMacroEventWarning,
   type CalendarConflictContext,
 } from "./calendarConflict.js";
 
@@ -116,32 +116,32 @@ describe("fetchCalendarConflictContext", () => {
   });
 });
 
-describe("economic calendar warning", () => {
-  it("fetches events up to the expiry with importance of at least 1, oldest first", async () => {
+describe("macro event warning", () => {
+  it("fetches the major macro events from today to the expiry by Eastern date, oldest first", async () => {
     database.state.calls.length = 0;
-    database.state.economicRows = [{ title: "CPI", eventDate: "2026-10-14", importance: 2 }];
-    const events = await fetchEconomicCalendarWarningEvents("20261016");
-    expect(events).toEqual([{ title: "CPI", eventDate: "2026-10-14", importance: 2 }]);
-    const call = database.state.calls.find((entry) => entry.table === "economic_calendar_events")!;
-    expect(call.operations).toContainEqual(["andWhereRaw", "event_at::date <= to_date(?, 'YYYYMMDD')", ["20261016"]]);
-    expect(call.operations).toContainEqual(["andWhere", "importance", ">=", 1]);
+    database.state.macroEventRows = [{ title: "CPI", eventDate: "2026-10-14" }];
+    const events = await fetchMacroEventWarningEvents("20261016");
+    expect(events).toEqual([{ title: "CPI", eventDate: "2026-10-14" }]);
+    const call = database.state.calls.find((entry) => entry.table === "major_macro_events")!;
+    expect(call.operations).toContainEqual(["whereRaw", "(event_at AT TIME ZONE 'America/New_York')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date"]);
+    expect(call.operations).toContainEqual(["andWhereRaw", "(event_at AT TIME ZONE 'America/New_York')::date <= to_date(?, 'YYYYMMDD')", ["20261016"]]);
     expect(call.operations).toContainEqual(["orderBy", "event_at", "asc"]);
   });
 
   it("formats nothing for no events", () => {
-    expect(formatEconomicCalendarWarning([])).toBeNull();
+    expect(formatMacroEventWarning([])).toBeNull();
   });
 
   it("formats a single event in the singular", () => {
-    expect(formatEconomicCalendarWarning([{ title: "CPI", eventDate: "2026-10-14", importance: 2 }])).toBe("1 economic event before expiry: CPI (2026-10-14)");
+    expect(formatMacroEventWarning([{ title: "CPI", eventDate: "2026-10-14" }])).toBe("1 economic event before expiry: CPI (2026-10-14)");
   });
 
   it("formats several events in the plural, joined by semicolons", () => {
     expect(
-      formatEconomicCalendarWarning([
-        { title: "CPI", eventDate: "2026-10-14", importance: 2 },
-        { title: "FOMC", eventDate: "2026-10-15", importance: 1 },
+      formatMacroEventWarning([
+        { title: "CPI", eventDate: "2026-10-14" },
+        { title: "Fed rate decision", eventDate: "2026-10-28" },
       ]),
-    ).toBe("2 economic events before expiry: CPI (2026-10-14); FOMC (2026-10-15)");
+    ).toBe("2 economic events before expiry: CPI (2026-10-14); Fed rate decision (2026-10-28)");
   });
 });

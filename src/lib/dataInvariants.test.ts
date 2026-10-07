@@ -22,7 +22,7 @@ const healthyInputs = (): DataInvariantInputs => ({
   riskFreeRateFetchedAt: new Date("2026-09-19T12:00:00Z"),
   marketCalendarDaysAhead: 14,
   latestTickerCalendarCapturedAt: new Date("2026-09-30T20:00:00Z"),
-  latestEconomicCalendarCapturedAt: new Date("2026-09-30T20:00:00Z"),
+  latestMajorMacroEventsCapturedAt: new Date("2026-09-30T20:00:00Z"),
   earningsDatesBySymbol: { AAA: ["2026-09-10", "2026-12-09"], BBB: ["2026-10-28"] },
 });
 const failing = (inputs: DataInvariantInputs) => evaluateDataInvariants(inputs).filter((result) => !result.ok);
@@ -76,8 +76,8 @@ describe("evaluateDataInvariants", () => {
   });
 
   it("flags short market-calendar coverage and stale or missing calendar data", () => {
-    const problems = failing({ ...healthyInputs(), marketCalendarDaysAhead: 13, latestTickerCalendarCapturedAt: new Date("2026-09-29T00:00:00Z"), latestEconomicCalendarCapturedAt: null });
-    expect(problems.map((problem) => problem.name)).toEqual(["Market calendar", "Ticker calendar (earnings, dividends)", "Economic calendar"]);
+    const problems = failing({ ...healthyInputs(), marketCalendarDaysAhead: 13, latestTickerCalendarCapturedAt: new Date("2026-09-29T00:00:00Z"), latestMajorMacroEventsCapturedAt: null });
+    expect(problems.map((problem) => problem.name)).toEqual(["Market calendar", "Ticker calendar (earnings, dividends)", "Major macro events"]);
   });
 
   it("flags a ticker with two earnings dates less than 45 days apart (a moved date left behind)", () => {

@@ -1,9 +1,11 @@
-// Scheduled job: captures earnings dates, ex-dividend dates (per shortlisted/
-// open-position ticker), and the US macro economic calendar, all sourced
-// from TradingView's public endpoints — see src/lib/tradingviewCalendarService.ts
-// for the endpoint details and why TradingView instead of IBKR/MarketWatch
-// (PROGRESS.md, 2026-08-30). No IBKR Gateway involved, so unlike the other
-// daily jobs this doesn't need market hours or a Gateway connection.
+// Scheduled job: captures earnings and ex-dividend dates (per shortlisted/
+// open-position ticker) from TradingView's public endpoints -- see
+// src/lib/tradingviewCalendarService.ts for the endpoint details and why
+// TradingView instead of IBKR/MarketWatch (PROGRESS.md, 2026-08-30) -- and the
+// major US macro events (Fed rate decision, CPI, GDP, US federal elections)
+// from FRED, the Federal Reserve's FOMC calendar and the election date rule
+// (src/lib/macroEventCalendar.ts). No IBKR Gateway involved, so unlike the
+// other daily jobs this doesn't need market hours or a Gateway connection.
 //
 // Usage (dev):
 //   npm run job:daily-calendar-capture
@@ -15,10 +17,10 @@ import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { buildCalendarCaptureFailureMessage, selectAlertWorthyUnresolved, type CalendarFetchFailure, type UnresolvedTicker } from "../src/lib/calendarCaptureOutcome.js";
 import { runJob } from "../src/lib/runJob.js";
+import { captureMajorMacroEvents, reportMajorMacroEventHorizon } from "../src/lib/macroEventCalendar.js";
 import {
   fetchDividendEvents,
   fetchEarningsEvents,
-  fetchEconomicCalendarEvents,
   resolveTradingViewTickerDetailed,
   upsertDividendEvents,
   upsertEarningsEvents,
@@ -87,37 +89,14 @@ async function main(): Promise<void> {
       fetchFailures.push({ source: "dividends", message: describeError(error) });
     }
 
-    let economicWritten = 0;
-    try {
-      const fromIso = now.toISOString();
-      const toIso = new Date(now.getTime() + LOOKAHEAD_DAYS * 24 * 60 * 60 * 1000).toISOString();
-      const events = await fetchEconomicCalendarEvents(fromIso, toIso);
-      for (const event of events) {
-        await db("economic_calendar_events")
-          .insert({
-            external_id: event.id,
-            title: event.title,
-            country: event.country,
-            category: event.category ?? null,
-            importance: event.importance ?? null,
-            actual: event.actual ?? null,
-            forecast: event.forecast ?? null,
-            previous: event.previous ?? null,
-            event_at: event.date,
-            raw: JSON.stringify(event),
-          })
-          .onConflict("external_id")
-          .merge(["actual", "forecast", "previous", "raw", "captured_at"]);
-        economicWritten++;
-      }
-    } catch (error) {
-      console.error("daily_calendar_capture: economic calendar fetch failed", error);
-      fetchFailures.push({ source: "economic calendar", message: describeError(error) });
-    }
+    const macroEvents = await captureMajorMacroEvents(now);
+    for (const failure of macroEvents.failures) fetchFailures.push({ source: `major macro events, ${failure.source}`, message: failure.message });
+    await reportMajorMacroEventHorizon(macroEvents);
+    const macroEventsWritten = Object.values(macroEvents.writtenBySource).reduce((total, count) => total + count, 0);
 
     console.log(
       `Calendar capture: ${tvTickers.length}/${tickers.length} ticker(s) resolved (${unresolved.length} unresolved), ` +
-        `${earningsWritten} earnings row(s), ${dividendsWritten} dividend row(s), ${economicWritten} economic event(s).`,
+        `${earningsWritten} earnings row(s), ${dividendsWritten} dividend row(s), ${macroEventsWritten} major macro event(s).`,
     );
 
     return {
@@ -127,7 +106,8 @@ async function main(): Promise<void> {
         unresolvedSymbols: unresolved,
         earningsWritten,
         dividendsWritten,
-        economicWritten,
+        macroEventsWrittenBySource: macroEvents.writtenBySource,
+        macroEventHorizonShortfalls: macroEvents.horizonShortfalls,
         fetchFailures,
       },
       // Recorded as a failure (runJob alerts) instead of a success with stale rows: the earnings dates gate trades.
