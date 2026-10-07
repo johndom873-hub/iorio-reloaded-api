@@ -234,6 +234,44 @@ export type PlutoEventType =
   | "readiness_check"
   | "warning";
 
+/** The Event log's groups: what a row is about, so the screen can show or hide a whole kind of event at once. */
+export type PlutoEventCategory = "system" | "config" | "safety" | "analysis" | "trading" | "info";
+
+export const plutoEventCategories: PlutoEventCategory[] = ["system", "config", "safety", "analysis", "trading", "info"];
+
+export const plutoEventCategoryByType: Record<PlutoEventType, PlutoEventCategory> = {
+  agent_started: "system",
+  agent_stopped: "system",
+  paused: "system",
+  resumed: "system",
+  mode_changed: "system",
+  readiness_check: "system",
+  warning: "system",
+  session_schedule: "system",
+  settings_changed: "config",
+  ticker_enabled: "config",
+  ticker_disabled: "config",
+  breaker_tripped: "safety",
+  breaker_reset: "safety",
+  stress_override_changed: "safety",
+  model_called: "analysis",
+  model_failed: "analysis",
+  no_trade: "analysis",
+  lines_changed: "analysis",
+  action_validated: "trading",
+  action_blocked: "trading",
+  order_built: "trading",
+  order_confirmed: "trading",
+  order_outcome: "trading",
+  order_adopted: "trading",
+  pass_started: "info",
+  pass_skipped: "info",
+};
+
+export function plutoEventTypesInCategories(categories: PlutoEventCategory[]): PlutoEventType[] {
+  return (Object.keys(plutoEventCategoryByType) as PlutoEventType[]).filter((type) => categories.includes(plutoEventCategoryByType[type]));
+}
+
 /** Appends to the timeline and pushes a `pluto_event` notification so open screens update live. */
 export async function recordPlutoEvent(type: PlutoEventType, payload: Record<string, unknown> = {}): Promise<void> {
   const [row] = await db("pluto_events").insert({ type, payload: JSON.stringify(payload) }).returning(["id", "occurred_at"]);

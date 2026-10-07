@@ -8,7 +8,7 @@ import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
 import { easternDateIso } from "../lib/marketSessionStatus.js";
-import { recordPlutoEvent } from "../pluto/ledger.js";
+import { plutoEventCategories, plutoEventCategoryByType, plutoEventTypesInCategories, recordPlutoEvent, type PlutoEventCategory, type PlutoEventType } from "../pluto/ledger.js";
 import { cancelPlutoOrders, countPlutoWorkingOrders, loadPlutoWorkingOrders } from "../pluto/orders.js";
 import { loadPlutoOrdersTodayBreakdown, loadPlutoTodayCounters } from "../pluto/counters.js";
 import { computePlutoActionExposure, loadPlutoOrderRequestsByActionId, type PlutoActionOrderRequest } from "../pluto/actionExposure.js";
@@ -263,8 +263,11 @@ function limitFrom(request: Request, fallback: number): number {
   return Math.max(1, Math.min(500, Number(request.query.limit) || fallback));
 }
 
+/** ?modelCalled=true keeps only passes that asked the model, so a screen wanting the latest decision is not buried under skipped passes. */
 plutoRouter.get("/passes", async (request: Request, response: Response) => {
-  const rows = await db("pluto_passes").orderBy("started_at", "desc").limit(limitFrom(request, 50));
+  const passesQuery = db("pluto_passes").orderBy("started_at", "desc").limit(limitFrom(request, 50));
+  if (request.query.modelCalled === "true") passesQuery.where({ model_called: true });
+  const rows = await passesQuery;
   const passIds = rows.map((row) => row.id);
   const [decisions, actions] = passIds.length === 0 ? [[], []] : await Promise.all([
     db("pluto_decisions").whereIn("pass_id", passIds).orderBy("call_index"),
@@ -301,9 +304,45 @@ plutoRouter.get("/actions", async (request: Request, response: Response) => {
   response.json(rows.map((row) => serializeAction(row, realized.get(String(row.id)), orderRequests.get(String(row.id)))));
 });
 
+/**
+ * The Event log's query. Filters (all optional, all applied in the query so the page and the total agree):
+ * ?categories=a,b keeps those groups, ?types=a,b keeps only those types, ?excludeTypes=a,b leaves those out,
+ * ?ticker=XYZ matches the symbol(s) an event names, ?session=YYYY-MM-DD keeps one Eastern calendar day.
+ * ?limit and ?offset page it; the body is `{ events, total }` with total counting every match, not just this page.
+ */
 plutoRouter.get("/events", async (request: Request, response: Response) => {
-  const rows = await db("pluto_events").orderBy("occurred_at", "desc").limit(limitFrom(request, 200));
-  response.json(rows.map((row) => ({ id: Number(row.id), occurredAt: new Date(row.occurred_at).toISOString(), type: row.type, payload: row.payload })));
+  const listFrom = (value: unknown): string[] => (typeof value === "string" ? value.split(",").filter(Boolean) : []);
+  const requestedCategories = listFrom(request.query.categories);
+  if (requestedCategories.some((category) => !plutoEventCategories.includes(category as PlutoEventCategory))) {
+    response.status(400).json({ error: `categories must be among: ${plutoEventCategories.join(", ")}.` });
+    return;
+  }
+  const session = typeof request.query.session === "string" && request.query.session !== "" ? request.query.session : null;
+  if (session !== null && (!/^\d{4}-\d{2}-\d{2}$/.test(session) || Number.isNaN(Date.parse(session)) || new Date(`${session}T00:00:00Z`).toISOString().slice(0, 10) !== session)) {
+    response.status(400).json({ error: "session must be a date like 2026-10-07." });
+    return;
+  }
+  const onlyTypes = listFrom(request.query.types);
+  const excludedTypes = listFrom(request.query.excludeTypes);
+  const ticker = typeof request.query.ticker === "string" ? request.query.ticker.trim().toUpperCase() : "";
+  const offset = Math.max(0, Math.floor(Number(request.query.offset)) || 0);
+
+  const filtered = db("pluto_events");
+  if (request.query.categories !== undefined) filtered.whereIn("type", plutoEventTypesInCategories(requestedCategories as PlutoEventCategory[]));
+  if (onlyTypes.length > 0) filtered.whereIn("type", onlyTypes);
+  if (excludedTypes.length > 0) filtered.whereNotIn("type", excludedTypes);
+  if (ticker !== "") {
+    // An event names its tickers as `symbol`, or as a list under `symbols` / `tickers`; a list's ->> text is its JSON, so one LIKE covers all three.
+    const likeTicker = `%${ticker.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
+    filtered.whereRaw("(upper(payload->>'symbol') like ? or upper(payload->>'symbols') like ? or upper(payload->>'tickers') like ?)", [likeTicker, likeTicker, likeTicker]);
+  }
+  if (session !== null) filtered.whereRaw("occurred_at >= (?::date)::timestamp at time zone 'America/New_York' and occurred_at < ((?::date) + 1)::timestamp at time zone 'America/New_York'", [session, session]);
+
+  const [rows, countRows] = await Promise.all([filtered.clone().orderBy("occurred_at", "desc").orderBy("id", "desc").limit(limitFrom(request, 200)).offset(offset), filtered.clone().count({ total: "*" })]);
+  response.json({
+    events: rows.map((row) => ({ id: Number(row.id), occurredAt: new Date(row.occurred_at).toISOString(), type: row.type, category: plutoEventCategoryByType[row.type as PlutoEventType] ?? "system", payload: row.payload })),
+    total: Number(countRows[0]?.total ?? 0),
+  });
 });
 
 plutoRouter.get("/tickers", async (_request: Request, response: Response) => {
