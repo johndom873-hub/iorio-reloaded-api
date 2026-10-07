@@ -304,10 +304,13 @@ plutoRouter.get("/actions", async (request: Request, response: Response) => {
   response.json(rows.map((row) => serializeAction(row, realized.get(String(row.id)), orderRequests.get(String(row.id)))));
 });
 
+/** The payload keys that tie an event to tickers or to a pass; an event with none of them applies to every ticker. */
+const tickerAndPassKeys = ["symbol", "symbols", "tickers", "passId"];
+
 /**
  * The Event log's query. Filters (all optional, all applied in the query so the page and the total agree):
  * ?categories=a,b keeps those groups, ?types=a,b keeps only those types, ?excludeTypes=a,b leaves those out,
- * ?ticker=XYZ matches the symbol(s) an event names, ?session=YYYY-MM-DD keeps one Eastern calendar day.
+ * ?ticker=XYZ keeps that ticker's trace (see below), ?session=YYYY-MM-DD keeps one Eastern calendar day.
  * ?limit and ?offset page it; the body is `{ events, total }` with total counting every match, not just this page.
  */
 plutoRouter.get("/events", async (request: Request, response: Response) => {
@@ -332,15 +335,24 @@ plutoRouter.get("/events", async (request: Request, response: Response) => {
   if (onlyTypes.length > 0) filtered.whereIn("type", onlyTypes);
   if (excludedTypes.length > 0) filtered.whereNotIn("type", excludedTypes);
   if (ticker !== "") {
-    // An event names its tickers as `symbol`, or as a list under `symbols` / `tickers`; a list's ->> text is its JSON, so one LIKE covers all three.
+    // A ticker's whole trace: events naming it, every event of a pass that looked at it (the model's call and its
+    // no-order result name no ticker themselves), and events that name no ticker and belong to no pass, since those
+    // (settings, pauses, breakers) apply to every ticker. An event names its tickers as `symbol`, or as a list under
+    // `symbols` / `tickers`; a list's ->> text is its JSON, so one LIKE covers all three.
     const likeTicker = `%${ticker.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
-    filtered.whereRaw("(upper(payload->>'symbol') like ? or upper(payload->>'symbols') like ? or upper(payload->>'tickers') like ?)", [likeTicker, likeTicker, likeTicker]);
+    const namesTicker = "(upper(payload->>'symbol') like ? or upper(payload->>'symbols') like ? or upper(payload->>'tickers') like ?)";
+    filtered.where((builder) => {
+      builder
+        .whereRaw(namesTicker, [likeTicker, likeTicker, likeTicker])
+        .orWhereRaw(`payload->>'passId' in (select payload->>'passId' from pluto_events where type = 'pass_started' and ${namesTicker})`, [likeTicker, likeTicker, likeTicker])
+        .orWhereRaw(`not jsonb_exists_any(payload, array[${tickerAndPassKeys.map(() => "?").join(", ")}])`, tickerAndPassKeys);
+    });
   }
   if (session !== null) filtered.whereRaw("occurred_at >= (?::date)::timestamp at time zone 'America/New_York' and occurred_at < ((?::date) + 1)::timestamp at time zone 'America/New_York'", [session, session]);
 
   const [rows, countRows] = await Promise.all([filtered.clone().orderBy("occurred_at", "desc").orderBy("id", "desc").limit(limitFrom(request, 200)).offset(offset), filtered.clone().count({ total: "*" })]);
   response.json({
-    events: rows.map((row) => ({ id: Number(row.id), occurredAt: new Date(row.occurred_at).toISOString(), type: row.type, category: plutoEventCategoryByType[row.type as PlutoEventType] ?? "system", payload: row.payload })),
+    events: rows.map((row) => ({ id: Number(row.id), occurredAt: new Date(row.occurred_at).toISOString(), type: row.type, category: plutoEventCategoryByType[row.type as PlutoEventType] ?? "system", appliesToAllTickers: !tickerAndPassKeys.some((key) => key in (row.payload ?? {})), payload: row.payload })),
     total: Number(countRows[0]?.total ?? 0),
   });
 });

@@ -22,7 +22,7 @@ import { finishPlutoPass, recordPlutoAction, recordPlutoDecision, recordPlutoEve
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { callPlutoModel } from "./modelClient.js";
 import { runPostModelGates } from "./postModelGates.js";
-import { buildPlutoSystemPrompt, buildPlutoUserPayload, plutoPromptVersion, type PlutoPromptTickerInput } from "./prompt.js";
+import { buildPlutoSystemPrompt, buildPlutoUserPayload, plutoPromptVersion, recentDecisionsForPrompt, type PlutoPromptTickerInput } from "./prompt.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState, recordPlutoPass, tripPlutoBreaker } from "./stateStore.js";
 import { runPlutoSystemChecks } from "./systemChecks.js";
@@ -141,7 +141,11 @@ export function signalsSnapshotForRoll(closeLeg: HeldLegScore | null, replacemen
 export async function runPlutoPass(request: PassRequest, context: PassRunnerContext): Promise<PassSummary> {
   const settings = await loadPlutoSettings();
   const passId = await startPlutoPass(request.trigger, request.triggerDetail, settings);
-  await recordPlutoEvent("pass_started", { passId, trigger: request.trigger, symbols: request.symbols });
+  // A round with no symbols of its own (opening look, settings change) looks at every enabled ticker: name them,
+  // so the Event log's ticker filter finds the round.
+  const enabledRows = await loadEnabledTickerRows();
+  const rows = request.symbols.length > 0 ? enabledRows.filter((row) => request.symbols.includes(row.symbol)) : enabledRows;
+  await recordPlutoEvent("pass_started", { passId, trigger: request.trigger, symbols: request.symbols.length > 0 ? request.symbols : rows.map((row) => row.symbol) });
   const now = new Date();
   const nowMs = now.getTime();
 
@@ -185,9 +189,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     detail: `${spyDayChangePct === null ? "SPY day change unknown" : `SPY ${spyDayChangePct.toFixed(2)}% (opens blocked at -${settings.spyStressBreakerPct}%)`}${stressOverridden ? ` — override on for today${checks.context.state.stressOverrideByDisplayName ? ` by ${checks.context.state.stressOverrideByDisplayName}` : ""}` : ""}`,
   };
 
-  // 2. Universe.
-  const enabledRows = await loadEnabledTickerRows();
-  const rows = request.symbols.length > 0 ? enabledRows.filter((row) => request.symbols.includes(row.symbol)) : enabledRows;
+  // 2. Universe (loaded above).
   if (rows.length === 0) return skip("no enabled tickers to evaluate", checks.checks);
   const [account, tradingSettings] = await Promise.all([loadAccountContext(), loadTradingSettings()]);
 
@@ -244,7 +246,9 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
 
   // 5. Prompt.
   const book = await loadPlutoBook();
-  const recentDecisions: { parsed_output: { decision?: string; candidate_id?: string | null; reasons?: string[] } | null; created_at: Date }[] = await db("pluto_decisions").whereNotNull("parsed_output").orderBy("created_at", "desc").limit(10).select("parsed_output", "created_at");
+  const recentDecisions: { pass_id: string; parsed_output: { decision?: string; candidate_id?: string | null; reasons?: string[] } | null; created_at: Date }[] = await db("pluto_decisions").whereNotNull("parsed_output").orderBy("created_at", "desc").limit(10).select("pass_id", "parsed_output", "created_at");
+  const tradePassIds = recentDecisions.filter((row) => row.parsed_output?.decision === "trade").map((row) => row.pass_id);
+  const tradeActions: { pass_id: string; outcome: string; block_reason: string | null }[] = tradePassIds.length === 0 ? [] : await db("pluto_actions").whereIn("pass_id", tradePassIds).whereNot({ kind: "no_trade" }).select("pass_id", "outcome", "block_reason");
   const openPositionsBySymbol: Record<string, string[]> = {};
   for (const position of book.openPositions) (openPositionsBySymbol[position.symbol] ??= []).push(position.strategyKey);
   const tickersForPrompt: PlutoPromptTickerInput[] = await Promise.all(
@@ -271,7 +275,10 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     },
     settings,
     tickers: tickersForPrompt,
-    recentDecisions: recentDecisions.map((row) => ({ at: new Date(row.created_at).toISOString(), verdict: row.parsed_output?.decision ?? "invalid", candidateId: row.parsed_output?.candidate_id ?? null, reason: row.parsed_output?.reasons?.[0] ?? null })),
+    recentDecisions: recentDecisionsForPrompt(
+      recentDecisions.map((row) => ({ passId: row.pass_id, createdAt: new Date(row.created_at), parsedOutput: row.parsed_output })),
+      new Map(tradeActions.map((action) => [action.pass_id, { outcome: action.outcome, blockReason: action.block_reason }])),
+    ),
     trigger: { kind: trigger, detail: triggerDetail },
   });
   const systemPrompt = buildPlutoSystemPrompt(settings);

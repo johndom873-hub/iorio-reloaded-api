@@ -19,6 +19,7 @@ const testDb: Knex = db;
 const testTrigger = "pluto_route_test";
 // Far in the future so these rows are always the newest, whatever else the shared test database holds.
 const farFuture = (minute: number) => new Date(Date.UTC(2099, 0, 1, 0, minute)).toISOString();
+const zzPassId = `pluto-route-test-pass-${Date.now()}`;
 
 let server: Server;
 let baseUrl: string;
@@ -39,9 +40,10 @@ beforeAll(async () => {
     // One Eastern session (2099-03-05, EST = UTC-5), newest last; the last two sit either side of its midnight.
     { occurred_at: "2099-03-05T12:00:00Z", type: "ticker_enabled", payload: { symbol: "ZZTA", by: "tester" } },
     { occurred_at: "2099-03-05T12:01:00Z", type: "ticker_enabled", payload: { symbol: "ZZTB", by: "tester" } },
-    { occurred_at: "2099-03-05T12:02:00Z", type: "pass_started", payload: { symbols: ["ZZTA", "ZZTB"] } },
+    { occurred_at: "2099-03-05T12:02:00Z", type: "pass_started", payload: { passId: zzPassId, symbols: ["ZZTA", "ZZTB"] } },
     { occurred_at: "2099-03-05T12:03:00Z", type: "pass_skipped", payload: { tickers: ["ZZTC"] } },
-    { occurred_at: "2099-03-05T12:04:00Z", type: "model_called", payload: {} },
+    // The model's call names no ticker; it belongs to the ZZTA/ZZTB pass.
+    { occurred_at: "2099-03-05T12:04:00Z", type: "model_called", payload: { passId: zzPassId } },
     { occurred_at: "2099-03-05T12:05:00Z", type: "paused", payload: {} },
     { occurred_at: "2099-03-06T04:59:00Z", type: "resumed", payload: {} },
     { occurred_at: "2099-03-06T05:01:00Z", type: "resumed", payload: {} },
@@ -135,13 +137,14 @@ describe("GET /pluto/events", () => {
     expect(status).toBe(400);
   });
 
-  it("matches a ticker named as symbol, in symbols or in tickers, whatever the case", async () => {
+  it("keeps a ticker's trace: events naming it (as symbol, symbols or tickers, any case), its passes' events, and events for every ticker", async () => {
     const zztb = await get("/events?session=2099-03-05&ticker=zztb");
-    expect(zztb.json.events.map((event: any) => event.type).sort()).toEqual(["pass_started", "ticker_enabled"]);
+    expect(zztb.json.events.map((event: any) => event.type)).toEqual(["resumed", "paused", "model_called", "pass_started", "ticker_enabled"]);
+    expect(zztb.json.events.filter((event: any) => event.appliesToAllTickers).map((event: any) => event.type)).toEqual(["resumed", "paused"]);
     const zztc = await get("/events?session=2099-03-05&ticker=ZZTC");
-    expect(zztc.json.events.map((event: any) => event.type)).toEqual(["pass_skipped"]);
+    expect(zztc.json.events.map((event: any) => event.type)).toEqual(["resumed", "paused", "pass_skipped"]);
     const wildcard = await get("/events?session=2099-03-05&ticker=%25");
-    expect(wildcard.json.total).toBe(0);
+    expect(wildcard.json.events.map((event: any) => event.type)).toEqual(["resumed", "paused"]);
   });
 
   it("treats a session as an Eastern calendar day, not a UTC one", async () => {

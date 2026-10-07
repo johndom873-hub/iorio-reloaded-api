@@ -34,6 +34,7 @@ export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
     "- move_context: today's move measured against the stock's own normal. day_move_sigmas is day_change_pct divided by the one-day move the realized-volatility forecast implies (expected_daily_move_pct); within ±1.5 is an ordinary day for this stock. change_1w_pct, change_1m_pct and change_3m_pct are the recent path; realized_vol_21d and realized_vol_126d (annualised %) say whether the last month is calmer or wilder than the last six; iv_rank is where today's implied volatility sits in its own one-year range (0-100).",
     "- rolls: replacing a held short leg with a lower-delta credit roll; net_roll_edge_vp is the new contract's net edge minus what holding the current leg still offers minus the cost of closing it.",
     "- close actions: selling unstructured shares at a positive cycle P&L, or buying back a short leg whose remaining edge is negative while locking a profit.",
+    "- recent_decisions: your latest decisions, newest first. A trade carries its outcome: blocked (a code check refused it before any order was sent; outcome_detail says why), validated, order_built or confirmed (an order is on its way or working), filled or partially_filled, cancelled, rejected or error (outcome_detail says why), not_executed (no order was attempted). Only a filled or partially filled trade changed the book; the account, positions and close actions in this message always show the book as it is now.",
     "",
     "Hard rules you must obey:",
     "1. You may only name a candidate_id that appears in this message. Never invent contracts, strikes, expiries, quantities, sizes or prices: code sizes every order to the standard order size.",
@@ -128,8 +129,40 @@ export interface PlutoPromptInput {
   tickers: PlutoPromptTickerInput[];
   /** Share of the half-spread that scoring charges as friction (trading_settings.spread_cost_charged_pct). */
   spreadCostSharePct: number;
-  recentDecisions: { at: string; verdict: string; candidateId: string | null; reason: string | null }[];
+  recentDecisions: PlutoRecentDecision[];
   trigger: { kind: string; detail: Record<string, unknown> };
+}
+
+export interface PlutoRecentDecision {
+  at: string;
+  verdict: string;
+  candidateId: string | null;
+  reason: string | null;
+  /** A trade's fate: the outcome of the action it produced, "not_executed" when it produced none; null for every other verdict. */
+  outcome: string | null;
+  outcomeDetail: string | null;
+}
+
+/**
+ * Pure: the recent_decisions block from the latest decision rows and the actions their passes produced. A trade
+ * carries its outcome so a blocked or cancelled one never reads as done.
+ */
+export function recentDecisionsForPrompt(
+  decisions: { passId: string; createdAt: Date; parsedOutput: { decision?: string; candidate_id?: string | null; reasons?: string[] } | null }[],
+  tradeActionsByPassId: Map<string, { outcome: string; blockReason: string | null }>,
+): PlutoRecentDecision[] {
+  return decisions.map((row) => {
+    const verdict = row.parsedOutput?.decision ?? "invalid";
+    const action = verdict === "trade" ? tradeActionsByPassId.get(row.passId) ?? null : null;
+    return {
+      at: row.createdAt.toISOString(),
+      verdict,
+      candidateId: row.parsedOutput?.candidate_id ?? null,
+      reason: row.parsedOutput?.reasons?.[0] ?? null,
+      outcome: verdict === "trade" ? action?.outcome ?? "not_executed" : null,
+      outcomeDetail: action?.blockReason ?? null,
+    };
+  });
 }
 
 export interface PlutoPromptPayload {
@@ -234,7 +267,7 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
       spread_cost_share_pct: input.spreadCostSharePct,
     },
     tickers,
-    recent_decisions: input.recentDecisions.length > 0 ? input.recentDecisions.map((entry) => stripUndefined({ at: entry.at, verdict: entry.verdict, candidate_id: entry.candidateId ?? undefined, reason: entry.reason ?? undefined })) : undefined,
+    recent_decisions: input.recentDecisions.length > 0 ? input.recentDecisions.map((entry) => stripUndefined({ at: entry.at, verdict: entry.verdict, candidate_id: entry.candidateId ?? undefined, outcome: entry.outcome ?? undefined, outcome_detail: entry.outcomeDetail ?? undefined, reason: entry.reason ?? undefined })) : undefined,
   });
   return { payload, offeredIds };
 }
