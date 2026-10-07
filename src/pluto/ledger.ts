@@ -45,12 +45,7 @@ export async function relabelPlutoPass(passId: string, trigger: PlutoTrigger, tr
   await db("pluto_passes").where({ id: passId }).update({ trigger, trigger_detail: JSON.stringify(triggerDetail) });
 }
 
-/** Timeline retention (built 2026-09-28, Marcelo to veto the number): events older than this are pruned once a day; passes, decisions and actions are the ledger and are kept. */
-export const plutoEventsRetentionDays = 90;
-
-export async function pruneOldPlutoEvents(now: Date = new Date()): Promise<number> {
-  return db("pluto_events").where("occurred_at", "<", new Date(now.getTime() - plutoEventsRetentionDays * 24 * 60 * 60 * 1000)).del();
-}
+// Nothing Pluto records is ever deleted (Marcelo, 2026-10-07): events, passes, decisions and actions are kept for later analysis.
 
 /** A round still unfinished this long after it started was abandoned (a crash, a deploy): longer than any real round, and long enough that the old dyno can still finish its last one while the new one boots. */
 export const abandonedPassAfterMs = 10 * 60_000;

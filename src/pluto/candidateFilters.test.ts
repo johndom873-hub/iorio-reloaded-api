@@ -12,7 +12,7 @@ const today = "2026-09-28";
 const settings: PlutoSettings = {
   capitalBudgetPct: 30, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeDollars: 30, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
-  maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxAbsDayChangePct: 6,
+  maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
   maxEdgeDriftVp: 1, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
   modelId: "openai/gpt-6-luna", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 3, confidenceFloor: 0.6, consecutiveModelFailuresBreaker: 3, promptVersion: "v1",
@@ -63,7 +63,10 @@ describe("filterTickerForPluto — ticker level", () => {
     expect(filterTickerForPluto(input({ botEnabled: false })).tickerBlocks).toEqual(["ticker not enabled for Pluto"]);
     expect(filterTickerForPluto(input({ scored: scored({ snapshotDateIso: "2026-09-25" }) })).tickerBlocks[0]).toMatch(/requires today's fit/);
     expect(filterTickerForPluto(input({ scored: scored({ forecast: { volatility: 0.5, windowDays: 21 } }) })).tickerBlocks[0]).toMatch(/not the 63-day/);
-    expect(filterTickerForPluto(input({ scored: scored({ dayChangePercent: -7.2 }) })).tickerBlocks[0]).toMatch(/day change -7.2%/);
+    // 50% forecast volatility: a normal day is 50 / √252 = 3.15%, so 3× is 9.45%.
+    expect(filterTickerForPluto(input({ scored: scored({ dayChangePercent: -9.6 }) })).tickerBlocks[0]).toBe("day change -9.6% is 3.05× its normal 3.15% day, beyond 3×");
+    expect(filterTickerForPluto(input({ scored: scored({ dayChangePercent: -9.3 }) })).tickerBlocks).toEqual([]);
+    expect(filterTickerForPluto(input({ scored: scored({ dayChangePercent: 7.2 }) })).tickerBlocks).toEqual([]); // the old fixed ±6% would have blocked it
     expect(filterTickerForPluto(input({ scored: scored({ priceSource: "frozen" }) })).tickerBlocks[0]).toMatch(/not live/);
     expect(filterTickerForPluto(input({ scored: scored({ unscoredReason: "no_surface_fit" }) })).tickerBlocks).toContain("not scored: no_surface_fit");
   });

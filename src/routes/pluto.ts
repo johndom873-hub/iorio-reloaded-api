@@ -201,10 +201,13 @@ plutoRouter.get("/scoreboard", async (_request: Request, response: Response) => 
   let agree = 0;
   let disagree = 0;
   let noTrade = 0;
+  let abstained = 0;
   for (const decision of decisions) {
     const verdict = decision.parsed_output?.decision;
     if (verdict !== "trade") {
       noTrade += 1;
+      // "abstain_system_concern" since prompt v3, "abstain" before it.
+      if (verdict?.startsWith("abstain")) abstained += 1;
       continue;
     }
     const topPick = topPickByPass.get(decision.pass_id) ?? null;
@@ -221,7 +224,7 @@ plutoRouter.get("/scoreboard", async (_request: Request, response: Response) => 
     closedActions,
     winningActions,
     openActions,
-    modelVsTopPick: { agree, disagree, noTrade },
+    modelVsTopPick: { agree, disagree, noTrade, abstained },
   });
 });
 

@@ -37,7 +37,8 @@ export interface PlutoSettings {
   minSlicePointCount: number;
   maxMidVsSurfaceIvVp: number;
   maxIvShiftVp: number;
-  maxAbsDayChangePct: number;
+  /** A ticker whose move today is more than this many times its normal daily move (expectedDailyMovePct) is out for the round. */
+  maxDayMoveMultiple: number;
   // Market
   windowStartEt: string;
   windowEndEt: string;
@@ -102,7 +103,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   minSlicePointCount: { column: "min_slice_point_count", kind: "integer", min: 0 },
   maxMidVsSurfaceIvVp: { column: "max_mid_vs_surface_iv_vp", kind: "number", min: 0 },
   maxIvShiftVp: { column: "max_iv_shift_vp", kind: "number", min: 0 },
-  maxAbsDayChangePct: { column: "max_abs_day_change_pct", kind: "number", min: 0 },
+  maxDayMoveMultiple: { column: "max_day_move_multiple", kind: "number", min: 0 },
   windowStartEt: { column: "window_start_et", kind: "text" },
   windowEndEt: { column: "window_end_et", kind: "text" },
   dailyLossBreakerPct: { column: "daily_loss_breaker_pct", kind: "number", min: 0, max: 100 },

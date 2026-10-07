@@ -43,12 +43,17 @@ function realizedVolPct(bars: DailyOhlcvBar[], windowDays: number): number | nul
  * `bars` in date order, ending at the last completed session (never today's partial bar). `forecastVolatility` is the
  * annualised realized-volatility forecast as a decimal; `dayChangePct` today's move so far.
  */
+/** The one-day move the realized-volatility forecast implies, in % (forecast × 100 / √252); null without a forecast. */
+export function expectedDailyMovePct(forecastVolatility: number | null): number | null {
+  return forecastVolatility !== null && forecastVolatility > 0 ? (forecastVolatility * 100) / Math.sqrt(tradingDaysPerYear) : null;
+}
+
 export function computeMoveContext(input: { bars: DailyOhlcvBar[]; forecastVolatility: number | null; dayChangePct: number | null; ivRank: number | null }): MoveContext {
-  const expectedDailyMovePct = input.forecastVolatility !== null && input.forecastVolatility > 0 ? (input.forecastVolatility * 100) / Math.sqrt(tradingDaysPerYear) : null;
-  const dayMoveSigmas = expectedDailyMovePct !== null && input.dayChangePct !== null ? input.dayChangePct / expectedDailyMovePct : null;
+  const normalDayMovePct = expectedDailyMovePct(input.forecastVolatility);
+  const dayMoveSigmas = normalDayMovePct !== null && input.dayChangePct !== null ? input.dayChangePct / normalDayMovePct : null;
   return {
     dayMoveSigmas,
-    expectedDailyMovePct,
+    expectedDailyMovePct: normalDayMovePct,
     change1wPct: changeOverBars(input.bars, oneWeekBars),
     change1mPct: changeOverBars(input.bars, oneMonthBars),
     change3mPct: changeOverBars(input.bars, threeMonthBars),

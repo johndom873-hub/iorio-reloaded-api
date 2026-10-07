@@ -1,4 +1,5 @@
 import type { SignalCandidate, SignalGrade, SignalSurfaceSlice } from "../lib/signalCandidates.js";
+import { expectedDailyMovePct } from "./moveContext.js";
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { TickerSignals } from "../lib/signalsTypes.js";
 import type { PlutoSettings } from "./settingsStore.js";
@@ -131,7 +132,9 @@ export function rejectTicker(input: PlutoTickerFilterInput): string[] {
   if (scored.unscoredReason) reasons.push(`not scored: ${scored.unscoredReason}`);
   if (scored.snapshotDateIso !== todayEasternIso) reasons.push(`surface is from ${scored.snapshotDateIso ?? "no snapshot"}, Pluto requires today's fit`);
   if (scored.forecast && scored.forecast.windowDays !== 63) reasons.push(`forecast window is ${scored.forecast.windowDays} days, not the 63-day one`);
-  if (scored.dayChangePercent !== null && Math.abs(scored.dayChangePercent) > settings.maxAbsDayChangePct) reasons.push(`day change ${scored.dayChangePercent.toFixed(1)}% beyond ±${settings.maxAbsDayChangePct}%`);
+  // Each stock against its own normal day (Marcelo, 2026-10-07): 3 × NOK's 4.2% is 12.7%, 3 × BSBR's 2.4% is 7.2%.
+  const normalDayMovePct = expectedDailyMovePct(scored.forecast?.volatility ?? null);
+  if (scored.dayChangePercent !== null && normalDayMovePct !== null && Math.abs(scored.dayChangePercent) > settings.maxDayMoveMultiple * normalDayMovePct) reasons.push(`day change ${scored.dayChangePercent.toFixed(1)}% is ${(Math.abs(scored.dayChangePercent) / normalDayMovePct).toFixed(2)}× its normal ${normalDayMovePct.toFixed(2)}% day, beyond ${settings.maxDayMoveMultiple}×`);
   if (scored.priceSource !== "live") reasons.push(`spot price is ${scored.priceSource}, not live`);
   return reasons;
 }

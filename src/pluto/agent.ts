@@ -11,7 +11,7 @@ import { readGitSha } from "../lib/readGitSha.js";
 import type { PlutoConfig } from "./config.js";
 import { labelExpiredCandidateOutcomes } from "./candidateOutcomes.js";
 import { loadWorkingPlutoOrders, watchPlutoOrder } from "./executor.js";
-import { closeAbandonedPlutoPasses, plutoEventsRetentionDays, pruneOldPlutoEvents, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
+import { closeAbandonedPlutoPasses, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRequest, type PassRunnerContext } from "./passRunner.js";
 import { advanceOpeningLook, decideOpeningLook, type OpeningLookDecision, type OpeningLookProgress } from "./openingLook.js";
@@ -194,7 +194,6 @@ export class PlutoAgent {
       this.settings = await loadPlutoSettings();
       this.marketWatch.updateSettings(this.settings);
       await this.adoptWorkingOrders();
-      await this.pruneEventsOncePerDay();
       await this.labelCandidateOutcomesOncePerDay();
       const { allowed, insideWindow } = await this.isAllowedToAct();
       if (!allowed || !insideWindow) {
@@ -294,19 +293,6 @@ export class PlutoAgent {
       console.log(`Pluto: adopted ${orphans.length} working order(s) left from a previous process.`);
     } catch (error) {
       console.warn(`Pluto: could not adopt working orders — ${error instanceof Error ? error.message : error}`);
-    }
-  }
-
-  private eventsPrunedFor: string | null = null;
-  private async pruneEventsOncePerDay(): Promise<void> {
-    const todayIso = easternIsoDate(new Date());
-    if (this.eventsPrunedFor === todayIso) return;
-    this.eventsPrunedFor = todayIso;
-    try {
-      const pruned = await pruneOldPlutoEvents();
-      if (pruned > 0) console.log(`Pluto: pruned ${pruned} timeline event(s) older than ${plutoEventsRetentionDays} days.`);
-    } catch (error) {
-      console.warn(`Pluto: event pruning failed — ${error instanceof Error ? error.message : error}`);
     }
   }
 

@@ -133,7 +133,7 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   }
 
   try {
-    const previous = await db("account_pnl_snapshots").where("snapshot_date", "<", todayEasternIso).orderBy("snapshot_date", "desc").first("net_liquidation_value", "snapshot_date");
+    const previous = await db("account_pnl_snapshots").where("snapshot_date", "<", todayEasternIso).orderBy("snapshot_date", "desc").first("net_liquidation_value", db.raw(`snapshot_date::text as snapshot_date`));
     const lossPct = dailyLossPercent(netLiquidationValue, previous ? Number(previous.net_liquidation_value) : null);
     if (lossPct === null) record("daily_loss", false, "cannot compute today's move: no previous snapshot or no live NLV");
     else record("daily_loss", lossPct > -settings.dailyLossBreakerPct, `${lossPct >= 0 ? "+" : ""}${lossPct.toFixed(2)}% vs ${previous?.snapshot_date} close (breaker at -${settings.dailyLossBreakerPct}%)`);
