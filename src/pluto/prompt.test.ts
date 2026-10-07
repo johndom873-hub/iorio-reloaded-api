@@ -81,14 +81,14 @@ describe("prompt v3.3 payload and wording (2026-10-07)", () => {
 
   it("v3.4: lists only the macro releases still to come, and asks for a stronger edge instead of ruling the trade out", () => {
     const macroEvents = [
-      { dateIso: "2026-10-06", eventAtIso: "2026-10-06T12:30:00Z", title: "Core PCE Price Index MoM" },
-      { dateIso: "2026-10-07", eventAtIso: "2026-10-07T18:00:00Z", title: "FOMC Minutes" },
+      { dateIso: "2026-10-06", eventAtIso: "2026-10-06T12:30:00Z", title: "CPI" },
+      { dateIso: "2026-10-07", eventAtIso: "2026-10-07T18:00:00Z", title: "Fed rate decision" },
     ];
     const { payload } = buildPlutoUserPayload(input({ tickers: [{ scored: { ...scored, macroEvents } as PlutoPromptTickerInput["scored"], eligible: [], eligibleRolls: [], closeActions: [closeOn("position-human", "SMCI:close_leg:leg-1")] }] }));
-    expect((payload.tickers as { macro_events?: unknown }[])[0]!.macro_events).toEqual([{ date: "2026-10-07", title: "FOMC Minutes" }]);
+    expect((payload.tickers as { macro_events?: unknown }[])[0]!.macro_events).toEqual([{ date: "2026-10-07", title: "Fed rate decision" }]);
     const prompt = buildPlutoSystemPrompt(input().settings);
     expect(prompt).toContain("ask for a clearly stronger net edge before trading through one");
-    expect(prompt).toContain("Light: FOMC Minutes, PPI, GDP.");
+    expect(prompt).toContain("Heavy: the Fed rate decision, CPI, the US presidential election. Medium: the US midterm elections. Light: GDP.");
     expect(prompt).not.toContain("no earnings or major macro release falls before expiry");
     expect(prompt).toContain("no earnings falls before expiry, liquidity is real");
     expect(prompt).toContain("Earnings are the heaviest event there is, far above any macro release");

@@ -79,7 +79,7 @@ export interface SignalCandidatesInput {
    * empty regardless of what's actually scheduled -- candidates are still produced but flagged, not excluded
    * (Marcelo 2026-09-23: don't block on missing data, but surface that earnings risk is unchecked). */
   earningsCalendarResolved: boolean;
-  /** Formula 3i (approved 2026-09-24): major US macro releases (FOMC, CPI, jobs, PCE, GDP), Eastern date and release time; a candidate whose
+  /** Formula 3i (approved 2026-09-24): major US macro events (Fed rate decision, CPI, GDP, US elections), Eastern date and release time; a candidate whose
    * expiry spans one is FLAGGED, never excluded -- with one flat forecast per ticker, a short-dated IV spike into such a
    * date scores like mispricing, and the flag says so. See macroEventCalendar.ts for the curated list. */
   macroEvents: { dateIso: string; eventAtMs: number }[];

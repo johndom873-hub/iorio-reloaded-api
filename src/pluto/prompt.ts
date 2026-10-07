@@ -10,7 +10,7 @@ import type { MoveContext } from "./moveContext.js";
 // deterministic filter, the top few per ticker per strategy, short field names, no nulls.
 // Shortlist notes never enter the prompt (Marcelo, 2026-09-28).
 
-export const plutoPromptVersion = "v3.4";
+export const plutoPromptVersion = "v3.5";
 
 /** How many open candidates per ticker per strategy the model sees (best Edge $ first). */
 export const candidatesPerTickerPerStrategy = 3;
@@ -28,7 +28,7 @@ export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
     `- grade: strong (net edge >= 10 vp), good (5-10), weak (0-5). ${settings.minGrade === "strong" ? "Only strong reaches you." : `Only ${settings.minGrade} or better reaches you.`}`,
     "- ann_yield_pct: annualised premium yield on capital at risk; it scales with 1/sqrt(time) so very short-dated contracts look richest. Short-dated premium is real on average but tail-heavy.",
     "- surface_iv vs mid_iv: how far the contract's own market price sits from the fitted surface. A big gap means the surface may be wrong for that contract.",
-    "- flags: macro_event_before_expiry means a major US macro release still to come falls on or before expiry (macro_events lists them). The IV may be partly pricing that event, so the measured edge is probably overstated, not wrong: ask for a clearly stronger net edge before trading through one, the more so the heavier the release. Heavy: the Fed rate decision (with its press conference and projections), CPI, the jobs report (non-farm payrolls, unemployment). Medium: core PCE. Light: FOMC Minutes, PPI, GDP. A light release alone is no reason to pass on a strong edge.",
+    "- flags: macro_event_before_expiry means a major US macro release still to come falls on or before expiry (macro_events lists them). The IV may be partly pricing that event, so the measured edge is probably overstated, not wrong: ask for a clearly stronger net edge before trading through one, the more so the heavier the release. Heavy: the Fed rate decision, CPI, the US presidential election. Medium: the US midterm elections. Light: GDP. A light release alone is no reason to pass on a strong edge.",
     "- next_earnings: the ticker's next earnings date. Earnings are the heaviest event there is, far above any macro release: a single report can move the stock more than its options price in. Never open a position, or roll one, so that it is still open when the company reports. Code already removes every open and roll whose expiry is on or after a known earnings date, and does not trade a ticker whose earnings date is unknown; if anything you are offered would still be open on next_earnings, do not choose it.",
     "- elevated_vol: the ticker's short-term realized volatility is unusually high versus its own history.",
     "- day_change_pct and spy_day_change_pct: today's moves. A sharp drop usually has a cause; selling puts into a falling market is exactly the tail risk this strategy carries.",
