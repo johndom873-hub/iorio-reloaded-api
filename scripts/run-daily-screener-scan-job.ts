@@ -28,7 +28,8 @@ import { runScannerSubscription, type ScannerCandidate } from "../src/ibkr/fetch
 import { enrichCandidate } from "../src/ibkr/enrichScannerCandidates.js";
 import { lookupContractDetails } from "../src/ibkr/fetchNewTickerData.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
-import { buildScreenerFailureMessage, isEmptyEnrichment } from "../src/lib/screenerScanOutcome.js";
+import { buildScreenerFailureMessage, describeFailedEnrichment, isEmptyEnrichment } from "../src/lib/screenerScanOutcome.js";
+import { findTickerRenames } from "../src/lib/screenerTickerRenames.js";
 import { runJob } from "../src/lib/runJob.js";
 
 const scanCodes = [
@@ -139,10 +140,23 @@ async function main(): Promise<void> {
         existingRows.map((row) => [row.symbol, { symbol: row.symbol, ibkrContractId: row.ibkr_contract_id, companyName: row.company_name, sector: row.sector, primaryExchange: row.primary_exchange }]),
       );
 
+      // A stored row whose ticker changed is renamed in place (keeping first_seen_at) instead of being re-enriched under
+      // its dead ticker every night while the new ticker is added as a duplicate.
+      const tickerRenames = findTickerRenames([...matches.values()], [...existingBySymbol.values()]);
+      const renamedFromBySymbol = new Map<string, ExistingUniverseRow>();
+      for (const rename of tickerRenames) {
+        console.log(`${rename.oldSymbol} is now ${rename.newSymbol} (same IBKR contract ${rename.ibkrContractId}): renaming its stored row.`);
+        renamedFromBySymbol.set(rename.newSymbol, existingBySymbol.get(rename.oldSymbol)!);
+      }
+      const renamedOldSymbols = new Set(tickerRenames.map((rename) => rename.oldSymbol));
+      // Fresh identity looked up for a renamed symbol, written with the rename even when its quote comes back empty,
+      // since the lookup never runs again once the row exists under the new ticker.
+      const renamedIdentityBySymbol = new Map<string, { ibkr_contract_id: number | null; company_name: string | null; sector: string | null; primary_exchange: string | null }>();
+
       // The full nightly re-enrichment set: tonight's matches (new or
       // already-known) UNION every symbol already accumulated, whether or
       // not it matched tonight — the "keep it, re-enrich anyway" decision.
-      const fullSymbolSet = new Set<string>([...matches.keys(), ...existingBySymbol.keys()]);
+      const fullSymbolSet = new Set<string>([...matches.keys(), ...[...existingBySymbol.keys()].filter((symbol) => !renamedOldSymbols.has(symbol))]);
       console.log(`Enriching ${fullSymbolSet.size} symbol(s) (${fullSymbolSet.size - matches.size} carried over from the existing universe, not matched tonight).`);
 
       const matchedRows: (EnrichedRow & { best_rank: number; matched_scan_codes: string[] })[] = [];
@@ -150,19 +164,22 @@ async function main(): Promise<void> {
 
       for (const symbol of fullSymbolSet) {
         try {
-          const existing = existingBySymbol.get(symbol);
+          const existing = existingBySymbol.get(symbol) ?? renamedFromBySymbol.get(symbol);
           const match = matches.get(symbol);
 
           // Identity (name/sector/exchange/conId) rarely changes — only
           // pay for a live reqContractDetails lookup for a symbol this
-          // table has never seen before.
+          // table has never seen before, or one that was just renamed
+          // (a ticker change usually comes with a new name or exchange).
           let identity = { companyName: existing?.companyName ?? null, sector: existing?.sector ?? null, primaryExchange: existing?.primaryExchange ?? null, conId: existing?.ibkrContractId ?? match?.conId ?? null };
-          if (!existing) {
+          if (!existingBySymbol.has(symbol)) {
             const detailsReqId = nextReqId++;
             const detailsPromise = lookupContractDetails(connection, detailsReqId);
             connection.ib.reqContractDetails(detailsReqId, new Stock(symbol, "SMART", "USD"));
             const details = await detailsPromise;
-            identity = { companyName: details.companyName, sector: details.sector, primaryExchange: details.primaryExchange, conId: details.conId ?? identity.conId };
+            // A renamed row keeps its stored identity when the lookup fails, rather than losing it to nulls.
+            if (!existing || details.conId !== null) identity = { companyName: details.companyName, sector: details.sector, primaryExchange: details.primaryExchange, conId: details.conId ?? identity.conId };
+            if (existing && details.conId !== null) renamedIdentityBySymbol.set(symbol, { ibkr_contract_id: identity.conId, company_name: identity.companyName, sector: identity.sector, primary_exchange: identity.primaryExchange });
           }
 
           const quote = await enrichCandidate(connection, nextReqId++, symbol);
@@ -170,8 +187,8 @@ async function main(): Promise<void> {
           // data and stamp last_refreshed_at, so it counts as a failed enrichment and only the match result is recorded.
           if (isEmptyEnrichment(quote)) {
             failed++;
-            failedSymbols.push(symbol);
-            console.warn(`${symbol}: enrichment returned no data (timeout or IBKR error), keeping its stored values.`);
+            failedSymbols.push(describeFailedEnrichment(symbol, quote.ibkrError));
+            console.warn(`${describeFailedEnrichment(symbol, quote.ibkrError)}: enrichment returned no data, keeping its stored values.`);
             // A symbol not yet in the table is NOT inserted from an empty enrichment: its identity lookup usually timed out too,
             // and once a row exists the lookup never runs again, freezing null name/sector for good. It is retried tomorrow.
             if (match && existing) matchOnlyRows.push({ symbol, ibkr_contract_id: identity.conId, company_name: identity.companyName, sector: identity.sector, primary_exchange: identity.primaryExchange, best_rank: match.bestRank, matched_scan_codes: [...match.scanCodes] });
@@ -205,6 +222,11 @@ async function main(): Promise<void> {
           failedSymbols.push(symbol);
           console.warn(`${symbol}: enrichment failed — ${error instanceof Error ? error.message : error}`);
         }
+      }
+
+      // Renamed first, so the upserts below merge into the existing row under its new ticker.
+      for (const rename of tickerRenames) {
+        await db("screener_universe").where({ symbol: rename.oldSymbol }).update({ symbol: rename.newSymbol, ...renamedIdentityBySymbol.get(rename.newSymbol) });
       }
 
       // Two batches: matched rows update best_rank/matched_scan_codes/last_matched_at;
@@ -285,7 +307,7 @@ async function main(): Promise<void> {
 
       console.log(`Screener scan complete: ${enriched} enriched, ${failed} failed, ${matchedRows.length} matched, ${carriedOverRows.length} carried over.`);
       return {
-        details: { scanCounts, matched: matches.size, universeSize: fullSymbolSet.size, enriched, failed, failedSymbols },
+        details: { scanCounts, matched: matches.size, universeSize: fullSymbolSet.size, enriched, failed, failedSymbols, tickerRenames },
         failureMessage: buildScreenerFailureMessage({ scanCounts, failedSymbols, universeSize: fullSymbolSet.size }),
       };
     } finally {

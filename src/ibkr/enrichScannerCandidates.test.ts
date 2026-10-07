@@ -131,6 +131,7 @@ describe("enrichCandidate", () => {
       putOpenInterest: null,
       bidAskSpreadPct: null,
       impliedVolatility: null,
+      ibkrError: null,
     });
   });
 
@@ -202,7 +203,46 @@ describe("enrichCandidate", () => {
     expect(ib.listenerCount(EventName.tickPrice)).toBe(0);
     expect(ib.listenerCount(EventName.tickSize)).toBe(0);
     expect(ib.listenerCount(EventName.tickGeneric)).toBe(0);
+    expect(ib.listenerCount(EventName.error)).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("settles at once on IBKR error 200 for its own request, carries the message and does not cancel the dropped request", async () => {
+    const { ib, result } = await startEnrichment(15_000);
+    ib.emit(EventName.error, new Error("No security definition has been found for the request"), 200, 9);
+    await vi.advanceTimersByTimeAsync(0);
+    const enrichment = await result;
+    expect(enrichment.ibkrError).toEqual({ code: 200, message: "No security definition has been found for the request" });
+    expect(enrichment.lastPrice).toBeNull();
+    expect(ib.cancelMktData).not.toHaveBeenCalled();
+    expect(ib.listenerCount(EventName.error)).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("records any other error on its own request but keeps waiting for ticks", async () => {
+    const { ib, result } = await startEnrichment(2_000);
+    ib.emit(EventName.error, new Error("Requested market data is not subscribed. Displaying delayed market data."), 10167, 9);
+    let settled = false;
+    void result.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(false);
+    ib.emit(EventName.tickPrice, 9, ticks.delayedLast, 20);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const enrichment = await result;
+    expect(enrichment).toMatchObject({ lastPrice: 20, ibkrError: { code: 10167 } });
+    expect(ib.cancelMktData).toHaveBeenCalledWith(9);
+  });
+
+  it("ignores errors for other request ids and connection notices", async () => {
+    const { ib, result } = await startEnrichment(1_000);
+    ib.emit(EventName.error, new Error("No security definition has been found for the request"), 200, 10);
+    ib.emit(EventName.error, new Error("Market data farm connection is OK"), 2104, -1);
+    let settled = false;
+    void result.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await result).ibkrError).toBeNull();
   });
 
   it("releases the reservation under the same holder it reserved", async () => {

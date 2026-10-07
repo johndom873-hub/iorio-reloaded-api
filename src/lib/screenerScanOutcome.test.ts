@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScreenerFailureMessage, isEmptyEnrichment, type EnrichmentQuote } from "./screenerScanOutcome.js";
+import { buildScreenerFailureMessage, describeFailedEnrichment, isEmptyEnrichment, type EnrichmentQuote } from "./screenerScanOutcome.js";
 
 const quote = (overrides: Partial<EnrichmentQuote> = {}): EnrichmentQuote => ({
   lastPrice: null,
@@ -17,6 +17,24 @@ describe("isEmptyEnrichment", () => {
     expect(isEmptyEnrichment(quote())).toBe(true);
     expect(isEmptyEnrichment(quote({ lastPrice: 12.5 }))).toBe(false);
     expect(isEmptyEnrichment(quote({ impliedVolatility: 0 }))).toBe(false);
+  });
+
+  it("is still true when the only thing that came back is an IBKR error", () => {
+    expect(isEmptyEnrichment({ ...quote(), ibkrError: { code: 200, message: "No security definition has been found for the request" } } as EnrichmentQuote)).toBe(true);
+  });
+});
+
+describe("describeFailedEnrichment", () => {
+  it("names the IBKR error code and message", () => {
+    expect(describeFailedEnrichment("PSKY", { code: 200, message: "No security definition has been found for the request" })).toBe("PSKY (IBKR 200 No security definition has been found for the request)");
+  });
+
+  it("says it timed out when IBKR sent no error", () => {
+    expect(describeFailedEnrichment("XYZ", null)).toBe("XYZ (no data before the timeout)");
+  });
+
+  it("never lets an IBKR message put '): ' into the alert", () => {
+    expect(describeFailedEnrichment("XYZ", { code: 354, message: "Requested market data is not subscribed (NYSE): delayed" })).not.toContain("): ");
   });
 });
 

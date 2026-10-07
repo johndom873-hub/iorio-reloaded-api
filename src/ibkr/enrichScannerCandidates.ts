@@ -32,6 +32,8 @@ const AVG_VOLUME_TICK = 21;
 const OPTION_CALL_OPEN_INTEREST_TICK = 27;
 const OPTION_PUT_OPEN_INTEREST_TICK = 28;
 const AVG_OPT_VOLUME_TICK = 87;
+// "No security definition has been found" (or an ambiguous contract): IBKR drops the request, so no tick will ever follow.
+const NO_SECURITY_DEFINITION_ERROR_CODE = 200;
 
 export interface CandidateEnrichment {
   lastPrice: number | null;
@@ -41,6 +43,8 @@ export interface CandidateEnrichment {
   putOpenInterest: number | null;
   bidAskSpreadPct: number | null;
   impliedVolatility: number | null;
+  // The last error IBKR sent for this request (e.g. code 200 after a ticker change), null when none.
+  ibkrError: { code: number; message: string } | null;
 }
 
 /**
@@ -83,6 +87,7 @@ function enrichCandidateUnbudgeted(connection: IbkrConnection, reqId: number, sy
       putOpenInterest: null,
       bidAskSpreadPct: null,
       impliedVolatility: null,
+      ibkrError: null,
     };
     let settled = false;
 
@@ -104,6 +109,12 @@ function enrichCandidateUnbudgeted(connection: IbkrConnection, reqId: number, sy
       if (allFieldsIn && graceTimer === null) graceTimer = setTimeout(finish, afterAllFieldsGraceMs);
     };
 
+    const onError = (error: Error, code: number, errorReqId: number) => {
+      if (errorReqId !== reqId) return;
+      result.ibkrError = { code, message: error.message };
+      if (code === NO_SECURITY_DEFINITION_ERROR_CODE) finish();
+    };
+
     let graceTimer: ReturnType<typeof setTimeout> | null = null;
     const timer = setTimeout(finish, timeoutMs);
 
@@ -115,7 +126,9 @@ function enrichCandidateUnbudgeted(connection: IbkrConnection, reqId: number, sy
       connection.ib.off(EventName.tickPrice, onTick);
       connection.ib.off(EventName.tickSize, onTick);
       connection.ib.off(EventName.tickGeneric, onTick);
-      connection.ib.cancelMktData(reqId);
+      connection.ib.off(EventName.error, onError);
+      // IBKR already dropped a request it rejected with 200: cancelling it only draws a "Can't find EId" error.
+      if (result.ibkrError?.code !== NO_SECURITY_DEFINITION_ERROR_CODE) connection.ib.cancelMktData(reqId);
 
       if (bid !== null && ask !== null && ask > 0) {
         const midpoint = (bid + ask) / 2;
@@ -127,6 +140,7 @@ function enrichCandidateUnbudgeted(connection: IbkrConnection, reqId: number, sy
     connection.ib.on(EventName.tickPrice, onTick);
     connection.ib.on(EventName.tickSize, onTick);
     connection.ib.on(EventName.tickGeneric, onTick);
+    connection.ib.on(EventName.error, onError);
 
     requestRealtimeMarketData(connection.ib);
     connection.ib.reqMktData(reqId, new Stock(symbol, "SMART", "USD"), "100,101,106,165", false, false);

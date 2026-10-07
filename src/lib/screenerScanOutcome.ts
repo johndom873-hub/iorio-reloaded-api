@@ -14,7 +14,13 @@ export interface EnrichmentQuote {
 
 /** True when the enrichment timed out or errored and came back with nothing at all: it must not overwrite stored data. */
 export function isEmptyEnrichment(quote: EnrichmentQuote): boolean {
-  return Object.values(quote).every((value) => value === null);
+  return [quote.lastPrice, quote.avgShareVolume, quote.avgOptionVolume, quote.callOpenInterest, quote.putOpenInterest, quote.bidAskSpreadPct, quote.impliedVolatility].every((value) => value === null);
+}
+
+/** "PSKY (IBKR 200 No security definition has been found for the request)", or "(no data before the timeout)" when IBKR sent no error. */
+export function describeFailedEnrichment(symbol: string, ibkrError: { code: number; message: string } | null): string {
+  if (!ibkrError) return `${symbol} (no data before the timeout)`;
+  return `${symbol} (IBKR ${ibkrError.code} ${ibkrError.message.replaceAll("): ", ") ")})`;
 }
 
 /** One line for the job alert, or undefined when every scan returned rows and every symbol enriched. Free of "): " (Telegram truncation). */
