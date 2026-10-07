@@ -107,7 +107,7 @@ describe("sessionMiddleware configuration", () => {
     expect(recordedStoreOptions[0]).toMatchObject({
       tableName: "session",
       createTableIfMissing: false,
-      conObject: { connectionString: "postgres://example.invalid/unit_test_db", max: 3, ssl: false },
+      conObject: { connectionString: "postgres://example.invalid/unit_test_db", max: 2, ssl: false },
     });
   });
 
