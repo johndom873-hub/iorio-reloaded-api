@@ -117,14 +117,14 @@ describe("fetchCalendarConflictContext", () => {
 });
 
 describe("macro event warning", () => {
-  it("fetches the major macro events from today to the expiry by Eastern date, oldest first", async () => {
+  it("fetches the major macro events still ahead and before the expiry's 16:00 ET close, oldest first", async () => {
     database.state.calls.length = 0;
     database.state.macroEventRows = [{ title: "CPI", eventDate: "2026-10-14" }];
     const events = await fetchMacroEventWarningEvents("20261016");
     expect(events).toEqual([{ title: "CPI", eventDate: "2026-10-14" }]);
     const call = database.state.calls.find((entry) => entry.table === "major_macro_events")!;
-    expect(call.operations).toContainEqual(["whereRaw", "(event_at AT TIME ZONE 'America/New_York')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date"]);
-    expect(call.operations).toContainEqual(["andWhereRaw", "(event_at AT TIME ZONE 'America/New_York')::date <= to_date(?, 'YYYYMMDD')", ["20261016"]]);
+    expect(call.operations).toContainEqual(["whereRaw", "event_at > CURRENT_TIMESTAMP"]);
+    expect(call.operations).toContainEqual(["andWhereRaw", "event_at < ((to_date(?, 'YYYYMMDD') + time '16:00') AT TIME ZONE 'America/New_York')", ["20261016"]]);
     expect(call.operations).toContainEqual(["orderBy", "event_at", "asc"]);
   });
 

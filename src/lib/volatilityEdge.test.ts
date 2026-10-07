@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "./realizedVolatility.js";
 import { sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { computeVolatilityEdge, expirySpansEarnings, selectRealizedVolatilityForecast, type EdgeSlice } from "./volatilityEdge.js";
+import { computeVolatilityEdge, expirySpansEarnings, expirySpansMacroEvent, selectRealizedVolatilityForecast, type EdgeSlice } from "./volatilityEdge.js";
 
 // Deterministic synthetic bars: a slow random walk with a fixed seed.
 function makeBars(count: number, dailyMove = 0.02, seed = 42): DailyOhlcvBar[] {
@@ -97,5 +97,25 @@ describe("expirySpansEarnings", () => {
     expect(expirySpansEarnings("2026-09-21", "2026-11-20", ["2026-08-01"])).toBe(false);
     expect(expirySpansEarnings("2026-09-21", "2026-11-20", [])).toBe(false);
     expect(expirySpansEarnings("2026-09-21", "2026-11-20", ["2027-01-01", "2026-10-01"])).toBe(true);
+  });
+});
+
+describe("expirySpansMacroEvent", () => {
+  const scoredAtMs = Date.parse("2026-10-30T14:30:00Z"); // 10:30 EDT
+  const at = (iso: string) => [{ eventAtMs: Date.parse(iso) }];
+
+  it("counts an event still ahead and before 16:00 ET on the expiry date", () => {
+    expect(expirySpansMacroEvent(scoredAtMs, "2026-11-06", at("2026-11-06T13:30:00Z"))).toBe(true); // 08:30 EST on expiry day
+    expect(expirySpansMacroEvent(scoredAtMs, "2026-11-06", at("2026-11-06T20:59:00Z"))).toBe(true); // 15:59 EST
+  });
+
+  it("does not count an event at or after the close, using the expiry date's own UTC offset", () => {
+    expect(expirySpansMacroEvent(scoredAtMs, "2026-11-06", at("2026-11-06T21:00:00Z"))).toBe(false); // 16:00 EST
+    expect(expirySpansMacroEvent(scoredAtMs, "2026-11-03", at("2026-11-04T00:00:00Z"))).toBe(false); // election, 19:00 EST
+    expect(expirySpansMacroEvent(scoredAtMs, "2026-11-04", at("2026-11-04T00:00:00Z"))).toBe(true); // the next day's expiry
+  });
+
+  it("does not count an event already out", () => {
+    expect(expirySpansMacroEvent(scoredAtMs, "2026-11-06", at("2026-10-30T12:30:00Z"))).toBe(false); // 08:30 today
   });
 });

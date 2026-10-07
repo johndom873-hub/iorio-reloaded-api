@@ -220,6 +220,13 @@ describe("buildSignalCandidates: flags and executability", () => {
     expect(after.flags).not.toContain("macro_event_before_expiry");
   });
 
+  it("does not count an event after the expiry's 16:00 ET close (the option has settled)", () => {
+    const electionEvening = { dateIso: "2026-10-21", eventAtMs: Date.parse("2026-10-21T23:00:00Z") }; // 19:00 EDT on the expiry date
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEvents: [electionEvening] }))[0]!.flags).not.toContain("macro_event_before_expiry");
+    const fedDecision = { dateIso: "2026-10-21", eventAtMs: Date.parse("2026-10-21T18:00:00Z") }; // 14:00 EDT on the expiry date
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEvents: [fedDecision] }))[0]!.flags).toContain("macro_event_before_expiry");
+  });
+
   it("counts a macro release later today, not one already out (scored at 10:30 ET)", () => {
     const laterToday = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEvents: [{ dateIso: "2026-09-21", eventAtMs: Date.parse("2026-09-21T18:00:00Z") }] }))[0]!; // 14:00 ET
     expect(laterToday.flags).toContain("macro_event_before_expiry");

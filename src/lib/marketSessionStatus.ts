@@ -1,5 +1,7 @@
 import { db } from "../db/connection.js";
-import { easternIsoDate } from "./easternIsoDate.js";
+import { easternInstant, easternIsoDate } from "./easternIsoDate.js";
+
+export { easternInstant };
 
 // US equities session schedule (Eastern Time) — approved 2026-09-14.
 // NASDAQ and NYSE share this exact schedule, which is why one computation
@@ -19,25 +21,6 @@ export interface MarketSessionStatus {
   label: string;
   /** ISO instant the countdown in `label` runs to, so a client can keep ticking it down between polls. */
   nextChangeAt: string;
-}
-
-// The Eastern/UTC offset varies by date (EST vs EDT) but not within a single
-// calendar date, so deriving it from a fixed UTC-noon instant on that date —
-// always the same ET calendar day regardless of the offset — and applying it
-// to any wall-clock time on that date is exact, with no manual DST table.
-const easternOffsetFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", timeZoneName: "shortOffset" });
-
-function easternOffsetMinutes(dateIso: string): number {
-  const parts = easternOffsetFormatter.formatToParts(new Date(`${dateIso}T12:00:00Z`));
-  const offsetText = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT-5";
-  const match = offsetText.match(/GMT([+-]\d+)/);
-  return match ? Number(match[1]) * 60 : -300;
-}
-
-export function easternInstant(dateIso: string, hour: number, minute: number): Date {
-  const [year, month, day] = dateIso.split("-").map(Number) as [number, number, number];
-  const utcMinutesSinceMidnight = hour * 60 + minute - easternOffsetMinutes(dateIso);
-  return new Date(Date.UTC(year, month - 1, day, 0, utcMinutesSinceMidnight));
 }
 
 /** 00:00 ET of the Eastern calendar day `at` falls on: "today" for jobs that must have run since the US day began. */

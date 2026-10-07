@@ -64,12 +64,13 @@ export interface MacroEventWarningEvent {
  * Non-blocking macro-event warning for the window between today and an order's
  * expiry — advisory-only per Marcelo's 2026-08-31 decision, unlike
  * earnings/ex-dividend which hard-exclude via findCalendarConflict above. The
- * events are the major US ones (macroEventCalendar.ts), compared by Eastern date.
+ * events are the major US ones (macroEventCalendar.ts) still ahead and before the
+ * expiry's 16:00 ET close: the same rule as the Signals flag (expirySpansMacroEvent).
  */
 export async function fetchMacroEventWarningEvents(expiryYyyymmdd: string): Promise<MacroEventWarningEvent[]> {
   return db("major_macro_events")
-    .whereRaw("(event_at AT TIME ZONE 'America/New_York')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date")
-    .andWhereRaw("(event_at AT TIME ZONE 'America/New_York')::date <= to_date(?, 'YYYYMMDD')", [expiryYyyymmdd])
+    .whereRaw("event_at > CURRENT_TIMESTAMP")
+    .andWhereRaw("event_at < ((to_date(?, 'YYYYMMDD') + time '16:00') AT TIME ZONE 'America/New_York')", [expiryYyyymmdd])
     .orderBy("event_at", "asc")
     .select("title", db.raw(`(event_at AT TIME ZONE 'America/New_York')::date::text AS "eventDate"`));
 }

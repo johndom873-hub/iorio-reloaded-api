@@ -1,3 +1,4 @@
+import { easternInstant } from "./easternIsoDate.js";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "./realizedVolatility.js";
 import { sviTotalVariance, type RawSviParameters, type SviSliceStatus } from "./impliedVolatilitySurface.js";
 
@@ -91,7 +92,15 @@ export function expirySpansEarnings(todayIso: string, expiryIso: string, earning
   return earningsDatesIso.some((eventDate) => eventDate >= todayIso && eventDate <= expiryIso);
 }
 
-/** A macro release still ahead of the scoring moment whose Eastern date is on or before the expiry: a 14:00 release today counts at 10:00, not at 14:05. */
-export function expirySpansMacroEvent(scoredAtMs: number, expiryIso: string, events: { dateIso: string; eventAtMs: number }[]): boolean {
-  return events.some((event) => event.eventAtMs > scoredAtMs && event.dateIso <= expiryIso);
+/** The option settles at the expiry date's regular close (half days close at 13:00 ET, but no major macro event falls between 13:00 and 16:00). */
+const expiryCloseEasternTime = { hour: 16, minute: 0 };
+
+/**
+ * A macro event still ahead of the scoring moment and before the expiry's 16:00 ET close (approved 2026-10-07): a 14:00
+ * release today counts at 10:00, not at 14:05; an 08:30 release on the expiry date counts; a 19:00 ET election on the
+ * expiry date does not, because the option has already settled.
+ */
+export function expirySpansMacroEvent(scoredAtMs: number, expiryIso: string, events: { eventAtMs: number }[]): boolean {
+  const expiryCloseMs = easternInstant(expiryIso, expiryCloseEasternTime.hour, expiryCloseEasternTime.minute).getTime();
+  return events.some((event) => event.eventAtMs > scoredAtMs && event.eventAtMs < expiryCloseMs);
 }
