@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import type { TelegramApi } from "./telegramApi.js";
-import { describeOrderFillLine, fillBearingOrderStatuses, loadOrderFills, shouldWaitForFills, type OrderFill } from "../lib/orderFills.js";
+import { describeOrderFillLine, fillBearingOrderStatuses, fillsAreComplete, loadOrderFills, shouldWaitForFills, type OrderFill } from "../lib/orderFills.js";
 
 export type { OrderFill };
 
@@ -24,10 +24,13 @@ export interface OrderNoticeInput {
   /** Why it ended cancelled when no user cancelled it (order_requests.cancellation_reason). */
   cancellationReason: string | null;
   symbol: string;
+  /** The order's legs (payload.legs), to tell a filled order whose fills are only partly recorded. */
+  legs?: { quantity: number }[];
 }
 
-function withFills(headline: string, fills: OrderFill[]): string {
-  return fills.length > 0 ? `${headline}\n${fills.map(describeOrderFillLine).join("\n")}` : `${headline}\n(fill prices not recorded yet)`;
+function withFills(headline: string, fills: OrderFill[], someFillsMissing = false): string {
+  if (fills.length === 0) return `${headline}\n(fill prices not recorded yet)`;
+  return [headline, ...fills.map(describeOrderFillLine), ...(someFillsMissing ? ["(some fills not recorded yet)"] : [])].join("\n");
 }
 
 /** Pure: the Telegram message for one status change of an order Genosuke placed. */
@@ -38,7 +41,7 @@ export function describeOrderUpdate(order: OrderNoticeInput, fills: OrderFill[])
     case "partially_filled":
       return withFills(`⚠️ ${order.symbol} order partly filled so far, the rest is still working:`, fills);
     case "filled":
-      return withFills(`✅ ${order.symbol} order filled — IBKR confirmed the trade:`, fills);
+      return withFills(`✅ ${order.symbol} order filled — IBKR confirmed the trade:`, fills, order.legs !== undefined && !fillsAreComplete(order.status, order.legs, fills));
     case "cancelled":
       if (order.cancellationReason === "expired_at_close") return `${order.symbol} order expired unfilled at the market close (orders are day orders) — nothing was filled.`;
       if (order.cancellationReason === "not_filled_in_time") return `${order.symbol} order was cancelled after resting unfilled past the time limit — nothing was filled.`;

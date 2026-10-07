@@ -85,8 +85,8 @@ function searchResult(overrides: Record<string, unknown> = {}) {
 }
 
 // 2026-10-30 00:00:00 UTC and 2026-11-15 00:00:00 UTC
-const OCTOBER_30_SECONDS = Date.UTC(2026, 9, 30) / 1000;
-const NOVEMBER_15_SECONDS = Date.UTC(2026, 10, 15) / 1000;
+const OCTOBER_30_SECONDS = Date.UTC(2026, 9, 30, 16) / 1000;
+const NOVEMBER_15_SECONDS = Date.UTC(2026, 10, 15, 16) / 1000;
 
 beforeEach(() => {
   recordedDatabaseCalls.length = 0;

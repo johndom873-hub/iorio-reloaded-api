@@ -1,0 +1,52 @@
+import { describe, expect, it } from "vitest";
+import { parseIbkrExecutionTime } from "./ibkrGatewayParseExecutionTime.js";
+
+// Audit F (2026-10-07): the per-call Intl.DateTimeFormat became one cached formatter per zone. The result must be exactly
+// the removed implementation's for every zone, and alternating zones must never read another zone's formatter.
+
+function removedParseIbkrExecutionTime(raw: string | undefined): Date | null {
+  if (!raw) return null;
+  const match = raw.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\S+)$/);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second, zone] = match;
+  const naiveUtcGuess = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+  const partsInZone = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(new Date(naiveUtcGuess));
+  const part = (type: string) => Number(partsInZone.find((p) => p.type === type)?.value);
+  const asIfUtc = Date.UTC(part("year"), part("month") - 1, part("day"), part("hour"), part("minute"), part("second"));
+  return new Date(naiveUtcGuess + (naiveUtcGuess - asIfUtc));
+}
+
+const zones = ["US/Eastern", "America/New_York", "Asia/Singapore", "Europe/London", "UTC", "US/Central"];
+const wallTimes = ["20260105 09:30:00", "20260306 15:59:59", "20260308 01:59:59", "20260308 03:00:00", "20260309 09:30:00", "20261030 16:00:00", "20261101 00:30:00", "20261101 01:30:00", "20261102 09:30:00", "20261007 23:59:59", "20261008 00:00:00"];
+
+describe("parseIbkrExecutionTime with cached per-zone formatters", () => {
+  it("equals the removed per-call implementation for every zone and wall time, zones interleaved", () => {
+    for (let round = 0; round < 3; round++) {
+      for (const wall of wallTimes) {
+        for (const zone of round === 1 ? [...zones].reverse() : zones) {
+          const raw = `${wall} ${zone}`;
+          expect(parseIbkrExecutionTime(raw)?.toISOString()).toBe(removedParseIbkrExecutionTime(raw)?.toISOString());
+        }
+      }
+    }
+  });
+
+  it("parses ordinary US session times in both EST and EDT", () => {
+    expect(parseIbkrExecutionTime("20260105 09:30:00 US/Eastern")?.toISOString()).toBe("2026-01-05T14:30:00.000Z");
+    expect(parseIbkrExecutionTime("20260824 09:44:07 US/Eastern")?.toISOString()).toBe("2026-08-24T13:44:07.000Z");
+    expect(parseIbkrExecutionTime("20261102 15:59:59 US/Eastern")?.toISOString()).toBe("2026-11-02T20:59:59.000Z");
+  });
+
+  it("throws for an unknown zone every time (nothing is cached for it) and keeps working for valid zones afterwards", () => {
+    expect(() => removedParseIbkrExecutionTime("20260105 09:30:00 Not/AZone")).toThrow(RangeError);
+    expect(() => parseIbkrExecutionTime("20260105 09:30:00 Not/AZone")).toThrow(RangeError);
+    expect(() => parseIbkrExecutionTime("20260105 09:30:00 Not/AZone")).toThrow(RangeError);
+    expect(parseIbkrExecutionTime("20260105 09:30:00 US/Eastern")?.toISOString()).toBe("2026-01-05T14:30:00.000Z");
+  });
+
+  it("returns null for the shapes it does not parse", () => {
+    expect(parseIbkrExecutionTime(undefined)).toBeNull();
+    expect(parseIbkrExecutionTime("")).toBeNull();
+    expect(parseIbkrExecutionTime("2026-01-05T09:30:00Z")).toBeNull();
+  });
+});

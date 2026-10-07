@@ -5,24 +5,26 @@ export function easternIsoDate(at: Date = new Date()): string {
   return easternDateFormatter.format(at);
 }
 
-// The Eastern/UTC offset varies by date (EST vs EDT) but not within a single
-// calendar date, so deriving it from a fixed UTC-noon instant on that date —
-// always the same ET calendar day regardless of the offset — and applying it
-// to any wall-clock time on that date is exact, with no manual DST table.
+// The Eastern/UTC offset (EST vs EDT), read from ICU at an instant, so no manual DST table.
 const easternOffsetFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", timeZoneName: "shortOffset" });
 
-function easternOffsetMinutes(dateIso: string): number {
-  const parts = easternOffsetFormatter.formatToParts(new Date(`${dateIso}T12:00:00Z`));
+function easternOffsetMinutesAt(at: Date): number {
+  const parts = easternOffsetFormatter.formatToParts(at);
   const offsetText = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT-5";
   const match = offsetText.match(/GMT([+-]\d+)/);
   return match ? Number(match[1]) * 60 : -300;
 }
 
-/** The instant `hour:minute` on the America/New_York clock on `dateIso`. */
+/**
+ * The instant `hour:minute` on the America/New_York clock on `dateIso`. The offset is read at the target instant (a first
+ * guess from that date's noon offset, then corrected once): on the two DST-change Sundays the offset differs before and
+ * after 02:00 ET.
+ */
 export function easternInstant(dateIso: string, hour: number, minute: number): Date {
   const [year, month, day] = dateIso.split("-").map(Number) as [number, number, number];
-  const utcMinutesSinceMidnight = hour * 60 + minute - easternOffsetMinutes(dateIso);
-  return new Date(Date.UTC(year, month - 1, day, 0, utcMinutesSinceMidnight));
+  const wallClockAsUtcMs = Date.UTC(year, month - 1, day, hour, minute);
+  const guessMs = wallClockAsUtcMs - easternOffsetMinutesAt(new Date(`${dateIso}T12:00:00Z`)) * 60_000;
+  return new Date(wallClockAsUtcMs - easternOffsetMinutesAt(new Date(guessMs)) * 60_000);
 }
 
 const easternPartsFormatter = new Intl.DateTimeFormat("en-US", {

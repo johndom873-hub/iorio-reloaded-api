@@ -109,19 +109,23 @@ export function parsePlutoDecision(rawText: string, offeredIds: ReadonlySet<stri
   };
 }
 
-/** The concerns array: each names a ticker of this message (every offered id starts with its symbol) or null for the whole message. */
+/**
+ * The concerns array: each names a ticker of this message (every offered id starts with its symbol) or null for the whole
+ * message. A symbol outside the message (SPY from the market block, a ticker from recent_decisions) is read as a concern about
+ * the whole message rather than voiding the answer: the concern stands, and code then trades nothing that round.
+ */
 function parseSystemConcerns(value: unknown, offeredIds: ReadonlySet<string>): PlutoSystemConcern[] | string {
   if (!Array.isArray(value)) return "system_concerns must be an array";
   if (value.length > 10) return "system_concerns has more than 10 entries";
-  const symbols = new Set([...offeredIds].map((id) => id.split(":")[0]));
+  const symbols = new Set([...offeredIds].map((id) => id.split(":")[0]!.toUpperCase()));
   const concerns: PlutoSystemConcern[] = [];
   for (const entry of value) {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return "each system concern must be an object with symbol and concern";
     const { symbol, concern } = entry as Record<string, unknown>;
     if (typeof concern !== "string" || concern.trim() === "") return "each system concern needs a concern text";
     if (symbol !== null && typeof symbol !== "string") return "a system concern's symbol must be a ticker or null";
-    if (typeof symbol === "string" && !symbols.has(symbol)) return `system concern names ${symbol}, which is not in this message`;
-    concerns.push({ symbol: symbol ?? null, concern });
+    const named = typeof symbol === "string" ? symbol.trim().toUpperCase() : null;
+    concerns.push({ symbol: named !== null && symbols.has(named) ? named : null, concern });
   }
   return concerns;
 }

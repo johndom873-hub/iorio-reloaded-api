@@ -100,9 +100,10 @@ export async function getLatestBackfillRun(tickerId: string): Promise<TickerBack
 /** Persistence for runs; injectable so the orchestration is testable without a database. */
 export interface BackfillRunStore {
   getLatest: (tickerId: string) => Promise<TickerBackfillRun | null>;
-  /** Marks any leftover 'running' row for the ticker as partial (a stale one would violate the one-running index). */
+  /** Marks the ticker's stale 'running' row as partial (it would violate the one-running index); a fresh one is a start racing this one and is left alone. */
   closeRunning: (tickerId: string) => Promise<void>;
-  create: (tickerId: string, steps: BackfillStep[], resumedFromRunId?: string) => Promise<TickerBackfillRun>;
+  /** joinedExisting: another start won the race and its running run came back instead; that start already queued it. */
+  create: (tickerId: string, steps: BackfillStep[], resumedFromRunId?: string) => Promise<TickerBackfillRun & { joinedExisting?: boolean }>;
   /** Every 'running' run, oldest first, whatever its age. */
   listRunning: () => Promise<RunningBackfillRun[]>;
   saveProgress: (runId: string, steps: BackfillStep[]) => Promise<void>;
@@ -127,7 +128,10 @@ export interface BackfillStepWorkers {
 export const databaseRunStore: BackfillRunStore = {
   getLatest: getLatestBackfillRun,
   closeRunning: async (tickerId) => {
-    await db("ticker_backfill_runs").where({ ticker_id: tickerId, status: "running" }).update({ status: "partial", finished_at: db.fn.now() });
+    await db("ticker_backfill_runs")
+      .where({ ticker_id: tickerId, status: "running" })
+      .whereRaw(`started_at < now() - interval '${staleBackfillRunMinutes} minutes'`)
+      .update({ status: "partial", finished_at: db.fn.now() });
   },
   create: async (tickerId, steps, resumedFromRunId) => {
     try {
@@ -140,7 +144,7 @@ export const databaseRunStore: BackfillRunStore = {
       // second — hand back the run that won instead of a 500 (2026-09-24).
       if ((error as { code?: string }).code === "23505") {
         const existing = await getLatestBackfillRun(tickerId);
-        if (existing && existing.status === "running") return existing;
+        if (existing && existing.status === "running") return { ...existing, joinedExisting: true };
       }
       throw error;
     }
@@ -210,8 +214,8 @@ export async function startTickerBackfill(tickerId: string, symbol: string, depe
   if (current && current.status === "running") return current;
 
   await dependencies.store.closeRunning(tickerId);
-  const run = await dependencies.store.create(tickerId, buildInitialBackfillSteps(scope));
-  enqueueBackfillRun(run, symbol, dependencies, scope);
+  const { joinedExisting, ...run } = await dependencies.store.create(tickerId, buildInitialBackfillSteps(scope));
+  if (!joinedExisting) enqueueBackfillRun(run, symbol, dependencies, scope);
   return run;
 }
 
@@ -222,7 +226,7 @@ function enqueueBackfillRun(run: TickerBackfillRun, symbol: string, dependencies
 export interface ResumeInterruptedBackfillsResult {
   resumed: string[];
   /** Closed but not restarted: already a restart once, or the ticker was removed from the shortlist. */
-  notResumed: { symbol: string; reason: "already_resumed_once" | "not_on_shortlist" }[];
+  notResumed: { symbol: string; reason: "already_resumed_once" | "not_on_shortlist" | "started_again_meanwhile" | "failed" }[];
 }
 
 /**
@@ -237,19 +241,30 @@ export interface ResumeInterruptedBackfillsResult {
 export async function resumeInterruptedBackfillRuns(dependencies: TickerBackfillDependencies = defaultDependencies): Promise<ResumeInterruptedBackfillsResult> {
   const result: ResumeInterruptedBackfillsResult = { resumed: [], notResumed: [] };
   for (const interrupted of await dependencies.store.listRunning()) {
-    await dependencies.store.finish(interrupted.id, "partial", markUnfinishedStepsInterrupted(interrupted.steps));
-    if (interrupted.resumedFromRunId) {
-      result.notResumed.push({ symbol: interrupted.symbol, reason: "already_resumed_once" });
-      continue;
+    // One bad row must not leave the later runs stuck at 'running' with nothing working on them.
+    try {
+      await dependencies.store.finish(interrupted.id, "partial", markUnfinishedStepsInterrupted(interrupted.steps));
+      if (interrupted.resumedFromRunId) {
+        result.notResumed.push({ symbol: interrupted.symbol, reason: "already_resumed_once" });
+        continue;
+      }
+      if (!interrupted.onShortlist) {
+        result.notResumed.push({ symbol: interrupted.symbol, reason: "not_on_shortlist" });
+        continue;
+      }
+      const scope = scopeOfSteps(interrupted.steps);
+      const { joinedExisting, ...run } = await dependencies.store.create(interrupted.tickerId, buildInitialBackfillSteps(scope), interrupted.id);
+      // A Retry (or the Signals switch) started the ticker's setup between the close and here: that one is already queued.
+      if (joinedExisting) {
+        result.notResumed.push({ symbol: interrupted.symbol, reason: "started_again_meanwhile" });
+        continue;
+      }
+      enqueueBackfillRun(run, interrupted.symbol, dependencies, scope);
+      result.resumed.push(interrupted.symbol);
+    } catch (error) {
+      console.error(`Ticker setup for ${interrupted.symbol}: could not close or restart the interrupted run ${interrupted.id}`, error);
+      result.notResumed.push({ symbol: interrupted.symbol, reason: "failed" });
     }
-    if (!interrupted.onShortlist) {
-      result.notResumed.push({ symbol: interrupted.symbol, reason: "not_on_shortlist" });
-      continue;
-    }
-    const scope = scopeOfSteps(interrupted.steps);
-    const run = await dependencies.store.create(interrupted.tickerId, buildInitialBackfillSteps(scope), interrupted.id);
-    enqueueBackfillRun(run, interrupted.symbol, dependencies, scope);
-    result.resumed.push(interrupted.symbol);
   }
   return result;
 }

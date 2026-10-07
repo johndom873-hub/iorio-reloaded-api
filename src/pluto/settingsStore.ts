@@ -103,7 +103,8 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   minSlicePointCount: { column: "min_slice_point_count", kind: "integer", min: 0 },
   maxMidVsSurfaceIvVp: { column: "max_mid_vs_surface_iv_vp", kind: "number", min: 0 },
   maxIvShiftVp: { column: "max_iv_shift_vp", kind: "number", min: 0 },
-  maxDayMoveMultiple: { column: "max_day_move_multiple", kind: "number", min: 0 },
+  // 0 would block every ticker that moved at all; the column is decimal(6,2). 100× normal is effectively off.
+  maxDayMoveMultiple: { column: "max_day_move_multiple", kind: "number", min: 0.5, max: 100 },
   windowStartEt: { column: "window_start_et", kind: "text" },
   windowEndEt: { column: "window_end_et", kind: "text" },
   dailyLossBreakerPct: { column: "daily_loss_breaker_pct", kind: "number", min: 0, max: 100 },

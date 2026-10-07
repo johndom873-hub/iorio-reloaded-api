@@ -10,7 +10,7 @@ import { computeMoveContext, type MoveContext } from "./moveContext.js";
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
-import { loadInFlightNotionals, loadOccupiedContracts, loadPlutoBook } from "./book.js";
+import { anyOpenPositionOn, loadInFlightNotionals, loadOccupiedContracts, loadPlutoBook } from "./book.js";
 import { deterministicTopPick, filterTickerForPluto, findSameContractConflict, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { updatePlutoConcernAlerts } from "./concernAlerts.js";
@@ -21,7 +21,7 @@ import { easternMinutesOfDay } from "../lib/easternIsoDate.js";
 import { fetchPlutoAccountSummary } from "./accountSummaryCache.js";
 import { candidateSetFingerprint, classifyFingerprintChange, tickerFingerprint } from "./inputHash.js";
 import { ensurePlutoPrompt } from "./prompts.js";
-import { finishPlutoPass, type FinishPlutoPassInput, recordPlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
+import { finishPlutoPass, type FinishPlutoPassInput, recordPlutoAction, updatePlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { callPlutoModel } from "./modelClient.js";
 import { runPostModelGates } from "./postModelGates.js";
@@ -63,6 +63,16 @@ export interface PassSummary {
   modelCalled: boolean;
   skippedReason: string | null;
   outcome: string | null;
+  /** The round stopped at the system checks (account data, worker, reconciliation…): nothing was analysed. */
+  skippedOnSystemChecks?: boolean;
+}
+
+/** A round that failed after its model call: the call was paid for and recorded, so it must not be retried as if nothing ran. */
+export class PlutoRoundFailedAfterModelCallError extends Error {
+  constructor(message: string, readonly passId: string) {
+    super(message);
+    this.name = "PlutoRoundFailedAfterModelCallError";
+  }
 }
 
 interface EvaluatedTicker {
@@ -132,14 +142,21 @@ async function loadMoveContext(ticker: EvaluatedTicker): Promise<MoveContext | n
  * Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here (only when `executeAutomatic`: the re-score
  * after a burst rebuilds the offers but must never send an automatic close twice), the rest go to the model.
  */
-async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string, cancelByMs: number, executeAutomatic: boolean): Promise<void> {
+async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string, cancelByMs: number, executeAutomatic: boolean, automaticBudget: { remaining: number } = { remaining: 0 }): Promise<void> {
   const watched = context.marketWatch.snapshot(ticker.row.symbol);
   const { offers } = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: ticker.scored.heldLegs, rolls: ticker.scored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso, todayIso: ticker.inputs.todayEasternIso });
   for (const offer of offers) {
     if (!offer.automatic || !executeAutomatic) continue;
+    // Automatic closes count against the session's order cap like any other order (counters.ts).
+    if (automaticBudget.remaining <= 0) {
+      await recordPlutoEvent("warning", { message: `automatic close not sent, the session's order cap is reached: ${offer.description}`, symbol: offer.symbol });
+      continue;
+    }
+    automaticBudget.remaining -= 1;
     const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds, ...(offer.contract ?? {}) }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: offer.automaticReason ?? "automatic close" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
-    const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.limitPrice })), description: offer.description, reasons: [`automatic close: ${offer.automaticReason ?? "no reason recorded"}`] });
-    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description, cancelByMs }), result.orderId, offer.symbol);
+    if (offer.otherReferenceLegs) await updatePlutoAction(actionId, { referenceOtherLegs: offer.otherReferenceLegs });
+    const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.legLimitPrices?.[legId] ?? offer.limitPrice })), description: offer.description, reasons: [`automatic close: ${offer.automaticReason ?? "no reason recorded"}`] });
+    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier, ...(offer.otherReferenceLegs ? { otherLegs: offer.otherReferenceLegs } : {}) }, description: offer.description, cancelByMs }), result.orderId, offer.symbol);
   }
   ticker.closeOffers = offers.filter((offer) => !offer.automatic);
 }
@@ -161,20 +178,22 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const settings = await loadPlutoSettings();
   const passId = await startPlutoPass(request.trigger, request.triggerDetail, settings);
   let passFinished = false;
+  let modelCallRecorded = false;
   const finishPass = async (input: FinishPlutoPassInput) => {
-    passFinished = true;
     await finishPlutoPass(passId, input);
+    passFinished = true;
+    modelCallRecorded = input.modelCalled === true;
   };
   try {
     return await runStartedPass(request, context, settings, passId, finishPass);
   } catch (error) {
-    // A pass already finished (a failure while recording its outcome) keeps what it recorded.
-    if (!passFinished) {
-      try {
-        await finishPlutoPass(passId, { skippedReason: `round failed: ${error instanceof Error ? error.message : String(error)}` });
-      } catch {
-        // The round's own error is the one worth reporting; the abandoned-pass sweep closes the row later.
-      }
+    // A pass already finished keeps what it recorded; one that recorded its model call must not be retried as if nothing ran.
+    if (modelCallRecorded) throw new PlutoRoundFailedAfterModelCallError(error instanceof Error ? error.message : String(error), passId);
+    if (passFinished) throw error;
+    try {
+      await finishPlutoPass(passId, { skippedReason: `round failed: ${error instanceof Error ? error.message : String(error)}` });
+    } catch {
+      // The round's own error is the one worth reporting; the abandoned-pass sweep closes the row later.
     }
     throw error;
   }
@@ -216,7 +235,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       await notifyPlutoTelegram(`🛑 Pluto breaker tripped (reconciliation): ${checks.checks.reconciliation.detail}. Pluto is paused until a human resets it.`);
     }
   }
-  if (!checks.ok) return skip(checks.failures.join(" | "), checks.checks);
+  if (!checks.ok) return { ...(await skip(checks.failures.join(" | "), checks.checks)), skippedOnSystemChecks: true };
 
   // Market stress (design round 4, item 72): a broad intraday drop blocks new opens for as long as it
   // lasts; rolls and profit-taking closes stay allowed. Recorded as a check, not a breaker, so it lifts
@@ -238,7 +257,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   // round, ~2,200 a session, only to find that nothing had changed or that the ticker was still cooling down).
   const cooldownMs = settings.perTickerModelCooldownMinutes * 60_000;
   const coolingDown = (symbol: string) => nowMs - (context.lastModelEvaluationAtBySymbol.get(symbol) ?? 0) < cooldownMs;
-  if (!request.force && rows.every((row) => coolingDown(row.symbol))) return skip("every ticker in this round is cooling down", checks.checks);
+  // A held position can have an automatic close due (odd lots, a buyback before earnings), so its ticker is never skipped here.
+  if (!request.force && rows.every((row) => coolingDown(row.symbol)) && !(await anyOpenPositionOn(rows.map((row) => row.symbol)))) return skip("every ticker in this round is cooling down", checks.checks);
   const opensBlockedBecause = marketStress ? "market stress: new opens blocked while SPY is down" : request.heldPositionsOnly ? "opens wait for today's opening look" : null;
   const blockOpensWhenBarred = (ticker: EvaluatedTicker) => {
     if (!opensBlockedBecause) return;
@@ -252,11 +272,12 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     evaluated.push(ticker);
   }
   const previousSessionDateIso = await previousOpenSessionDate(checks.context.todayEasternIso);
+  const automaticBudget = { remaining: settings.maxActionsPerSession - checks.context.counters.actionsToday };
   // What the round looked at, before any live quote: what the next round compares against.
   const lookedAtFingerprintBySymbol = new Map<string, string>();
   let offeredCount = 0;
   for (const ticker of evaluated) {
-    await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs, true);
+    await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs, true, automaticBudget);
     const requotable = opensBlockedBecause ? [] : candidatesEligibleOnceRequoted(ticker.scored, ticker.filtered);
     lookedAtFingerprintBySymbol.set(ticker.row.symbol, tickerFingerprint([...ticker.filtered.eligible, ...requotable], ticker.filtered.eligibleRolls, ticker.closeOffers.map((offer) => offer.id)));
     offeredCount += ticker.filtered.eligible.length + requotable.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length;
@@ -280,7 +301,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   // 4b. The model will be called: only now burst the promising contracts and re-score with the live quotes.
   const refreshed: EvaluatedTicker[] = [];
   for (const ticker of evaluated) {
-    const contracts = ticker.filtered.tickerBlocks.length === 0 ? burstContractsFor(ticker.scored, ticker.filtered, settings) : [];
+    // Opens blocked for the round (market stress, before the opening look): nothing worth a burst but the held legs' own quotes.
+    const contracts = ticker.filtered.tickerBlocks.length === 0 && !opensBlockedBecause ? burstContractsFor(ticker.scored, ticker.filtered, settings) : [];
     const liveQuotes = contracts.length > 0 ? await context.marketWatch.burst(ticker.row.symbol, contracts) : [];
     if (liveQuotes.length === 0) {
       refreshed.push(ticker);
@@ -310,7 +332,18 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const book = await loadPlutoBook();
   const recentDecisions: { pass_id: string; parsed_output: { decision?: string; candidate_id?: string | null; reasons?: string[] } | null; created_at: Date }[] = await db("pluto_decisions").whereNotNull("parsed_output").orderBy("created_at", "desc").limit(10).select("pass_id", "parsed_output", "created_at");
   const tradePassIds = recentDecisions.filter((row) => row.parsed_output?.decision === "trade").map((row) => row.pass_id);
-  const tradeActions: { pass_id: string; outcome: string; block_reason: string | null }[] = tradePassIds.length === 0 ? [] : await db("pluto_actions").whereIn("pass_id", tradePassIds).whereNot({ kind: "no_trade" }).select("pass_id", "outcome", "block_reason");
+  // The model's own action per pass: not an automatic close recorded in the same round (those carry the automatic_close
+  // gate), and the "chosen candidate not found" row (kind no_trade, outcome blocked) included. Oldest first, so the last wins.
+  const tradeActions: { pass_id: string; outcome: string; block_reason: string | null }[] =
+    tradePassIds.length === 0
+      ? []
+      : await db("pluto_actions")
+          .whereIn("pass_id", tradePassIds)
+          .whereNot((builder) => builder.where({ kind: "no_trade", outcome: "no_trade" }))
+          .whereRaw("not coalesce(gate_results, '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ gate: "automatic_close" }])])
+          .orderBy("created_at")
+          .orderBy("id")
+          .select("pass_id", "outcome", "block_reason");
   const openPositionsBySymbol: Record<string, string[]> = {};
   for (const position of book.openPositions) (openPositionsBySymbol[position.symbol] ??= []).push(position.strategyKey);
   const tickersForPrompt: PlutoPromptTickerInput[] = await Promise.all(
@@ -369,7 +402,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     agreementDetail = "single call";
   }
   await recordPlutoEvent("model_called", { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, confidence: decision.confidence, actionKind: decision.actionKind, agreement: agreementDetail, reasons: decision.reasons });
-  await finishPass({ inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, tokensIn, tokensOut, costUsd, servedModelIds });
+  await finishPass({ inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, skippedReason: null, tokensIn, tokensOut, costUsd, servedModelIds });
   await recordPlutoPass();
   // The model's data concerns, per ticker (start / at most hourly / cleared), under the same switch as every Pluto message.
   // A failed call says nothing about the data, so it neither raises nor clears a concern.
@@ -393,10 +426,11 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     await recordPlutoAction({ passId, kind: "no_trade", symbol: "—", tickerId: null, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: [{ gate: "candidate_present", ok: false, detail: `${chosenId} not found among the offers` }], sizeTier: null, quantity: null, limitPrice: null, outcome: "blocked", blockReason: "chosen candidate not found", referenceBid: null, referenceMid: null });
     return { passId, modelCalled: true, skippedReason: null, outcome: "blocked" };
   }
-  // Never trade a ticker the model itself flagged in the same answer (prompt v3.3).
-  if (flaggedSymbols(decision).has(owner.row.symbol)) {
-    const failed = [{ gate: "flagged_ticker", ok: false, detail: `the model flagged ${owner.row.symbol}'s data in the same answer` }];
-    const actionId = await recordPlutoAction({ passId, kind: decision.actionKind!, symbol: owner.row.symbol, tickerId: owner.row.tickerId, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: failed, sizeTier: null, quantity: null, limitPrice: null, outcome: "blocked", blockReason: `flagged_ticker: ${failed[0]!.detail}`, referenceBid: null, referenceMid: null });
+  // Never trade a ticker the model itself flagged in the same answer (prompt v3.3), nor anything when it flagged the whole message.
+  const flaggedWholeMessage = decision.systemConcerns.some((concern) => concern.symbol === null);
+  if (flaggedWholeMessage || flaggedSymbols(decision).has(owner.row.symbol)) {
+    const failed = [flaggedWholeMessage ? { gate: "flagged_message", ok: false, detail: "the model flagged the whole message's data in the same answer" } : { gate: "flagged_ticker", ok: false, detail: `the model flagged ${owner.row.symbol}'s data in the same answer` }];
+    const actionId = await recordPlutoAction({ passId, kind: decision.actionKind!, symbol: owner.row.symbol, tickerId: owner.row.tickerId, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: failed, sizeTier: null, quantity: null, limitPrice: null, outcome: "blocked", blockReason: `${failed[0]!.gate}: ${failed[0]!.detail}`, referenceBid: null, referenceMid: null });
     await recordPlutoEvent("action_blocked", { passId, actionId, symbol: owner.row.symbol, candidateId: chosenId, stage: "post_model", failed });
     return { passId, modelCalled: true, skippedReason: null, outcome: "blocked" };
   }

@@ -14,7 +14,8 @@ import { soldFillsEntryPrice, verifyHeldStockCostBasis } from "../lib/stockCostB
 // database without the worker's IBKR connection, execution buffer or Telegram plumbing (the
 // scenario tests, and any local replay of synthetic IBKR holdings).
 export interface ReconciliationDependencies {
-  notifyTelegram: (message: string) => Promise<void>;
+  /** Whether the message was delivered. */
+  notifyTelegram: (message: string) => Promise<boolean>;
   /** Writes the opening trades recordExecution buffered for a conId before its leg existed. */
   drainPendingOpeningExecutions: (conId: string, newLegId: string) => Promise<void>;
 }
@@ -599,9 +600,9 @@ async function notifyPositionExpired(positionId: string, closeReason: string): P
     assigned,
     uncertain: marginalCallPositionIds.has(positionId),
   });
-  await dependencies.notifyTelegram(message);
-  // This message is the close notice: the trading-events catch-all (positionTelegramNotices.ts) must not repeat it.
-  await db("positions").where({ id: position.id }).update({ telegram_closed_notified_at: db.fn.now() });
+  // This message is the close notice: the trading-events catch-all (positionTelegramNotices.ts) must not repeat it. If it
+  // was not delivered, the catch-all's own close notice goes out on a later pass instead.
+  if (await dependencies.notifyTelegram(message)) await db("positions").where({ id: position.id }).update({ telegram_closed_notified_at: db.fn.now() });
   await publishNotification({ type: "position_closed", positionId: position.id, symbol: position.symbol, message });
 }
 

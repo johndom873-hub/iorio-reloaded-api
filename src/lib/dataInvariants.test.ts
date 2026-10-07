@@ -24,6 +24,7 @@ const healthyInputs = (): DataInvariantInputs => ({
   latestTickerCalendarCapturedAt: new Date("2026-09-30T20:00:00Z"),
   latestMajorMacroEventsCapturedAt: new Date("2026-09-30T20:00:00Z"),
   earningsDatesBySymbol: { AAA: ["2026-09-10", "2026-12-09"], BBB: ["2026-10-28"] },
+  todayEasternIso: "2026-10-01",
 });
 const failing = (inputs: DataInvariantInputs) => evaluateDataInvariants(inputs).filter((result) => !result.ok);
 
@@ -84,6 +85,8 @@ describe("evaluateDataInvariants", () => {
     const problems = failing({ ...healthyInputs(), earningsDatesBySymbol: { AAA: ["2026-09-10", "2026-12-09"], HOOD: ["2026-11-04", "2026-10-27"] } });
     expect(problems).toEqual([{ name: "Earnings dates", ok: false, detail: "two earnings dates within 45 days: HOOD (2026-10-27 and 2026-11-04)" }]);
     expect(failing({ ...healthyInputs(), earningsDatesBySymbol: { AAA: ["2026-09-10", "2026-10-25"] } })).toEqual([]); // exactly 45 days
+    // Two sources a day apart about a report already past: harmless, not flagged.
+    expect(failing({ ...healthyInputs(), earningsDatesBySymbol: { WDC: ["2026-09-04", "2026-09-05", "2026-11-04"] } })).toEqual([]);
   });
 
   it("does not repeat a failed snapshot as a missing rate or thin coverage (it is already reported as not complete)", () => {

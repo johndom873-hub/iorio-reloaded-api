@@ -1,4 +1,5 @@
 import { OrderAction, OptionType } from "@stoqey/ib";
+import { hasDaySignalsSeedFinished } from "./daySignalsStore.js";
 import { db } from "../db/connection.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
@@ -228,14 +229,11 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
       const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).orderBy("started_at", "desc").first("started_at", "status");
       return row ? { startedAt: new Date(row.started_at), status: row.status } : null;
     },
+    // Today once the morning chain is done: the Day Signals seed runs last (after the capture, the fit and the retries, even
+    // when the capture failed), so the surface and pool checks never describe a today that is still being built.
     dataSessionIso: async (now) => {
       const todayIso = easternIsoDate(now);
-      const captureFinishedToday = await db("job_runs")
-        .where({ job_name: "option_chain_capture" })
-        .whereNotNull("finished_at")
-        .whereRaw("(started_at at time zone 'America/New_York')::date::text = ?", [todayIso])
-        .first("job_name");
-      return captureFinishedToday ? todayIso : lastCompletedSessionDate(now);
+      return (await hasDaySignalsSeedFinished(todayIso)) ? todayIso : lastCompletedSessionDate(now);
     },
     loadDataInvariants: async (now, dataSessionIso) => evaluateDataInvariants(await loadDataInvariantInputs(now, dataSessionIso)),
     loadMarketDataFigures: async (stage, contract) => {

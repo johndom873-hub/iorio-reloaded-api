@@ -313,6 +313,8 @@ shortlistRouter.patch("/:id/signals-enabled", async (request, response) => {
     response.status(404).json({ error: "Entry not found or already removed." });
     return;
   }
+  // Price Performance shows the Signals flag (and hides IV / Avg Vol for a Signals-off ticker).
+  if (result.changed) invalidatePricePerformanceSnapshot();
   if (result.turnsPlutoOff) {
     const user = await db("users").where({ id: userId }).first("display_name");
     await recordPlutoEvent("ticker_disabled", { symbol: result.symbol, by: `${user?.display_name ?? "an operator"} (turned Signals off)` });

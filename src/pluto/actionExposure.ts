@@ -36,7 +36,7 @@ export function computePlutoActionExposure(action: PlutoActionExposureInput, ord
     const strike = Number(action.contract?.strike ?? 0);
     return action.contract?.right === "P" && strike > 0 ? -strike * 100 * quantity : 0;
   }
-  if (action.kind === "close_shares") {
+  if (action.kind === "close_shares" || action.kind === "close_position") {
     const price = action.fillPrice ?? action.limitPrice ?? 0;
     return -quantity * price;
   }
@@ -65,7 +65,7 @@ export async function loadPlutoOrderRequestsByActionId(actionIds: string[], conn
   const kindByAction = new Map(rows.map((row) => [row.pluto_action_id, row.kind]));
   for (const fill of fills) {
     const kind = kindByAction.get(fill.pluto_action_id);
-    const counts = kind === "close_shares" ? fill.leg_type === "stock" && fill.is_closing_trade : kind === "close_leg" ? fill.leg_type === "option" && fill.is_closing_trade : fill.leg_type === "option" && !fill.is_closing_trade;
+    const counts = kind === "close_shares" || kind === "close_position" ? fill.leg_type === "stock" && fill.is_closing_trade : kind === "close_leg" ? fill.leg_type === "option" && fill.is_closing_trade : fill.leg_type === "option" && !fill.is_closing_trade;
     if (counts) filledQuantity.set(fill.pluto_action_id, (filledQuantity.get(fill.pluto_action_id) ?? 0) + Number(fill.quantity));
   }
   return new Map(rows.map((row) => [row.pluto_action_id, { requestType: row.request_type, payload: row.payload, filledQuantity: filledQuantity.get(row.pluto_action_id) ?? null }]));

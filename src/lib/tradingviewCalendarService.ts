@@ -163,8 +163,9 @@ async function deleteRevisedFutureDates(tickerId: string, eventType: "earnings" 
   await db("ticker_calendar_events").where({ ticker_id: tickerId, event_type: eventType }).where("event_date", ">=", todayIso).whereNotIn("event_date", reportedDatesIso).delete();
 }
 
+/** TradingView's report instant as its US Eastern date: an after-close report at 19:05 EST is that day, not the next UTC day. */
 function eventDateIso(epochSeconds: unknown): string | null {
-  return epochSeconds === null || epochSeconds === undefined ? null : new Date((epochSeconds as number) * 1000).toISOString().slice(0, 10);
+  return epochSeconds === null || epochSeconds === undefined ? null : easternIsoDate(new Date((epochSeconds as number) * 1000));
 }
 
 /** Writes earnings rows (from fetchEarningsEvents) to ticker_calendar_events, replacing a next date TradingView has moved. Returns rows written. */
@@ -174,7 +175,6 @@ export async function upsertEarningsEvents(rows: Record<string, unknown>[], tick
     const tickerId = tickerIdByTvTicker.get(row.tvTicker as string);
     if (!tickerId) continue;
     const nextDateIso = eventDateIso(row.earnings_release_next_date);
-    if (nextDateIso) await deleteRevisedFutureDates(tickerId, "earnings", [nextDateIso, eventDateIso(row.earnings_release_date)].filter((date): date is string => date !== null), todayIso);
     for (const dateField of ["earnings_release_date", "earnings_release_next_date"] as const) {
       const raw = row[dateField];
       if (raw === null || raw === undefined) continue;
@@ -192,6 +192,8 @@ export async function upsertEarningsEvents(rows: Record<string, unknown>[], tick
         .merge(["event_time", "raw", "captured_at"]);
       written++;
     }
+    // After the upserts, so the ticker is never without its next date in between.
+    if (nextDateIso) await deleteRevisedFutureDates(tickerId, "earnings", [nextDateIso, eventDateIso(row.earnings_release_date)].filter((date): date is string => date !== null), todayIso);
   }
   return written;
 }
@@ -203,7 +205,6 @@ export async function upsertDividendEvents(rows: Record<string, unknown>[], tick
     const tickerId = tickerIdByTvTicker.get(row.tvTicker as string);
     if (!tickerId) continue;
     const upcomingDateIso = eventDateIso(row.dividend_ex_date_upcoming);
-    if (upcomingDateIso) await deleteRevisedFutureDates(tickerId, "ex_dividend", [upcomingDateIso, eventDateIso(row.dividend_ex_date_recent)].filter((date): date is string => date !== null), todayIso);
     for (const [dateField, amountField] of [
       ["dividend_ex_date_recent", "dividend_amount_recent"],
       ["dividend_ex_date_upcoming", "dividend_amount_upcoming"],
@@ -224,6 +225,7 @@ export async function upsertDividendEvents(rows: Record<string, unknown>[], tick
         .merge(["amount", "raw", "captured_at"]);
       written++;
     }
+    if (upcomingDateIso) await deleteRevisedFutureDates(tickerId, "ex_dividend", [upcomingDateIso, eventDateIso(row.dividend_ex_date_recent)].filter((date): date is string => date !== null), todayIso);
   }
   return written;
 }

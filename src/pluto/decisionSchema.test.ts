@@ -72,8 +72,9 @@ describe("per-ticker system concerns (prompt v3.3)", () => {
     expect(result.ok && [...flaggedSymbols(result.decision)]).toEqual(["SMCI"]);
   });
 
-  it("refuses a concern about a ticker that was not in the message, an empty concern, and the old plain strings", () => {
-    expect(answer([{ symbol: "NVDA", concern: "x" }])).toEqual({ ok: false, error: "system concern names NVDA, which is not in this message" });
+  it("reads a concern about a ticker outside the message as a whole-message concern; refuses an empty concern and the old plain strings", () => {
+    const outside = answer([{ symbol: "NVDA", concern: "x" }]);
+    expect(outside.ok && outside.decision.systemConcerns).toEqual([{ symbol: null, concern: "x" }]);
     expect(answer([{ symbol: "SMCI", concern: " " }]).ok).toBe(false);
     expect(answer(["plain text concern"]).ok).toBe(false);
   });

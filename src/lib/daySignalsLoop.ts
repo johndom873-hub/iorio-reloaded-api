@@ -401,7 +401,9 @@ export class DaySignalsLoop {
     let contexts = await this.loadContractContextsSafely(trackedTickers, tradingDateIso);
     let poolChanged = false;
     const rerankedTickerIds = new Set<string>();
-    const rerankStates = await this.loadRerankStatesSafely(tradingDateIso);
+    const loadedRerankStates = await this.loadRerankStatesSafely(tradingDateIso);
+    // A failed read skips this cycle's looks: saving first-sight defaults would overwrite every ticker's stored look and gap.
+    const rerankStates = loadedRerankStates ?? new Map<string, DayRerankState>();
     const pooledTickerIds = new Set(pool.map((row) => row.tickerId));
     const nowMs = this.deps.now().getTime();
     const saveState = async (tickerId: string, symbol: string, state: DayRerankState) => {
@@ -415,7 +417,7 @@ export class DaySignalsLoop {
     // discovery or a restart neither retries it at once nor resets the 15-minute gap.
     const look = async (tickerId: string, context: DayTickerContractContext, spot: number, kind: "price" | "timed"): Promise<"stop" | "continue"> => {
       const state = rerankStates.get(tickerId)!;
-      await saveState(tickerId, context.symbol, { ...state, referenceSpotPrice: spot, reranks: state.reranks + 1, lastLookAt: new Date(nowMs), lastLookKind: kind });
+      await saveState(tickerId, context.symbol, { ...state, referenceSpotPrice: spot, reranks: state.reranks + 1, lastLookAt: this.deps.now(), lastLookKind: kind });
       if (kind === "timed") console.log(`day signals loop: hourly re-check of ${context.symbol} at ${spot}`);
       const outcome = await this.rerankTicker(ib, context, spot, tradingDateIso, settings, account, signal);
       if (outcome === "disconnected") return "stop";
@@ -426,7 +428,7 @@ export class DaySignalsLoop {
       return "continue";
     };
     const timedDue: { tickerId: string; context: DayTickerContractContext; spot: number; clockStartMs: number }[] = [];
-    for (const { tickerId } of trackedTickers) {
+    for (const { tickerId } of loadedRerankStates === null ? [] : trackedTickers) {
       const context = contexts.get(tickerId);
       const spot = spotByTicker.get(tickerId) ?? null;
       if (!context || spot === null || context.atmImpliedVolatility === null || context.snapshotSpotPrice === null || signal.aborted) continue;
@@ -532,13 +534,14 @@ export class DaySignalsLoop {
     return [...tracked.values()];
   }
 
-  private async loadRerankStatesSafely(tradingDateIso: string): Promise<Map<string, DayRerankState>> {
+  /** Null when the read failed: the cycle then skips its re-rank looks rather than act on (and save) a blank state. */
+  private async loadRerankStatesSafely(tradingDateIso: string): Promise<Map<string, DayRerankState> | null> {
     try {
       return await this.deps.loadRerankStates(tradingDateIso);
     } catch (error) {
-      console.warn(`day signals loop: re-rank state unavailable, assuming none — ${error instanceof Error ? error.message : error}`);
-      this.deps.reportFailure?.("day-signals:rerank-state", `Day Signals loop could not read its re-rank state (${error instanceof Error ? error.message : error}), so it assumes none.`);
-      return new Map();
+      console.warn(`day signals loop: re-rank state unavailable, skipping this cycle's re-ranks — ${error instanceof Error ? error.message : error}`);
+      this.deps.reportFailure?.("day-signals:rerank-state", `Day Signals loop could not read its re-rank state (${error instanceof Error ? error.message : error}), so it skips re-ranks until it can.`);
+      return null;
     }
   }
 

@@ -41,7 +41,7 @@ export const plutoOpenedPositionIdsCte = `pluto_opened_position_ids(id) AS (
   FROM order_requests orq
   JOIN trades tr ON tr.source_order_request_id = orq.id
   JOIN position_legs pl ON pl.id = tr.position_leg_id
-  WHERE orq.pluto_action_id IS NOT NULL
+  WHERE orq.pluto_action_id IS NOT NULL AND NOT tr.is_closing_trade
   UNION
   SELECT pss.position_id
   FROM position_share_sources pss
@@ -123,6 +123,13 @@ function describeContract(symbol: string, expiry: string, strike: number, right:
  * Every contract on the symbol already taken: open option legs (anyone's, human or Pluto) and the option legs of
  * orders still active (any origin). Expiry as YYYY-MM-DD, the way candidates carry it.
  */
+/** Whether any of these tickers has an open position (an automatic close may be due on it). */
+export async function anyOpenPositionOn(symbols: string[]): Promise<boolean> {
+  if (symbols.length === 0) return false;
+  const row = await db("positions as p").join("tickers as t", "t.id", "p.ticker_id").where("p.status", "open").whereIn("t.symbol", symbols).first("p.id");
+  return Boolean(row);
+}
+
 export async function loadOccupiedContracts(symbol: string): Promise<OccupiedContract[]> {
   const [legs, orders] = await Promise.all([
     db("position_legs as pl")

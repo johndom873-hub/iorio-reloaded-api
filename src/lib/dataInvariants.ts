@@ -49,6 +49,8 @@ export interface DataInvariantInputs {
   latestMajorMacroEventsCapturedAt: Date | null;
   /** Earnings dates (YYYY-MM-DD) from earningsDatesLookbackDays ago on, per universe ticker. */
   earningsDatesBySymbol: Record<string, string[]>;
+  /** The trading date the checks describe (the earnings pairs that matter reach it or later). */
+  todayEasternIso: string;
 }
 
 const list = (symbols: string[]): string => symbols.join(", ");
@@ -122,9 +124,10 @@ export function evaluateDataInvariants(input: DataInvariantInputs): InvariantRes
       results.push({ name, ok: ageHours <= calendarEventDataMaxAgeHours, detail: `captured ${Math.round(ageHours)} h ago${ageHours > calendarEventDataMaxAgeHours ? `, older than ${calendarEventDataMaxAgeHours} h` : ""}` });
     }
   }
+  // Only a pair that reaches today or later matters: two sources disagreeing by a day about a past report is harmless.
   const tooClose = Object.entries(input.earningsDatesBySymbol).flatMap(([symbol, dates]) => {
     const sorted = [...dates].sort();
-    const pair = sorted.slice(1).map((date, index) => [sorted[index]!, date] as const).find(([earlier, later]) => (Date.parse(later) - Date.parse(earlier)) / 86_400_000 < earningsDatesMinGapDays);
+    const pair = sorted.slice(1).map((date, index) => [sorted[index]!, date] as const).find(([earlier, later]) => later >= input.todayEasternIso && (Date.parse(later) - Date.parse(earlier)) / 86_400_000 < earningsDatesMinGapDays);
     return pair ? [`${symbol} (${pair[0]} and ${pair[1]})`] : [];
   });
   results.push(result("Earnings dates", tooClose, `no ticker has two earnings dates within ${earningsDatesMinGapDays} days`, `two earnings dates within ${earningsDatesMinGapDays} days`));
@@ -204,5 +207,6 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
     latestTickerCalendarCapturedAt: tickerCalendarRow?.captured_at ? new Date(tickerCalendarRow.captured_at) : null,
     latestMajorMacroEventsCapturedAt: majorMacroEventsRow?.captured_at ? new Date(majorMacroEventsRow.captured_at) : null,
     earningsDatesBySymbol,
+    todayEasternIso,
   };
 }

@@ -14,8 +14,7 @@ import { fetchLogsFromBetterStack, type LogSourceApp } from "../../lib/bettersta
 import { annotateLegOpenState } from "../confirmationText.js";
 import type { GenosukeTool } from "./types.js";
 
-const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
-// The blotter route (unlike shortlist) also accepts "hedge" and "unstructured".
+// The blotter route accepts "hedge" and "unstructured" besides the two option strategies.
 const blotterStrategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put", "hedge", "unstructured"] };
 
 export const readTools: GenosukeTool[] = [
@@ -126,8 +125,8 @@ export const readTools: GenosukeTool[] = [
     name: "list_shortlist",
     description: "The monitored-ticker shortlist, with each ticker's Signals and Pluto flags (signalsEnabled, botEnabled) and its Signals data readiness (daily bars, earnings, option-chain snapshots, surface fits).",
     tier: "read",
-    parameters: { type: "object", properties: { strategyKey: strategyKeyEnum }, required: ["strategyKey"] },
-    execute: (input, api) => api.get(`/shortlist?strategy=${encodeURIComponent(String(input.strategyKey))}`),
+    parameters: { type: "object", properties: {} },
+    execute: (_input, api) => api.get("/shortlist"),
   },
   {
     name: "search_tickers",

@@ -36,18 +36,21 @@ export interface DaySignalsWatchInput {
   rerankState: DayRerankState | null;
 }
 
-const round2 = (value: number) => Math.round(value * 100) / 100;
+// Rounded outward to the cent, so a spot at the displayed price always triggers (decideRerank's >= comparison).
+const roundUpToCent = (value: number) => Math.ceil(value * 100 - 1e-9) / 100;
+const roundDownToCent = (value: number) => Math.floor(value * 100 + 1e-9) / 100;
 
 /** Pure: one ticker's status from today's facts. */
 export function describeDaySignalsWatch(input: DaySignalsWatchInput): DaySignalsWatchStatus {
   const empty: DaySignalsWatchStatus = { kind: "market_closed", pooledExpiries: [], lastLookAt: null, lastLookKind: null, nextTimedCheckAt: null, triggerLowPrice: null, triggerHighPrice: null };
   if (!input.openDay) return empty;
-  if (!input.seedFinished) return { ...empty, kind: "waiting_for_capture" };
+  // A pooled ticker is being quoted whatever the seed's job row says (a run stuck at "running" until the next one starts).
+  if (!input.seedFinished && input.pooledExpiries.length === 0) return { ...empty, kind: "waiting_for_capture" };
   if (input.atmImpliedVolatility === null || input.snapshotSpotPrice === null) return { ...empty, kind: "no_surface" };
   const state = input.rerankState;
   const reference = state?.referenceSpotPrice ?? input.snapshotSpotPrice;
   const fraction = daySignalsRerankTriggerFraction(input.atmImpliedVolatility);
-  const look = { lastLookAt: state?.lastLookAt?.toISOString() ?? null, lastLookKind: state?.lastLookKind ?? null, triggerLowPrice: round2(reference * (1 - fraction)), triggerHighPrice: round2(reference * (1 + fraction)) };
+  const look = { lastLookAt: state?.lastLookAt?.toISOString() ?? null, lastLookKind: state?.lastLookKind ?? null, triggerLowPrice: roundDownToCent(reference * (1 - fraction)), triggerHighPrice: roundUpToCent(reference * (1 + fraction)) };
   if (input.pooledExpiries.length > 0) return { ...empty, ...look, kind: "watched", pooledExpiries: input.pooledExpiries };
   const clockStart = state?.lastLookAt ?? state?.firstSeenAt ?? null;
   return { ...empty, ...look, kind: "not_watched", nextTimedCheckAt: clockStart ? new Date(clockStart.getTime() + daySignalsUnpooledRecheckIntervalMs).toISOString() : null };

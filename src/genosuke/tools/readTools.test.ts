@@ -56,7 +56,7 @@ describe("the read tool set", () => {
       get_position: { positionId: "p1" },
       get_position_live_pnl_and_greeks: { positionId: "p1" },
       get_ticker_quote: { symbol: "aapl" },
-      list_shortlist: { strategyKey: "covered_call" },
+      list_shortlist: {},
       search_tickers: { query: "apple" },
     };
     for (const tool of readTools) await tool.execute(inputs[tool.name] ?? {}, api).catch(() => {});
@@ -70,7 +70,7 @@ describe("simple GET tools", () => {
     ["get_risk_limits_settings", {}, "/risk-limits/settings"],
     ["get_risk_exposure", {}, "/risk-limits/exposure"],
     ["get_system_health_status", {}, "/system-health/status"],
-    ["list_shortlist", { strategyKey: "cash_secured_put" }, "/shortlist?strategy=cash_secured_put"],
+    ["list_shortlist", {}, "/shortlist"],
   ])("%s requests %s", async (name, input, expectedPath) => {
     const { api, paths } = fakeApi(() => ({ ok: true }));
     expect(await toolNamed(name).execute(input, api)).toEqual({ ok: true });

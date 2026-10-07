@@ -3,7 +3,7 @@ import { fetchPositionEventsForPositions, type PositionEvent, type PositionEvent
 import { fetchPositionById } from "./positionQueries.js";
 import { formatSignedDollars } from "./formatSignedDollars.js";
 import { formatSignedPercent } from "./formatSignedPercent.js";
-import { describeTradeLine, labelStrategy } from "./tradeMessageFormatting.js";
+import { describeTradeContract, describeTradeLine, labelStrategy } from "./tradeMessageFormatting.js";
 
 // Trading-events catch-all, position side (approved 2026-10-07): every position opening and closing is told once to the
 // alerts chat, including the leftover-stock positions the dashboard feed hides. A close the expiry message already told
@@ -43,7 +43,9 @@ export function describePositionOpenedNotice(event: PositionEvent): string {
 export function describePositionClosedNotice(event: PositionEvent, capitalDeployed: number | null): string {
   const reasonLabel = event.closeReason ? closeReasonLabels[event.closeReason] : undefined;
   const headline = `📤 Position closed: ${describePositionSubject(event, null)}${reasonLabel ? ` — ${reasonLabel}` : ""}`;
-  const lines = event.legs.map((leg: PositionEventLeg) => describeTradeLine(leg.side === "short" ? "BUY" : "SELL", leg, leg.exitPrice));
+  const lines = event.legs.map((leg: PositionEventLeg) =>
+    leg.sharesHandedOn ? `• ${describeTradeContract(leg)} moved to the next position` : describeTradeLine(leg.side === "short" ? "BUY" : "SELL", leg, leg.exitPrice),
+  );
   // Same P&L % base as the expiry message: realized P&L over capitalDeployed (approved 2026-10-01).
   const pnlLine =
     event.realizedPnl === null

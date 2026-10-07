@@ -45,19 +45,21 @@ afterAll(async () => {
 });
 
 describe("order Telegram notice database dependencies", () => {
-  it("picks up an order once per status change, and never one that is old, internal or already told", async () => {
+  it("picks up an order once per status change, and never one that is old, internal, already told or cancelled before it was sent", async () => {
     const changed = await createOrder({});
-    const cancelled = await createOrder({ status: "cancelled", cancelled_by_user_id: cancellerId });
+    const cancelled = await createOrder({ status: "cancelled", cancelled_by_user_id: cancellerId, ibkr_order_id: 4242 });
+    const staleUnconfirmed = await createOrder({ status: "cancelled", cancellation_reason: "not_confirmed_in_time" });
+    const neverSent = await createOrder({ status: "cancelled", cancelled_by_user_id: cancellerId });
     const alreadyTold = await createOrder({ telegram_notified_status: "submitted" });
     const internal = await createOrder({ status: "pending_confirmation" });
     const old = await createOrder({ created_at: new Date(Date.now() - 49 * 3_600_000) });
     const dependencies = createDatabaseDependencies();
 
     const due = (await dependencies.loadOrdersNeedingNotice()).filter((order) => createdOrderIds.includes(order.id));
-    expect(due.map((order) => order.id).sort()).toEqual([changed, cancelled].sort());
+    expect(due.map((order) => order.id).sort()).toEqual([changed, cancelled, staleUnconfirmed].sort());
     expect(due.find((order) => order.id === changed)).toMatchObject({ symbol: "OTN", placedBy: "Requester, web", legs: payload.legs });
     expect(due.find((order) => order.id === cancelled)).toMatchObject({ cancelledByDisplayName: "Canceller" });
-    expect([alreadyTold, internal, old].some((id) => due.some((order) => order.id === id))).toBe(false);
+    expect([alreadyTold, internal, old, neverSent].some((id) => due.some((order) => order.id === id))).toBe(false);
 
     await dependencies.markNotified(changed, "submitted");
     const afterMark = (await dependencies.loadOrdersNeedingNotice()).map((order) => order.id);

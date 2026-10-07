@@ -22,11 +22,14 @@ const { loadPlutoBook } = await import("../pluto/book.js");
 
 const testDb: Knex = db;
 const telegramMessages: string[] = [];
+// A test sets this false to simulate an undelivered message.
+let telegramDelivers = true;
 // A test sets this to simulate the worker saving a buffered opening fill onto a leg right after the leg is created.
 let drainPendingOpeningExecutionsHook: ((conId: string, newLegId: string) => Promise<void>) | undefined;
 const dependencies = {
   notifyTelegram: async (message: string) => {
     telegramMessages.push(message);
+    return telegramDelivers;
   },
   drainPendingOpeningExecutions: async (conId: string, newLegId: string) => {
     await drainPendingOpeningExecutionsHook?.(conId, newLegId);
@@ -317,6 +320,28 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(await shareSourcesOf(leftover.id)).toEqual([coveredCallId]);
     expect(telegramMessages).toHaveLength(1);
     expect(telegramMessages[0]!.toLowerCase()).not.toContain("assigned");
+    // The expiry message is the close notice: delivered, so the trading-events catch-all will not repeat it.
+    expect(coveredCall.telegram_closed_notified_at).not.toBeNull();
+  });
+
+  it("an undelivered expiry message leaves the close for the trading-events catch-all to tell", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    await insertStockLeg(coveredCallId, stockConId, 100, 107.66);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 114, isoDateDaysFromToday(-1), 2.9956);
+    telegramMessages.length = 0;
+    telegramDelivers = false;
+    try {
+      await runPass([heldStock(ticker.symbol, stockConId, 100, 107.66)]);
+    } finally {
+      telegramDelivers = true;
+    }
+    const coveredCall = (await positionsFor(ticker.id)).find((position) => position.id === coveredCallId)!;
+    expect(coveredCall.close_reason).toBe("expired_worthless");
+    expect(telegramMessages).toHaveLength(1);
+    expect(coveredCall.telegram_closed_notified_at).toBeNull();
   });
 
   it("covered call genuinely assigned at expiry: the notification reflects the correction instead of the same-pass default", async () => {

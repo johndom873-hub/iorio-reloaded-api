@@ -312,7 +312,7 @@ let reconciliationRerunQueued = false;
 let reconciliationPassCounter = 0;
 
 const reconciliationDependencies: ReconciliationDependencies = {
-  notifyTelegram: notifyTelegramWithTimeout,
+  notifyTelegram: notifyTelegramDeliveredWithinTimeout,
   drainPendingOpeningExecutions: (conId, newLegId) => executionRecorder.drainPendingOpeningExecutions(conId, newLegId),
 };
 

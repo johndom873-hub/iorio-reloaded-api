@@ -79,7 +79,8 @@ export async function finishPlutoPass(passId: string, input: FinishPlutoPassInpu
       ...(input.candidateCount !== undefined ? { candidate_count: input.candidateCount } : {}),
       ...(input.systemChecks !== undefined ? { system_checks: JSON.stringify(input.systemChecks) } : {}),
       ...(input.modelCalled !== undefined ? { model_called: input.modelCalled } : {}),
-      ...(input.skippedReason !== undefined ? { skipped_reason: input.skippedReason } : {}),
+      // A finish that records a model call clears an "abandoned" label the sweep may have written meanwhile (a round over 10 minutes).
+      ...(input.skippedReason !== undefined ? { skipped_reason: input.skippedReason } : input.modelCalled === true ? { skipped_reason: null } : {}),
       ...(input.tokensIn !== undefined ? { tokens_in: input.tokensIn } : {}),
       ...(input.tokensOut !== undefined ? { tokens_out: input.tokensOut } : {}),
       ...(input.costUsd !== undefined ? { cost_usd: input.costUsd } : {}),
@@ -129,7 +130,7 @@ export async function recordPlutoDecision(input: RecordPlutoDecisionInput): Prom
   return row.id as string;
 }
 
-export type PlutoActionKind = "open_covered_call" | "open_cash_secured_put" | "roll" | "close_shares" | "close_leg" | "no_trade";
+export type PlutoActionKind = "open_covered_call" | "open_cash_secured_put" | "roll" | "close_shares" | "close_leg" | "close_position" | "no_trade";
 export type PlutoActionOutcome = "validated" | "blocked" | "order_built" | "confirmed" | "filled" | "partially_filled" | "cancelled" | "cancelled_partially_filled" | "rejected" | "error" | "no_trade";
 
 export interface PlutoGateResult {

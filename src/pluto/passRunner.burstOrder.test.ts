@@ -76,7 +76,7 @@ vi.mock("./book.js", () => ({
   loadPlutoBook: async () => {
     if (harness.bookError) throw new Error(harness.bookError);
     return { openPositions: [], committedDollars: 0 };
-  }, loadOccupiedContracts: async () => [], loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }) }));
+  }, loadOccupiedContracts: async () => [], loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), anyOpenPositionOn: async () => false }));
 vi.mock("./closeActions.js", () => ({ buildCloseOffersForTicker: async () => ({ offers: [] }) }));
 vi.mock("../lib/marketSessionStatus.js", () => ({ previousOpenSessionDate: async () => "2026-10-06" }));
 vi.mock("../lib/tradingSettingsStore.js", () => ({ loadTradingSettings: async () => ({ spreadCostChargedPct: 50 }) }));

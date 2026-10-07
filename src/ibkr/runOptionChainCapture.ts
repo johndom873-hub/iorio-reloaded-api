@@ -132,16 +132,18 @@ export interface PreparedTicker {
   chainRefresh: OptionChainRefreshTimings;
 }
 
-/** Shortlist with Signals on (not removed) + tickers with an open position, de-duplicated. No hardcoded symbols (approved 2026-09-21). Tickers still being prepared by the new-ticker backfill are skipped (approved 2026-09-21). */
+/**
+ * Shortlist with Signals on (not removed) + tickers with an open position, de-duplicated. No hardcoded symbols (approved 2026-09-21).
+ * Shortlist tickers still being prepared by the new-ticker backfill are skipped (approved 2026-09-21); a held ticker never is, since
+ * its open position needs the capture whatever setup is running for it.
+ */
 export async function loadCaptureUniverse(): Promise<UniverseTicker[]> {
-  const rows: { tickerId: string; symbol: string; contractId: number | null }[] = await excludeTickersBeingPrepared(
-    db("tickers as t").where((builder) =>
+  const rows: { tickerId: string; symbol: string; contractId: number | null }[] = await db("tickers as t")
+    .where((builder) =>
       builder
-        .whereIn("t.id", signalsEnabledShortlistTickerIdsQuery())
+        .where((shortlisted) => excludeTickersBeingPrepared(shortlisted.whereIn("t.id", signalsEnabledShortlistTickerIdsQuery()), "t.id"))
         .orWhereIn("t.id", db("positions").where({ status: "open" }).select("ticker_id")),
-    ),
-    "t.id",
-  )
+    )
     .select("t.id as tickerId", "t.symbol", "t.ibkr_contract_id as contractId")
     .orderBy("t.symbol");
   return rows;

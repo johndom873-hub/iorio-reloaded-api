@@ -13,7 +13,7 @@ import { labelExpiredCandidateOutcomes } from "./candidateOutcomes.js";
 import { loadWorkingPlutoOrders, watchPlutoOrder } from "./executor.js";
 import { closeAbandonedPlutoPasses, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
-import { runPlutoPass, type PassRequest, type PassRunnerContext } from "./passRunner.js";
+import { PlutoRoundFailedAfterModelCallError, runPlutoPass, type PassRequest, type PassRunnerContext } from "./passRunner.js";
 import { advanceOpeningLook, decideOpeningLook, type OpeningLookDecision, type OpeningLookProgress } from "./openingLook.js";
 import { forcedRoundRetryDelayMs, recordRoundOutcome, roundFailureAlertText, roundFailureRecoveryText, shouldRetryForcedRound, type RoundFailureState } from "./roundFailures.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
@@ -187,8 +187,19 @@ export class PlutoAgent {
     return { allowed: true, reason: null, insideWindow };
   }
 
+  private housekeepingInFlight = false;
   private async housekeeping(): Promise<void> {
-    if (this.stopped) return;
+    // A slow tick (an IBKR borrow, a slow query) must not overlap the next one: two could queue the opening look twice.
+    if (this.stopped || this.housekeepingInFlight) return;
+    this.housekeepingInFlight = true;
+    try {
+      await this.housekeepingTick();
+    } finally {
+      this.housekeepingInFlight = false;
+    }
+  }
+
+  private async housekeepingTick(): Promise<void> {
     try {
       await this.sweepAbandonedPasses();
       this.settings = await loadPlutoSettings();
@@ -318,10 +329,11 @@ export class PlutoAgent {
   /** The opening look's round has run: today's look is done, and the day's data-state messages go out (like a breaker, whatever the Telegram verbosity). */
   private async completeOpeningLook(pending: { todayIso: string; decision: OpeningLookDecision }): Promise<void> {
     this.openingLook = advanceOpeningLook(this.openingLook, pending.todayIso, pending.decision);
-    if (pending.decision === "run_after_late_seed") await notifyPlutoTelegram("✅ Pluto: today's Day Signals data is ready now, and Pluto has run its full opening analysis.");
+    const quietly = (step: Promise<unknown>) => step.catch((error) => console.warn(`Pluto: opening-look message failed — ${error instanceof Error ? error.message : error}`));
+    if (pending.decision === "run_after_late_seed") await quietly(notifyPlutoTelegram("✅ Pluto: today's Day Signals data is ready now, and Pluto has run its full opening analysis."));
     if (pending.decision === "run_incomplete") {
-      await recordPlutoEvent("warning", { message: "opening look on incomplete data: today's Day Signals seed had not finished by 10:30 ET; one more full round follows once it finishes" });
-      await notifyPlutoTelegram("⚠️ Pluto: today's Day Signals data was not ready by 10:30 ET (it is normally ready by about 10:07), so Pluto's opening analysis ran on incomplete data. Check the 10:00 option-chain capture. Pluto runs a full analysis once the data is ready.");
+      await quietly(recordPlutoEvent("warning", { message: "opening look on incomplete data: today's Day Signals seed had not finished by 10:30 ET; one more full round follows once it finishes" }));
+      await quietly(notifyPlutoTelegram("⚠️ Pluto: today's Day Signals data was not ready by 10:30 ET (it is normally ready by about 10:07), so Pluto's opening analysis ran on incomplete data. Check the 10:00 option-chain capture. Pluto runs a full analysis once the data is ready."));
     }
   }
 
@@ -392,13 +404,15 @@ export class PlutoAgent {
     if (forced) {
       // Until today's opening look has run, the only data for opens is yesterday's: a forced round may manage held positions only.
       const beforeOpeningLook = forced.trigger !== "opening_analysis" && this.openingLook.doneFor !== easternIsoDate(new Date());
-      const completed = await this.runRoundSafely({ trigger: forced.trigger, triggerDetail: forced.detail, symbols: forced.symbols ?? [], force: true, heldPositionsOnly: beforeOpeningLook });
+      const result = await this.runRoundSafely({ trigger: forced.trigger, triggerDetail: forced.detail, symbols: forced.symbols ?? [], force: true, heldPositionsOnly: beforeOpeningLook });
       if (forced.trigger === "opening_analysis" && this.pendingOpeningLook) {
         const pending = this.pendingOpeningLook;
         this.pendingOpeningLook = null;
-        if (completed) await this.completeOpeningLook(pending);
+        // Done only if the look really looked: a round stopped at the system checks analysed nothing (housekeeping
+        // re-queues it); one that failed after its model call did look, and its call must not be paid twice.
+        if ((result === "completed") || result === "failed_after_model_call") await this.completeOpeningLook(pending);
       }
-      if (completed) return;
+      if (result !== "failed_before_model_call") return;
       if (shouldRetryForcedRound(forced)) {
         const timer = setTimeout(() => {
           this.retryTimers.delete(timer);
@@ -417,23 +431,28 @@ export class PlutoAgent {
     rememberAnalysed(newlyQuoted.stamps, this.lastAnalysedQuotedAtMs);
   }
 
-  /** Runs one round; false when it threw (a skipped round completed). Three failures in a row alert once (roundFailures.ts). */
-  private async runRoundSafely(request: PassRequest): Promise<boolean> {
-    if (this.stopped) return true;
-    let completed = true;
+  /**
+   * Runs one round. "completed" covers skipped rounds, except one stopped at the system checks; a failure is "before" or
+   * "after" the model call (only the first may be retried). Three failures in a row alert once (roundFailures.ts).
+   */
+  private async runRoundSafely(request: PassRequest): Promise<"completed" | "skipped_on_system_checks" | "failed_before_model_call" | "failed_after_model_call"> {
+    if (this.stopped) return "completed";
+    let result: "completed" | "skipped_on_system_checks" | "failed_before_model_call" | "failed_after_model_call" = "completed";
     try {
       const summary = await runPlutoPass(request, this.context);
+      if (summary.skippedOnSystemChecks) result = "skipped_on_system_checks";
       console.log(`Pluto round ${summary.passId} (${request.trigger}): ${summary.modelCalled ? `model called → ${summary.outcome}` : `no model call — ${summary.skippedReason}`}`);
     } catch (error) {
-      completed = false;
+      result = error instanceof PlutoRoundFailedAfterModelCallError ? "failed_after_model_call" : "failed_before_model_call";
       console.error(`Pluto round failed: ${error instanceof Error ? error.stack ?? error.message : error}`);
-      await recordPlutoEvent("warning", { message: `analysis round failed: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
+      await recordPlutoEvent("warning", { message: `analysis round failed${result === "failed_after_model_call" ? " after its model call" : ""}: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
     }
+    const completed = result === "completed" || result === "skipped_on_system_checks";
     const outcome = recordRoundOutcome(this.roundFailures, completed);
     this.roundFailures = outcome.state;
     if (outcome.send === "alert") await notifyPlutoTelegram(roundFailureAlertText).catch(() => false);
     if (outcome.send === "recovery") await notifyPlutoTelegram(roundFailureRecoveryText).catch(() => false);
-    return completed;
+    return result;
   }
 
   async stop(): Promise<void> {

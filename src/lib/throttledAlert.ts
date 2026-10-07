@@ -32,7 +32,11 @@ export async function notifyDownThrottled(alertKey: string, message: string, rem
     .ignore()
     .returning("alert_key");
   if (inserted.length > 0) {
-    await send(message);
+    // A sender that reports failure (Pluto's returns false) leaves no state behind, so the next call tries again.
+    if ((await send(message)) === false) {
+      await db("alert_state").where({ alert_key: alertKey }).delete();
+      return false;
+    }
     return true;
   }
 
@@ -47,7 +51,11 @@ export async function notifyDownThrottled(alertKey: string, message: string, rem
   const downForMs = Date.now() - new Date(updated[0]!.first_alerted_at).getTime();
   const downFor = formatDurationHuman(downForMs);
   const interval = formatDurationHuman(reminderIntervalMs);
-  await send(options.reminderText ? options.reminderText(message, downFor, interval) : `${message}\n\n(Still down after ~${downFor}. Reminders are sent at most every ${interval}.)`);
+  if ((await send(options.reminderText ? options.reminderText(message, downFor, interval) : `${message}\n\n(Still down after ~${downFor}. Reminders are sent at most every ${interval}.)`)) === false) {
+    // Not delivered: make the reminder due again at once.
+    await db("alert_state").where({ alert_key: alertKey }).update({ last_alerted_at: new Date(0) });
+    return false;
+  }
   return true;
 }
 

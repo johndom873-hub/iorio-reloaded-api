@@ -273,7 +273,8 @@ export function referenceForAdoptedOrder(action: { kind: string; symbol: string;
   const num = (value: unknown) => (value === null || value === undefined || Number.isNaN(Number(value)) ? null : Number(value));
   const price = num(action.reference_bid) ?? num(action.reference_mid) ?? num(action.limit_price) ?? 0;
   const side: "sell" | "buy" = action.kind === "close_leg" ? "buy" : "sell";
-  const multiplier = action.kind === "close_shares" ? 1 : 100;
+  // A close_position (covered call before earnings) is referenced on its shares, the call being its other leg.
+  const multiplier = action.kind === "close_shares" || action.kind === "close_position" ? 1 : 100;
   const contract = (action.contract ?? {}) as { strike?: number; expiry?: string; strategyKey?: string };
   const description = `${action.symbol} ${num(action.quantity) ?? ""}× ${action.kind}${contract.strike !== undefined ? ` $${contract.strike}` : ""}${contract.expiry ? ` ${contract.expiry}` : ""}`.replace(/\s+/g, " ").trim();
   const otherLegs = Array.isArray(action.reference_other_legs) ? (action.reference_other_legs as PlutoReferenceLeg[]) : undefined;

@@ -468,19 +468,19 @@ describe("createDefaultReadinessDependencies", () => {
   });
 
   describe("dataSessionIso", () => {
-    it("is the previous session until today's chain capture has finished", async () => {
+    it("is the previous session until today's Day Signals seed (the last morning job) has finished", async () => {
       mocks.lastCompletedSessionDate.mockResolvedValue("2026-10-02");
       mocks.state.resultsByTable.job_runs = undefined;
       expect(await createDefaultReadinessDependencies().dataSessionIso(now)).toBe("2026-10-02");
       expect(mocks.lastCompletedSessionDate).toHaveBeenCalledWith(now);
       const [query] = queriesOn("job_runs");
-      expect(operationArgs(query!, "where")).toEqual([[{ job_name: "option_chain_capture" }]]);
+      expect(operationArgs(query!, "where")).toEqual([[{ job_name: "day_signals_seed" }]]);
       expect(operationArgs(query!, "whereRaw")).toEqual([[expect.stringContaining("America/New_York"), ["2026-10-05"]]]);
     });
 
-    it("is today once today's chain capture has finished, even if it failed", async () => {
+    it("is today once today's seed has finished, even if it failed", async () => {
       mocks.lastCompletedSessionDate.mockResolvedValue("2026-10-02");
-      mocks.state.resultsByTable.job_runs = { job_name: "option_chain_capture" };
+      mocks.state.resultsByTable.job_runs = { id: "seed-run" };
       expect(await createDefaultReadinessDependencies().dataSessionIso(now)).toBe("2026-10-05");
     });
   });

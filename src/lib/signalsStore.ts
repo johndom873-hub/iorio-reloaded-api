@@ -64,10 +64,12 @@ export async function loadPreviousClose(tickerId: string, todayEasternIso: strin
   return row ? { close: Number(row.close), dateIso: row.dateIso } : null;
 }
 
+/** The next earnings report still to come: today's counts unless it was before the open (as loadEarningsDatesNotYetReported). */
 export async function loadNextEarningsDate(tickerId: string, todayIso: string): Promise<string | null> {
   const row = await db("ticker_calendar_events")
     .where({ ticker_id: tickerId, event_type: "earnings" })
     .where("event_date", ">=", todayIso)
+    .whereRaw("not (event_date = ?::date and event_time is not distinct from '-1')", [todayIso])
     .orderBy("event_date")
     .select(db.raw('event_date::text as "eventDate"'))
     .first();

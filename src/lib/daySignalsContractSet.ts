@@ -116,7 +116,8 @@ export function decideRerank(input: RerankDecisionInput): "price" | "timed" | nu
   const sinceLastLookMs = input.lastLookAtMs === null ? null : input.nowMs - input.lastLookAtMs;
   if (sinceLastLookMs !== null && sinceLastLookMs < daySignalsRerankMinimumGapMs) return null;
   const moveFraction = Math.abs(input.spotPrice - input.referenceSpotPrice) / input.referenceSpotPrice;
-  if (moveFraction >= daySignalsRerankTriggerFraction(input.atmImpliedVolatility)) return "price";
+  // A hair of tolerance: (10.10 − 10) / 10 is 0.00999…96 in floating point, and a move of exactly the trigger must count.
+  if (moveFraction >= daySignalsRerankTriggerFraction(input.atmImpliedVolatility) - 1e-9) return "price";
   const clockStartMs = input.lastLookAtMs ?? input.firstSeenAtMs;
   if (!input.pooled && clockStartMs !== null && input.nowMs - clockStartMs >= daySignalsUnpooledRecheckIntervalMs) return "timed";
   return null;

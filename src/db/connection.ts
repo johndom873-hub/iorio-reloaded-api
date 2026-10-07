@@ -7,7 +7,7 @@ import { postgresSslOption } from "../config/databaseSsl.js";
 // live under scripts/) get the smaller job pool — see databaseConnectionBudget.ts.
 const isOneOffJobProcess = /[\\/]scripts[\\/]/.test(process.argv[1] ?? "");
 // The Pluto agent (npm run agent / agent:dev) has its own, smaller pool.
-const isPlutoAgentProcess = /[\\/]plutoAgent\.(js|ts)$/.test(process.argv[1] ?? "");
+const isPlutoAgentProcess = /[\\/]plutoAgent(\.(js|ts))?$/.test(process.argv[1] ?? "");
 
 export const db = knexLibrary({
   client: "pg",

@@ -314,7 +314,8 @@ plutoRouter.get("/actions", async (request: Request, response: Response) => {
 });
 
 /** The payload keys that tie an event to tickers or to a pass; an event with none of them applies to every ticker. */
-const tickerAndPassKeys = ["symbol", "symbols", "tickers", "passId"];
+const tickerKeys = ["symbol", "symbols", "tickers"];
+const tickerAndPassKeys = [...tickerKeys, "passId"];
 
 /**
  * The Event log's query. Filters (all optional, all applied in the query so the page and the total agree):
@@ -340,7 +341,12 @@ plutoRouter.get("/events", async (request: Request, response: Response) => {
   const offset = Math.max(0, Math.floor(Number(request.query.offset)) || 0);
 
   const filtered = db("pluto_events");
-  if (request.query.categories !== undefined) filtered.whereIn("type", plutoEventTypesInCategories(requestedCategories as PlutoEventCategory[]));
+  if (request.query.categories !== undefined) {
+    const typesInCategories = plutoEventTypesInCategories(requestedCategories as PlutoEventCategory[]);
+    // A type missing from the map (older or renamed) is labelled "system" below, so System must list it too.
+    if (requestedCategories.includes("system")) filtered.where((builder) => builder.whereIn("type", typesInCategories).orWhereNotIn("type", Object.keys(plutoEventCategoryByType)));
+    else filtered.whereIn("type", typesInCategories);
+  }
   if (onlyTypes.length > 0) filtered.whereIn("type", onlyTypes);
   if (excludedTypes.length > 0) filtered.whereNotIn("type", excludedTypes);
   if (ticker !== "") {
@@ -348,12 +354,16 @@ plutoRouter.get("/events", async (request: Request, response: Response) => {
     // no-order result name no ticker themselves), and events that name no ticker and belong to no pass, since those
     // (settings, pauses, breakers) apply to every ticker. An event names its tickers as `symbol`, or as a list under
     // `symbols` / `tickers`; a list's ->> text is its JSON, so one LIKE covers all three.
-    const likeTicker = `%${ticker.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
-    const namesTicker = "(upper(payload->>'symbol') like ? or upper(payload->>'symbols') like ? or upper(payload->>'tickers') like ?)";
+    // Exact matches only: a list's elements are symbols or { symbol, … } objects (pass_skipped), never free text.
+    const namesTicker = `(upper(payload->>'symbol') = ?
+      or (jsonb_typeof(payload->'symbols') = 'array' and exists (select 1 from jsonb_array_elements_text(payload->'symbols') listed where upper(listed) = ?))
+      or (jsonb_typeof(payload->'tickers') = 'array' and exists (select 1 from jsonb_array_elements(payload->'tickers') listed where upper(case when jsonb_typeof(listed) = 'object' then listed->>'symbol' else listed #>> '{}' end) = ?)))`;
+    const namesNoTicker = `not jsonb_exists_any(payload, array[${tickerKeys.map(() => "?").join(", ")}])`;
     filtered.where((builder) => {
       builder
-        .whereRaw(namesTicker, [likeTicker, likeTicker, likeTicker])
-        .orWhereRaw(`payload->>'passId' in (select payload->>'passId' from pluto_events where type = 'pass_started' and ${namesTicker})`, [likeTicker, likeTicker, likeTicker])
+        .whereRaw(namesTicker, [ticker, ticker, ticker])
+        // A pass's own events that name no ticker (the model call, its no-order result); its other tickers' actions are theirs.
+        .orWhereRaw(`(${namesNoTicker} and payload->>'passId' in (select payload->>'passId' from pluto_events where type = 'pass_started' and ${namesTicker}))`, [...tickerKeys, ticker, ticker, ticker])
         .orWhereRaw(`not jsonb_exists_any(payload, array[${tickerAndPassKeys.map(() => "?").join(", ")}])`, tickerAndPassKeys);
     });
   }

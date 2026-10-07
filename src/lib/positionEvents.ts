@@ -77,6 +77,8 @@ export interface PositionEvent {
     expiryDate: string | null;
     entryPrice: number;
     exitPrice: number | null;
+    /** Long stock closed at its entry price with no closing trade: the shares went to the next position, never sold. */
+    sharesHandedOn?: boolean;
   }[];
 }
 
@@ -103,6 +105,7 @@ interface LegRow {
   exitPrice: string | null;
   exitAt: string | null;
   closingCommission: string | number;
+  hasClosingTrade: boolean;
 }
 
 // sinceDays scopes the feed to recent activity (approved 2026-08-28,
@@ -197,6 +200,7 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
       "exit_at as exitAt",
       // Approved 2026-09-19: realized P&L is net of closing-trade commissions (see legRealizedPnlSql.ts).
       db.raw('COALESCE((SELECT SUM(tr.commission) FROM trades tr WHERE tr.position_leg_id = position_legs.id AND tr.is_closing_trade), 0) AS "closingCommission"'),
+      db.raw('EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = position_legs.id AND tr.is_closing_trade) AS "hasClosingTrade"'),
     );
 
   const legsByPositionId = new Map<string, LegRow[]>();
@@ -216,6 +220,8 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
       expiryDate: leg.expiryDate,
       entryPrice: Number(leg.entryPrice),
       exitPrice: leg.exitPrice === null ? null : Number(leg.exitPrice),
+      sharesHandedOn:
+        leg.legType === "stock" && leg.side === "long" && leg.exitAt !== null && !leg.hasClosingTrade && leg.exitPrice !== null && Number(leg.exitPrice) === Number(leg.entryPrice),
     }));
   }
 

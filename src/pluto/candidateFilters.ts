@@ -134,7 +134,9 @@ export function rejectTicker(input: PlutoTickerFilterInput): string[] {
   if (scored.forecast && scored.forecast.windowDays !== 63) reasons.push(`forecast window is ${scored.forecast.windowDays} days, not the 63-day one`);
   // Each stock against its own normal day (Marcelo, 2026-10-07): 3 × NOK's 4.2% is 12.7%, 3 × BSBR's 2.4% is 7.2%.
   const normalDayMovePct = expectedDailyMovePct(scored.forecast?.volatility ?? null);
-  if (scored.dayChangePercent !== null && normalDayMovePct !== null && Math.abs(scored.dayChangePercent) > settings.maxDayMoveMultiple * normalDayMovePct) reasons.push(`day change ${scored.dayChangePercent.toFixed(1)}% is ${(Math.abs(scored.dayChangePercent) / normalDayMovePct).toFixed(2)}× its normal ${normalDayMovePct.toFixed(2)}% day, beyond ${settings.maxDayMoveMultiple}×`);
+  // No usable forecast (zero or missing volatility) means no normal day to measure against: the ticker is out, not unlimited.
+  if (scored.dayChangePercent !== null && normalDayMovePct === null) reasons.push("no volatility forecast to judge today's move against");
+  else if (scored.dayChangePercent !== null && normalDayMovePct !== null && Math.abs(scored.dayChangePercent) > settings.maxDayMoveMultiple * normalDayMovePct) reasons.push(`day change ${scored.dayChangePercent.toFixed(1)}% is ${(Math.abs(scored.dayChangePercent) / normalDayMovePct).toFixed(2)}× its normal ${normalDayMovePct.toFixed(2)}% day, beyond ${settings.maxDayMoveMultiple}×`);
   if (scored.priceSource !== "live") reasons.push(`spot price is ${scored.priceSource}, not live`);
   return reasons;
 }

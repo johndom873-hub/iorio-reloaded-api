@@ -21,7 +21,7 @@ export const lowStakesWriteTools: GenosukeTool[] = [
   {
     name: "remove_shortlist_ticker",
     description:
-      "Remove a ticker from a strategy's shortlist (soft-delete). Use the shortlist entry id from list_shortlist, not the ticker id. Refused (409) while the ticker has an open position — it must be closed first.",
+      "Remove a ticker from the shortlist (soft-delete). Use the shortlist entry id from list_shortlist, not the ticker id. Refused (409) while the ticker has an open position — it must be closed first.",
     tier: "low-stakes-write",
     parameters: { type: "object", properties: { entryId: { type: "string" } }, required: ["entryId"] },
     execute: (input, api) => api.delete(`/shortlist/${encodeURIComponent(String(input.entryId))}`),
