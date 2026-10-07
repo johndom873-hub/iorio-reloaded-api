@@ -174,7 +174,7 @@ plutoRouter.put("/stress-override", async (request: Request, response: Response)
 });
 
 plutoRouter.get("/scoreboard", async (_request: Request, response: Response) => {
-  const actions: { id: string; pass_id: string; kind: string; outcome: string; pessimistic_pnl: string | null; deterministic_top_pick: { id?: string } | null; order_request_id: string | null }[] = await db("pluto_actions").select("id", "pass_id", "kind", "outcome", "pessimistic_pnl", "deterministic_top_pick", "order_request_id");
+  const actions: { id: string; pass_id: string; kind: string; outcome: string; deterministic_top_pick: { id?: string } | null; order_request_id: string | null }[] = await db("pluto_actions").select("id", "pass_id", "kind", "outcome", "deterministic_top_pick", "order_request_id");
   const realized = await loadRealizedPnlByActionId(actions.filter((action) => action.order_request_id).map((action) => action.id));
   const decisions: { pass_id: string; parsed_output: { decision?: string; candidate_id?: string | null } | null }[] = await db("pluto_decisions").where("call_index", 1).whereNotNull("parsed_output").select("pass_id", "parsed_output");
   const passes = await db("pluto_passes").select(db.raw("count(*)::int AS passes, count(*) FILTER (WHERE model_called)::int AS model_called, COALESCE(SUM(cost_usd), 0) AS cost_usd, MIN(started_at) AS since")).first();
@@ -182,12 +182,10 @@ plutoRouter.get("/scoreboard", async (_request: Request, response: Response) => 
   const outcomes: Record<string, number> = {};
   for (const action of actions) outcomes[action.outcome] = (outcomes[action.outcome] ?? 0) + 1;
   let realizedPnl = 0;
-  let pessimisticPnl = 0;
   let closedActions = 0;
   let winningActions = 0;
   let openActions = 0;
   for (const action of actions) {
-    pessimisticPnl += action.pessimistic_pnl === null ? 0 : Number(action.pessimistic_pnl);
     const figures = realized.get(action.id);
     if (!figures) continue;
     if (figures.realizedPnl !== null) realizedPnl += figures.realizedPnl;
@@ -220,7 +218,6 @@ plutoRouter.get("/scoreboard", async (_request: Request, response: Response) => 
     costUsd: Math.round(Number(passes?.cost_usd ?? 0) * 10000) / 10000,
     outcomes,
     realizedPnl: Math.round(realizedPnl * 100) / 100,
-    pessimisticPnl: Math.round(pessimisticPnl * 100) / 100,
     closedActions,
     winningActions,
     openActions,
@@ -469,7 +466,6 @@ function serializeAction(row: Record<string, unknown>, realized?: PlutoActionRea
     referenceMid: num(row.reference_mid),
     fillPrice: num(row.fill_price),
     impliedFillPrice: num(row.implied_fill_price),
-    pessimisticPnl: num(row.pessimistic_pnl),
     // EXP $ the order adds (or, negative, releases), the way Positions counts exposure; null without an order.
     exposureDollars: computePlutoActionExposure(exposureInput, orderRequest ?? null),
     // Contracts (shares for a share sale) the order's trades filled so far; null before any fill or without an order.

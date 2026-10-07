@@ -12,7 +12,6 @@ describe("compareFillsWithReference", () => {
     expect(compareFillsWithReference({ price: 0, side: "buy", multiplier: 100 }, [option("buy", 1, 1.4)])?.slippagePct).toBe(0);
     const sold = compareFillsWithReference({ price: 2.0, side: "sell", multiplier: 100 }, [option("sell", 2, 2.1), option("sell", 1, 1.9)])!;
     expect(sold.chosenLegFillPrice).toBeCloseTo(2.0333, 4);
-    expect(sold.pessimisticPnl).toBe(-10); // filled $10 better than three contracts at the bid
   });
 
   it("buy-write: the net is what counts, not IBKR's split between shares and call (COHR, 2026-09-21)", () => {
@@ -21,7 +20,6 @@ describe("compareFillsWithReference", () => {
     expect(comparison.chosenLegFillPrice).toBeCloseTo(6.86);
     expect(comparison.fillNetDollars).toBeCloseTo(comparison.referenceNetDollars, 6);
     expect(comparison.slippagePct).toBeCloseTo(0, 6);
-    expect(comparison.pessimisticPnl).toBe(0);
   });
 
   it("roll: a worse net shows as a share of the new option's reference value (SPCX-shaped)", () => {
@@ -31,7 +29,6 @@ describe("compareFillsWithReference", () => {
     expect(worse.referenceNetDollars).toBeCloseTo(326);
     expect(worse.fillNetDollars).toBeCloseTo(280);
     expect(worse.slippagePct).toBeCloseTo((46 / 526) * 100, 6);
-    expect(worse.pessimisticPnl).toBe(46);
   });
 
   it("is null until the chosen leg has a fill", () => {

@@ -192,7 +192,6 @@ export interface UpdatePlutoActionInput {
   fillPrice?: number | null;
   /** Two-part orders only: the chosen option's price implied by the net fill (see impliedChosenLegPrice). */
   impliedFillPrice?: number | null;
-  pessimisticPnl?: number | null;
   realizedPnl?: number | null;
   evaluatedAt?: Date | null;
   /** A combo's legs other than the chosen option, at their reference prices (see executor.ts). */
@@ -210,7 +209,6 @@ export async function updatePlutoAction(actionId: string, input: UpdatePlutoActi
       ...(input.gateResults !== undefined ? { gate_results: JSON.stringify(input.gateResults) } : {}),
       ...(input.fillPrice !== undefined ? { fill_price: input.fillPrice } : {}),
       ...(input.impliedFillPrice !== undefined ? { implied_fill_price: input.impliedFillPrice } : {}),
-      ...(input.pessimisticPnl !== undefined ? { pessimistic_pnl: input.pessimisticPnl } : {}),
       ...(input.realizedPnl !== undefined ? { realized_pnl: input.realizedPnl } : {}),
       ...(input.evaluatedAt !== undefined ? { evaluated_at: input.evaluatedAt } : {}),
       ...(input.referenceOtherLegs !== undefined ? { reference_other_legs: input.referenceOtherLegs === null ? null : JSON.stringify(input.referenceOtherLegs) } : {}),

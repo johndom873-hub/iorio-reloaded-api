@@ -220,8 +220,6 @@ export interface FillComparison {
   fillNetDollars: number;
   /** Net shortfall against the reference as % of the chosen leg's reference value; positive = worse. */
   slippagePct: number;
-  /** Reference net minus fill net: what the fill would have been worth at the worse side of each leg's market. */
-  pessimisticPnl: number;
 }
 
 /**
@@ -257,7 +255,6 @@ export function compareFillsWithReference(reference: PlutoFillReference, fills: 
     referenceNetDollars,
     fillNetDollars,
     slippagePct: chosenReferenceDollars > 0 ? (shortfall / chosenReferenceDollars) * 100 : 0,
-    pessimisticPnl: Math.round(shortfall * 100) / 100,
   };
 }
 
@@ -339,7 +336,7 @@ export async function loadOrderFills(orderId: string): Promise<PlutoFill[]> {
 
 /**
  * Polls the order until IBKR is done with it or the timeout passes (then asks for a cancel and keeps
- * polling until the cancel lands). Records the outcome, the fill price and the pessimistic-fill gap.
+ * polling until the cancel lands). Records the outcome and the fill price, and checks the fill against the reference (fill_slippage).
  */
 export async function watchPlutoOrder(
   api: InternalApiClient,
@@ -367,9 +364,7 @@ export async function watchPlutoOrder(
     }
     if (isFinalOrderRequestStatus(order.status)) {
       const outcome = order.status as PlutoActionOutcome;
-      // Pessimistic bracket (design 2026-09-28): the P&L difference had the order filled at the worse side of
-      // the market it was placed into (the bid for a sell, the ask for a buy) instead of where it did fill —
-      // on the net for a combo (compareFillsWithReference).
+      // The fill against the order's reference, on the net for a combo (compareFillsWithReference).
       const filledStatus = order.status === "filled" || order.status === "cancelled_partially_filled";
       const fills = filledStatus ? await loadOrderFills(input.orderId) : [];
       const comparison = fills.length > 0 ? compareFillsWithReference(input.reference, fills) : null;
@@ -377,8 +372,7 @@ export async function watchPlutoOrder(
       if (filledStatus && comparison === null && missingFillPolls++ < 3) continue;
       const fillPrice = comparison?.chosenLegFillPrice ?? null;
       const impliedFillPrice = comparison ? impliedChosenLegPrice(input.reference, otherLegOrderPrices(input.reference, order.payload?.legs ?? []), fills) : null;
-      const pessimisticPnl = comparison?.pessimisticPnl ?? null;
-      await updatePlutoAction(input.actionId, { outcome, fillPrice, impliedFillPrice, pessimisticPnl, blockReason: order.errorMessage ?? null });
+      await updatePlutoAction(input.actionId, { outcome, fillPrice, impliedFillPrice, blockReason: order.errorMessage ?? null });
       await recordPlutoEvent("order_outcome", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, outcome, fillPrice, error: order.errorMessage ?? undefined });
       if (outcome === "rejected" || outcome === "error") {
         const detail = `${input.description}: ${order.errorMessage ?? outcome}`;

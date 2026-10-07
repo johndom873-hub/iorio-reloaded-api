@@ -45,7 +45,7 @@ export interface CloseOffer extends PlutoCloseActionOffer {
   /** Executed by code without a model call (odd lots, earnings buybacks), with the rule that did it. */
   automatic: boolean;
   automaticReason: string | null;
-  /** Reference price for the order and the pessimistic bracket. */
+  /** Reference price for the order and the fill-slippage check. */
   limitPrice: number;
   side: "sell" | "buy";
   multiplier: number;
