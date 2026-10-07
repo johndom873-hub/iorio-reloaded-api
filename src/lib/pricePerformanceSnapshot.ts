@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import { computeIvMetrics } from "./ivMetrics.js";
-import { lastCompletedSessionDate } from "./marketSessionStatus.js";
+import { lastCompletedSessionDate, liveSessionDate } from "./marketSessionStatus.js";
 import { computePriceTrend, type PriceTrend } from "./priceTrends.js";
 import { easternIsoDate } from "./easternIsoDate.js";
 
@@ -25,6 +25,13 @@ interface RawRow {
   close1mAgo: string | null;
   close3mAgo: string | null;
   close1yAgo: string | null;
+  liveClose24hAgo: string | null;
+  liveClose48hAgo: string | null;
+  liveClose72hAgo: string | null;
+  liveClose1wAgo: string | null;
+  liveClose1mAgo: string | null;
+  liveClose3mAgo: string | null;
+  liveClose1yAgo: string | null;
   signalsEnabled: boolean;
   weeklyLow: string;
   weeklyHigh: string;
@@ -64,8 +71,14 @@ export interface PricePerformanceRow extends PriceTrend {
   change1m: number | null;
   change3m: number | null;
   change1y: number | null;
-  /** The closes each change is measured against — delivered once so the browser can apply the live price itself. */
+  /** The closes each change above is measured against, counted back from the latest completed close. */
   referenceCloses: ReferenceCloses;
+  /**
+   * The closes a LIVE price is measured against, counted back from the session the live price belongs to (meta.liveSessionDate):
+   * during the session, 24hr is the live price vs the latest close, 48hr vs the close before it, 1W vs the last close on or
+   * before 7 days before today (Marcelo, 2026-10-07). The same as referenceCloses once that session's bar is stored.
+   */
+  liveReferenceCloses: ReferenceCloses;
   /** Off: the nightly IV snapshot is skipped, so impliedVolatility and avgOptionVolume are null rather than stale. */
   signalsEnabled: boolean;
   impliedVolatility: string | null;
@@ -84,6 +97,8 @@ export interface PricePerformanceMeta {
   expectedSessionDate: string;
   isDataCurrent: boolean;
   behindSymbols: string[];
+  /** The session a live price belongs to now (marketSessionStatus.liveSessionDate). */
+  liveSessionDate: string;
 }
 
 export interface PricePerformanceSnapshot {
@@ -114,53 +129,37 @@ export function classifyFreshness(latestDateBySymbol: Record<string, string>, ex
   return { behindSymbols: symbols.filter((symbol) => latestDateBySymbol[symbol]! < expectedSessionDate) };
 }
 
-// The old fragment, unchanged except that "latest" is now the newest bar AT OR
-// BEFORE the completed-session cutoff (the one `?` binding), and every "N days
-// back" join still hangs off that latest date.
+// "latest" is the newest bar AT OR BEFORE the completed-session cutoff (the first `?` binding). The reference closes hang
+// off an anchor date: the latest bar's date for the stored changes, the live session's date for the live ones.
+function referenceCloseJoins(prefix: string, anchorSql: string): string {
+  const sessionsBack = (alias: string, offset: number) => `
+  LEFT JOIN LATERAL (
+    SELECT close_price FROM daily_price_bars
+    WHERE ticker_id = t.id AND trading_date < ${anchorSql}
+    ORDER BY trading_date DESC OFFSET ${offset} LIMIT 1
+  ) ${prefix}${alias} ON true`;
+  const daysBack = (alias: string, days: number) => `
+  LEFT JOIN LATERAL (
+    SELECT close_price FROM daily_price_bars
+    WHERE ticker_id = t.id AND trading_date <= ${anchorSql} - INTERVAL '${days} days'
+    ORDER BY trading_date DESC LIMIT 1
+  ) ${prefix}${alias} ON true`;
+  return [sessionsBack("d1", 0), sessionsBack("d2", 1), sessionsBack("d3", 2), daysBack("wk", 7), daysBack("mo", 30), daysBack("q", 91), daysBack("yr", 365)].join("");
+}
+
 const historicalCloseJoins = `
   JOIN LATERAL (
     SELECT trading_date, close_price, low_price, high_price
     FROM daily_price_bars WHERE ticker_id = t.id AND trading_date <= ?::date ORDER BY trading_date DESC LIMIT 1
   ) latest ON true
-  LEFT JOIN LATERAL (
-    SELECT close_price FROM daily_price_bars
-    WHERE ticker_id = t.id AND trading_date < latest.trading_date
-    ORDER BY trading_date DESC OFFSET 0 LIMIT 1
-  ) d1 ON true
-  LEFT JOIN LATERAL (
-    SELECT close_price FROM daily_price_bars
-    WHERE ticker_id = t.id AND trading_date < latest.trading_date
-    ORDER BY trading_date DESC OFFSET 1 LIMIT 1
-  ) d2 ON true
-  LEFT JOIN LATERAL (
-    SELECT close_price FROM daily_price_bars
-    WHERE ticker_id = t.id AND trading_date < latest.trading_date
-    ORDER BY trading_date DESC OFFSET 2 LIMIT 1
-  ) d3 ON true
-  LEFT JOIN LATERAL (
-    SELECT close_price FROM daily_price_bars
-    WHERE ticker_id = t.id AND trading_date <= latest.trading_date - INTERVAL '7 days'
-    ORDER BY trading_date DESC LIMIT 1
-  ) wk ON true
-  LEFT JOIN LATERAL (
-    SELECT close_price FROM daily_price_bars
-    WHERE ticker_id = t.id AND trading_date <= latest.trading_date - INTERVAL '30 days'
-    ORDER BY trading_date DESC LIMIT 1
-  ) mo ON true
-  LEFT JOIN LATERAL (
-    SELECT close_price FROM daily_price_bars
-    WHERE ticker_id = t.id AND trading_date <= latest.trading_date - INTERVAL '91 days'
-    ORDER BY trading_date DESC LIMIT 1
-  ) q ON true
-  LEFT JOIN LATERAL (
-    SELECT close_price FROM daily_price_bars
-    WHERE ticker_id = t.id AND trading_date <= latest.trading_date - INTERVAL '365 days'
-    ORDER BY trading_date DESC LIMIT 1
-  ) yr ON true
+  ${referenceCloseJoins("", "latest.trading_date")}
+  CROSS JOIN (SELECT ?::date AS live_session_date) live_session
+  ${referenceCloseJoins("live_", "live_session.live_session_date")}
 `;
 
 async function computePricePerformanceSnapshot(now: Date): Promise<PricePerformanceSnapshot> {
   const completedThroughDate = await lastCompletedSessionDate(now);
+  const liveSession = await liveSessionDate(now);
   const expectedSessionDate = await lastCompletedSessionDate(new Date(now.getTime() - nightlyJobGraceMs));
 
   // 24hr/48hr/72hr use trading-day close deltas (1/2/3 trading days back), not
@@ -184,6 +183,13 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       mo.close_price AS "close1mAgo",
       q.close_price AS "close3mAgo",
       yr.close_price AS "close1yAgo",
+      live_d1.close_price AS "liveClose24hAgo",
+      live_d2.close_price AS "liveClose48hAgo",
+      live_d3.close_price AS "liveClose72hAgo",
+      live_wk.close_price AS "liveClose1wAgo",
+      live_mo.close_price AS "liveClose1mAgo",
+      live_q.close_price AS "liveClose3mAgo",
+      live_yr.close_price AS "liveClose1yAgo",
       se.signals_enabled AS "signalsEnabled",
       wkrange.low AS "weeklyLow",
       wkrange.high AS "weeklyHigh",
@@ -212,7 +218,7 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
     ) m ON true
     ORDER BY t.symbol
   `,
-    [completedThroughDate],
+    [completedThroughDate, liveSession],
   );
   const rawRows = result.rows as RawRow[];
 
@@ -253,6 +259,15 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
         close3mAgo: toNumberOrNull(row.close3mAgo),
         close1yAgo: toNumberOrNull(row.close1yAgo),
       };
+      const liveReferenceCloses: ReferenceCloses = {
+        close24hAgo: toNumberOrNull(row.liveClose24hAgo),
+        close48hAgo: toNumberOrNull(row.liveClose48hAgo),
+        close72hAgo: toNumberOrNull(row.liveClose72hAgo),
+        close1wAgo: toNumberOrNull(row.liveClose1wAgo),
+        close1mAgo: toNumberOrNull(row.liveClose1mAgo),
+        close3mAgo: toNumberOrNull(row.liveClose3mAgo),
+        close1yAgo: toNumberOrNull(row.liveClose1yAgo),
+      };
       return {
         symbol: row.symbol,
         companyName: row.companyName,
@@ -272,6 +287,7 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
         change3m: percentChange(latestClose, referenceCloses.close3mAgo),
         change1y: percentChange(latestClose, referenceCloses.close1yAgo),
         referenceCloses,
+        liveReferenceCloses,
         ...computePriceTrend(closesByTickerId.get(row.tickerId) ?? []),
         signalsEnabled: row.signalsEnabled,
         impliedVolatility: row.signalsEnabled ? row.impliedVolatility : null,
@@ -289,6 +305,7 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       expectedSessionDate,
       isDataCurrent: freshness.behindSymbols.length === 0,
       behindSymbols: freshness.behindSymbols,
+      liveSessionDate: liveSession,
     },
   };
 }

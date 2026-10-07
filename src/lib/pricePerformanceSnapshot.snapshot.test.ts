@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => {
     completedSessionCalls: [] as Date[],
     completedThroughDate: "2026-10-05",
     expectedSessionDate: "2026-10-05",
+    liveSessionDate: "2026-10-06",
     rawDelayMs: 0,
   };
   const barBuilder: Record<string, unknown> = {};
@@ -50,6 +51,7 @@ vi.mock("./marketSessionStatus.js", () => ({
     mocks.state.completedSessionCalls.push(now);
     return mocks.state.completedSessionCalls.length % 2 === 1 ? mocks.state.completedThroughDate : mocks.state.expectedSessionDate;
   },
+  liveSessionDate: async () => mocks.state.liveSessionDate,
   easternIsoDate: (instant: Date) => instant.toLocaleDateString("en-CA", { timeZone: "America/New_York" }),
 }));
 
@@ -70,6 +72,13 @@ const rawRowFor = (overrides: Record<string, unknown> = {}) => ({
   close1mAgo: "88.00",
   close3mAgo: "100.00",
   close1yAgo: "55.00",
+  liveClose24hAgo: "110.00",
+  liveClose48hAgo: "100.00",
+  liveClose72hAgo: "125.00",
+  liveClose1wAgo: "90.00",
+  liveClose1mAgo: "88.00",
+  liveClose3mAgo: null,
+  liveClose1yAgo: "50.00",
   signalsEnabled: true,
   weeklyLow: "98.00",
   weeklyHigh: "112.00",
@@ -124,6 +133,7 @@ describe("getPricePerformanceSnapshot", () => {
       change3m: 10,
       change1y: 100,
       referenceCloses: { close24hAgo: 100, close48hAgo: 125, close72hAgo: null, close1wAgo: 0, close1mAgo: 88, close3mAgo: 100, close1yAgo: 55 },
+      liveReferenceCloses: { close24hAgo: 110, close48hAgo: 100, close72hAgo: 125, close1wAgo: 90, close1mAgo: 88, close3mAgo: null, close1yAgo: 50 },
       macdTrend: "Bullish",
       maTrend: "uptrend",
       signalsEnabled: true,
@@ -142,9 +152,9 @@ describe("getPricePerformanceSnapshot", () => {
     expect(tickers[0]).toMatchObject({ signalsEnabled: false, impliedVolatility: null, avgOptionVolume: null, change1y: 100 });
   });
 
-  it("binds the completed-session date to the latest-bar lookup and asks for the completed session twice (now, and now minus 150 minutes)", async () => {
+  it("binds the completed-session date to the latest-bar lookup, then the live session date, and asks for the completed session twice (now, and now minus 150 minutes)", async () => {
     await snapshotModule.getPricePerformanceSnapshot(now);
-    expect(mocks.state.rawCalls[0]!.bindings).toEqual(["2026-10-05"]);
+    expect(mocks.state.rawCalls[0]!.bindings).toEqual(["2026-10-05", "2026-10-06"]);
     expect(mocks.state.completedSessionCalls.map((date) => date.toISOString())).toEqual(["2026-10-06T14:00:00.000Z", "2026-10-06T11:30:00.000Z"]);
   });
 
@@ -157,7 +167,7 @@ describe("getPricePerformanceSnapshot", () => {
 
   it("reports meta with the completed and expected session dates and a current data flag", async () => {
     const { meta } = await snapshotModule.getPricePerformanceSnapshot(now);
-    expect(meta).toEqual({ completedThroughDate: "2026-10-05", expectedSessionDate: "2026-10-05", isDataCurrent: true, behindSymbols: [] });
+    expect(meta).toEqual({ completedThroughDate: "2026-10-05", expectedSessionDate: "2026-10-05", isDataCurrent: true, behindSymbols: [], liveSessionDate: "2026-10-06" });
   });
 
   it("flags only the tickers whose latest bar predates the expected session", async () => {

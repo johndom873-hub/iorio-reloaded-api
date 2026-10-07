@@ -149,6 +149,17 @@ export async function previousOpenSessionDate(dateIso: string, isOpenDay: (dateI
  * not a trading day) it walks back to the previous open day. `isOpenDay` is
  * injectable so the walk-back logic can be tested without a database.
  */
+/**
+ * The session a live price belongs to: today from the regular open (09:30 ET) on an open day, else the last completed
+ * session (before the open a live price is still the previous session's last trade). Price Performance measures every
+ * live change back from it (Marcelo, 2026-10-07).
+ */
+export async function liveSessionDate(now: Date = new Date(), isOpenDay: (dateIso: string) => Promise<boolean> = resolveIsOpenDay): Promise<string> {
+  const todayIso = easternIsoDate(now);
+  if (now >= easternInstant(todayIso, REGULAR_OPEN.hour, REGULAR_OPEN.minute) && (await isOpenDay(todayIso))) return todayIso;
+  return lastCompletedSessionDate(now, isOpenDay);
+}
+
 export async function lastCompletedSessionDate(
   now: Date = new Date(),
   isOpenDay: (dateIso: string) => Promise<boolean> = resolveIsOpenDay,

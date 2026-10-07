@@ -12,9 +12,11 @@ vi.mock("../db/connection.js", async () => {
 });
 vi.mock("./notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => undefined) }));
 let completedSession = "2026-10-05";
+// null: the live session is the completed one (no live session ahead of the stored bars).
+let liveSession: string | null = null;
 vi.mock("./marketSessionStatus.js", async () => {
   const actual = await vi.importActual<typeof import("./marketSessionStatus.js")>("./marketSessionStatus.js");
-  return { ...actual, lastCompletedSessionDate: async () => completedSession };
+  return { ...actual, lastCompletedSessionDate: async () => completedSession, liveSessionDate: async () => liveSession ?? completedSession };
 });
 
 const { db } = await import("../db/connection.js");
@@ -55,6 +57,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   invalidatePricePerformanceSnapshot();
+  liveSession = null;
 });
 
 afterAll(async () => {
@@ -179,3 +182,26 @@ describe("shortlist membership", () => {
     expect(row).toMatchObject({ signalsEnabled: true, impliedVolatility: null, avgOptionVolume: null });
   });
 });
+
+describe("live reference closes (Marcelo, 2026-10-07: a live price is measured back from its own session)", () => {
+  it("during the session after the latest bar, 24hr is vs the last close, 48hr / 72hr one and two sessions before it, 1W / 1M / 3M / 1Y back from today", async () => {
+    // NOK's real closes; live session 2026-10-07 (Wednesday), latest stored bar 2026-10-06.
+    const ticker = await shortlistedTicker();
+    await bars(ticker.id, { "2025-10-07": 5.07, "2026-07-08": 11.95, "2026-09-04": 10.03, "2026-09-29": 10.36, "2026-09-30": 10.14, "2026-10-01": 10.37, "2026-10-02": 10.6, "2026-10-05": 10.2, "2026-10-06": 10.97 });
+    liveSession = "2026-10-07";
+    const [row] = await rowFor(ticker.symbol, "2026-10-06");
+    expect(row!.referenceCloses).toMatchObject({ close24hAgo: 10.2, close48hAgo: 10.6, close72hAgo: 10.37, close1wAgo: 10.36 });
+    expect(row!.liveReferenceCloses).toEqual({ close24hAgo: 10.97, close48hAgo: 10.2, close72hAgo: 10.6, close1wAgo: 10.14, close1mAgo: 10.03, close3mAgo: 11.95, close1yAgo: 5.07 });
+    // The stored changes still compare the last close with the close before it.
+    expect(row!.change24h).toBeCloseTo(((10.97 - 10.2) / 10.2) * 100, 6);
+  });
+
+  it("once the live session's bar is stored (or before the open), the live references are the stored ones", async () => {
+    const ticker = await shortlistedTicker();
+    await bars(ticker.id, { "2026-10-01": 10.37, "2026-10-02": 10.6, "2026-10-05": 10.2, "2026-10-06": 10.97 });
+    liveSession = "2026-10-06";
+    const [row] = await rowFor(ticker.symbol, "2026-10-06");
+    expect(row!.liveReferenceCloses).toEqual(row!.referenceCloses);
+  });
+});
+

@@ -11,7 +11,7 @@ vi.mock("../db/connection.js", async () => {
 });
 
 const { db } = await import("../db/connection.js");
-const { computeMarketSessionStatus, easternDayStart, lastCompletedSessionDate } = await import("./marketSessionStatus.js");
+const { computeMarketSessionStatus, easternDayStart, lastCompletedSessionDate, liveSessionDate } = await import("./marketSessionStatus.js");
 const testDb: Knex = db;
 
 afterAll(async () => {
@@ -84,3 +84,19 @@ describe("easternDayStart", () => {
     expect(easternDayStart(new Date("2026-12-01T14:00:00Z")).toISOString()).toBe("2026-12-01T05:00:00.000Z");
   });
 });
+
+describe("liveSessionDate (the session a live price belongs to)", () => {
+  it("is today from the 09:30 ET open on an open day, through the close and after it", async () => {
+    expect(await liveSessionDate(new Date("2026-10-07T13:30:00Z"), openDayStub)).toBe("2026-10-07"); // 09:30 EDT
+    expect(await liveSessionDate(new Date("2026-10-07T19:59:00Z"), openDayStub)).toBe("2026-10-07"); // 15:59 EDT
+    expect(await liveSessionDate(new Date("2026-10-07T23:00:00Z"), openDayStub)).toBe("2026-10-07"); // 19:00 EDT
+    expect(await liveSessionDate(new Date("2026-12-01T14:30:00Z"), openDayStub)).toBe("2026-12-01"); // 09:30 EST
+  });
+
+  it("before the open, and on a closed day, is the last completed session", async () => {
+    expect(await liveSessionDate(new Date("2026-10-07T13:29:00Z"), openDayStub)).toBe("2026-10-06"); // 09:29 EDT
+    expect(await liveSessionDate(new Date("2026-12-01T14:29:00Z"), openDayStub)).toBe("2026-11-30"); // 09:29 EST, Monday before
+    expect(await liveSessionDate(new Date("2026-10-10T15:00:00Z"), openDayStub)).toBe("2026-10-09"); // a Saturday
+  });
+});
+
