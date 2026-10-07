@@ -62,7 +62,7 @@ vi.mock("../ibkr/marketDataPool.js", async (importOriginal) => ({
   marketDataFeedRefusal: mocks.marketDataFeedRefusal,
 }));
 vi.mock("./dataInvariants.js", () => ({ evaluateDataInvariants: mocks.evaluateDataInvariants, loadDataInvariantInputs: mocks.loadDataInvariantInputs }));
-vi.mock("./marketSessionStatus.js", () => ({ lastCompletedSessionDate: mocks.lastCompletedSessionDate }));
+vi.mock("./marketSessionStatus.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./marketSessionStatus.js")>()), lastCompletedSessionDate: mocks.lastCompletedSessionDate }));
 vi.mock("./undeliveredAlerts.js", () => ({ loadUndeliveredAlerts: mocks.loadUndeliveredAlerts }));
 vi.mock("./tradingSettingsStore.js", () => ({ loadTradingSettingsForEditing: mocks.loadTradingSettingsForEditing }));
 vi.mock("./platformControls.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./platformControls.js")>()), fetchTradingHalt: mocks.fetchTradingHalt }));
@@ -92,7 +92,7 @@ function healthyDependencies(overrides: Partial<ReadinessDependencies> = {}): Re
     loadLatestJobRuns: async () => [{ jobName: "daily_pnl_snapshot", startedAt: new Date("2026-10-02T22:30:00Z"), status: "success", errorMessage: null }],
     loadJobsDueButNotStarted: async () => [],
     loadLatestHealthCheck: async () => ({ startedAt: new Date(now.getTime() - 5 * 60_000), status: "success" }),
-    previousSessionIso: async () => "2026-10-02",
+    dataSessionIso: async () => "2026-10-02",
     loadDataInvariants: async () => [{ name: "Surface fits", ok: true, detail: "every snapshot has fitted expiries" }],
     loadMarketDataFigures: async (stage, contract) => {
       calls.push(`marketData:${stage}:${contract?.symbol}`);
@@ -210,8 +210,8 @@ describe("collectReadinessChecks", () => {
     expect(development.find((entry) => entry.name === "Configuration")).toMatchObject({ status: "warn", detail: expect.stringContaining("development") });
   });
 
-  it("passes the previous session to the data checks and names it", async () => {
-    const dependencies = healthyDependencies({ previousSessionIso: async () => "2026-10-02", loadDataInvariants: async (_now, previousSession) => [{ name: "Surface fits", ok: previousSession === "2026-10-02", detail: `for ${previousSession}` }] });
+  it("passes the data session to the data checks and names it", async () => {
+    const dependencies = healthyDependencies({ dataSessionIso: async () => "2026-10-02", loadDataInvariants: async (_now, previousSession) => [{ name: "Surface fits", ok: previousSession === "2026-10-02", detail: `for ${previousSession}` }] });
     const checks = await collectReadinessChecks("pre_open", now, dependencies);
     expect(checks.find((entry) => entry.name.startsWith("Data:"))).toMatchObject({ name: "Data: Surface fits (2026-10-02)", status: "ok", detail: "for 2026-10-02" });
   });
@@ -467,10 +467,22 @@ describe("createDefaultReadinessDependencies", () => {
     });
   });
 
-  it("finds the previous session for the given moment", async () => {
-    mocks.lastCompletedSessionDate.mockResolvedValue("2026-10-02");
-    expect(await createDefaultReadinessDependencies().previousSessionIso(now)).toBe("2026-10-02");
-    expect(mocks.lastCompletedSessionDate).toHaveBeenCalledWith(now);
+  describe("dataSessionIso", () => {
+    it("is the previous session until today's chain capture has finished", async () => {
+      mocks.lastCompletedSessionDate.mockResolvedValue("2026-10-02");
+      mocks.state.resultsByTable.job_runs = undefined;
+      expect(await createDefaultReadinessDependencies().dataSessionIso(now)).toBe("2026-10-02");
+      expect(mocks.lastCompletedSessionDate).toHaveBeenCalledWith(now);
+      const [query] = queriesOn("job_runs");
+      expect(operationArgs(query!, "where")).toEqual([[{ job_name: "option_chain_capture" }]]);
+      expect(operationArgs(query!, "whereRaw")).toEqual([[expect.stringContaining("America/New_York"), ["2026-10-05"]]]);
+    });
+
+    it("is today once today's chain capture has finished, even if it failed", async () => {
+      mocks.lastCompletedSessionDate.mockResolvedValue("2026-10-02");
+      mocks.state.resultsByTable.job_runs = { job_name: "option_chain_capture" };
+      expect(await createDefaultReadinessDependencies().dataSessionIso(now)).toBe("2026-10-05");
+    });
   });
 
   it("evaluates the data invariants over the inputs loaded for the moment and the previous session", async () => {

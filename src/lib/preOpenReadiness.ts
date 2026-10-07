@@ -282,10 +282,10 @@ export function evaluateHealthCheck(latest: { startedAt: Date; status: "running"
 
 const warnOnlyInvariantNames = new Set(["Ticker calendar (earnings, dividends)", "Economic calendar"]);
 
-/** The data checks of the morning digest, run against the previous session (today's capture does not exist before 10:00 ET). */
-export function evaluateDataChecks(invariants: InvariantResult[], previousSessionIso: string): ReadinessCheck[] {
+/** The data checks of the morning digest, run against the session named in each check (the previous one until today's 10:00 ET capture has finished, then today). */
+export function evaluateDataChecks(invariants: InvariantResult[], dataSessionIso: string): ReadinessCheck[] {
   return invariants.map((invariant) =>
-    check(`Data: ${invariant.name} (${previousSessionIso})`, invariant.ok ? "ok" : warnOnlyInvariantNames.has(invariant.name) ? "warn" : "fail", invariant.detail),
+    check(`Data: ${invariant.name} (${dataSessionIso})`, invariant.ok ? "ok" : warnOnlyInvariantNames.has(invariant.name) ? "warn" : "fail", invariant.detail),
   );
 }
 

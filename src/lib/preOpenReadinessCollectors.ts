@@ -8,7 +8,7 @@ import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { evaluateDataInvariants, loadDataInvariantInputs, type InvariantResult } from "./dataInvariants.js";
 import { readAppEnvironment } from "./appEnvironment.js";
-import { lastCompletedSessionDate } from "./marketSessionStatus.js";
+import { easternDateIso, lastCompletedSessionDate } from "./marketSessionStatus.js";
 import { loadUndeliveredAlerts } from "./undeliveredAlerts.js";
 import { loadTradingSettingsForEditing } from "./tradingSettingsStore.js";
 import { fetchTradingHalt, type TradingHalt } from "./platformControls.js";
@@ -71,8 +71,9 @@ export interface ReadinessDependencies {
   loadLatestJobRuns(): Promise<LatestJobRun[]>;
   loadJobsDueButNotStarted(now: Date): Promise<string[]>;
   loadLatestHealthCheck(): Promise<{ startedAt: Date; status: "running" | "success" | "failure" } | null>;
-  previousSessionIso(now: Date): Promise<string>;
-  loadDataInvariants(now: Date, previousSessionIso: string): Promise<InvariantResult[]>;
+  /** The trading date the data checks describe: today once today's chain capture has finished, otherwise the last completed session. */
+  dataSessionIso(now: Date): Promise<string>;
+  loadDataInvariants(now: Date, dataSessionIso: string): Promise<InvariantResult[]>;
   loadMarketDataFigures(stage: ReadinessStage, contract: ProbeContract | null): Promise<MarketDataFigures>;
   countUndeliveredAlerts(): Promise<number>;
   loadDatabaseFigures(): Promise<DatabaseFigures>;
@@ -132,8 +133,8 @@ export async function collectReadinessChecks(stage: ReadinessStage, now: Date, d
     guarded("Scheduled jobs", async () => evaluateJobs(await dependencies.loadLatestJobRuns(), await dependencies.loadJobsDueButNotStarted(now))),
     guarded("Gateway health check", async () => evaluateHealthCheck(await dependencies.loadLatestHealthCheck(), now)),
     guarded("Data", async () => {
-      const previousSession = await dependencies.previousSessionIso(now);
-      return evaluateDataChecks(await dependencies.loadDataInvariants(now, previousSession), previousSession);
+      const dataSession = await dependencies.dataSessionIso(now);
+      return evaluateDataChecks(await dependencies.loadDataInvariants(now, dataSession), dataSession);
     }),
     guarded("Market data", async () => evaluateMarketData(await withTimeout(dependencies.loadMarketDataFigures(stage, await probeContractPromise), "the live quote probe"), stage)),
     guarded("Telegram", async () => evaluateUndeliveredAlerts(await dependencies.countUndeliveredAlerts())),
@@ -226,8 +227,16 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
       const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).orderBy("started_at", "desc").first("started_at", "status");
       return row ? { startedAt: new Date(row.started_at), status: row.status } : null;
     },
-    previousSessionIso: (now) => lastCompletedSessionDate(now),
-    loadDataInvariants: async (now, previousSessionIso) => evaluateDataInvariants(await loadDataInvariantInputs(now, previousSessionIso)),
+    dataSessionIso: async (now) => {
+      const todayIso = easternDateIso(now);
+      const captureFinishedToday = await db("job_runs")
+        .where({ job_name: "option_chain_capture" })
+        .whereNotNull("finished_at")
+        .whereRaw("(started_at at time zone 'America/New_York')::date::text = ?", [todayIso])
+        .first("job_name");
+      return captureFinishedToday ? todayIso : lastCompletedSessionDate(now);
+    },
+    loadDataInvariants: async (now, dataSessionIso) => evaluateDataInvariants(await loadDataInvariantInputs(now, dataSessionIso)),
     loadMarketDataFigures: async (stage, contract) => {
       const stockProbe = await probeQuote({ key: "readiness-stock", legType: "stock", symbol: "SPY" }, "SPY", false).catch(() => null);
       const optionProbe =
