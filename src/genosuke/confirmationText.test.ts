@@ -4,10 +4,10 @@ import {
   buildOrderCard,
   buildTradingHaltCard,
   buildRiskLimitsCard,
-  toIsoExpiry,
   validateCloseLegs,
   type PositionForCard,
 } from "./confirmationText.js";
+import { toIsoExpiry } from "../lib/tradeMessageFormatting.js";
 
 // Mirrors the real staging AAOI position: the 110 call expired (leg closed), 100 shares still open.
 const aaoi: PositionForCard = {

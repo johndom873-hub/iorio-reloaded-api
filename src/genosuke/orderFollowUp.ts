@@ -1,8 +1,12 @@
 import { db } from "../db/connection.js";
 import type { TelegramApi } from "./telegramApi.js";
+import { describeOrderFillLine, fillBearingOrderStatuses, loadOrderFills, shouldWaitForFills, type OrderFill } from "../lib/orderFills.js";
 
-// Genosuke follows the orders it placed until they reach a final status (approved 2026-10-05), and only those:
-// an order placed from the web UI never produces a Telegram message. Every status change worth hearing about is sent once
+export type { OrderFill };
+
+// Genosuke follows the orders it placed until they reach a final status (approved 2026-10-05), and only those, in its own
+// voice. Every order, Genosuke's included, is also reported by the trading-events catch-all (lib/orderTelegramNotices.ts);
+// both are kept on purpose. Every status change worth hearing about is sent once
 // (genosuke_notified_status remembers the last one told), so a restart neither repeats nor loses a message. Fills are read
 // from the trades the worker recorded for the order.
 
@@ -13,15 +17,6 @@ const followUpWindowHours = 48;
 /** Statuses Genosuke reports: the order is working at IBKR, partly or fully filled, or it ended without (all of) a fill. */
 export const notifiableOrderStatuses = ["submitted", "partially_filled", "filled", "cancelled", "cancelled_partially_filled", "rejected", "error"] as const;
 
-export interface OrderFill {
-  side: string;
-  quantity: number;
-  price: number;
-  optionType: "call" | "put" | null;
-  strikePrice: number | null;
-  expiryDate: string | null;
-}
-
 export interface OrderNoticeInput {
   id: string;
   status: string;
@@ -31,14 +26,8 @@ export interface OrderNoticeInput {
   symbol: string;
 }
 
-function describeFill(fill: OrderFill): string {
-  const action = fill.side.toUpperCase();
-  const what = fill.optionType ? `${fill.quantity} ${fill.optionType} $${fill.strikePrice} exp ${fill.expiryDate}` : `${fill.quantity} shares`;
-  return `• ${action} ${what} at ${fill.price}`;
-}
-
 function withFills(headline: string, fills: OrderFill[]): string {
-  return fills.length > 0 ? `${headline}\n${fills.map(describeFill).join("\n")}` : headline;
+  return fills.length > 0 ? `${headline}\n${fills.map(describeOrderFillLine).join("\n")}` : `${headline}\n(fill prices not recorded yet)`;
 }
 
 /** Pure: the Telegram message for one status change of an order Genosuke placed. */
@@ -68,20 +57,32 @@ export function describeOrderUpdate(order: OrderNoticeInput, fills: OrderFill[])
   }
 }
 
+export interface OrderNoticeRow extends OrderNoticeInput {
+  /** The order's legs (payload.legs), to tell when every fill is recorded. */
+  legs: { quantity: number }[];
+  /** When the order last changed status. */
+  updatedAt: Date;
+}
+
 export interface OrderFollowUpDependencies {
-  loadOrdersNeedingNotice(): Promise<OrderNoticeInput[]>;
+  loadOrdersNeedingNotice(): Promise<OrderNoticeRow[]>;
   loadFills(orderId: string): Promise<OrderFill[]>;
   send(text: string): Promise<void>;
   markNotified(orderId: string, status: string): Promise<void>;
+  now(): number;
 }
 
-/** One pass: tells the chat about every order whose status changed since it was last told. A failed send leaves the order for the next pass. */
+/** One pass: tells the chat about every order whose status changed since it was last told. A failed send, or fills still being recorded, leave the order for a later pass. */
 export async function sendDueOrderNotices(dependencies: OrderFollowUpDependencies): Promise<number> {
   const orders = await dependencies.loadOrdersNeedingNotice();
   let sent = 0;
   for (const order of orders) {
     try {
-      const fills = ["partially_filled", "filled", "cancelled_partially_filled"].includes(order.status) ? await dependencies.loadFills(order.id) : [];
+      let fills: OrderFill[] = [];
+      if (fillBearingOrderStatuses.includes(order.status)) {
+        fills = await dependencies.loadFills(order.id);
+        if (shouldWaitForFills(order.status, order.legs, fills, order.updatedAt, dependencies.now())) continue;
+      }
       await dependencies.send(describeOrderUpdate(order, fills));
       await dependencies.markNotified(order.id, order.status);
       sent += 1;
@@ -102,21 +103,23 @@ export function createDatabaseDependencies(serviceUsername: string, send: (text:
         .whereRaw("orq.genosuke_notified_status is distinct from orq.status")
         .whereRaw(`orq.created_at > now() - interval '${followUpWindowHours} hours'`)
         .orderBy("orq.updated_at")
-        .select("orq.id", "orq.status", "orq.error_message as errorMessage", "orq.cancellation_reason as cancellationReason", db.raw("orq.payload->>'symbol' as symbol"));
-      return rows;
+        .select(
+          "orq.id",
+          "orq.status",
+          "orq.error_message as errorMessage",
+          "orq.cancellation_reason as cancellationReason",
+          "orq.updated_at as updatedAt",
+          db.raw("orq.payload->>'symbol' as symbol"),
+          db.raw("orq.payload->'legs' as legs"),
+        );
+      return rows.map((row) => ({ ...row, legs: row.legs ?? [], updatedAt: new Date(row.updatedAt) }));
     },
-    loadFills: async (orderId) => {
-      const rows = await db("trades as t")
-        .leftJoin("position_legs as pl", "pl.id", "t.position_leg_id")
-        .where("t.source_order_request_id", orderId)
-        .orderBy("t.executed_at")
-        .select("t.side", "t.quantity", "t.price", "pl.option_type as optionType", "pl.strike_price as strikePrice", db.raw("to_char(pl.expiry_date, 'YYYY-MM-DD') as \"expiryDate\""));
-      return rows.map((row) => ({ ...row, price: Number(row.price), strikePrice: row.strikePrice === null ? null : Number(row.strikePrice) }));
-    },
+    loadFills: loadOrderFills,
     send,
     markNotified: async (orderId, status) => {
       await db("order_requests").where({ id: orderId }).update({ genosuke_notified_status: status });
     },
+    now: () => Date.now(),
   };
 }
 

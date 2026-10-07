@@ -567,11 +567,11 @@ async function closeOrphanedOpenPositions(passId: number): Promise<void> {
 }
 
 // Fires only for a position that closed via the "option past expiry, no
-// closing trade" path — a manual close through the app already has its
-// own confirmation UI (and its own "Filled" order toast), so it doesn't
-// need a Telegram ping or a second toast too. Sends both the Telegram
-// message and the in-app toast notification (routes/notifications.ts's SSE
-// stream) off the same message text, so they never drift apart.
+// closing trade" path — every other close is told by the trading-events
+// catch-all (positionTelegramNotices.ts) and has its own "Filled" order
+// toast. Sends both the Telegram message and the in-app toast notification
+// (routes/notifications.ts's SSE stream) off the same message text, so they
+// never drift apart.
 async function notifyPositionExpired(positionId: string, closeReason: string): Promise<void> {
   const position = await fetchPositionById(positionId);
   if (!position) return;
@@ -600,6 +600,8 @@ async function notifyPositionExpired(positionId: string, closeReason: string): P
     uncertain: marginalCallPositionIds.has(positionId),
   });
   await dependencies.notifyTelegram(message);
+  // This message is the close notice: the trading-events catch-all (positionTelegramNotices.ts) must not repeat it.
+  await db("positions").where({ id: position.id }).update({ telegram_closed_notified_at: db.fn.now() });
   await publishNotification({ type: "position_closed", positionId: position.id, symbol: position.symbol, message });
 }
 

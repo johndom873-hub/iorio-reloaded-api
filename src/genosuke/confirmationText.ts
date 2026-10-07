@@ -6,6 +6,8 @@
 // prices) — never a computed net credit/P&L, since financial formulas need
 // explicit sign-off before they're implemented.
 
+import { labelStrategy, toIsoExpiry } from "../lib/tradeMessageFormatting.js";
+
 export interface PositionLeg {
   id: string;
   legType: "option" | "stock";
@@ -24,13 +26,6 @@ export interface PositionForCard {
   legs: PositionLeg[];
 }
 
-const strategyLabels: Record<string, string> = {
-  covered_call: "covered call",
-  cash_secured_put: "cash-secured put",
-  hedge: "hedge",
-  unstructured: "unstructured",
-};
-
 const riskSettingLabels: [string, string][] = [
   ["maxPositionPctOfPortfolio", "Max position % of portfolio"],
   ["maxConcentrationPerTickerPct", "Max concentration per ticker %"],
@@ -46,15 +41,6 @@ const riskSettingLabels: [string, string][] = [
   ["spreadCostChargedPct", "Signals spread cost % of the half-spread"],
   ["orderUnfilledCancelMinutes", "Cancel unfilled orders after (minutes, 0 = never)"],
 ];
-
-export function labelStrategy(strategyKey: string): string {
-  return strategyLabels[strategyKey] ?? strategyKey;
-}
-
-/** IBKR-style YYYYMMDD -> ISO YYYY-MM-DD; anything else passes through unchanged. */
-export function toIsoExpiry(expiry: string): string {
-  return /^\d{8}$/.test(expiry) ? `${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}` : expiry;
-}
 
 function formatLimitPrice(limitPrice: unknown): string {
   const numeric = Number(limitPrice);

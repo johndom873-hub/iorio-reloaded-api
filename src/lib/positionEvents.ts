@@ -125,6 +125,31 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
       "p.unstructured_reason as unstructuredReason",
     );
 
+  return (await buildPositionEvents(positions, { includeConsequenceEvents: false })).slice(0, limit);
+}
+
+/**
+ * Every event of the given positions, including the leftover-stock opens/closes the feed hides as consequences of another
+ * event (the trading-events Telegram catch-all, approved 2026-10-07, reports those too).
+ */
+export async function fetchPositionEventsForPositions(positionIds: string[]): Promise<PositionEvent[]> {
+  if (positionIds.length === 0) return [];
+  const positions: PositionRow[] = await db("positions as p")
+    .join("tickers as t", "t.id", "p.ticker_id")
+    .whereIn("p.id", positionIds)
+    .select(
+      "p.id",
+      "t.symbol",
+      "p.strategy_key as strategyKey",
+      "p.opened_at as openedAt",
+      "p.closed_at as closedAt",
+      "p.close_reason as closeReason",
+      "p.unstructured_reason as unstructuredReason",
+    );
+  return buildPositionEvents(positions, { includeConsequenceEvents: true });
+}
+
+async function buildPositionEvents(positions: PositionRow[], options: { includeConsequenceEvents: boolean }): Promise<PositionEvent[]> {
   if (positions.length === 0) return [];
 
   const positionIds = positions.map((p) => p.id);
@@ -255,8 +280,10 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
     // A leftover position closed because its shares were actually sold is a
     // real transaction and still shows.
     const openIsConsequenceOfAnotherEvent =
-      isUnstructured && (position.unstructuredReason === "csp_assigned_stock" || position.unstructuredReason === "cc_expired_leftover_stock");
-    const closeIsConsequenceOfAnotherEvent = isUnstructured && position.closeReason === "stock_rolled_into_covered_call";
+      !options.includeConsequenceEvents &&
+      isUnstructured &&
+      (position.unstructuredReason === "csp_assigned_stock" || position.unstructuredReason === "cc_expired_leftover_stock");
+    const closeIsConsequenceOfAnotherEvent = !options.includeConsequenceEvents && isUnstructured && position.closeReason === "stock_rolled_into_covered_call";
     if (!openIsConsequenceOfAnotherEvent) {
       events.push({
         positionId: position.id,
@@ -294,5 +321,5 @@ export async function fetchPositionEvents(limit = 40, sinceDays = 7): Promise<Po
     }
   }
 
-  return events.sort((a, b) => new Date(b.eventAt).getTime() - new Date(a.eventAt).getTime()).slice(0, limit);
+  return events.sort((a, b) => new Date(b.eventAt).getTime() - new Date(a.eventAt).getTime());
 }

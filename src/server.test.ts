@@ -13,6 +13,7 @@ const calls = vi.hoisted(() => ({
   startNotificationBroadcaster: vi.fn(),
   startDaySignalsLoop: vi.fn(),
   startOpsMonitor: vi.fn(),
+  startOrderTelegramNotices: vi.fn(),
   announceWebDynoStart: vi.fn(),
   resumeInterruptedBackfillRuns: vi.fn(),
   borrowRead: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock("./genosuke/bot.js", () => ({ startGenosuke: calls.startGenosuke }));
 vi.mock("./lib/notificationBroadcaster.js", () => ({ startNotificationBroadcaster: calls.startNotificationBroadcaster }));
 vi.mock("./lib/daySignalsLoop.js", () => ({ startDaySignalsLoop: calls.startDaySignalsLoop }));
 vi.mock("./lib/opsMonitor.js", () => ({ startOpsMonitor: calls.startOpsMonitor }));
+vi.mock("./lib/orderTelegramNotices.js", () => ({ startOrderTelegramNotices: calls.startOrderTelegramNotices }));
 vi.mock("./lib/webDynoStartNotice.js", () => ({ announceWebDynoStart: calls.announceWebDynoStart }));
 vi.mock("./ibkr/tickerBackfillPipeline.js", () => ({ resumeInterruptedBackfillRuns: calls.resumeInterruptedBackfillRuns }));
 vi.mock("./ibkr/sharedReadConnection.js", () => ({
@@ -95,7 +97,7 @@ describe("server.ts boot validation", () => {
   it("does not start any background work before the port is bound", async () => {
     stubBootEnvironment();
     await importServer();
-    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startDaySignalsLoop, calls.announceWebDynoStart, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
+    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startOrderTelegramNotices, calls.startDaySignalsLoop, calls.announceWebDynoStart, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
       expect(started).not.toHaveBeenCalled();
     }
   });
@@ -148,7 +150,7 @@ describe("server.ts once the port is bound", () => {
     await importServer();
     runListenCallback();
     await vi.waitFor(() => expect(calls.announceWebDynoStart).toHaveBeenCalledWith({ subject: "API" }));
-    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startDaySignalsLoop, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
+    for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startOrderTelegramNotices, calls.startDaySignalsLoop, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
       expect(started).toHaveBeenCalledTimes(1);
     }
   });

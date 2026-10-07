@@ -8,6 +8,7 @@ import { installShutdownHandler } from "./lib/installShutdownHandler.js";
 import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
 import { startOpsMonitor } from "./lib/opsMonitor.js";
+import { startOrderTelegramNotices } from "./lib/orderTelegramNotices.js";
 import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
 import { validatePasskeyConfiguration } from "./config/passkeyLoginMode.js";
@@ -72,6 +73,7 @@ app.listen(port, () => {
   // server to call.
   startGenosuke();
   startOpsMonitor();
+  startOrderTelegramNotices();
   if (daySignalsLoopFlag === "true") startDaySignalsLoop();
   else console.log("Day Signals loop disabled (DAY_SIGNALS_LOOP_ENABLED=false).");
 });

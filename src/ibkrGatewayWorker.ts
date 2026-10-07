@@ -16,6 +16,7 @@ import { resolveContractId } from "./ibkr/ibkrGatewayResolveContractId.js";
 import { allocateContractResolutionRequestId } from "./ibkr/contractResolutionRequestIds.js";
 import { fetchIbkrHeldPositions } from "./ibkr/ibkrGatewayFetchHeldPositions.js";
 import { reconcileHeldPositions, type ReconciliationDependencies } from "./ibkr/ibkrGatewayReconcilePositions.js";
+import { sendDuePositionTelegramNotices } from "./lib/positionTelegramNotices.js";
 import { replayRecentIbkrExecutions } from "./ibkr/ibkrGatewayReplayRecentExecutions.js";
 import { fetchIbkrOpenOrders } from "./ibkr/ibkrGatewayFetchOpenOrders.js";
 import { fetchIbkrCompletedOrders } from "./ibkr/ibkrGatewayFetchCompletedOrders.js";
@@ -100,6 +101,11 @@ const telegramNotifyTimeoutMs = 5_000;
 /** Never lets a hung Telegram call block startup/shutdown paths that must proceed regardless. */
 function notifyTelegramWithTimeout(message: string): Promise<void> {
   return Promise.race([notifyTelegram(message).then(() => undefined), new Promise<void>((resolve) => setTimeout(resolve, telegramNotifyTimeoutMs))]);
+}
+
+/** Whether the message was delivered within the timeout: a slow Telegram counts as undelivered (so it may arrive twice). */
+function notifyTelegramDeliveredWithinTimeout(message: string): Promise<boolean> {
+  return Promise.race([notifyTelegram(message), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), telegramNotifyTimeoutMs))]);
 }
 
 // Order placement lives in ibkr/ibkrGatewayOrderPlacement.ts (testable without this process); this wires in the real collaborators.
@@ -344,6 +350,8 @@ async function reconcilePositionsFromIbkr(): Promise<void> {
     publishPulse("ibkr-gateway").catch(() => {});
 
     await reconcileHeldPositions(held, passId, reconciliationDependencies);
+    // Inside the pass's lock, so the notices never read positions a concurrent pass is still changing.
+    await sendDuePositionTelegramNotices(notifyTelegramDeliveredWithinTimeout);
     console.log(`Reconciliation #${passId}: pass completed in ${Date.now() - startedAt}ms.`);
   } catch (error) {
     console.error(`Reconciliation #${passId}: pass threw after ${Date.now() - startedAt}ms: ${error instanceof Error ? error.stack ?? error.message : error}`);
