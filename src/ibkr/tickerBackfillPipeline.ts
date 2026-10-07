@@ -14,6 +14,7 @@ import {
   staleBackfillRunMinutes,
   updateStep,
   type BackfillRunStatus,
+  type BackfillScope,
   type BackfillStep,
   type BackfillStepKey,
   type BackfillStepStatus,
@@ -104,6 +105,8 @@ export interface BackfillStepWorkers {
     symbol: string,
   ) => Promise<{ resolved: boolean; earningsWritten: number; dividendsWritten: number; historicalEarningsWritten: number; historicalEarningsSkippedEtf: boolean; historicalEarningsError: string | null }>;
   loadUniverseTicker: (tickerId: string, symbol: string) => Promise<UniverseTicker>;
+  /** Read right before the option-chain step, so Signals turned on mid-run still gets its strikes. */
+  loadSignalsEnabled: (tickerId: string) => Promise<boolean>;
   prepareChain: (ib: IbkrConnection["ib"], ticker: UniverseTicker, todayIso: string) => Promise<PreparedTicker>;
   now: () => Date;
 }
@@ -156,6 +159,10 @@ const defaultStepWorkers: BackfillStepWorkers = {
     const row = await db("tickers").where({ id: tickerId }).first();
     return { tickerId, symbol, contractId: (row?.ibkr_contract_id as number | null | undefined) ?? null };
   },
+  loadSignalsEnabled: async (tickerId) => {
+    const entry = await db("shortlist_entries").where({ ticker_id: tickerId }).whereNull("removed_at").first("signals_enabled");
+    return Boolean(entry?.signals_enabled);
+  },
   prepareChain: (ib, ticker, todayIso) => prepareTicker(ib, ticker, todayIso),
   now: () => new Date(),
 };
@@ -175,14 +182,14 @@ let pipelineQueue: Promise<void> = Promise.resolve();
  * the work continues in the background. If a fresh run is already in
  * progress for the ticker, that run is returned instead of starting another.
  */
-export async function startTickerBackfill(tickerId: string, symbol: string, dependencies: TickerBackfillDependencies = defaultDependencies): Promise<TickerBackfillRun> {
+export async function startTickerBackfill(tickerId: string, symbol: string, dependencies: TickerBackfillDependencies = defaultDependencies, scope: BackfillScope = "full"): Promise<TickerBackfillRun> {
   const current = await dependencies.store.getLatest(tickerId);
   if (current && current.status === "running") return current;
 
   await dependencies.store.closeRunning(tickerId);
-  const run = await dependencies.store.create(tickerId, buildInitialBackfillSteps());
+  const run = await dependencies.store.create(tickerId, buildInitialBackfillSteps(scope));
 
-  pipelineQueue = pipelineQueue.then(() => executeBackfillRun(run.id, tickerId, symbol, dependencies)).catch((error) => console.error(`ticker backfill for ${symbol} crashed`, error));
+  pipelineQueue = pipelineQueue.then(() => executeBackfillRun(run.id, tickerId, symbol, dependencies, scope)).catch((error) => console.error(`ticker backfill for ${symbol} crashed`, error));
   return run;
 }
 
@@ -191,9 +198,9 @@ export function waitForBackfillQueue(): Promise<void> {
   return pipelineQueue;
 }
 
-export async function executeBackfillRun(runId: string, tickerId: string, symbol: string, dependencies: TickerBackfillDependencies = defaultDependencies): Promise<void> {
+export async function executeBackfillRun(runId: string, tickerId: string, symbol: string, dependencies: TickerBackfillDependencies = defaultDependencies, scope: BackfillScope = "full"): Promise<void> {
   const { store, workers } = dependencies;
-  let steps = buildInitialBackfillSteps();
+  let steps = buildInitialBackfillSteps(scope);
   const report = async (key: BackfillStepKey, status: BackfillStepStatus, message: string | null) => {
     steps = updateStep(steps, key, status, message);
     await store.saveProgress(runId, steps);
@@ -214,25 +221,29 @@ export async function executeBackfillRun(runId: string, tickerId: string, symbol
   const todayIso = easternDateIso(workers.now());
 
   try {
-    await runStep("history", async () => {
-      const result = await workers.fetchHistory(await getConnection(), tickerId, symbol);
-      const splitNote = result.suspectedSplitDates.length > 0 ? ` Possible stock split on ${result.suspectedSplitDates.join(", ")}: check the price history.` : "";
-      return { status: "done", message: `${result.barCount} daily bars (${result.firstTradingDate} to ${result.lastTradingDate}), ${result.ivPointCount} implied-volatility points.${splitNote}` };
-    });
+    if (scope === "full") {
+      await runStep("history", async () => {
+        const result = await workers.fetchHistory(await getConnection(), tickerId, symbol);
+        const splitNote = result.suspectedSplitDates.length > 0 ? ` Possible stock split on ${result.suspectedSplitDates.join(", ")}: check the price history.` : "";
+        return { status: "done", message: `${result.barCount} daily bars (${result.firstTradingDate} to ${result.lastTradingDate}), ${result.ivPointCount} implied-volatility points.${splitNote}` };
+      });
 
-    await runStep("calendar", async () => {
-      const result = await workers.captureCalendar(tickerId, symbol);
-      const historicalNote = result.historicalEarningsError
-        ? ` Historical earnings backfill failed: ${result.historicalEarningsError}.`
-        : result.historicalEarningsSkippedEtf
-          ? " ETF: no earnings to backfill."
-          : ` ${result.historicalEarningsWritten} historical earnings dates.`;
-      if (!result.resolved) return { status: "skipped", message: `Ticker not found on TradingView; forward calendar unavailable.${historicalNote}` };
-      return { status: "done", message: `${result.earningsWritten} earnings and ${result.dividendsWritten} dividend events.${historicalNote}` };
-    });
+      await runStep("calendar", async () => {
+        const result = await workers.captureCalendar(tickerId, symbol);
+        const historicalNote = result.historicalEarningsError
+          ? ` Historical earnings backfill failed: ${result.historicalEarningsError}.`
+          : result.historicalEarningsSkippedEtf
+            ? " ETF: no earnings to backfill."
+            : ` ${result.historicalEarningsWritten} historical earnings dates.`;
+        if (!result.resolved) return { status: "skipped", message: `Ticker not found on TradingView; forward calendar unavailable.${historicalNote}` };
+        return { status: "done", message: `${result.earningsWritten} earnings and ${result.dividendsWritten} dividend events.${historicalNote}` };
+      });
+    }
 
+    const signalsEnabled = await workers.loadSignalsEnabled(tickerId);
     let prepared: PreparedTicker | null = null;
     await runStep("chain_warmup", async () => {
+      if (!signalsEnabled) return { status: "skipped", message: "Signals is off: the strikes are set up when Signals is turned on." };
       prepared = await workers.prepareChain((await getConnection()).ib, await workers.loadUniverseTicker(tickerId, symbol), todayIso);
       const gridCount = prepared.chainRefresh.expiries.length;
       const strikeCount = prepared.chainRefresh.expiries.reduce((sum, expiry) => sum + expiry.strikeCount, 0);
@@ -247,6 +258,7 @@ export async function executeBackfillRun(runId: string, tickerId: string, symbol
       // anywhere from 9:30am to 4pm ET -- gave that one ticker's first data point a different time-of-day
       // basis than everything else, the same class of inconsistency already flagged once before (see the
       // 2026-09-11 capture-timing finding in PROGRESS.md).
+      if (!signalsEnabled) return { status: "skipped", message: "Signals is off: no option chain is captured for this ticker." };
       if (!prepared) return { status: "skipped", message: "Skipped because the strike step did not finish." };
       return { status: "skipped", message: "Captured by tonight's job in the normal 10:00 ET window, same as every other ticker." };
     });

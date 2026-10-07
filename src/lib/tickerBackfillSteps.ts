@@ -16,13 +16,19 @@ export interface BackfillStep {
 /** A 'running' run older than this is treated as dead (dyno restart) and no longer blocks the nightly jobs. */
 export const staleBackfillRunMinutes = 30;
 
-export function buildInitialBackfillSteps(): BackfillStep[] {
-  return [
+/** "full" is the new-ticker setup; "option_chain" is only the option-chain steps, run when Signals is turned on. */
+export type BackfillScope = "full" | "option_chain";
+
+const optionChainStepKeys: BackfillStepKey[] = ["chain_warmup", "first_snapshot"];
+
+export function buildInitialBackfillSteps(scope: BackfillScope = "full"): BackfillStep[] {
+  const steps: BackfillStep[] = [
     { key: "history", label: "Price and implied-volatility history (5 years)", status: "pending", message: null },
     { key: "calendar", label: "Earnings and dividend calendar", status: "pending", message: null },
     { key: "chain_warmup", label: "Option chain strikes (0-90 days)", status: "pending", message: null },
     { key: "first_snapshot", label: "First option chain snapshot", status: "pending", message: null },
   ];
+  return scope === "full" ? steps : steps.filter((step) => optionChainStepKeys.includes(step.key));
 }
 
 /** Each step is worth an equal share; a step counts once it is no longer pending/running. */

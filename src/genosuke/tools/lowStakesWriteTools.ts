@@ -5,17 +5,16 @@
 // after the fact, just not ask permission first.
 import type { GenosukeTool } from "./types.js";
 
-const strategyKeyEnum = { type: "string", enum: ["covered_call", "cash_secured_put"] };
-
 export const lowStakesWriteTools: GenosukeTool[] = [
   {
     name: "add_shortlist_ticker",
-    description: "Add a ticker to a strategy's monitored shortlist. Fetches live market data from IBKR if the ticker isn't already tracked.",
+    description:
+      "Add a ticker to the monitored shortlist. Fetches live market data from IBKR if the ticker isn't already tracked. Signals is off unless signalsEnabled is true: an off ticker only shows on Price Performance and is not scored on Signals or tradable by Pluto. Only set it when the user asks for Signals on.",
     tier: "low-stakes-write",
     parameters: {
       type: "object",
-      properties: { symbol: { type: "string" }, strategyKey: strategyKeyEnum, notes: { type: "string" } },
-      required: ["symbol", "strategyKey"],
+      properties: { symbol: { type: "string" }, signalsEnabled: { type: "boolean" } },
+      required: ["symbol"],
     },
     execute: (input, api) => api.post("/shortlist", input),
   },
@@ -26,13 +25,6 @@ export const lowStakesWriteTools: GenosukeTool[] = [
     tier: "low-stakes-write",
     parameters: { type: "object", properties: { entryId: { type: "string" } }, required: ["entryId"] },
     execute: (input, api) => api.delete(`/shortlist/${encodeURIComponent(String(input.entryId))}`),
-  },
-  {
-    name: "update_shortlist_notes",
-    description: "Update the free-text notes on a shortlist entry.",
-    tier: "low-stakes-write",
-    parameters: { type: "object", properties: { entryId: { type: "string" }, notes: { type: "string" } }, required: ["entryId", "notes"] },
-    execute: (input, api) => api.patch(`/shortlist/${encodeURIComponent(String(input.entryId))}`, { notes: input.notes }),
   },
   {
     name: "trigger_ibkr_health_check",

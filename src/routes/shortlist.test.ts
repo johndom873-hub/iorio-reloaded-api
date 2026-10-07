@@ -23,6 +23,12 @@ vi.mock("../ibkr/fetchNewTickerData.js", async () => {
   return { ...actual, fetchNewTickerData: (...args: unknown[]) => fetchNewTickerDataMock(...args) };
 });
 
+const recordPlutoEventMock = vi.fn();
+vi.mock("../pluto/ledger.js", async () => {
+  const actual = await vi.importActual<typeof import("../pluto/ledger.js")>("../pluto/ledger.js");
+  return { ...actual, recordPlutoEvent: (...args: unknown[]) => recordPlutoEventMock(...args) };
+});
+
 const startTickerBackfillMock = vi.fn();
 const fetchAndStoreFiveYearHistoryMock = vi.fn();
 vi.mock("../ibkr/tickerBackfillPipeline.js", async () => {
@@ -120,6 +126,7 @@ beforeAll(async () => {
 beforeEach(() => {
   searchTickersMock.mockReset().mockResolvedValue([]);
   fetchNewTickerDataMock.mockReset();
+  recordPlutoEventMock.mockReset().mockResolvedValue(undefined);
   startTickerBackfillMock.mockReset().mockImplementation(async (tickerId: string) => fakeBackfillRun(tickerId));
   fetchAndStoreFiveYearHistoryMock.mockReset();
   topUpDailyBarsMock.mockReset();
@@ -296,7 +303,7 @@ describe("GET /shortlist", () => {
     const first = await insertTicker({ symbol: newSymbol("B"), company_name: "First Co", sector: "Technology" });
     const removed = await insertTicker({ symbol: newSymbol("D") });
     const unlisted = await insertTicker({ symbol: newSymbol("E") });
-    const firstEntryId = await insertEntry(first.id, { notes: "watch earnings" });
+    const firstEntryId = await insertEntry(first.id, { signals_enabled: true, bot_enabled: true });
     const secondEntryId = await insertEntry(second.id);
     await insertEntry(removed.id, { removed_at: new Date() });
 
@@ -307,7 +314,8 @@ describe("GET /shortlist", () => {
     expect(mine[0]).toMatchObject({
       id: firstEntryId,
       addedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
-      notes: "watch earnings",
+      signalsEnabled: true,
+      botEnabled: true,
       tickerId: first.id,
       symbol: first.symbol,
       companyName: "First Co",
@@ -317,7 +325,8 @@ describe("GET /shortlist", () => {
       backfillNeedsRetry: false,
       openPositionCount: 0,
     });
-    expect(mine[1]).toMatchObject({ id: secondEntryId, notes: null, sector: "Energy" });
+    expect(mine[1]).toMatchObject({ id: secondEntryId, signalsEnabled: false, botEnabled: false, sector: "Energy" });
+    expect(mine[0]).not.toHaveProperty("notes");
     expect((json as { symbol: string }[]).map((row) => row.symbol)).not.toContain(unlisted.symbol);
   });
 
@@ -415,12 +424,13 @@ describe("POST /shortlist", () => {
   it("adds an existing ticker, records who added it, starts the backfill and answers 201 with the row", async () => {
     const ticker = await insertTicker({ company_name: "Existing Co", sector: "Technology" });
 
-    const { status, json } = await call("POST", "/", { symbol: ticker.symbol, notes: "covered call candidate" });
+    const { status, json } = await call("POST", "/", { symbol: ticker.symbol });
     expect(status).toBe(201);
     expect(json).toMatchObject({
       id: expect.any(String),
       addedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
-      notes: "covered call candidate",
+      signalsEnabled: false,
+      botEnabled: false,
       backfillRun: fakeBackfillRun(ticker.id),
       tickerId: ticker.id,
       symbol: ticker.symbol,
@@ -433,7 +443,7 @@ describe("POST /shortlist", () => {
     });
     const entries = await readEntries(ticker.id);
     expect(entries).toHaveLength(1);
-    expect(entries[0]).toMatchObject({ id: json.id, added_by_user_id: userId, notes: "covered call candidate", removed_at: null });
+    expect(entries[0]).toMatchObject({ id: json.id, added_by_user_id: userId, signals_enabled: false, bot_enabled: false, removed_at: null });
     expect(startTickerBackfillMock).toHaveBeenCalledTimes(1);
     expect(startTickerBackfillMock).toHaveBeenCalledWith(ticker.id, ticker.symbol);
     expect(invalidatePricePerformanceSnapshotMock).toHaveBeenCalled();
@@ -462,14 +472,19 @@ describe("POST /shortlist", () => {
     expect(fetchNewTickerDataMock).not.toHaveBeenCalled();
   });
 
-  it("stores a missing note as null and keeps an empty note as empty text", async () => {
-    const withoutNotes = await insertTicker();
-    const withEmptyNotes = await insertTicker();
+  it("adds with Signals on when asked", async () => {
+    const ticker = await insertTicker();
 
-    expect((await call("POST", "/", { symbol: withoutNotes.symbol })).json.notes).toBeNull();
-    expect((await call("POST", "/", { symbol: withEmptyNotes.symbol, notes: "" })).json.notes).toBe("");
-    expect((await readEntries(withoutNotes.id))[0]?.notes).toBeNull();
-    expect((await readEntries(withEmptyNotes.id))[0]?.notes).toBe("");
+    expect((await call("POST", "/", { symbol: ticker.symbol, signalsEnabled: true })).json).toMatchObject({ signalsEnabled: true, botEnabled: false });
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ signals_enabled: true });
+  });
+
+  it.each([["a string", "yes"], ["a number", 1], ["null", null]])("refuses signalsEnabled as %s with a 400 and stores nothing", async (_label, signalsEnabled) => {
+    const ticker = await insertTicker();
+
+    expect(await call("POST", "/", { symbol: ticker.symbol, signalsEnabled })).toMatchObject({ status: 400, json: { error: "signalsEnabled must be true or false." } });
+    expect(await readEntries(ticker.id)).toHaveLength(0);
+    expect(startTickerBackfillMock).not.toHaveBeenCalled();
   });
 
   it("reports a ticker with no sector as null and an ETF as an ETF", async () => {
@@ -528,14 +543,14 @@ describe("POST /shortlist", () => {
 
   it("answers 409 for a ticker that is already being monitored and keeps the original entry", async () => {
     const ticker = await insertTicker();
-    const originalEntryId = await insertEntry(ticker.id, { notes: "first" });
+    const originalEntryId = await insertEntry(ticker.id, { signals_enabled: true });
 
-    const { status, json } = await call("POST", "/", { symbol: ticker.symbol, notes: "second" });
+    const { status, json } = await call("POST", "/", { symbol: ticker.symbol });
     expect(status).toBe(409);
     expect(json).toEqual({ error: `${ticker.symbol} is already being monitored.` });
     const entries = await readEntries(ticker.id);
     expect(entries).toHaveLength(1);
-    expect(entries[0]).toMatchObject({ id: originalEntryId, notes: "first" });
+    expect(entries[0]).toMatchObject({ id: originalEntryId, signals_enabled: true });
     expect(startTickerBackfillMock).not.toHaveBeenCalled();
   });
 
@@ -561,19 +576,19 @@ describe("POST /shortlist", () => {
 
   it("can add a ticker again after it was removed, as a new entry that keeps the old one", async () => {
     const ticker = await insertTicker();
-    const first = await call("POST", "/", { symbol: ticker.symbol, notes: "first stint" });
+    const first = await call("POST", "/", { symbol: ticker.symbol, signalsEnabled: true });
     expect((await call("DELETE", `/${first.json.id}`)).status).toBe(204);
 
-    const second = await call("POST", "/", { symbol: ticker.symbol, notes: "second stint" }, { asUser: secondUserId });
+    const second = await call("POST", "/", { symbol: ticker.symbol }, { asUser: secondUserId });
     expect(second.status).toBe(201);
     expect(second.json.id).not.toBe(first.json.id);
-    expect(second.json.notes).toBe("second stint");
+    expect(second.json.signalsEnabled).toBe(false);
 
     const entries = await readEntries(ticker.id);
     expect(entries).toHaveLength(2);
-    expect(entries[0]).toMatchObject({ id: first.json.id, added_by_user_id: userId, notes: "first stint" });
+    expect(entries[0]).toMatchObject({ id: first.json.id, added_by_user_id: userId, signals_enabled: true });
     expect(entries[0]?.removed_at).not.toBeNull();
-    expect(entries[1]).toMatchObject({ id: second.json.id, added_by_user_id: secondUserId, notes: "second stint", removed_at: null });
+    expect(entries[1]).toMatchObject({ id: second.json.id, added_by_user_id: secondUserId, signals_enabled: false, removed_at: null });
     expect(startTickerBackfillMock).toHaveBeenCalledTimes(2);
   });
 
@@ -588,40 +603,102 @@ describe("POST /shortlist", () => {
   });
 });
 
-describe("PATCH /shortlist/:id", () => {
-  it("updates the notes and answers with them", async () => {
+describe("PATCH /shortlist/:id/signals-enabled", () => {
+  it("turns Signals on and starts only the option-chain setup", async () => {
     const ticker = await insertTicker();
-    const entryId = await insertEntry(ticker.id, { notes: "old" });
+    const entryId = await insertEntry(ticker.id);
 
-    expect(await call("PATCH", `/${entryId}`, { notes: "new note" })).toMatchObject({ status: 200, json: { notes: "new note" } });
-    expect((await readEntries(ticker.id))[0]?.notes).toBe("new note");
+    expect(await call("PATCH", `/${entryId}/signals-enabled`, { enabled: true })).toMatchObject({ status: 200, json: { signalsEnabled: true, botEnabled: false, backfillRun: fakeBackfillRun(ticker.id) } });
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ signals_enabled: true, bot_enabled: false });
+    expect(startTickerBackfillMock).toHaveBeenCalledTimes(1);
+    expect(startTickerBackfillMock).toHaveBeenCalledWith(ticker.id, ticker.symbol, undefined, "option_chain");
   });
 
-  it.each([["null notes", { notes: null }], ["no notes field", {}]])("clears the notes for %s", async (_label, body) => {
+  it("starts no setup when Signals was already on, and keeps Pluto as it was", async () => {
     const ticker = await insertTicker();
-    const entryId = await insertEntry(ticker.id, { notes: "old" });
+    const entryId = await insertEntry(ticker.id, { signals_enabled: true, bot_enabled: true });
 
-    expect(await call("PATCH", `/${entryId}`, body)).toMatchObject({ status: 200, json: { notes: null } });
-    expect((await readEntries(ticker.id))[0]?.notes).toBeNull();
+    expect(await call("PATCH", `/${entryId}/signals-enabled`, { enabled: true })).toMatchObject({ status: 200, json: { signalsEnabled: true, botEnabled: true, backfillRun: null } });
+    expect(startTickerBackfillMock).not.toHaveBeenCalled();
   });
 
-  it("keeps empty text as empty text", async () => {
+  it("turning Signals off also turns Pluto off, records who did it, and logs the Pluto change", async () => {
     const ticker = await insertTicker();
-    const entryId = await insertEntry(ticker.id, { notes: "old" });
+    const entryId = await insertEntry(ticker.id, { signals_enabled: true, bot_enabled: true });
 
-    expect((await call("PATCH", `/${entryId}`, { notes: "" })).json).toEqual({ notes: "" });
+    expect(await call("PATCH", `/${entryId}/signals-enabled`, { enabled: false }, { asUser: secondUserId })).toMatchObject({ status: 200, json: { signalsEnabled: false, botEnabled: false, backfillRun: null } });
+    const entry = (await readEntries(ticker.id))[0];
+    expect(entry).toMatchObject({ signals_enabled: false, bot_enabled: false, bot_enabled_changed_by_user_id: secondUserId });
+    expect(entry?.bot_enabled_changed_at).not.toBeNull();
+    expect(recordPlutoEventMock).toHaveBeenCalledWith("ticker_disabled", { symbol: ticker.symbol, by: "Shortlist Tester Two (turned Signals off)" });
+    expect(startTickerBackfillMock).not.toHaveBeenCalled();
   });
 
-  it("answers 404 for an unknown entry", async () => {
-    expect(await call("PATCH", `/${unknownId}`, { notes: "x" })).toMatchObject({ status: 404, json: { error: "Entry not found or already removed." } });
+  it("turning Signals off with Pluto already off logs no Pluto change and leaves its audit alone", async () => {
+    const ticker = await insertTicker();
+    const entryId = await insertEntry(ticker.id, { signals_enabled: true });
+
+    expect((await call("PATCH", `/${entryId}/signals-enabled`, { enabled: false })).json).toMatchObject({ signalsEnabled: false, botEnabled: false });
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ signals_enabled: false, bot_enabled_changed_by_user_id: null, bot_enabled_changed_at: null });
+    expect(recordPlutoEventMock).not.toHaveBeenCalled();
   });
 
-  it("answers 404 for a removed entry and leaves its notes alone", async () => {
+  it("still answers 200 with a null run when the option-chain setup cannot start", async () => {
     const ticker = await insertTicker();
-    const entryId = await insertEntry(ticker.id, { notes: "kept", removed_at: new Date() });
+    const entryId = await insertEntry(ticker.id);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    startTickerBackfillMock.mockRejectedValue(new Error("queue unavailable"));
 
-    expect((await call("PATCH", `/${entryId}`, { notes: "changed" })).status).toBe(404);
-    expect((await readEntries(ticker.id))[0]?.notes).toBe("kept");
+    expect(await call("PATCH", `/${entryId}/signals-enabled`, { enabled: true })).toMatchObject({ status: 200, json: { signalsEnabled: true, backfillRun: null } });
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ signals_enabled: true });
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(`option-chain setup for ${ticker.symbol} could not start`));
+  });
+
+  it.each([["no body", undefined], ["a string", { enabled: "true" }], ["null", { enabled: null }]])("refuses %s with a 400", async (_label, body) => {
+    const ticker = await insertTicker();
+    const entryId = await insertEntry(ticker.id);
+
+    expect(await call("PATCH", `/${entryId}/signals-enabled`, body)).toMatchObject({ status: 400, json: { error: "enabled must be true or false." } });
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ signals_enabled: false });
+  });
+
+  it("answers 404 for an unknown or removed entry and changes nothing", async () => {
+    const ticker = await insertTicker();
+    const removedEntryId = await insertEntry(ticker.id, { removed_at: new Date() });
+
+    expect(await call("PATCH", `/${unknownId}/signals-enabled`, { enabled: true })).toMatchObject({ status: 404, json: { error: "Entry not found or already removed." } });
+    expect((await call("PATCH", `/${removedEntryId}/signals-enabled`, { enabled: true })).status).toBe(404);
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ signals_enabled: false });
+    expect(startTickerBackfillMock).not.toHaveBeenCalled();
+  });
+
+  it("the notes route is gone", async () => {
+    const ticker = await insertTicker();
+    const entryId = await insertEntry(ticker.id);
+
+    expect((await call("PATCH", `/${entryId}`, { notes: "x" })).status).toBe(404);
+  });
+});
+
+describe("PATCH /shortlist/:id/bot-enabled", () => {
+  it("refuses to turn Pluto on while Signals is off, and changes nothing", async () => {
+    const ticker = await insertTicker();
+    const entryId = await insertEntry(ticker.id);
+
+    expect(await call("PATCH", `/${entryId}/bot-enabled`, { enabled: true })).toMatchObject({
+      status: 409,
+      json: { error: `Turn Signals on for ${ticker.symbol} first: Pluto only trades Signals tickers.` },
+    });
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ bot_enabled: false });
+    expect(recordPlutoEventMock).not.toHaveBeenCalled();
+  });
+
+  it("turns Pluto on for a Signals ticker", async () => {
+    const ticker = await insertTicker();
+    const entryId = await insertEntry(ticker.id, { signals_enabled: true });
+
+    expect(await call("PATCH", `/${entryId}/bot-enabled`, { enabled: true })).toMatchObject({ status: 200, json: { botEnabled: true } });
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ bot_enabled: true });
   });
 });
 

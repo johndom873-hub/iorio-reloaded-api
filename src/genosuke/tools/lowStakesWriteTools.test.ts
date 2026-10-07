@@ -18,11 +18,10 @@ function toolNamed(name: string) {
 }
 
 describe("the low-stakes write tool set", () => {
-  it("lists the six tools, all in the low-stakes tier, with unique names", () => {
+  it("lists the five tools, all in the low-stakes tier, with unique names", () => {
     expect(lowStakesWriteTools.map((tool) => tool.name)).toEqual([
       "add_shortlist_ticker",
       "remove_shortlist_ticker",
-      "update_shortlist_notes",
       "trigger_ibkr_health_check",
       "save_preference",
       "forget_preference",
@@ -41,39 +40,39 @@ describe("the low-stakes write tool set", () => {
   it("touches only shortlist, system-health and Genosuke preference routes, never positions, orders or risk limits", async () => {
     const { api, post, patch, remove, put } = fakeApi();
     const inputs: Record<string, Record<string, unknown>> = {
-      add_shortlist_ticker: { symbol: "AAPL", strategyKey: "covered_call" },
+      add_shortlist_ticker: { symbol: "AAPL" },
       remove_shortlist_ticker: { entryId: "e1" },
-      update_shortlist_notes: { entryId: "e1", notes: "n" },
       trigger_ibkr_health_check: {},
       save_preference: { content: "c" },
       forget_preference: { id: "p1" },
     };
     for (const tool of lowStakesWriteTools) await tool.execute(inputs[tool.name]!, api);
     const paths = [...post.mock.calls, ...patch.mock.calls, ...remove.mock.calls].map((call) => String((call as unknown[])[0]));
-    expect([...paths].sort()).toEqual(["/genosuke/preferences", "/genosuke/preferences/p1", "/shortlist", "/shortlist/e1", "/shortlist/e1", "/system-health/check-ibkr"]);
+    expect([...paths].sort()).toEqual(["/genosuke/preferences", "/genosuke/preferences/p1", "/shortlist", "/shortlist/e1", "/system-health/check-ibkr"]);
     expect(paths.every((path) => /^\/(shortlist|system-health|genosuke)/.test(path))).toBe(true);
     expect(put).not.toHaveBeenCalled();
   });
 });
 
 describe("add_shortlist_ticker", () => {
-  it("posts the symbol, strategy and notes exactly as given and returns the response", async () => {
+  it("posts the symbol and the Signals choice exactly as given and returns the response", async () => {
     const { api, post } = fakeApi();
-    const input = { symbol: "AAPL", strategyKey: "cash_secured_put", notes: "earnings next week" };
+    const input = { symbol: "AAPL", signalsEnabled: true };
     expect(await toolNamed("add_shortlist_ticker").execute(input, api)).toEqual({ posted: true });
     expect(post).toHaveBeenCalledWith("/shortlist", input);
   });
 
-  it("requires symbol and strategyKey, limited to the two strategies", () => {
-    const parameters = toolNamed("add_shortlist_ticker").parameters as { required: string[]; properties: { strategyKey: { enum: string[] } } };
-    expect(parameters.required).toEqual(["symbol", "strategyKey"]);
-    expect(parameters.properties.strategyKey.enum).toEqual(["covered_call", "cash_secured_put"]);
+  it("requires only the symbol; Signals is an optional boolean", () => {
+    const parameters = toolNamed("add_shortlist_ticker").parameters as { required: string[]; properties: Record<string, { type: string }> };
+    expect(parameters.required).toEqual(["symbol"]);
+    expect(Object.keys(parameters.properties)).toEqual(["symbol", "signalsEnabled"]);
+    expect(parameters.properties.signalsEnabled!.type).toBe("boolean");
   });
 
   it("propagates the route's refusal", async () => {
     const { api, post } = fakeApi();
     post.mockRejectedValueOnce(new Error("POST /shortlist → 409: already on the shortlist"));
-    await expect(toolNamed("add_shortlist_ticker").execute({ symbol: "AAPL", strategyKey: "covered_call" }, api)).rejects.toThrow("409");
+    await expect(toolNamed("add_shortlist_ticker").execute({ symbol: "AAPL" }, api)).rejects.toThrow("409");
   });
 });
 
@@ -88,14 +87,6 @@ describe("remove_shortlist_ticker", () => {
     const { api, remove } = fakeApi();
     remove.mockRejectedValueOnce(new Error("DELETE /shortlist/entry-7 → 409: open position"));
     await expect(toolNamed("remove_shortlist_ticker").execute({ entryId: "entry-7" }, api)).rejects.toThrow("409");
-  });
-});
-
-describe("update_shortlist_notes", () => {
-  it("patches only the notes", async () => {
-    const { api, patch } = fakeApi();
-    expect(await toolNamed("update_shortlist_notes").execute({ entryId: "entry-7", notes: "watch IV", ignored: "x" }, api)).toEqual({ patched: true });
-    expect(patch).toHaveBeenCalledWith("/shortlist/entry-7", { notes: "watch IV" });
   });
 });
 
@@ -125,11 +116,9 @@ describe("forget_preference", () => {
 
 describe("ids in request paths", () => {
   it("are encoded for the shortlist and preference routes", async () => {
-    const { api, remove, patch } = fakeApi();
+    const { api, remove } = fakeApi();
     await toolNamed("remove_shortlist_ticker").execute({ entryId: "../positions/x" }, api);
-    await toolNamed("update_shortlist_notes").execute({ entryId: "a b", notes: "n" }, api);
     await toolNamed("forget_preference").execute({ id: "p/1" }, api);
     expect((remove.mock.calls as unknown as string[][]).map((call) => call[0])).toEqual(["/shortlist/..%2Fpositions%2Fx", "/genosuke/preferences/p%2F1"]);
-    expect((patch.mock.calls as unknown as string[][])[0]![0]).toBe("/shortlist/a%20b");
   });
 });

@@ -71,6 +71,7 @@ function workers(overrides: Partial<BackfillStepWorkers> = {}) {
     fetchHistory: vi.fn(async () => history),
     captureCalendar: vi.fn(async () => ({ resolved: true, earningsWritten: 2, dividendsWritten: 0, historicalEarningsWritten: 5, historicalEarningsSkippedEtf: false, historicalEarningsError: null })),
     loadUniverseTicker: vi.fn(async (tickerId: string, symbol: string) => ({ tickerId, symbol, contractId: 1 })),
+    loadSignalsEnabled: vi.fn(async () => true),
     prepareChain: vi.fn(async () => prepared()),
     now: () => new Date(Date.UTC(2026, 8, 21, 14, 30)),
     ...overrides,
@@ -170,6 +171,46 @@ describe("executeBackfillRun", () => {
     expect(progressLog.length).toBe(8); // running + finished for each of 4 steps
   });
 
+  it("with Signals off, skips both option-chain steps without touching the chain, and the run still completes", async () => {
+    const { store } = inMemoryStore();
+    const { workers: w } = workers({ loadSignalsEnabled: async () => false });
+    const run = await store.create("t1", []);
+    await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
+    const finished = (await store.getLatest("t1"))!;
+    expect(statusOf(finished.steps)).toEqual({ history: "done", calendar: "done", chain_warmup: "skipped", first_snapshot: "skipped" });
+    expect(finished.steps[2]!.message).toBe("Signals is off: the strikes are set up when Signals is turned on.");
+    expect(finished.steps[3]!.message).toBe("Signals is off: no option chain is captured for this ticker.");
+    expect(w.prepareChain).not.toHaveBeenCalled();
+    expect(finished.status).toBe("complete");
+  });
+
+  it("reads Signals after the calendar step, so Signals turned on mid-run still gets its strikes", async () => {
+    const { store } = inMemoryStore();
+    let signalsEnabled = false;
+    const { workers: w } = workers({
+      captureCalendar: async () => {
+        signalsEnabled = true;
+        return { resolved: true, earningsWritten: 0, dividendsWritten: 0, historicalEarningsWritten: 0, historicalEarningsSkippedEtf: false, historicalEarningsError: null };
+      },
+      loadSignalsEnabled: async () => signalsEnabled,
+    });
+    const run = await store.create("t1", []);
+    await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
+    expect(statusOf((await store.getLatest("t1"))!.steps)).toMatchObject({ chain_warmup: "done" });
+  });
+
+  it("the option-chain scope runs only the strike and snapshot steps, never history or calendar", async () => {
+    const { store } = inMemoryStore();
+    const { workers: w } = workers();
+    const run = await store.create("t1", []);
+    await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w }, "option_chain");
+    const finished = (await store.getLatest("t1"))!;
+    expect(statusOf(finished.steps)).toEqual({ chain_warmup: "done", first_snapshot: "skipped" });
+    expect(w.fetchHistory).not.toHaveBeenCalled();
+    expect(w.captureCalendar).not.toHaveBeenCalled();
+    expect(finished.status).toBe("complete");
+  });
+
   it("still records the final state and disconnects when the store itself throws mid-run", async () => {
     const { store } = inMemoryStore();
     const finish = vi.fn(async () => {});
@@ -196,6 +237,16 @@ describe("startTickerBackfill", () => {
     await vi.waitFor(() => expect(w.fetchHistory).toHaveBeenCalled());
     releaseHistory();
     await waitForBackfillQueue();
+    expect((await store.getLatest("t1"))!.status).toBe("complete");
+  });
+
+  it("an option-chain run is created with only the strike and snapshot steps", async () => {
+    const { store } = inMemoryStore();
+    const create = vi.spyOn(store, "create");
+    const { workers: w } = workers();
+    await startTickerBackfill("t1", "SMCI", { store, workers: w }, "option_chain");
+    await waitForBackfillQueue();
+    expect(create.mock.calls[0]![1].map((step) => step.key)).toEqual(["chain_warmup", "first_snapshot"]);
     expect((await store.getLatest("t1"))!.status).toBe("complete");
   });
 

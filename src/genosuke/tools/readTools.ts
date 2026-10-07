@@ -124,7 +124,7 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "list_shortlist",
-    description: "The monitored-ticker shortlist for one strategy, with each ticker's latest IV, IV Rank, and avg option volume snapshot.",
+    description: "The monitored-ticker shortlist, with each ticker's Signals and Pluto flags (signalsEnabled, botEnabled) and its Signals data readiness (daily bars, earnings, option-chain snapshots, surface fits).",
     tier: "read",
     parameters: { type: "object", properties: { strategyKey: strategyKeyEnum }, required: ["strategyKey"] },
     execute: (input, api) => api.get(`/shortlist?strategy=${encodeURIComponent(String(input.strategyKey))}`),

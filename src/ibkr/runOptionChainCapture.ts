@@ -32,6 +32,7 @@ import {
 import { saveOptionChainSnapshot } from "../lib/optionChainSnapshotStore.js";
 import { fitAndStoreSurfacesForDate } from "../lib/optionSurfaceStore.js";
 import { excludeTickersBeingPrepared } from "../lib/tickersBeingPrepared.js";
+import { signalsEnabledShortlistTickerIdsQuery } from "../lib/shortlistQueries.js";
 import { describeMarketDataLineShortage, releaseMarketDataLines, renewMarketDataLineReservation, reserveMarketDataLines, type LineReservationResult } from "./marketDataLineBudget.js";
 
 // The job holds ONE priority reservation for its whole run (approved
@@ -131,12 +132,12 @@ export interface PreparedTicker {
   chainRefresh: OptionChainRefreshTimings;
 }
 
-/** Shortlist (not removed) + tickers with an open position, de-duplicated. No hardcoded symbols (approved 2026-09-21). Tickers still being prepared by the new-ticker backfill are skipped (approved 2026-09-21). */
+/** Shortlist with Signals on (not removed) + tickers with an open position, de-duplicated. No hardcoded symbols (approved 2026-09-21). Tickers still being prepared by the new-ticker backfill are skipped (approved 2026-09-21). */
 export async function loadCaptureUniverse(): Promise<UniverseTicker[]> {
   const rows: { tickerId: string; symbol: string; contractId: number | null }[] = await excludeTickersBeingPrepared(
     db("tickers as t").where((builder) =>
       builder
-        .whereIn("t.id", db("shortlist_entries").whereNull("removed_at").select("ticker_id"))
+        .whereIn("t.id", signalsEnabledShortlistTickerIdsQuery())
         .orWhereIn("t.id", db("positions").where({ status: "open" }).select("ticker_id")),
     ),
     "t.id",

@@ -127,9 +127,9 @@ beforeEach(() => {
     const [inserted] = await testDb("tickers").insert({ symbol }).returning("*");
     return { ticker: inserted, created: true };
   });
-  addTickerToShortlistMock.mockImplementation(async (tickerId: string, _symbol: string, addedByUserId: string | undefined, notes?: string | null) => {
-    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: addedByUserId, notes: notes ?? null }).returning("*");
-    return { id: entry.id, addedAt: entry.added_at, notes: entry.notes, backfillRun: null };
+  addTickerToShortlistMock.mockImplementation(async (tickerId: string, _symbol: string, addedByUserId: string | undefined, signalsEnabled = false) => {
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: addedByUserId, signals_enabled: signalsEnabled }).returning("*");
+    return { id: entry.id, addedAt: entry.added_at, signalsEnabled: entry.signals_enabled, backfillRun: null };
   });
 });
 
@@ -388,14 +388,14 @@ describe("POST /screener/:symbol/shortlist", () => {
     return ticker ? testDb("shortlist_entries").where({ ticker_id: ticker.id, removed_at: null }) : [];
   };
 
-  it("adds a candidate: creates the ticker, stores the entry with the user and the notes, answers 204 with no body", async () => {
+  it("adds a candidate with Signals off: creates the ticker, stores the entry with the user, answers 204 with no body", async () => {
     const symbol = symbolOf("C");
-    const response = await call("POST", `/screener/${symbol}/shortlist`, { notes: "looks liquid" });
+    const response = await call("POST", `/screener/${symbol}/shortlist`, {});
     expect(response).toEqual({ status: 204, json: null });
     expect(findOrCreateTickerMock).toHaveBeenCalledWith(symbol);
     const tickerRow = await testDb("tickers").where({ symbol }).first();
-    expect(addTickerToShortlistMock).toHaveBeenCalledWith(tickerRow.id, symbol, userId, "looks liquid");
-    expect(await readEntries(symbol)).toEqual([expect.objectContaining({ added_by_user_id: userId, notes: "looks liquid" })]);
+    expect(addTickerToShortlistMock).toHaveBeenCalledWith(tickerRow.id, symbol, userId);
+    expect(await readEntries(symbol)).toEqual([expect.objectContaining({ added_by_user_id: userId, signals_enabled: false })]);
     expect((await call("GET", `/screener?search=${symbol}`)).json[0].isShortlisted).toBe(true);
   });
 
@@ -407,18 +407,11 @@ describe("POST /screener/:symbol/shortlist", () => {
     expect(await readEntries(symbol)).toHaveLength(1);
   });
 
-  it("stores no notes as null when none are sent", async () => {
-    const symbol = symbolOf("F");
-    expect((await call("POST", `/screener/${symbol}/shortlist`, {})).status).toBe(204);
-    expect(addTickerToShortlistMock.mock.calls[0]![3]).toBeUndefined();
-    expect(await readEntries(symbol)).toEqual([expect.objectContaining({ notes: null })]);
-  });
-
-  it("a request with no body at all adds the candidate without notes instead of failing", async () => {
+  it("a request with no body at all adds the candidate instead of failing", async () => {
     const symbol = symbolOf("J");
     const response = await call("POST", `/screener/${symbol}/shortlist`);
     expect(response.status).toBe(204);
-    expect(await readEntries(symbol)).toEqual([expect.objectContaining({ notes: null })]);
+    expect(await readEntries(symbol)).toHaveLength(1);
   });
 
   it("a symbol that is not in the screener universe is a 404, and nothing is looked up or stored", async () => {
@@ -440,11 +433,12 @@ describe("POST /screener/:symbol/shortlist", () => {
 
   it("a symbol that is already on the shortlist is a 409, and the first entry is left alone", async () => {
     const symbol = symbolOf("A");
-    const response = await call("POST", `/screener/${symbol}/shortlist`, { notes: "second try" });
+    const firstEntryId = (await readEntries(symbol))[0]!.id;
+    const response = await call("POST", `/screener/${symbol}/shortlist`, {});
     expect(response).toEqual({ status: 409, json: { error: `${symbol} is already being monitored.` } });
     const entries = await readEntries(symbol);
     expect(entries).toHaveLength(1);
-    expect(entries[0]!.notes).toBeNull();
+    expect(entries[0]!.id).toBe(firstEntryId);
   });
 
   it("re-adds a symbol whose earlier entry was removed", async () => {

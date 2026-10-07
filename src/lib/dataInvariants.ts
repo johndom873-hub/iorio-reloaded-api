@@ -1,6 +1,8 @@
 import { db } from "../db/connection.js";
 import { loadCaptureUniverse } from "../ibkr/runOptionChainCapture.js";
 import { lastCompletedSessionDate } from "./marketSessionStatus.js";
+import { activeShortlistTickerIdsQuery } from "./shortlistQueries.js";
+import { excludeTickersBeingPrepared } from "./tickersBeingPrepared.js";
 import { impliedVolatilityMinPercent, twoSidedQuoteMinPercent } from "./optionChainCaptureCoverage.js";
 
 // Data invariants for the morning digest (opsMonitor.ts): checks on the DATA the nightly and
@@ -144,8 +146,11 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
     );
 
   const lastCompletedSession = await lastCompletedSessionDate(now);
-  const barRows: { symbol: string; latest: string | null }[] = await db("tickers as t")
-    .whereIn("t.id", universeTickerIds)
+  // Price bars cover the Signals-off shortlist tickers too: Price Performance reads them.
+  const barRows: { symbol: string; latest: string | null }[] = await excludeTickersBeingPrepared(
+    db("tickers as t").where((builder) => builder.whereIn("t.id", universeTickerIds).orWhereIn("t.id", activeShortlistTickerIdsQuery())),
+    "t.id",
+  )
     .leftJoin("daily_price_bars as b", "b.ticker_id", "t.id")
     .groupBy("t.symbol")
     .select("t.symbol", db.raw("max(b.trading_date)::text as latest"));

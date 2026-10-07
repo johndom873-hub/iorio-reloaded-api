@@ -15,6 +15,7 @@ import { loadVolatilityForecast } from "./volatilityForecastStore.js";
 import type { OpenShortLeg } from "./rollSignalCandidates.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew } from "./tiltMeasures.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
+import { signalsEnabledShortlistTickerIdsQuery } from "./shortlistQueries.js";
 
 // DB side of the Signals screen (mockup approved 2026-09-22). Loads one ticker's
 // inputs once (loadTickerSignalsInputs); scoring itself is the pure scoreTicker in
@@ -198,14 +199,14 @@ export interface SignalsTickerRow {
   sector: string | null;
 }
 
-// The Signals universe: the shortlist plus every ticker with an open short
-// option leg (Roll Signals, 2026-09-24) -- a position on a ticker removed
-// from the shortlist still needs its roll scored.
+// The Signals universe: the shortlist tickers with Signals on plus every ticker
+// with an open short option leg (Roll Signals, 2026-09-24) -- a position on a
+// ticker removed from the shortlist still needs its roll scored.
 function signalsUniverseQuery() {
   return db("tickers as t")
     .where((builder) =>
       builder
-        .whereIn("t.id", db("shortlist_entries").whereNull("removed_at").select("ticker_id"))
+        .whereIn("t.id", signalsEnabledShortlistTickerIdsQuery())
         .orWhereIn("t.id", openShortLegPositionsQuery().select("p.ticker_id")),
     )
     .select("t.id as tickerId", "t.symbol", "t.company_name as companyName", db.raw("NULLIF(t.sector, '') as sector"));
@@ -304,6 +305,7 @@ export async function loadRoadmapCounts(now: Date = new Date()): Promise<Roadmap
     // Only tickers that report at all (an ETF has no earnings and would otherwise pin the minimum at 0 forever).
     db("shortlist_entries as se")
       .whereNull("se.removed_at")
+      .where("se.signals_enabled", true)
       .whereExists(db("ticker_calendar_events as any_earnings").whereRaw("any_earnings.ticker_id = se.ticker_id").where("any_earnings.event_type", "earnings"))
       .select(db.raw("(SELECT count(*) FROM ticker_calendar_events e WHERE e.ticker_id = se.ticker_id AND e.event_type = 'earnings' AND e.event_date < ?) AS past_earnings", [todayEastern]))
       .orderBy("past_earnings")

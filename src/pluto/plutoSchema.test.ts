@@ -82,7 +82,11 @@ describe("Pluto schema", () => {
 
     const [entry] = await db("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId }).returning("*");
     expect(entry.bot_enabled).toBe(false);
-    await db("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: true, bot_enabled_changed_by_user_id: userId, bot_enabled_changed_at: db.fn.now() });
+    expect(entry.signals_enabled).toBe(false);
+    // Pluto only trades Signals tickers: the database refuses Pluto on with Signals off.
+    await expect(db("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: true })).rejects.toThrow(/shortlist_entries_bot_requires_signals/);
+    await db("shortlist_entries").where({ id: entry.id }).update({ signals_enabled: true, bot_enabled: true, bot_enabled_changed_by_user_id: userId, bot_enabled_changed_at: db.fn.now() });
+    await expect(db("shortlist_entries").where({ id: entry.id }).update({ signals_enabled: false })).rejects.toThrow(/shortlist_entries_bot_requires_signals/);
     const updated = await db("shortlist_entries").where({ id: entry.id }).first();
     expect(updated.bot_enabled).toBe(true);
     expect(updated.bot_enabled_changed_by_user_id).toBe(userId);

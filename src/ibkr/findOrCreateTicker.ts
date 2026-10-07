@@ -74,7 +74,7 @@ export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTi
 export interface AddTickerToShortlistResult {
   id: string;
   addedAt: string;
-  notes: string | null;
+  signalsEnabled: boolean;
   backfillRun: TickerBackfillRun | null;
 }
 
@@ -86,19 +86,20 @@ export interface AddTickerToShortlistResult {
  *
  * Starts the new-ticker backfill pipeline (5Y history, calendar, option chain
  * strikes, first snapshot) for every add, including re-adds — it is idempotent,
- * and a run already in progress for the ticker is joined, not duplicated.
+ * and a run already in progress for the ticker is joined, not duplicated. With
+ * Signals off (the default) the option-chain steps are skipped.
  */
 export async function addTickerToShortlist(
   tickerId: string,
   symbol: string,
   userId: string | undefined,
-  notes?: string | null,
+  signalsEnabled = false,
 ): Promise<AddTickerToShortlistResult> {
   const [entry] = await db("shortlist_entries")
     .insert({
       ticker_id: tickerId,
       added_by_user_id: userId,
-      notes: notes ?? null,
+      signals_enabled: signalsEnabled,
     })
     .returning("*");
   // Price Performance caches its table for a minute; its live stream reads the shortlist directly.
@@ -113,5 +114,5 @@ export async function addTickerToShortlist(
     console.warn(`addTickerToShortlist: backfill for ${symbol} could not start — ${error instanceof Error ? error.message : error}`);
   }
 
-  return { id: entry.id, addedAt: entry.added_at, notes: entry.notes, backfillRun };
+  return { id: entry.id, addedAt: entry.added_at, signalsEnabled: entry.signals_enabled, backfillRun };
 }

@@ -110,11 +110,14 @@ describe("day signals store, against the database", () => {
     expect((await loadDaySignalExpiries(tradingDateIso)).filter((row) => row.tickerId === tickerId)).toHaveLength(1);
   });
 
-  it("lists a shortlisted ticker with today's snapshot and no pool as unpooled, and stops listing it once pooled", async () => {
+  it("lists a Signals-on shortlisted ticker with today's snapshot and no pool as unpooled, and stops listing it once pooled", async () => {
     const [user] = await testDb("users").insert({ username: `dstest${Date.now()}`, display_name: "Day Signals Test", password_hash: "x" }).returning("id");
     const [entry] = await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: user.id }).returning("id");
     try {
       await testDb("day_signal_expiries").where({ ticker_id: tickerId }).del();
+      // Signals off: a price-only ticker is never in the Day Signals universe.
+      expect((await loadDayUnpooledTickers(tradingDateIso)).some((ticker) => ticker.tickerId === tickerId)).toBe(false);
+      await testDb("shortlist_entries").where({ id: entry.id }).update({ signals_enabled: true });
       const unpooled = (await loadDayUnpooledTickers(tradingDateIso)).find((ticker) => ticker.tickerId === tickerId);
       expect(unpooled).toMatchObject({ tickerId, snapshotId });
       expect(await replaceTickerPoolExpiries(tickerId, tradingDateIso, snapshotId, [{ expiry: nearExpiryIso, rank: 1, seedBestEdgeDollars: 1, seedBestNetEdge: 1 }], new Date())).toBe(true);

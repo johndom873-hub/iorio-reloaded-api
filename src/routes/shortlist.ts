@@ -5,7 +5,7 @@ import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
 import { findOrCreateTicker, addTickerToShortlist, UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
-import { fetchAndStoreFiveYearHistory, getLatestBackfillRun, startTickerBackfill } from "../ibkr/tickerBackfillPipeline.js";
+import { fetchAndStoreFiveYearHistory, getLatestBackfillRun, startTickerBackfill, type TickerBackfillRun } from "../ibkr/tickerBackfillPipeline.js";
 import { topUpDailyBars } from "../ibkr/priceBarCache.js";
 import { loadDailyBarsStatus } from "../lib/dailyBarsStatus.js";
 import { borrowSharedConnectionOrConnect, nextReqIdFor, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
@@ -46,7 +46,7 @@ shortlistRouter.get("/", async (_request, response) => {
     SELECT
       se.id,
       se.added_at AS "addedAt",
-      se.notes,
+      se.signals_enabled AS "signalsEnabled",
       t.id AS "tickerId",
       t.symbol,
       t.company_name AS "companyName",
@@ -169,14 +169,19 @@ shortlistRouter.post("/:tickerId/populate-option-chain", async (request, respons
   });
 });
 
+// Signals defaults to off (Marcelo, 2026-10-07): the ticker is price-only until Signals is turned on.
 shortlistRouter.post("/", async (request, response) => {
-  const { symbol, notes } = (request.body ?? {}) as {
+  const { symbol, signalsEnabled } = (request.body ?? {}) as {
     symbol?: string;
-    notes?: string;
+    signalsEnabled?: unknown;
   };
 
   if (typeof symbol !== "string" || !symbol.trim()) {
     response.status(400).json({ error: "Symbol is required." });
+    return;
+  }
+  if (signalsEnabled !== undefined && typeof signalsEnabled !== "boolean") {
+    response.status(400).json({ error: "signalsEnabled must be true or false." });
     return;
   }
 
@@ -193,13 +198,14 @@ shortlistRouter.post("/", async (request, response) => {
   }
 
   try {
-    const entry = await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, notes);
+    const entry = await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, signalsEnabled ?? false);
     const sector = ticker.sector || null;
 
     response.status(201).json({
       id: entry.id,
       addedAt: entry.addedAt,
-      notes: entry.notes,
+      signalsEnabled: entry.signalsEnabled,
+      botEnabled: false,
       backfillRun: entry.backfillRun,
       tickerId: ticker.id,
       symbol: ticker.symbol,
@@ -276,20 +282,50 @@ shortlistRouter.get("/:tickerId/backfill/stream", async (request, response) => {
   }
 });
 
-shortlistRouter.patch("/:id", async (request, response) => {
-  const { notes } = request.body as { notes?: string | null };
-
-  const [entry] = await db("shortlist_entries")
-    .where({ id: request.params.id })
-    .whereNull("removed_at")
-    .update({ notes: notes ?? null })
-    .returning("*");
-
-  if (!entry) {
+// Per-ticker Signals flag (Marcelo, 2026-10-07). Turning it on starts the option-chain setup (strikes) in the
+// background; turning it off also turns Pluto off for the ticker in the same update, since Pluto only trades
+// Signals tickers (the shortlist_entries_bot_requires_signals constraint holds the same rule).
+shortlistRouter.patch("/:id/signals-enabled", async (request, response) => {
+  const enabled = request.body?.enabled;
+  if (typeof enabled !== "boolean") {
+    response.status(400).json({ error: "enabled must be true or false." });
+    return;
+  }
+  const userId = request.session.userId as string;
+  const result = await db.transaction(async (trx) => {
+    const entry = await trx("shortlist_entries as se")
+      .join("tickers as t", "t.id", "se.ticker_id")
+      .where("se.id", request.params.id)
+      .whereNull("se.removed_at")
+      .forUpdate("se")
+      .first("se.id", "se.signals_enabled", "se.bot_enabled", "t.id as tickerId", "t.symbol");
+    if (!entry) return null;
+    const turnsPlutoOff = !enabled && Boolean(entry.bot_enabled);
+    if (Boolean(entry.signals_enabled) !== enabled) {
+      await trx("shortlist_entries")
+        .where({ id: entry.id })
+        .update({ signals_enabled: enabled, ...(turnsPlutoOff ? { bot_enabled: false, bot_enabled_changed_by_user_id: userId, bot_enabled_changed_at: trx.fn.now() } : {}) });
+    }
+    return { tickerId: entry.tickerId as string, symbol: entry.symbol as string, changed: Boolean(entry.signals_enabled) !== enabled, turnsPlutoOff, botEnabled: Boolean(entry.bot_enabled) && !turnsPlutoOff };
+  });
+  if (!result) {
     response.status(404).json({ error: "Entry not found or already removed." });
     return;
   }
-  response.json({ notes: entry.notes });
+  if (result.turnsPlutoOff) {
+    const user = await db("users").where({ id: userId }).first("display_name");
+    await recordPlutoEvent("ticker_disabled", { symbol: result.symbol, by: `${user?.display_name ?? "an operator"} (turned Signals off)` });
+  }
+  // The entry is already saved; a setup that cannot start must not read as "toggle failed" (same as an add).
+  let backfillRun: TickerBackfillRun | null = null;
+  if (enabled && result.changed) {
+    try {
+      backfillRun = await startTickerBackfill(result.tickerId, result.symbol, undefined, "option_chain");
+    } catch (error) {
+      console.warn(`signals-enabled: option-chain setup for ${result.symbol} could not start — ${error instanceof Error ? error.message : error}`);
+    }
+  }
+  response.json({ signalsEnabled: enabled, botEnabled: result.botEnabled, backfillRun });
 });
 
 // Pluto's per-ticker allow flag (design 2026-09-28): default off, any user may flip it, audited on
@@ -303,9 +339,10 @@ shortlistRouter.patch("/:id/bot-enabled", async (request, response) => {
   }
   const userId = request.session.userId as string;
   const result = await db.transaction(async (trx) => {
-    const entry = await trx("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").where("se.id", request.params.id).whereNull("se.removed_at").first("se.id", "se.bot_enabled", "t.symbol");
+    const entry = await trx("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").where("se.id", request.params.id).whereNull("se.removed_at").forUpdate("se").first("se.id", "se.bot_enabled", "se.signals_enabled", "t.symbol");
     if (!entry) return { status: 404 as const, error: "Entry not found or already removed." };
     if (Boolean(entry.bot_enabled) === enabled) return { status: 200 as const, symbol: entry.symbol as string, changed: false };
+    if (enabled && !entry.signals_enabled) return { status: 409 as const, error: `Turn Signals on for ${entry.symbol} first: Pluto only trades Signals tickers.` };
     if (enabled) {
       const settings = await loadPlutoSettings(trx);
       const enabledCount = await trx("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0));

@@ -131,8 +131,6 @@ screenerRouter.get("/sectors", async (_request, response) => {
 // (shortlist.ts), reused here rather than duplicated.
 screenerRouter.post("/:symbol/shortlist", async (request, response) => {
   const symbol = request.params.symbol.trim().toUpperCase();
-  const { notes } = (request.body ?? {}) as { notes?: string };
-
   const candidate = await db("screener_universe").where({ symbol }).first();
   if (!candidate) {
     response.status(404).json({ error: `${symbol} is not a current screener candidate.` });
@@ -151,7 +149,7 @@ screenerRouter.post("/:symbol/shortlist", async (request, response) => {
   }
 
   try {
-    await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId, notes);
+    await addTickerToShortlist(ticker.id, ticker.symbol, request.session.userId);
     response.status(204).end();
   } catch (error) {
     if ((error as { code?: string }).code === "23505") {

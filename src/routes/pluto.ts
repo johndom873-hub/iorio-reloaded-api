@@ -351,6 +351,8 @@ plutoRouter.get("/tickers", async (_request: Request, response: Response) => {
       .join("tickers as t", "t.id", "se.ticker_id")
       .leftJoin("users as u", "u.id", "se.bot_enabled_changed_by_user_id")
       .whereNull("se.removed_at")
+      // Pluto only trades Signals tickers; a Signals-off ticker is not listed here at all.
+      .where("se.signals_enabled", true)
       .select("se.id as entryId", "t.id as tickerId", "t.symbol", "t.company_name as companyName", "t.sector", "se.bot_enabled as botEnabled", "se.bot_enabled_changed_at as botEnabledChangedAt", "u.display_name as botEnabledChangedBy")
       .orderBy("t.symbol"),
     loadPlutoSettings(),

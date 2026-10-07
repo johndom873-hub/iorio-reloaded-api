@@ -22,6 +22,9 @@ interface RawRow {
   close72hAgo: string | null;
   close1wAgo: string | null;
   close1mAgo: string | null;
+  close3mAgo: string | null;
+  close1yAgo: string | null;
+  signalsEnabled: boolean;
   weeklyLow: string;
   weeklyHigh: string;
   monthlyLow: string;
@@ -36,6 +39,8 @@ export interface ReferenceCloses {
   close72hAgo: number | null;
   close1wAgo: number | null;
   close1mAgo: number | null;
+  close3mAgo: number | null;
+  close1yAgo: number | null;
 }
 
 export interface PricePerformanceRow extends PriceTrend {
@@ -56,8 +61,12 @@ export interface PricePerformanceRow extends PriceTrend {
   change72h: number | null;
   change1w: number | null;
   change1m: number | null;
+  change3m: number | null;
+  change1y: number | null;
   /** The closes each change is measured against — delivered once so the browser can apply the live price itself. */
   referenceCloses: ReferenceCloses;
+  /** Off: the nightly IV snapshot is skipped, so impliedVolatility and avgOptionVolume are null rather than stale. */
+  signalsEnabled: boolean;
   impliedVolatility: string | null;
   avgOptionVolume: string | null;
   ivRank: number | null;
@@ -137,6 +146,16 @@ const historicalCloseJoins = `
     WHERE ticker_id = t.id AND trading_date <= latest.trading_date - INTERVAL '30 days'
     ORDER BY trading_date DESC LIMIT 1
   ) mo ON true
+  LEFT JOIN LATERAL (
+    SELECT close_price FROM daily_price_bars
+    WHERE ticker_id = t.id AND trading_date <= latest.trading_date - INTERVAL '91 days'
+    ORDER BY trading_date DESC LIMIT 1
+  ) q ON true
+  LEFT JOIN LATERAL (
+    SELECT close_price FROM daily_price_bars
+    WHERE ticker_id = t.id AND trading_date <= latest.trading_date - INTERVAL '365 days'
+    ORDER BY trading_date DESC LIMIT 1
+  ) yr ON true
 `;
 
 async function computePricePerformanceSnapshot(now: Date): Promise<PricePerformanceSnapshot> {
@@ -144,9 +163,9 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
   const expectedSessionDate = await lastCompletedSessionDate(new Date(now.getTime() - nightlyJobGraceMs));
 
   // 24hr/48hr/72hr use trading-day close deltas (1/2/3 trading days back), not
-  // true rolling 24-hour windows — approved 2026-08-25. Weekly/monthly use a
-  // rolling 7/30 calendar-day window, found via "closest available close
-  // on/before N days back".
+  // true rolling 24-hour windows — approved 2026-08-25. 1W/1M/3M/1Y use a
+  // rolling 7/30/91/365 calendar-day window (3M and 1Y approved 2026-10-07),
+  // found via "closest available close on/before N days back".
   const result = await db.raw(
     `
     SELECT
@@ -162,6 +181,9 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       d3.close_price AS "close72hAgo",
       wk.close_price AS "close1wAgo",
       mo.close_price AS "close1mAgo",
+      q.close_price AS "close3mAgo",
+      yr.close_price AS "close1yAgo",
+      se.signals_enabled AS "signalsEnabled",
       wkrange.low AS "weeklyLow",
       wkrange.high AS "weeklyHigh",
       morange.low AS "monthlyLow",
@@ -169,6 +191,7 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       m.implied_volatility AS "impliedVolatility",
       m.avg_option_volume AS "avgOptionVolume"
     FROM tickers t
+    JOIN shortlist_entries se ON se.ticker_id = t.id AND se.removed_at IS NULL
     ${historicalCloseJoins}
     LEFT JOIN LATERAL (
       SELECT MIN(low_price) AS low, MAX(high_price) AS high FROM daily_price_bars
@@ -185,7 +208,6 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       ORDER BY snapshot_date DESC
       LIMIT 1
     ) m ON true
-    WHERE EXISTS (SELECT 1 FROM shortlist_entries se WHERE se.ticker_id = t.id AND se.removed_at IS NULL)
     ORDER BY t.symbol
   `,
     [completedThroughDate],
@@ -226,6 +248,8 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
         close72hAgo: toNumberOrNull(row.close72hAgo),
         close1wAgo: toNumberOrNull(row.close1wAgo),
         close1mAgo: toNumberOrNull(row.close1mAgo),
+        close3mAgo: toNumberOrNull(row.close3mAgo),
+        close1yAgo: toNumberOrNull(row.close1yAgo),
       };
       return {
         symbol: row.symbol,
@@ -243,10 +267,13 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
         change72h: percentChange(latestClose, referenceCloses.close72hAgo),
         change1w: percentChange(latestClose, referenceCloses.close1wAgo),
         change1m: percentChange(latestClose, referenceCloses.close1mAgo),
+        change3m: percentChange(latestClose, referenceCloses.close3mAgo),
+        change1y: percentChange(latestClose, referenceCloses.close1yAgo),
         referenceCloses,
         ...computePriceTrend(closesByTickerId.get(row.tickerId) ?? []),
-        impliedVolatility: row.impliedVolatility,
-        avgOptionVolume: row.avgOptionVolume,
+        signalsEnabled: row.signalsEnabled,
+        impliedVolatility: row.signalsEnabled ? row.impliedVolatility : null,
+        avgOptionVolume: row.signalsEnabled ? row.avgOptionVolume : null,
         ...(await computeIvMetrics(row.tickerId)),
         isBehind: freshness.behindSymbols.includes(row.symbol),
       };
