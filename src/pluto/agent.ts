@@ -14,7 +14,7 @@ import { PlutoMarketWatch } from "./marketWatch.js";
 import { runPlutoPass, type PassRunnerContext } from "./passRunner.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
-import { decidePlutoReadinessRun, describePlutoReadinessOutcome, runPlutoReadinessTests } from "./readiness.js";
+import { decidePlutoReadinessRun, describePlutoReadinessOutcome, evaluatePlutoRunning, runPlutoReadinessTests } from "./readiness.js";
 import { createPlutoReadinessProbes } from "./readinessProbes.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease, savePlutoReadiness } from "./stateStore.js";
 import { findNewlyQuotedContracts, loadTodaysDaySignalQuoteStamps, rememberAnalysed } from "./daySignalsWatermark.js";
@@ -209,9 +209,10 @@ export class PlutoAgent {
   }
 
   /**
-   * The pre-open readiness check (Marcelo, 2026-10-06): on open market days while Pluto is on, runs whatever readiness.ts says
-   * is due, stores the result, alerts on failure or recovery, and pauses at the final run if anything still fails. A run takes
-   * up to a minute (the IBKR test), so overlapping ticks are skipped.
+   * The pre-open readiness check (Marcelo, 2026-10-06): on open market days, whether Pluto is on, paused or off (2026-10-07: an
+   * off or paused Pluto is reported by its "Pluto running" test), runs whatever readiness.ts says is due, stores the result,
+   * alerts on failure or recovery, and pauses a running Pluto at the final run if a probe still fails. A run takes up to a
+   * minute (the IBKR test), so overlapping ticks are skipped.
    */
   private async runReadinessIfDue(): Promise<void> {
     if (this.stopped || this.readinessInFlight) return;
@@ -220,12 +221,12 @@ export class PlutoAgent {
       const now = new Date();
       const dateIso = easternDateIso(now);
       const state = await loadPlutoState();
-      if (state.mode !== "on") return;
       if (!(await resolveIsOpenDay(dateIso))) return;
       const kind = decidePlutoReadinessRun(now, dateIso, state.readiness);
       if (kind === null) return;
       const settings = this.settings ?? (await loadPlutoSettings());
-      const results = await runPlutoReadinessTests(createPlutoReadinessProbes({ api: this.api, openRouterApiKey: this.config.openRouterApiKey, dailyCostCeilingUsd: settings.dailyCostCeilingUsd }));
+      const probeResults = await runPlutoReadinessTests(createPlutoReadinessProbes({ api: this.api, openRouterApiKey: this.config.openRouterApiKey, dailyCostCeilingUsd: settings.dailyCostCeilingUsd }));
+      const results = [...probeResults, evaluatePlutoRunning(await loadPlutoState())];
       const previousSignature = state.readiness?.dateIso === dateIso ? state.readiness.signature : null;
       const outcome = describePlutoReadinessOutcome(kind, previousSignature, results);
       await savePlutoReadiness({ dateIso, lastRunAt: new Date().toISOString(), lastRunKind: kind, signature: outcome.signature, finalDone: kind === "final", results });
@@ -233,7 +234,7 @@ export class PlutoAgent {
       if (outcome.pause) {
         // Another pause (a person's, a deploy's) keeps its own reason; the alert still says the check failed.
         const current = await loadPlutoState();
-        if (!current.paused) {
+        if (current.mode === "on" && !current.paused) {
           await pausePluto("readiness");
           await recordPlutoEvent("paused", { by: "agent", reason: "readiness", failing: results.filter((result) => !result.ok).map((result) => result.name) });
         }

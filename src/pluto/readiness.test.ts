@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { decidePlutoReadinessRun, describePlutoReadinessOutcome, plutoReadinessTestTimeoutMs, runPlutoReadinessTests, type PlutoReadinessRecord, type PlutoReadinessResult } from "./readiness.js";
+import { decidePlutoReadinessRun, describePlutoReadinessOutcome, evaluatePlutoRunning, plutoReadinessTestTimeoutMs, runPlutoReadinessTests, type PlutoReadinessRecord, type PlutoReadinessResult } from "./readiness.js";
 
 // 2026-10-06 is EDT (UTC−4): 6:00 ET = 10:00Z, 9:20 ET = 13:20Z, 10:15 ET = 14:15Z.
 const day = "2026-10-06";
@@ -72,6 +72,76 @@ describe("describePlutoReadinessOutcome", () => {
     expect(outcome.message).toContain("the 9:20 ET check still fails, so Pluto is paused");
     expect(outcome.message).toContain("❌ IBKR: no answer within 60 s");
     expect(outcome.message).toContain("Press Resume");
+  });
+});
+
+describe("evaluatePlutoRunning", () => {
+  it("passes only when Pluto is on and not paused", () => {
+    expect(evaluatePlutoRunning({ mode: "on", paused: false, pauseReason: null })).toEqual({ name: "Pluto running", ok: true, detail: "on and not paused" });
+  });
+
+  it("fails when Pluto is switched off", () => {
+    expect(evaluatePlutoRunning({ mode: "off", paused: false, pauseReason: null })).toEqual({ name: "Pluto running", ok: false, detail: "switched off" });
+  });
+
+  it("fails when Pluto is paused, naming why", () => {
+    expect(evaluatePlutoRunning({ mode: "on", paused: true, pauseReason: "deploy" }).detail).toBe("paused after a deploy");
+    expect(evaluatePlutoRunning({ mode: "on", paused: true, pauseReason: "manual" }).detail).toBe("paused by a person");
+    expect(evaluatePlutoRunning({ mode: "on", paused: true, pauseReason: "crash_loop" }).detail).toBe("paused after repeated restarts");
+    expect(evaluatePlutoRunning({ mode: "on", paused: true, pauseReason: "readiness" }).detail).toBe("paused by an earlier pre-open check");
+    expect(evaluatePlutoRunning({ mode: "on", paused: true, pauseReason: "breaker:daily_loss" }).detail).toBe("paused, the daily loss breaker is tripped");
+    expect(evaluatePlutoRunning({ mode: "on", paused: true, pauseReason: null }).detail).toBe("paused");
+  });
+
+  it("reports both when Pluto is off and paused", () => {
+    expect(evaluatePlutoRunning({ mode: "off", paused: true, pauseReason: "manual" }).detail).toBe("switched off and paused by a person");
+  });
+});
+
+describe("describePlutoReadinessOutcome with the Pluto running test", () => {
+  const running = ok("Pluto running");
+  const notRunning = failed("Pluto running", "paused after a deploy");
+  const probesPass = [ok("IBKR"), ok("API sign-in"), ok("OpenRouter")];
+  const ibkrDown = failed("IBKR", "no answer within 60 s");
+
+  it("shows the tick with the other tests when Pluto is running", () => {
+    expect(describePlutoReadinessOutcome("first", null, [...probesPass, running]).message).toBe("✅ Pluto pre-open check passed.\n✅ IBKR: fine\n✅ API sign-in: fine\n✅ OpenRouter: fine\n✅ Pluto running: fine");
+  });
+
+  it("alerts at 6:00 ET when Pluto is paused, without promising a pause that cannot happen", () => {
+    const outcome = describePlutoReadinessOutcome("first", null, [...probesPass, notRunning]);
+    expect(outcome).toMatchObject({ signature: "Pluto running", pause: false });
+    expect(outcome.message).toBe("⚠️ Pluto pre-open check failed.\n❌ Pluto running: paused after a deploy\n✅ IBKR: fine\n✅ API sign-in: fine\n✅ OpenRouter: fine\nRe-checking every 10 minutes.");
+  });
+
+  it("keeps the pause warning when a probe fails on a running Pluto", () => {
+    expect(describePlutoReadinessOutcome("first", null, [ibkrDown, ok("API sign-in"), ok("OpenRouter"), running]).message).toContain("Pluto pauses at 9:20 ET if it still fails.");
+  });
+
+  it("says Pluto is not running at 9:20 ET, and does not pause again", () => {
+    const outcome = describePlutoReadinessOutcome("final", "Pluto running", [...probesPass, notRunning]);
+    expect(outcome.pause).toBe(false);
+    expect(outcome.message).toMatch(/^🛑 Pluto is not running at the 9:20 ET check\./);
+    expect(outcome.message).toContain("❌ Pluto running: paused after a deploy");
+    expect(outcome.message).toContain("Resume it (or switch it on)");
+  });
+
+  it("does not pause an off or paused Pluto when a probe also fails at 9:20 ET", () => {
+    const outcome = describePlutoReadinessOutcome("final", "", [ibkrDown, ok("API sign-in"), ok("OpenRouter"), failed("Pluto running", "switched off")]);
+    expect(outcome.pause).toBe(false);
+    expect(outcome.message).toContain("and Pluto is not running");
+    expect(outcome.message).not.toContain("so Pluto is paused");
+  });
+
+  it("still pauses a running Pluto when a probe fails at 9:20 ET", () => {
+    const outcome = describePlutoReadinessOutcome("final", "IBKR", [ibkrDown, ok("API sign-in"), ok("OpenRouter"), running]);
+    expect(outcome.pause).toBe(true);
+    expect(outcome.message).toContain("so Pluto is paused");
+  });
+
+  it("announces the recovery once Pluto is resumed", () => {
+    expect(describePlutoReadinessOutcome("recheck", "Pluto running", [...probesPass, running]).message).toMatch(/^✅ Pluto pre-open check passes again\./);
+    expect(describePlutoReadinessOutcome("recheck", "Pluto running", [...probesPass, notRunning]).message).toBeNull();
   });
 });
 
