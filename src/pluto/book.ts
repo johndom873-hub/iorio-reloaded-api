@@ -5,10 +5,10 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { positionSelect } from "../lib/positionQueries.js";
 import type { OccupiedContract } from "./candidateFilters.js";
 
-// Pluto's book: the open positions its own orders created (order_requests.pluto_action_id →
-// trades.source_order_request_id → position_legs → positions) or that received shares from them
-// (position_share_sources), the capital they commit against the Pluto budget, and the per-symbol
-// facts the post-model gates need (last filled action for the cooldown, symbols with a working
+// Pluto's book (Marcelo, 2026-10-07): every open position on a ticker Pluto is enabled on, whoever opened it, except hedges
+// (Pluto has no way to act on a long option). An enabled ticker is Pluto's to manage (2026-10-06), so all of it counts toward
+// Pluto's capital budget and its position cap; switching a ticker off hands every position on it, Pluto's own included, back
+// to people. Also the per-symbol facts the post-model gates need (last filled action for the cooldown, symbols with a working
 // Pluto order).
 
 export interface PlutoBookPosition {
@@ -21,6 +21,8 @@ export interface PlutoBookPosition {
 
 export interface PlutoBook {
   openPositions: PlutoBookPosition[];
+  /** Which of openPositions a Pluto order opened; the rest were opened by a person. */
+  plutoOpenedPositionIds: Set<string>;
   committedDollars: number;
   openSymbols: Set<string>;
   /** When the last Pluto action per symbol whose order filled (fully or partly) was taken — the ticker cooldown's clock. */
@@ -30,12 +32,11 @@ export interface PlutoBook {
 }
 
 /**
- * Pluto's positions: every position a Pluto order filled on, plus every position that received shares
- * from one of them (position_share_sources, followed transitively). A stock position that mixes Pluto's
- * and humans' shares counts as Pluto's whole — the budget errs towards less room (Marcelo, 2026-09-29).
- * For use after WITH RECURSIVE.
+ * Positions a Pluto order opened: every position a Pluto order filled on, plus every position that received shares from one
+ * of them (position_share_sources, followed transitively). Only labels a managed position "opened by Pluto" for the model and
+ * the screen; the budget counts every managed position either way. For use after WITH RECURSIVE.
  */
-export const plutoPositionIdsCte = `pluto_position_ids(id) AS (
+export const plutoOpenedPositionIdsCte = `pluto_opened_position_ids(id) AS (
   SELECT pl.position_id
   FROM order_requests orq
   JOIN trades tr ON tr.source_order_request_id = orq.id
@@ -44,18 +45,23 @@ export const plutoPositionIdsCte = `pluto_position_ids(id) AS (
   UNION
   SELECT pss.position_id
   FROM position_share_sources pss
-  JOIN pluto_position_ids known ON known.id = pss.source_position_id
+  JOIN pluto_opened_position_ids known ON known.id = pss.source_position_id
 )`;
 
+/** Strategies that never count in Pluto's book. */
+export const strategiesOutsidePlutoBook = ["hedge"];
+
 export async function loadPlutoBook(): Promise<PlutoBook> {
-  const [positionRows, lastFilledActions, workingOrders] = await Promise.all([
+  const [positionRows, plutoOpenedRows, lastFilledActions, workingOrders] = await Promise.all([
     db.raw(
-      `WITH RECURSIVE ${plutoPositionIdsCte}
-       SELECT x.id, x.symbol, t.sector, x."strategyKey", x."capitalAtRisk"
+      `SELECT x.id, x.symbol, t.sector, x."strategyKey", x."capitalAtRisk"
        FROM (${positionSelect}) x
        JOIN tickers t ON t.symbol = x.symbol
-       WHERE x.status = 'open' AND x.id IN (SELECT id FROM pluto_position_ids)`,
+       JOIN shortlist_entries se ON se.ticker_id = t.id AND se.removed_at IS NULL AND se.bot_enabled
+       WHERE x.status = 'open' AND NOT (x."strategyKey" = ANY(?::text[]))`,
+      [strategiesOutsidePlutoBook],
     ),
+    db.raw(`WITH RECURSIVE ${plutoOpenedPositionIdsCte} SELECT id FROM pluto_opened_position_ids`),
     // Read from the orders themselves, not the action's outcome, which is only written when the watcher next polls.
     db("pluto_actions as pa")
       .join("order_requests as orq", "orq.pluto_action_id", "pa.id")
@@ -77,6 +83,7 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
   }));
   return {
     openPositions,
+    plutoOpenedPositionIds: new Set((plutoOpenedRows.rows as { id: string }[]).map((row) => row.id).filter((id) => openPositions.some((position) => position.positionId === id))),
     committedDollars: openPositions.reduce((sum, position) => sum + position.capitalAtRisk, 0),
     openSymbols: new Set(openPositions.map((position) => position.symbol)),
     lastFilledActionAtBySymbol: new Map((lastFilledActions as { symbol: string; last_at: Date | string }[]).map((row) => [row.symbol, new Date(row.last_at)])),
@@ -87,15 +94,22 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
 /** Statuses the order gate counts as in flight (orderLimits.ts): confirmed and not yet done. */
 const inFlightOrderStatuses = ["confirmed", "submitted", "partially_filled", "cancel_requested"];
 
-/** In-flight order notional, the order gate's way: every origin's, one symbol's, and Pluto's own. */
-export async function loadInFlightNotionals(symbol: string): Promise<{ totalNotional: number; tickerNotional: number; plutoNotional: number }> {
-  const rows: { request_type: string; payload: OrderRequestPayload; pluto_action_id: string | null }[] = await db("order_requests").whereIn("status", inFlightOrderStatuses).select("request_type", "payload", "pluto_action_id");
-  const totals = { totalNotional: 0, tickerNotional: 0, plutoNotional: 0 };
+/**
+ * In-flight order notional, the order gate's way: every origin's, one symbol's, and the book's — Pluto's own orders plus anyone's
+ * on an enabled ticker (Marcelo, 2026-10-07: an order there joins Pluto's book the moment it fills).
+ */
+export async function loadInFlightNotionals(symbol: string): Promise<{ totalNotional: number; tickerNotional: number; managedNotional: number }> {
+  const [rows, enabledRows]: [{ request_type: string; payload: OrderRequestPayload; pluto_action_id: string | null }[], { symbol: string }[]] = await Promise.all([
+    db("order_requests").whereIn("status", inFlightOrderStatuses).select("request_type", "payload", "pluto_action_id"),
+    db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").where("se.bot_enabled", true).select("t.symbol"),
+  ]);
+  const enabledSymbols = new Set(enabledRows.map((row) => row.symbol));
+  const totals = { totalNotional: 0, tickerNotional: 0, managedNotional: 0 };
   for (const row of rows) {
     const notional = computeInFlightOrderNotional(row.request_type, row.payload);
     totals.totalNotional += notional;
     if (row.payload.symbol === symbol) totals.tickerNotional += notional;
-    if (row.pluto_action_id !== null) totals.plutoNotional += notional;
+    if (row.pluto_action_id !== null || enabledSymbols.has(row.payload.symbol)) totals.managedNotional += notional;
   }
   return totals;
 }

@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { easternDateIso } from "./marketSessionStatus.js";
 import { chainCaptureSlotEastern, evaluateJobDeadlines, evaluatePendingJobs, expectedScheduledJobs, runFallsInSlot, type JobRunSummary } from "./jobDeadlines.js";
 import { isWithinChainCaptureClockWindow } from "./optionChainCaptureClock.js";
 import { easternInstant } from "./marketSessionStatus.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 const utc = (iso: string) => new Date(iso);
 const run = (jobName: string, startedAt: string, status: JobRunSummary["status"] = "success"): JobRunSummary => ({ jobName, startedAt: utc(startedAt), status });
-const evaluate = (now: string, runs: JobRunSummary[], isOpenDay = true) => evaluateJobDeadlines({ now: utc(now), runs, isOpenDay: () => isOpenDay, easternDateIsoOf: easternDateIso });
+const evaluate = (now: string, runs: JobRunSummary[], isOpenDay = true) => evaluateJobDeadlines({ now: utc(now), runs, isOpenDay: () => isOpenDay, easternDateIsoOf: easternIsoDate });
 const keys = (problems: { alertKey: string }[]) => problems.map((problem) => problem.alertKey);
 const recentHealthCheck = (now: string) => run("ibkr_health_check", new Date(utc(now).getTime() - 5 * 60_000).toISOString());
 
@@ -123,7 +123,7 @@ describe("the monitor's capture slot follows the clock guard", () => {
 });
 
 describe("evaluatePendingJobs", () => {
-  const pending = (now: string, runs: JobRunSummary[], isOpenDay = true) => evaluatePendingJobs({ now: utc(now), runs, isOpenDay: () => isOpenDay, easternDateIsoOf: easternDateIso });
+  const pending = (now: string, runs: JobRunSummary[], isOpenDay = true) => evaluatePendingJobs({ now: utc(now), runs, isOpenDay: () => isOpenDay, easternDateIsoOf: easternIsoDate });
 
   it("lists the capture chain between its slot and its deadline when it has not started, and nothing once it has", () => {
     // 10:45 ET summer = 14:45 UTC: capture slot 10:00 (deadline 10:35 passed -> a problem, not pending); fit/seed deadline 11:00 -> pending

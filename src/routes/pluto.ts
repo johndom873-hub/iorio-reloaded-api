@@ -7,12 +7,14 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { plutoEventCategories, plutoEventCategoryByType, plutoEventTypesInCategories, recordPlutoEvent, type PlutoEventCategory, type PlutoEventType } from "../pluto/ledger.js";
 import { cancelPlutoOrders, countPlutoWorkingOrders, loadPlutoWorkingOrders } from "../pluto/orders.js";
 import { loadPlutoOrdersTodayBreakdown, loadPlutoTodayCounters } from "../pluto/counters.js";
 import { computePlutoActionExposure, loadPlutoOrderRequestsByActionId, type PlutoActionOrderRequest } from "../pluto/actionExposure.js";
 import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { normalizeSystemConcerns } from "../pluto/decisionSchema.js";
+import { loadDaySignalsWatchStatuses } from "../lib/daySignalsWatchStatus.js";
 
 // The Pluto screen's API. Any signed-in user can operate every control (Marcelo, 2026-09-28:
 // both users share one access level); the UI puts confirm modals in front of the risky ones.
@@ -163,7 +165,7 @@ plutoRouter.put("/stress-override", async (request: Request, response: Response)
     response.status(400).json({ error: "enabled must be true or false." });
     return;
   }
-  const todayIso = easternDateIso(new Date());
+  const todayIso = easternIsoDate(new Date());
   const who = await currentUserDisplayName(request);
   const state = await setPlutoStressOverride(enabled ? todayIso : null, currentUserId(request));
   await recordPlutoEvent("stress_override_changed", { enabled, dateIso: todayIso, by: who });
@@ -278,7 +280,7 @@ plutoRouter.get("/passes", async (request: Request, response: Response) => {
     rows.map((row) => ({
       ...serializePass(row),
       // Compact per-call summary for the Decisions card (the full input payload stays on GET /passes/:id).
-      decisions: decisions.filter((decision) => decision.pass_id === row.id).map((decision) => ({ callIndex: decision.call_index, servedModelId: decision.served_model_id ?? null, serviceTier: decision.service_tier ?? null, parsedOutput: decision.parsed_output ?? null, schemaValid: Boolean(decision.schema_valid), latencyMs: decision.latency_ms ?? null, tokensIn: decision.tokens_in ?? null, tokensOut: decision.tokens_out ?? null, costUsd: decision.cost_usd === null ? null : Number(decision.cost_usd), error: decision.error ?? null })),
+      decisions: decisions.filter((decision) => decision.pass_id === row.id).map((decision) => ({ callIndex: decision.call_index, servedModelId: decision.served_model_id ?? null, serviceTier: decision.service_tier ?? null, parsedOutput: serializeParsedOutput(decision.parsed_output), schemaValid: Boolean(decision.schema_valid), latencyMs: decision.latency_ms ?? null, tokensIn: decision.tokens_in ?? null, tokensOut: decision.tokens_out ?? null, costUsd: decision.cost_usd === null ? null : Number(decision.cost_usd), error: decision.error ?? null })),
       actions: actions.filter((action) => action.pass_id === row.id).map((action) => serializeAction(action, realized.get(String(action.id)), orderRequests.get(String(action.id)))),
     })),
   );
@@ -297,6 +299,13 @@ plutoRouter.get("/passes/:id", async (request: Request, response: Response) => {
   const [realized, orderRequests] = await Promise.all([loadRealizedPnlByActionId(actions.map((action) => String(action.id))), loadPlutoOrderRequestsByActionId(actions.map((action) => String(action.id)))]);
   response.json({ ...serializePass(pass), decisions: decisions.map(serializeDecision), actions: actions.map((action) => serializeAction(action, realized.get(String(action.id)), orderRequests.get(String(action.id)))) });
 });
+
+/** A stored decision for the screen: system concerns always as { symbol, concern } (stored before prompt v3.3 as plain strings). */
+function serializeParsedOutput(parsed: unknown): Record<string, unknown> | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const output = parsed as Record<string, unknown>;
+  return { ...output, system_concerns: normalizeSystemConcerns(output.system_concerns) };
+}
 
 plutoRouter.get("/actions", async (request: Request, response: Response) => {
   const rows = await db("pluto_actions").orderBy("created_at", "desc").limit(limitFrom(request, 100));
@@ -355,6 +364,16 @@ plutoRouter.get("/events", async (request: Request, response: Response) => {
     events: rows.map((row) => ({ id: Number(row.id), occurredAt: new Date(row.occurred_at).toISOString(), type: row.type, category: plutoEventCategoryByType[row.type as PlutoEventType] ?? "system", appliesToAllTickers: !tickerAndPassKeys.some((key) => key in (row.payload ?? {})), payload: row.payload })),
     total: Number(countRows[0]?.total ?? 0),
   });
+});
+
+/**
+ * Whether Day Signals is watching each Pluto-enabled ticker today, and when it looks again (daySignalsWatchStatus.ts):
+ * `{ tradingDateIso, sessionOpen, tickers: { [tickerId]: status } }`.
+ */
+plutoRouter.get("/day-signals-watch", async (_request: Request, response: Response) => {
+  const enabled: { tickerId: string }[] = await db("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).select("ticker_id as tickerId");
+  const { tradingDateIso, sessionOpen, statuses } = await loadDaySignalsWatchStatuses(enabled.map((row) => row.tickerId));
+  response.json({ tradingDateIso, sessionOpen, tickers: Object.fromEntries(statuses) });
 });
 
 plutoRouter.get("/tickers", async (_request: Request, response: Response) => {
@@ -416,7 +435,7 @@ function serializeDecision(row: Record<string, unknown>) {
     promptId: row.prompt_id ?? null,
     inputPayload: row.input_payload,
     rawOutput: row.raw_output ?? null,
-    parsedOutput: row.parsed_output ?? null,
+    parsedOutput: serializeParsedOutput(row.parsed_output),
     schemaValid: Boolean(row.schema_valid),
     latencyMs: row.latency_ms ?? null,
     tokensIn: row.tokens_in ?? null,

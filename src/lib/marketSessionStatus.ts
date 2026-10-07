@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // US equities session schedule (Eastern Time) — approved 2026-09-14.
 // NASDAQ and NYSE share this exact schedule, which is why one computation
@@ -20,20 +21,14 @@ export interface MarketSessionStatus {
   nextChangeAt: string;
 }
 
-export function easternDateIso(instant: Date): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(
-    instant,
-  );
-}
-
 // The Eastern/UTC offset varies by date (EST vs EDT) but not within a single
 // calendar date, so deriving it from a fixed UTC-noon instant on that date —
 // always the same ET calendar day regardless of the offset — and applying it
 // to any wall-clock time on that date is exact, with no manual DST table.
+const easternOffsetFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", timeZoneName: "shortOffset" });
+
 function easternOffsetMinutes(dateIso: string): number {
-  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", timeZoneName: "shortOffset" }).formatToParts(
-    new Date(`${dateIso}T12:00:00Z`),
-  );
+  const parts = easternOffsetFormatter.formatToParts(new Date(`${dateIso}T12:00:00Z`));
   const offsetText = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT-5";
   const match = offsetText.match(/GMT([+-]\d+)/);
   return match ? Number(match[1]) * 60 : -300;
@@ -47,7 +42,7 @@ export function easternInstant(dateIso: string, hour: number, minute: number): D
 
 /** 00:00 ET of the Eastern calendar day `at` falls on: "today" for jobs that must have run since the US day began. */
 export function easternDayStart(at: Date): Date {
-  return easternInstant(easternDateIso(at), 0, 0);
+  return easternInstant(easternIsoDate(at), 0, 0);
 }
 
 function isWeekday(dateIso: string): boolean {
@@ -117,7 +112,7 @@ function formatCountdown(ms: number, prefix: string): string {
 }
 
 export async function computeMarketSessionStatus(now: Date = new Date()): Promise<MarketSessionStatus> {
-  const dateIso = easternDateIso(now);
+  const dateIso = easternIsoDate(now);
   const schedule = await resolveSessionSchedule(dateIso);
   const todayIsOpen = schedule.isOpen;
   const close = hhmmParts(schedule.closeTimeEt);
@@ -175,7 +170,7 @@ export async function lastCompletedSessionDate(
   now: Date = new Date(),
   isOpenDay: (dateIso: string) => Promise<boolean> = resolveIsOpenDay,
 ): Promise<string> {
-  let candidate = easternDateIso(now);
+  let candidate = easternIsoDate(now);
   if (now < easternInstant(candidate, REGULAR_CLOSE.hour, REGULAR_CLOSE.minute)) candidate = previousCalendarDate(candidate);
   for (let attempt = 0; attempt < 14; attempt++) {
     if (await isOpenDay(candidate)) return candidate;

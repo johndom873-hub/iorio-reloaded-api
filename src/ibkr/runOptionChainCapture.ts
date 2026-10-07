@@ -5,7 +5,6 @@ import { refreshStoredOptionChain, loadStoredOptionChain, type OptionChainRefres
 import { fetchLivePrices } from "./fetchLivePrices.js";
 import { openCaptureQuoteWindow, type CaptureQuoteWindow, type CaptureSettleStats, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
 import { getRiskFreeRateForJob } from "../lib/riskFreeRate.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "../lib/realizedVolatility.js";
 import {
   calendarDaysUntilExpiry,
@@ -34,6 +33,7 @@ import { fitAndStoreSurfacesForDate } from "../lib/optionSurfaceStore.js";
 import { excludeTickersBeingPrepared } from "../lib/tickersBeingPrepared.js";
 import { signalsEnabledShortlistTickerIdsQuery } from "../lib/shortlistQueries.js";
 import { describeMarketDataLineShortage, releaseMarketDataLines, renewMarketDataLineReservation, reserveMarketDataLines, type LineReservationResult } from "./marketDataLineBudget.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // The job holds ONE priority reservation for its whole run (approved
 // 2026-09-24): live screens see the budget minus these lines and the live
@@ -229,7 +229,7 @@ export const ticksOnlyPrepareDependencies: PrepareTickerDependencies = {
   ...defaultPrepareDependencies,
   refreshStoredOptionChain: async (_ib, ticker, todayIso) => {
     const stored = await loadStoredOptionChain(ticker.tickerId);
-    if (!stored.fetchedAt || easternDateIso(stored.fetchedAt) !== todayIso) {
+    if (!stored.fetchedAt || easternIsoDate(stored.fetchedAt) !== todayIso) {
       throw new Error("no chain structure captured for today yet — the pre-market structure job may not have run");
     }
     return { expirations: stored.expirations, strikesByExpiry: stored.strikesByExpiry, timings: { optionParamsMs: 0, expiries: [], totalMs: 0 } };
@@ -397,7 +397,7 @@ export async function runOptionChainCapture(
   options: OptionChainCaptureOptions = {},
 ): Promise<OptionChainCaptureResult> {
   const jobStartedAt = dependencies.now().getTime();
-  const todayIso = easternDateIso(dependencies.now());
+  const todayIso = easternIsoDate(dependencies.now());
   const fullUniverse = await dependencies.loadUniverse();
   const universe = options.symbols === undefined ? fullUniverse : fullUniverse.filter((ticker) => options.symbols!.includes(ticker.symbol));
   const riskFreeRate = await dependencies.getRiskFreeRate();

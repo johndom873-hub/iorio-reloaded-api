@@ -242,3 +242,15 @@ describe("split guard", () => {
     expect(findSuspectedSplitBarIndices(baseBars)).toEqual([]);
   });
 });
+
+describe("computeYangZhangVolatility endIndex (2026-10-07)", () => {
+  it("equals the result on a copy cut at endIndex, for every end", () => {
+    const bars = Array.from({ length: 160 }, (_, index) => {
+      const close = 100 + Math.sin(index / 5) * 4 + index * 0.1;
+      return { tradingDate: new Date(Date.UTC(2025, 0, 1) + index * 86_400_000).toISOString().slice(0, 10), open: close * 0.995, high: close * 1.01, low: close * 0.985, close, volume: 1_000_000 };
+    });
+    for (let end = 0; end <= bars.length; end++) {
+      expect(computeYangZhangVolatility(bars, 21, end)).toEqual(computeYangZhangVolatility(bars.slice(0, end), 21));
+    }
+  });
+});

@@ -1,4 +1,4 @@
-import { formatEasternDateTime, formatEasternTime } from "./easternIsoDate.js";
+import { formatEasternDateTime, formatEasternTime, easternIsoDate } from "./easternIsoDate.js";
 import { easternInstant } from "./marketSessionStatus.js";
 
 // Deadline monitor (opsMonitor.ts): every scheduled job must have STARTED by a fixed time.

@@ -130,23 +130,41 @@ export async function replaceTickerPoolExpiries(tickerId: string, tradingDateIso
 }
 
 export interface DayRerankState {
-  /** Spot at the ticker's last expiry re-rank. */
+  /** Spot at the ticker's last look (the 10:00 capture spot before its first). */
   referenceSpotPrice: number;
-  /** Re-ranks run for the ticker today. */
+  /** Looks (re-ranks and re-checks) run for the ticker today. */
   reranks: number;
+  /** When the loop first saw the ticker today (the timed re-check's clock start). */
+  firstSeenAt: Date | null;
+  /** The last look, and whether a price move or the clock caused it. */
+  lastLookAt: Date | null;
+  lastLookKind: "price" | "timed" | null;
 }
 
-/** Today's re-rank bookkeeping per ticker; a ticker with no row has not re-ranked today (its reference is the 10:00 capture spot). */
+/** Whether today's day_signals_seed job has finished, successfully or not: a failed seed (one ticker without a snapshot, say) still leaves a usable pool. */
+export async function hasDaySignalsSeedFinished(tradingDateIso: string): Promise<boolean> {
+  const run = await db("job_runs").where({ job_name: "day_signals_seed" }).whereNotNull("finished_at").whereRaw("(started_at AT TIME ZONE 'America/New_York')::date::text = ?", [tradingDateIso]).first("id");
+  return Boolean(run);
+}
+
+/** Today's re-rank bookkeeping per ticker; a ticker with no row has not been seen or re-ranked today (its reference is the 10:00 capture spot). */
 export async function loadDayRerankStates(tradingDateIso: string): Promise<Map<string, DayRerankState>> {
-  const rows = await db("day_signal_rerank_state").whereRaw("trading_date::text = ?", [tradingDateIso]).select("ticker_id as tickerId", "reference_spot_price as referenceSpotPrice", "rerank_count as reranks");
-  return new Map(rows.map((row) => [row.tickerId, { referenceSpotPrice: Number(row.referenceSpotPrice), reranks: Number(row.reranks) }]));
+  const rows = await db("day_signal_rerank_state")
+    .whereRaw("trading_date::text = ?", [tradingDateIso])
+    .select("ticker_id as tickerId", "reference_spot_price as referenceSpotPrice", "rerank_count as reranks", "first_seen_at as firstSeenAt", "last_look_at as lastLookAt", "last_look_kind as lastLookKind");
+  return new Map(
+    rows.map((row) => [
+      row.tickerId,
+      { referenceSpotPrice: Number(row.referenceSpotPrice), reranks: Number(row.reranks), firstSeenAt: row.firstSeenAt ? new Date(row.firstSeenAt) : null, lastLookAt: row.lastLookAt ? new Date(row.lastLookAt) : null, lastLookKind: row.lastLookKind ?? null },
+    ]),
+  );
 }
 
 export async function saveDayRerankState(tickerId: string, tradingDateIso: string, state: DayRerankState): Promise<void> {
   await db("day_signal_rerank_state")
-    .insert({ ticker_id: tickerId, trading_date: tradingDateIso, reference_spot_price: state.referenceSpotPrice, rerank_count: state.reranks, updated_at: db.fn.now() })
+    .insert({ ticker_id: tickerId, trading_date: tradingDateIso, reference_spot_price: state.referenceSpotPrice, rerank_count: state.reranks, first_seen_at: state.firstSeenAt, last_look_at: state.lastLookAt, last_look_kind: state.lastLookKind, updated_at: db.fn.now() })
     .onConflict("ticker_id")
-    .merge(["trading_date", "reference_spot_price", "rerank_count", "updated_at"]);
+    .merge(["trading_date", "reference_spot_price", "rerank_count", "first_seen_at", "last_look_at", "last_look_kind", "updated_at"]);
 }
 
 /** Deletes a ticker's day quotes for every contract not in `keep`: contracts the loop stopped quoting must not linger as "fresh" quotes. No-op for an empty list (an empty set is a bug, never a reason to wipe). */

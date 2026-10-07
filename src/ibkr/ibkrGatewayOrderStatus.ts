@@ -1,4 +1,5 @@
-import { easternDateIso, easternInstant, hhmmParts, regularCloseEt } from "../lib/marketSessionStatus.js";
+import { easternInstant, hhmmParts, regularCloseEt } from "../lib/marketSessionStatus.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 /** order_requests.status values the worker derives from IBKR's orderStatus event. */
 export type OrderRequestStatusFromIbkr = "filled" | "cancelled" | "cancelled_partially_filled" | "partially_filled" | "submitted" | "rejected";
@@ -44,8 +45,8 @@ export const ibkrOrderCanceledErrorCode = 202;
  * `closeTimeEt` is the day's stored close (market_calendar.close_time, an early close on a half day), else 16:00.
  */
 export function cancellationReasonForIbkrCancel(orderCreatedAt: Date, endedAt: Date, closeTimeEt: string = regularCloseEt): "expired_at_close" | "cancelled_by_ibkr" {
-  const endedDateIso = easternDateIso(endedAt);
-  if (easternDateIso(orderCreatedAt) < endedDateIso) return "expired_at_close";
+  const endedDateIso = easternIsoDate(endedAt);
+  if (easternIsoDate(orderCreatedAt) < endedDateIso) return "expired_at_close";
   const close = hhmmParts(closeTimeEt);
   return endedAt >= easternInstant(endedDateIso, close.hour, close.minute) ? "expired_at_close" : "cancelled_by_ibkr";
 }

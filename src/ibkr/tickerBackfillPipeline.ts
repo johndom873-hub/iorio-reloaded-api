@@ -4,9 +4,9 @@ import { fetchDailyHistoryFromIbkr, upsertDailyBars } from "./priceBarCache.js";
 import { prepareTicker, type PreparedTicker, type UniverseTicker } from "./runOptionChainCapture.js";
 import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
 import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { summarizeBackfillBars } from "../lib/backfillBarSummary.js";
 import type { DailyOhlcvBar } from "../lib/realizedVolatility.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 import {
   buildInitialBackfillSteps,
   computeProgressPercent,
@@ -279,7 +279,7 @@ export async function executeBackfillRun(runId: string, tickerId: string, symbol
 
   let connection: IbkrConnection | null = null;
   const getConnection = async () => (connection ??= (await workers.connect()) as IbkrConnection);
-  const todayIso = easternDateIso(workers.now());
+  const todayIso = easternIsoDate(workers.now());
 
   try {
     if (scope === "full") {

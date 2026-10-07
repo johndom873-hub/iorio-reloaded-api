@@ -1,4 +1,5 @@
-import { easternDateIso, easternInstant } from "./marketSessionStatus.js";
+import { easternInstant } from "./marketSessionStatus.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // Heroku Scheduler only fires at fixed UTC times, but the capture is meant to
 // run 30 minutes after the market open, 10:00 ET (moved from 9:30 on 2026-09-30:
@@ -14,7 +15,7 @@ const captureWindowStart = { hour: 10, minute: 0 };
 const captureWindowEnd = { hour: 10, minute: 30 };
 
 export function isWithinChainCaptureClockWindow(now: Date = new Date()): boolean {
-  const dateIso = easternDateIso(now);
+  const dateIso = easternIsoDate(now);
   const windowStart = easternInstant(dateIso, captureWindowStart.hour, captureWindowStart.minute);
   const windowEnd = easternInstant(dateIso, captureWindowEnd.hour, captureWindowEnd.minute);
   return now >= windowStart && now < windowEnd;

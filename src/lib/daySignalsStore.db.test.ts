@@ -105,7 +105,7 @@ describe("replaceDaySignalPool and loadDaySignalExpiries", () => {
     const { legId } = await createHeldOptionLeg(ticker.id);
     await store.upsertDayQuotes([quoteWrite(ticker.id)]);
     await store.upsertDayRollGrades(ticker.id, tradingDate, [{ legId, expiry: "2031-03-28", strike: 105, right: "C", grade: "good" }]);
-    await store.saveDayRerankState(ticker.id, tradingDate, { referenceSpotPrice: 99, reranks: 2 });
+    await store.saveDayRerankState(ticker.id, tradingDate, { referenceSpotPrice: 99, reranks: 2, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
 
     await store.replaceDaySignalPool(tradingDate, [{ tickerId: ticker.id, snapshotId, expiries: [seedExpiry("2031-03-21", 1)] }], seededAt);
 
@@ -166,18 +166,26 @@ describe("replaceTickerPoolExpiries (a mid-day re-rank)", () => {
 describe("re-rank state", () => {
   it("saves, updates in place, and only loads the asked trading date", async () => {
     const ticker = await createTicker();
-    await store.saveDayRerankState(ticker.id, tradingDate, { referenceSpotPrice: 101.5, reranks: 1 });
-    await store.saveDayRerankState(ticker.id, tradingDate, { referenceSpotPrice: 104.25, reranks: 2 });
-    expect([...(await store.loadDayRerankStates(tradingDate))]).toEqual([[ticker.id, { referenceSpotPrice: 104.25, reranks: 2 }]]);
+    await store.saveDayRerankState(ticker.id, tradingDate, { referenceSpotPrice: 101.5, reranks: 1, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
+    await store.saveDayRerankState(ticker.id, tradingDate, { referenceSpotPrice: 104.25, reranks: 2, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
+    expect([...(await store.loadDayRerankStates(tradingDate))]).toEqual([[ticker.id, { referenceSpotPrice: 104.25, reranks: 2, firstSeenAt: null, lastLookAt: null, lastLookKind: null }]]);
     expect((await store.loadDayRerankStates("2031-03-04")).size).toBe(0);
+  });
+
+  it("keeps the look times and kind (15-minute gap and hourly re-check, 2026-10-07)", async () => {
+    const ticker = await createTicker();
+    const firstSeenAt = new Date("2031-03-05T15:07:16.000Z");
+    const lastLookAt = new Date("2031-03-05T16:08:00.000Z");
+    await store.saveDayRerankState(ticker.id, tradingDate, { referenceSpotPrice: 113.93, reranks: 1, firstSeenAt, lastLookAt, lastLookKind: "timed" });
+    expect((await store.loadDayRerankStates(tradingDate)).get(ticker.id)).toEqual({ referenceSpotPrice: 113.93, reranks: 1, firstSeenAt, lastLookAt, lastLookKind: "timed" });
   });
 
   it("a new day's save replaces the old day's row for the ticker", async () => {
     const ticker = await createTicker();
-    await store.saveDayRerankState(ticker.id, tradingDate, { referenceSpotPrice: 100, reranks: 3 });
-    await store.saveDayRerankState(ticker.id, "2031-03-04", { referenceSpotPrice: 90, reranks: 1 });
+    await store.saveDayRerankState(ticker.id, tradingDate, { referenceSpotPrice: 100, reranks: 3, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
+    await store.saveDayRerankState(ticker.id, "2031-03-04", { referenceSpotPrice: 90, reranks: 1, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
     expect((await store.loadDayRerankStates(tradingDate)).size).toBe(0);
-    expect((await store.loadDayRerankStates("2031-03-04")).get(ticker.id)).toEqual({ referenceSpotPrice: 90, reranks: 1 });
+    expect((await store.loadDayRerankStates("2031-03-04")).get(ticker.id)).toEqual({ referenceSpotPrice: 90, reranks: 1, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
   });
 });
 

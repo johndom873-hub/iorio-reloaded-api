@@ -2,7 +2,8 @@ import type { Request, Response } from "express";
 import { settleGraceMs, subscribeToPooledQuote } from "../ibkr/marketDataPool.js";
 import { loadCloseLiveInputs, toCloseLiveQuote } from "../lib/closeGate.js";
 import { deriveCloseLiveState, type CloseLiveQuote } from "../lib/closeLiveState.js";
-import { computeMarketSessionStatus, easternDateIso, type MarketSessionState } from "../lib/marketSessionStatus.js";
+import { computeMarketSessionStatus, type MarketSessionState } from "../lib/marketSessionStatus.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // Live data behind the Close form only (approved 2026-09-28): one SSE stream per open modal carrying the
 // position's live bid/ask, the live wheel-cycle P&L and whether closing is allowed right now. It reads the
@@ -61,7 +62,7 @@ export async function streamCloseLiveHandler(request: Request, response: Respons
         optionQuotesByLegId,
         stockQuote,
         cycleInput: inputs.cycleInput,
-        todayIso: easternDateIso(new Date()),
+        todayIso: easternIsoDate(new Date()),
         waitedMs: Date.now() - startedAt,
         settleGraceMs,
       }),

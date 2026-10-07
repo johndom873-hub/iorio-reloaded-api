@@ -260,8 +260,10 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       quotes,
       earningsDatesIso: inputs.earningsDatesIso,
       earningsCalendarResolved: inputs.earningsCalendarResolved,
-      macroEventDatesIso: [...new Set(inputs.macroEvents.map((event) => event.dateIso))],
-      snapshotDateIso: header.tradingDateIso,
+      macroEvents: inputs.macroEvents.map((event) => ({ dateIso: event.dateIso, eventAtMs: Date.parse(event.eventAtIso) })),
+      todayEasternIso: inputs.todayEasternIso,
+      // The clock, not the snapshot: an event earlier today is over, a release later today is still ahead.
+      scoredAtMs: Date.now(),
       freeShares: inputs.freeShares,
       freeCash: account.freeCash,
       deltaTargetMin: settings.deltaTargetMin,
@@ -303,7 +305,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     rollCount: countRollableLegs(rolls),
     ivShiftByExpiry: Object.fromEntries([...ivShifts].map(([expiry, entry]) => [expiry, { shiftVolatilityPoints: entry.shift * 100, quoteCount: entry.quoteCount }])),
     quoteSourceCounts: countQuoteSources(candidates),
-    noCandidatesReason: candidates.length > 0 ? null : describeNoCandidates(exclusionTally, inputs.earningsDatesIso, header.tradingDateIso, settings),
+    noCandidatesReason: candidates.length > 0 ? null : describeNoCandidates(exclusionTally, inputs.earningsDatesIso, inputs.todayEasternIso, settings),
   };
 }
 
@@ -321,12 +323,12 @@ export function describeFitIssue(inputs: Pick<TickerSignalsInputs, "slices" | "h
 export function describeNoCandidates(
   tally: CandidateExclusionTally,
   earningsDatesIso: string[],
-  snapshotDateIso: string,
+  todayEasternIso: string,
   settings: { minAnnualizedYieldPct: number; deltaTargetMin: number; deltaTargetMax: number },
 ): SignalsNoCandidatesReason {
   const filtered = tally.belowMinDeltaCount + tally.aboveMaxDeltaCount + tally.belowMinYieldCount > 0;
-  // Strictly after the snapshot, as expirySpansEarnings counts it.
-  const nextEarnings = [...earningsDatesIso].sort().find((dateIso) => dateIso > snapshotDateIso) ?? null;
+  // From today on, as expirySpansEarnings counts it.
+  const nextEarnings = [...earningsDatesIso].sort().find((dateIso) => dateIso >= todayEasternIso) ?? null;
   return {
     kind: filtered ? "filtered" : "nothing_scorable",
     surfaceFitRejectedExpiries: [...tally.surfaceFitRejectedExpiries].sort(),

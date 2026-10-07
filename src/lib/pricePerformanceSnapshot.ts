@@ -1,7 +1,8 @@
 import { db } from "../db/connection.js";
 import { computeIvMetrics } from "./ivMetrics.js";
-import { easternDateIso, lastCompletedSessionDate } from "./marketSessionStatus.js";
+import { lastCompletedSessionDate } from "./marketSessionStatus.js";
 import { computePriceTrend, type PriceTrend } from "./priceTrends.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // Everything the Price Performance page shows except the live price: end-of-day
 // facts computed from daily_price_bars alone — zero IBKR calls at request time
@@ -306,7 +307,7 @@ export function invalidatePricePerformanceSnapshot(): void {
 
 export async function getPricePerformanceSnapshot(now: Date = new Date()): Promise<PricePerformanceSnapshot> {
   // A different Eastern date invalidates the cache even inside the TTL.
-  const sessionDate = easternDateIso(now);
+  const sessionDate = easternIsoDate(now);
   if (cachedSnapshot && cachedSnapshot.sessionDateAtCompute === sessionDate && now.getTime() - cachedSnapshot.computedAtMs < snapshotTtlMs) {
     return cachedSnapshot.snapshot;
   }

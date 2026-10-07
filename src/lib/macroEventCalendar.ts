@@ -27,15 +27,16 @@ export function isMajorMacroEvent(title: string): boolean {
 
 export interface MacroEvent {
   dateIso: string; // YYYY-MM-DD (Eastern date of the release)
+  eventAtIso: string; // UTC ISO of event_at, the release time
   title: string;
 }
 
 /** Major US releases from today forward, in date order (US-only feed, not ticker-scoped). */
 export async function loadUpcomingMajorMacroEvents(): Promise<MacroEvent[]> {
-  const rows: { dateIso: string; title: string }[] = await db("economic_calendar_events")
+  const rows: MacroEvent[] = await db("economic_calendar_events")
     .where("country", "US")
     .whereRaw("(event_at AT TIME ZONE 'America/New_York')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date")
     .orderBy("event_at", "asc")
-    .select(db.raw(`(event_at AT TIME ZONE 'America/New_York')::date::text AS "dateIso"`), "title");
+    .select(db.raw(`(event_at AT TIME ZONE 'America/New_York')::date::text AS "dateIso"`), db.raw(`to_char(event_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "eventAtIso"`), "title");
   return rows.filter((row) => isMajorMacroEvent(row.title));
 }

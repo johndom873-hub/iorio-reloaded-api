@@ -14,9 +14,9 @@ import { loadShortlistDataReadiness } from "../lib/shortlistDataReadiness.js";
 import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
 import { respondWithStreamedResult } from "../lib/streamedResponse.js";
 import { refreshStoredOptionChain } from "../ibkr/fetchOptionChain.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { invalidatePricePerformanceSnapshot } from "../lib/pricePerformanceSnapshot.js";
 import { countOpenPositionsForTicker, describeOpenPositionsBlockingRemoval } from "../lib/positionQueries.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 export const shortlistRouter = Router();
 shortlistRouter.use(requireAuth);
@@ -158,7 +158,7 @@ shortlistRouter.post("/:tickerId/populate-option-chain", async (request, respons
       const refresh = await refreshStoredOptionChain(
         connection.ib,
         { tickerId: ticker.id, symbol: ticker.symbol, contractId: ticker.ibkr_contract_id },
-        easternDateIso(new Date()),
+        easternIsoDate(new Date()),
       );
       const optionChainExpiries = Array.from(refresh.strikesByExpiry.entries())
         .map(([expiry, strikes]) => ({ expiry, strikeCount: strikes.length }))

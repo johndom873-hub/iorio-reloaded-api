@@ -1,8 +1,9 @@
 import { db } from "../db/connection.js";
 import { readAppEnvironment } from "./appEnvironment.js";
-import { easternDateIso, resolveIsOpenDay } from "./marketSessionStatus.js";
+import { resolveIsOpenDay } from "./marketSessionStatus.js";
 import { notifyTelegramTracked } from "./undeliveredAlerts.js";
 import { collectReadinessChecks, createDefaultReadinessDependencies, type ReadinessDependencies } from "./preOpenReadinessCollectors.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 import {
   buildReadinessMessage,
   decideReadinessActions,
@@ -86,7 +87,7 @@ async function performAction(action: ReadinessAction, dateIso: string, now: Date
 export async function runPreOpenReadinessIfDue(now: Date = new Date(), dependencies?: ReadinessDependencies): Promise<ReadinessAction[]> {
   const appEnvironment = readAppEnvironment();
   if (appEnvironment === "development") return [];
-  const dateIso = easternDateIso(now);
+  const dateIso = easternIsoDate(now);
   if (!(await resolveIsOpenDay(dateIso))) return [];
   const state = await loadReadinessState(dateIso).catch(() => emptyReadinessState);
   const actions = decideReadinessActions(now, dateIso, state);

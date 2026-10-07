@@ -122,3 +122,44 @@ describe("volatilityRatio and computeElevatedVolatilityFlag", () => {
     expect(spikedFlag.ratio).toBeGreaterThan(calmFlag.ratio);
   });
 });
+
+describe("computeElevatedVolatilityFlag by index (2026-10-07)", () => {
+  // The earlier implementation, kept as the reference: each earlier ratio read a copy of the history up to that day.
+  function referenceFlag(bars: DailyOhlcvBar[]) {
+    const ratio = volatilityRatio(bars);
+    if (ratio === null) return null;
+    const earlierRatios: number[] = [];
+    for (let end = 126; end < bars.length - 1; end++) {
+      const earlier = volatilityRatio(bars.slice(0, end + 1));
+      if (earlier !== null) earlierRatios.push(earlier);
+    }
+    const useOwn = earlierRatios.length >= 250;
+    const sorted = [...earlierRatios].sort((first, second) => first - second);
+    const threshold = useOwn ? sorted[Math.floor(0.9 * sorted.length)]! : 1.3;
+    return { ratio, threshold, thresholdSource: useOwn ? "own_p90" : "fixed_fallback", elevated: ratio >= threshold };
+  }
+
+  function randomWalkBars(count: number, seed: number): DailyOhlcvBar[] {
+    let state = seed;
+    const random = () => ((state = (state * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648);
+    const bars: DailyOhlcvBar[] = [];
+    let close = 100;
+    for (let index = 0; index < count; index++) {
+      const open = close * Math.exp((random() - 0.5) * 0.02);
+      close = open * Math.exp((random() - 0.5) * (index > count * 0.7 ? 0.08 : 0.03));
+      const high = Math.max(open, close) * (1 + random() * 0.01);
+      const low = Math.min(open, close) * (1 - random() * 0.01);
+      bars.push({ tradingDate: new Date(Date.UTC(2021, 0, 1) + index * 86_400_000).toISOString().slice(0, 10), open, high, low, close, volume: 1_000_000 + Math.round(random() * 500_000) });
+    }
+    return bars;
+  }
+
+  it.each([
+    ["a full five-year history", randomWalkBars(1263, 7)],
+    ["a short history that uses the fixed fallback", randomWalkBars(300, 11)],
+    ["a history with a 2:1 split in the middle", (() => { const bars = randomWalkBars(900, 3); for (let index = 450; index < bars.length; index++) { const bar = bars[index]!; bars[index] = { ...bar, open: bar.open / 2, high: bar.high / 2, low: bar.low / 2, close: bar.close / 2, volume: bar.volume * 3 }; } return bars; })()],
+    ["a history with a bad bar", (() => { const bars = randomWalkBars(700, 5); bars[400] = { ...bars[400]!, high: -1 }; return bars; })()],
+  ])("gives exactly the earlier result on %s", (_label, bars) => {
+    expect(computeElevatedVolatilityFlag(bars)).toEqual(referenceFlag(bars));
+  });
+});

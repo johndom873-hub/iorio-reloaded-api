@@ -7,6 +7,15 @@
 export type PlutoDecisionVerdict = "trade" | "no_trade" | "abstain_system_concern";
 export type PlutoDecisionActionKind = "open_covered_call" | "open_cash_secured_put" | "roll" | "close_shares" | "close_leg";
 
+/**
+ * A data problem the model saw (prompt v3.3, Marcelo 2026-10-07): `symbol` is a ticker of the message, or null when the
+ * concern covers the whole message (the account block, say). A flagged ticker is not traded; the others are judged normally.
+ */
+export interface PlutoSystemConcern {
+  symbol: string | null;
+  concern: string;
+}
+
 export interface PlutoDecision {
   decision: PlutoDecisionVerdict;
   actionKind: PlutoDecisionActionKind | null;
@@ -14,7 +23,7 @@ export interface PlutoDecision {
   confidence: number;
   reasons: string[];
   risksAcknowledged: string[];
-  systemConcerns: string[];
+  systemConcerns: PlutoSystemConcern[];
 }
 
 export const plutoDecisionJsonSchema = {
@@ -28,7 +37,11 @@ export const plutoDecisionJsonSchema = {
     confidence: { type: "number", minimum: 0, maximum: 1 },
     reasons: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 5 },
     risks_acknowledged: { type: "array", items: { type: "string" }, maxItems: 10 },
-    system_concerns: { type: "array", items: { type: "string" }, maxItems: 10 },
+    system_concerns: {
+      type: "array",
+      maxItems: 10,
+      items: { type: "object", additionalProperties: false, required: ["symbol", "concern"], properties: { symbol: { type: ["string", "null"] }, concern: { type: "string" } } },
+    },
   },
 } as const;
 
@@ -71,7 +84,7 @@ export function parsePlutoDecision(rawText: string, offeredIds: ReadonlySet<stri
   if (typeof reasons === "string") return { ok: false, error: reasons };
   const risks = stringArray(object.risks_acknowledged ?? [], "risks_acknowledged", 10);
   if (typeof risks === "string") return { ok: false, error: risks };
-  const concerns = stringArray(object.system_concerns ?? [], "system_concerns", 10);
+  const concerns = parseSystemConcerns(object.system_concerns ?? [], offeredIds);
   if (typeof concerns === "string") return { ok: false, error: concerns };
 
   if (decision === "trade") {
@@ -94,6 +107,41 @@ export function parsePlutoDecision(rawText: string, offeredIds: ReadonlySet<stri
       systemConcerns: concerns,
     },
   };
+}
+
+/** The concerns array: each names a ticker of this message (every offered id starts with its symbol) or null for the whole message. */
+function parseSystemConcerns(value: unknown, offeredIds: ReadonlySet<string>): PlutoSystemConcern[] | string {
+  if (!Array.isArray(value)) return "system_concerns must be an array";
+  if (value.length > 10) return "system_concerns has more than 10 entries";
+  const symbols = new Set([...offeredIds].map((id) => id.split(":")[0]));
+  const concerns: PlutoSystemConcern[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return "each system concern must be an object with symbol and concern";
+    const { symbol, concern } = entry as Record<string, unknown>;
+    if (typeof concern !== "string" || concern.trim() === "") return "each system concern needs a concern text";
+    if (symbol !== null && typeof symbol !== "string") return "a system concern's symbol must be a ticker or null";
+    if (typeof symbol === "string" && !symbols.has(symbol)) return `system concern names ${symbol}, which is not in this message`;
+    concerns.push({ symbol: symbol ?? null, concern });
+  }
+  return concerns;
+}
+
+/** Stored decisions before prompt v3.3 hold plain strings: read them as concerns about the whole message. */
+export function normalizeSystemConcerns(value: unknown): PlutoSystemConcern[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): PlutoSystemConcern[] => {
+    if (typeof entry === "string") return [{ symbol: null, concern: entry }];
+    if (typeof entry === "object" && entry !== null && typeof (entry as { concern?: unknown }).concern === "string") {
+      const symbol = (entry as { symbol?: unknown }).symbol;
+      return [{ symbol: typeof symbol === "string" ? symbol : null, concern: (entry as { concern: string }).concern }];
+    }
+    return [];
+  });
+}
+
+/** The tickers a decision flagged; a whole-message concern flags none by name (the verdict carries it). */
+export function flaggedSymbols(decision: Pick<PlutoDecision, "systemConcerns">): Set<string> {
+  return new Set(decision.systemConcerns.map((entry) => entry.symbol).filter((symbol): symbol is string => symbol !== null));
 }
 
 /** Ids are self-describing (symbol:kind:...), so the action kind can be cross-checked against the id. */

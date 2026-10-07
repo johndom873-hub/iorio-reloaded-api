@@ -1,4 +1,5 @@
-import { easternDateIso, resolveIsOpenDay } from "./marketSessionStatus.js";
+import { resolveIsOpenDay } from "./marketSessionStatus.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 /**
  * Whether the US market is closed on the Eastern calendar day `now` falls on (weekend or market_calendar holiday).
@@ -13,5 +14,5 @@ import { easternDateIso, resolveIsOpenDay } from "./marketSessionStatus.js";
  * which matches a weekend correctly and never wrongly skips a real trading day.
  */
 export async function isMarketClosedToday(now: Date = new Date()): Promise<boolean> {
-  return !(await resolveIsOpenDay(easternDateIso(now)));
+  return !(await resolveIsOpenDay(easternIsoDate(now)));
 }

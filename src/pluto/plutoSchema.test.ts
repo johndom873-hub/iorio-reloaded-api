@@ -42,7 +42,7 @@ describe("Pluto schema", () => {
     expect(Number(settings[0].order_size_pct_of_budget)).toBe(10);
     expect(settings[0].max_open_positions).toBe(15);
     expect(Number(settings[0].daily_cost_ceiling_usd)).toBe(1);
-    expect(settings[0].prompt_version).toBe("v3.2");
+    expect(settings[0].prompt_version).toBe("v3.4");
     expect(settings[0].day_signals_poll_seconds).toBe(1);
     await expect(db("pluto_settings").insert({ id: 2 })).rejects.toThrow();
 

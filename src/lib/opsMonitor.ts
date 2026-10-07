@@ -2,8 +2,8 @@ import { db } from "../db/connection.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { evaluateDataInvariants, loadDataInvariantInputs, type InvariantResult } from "./dataInvariants.js";
 import { expectedScheduledJobs, evaluateJobDeadlines, evaluatePendingJobs, runFallsInSlot, scheduledInstant, slotDateIso, type JobRunSummary } from "./jobDeadlines.js";
-import { easternDateIso, easternInstant, resolveIsOpenDay } from "./marketSessionStatus.js";
-import { formatDateWithWeekday, formatEasternDateTime, formatEasternTime } from "./easternIsoDate.js";
+import { easternInstant, resolveIsOpenDay } from "./marketSessionStatus.js";
+import { formatDateWithWeekday, formatEasternDateTime, formatEasternTime, easternIsoDate } from "./easternIsoDate.js";
 import { readGitSha } from "./readGitSha.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { reportBackgroundFailure } from "./backgroundFailureAlert.js";
@@ -55,7 +55,7 @@ export function buildMorningDigest(input: {
 }): string {
   const pendingJobs = new Set(input.pendingJobs ?? []);
   const when = (instant: Date): string => formatEasternDateTime(instant, input.dateIso);
-  const ranToday = (job: DigestJobLine): boolean => job.lastStartedAt !== null && easternDateIso(job.lastStartedAt) === input.dateIso;
+  const ranToday = (job: DigestJobLine): boolean => job.lastStartedAt !== null && easternIsoDate(job.lastStartedAt) === input.dateIso;
   const slotLaterToday = (job: DigestJobLine): Date | null => (job.scheduledTodayAt && job.scheduledTodayAt > input.now && !ranToday(job) ? job.scheduledTodayAt : null);
   const lastRunMark = (job: DigestJobLine): string => (job.lastStartedAt ? `${when(job.lastStartedAt)} ✅` : "never run");
 
@@ -125,8 +125,8 @@ async function loadRecentRuns(now: Date): Promise<JobRunSummary[]> {
 export async function findDeadlineProblems(now: Date) {
   const runs = await loadRecentRuns(now);
   const openByDate = new Map<string, boolean>();
-  for (const dateIso of new Set([now.toISOString().slice(0, 10), easternDateIso(now)])) openByDate.set(dateIso, await resolveIsOpenDay(dateIso));
-  return { runs, problems: evaluateJobDeadlines({ now, runs, isOpenDay: (dateIso) => openByDate.get(dateIso) ?? true, easternDateIsoOf: easternDateIso }) };
+  for (const dateIso of new Set([now.toISOString().slice(0, 10), easternIsoDate(now)])) openByDate.set(dateIso, await resolveIsOpenDay(dateIso));
+  return { runs, problems: evaluateJobDeadlines({ now, runs, isOpenDay: (dateIso) => openByDate.get(dateIso) ?? true, easternDateIsoOf: easternIsoDate }) };
 }
 
 /** Alerts (once, then every few hours) on jobs past their deadline; announces when one later catches up. */
@@ -161,7 +161,7 @@ export async function reportJobDeadlines(now: Date = new Date()): Promise<void> 
 /** Sends the morning digest once per open day between 10:45 and 16:00 ET. Returns whether it sent. */
 export async function sendMorningDigestIfDue(now: Date = new Date()): Promise<boolean> {
   if (now.getTime() < digestRetryNotBefore) return false;
-  const dateIso = easternDateIso(now);
+  const dateIso = easternIsoDate(now);
   if (now < easternInstant(dateIso, digestTime.hour, digestTime.minute) || now >= easternInstant(dateIso, digestLatestTime.hour, digestLatestTime.minute)) return false;
   if (!(await resolveIsOpenDay(dateIso))) return false;
 
@@ -177,7 +177,7 @@ export async function sendMorningDigestIfDue(now: Date = new Date()): Promise<bo
     const undelivered = allUndelivered.slice(0, maxUndeliveredListed);
     const openDays = new Map<string, boolean>();
     for (const day of new Set([now.toISOString().slice(0, 10), dateIso])) openDays.set(day, await resolveIsOpenDay(day));
-    const pendingJobs = evaluatePendingJobs({ now, runs: deadlines.runs, isOpenDay: (day) => openDays.get(day) ?? true, easternDateIsoOf: easternDateIso });
+    const pendingJobs = evaluatePendingJobs({ now, runs: deadlines.runs, isOpenDay: (day) => openDays.get(day) ?? true, easternDateIsoOf: easternIsoDate });
     const digest = buildMorningDigest({ dateIso, now, jobs: latestRuns, invariants: evaluateDataInvariants(inputs), undelivered, deadlineProblems: deadlines.problems.map((problem) => problem.message), pendingJobs });
     // Plain send: the earlier undelivered alerts are only cleared once the digest that lists them was really delivered.
     const delivered = await notifyTelegram(digest);
@@ -218,7 +218,7 @@ export async function loadLatestRunPerExpectedJob(now: Date = new Date()): Promi
       lastStartedAt: row ? new Date(row.started_at) : null,
       status: row?.status ?? null,
       errorMessage: row?.error_message ?? null,
-      scheduledTodayAt: scheduledInstant(job, slotDateIso(job, now, easternDateIso)),
+      scheduledTodayAt: scheduledInstant(job, slotDateIso(job, now, easternIsoDate)),
     };
   });
 }

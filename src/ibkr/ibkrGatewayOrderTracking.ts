@@ -1,6 +1,5 @@
 import type { CommissionReport, Contract, Execution, IBApi } from "@stoqey/ib";
 import type { Knex } from "knex";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 import type { AppNotification } from "../lib/notificationChannel.js";
 import { finalOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { ibkrInactiveOrderMessage, ibkrOrderCanceledErrorCode, ibkrOrderRejectionErrorCodes, requestStatusForIbkrRejection, requestStatusForOrderStatusEvent } from "./ibkrGatewayOrderStatus.js";
@@ -9,6 +8,7 @@ import type { OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
 import { parseIbkrExecutionTime } from "./ibkrGatewayParseExecutionTime.js";
 import type { fetchIbkrCompletedOrders } from "./ibkrGatewayFetchCompletedOrders.js";
 import type { fetchIbkrOpenOrders } from "./ibkrGatewayFetchOpenOrders.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // How the worker follows an order after it is placed: IBKR's order-status and error events, the executions and commissions
 // that become the trades ledger, and the sweep that settles orders IBKR no longer lists. Kept apart from
@@ -201,7 +201,7 @@ export async function reconcileStaleOrderRequests(dependencies: StaleOrderReconc
 
     // A DAY order from an earlier session cannot still be working: IBKR expired it at that session's close, even when
     // a Gateway restart since has dropped it from the completed-orders list.
-    const expiredDayOrder = easternDateIso(new Date(row.created_at)) < easternDateIso(now());
+    const expiredDayOrder = easternIsoDate(new Date(row.created_at)) < easternIsoDate(now());
     const executed = await executedOutcomeForOrderRequest(row.id, row.payload, db);
     if (executed !== "none" || expiredDayOrder) {
       const resolvedStatus = !expiredDayOrder ? executed : executed === "filled" ? "filled" : executed === "partially_filled" ? "cancelled_partially_filled" : "cancelled";

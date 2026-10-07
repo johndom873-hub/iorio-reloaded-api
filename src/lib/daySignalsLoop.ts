@@ -6,7 +6,7 @@ import { sharedLiveConnection } from "../ibkr/sharedReadConnection.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { emitDayQuotesUpdated } from "./daySignalsEvents.js";
 import { selectContractsToCapture, computeStrikeWindow, calendarDaysUntilExpiry } from "./optionChainCaptureWindow.js";
-import { selectDaySignalContractSet, shouldRerankExpiries, type DayContractRef, type DayContractSetExpiry } from "./daySignalsContractSet.js";
+import { decideRerank, selectDaySignalContractSet, type DayContractRef, type DayContractSetExpiry } from "./daySignalsContractSet.js";
 import { loadDayTickerContractContexts, loadDayUnpooledTickers, type DayTickerContractContext, type DayTrackedTicker } from "./daySignalsContractContextStore.js";
 import { selectDaySignalExpiries } from "./daySignalsSeed.js";
 import { clearsNotificationHysteresis, decideAssignmentRiskAlert, isGradeUpgrade, notifyAssignmentRisk, notifyRollSignalUpgrade, notifySignalUpgrade, type AssignmentRiskAlert, type RollSignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
@@ -32,7 +32,7 @@ import {
   type DaySignalExpirySeed,
   type DaySignalExpiryRow,
 } from "./daySignalsStore.js";
-import { computeMarketSessionStatus, easternDateIso } from "./marketSessionStatus.js";
+import { computeMarketSessionStatus } from "./marketSessionStatus.js";
 import { formatIsoDateAsExpiry } from "./optionChainSnapshotStore.js";
 import { readGitSha } from "./readGitSha.js";
 import { reportBackgroundFailure, reportBackgroundRecovery } from "./backgroundFailureAlert.js";
@@ -43,6 +43,7 @@ import { loadAccountContext, loadTickerSignalsInputs, type SignalsTickerRow } fr
 import { loadTradingSettings, type TradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // The Day Signals refresh loop (design agreed 2026-09-24, PROGRESS.md "DAY
 // SIGNALS"). Lives in the web dyno as a background service, gated by
@@ -299,7 +300,7 @@ export class DaySignalsLoop {
   /** One state evaluation; returns true when a full cycle ran (so the next evaluation follows immediately). */
   private async tick(signal: AbortSignal): Promise<boolean> {
     const now = this.deps.now();
-    const tradingDateIso = easternDateIso(now);
+    const tradingDateIso = easternIsoDate(now);
     if (!(await this.deps.isMarketOpen(now))) {
       await this.releaseLines();
       this.setState("idle", "market closed");
@@ -401,26 +402,47 @@ export class DaySignalsLoop {
     let poolChanged = false;
     const rerankedTickerIds = new Set<string>();
     const rerankStates = await this.loadRerankStatesSafely(tradingDateIso);
-    for (const { tickerId } of trackedTickers) {
-      const context = contexts.get(tickerId);
-      const spot = spotByTicker.get(tickerId) ?? null;
-      if (!context || spot === null || context.atmImpliedVolatility === null || context.snapshotSpotPrice === null || signal.aborted) continue;
-      const state = rerankStates.get(tickerId) ?? { referenceSpotPrice: context.snapshotSpotPrice, reranks: 0 };
-      if (!shouldRerankExpiries({ spotPrice: spot, referenceSpotPrice: state.referenceSpotPrice, atmImpliedVolatility: context.atmImpliedVolatility, reranksToday: state.reranks })) continue;
-      // Counted and re-referenced whatever the outcome (and saved before the discovery runs): a failing discovery or a restart must not retry it.
-      const nextState = { referenceSpotPrice: spot, reranks: state.reranks + 1 };
-      rerankStates.set(tickerId, nextState);
-      await this.deps.saveRerankState(tickerId, tradingDateIso, nextState).catch((error) => {
-        console.warn(`day signals loop: could not save ${context.symbol}'s re-rank state — ${error instanceof Error ? error.message : error}`);
-        this.deps.reportFailure?.("day-signals:rerank-state-save", `Day Signals loop could not save ${context.symbol}'s re-rank state (${error instanceof Error ? error.message : error}).`);
+    const pooledTickerIds = new Set(pool.map((row) => row.tickerId));
+    const nowMs = this.deps.now().getTime();
+    const saveState = async (tickerId: string, symbol: string, state: DayRerankState) => {
+      rerankStates.set(tickerId, state);
+      await this.deps.saveRerankState(tickerId, tradingDateIso, state).catch((error) => {
+        console.warn(`day signals loop: could not save ${symbol}'s re-rank state — ${error instanceof Error ? error.message : error}`);
+        this.deps.reportFailure?.("day-signals:rerank-state-save", `Day Signals loop could not save ${symbol}'s re-rank state (${error instanceof Error ? error.message : error}).`);
       });
+    };
+    // One look: counted, timed and re-referenced whatever the outcome (and saved before the discovery runs), so a failing
+    // discovery or a restart neither retries it at once nor resets the 15-minute gap.
+    const look = async (tickerId: string, context: DayTickerContractContext, spot: number, kind: "price" | "timed"): Promise<"stop" | "continue"> => {
+      const state = rerankStates.get(tickerId)!;
+      await saveState(tickerId, context.symbol, { ...state, referenceSpotPrice: spot, reranks: state.reranks + 1, lastLookAt: new Date(nowMs), lastLookKind: kind });
+      if (kind === "timed") console.log(`day signals loop: hourly re-check of ${context.symbol} at ${spot}`);
       const outcome = await this.rerankTicker(ib, context, spot, tradingDateIso, settings, account, signal);
-      if (outcome === "disconnected") return { settled: 0, disconnected: true, aborted: false };
+      if (outcome === "disconnected") return "stop";
       if (outcome === "changed") {
         poolChanged = true;
         rerankedTickerIds.add(tickerId);
       }
+      return "continue";
+    };
+    const timedDue: { tickerId: string; context: DayTickerContractContext; spot: number; clockStartMs: number }[] = [];
+    for (const { tickerId } of trackedTickers) {
+      const context = contexts.get(tickerId);
+      const spot = spotByTicker.get(tickerId) ?? null;
+      if (!context || spot === null || context.atmImpliedVolatility === null || context.snapshotSpotPrice === null || signal.aborted) continue;
+      // First sight today starts the hourly clock; saved, so a restart does not reset it.
+      let state = rerankStates.get(tickerId);
+      if (!state || state.firstSeenAt === null) {
+        state = { referenceSpotPrice: context.snapshotSpotPrice, reranks: 0, lastLookAt: null, lastLookKind: null, ...state, firstSeenAt: new Date(nowMs) };
+        await saveState(tickerId, context.symbol, state);
+      }
+      const decision = decideRerank({ spotPrice: spot, referenceSpotPrice: state.referenceSpotPrice, atmImpliedVolatility: context.atmImpliedVolatility, lastLookAtMs: state.lastLookAt?.getTime() ?? null, firstSeenAtMs: state.firstSeenAt?.getTime() ?? null, pooled: pooledTickerIds.has(tickerId), nowMs });
+      if (decision === "timed") timedDue.push({ tickerId, context, spot, clockStartMs: (state.lastLookAt ?? state.firstSeenAt)!.getTime() });
+      else if (decision === "price" && (await look(tickerId, context, spot, "price")) === "stop") return { settled: 0, disconnected: true, aborted: false };
     }
+    // At most one timed re-check per cycle (each stretches the cycle to about a minute), the most overdue first.
+    const nextTimed = timedDue.sort((first, second) => first.clockStartMs - second.clockStartMs)[0];
+    if (nextTimed && !signal.aborted && (await look(nextTimed.tickerId, nextTimed.context, nextTimed.spot, "timed")) === "stop") return { settled: 0, disconnected: true, aborted: false };
     if (poolChanged) {
       [activePool, universe] = await Promise.all([this.deps.loadPool(tradingDateIso), this.deps.loadUniverse(tradingDateIso)]);
       trackedTickers = await this.trackedTickersFor(activePool, tradingDateIso);

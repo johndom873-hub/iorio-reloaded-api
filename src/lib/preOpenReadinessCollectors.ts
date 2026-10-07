@@ -8,10 +8,11 @@ import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { evaluateDataInvariants, loadDataInvariantInputs, type InvariantResult } from "./dataInvariants.js";
 import { readAppEnvironment } from "./appEnvironment.js";
-import { easternDateIso, lastCompletedSessionDate } from "./marketSessionStatus.js";
+import { lastCompletedSessionDate } from "./marketSessionStatus.js";
 import { loadUndeliveredAlerts } from "./undeliveredAlerts.js";
 import { loadTradingSettingsForEditing } from "./tradingSettingsStore.js";
 import { fetchTradingHalt, type TradingHalt } from "./platformControls.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 import {
   configurationExpectationsFor,
   evaluateAccount,
@@ -228,7 +229,7 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
       return row ? { startedAt: new Date(row.started_at), status: row.status } : null;
     },
     dataSessionIso: async (now) => {
-      const todayIso = easternDateIso(now);
+      const todayIso = easternIsoDate(now);
       const captureFinishedToday = await db("job_runs")
         .where({ job_name: "option_chain_capture" })
         .whereNotNull("finished_at")

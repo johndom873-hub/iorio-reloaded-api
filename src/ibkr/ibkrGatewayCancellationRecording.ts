@@ -2,7 +2,8 @@ import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import type { OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
 import { cancellationReasonForIbkrCancel, ibkrCancelReasonText, ibkrOrderCanceledErrorCode } from "./ibkrGatewayOrderStatus.js";
-import { easternDateIso, resolveSessionSchedule } from "../lib/marketSessionStatus.js";
+import { resolveSessionSchedule } from "../lib/marketSessionStatus.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // Runs on the VPS worker: recording an order IBKR ended as cancelled, with why (order_requests.cancellation_reason).
 
@@ -15,7 +16,7 @@ export async function recordIbkrCancellationReason(orderRequestId: string, conne
   const row: { created_at: Date; cancelled_by_user_id: string | null; cancellation_reason: string | null } | undefined = await connection("order_requests").where({ id: orderRequestId }).first("created_at", "cancelled_by_user_id", "cancellation_reason");
   // A reason already set (the unfilled-order sweep's) is the real one; the clock-based guess must not replace it.
   if (!row || row.cancelled_by_user_id || row.cancellation_reason) return;
-  const { closeTimeEt } = await resolveSessionSchedule(easternDateIso(now));
+  const { closeTimeEt } = await resolveSessionSchedule(easternIsoDate(now));
   await connection("order_requests").where({ id: orderRequestId }).update({ cancellation_reason: cancellationReasonForIbkrCancel(new Date(row.created_at), now, closeTimeEt) });
 }
 

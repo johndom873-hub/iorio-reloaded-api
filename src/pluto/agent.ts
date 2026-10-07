@@ -1,9 +1,11 @@
 import { db } from "../db/connection.js";
-import { sharedLiveConnection } from "../ibkr/sharedReadConnection.js";
+import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
+import { sharedLiveConnection, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
+import { startProcessMemoryMonitor } from "../lib/processMemoryMonitor.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { InternalApiClient } from "../lib/internalApiClient.js";
 import { startNotificationBroadcaster, subscribeToNotifications } from "../lib/notificationBroadcaster.js";
-import { computeMarketSessionStatus, easternDateIso, resolveIsOpenDay } from "../lib/marketSessionStatus.js";
+import { computeMarketSessionStatus, resolveIsOpenDay } from "../lib/marketSessionStatus.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
 import type { PlutoConfig } from "./config.js";
@@ -11,7 +13,8 @@ import { labelExpiredCandidateOutcomes } from "./candidateOutcomes.js";
 import { loadWorkingPlutoOrders, watchPlutoOrder } from "./executor.js";
 import { plutoEventsRetentionDays, pruneOldPlutoEvents, recordPlutoEvent, type PlutoTrigger } from "./ledger.js";
 import { PlutoMarketWatch } from "./marketWatch.js";
-import { runPlutoPass, type PassRunnerContext } from "./passRunner.js";
+import { runPlutoPass, type PassRequest, type PassRunnerContext } from "./passRunner.js";
+import { advanceOpeningLook, decideOpeningLook, type OpeningLookProgress } from "./openingLook.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { decidePlutoReadinessRun, describePlutoReadinessOutcome, evaluatePlutoRunning, runPlutoReadinessTests } from "./readiness.js";
@@ -19,6 +22,8 @@ import { createPlutoReadinessProbes } from "./readinessProbes.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease, savePlutoReadiness } from "./stateStore.js";
 import { findNewlyQuotedContracts, loadTodaysDaySignalQuoteStamps, rememberAnalysed } from "./daySignalsWatermark.js";
 import { isInsideTradingWindow } from "./systemChecks.js";
+import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
+import { hasDaySignalsSeedFinished } from "../lib/daySignalsStore.js";
 
 // The Pluto agent process (design round 4, 2026-09-28; loop redesigned 2026-10-06):
 //   - boot: crash-loop and deploy detection pause the agent before it can act;
@@ -48,6 +53,7 @@ export class PlutoAgent {
   private settings: PlutoSettings | null = null;
   private timers: ReturnType<typeof setInterval>[] = [];
   private unsubscribeNotifications: (() => void) | null = null;
+  private stopMemoryMonitor: (() => void) | null = null;
   /** quoted_at last analysed, per Day Signals contract. */
   private readonly lastAnalysedQuotedAtMs = new Map<string, number>();
   /** Forced rounds waiting for the loop, in arrival order; null symbols = every allowed ticker. */
@@ -57,7 +63,7 @@ export class PlutoAgent {
   private wakeLoop: (() => void) | null = null;
   private readonly watches = new Set<Promise<unknown>>();
   private readonly watchedOrderIds = new Set<string>();
-  private openingLookDoneFor: string | null = null;
+  private openingLook: OpeningLookProgress = { doneFor: null, incompleteFor: null };
   private watching = false;
   private readinessInFlight = false;
   private stopped = false;
@@ -100,6 +106,11 @@ export class PlutoAgent {
     this.timers.push(setInterval(() => void this.heartbeat(), heartbeatIntervalMs));
     this.timers.push(setInterval(() => void this.housekeeping(), housekeepingIntervalMs));
     this.timers.push(setInterval(() => void this.runReadinessIfDue(), readinessIntervalMs));
+    this.stopMemoryMonitor = startProcessMemoryMonitor({
+      processName: plutoProcessName,
+      label: "Pluto's agent",
+      counts: () => ({ poolContracts: marketDataPoolSnapshot().contractCount, orderWatches: this.watches.size, liveListeners: sharedLiveConnection.listenerCount(), readListeners: sharedReadConnection.listenerCount() }),
+    });
     // A saved settings change, or a position closing (budget and capacity free up), is felt at the next round.
     startNotificationBroadcaster();
     this.unsubscribeNotifications = subscribeToNotifications((notification) => {
@@ -166,7 +177,7 @@ export class PlutoAgent {
     const now = new Date();
     const session = await computeMarketSessionStatus(now).catch(() => ({ state: "closed" as const }));
     const plutoSession = await resolvePlutoSession(now, settings);
-    const insideWindow = session.state === "open" && isInsideTradingWindow(now, easternDateIso(now), plutoSession.windowStartEt, plutoSession.windowEndEt);
+    const insideWindow = session.state === "open" && isInsideTradingWindow(now, easternIsoDate(now), plutoSession.windowStartEt, plutoSession.windowEndEt);
     return { allowed: true, reason: null, insideWindow };
   }
 
@@ -194,15 +205,7 @@ export class PlutoAgent {
       this.watching = result.ok;
       if (!result.ok) return;
 
-      // The opening look (design item 74): once per session, when today's fit exists and the window is open.
-      const todayIso = easternDateIso(new Date());
-      if (this.openingLookDoneFor !== todayIso) {
-        const fitToday = await db("option_chain_snapshots as s").join("option_surface_fits as f", "f.snapshot_id", "s.id").where("s.trading_date", todayIso).where("f.status", "ok").first("s.id");
-        if (fitToday) {
-          this.openingLookDoneFor = todayIso;
-          this.queueForcedRound("opening_analysis", { date: todayIso }, null);
-        }
-      }
+      await this.queueOpeningLookIfDue();
     } catch (error) {
       console.error(`Pluto housekeeping failed: ${error instanceof Error ? error.message : error}`);
     }
@@ -219,7 +222,7 @@ export class PlutoAgent {
     this.readinessInFlight = true;
     try {
       const now = new Date();
-      const dateIso = easternDateIso(now);
+      const dateIso = easternIsoDate(now);
       const state = await loadPlutoState();
       if (!(await resolveIsOpenDay(dateIso))) return;
       const kind = decidePlutoReadinessRun(now, dateIso, state.readiness);
@@ -250,7 +253,7 @@ export class PlutoAgent {
   private outcomesLabelledFor: string | null = null;
   /** Hold-to-expiry labels for every candidate offered in past passes, once the expiry has settled (backtest data). */
   private async labelCandidateOutcomesOncePerDay(): Promise<void> {
-    const todayIso = easternDateIso(new Date());
+    const todayIso = easternIsoDate(new Date());
     if (this.outcomesLabelledFor === todayIso) return;
     this.outcomesLabelledFor = todayIso;
     try {
@@ -289,7 +292,7 @@ export class PlutoAgent {
 
   private eventsPrunedFor: string | null = null;
   private async pruneEventsOncePerDay(): Promise<void> {
-    const todayIso = easternDateIso(new Date());
+    const todayIso = easternIsoDate(new Date());
     if (this.eventsPrunedFor === todayIso) return;
     this.eventsPrunedFor = todayIso;
     try {
@@ -297,6 +300,30 @@ export class PlutoAgent {
       if (pruned > 0) console.log(`Pluto: pruned ${pruned} timeline event(s) older than ${plutoEventsRetentionDays} days.`);
     } catch (error) {
       console.warn(`Pluto: event pruning failed — ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  /**
+   * The opening look, once today's Day Signals seed has finished (openingLook.ts). The progress is in memory on purpose: after
+   * a restart or a deploy the look runs once more, which is what a new process wants (it has seen nothing yet today).
+   */
+  private async queueOpeningLookIfDue(): Promise<void> {
+    const now = new Date();
+    const todayIso = easternIsoDate(now);
+    if (this.openingLook.doneFor === todayIso && this.openingLook.incompleteFor !== todayIso) return;
+    const decision = decideOpeningLook({ todayIso, nowEtMinutes: easternMinutesOfDay(now), seedFinished: await hasDaySignalsSeedFinished(todayIso), progress: this.openingLook });
+    this.openingLook = advanceOpeningLook(this.openingLook, todayIso, decision);
+    if (decision === "run_complete") this.queueForcedRound("opening_analysis", { date: todayIso }, null);
+    if (decision === "run_after_late_seed") {
+      this.queueForcedRound("opening_analysis", { date: todayIso, afterLateSeed: true }, null);
+      await notifyPlutoTelegram("✅ Pluto: today's Day Signals data is ready now. Pluto is running its full opening analysis.");
+    }
+    if (decision === "run_incomplete") {
+      const reason = "today's Day Signals seed had not finished by 10:30 ET";
+      await recordPlutoEvent("warning", { message: `opening look on incomplete data: ${reason}; one more full round follows once it finishes` });
+      this.queueForcedRound("opening_analysis", { date: todayIso, dataIncomplete: true, reason }, null);
+      // Like a breaker: a system problem, sent whatever the Telegram verbosity setting.
+      await notifyPlutoTelegram("⚠️ Pluto: today's Day Signals data was not ready by 10:30 ET (it is normally ready by about 10:07), so Pluto's opening analysis ran on incomplete data. Check the 10:00 option-chain capture. Pluto runs a full analysis once the data is ready.");
     }
   }
 
@@ -354,7 +381,9 @@ export class PlutoAgent {
     }
     const forced = this.forcedRounds.shift();
     if (forced) {
-      await this.runRoundSafely({ trigger: forced.trigger, triggerDetail: forced.detail, symbols: forced.symbols ?? [], force: true });
+      // Until today's opening look has run, the only data for opens is yesterday's: a forced round may manage held positions only.
+      const beforeOpeningLook = forced.trigger !== "opening_analysis" && this.openingLook.doneFor !== easternIsoDate(new Date());
+      await this.runRoundSafely({ trigger: forced.trigger, triggerDetail: forced.detail, symbols: forced.symbols ?? [], force: true, heldPositionsOnly: beforeOpeningLook });
       return;
     }
     const newlyQuoted = findNewlyQuotedContracts(await loadTodaysDaySignalQuoteStamps(), this.lastAnalysedQuotedAtMs);
@@ -363,7 +392,7 @@ export class PlutoAgent {
     rememberAnalysed(newlyQuoted.stamps, this.lastAnalysedQuotedAtMs);
   }
 
-  private async runRoundSafely(request: { trigger: PlutoTrigger; triggerDetail: Record<string, unknown>; symbols: string[]; force: boolean }): Promise<void> {
+  private async runRoundSafely(request: PassRequest): Promise<void> {
     if (this.stopped) return;
     try {
       const summary = await runPlutoPass(request, this.context);
@@ -377,6 +406,7 @@ export class PlutoAgent {
   async stop(): Promise<void> {
     this.stopped = true;
     this.unsubscribeNotifications?.();
+    this.stopMemoryMonitor?.();
     for (const timer of this.timers) clearInterval(timer);
     for (const timer of this.cooldownTimers) clearTimeout(timer);
     this.wakeLoop?.();

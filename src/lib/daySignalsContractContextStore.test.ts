@@ -91,10 +91,10 @@ describe("day signals store, against the database", () => {
 
   it("persists the re-rank state per ticker and day: absent = none, save then update, other days ignored", async () => {
     expect((await loadDayRerankStates(tradingDateIso)).has(tickerId)).toBe(false);
-    await saveDayRerankState(tickerId, tradingDateIso, { referenceSpotPrice: 299.73, reranks: 1 });
-    expect((await loadDayRerankStates(tradingDateIso)).get(tickerId)).toEqual({ referenceSpotPrice: 299.73, reranks: 1 });
-    await saveDayRerankState(tickerId, tradingDateIso, { referenceSpotPrice: 310.5, reranks: 2 });
-    expect((await loadDayRerankStates(tradingDateIso)).get(tickerId)).toEqual({ referenceSpotPrice: 310.5, reranks: 2 });
+    await saveDayRerankState(tickerId, tradingDateIso, { referenceSpotPrice: 299.73, reranks: 1, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
+    expect((await loadDayRerankStates(tradingDateIso)).get(tickerId)).toEqual({ referenceSpotPrice: 299.73, reranks: 1, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
+    await saveDayRerankState(tickerId, tradingDateIso, { referenceSpotPrice: 310.5, reranks: 2, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
+    expect((await loadDayRerankStates(tradingDateIso)).get(tickerId)).toEqual({ referenceSpotPrice: 310.5, reranks: 2, firstSeenAt: null, lastLookAt: null, lastLookKind: null });
     expect((await loadDayRerankStates("2026-09-30")).has(tickerId)).toBe(false);
   });
 

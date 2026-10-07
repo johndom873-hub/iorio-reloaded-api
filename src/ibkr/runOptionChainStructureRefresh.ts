@@ -1,8 +1,8 @@
 import { connectToIbkrGateway } from "./connectIbkr.js";
 import { IbkrLookupTimeoutError, refreshStoredOptionChain, type OptionChainRefreshTimings } from "./fetchOptionChain.js";
 import { loadCaptureUniverse, type UniverseTicker } from "./runOptionChainCapture.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { loadFallbackStockPrices } from "../lib/priceService.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // Split off runOptionChainCapture.ts 2026-09-23: chain STRUCTURE (expiries +
 // each expiry's real strike grid) is plain IBKR contract-definition data,
@@ -58,7 +58,7 @@ export async function runOptionChainStructureRefresh(
   onEvent: (event: OptionChainStructureEvent) => void = () => {},
   dependencies: OptionChainStructureDependencies = defaultDependencies,
 ): Promise<OptionChainStructureResult> {
-  const todayIso = easternDateIso(dependencies.now());
+  const todayIso = easternIsoDate(dependencies.now());
   const universe = await dependencies.loadUniverse();
   const result: OptionChainStructureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersFailed: 0, failedSymbols: [], skippedSymbols: [], gridLookups: 0, gridsReused: 0 };
   const spotBySymbol = await dependencies.loadSpotPrices(universe.map((ticker) => ticker.symbol));

@@ -14,13 +14,14 @@ import type { PlutoSettings } from "./settingsStore.js";
 export interface PostModelBookInput {
   netLiquidationValue: number;
   freeCash: number;
-  /** Capital Pluto's own open positions already commit. */
+  /** Capital the book already commits: every open position on an enabled ticker, hedges aside (book.ts). */
   committedDollars: number;
   /**
    * Notional of orders confirmed but not yet done (the same statuses and formula as the order gate's limits): every
-   * origin's, this symbol's, and Pluto's own. Room is sized net of them, so Pluto never sizes what the gate would refuse.
+   * origin's, this symbol's, and the book's (Pluto's orders plus anyone's on an enabled ticker). Room is sized net of them,
+   * so Pluto never sizes what the gate would refuse.
    */
-  inFlight: { totalNotional: number; tickerNotional: number; plutoNotional: number };
+  inFlight: { totalNotional: number; tickerNotional: number; managedNotional: number };
   openPositionCount: number;
   /** Every open position's exposure on this symbol and sector, humans' included (computePositionExposures). */
   existingTickerExposure: number;
@@ -91,7 +92,7 @@ export interface SizingRoom {
 export function computeSizingRoom(settings: PlutoSettings, book: PostModelBookInput, sectorKnown: boolean): SizingRoom {
   const nlv = book.netLiquidationValue;
   return {
-    budgetRoom: (nlv * settings.capitalBudgetPct) / 100 - book.committedDollars - book.inFlight.plutoNotional,
+    budgetRoom: (nlv * settings.capitalBudgetPct) / 100 - book.committedDollars - book.inFlight.managedNotional,
     orderCap: (((nlv * settings.capitalBudgetPct) / 100) * settings.orderSizePctOfBudget) / 100,
     tickerRoom: (nlv * settings.maxTickerExposurePct) / 100 - book.existingTickerExposure - book.inFlight.tickerNotional,
     sectorRoom: sectorKnown && settings.maxSectorExposurePct < 100 ? (nlv * settings.maxSectorExposurePct) / 100 - book.existingSectorExposure : Number.POSITIVE_INFINITY,
@@ -137,7 +138,7 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
       ? "no filled Pluto action on this symbol"
       : `last filled Pluto action on this symbol ${Math.floor(minutesSinceLastFill)} min ago (cooldown ${settings.tickerCooldownMinutes} min)`,
   );
-  if (!isRoll) gate("open_positions_cap", book.openPositionCount < settings.maxOpenPositions, `${book.openPositionCount} of ${settings.maxOpenPositions} open Pluto positions`);
+  if (!isRoll) gate("open_positions_cap", book.openPositionCount < settings.maxOpenPositions, `${book.openPositionCount} of ${settings.maxOpenPositions} managed positions`);
   gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${candidate.expiry} $${candidate.strike}`);
 
   // Sizing in dollars: the standard order size, less only where a tighter limit binds; contracts follow from it.

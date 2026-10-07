@@ -1,9 +1,9 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 import { buildSignalsRoadmap } from "../lib/signalsRoadmap.js";
 import { loadAccountContext, loadRoadmapCounts, loadSignalsUniverseTicker, loadSignalsScreen, loadTickerSignals } from "../lib/signalsStore.js";
 import { loadSignalContractScore, loadSignalsChain, loadTickerBySymbol, type LiveSpot } from "../lib/signalsChainStore.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // Snapshot-priced first paint for the Signals screen and modal (mockup approved
 // 2026-09-22); the live re-scoring runs over the stream multiplexer
@@ -19,7 +19,7 @@ signalsRouter.get("/", async (_request, response) => {
 // Before "/:symbol" so "roadmap" is never read as a ticker.
 signalsRouter.get("/roadmap", async (_request, response) => {
   const now = new Date();
-  response.json({ asOfDateIso: easternDateIso(now), items: buildSignalsRoadmap(await loadRoadmapCounts(now), easternDateIso(now)) });
+  response.json({ asOfDateIso: easternIsoDate(now), items: buildSignalsRoadmap(await loadRoadmapCounts(now), easternIsoDate(now)) });
 });
 
 signalsRouter.get("/:symbol", async (request, response) => {

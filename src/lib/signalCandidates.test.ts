@@ -43,8 +43,9 @@ function baseInput(overrides: Partial<SignalCandidatesInput> = {}): SignalCandid
     quotes: [quoteAt(90, "P"), quoteAt(110, "C")],
     earningsDatesIso: [],
     earningsCalendarResolved: true,
-    macroEventDatesIso: [],
-    snapshotDateIso: "2026-09-21",
+    macroEvents: [],
+    todayEasternIso: "2026-09-21",
+    scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), // 10:30 ET
     freeShares: 0,
     freeCash: 1_000_000,
     deltaTargetMin: 0,
@@ -189,7 +190,12 @@ describe("attachUncompensatedShare", () => {
 });
 
 describe("buildSignalCandidates: flags and executability", () => {
-  it("excludes the candidate entirely when a resolved calendar's earnings date falls strictly after the snapshot and on/before the expiry", () => {
+  it("excludes today's earnings too: loadEarningsDatesNotYetReported has already dropped a report before today's open", () => {
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: ["2026-09-21"] }))).toHaveLength(0);
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: ["2026-09-18"] }))).toHaveLength(1);
+  });
+
+  it("excludes the candidate entirely when a resolved calendar's earnings date falls from today through the expiry", () => {
     const spans = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: ["2026-10-05"] }));
     const notSpans = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], earningsDatesIso: ["2026-11-05"] }));
     expect(spans).toHaveLength(0);
@@ -205,12 +211,20 @@ describe("buildSignalCandidates: flags and executability", () => {
   });
 
   it("flags macro_event_before_expiry (does not exclude) when a major macro release falls before the expiry", () => {
-    const spans = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEventDatesIso: ["2026-10-14"] }))[0]!;
+    const release = (dateIso: string, utcTime: string) => ({ dateIso, eventAtMs: Date.parse(`${dateIso}T${utcTime}Z`) });
+    const spans = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEvents: [release("2026-10-14", "12:30:00")] }))[0]!;
     expect(spans.flags).toContain("macro_event_before_expiry");
-    const onExpiry = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEventDatesIso: ["2026-10-21"] }))[0]!;
+    const onExpiry = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEvents: [release("2026-10-21", "12:30:00")] }))[0]!;
     expect(onExpiry.flags).toContain("macro_event_before_expiry"); // release on expiry day still lands inside the trade
-    const after = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEventDatesIso: ["2026-10-22", "2026-09-21"] }))[0]!;
-    expect(after.flags).not.toContain("macro_event_before_expiry"); // after expiry, or on the snapshot date itself, is not spanned
+    const after = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEvents: [release("2026-10-22", "12:30:00")] }))[0]!;
+    expect(after.flags).not.toContain("macro_event_before_expiry");
+  });
+
+  it("counts a macro release later today, not one already out (scored at 10:30 ET)", () => {
+    const laterToday = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEvents: [{ dateIso: "2026-09-21", eventAtMs: Date.parse("2026-09-21T18:00:00Z") }] }))[0]!; // 14:00 ET
+    expect(laterToday.flags).toContain("macro_event_before_expiry");
+    const earlierToday = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], macroEvents: [{ dateIso: "2026-09-21", eventAtMs: Date.parse("2026-09-21T12:30:00Z") }] }))[0]!; // 08:30 ET
+    expect(earlierToday.flags).not.toContain("macro_event_before_expiry");
   });
 
   it("flags outside_fitted_range when the strike's log-moneyness is beyond the slice's kMin/kMax", () => {

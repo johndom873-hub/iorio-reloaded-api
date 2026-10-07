@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { computeStrikeWindow } from "./optionChainCaptureWindow.js";
 import {
-  daySignalsMaximumReranksPerTickerPerDay,
   daySignalsRerankTriggerFraction,
+  decideRerank,
   selectDaySignalContractSet,
-  shouldRerankExpiries,
   strikeStepAroundSpot,
   type DayContractRef,
 } from "./daySignalsContractSet.js";
@@ -83,18 +82,33 @@ describe("daySignalsRerankTriggerFraction", () => {
   });
 });
 
-describe("shouldRerankExpiries", () => {
-  const base = { spotPrice: 100, referenceSpotPrice: 100, atmImpliedVolatility: 0.8, reranksToday: 0 };
-  it("fires at the trigger in either direction and not below it", () => {
-    expect(shouldRerankExpiries({ ...base, spotPrice: 102 })).toBe(false); // 2% < 2.52%
-    expect(shouldRerankExpiries({ ...base, spotPrice: 102.6 })).toBe(true);
-    expect(shouldRerankExpiries({ ...base, spotPrice: 97.4 })).toBe(true);
+describe("decideRerank (2026-10-07: 15-minute gap, hourly re-check of unpooled tickers)", () => {
+  const now = Date.UTC(2026, 9, 7, 16, 0);
+  const minutes = (count: number) => count * 60_000;
+  const base = { spotPrice: 100, referenceSpotPrice: 100, atmImpliedVolatility: 0.8, lastLookAtMs: null, firstSeenAtMs: now - minutes(10), pooled: true, nowMs: now };
+
+  it("fires on price at the trigger in either direction and not below it", () => {
+    expect(decideRerank({ ...base, spotPrice: 102 })).toBeNull(); // 2% < 2.52%
+    expect(decideRerank({ ...base, spotPrice: 102.6 })).toBe("price");
+    expect(decideRerank({ ...base, spotPrice: 97.4 })).toBe("price");
   });
-  it("stops after the daily cap", () => {
-    expect(shouldRerankExpiries({ ...base, spotPrice: 120, reranksToday: daySignalsMaximumReranksPerTickerPerDay })).toBe(false);
+
+  it("has no daily cap, only a 15-minute gap after any look", () => {
+    expect(decideRerank({ ...base, spotPrice: 120, lastLookAtMs: now - minutes(14) })).toBeNull();
+    expect(decideRerank({ ...base, spotPrice: 120, lastLookAtMs: now - minutes(15) })).toBe("price");
   });
-  it("never fires on unusable inputs", () => {
-    expect(shouldRerankExpiries({ ...base, spotPrice: 120, atmImpliedVolatility: 0 })).toBe(false);
-    expect(shouldRerankExpiries({ ...base, spotPrice: Number.NaN })).toBe(false);
+
+  it("re-checks an unpooled ticker an hour after its last look, or after it was first seen", () => {
+    expect(decideRerank({ ...base, pooled: false, firstSeenAtMs: now - minutes(59) })).toBeNull();
+    expect(decideRerank({ ...base, pooled: false, firstSeenAtMs: now - minutes(60) })).toBe("timed");
+    expect(decideRerank({ ...base, pooled: false, firstSeenAtMs: now - minutes(200), lastLookAtMs: now - minutes(30) })).toBeNull();
+    expect(decideRerank({ ...base, pooled: false, lastLookAtMs: now - minutes(61) })).toBe("timed");
+    expect(decideRerank({ ...base, pooled: true, lastLookAtMs: now - minutes(120) })).toBeNull(); // pooled tickers are quoted every cycle
+  });
+
+  it("prefers the price reason when both apply, and never fires on unusable inputs", () => {
+    expect(decideRerank({ ...base, pooled: false, spotPrice: 105, lastLookAtMs: now - minutes(90) })).toBe("price");
+    expect(decideRerank({ ...base, spotPrice: 120, atmImpliedVolatility: 0 })).toBeNull();
+    expect(decideRerank({ ...base, spotPrice: Number.NaN, pooled: false, lastLookAtMs: now - minutes(90) })).toBeNull();
   });
 });

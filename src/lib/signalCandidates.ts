@@ -2,7 +2,7 @@ import { blackScholesDelta, impliedVolatilityFromPrice, sviTotalVariance, type R
 import { blackScholesVega, computeFrictionCost, computeNetEdge } from "./optionFriction.js";
 import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
 import { computeUncompensatedShare, type UncompensatedShareOptions } from "./uncompensatedShare.js";
-import { expirySpansEarnings, expirySpansEventDate, type RealizedVolatilityForecast } from "./volatilityEdge.js";
+import { expirySpansEarnings, expirySpansMacroEvent, type RealizedVolatilityForecast } from "./volatilityEdge.js";
 
 // Signals screen: turns one ticker's fitted surface (one row per expiry, from
 // option_surface_fits) + that day's raw quotes into graded, tradable candidates.
@@ -79,11 +79,13 @@ export interface SignalCandidatesInput {
    * empty regardless of what's actually scheduled -- candidates are still produced but flagged, not excluded
    * (Marcelo 2026-09-23: don't block on missing data, but surface that earnings risk is unchecked). */
   earningsCalendarResolved: boolean;
-  /** Formula 3i (approved 2026-09-24): dates of major US macro releases (FOMC, CPI, jobs, PCE, GDP); a candidate whose
+  /** Formula 3i (approved 2026-09-24): major US macro releases (FOMC, CPI, jobs, PCE, GDP), Eastern date and release time; a candidate whose
    * expiry spans one is FLAGGED, never excluded -- with one flat forecast per ticker, a short-dated IV spike into such a
    * date scores like mispricing, and the flag says so. See macroEventCalendar.ts for the curated list. */
-  macroEventDatesIso: string[];
-  snapshotDateIso: string;
+  macroEvents: { dateIso: string; eventAtMs: number }[];
+  /** The Eastern date and the moment of scoring: an event counts only while it is still ahead. */
+  todayEasternIso: string;
+  scoredAtMs: number;
   /** Free (uncovered) shares available for a covered call. */
   freeShares: number;
   /** Free cash available to secure a put. */
@@ -262,9 +264,9 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     // Only excludes when the calendar
     // is actually resolved -- an unresolved ticker can't tell true "no earnings" apart from "unchecked", so
     // it falls through to the earnings_calendar_unresolved flag below instead of being silently allowed.
-    if (input.earningsCalendarResolved && expirySpansEarnings(input.snapshotDateIso, quote.expiry, input.earningsDatesIso)) {
+    if (input.earningsCalendarResolved && expirySpansEarnings(input.todayEasternIso, quote.expiry, input.earningsDatesIso)) {
       tally?.spansEarningsExpiries.add(quote.expiry);
-      if (input.onContractExcluded) exclude(quote, { kind: "spans_earnings", earningsDateIso: [...input.earningsDatesIso].sort().find((dateIso) => dateIso > input.snapshotDateIso && dateIso <= quote.expiry) ?? null });
+      if (input.onContractExcluded) exclude(quote, { kind: "spans_earnings", earningsDateIso: [...input.earningsDatesIso].sort().find((dateIso) => dateIso >= input.todayEasternIso && dateIso <= quote.expiry) ?? null });
       continue;
     }
 
@@ -329,7 +331,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     if (!insideRange) flags.push("outside_fitted_range");
     if (spreadPercent / 100 > wideSpreadThreshold) flags.push("wide_spread");
     if (strategyKey === "cash_secured_put" && input.freeCash < quote.strike * 100) flags.push("insufficient_cash");
-    if (expirySpansEventDate(input.snapshotDateIso, quote.expiry, input.macroEventDatesIso)) flags.push("macro_event_before_expiry");
+    if (expirySpansMacroEvent(input.scoredAtMs, quote.expiry, input.macroEvents)) flags.push("macro_event_before_expiry");
     // A covered call always ships as one order (buy the shares, sell the call), so free shares
     // aren't a precondition -- only a cash-secured put needs the cash upfront.
     const executable = !flags.includes("insufficient_cash");

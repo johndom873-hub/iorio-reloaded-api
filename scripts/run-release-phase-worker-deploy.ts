@@ -33,8 +33,9 @@ import { runForcedCommandSsh } from "../src/ibkr/runForcedCommandSsh.js";
 import { computeSourceClosureHash } from "../src/lib/computeSourceClosureHash.js";
 import { decideWorkerDeployAction } from "../src/lib/decideWorkerDeployAction.js";
 import { evaluateReleaseDeployGuard, inFlightOrderStatuses } from "../src/lib/releaseDeployGuard.js";
-import { computeMarketSessionStatus, easternDateIso, easternInstant } from "../src/lib/marketSessionStatus.js";
+import { computeMarketSessionStatus, easternInstant } from "../src/lib/marketSessionStatus.js";
 import { readAppEnvironment } from "../src/lib/appEnvironment.js";
+import { easternIsoDate } from "../src/lib/easternIsoDate.js";
 
 const workerEntryFile = "src/ibkrGatewayWorker.ts";
 const sshTimeoutMs = 150_000; // npm ci + tsc build + up to a 30s health check, generous margin.
@@ -47,7 +48,7 @@ interface WorkerHealthRow {
 const postCloseBufferMinutes = 15;
 
 async function isWithinPostCloseBuffer(now: Date): Promise<boolean> {
-  const dateIso = easternDateIso(now);
+  const dateIso = easternIsoDate(now);
   const regularClose = easternInstant(dateIso, 16, 0);
   const bufferEnd = new Date(regularClose.getTime() + postCloseBufferMinutes * 60_000);
   return now >= regularClose && now < bufferEnd;

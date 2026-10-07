@@ -20,6 +20,12 @@ function easternParts(at: Date): { weekday: string; month: string; day: string; 
   return { weekday: parts.weekday!, month: parts.month!, day: parts.day!, hour: parts.hour!, minute: parts.minute! };
 }
 
+/** Minutes since midnight on the America/New_York clock, e.g. 10:06 ET = 606. */
+export function easternMinutesOfDay(at: Date): number {
+  const { hour, minute } = easternParts(at);
+  return Number(hour) * 60 + Number(minute);
+}
+
 /** Clock time in America/New_York for alerts and digests, e.g. "10:06 ET". */
 export function formatEasternTime(at: Date): string {
   const { hour, minute } = easternParts(at);
@@ -37,7 +43,9 @@ export function formatEasternDateTime(at: Date, omitDateOnEasternDay?: string): 
 }
 
 /** A calendar date with its weekday, e.g. "Mon 2026-10-05". The date is a plain calendar date, so no time zone applies. */
+const utcWeekdayFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short" });
+
 export function formatDateWithWeekday(dateIso: string): string {
-  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short" }).format(new Date(`${dateIso}T12:00:00Z`));
+  const weekday = utcWeekdayFormatter.format(new Date(`${dateIso}T12:00:00Z`));
   return `${weekday} ${dateIso}`;
 }

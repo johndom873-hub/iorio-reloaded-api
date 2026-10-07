@@ -802,3 +802,22 @@ describe("feed refusal while lines are shed", () => {
     expect(poolHarness.broadcasts.at(-1)).toEqual({ type: "market_data_feed", refusal: null });
   });
 });
+
+describe("contracts subscribed while a reconcile is in flight (2026-10-07)", () => {
+  it("are never paused by a reservation sized before they existed, and only subscribe once a reconcile booked them", async () => {
+    const pool = await loadPool();
+    poolHarness.reserveDelayMs = 50;
+    const contracts: PriceContract[] = [stockAlpha, stockBravo, optionAlpha, optionBravo, { ...optionAlpha, strike: 55 }, { ...optionAlpha, strike: 60 }];
+    // A burst subscribes one contract at a time: the first starts a reconcile sized for 1, the rest arrive while it awaits.
+    for (const contract of contracts) await pool.subscribeToPooledQuote(contract, () => {});
+    await vi.advanceTimersByTimeAsync(10);
+    expect(ib.reqMktData).not.toHaveBeenCalled(); // nothing subscribes before its line is booked
+    await vi.advanceTimersByTimeAsync(200);
+    await settle();
+    expect(ib.cancelMktData).not.toHaveBeenCalled();
+    expect(ib.reqMktData).toHaveBeenCalledTimes(contracts.length);
+    expect(pool.marketDataPoolSnapshot().pausedCount).toBe(0);
+    expect(vi.mocked(console.log).mock.calls.some(([message]) => String(message).includes("paused"))).toBe(false);
+    expect(poolHarness.reserveCalls.at(-1)!.lines).toBe(contracts.length);
+  });
+});

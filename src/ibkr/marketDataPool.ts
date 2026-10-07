@@ -159,6 +159,12 @@ interface PoolEntry {
   sequence: number;
   /** Shed to fit the budget; not subscribed until a reconcile resumes it. */
   paused: boolean;
+  /**
+   * False until a reconcile has counted the entry in its reservation. A contract added while a reconcile is in flight waits
+   * for the follow-up one (2026-10-07): planning it with a reservation sized before it existed paused it, and subscribing it
+   * then would open a line nobody booked.
+   */
+  planned: boolean;
 }
 
 export function poolKeyFor(contract: PriceContract): string {
@@ -281,7 +287,7 @@ export function peekPooledQuote(contract: PriceContract): PooledQuote | null {
 export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: (quote: PooledQuote) => void): Promise<() => void> {
   const poolKey = poolKeyFor(contract);
   if (!entriesByPoolKey.has(poolKey)) {
-    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sequence: nextSequence++, paused: false, cancelTimer: null };
+    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sequence: nextSequence++, paused: false, planned: false, cancelTimer: null };
     entriesByPoolKey.set(poolKey, newEntry);
     if (contract.legType === "stock") {
       // Fast first paint while the live subscription is still being
@@ -366,7 +372,9 @@ function scheduleReconcile(): void {
 async function reconcile(): Promise<void> {
   let reservationSucceeded = false;
   try {
-    const desired = entriesByPoolKey.size;
+    // The entries this reconcile sizes the reservation for; anything subscribed while it awaits waits for the next one.
+    const plannedKeys = new Set(entriesByPoolKey.keys());
+    const desired = plannedKeys.size;
     if (desired === 0) {
       await releaseMarketDataLines(reservationHolder);
       setRestricted(false);
@@ -386,7 +394,7 @@ async function reconcile(): Promise<void> {
       if (allowed > 0) await reserveMarketDataLines(reservationHolder, allowed, reservationTtlSeconds, { priority: reservationPriority });
       else await releaseMarketDataLines(reservationHolder);
     }
-    applyCapacityPlan(allowed);
+    applyCapacityPlan(allowed, plannedKeys);
     setRestricted(allowed < desired);
     reservationSucceeded = true;
   } catch (error) {
@@ -401,8 +409,10 @@ async function reconcile(): Promise<void> {
   if (reservationSucceeded) await subscribeUnsubscribedEntries();
 }
 
-function applyCapacityPlan(allowedLines: number): void {
-  const capacityEntries: PoolCapacityEntry[] = [...entriesByPoolKey.entries()].map(([poolKey, entry]) => ({ poolKey, legType: entry.contract.legType, sequence: entry.sequence, paused: entry.paused }));
+function applyCapacityPlan(allowedLines: number, plannedKeys: Set<string>): void {
+  const plannedEntries = [...entriesByPoolKey.entries()].filter(([poolKey]) => plannedKeys.has(poolKey));
+  for (const [, entry] of plannedEntries) entry.planned = true;
+  const capacityEntries: PoolCapacityEntry[] = plannedEntries.map(([poolKey, entry]) => ({ poolKey, legType: entry.contract.legType, sequence: entry.sequence, paused: entry.paused }));
   const plan = planPoolCapacity(capacityEntries, allowedLines);
   for (const poolKey of plan.pauseKeys) {
     const entry = entriesByPoolKey.get(poolKey);
@@ -415,7 +425,7 @@ function applyCapacityPlan(allowedLines: number): void {
     if (entry) entry.paused = false;
   }
   if (plan.pauseKeys.length > 0 || plan.resumeKeys.length > 0) {
-    console.log(`marketDataPool: budget allows ${allowedLines} of ${entriesByPoolKey.size} contracts — paused ${plan.pauseKeys.length}, resumed ${plan.resumeKeys.length}.`);
+    console.log(`marketDataPool: budget allows ${allowedLines} of ${plannedEntries.length} contracts — paused ${plan.pauseKeys.length}, resumed ${plan.resumeKeys.length}.`);
   }
 }
 
@@ -526,7 +536,7 @@ function scheduleResubscribeRetry(): void {
 }
 
 async function subscribeUnsubscribedEntries(): Promise<void> {
-  const hasUnsubscribed = [...entriesByPoolKey.values()].some((entry) => entry.reqId === -1 && !entry.paused);
+  const hasUnsubscribed = [...entriesByPoolKey.values()].some((entry) => entry.reqId === -1 && !entry.paused && entry.planned);
   if (!hasUnsubscribed) return;
   let borrowed: Awaited<ReturnType<typeof sharedLiveConnection.borrow>>;
   try {
@@ -539,7 +549,7 @@ async function subscribeUnsubscribedEntries(): Promise<void> {
   resubscribeRetryAttempt = 0;
   attachListeners(borrowed.ib);
   for (const [poolKey, entry] of entriesByPoolKey) {
-    if (entry.reqId !== -1 || entry.paused) continue;
+    if (entry.reqId !== -1 || entry.paused || !entry.planned) continue;
     entry.reqId = sharedLiveConnection.allocateReqId();
     reqIdToPoolKey.set(entry.reqId, poolKey);
     // Empty generic tick list: IBKR sends bid/ask/last AND the computed

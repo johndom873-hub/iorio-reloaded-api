@@ -78,15 +78,19 @@ export function selectDaySignalContractSet(input: DayContractSetInput): DayContr
   return [...contractsByKey.values()].sort((a, b) => a.expiry.localeCompare(b.expiry) || a.strike - b.strike || a.right.localeCompare(b.right));
 }
 
-// ---- Re-ranking the pooled expiries after a large move ----
+// ---- Re-ranking the pooled expiries after a large move, and re-checking unpooled tickers ----
 // Formula approved 2026-09-29: a ticker re-ranks when its spot has moved, since the last rank (initially
 // the 10:00 capture spot), by at least max(1%, 0.5 x one-day expected move), where the one-day expected
-// move is ATM IV / sqrt(252). At most three re-ranks per ticker per day.
+// move is ATM IV / sqrt(252). Since 2026-10-07 (Marcelo): no daily cap (it went blind after three looks, exactly when a
+// big mover's options get interesting); instead at least 15 minutes between two looks at the same ticker. A ticker the
+// seed left unpooled is also re-checked on a clock, every 60 minutes since its last look (or since the loop first saw it
+// that day), so an IV change without a price move is still caught. Every look re-references the spot.
 
 export const daySignalsRerankMinimumMoveFraction = 0.01;
 export const daySignalsRerankDailyMoveShare = 0.5;
 export const daySignalsTradingDaysPerYear = 252;
-export const daySignalsMaximumReranksPerTickerPerDay = 3;
+export const daySignalsRerankMinimumGapMs = 15 * 60_000;
+export const daySignalsUnpooledRecheckIntervalMs = 60 * 60_000;
 
 export function daySignalsRerankTriggerFraction(atmImpliedVolatility: number): number {
   return Math.max(daySignalsRerankMinimumMoveFraction, (daySignalsRerankDailyMoveShare * atmImpliedVolatility) / Math.sqrt(daySignalsTradingDaysPerYear));
@@ -94,15 +98,26 @@ export function daySignalsRerankTriggerFraction(atmImpliedVolatility: number): n
 
 export interface RerankDecisionInput {
   spotPrice: number;
-  /** Spot at the last rank (the 10:00 capture spot until the first re-rank). */
+  /** Spot at the last look (the 10:00 capture spot until the first one). */
   referenceSpotPrice: number;
   atmImpliedVolatility: number;
-  reranksToday: number;
+  /** When the ticker was last re-ranked or re-checked today; null before its first look. Gates the 15-minute gap. */
+  lastLookAtMs: number | null;
+  /** When the loop first saw the ticker today: the hourly clock's start until its first look. */
+  firstSeenAtMs: number | null;
+  /** Whether the ticker has a pool (its contracts are quoted every cycle): only unpooled tickers get the timed re-check. */
+  pooled: boolean;
+  nowMs: number;
 }
 
-export function shouldRerankExpiries(input: RerankDecisionInput): boolean {
-  if (input.reranksToday >= daySignalsMaximumReranksPerTickerPerDay) return false;
-  if (!(input.spotPrice > 0) || !(input.referenceSpotPrice > 0) || !(input.atmImpliedVolatility > 0)) return false;
+/** Pure: "price" when the move since the last look crossed the trigger, "timed" when an unpooled ticker is due its hourly look, else null. */
+export function decideRerank(input: RerankDecisionInput): "price" | "timed" | null {
+  if (!(input.spotPrice > 0) || !(input.referenceSpotPrice > 0) || !(input.atmImpliedVolatility > 0)) return null;
+  const sinceLastLookMs = input.lastLookAtMs === null ? null : input.nowMs - input.lastLookAtMs;
+  if (sinceLastLookMs !== null && sinceLastLookMs < daySignalsRerankMinimumGapMs) return null;
   const moveFraction = Math.abs(input.spotPrice - input.referenceSpotPrice) / input.referenceSpotPrice;
-  return moveFraction >= daySignalsRerankTriggerFraction(input.atmImpliedVolatility);
+  if (moveFraction >= daySignalsRerankTriggerFraction(input.atmImpliedVolatility)) return "price";
+  const clockStartMs = input.lastLookAtMs ?? input.firstSeenAtMs;
+  if (!input.pooled && clockStartMs !== null && input.nowMs - clockStartMs >= daySignalsUnpooledRecheckIntervalMs) return "timed";
+  return null;
 }

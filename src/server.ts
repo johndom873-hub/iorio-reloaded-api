@@ -13,6 +13,8 @@ import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
 import { readAppEnvironment } from "./lib/appEnvironment.js";
 import { validatePasskeyConfiguration } from "./config/passkeyLoginMode.js";
 import { resumeInterruptedBackfillRuns } from "./ibkr/tickerBackfillPipeline.js";
+import { marketDataPoolSnapshot } from "./ibkr/marketDataPool.js";
+import { startProcessMemoryMonitor } from "./lib/processMemoryMonitor.js";
 
 installShutdownHandler("web");
 
@@ -74,6 +76,7 @@ app.listen(port, () => {
   startGenosuke();
   startOpsMonitor();
   startOrderTelegramNotices();
+  startProcessMemoryMonitor({ processName: "web", label: "The API web dyno", counts: () => ({ poolContracts: marketDataPoolSnapshot().contractCount, liveListeners: sharedLiveConnection.listenerCount(), readListeners: sharedReadConnection.listenerCount() }) });
   if (daySignalsLoopFlag === "true") startDaySignalsLoop();
   else console.log("Day Signals loop disabled (DAY_SIGNALS_LOOP_ENABLED=false).");
 });

@@ -203,7 +203,7 @@ describe("scoreTicker", () => {
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {
     const in1 = inputs();
     const scored = scoreTicker(in1, account, permissiveSettings);
-    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEventDatesIso: [], snapshotDateIso: "2026-09-21", freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct, spreadShareCharged: permissiveSettings.spreadCostChargedPct / 100 }));
+    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEvents: [], todayEasternIso: "2026-09-21", scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct, spreadShareCharged: permissiveSettings.spreadCostChargedPct / 100 }));
     expect(scored.candidates).toEqual(direct);
     expect(scored.unscoredReason).toBeNull();
     expect(scored.priceSource).toBe("snapshot");
@@ -297,7 +297,7 @@ describe("noCandidatesReason", () => {
 
   it("is 'nothing_scorable' when the near slice failed its fit and the far expiry spans earnings (the NBIS case)", () => {
     const scored = scoreTicker(
-      inputs({ slices: [slice("2026-10-21", years30, { status: "poor_fit" as never }), slice("2026-11-20", years60)], earningsDatesIso: ["2026-09-21", "2026-11-05"] }),
+      inputs({ slices: [slice("2026-10-21", years30, { status: "poor_fit" as never }), slice("2026-11-20", years60)], earningsDatesIso: ["2026-09-18", "2026-11-05"] }),
       account,
       permissiveSettings,
     );
@@ -306,7 +306,7 @@ describe("noCandidatesReason", () => {
       kind: "nothing_scorable",
       surfaceFitRejectedExpiries: ["2026-10-21"],
       spansEarningsExpiries: ["2026-11-20"],
-      earningsDateIso: "2026-11-05", // not the snapshot-day date, which spans nothing
+      earningsDateIso: "2026-11-05", // not the past date, which spans nothing
       bestAnnualizedYieldPct: null,
     });
   });

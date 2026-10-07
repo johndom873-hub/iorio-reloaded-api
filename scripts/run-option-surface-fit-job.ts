@@ -10,13 +10,13 @@
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
-import { easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { runOptionSurfaceFitJob } from "../src/lib/runOptionSurfaceFitJob.js";
+import { easternIsoDate } from "../src/lib/easternIsoDate.js";
 
 async function main(): Promise<void> {
   const arguments_ = process.argv.slice(2);
   const dateFlagIndex = arguments_.indexOf("--date");
-  const tradingDate = dateFlagIndex >= 0 ? (arguments_[dateFlagIndex + 1] ?? "") : easternDateIso(new Date());
+  const tradingDate = dateFlagIndex >= 0 ? (arguments_[dateFlagIndex + 1] ?? "") : easternIsoDate(new Date());
   if (!/^\d{4}-\d{2}-\d{2}$/.test(tradingDate)) throw new Error(`--date must be YYYY-MM-DD, got "${tradingDate}"`);
   const symbols = arguments_.filter((argument, index) => !argument.startsWith("--") && index !== dateFlagIndex + 1).map((symbol) => symbol.toUpperCase());
 

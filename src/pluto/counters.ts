@@ -1,6 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // Today's session counters, straight from the ledger in Eastern time. Read by the screen's
 // state endpoint and by the agent's system checks (action cap, model-call cap, cost ceiling).
@@ -14,7 +14,7 @@ export interface PlutoTodayCounters {
 const actionOutcomesThatCount = ["order_built", "confirmed", "filled", "partially_filled", "cancelled", "cancelled_partially_filled", "rejected", "error"];
 
 export async function loadPlutoTodayCounters(now: Date = new Date()): Promise<PlutoTodayCounters> {
-  const todayIso = easternDateIso(now);
+  const todayIso = easternIsoDate(now);
   const [actions, calls] = await Promise.all([
     db("pluto_actions")
       .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?", [todayIso])
@@ -31,7 +31,7 @@ export async function loadPlutoTodayCounters(now: Date = new Date()): Promise<Pl
 
 /** Consecutive model failures at the tail of today's decisions — the breaker input. */
 export async function countTrailingModelFailures(now: Date = new Date()): Promise<number> {
-  const todayIso = easternDateIso(now);
+  const todayIso = easternIsoDate(now);
   const rows: { error: string | null; schema_valid: boolean }[] = await db("pluto_decisions")
     .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?", [todayIso])
     .orderBy("created_at", "desc")
@@ -54,7 +54,7 @@ export interface PlutoOrdersTodayBreakdown {
 }
 
 export async function loadPlutoOrdersTodayBreakdown(now: Date = new Date(), connection: Knex = db): Promise<PlutoOrdersTodayBreakdown> {
-  const todayIso = easternDateIso(now);
+  const todayIso = easternIsoDate(now);
   const rows: { outcome: string; count: string }[] = await connection("pluto_actions")
     .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?", [todayIso])
     .groupBy("outcome")

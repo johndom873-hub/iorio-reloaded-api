@@ -1,9 +1,8 @@
 import { db } from "../db/connection.js";
 import { isRegularDividendCadence } from "./impliedVolatilitySurface.js";
-import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
+import { fetchAccountSummary, type AccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
-import { easternDateIso } from "./marketSessionStatus.js";
 import type { SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedByContract, scoreTicker, toScreenRow, type LiveOptionQuote } from "./signalsLiveScoring.js";
 import { loadDayQuotesForTicker } from "./daySignalsStore.js";
@@ -16,6 +15,7 @@ import type { OpenShortLeg } from "./rollSignalCandidates.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew } from "./tiltMeasures.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
 import { signalsEnabledShortlistTickerIdsQuery } from "./shortlistQueries.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // DB side of the Signals screen (mockup approved 2026-09-22). Loads one ticker's
 // inputs once (loadTickerSignalsInputs); scoring itself is the pure scoreTicker in
@@ -23,8 +23,9 @@ import { signalsEnabledShortlistTickerIdsQuery } from "./shortlistQueries.js";
 // same way. Shares out for a covered call, and cash out for a cash-secured put, use
 // the same live account/position queries the order-limit checks use.
 
-export async function loadAccountContext(): Promise<AccountContext> {
-  const [account, cashLockedInCsps] = await Promise.all([fetchAccountSummary(), computeCashLockedInCsps()]);
+/** `fetchSummary` lets a caller reuse a cached summary (Pluto's agent, accountSummaryCache.ts). */
+export async function loadAccountContext(fetchSummary: () => Promise<AccountSummary> = fetchAccountSummary): Promise<AccountContext> {
+  const [account, cashLockedInCsps] = await Promise.all([fetchSummary(), computeCashLockedInCsps()]);
   const totalCashValue = account.totalCashValue ?? 0;
   return { freeCash: Math.max(0, totalCashValue - cashLockedInCsps) };
 }
@@ -86,9 +87,21 @@ export async function loadDividendCadenceUnknown(tickerId: string, todayIso: str
 }
 
 export async function loadEarningsDatesForForecastWindow(tickerId: string): Promise<string[]> {
-  // Only ever one past + one future row is kept by the calendar capture, but querying without a date
-  // filter keeps this correct if that ever changes -- expirySpansEarnings only looks forward anyway.
+  // Every stored earnings row (the Shortlist readiness count); the Signals exclusion uses loadEarningsDatesNotYetReported.
   const rows: { eventDate: string }[] = await db("ticker_calendar_events").where({ ticker_id: tickerId, event_type: "earnings" }).select(db.raw('event_date::text as "eventDate"'));
+  return rows.map((row) => row.eventDate);
+}
+
+/**
+ * The earnings dates the Signals exclusion checks: today's only when not reported before the open (TradingView's event_time
+ * "-1" = before the open, "1" = after the close, "0" or none = unknown time, which still counts).
+ */
+export async function loadEarningsDatesNotYetReported(tickerId: string, todayIso: string): Promise<string[]> {
+  const rows: { eventDate: string }[] = await db("ticker_calendar_events")
+    .where({ ticker_id: tickerId, event_type: "earnings" })
+    .where("event_date", ">=", todayIso)
+    .whereRaw("not (event_date = ?::date and event_time is not distinct from '-1')", [todayIso])
+    .select(db.raw('event_date::text as "eventDate"'));
   return rows.map((row) => row.eventDate);
 }
 
@@ -250,11 +263,11 @@ export async function loadOpenShortLegs(tickerId: string): Promise<OpenShortLeg[
 
 /** Everything scoring needs for one ticker, from the DB only (no IBKR). Loaded once per REST call or stream start. */
 export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {
-  const todayEastern = easternDateIso(now);
+  const todayEastern = easternIsoDate(now);
   const [bars, nextEarningsDateIso, earningsDatesIso, earningsCalendarResolved, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs] = await Promise.all([
     loadBarsForTilt(ticker.tickerId, todayEastern),
     loadNextEarningsDate(ticker.tickerId, todayEastern),
-    loadEarningsDatesForForecastWindow(ticker.tickerId),
+    loadEarningsDatesNotYetReported(ticker.tickerId, todayEastern),
     loadEarningsCalendarResolved(ticker.tickerId),
     loadPreviousClose(ticker.tickerId, todayEastern),
     loadLatestSnapshot(ticker.tickerId),
@@ -280,9 +293,9 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
  * still match the (previous-day) snapshot date, and would otherwise price an order from yesterday. Contracts that errored carry no quote.
  */
 export async function loadDayQuotesAsLiveQuotes(tickerId: string, snapshotTradingDateIso: string, now: Date = new Date()): Promise<LiveOptionQuote[]> {
-  const todayEastern = easternDateIso(now);
+  const todayEastern = easternIsoDate(now);
   const rows = await loadDayQuotesForTicker(tickerId, snapshotTradingDateIso);
-  return rows.filter((row) => row.errorCode === null && easternDateIso(new Date(row.quotedAt)) === todayEastern).map((row) => ({ expiry: row.expiry, strike: row.strike, right: row.right, bid: row.bid, ask: row.ask, quotedAt: row.quotedAt }));
+  return rows.filter((row) => row.errorCode === null && easternIsoDate(new Date(row.quotedAt)) === todayEastern).map((row) => ({ expiry: row.expiry, strike: row.strike, right: row.right, bid: row.bid, ask: row.ask, quotedAt: row.quotedAt }));
 }
 
 /** One ticker, snapshot prices, with the Monte Carlo attached (REST first paint for the modal). Includes the raw
@@ -298,7 +311,7 @@ export async function loadTickerSignals(ticker: SignalsTickerRow, accountContext
 
 /** The counts the roadmap's ETAs are projected from. */
 export async function loadRoadmapCounts(now: Date = new Date()): Promise<RoadmapCounts> {
-  const todayEastern = easternDateIso(now);
+  const todayEastern = easternIsoDate(now);
   const [snapshotNights, fittedNights, leastCoveredTicker, signalsOrderFills] = await Promise.all([
     db("option_chain_snapshots").whereIn("status", ["complete", "partial"]).countDistinct<{ count: string }[]>("trading_date as count").then((rows) => Number(rows[0]?.count ?? 0)),
     db("option_surface_fits as f").join("option_chain_snapshots as s", "s.id", "f.snapshot_id").where("f.status", "ok").countDistinct<{ count: string }[]>("s.trading_date as count").then((rows) => Number(rows[0]?.count ?? 0)),

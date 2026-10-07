@@ -4,7 +4,8 @@ import { settleGraceMs, subscribeToPooledQuote, waitForFirstReading, type Pooled
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { loadCycleInputsForTickers, type SymbolCycleInput } from "./cycleQueries.js";
 import { deriveCloseLiveState, type CloseLiveLeg, type CloseLiveQuote, type CloseLiveState } from "./closeLiveState.js";
-import { computeMarketSessionStatus, easternDateIso, type MarketSessionState } from "./marketSessionStatus.js";
+import { computeMarketSessionStatus, type MarketSessionState } from "./marketSessionStatus.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // Server-side close gate (gap fix 4 for Pluto, 2026-09-28). The Close form's live stream
 // (routes/positionCloseLive.ts) already derives "may this position be closed right now" —
@@ -185,6 +186,6 @@ export function inputsForDerivation(inputs: CloseLiveInputs, optionQuotesByLegId
     optionQuotesByLegId,
     stockQuote,
     cycleInput: inputs.cycleInput,
-    todayIso: easternDateIso(new Date()),
+    todayIso: easternIsoDate(new Date()),
   };
 }

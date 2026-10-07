@@ -17,14 +17,22 @@ import { formatDurationHuman } from "./formatDurationHuman.js";
  * The insert / conditional update are single atomic statements, so two
  * concurrent callers can't both send.
  */
-export async function notifyDownThrottled(alertKey: string, message: string, reminderIntervalMs: number): Promise<boolean> {
+export interface DownThrottledOptions {
+  /** Who sends the message; the ops bot by default (Pluto's alerts come from its own bot). */
+  send?: (text: string) => Promise<unknown>;
+  /** The reminder's wording, given how long the state has lasted and the reminder interval, both human-readable. */
+  reminderText?: (message: string, downFor: string, interval: string) => string;
+}
+
+export async function notifyDownThrottled(alertKey: string, message: string, reminderIntervalMs: number, options: DownThrottledOptions = {}): Promise<boolean> {
+  const send = options.send ?? notifyTelegramTracked;
   const inserted = await db("alert_state")
     .insert({ alert_key: alertKey, first_alerted_at: db.fn.now(), last_alerted_at: db.fn.now(), last_message: message })
     .onConflict("alert_key")
     .ignore()
     .returning("alert_key");
   if (inserted.length > 0) {
-    await notifyTelegramTracked(message);
+    await send(message);
     return true;
   }
 
@@ -37,7 +45,9 @@ export async function notifyDownThrottled(alertKey: string, message: string, rem
   if (updated.length === 0) return false;
 
   const downForMs = Date.now() - new Date(updated[0]!.first_alerted_at).getTime();
-  await notifyTelegramTracked(`${message}\n\n(Still down after ~${formatDurationHuman(downForMs)}. Reminders are sent at most every ${formatDurationHuman(reminderIntervalMs)}.)`);
+  const downFor = formatDurationHuman(downForMs);
+  const interval = formatDurationHuman(reminderIntervalMs);
+  await send(options.reminderText ? options.reminderText(message, downFor, interval) : `${message}\n\n(Still down after ~${downFor}. Reminders are sent at most every ${interval}.)`);
   return true;
 }
 

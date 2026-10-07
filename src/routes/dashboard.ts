@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
-import { easternDateIso, previousOpenSessionDate } from "../lib/marketSessionStatus.js";
+import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
 import { summarizePerformance, type PerformanceSnapshotRow } from "../lib/performanceReturns.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
@@ -9,6 +9,7 @@ import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { computeStrategyDailyPnlSeries } from "../lib/strategyPeriodPnl.js";
 import { computeCyclePeriodPnl } from "../lib/cyclePeriodPnl.js";
 import { fetchPositionEvents } from "../lib/positionEvents.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // The known strategy buckets the Dashboard breaks P&L/allocation down by —
 // "unstructured" folds leftover legs that didn't cleanly resolve into a CC
@@ -152,7 +153,7 @@ dashboardRouter.get("/performance", async (_request, response) => {
     netLiquidationValue: snapshotRow.netLiquidationValue === null ? null : Number(snapshotRow.netLiquidationValue),
     netCashFlow: snapshotRow.netCashFlow === null ? null : Number(snapshotRow.netCashFlow),
   }));
-  response.json(summarizePerformance(performanceRows, easternDateIso(new Date())));
+  response.json(summarizePerformance(performanceRows, easternIsoDate(new Date())));
 });
 
 // Lightweight shared source for "total account value" used by EXP%

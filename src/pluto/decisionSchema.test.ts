@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { kindFromCandidateId, parsePlutoDecision, reconcileAgreement, type PlutoDecision } from "./decisionSchema.js";
+import { kindFromCandidateId, parsePlutoDecision, reconcileAgreement, type PlutoDecision, flaggedSymbols, normalizeSystemConcerns } from "./decisionSchema.js";
 
 const offered = new Set(["HOOD:cash_secured_put:2026-10-16:100", "COIN:roll:leg1:2026-10-23:250"]);
 
@@ -59,5 +59,35 @@ describe("reconcileAgreement", () => {
   it("a verdict or candidate mismatch becomes a no_trade", () => {
     expect(reconcileAgreement(trade("HOOD:cash_secured_put:2026-10-16:100"), none)).toMatchObject({ agreed: false, decision: { decision: "no_trade" } });
     expect(reconcileAgreement(trade("HOOD:cash_secured_put:2026-10-16:100"), trade("COIN:roll:leg1:2026-10-23:250"))).toMatchObject({ agreed: false, decision: { decision: "no_trade" } });
+  });
+});
+
+describe("per-ticker system concerns (prompt v3.3)", () => {
+  const offered = new Set(["SMCI:close_leg:leg-1", "BMNR:covered_call:2026-10-09:29"]);
+  const answer = (concerns: unknown, extra: Record<string, unknown> = {}) => parsePlutoDecision(JSON.stringify({ decision: "no_trade", action_kind: null, candidate_id: null, confidence: 0.9, reasons: ["r"], risks_acknowledged: [], system_concerns: concerns, ...extra }), offered);
+
+  it("accepts a concern naming a ticker of the message, and one about the whole message", () => {
+    const result = answer([{ symbol: "SMCI", concern: "close action conflicts with the position count" }, { symbol: null, concern: "account block looks inconsistent" }]);
+    expect(result.ok && result.decision.systemConcerns).toEqual([{ symbol: "SMCI", concern: "close action conflicts with the position count" }, { symbol: null, concern: "account block looks inconsistent" }]);
+    expect(result.ok && [...flaggedSymbols(result.decision)]).toEqual(["SMCI"]);
+  });
+
+  it("refuses a concern about a ticker that was not in the message, an empty concern, and the old plain strings", () => {
+    expect(answer([{ symbol: "NVDA", concern: "x" }])).toEqual({ ok: false, error: "system concern names NVDA, which is not in this message" });
+    expect(answer([{ symbol: "SMCI", concern: " " }]).ok).toBe(false);
+    expect(answer(["plain text concern"]).ok).toBe(false);
+  });
+
+  it("still lets the model trade another ticker while one is flagged", () => {
+    const result = answer([{ symbol: "SMCI", concern: "stale quote" }], { decision: "trade", action_kind: "open_covered_call", candidate_id: "BMNR:covered_call:2026-10-09:29" });
+    expect(result.ok && result.decision.candidateId).toBe("BMNR:covered_call:2026-10-09:29");
+  });
+});
+
+describe("normalizeSystemConcerns", () => {
+  it("reads stored decisions of both shapes", () => {
+    expect(normalizeSystemConcerns(["old concern"])).toEqual([{ symbol: null, concern: "old concern" }]);
+    expect(normalizeSystemConcerns([{ symbol: "SMCI", concern: "new" }])).toEqual([{ symbol: "SMCI", concern: "new" }]);
+    expect(normalizeSystemConcerns(null)).toEqual([]);
   });
 });

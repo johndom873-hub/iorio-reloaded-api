@@ -2,7 +2,7 @@ import { db } from "../db/connection.js";
 import { fetchNewTickerData } from "./fetchNewTickerData.js";
 import { startTickerBackfill, type TickerBackfillRun } from "./tickerBackfillPipeline.js";
 import { invalidatePricePerformanceSnapshot } from "../lib/pricePerformanceSnapshot.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 export interface FindOrCreateTickerResult {
   ticker: { id: string; symbol: string; company_name: string | null; sector: string | null };
@@ -61,7 +61,7 @@ export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTi
   await db("market_data_snapshots")
     .insert({
       ticker_id: ticker.id,
-      snapshot_date: easternDateIso(new Date()),
+      snapshot_date: easternIsoDate(new Date()),
       implied_volatility: tickerData.impliedVolatility,
       avg_option_volume: tickerData.avgOptionVolume,
     })

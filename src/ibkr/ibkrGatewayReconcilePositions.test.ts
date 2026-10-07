@@ -170,6 +170,7 @@ afterAll(async () => {
     if (plutoTestPassId) await testDb("pluto_passes").where({ id: plutoTestPassId }).del();
     await testDb("position_legs").whereIn("position_id", positionIds).del();
     await testDb("positions").whereIn("id", positionIds).del();
+    await testDb("shortlist_entries").whereIn("ticker_id", createdTickerIds).del();
     await testDb("daily_price_bars").whereIn("ticker_id", createdTickerIds).del();
     await testDb("tickers").whereIn("id", createdTickerIds).del();
   }
@@ -816,17 +817,28 @@ describe("option expiry clock", () => {
   });
 });
 
-describe("Pluto's book follows shares that leave a Pluto position (position_share_sources)", () => {
-  /** Marks a leg as opened by a Pluto order: an action, an order carrying its id, and the opening fill. */
-  async function fillFromPlutoOrder(legId: string, symbol: string, price: number): Promise<void> {
+describe("Pluto's book: every open position on an enabled ticker (Marcelo, 2026-10-07)", () => {
+  async function plutoTestUser(): Promise<string> {
     if (!plutoTestUserId) {
       const [user] = await testDb("users").insert({ username: `reconcile-pluto-${Date.now()}`, display_name: "Pluto book test", password_hash: "x" }).returning(["id"]);
       plutoTestUserId = user.id;
+    }
+    return plutoTestUserId!;
+  }
+
+  async function enablePluto(tickerId: string): Promise<void> {
+    await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: await plutoTestUser(), signals_enabled: true, bot_enabled: true });
+  }
+
+  /** Marks a leg as opened by a Pluto order: an action, an order carrying its id, and the opening fill. */
+  async function fillFromPlutoOrder(legId: string, symbol: string, price: number): Promise<void> {
+    const userId = await plutoTestUser();
+    if (!plutoTestPassId) {
       const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "pluto-book" }), model_called: false }).returning(["id"]);
       plutoTestPassId = pass.id;
     }
     const [action] = await testDb("pluto_actions").insert({ pass_id: plutoTestPassId, kind: "open_cash_secured_put", symbol, outcome: "filled" }).returning(["id"]);
-    const [order] = await testDb("order_requests").insert({ requested_by_user_id: plutoTestUserId, request_type: "open_position", payload: JSON.stringify({ symbol, legs: [] }), status: "filled", pluto_action_id: action.id }).returning(["id"]);
+    const [order] = await testDb("order_requests").insert({ requested_by_user_id: userId, request_type: "open_position", payload: JSON.stringify({ symbol, legs: [] }), status: "filled", pluto_action_id: action.id }).returning(["id"]);
     await testDb("trades").insert({ position_leg_id: legId, ibkr_exec_id: `pluto-book-${legId}`, side: "sell", quantity: 1, price, executed_at: new Date(Date.now() - 86_400_000), is_closing_trade: false, source_order_request_id: order.id });
   }
 
@@ -834,13 +846,13 @@ describe("Pluto's book follows shares that leave a Pluto position (position_shar
     return (await loadPlutoBook()).openPositions.map((position) => position.positionId);
   }
 
-  it("a Pluto covered call expires: the leftover shares stay in Pluto's book, and so does a covered call later written on them", async () => {
+  it("a person's covered call on an enabled ticker expires: the leftover shares and the call later written on them are in the book", async () => {
     const ticker = await createTicker();
+    await enablePluto(ticker.id);
     const stockConId = (nextConId += 1);
     const coveredCallId = await insertPosition(ticker.id, "covered_call");
     await insertStockLeg(coveredCallId, stockConId, 100, 50);
-    const callLegId = await insertShortOptionLeg(coveredCallId, (nextConId += 1), "call", 55, isoDateDaysFromToday(-1), 1.2);
-    await fillFromPlutoOrder(callLegId, ticker.symbol, 1.2);
+    await insertShortOptionLeg(coveredCallId, (nextConId += 1), "call", 55, isoDateDaysFromToday(-1), 1.2);
     expect(await plutoBookPositionIds()).toContain(coveredCallId);
 
     await runPass([heldStock(ticker.symbol, stockConId, 100, 50)]);
@@ -854,18 +866,16 @@ describe("Pluto's book follows shares that leave a Pluto position (position_shar
     expect(await plutoBookPositionIds()).toContain(newCoveredCall.id);
   });
 
-  it("a Pluto put assigned 200 shares, one call sold on them: the 100 shares left over stay in Pluto's book", async () => {
+  it("a put on an enabled ticker assigned 200 shares, one call sold on them: the call and the 100 shares left over are both in the book", async () => {
     const ticker = await createTicker();
+    await enablePluto(ticker.id);
     const stockConId = (nextConId += 1);
-    const plutoPutId = await insertPosition(ticker.id, "cash_secured_put");
-    const plutoPutLegId = await insertShortOptionLeg(plutoPutId, (nextConId += 1), "put", 40, isoDateDaysFromToday(-1), 0.9);
-    await fillFromPlutoOrder(plutoPutLegId, ticker.symbol, 0.9);
-    // The assignment pass delivers 200 shares to a stock-only position linked to the put.
+    const putId = await insertPosition(ticker.id, "cash_secured_put");
+    await insertShortOptionLeg(putId, (nextConId += 1), "put", 40, isoDateDaysFromToday(-1), 0.9);
     await runPass([heldStock(ticker.symbol, stockConId, 200, 39.1)]);
     const assigned = (await positionsFor(ticker.id)).find((position) => position.status === "open")!;
     expect(await plutoBookPositionIds()).toContain(assigned.id);
 
-    // One call is sold: 100 shares move under it, the other 100 are split out into a new stock-only position.
     await runPass([heldStock(ticker.symbol, stockConId, 200, 39.1), heldShortOption(ticker.symbol, (nextConId += 1), OptionType.Call, 45, isoDateDaysFromToday(20), 80)]);
     const open = (await positionsFor(ticker.id)).filter((position) => position.status === "open");
     const coveredCall = open.find((position) => position.strategy_key === "covered_call")!;
@@ -876,21 +886,33 @@ describe("Pluto's book follows shares that leave a Pluto position (position_shar
     expect(bookIds).toContain(leftover.id);
   });
 
-  it("a Pluto put is assigned: the delivered shares are in Pluto's book; a human's put assigned on another ticker is not", async () => {
-    const plutoTicker = await createTicker();
-    const plutoPutId = await insertPosition(plutoTicker.id, "cash_secured_put");
+  it("a ticker Pluto is not enabled on is outside the book, even shares from a put Pluto sold; a person's put on an enabled ticker is inside", async () => {
+    const disabledTicker = await createTicker();
+    const plutoPutId = await insertPosition(disabledTicker.id, "cash_secured_put");
     const plutoPutLegId = await insertShortOptionLeg(plutoPutId, (nextConId += 1), "put", 40, isoDateDaysFromToday(-1), 0.9);
-    await fillFromPlutoOrder(plutoPutLegId, plutoTicker.symbol, 0.9);
-    const humanTicker = await createTicker();
-    const humanPutId = await insertPosition(humanTicker.id, "cash_secured_put");
+    await fillFromPlutoOrder(plutoPutLegId, disabledTicker.symbol, 0.9);
+    const enabledTicker = await createTicker();
+    await enablePluto(enabledTicker.id);
+    const humanPutId = await insertPosition(enabledTicker.id, "cash_secured_put");
     await insertShortOptionLeg(humanPutId, (nextConId += 1), "put", 40, isoDateDaysFromToday(-1), 0.9);
 
-    await runPass([heldStock(plutoTicker.symbol, (nextConId += 1), 100, 39.1), heldStock(humanTicker.symbol, (nextConId += 1), 100, 39.1)]);
+    await runPass([heldStock(disabledTicker.symbol, (nextConId += 1), 100, 39.1), heldStock(enabledTicker.symbol, (nextConId += 1), 100, 39.1)]);
 
-    const plutoShares = (await positionsFor(plutoTicker.id)).find((position) => position.status === "open")!;
-    const humanShares = (await positionsFor(humanTicker.id)).find((position) => position.status === "open")!;
+    const plutoShares = (await positionsFor(disabledTicker.id)).find((position) => position.status === "open")!;
+    const humanShares = (await positionsFor(enabledTicker.id)).find((position) => position.status === "open")!;
     const bookIds = await plutoBookPositionIds();
-    expect(bookIds).toContain(plutoShares.id);
-    expect(bookIds).not.toContain(humanShares.id);
+    expect(bookIds).not.toContain(plutoShares.id);
+    expect(bookIds).toContain(humanShares.id);
+  });
+
+  it("a hedge on an enabled ticker is never in the book", async () => {
+    const ticker = await createTicker();
+    await enablePluto(ticker.id);
+    const hedgeId = await insertPosition(ticker.id, "hedge");
+    const [leg] = await testDb("position_legs")
+      .insert({ position_id: hedgeId, leg_type: "option", side: "long", quantity: 10, multiplier: 100, option_type: "call", strike_price: 82, expiry_date: isoDateDaysFromToday(400), ibkr_contract_id: String((nextConId += 1)), entry_price: 3.9, entry_at: new Date(Date.now() - 86_400_000) })
+      .returning(["id"]);
+    expect(leg.id).toBeTruthy();
+    expect(await plutoBookPositionIds()).not.toContain(hedgeId);
   });
 });

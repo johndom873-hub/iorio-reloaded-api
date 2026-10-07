@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -49,7 +50,7 @@ vi.mock("./marketSessionStatus.js", () => ({
     mocks.state.completedSessionCalls.push(now);
     return mocks.state.completedSessionCalls.length % 2 === 1 ? mocks.state.completedThroughDate : mocks.state.expectedSessionDate;
   },
-  easternDateIso: (instant: Date) => instant.toLocaleDateString("en-CA", { timeZone: "America/New_York" }),
+  easternIsoDate: (instant: Date) => instant.toLocaleDateString("en-CA", { timeZone: "America/New_York" }),
 }));
 
 type SnapshotModule = typeof import("./pricePerformanceSnapshot.js");

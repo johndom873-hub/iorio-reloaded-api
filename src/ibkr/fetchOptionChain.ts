@@ -4,7 +4,7 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { db } from "../db/connection.js";
 import { calendarDaysUntilExpiry, captureMaximumDaysToExpiry, captureMinimumDaysToExpiry } from "../lib/optionChainCaptureWindow.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 
 export interface OptionQuote {
@@ -55,7 +55,7 @@ export function parseExpiry(expiry: string): Date {
  * expired the evening before, and every DTE one day short.
  */
 export function daysBetween(from: Date, to: Date): number {
-  const fromMidnightUtc = Date.parse(`${easternDateIso(from)}T00:00:00Z`);
+  const fromMidnightUtc = Date.parse(`${easternIsoDate(from)}T00:00:00Z`);
   const toMidnightUtc = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
   return Math.round((toMidnightUtc - fromMidnightUtc) / 86_400_000);
 }

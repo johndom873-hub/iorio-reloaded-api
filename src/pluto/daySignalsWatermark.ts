@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // What drives Pluto's loop (Marcelo, 2026-10-06): the Day Signals table, one row per contract, each with its own
 // quoted_at. Pluto remembers the quoted_at it last analysed per contract and only analyses a ticker again when at
@@ -46,8 +46,8 @@ export async function loadTodaysDaySignalQuoteStamps(now: Date = new Date()): Pr
     .where("se.bot_enabled", true)
     .whereNull("q.error_code")
     .select("t.symbol", db.raw("q.expiry::text as expiry"), "q.strike", "q.option_right as right", "q.quoted_at as quotedAt");
-  const todayIso = easternDateIso(now);
+  const todayIso = easternIsoDate(now);
   return rows
     .map((row) => ({ symbol: row.symbol, expiry: row.expiry, strike: Number(row.strike), right: row.right, quotedAtMs: new Date(row.quotedAt).getTime() }))
-    .filter((stamp) => easternDateIso(new Date(stamp.quotedAtMs)) === todayIso);
+    .filter((stamp) => easternIsoDate(new Date(stamp.quotedAtMs)) === todayIso);
 }

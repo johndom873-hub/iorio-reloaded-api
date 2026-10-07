@@ -28,7 +28,7 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
 }
 
 const book: PostModelBookInput = {
-  netLiquidationValue: 1_000_000, freeCash: 600_000, committedDollars: 50_000, inFlight: { totalNotional: 0, tickerNotional: 0, plutoNotional: 0 }, openPositionCount: 2, existingTickerExposure: 20_000, existingSectorExposure: 100_000, freeShares: 0,
+  netLiquidationValue: 1_000_000, freeCash: 600_000, committedDollars: 50_000, inFlight: { totalNotional: 0, tickerNotional: 0, managedNotional: 0 }, openPositionCount: 2, existingTickerExposure: 20_000, existingSectorExposure: 100_000, freeShares: 0,
   workingOrderOnSymbol: false, lastFilledActionAt: null, nowMs: Date.parse("2026-09-28T16:00:00Z"), spotPrice: 110, sameContractConflict: null,
 };
 
@@ -87,7 +87,7 @@ describe("runPostModelGates — the gates", () => {
   });
   it("sizes net of orders already in flight: every origin's against cash, the symbol's against the ticker, Pluto's own against the budget", () => {
     const idle = computeSizingRoom(settings, book, false);
-    const busy = computeSizingRoom(settings, { ...book, inFlight: { totalNotional: 30_000, tickerNotional: 12_000, plutoNotional: 8_000 } }, false);
+    const busy = computeSizingRoom(settings, { ...book, inFlight: { totalNotional: 30_000, tickerNotional: 12_000, managedNotional: 8_000 } }, false);
     expect(idle.cashRoom - busy.cashRoom).toBe(30_000);
     expect(idle.tickerRoom - busy.tickerRoom).toBe(12_000);
     expect(idle.budgetRoom - busy.budgetRoom).toBe(8_000);

@@ -1,9 +1,10 @@
 import { db } from "../db/connection.js";
 import { loadDaySignalExpiries } from "./daySignalsStore.js";
 import { formatDurationHuman } from "./formatDurationHuman.js";
-import { computeMarketSessionStatus, easternDateIso } from "./marketSessionStatus.js";
+import { computeMarketSessionStatus } from "./marketSessionStatus.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { clearDownState, notifyDownThrottled } from "./throttledAlert.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // Liveness of the Day Signals loop, checked by the 10-minute IBKR health-check
 // job (the daily watchdog runs after the close, too late for an intraday
@@ -48,7 +49,7 @@ export function evaluateDaySignalsLiveness(input: DaySignalsLivenessInput): stri
 
 /** Runs the check against the real tables and sends/clears the throttled alert. Returns the problem text, if any. */
 export async function reportDaySignalsLoopLiveness(now: Date = new Date()): Promise<string | null> {
-  const todayIso = easternDateIso(now);
+  const todayIso = easternIsoDate(now);
   const [session, pool, heartbeatRow, quoteRow] = await Promise.all([
     computeMarketSessionStatus(now),
     loadDaySignalExpiries(todayIso),

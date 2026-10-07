@@ -1,9 +1,9 @@
 import { db } from "../db/connection.js";
 import { loadVolatilityForecast } from "./volatilityForecastStore.js";
 import { loadDividendCadenceUnknown, loadEarningsDatesForForecastWindow, loadNextEarningsDate } from "./signalsStore.js";
-import { easternDateIso } from "./marketSessionStatus.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { loadDailyBarsStatus, type DailyBarsStatus } from "./dailyBarsStatus.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // Backs the Shortlist screen's data-sanity-check columns (redesigned 2026-09-23, replacing the old
 // IV/volume columns): per ticker, everything the Signals pipeline actually reads before it can score a
@@ -28,7 +28,7 @@ export interface ShortlistDataReadiness extends DailyBarsStatus {
 }
 
 export async function loadShortlistDataReadiness(tickerId: string, sector: string | null, now: Date = new Date()): Promise<ShortlistDataReadiness> {
-  const todayIso = easternDateIso(now);
+  const todayIso = easternIsoDate(now);
 
   const [dailyBarsStatus, barCountRow, forecastSelection, earningsDatesIso, nextEarningsDateIso, dividendHistoryCountRow, dividendCadenceUnknown, chainCountRow, latestSnapshot, storedOptionChain] = await Promise.all([
     loadDailyBarsStatus(tickerId, now),

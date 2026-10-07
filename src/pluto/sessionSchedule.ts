@@ -1,6 +1,7 @@
 import { db } from "../db/connection.js";
-import { easternDateIso, easternInstant, hhmmParts, resolveSessionSchedule, type SessionCloseSource } from "../lib/marketSessionStatus.js";
+import { easternInstant, hhmmParts, resolveSessionSchedule, type SessionCloseSource } from "../lib/marketSessionStatus.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // Today's session for Pluto (approved 2026-09-28): the close comes from IBKR's liquid hours for
 // SPY, read every trading morning by the option-chain structure job in every environment
@@ -49,7 +50,7 @@ export function effectiveWindowEndEt(windowEndEt: string, closeTimeEt: string, m
 }
 
 export async function resolvePlutoSession(now: Date, settings: Pick<PlutoSettings, "windowStartEt" | "windowEndEt">): Promise<PlutoSession> {
-  const dateIso = easternDateIso(now);
+  const dateIso = easternIsoDate(now);
   const schedule = await resolveSessionSchedule(dateIso);
   let closeTimeEt = schedule.closeTimeEt;
   let closeSource: PlutoSessionCloseSource = schedule.closeSource;

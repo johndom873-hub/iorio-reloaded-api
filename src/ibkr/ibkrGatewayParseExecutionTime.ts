@@ -10,6 +10,17 @@
 // wall-clock numbers as if they were already UTC, format that instant back
 // into the named zone via Intl (which knows the real DST rules), and use
 // the difference to correct the guess — avoids hardcoding EST/EDT offsets.
+// One formatter per zone, built once: constructing an Intl.DateTimeFormat per call holds native memory until a GC.
+const zonePartsFormatters = new Map<string, Intl.DateTimeFormat>();
+function zonePartsFormatter(zone: string): Intl.DateTimeFormat {
+  let formatter = zonePartsFormatters.get(zone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    zonePartsFormatters.set(zone, formatter);
+  }
+  return formatter;
+}
+
 export function parseIbkrExecutionTime(raw: string | undefined): Date | null {
   if (!raw) return null;
   const match = raw.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\S+)$/);
@@ -17,16 +28,7 @@ export function parseIbkrExecutionTime(raw: string | undefined): Date | null {
   const [, year, month, day, hour, minute, second, zone] = match;
 
   const naiveUtcGuess = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
-  const partsInZone = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(new Date(naiveUtcGuess));
+  const partsInZone = zonePartsFormatter(zone!).formatToParts(new Date(naiveUtcGuess));
   const part = (type: string) => Number(partsInZone.find((p) => p.type === type)?.value);
 
   const asIfUtc = Date.UTC(part("year"), part("month") - 1, part("day"), part("hour"), part("minute"), part("second"));

@@ -27,10 +27,10 @@ import { buildCaptureFailureMessage, runOptionChainCapture, type OptionChainCapt
 import { buildCaptureRetryFailureMessage, buildDefaultCaptureRetryDependencies, runCaptureRetryRounds } from "../src/ibkr/runOptionChainCaptureRetries.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { isWithinChainCaptureClockWindow } from "../src/lib/optionChainCaptureClock.js";
-import { easternDateIso } from "../src/lib/marketSessionStatus.js";
 import { runOptionSurfaceFitJob } from "../src/lib/runOptionSurfaceFitJob.js";
 import { runJob } from "../src/lib/runJob.js";
 import { buildSeedFailureMessage, seedDaySignals } from "../src/lib/daySignalsSeed.js";
+import { easternIsoDate } from "../src/lib/easternIsoDate.js";
 
 // This job has no user waiting on latency, so it would rather queue behind
 // the shared connection's own reconnect (backoff caps at 60s, see
@@ -83,7 +83,7 @@ async function main(): Promise<void> {
 
   // Fit tonight's surfaces from the snapshots just captured. Failure here is
   // recorded by runJob's own try/catch inside runOptionSurfaceFitJob.
-  const tradingDateIso = easternDateIso(new Date());
+  const tradingDateIso = easternIsoDate(new Date());
   await runOptionSurfaceFitJob(tradingDateIso, { triggeredBy: "scheduler" });
 
   // Re-capture and re-fit the tickers whose surface came out unusable. A failure here is recorded/alerted

@@ -1,11 +1,11 @@
 import { OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
 import { db } from "../db/connection.js";
-import { easternDateIso } from "../lib/marketSessionStatus.js";
 import type { RecoveryTargetWindow } from "../lib/recoveryTargetWindow.js";
 import { fetchCalendarConflictContext, findCalendarConflict } from "./calendarConflict.js";
 import { daysBetween, loadStoredOptionChain, parseExpiry, type ExpiryStrikes, type OptionQuote } from "./fetchOptionChain.js";
 import { quoteContracts } from "./quoteContracts.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 export interface CoveredCallCandidate {
   expiry: string; // YYYY-MM-DD
@@ -74,7 +74,7 @@ export function archivedCallDeltaKey(expiryYyyymmdd: string, strike: number): st
 async function loadArchivedCallDeltasForToday(tickerId: string): Promise<ArchivedCallDeltas> {
   const rows: { expiry: string; strike: string; delta: string }[] = await db("option_quote_snapshots as q")
     .join("option_chain_snapshots as s", "s.id", "q.snapshot_id")
-    .where({ "s.ticker_id": tickerId, "s.trading_date": easternDateIso(new Date()), "q.option_right": "C" })
+    .where({ "s.ticker_id": tickerId, "s.trading_date": easternIsoDate(new Date()), "q.option_right": "C" })
     .whereIn("s.status", ["complete", "partial"])
     .whereNotNull("q.delta")
     .select(db.raw("to_char(q.expiry, 'YYYYMMDD') as expiry"), "q.strike", "q.delta");

@@ -12,10 +12,13 @@ import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
 import { loadInFlightNotionals, loadOccupiedContracts, loadPlutoBook } from "./book.js";
 import { deterministicTopPick, filterTickerForPluto, findSameContractConflict, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
-import { noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
+import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
+import { updatePlutoConcernAlerts } from "./concernAlerts.js";
 import { executePlutoClose, executePlutoOrder, watchPlutoOrder } from "./executor.js";
 import { buildCloseOffersForTicker, type CloseOffer } from "./closeActions.js";
 import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
+import { easternMinutesOfDay } from "../lib/easternIsoDate.js";
+import { fetchPlutoAccountSummary } from "./accountSummaryCache.js";
 import { candidateSetFingerprint, classifyFingerprintChange, tickerFingerprint } from "./inputHash.js";
 import { ensurePlutoPrompt } from "./prompts.js";
 import { finishPlutoPass, recordPlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
@@ -51,6 +54,8 @@ export interface PassRequest {
   symbols: string[];
   /** The opening look evaluates even when nothing changed. */
   force: boolean;
+  /** Before today's opening look: opens would rest on yesterday's data, so only closes and rolls of held positions are offered. */
+  heldPositionsOnly?: boolean;
 }
 
 export interface PassSummary {
@@ -76,16 +81,27 @@ async function loadEnabledTickerRows(): Promise<SignalsTickerRow[]> {
   return (await loadSignalsUniverseTickers()).filter((row) => enabledIds.has(row.tickerId));
 }
 
+const isQuoteAgeReason = (reason: string) => reason.startsWith("quote ") || reason === "quote age unknown";
+
+/** True when the candidate is eligible, or out only because its quote is too old (a burst would re-quote it). */
+function passesAllButQuoteAge(scored: TickerSignals, filtered: PlutoTickerFilterResult, candidate: SignalCandidate): boolean {
+  const id = openCandidateId(scored.symbol, candidate);
+  const rejection = filtered.rejected.find((entry) => entry.id === id);
+  return rejection ? rejection.reasons.every(isQuoteAgeReason) : true;
+}
+
+/** Open candidates out only on quote age: eligible once a burst re-quotes them, so they count before the burst too. */
+function candidatesEligibleOnceRequoted(scored: TickerSignals, filtered: PlutoTickerFilterResult): PlutoOpenCandidate[] {
+  if (filtered.tickerBlocks.length > 0) return [];
+  const eligibleIds = new Set(filtered.eligible.map((entry) => entry.id));
+  return scored.candidates
+    .filter((candidate) => !eligibleIds.has(openCandidateId(scored.symbol, candidate)) && passesAllButQuoteAge(scored, filtered, candidate))
+    .map((candidate) => ({ id: openCandidateId(scored.symbol, candidate), kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate }));
+}
+
 /** Contracts worth a quote burst: the best candidates by Edge $ that pass every filter except quote age. */
 function burstContractsFor(scored: TickerSignals, filtered: PlutoTickerFilterResult, settings: PlutoSettings): { expiry: string; strike: number; right: "C" | "P" }[] {
-  const ranked = [...scored.candidates]
-    .filter((candidate) => {
-      const id = openCandidateId(scored.symbol, candidate);
-      const rejection = filtered.rejected.find((entry) => entry.id === id);
-      const nonAgeReasons = rejection ? rejection.reasons.filter((reason) => !reason.startsWith("quote ") && reason !== "quote age unknown") : [];
-      return nonAgeReasons.length === 0;
-    })
-    .sort((a, b) => b.edgeDollars - a.edgeDollars);
+  const ranked = [...scored.candidates].filter((candidate) => passesAllButQuoteAge(scored, filtered, candidate)).sort((a, b) => b.edgeDollars - a.edgeDollars);
   return ranked.slice(0, settings.burstLines).map((candidate) => ({ expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" }));
 }
 
@@ -112,12 +128,15 @@ async function loadMoveContext(ticker: EvaluatedTicker): Promise<MoveContext | n
   }
 }
 
-/** Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here, the rest go to the model. */
-async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string, cancelByMs: number): Promise<void> {
+/**
+ * Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here (only when `executeAutomatic`: the re-score
+ * after a burst rebuilds the offers but must never send an automatic close twice), the rest go to the model.
+ */
+async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string, cancelByMs: number, executeAutomatic: boolean): Promise<void> {
   const watched = context.marketWatch.snapshot(ticker.row.symbol);
   const { offers } = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: ticker.scored.heldLegs, rolls: ticker.scored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso });
   for (const offer of offers) {
-    if (!offer.automatic) continue;
+    if (!offer.automatic || !executeAutomatic) continue;
     const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds, ...(offer.contract ?? {}) }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: "odd lot below 100 shares at a positive cycle P&L (Formula P1)" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
     const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.limitPrice })), description: offer.description, reasons: ["automatic odd-lot close (Formula P1)"] });
     if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description, cancelByMs }), result.orderId, offer.symbol);
@@ -191,52 +210,73 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
 
   // 2. Universe (loaded above).
   if (rows.length === 0) return skip("no enabled tickers to evaluate", checks.checks);
-  const [account, tradingSettings] = await Promise.all([loadAccountContext(), loadTradingSettings()]);
+  const [account, tradingSettings] = await Promise.all([loadAccountContext(() => fetchPlutoAccountSummary()), loadTradingSettings()]);
 
-  // 3. Score, burst the promising ones, re-score with live quotes, filter.
-  const evaluated: EvaluatedTicker[] = [];
+  // 3. Score from the Day Signals data and filter; no quote burst yet (2026-10-07: bursting first cost 10 lines for 4 s on every
+  // round, ~2,200 a session, only to find that nothing had changed or that the ticker was still cooling down).
+  const cooldownMs = settings.perTickerModelCooldownMinutes * 60_000;
+  const coolingDown = (symbol: string) => nowMs - (context.lastModelEvaluationAtBySymbol.get(symbol) ?? 0) < cooldownMs;
+  if (!request.force && rows.every((row) => coolingDown(row.symbol))) return skip("every ticker in this round is cooling down", checks.checks);
+  const opensBlockedBecause = marketStress ? "market stress: new opens blocked while SPY is down" : request.heldPositionsOnly ? "opens wait for today's opening look" : null;
+  const blockOpensWhenBarred = (ticker: EvaluatedTicker) => {
+    if (!opensBlockedBecause) return;
+    ticker.filtered.rejected.push(...ticker.filtered.eligible.map((entry) => ({ id: entry.id, reasons: [opensBlockedBecause] })));
+    ticker.filtered.eligible = [];
+  };
+  let evaluated: EvaluatedTicker[] = [];
   for (const row of rows) {
-    let ticker = await evaluateTicker(row, settings, context, account, tradingSettings, true, nowMs);
-    if (ticker.filtered.tickerBlocks.length === 0) {
-      const contracts = burstContractsFor(ticker.scored, ticker.filtered, settings);
-      if (contracts.length > 0) {
-        const liveQuotes = await context.marketWatch.burst(row.symbol, contracts);
-        if (liveQuotes.length > 0) ticker = await evaluateTicker(row, settings, context, account, tradingSettings, true, Date.now(), liveQuotes);
-      }
-    }
-    if (marketStress) {
-      ticker.filtered.rejected.push(...ticker.filtered.eligible.map((entry) => ({ id: entry.id, reasons: ["market stress: new opens blocked while SPY is down"] })));
-      ticker.filtered.eligible = [];
-    }
+    const ticker = await evaluateTicker(row, settings, context, account, tradingSettings, true, nowMs);
+    blockOpensWhenBarred(ticker);
     evaluated.push(ticker);
   }
   const previousSessionDateIso = await previousOpenSessionDate(checks.context.todayEasternIso);
+  // What the round looked at, before any live quote: what the next round compares against.
+  const lookedAtFingerprintBySymbol = new Map<string, string>();
+  let offeredCount = 0;
   for (const ticker of evaluated) {
-    await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs);
-    if (ticker.closeOffers.length > 0) ticker.fingerprint = tickerFingerprint(ticker.filtered.eligible, ticker.filtered.eligibleRolls, ticker.closeOffers.map((offer) => offer.id));
+    await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs, true);
+    const requotable = opensBlockedBecause ? [] : candidatesEligibleOnceRequoted(ticker.scored, ticker.filtered);
+    lookedAtFingerprintBySymbol.set(ticker.row.symbol, tickerFingerprint([...ticker.filtered.eligible, ...requotable], ticker.filtered.eligibleRolls, ticker.closeOffers.map((offer) => offer.id)));
+    offeredCount += ticker.filtered.eligible.length + requotable.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length;
   }
-  const offeredCount = evaluated.reduce((sum, ticker) => sum + ticker.filtered.eligible.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length, 0);
 
   // 4. Only call the model when something material changed (or on the opening look).
-  const cooldownMs = settings.perTickerModelCooldownMinutes * 60_000;
-  const changed = evaluated.filter((ticker) => {
-    const previous = context.lastFingerprintBySymbol.get(ticker.row.symbol);
-    const lastEvaluated = context.lastModelEvaluationAtBySymbol.get(ticker.row.symbol) ?? 0;
-    return previous !== ticker.fingerprint && nowMs - lastEvaluated >= cooldownMs;
-  });
-  if (offeredCount === 0) {
-    for (const ticker of evaluated) context.lastFingerprintBySymbol.set(ticker.row.symbol, ticker.fingerprint);
-    await finishPlutoPass(passId, { candidateCount: 0, systemChecks: checks.checks, modelCalled: false, skippedReason: "nothing eligible after the deterministic filters" });
+  const changed = evaluated.filter((ticker) => context.lastFingerprintBySymbol.get(ticker.row.symbol) !== lookedAtFingerprintBySymbol.get(ticker.row.symbol) && !coolingDown(ticker.row.symbol));
+  const skipNothingEligible = async (reason: string) => {
+    for (const ticker of evaluated) context.lastFingerprintBySymbol.set(ticker.row.symbol, lookedAtFingerprintBySymbol.get(ticker.row.symbol) ?? ticker.fingerprint);
+    await finishPlutoPass(passId, { candidateCount: 0, systemChecks: checks.checks, modelCalled: false, skippedReason: reason });
     await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason: "nothing eligible", tickers: evaluated.map((ticker) => ({ symbol: ticker.row.symbol, blocks: ticker.filtered.tickerBlocks, rejected: ticker.filtered.rejected.length })) });
     await recordPlutoPass();
     return { passId, modelCalled: false, skippedReason: "nothing eligible", outcome: null };
-  }
+  };
+  // Nothing held to manage yet: not a "nothing eligible" round, so the next round (the opening look) compares against nothing.
+  if (offeredCount === 0 && request.heldPositionsOnly) return skip("waiting for today's opening look: no held position to manage", checks.checks);
+  if (offeredCount === 0) return skipNothingEligible("nothing eligible after the deterministic filters");
   if (!request.force && changed.length === 0) return skip("no material change since the model last looked", checks.checks);
+  const changeKinds = changed.map((ticker) => ({ symbol: ticker.row.symbol, kind: classifyFingerprintChange(context.lastFingerprintBySymbol.get(ticker.row.symbol), lookedAtFingerprintBySymbol.get(ticker.row.symbol)!) }));
+
+  // 4b. The model will be called: only now burst the promising contracts and re-score with the live quotes.
+  const refreshed: EvaluatedTicker[] = [];
+  for (const ticker of evaluated) {
+    const contracts = ticker.filtered.tickerBlocks.length === 0 ? burstContractsFor(ticker.scored, ticker.filtered, settings) : [];
+    const liveQuotes = contracts.length > 0 ? await context.marketWatch.burst(ticker.row.symbol, contracts) : [];
+    if (liveQuotes.length === 0) {
+      refreshed.push(ticker);
+      continue;
+    }
+    const requoted = await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now(), liveQuotes);
+    blockOpensWhenBarred(requoted);
+    await attachCloseOffers(requoted, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs, false);
+    refreshed.push(requoted);
+  }
+  evaluated = refreshed;
+  offeredCount = evaluated.reduce((sum, ticker) => sum + ticker.filtered.eligible.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length, 0);
+  if (offeredCount === 0) return skipNothingEligible("nothing eligible once re-quoted live");
   // A Day Signals update is only the messenger: name the round after what actually changed.
   let trigger: PlutoTrigger = request.trigger;
   let triggerDetail = request.triggerDetail;
   if (request.trigger === "day_signals_update" && changed.length > 0) {
-    const kinds = changed.map((ticker) => ({ symbol: ticker.row.symbol, kind: classifyFingerprintChange(context.lastFingerprintBySymbol.get(ticker.row.symbol), ticker.fingerprint) }));
+    const kinds = changeKinds;
     const heldLeg = kinds.filter((entry) => entry.kind === "held_leg").map((entry) => entry.symbol);
     const gradeCrossing = kinds.filter((entry) => entry.kind === "grade_crossing").map((entry) => entry.symbol);
     trigger = gradeCrossing.length > 0 ? "grade_crossing" : "held_leg";
@@ -267,7 +307,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       freeCash: account.freeCash,
       plutoBudgetPct: settings.capitalBudgetPct,
       plutoBudgetUsedPct: checks.context.netLiquidationValue ? (book.committedDollars / checks.context.netLiquidationValue) * 100 : 0,
-      openPlutoPositions: book.openPositions.length,
+      managedPositions: book.openPositions.length,
       maxOpenPositions: settings.maxOpenPositions,
       actionsToday: checks.context.counters.actionsToday,
       maxActionsPerSession: settings.maxActionsPerSession,
@@ -280,6 +320,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
       new Map(tradeActions.map((action) => [action.pass_id, { outcome: action.outcome, blockReason: action.block_reason }])),
     ),
     trigger: { kind: trigger, detail: triggerDetail },
+    plutoOpenedPositionIds: book.plutoOpenedPositionIds,
   });
   const systemPrompt = buildPlutoSystemPrompt(settings);
   const promptId = await ensurePlutoPrompt(settings.promptVersion, systemPrompt);
@@ -287,7 +328,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
 
   // 6. One call per decision (Marcelo, 2026-10-06: the deterministic gates are the second opinion; a second call doubled the cost).
   for (const ticker of evaluated) {
-    context.lastFingerprintBySymbol.set(ticker.row.symbol, ticker.fingerprint);
+    context.lastFingerprintBySymbol.set(ticker.row.symbol, lookedAtFingerprintBySymbol.get(ticker.row.symbol) ?? ticker.fingerprint);
     context.lastModelEvaluationAtBySymbol.set(ticker.row.symbol, nowMs);
   }
   const call = await modelCall(1);
@@ -308,6 +349,12 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   await recordPlutoEvent("model_called", { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, confidence: decision.confidence, actionKind: decision.actionKind, agreement: agreementDetail, reasons: decision.reasons });
   await finishPlutoPass(passId, { inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, tokensIn, tokensOut, costUsd, servedModelIds });
   await recordPlutoPass();
+  // The model's data concerns, per ticker (start / at most hourly / cleared), under the same switch as every Pluto message.
+  // A failed call says nothing about the data, so it neither raises nor clears a concern.
+  if (call.decision !== null && settings.telegramVerbosity !== "off") {
+    const roundSymbols = evaluated.filter((ticker) => ticker.filtered.eligible.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length > 0).map((ticker) => ticker.row.symbol);
+    await updatePlutoConcernAlerts({ roundSymbols, concerns: decision.systemConcerns }).catch((error) => console.warn(`Pluto: concern alert failed — ${error instanceof Error ? error.message : error}`));
+  }
 
   // 7. Outcome.
   const topPick = deterministicTopPick(evaluated.flatMap((ticker) => ticker.filtered.eligible));
@@ -315,7 +362,6 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   if (decision.decision !== "trade") {
     await recordPlutoAction({ passId, kind: "no_trade", symbol: "—", tickerId: null, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: [], sizeTier: null, quantity: null, limitPrice: null, outcome: "no_trade", blockReason: decision.reasons.join(" "), referenceBid: null, referenceMid: null });
     await recordPlutoEvent("no_trade", { passId, verdict: decision.decision, reasons: decision.reasons, systemConcerns: decision.systemConcerns, deterministicTopPick: topPickSummary });
-    if (decision.decision === "abstain_system_concern" && settings.telegramVerbosity !== "off") await notifyPlutoTelegram(`🪐 Pluto abstained on a system concern: ${decision.systemConcerns.join("; ") || decision.reasons.join("; ")}`);
     return { passId, modelCalled: true, skippedReason: null, outcome: decision.decision };
   }
 
@@ -323,6 +369,13 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   const owner = evaluated.find((ticker) => ticker.filtered.eligible.some((entry) => entry.id === chosenId) || ticker.filtered.eligibleRolls.some((entry) => entry.id === chosenId) || ticker.closeOffers.some((offer) => offer.id === chosenId));
   if (!owner) {
     await recordPlutoAction({ passId, kind: "no_trade", symbol: "—", tickerId: null, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: [{ gate: "candidate_present", ok: false, detail: `${chosenId} not found among the offers` }], sizeTier: null, quantity: null, limitPrice: null, outcome: "blocked", blockReason: "chosen candidate not found", referenceBid: null, referenceMid: null });
+    return { passId, modelCalled: true, skippedReason: null, outcome: "blocked" };
+  }
+  // Never trade a ticker the model itself flagged in the same answer (prompt v3.3).
+  if (flaggedSymbols(decision).has(owner.row.symbol)) {
+    const failed = [{ gate: "flagged_ticker", ok: false, detail: `the model flagged ${owner.row.symbol}'s data in the same answer` }];
+    const actionId = await recordPlutoAction({ passId, kind: decision.actionKind!, symbol: owner.row.symbol, tickerId: owner.row.tickerId, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: failed, sizeTier: null, quantity: null, limitPrice: null, outcome: "blocked", blockReason: `flagged_ticker: ${failed[0]!.detail}`, referenceBid: null, referenceMid: null });
+    await recordPlutoEvent("action_blocked", { passId, actionId, symbol: owner.row.symbol, candidateId: chosenId, stage: "post_model", failed });
     return { passId, modelCalled: true, skippedReason: null, outcome: "blocked" };
   }
   const chosenClose = owner.closeOffers.find((offer) => offer.id === chosenId);
@@ -454,9 +507,3 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
   }
 }
 
-function easternMinutesOfDay(now: Date): number {
-  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(now);
-  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? 0) % 24;
-  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? 0);
-  return hour * 60 + minute;
-}

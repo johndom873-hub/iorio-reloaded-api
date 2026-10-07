@@ -124,23 +124,25 @@ export function findSuspectedSplitBarIndices(bars: DailyOhlcvBar[]): number[] {
 /**
  * Yang-Zhang annualized volatility over the LAST `windowDays` trading days of
  * `bars` (which therefore needs windowDays + 1 bars — the first overnight
- * return needs the prior close). Never throws for bad data; returns
+ * return needs the prior close). `endIndex` (exclusive, default all bars)
+ * ends the window earlier without copying the array: the result is exactly
+ * that of `bars.slice(0, endIndex)`. Never throws for bad data; returns
  * `available: false` with a reason instead.
  */
-export function computeYangZhangVolatility(bars: DailyOhlcvBar[], windowDays: number): YangZhangResult {
+export function computeYangZhangVolatility(bars: DailyOhlcvBar[], windowDays: number, endIndex: number = bars.length): YangZhangResult {
   if (!Number.isInteger(windowDays) || windowDays < 2) throw new RangeError(`windowDays must be an integer >= 2, got ${windowDays}`);
 
-  if (bars.length < windowDays + 1) {
-    return { available: false, windowDays, reason: "insufficient_history", detail: `${bars.length} bars, need ${windowDays + 1}` };
+  if (endIndex < windowDays + 1) {
+    return { available: false, windowDays, reason: "insufficient_history", detail: `${endIndex} bars, need ${windowDays + 1}` };
   }
 
-  const firstWindowIndex = bars.length - windowDays;
-  for (let index = firstWindowIndex - 1; index < bars.length; index++) {
+  const firstWindowIndex = endIndex - windowDays;
+  for (let index = firstWindowIndex - 1; index < endIndex; index++) {
     if (!isValidBar(bars[index]!)) {
       return { available: false, windowDays, reason: "invalid_bar", detail: `invalid OHLCV bar on ${bars[index]!.tradingDate}` };
     }
   }
-  for (let index = firstWindowIndex; index < bars.length; index++) {
+  for (let index = firstWindowIndex; index < endIndex; index++) {
     if (isSuspectedSplitAt(bars, index)) {
       return { available: false, windowDays, reason: "suspected_split", detail: `suspected split on ${bars[index]!.tradingDate}`, splitDateIso: bars[index]!.tradingDate };
     }
@@ -149,7 +151,7 @@ export function computeYangZhangVolatility(bars: DailyOhlcvBar[], windowDays: nu
   const overnightReturns: number[] = [];
   const openToCloseReturns: number[] = [];
   let rogersSatchellSum = 0;
-  for (let index = firstWindowIndex; index < bars.length; index++) {
+  for (let index = firstWindowIndex; index < endIndex; index++) {
     const { open, high, low, close } = bars[index]!;
     overnightReturns.push(Math.log(open / bars[index - 1]!.close));
     openToCloseReturns.push(Math.log(close / open));

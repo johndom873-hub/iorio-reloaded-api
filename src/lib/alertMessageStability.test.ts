@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { evaluateDaySignalsLiveness } from "./daySignalsLiveness.js";
-import { easternDateIso } from "./marketSessionStatus.js";
 import { evaluateJobDeadlines } from "./jobDeadlines.js";
 import { evaluateOpsMonitorLiveness } from "./opsMonitorLiveness.js";
 import { evaluateWorkerHeartbeat } from "./workerHeartbeatLiveness.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // throttledAlert.notifyDownThrottled treats a CHANGED message as a new alert and sends it immediately, so any
 // alert text that embeds a live counter ("stuck for 181 min") would page every minute instead of at the
@@ -21,7 +21,7 @@ describe("state-based alert texts do not change while the condition persists", (
         now,
         runs: [run("daily_market_data_capture", "2026-10-01T22:00:05Z", "running"), run("ibkr_health_check", "2026-10-01T18:00:00Z", "success")],
         isOpenDay: () => true,
-        easternDateIsoOf: easternDateIso,
+        easternDateIsoOf: easternIsoDate,
       }).map((problem) => `${problem.alertKey} => ${problem.message}`);
     const first = evaluate(new Date("2026-10-01T23:05:00Z"));
     expect(first.length).toBeGreaterThan(2);

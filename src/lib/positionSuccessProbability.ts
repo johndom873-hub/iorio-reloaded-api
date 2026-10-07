@@ -1,5 +1,6 @@
 import { computeSuccessProbability } from "./blackScholesPop.js";
 import type { Greeks } from "../ibkr/fetchLiveGreeks.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // Approved 2026-09-19 for the Positions P(Δ) / P(d2) columns. Both run 0..1,
 // 0 = undesired outcome, 1 = success, where success means a covered call is
@@ -24,10 +25,6 @@ export interface LegSuccessProbabilities {
   probabilityByD2: number | null;
 }
 
-function todayInEasternIso(): string {
-  return new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-}
-
 function wholeDaysBetween(fromIsoDate: string, toIsoDate: string): number {
   return Math.round((Date.parse(`${toIsoDate}T00:00:00Z`) - Date.parse(`${fromIsoDate}T00:00:00Z`)) / 86_400_000);
 }
@@ -49,7 +46,7 @@ export function computeLegSuccessProbabilities(
       spotPrice: greeks.underlyingPrice,
       thresholdPrice: isCall ? Math.max(leg.strike, leg.stockCostBasisPerShare ?? leg.strike) : leg.strike,
       impliedVolatility: greeks.impliedVolatility,
-      daysToExpiry: wholeDaysBetween(todayInEasternIso(), leg.expiryIsoDate),
+      daysToExpiry: wholeDaysBetween(easternIsoDate(), leg.expiryIsoDate),
       riskFreeRate,
     });
   }

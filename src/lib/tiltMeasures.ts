@@ -70,10 +70,10 @@ export function computeSkew(slices: SkewSlice[]): SkewMeasure | null {
 const shortWindowDays = 21;
 const longWindowDays = 126;
 
-/** YZ21 / YZ126 at the end of `bars`, or null when either window is unavailable. */
-export function volatilityRatio(bars: DailyOhlcvBar[]): number | null {
-  const short = computeYangZhangVolatility(bars, shortWindowDays);
-  const long = computeYangZhangVolatility(bars, longWindowDays);
+/** YZ21 / YZ126 at the end of `bars` (or ending before `endIndex`), or null when either window is unavailable. */
+export function volatilityRatio(bars: DailyOhlcvBar[], endIndex: number = bars.length): number | null {
+  const short = computeYangZhangVolatility(bars, shortWindowDays, endIndex);
+  const long = computeYangZhangVolatility(bars, longWindowDays, endIndex);
   if (!short.available || !long.available || !(long.annualizedVolatility > 0)) return null;
   return short.annualizedVolatility / long.annualizedVolatility;
 }
@@ -96,7 +96,7 @@ export function computeElevatedVolatilityFlag(bars: DailyOhlcvBar[]): ElevatedVo
   if (ratio === null) return null;
   const earlierRatios: number[] = [];
   for (let end = longWindowDays; end < bars.length - 1; end++) {
-    const earlier = volatilityRatio(bars.slice(0, end + 1));
+    const earlier = volatilityRatio(bars, end + 1);
     if (earlier !== null) earlierRatios.push(earlier);
   }
   const useOwn = earlierRatios.length >= minimumHistoryForOwnThreshold;

@@ -82,12 +82,16 @@ export function computeVolatilityEdge(slice: EdgeSlice, strike: number, forecast
   };
 }
 
-/** True when any of the dates falls after the snapshot date and on or before the expiry (ISO dates YYYY-MM-DD compare correctly as text). */
-export function expirySpansEventDate(snapshotDateIso: string, expiryIso: string, eventDatesIso: string[]): boolean {
-  return eventDatesIso.some((eventDate) => eventDate > snapshotDateIso && eventDate <= expiryIso);
+/**
+ * Earnings from today through the expiry (hard exclusion in Signals; ISO dates YYYY-MM-DD compare correctly as text).
+ * Today counts: a report after today's close, or at an unknown time, is still ahead. A report before today's open has
+ * already happened, and loadEarningsDatesNotYetReported leaves it out.
+ */
+export function expirySpansEarnings(todayIso: string, expiryIso: string, earningsDatesIso: string[]): boolean {
+  return earningsDatesIso.some((eventDate) => eventDate >= todayIso && eventDate <= expiryIso);
 }
 
-/** Earnings-specific name for expirySpansEventDate (hard exclusion in Signals). */
-export function expirySpansEarnings(snapshotDateIso: string, expiryIso: string, earningsDatesIso: string[]): boolean {
-  return expirySpansEventDate(snapshotDateIso, expiryIso, earningsDatesIso);
+/** A macro release still ahead of the scoring moment whose Eastern date is on or before the expiry: a 14:00 release today counts at 10:00, not at 14:05. */
+export function expirySpansMacroEvent(scoredAtMs: number, expiryIso: string, events: { dateIso: string; eventAtMs: number }[]): boolean {
+  return events.some((event) => event.eventAtMs > scoredAtMs && event.dateIso <= expiryIso);
 }

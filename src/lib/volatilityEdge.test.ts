@@ -89,11 +89,11 @@ describe("computeVolatilityEdge", () => {
 });
 
 describe("expirySpansEarnings", () => {
-  it("is true only when an earnings date is after the snapshot date and on or before the expiry", () => {
+  it("is true only when an earnings date is from today through the expiry", () => {
     expect(expirySpansEarnings("2026-09-21", "2026-11-20", ["2026-11-05"])).toBe(true);
     expect(expirySpansEarnings("2026-09-21", "2026-11-20", ["2026-11-20"])).toBe(true); // on the expiry date
     expect(expirySpansEarnings("2026-09-21", "2026-11-20", ["2026-11-21"])).toBe(false); // after
-    expect(expirySpansEarnings("2026-09-21", "2026-11-20", ["2026-09-21"])).toBe(false); // today's is already priced in
+    expect(expirySpansEarnings("2026-09-21", "2026-11-20", ["2026-09-21"])).toBe(true); // today's, not before the open (the loader drops those)
     expect(expirySpansEarnings("2026-09-21", "2026-11-20", ["2026-08-01"])).toBe(false);
     expect(expirySpansEarnings("2026-09-21", "2026-11-20", [])).toBe(false);
     expect(expirySpansEarnings("2026-09-21", "2026-11-20", ["2027-01-01", "2026-10-01"])).toBe(true);

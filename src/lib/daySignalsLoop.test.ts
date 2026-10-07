@@ -362,37 +362,35 @@ describe("DaySignalsLoop", () => {
       expect(harness.calls.poolReplacements).toEqual([{ tickerId: "t1", snapshotId: "s1", expiries: [expiry] }]);
     });
 
-    it("persists the re-rank state: a restarted loop neither repeats a re-rank nor resets the daily cap", async () => {
+    it("persists the re-rank state: a restarted loop neither repeats a re-rank nor ignores the 15-minute gap", async () => {
       const harness = createHarness(0.05);
       harness.state.spot = 110;
       harness.state.contexts = new Map([["t1", contextAt({ atmImpliedVolatility: 0.8 })]]);
       await runCycles(harness, 1);
-      expect(harness.state.rerankStates.get("t1")).toEqual({ referenceSpotPrice: 110, reranks: 1 });
+      const lookedAt = new Date(harness.state.nowIso);
+      expect(harness.state.rerankStates.get("t1")).toEqual({ referenceSpotPrice: 110, reranks: 1, firstSeenAt: lookedAt, lastLookAt: lookedAt, lastLookKind: "price" });
       const discoveryCount = () => harness.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock"))).length;
       expect(discoveryCount()).toBe(1);
 
-      // A fresh loop instance on the same stored state: the 10:00 spot (100) is no longer the reference, so 110 is not a new move.
-      const restarted = new DaySignalsLoop(harness.deps);
-      let cycles = 0;
-      const originalWindow = harness.deps.runQuoteWindow;
-      harness.deps.runQuoteWindow = async (contracts, options) => {
-        const result = await originalWindow(contracts, options);
-        if (contracts.some((contract) => contract.key.endsWith("|stock")) && (cycles += 1) === 1) restarted.stop();
-        return result;
+      const runRestarted = async () => {
+        const restarted = new DaySignalsLoop(harness.deps);
+        let cycles = 0;
+        const originalWindow = harness.deps.runQuoteWindow;
+        harness.deps.runQuoteWindow = async (contracts, options) => {
+          const result = await originalWindow(contracts, options);
+          if (contracts.some((contract) => contract.key.endsWith("|stock")) && (cycles += 1) === 1) restarted.stop();
+          return result;
+        };
+        await restarted.start();
+        harness.deps.runQuoteWindow = originalWindow;
       };
-      await restarted.start();
+      // A fresh loop instance on the same stored state: the 10:00 spot (100) is no longer the reference, so 110 is not a new move.
+      await runRestarted();
       expect(discoveryCount()).toBe(1);
 
-      // A stored count at the cap blocks any further re-rank however far the price has moved since.
-      harness.state.rerankStates.set("t1", { referenceSpotPrice: 100, reranks: 3 });
-      const capped = new DaySignalsLoop(harness.deps);
-      cycles = 0;
-      harness.deps.runQuoteWindow = async (contracts, options) => {
-        const result = await originalWindow(contracts, options);
-        if (contracts.some((contract) => contract.key.endsWith("|stock")) && (cycles += 1) === 1) capped.stop();
-        return result;
-      };
-      await capped.start();
+      // A stored look 5 minutes ago blocks a re-rank however far the price has moved since.
+      harness.state.rerankStates.set("t1", { referenceSpotPrice: 100, reranks: 3, firstSeenAt: lookedAt, lastLookAt: new Date(lookedAt.getTime() - 5 * 60_000), lastLookKind: "price" });
+      await runRestarted();
       expect(discoveryCount()).toBe(1);
     });
 
@@ -406,7 +404,7 @@ describe("DaySignalsLoop", () => {
       const discovery = harness.calls.windows.find((window) => !window.some((contract) => contract.key.endsWith("|stock")))!;
       expect(discovery.every((contract) => contract.key.startsWith("t2|"))).toBe(true);
       expect(harness.calls.poolReplacements).toEqual([{ tickerId: "t2", snapshotId: "s2", expiries: [expiry] }]);
-      expect(harness.state.rerankStates.get("t2")).toEqual({ referenceSpotPrice: 110, reranks: 1 });
+      expect(harness.state.rerankStates.get("t2")).toEqual({ referenceSpotPrice: 110, reranks: 1, firstSeenAt: new Date(harness.state.nowIso), lastLookAt: new Date(harness.state.nowIso), lastLookKind: "price" });
     });
 
     it("leaves an unpooled ticker alone while it stays under the trigger", async () => {
@@ -419,24 +417,60 @@ describe("DaySignalsLoop", () => {
       expect(harness.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock")))).toHaveLength(0);
     });
 
-    it("does not re-rank a move under the trigger, nor after the daily cap", async () => {
+    it("does not re-rank a move under the trigger, nor within 15 minutes of the last look, and has no daily cap", async () => {
       const small = createHarness(0.05);
       small.state.spot = 102; // +2% < 2.52%
       small.state.contexts = new Map([["t1", contextAt({ atmImpliedVolatility: 0.8 })]]);
       await runCycles(small, 1);
       expect(small.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock")))).toHaveLength(0);
 
-      const capped = createHarness(0.05);
-      capped.state.contexts = new Map([["t1", contextAt({ atmImpliedVolatility: 0.8 })]]);
+      // +10% every cycle, always past the trigger.
+      const runMovingCycles = async (minutesPerCycle: number) => {
+        const harness = createHarness(0.05);
+        harness.state.contexts = new Map([["t1", contextAt({ atmImpliedVolatility: 0.8 })]]);
+        let cycle = 0;
+        const originalSpotPass = harness.deps.runSpotPass;
+        harness.deps.runSpotPass = async (contracts, options) => {
+          cycle += 1;
+          harness.state.spot = 100 * 1.1 ** cycle;
+          harness.state.nowIso = new Date(Date.parse("2026-09-24T15:00:00Z") + (cycle - 1) * minutesPerCycle * 60_000).toISOString();
+          return originalSpotPass(contracts, options);
+        };
+        await runCycles(harness, 6);
+        return harness.calls.poolReplacements.length;
+      };
+      expect(await runMovingCycles(5)).toBe(2); // looks at 0 and 15 minutes (cycles 1 and 4)
+      expect(await runMovingCycles(16)).toBe(6); // every cycle: no cap
+    });
+
+    it("re-checks an unpooled ticker an hour after first seeing it even when its price has not moved, one per cycle, the most overdue first", async () => {
+      const harness = createHarness(0.05);
+      harness.state.spot = 100; // no move
+      harness.state.unpooledTickers = [
+        { tickerId: "t2", symbol: "BBB", snapshotId: "s2" },
+        { tickerId: "t3", symbol: "CCC", snapshotId: "s3" },
+      ];
+      harness.state.contexts = new Map([
+        ["t2", contextAt({ tickerId: "t2", symbol: "BBB", snapshotId: "s2", atmImpliedVolatility: 0.8, previousContracts: [] })],
+        ["t3", contextAt({ tickerId: "t3", symbol: "CCC", snapshotId: "s3", atmImpliedVolatility: 0.8, previousContracts: [] })],
+      ]);
+      // CCC was first seen earlier than BBB: it is the more overdue one.
+      const start = Date.parse("2026-09-24T15:00:00Z");
+      harness.state.rerankStates.set("t3", { referenceSpotPrice: 100, reranks: 0, firstSeenAt: new Date(start - 10 * 60_000), lastLookAt: null, lastLookKind: null });
+      const steps = [0, 30, 61, 61.5, 62];
       let cycle = 0;
-      const originalSpotPass = capped.deps.runSpotPass;
-      capped.deps.runSpotPass = async (contracts, options) => {
+      const originalSpotPass = harness.deps.runSpotPass;
+      harness.deps.runSpotPass = async (contracts, options) => {
+        harness.state.nowIso = new Date(start + steps[cycle]! * 60_000).toISOString();
         cycle += 1;
-        capped.state.spot = 100 * 1.1 ** cycle; // +10% every cycle: always past the trigger
         return originalSpotPass(contracts, options);
       };
-      await runCycles(capped, 6);
-      expect(capped.calls.poolReplacements).toHaveLength(3);
+      await runCycles(harness, steps.length);
+      const discoveries = harness.calls.windows.filter((window) => !window.some((contract) => contract.key.endsWith("|stock"))).map((window) => window[0]!.key.split("|")[0]);
+      // Minute 61: both are due; only CCC (first seen 10 minutes earlier) runs. Minute 61.5: BBB.
+      expect(discoveries).toEqual(["t3", "t2"]);
+      expect(harness.state.rerankStates.get("t3")!.lastLookKind).toBe("timed");
+      expect(harness.state.rerankStates.get("t2")!.lastLookKind).toBe("timed");
     });
   });
 

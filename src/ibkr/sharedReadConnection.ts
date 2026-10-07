@@ -166,6 +166,12 @@ export class SharedReadConnection {
     this.tunnel = null;
   }
 
+  /** Listeners registered on the current IBApi, across every event: a count that keeps climbing is a listener leak. */
+  listenerCount(): number {
+    const ib = this.ib as unknown as { eventNames(): (string | symbol)[]; listenerCount(event: string | symbol): number } | null;
+    return ib ? ib.eventNames().reduce((sum, event) => sum + ib.listenerCount(event), 0) : 0;
+  }
+
   getHealthSnapshot(): { connected: boolean; uptimeMs: number | null; totalReconnects: number } {
     return {
       connected: this.ib !== null,

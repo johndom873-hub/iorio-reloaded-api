@@ -110,7 +110,7 @@ export function plutoDecisionFromJev(answers: Record<string, JevAnswer>, offered
   const probability = action.probabilities[action.choice] ?? 0;
   const summary = `jev: ${action.choice} p=${probability.toFixed(2)} confidence=${action.confidence.toFixed(2)}${concernProbability !== null ? ` stand_aside=${concernProbability.toFixed(2)}` : ""}`;
   if (concernProbability !== null && concernProbability >= 0.5) {
-    return { decision: "abstain_system_concern", actionKind: null, candidateId: null, confidence: concernProbability, reasons: [summary], risksAcknowledged: [], systemConcerns: [`jev stand-aside probability ${concernProbability.toFixed(2)}`] };
+    return { decision: "abstain_system_concern", actionKind: null, candidateId: null, confidence: concernProbability, reasons: [summary], risksAcknowledged: [], systemConcerns: [{ symbol: null, concern: `jev stand-aside probability ${concernProbability.toFixed(2)}` }] };
   }
   if (action.choice === "no_trade" || !offeredIds.has(action.choice)) {
     return { decision: "no_trade", actionKind: null, candidateId: null, confidence: action.confidence, reasons: [summary], risksAcknowledged: [], systemConcerns: [] };

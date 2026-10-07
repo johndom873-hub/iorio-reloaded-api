@@ -1,8 +1,8 @@
 import { db } from "../db/connection.js";
 import { reconciliationRunFailedPrefix } from "../ibkr/checkIbkrHealthJob.js";
-import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
+import { fetchPlutoAccountSummary } from "./accountSummaryCache.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
-import { computeMarketSessionStatus, easternDateIso, easternInstant, type MarketSessionState } from "../lib/marketSessionStatus.js";
+import { computeMarketSessionStatus, easternInstant, type MarketSessionState } from "../lib/marketSessionStatus.js";
 import { fetchTradingHalt } from "../lib/platformControls.js";
 import { classifyTradingStatus } from "../lib/tradingGate.js";
 import { countTrailingModelFailures, loadPlutoTodayCounters, type PlutoTodayCounters } from "./counters.js";
@@ -10,6 +10,7 @@ import type { PlutoSystemCheck } from "./ledger.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { resolvePlutoSession, type PlutoSession } from "./sessionSchedule.js";
 import { describePlutoBlock, loadPlutoState, type PlutoState } from "./stateStore.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // Pre-model system gates (design round 3, item 19, approved 2026-09-28). Every check runs and is
 // recorded on the pass row, so the screen shows the whole board, not just the first failure;
@@ -80,7 +81,7 @@ export function dailyLossPercent(netLiquidationValue: number | null, previousNet
 }
 
 export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = new Date()): Promise<PlutoSystemChecksResult> {
-  const todayEasternIso = easternDateIso(now);
+  const todayEasternIso = easternIsoDate(now);
   const checks: Record<string, PlutoSystemCheck> = {};
   const record = (name: string, ok: boolean, detail: string) => {
     checks[name] = { ok, detail };
@@ -123,7 +124,7 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   let netLiquidationValue: number | null = null;
   let totalCashValue: number | null = null;
   try {
-    const account = await fetchAccountSummary();
+    const account = await fetchPlutoAccountSummary();
     netLiquidationValue = account.netLiquidationValue;
     totalCashValue = account.totalCashValue;
     record("account_data", netLiquidationValue !== null && netLiquidationValue > 0, netLiquidationValue !== null ? `NLV ${netLiquidationValue.toFixed(0)}` : "net liquidation value unavailable");

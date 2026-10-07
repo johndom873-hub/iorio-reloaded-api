@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import type { SessionHours } from "../ibkr/fetchLiquidHours.js";
-import { easternDateIso } from "./marketSessionStatus.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // The session close (half days included) from IBKR's liquid hours for SPY, stored in market_calendar.close_time. Read
 // every trading morning by the option-chain structure job in every environment (Marcelo 2026-10-05: staging and
@@ -22,7 +22,7 @@ export async function recordSessionCloseFromIbkr(fetchHours: () => Promise<Sessi
       .merge(["close_time", "close_time_source", "close_time_read_at"]);
     datesWritten.push(day.dateIso);
   }
-  const todayIso = easternDateIso(now);
+  const todayIso = easternIsoDate(now);
   const today = days.find((day) => day.dateIso === todayIso);
   return { todayCloseTimeEt: today && !today.closed ? today.closeHhmm : null, datesWritten };
 }
