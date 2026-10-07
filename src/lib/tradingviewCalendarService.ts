@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { easternIsoDate } from "./easternIsoDate.js";
 
 // Earnings/dividend/economic-calendar data sourced from TradingView's
 // public, unauthenticated endpoints -- same pattern already proven in
@@ -154,16 +155,31 @@ export function fetchDividendEvents(tvTickers: string[], fromSec: number, toSec:
   return scanTradingView(tvTickers, DIVIDEND_COLUMNS, "dividend_ex_date_recent,dividend_ex_date_upcoming", fromSec, toSec);
 }
 
-/** Writes earnings rows (from fetchEarningsEvents) to ticker_calendar_events. Returns rows written. */
-export async function upsertEarningsEvents(rows: Record<string, unknown>[], tickerIdByTvTicker: Map<string, string>): Promise<number> {
+/**
+ * Removes a ticker's other dates of this type from today on: TradingView reports one recent and one next date, so a future
+ * row it no longer reports is one it has moved. Only when it reports a next date at all,
+ * and never a past row (the API Ninjas earnings history lives there).
+ */
+async function deleteRevisedFutureDates(tickerId: string, eventType: "earnings" | "ex_dividend", reportedDatesIso: string[], todayIso: string): Promise<void> {
+  await db("ticker_calendar_events").where({ ticker_id: tickerId, event_type: eventType }).where("event_date", ">=", todayIso).whereNotIn("event_date", reportedDatesIso).delete();
+}
+
+function eventDateIso(epochSeconds: unknown): string | null {
+  return epochSeconds === null || epochSeconds === undefined ? null : new Date((epochSeconds as number) * 1000).toISOString().slice(0, 10);
+}
+
+/** Writes earnings rows (from fetchEarningsEvents) to ticker_calendar_events, replacing a next date TradingView has moved. Returns rows written. */
+export async function upsertEarningsEvents(rows: Record<string, unknown>[], tickerIdByTvTicker: Map<string, string>, todayIso: string = easternIsoDate(new Date())): Promise<number> {
   let written = 0;
   for (const row of rows) {
     const tickerId = tickerIdByTvTicker.get(row.tvTicker as string);
     if (!tickerId) continue;
+    const nextDateIso = eventDateIso(row.earnings_release_next_date);
+    if (nextDateIso) await deleteRevisedFutureDates(tickerId, "earnings", [nextDateIso, eventDateIso(row.earnings_release_date)].filter((date): date is string => date !== null), todayIso);
     for (const dateField of ["earnings_release_date", "earnings_release_next_date"] as const) {
       const raw = row[dateField];
       if (raw === null || raw === undefined) continue;
-      const eventDate = new Date((raw as number) * 1000).toISOString().slice(0, 10);
+      const eventDate = eventDateIso(raw)!;
       const eventTime = row[dateField === "earnings_release_date" ? "earnings_release_time" : "earnings_release_next_time"];
       await db("ticker_calendar_events")
         .insert({
@@ -181,19 +197,21 @@ export async function upsertEarningsEvents(rows: Record<string, unknown>[], tick
   return written;
 }
 
-/** Writes dividend rows (from fetchDividendEvents) to ticker_calendar_events. Returns rows written. */
-export async function upsertDividendEvents(rows: Record<string, unknown>[], tickerIdByTvTicker: Map<string, string>): Promise<number> {
+/** Writes dividend rows (from fetchDividendEvents) to ticker_calendar_events, replacing an upcoming ex-date TradingView has moved. Returns rows written. */
+export async function upsertDividendEvents(rows: Record<string, unknown>[], tickerIdByTvTicker: Map<string, string>, todayIso: string = easternIsoDate(new Date())): Promise<number> {
   let written = 0;
   for (const row of rows) {
     const tickerId = tickerIdByTvTicker.get(row.tvTicker as string);
     if (!tickerId) continue;
+    const upcomingDateIso = eventDateIso(row.dividend_ex_date_upcoming);
+    if (upcomingDateIso) await deleteRevisedFutureDates(tickerId, "ex_dividend", [upcomingDateIso, eventDateIso(row.dividend_ex_date_recent)].filter((date): date is string => date !== null), todayIso);
     for (const [dateField, amountField] of [
       ["dividend_ex_date_recent", "dividend_amount_recent"],
       ["dividend_ex_date_upcoming", "dividend_amount_upcoming"],
     ] as const) {
       const raw = row[dateField];
       if (raw === null || raw === undefined) continue;
-      const eventDate = new Date((raw as number) * 1000).toISOString().slice(0, 10);
+      const eventDate = eventDateIso(raw)!;
       const amount = row[amountField];
       await db("ticker_calendar_events")
         .insert({

@@ -521,3 +521,26 @@ describe("appendMissingContractQuotes (Roll Signals)", () => {
     expect(appendMissingContractQuotes(snapshot, [], day, live)).toBe(snapshot);
   });
 });
+
+describe("rolls never cross earnings (Marcelo 2026-10-07)", () => {
+  // The 60-day slice carries twice the 30-day total variance (same volatility per year), so time has value and a credit roll exists.
+  const farParams: RawSviParameters = { ...params, a: params.a * 2, b: params.b * 2 };
+  const farPut = (strike: number): SignalQuote => {
+    const iv = Math.sqrt(sviTotalVariance(farParams, Math.log(strike / forward)) / years60);
+    const mid = blackScholesPriceOnForward(forward, strike, years60, rate, iv, false);
+    return { expiry: "2026-11-20", strike, right: "P", bid: mid * 0.98, ask: mid * 1.02, source: "snapshot" };
+  };
+  const rollInputs = (earningsDatesIso: string[]) =>
+    inputs({
+      slices: [slice("2026-10-21", years30), slice("2026-11-20", years60, { parameters: farParams })],
+      quotes: [quoteAt(92, "P", "2026-10-21", years30), farPut(86)],
+      openShortLegs: [{ legId: "leg1", positionId: "pos1", strategyKey: "cash_secured_put", expiry: "2026-10-21", strike: 92, right: "P", quantity: 1, entryPrice: 5, entryAtIso: "2026-09-01T14:00:00Z" }],
+      earningsDatesIso,
+    });
+
+  it("offers no roll whose new expiry is on or after a known earnings date", () => {
+    expect(scoreTicker(rollInputs([]), account, permissiveSettings).rolls.map((roll) => `${roll.replacement.expiry} ${roll.replacement.strike}`)).toEqual(["2026-11-20 86"]);
+    expect(scoreTicker(rollInputs(["2026-11-05"]), account, permissiveSettings).rolls).toEqual([]);
+    expect(scoreTicker(rollInputs(["2026-11-25"]), account, permissiveSettings).rolls).toHaveLength(1); // after the new expiry: allowed
+  });
+});

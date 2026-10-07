@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface RecordedDatabaseCall {
   table: string;
-  operation: "first" | "update" | "insert";
+  operation: "first" | "update" | "insert" | "delete";
   where?: unknown;
+  conditions?: unknown[];
   columns?: unknown;
   values?: unknown;
   conflictColumns?: unknown;
@@ -16,10 +17,20 @@ const storedTradingViewTickerByTickerId = new Map<string, string | null>();
 vi.mock("../db/connection.js", () => ({
   db: (table: string) => {
     let whereClause: unknown;
+    const conditions: unknown[] = [];
     const builder = {
-      where(clause: unknown) {
-        whereClause = clause;
+      where(...args: unknown[]) {
+        if (args.length === 1) whereClause = args[0];
+        else conditions.push(args);
         return builder;
+      },
+      whereNotIn(column: string, values: unknown[]) {
+        conditions.push(["not in", column, values]);
+        return builder;
+      },
+      async delete() {
+        recordedDatabaseCalls.push({ table, operation: "delete", where: whereClause, conditions });
+        return 0;
       },
       async first(...columns: unknown[]) {
         recordedDatabaseCalls.push({ table, operation: "first", where: whereClause, columns });
@@ -335,6 +346,18 @@ describe("fetchEarningsEvents and fetchDividendEvents", () => {
 
 describe("upsertEarningsEvents", () => {
   const tickerIdByTvTicker = new Map([["NASDAQ:AAPL", "ticker-aapl"]]);
+
+  it("removes the ticker's other earnings dates from today on, keeping the two TradingView reports", async () => {
+    await upsertEarningsEvents([{ tvTicker: "NASDAQ:AAPL", earnings_release_date: OCTOBER_30_SECONDS, earnings_release_next_date: NOVEMBER_15_SECONDS }], tickerIdByTvTicker, "2026-10-07");
+    expect(recordedDatabaseCalls.filter((call) => call.operation === "delete")).toEqual([
+      { table: "ticker_calendar_events", operation: "delete", where: { ticker_id: "ticker-aapl", event_type: "earnings" }, conditions: [["event_date", ">=", "2026-10-07"], ["not in", "event_date", ["2026-11-15", "2026-10-30"]]] },
+    ]);
+  });
+
+  it("removes nothing when TradingView reports no next date", async () => {
+    await upsertEarningsEvents([{ tvTicker: "NASDAQ:AAPL", earnings_release_date: OCTOBER_30_SECONDS, earnings_release_next_date: null }], tickerIdByTvTicker, "2026-10-07");
+    expect(recordedDatabaseCalls.filter((call) => call.operation === "delete")).toEqual([]);
+  });
 
   it("writes one event per non-null earnings date with its matching release time", async () => {
     const row = {

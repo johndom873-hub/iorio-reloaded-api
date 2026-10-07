@@ -4,6 +4,8 @@ import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandida
 import type { PlutoCloseActionOffer } from "./prompt.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { formatSignedDollars } from "../lib/formatSignedDollars.js";
+import { resolveIsOpenDay } from "../lib/marketSessionStatus.js";
+import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 
 // Formulas P1 and P2 (approved 2026-09-28) as deterministic offers. The model never invents a
 // close: code decides which closes are even on the table, the model chooses among them (or the
@@ -21,6 +23,11 @@ import { formatSignedDollars } from "../lib/formatSignedDollars.js";
 //   The leg's premium for the loss check is the price we set on it when it was opened by a two-part
 //   order (Marcelo 2026-09-29): IBKR fills a combo at exactly its net but splits it between the legs
 //   its own way, so its recorded fill for one leg is arbitrary (orderedEntryPremium).
+// P3 — earnings buyback (approved 2026-10-07): a single-leg short whose expiry is on or after the ticker's next earnings
+//   announcement is bought back by code, without a model call, within the last earningsBuybackWindowSessions sessions before
+//   the announcement, and only when its P&L at the ask is positive (never at a loss). The last session before the
+//   announcement is the report day for an after-close report, the session before it otherwise (before the open, or a time
+//   TradingView does not know). P2's hold-edge, roll and minimum-DTE conditions do not apply: the point is the event.
 
 export interface UnstructuredSharePosition {
   positionId: string;
@@ -35,8 +42,9 @@ export interface UnstructuredSharePosition {
 export interface CloseOffer extends PlutoCloseActionOffer {
   positionId: string;
   legIds: string[];
-  /** Executed by code without a model call (odd lots). */
+  /** Executed by code without a model call (odd lots, earnings buybacks), with the rule that did it. */
   automatic: boolean;
+  automaticReason: string | null;
   /** Reference price for the order and the pessimistic bracket. */
   limitPrice: number;
   side: "sell" | "buy";
@@ -148,6 +156,7 @@ export function evaluateUnstructuredClose(input: P1Input): { offer: CloseOffer |
       positionId: position.positionId,
       legIds: [position.legId],
       automatic: oddLot,
+      automaticReason: oddLot ? "odd lot below 100 shares at a positive cycle P&L (Formula P1)" : null,
       limitPrice,
       side: "sell",
       multiplier: 1,
@@ -193,6 +202,7 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
       positionId: leg.positionId,
       legIds: [leg.legId],
       automatic: false,
+      automaticReason: null,
       limitPrice,
       side: "buy",
       multiplier: 100,
@@ -201,6 +211,92 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
     },
     reason: null,
   };
+}
+
+export const earningsBuybackWindowSessions = 5;
+
+export interface UpcomingEarnings {
+  dateIso: string;
+  /** TradingView's event_time: "-1" before the open, "1" after the close, "0" or null unknown. */
+  time: string | null;
+}
+
+const earningsTimeLabel = (time: string | null) => (time === "1" ? "after the close" : time === "-1" ? "before the open" : "time unknown");
+
+/** The ticker's next earnings announcement still to come (a report before today's open is already out). */
+export async function loadUpcomingEarnings(symbol: string, todayIso: string): Promise<UpcomingEarnings | null> {
+  const row = await db("ticker_calendar_events as e")
+    .join("tickers as t", "t.id", "e.ticker_id")
+    .where({ "t.symbol": symbol, "e.event_type": "earnings" })
+    .where("e.event_date", ">=", todayIso)
+    .whereRaw("not (e.event_date = ?::date and e.event_time is not distinct from '-1')", [todayIso])
+    .orderBy("e.event_date")
+    .first(db.raw("e.event_date::text as \"dateIso\""), "e.event_time as time");
+  return row ? { dateIso: row.dateIso, time: row.time ?? null } : null;
+}
+
+/** Pure: open sessions from today through the last session before the announcement (at least 1 while it is still ahead). */
+export function countSessionsLeftBeforeEarnings(todayIso: string, earnings: UpcomingEarnings, openDaysIso: string[]): number {
+  const announcementDayCounts = earnings.time === "1" && openDaysIso.includes(earnings.dateIso);
+  const lastSession = [...openDaysIso].filter((day) => (announcementDayCounts ? day <= earnings.dateIso : day < earnings.dateIso)).sort().at(-1);
+  if (!lastSession) return 1;
+  return Math.max(1, openDaysIso.filter((day) => day >= todayIso && day <= lastSession).length);
+}
+
+/** Calendar days today..date inclusive (YYYY-MM-DD). */
+function calendarDaysThrough(todayIso: string, endIso: string): string[] {
+  const days: string[] = [];
+  for (let at = Date.parse(`${todayIso}T12:00:00Z`); at <= Date.parse(`${endIso}T12:00:00Z`); at += 86_400_000) days.push(new Date(at).toISOString().slice(0, 10));
+  return days;
+}
+
+export interface P3Input {
+  symbol: string;
+  leg: HeldLegScore;
+  singleLegPosition: boolean;
+  orderedEntryPremium?: number | null;
+  earnings: UpcomingEarnings | null;
+  /** countSessionsLeftBeforeEarnings, or null when the announcement is too far off to count. */
+  sessionsLeft: number | null;
+}
+
+/** Pure P3: the automatic buyback, the reason there is none, or neither when the leg does not span an announcement. */
+export function evaluateEarningsBuyback(input: P3Input): { offer: CloseOffer | null; reason: string | null } {
+  const { leg, earnings } = input;
+  if (!earnings || leg.expiry < earnings.dateIso) return { offer: null, reason: null };
+  const spans = `expires after the ${earnings.dateIso} earnings (${earningsTimeLabel(earnings.time)})`;
+  if (!input.singleLegPosition) return { offer: null, reason: `${spans}, but buybacks are limited to single-leg positions` };
+  if (input.sessionsLeft === null || input.sessionsLeft > earningsBuybackWindowSessions) return { offer: null, reason: `${spans}; bought back only in the last ${earningsBuybackWindowSessions} sessions before it` };
+  if (leg.ask === null || leg.bid === null || !(leg.ask > 0) || leg.ask < leg.bid) return { offer: null, reason: `${spans}; no live two-sided quote on the held leg` };
+  const entryPremium = input.orderedEntryPremium ?? leg.entryPrice;
+  const pnlAtAsk = (entryPremium - leg.ask) * leg.quantity * 100;
+  if (pnlAtAsk <= 0) return { offer: null, reason: `${spans}; buying back at the ask would ${pnlAtAsk < 0 ? `lose ${formatSignedDollars(-pnlAtAsk, 0)}` : "only break even"}, so it stays open` };
+  const limitPrice = Math.round(((leg.bid + leg.ask) / 2) * 100) / 100;
+  return {
+    offer: {
+      id: `${input.symbol}:close_leg:${leg.legId}`,
+      kind: "close_leg",
+      symbol: input.symbol,
+      description: `Buy back ${leg.quantity}× ${input.symbol} $${leg.strike}${leg.right} ${leg.expiry} at ~${limitPrice.toFixed(2)} (sold at ${entryPremium.toFixed(2)}) before the ${earnings.dateIso} earnings; locks ${pnlAtAsk.toFixed(0)} at the ask`,
+      cycle_pnl: pnlAtAsk,
+      detail: { dte: leg.dte, entry_credit: entryPremium, recorded_entry_credit: leg.entryPrice, ask: leg.ask, earnings_date: earnings.dateIso, earnings_time: earnings.time, sessions_left: input.sessionsLeft, pnl_at_ask: Math.round(pnlAtAsk) },
+      positionId: leg.positionId,
+      legIds: [leg.legId],
+      automatic: true,
+      automaticReason: `${spans}: bought back at a profit within the last ${earningsBuybackWindowSessions} sessions before it (Formula P3)`,
+      limitPrice,
+      side: "buy",
+      multiplier: 100,
+      quantity: leg.quantity,
+      contract: { strategyKey: leg.right === "C" ? "covered_call" : "cash_secured_put", expiry: leg.expiry, strike: leg.strike, right: leg.right },
+    },
+    reason: null,
+  };
+}
+
+/** Whether the position already has an order that may still be working (a second one would be refused by the order route). */
+async function positionHasActiveOrder(positionId: string): Promise<boolean> {
+  return Boolean(await db("order_requests").where({ related_position_id: positionId }).whereIn("status", activeOrderRequestStatuses).first("id"));
 }
 
 /** Everything close-related for one ticker this pass: offers for the model, automatic ones for code, and why the rest were skipped. */
@@ -212,6 +308,7 @@ export async function buildCloseOffersForTicker(input: {
   stockBid: number | null;
   stockAsk: number | null;
   previousSessionDateIso: string;
+  todayIso: string;
 }): Promise<{ offers: CloseOffer[]; skipped: { id: string; reason: string }[] }> {
   const offers: CloseOffer[] = [];
   const skipped: { id: string; reason: string }[] = [];
@@ -226,14 +323,27 @@ export async function buildCloseOffersForTicker(input: {
     const legCounts: { position_id: string; count: string }[] = await db("position_legs").whereIn("position_id", [...new Set(input.heldLegs.map((leg) => leg.positionId))]).whereNull("exit_at").groupBy("position_id").select("position_id").count("* as count");
     const openLegCountByPosition = new Map(legCounts.map((row) => [row.position_id, Number(row.count)]));
     const openingTradesByLeg = await loadOpeningTradesForPremium(input.heldLegs.map((leg) => leg.legId));
+    const earnings = await loadUpcomingEarnings(input.symbol, input.todayIso);
+    // Five sessions never reach past fourteen calendar days, so a later announcement needs no calendar lookups.
+    const earningsDays = earnings && Date.parse(earnings.dateIso) - Date.parse(input.todayIso) <= 14 * 86_400_000 ? calendarDaysThrough(input.todayIso, earnings.dateIso) : null;
+    const openDays = earningsDays ? (await Promise.all(earningsDays.map(async (day) => ((await resolveIsOpenDay(day)) ? day : null)))).filter((day): day is string => day !== null) : null;
+    const sessionsLeft = earnings && openDays ? countSessionsLeftBeforeEarnings(input.todayIso, earnings, openDays) : null;
     for (const leg of input.heldLegs) {
+      const singleLegPosition = (openLegCountByPosition.get(leg.positionId) ?? 0) === 1;
+      const orderedPremium = orderedEntryPremium(leg.entryPrice, openingTradesByLeg.get(leg.legId) ?? []);
+      const earningsResult = evaluateEarningsBuyback({ symbol: input.symbol, leg, singleLegPosition, orderedEntryPremium: orderedPremium, earnings, sessionsLeft });
+      if (earningsResult.offer && !(await positionHasActiveOrder(leg.positionId))) {
+        offers.push(earningsResult.offer);
+        continue;
+      }
+      if (earningsResult.reason) skipped.push({ id: `${input.symbol}:earnings_close:${leg.legId}`, reason: earningsResult.reason });
       const result = evaluateShortLegBuyback({
         symbol: input.symbol,
         leg,
         rolls: input.rolls,
         settings: input.settings,
-        singleLegPosition: (openLegCountByPosition.get(leg.positionId) ?? 0) === 1,
-        orderedEntryPremium: orderedEntryPremium(leg.entryPrice, openingTradesByLeg.get(leg.legId) ?? []),
+        singleLegPosition,
+        orderedEntryPremium: orderedPremium,
       });
       if (result.offer) offers.push(result.offer);
       else skipped.push({ id: `${input.symbol}:close_leg:${leg.legId}`, reason: result.reason ?? "not offered" });

@@ -14,6 +14,10 @@ import { impliedVolatilityMinPercent, twoSidedQuoteMinPercent } from "./optionCh
 export const riskFreeRateMaxAgeDays = 25;
 export const marketCalendarCoverageDays = 14;
 export const calendarEventDataMaxAgeHours = 36;
+/** Two earnings dates of one ticker closer than this are a data error: reports come about every 91 days (approved 2026-10-07). */
+export const earningsDatesMinGapDays = 45;
+/** How far back the earnings check looks: the older history (API Ninjas) has real same-week oddities that are harmless now. */
+export const earningsDatesLookbackDays = 30;
 
 export interface InvariantResult {
   name: string;
@@ -43,6 +47,8 @@ export interface DataInvariantInputs {
   marketCalendarDaysAhead: number;
   latestTickerCalendarCapturedAt: Date | null;
   latestEconomicCalendarCapturedAt: Date | null;
+  /** Earnings dates (YYYY-MM-DD) from earningsDatesLookbackDays ago on, per universe ticker. */
+  earningsDatesBySymbol: Record<string, string[]>;
 }
 
 const list = (symbols: string[]): string => symbols.join(", ");
@@ -116,6 +122,12 @@ export function evaluateDataInvariants(input: DataInvariantInputs): InvariantRes
       results.push({ name, ok: ageHours <= calendarEventDataMaxAgeHours, detail: `captured ${Math.round(ageHours)} h ago${ageHours > calendarEventDataMaxAgeHours ? `, older than ${calendarEventDataMaxAgeHours} h` : ""}` });
     }
   }
+  const tooClose = Object.entries(input.earningsDatesBySymbol).flatMap(([symbol, dates]) => {
+    const sorted = [...dates].sort();
+    const pair = sorted.slice(1).map((date, index) => [sorted[index]!, date] as const).find(([earlier, later]) => (Date.parse(later) - Date.parse(earlier)) / 86_400_000 < earningsDatesMinGapDays);
+    return pair ? [`${symbol} (${pair[0]} and ${pair[1]})`] : [];
+  });
+  results.push(result("Earnings dates", tooClose, `no ticker has two earnings dates within ${earningsDatesMinGapDays} days`, `two earnings dates within ${earningsDatesMinGapDays} days`));
   return results;
 }
 
@@ -155,13 +167,21 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
     .groupBy("t.symbol")
     .select("t.symbol", db.raw("max(b.trading_date)::text as latest"));
 
-  const [poolRow, rateRow, calendarRow, tickerCalendarRow, economicCalendarRow] = await Promise.all([
+  const [poolRow, rateRow, calendarRow, tickerCalendarRow, economicCalendarRow, earningsRows] = await Promise.all([
     db("day_signal_expiries").whereRaw("trading_date::text = ?", [todayEasternIso]).count<{ count: string }[]>("* as count").first(),
     db("risk_free_rates").max<{ fetched_at: Date | null }[]>("fetched_at as fetched_at").first(),
     db("market_calendar").whereRaw("calendar_date > ?::date and calendar_date <= (?::date + ?::int)", [todayEasternIso, todayEasternIso, marketCalendarCoverageDays]).count<{ count: string }[]>("* as count").first(),
     db("ticker_calendar_events").max<{ captured_at: Date | null }[]>("captured_at as captured_at").first(),
     db("economic_calendar_events").max<{ captured_at: Date | null }[]>("captured_at as captured_at").first(),
+    db("ticker_calendar_events as e")
+      .join("tickers as t", "t.id", "e.ticker_id")
+      .whereIn("e.ticker_id", universeTickerIds)
+      .where("e.event_type", "earnings")
+      .whereRaw("e.event_date >= ?::date - ?::int", [todayEasternIso, earningsDatesLookbackDays])
+      .select("t.symbol", db.raw("e.event_date::text as date")) as Promise<{ symbol: string; date: string }[]>,
   ]);
+  const earningsDatesBySymbol: Record<string, string[]> = {};
+  for (const row of earningsRows) (earningsDatesBySymbol[row.symbol] ??= []).push(row.date);
 
   return {
     now,
@@ -182,5 +202,6 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
     marketCalendarDaysAhead: Number(calendarRow?.count ?? 0),
     latestTickerCalendarCapturedAt: tickerCalendarRow?.captured_at ? new Date(tickerCalendarRow.captured_at) : null,
     latestEconomicCalendarCapturedAt: economicCalendarRow?.captured_at ? new Date(economicCalendarRow.captured_at) : null,
+    earningsDatesBySymbol,
   };
 }

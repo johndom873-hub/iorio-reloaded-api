@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
-import { evaluateShortLegBuyback, evaluateUnstructuredClose, orderedEntryPremium, type UnstructuredSharePosition } from "./closeActions.js";
+import { countSessionsLeftBeforeEarnings, evaluateEarningsBuyback, evaluateShortLegBuyback, evaluateUnstructuredClose, orderedEntryPremium, type UnstructuredSharePosition } from "./closeActions.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 const settings = { unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50, buybackMinDte: 2 } as PlutoSettings;
@@ -79,5 +79,50 @@ describe("orderedEntryPremium", () => {
     expect(orderedEntryPremium(2.0, [{ quantity: 2, price: 2.01, orderedLegPrice: null }])).toBeNull();
     expect(orderedEntryPremium(2.0, [])).toBeNull();
     expect(orderedEntryPremium(2.0, [{ quantity: 1, price: 2.1, orderedLegPrice: 1.9 }, { quantity: 3, price: 2.0, orderedLegPrice: null }])).toBeCloseTo(1.95, 6);
+  });
+});
+
+describe("Formula P3 — earnings buyback", () => {
+  const leg: HeldLegScore = {
+    legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, right: "P", quantity: 2, entryPrice: 2.4, entryAtIso: "2026-09-10T14:00:00Z",
+    dte: 18, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42, edge: -0.05, frictionVolatility: 0.01, vega: 0.05, holdEdgeDollars: -25, closeCostDollars: 5, dollarRisk: 9948, quoteSource: "day", quotedAt: "2026-09-28T15:00:00Z", flags: [], unscoredReason: null,
+  };
+  // HOOD reports 2026-10-27 after the close; the put expires 2026-10-30.
+  const earnings = { dateIso: "2026-10-27", time: "1" };
+  const base = { symbol: "HOOD", leg: { ...leg, expiry: "2026-10-30" }, singleLegPosition: true, earnings, sessionsLeft: 3 };
+
+  it("buys back automatically at the mid inside the last 5 sessions when the ask locks a profit", () => {
+    const { offer, reason } = evaluateEarningsBuyback(base);
+    expect(reason).toBeNull();
+    expect(offer).toMatchObject({ id: "HOOD:close_leg:leg9", kind: "close_leg", automatic: true, side: "buy", quantity: 2, limitPrice: 0.53 });
+    expect(offer!.automaticReason).toContain("Formula P3");
+  });
+  it("never at a loss, never before the window, only on single-leg positions, only with a live quote", () => {
+    expect(evaluateEarningsBuyback({ ...base, leg: { ...base.leg, bid: 2.5, ask: 2.6 } }).reason).toMatch(/would lose \$\d+, so it stays open$/);
+    expect(evaluateEarningsBuyback({ ...base, sessionsLeft: 6 }).offer).toBeNull();
+    expect(evaluateEarningsBuyback({ ...base, sessionsLeft: null }).reason).toMatch(/last 5 sessions/);
+    expect(evaluateEarningsBuyback({ ...base, singleLegPosition: false }).reason).toMatch(/single-leg/);
+    expect(evaluateEarningsBuyback({ ...base, leg: { ...base.leg, ask: null } }).reason).toMatch(/two-sided quote/);
+  });
+  it("does nothing for a leg that expires before the announcement, or with no announcement", () => {
+    expect(evaluateEarningsBuyback({ ...base, leg: { ...base.leg, expiry: "2026-10-23" } })).toEqual({ offer: null, reason: null });
+    expect(evaluateEarningsBuyback({ ...base, earnings: null })).toEqual({ offer: null, reason: null });
+  });
+});
+
+describe("countSessionsLeftBeforeEarnings", () => {
+  // Oct 2026: 19–23 and 26–30 are open sessions.
+  const openDays = ["2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-26", "2026-10-27"];
+  it("counts the report day for an after-close report", () => {
+    expect(countSessionsLeftBeforeEarnings("2026-10-21", { dateIso: "2026-10-27", time: "1" }, openDays.filter((day) => day >= "2026-10-21"))).toBe(5); // 21, 22, 23, 26, 27
+    expect(countSessionsLeftBeforeEarnings("2026-10-20", { dateIso: "2026-10-27", time: "1" }, openDays.filter((day) => day >= "2026-10-20"))).toBe(6);
+  });
+  it("stops at the session before a before-open or unknown-time report", () => {
+    expect(countSessionsLeftBeforeEarnings("2026-10-21", { dateIso: "2026-10-27", time: "-1" }, openDays.filter((day) => day >= "2026-10-21"))).toBe(4); // 21, 22, 23, 26
+    expect(countSessionsLeftBeforeEarnings("2026-10-21", { dateIso: "2026-10-27", time: null }, openDays.filter((day) => day >= "2026-10-21"))).toBe(4);
+  });
+  it("is 1 on the last day, and while an unknown-time report today is still ahead", () => {
+    expect(countSessionsLeftBeforeEarnings("2026-10-27", { dateIso: "2026-10-27", time: "1" }, ["2026-10-27"])).toBe(1);
+    expect(countSessionsLeftBeforeEarnings("2026-10-27", { dateIso: "2026-10-27", time: "0" }, ["2026-10-27"])).toBe(1);
   });
 });

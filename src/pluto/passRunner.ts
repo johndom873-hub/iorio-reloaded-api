@@ -134,11 +134,11 @@ async function loadMoveContext(ticker: EvaluatedTicker): Promise<MoveContext | n
  */
 async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string, cancelByMs: number, executeAutomatic: boolean): Promise<void> {
   const watched = context.marketWatch.snapshot(ticker.row.symbol);
-  const { offers } = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: ticker.scored.heldLegs, rolls: ticker.scored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso });
+  const { offers } = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: ticker.scored.heldLegs, rolls: ticker.scored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso, todayIso: ticker.inputs.todayEasternIso });
   for (const offer of offers) {
     if (!offer.automatic || !executeAutomatic) continue;
-    const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds, ...(offer.contract ?? {}) }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: "odd lot below 100 shares at a positive cycle P&L (Formula P1)" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
-    const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.limitPrice })), description: offer.description, reasons: ["automatic odd-lot close (Formula P1)"] });
+    const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds, ...(offer.contract ?? {}) }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: offer.automaticReason ?? "automatic close" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
+    const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.limitPrice })), description: offer.description, reasons: [`automatic close: ${offer.automaticReason ?? "no reason recorded"}`] });
     if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier }, description: offer.description, cancelByMs }), result.orderId, offer.symbol);
   }
   ticker.closeOffers = offers.filter((offer) => !offer.automatic);
@@ -477,7 +477,7 @@ export async function runPlutoPass(request: PassRequest, context: PassRunnerCont
     // Re-derive the offer fresh: the cycle P&L, the quote and the leg's edge can all have moved.
     const watched = context.marketWatch.snapshot(ticker.row.symbol);
     const freshScored = (await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now())).scored;
-    const rebuilt = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: freshScored.heldLegs, rolls: freshScored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso });
+    const rebuilt = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: freshScored.heldLegs, rolls: freshScored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso, todayIso: checks.context.todayEasternIso });
     const freshOffer = rebuilt.offers.find((entry) => entry.id === offer.id) ?? null;
     const gateResults: PlutoGateResult[] = [
       { gate: "verdict", ok: true, detail: "trade" },

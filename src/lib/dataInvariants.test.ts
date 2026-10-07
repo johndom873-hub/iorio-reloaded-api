@@ -23,6 +23,7 @@ const healthyInputs = (): DataInvariantInputs => ({
   marketCalendarDaysAhead: 14,
   latestTickerCalendarCapturedAt: new Date("2026-09-30T20:00:00Z"),
   latestEconomicCalendarCapturedAt: new Date("2026-09-30T20:00:00Z"),
+  earningsDatesBySymbol: { AAA: ["2026-09-10", "2026-12-09"], BBB: ["2026-10-28"] },
 });
 const failing = (inputs: DataInvariantInputs) => evaluateDataInvariants(inputs).filter((result) => !result.ok);
 
@@ -77,6 +78,12 @@ describe("evaluateDataInvariants", () => {
   it("flags short market-calendar coverage and stale or missing calendar data", () => {
     const problems = failing({ ...healthyInputs(), marketCalendarDaysAhead: 13, latestTickerCalendarCapturedAt: new Date("2026-09-29T00:00:00Z"), latestEconomicCalendarCapturedAt: null });
     expect(problems.map((problem) => problem.name)).toEqual(["Market calendar", "Ticker calendar (earnings, dividends)", "Economic calendar"]);
+  });
+
+  it("flags a ticker with two earnings dates less than 45 days apart (a moved date left behind)", () => {
+    const problems = failing({ ...healthyInputs(), earningsDatesBySymbol: { AAA: ["2026-09-10", "2026-12-09"], HOOD: ["2026-11-04", "2026-10-27"] } });
+    expect(problems).toEqual([{ name: "Earnings dates", ok: false, detail: "two earnings dates within 45 days: HOOD (2026-10-27 and 2026-11-04)" }]);
+    expect(failing({ ...healthyInputs(), earningsDatesBySymbol: { AAA: ["2026-09-10", "2026-10-25"] } })).toEqual([]); // exactly 45 days
   });
 
   it("does not repeat a failed snapshot as a missing rate or thin coverage (it is already reported as not complete)", () => {
