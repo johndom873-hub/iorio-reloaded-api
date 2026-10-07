@@ -170,4 +170,12 @@ describe("shortlist membership", () => {
     expect(onRow).toMatchObject({ signalsEnabled: true, impliedVolatility: expect.stringMatching(/^0\.42/), avgOptionVolume: expect.anything() });
     expect(offRow).toMatchObject({ signalsEnabled: false, impliedVolatility: null, avgOptionVolume: null });
   });
+
+  it("switched back on: an IV snapshot older than the ticker's latest bar is not shown (dash until the next nightly run)", async () => {
+    const ticker = await shortlistedTicker({ signalsEnabled: true });
+    await bars(ticker.id, { "2026-09-01": 9, "2026-10-05": 10 });
+    await testDb("market_data_snapshots").insert({ ticker_id: ticker.id, snapshot_date: "2026-09-01", implied_volatility: 0.9, avg_option_volume: 99 });
+    const [row] = await rowFor(ticker.symbol, "2026-10-05");
+    expect(row).toMatchObject({ signalsEnabled: true, impliedVolatility: null, avgOptionVolume: null });
+  });
 });

@@ -18,7 +18,7 @@ import { advanceOpeningLook, decideOpeningLook, type OpeningLookDecision, type O
 import { forcedRoundRetryDelayMs, recordRoundOutcome, roundFailureAlertText, roundFailureRecoveryText, shouldRetryForcedRound, type RoundFailureState } from "./roundFailures.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
-import { decidePlutoReadinessRun, describePlutoReadinessOutcome, evaluatePlutoRunning, runPlutoReadinessTests } from "./readiness.js";
+import { decidePlutoReadinessRun, describePlutoReadinessOutcome, evaluatePlutoRunning, reusableProbeResults, runPlutoReadinessTests } from "./readiness.js";
 import { createPlutoReadinessProbes } from "./readinessProbes.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease, savePlutoReadiness } from "./stateStore.js";
 import { findNewlyQuotedContracts, loadTodaysDaySignalQuoteStamps, rememberAnalysed } from "./daySignalsWatermark.js";
@@ -245,9 +245,12 @@ export class PlutoAgent {
       const kind = decidePlutoReadinessRun(now, dateIso, state.readiness);
       if (kind === null) return;
       const settings = this.settings ?? (await loadPlutoSettings());
-      const probeResults = await runPlutoReadinessTests(createPlutoReadinessProbes({ api: this.api, openRouterApiKey: this.config.openRouterApiKey, dailyCostCeilingUsd: settings.dailyCostCeilingUsd }));
+      const todaysRecord = state.readiness?.dateIso === dateIso ? state.readiness : null;
+      const probeResults =
+        reusableProbeResults(kind, todaysRecord) ??
+        (await runPlutoReadinessTests(createPlutoReadinessProbes({ api: this.api, openRouterApiKey: this.config.openRouterApiKey, dailyCostCeilingUsd: settings.dailyCostCeilingUsd })));
       const results = [...probeResults, evaluatePlutoRunning(await loadPlutoState())];
-      const previousSignature = state.readiness?.dateIso === dateIso ? state.readiness.signature : null;
+      const previousSignature = todaysRecord ? todaysRecord.signature : null;
       const outcome = describePlutoReadinessOutcome(kind, previousSignature, results);
       await savePlutoReadiness({ dateIso, lastRunAt: new Date().toISOString(), lastRunKind: kind, signature: outcome.signature, finalDone: kind === "final", results });
       await recordPlutoEvent("readiness_check", { kind, results });

@@ -47,3 +47,12 @@ export function fillsAreComplete(status: string, legs: { quantity: number }[], f
 export function shouldWaitForFills(status: string, legs: { quantity: number }[], fills: OrderFill[], statusChangedAt: Date, now: number): boolean {
   return !fillsAreComplete(status, legs, fills) && now - statusChangedAt.getTime() < fillWaitMs;
 }
+
+/**
+ * SQL condition (on order_requests aliased `alias`) for an order cancelled before it was ever sent to IBKR: a review panel
+ * closed without Confirm, or a gate-blocked Genosuke or Pluto order. Not news for a follow-up message. One left unconfirmed
+ * until the stale sweep cancelled it (not_confirmed_in_time) is not included: that one is still told.
+ */
+export function orderCancelledBeforeSentSql(alias: string): string {
+  return `(${alias}.status = 'cancelled' and ${alias}.ibkr_order_id is null and ${alias}.cancellation_reason is distinct from 'not_confirmed_in_time')`;
+}

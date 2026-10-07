@@ -1,3 +1,4 @@
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
@@ -24,9 +25,9 @@ calendarEventsRouter.get("/", async (_request, response) => {
       tce.amount
     FROM ticker_calendar_events tce
     JOIN tickers t ON t.id = tce.ticker_id
-    WHERE tce.event_date >= CURRENT_DATE
+    WHERE tce.event_date >= ?::date
     ORDER BY tce.event_date ASC, t.symbol ASC
-  `);
+  `, [easternIsoDate(new Date())]);
 
   const macroEvents = await loadUpcomingMajorMacroEvents();
 
@@ -39,7 +40,7 @@ calendarEventsRouter.get("/", async (_request, response) => {
 async function loadNextEvents(tickerId: string) {
   const rows = await db("ticker_calendar_events")
     .where({ ticker_id: tickerId })
-    .where("event_date", ">=", db.raw("CURRENT_DATE"))
+    .whereRaw("event_date >= ?::date", [easternIsoDate(new Date())])
     .orderBy("event_date", "asc")
     .select(db.raw(`event_type AS "eventType"`), db.raw(`to_char(event_date, 'YYYY-MM-DD') AS "eventDate"`));
 

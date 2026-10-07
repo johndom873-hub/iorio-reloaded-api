@@ -66,8 +66,14 @@ function recordingSender(delivered = true) {
   };
 }
 
+const createdOrderIds: string[] = [];
+let orderUserId: string | null = null;
+
 afterAll(async () => {
   const positionIds = testDb("positions").whereIn("ticker_id", createdTickerIds).select("id");
+  await testDb("trades").whereIn("position_leg_id", testDb("position_legs").whereIn("position_id", positionIds).select("id")).del();
+  await testDb("order_requests").whereIn("id", createdOrderIds).del();
+  if (orderUserId) await testDb("users").where({ id: orderUserId }).del();
   await testDb("position_legs").whereIn("position_id", positionIds).del();
   await testDb("positions").whereIn("ticker_id", createdTickerIds).del();
   await testDb("tickers").whereIn("id", createdTickerIds).del();
@@ -89,6 +95,31 @@ describe("sendDuePositionTelegramNotices", () => {
     expect(second.sent.filter((message) => message.includes(symbol))).toEqual([]);
   });
 
+  it("waits while the opening order is still filling, then tells the position at its full size", async () => {
+    if (!orderUserId) {
+      const [user] = await testDb("users").insert({ username: `ptn-orders-${Date.now()}`, display_name: "Notice orders", password_hash: "x" }).returning(["id"]);
+      orderUserId = user.id as string;
+    }
+    const { positionId, symbol } = await createPosition({ strategyKey: "cash_secured_put" });
+    const [order] = await testDb("order_requests").insert({ requested_by_user_id: orderUserId, request_type: "open_cash_secured_put", payload: JSON.stringify({ symbol, legs: [] }), status: "partially_filled" }).returning(["id"]);
+    createdOrderIds.push(order.id);
+    const [leg] = await testDb("position_legs")
+      .insert({ position_id: positionId, leg_type: "option", side: "short", quantity: 1, multiplier: 100, option_type: "put", strike_price: 180, expiry_date: "2031-01-17", entry_price: 1.25, entry_at: new Date() })
+      .returning(["id"]);
+    await testDb("trades").insert({ position_leg_id: leg.id, ibkr_exec_id: `ptn-lot-1-${leg.id}`, side: "sell", quantity: 1, price: 1.25, executed_at: new Date(), is_closing_trade: false, source_order_request_id: order.id });
+
+    const whileFilling = recordingSender();
+    await sendDuePositionTelegramNotices(whileFilling.send);
+    expect(whileFilling.sent.filter((message) => message.includes(symbol))).toEqual([]);
+    expect((await noticeState(positionId)).opened).toBeNull();
+
+    await testDb("position_legs").where({ id: leg.id }).update({ quantity: 3 });
+    await testDb("order_requests").where({ id: order.id }).update({ status: "filled" });
+    const afterFill = recordingSender();
+    await sendDuePositionTelegramNotices(afterFill.send);
+    expect(afterFill.sent.filter((message) => message.includes(symbol))).toEqual([`📥 New position: ${symbol} cash-secured put\n• SELL 3 put $180 exp 2031-01-17 at 1.25`]);
+  });
+
   it("tells a position opened and closed between two passes in order, with the realized P&L", async () => {
     const { positionId, symbol } = await createPosition({ strategyKey: "cash_secured_put", closedAt: new Date(), closeReason: "closed_via_app" });
     await insertShortPut(positionId, 0.4);
@@ -99,7 +130,7 @@ describe("sendDuePositionTelegramNotices", () => {
     expect(mine).toHaveLength(2);
     expect(mine[0]).toContain("📥 New position:");
     // (1.25 − 0.40) × 1 × 100 = +$85.00 over capitalDeployed (the $180 × 100 collateral) = +0.47%.
-    expect(mine[1]).toBe(`📤 Position closed: ${symbol} cash-secured put\n• BUY 1 put $180 exp 2031-01-17 at 0.40\nP&L: +$85.00 (+0.47%)`);
+    expect(mine[1]).toBe(`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• BUY 1 put $180 exp 2031-01-17 at 0.40\nP&L: +$85.00 (+0.47%)`);
     const state = await noticeState(positionId);
     expect(state.opened).not.toBeNull();
     expect(state.closed).not.toBeNull();

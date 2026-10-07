@@ -935,6 +935,12 @@ async function readPlutoActionId(body: { plutoActionId?: unknown }): Promise<{ o
   return { ok: true, value: raw };
 }
 
+/** Whether a ticker's Pluto switch is still on: a Pluto round that loaded its tickers before the switch went off must not trade it. */
+async function plutoMayTradeSymbol(symbol: string): Promise<boolean> {
+  const entry = await db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").where("t.symbol", symbol).whereNull("se.removed_at").where("se.bot_enabled", true).first("se.id");
+  return Boolean(entry);
+}
+
 function readSignalSnapshot(raw: unknown): { ok: true; value: Record<string, unknown> | null } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, value: null };
   if (typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "signalSnapshot must be an object." };
@@ -1409,6 +1415,11 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   // stalePendingOrders.ts cancels such rows on its own.
   if (Date.now() - new Date(orderRequest.created_at).getTime() > pendingConfirmationMaxAgeMs) {
     response.status(409).json({ error: "This order was built more than 15 minutes ago — its limit prices are stale. Build it again at current prices." });
+    return;
+  }
+
+  if (orderRequest.pluto_action_id && !(await plutoMayTradeSymbol(orderRequest.payload.symbol))) {
+    response.status(409).json({ error: `Pluto is no longer allowed to trade ${orderRequest.payload.symbol} (its Pluto switch is off).` });
     return;
   }
 

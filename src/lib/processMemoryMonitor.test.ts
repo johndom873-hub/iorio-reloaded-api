@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideMemoryAlert, formatMemoryLine, readContainerMemoryLimitBytes } from "./processMemoryMonitor.js";
+import { decideMemoryAlert, formatMemoryLine, readContainerMemoryLimitBytes, readProcessSwapBytes } from "./processMemoryMonitor.js";
 
 const limit = 512 * 1_048_576;
 const mb = (value: number) => value * 1_048_576;
@@ -31,7 +31,24 @@ describe("readContainerMemoryLimitBytes", () => {
 describe("formatMemoryLine", () => {
   it("separates heap from native memory and shows the share of the limit", () => {
     const usage = { rss: mb(805), heapUsed: mb(20), heapTotal: mb(33), external: mb(5), arrayBuffers: mb(2) } as NodeJS.MemoryUsage;
-    expect(formatMemoryLine("pluto_agent", usage, limit, { poolContracts: 11 })).toBe("memory pluto_agent: rss=805MB heapUsed=20MB heapTotal=33MB external=5MB arrayBuffers=2MB limit=512MB (157%) poolContracts=11");
-    expect(formatMemoryLine("web", usage, null, {})).toBe("memory web: rss=805MB heapUsed=20MB heapTotal=33MB external=5MB arrayBuffers=2MB");
+    expect(formatMemoryLine("pluto_agent", usage, limit, { poolContracts: 11 })).toBe("memory pluto_agent: rss=805MB swap=0MB heapUsed=20MB heapTotal=33MB external=5MB arrayBuffers=2MB limit=512MB (157%) poolContracts=11");
+    expect(formatMemoryLine("web", usage, null, {})).toBe("memory web: rss=805MB swap=0MB heapUsed=20MB heapTotal=33MB external=5MB arrayBuffers=2MB");
+  });
+
+  it("counts swap in the share of the limit (at the limit the excess is swapped out)", () => {
+    const usage = { rss: mb(400), heapUsed: mb(20), heapTotal: mb(33), external: mb(5), arrayBuffers: mb(2) } as NodeJS.MemoryUsage;
+    expect(formatMemoryLine("web", usage, mb(512), {}, mb(120))).toBe("memory web: rss=400MB swap=120MB heapUsed=20MB heapTotal=33MB external=5MB arrayBuffers=2MB limit=512MB (102%)");
+  });
+});
+
+describe("readProcessSwapBytes", () => {
+  it("reads VmSwap in kB from /proc/self/status, 0 when missing or unreadable", () => {
+    expect(readProcessSwapBytes(() => "Name:\tnode\nVmRSS:\t  409600 kB\nVmSwap:\t  122880 kB\nThreads:\t11\n")).toBe(122880 * 1024);
+    expect(readProcessSwapBytes(() => "Name:\tnode\n")).toBe(0);
+    expect(
+      readProcessSwapBytes(() => {
+        throw new Error("ENOENT");
+      }),
+    ).toBe(0);
   });
 });

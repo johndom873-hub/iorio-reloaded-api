@@ -102,8 +102,9 @@ async function insertShortOptionLeg(positionId: string, conId: number, optionTyp
   return leg.id;
 }
 
-async function insertClosingTrade(legId: string, price: number, executedAt: Date): Promise<void> {
+async function insertClosingTrade(legId: string, price: number, executedAt: Date, sourceOrderRequestId: string | null = null): Promise<void> {
   await testDb("trades").insert({
+    source_order_request_id: sourceOrderRequestId,
     position_leg_id: legId,
     ibkr_exec_id: `reconcile-test-${legId}-${executedAt.getTime()}`,
     side: "buy",
@@ -180,6 +181,15 @@ afterAll(async () => {
   if (plutoTestUserId) await testDb("users").where({ id: plutoTestUserId }).del();
   await testDb.destroy();
 });
+
+/** The requester of this file's order rows (deleted in afterAll with them). */
+async function plutoTestUser(): Promise<string> {
+  if (!plutoTestUserId) {
+    const [user] = await testDb("users").insert({ username: `reconcile-pluto-${Date.now()}`, display_name: "Pluto book test", password_hash: "x" }).returning(["id"]);
+    plutoTestUserId = user.id;
+  }
+  return plutoTestUserId!;
+}
 
 describe("reconcileHeldPositions — every structure change is its own position", () => {
   it("cash-secured put assigned: the put closes as assigned and the shares open a leftover-stock position", async () => {
@@ -445,6 +455,26 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(Number(newLegs.find((leg) => leg.leg_type === "stock")!.entry_price)).toBeCloseTo(50, 4);
     expect(Number(newLegs.find((leg) => leg.leg_type === "option")!.strike_price)).toBe(60);
     expect(await shareSourcesOf(newCoveredCall.id)).toEqual([oldCoveredCallId]);
+  });
+
+  it("a roll placed in the app closes the old position as an app close even before the roll order reads filled", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const oldCallConId = (nextConId += 1);
+    const newCallConId = (nextConId += 1);
+    const oldCoveredCallId = await insertPosition(ticker.id, "covered_call");
+    await insertStockLeg(oldCoveredCallId, stockConId, 100, 50);
+    const oldCallLegId = await insertShortOptionLeg(oldCoveredCallId, oldCallConId, "call", 55, isoDateDaysFromToday(3), 1.2);
+    const [rollOrder] = await testDb("order_requests")
+      .insert({ requested_by_user_id: await plutoTestUser(), request_type: "roll_leg", payload: JSON.stringify({ symbol: ticker.symbol, legs: [] }), status: "partially_filled", related_position_id: oldCoveredCallId })
+      .returning(["id"]);
+    await insertClosingTrade(oldCallLegId, 0.4, new Date(Date.now() - 20 * 60_000), rollOrder.id);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 100, 50), heldShortOption(ticker.symbol, newCallConId, OptionType.Call, 60, isoDateDaysFromToday(30), 110)]);
+
+    const oldCoveredCall = (await positionsFor(ticker.id)).find((position) => position.id === oldCoveredCallId)!;
+    expect(oldCoveredCall.status).toBe("closed");
+    expect(oldCoveredCall.close_reason).toBe("closed_via_app");
   });
 
   it("never rewrites a position's strategy_key in place", async () => {
@@ -843,14 +873,6 @@ describe("option expiry clock", () => {
 });
 
 describe("Pluto's book: every open position on an enabled ticker (Marcelo, 2026-10-07)", () => {
-  async function plutoTestUser(): Promise<string> {
-    if (!plutoTestUserId) {
-      const [user] = await testDb("users").insert({ username: `reconcile-pluto-${Date.now()}`, display_name: "Pluto book test", password_hash: "x" }).returning(["id"]);
-      plutoTestUserId = user.id;
-    }
-    return plutoTestUserId!;
-  }
-
   async function enablePluto(tickerId: string): Promise<void> {
     await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: await plutoTestUser(), signals_enabled: true, bot_enabled: true });
   }

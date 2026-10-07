@@ -19,7 +19,7 @@ vi.mock("../db/connection.js", async () => {
 });
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => true) }));
 
-const { fetchMacroEventWarningEvents } = await import("./calendarConflict.js");
+const { fetchCalendarConflictContext, fetchMacroEventWarningEvents } = await import("./calendarConflict.js");
 const { expirySpansMacroEvent } = await import("../lib/volatilityEdge.js");
 
 const events = [
@@ -66,5 +66,22 @@ describe("fetchMacroEventWarningEvents edges", () => {
       const fromRule = events.filter((event) => expirySpansMacroEvent(nowMs, expiry, [{ eventAtMs: Date.parse(event.at) }])).map((event) => event.title);
       expect([...fromQuery].sort()).toEqual([...fromRule].sort());
     }
+  });
+});
+
+describe("fetchCalendarConflictContext: today is the Eastern date", () => {
+  it("from today ET on, dropping today's before-open report (already out), keeping today's after-close one", async () => {
+    const [ticker] = await transaction("tickers").insert({ symbol: `ACCE${Date.now() % 100_000}`, company_name: "Audit E", tradingview_ticker: "NASDAQ:ACCE" }).returning(["id"]);
+    const row = (eventDate: string, eventType: string, eventTime: string | null) => ({ ticker_id: ticker.id, event_type: eventType, event_date: eventDate, event_time: eventTime, raw: "{}" });
+    await transaction("ticker_calendar_events").insert([
+      row("2034-03-08", "earnings", "1"), // yesterday ET
+      row("2034-03-09", "earnings", "-1"), // today, before the open
+      row("2034-03-09", "ex_dividend", null),
+      row("2034-03-10", "earnings", "1"),
+    ]);
+    // 2034-03-10T03:00Z is 22:00 EST on 03-09: the server's UTC date is already 03-10.
+    const context = await fetchCalendarConflictContext(ticker.id, new Date("2034-03-10T03:00:00Z"));
+    expect(context.resolved).toBe(true);
+    expect(context.events.map((event) => `${event.eventType} ${event.eventDate}`).sort()).toEqual(["earnings 2034-03-10", "ex_dividend 2034-03-09"]);
   });
 });

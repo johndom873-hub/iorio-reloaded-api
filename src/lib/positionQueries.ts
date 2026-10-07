@@ -132,7 +132,9 @@ export const positionSelect = `
     -- The base for P&L %, approved 2026-10-01: the same as capitalAtRisk, except that it also counts what
     -- partial closes already carved off (closed stock slices while shares are still held; closed slices of
     -- the same option contract), because the P&L it divides includes their realized result. capitalAtRisk
-    -- itself stays the capital exposed NOW (EXP $, EXP %, Pulse exposure).
+    -- itself stays the capital exposed NOW (EXP $, EXP %, Pulse exposure). A position that held shares keeps their cost
+    -- as its base once they are sold or moved on (Marcelo, 2026-10-07: a closed covered call over what its shares cost,
+    -- not its strike).
     CASE
       WHEN p.strategy_key = 'hedge' THEN (
         SELECT SUM(pl.entry_price * pl.multiplier * pl.quantity)
@@ -141,7 +143,7 @@ export const positionSelect = `
       )
       WHEN EXISTS (
         SELECT 1 FROM position_legs pl
-        WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.exit_at IS NULL
+        WHERE pl.position_id = p.id AND pl.leg_type = 'stock'
       ) THEN (
         SELECT SUM(pl.entry_price * pl.quantity)
         FROM position_legs pl

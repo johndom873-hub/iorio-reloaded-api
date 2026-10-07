@@ -262,7 +262,8 @@ plutoRouter.get("/settings/audit", async (request: Request, response: Response) 
 });
 
 function limitFrom(request: Request, fallback: number): number {
-  return Math.max(1, Math.min(500, Number(request.query.limit) || fallback));
+  const requested = request.query.limit === undefined || request.query.limit === "" ? Number.NaN : Number(request.query.limit);
+  return Number.isFinite(requested) ? Math.max(1, Math.min(500, Math.floor(requested))) : fallback;
 }
 
 /** ?modelCalled=true keeps only passes that asked the model, so a screen wanting the latest decision is not buried under skipped passes. */
@@ -324,7 +325,8 @@ const tickerAndPassKeys = [...tickerKeys, "passId"];
  * ?limit and ?offset page it; the body is `{ events, total }` with total counting every match, not just this page.
  */
 plutoRouter.get("/events", async (request: Request, response: Response) => {
-  const listFrom = (value: unknown): string[] => (typeof value === "string" ? value.split(",").filter(Boolean) : []);
+  // One comma-separated value, or the parameter repeated (?categories=a&categories=b arrives as an array).
+  const listFrom = (value: unknown): string[] => (Array.isArray(value) ? value : [value]).filter((part): part is string => typeof part === "string").flatMap((part) => part.split(",")).filter(Boolean);
   const requestedCategories = listFrom(request.query.categories);
   if (requestedCategories.some((category) => !plutoEventCategories.includes(category as PlutoEventCategory))) {
     response.status(400).json({ error: `categories must be among: ${plutoEventCategories.join(", ")}.` });

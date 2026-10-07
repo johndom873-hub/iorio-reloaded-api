@@ -17,7 +17,9 @@ function removedParseIbkrExecutionTime(raw: string | undefined): Date | null {
 }
 
 const zones = ["US/Eastern", "America/New_York", "Asia/Singapore", "Europe/London", "UTC", "US/Central"];
-const wallTimes = ["20260105 09:30:00", "20260306 15:59:59", "20260308 01:59:59", "20260308 03:00:00", "20260309 09:30:00", "20261030 16:00:00", "20261101 00:30:00", "20261101 01:30:00", "20261102 09:30:00", "20261007 23:59:59", "20261008 00:00:00"];
+// Ordinary days and the safe hours of the DST Sundays: the removed single correction was an hour off a few hours after
+// each switch (03:00 on 03-08 among them), which the DST test below covers instead.
+const wallTimes = ["20260105 09:30:00", "20260306 15:59:59", "20260308 01:59:59", "20260308 08:00:00", "20260309 09:30:00", "20261030 16:00:00", "20261101 00:30:00", "20261101 01:30:00", "20261102 09:30:00", "20261007 23:59:59", "20261008 00:00:00"];
 
 describe("parseIbkrExecutionTime with cached per-zone formatters", () => {
   it("equals the removed per-call implementation for every zone and wall time, zones interleaved", () => {
@@ -42,6 +44,17 @@ describe("parseIbkrExecutionTime with cached per-zone formatters", () => {
     expect(() => parseIbkrExecutionTime("20260105 09:30:00 Not/AZone")).toThrow(RangeError);
     expect(() => parseIbkrExecutionTime("20260105 09:30:00 Not/AZone")).toThrow(RangeError);
     expect(parseIbkrExecutionTime("20260105 09:30:00 US/Eastern")?.toISOString()).toBe("2026-01-05T14:30:00.000Z");
+  });
+
+  it("is right on both DST-change Sundays, either side of the switch", () => {
+    // Spring forward 2026-03-08: 01:30 EST, then 03:30 and 05:30 EDT.
+    expect(parseIbkrExecutionTime("20260308 01:30:00 US/Eastern")?.toISOString()).toBe("2026-03-08T06:30:00.000Z");
+    expect(parseIbkrExecutionTime("20260308 03:30:00 US/Eastern")?.toISOString()).toBe("2026-03-08T07:30:00.000Z");
+    expect(parseIbkrExecutionTime("20260308 05:30:00 US/Eastern")?.toISOString()).toBe("2026-03-08T09:30:00.000Z");
+    // Fall back 2026-11-01: 00:30 EDT, then 02:30 and 05:00 EST.
+    expect(parseIbkrExecutionTime("20261101 00:30:00 US/Eastern")?.toISOString()).toBe("2026-11-01T04:30:00.000Z");
+    expect(parseIbkrExecutionTime("20261101 02:30:00 US/Eastern")?.toISOString()).toBe("2026-11-01T07:30:00.000Z");
+    expect(parseIbkrExecutionTime("20261101 05:00:00 US/Eastern")?.toISOString()).toBe("2026-11-01T10:00:00.000Z");
   });
 
   it("returns null for the shapes it does not parse", () => {

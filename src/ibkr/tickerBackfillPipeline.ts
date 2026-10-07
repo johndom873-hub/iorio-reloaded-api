@@ -119,8 +119,8 @@ export interface BackfillStepWorkers {
     symbol: string,
   ) => Promise<{ resolved: boolean; earningsWritten: number; dividendsWritten: number; historicalEarningsWritten: number; historicalEarningsSkippedEtf: boolean; historicalEarningsError: string | null }>;
   loadUniverseTicker: (tickerId: string, symbol: string) => Promise<UniverseTicker>;
-  /** Read right before the option-chain step, so Signals turned on mid-run still gets its strikes. */
-  loadSignalsEnabled: (tickerId: string) => Promise<boolean>;
+  /** Read right before the option-chain step, so Signals turned on mid-run still gets its strikes. Null: no longer on the Shortlist. */
+  loadSignalsEnabled: (tickerId: string) => Promise<boolean | null>;
   prepareChain: (ib: IbkrConnection["ib"], ticker: UniverseTicker, todayIso: string) => Promise<PreparedTicker>;
   now: () => Date;
 }
@@ -157,11 +157,12 @@ export const databaseRunStore: BackfillRunStore = {
       .select("r.*", "t.symbol", db.raw("EXISTS (SELECT 1 FROM shortlist_entries se WHERE se.ticker_id = r.ticker_id AND se.removed_at IS NULL) AS on_shortlist"));
     return rows.map((row) => ({ ...toRun(row), symbol: row.symbol as string, onShortlist: row.on_shortlist as boolean }));
   },
+  // Only while the run is still running: a process cut off by a restart may still be finishing a run the new boot has closed.
   saveProgress: async (runId, steps) => {
-    await db("ticker_backfill_runs").where({ id: runId }).update({ steps: JSON.stringify(steps), progress_percent: computeProgressPercent(steps) });
+    await db("ticker_backfill_runs").where({ id: runId, status: "running" }).update({ steps: JSON.stringify(steps), progress_percent: computeProgressPercent(steps) });
   },
   finish: async (runId, status, steps) => {
-    await db("ticker_backfill_runs").where({ id: runId }).update({ status, steps: JSON.stringify(steps), progress_percent: computeProgressPercent(steps), finished_at: db.fn.now() });
+    await db("ticker_backfill_runs").where({ id: runId, status: "running" }).update({ status, steps: JSON.stringify(steps), progress_percent: computeProgressPercent(steps), finished_at: db.fn.now() });
   },
 };
 
@@ -188,7 +189,7 @@ const defaultStepWorkers: BackfillStepWorkers = {
   },
   loadSignalsEnabled: async (tickerId) => {
     const entry = await db("shortlist_entries").where({ ticker_id: tickerId }).whereNull("removed_at").first("signals_enabled");
-    return Boolean(entry?.signals_enabled);
+    return entry ? Boolean(entry.signals_enabled) : null;
   },
   prepareChain: (ib, ticker, todayIso) => prepareTicker(ib, ticker, todayIso),
   now: () => new Date(),
@@ -319,6 +320,7 @@ export async function executeBackfillRun(runId: string, tickerId: string, symbol
     const signalsEnabled = await workers.loadSignalsEnabled(tickerId);
     let prepared: PreparedTicker | null = null;
     await runStep("chain_warmup", async () => {
+      if (signalsEnabled === null) return { status: "skipped", message: "Removed from the Shortlist: no strikes set up." };
       if (!signalsEnabled) return { status: "skipped", message: "Signals is off: the strikes are set up when Signals is turned on." };
       prepared = await workers.prepareChain((await getConnection()).ib, await workers.loadUniverseTicker(tickerId, symbol), todayIso);
       const gridCount = prepared.chainRefresh.expiries.length;
@@ -334,6 +336,7 @@ export async function executeBackfillRun(runId: string, tickerId: string, symbol
       // anywhere from 9:30am to 4pm ET -- gave that one ticker's first data point a different time-of-day
       // basis than everything else, the same class of inconsistency already flagged once before (see the
       // 2026-09-11 capture-timing finding in PROGRESS.md).
+      if (signalsEnabled === null) return { status: "skipped", message: "Removed from the Shortlist: no option chain is captured for this ticker." };
       if (!signalsEnabled) return { status: "skipped", message: "Signals is off: no option chain is captured for this ticker." };
       if (!prepared) return { status: "skipped", message: "Skipped because the strike step did not finish." };
       return { status: "skipped", message: "Captured by tonight's job in the normal 10:00 ET window, same as every other ticker." };

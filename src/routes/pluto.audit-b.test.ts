@@ -121,11 +121,11 @@ describe("GET /pluto/events — other filters", () => {
     expect(json.events).toHaveLength(4);
   });
 
-  // Characterised: a repeated ?categories= arrives as an array, which listFrom reads as no categories, so the filter keeps nothing.
-  it("a repeated categories parameter returns nothing rather than both categories", async () => {
-    const { status, json } = await get(`/events?session=${session}&categories=trading&categories=info`);
-    expect(status).toBe(200);
-    expect(json.total).toBe(0);
+  it("a repeated categories parameter keeps both categories, as the comma-separated form does", async () => {
+    const repeated = await get(`/events?session=${session}&categories=trading&categories=info`);
+    const commaSeparated = await get(`/events?session=${session}&categories=trading,info`);
+    expect(repeated.status).toBe(200);
+    expect(repeated.json.total).toBe(commaSeparated.json.total);
   });
 
   it("an empty session is ignored rather than rejected", async () => {

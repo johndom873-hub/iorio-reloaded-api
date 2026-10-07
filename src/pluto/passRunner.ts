@@ -142,9 +142,10 @@ async function loadMoveContext(ticker: EvaluatedTicker): Promise<MoveContext | n
  * Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here (only when `executeAutomatic`: the re-score
  * after a burst rebuilds the offers but must never send an automatic close twice), the rest go to the model.
  */
-async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string, cancelByMs: number, executeAutomatic: boolean, automaticBudget: { remaining: number } = { remaining: 0 }): Promise<void> {
+async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string, cancelByMs: number, executeAutomatic: boolean, automaticBudget: { remaining: number } = { remaining: 0 }): Promise<boolean> {
   const watched = context.marketWatch.snapshot(ticker.row.symbol);
   const { offers } = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: ticker.scored.heldLegs, rolls: ticker.scored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso, todayIso: ticker.inputs.todayEasternIso });
+  let automaticCloseWorking = false;
   for (const offer of offers) {
     if (!offer.automatic || !executeAutomatic) continue;
     // Automatic closes count against the session's order cap like any other order (counters.ts).
@@ -156,9 +157,20 @@ async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSetting
     const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds, ...(offer.contract ?? {}) }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: offer.automaticReason ?? "automatic close" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
     if (offer.otherReferenceLegs) await updatePlutoAction(actionId, { referenceOtherLegs: offer.otherReferenceLegs });
     const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: offer.positionId, legs: offer.legIds.map((legId) => ({ legId, limitPrice: offer.legLimitPrices?.[legId] ?? offer.limitPrice })), description: offer.description, reasons: [`automatic close: ${offer.automaticReason ?? "no reason recorded"}`] });
-    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier, ...(offer.otherReferenceLegs ? { otherLegs: offer.otherReferenceLegs } : {}) }, description: offer.description, cancelByMs }), result.orderId, offer.symbol);
+    if (result.outcome === "confirmed" && result.orderId) {
+      automaticCloseWorking = true;
+      context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: offer.limitPrice, side: offer.side, multiplier: offer.multiplier, ...(offer.otherReferenceLegs ? { otherLegs: offer.otherReferenceLegs } : {}) }, description: offer.description, cancelByMs }), result.orderId, offer.symbol);
+    }
+  }
+  // With an automatic close now working on the ticker, anything the model chose for it would be blocked by the
+  // working-order gate: it is offered nothing for that ticker this round (the order's end queues a fresh round).
+  if (automaticCloseWorking) {
+    ticker.filtered = { ...ticker.filtered, eligible: [], eligibleRolls: [] };
+    ticker.closeOffers = [];
+    return true;
   }
   ticker.closeOffers = offers.filter((offer) => !offer.automatic);
+  return false;
 }
 
 /**
@@ -276,8 +288,9 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   // What the round looked at, before any live quote: what the next round compares against.
   const lookedAtFingerprintBySymbol = new Map<string, string>();
   let offeredCount = 0;
+  const automaticCloseWorkingSymbols = new Set<string>();
   for (const ticker of evaluated) {
-    await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs, true, automaticBudget);
+    if (await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs, true, automaticBudget)) automaticCloseWorkingSymbols.add(ticker.row.symbol);
     const requotable = opensBlockedBecause ? [] : candidatesEligibleOnceRequoted(ticker.scored, ticker.filtered);
     lookedAtFingerprintBySymbol.set(ticker.row.symbol, tickerFingerprint([...ticker.filtered.eligible, ...requotable], ticker.filtered.eligibleRolls, ticker.closeOffers.map((offer) => offer.id)));
     offeredCount += ticker.filtered.eligible.length + requotable.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length;
@@ -301,6 +314,11 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   // 4b. The model will be called: only now burst the promising contracts and re-score with the live quotes.
   const refreshed: EvaluatedTicker[] = [];
   for (const ticker of evaluated) {
+    // A ticker with an automatic close just sent stays empty for the model (see attachCloseOffers): no burst, no re-score.
+    if (automaticCloseWorkingSymbols.has(ticker.row.symbol)) {
+      refreshed.push(ticker);
+      continue;
+    }
     // Opens blocked for the round (market stress, before the opening look): nothing worth a burst but the held legs' own quotes.
     const contracts = ticker.filtered.tickerBlocks.length === 0 && !opensBlockedBecause ? burstContractsFor(ticker.scored, ticker.filtered, settings) : [];
     const liveQuotes = contracts.length > 0 ? await context.marketWatch.burst(ticker.row.symbol, contracts) : [];

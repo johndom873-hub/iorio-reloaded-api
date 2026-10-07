@@ -178,11 +178,14 @@ async function determineCloseReason(positionId: string): Promise<string> {
     }
   }
 
-  const closingTrade = await db("trades as t")
+  const closingTrades: { sourceOrderRequestId: string | null }[] = await db("trades as t")
     .join("position_legs as pl", "pl.id", "t.position_leg_id")
     .where({ "pl.position_id": positionId, "t.is_closing_trade": true })
-    .first();
-  if (closingTrade) {
+    .select("t.source_order_request_id as sourceOrderRequestId");
+  if (closingTrades.length > 0) {
+    // A fill of an app order is an app close whatever that order's status: a roll's buy-back can close the old position
+    // before the roll order itself reads "filled".
+    if (closingTrades.some((trade) => trade.sourceOrderRequestId !== null)) return "closed_via_app";
     const orderRequest = await db("order_requests").where({ related_position_id: positionId, status: "filled" }).first();
     return orderRequest ? "closed_via_app" : "closed_via_external_trade";
   }

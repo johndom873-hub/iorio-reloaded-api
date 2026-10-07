@@ -93,7 +93,7 @@ describe("startProcessMemoryMonitor", () => {
     await tick(5_000);
     await tick(5_000);
     expect(console.log).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(console.log).mock.calls[0]![0]).toBe("memory web: rss=5000MB heapUsed=20MB heapTotal=30MB external=2MB arrayBuffers=1MB");
+    expect(vi.mocked(console.log).mock.calls[0]![0]).toBe("memory web: rss=5000MB swap=0MB heapUsed=20MB heapTotal=30MB external=2MB arrayBuffers=1MB");
     expect(mocks.alertStateReads).toEqual([]);
     expect(mocks.notifyDownThrottled).not.toHaveBeenCalled();
   });

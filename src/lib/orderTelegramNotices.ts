@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import { computeNetLimitPrice, type OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
-import { describeOrderFillLine, fillBearingOrderStatuses, fillsAreComplete, loadOrderFills, shouldWaitForFills, type OrderFill } from "./orderFills.js";
+import { describeOrderFillLine, fillBearingOrderStatuses, fillsAreComplete, loadOrderFills, orderCancelledBeforeSentSql, shouldWaitForFills, type OrderFill } from "./orderFills.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { describeTradeContract, formatTradePrice } from "./tradeMessageFormatting.js";
 
@@ -143,9 +143,7 @@ export function createDatabaseDependencies(): OrderTelegramNoticeDependencies {
         .leftJoin("users as canceller", "canceller.id", "orq.cancelled_by_user_id")
         .whereIn("orq.status", [...notifiableOrderStatuses])
         .whereRaw("orq.telegram_notified_status is distinct from orq.status")
-        // An order cancelled before it was ever sent (a review panel closed without Confirm, a gate-blocked Genosuke or
-        // Pluto order) is not news; one left unconfirmed until the stale sweep cancelled it still is.
-        .whereRaw("not (orq.status = 'cancelled' and orq.ibkr_order_id is null and orq.cancellation_reason is distinct from 'not_confirmed_in_time')")
+        .whereRaw(`not ${orderCancelledBeforeSentSql("orq")}`)
         .whereRaw(`orq.created_at > now() - interval '${noticeWindowHours} hours'`)
         .orderBy("orq.updated_at")
         .select(

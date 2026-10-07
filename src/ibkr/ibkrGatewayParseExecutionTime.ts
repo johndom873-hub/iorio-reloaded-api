@@ -28,10 +28,14 @@ export function parseIbkrExecutionTime(raw: string | undefined): Date | null {
   const [, year, month, day, hour, minute, second, zone] = match;
 
   const naiveUtcGuess = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
-  const partsInZone = zonePartsFormatter(zone!).formatToParts(new Date(naiveUtcGuess));
-  const part = (type: string) => Number(partsInZone.find((p) => p.type === type)?.value);
-
-  const asIfUtc = Date.UTC(part("year"), part("month") - 1, part("day"), part("hour"), part("minute"), part("second"));
-  const offsetMs = naiveUtcGuess - asIfUtc;
-  return new Date(naiveUtcGuess + offsetMs);
+  const formatter = zonePartsFormatter(zone!);
+  // The zone's offset from UTC at an instant (e.g. −4 h for EDT).
+  const zoneOffsetMsAt = (instantMs: number) => {
+    const partsInZone = formatter.formatToParts(new Date(instantMs));
+    const part = (type: string) => Number(partsInZone.find((p) => p.type === type)?.value);
+    return Date.UTC(part("year"), part("month") - 1, part("day"), part("hour"), part("minute"), part("second")) - instantMs;
+  };
+  // Corrected twice: on a DST-change day the offset at the first guess can be the other side of the switch.
+  const firstGuess = naiveUtcGuess - zoneOffsetMsAt(naiveUtcGuess);
+  return new Date(naiveUtcGuess - zoneOffsetMsAt(firstGuess));
 }

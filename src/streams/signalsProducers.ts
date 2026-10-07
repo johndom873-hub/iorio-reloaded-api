@@ -1,3 +1,4 @@
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { streamPooledPrices } from "../ibkr/pricePool.js";
 import { streamSignalsOptionQuotes } from "../ibkr/streamSignalsOptionQuotes.js";
@@ -384,7 +385,9 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
         snapshotChangePollIntervalMs,
         async () => {
           const versions = await deps.loadSnapshotVersions(tickers.map((ticker) => ticker.tickerId));
-          const changed = [...states.values()].filter((state) => (versions.get(state.ticker.tickerId) ?? null) !== state.snapshotVersion);
+          // A new snapshot, or a new Eastern day (a stream left open overnight: the earnings and macro rules are judged against today).
+          const todayIso = easternIsoDate(deps.now());
+          const changed = [...states.values()].filter((state) => (versions.get(state.ticker.tickerId) ?? null) !== state.snapshotVersion || state.inputs.todayEasternIso !== todayIso);
           if (changed.length === 0) return;
           await Promise.all(
             changed.map(async (state) => {
@@ -540,7 +543,7 @@ export function createSignalsProducers(deps: SignalsProducerDependencies = defau
         snapshotChangePollIntervalMs,
         async () => {
           const version = (await deps.loadSnapshotVersions([ticker.tickerId])).get(ticker.tickerId) ?? null;
-          if (version === snapshotVersion) return;
+          if (version === snapshotVersion && inputs.todayEasternIso === easternIsoDate(deps.now())) return;
           const reloaded = await deps.loadTickerSignalsInputs(ticker);
           if (signal.aborted) return;
           inputs = reloaded;

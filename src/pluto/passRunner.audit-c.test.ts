@@ -137,13 +137,9 @@ beforeEach(() => {
 });
 
 describe("automatic close offers in a round", () => {
-  it("are executed once (not again by the re-score after the burst), with their rule recorded, and kept off the model's menu", async () => {
+  it("are executed once, with their rule recorded; the ticker is then offered nothing (its order is working), so no model call", async () => {
     const context = makeContext();
     const summary = await runPlutoPass(dayRound, context);
-    expect(summary.modelCalled).toBe(true);
-    // Built twice (before and after the burst), executed once.
-    expect(harness.closeBuilds.length).toBe(2);
-    expect(harness.closeBuilds.every((build) => build.todayIso === "2026-10-07")).toBe(true);
     expect(executor.executePlutoClose).toHaveBeenCalledTimes(1);
     const closeInput = vi.mocked(executor.executePlutoClose).mock.calls[0]![2];
     expect(closeInput).toMatchObject({ positionId: "pos-p3", legs: [{ legId: "leg-p3", limitPrice: 0.2 }] });
@@ -152,7 +148,21 @@ describe("automatic close offers in a round", () => {
     expect(automaticAction.gateResults[0]!.detail).toMatch(/Formula P3/);
     // The watcher gets a buy reference at the limit (the fill-slippage check).
     expect(vi.mocked(executor.watchPlutoOrder).mock.calls[0]![2]).toMatchObject({ reference: { price: 0.2, side: "buy", multiplier: 100 } });
-    // The model sees the P2 offer only.
+    // Anything chosen for AAA would be blocked by the working-order gate: no burst, no re-score, no model call.
+    expect(harness.closeBuilds.length).toBe(1);
+    expect(summary.modelCalled).toBe(false);
+    expect(summary.skippedReason).toBe("nothing eligible");
+    expect(harness.promptCloseActionIds).toEqual([]);
+  });
+
+  it("an automatic close the route refused leaves the ticker on the menu, the automatic offer itself kept off it", async () => {
+    vi.mocked(executor.executePlutoClose).mockResolvedValueOnce({ outcome: "blocked", orderId: null, detail: "build refused" });
+    const summary = await runPlutoPass(dayRound, makeContext());
+    expect(executor.executePlutoClose).toHaveBeenCalledTimes(1);
+    // Built twice (before and after the burst), executed once.
+    expect(harness.closeBuilds.length).toBe(2);
+    expect(harness.closeBuilds.every((build) => build.todayIso === "2026-10-07")).toBe(true);
+    expect(summary.modelCalled).toBe(true);
     expect(harness.promptCloseActionIds).toEqual([["AAA:close_leg:leg-p2"]]);
   });
 

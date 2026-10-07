@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import type { TelegramApi } from "./telegramApi.js";
-import { describeOrderFillLine, fillBearingOrderStatuses, fillsAreComplete, loadOrderFills, shouldWaitForFills, type OrderFill } from "../lib/orderFills.js";
+import { describeOrderFillLine, fillBearingOrderStatuses, fillsAreComplete, loadOrderFills, orderCancelledBeforeSentSql, shouldWaitForFills, type OrderFill } from "../lib/orderFills.js";
 
 export type { OrderFill };
 
@@ -104,6 +104,7 @@ export function createDatabaseDependencies(serviceUsername: string, send: (text:
         .where("u.username", serviceUsername)
         .whereIn("orq.status", [...notifiableOrderStatuses])
         .whereRaw("orq.genosuke_notified_status is distinct from orq.status")
+        .whereRaw(`not ${orderCancelledBeforeSentSql("orq")}`)
         .whereRaw(`orq.created_at > now() - interval '${followUpWindowHours} hours'`)
         .orderBy("orq.updated_at")
         .select(

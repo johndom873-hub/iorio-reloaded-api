@@ -104,7 +104,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
 
     const second = sender();
     expect(await sendDuePositionTelegramNotices(second.send)).toBe(1);
-    expect(second.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put\n• BUY 1 put $50 exp 2031-01-17 at 0.40\nP&L: +$85.00 (+1.70%)`]);
+    expect(second.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• BUY 1 put $50 exp 2031-01-17 at 0.40\nP&L: +$85.00 (+1.70%)`]);
   });
 
   it("the first undelivered message ends the pass: a later position is not even tried", async () => {
@@ -148,7 +148,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
     // (1.25 − 0.40) × 100 − 1.30 = +$83.70 over $5,000 collateral = +1.67%.
-    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put\n• BUY 1 put $50 exp 2031-01-17 at 0.40\nP&L: +$83.70 (+1.67%)`]);
+    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• BUY 1 put $50 exp 2031-01-17 at 0.40\nP&L: +$83.70 (+1.67%)`]);
   });
 
   it("an opening lists slices of one contract as one leg; the close lists each slice at its own exit", async () => {
@@ -164,13 +164,13 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     expect(pass.sent[1]!.split("\n")[3]).toBe("P&L: +$275.00 (+1.83%)");
   });
 
-  it("the most common close reason (closed_via_app) reads without a dangling separator", async () => {
+  it("the most common close reason (closed_via_app) is named in the headline", async () => {
     const { positionId, symbol } = await createPosition({ strategyKey: "cash_secured_put", closedAt: new Date(), closeReason: "closed_via_app" });
     await trx("positions").where({ id: positionId }).update({ telegram_opened_notified_at: new Date() });
     await insertLeg(positionId, { exit_price: 0.4, exit_at: new Date() });
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
-    expect(pass.sent[0]!.split("\n")[0]).toBe(`📤 Position closed: ${symbol} cash-secured put`);
+    expect(pass.sent[0]!.split("\n")[0]).toBe(`📤 Position closed: ${symbol} cash-secured put — closed in the app`);
   });
 
   // Shares handed off to a successor position (a covered call rolled to a new call, or leftover stock absorbed into a new
@@ -195,15 +195,15 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
     expect(pass.sent[0]!.split("\n")[0]).toBe(`📤 Position closed: ${symbol} stock, no strategy — shares moved into a covered call`);
-    // No option leg and no open stock leg: capitalDeployed is null, so no percent.
-    expect(pass.sent[0]!.split("\n").at(-1)).toBe("P&L: +$0.00");
+    // The base is what the shares cost (100 × 50), even once they have moved on.
+    expect(pass.sent[0]!.split("\n").at(-1)).toBe("P&L: $0.00 (0.00%)");
   });
 
   it("a position with no legs at all (an orphan the self-heal closes) still produces readable messages", async () => {
     const { symbol } = await createPosition({ strategyKey: "covered_call", closedAt: new Date(), closeReason: "unknown" });
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
-    expect(pass.sent).toEqual([`📥 New position: ${symbol} covered call`, `📤 Position closed: ${symbol} covered call — reason unknown\nP&L: +$0.00`]);
+    expect(pass.sent).toEqual([`📥 New position: ${symbol} covered call`, `📤 Position closed: ${symbol} covered call — reason unknown\nP&L: $0.00`]);
   });
 });
 

@@ -132,6 +132,18 @@ describe("GET /pluto/events", () => {
     expect(none.json).toEqual({ events: [], total: 0 });
   });
 
+  it("accepts a repeated parameter as well as a comma-separated one", async () => {
+    const repeated = await get("/events?session=2099-03-05&categories=info&categories=analysis");
+    expect(repeated.json.total).toBe(3);
+    const repeatedTypes = await get("/events?session=2099-03-05&types=paused&types=resumed");
+    expect(repeatedTypes.json.events.map((event: any) => event.type)).toEqual(["resumed", "paused"]);
+  });
+
+  it("a limit of 0 returns one event, a missing or unreadable limit the default", async () => {
+    expect((await get("/events?session=2099-03-05&limit=0")).json.events).toHaveLength(1);
+    expect((await get("/events?session=2099-03-05&limit=abc")).json.events).toHaveLength(7);
+  });
+
   it("rejects a category that does not exist", async () => {
     const { status } = await get("/events?categories=config,bogus");
     expect(status).toBe(400);

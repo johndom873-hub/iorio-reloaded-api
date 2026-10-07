@@ -202,10 +202,11 @@ async function computePricePerformanceSnapshot(now: Date): Promise<PricePerforma
       SELECT MIN(low_price) AS low, MAX(high_price) AS high FROM daily_price_bars
       WHERE ticker_id = t.id AND trading_date <= latest.trading_date AND trading_date >= latest.trading_date - INTERVAL '30 days'
     ) morange ON true
+    -- The IV snapshot of the ticker's latest bar only: one left from before Signals was last switched off is weeks old.
     LEFT JOIN LATERAL (
       SELECT *
       FROM market_data_snapshots
-      WHERE ticker_id = t.id
+      WHERE ticker_id = t.id AND snapshot_date = latest.trading_date
       ORDER BY snapshot_date DESC
       LIMIT 1
     ) m ON true

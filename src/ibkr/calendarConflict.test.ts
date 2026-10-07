@@ -97,13 +97,13 @@ describe("fetchCalendarConflictContext", () => {
     expect(context).toEqual({ resolved: true, events: [earningsOn("2026-10-29"), exDividendOn("2026-11-07")] });
   });
 
-  it("queries the ticker by id and the events from today forward", async () => {
-    await fetchCalendarConflictContext("ticker-1");
+  it("queries the ticker by id and the events from today (US Eastern) forward", async () => {
+    await fetchCalendarConflictContext("ticker-1", new Date("2026-10-08T02:00:00Z")); // 22:00 EDT on 10-07
     const tickerCall = database.state.calls.find((call) => call.table === "tickers")!;
     expect(tickerCall.operations).toContainEqual(["where", { id: "ticker-1" }]);
     const eventsCall = database.state.calls.find((call) => call.table === "ticker_calendar_events")!;
     expect(eventsCall.operations[0]).toEqual(["where", { ticker_id: "ticker-1" }]);
-    expect(eventsCall.operations[1]).toEqual(["andWhere", "event_date", ">=", { rawSql: "CURRENT_DATE" }]);
+    expect(eventsCall.operations[1]).toEqual(["whereRaw", "event_date >= ?::date", ["2026-10-07"]]);
   });
 
   it("is unresolved when the ticker has no TradingView symbol, an empty one, or no row at all", async () => {

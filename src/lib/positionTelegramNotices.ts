@@ -22,6 +22,7 @@ const closeReasonLabels: Record<string, string> = {
   assigned: "assigned",
   expired_worthless: "expired worthless",
   stock_rolled_into_covered_call: "shares moved into a covered call",
+  closed_via_app: "closed in the app",
   closed_via_external_trade: "closed outside the app",
   unknown: "reason unknown",
 };
@@ -46,13 +47,15 @@ export function describePositionClosedNotice(event: PositionEvent, capitalDeploy
   const lines = event.legs.map((leg: PositionEventLeg) =>
     leg.sharesHandedOn ? `• ${describeTradeContract(leg)} moved to the next position` : describeTradeLine(leg.side === "short" ? "BUY" : "SELL", leg, leg.exitPrice),
   );
-  // Same P&L % base as the expiry message: realized P&L over capitalDeployed (approved 2026-10-01).
+  // Same P&L % base as the expiry message: realized P&L over capitalDeployed (approved 2026-10-01). A zero P&L has no sign,
+  // like its 0.00%.
+  const pnlDollars = event.realizedPnl === null ? null : formatSignedDollars(event.realizedPnl, 2, Math.abs(event.realizedPnl) >= 0.005);
   const pnlLine =
     event.realizedPnl === null
       ? "P&L: unknown (an exit price is missing)"
       : capitalDeployed
-        ? `P&L: ${formatSignedDollars(event.realizedPnl, 2, true)} (${formatSignedPercent((event.realizedPnl / capitalDeployed) * 100, 2)})`
-        : `P&L: ${formatSignedDollars(event.realizedPnl, 2, true)}`;
+        ? `P&L: ${pnlDollars} (${formatSignedPercent((event.realizedPnl / capitalDeployed) * 100, 2)})`
+        : `P&L: ${pnlDollars}`;
   return [headline, ...lines, pnlLine].join("\n");
 }
 
@@ -60,6 +63,8 @@ interface PositionNeedingNotice {
   id: string;
   openedNeedsNotice: boolean;
   closedNeedsNotice: boolean;
+  /** An order that opened one of its legs is still working: the legs may grow lot by lot. */
+  openingOrderWorking: boolean;
 }
 
 /**
@@ -78,6 +83,12 @@ export async function sendDuePositionTelegramNotices(send: (message: string) => 
         "id",
         db.raw('telegram_opened_notified_at IS NULL AS "openedNeedsNotice"'),
         db.raw('(closed_at IS NOT NULL AND telegram_closed_notified_at IS NULL) AS "closedNeedsNotice"'),
+        db.raw(`EXISTS (
+          SELECT 1 FROM trades tr
+          JOIN position_legs pl ON pl.id = tr.position_leg_id
+          JOIN order_requests orq ON orq.id = tr.source_order_request_id
+          WHERE pl.position_id = positions.id AND NOT tr.is_closing_trade AND orq.status IN ('submitted', 'partially_filled')
+        ) AS "openingOrderWorking"`),
       );
     if (positions.length === 0) return 0;
 
@@ -88,6 +99,8 @@ export async function sendDuePositionTelegramNotices(send: (message: string) => 
         const openedEvent = positionEvents.find((event) => event.eventType === "opened" || event.eventType === "unstructured");
         const closedEvent = positionEvents.find((event) => event.eventType === "closed");
 
+        // Told once its opening order has finished, so an order filled lot by lot is told at its full size.
+        if (position.openedNeedsNotice && position.openingOrderWorking) continue;
         if (position.openedNeedsNotice && openedEvent) {
           if (!(await send(describePositionOpenedNotice(openedEvent)))) return sent;
           await db("positions").where({ id: position.id }).update({ telegram_opened_notified_at: db.fn.now() });

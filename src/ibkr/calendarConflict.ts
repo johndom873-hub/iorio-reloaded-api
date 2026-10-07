@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 import type { SignalStrategyKey } from "../lib/signalCandidates.js";
 
 export interface CalendarConflict {
@@ -20,15 +21,19 @@ export interface CalendarConflictContext {
  * query per ticker — callers fetch this once and reuse it across every
  * candidate expiry for that ticker rather than querying per-candidate.
  */
-export async function fetchCalendarConflictContext(tickerId: string): Promise<CalendarConflictContext> {
+export async function fetchCalendarConflictContext(tickerId: string, now: Date = new Date()): Promise<CalendarConflictContext> {
   const tickerRow = await db("tickers").where({ id: tickerId }).first("tradingview_ticker");
   const resolved = !!tickerRow?.tradingview_ticker;
 
   // Cast to ::text — a bare `date` column round-trips through node-pg's
   // local-timezone Date parsing otherwise, see project_postgres_date_local_timezone_parsing.
+  // From today in US Eastern time (not the server's UTC date). Today's before-open report has already happened, as in the
+  // Signals earnings exclusion (loadEarningsDatesNotYetReported).
+  const todayIso = easternIsoDate(now);
   const rows: { eventType: "earnings" | "ex_dividend"; eventDate: string }[] = await db("ticker_calendar_events")
     .where({ ticker_id: tickerId })
-    .andWhere("event_date", ">=", db.raw("CURRENT_DATE"))
+    .whereRaw("event_date >= ?::date", [todayIso])
+    .whereRaw("not (event_type = 'earnings' and event_date = ?::date and event_time is not distinct from '-1')", [todayIso])
     .select("event_type as eventType", db.raw(`event_date::text as "eventDate"`));
 
   return { resolved, events: rows };

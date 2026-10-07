@@ -369,6 +369,33 @@ describe("POST /positions/orders/:id/confirm", () => {
     expect(publishNotificationMock).toHaveBeenCalledWith({ type: "order_status", orderId });
   });
 
+  it("refuses a Pluto order whose ticker's Pluto switch went off after it was built, and confirms it while the switch is on", async () => {
+    const ticker = await createTicker();
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates" }), model_called: false }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
+    try {
+      const switchedOff = await insertOrder(ticker.symbol, { pluto_action_id: action.id });
+      await testDb("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: false });
+      const refused = await call("POST", `/positions/orders/${switchedOff}/confirm`, {});
+      expect(refused.status).toBe(409);
+      expect(refused.json.error).toBe(`Pluto is no longer allowed to trade ${ticker.symbol} (its Pluto switch is off).`);
+      expect((await orderRow(switchedOff)).status).toBe("pending_confirmation");
+
+      await testDb("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: true });
+      const allowed = await insertOrder(ticker.symbol, { pluto_action_id: action.id });
+      expect((await call("POST", `/positions/orders/${allowed}/confirm`, {})).status).toBe(200);
+      // A person's order is not subject to the Pluto switch.
+      await testDb("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: false });
+      expect((await call("POST", `/positions/orders/${await insertOrder(ticker.symbol)}/confirm`, {})).status).toBe(200);
+    } finally {
+      await testDb("order_requests").where({ pluto_action_id: action.id }).del();
+      await testDb("pluto_actions").where({ id: action.id }).del();
+      await testDb("pluto_passes").where({ id: pass.id }).del();
+      await testDb("shortlist_entries").where({ id: entry.id }).del();
+    }
+  });
+
   it("answers 409 with every block reason joined, and leaves the order pending with no notification", async () => {
     const ticker = await createTicker();
     const orderId = await insertOrder(ticker.symbol);

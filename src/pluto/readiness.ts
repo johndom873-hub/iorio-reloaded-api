@@ -46,6 +46,17 @@ export function decidePlutoReadinessRun(now: Date, dateIso: string, record: Plut
   return null;
 }
 
+/**
+ * Pure: a re-check whose last run failed only "Pluto running" (Pluto off or paused, every probe passing) keeps that run's
+ * probe results and re-reads just Pluto's state (Marcelo, 2026-10-07): an Off Pluto would otherwise open an IBKR probe
+ * connection every 10 minutes all morning. Null: run the probes.
+ */
+export function reusableProbeResults(kind: PlutoReadinessRunKind, todaysRecord: PlutoReadinessRecord | null): PlutoReadinessResult[] | null {
+  if (kind !== "recheck" || !todaysRecord) return null;
+  const probeResults = todaysRecord.results.filter((result) => result.name !== plutoRunningTestName);
+  return probeResults.length === plutoReadinessTestNames.length - 1 && probeResults.every((result) => result.ok) ? probeResults : null;
+}
+
 const pauseReasonDescriptions: Record<string, string> = {
   manual: "paused by a person",
   deploy: "paused after a deploy",

@@ -82,10 +82,18 @@ describe("loadOrdersNeedingNotice: which orders", () => {
 
   it("returns exactly the notifiable statuses, and none of pending_confirmation, confirmed or cancel_requested", async () => {
     const idByStatus = new Map<string, string>();
-    for (const status of [...notifiableOrderStatuses, "pending_confirmation", "confirmed", "cancel_requested"]) idByStatus.set(status, await insertOrder({ status }));
+    for (const status of [...notifiableOrderStatuses, "pending_confirmation", "confirmed", "cancel_requested"]) idByStatus.set(status, await insertOrder({ status, ibkr_order_id: 4242 }));
     const returned = await dependencies().loadOrdersNeedingNotice();
     expect(returned.map((order) => order.status).sort()).toEqual([...notifiableOrderStatuses].sort());
     for (const status of ["pending_confirmation", "confirmed", "cancel_requested"]) expect(returned.map((order) => order.id)).not.toContain(idByStatus.get(status));
+  });
+
+  it("skips an order cancelled before it reached IBKR (discarded or never confirmed by hand), but tells one the stale sweep cancelled", async () => {
+    const discarded = await insertOrder({ status: "cancelled" });
+    const staleUnconfirmed = await insertOrder({ status: "cancelled", cancellation_reason: "not_confirmed_in_time" });
+    const ids = (await dependencies().loadOrdersNeedingNotice()).map((order) => order.id);
+    expect(ids).not.toContain(discarded);
+    expect(ids).toContain(staleUnconfirmed);
   });
 
   it("the notifiable statuses are the seven the follow-up promises", () => {
@@ -127,7 +135,7 @@ describe("loadOrdersNeedingNotice: which orders", () => {
   it("orders the notices by when each order last changed", async () => {
     const newest = await insertOrder({ status: "filled", updated_at: hoursAgo(1) });
     const oldest = await insertOrder({ status: "submitted", updated_at: hoursAgo(5) });
-    const middle = await insertOrder({ status: "cancelled", updated_at: hoursAgo(3) });
+    const middle = await insertOrder({ status: "cancelled", ibkr_order_id: 4243, updated_at: hoursAgo(3) });
     const ids = (await dependencies().loadOrdersNeedingNotice()).map((order) => order.id);
     expect(ids).toEqual([oldest, middle, newest]);
   });

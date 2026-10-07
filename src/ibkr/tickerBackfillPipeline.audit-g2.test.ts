@@ -56,7 +56,10 @@ function fakeWorkers(overrides: Partial<Workers> = {}) {
     captureCalendar: vi.fn(async () => ({ resolved: true, earningsWritten: 1, dividendsWritten: 0, historicalEarningsWritten: 1, historicalEarningsSkippedEtf: false, historicalEarningsError: null })),
     loadUniverseTicker: vi.fn(async (tickerId: string, symbol: string) => ({ tickerId, symbol, contractId: 1 })),
     // The real worker's query, so a Signals-off or removed ticker is read from the database as in production.
-    loadSignalsEnabled: vi.fn(async (tickerId: string) => Boolean((await testDb("shortlist_entries").where({ ticker_id: tickerId }).whereNull("removed_at").first("signals_enabled"))?.signals_enabled)),
+    loadSignalsEnabled: vi.fn(async (tickerId: string) => {
+      const entry = await testDb("shortlist_entries").where({ ticker_id: tickerId }).whereNull("removed_at").first("signals_enabled");
+      return entry ? Boolean(entry.signals_enabled) : null;
+    }),
     prepareChain,
     now: () => new Date("2026-10-07T14:00:00Z"),
     ...overrides,
@@ -243,6 +246,31 @@ describe("closeRunning", () => {
     expect((await testDb("ticker_backfill_runs").where({ id: staleId }).first()).status).toBe("partial");
     expect((await testDb("ticker_backfill_runs").where({ id: freshId }).first()).status).toBe("running");
     await databaseRunStore.finish(freshId, "partial", buildInitialBackfillSteps());
+  });
+});
+
+describe("progress writes only land on a running run", () => {
+  it("a cut-off process finishing a run the new boot already closed changes nothing", async () => {
+    const ticker = await createTicker({ signalsEnabled: true });
+    const runId = await insertInterruptedRun(ticker.id);
+    await databaseRunStore.finish(runId, "partial", buildInitialBackfillSteps());
+    const closed = await testDb("ticker_backfill_runs").where({ id: runId }).first();
+    await databaseRunStore.saveProgress(runId, updateStep(buildInitialBackfillSteps(), "history", "done", "late write"));
+    await databaseRunStore.finish(runId, "complete", updateStep(buildInitialBackfillSteps(), "history", "done", "late write"));
+    const after = await testDb("ticker_backfill_runs").where({ id: runId }).first();
+    expect(after.status).toBe("partial");
+    expect(after.steps).toEqual(closed.steps);
+  });
+
+  it("a ticker removed from the Shortlist mid-setup has its chain steps skipped for that reason", async () => {
+    const ticker = await createTicker({ signalsEnabled: true });
+    const { workers, prepareChain } = fakeWorkers();
+    await testDb("shortlist_entries").where({ ticker_id: ticker.id }).update({ removed_at: new Date() });
+    const run = await startTickerBackfill(ticker.id, ticker.symbol, { store: scopedStore(), workers }, "option_chain");
+    await waitForBackfillQueue();
+    const finished = await testDb("ticker_backfill_runs").where({ id: run.id }).first();
+    expect(prepareChain).not.toHaveBeenCalled();
+    expect(finished.steps.find((step: { key: string }) => step.key === "chain_warmup").message).toBe("Removed from the Shortlist: no strikes set up.");
   });
 });
 

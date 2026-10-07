@@ -1,5 +1,6 @@
 import { getEventListeners } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "../lib/impliedVolatilitySurface.js";
 import type { SignalQuote, SignalSurfaceSlice } from "../lib/signalCandidates.js";
 import { candidateContractKey, contractKey, liveFrameIntervalMs, type ContractRef, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
@@ -57,7 +58,7 @@ function inputsFor(ticker: SignalsTickerRow, withSnapshot: boolean, freeShares =
     openShortLegs: [],
     dailyBarCount: 1253,
     dividendCadenceUnknown: false,
-    todayEasternIso: "2026-09-22",
+    todayEasternIso: easternIsoDate(new Date()),
   };
 }
 
@@ -146,7 +147,11 @@ function createHarness(): Harness {
   };
 }
 
-beforeEach(() => vi.useFakeTimers());
+// The fixtures' trading day (the clock the inputs' todayEasternIso is read from).
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-09-22T14:00:00Z"));
+});
 afterEach(() => vi.useRealTimers());
 
 describe("signalsScreen producer", () => {
@@ -580,6 +585,27 @@ describe("snapshot-change poll (a stream opened mid-capture must not stay half-f
     const aaoi = frames.at(-1)!.rows.find((row) => row.symbol === "AAOI")!;
     expect(aaoi.unscoredReason).toBeNull();
     expect(aaoi.best).not.toBeNull();
+    abort.abort();
+  });
+
+  it("screen: a stream left open past midnight ET reloads its inputs once for the new day", async () => {
+    const harness = createHarness();
+    harness.snapshots.versions.set("id-aaoi", "snap-1|2026-09-22T14:00:00.000Z");
+    harness.snapshots.versions.set("id-hood", "snap-h|2026-09-22T14:00:00.000Z");
+    vi.setSystemTime(new Date("2026-09-23T03:55:00Z")); // 23:55 ET
+    const { signalsScreen } = createSignalsProducers(harness.deps);
+    const abort = new AbortController();
+    void signalsScreen.run({}, { userId: "u" }, () => {}, abort.signal);
+    await vi.advanceTimersByTimeAsync(firstFramePriceGraceMs);
+    expect(harness.snapshots.inputsLoads).toEqual(["AAOI", "HOOD"]);
+    await vi.advanceTimersByTimeAsync(snapshotChangePollIntervalMs);
+    expect(harness.snapshots.inputsLoads).toEqual(["AAOI", "HOOD"]);
+    // Past 00:00 ET: the next poll reloads both (same snapshots), once.
+    vi.setSystemTime(new Date("2026-09-23T04:01:00Z"));
+    await vi.advanceTimersByTimeAsync(snapshotChangePollIntervalMs);
+    expect(harness.snapshots.inputsLoads.sort()).toEqual(["AAOI", "AAOI", "HOOD", "HOOD"]);
+    await vi.advanceTimersByTimeAsync(snapshotChangePollIntervalMs);
+    expect(harness.snapshots.inputsLoads).toHaveLength(4);
     abort.abort();
   });
 
