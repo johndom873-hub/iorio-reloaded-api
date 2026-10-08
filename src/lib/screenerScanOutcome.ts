@@ -17,10 +17,14 @@ export function isEmptyEnrichment(quote: EnrichmentQuote): boolean {
   return [quote.lastPrice, quote.avgShareVolume, quote.avgOptionVolume, quote.callOpenInterest, quote.putOpenInterest, quote.bidAskSpreadPct, quote.impliedVolatility].every((value) => value === null);
 }
 
-/** "PSKY (IBKR 200 No security definition has been found for the request)", or "(no data before the timeout)" when IBKR sent no error. */
-export function describeFailedEnrichment(symbol: string, ibkrError: { code: number; message: string } | null): string {
-  if (!ibkrError) return `${symbol} (no data before the timeout)`;
-  return `${symbol} (IBKR ${ibkrError.code} ${ibkrError.message.replaceAll("): ", ") ")})`;
+/**
+ * "PSKY (IBKR 200 No security definition has been found for the request)", or "(no data before the timeout)" when IBKR
+ * sent no error. newSymbol, when IBKR now files the contract under another ticker, adds ", now trades as SKYD".
+ */
+export function describeFailedEnrichment(symbol: string, ibkrError: { code: number; message: string } | null, newSymbol: string | null = null): string {
+  const renameNote = newSymbol ? `, now trades as ${newSymbol}` : "";
+  if (!ibkrError) return `${symbol} (no data before the timeout${renameNote})`;
+  return `${symbol} (IBKR ${ibkrError.code} ${ibkrError.message.replaceAll("): ", ") ")}${renameNote})`;
 }
 
 /** One line for the job alert, or undefined when every scan returned rows and every symbol enriched. Free of "): " (Telegram truncation). */

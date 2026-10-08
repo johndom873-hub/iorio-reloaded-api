@@ -33,7 +33,7 @@ const OPTION_CALL_OPEN_INTEREST_TICK = 27;
 const OPTION_PUT_OPEN_INTEREST_TICK = 28;
 const AVG_OPT_VOLUME_TICK = 87;
 // "No security definition has been found" (or an ambiguous contract): IBKR drops the request, so no tick will ever follow.
-const NO_SECURITY_DEFINITION_ERROR_CODE = 200;
+export const NO_SECURITY_DEFINITION_ERROR_CODE = 200;
 
 export interface CandidateEnrichment {
   lastPrice: number | null;

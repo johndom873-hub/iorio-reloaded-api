@@ -1,7 +1,8 @@
 // Scheduled job (redesigned 2026-09-25, see PROGRESS.md "Screener revamp"):
 // builds/maintains screener_universe, an ACCUMULATING candidate list —
 // unlike the table this replaces (screener_scan_results, purged daily),
-// a symbol is never removed just because it didn't match tonight's scans.
+// a symbol is never removed just because it didn't match tonight's scans
+// (only once IBKR shows it delisted, see screenerDelistings.ts).
 // Every symbol already in the table gets re-enriched every night regardless
 // of whether it matched, so the data never goes stale for a ticker that's
 // stopped qualifying; best_rank/matched_scan_codes reflect ONLY tonight's
@@ -25,10 +26,12 @@ import { ScanCode, Stock } from "@stoqey/ib";
 import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { runScannerSubscription, type ScannerCandidate } from "../src/ibkr/fetchScannerCandidates.js";
-import { enrichCandidate } from "../src/ibkr/enrichScannerCandidates.js";
+import { enrichCandidate, NO_SECURITY_DEFINITION_ERROR_CODE } from "../src/ibkr/enrichScannerCandidates.js";
 import { lookupContractDetails } from "../src/ibkr/fetchNewTickerData.js";
+import { lookupListingByContractId } from "../src/ibkr/lookupListingByContractId.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { buildScreenerFailureMessage, describeFailedEnrichment, isEmptyEnrichment } from "../src/lib/screenerScanOutcome.js";
+import { classifyRejectedSymbol } from "../src/lib/screenerDelistings.js";
 import { findTickerRenames } from "../src/lib/screenerTickerRenames.js";
 import { runJob } from "../src/lib/runJob.js";
 
@@ -111,6 +114,8 @@ async function main(): Promise<void> {
     // Symbols whose enrichment came back empty: their stored data must survive, but tonight's match result still counts.
     const matchOnlyRows: { symbol: string; ibkr_contract_id: number | null; company_name: string | null; sector: string | null; primary_exchange: string | null; best_rank: number; matched_scan_codes: string[] }[] = [];
     const unmatchedWithoutEnrichment: string[] = [];
+    // Stored symbols IBKR shows delisted: deleted from the universe, not counted as failures.
+    const delistedSymbols: string[] = [];
 
     try {
       // Sequential, not Promise.all — matches the existing precedent
@@ -186,9 +191,21 @@ async function main(): Promise<void> {
           // enrichCandidate resolves with every field null on a timeout: writing that would wipe the symbol's stored
           // data and stamp last_refreshed_at, so it counts as a failed enrichment and only the match result is recorded.
           if (isEmptyEnrichment(quote)) {
+            // A stored symbol that did not match tonight and that IBKR rejects outright: its contract id says whether
+            // it was delisted (row deleted) or now trades under another ticker (named in the alert).
+            let newSymbol: string | null = null;
+            if (quote.ibkrError?.code === NO_SECURITY_DEFINITION_ERROR_CODE && existingBySymbol.has(symbol) && !match && identity.conId !== null) {
+              const outcome = classifyRejectedSymbol(symbol, await lookupListingByContractId(connection.ib, identity.conId, nextReqId++));
+              if (outcome.kind === "delisted") {
+                delistedSymbols.push(symbol);
+                console.log(`${symbol}: delisted (IBKR files contract ${identity.conId} on the VALUE exchange), removing it from the universe.`);
+                continue;
+              }
+              if (outcome.kind === "renamed") newSymbol = outcome.newSymbol;
+            }
             failed++;
-            failedSymbols.push(describeFailedEnrichment(symbol, quote.ibkrError));
-            console.warn(`${describeFailedEnrichment(symbol, quote.ibkrError)}: enrichment returned no data, keeping its stored values.`);
+            failedSymbols.push(describeFailedEnrichment(symbol, quote.ibkrError, newSymbol));
+            console.warn(`${describeFailedEnrichment(symbol, quote.ibkrError, newSymbol)}: enrichment returned no data, keeping its stored values.`);
             // A symbol not yet in the table is NOT inserted from an empty enrichment: its identity lookup usually timed out too,
             // and once a row exists the lookup never runs again, freezing null name/sector for good. It is retried tomorrow.
             if (match && existing) matchOnlyRows.push({ symbol, ibkr_contract_id: identity.conId, company_name: identity.companyName, sector: identity.sector, primary_exchange: identity.primaryExchange, best_rank: match.bestRank, matched_scan_codes: [...match.scanCodes] });
@@ -227,6 +244,10 @@ async function main(): Promise<void> {
       // Renamed first, so the upserts below merge into the existing row under its new ticker.
       for (const rename of tickerRenames) {
         await db("screener_universe").where({ symbol: rename.oldSymbol }).update({ symbol: rename.newSymbol, ...renamedIdentityBySymbol.get(rename.newSymbol) });
+      }
+
+      if (delistedSymbols.length > 0) {
+        await db("screener_universe").whereIn("symbol", delistedSymbols).delete();
       }
 
       // Two batches: matched rows update best_rank/matched_scan_codes/last_matched_at;
@@ -305,9 +326,9 @@ async function main(): Promise<void> {
         await db("screener_universe").whereIn("symbol", unmatchedWithoutEnrichment).update({ best_rank: unmatchedRankSentinel, matched_scan_codes: [] });
       }
 
-      console.log(`Screener scan complete: ${enriched} enriched, ${failed} failed, ${matchedRows.length} matched, ${carriedOverRows.length} carried over.`);
+      console.log(`Screener scan complete: ${enriched} enriched, ${failed} failed, ${delistedSymbols.length} delisted and removed, ${matchedRows.length} matched, ${carriedOverRows.length} carried over.`);
       return {
-        details: { scanCounts, matched: matches.size, universeSize: fullSymbolSet.size, enriched, failed, failedSymbols, tickerRenames },
+        details: { scanCounts, matched: matches.size, universeSize: fullSymbolSet.size, enriched, failed, failedSymbols, delistedSymbols, tickerRenames },
         failureMessage: buildScreenerFailureMessage({ scanCounts, failedSymbols, universeSize: fullSymbolSet.size }),
       };
     } finally {

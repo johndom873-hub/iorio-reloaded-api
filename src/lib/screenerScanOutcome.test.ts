@@ -29,6 +29,12 @@ describe("describeFailedEnrichment", () => {
     expect(describeFailedEnrichment("PSKY", { code: 200, message: "No security definition has been found for the request" })).toBe("PSKY (IBKR 200 No security definition has been found for the request)");
   });
 
+  it("names the new ticker when IBKR now files the contract under one", () => {
+    expect(describeFailedEnrichment("PSKY", { code: 200, message: "No security definition has been found for the request" }, "SKYD")).toBe(
+      "PSKY (IBKR 200 No security definition has been found for the request, now trades as SKYD)",
+    );
+  });
+
   it("says it timed out when IBKR sent no error", () => {
     expect(describeFailedEnrichment("XYZ", null)).toBe("XYZ (no data before the timeout)");
   });
