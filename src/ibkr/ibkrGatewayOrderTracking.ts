@@ -235,6 +235,12 @@ export interface ExecutionRecordingDependencies {
   requestReconciliation(): void;
 }
 
+/**
+ * A buffered opening fill asks for a reconciliation this long after the last one of its burst: a combo's legs arrive over a
+ * second or two, and a pass that read the shares before the call would build a stock-only position first.
+ */
+export const openingFillReconciliationDelayMs = 3_000;
+
 /** Most commission reports held while waiting for their trade row; the oldest is dropped beyond this. */
 export const maxPendingCommissions = 500;
 
@@ -253,8 +259,30 @@ function isRealCommission(value: number | undefined): value is number {
  */
 export function createExecutionRecorder(dependencies: ExecutionRecordingDependencies) {
   const { db } = dependencies;
-  const pendingOpeningExecutions = new Map<string, { contract: Contract; execution: Execution }[]>();
+  const pendingOpeningExecutions = new Map<string, { contract: Contract; execution: Execution; receivedAt: Date }[]>();
   const pendingCommissionsByExecId = new Map<string, number>();
+  let openingFillReconciliationTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function requestReconciliationAfterOpeningFills(): void {
+    if (openingFillReconciliationTimer) clearTimeout(openingFillReconciliationTimer);
+    openingFillReconciliationTimer = setTimeout(() => {
+      openingFillReconciliationTimer = null;
+      dependencies.requestReconciliation();
+    }, openingFillReconciliationDelayMs);
+    openingFillReconciliationTimer.unref?.();
+  }
+
+  /** IBKR's own execution time; when it cannot be read, the moment the execution reached the worker (not when it was written). */
+  function executedAtOf(execution: Execution, receivedAt: Date): Date {
+    let parsed: Date | null = null;
+    try {
+      parsed = parseIbkrExecutionTime(execution.time);
+    } catch {
+      // An unknown zone name (RangeError): the trade row matters more than its exact second.
+    }
+    if (!parsed) console.warn(`Execution ${execution.execId}: IBKR time ${JSON.stringify(execution.time)} could not be read, recording the time it reached the worker.`);
+    return parsed ?? receivedAt;
+  }
 
   // Looked up by permId, not ibkr_order_id: ibkr_order_id resets and gets reused after every Gateway/worker restart, so
   // matching a trade to its requester by order id could attribute an old trade to whichever unrelated request later reused
@@ -285,7 +313,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     pendingCommissionsByExecId.delete(execId);
   }
 
-  async function insertOpeningTradeRow(positionLegId: string, _contract: Contract, execution: Execution): Promise<void> {
+  async function insertOpeningTradeRow(positionLegId: string, _contract: Contract, execution: Execution, receivedAt: Date): Promise<void> {
     if (!execution.execId) return;
     await db("trades")
       .insert({
@@ -295,7 +323,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
         side: execution.side === "BOT" ? "buy" : "sell",
         quantity: execution.shares ?? 0,
         price: execution.price ?? 0,
-        executed_at: parseIbkrExecutionTime(execution.time) ?? new Date(),
+        executed_at: executedAtOf(execution, receivedAt),
         is_closing_trade: false,
         source_order_request_id: await lookupSourceOrderRequestId(execution),
       })
@@ -310,6 +338,10 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
    */
   async function recordExecution(contract: Contract, execution: Execution): Promise<void> {
     if (!execution.execId || !contract.conId) return;
+    // A combo also reports one execution for the combo itself; its legs arrive as their own executions, and no leg ever
+    // carries the combo's conId, so it would wait in the buffer forever.
+    if (contract.secType === "BAG") return;
+    const receivedAt = new Date();
     if (dependencies.isAccountBindingMismatch()) {
       console.log(`Execution ${execution.execId} ignored: account binding mismatch.`);
       return;
@@ -326,9 +358,10 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
       // position reconciliation has not run since this fill. Buffer it; the reconciliation drains the buffer once it
       // creates the leg.
       const buffered = pendingOpeningExecutions.get(conId) ?? [];
-      buffered.push({ contract, execution });
+      buffered.push({ contract, execution, receivedAt });
       pendingOpeningExecutions.set(conId, buffered);
       console.log(`Execution ${execution.execId} for conId ${conId} has no matching open leg yet — buffered for the next reconciliation pass.`);
+      requestReconciliationAfterOpeningFills();
       return;
     }
 
@@ -337,7 +370,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
       // An add-on fill to an already-tracked leg: not a close, but still a real execution the Trade Blotter should show.
       // The leg's own quantity is not updated here; the reconciliation does that, so trigger it now rather than waiting
       // for the periodic pass.
-      await insertOpeningTradeRow(leg.id, contract, execution);
+      await insertOpeningTradeRow(leg.id, contract, execution, receivedAt);
       dependencies.requestReconciliation();
       return;
     }
@@ -353,7 +386,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
       side: execution.side === "BOT" ? "buy" : "sell",
       quantity: execution.shares ?? 0,
       price: execution.price ?? 0,
-      executed_at: parseIbkrExecutionTime(execution.time) ?? new Date(),
+      executed_at: executedAtOf(execution, receivedAt),
       is_closing_trade: true,
       source_order_request_id: await lookupSourceOrderRequestId(execution),
     });
@@ -367,8 +400,8 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     const buffered = pendingOpeningExecutions.get(conId);
     if (!buffered) return;
     pendingOpeningExecutions.delete(conId);
-    for (const { contract, execution } of buffered) {
-      await insertOpeningTradeRow(newLegId, contract, execution);
+    for (const { contract, execution, receivedAt } of buffered) {
+      await insertOpeningTradeRow(newLegId, contract, execution, receivedAt);
     }
   }
 

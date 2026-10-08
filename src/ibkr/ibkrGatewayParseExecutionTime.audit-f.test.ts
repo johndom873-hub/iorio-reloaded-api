@@ -63,3 +63,14 @@ describe("parseIbkrExecutionTime with cached per-zone formatters", () => {
     expect(parseIbkrExecutionTime("2026-01-05T09:30:00Z")).toBeNull();
   });
 });
+
+describe("parseIbkrExecutionTime — IBKR's UTC form (2026-10-08)", () => {
+  it("reads YYYYMMDD-HH:mm:ss as UTC", () => {
+    expect(parseIbkrExecutionTime("20261007-14:14:54")?.toISOString()).toBe("2026-10-07T14:14:54.000Z");
+    expect(parseIbkrExecutionTime("20260308-06:30:00")?.toISOString()).toBe("2026-03-08T06:30:00.000Z");
+  });
+  it("still refuses anything else", () => {
+    expect(parseIbkrExecutionTime("20261007-14:14")).toBeNull();
+    expect(parseIbkrExecutionTime("2026-10-07 14:14:54")).toBeNull();
+  });
+});

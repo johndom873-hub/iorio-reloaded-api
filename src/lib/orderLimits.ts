@@ -5,6 +5,7 @@ import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
 import { computeCashLockedInCsps, computeTickerExposure } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
 import { loadTradingSettings } from "./tradingSettingsStore.js";
+import { orderFillsPendingSql } from "./orderFills.js";
 
 // The three trading settings that block *placing* an order: max position %, max concentration per ticker %
 // and min cash reserve % (table trading_settings, edited on Risk & Limits). They apply to EVERY opening or
@@ -119,9 +120,20 @@ interface InFlightTotals {
   tickerNotional: number;
 }
 
+/** Statuses the order gate counts as in flight: confirmed and not yet done. */
+export const inFlightOrderRequestStatuses = ["confirmed", "submitted", "partially_filled", "cancel_requested"];
+
+/**
+ * order_requests (aliased orq) still committing capital: in flight, or filled with fills not yet recorded, i.e. not yet a
+ * position either (orderFillsPendingSql).
+ */
+export function inFlightOrderRequestsQuery() {
+  return db("order_requests as orq").where((builder) => builder.whereIn("orq.status", inFlightOrderRequestStatuses).orWhereRaw(orderFillsPendingSql("orq")));
+}
+
 async function loadInFlightNotionals(symbol: string, excludeOrderRequestId: string | undefined): Promise<InFlightTotals> {
-  let query = db("order_requests").whereIn("status", ["confirmed", "submitted", "partially_filled", "cancel_requested"]).select("request_type", "payload");
-  if (excludeOrderRequestId) query = query.whereNot({ id: excludeOrderRequestId });
+  let query = inFlightOrderRequestsQuery().select("orq.request_type", "orq.payload");
+  if (excludeOrderRequestId) query = query.whereNot("orq.id", excludeOrderRequestId);
   const rows: { request_type: string; payload: OrderRequestPayload }[] = await query;
   const totals: InFlightTotals = { totalNotional: 0, tickerNotional: 0 };
   for (const row of rows) {

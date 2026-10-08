@@ -16,7 +16,7 @@ vi.mock("../lib/notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => t
 
 const { db } = await import("../db/connection.js");
 const testDb: Knex = db;
-const { loadPlutoBook, loadInFlightNotionals } = await import("./book.js");
+const { loadPlutoBook, loadInFlightNotionals, loadOccupiedContracts } = await import("./book.js");
 
 let counter = Date.now() % 100_000;
 let userId: string;
@@ -179,12 +179,28 @@ describe("loadInFlightNotionals (test DB)", () => {
     await insertOrder(disabled.symbol, "partially_filled", { strike: 20, pluto: true }); // Pluto, disabled: 2,000 managed
     await insertOrder(removed.symbol, "cancel_requested", { strike: 10 }); // person, removed entry: 1,000 not managed
     await insertOrder(enabled.symbol, "pending_confirmation", { strike: 70 }); // not in flight yet
-    await insertOrder(enabled.symbol, "filled", { strike: 80 }); // done
+    const filledOrderId = await insertOrder(enabled.symbol, "filled", { strike: 80 }); // done (past the fill wait)
+    await testDb("order_requests").where({ id: filledOrderId }).update({ updated_at: new Date(Date.now() - 10 * 60_000) });
     await insertOrder(enabled.symbol, "confirmed", { strike: 90, requestType: "close_position" }); // a close adds nothing
 
     const after = await loadInFlightNotionals(enabled.symbol);
     expect(after.totalNotional - before.totalNotional).toBeCloseTo(10_000 + 3_000 + 2_000 + 1_000, 6);
     expect(after.tickerNotional - before.tickerNotional).toBeCloseTo(10_000, 6);
     expect(after.managedNotional - before.managedNotional).toBeCloseTo(10_000 + 2_000, 6);
+  });
+});
+
+describe("an order IBKR reported filled whose fills are not recorded yet (test DB, 2026-10-08)", () => {
+  it("still takes its contract, counts as a working Pluto order and stays in flight; past the fill wait it is done", async () => {
+    const enabled = await createTicker({ botEnabled: true });
+    const orderId = await insertOrder(enabled.symbol, "filled", { strike: 61, quantity: 2, pluto: true });
+    expect(await loadOccupiedContracts(enabled.symbol)).toEqual([expect.objectContaining({ expiry: "2031-03-21", strike: 61 })]);
+    expect((await loadPlutoBook()).workingOrderSymbols.has(enabled.symbol)).toBe(true);
+    expect((await loadInFlightNotionals(enabled.symbol)).tickerNotional).toBeCloseTo(61 * 100 * 2, 6);
+
+    await testDb("order_requests").where({ id: orderId }).update({ updated_at: new Date(Date.now() - 10 * 60_000) });
+    expect(await loadOccupiedContracts(enabled.symbol)).toEqual([]);
+    expect((await loadPlutoBook()).workingOrderSymbols.has(enabled.symbol)).toBe(false);
+    expect((await loadInFlightNotionals(enabled.symbol)).tickerNotional).toBe(0);
   });
 });

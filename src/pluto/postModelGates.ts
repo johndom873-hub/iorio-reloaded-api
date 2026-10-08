@@ -1,3 +1,4 @@
+import { weekdaysAfterUntil } from "../lib/easternIsoDate.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
@@ -56,6 +57,17 @@ export interface PostModelGateInput {
   settings: PlutoSettings;
   book: PostModelBookInput;
   sector: string | null;
+  /** What the stress cap needs about the ticker today (fresh re-score). */
+  stress: StressCapInput;
+}
+
+export interface StressCapInput {
+  /** Annualised Yang-Zhang forecast (decimal); null means the cap cannot be sized and the order is refused. */
+  forecastVolatility: number | null;
+  elevatedVolatility: boolean;
+  /** Today's move in normal days (day change ÷ forecast daily move); null when either is unknown. */
+  dayMoveSigmas: number | null;
+  todayEasternIso: string;
 }
 
 export interface PlutoOrderPlan {
@@ -111,6 +123,55 @@ function volumeCap(volume: number | null, settings: PlutoSettings): number {
   return volume === null ? 0 : Math.floor((volume * settings.maxContractsVolumeSharePct) / 100);
 }
 
+/** The ticker cooldown: over once tickerCooldownMinutes have passed since the last Pluto action on the symbol whose order filled. */
+export function tickerCooldownStatus(lastFilledActionAt: Date | null, nowMs: number, cooldownMinutes: number): { cooledDown: boolean; detail: string } {
+  if (lastFilledActionAt === null) return { cooledDown: true, detail: "no filled Pluto action on this symbol" };
+  const minutesSinceLastFill = (nowMs - lastFilledActionAt.getTime()) / 60_000;
+  return {
+    cooledDown: cooldownMinutes === 0 || minutesSinceLastFill >= cooldownMinutes,
+    detail: `last filled Pluto action on this symbol ${Math.floor(minutesSinceLastFill)} min ago (cooldown ${cooldownMinutes} min)`,
+  };
+}
+
+// Stress cap (Marcelo, 2026-10-08): the risk an order adds is sized so that an adverse move of k forecast standard deviations
+// by expiry loses at most stressRiskBudgetPct of the account.
+//   σ_T = forecast volatility × √(trading days to expiry ÷ 252)          (weekdays, holidays not excluded)
+//   k   = stressSigmas + 0.5 if the stock is in an elevated-volatility stretch + 0.5 if today it is down more than one normal day
+//   stressed spot = spot × (1 − k × σ_T)
+//   loss per contract: cash-secured put = max(0, strike − stressed spot) × 100 − mid × 100
+//                      covered call bought with new shares = (spot − stressed spot) × 100 − mid × 100
+//   contracts = floor(account × stressRiskBudgetPct ÷ 100 ÷ loss per contract)   (no limit when the loss is ≤ 0)
+// The two add-ons are fixed here, not settings (Marcelo, 2026-10-08). A call written on shares already held adds no risk and is not capped.
+export const stressSigmasElevatedVolatilityAddOn = 0.5;
+export const stressSigmasAdverseDayAddOn = 0.5;
+/** Down more than this many normal days today counts as an adverse day. */
+export const adverseDayMoveSigmas = 1;
+
+export interface StressCap {
+  /** Contracts of new risk the cap allows (Infinity when it does not bind or is off). */
+  contracts: number;
+  detail: string;
+}
+
+export function computeStressCap(settings: PlutoSettings, stress: StressCapInput, contract: Pick<SignalCandidate, "strategyKey" | "strike" | "expiry" | "bid" | "ask">, spotPrice: number | null, netLiquidationValue: number): StressCap {
+  if (settings.stressRiskBudgetPct <= 0) return { contracts: Number.POSITIVE_INFINITY, detail: "stress cap off" };
+  if (stress.forecastVolatility === null || !(stress.forecastVolatility > 0) || spotPrice === null || !(spotPrice > 0)) return { contracts: 0, detail: "stress cap: no volatility forecast or live spot to size it" };
+  const tradingDays = Math.max(1, weekdaysAfterUntil(stress.todayEasternIso, contract.expiry));
+  const sigmaToExpiry = stress.forecastVolatility * Math.sqrt(tradingDays / 252);
+  const adverseDay = stress.dayMoveSigmas !== null && stress.dayMoveSigmas <= -adverseDayMoveSigmas;
+  const sigmas = settings.stressSigmas + (stress.elevatedVolatility ? stressSigmasElevatedVolatilityAddOn : 0) + (adverseDay ? stressSigmasAdverseDayAddOn : 0);
+  const stressedSpot = Math.max(0, spotPrice * (1 - sigmas * sigmaToExpiry));
+  const mid = (contract.bid + contract.ask) / 2;
+  const lossPerContract = contract.strategyKey === "covered_call" ? (spotPrice - stressedSpot) * 100 - mid * 100 : Math.max(0, contract.strike - stressedSpot) * 100 - mid * 100;
+  const budgetDollars = (netLiquidationValue * settings.stressRiskBudgetPct) / 100;
+  const contracts = lossPerContract > 0 ? Math.floor(budgetDollars / lossPerContract) : Number.POSITIVE_INFINITY;
+  const why = [stress.elevatedVolatility ? "elevated volatility" : null, adverseDay ? "down more than a normal day" : null].filter(Boolean).join(", ");
+  return {
+    contracts,
+    detail: `stress cap: a ${sigmas}σ${why ? ` (${why})` : ""} move to expiry (−${(Math.min(1, sigmas * sigmaToExpiry) * 100).toFixed(1)}% in ${tradingDays} trading day(s)) loses $${lossPerContract.toFixed(0)}/contract → ${Number.isFinite(contracts) ? contracts : "no limit"} within $${budgetDollars.toFixed(0)} (${settings.stressRiskBudgetPct}% of account)`,
+  };
+}
+
 export function runPostModelGates(input: PostModelGateInput): PostModelGateOutput {
   const { decision, settings, book } = input;
   const gates: PlutoGateResult[] = [];
@@ -130,15 +191,8 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
   const driftVp = Math.abs(netEdgeNow - input.netEdgeAtDecision) * 100;
   gate("edge_drift", driftVp <= settings.maxEdgeDriftVp, `${driftVp.toFixed(2)} vp since the decision, max ${settings.maxEdgeDriftVp}`);
   gate("working_order", !book.workingOrderOnSymbol, book.workingOrderOnSymbol ? "a Pluto order on this symbol is already working" : "no working Pluto order on the symbol");
-  const minutesSinceLastFill = book.lastFilledActionAt === null ? null : (book.nowMs - book.lastFilledActionAt.getTime()) / 60_000;
-  const cooledDown = settings.tickerCooldownMinutes === 0 || minutesSinceLastFill === null || minutesSinceLastFill >= settings.tickerCooldownMinutes;
-  gate(
-    "ticker_cooldown",
-    cooledDown,
-    minutesSinceLastFill === null
-      ? "no filled Pluto action on this symbol"
-      : `last filled Pluto action on this symbol ${Math.floor(minutesSinceLastFill)} min ago (cooldown ${settings.tickerCooldownMinutes} min)`,
-  );
+  const cooldown = tickerCooldownStatus(book.lastFilledActionAt, book.nowMs, settings.tickerCooldownMinutes);
+  gate("ticker_cooldown", cooldown.cooledDown, cooldown.detail);
   if (!isRoll) gate("open_positions_cap", book.openPositionCount < settings.maxOpenPositions, `${book.openPositionCount} of ${settings.maxOpenPositions} managed positions`);
   gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${describeOptionContract({ strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", expiry: candidate.expiry, dte: candidate.dte })}`);
 
@@ -157,8 +211,9 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     unitNotional = candidate.strike * 100;
     const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
     const byRoom = Math.floor(Math.max(0, roomDollars) / unitNotional);
-    fullSizeQuantity = Math.min(byRoom, liquidityCap);
-    gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at $${unitNotional.toFixed(0)} each; volume share allows ${liquidityCap} → $${(fullSizeQuantity * unitNotional).toFixed(0)}`);
+    const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
+    fullSizeQuantity = Math.min(byRoom, liquidityCap, stressCap.contracts);
+    gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at $${unitNotional.toFixed(0)} each; volume share allows ${liquidityCap}; ${stressCap.detail} → $${(fullSizeQuantity * unitNotional).toFixed(0)}`);
   } else {
     // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
     // contract is a buy-write that buys 100 shares at the live spot, sized from the same room as a put.
@@ -170,9 +225,11 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     } else {
       unitNotional = book.spotPrice * 100;
       const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
-      const buyWriteContracts = Math.floor(Math.max(0, roomDollars) / unitNotional);
+      // Only the contracts that buy shares add risk, so only they are stress-capped.
+      const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
+      const buyWriteContracts = Math.min(Math.floor(Math.max(0, roomDollars) / unitNotional), stressCap.contracts);
       fullSizeQuantity = Math.min(coveredByShares + buyWriteContracts, liquidityCap);
-      gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${coveredByShares} contract(s), room allows ${buyWriteContracts} more contract(s) buying 100 shares each at ${book.spotPrice.toFixed(2)} (${describeRoom(room)}), volume share allows ${liquidityCap}`);
+      gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${coveredByShares} contract(s), room allows ${buyWriteContracts} more contract(s) buying 100 shares each at ${book.spotPrice.toFixed(2)} (${describeRoom(room)}; ${stressCap.detail}), volume share allows ${liquidityCap}`);
     }
     // Only the shares actually bought count as notional: the free-share contracts commit no new cash.
     unitNotional = fullSizeQuantity > 0 ? (Math.max(0, fullSizeQuantity - coveredByShares) * unitNotional) / fullSizeQuantity : 0;

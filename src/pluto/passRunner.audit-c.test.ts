@@ -70,7 +70,7 @@ vi.mock("./candidateFilters.js", () => ({
   rejectTicker: () => [],
   rollCandidateId: () => "",
 }));
-vi.mock("./book.js", () => ({ loadPlutoBook: async () => ({ openPositions: [], committedDollars: 0, plutoOpenedPositionIds: new Set(), workingOrderSymbols: new Set(), lastFilledActionAtBySymbol: new Map() }), loadOccupiedContracts: async () => [], loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), anyOpenPositionOn: async () => false }));
+vi.mock("./book.js", () => ({ loadPlutoBook: async () => ({ openPositions: [], committedDollars: 0, plutoOpenedPositionIds: new Set(), workingOrderSymbols: new Set(), lastFilledActionAtBySymbol: new Map() }), loadOccupiedContracts: async () => [], loadLastFilledPlutoActionAtBySymbol: async () => new Map(), loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), anyOpenPositionOn: async () => false }));
 vi.mock("./closeActions.js", () => ({
   buildCloseOffersForTicker: async (input: { todayIso: string }) => {
     harness.closeBuilds.push({ todayIso: input.todayIso });
@@ -97,7 +97,7 @@ vi.mock("./modelClient.js", () => ({
   callPlutoModel: async () => ({ ok: true, rawText: JSON.stringify(harness.modelAnswer ?? { decision: "no_trade", action_kind: null, candidate_id: null, confidence: 0.9, reasons: ["nothing worth it"], risks_acknowledged: [], system_concerns: [] }), servedModelId: "test/model", latencyMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, serviceTier: null, error: null, httpStatus: 200 }),
 }));
 vi.mock("./executor.js", () => ({ executePlutoClose: vi.fn(async () => ({ outcome: "confirmed", orderId: "order-1", detail: "" })), executePlutoOrder: vi.fn(), watchPlutoOrder: vi.fn(async () => ({ outcome: "filled", detail: "" })) }));
-vi.mock("./postModelGates.js", () => ({ runPostModelGates: vi.fn() }));
+vi.mock("./postModelGates.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./postModelGates.js")>()), runPostModelGates: vi.fn() }));
 vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn() }));
 
 const { runPlutoPass } = await import("./passRunner.js");

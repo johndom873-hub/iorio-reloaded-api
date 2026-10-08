@@ -24,8 +24,8 @@ const { InternalApiError } = await import("../lib/internalApiClient.js");
 
 const settings = { maxFillSlippagePct: 5, telegramVerbosity: "all" } as never;
 
-function fakeApi(status = "filled") {
-  return { get: vi.fn(async () => ({ id: "o1", status, errorMessage: null, payload: { legs: [{ role: "option", action: "BUY", unitPrice: 0.53 }] } })), post: vi.fn(async () => ({})) } as never;
+function fakeApi(status = "filled", quantity = 2) {
+  return { get: vi.fn(async () => ({ id: "o1", status, errorMessage: null, updatedAt: new Date().toISOString(), payload: { legs: [{ role: "option", action: "BUY", unitPrice: 0.53, quantity }] } })), post: vi.fn(async () => ({})) } as never;
 }
 
 beforeEach(() => {
@@ -69,7 +69,7 @@ describe("watchPlutoOrder — the fill_slippage breaker", () => {
   it("does not trip at exactly the limit, or on a better fill; tells Telegram instead", async () => {
     // 5% of 2.00 = 0.10: a sell filled at 1.90 is exactly at the limit (strictly greater trips).
     fillRows.push({ side: "SELL", quantity: 1, price: "1.90", multiplier: 100 });
-    await watchPlutoOrder(fakeApi(), settings, { ...input, reference: { price: 2, side: "sell", multiplier: 100 } }, { pollIntervalMs: 0 });
+    await watchPlutoOrder(fakeApi("filled", 1), settings, { ...input, reference: { price: 2, side: "sell", multiplier: 100 } }, { pollIntervalMs: 0 });
     expect(tripPlutoBreaker).not.toHaveBeenCalled();
     fillRows.length = 0;
     fillRows.push({ side: "BUY", quantity: 2, price: "0.50", multiplier: 100 });
@@ -88,6 +88,35 @@ describe("watchPlutoOrder — the fill_slippage breaker", () => {
     const result = await watchPlutoOrder(fakeApi("cancelled"), settings, input, { pollIntervalMs: 0 });
     expect(result.outcome).toBe("cancelled");
     expect(tripPlutoBreaker).not.toHaveBeenCalled();
+  });
+});
+
+describe("watchPlutoOrder — fills recorded after the status (2026-10-08)", () => {
+  const input = { actionId: "a1", orderId: "o1", symbol: "AUD", reference: { price: 0.53, side: "buy" as const, multiplier: 100 }, description: "Buy back 2× AUD $50P" };
+
+  it("waits for a new contract's fills, written only at the reconciliation, then records the fill price", async () => {
+    // 10-07: the order read filled at 10:14:55 ET, its fills were written at 10:15:38; the old 3-poll wait gave up first.
+    const api = fakeApi();
+    let polls = 0;
+    vi.mocked((api as unknown as { get: () => unknown }).get).mockImplementation(async () => {
+      polls += 1;
+      if (polls === 6) fillRows.push({ side: "BUY", quantity: 2, price: "0.53", multiplier: 100 });
+      return { id: "o1", status: "filled", errorMessage: null, updatedAt: new Date().toISOString(), payload: { legs: [{ role: "option", action: "BUY", unitPrice: 0.53, quantity: 2 }] } };
+    });
+    await watchPlutoOrder(api, settings, input, { pollIntervalMs: 0 });
+    expect(polls).toBe(6);
+    expect(vi.mocked(updatePlutoAction).mock.calls.at(-1)![1]).toMatchObject({ outcome: "filled", fillPrice: 0.53 });
+  });
+
+  it("fills still incomplete when the wait is over: no fill price, no slippage judgement, a warning instead", async () => {
+    const { recordPlutoEvent } = await import("./ledger.js");
+    // Half of the order recorded, e.g. a roll's buyback without its new leg: judged on that alone it would read as slippage.
+    fillRows.push({ side: "BUY", quantity: 1, price: "0.90", multiplier: 100 });
+    let clock = Date.now();
+    await watchPlutoOrder(fakeApi(), settings, input, { pollIntervalMs: 0, now: () => (clock += 60_000) });
+    expect(tripPlutoBreaker).not.toHaveBeenCalled();
+    expect(vi.mocked(updatePlutoAction).mock.calls.at(-1)![1]).toMatchObject({ outcome: "filled", fillPrice: null });
+    expect(recordPlutoEvent).toHaveBeenCalledWith("warning", expect.objectContaining({ message: expect.stringContaining("not all recorded") }));
   });
 });
 

@@ -6,11 +6,11 @@ import { loadTradingSettings, type TradingSettings } from "../lib/tradingSetting
 import { scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import { accountContextFromTotalCash, loadBarsForTilt, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
-import { computeMoveContext, type MoveContext } from "./moveContext.js";
+import { computeMoveContext, expectedDailyMovePct, type MoveContext } from "./moveContext.js";
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
-import { anyOpenPositionOn, loadInFlightNotionals, loadOccupiedContracts, loadPlutoBook } from "./book.js";
+import { anyOpenPositionOn, loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol, loadOccupiedContracts, loadPlutoBook } from "./book.js";
 import { describeCandidateId, deterministicTopPick, filterTickerForPluto, findSameContractConflict, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { updatePlutoConcernAlerts } from "./concernAlerts.js";
@@ -24,7 +24,7 @@ import { ensurePlutoPrompt } from "./prompts.js";
 import { finishPlutoPass, type FinishPlutoPassInput, recordPlutoAction, updatePlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { callPlutoModel } from "./modelClient.js";
-import { runPostModelGates } from "./postModelGates.js";
+import { runPostModelGates, tickerCooldownStatus, type StressCapInput } from "./postModelGates.js";
 import { buildPlutoSystemPrompt, buildPlutoUserPayload, plutoPromptVersion, recentDecisionsForPrompt, type PlutoPromptTickerInput } from "./prompt.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState, recordPlutoPass, tripPlutoBreaker } from "./stateStore.js";
@@ -115,15 +115,27 @@ function burstContractsFor(scored: TickerSignals, filtered: PlutoTickerFilterRes
   return ranked.slice(0, settings.burstLines).map((candidate) => ({ expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" }));
 }
 
-async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, context: PassRunnerContext, account: { freeCash: number }, tradingSettings: TradingSettings, botEnabled: boolean, nowMs: number, extraLiveQuotes: LiveOptionQuote[] = []): Promise<EvaluatedTicker> {
+async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, context: PassRunnerContext, account: { freeCash: number }, tradingSettings: TradingSettings, botEnabled: boolean, nowMs: number, extraLiveQuotes: LiveOptionQuote[] = [], opensBlockedReason: string | null = null): Promise<EvaluatedTicker> {
   const inputs = await loadTickerSignalsInputs(row);
   const watched = context.marketWatch.snapshot(row.symbol);
   const spot = watched?.last ?? null;
   const live = spot !== null ? { spotPrice: spot, priceSource: "live" as const, liveQuotes: extraLiveQuotes } : undefined;
   const scored = scoreTicker(inputs, account, tradingSettings, live);
   const occupiedContracts = await loadOccupiedContracts(row.symbol);
-  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts });
+  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason });
   return { row, inputs, scored, filtered, occupiedContracts, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [] };
+}
+
+/** What the sizing gate's stress cap needs about the ticker today. */
+function stressCapInputFor(scored: TickerSignals, todayEasternIso: string): StressCapInput {
+  const forecastVolatility = scored.forecast?.volatility ?? null;
+  const normalDayMovePct = expectedDailyMovePct(forecastVolatility);
+  return {
+    forecastVolatility,
+    elevatedVolatility: scored.elevatedVolatility?.elevated === true,
+    dayMoveSigmas: scored.dayChangePercent !== null && normalDayMovePct !== null ? scored.dayChangePercent / normalDayMovePct : null,
+    todayEasternIso,
+  };
 }
 
 /** The move-context block for the prompt: bars up to the last completed session, the forecast, today's move and IV rank. A failure costs the block, not the round. */
@@ -277,9 +289,15 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     ticker.filtered.rejected.push(...ticker.filtered.eligible.map((entry) => ({ id: entry.id, reasons: [opensBlockedBecause] })));
     ticker.filtered.eligible = [];
   };
+  // The ticker cooldown after a filled Pluto action keeps the ticker's opens from the model too: the post-model gate would refuse them.
+  const lastFilledActionAtBySymbol = await loadLastFilledPlutoActionAtBySymbol();
+  const tickerCooldownReason = (symbol: string): string | null => {
+    const cooldown = tickerCooldownStatus(lastFilledActionAtBySymbol.get(symbol) ?? null, nowMs, settings.tickerCooldownMinutes);
+    return cooldown.cooledDown ? null : `ticker cooldown: ${cooldown.detail}`;
+  };
   let evaluated: EvaluatedTicker[] = [];
   for (const row of rows) {
-    const ticker = await evaluateTicker(row, settings, context, account, tradingSettings, true, nowMs);
+    const ticker = await evaluateTicker(row, settings, context, account, tradingSettings, true, nowMs, [], tickerCooldownReason(row.symbol));
     blockOpensWhenBarred(ticker);
     evaluated.push(ticker);
   }
@@ -326,7 +344,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       refreshed.push(ticker);
       continue;
     }
-    const requoted = await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now(), liveQuotes);
+    const requoted = await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now(), liveQuotes, tickerCooldownReason(ticker.row.symbol));
     blockOpensWhenBarred(requoted);
     await attachCloseOffers(requoted, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs, false);
     refreshed.push(requoted);
@@ -505,6 +523,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       nowMs: Date.now(),
       sameContractConflict: freshContractForGate ? findSameContractConflict(fresh.occupiedContracts, freshContractForGate.expiry, freshContractForGate.strike) : null,
     },
+    stress: stressCapInputFor(fresh.scored, fresh.inputs.todayEasternIso),
   });
   const contract = freshCandidate ?? freshRoll?.replacement ?? null;
   const gateResults: PlutoGateResult[] = gates.gates;

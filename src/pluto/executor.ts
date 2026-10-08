@@ -2,6 +2,7 @@ import { db } from "../db/connection.js";
 import { InternalApiClient, InternalApiError } from "../lib/internalApiClient.js";
 import { finalOrderRequestStatuses, isFinalOrderRequestStatus } from "../lib/orderRequestStatuses.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
+import { fillsAreComplete, shouldWaitForFills } from "../lib/orderFills.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize, formatStrike } from "../lib/optionContractLabel.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
@@ -25,8 +26,9 @@ import { tripPlutoBreaker } from "./stateStore.js";
 interface OrderRequestResponse {
   id: string;
   status: string;
-  payload?: { legs?: { role: "stock" | "option"; action: string; unitPrice: number }[] };
+  payload?: { legs?: { role: "stock" | "option"; action: string; unitPrice: number; quantity: number }[] };
   errorMessage: string | null;
+  updatedAt?: string | null;
 }
 
 export interface ExecuteOpenInput {
@@ -376,7 +378,6 @@ export async function watchPlutoOrder(
   // (Marcelo 2026-10-05). Pluto only adds the cancel shortly before the session close, which the sweep does not know.
   const cancelAtMs = input.cancelByMs ?? Number.POSITIVE_INFINITY;
   let cancelRequested = false;
-  let missingFillPolls = 0;
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     let order: OrderRequestResponse;
@@ -391,9 +392,12 @@ export async function watchPlutoOrder(
       // The fill against the order's reference, on the net for a combo (compareFillsWithReference).
       const filledStatus = order.status === "filled" || order.status === "cancelled_partially_filled";
       const fills = filledStatus ? await loadOrderFills(input.orderId) : [];
-      const comparison = fills.length > 0 ? compareFillsWithReference(input.reference, fills) : null;
-      // The status can land a moment before the executions are written: give them a few polls.
-      if (filledStatus && comparison === null && missingFillPolls++ < 3) continue;
+      const orderLegs = order.payload?.legs ?? [];
+      // A new contract's fills are written only once the reconciliation creates its position: wait for all of them.
+      if (filledStatus && shouldWaitForFills(order.status, orderLegs, fills, order.updatedAt ? new Date(order.updatedAt) : new Date(startedAt), now())) continue;
+      // Judged only on complete fills: a roll recorded half-way would read as a huge slippage on one leg.
+      const comparison = fills.length > 0 && fillsAreComplete(order.status, orderLegs, fills) ? compareFillsWithReference(input.reference, fills) : null;
+      if (filledStatus && comparison === null) await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: "the order's fills were not all recorded in time, so its fill price and slippage are not checked" });
       const fillPrice = comparison?.chosenLegFillPrice ?? null;
       const impliedFillPrice = comparison ? impliedChosenLegPrice(input.reference, otherLegOrderPrices(input.reference, order.payload?.legs ?? []), fills) : null;
       await updatePlutoAction(input.actionId, { outcome, fillPrice, impliedFillPrice, blockReason: order.errorMessage ?? null });

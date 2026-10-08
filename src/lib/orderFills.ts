@@ -36,7 +36,7 @@ export const fillBearingOrderStatuses = ["partially_filled", "filled", "cancelle
 const fillWaitMs = 5 * 60_000;
 
 /** Whether the fills a message needs are all recorded: every ordered unit for "filled", at least one otherwise. */
-export function fillsAreComplete(status: string, legs: { quantity: number }[], fills: OrderFill[]): boolean {
+export function fillsAreComplete(status: string, legs: { quantity: number }[], fills: Pick<OrderFill, "quantity">[]): boolean {
   if (status !== "filled") return fills.length > 0;
   const orderedQuantity = legs.reduce((sum, leg) => sum + Number(leg.quantity), 0);
   const filledQuantity = fills.reduce((sum, fill) => sum + Number(fill.quantity), 0);
@@ -44,8 +44,22 @@ export function fillsAreComplete(status: string, legs: { quantity: number }[], f
 }
 
 /** Whether a fill-bearing message should wait for a later pass: its fills are incomplete and the wait is not over. */
-export function shouldWaitForFills(status: string, legs: { quantity: number }[], fills: OrderFill[], statusChangedAt: Date, now: number): boolean {
+export function shouldWaitForFills(status: string, legs: { quantity: number }[], fills: Pick<OrderFill, "quantity">[], statusChangedAt: Date, now: number): boolean {
   return !fillsAreComplete(status, legs, fills) && now - statusChangedAt.getTime() < fillWaitMs;
+}
+
+/**
+ * SQL condition (on order_requests aliased `alias`) for an order IBKR has reported filled, or partly filled then cancelled, within
+ * the fill wait, whose fills are not all recorded yet (fillsAreComplete in SQL). A new contract's fills wait for the
+ * reconciliation that creates its position, so until then the order is neither working nor a position: whatever counts
+ * working orders (in-flight notional, taken contracts) must count it too.
+ */
+export function orderFillsPendingSql(alias: string): string {
+  const recordedQuantity = `coalesce((select sum(tr.quantity) from trades tr where tr.source_order_request_id = ${alias}.id), 0)`;
+  const orderedQuantity = `coalesce((select sum((leg->>'quantity')::numeric) from jsonb_array_elements(coalesce(${alias}.payload->'legs', '[]'::jsonb)) leg), 0)`;
+  return `(${alias}.updated_at > now() - interval '${fillWaitMs / 1000} seconds' and (
+    (${alias}.status = 'filled' and ${recordedQuantity} < ${orderedQuantity})
+    or (${alias}.status = 'cancelled_partially_filled' and ${recordedQuantity} = 0)))`;
 }
 
 /**

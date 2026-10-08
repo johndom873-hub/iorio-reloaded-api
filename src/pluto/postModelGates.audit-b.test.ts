@@ -8,7 +8,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 const settings = {
   capitalBudgetPct: 50, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeDollars: 30, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
-  maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3,
+  maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 0, stressSigmas: 2,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3, maxEdgeDriftVp: 1, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
   modelId: "m", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 3, confidenceFloor: 0.6, consecutiveModelFailuresBreaker: 3, promptVersion: "v3.5",
   daySignalsPollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, perTickerModelCooldownMinutes: 5, maxEnabledTickers: 15, messageRateLimitPerSecond: 8, crashLoopRestartsPerHour: 3, telegramVerbosity: "actions",
@@ -27,7 +27,7 @@ const candidate = {
 } as SignalCandidate;
 
 const trade: PlutoDecision = { decision: "trade", actionKind: "open_cash_secured_put", candidateId: "HOOD:cash_secured_put:2026-10-16:100", confidence: 0.8, reasons: ["r"], risksAcknowledged: [], systemConcerns: [] };
-const input = (overrides: Partial<PostModelGateInput> = {}): PostModelGateInput => ({ decision: trade, candidate, roll: null, freshRejectionReasons: [], netEdgeAtDecision: 0.1, settings, book, sector: "Financial", ...overrides });
+const input = (overrides: Partial<PostModelGateInput> = {}): PostModelGateInput => ({ decision: trade, candidate, roll: null, freshRejectionReasons: [], netEdgeAtDecision: 0.1, settings, book, sector: "Financial", stress: { forecastVolatility: 0.5, elevatedVolatility: false, dayMoveSigmas: 0, todayEasternIso: "2026-09-28" }, ...overrides });
 
 describe("computeSizingRoom — managedNotional", () => {
   it("budget room = NLV × budget % − committed − the managed book's in-flight notional; total and ticker notionals do not touch it", () => {

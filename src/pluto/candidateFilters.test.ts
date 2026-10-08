@@ -12,7 +12,7 @@ const today = "2026-09-28";
 const settings: PlutoSettings = {
   capitalBudgetPct: 30, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeDollars: 30, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
-  maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3,
+  maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 0, stressSigmas: 2,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
   maxEdgeDriftVp: 1, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
   modelId: "openai/gpt-6-luna", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 3, confidenceFloor: 0.6, consecutiveModelFailuresBreaker: 3, promptVersion: "v1",
@@ -115,6 +115,10 @@ describe("filterTickerForPluto — candidate level", () => {
   });
   it("lists every reason at once, not just the first", () => {
     expect(rejectionsFor({ grade: "weak", volume: 1 })).toHaveLength(2);
+  });
+  it("a ticker whose opens are barred for the round (the ticker cooldown) offers no open, whatever its quality", () => {
+    expect(rejectionsFor({}, { opensBlockedReason: "ticker cooldown: last filled Pluto action on this symbol 20 min ago (cooldown 60 min)" })).toEqual(["ticker cooldown: last filled Pluto action on this symbol 20 min ago (cooldown 60 min)"]);
+    expect(filterTickerForPluto(input({ scored: scored({ candidates: [candidate()] }), opensBlockedReason: "ticker cooldown" })).eligible).toEqual([]);
   });
 });
 

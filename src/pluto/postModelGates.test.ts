@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
-import { computeSizingRoom, midLimitPrice, runPostModelGates, type PostModelBookInput, type PostModelGateInput } from "./postModelGates.js";
+import { computeSizingRoom, computeStressCap, midLimitPrice, runPostModelGates, tickerCooldownStatus, type PostModelBookInput, type PostModelGateInput } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 const settings: PlutoSettings = {
   capitalBudgetPct: 50, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeDollars: 30, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
-  maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3,
+  maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 0, stressSigmas: 2,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
   maxEdgeDriftVp: 1, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
   modelId: "openai/gpt-6-luna", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 3, confidenceFloor: 0.6, consecutiveModelFailuresBreaker: 3, promptVersion: "v1",
@@ -32,10 +32,12 @@ const book: PostModelBookInput = {
   workingOrderOnSymbol: false, lastFilledActionAt: null, nowMs: Date.parse("2026-09-28T16:00:00Z"), spotPrice: 110, sameContractConflict: null,
 };
 
+const stress = { forecastVolatility: 0.5, elevatedVolatility: false, dayMoveSigmas: 0.2, todayEasternIso: "2026-09-28" };
+
 const trade: PlutoDecision = { decision: "trade", actionKind: "open_cash_secured_put", candidateId: "HOOD:cash_secured_put:2026-10-16:100", confidence: 0.8, reasons: ["r"], risksAcknowledged: [], systemConcerns: [] };
 
 function input(overrides: Partial<PostModelGateInput> = {}): PostModelGateInput {
-  return { decision: trade, candidate: candidate(), roll: null, freshRejectionReasons: [], netEdgeAtDecision: 0.1, settings, book, sector: "Financial", ...overrides };
+  return { decision: trade, candidate: candidate(), roll: null, freshRejectionReasons: [], netEdgeAtDecision: 0.1, settings, book, sector: "Financial", stress, ...overrides };
 }
 
 function failed(output: ReturnType<typeof runPostModelGates>): string[] {
@@ -62,7 +64,7 @@ describe("runPostModelGates — a clean cash-secured put", () => {
   });
   it("the volume share caps the quantity", () => {
     expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).plan?.quantity).toBe(4);
-    expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).gates.find((gate) => gate.gate === "sizing")?.detail).toBe("order size $50000, budget left $450000, ticker room $80000, cash room $550000 → 5 contract(s) at $10000 each; volume share allows 4 → $40000");
+    expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).gates.find((gate) => gate.gate === "sizing")?.detail).toBe("order size $50000, budget left $450000, ticker room $80000, cash room $550000 → 5 contract(s) at $10000 each; volume share allows 4; stress cap off → $40000");
     expect(failed(runPostModelGates(input({ candidate: candidate({ volume: 3 }) })))).toEqual(["sizing"]);
   });
 });
@@ -140,5 +142,64 @@ describe("midLimitPrice", () => {
     expect(midLimitPrice(2.0, 2.1)).toBe(2.05);
     expect(midLimitPrice(1.01, 1.02)).toBe(1.02); // 1.015 rounds up to 1.02, still inside
     expect(midLimitPrice(0.61, 0.62)).toBe(0.62);
+  });
+});
+
+describe("tickerCooldownStatus (shared by the round's filters and the post-model gate)", () => {
+  const filledAt = new Date("2026-10-07T14:14:26Z");
+  it("is over with no filled action, at exactly the cooldown, or with the cooldown set to 0", () => {
+    expect(tickerCooldownStatus(null, filledAt.getTime(), 60)).toEqual({ cooledDown: true, detail: "no filled Pluto action on this symbol" });
+    expect(tickerCooldownStatus(filledAt, filledAt.getTime() + 60 * 60_000, 60).cooledDown).toBe(true);
+    expect(tickerCooldownStatus(filledAt, filledAt.getTime() + 60_000, 0).cooledDown).toBe(true);
+  });
+  it("is still running 48 minutes after a fill (the 10-07 SMCI case)", () => {
+    expect(tickerCooldownStatus(filledAt, filledAt.getTime() + 48.7 * 60_000, 60)).toEqual({ cooledDown: false, detail: "last filled Pluto action on this symbol 48 min ago (cooldown 60 min)" });
+  });
+});
+
+describe("stress cap (Marcelo, 2026-10-08)", () => {
+  const on = { ...settings, stressRiskBudgetPct: 1, stressSigmas: 2 };
+  // SMCI on 2026-10-07: spot 44.02, forecast 76.1%, $46 call 2026-10-09 at 0.37/0.40, Wed → Fri = 2 trading days.
+  const smciCall = { strategyKey: "covered_call" as const, strike: 46, expiry: "2026-10-09", bid: 0.37, ask: 0.4 };
+  const smciDay = { forecastVolatility: 0.761, elevatedVolatility: false, dayMoveSigmas: 0.31, todayEasternIso: "2026-10-07" };
+  it("sizes a buy-write from a 2σ move to expiry: σ_T 6.78%, stressed spot 38.05, loss $558/contract, 18 contracts within $10,383", () => {
+    const cap = computeStressCap(on, smciDay, smciCall, 44.02, 1_038_326);
+    expect(cap.contracts).toBe(18);
+    expect(cap.detail).toBe("stress cap: a 2σ move to expiry (−13.6% in 2 trading day(s)) loses $558/contract → 18 within $10383 (1% of account)");
+  });
+  it("a cash-secured put loses only below its strike: far out of the money, the cap does not bind", () => {
+    const farPut = { strategyKey: "cash_secured_put" as const, strike: 30, expiry: "2026-10-09", bid: 0.01, ask: 0.02 };
+    expect(computeStressCap(on, smciDay, farPut, 44.02, 1_000_000).contracts).toBe(Number.POSITIVE_INFINITY);
+    const nearPut = { strategyKey: "cash_secured_put" as const, strike: 43, expiry: "2026-10-09", bid: 0.56, ask: 0.61 };
+    // stressed spot 44.02 × (1 − 0.1356) = 38.05 → (43 − 38.05) × 100 − 58.5 = $436 → floor(10,000 / 436) = 22
+    expect(computeStressCap(on, smciDay, nearPut, 44.02, 1_000_000).contracts).toBe(22);
+  });
+  it("adds 0.5σ for an elevated-volatility stretch and 0.5σ on a day down more than one normal day", () => {
+    expect(computeStressCap(on, { ...smciDay, elevatedVolatility: true }, smciCall, 44.02, 1_038_326).detail).toContain("a 2.5σ (elevated volatility) move");
+    expect(computeStressCap(on, { ...smciDay, dayMoveSigmas: -1 }, smciCall, 44.02, 1_038_326).detail).toContain("a 2.5σ (down more than a normal day) move");
+    expect(computeStressCap(on, { ...smciDay, dayMoveSigmas: 1.8 }, smciCall, 44.02, 1_038_326).detail).toContain("a 2σ move");
+    expect(computeStressCap(on, { ...smciDay, elevatedVolatility: true, dayMoveSigmas: -2 }, smciCall, 44.02, 1_038_326).contracts).toBeLessThan(18);
+  });
+  it("a longer expiry carries a bigger tail and gets fewer contracts: 22 trading days, a 45% move, $1,941/contract → 5", () => {
+    const thirtyDays = { ...smciCall, strike: 50, expiry: "2026-11-06" };
+    expect(computeStressCap(on, smciDay, thirtyDays, 44.02, 1_038_326).contracts).toBe(5);
+  });
+  it("0 turns it off; no forecast or no live spot refuses the order (fail closed)", () => {
+    expect(computeStressCap({ ...on, stressRiskBudgetPct: 0 }, smciDay, smciCall, 44.02, 1_000_000)).toEqual({ contracts: Number.POSITIVE_INFINITY, detail: "stress cap off" });
+    expect(computeStressCap(on, { ...smciDay, forecastVolatility: null }, smciCall, 44.02, 1_000_000).contracts).toBe(0);
+    expect(computeStressCap(on, smciDay, smciCall, null, 1_000_000).contracts).toBe(0);
+  });
+  it("caps the put's quantity in the sizing gate, and says so", () => {
+    // put $100, 2.05 mid, spot 110, forecast 50%, 2026-09-28 → 2026-10-16 = 14 trading days: σ_T 11.8%, stressed 84.07 → loss $1,388 → 7 at 1%, 3 at 0.5%
+    expect(runPostModelGates(input({ settings: { ...on, stressRiskBudgetPct: 0.5 } })).plan?.quantity).toBe(3);
+    expect(runPostModelGates(input({ settings: { ...on, stressRiskBudgetPct: 0.5 } })).gates.find((gate) => gate.gate === "sizing")?.detail).toContain("stress cap: a 2σ move to expiry");
+    expect(runPostModelGates(input({ settings: on })).plan?.quantity).toBe(5); // the 5-contract order size binds first
+  });
+  it("caps only the contracts that buy shares: calls on shares already held are never capped", () => {
+    const callTrade = { ...trade, actionKind: "open_covered_call" as const, candidateId: "HOOD:covered_call:2026-10-16:120" };
+    const call = candidate({ strategyKey: "covered_call", strike: 120, delta: 0.25, bid: 1.5, ask: 1.6, volume: 1000 });
+    const capped = { ...on, stressRiskBudgetPct: 0.2 }; // $2,000: a buy-write's 2σ loss (~$2,450 here) allows none
+    expect(runPostModelGates(input({ decision: callTrade, candidate: call, settings: capped, book: { ...book, freeShares: 0 } })).plan).toBeNull();
+    expect(runPostModelGates(input({ decision: callTrade, candidate: call, settings: capped, book: { ...book, freeShares: 300 } })).plan?.quantity).toBe(3);
   });
 });

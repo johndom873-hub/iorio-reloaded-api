@@ -53,6 +53,8 @@ export interface PlutoTickerFilterInput {
   botEnabled: boolean;
   /** Contracts on this ticker already held (by anyone) or with a working order: Pluto never opens a second position on one. */
   occupiedContracts?: OccupiedContract[];
+  /** Why no open on this ticker may be offered this round (the ticker cooldown); rolls and closes are unaffected. */
+  opensBlockedReason?: string | null;
 }
 
 /** A contract on the ticker that is already taken: an open option leg (anyone's) or a leg of a working order. */
@@ -173,6 +175,7 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
     const reasons = rejectOpenCandidate(candidate, context);
     const conflict = findSameContractConflict(occupied, candidate.expiry, candidate.strike);
     if (conflict) reasons.push(`same contract: ${conflict}`);
+    if (input.opensBlockedReason) reasons.push(input.opensBlockedReason);
     if (reasons.length === 0) result.eligible.push({ id, kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate });
     else result.rejected.push({ id, reasons });
   }

@@ -1,6 +1,7 @@
 import { db } from "../db/connection.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
-import { computeInFlightOrderNotional } from "../lib/orderLimits.js";
+import { computeInFlightOrderNotional, inFlightOrderRequestsQuery } from "../lib/orderLimits.js";
+import { orderFillsPendingSql } from "../lib/orderFills.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { positionSelect } from "../lib/positionQueries.js";
 import type { OccupiedContract } from "./candidateFilters.js";
@@ -29,7 +30,7 @@ export interface PlutoBook {
   openSymbols: Set<string>;
   /** When the last Pluto action per symbol whose order filled (fully or partly) was taken — the ticker cooldown's clock. */
   lastFilledActionAtBySymbol: Map<string, Date>;
-  /** Symbols with a Pluto order IBKR may still be working. */
+  /** Symbols with a Pluto order IBKR may still be working, or filled with its fills not yet recorded. */
   workingOrderSymbols: Set<string>;
 }
 
@@ -53,6 +54,18 @@ export const plutoOpenedPositionIdsCte = `pluto_opened_position_ids(id) AS (
 /** Strategies that never count in Pluto's book. */
 export const strategiesOutsidePlutoBook = ["hedge"];
 
+/** When the last Pluto action per symbol whose order filled (fully or partly) was taken: the ticker cooldown's clock. */
+export async function loadLastFilledPlutoActionAtBySymbol(): Promise<Map<string, Date>> {
+  // Read from the orders themselves, not the action's outcome, which is only written when the watcher next polls.
+  const rows: { symbol: string; last_at: Date | string }[] = await db("pluto_actions as pa")
+    .join("order_requests as orq", "orq.pluto_action_id", "pa.id")
+    .whereExists(db("trades as tr").whereRaw("tr.source_order_request_id = orq.id"))
+    .groupBy("pa.symbol")
+    .select("pa.symbol")
+    .max("pa.created_at as last_at");
+  return new Map(rows.map((row) => [row.symbol, new Date(row.last_at)]));
+}
+
 export async function loadPlutoBook(): Promise<PlutoBook> {
   const [positionRows, plutoOpenedRows, lastFilledActions, workingOrders] = await Promise.all([
     db.raw(
@@ -64,16 +77,10 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
       [strategiesOutsidePlutoBook],
     ),
     db.raw(`WITH RECURSIVE ${plutoOpenedPositionIdsCte} SELECT id FROM pluto_opened_position_ids`),
-    // Read from the orders themselves, not the action's outcome, which is only written when the watcher next polls.
-    db("pluto_actions as pa")
-      .join("order_requests as orq", "orq.pluto_action_id", "pa.id")
-      .whereExists(db("trades as tr").whereRaw("tr.source_order_request_id = orq.id"))
-      .groupBy("pa.symbol")
-      .select("pa.symbol")
-      .max("pa.created_at as last_at"),
+    loadLastFilledPlutoActionAtBySymbol(),
     db("order_requests as orq")
       .whereNotNull("orq.pluto_action_id")
-      .whereIn("orq.status", activeOrderRequestStatuses)
+      .where((builder) => builder.whereIn("orq.status", activeOrderRequestStatuses).orWhereRaw(orderFillsPendingSql("orq")))
       .select(db.raw("orq.payload->>'symbol' as symbol")),
   ]);
   const openPositions: PlutoBookPosition[] = (positionRows.rows as { id: string; symbol: string; sector: string | null; strategyKey: string; capitalAtRisk: string | null }[]).map((row) => ({
@@ -88,13 +95,10 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
     plutoOpenedPositionIds: new Set((plutoOpenedRows.rows as { id: string }[]).map((row) => row.id).filter((id) => openPositions.some((position) => position.positionId === id))),
     committedDollars: openPositions.reduce((sum, position) => sum + position.capitalAtRisk, 0),
     openSymbols: new Set(openPositions.map((position) => position.symbol)),
-    lastFilledActionAtBySymbol: new Map((lastFilledActions as { symbol: string; last_at: Date | string }[]).map((row) => [row.symbol, new Date(row.last_at)])),
+    lastFilledActionAtBySymbol: lastFilledActions,
     workingOrderSymbols: new Set((workingOrders as { symbol: string | null }[]).map((row) => row.symbol).filter((symbol): symbol is string => Boolean(symbol))),
   };
 }
-
-/** Statuses the order gate counts as in flight (orderLimits.ts): confirmed and not yet done. */
-const inFlightOrderStatuses = ["confirmed", "submitted", "partially_filled", "cancel_requested"];
 
 /**
  * In-flight order notional, the order gate's way: every origin's, one symbol's, and the book's — Pluto's own orders plus anyone's
@@ -102,7 +106,7 @@ const inFlightOrderStatuses = ["confirmed", "submitted", "partially_filled", "ca
  */
 export async function loadInFlightNotionals(symbol: string): Promise<{ totalNotional: number; tickerNotional: number; managedNotional: number }> {
   const [rows, enabledRows]: [{ request_type: string; payload: OrderRequestPayload; pluto_action_id: string | null }[], { symbol: string }[]] = await Promise.all([
-    db("order_requests").whereIn("status", inFlightOrderStatuses).select("request_type", "payload", "pluto_action_id"),
+    inFlightOrderRequestsQuery().select("orq.request_type", "orq.payload", "orq.pluto_action_id"),
     db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").where("se.bot_enabled", true).select("t.symbol"),
   ]);
   const enabledSymbols = new Set(enabledRows.map((row) => row.symbol));
@@ -123,7 +127,7 @@ function describeContract(symbol: string, expiry: string, strike: number, right:
 
 /**
  * Every contract on the symbol already taken: open option legs (anyone's, human or Pluto) and the option legs of
- * orders still active (any origin). Expiry as YYYY-MM-DD, the way candidates carry it.
+ * orders still active (any origin) or filled with their fills, and so their position, not yet recorded. Expiry as YYYY-MM-DD, the way candidates carry it.
  */
 /** Whether any of these tickers has an open position (an automatic close may be due on it). */
 export async function anyOpenPositionOn(symbols: string[]): Promise<boolean> {
@@ -141,7 +145,10 @@ export async function loadOccupiedContracts(symbol: string): Promise<OccupiedCon
       .where("pl.leg_type", "option")
       .whereNull("pl.exit_at")
       .select(db.raw("to_char(pl.expiry_date, 'YYYY-MM-DD') as expiry"), "pl.strike_price as strike", "pl.option_type as right"),
-    db("order_requests").whereIn("status", activeOrderRequestStatuses).whereRaw("payload->>'symbol' = ?", [symbol]).select("payload"),
+    db("order_requests as orq")
+      .where((builder) => builder.whereIn("orq.status", activeOrderRequestStatuses).orWhereRaw(orderFillsPendingSql("orq")))
+      .whereRaw("orq.payload->>'symbol' = ?", [symbol])
+      .select("orq.payload"),
   ]);
   const occupied: OccupiedContract[] = (legs as { expiry: string | null; strike: string | null; right: string | null }[])
     .filter((leg) => leg.expiry !== null && leg.strike !== null)

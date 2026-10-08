@@ -353,11 +353,36 @@ describe("orders still in flight", () => {
 
   for (const status of notInFlightStatuses) {
     it(`an order in status ${status} does not count`, async () => {
-      await insertOrder("open_cash_secured_put", status, putOpenPayload("INF", 100, 5));
+      const orderId = await insertOrder("open_cash_secured_put", status, putOpenPayload("INF", 100, 5));
+      // Past the fill wait: a filled order with no recorded fills counts only right after its status changed (below).
+      await testDb("order_requests").where({ id: orderId }).update({ updated_at: new Date(Date.now() - 10 * 60_000) });
       const result = await evaluateOrderLimits(cashSecuredPut("AAA", 10, 1));
       expect(result.details?.inFlightNotional).toBe(0);
     });
   }
+
+  for (const status of ["filled", "cancelled_partially_filled"]) {
+    it(`an order IBKR reported ${status} moments ago whose fills are not recorded yet still counts (its position does not exist yet)`, async () => {
+      await insertOrder("open_cash_secured_put", status, putOpenPayload("INF", 100, 5));
+      const result = await evaluateOrderLimits(cashSecuredPut("AAA", 10, 1));
+      expect(result.details?.inFlightNotional).toBe(50_000);
+    });
+  }
+
+  it("a just-filled order stops counting once all its fills are recorded", async () => {
+    const orderId = await insertOrder("open_cash_secured_put", "filled", putOpenPayload("INF", 100, 5));
+    const ticker = await createTicker();
+    const [position] = await testDb("positions").insert({ strategy_key: "cash_secured_put", ticker_id: ticker.id, status: "open" }).returning("id");
+    const [leg] = await testDb("position_legs").insert({ position_id: position.id, leg_type: "option", side: "short", quantity: 5, multiplier: 100, option_type: "put", strike_price: 100, expiry_date: "2026-11-20", entry_price: 1, entry_at: new Date() }).returning("id");
+    await testDb("trades").insert({ position_leg_id: leg.id, ibkr_order_id: "1", ibkr_exec_id: `limits-db-${Date.now()}-a`, side: "sell", quantity: 3, price: 1, executed_at: new Date(), is_closing_trade: false, source_order_request_id: orderId });
+    try {
+      expect((await evaluateOrderLimits(cashSecuredPut("AAA", 10, 1))).details?.inFlightNotional).toBe(50_000); // 3 of 5 recorded
+      await testDb("trades").insert({ position_leg_id: leg.id, ibkr_order_id: "1", ibkr_exec_id: `limits-db-${Date.now()}-b`, side: "sell", quantity: 2, price: 1, executed_at: new Date(), is_closing_trade: false, source_order_request_id: orderId });
+      expect((await evaluateOrderLimits(cashSecuredPut("AAA", 10, 1))).details?.inFlightNotional).toBe(0);
+    } finally {
+      await testDb("trades").where({ source_order_request_id: orderId }).del();
+    }
+  });
 
   it("sums every in-flight order across tickers and kinds: puts, buy-writes, put rolls, closes and held-share calls", async () => {
     await insertOrder("open_cash_secured_put", "confirmed", putOpenPayload("INF", 100, 5)); // 50,000

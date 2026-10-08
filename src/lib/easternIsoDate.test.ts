@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDateWithWeekday, formatEasternDateTime, formatEasternTime } from "./easternIsoDate.js";
+import { formatDateWithWeekday, formatEasternDateTime, formatEasternTime, weekdaysAfterUntil } from "./easternIsoDate.js";
 
 describe("Eastern time formatting", () => {
   it("shows summer clock time (EDT, UTC-4)", () => {
@@ -26,5 +26,14 @@ describe("Eastern time formatting", () => {
 
   it("puts the weekday on a plain calendar date", () => {
     expect(formatDateWithWeekday("2026-10-05")).toBe("Mon 2026-10-05");
+  });
+});
+
+describe("weekdaysAfterUntil", () => {
+  it("counts the weekdays after the first date up to and including the second", () => {
+    expect(weekdaysAfterUntil("2026-10-07", "2026-10-09")).toBe(2); // Wed → Fri
+    expect(weekdaysAfterUntil("2026-10-09", "2026-10-12")).toBe(1); // Fri → Mon
+    expect(weekdaysAfterUntil("2026-10-07", "2026-10-07")).toBe(0);
+    expect(weekdaysAfterUntil("2026-10-07", "2026-11-06")).toBe(22);
   });
 });

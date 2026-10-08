@@ -48,6 +48,8 @@ export const plutoProcessName = "pluto_agent";
 export const settingsFieldsThatNeverChangeADecision = new Set([
   "telegramVerbosity", "crashLoopRestartsPerHour", "messageRateLimitPerSecond", "burstLines", "burstSettleSeconds",
   "daySignalsPollSeconds", "callTimeoutSeconds", "maxEnabledTickers", "promptVersion",
+  // Sizing only: how many contracts, never whether to trade.
+  "stressRiskBudgetPct", "stressSigmas",
 ]);
 
 export class PlutoAgent {

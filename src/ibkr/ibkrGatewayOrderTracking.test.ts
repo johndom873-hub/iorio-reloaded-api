@@ -21,6 +21,7 @@ const {
   handleOrderErrorEvent,
   handleOrderStatusEvent,
   maxPendingCommissions,
+  openingFillReconciliationDelayMs,
   reconcileStaleOrderRequests,
 } = await import("./ibkrGatewayOrderTracking.js");
 const testDb: Knex = db;
@@ -557,7 +558,45 @@ describe("execution recorder", () => {
     await recorder.recordExecution(contractOf(conId), execution);
     expect(await tradeCount(execution.execId!)).toBe(0);
     expect(recorder.bufferedOpeningExecutionCount(conId)).toBe(1);
-    expect(reconciliationRequests).toBe(0);
+  });
+
+  it("asks for one reconciliation once a burst of opening fills has settled, not at the first fill of a combo", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      for (const conId of [nextConId(), nextConId(), nextConId()]) await recorder.recordExecution(contractOf(conId), executionOf());
+      expect(reconciliationRequests).toBe(0);
+      vi.advanceTimersByTime(openingFillReconciliationDelayMs - 1);
+      expect(reconciliationRequests).toBe(0);
+      vi.advanceTimersByTime(1);
+      expect(reconciliationRequests).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores a combo's own execution: its legs arrive separately and no leg ever carries the combo's conId", async () => {
+    const conId = nextConId();
+    const execution = executionOf();
+    await recorder.recordExecution({ conId: Number(conId), secType: "BAG" } as Contract, execution);
+    expect(recorder.bufferedOpeningExecutionCount(conId)).toBe(0);
+    expect(await tradeCount(execution.execId!)).toBe(0);
+  });
+
+  it("a drained fill keeps IBKR's execution time; one IBKR's time cannot be read keeps the time it reached the worker, not the drain time", async () => {
+    const conId = nextConId();
+    const readable = executionOf({ time: "20261007-14:14:54" });
+    const unreadable = executionOf({ time: "not a time" });
+    const beforeArrival = Date.now();
+    await recorder.recordExecution(contractOf(conId), readable);
+    await recorder.recordExecution(contractOf(conId), unreadable);
+    const afterArrival = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const { legId } = await createLeg("long", conId);
+    await recorder.drainPendingOpeningExecutions(conId, legId);
+    expect(new Date((await tradeOf(readable.execId!)).executed_at).toISOString()).toBe("2026-10-07T14:14:54.000Z");
+    const fallback = new Date((await tradeOf(unreadable.execId!)).executed_at).getTime();
+    expect(fallback).toBeGreaterThanOrEqual(beforeArrival);
+    expect(fallback).toBeLessThanOrEqual(afterArrival);
   });
 
   it("drains the buffered fills into opening trades when the reconciliation creates the leg, linked to the order by permId", async () => {

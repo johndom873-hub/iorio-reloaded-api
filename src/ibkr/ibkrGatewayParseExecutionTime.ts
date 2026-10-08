@@ -1,5 +1,5 @@
 // IBKR's Execution.time is not ISO and not parseable by `new Date()` — it's
-// "YYYYMMDD HH:mm:ss <IANA zone name>", e.g. "20260824 09:44:07 US/Eastern"
+// "YYYYMMDD HH:mm:ss <IANA zone name>", e.g. "20260824 09:44:07 US/Eastern", or the UTC form "YYYYMMDD-HH:mm:ss"
 // (found 2026-08-24 backfilling real HOOD executions: `new Date(execution.time)`
 // silently produced an Invalid Date, which then crashed the trades insert
 // with "invalid input syntax for type timestamp"). This affects every real
@@ -23,6 +23,12 @@ function zonePartsFormatter(zone: string): Intl.DateTimeFormat {
 
 export function parseIbkrExecutionTime(raw: string | undefined): Date | null {
   if (!raw) return null;
+  // IBKR's UTC form, "YYYYMMDD-HH:mm:ss" (the form reqExecutions' own time filter takes).
+  const utcMatch = raw.match(/^(\d{4})(\d{2})(\d{2})-(\d{2}):(\d{2}):(\d{2})$/);
+  if (utcMatch) {
+    const [, utcYear, utcMonth, utcDay, utcHour, utcMinute, utcSecond] = utcMatch;
+    return new Date(Date.UTC(Number(utcYear), Number(utcMonth) - 1, Number(utcDay), Number(utcHour), Number(utcMinute), Number(utcSecond)));
+  }
   const match = raw.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\S+)$/);
   if (!match) return null;
   const [, year, month, day, hour, minute, second, zone] = match;

@@ -39,6 +39,10 @@ export interface PlutoSettings {
   maxIvShiftVp: number;
   /** A ticker whose move today is more than this many times its normal daily move (expectedDailyMovePct) is out for the round. */
   maxDayMoveMultiple: number;
+  /** Stress cap: an order's new risk may lose at most this % of the account in a stressSigmas move to expiry. 0 = off. */
+  stressRiskBudgetPct: number;
+  /** Stress cap: the adverse move to expiry, in forecast standard deviations, before the fixed add-ons (postModelGates.ts). */
+  stressSigmas: number;
   // Market
   windowStartEt: string;
   windowEndEt: string;
@@ -105,6 +109,8 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   maxIvShiftVp: { column: "max_iv_shift_vp", kind: "number", min: 0 },
   // 0 would block every ticker that moved at all; the column is decimal(6,2). 100× normal is effectively off.
   maxDayMoveMultiple: { column: "max_day_move_multiple", kind: "number", min: 0.5, max: 100 },
+  stressRiskBudgetPct: { column: "stress_risk_budget_pct", kind: "number", min: 0, max: 100 },
+  stressSigmas: { column: "stress_sigmas", kind: "number", min: 0.5, max: 10 },
   windowStartEt: { column: "window_start_et", kind: "text" },
   windowEndEt: { column: "window_end_et", kind: "text" },
   dailyLossBreakerPct: { column: "daily_loss_breaker_pct", kind: "number", min: 0, max: 100 },

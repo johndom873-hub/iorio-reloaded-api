@@ -71,3 +71,15 @@ export function formatDateWithWeekday(dateIso: string): string {
   const weekday = utcWeekdayFormatter.format(new Date(`${dateIso}T12:00:00Z`));
   return `${weekday} ${dateIso}`;
 }
+
+/** Weekdays after `fromIso` up to and including `toIso` (holidays not excluded), e.g. Wed 2026-10-07 → Fri 2026-10-09 = 2. */
+export function weekdaysAfterUntil(fromIso: string, toIso: string): number {
+  let weekdays = 0;
+  const day = new Date(`${fromIso}T12:00:00Z`);
+  const end = new Date(`${toIso}T12:00:00Z`);
+  while (day < end) {
+    day.setUTCDate(day.getUTCDate() + 1);
+    if (day.getUTCDay() !== 0 && day.getUTCDay() !== 6) weekdays += 1;
+  }
+  return weekdays;
+}

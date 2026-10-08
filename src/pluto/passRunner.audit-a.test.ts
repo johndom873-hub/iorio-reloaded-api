@@ -22,6 +22,7 @@ const harness = vi.hoisted(() => ({
   accountContextCalls: [] as (number | null)[],
   executedCloses: [] as string[],
   throwOnBook: null as unknown,
+  lastFilledActionAtBySymbol: new Map<string, Date>(),
 }));
 
 vi.mock("../db/connection.js", () => {
@@ -35,7 +36,7 @@ vi.mock("../db/connection.js", () => {
   return { db: Object.assign((table: string) => chain(table), { raw: () => "" }) };
 });
 vi.mock("./settingsStore.js", () => ({
-  loadPlutoSettings: async () => ({ perTickerModelCooldownMinutes: 5, burstLines: 10, spyStressBreakerPct: 3, modelId: "test/model", reasoningEffort: "low", callTimeoutSeconds: 10, promptVersion: "test", confidenceFloor: 0.6, telegramVerbosity: "off", maxOpenPositions: 15, maxActionsPerSession: 10, capitalBudgetPct: 50 }),
+  loadPlutoSettings: async () => ({ perTickerModelCooldownMinutes: 5, tickerCooldownMinutes: 60, burstLines: 10, spyStressBreakerPct: 3, modelId: "test/model", reasoningEffort: "low", callTimeoutSeconds: 10, promptVersion: "test", confidenceFloor: 0.6, telegramVerbosity: "off", maxOpenPositions: 15, maxActionsPerSession: 10, capitalBudgetPct: 50 }),
 }));
 vi.mock("./ledger.js", () => ({
   startPlutoPass: vi.fn(async () => "pass-1"),
@@ -85,8 +86,9 @@ vi.mock("../lib/signalsLiveScoring.js", () => ({
 }));
 vi.mock("./candidateFilters.js", () => ({
   openCandidateId: (_symbol: string, candidate: { id: string }) => candidate.id,
-  filterTickerForPluto: ({ scored }: { scored: { symbol: string; candidates: { id: string }[]; live: number } }) => {
+  filterTickerForPluto: ({ scored, opensBlockedReason }: { scored: { symbol: string; candidates: { id: string }[]; live: number }; opensBlockedReason?: string | null }) => {
     const ticker = harness.tickers.find((entry) => entry.symbol === scored.symbol)!;
+    if (opensBlockedReason) return { symbol: scored.symbol, tickerBlocks: [], eligible: [], eligibleRolls: [], rejected: scored.candidates.map((candidate) => ({ id: candidate.id, reasons: [opensBlockedReason] })) };
     return {
       symbol: scored.symbol,
       tickerBlocks: [],
@@ -107,6 +109,7 @@ vi.mock("./book.js", () => ({
     return { openPositions: [], committedDollars: 0, workingOrderSymbols: new Set(), lastFilledActionAtBySymbol: new Map(), plutoOpenedPositionIds: [] };
   },
   loadOccupiedContracts: async () => [],
+  loadLastFilledPlutoActionAtBySymbol: async () => harness.lastFilledActionAtBySymbol,
   loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }),
   // A ticker holding something to close stands for one with an open position.
   anyOpenPositionOn: async (symbols: string[]) => harness.tickers.some((entry) => symbols.includes(entry.symbol) && entry.closeOffers.length > 0),
@@ -137,7 +140,7 @@ vi.mock("./executor.js", () => ({
   executePlutoOrder: vi.fn(),
   watchPlutoOrder: vi.fn(),
 }));
-vi.mock("./postModelGates.js", () => ({ runPostModelGates: vi.fn() }));
+vi.mock("./postModelGates.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./postModelGates.js")>()), runPostModelGates: vi.fn() }));
 vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn() }));
 
 const { runPlutoPass } = await import("./passRunner.js");
@@ -184,6 +187,7 @@ beforeEach(() => {
   harness.accountContextCalls.length = 0;
   harness.executedCloses.length = 0;
   harness.throwOnBook = null;
+  harness.lastFilledActionAtBySymbol = new Map();
   vi.mocked(ledger.finishPlutoPass).mockClear();
   vi.mocked(ledger.startPlutoPass).mockClear();
 });
@@ -276,6 +280,31 @@ describe("runPlutoPass: cooldown early skip (audit A)", () => {
     // A ticker with an open position is not skipped on its model cooldown: its automatic closes (odd lot P1, earnings buyback P3) run.
     expect(summary.skippedReason).not.toBe("every ticker in this round is cooling down");
     expect(harness.executedCloses).toEqual(["AAA"]);
+  });
+});
+
+describe("runPlutoPass: ticker cooldown before the model (2026-10-08)", () => {
+  it("a ticker whose last filled Pluto action is inside the cooldown offers no opens: no burst, no model call", async () => {
+    harness.lastFilledActionAtBySymbol = new Map([["AAA", new Date(Date.now() - 20 * 60_000)]]);
+    harness.tickers = [ticker("AAA", { requotableIds: [openId("AAA", 32)] })];
+    const summary = await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(summary.skippedReason).toBe("nothing eligible");
+    expect(harness.bursts).toEqual([]);
+    expect(harness.modelCalls).toBe(0);
+  });
+
+  it("offers the ticker's opens again once the cooldown is over", async () => {
+    harness.lastFilledActionAtBySymbol = new Map([["AAA", new Date(Date.now() - 61 * 60_000)]]);
+    const summary = await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(summary.modelCalled).toBe(true);
+  });
+
+  it("still offers the cooling-down ticker's closes", async () => {
+    harness.lastFilledActionAtBySymbol = new Map([["AAA", new Date(Date.now() - 20 * 60_000)]]);
+    harness.tickers = [ticker("AAA", { closeOffers: [closeOffer("AAA", false)] })];
+    const summary = await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(summary.modelCalled).toBe(true);
+    expect(vi.mocked(ledger.finishPlutoPass).mock.calls.at(-1)![1]).toMatchObject({ candidateCount: 1 });
   });
 });
 
