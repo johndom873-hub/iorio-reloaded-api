@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { EventName, type IBApi } from "@stoqey/ib";
+import { EventName, OptionType, type IBApi } from "@stoqey/ib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { requestLivePrices, type PriceContract } from "./fetchLivePrices.js";
 
@@ -72,6 +72,34 @@ describe("requestLivePrices settle grace", () => {
     tick(1, 60);
     tick(2, 0.4);
     expect(await result).toEqual({ stock: 60, option: 0.4 });
+  });
+
+  it("at the ceiling, names the contracts that neither priced nor ended their snapshot", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const quietCall: PriceContract = { key: "call", legType: "option", symbol: "SMCI", expiry: "20261009", strike: 46, right: OptionType.Call };
+    const quietStock: PriceContract = { key: "quiet", legType: "stock", symbol: "BSBR" };
+    const { result, tick, ib } = startRequest([stockLeg, optionLeg, quietCall, quietStock, neverTickingLeg], null);
+    tick(1, 60);
+    ib.emit(EventName.tickSnapshotEnd, 2);
+    await vi.advanceTimersByTimeAsync(6_000);
+    await result;
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toBe("Live price snapshot hit its 6000 ms ceiling with 3 of 5 contract(s) unanswered: SMCI $46 Call · 9 Oct, BSBR stock, TLT option 20280616 82.");
+    warn.mockRestore();
+  });
+
+  it("logs nothing when the batch ends before the ceiling, by settle grace or by every leg answering", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const graceRequest = startRequest([stockLeg, neverTickingLeg], 1_000);
+    graceRequest.tick(1, 60);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await graceRequest.result;
+    const completeRequest = startRequest([stockLeg, optionLeg], null);
+    completeRequest.tick(1, 60);
+    completeRequest.tick(2, 0.4);
+    await completeRequest.result;
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("does not hold the process up afterwards: no timer is left running", async () => {

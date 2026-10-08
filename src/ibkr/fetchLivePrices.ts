@@ -4,6 +4,7 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { sharedReadConnection } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 import { loadFallbackStockPrices, recordStockPrices } from "../lib/priceService.js";
+import { describeOptionContract } from "../lib/optionContractLabel.js";
 import { randomUUID } from "node:crypto";
 import { describeMarketDataLineShortage, releaseMarketDataLines, reserveMarketDataLines } from "./marketDataLineBudget.js";
 
@@ -130,7 +131,10 @@ export function requestLivePrices(ib: IBApi, allocateReqId: () => number, contra
       }
 
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, timeoutMs);
+        const timer = setTimeout(() => {
+          logContractsStillWaiting(contracts.length, [...pendingReqIds].map((reqId) => reqIdToContract.get(reqId)!), timeoutMs);
+          resolve();
+        }, timeoutMs);
         onAllReceived = () => {
           clearTimeout(timer);
           resolve();
@@ -148,6 +152,19 @@ export function requestLivePrices(ib: IBApi, allocateReqId: () => number, contra
       ib.removeListener(EventName.error, onError);
     }
   })();
+}
+
+// The ceiling returns unanswered contracts as null; naming them traces a slow batch to the contract that held it. Only
+// contracts with neither a price nor IBKR's snapshot end are listed: a settle-grace stop or a snapshot end logs nothing.
+function logContractsStillWaiting(requestedCount: number, waitingContracts: PriceContract[], timeoutMs: number): void {
+  if (waitingContracts.length === 0) return;
+  console.warn(`Live price snapshot hit its ${timeoutMs} ms ceiling with ${waitingContracts.length} of ${requestedCount} contract(s) unanswered: ${waitingContracts.map(describePriceContract).join(", ")}.`);
+}
+
+function describePriceContract(contract: PriceContract): string {
+  if (contract.legType === "stock") return `${contract.symbol} stock`;
+  if (contract.expiry === undefined || contract.strike === undefined || contract.right === undefined) return `${contract.symbol} option ${contract.expiry ?? "?"} ${contract.strike ?? "?"}${contract.right ?? ""}`;
+  return describeOptionContract({ symbol: contract.symbol, strike: contract.strike, right: contract.right, expiry: contract.expiry, dte: null });
 }
 
 /**
