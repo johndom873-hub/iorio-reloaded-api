@@ -1,6 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenosukeApiClient } from "./apiClient.js";
 import { confirmPreparedOrder, discardPreparedOrder, prepareOrderConfirmation } from "./prepareOrderConfirmation.js";
+
+// Card lines carry each contract's DTE: pin the date (Date only, so other timers keep working).
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-07T15:00:00Z") });
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 
 type Handler = (path: string, body?: unknown) => unknown;
 
@@ -24,7 +33,7 @@ const builtOrder = {
   requestType: "open_cash_secured_put",
   payload: { symbol: "AAOI", strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", quantity: 2, unitPrice: 1.35, strike: 50, expiry: "20261016", right: "P" }] },
 };
-const builtCard = "Place order for AAOI (cash-secured put)\n• SELL 2 put $50 exp 2026-10-16, limit 1.35\nOne limit order, sent to IBKR immediately when you tap Yes.";
+const builtCard = "Place order for AAOI (cash-secured put)\n• Sell $50 Put · 16 Oct (9DTE) · 2× @ 1.35 limit\nOne limit order, sent to IBKR immediately when you tap Yes.";
 const noCommissionWarning = { warn: false, netPremiumDollars: 100, commissionSharePctOfPremium: 1, warnThresholdPct: 5 };
 
 describe("prepareOrderConfirmation", () => {

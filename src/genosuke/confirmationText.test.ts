@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   annotateLegOpenState,
   buildOrderCard,
@@ -8,6 +8,15 @@ import {
   type PositionForCard,
 } from "./confirmationText.js";
 import { toIsoExpiry } from "../lib/tradeMessageFormatting.js";
+
+// Card lines carry each contract's DTE: pin the date (Date only, so other timers keep working).
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-07T15:00:00Z") });
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 
 // Mirrors the real staging AAOI position: the 110 call expired (leg closed), 100 shares still open.
 const aaoi: PositionForCard = {
@@ -47,10 +56,10 @@ describe("buildOrderCard (from the order the server built)", () => {
         requestType: "open_cash_secured_put",
         payload: { symbol: "AAOI", strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", quantity: 2, unitPrice: 1.35, strike: 50, expiry: "20261016", right: "P" }] },
       }),
-    ).toBe("Place order for AAOI (cash-secured put)\n• SELL 2 put $50 exp 2026-10-16, limit 1.35\nOne limit order, sent to IBKR immediately when you tap Yes.");
+    ).toBe("Place order for AAOI (cash-secured put)\n• Sell $50 Put · 16 Oct (9DTE) · 2× @ 1.35 limit\nOne limit order, sent to IBKR immediately when you tap Yes.");
   });
 
-  it("a buy-write lists BOTH legs, including a stock leg the server added, as one combo", () => {
+  it("a covered call opening lists BOTH legs, including a stock leg the server added, as one combo", () => {
     const card = buildOrderCard({
       requestType: "open_covered_call",
       payload: {
@@ -64,8 +73,8 @@ describe("buildOrderCard (from the order the server built)", () => {
     });
     expect(card.split("\n")).toEqual([
       "Place order for AAOI (covered call)",
-      "• BUY 200 shares, limit 48.20",
-      "• SELL 2 call $55 exp 2026-10-16, limit 1.10",
+      "• Buy 200 shares @ 48.20 limit",
+      "• Sell $55 Call · 16 Oct (9DTE) · 2× @ 1.10 limit",
       "One combo order, sent to IBKR immediately when you tap Yes.",
     ]);
   });
@@ -83,8 +92,8 @@ describe("buildOrderCard (from the order the server built)", () => {
       },
     });
     expect(card.split("\n")[0]).toBe("Close SPCX (covered call)");
-    expect(card).toContain("• BUY BACK 2 call $152.5 exp 2026-09-25, limit 0.50");
-    expect(card).toContain("• SELL 200 shares, limit 151.00");
+    expect(card).toContain("• Buy back $152.5 Call · 25 Sep · 2× @ 0.50 limit");
+    expect(card).toContain("• Sell 200 shares @ 151.00 limit");
     expect(card).toContain("One combo order");
   });
 
@@ -101,10 +110,10 @@ describe("buildOrderCard (from the order the server built)", () => {
       },
     });
     expect(card.split("\n")[0]).toBe("Roll DRAM (cash-secured put)");
-    expect(card).toContain("• BUY BACK 1 put $60 exp 2026-10-16, limit 0.40");
-    expect(card).toContain("• SELL 1 put $61.5 exp 2026-11-13, limit 0.90");
+    expect(card).toContain("• Buy back $60 Put · 16 Oct (9DTE) · 1× @ 0.40 limit");
+    expect(card).toContain("• Sell $61.5 Put · 13 Nov (37DTE) · 1× @ 0.90 limit");
     const plainBuy = buildOrderCard({ requestType: "open_cash_secured_put", payload: { symbol: "X", legs: [{ role: "option", action: "BUY", quantity: 1, unitPrice: 1, strike: 10, expiry: "20261016", right: "P" }] } });
-    expect(plainBuy).toContain("• BUY 1 put $10");
+    expect(plainBuy).toContain("• Buy $10 Put · 16 Oct (9DTE) · 1× @ 1.00 limit");
     expect(plainBuy.split("\n")[0]).toBe("Place order for X");
   });
 });

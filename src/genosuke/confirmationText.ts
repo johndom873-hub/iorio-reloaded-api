@@ -6,7 +6,7 @@
 // prices) — never a computed net credit/P&L, since financial formulas need
 // explicit sign-off before they're implemented.
 
-import { labelStrategy, toIsoExpiry } from "../lib/tradeMessageFormatting.js";
+import { describeTradeContract, labelStrategy, tradeVerb } from "../lib/tradeMessageFormatting.js";
 
 export interface PositionLeg {
   id: string;
@@ -47,9 +47,9 @@ function formatLimitPrice(limitPrice: unknown): string {
   return Number.isFinite(numeric) ? numeric.toFixed(2) : String(limitPrice);
 }
 
+/** "$50 Put · 16 Oct (9DTE) · 1×" or "100 shares": the platform's contract wording, as in every trade message. */
 export function describeLegContract(leg: PositionLeg): string {
-  if (leg.legType === "stock") return `${leg.quantity} shares`;
-  return `${leg.quantity} ${leg.optionType} $${leg.strikePrice} exp ${leg.expiryDate ? toIsoExpiry(leg.expiryDate) : "?"}`;
+  return describeTradeContract(leg);
 }
 
 /** What closing this leg means as an order: a short leg is bought back, a long leg is sold. */
@@ -107,13 +107,11 @@ export interface BuiltOrderForCard {
   payload: { symbol: string; strategyKey?: string; legs: BuiltOrderLeg[] };
 }
 
+/** "• Sell $50 Put · 16 Oct (9DTE) · 2× @ 1.35 limit", "• Buy back …", "• Buy 100 shares @ 45.10 limit". */
 function describeBuiltLeg(leg: BuiltOrderLeg): string {
-  const verb = leg.role === "option" && leg.action === "BUY" && leg.positionLegId ? "BUY BACK" : leg.action;
-  const what =
-    leg.role === "stock"
-      ? `${leg.quantity} shares`
-      : `${leg.quantity} ${leg.right === "C" ? "call" : "put"} $${leg.strike} exp ${leg.expiry ? toIsoExpiry(leg.expiry) : "?"}`;
-  return `• ${verb} ${what}, limit ${formatLimitPrice(leg.unitPrice)}`;
+  const verb = leg.role === "option" && leg.action === "BUY" && leg.positionLegId ? "Buy back" : tradeVerb(leg.action);
+  const what = describeTradeContract({ legType: leg.role, quantity: leg.quantity, optionType: leg.right ? (leg.right === "C" ? "call" : "put") : null, strikePrice: leg.strike ?? null, expiryDate: leg.expiry ?? null });
+  return `• ${verb} ${what} @ ${formatLimitPrice(leg.unitPrice)} limit`;
 }
 
 /**

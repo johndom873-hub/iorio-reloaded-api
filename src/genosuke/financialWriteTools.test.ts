@@ -5,6 +5,15 @@ import { createConfirmation, takeConfirmation } from "./confirmations.js";
 import { financialWriteTools } from "./tools/financialWriteTools.js";
 import type { GenosukeTool } from "./tools/types.js";
 
+// Card lines carry each contract's DTE: pin the date (Date only, so other timers keep working).
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-07T15:00:00Z") });
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+
 type Handler = (path: string, body?: unknown) => unknown;
 
 /** A scripted API client that records every call as "METHOD path" plus its body. */
@@ -109,7 +118,7 @@ describe("create_position", () => {
     const { api, paths, calls } = fakeApi(openHandlers());
     const result = await tool.prepareConfirmation!(putInput, api);
     expect(result).toEqual({
-      description: "Place order for AAOI (cash-secured put)\n• SELL 2 put $50 exp 2026-10-16, limit 1.35\nOne limit order, sent to IBKR immediately when you tap Yes.",
+      description: "Place order for AAOI (cash-secured put)\n• Sell $50 Put · 16 Oct (9DTE) · 2× @ 1.35 limit\nOne limit order, sent to IBKR immediately when you tap Yes.",
       prepared: { orderId: "order-1" },
     });
     expect(paths()).toEqual(["POST /positions/orders", "GET /positions/orders/order-1/gates", "POST /order-checks/commission-preview"]);
@@ -120,7 +129,7 @@ describe("create_position", () => {
     const { api } = fakeApi(openHandlers());
     const result = await tool.prepareConfirmation!(callInput, api);
     expect((result as { description: string }).description).toBe(
-      "Place order for AAOI (covered call)\n• BUY 200 shares, limit 48.20\n• SELL 2 call $55 exp 2026-10-16, limit 1.10\nOne combo order, sent to IBKR immediately when you tap Yes.",
+      "Place order for AAOI (covered call)\n• Buy 200 shares @ 48.20 limit\n• Sell $55 Call · 16 Oct (9DTE) · 2× @ 1.10 limit\nOne combo order, sent to IBKR immediately when you tap Yes.",
     );
   });
 
@@ -129,7 +138,7 @@ describe("create_position", () => {
     const { stock: _omitted, ...callInputWithoutStock } = callInput;
     const result = await tool.prepareConfirmation!(callInputWithoutStock, api);
     const description = (result as { description: string }).description;
-    expect(description).toContain("• BUY 200 shares, limit 48.20");
+    expect(description).toContain("• Buy 200 shares @ 48.20 limit");
     expect(description).toContain("One combo order");
   });
 
@@ -226,7 +235,7 @@ describe("close_position", () => {
     const { api, paths, calls } = fakeApi(closeHandlers());
     const result = await tool.prepareConfirmation!(closeInput, api);
     expect(result).toEqual({
-      description: "Close AAOI (cash-secured put)\n• BUY BACK 2 put $50 exp 2026-10-16, limit 0.50\nOne limit order, sent to IBKR immediately when you tap Yes.",
+      description: "Close AAOI (cash-secured put)\n• Buy back $50 Put · 16 Oct (9DTE) · 2× @ 0.50 limit\nOne limit order, sent to IBKR immediately when you tap Yes.",
       prepared: { orderId: "close-order-1" },
     });
     expect(paths()).toEqual(["GET /positions/pos-1", "POST /positions/pos-1/close", "GET /positions/orders/close-order-1/gates", "POST /order-checks/commission-preview"]);
