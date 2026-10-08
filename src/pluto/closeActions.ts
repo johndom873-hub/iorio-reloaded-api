@@ -4,6 +4,7 @@ import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandida
 import type { PlutoCloseActionOffer } from "./prompt.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { formatSignedDollars } from "../lib/formatSignedDollars.js";
+import { describeOptionContract, describeOrderSize, formatDayMonth } from "../lib/optionContractLabel.js";
 import { resolveIsOpenDay } from "../lib/marketSessionStatus.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 
@@ -161,7 +162,7 @@ export function evaluateUnstructuredClose(input: P1Input): { offer: CloseOffer |
       id: `${position.symbol}:close_shares:${position.positionId}`,
       kind: "close_shares",
       symbol: position.symbol,
-      description: `Sell ${position.shares} ${position.symbol} shares (unstructured) at ~${limitPrice.toFixed(2)}; open cycle P&L ${input.cycleTotal.toFixed(0)}`,
+      description: `${position.symbol} Sell ${position.shares} shares @ ${limitPrice.toFixed(2)} (unstructured); open cycle P&L ${input.cycleTotal.toFixed(0)}`,
       cycle_pnl: input.cycleTotal,
       detail: { shares: position.shares, entry_price: position.entryPrice, cycle_pnl_pct_of_capital: capital > 0 ? Math.round((input.cycleTotal / capital) * 1000) / 10 : null, odd_lot: oddLot || undefined },
       positionId: position.positionId,
@@ -207,7 +208,7 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
       id: `${input.symbol}:close_leg:${leg.legId}`,
       kind: "close_leg",
       symbol: input.symbol,
-      description: `Buy back ${leg.quantity}× ${input.symbol} $${leg.strike}${leg.right} ${leg.expiry} at ~${limitPrice.toFixed(2)} (sold at ${entryPremium.toFixed(2)}); locks ${pnlAtAsk.toFixed(0)} at the ask`,
+      description: `${input.symbol} Buy back ${describeOptionContract({ strike: leg.strike, right: leg.right, expiry: leg.expiry, dte: leg.dte })}${describeOrderSize(leg.quantity, limitPrice)} (sold at ${entryPremium.toFixed(2)}); locks ${pnlAtAsk.toFixed(0)} at the ask`,
       cycle_pnl: pnlAtAsk,
       detail: { dte: leg.dte, entry_credit: entryPremium, recorded_entry_credit: leg.entryPrice, ask: leg.ask, hold_edge_dollars: Math.round(leg.holdEdgeDollars), close_cost_dollars: Math.round(leg.closeCostDollars), pnl_at_ask: Math.round(pnlAtAsk) },
       positionId: leg.positionId,
@@ -282,7 +283,7 @@ export function evaluateEarningsBuyback(input: P3Input): { offer: CloseOffer | n
   const { leg, earnings } = input;
   // A leg expiring on the report day settles at 16:00 ET, before an after-close report: it never holds through it.
   if (!legHoldsThroughEarnings(leg.expiry, earnings)) return { offer: null, reason: null };
-  const spans = `expires after the ${earnings.dateIso} earnings (${earningsTimeLabel(earnings.time)})`;
+  const spans = `expires after the ${formatDayMonth(earnings.dateIso)} earnings (${earningsTimeLabel(earnings.time)})`;
   if (!input.singleLegPosition) return { offer: null, reason: `${spans}, but buybacks are limited to single-leg positions` };
   if (leg.strategyKey !== "cash_secured_put") return { offer: null, reason: `${spans}, but only a cash-secured put is bought back on its own` };
   if (input.sessionsLeft === null || input.sessionsLeft > earningsBuybackWindowSessions) return { offer: null, reason: `${spans}; bought back only in the last ${earningsBuybackWindowSessions} sessions before it` };
@@ -296,7 +297,7 @@ export function evaluateEarningsBuyback(input: P3Input): { offer: CloseOffer | n
       id: `${input.symbol}:close_leg:${leg.legId}`,
       kind: "close_leg",
       symbol: input.symbol,
-      description: `Buy back ${leg.quantity}× ${input.symbol} $${leg.strike}${leg.right} ${leg.expiry} at ~${limitPrice.toFixed(2)} (sold at ${entryPremium.toFixed(2)}) before the ${earnings.dateIso} earnings; locks ${pnlAtAsk.toFixed(0)} at the ask`,
+      description: `${input.symbol} Buy back ${describeOptionContract({ strike: leg.strike, right: leg.right, expiry: leg.expiry, dte: leg.dte })}${describeOrderSize(leg.quantity, limitPrice)} (sold at ${entryPremium.toFixed(2)}) before the ${formatDayMonth(earnings.dateIso)} earnings; locks ${pnlAtAsk.toFixed(0)} at the ask`,
       cycle_pnl: pnlAtAsk,
       detail: { dte: leg.dte, entry_credit: entryPremium, recorded_entry_credit: leg.entryPrice, ask: leg.ask, earnings_date: earnings.dateIso, earnings_time: earnings.time, sessions_left: input.sessionsLeft, pnl_at_ask: Math.round(pnlAtAsk) },
       positionId: leg.positionId,
@@ -338,7 +339,7 @@ export function coveredCallEarningsCloseDue(callLeg: HeldLegScore, earnings: Upc
 export function evaluateEarningsCoveredCallClose(input: P3bInput): { offer: CloseOffer | null; reason: string | null } {
   const { callLeg, earnings } = input;
   if (!legHoldsThroughEarnings(callLeg.expiry, earnings)) return { offer: null, reason: null };
-  const spans = `covered call expires after the ${earnings.dateIso} earnings (${earningsTimeLabel(earnings.time)})`;
+  const spans = `covered call expires after the ${formatDayMonth(earnings.dateIso)} earnings (${earningsTimeLabel(earnings.time)})`;
   if (input.sessionsLeft === null || input.sessionsLeft > earningsBuybackWindowSessions) return { offer: null, reason: `${spans}; closed only in the last ${earningsBuybackWindowSessions} sessions before it` };
   if (input.gateBlockReason) return { offer: null, reason: `${spans}; ${input.gateBlockReason}` };
   if (input.cycleTotal === null) return { offer: null, reason: `${spans}; no live cycle P&L` };
@@ -356,7 +357,7 @@ export function evaluateEarningsCoveredCallClose(input: P3bInput): { offer: Clos
       id: `${input.symbol}:close_position:${input.positionId}`,
       kind: "close_position",
       symbol: input.symbol,
-      description: `Close ${callLeg.quantity}× ${input.symbol} covered call before the ${earnings.dateIso} earnings: buy back $${callLeg.strike}C ${callLeg.expiry} at ~${callLimit.toFixed(2)}, sell ${input.stockLeg.shares} shares at ~${stockLimit.toFixed(2)}; cycle ${formatSignedDollars(profit, 0)} after half the spreads`,
+      description: `${input.symbol} Close ${describeOptionContract({ strike: callLeg.strike, right: "C", expiry: callLeg.expiry, dte: callLeg.dte })} + sell ${input.stockLeg.shares} shares · ${callLeg.quantity}× before the ${formatDayMonth(earnings.dateIso)} earnings: Call @ ${callLimit.toFixed(2)}, shares @ ${stockLimit.toFixed(2)}; cycle ${formatSignedDollars(profit, 0)} after half the spreads`,
       cycle_pnl: profit,
       detail: { earnings_date: earnings.dateIso, earnings_time: earnings.time, sessions_left: input.sessionsLeft, cycle_total: Math.round(input.cycleTotal), half_spread_cost: Math.round(halfSpreadCost), call_ask: callAsk, stock_bid: input.stockBid },
       positionId: input.positionId,

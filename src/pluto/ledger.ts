@@ -223,7 +223,6 @@ export type PlutoEventType =
   | "order_built"
   | "order_confirmed"
   | "order_outcome"
-  | "no_trade"
   | "paused"
   | "resumed"
   | "breaker_tripped"
@@ -233,7 +232,11 @@ export type PlutoEventType =
   | "ticker_enabled"
   | "ticker_disabled"
   | "lines_changed"
-  | "session_schedule"
+  | "window_opened"
+  | "window_closed"
+  | "analysis_started"
+  | "connection_lost"
+  | "connection_restored"
   | "stress_override_changed"
   | "order_adopted"
   | "readiness_check"
@@ -244,7 +247,10 @@ export type PlutoEventCategory = "system" | "config" | "safety" | "analysis" | "
 
 export const plutoEventCategories: PlutoEventCategory[] = ["system", "config", "safety", "analysis", "trading", "info"];
 
-export const plutoEventCategoryByType: Record<PlutoEventType, PlutoEventCategory> = {
+/** Types still stored in older rows but no longer written: no_trade (now part of model_called). */
+type LegacyPlutoEventType = "no_trade";
+
+export const plutoEventCategoryByType: Record<PlutoEventType | LegacyPlutoEventType, PlutoEventCategory> = {
   agent_started: "system",
   agent_stopped: "system",
   paused: "system",
@@ -252,8 +258,11 @@ export const plutoEventCategoryByType: Record<PlutoEventType, PlutoEventCategory
   mode_changed: "system",
   readiness_check: "system",
   warning: "system",
-  session_schedule: "system",
   lines_changed: "system",
+  window_opened: "system",
+  window_closed: "system",
+  connection_lost: "system",
+  connection_restored: "system",
   settings_changed: "config",
   ticker_enabled: "config",
   ticker_disabled: "config",
@@ -262,6 +271,7 @@ export const plutoEventCategoryByType: Record<PlutoEventType, PlutoEventCategory
   stress_override_changed: "safety",
   model_called: "analysis",
   model_failed: "analysis",
+  analysis_started: "analysis",
   no_trade: "analysis",
   action_validated: "trading",
   action_blocked: "trading",
@@ -273,8 +283,8 @@ export const plutoEventCategoryByType: Record<PlutoEventType, PlutoEventCategory
   pass_skipped: "info",
 };
 
-export function plutoEventTypesInCategories(categories: PlutoEventCategory[]): PlutoEventType[] {
-  return (Object.keys(plutoEventCategoryByType) as PlutoEventType[]).filter((type) => categories.includes(plutoEventCategoryByType[type]));
+export function plutoEventTypesInCategories(categories: PlutoEventCategory[]): (PlutoEventType | LegacyPlutoEventType)[] {
+  return (Object.keys(plutoEventCategoryByType) as (PlutoEventType | LegacyPlutoEventType)[]).filter((type) => categories.includes(plutoEventCategoryByType[type]));
 }
 
 /** Appends to the timeline and pushes a `pluto_event` notification so open screens update live. */

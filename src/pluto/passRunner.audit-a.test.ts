@@ -207,6 +207,21 @@ describe("runPlutoPass: failure handling (audit A)", () => {
     expect(harness.modelCalls).toBe(1);
   });
 
+  it("a no-order answer writes its action row first, then one model_called event carrying the concerns and the top pick (no no_trade event)", async () => {
+    vi.mocked(ledger.recordPlutoEvent).mockClear();
+    vi.mocked(ledger.recordPlutoAction).mockClear();
+    await runPlutoPass(dayRound(["AAA"]), makeContext());
+    const eventTypes = vi.mocked(ledger.recordPlutoEvent).mock.calls.map((call) => call[0]);
+    expect(eventTypes).not.toContain("no_trade");
+    const modelCalledIndex = eventTypes.indexOf("model_called");
+    expect(eventTypes.filter((type) => type === "model_called")).toHaveLength(1);
+    const payload = vi.mocked(ledger.recordPlutoEvent).mock.calls[modelCalledIndex]![1];
+    expect(payload).toMatchObject({ verdict: "no_trade", systemConcerns: [] });
+    expect(payload).toHaveProperty("deterministicTopPick");
+    const actionOrder = vi.mocked(ledger.recordPlutoAction).mock.invocationCallOrder.at(-1)!;
+    expect(vi.mocked(ledger.recordPlutoEvent).mock.invocationCallOrder[modelCalledIndex]!).toBeGreaterThan(actionOrder);
+  });
+
   it("records a non-Error throw as its string", async () => {
     harness.throwOnBook = "plain string failure";
     await expect(runPlutoPass(dayRound(["AAA"]), makeContext())).rejects.toBe("plain string failure");

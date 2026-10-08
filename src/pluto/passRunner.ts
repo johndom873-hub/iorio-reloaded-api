@@ -419,7 +419,10 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     decision = call.decision;
     agreementDetail = "single call";
   }
-  await recordPlutoEvent("model_called", { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, confidence: decision.confidence, actionKind: decision.actionKind, agreement: agreementDetail, reasons: decision.reasons });
+  const topPick = deterministicTopPick(evaluated.flatMap((ticker) => ticker.filtered.eligible));
+  const topPickSummary = topPick ? { id: topPick.id, edgeDollars: topPick.candidate.edgeDollars, netEdge: topPick.candidate.netEdge, grade: topPick.candidate.grade } : null;
+  const modelCalledEvent = { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, confidence: decision.confidence, actionKind: decision.actionKind, agreement: agreementDetail, reasons: decision.reasons, systemConcerns: decision.systemConcerns, deterministicTopPick: topPickSummary };
+  if (decision.decision === "trade") await recordPlutoEvent("model_called", modelCalledEvent);
   await finishPass({ inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, skippedReason: null, tokensIn, tokensOut, costUsd, servedModelIds });
   await recordPlutoPass();
   // The model's data concerns, per ticker (start / at most hourly / cleared), under the same switch as every Pluto message.
@@ -430,11 +433,10 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   }
 
   // 7. Outcome.
-  const topPick = deterministicTopPick(evaluated.flatMap((ticker) => ticker.filtered.eligible));
-  const topPickSummary = topPick ? { id: topPick.id, edgeDollars: topPick.candidate.edgeDollars, netEdge: topPick.candidate.netEdge, grade: topPick.candidate.grade } : null;
   if (decision.decision !== "trade") {
     await recordPlutoAction({ passId, kind: "no_trade", symbol: "—", tickerId: null, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: [], sizeTier: null, quantity: null, limitPrice: null, outcome: "no_trade", blockReason: decision.reasons.join(" "), referenceBid: null, referenceMid: null });
-    await recordPlutoEvent("no_trade", { passId, verdict: decision.decision, reasons: decision.reasons, systemConcerns: decision.systemConcerns, deterministicTopPick: topPickSummary });
+    // After the no-order row: the screen reloads its actions when this event arrives, and must find that row.
+    await recordPlutoEvent("model_called", modelCalledEvent);
     return { passId, modelCalled: true, skippedReason: null, outcome: decision.decision };
   }
 

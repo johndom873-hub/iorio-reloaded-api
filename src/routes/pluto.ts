@@ -7,7 +7,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
-import { plutoEventCategories, plutoEventCategoryByType, plutoEventTypesInCategories, recordPlutoEvent, type PlutoEventCategory, type PlutoEventType } from "../pluto/ledger.js";
+import { plutoEventCategories, plutoEventCategoryByType, plutoEventTypesInCategories, recordPlutoEvent, type PlutoEventCategory } from "../pluto/ledger.js";
 import { cancelPlutoOrders, countPlutoWorkingOrders, loadPlutoWorkingOrders } from "../pluto/orders.js";
 import { loadPlutoOrdersTodayBreakdown, loadPlutoTodayCounters } from "../pluto/counters.js";
 import { computePlutoActionExposure, loadPlutoOrderRequestsByActionId, type PlutoActionOrderRequest } from "../pluto/actionExposure.js";
@@ -373,7 +373,7 @@ plutoRouter.get("/events", async (request: Request, response: Response) => {
 
   const [rows, countRows] = await Promise.all([filtered.clone().orderBy("occurred_at", "desc").orderBy("id", "desc").limit(limitFrom(request, 200)).offset(offset), filtered.clone().count({ total: "*" })]);
   response.json({
-    events: rows.map((row) => ({ id: Number(row.id), occurredAt: new Date(row.occurred_at).toISOString(), type: row.type, category: plutoEventCategoryByType[row.type as PlutoEventType] ?? "system", appliesToAllTickers: !tickerAndPassKeys.some((key) => key in (row.payload ?? {})), payload: row.payload })),
+    events: rows.map((row) => ({ id: Number(row.id), occurredAt: new Date(row.occurred_at).toISOString(), type: row.type, category: plutoEventCategoryByType[row.type as keyof typeof plutoEventCategoryByType] ?? "system", appliesToAllTickers: !tickerAndPassKeys.some((key) => key in (row.payload ?? {})), payload: row.payload })),
     total: Number(countRows[0]?.total ?? 0),
   });
 });

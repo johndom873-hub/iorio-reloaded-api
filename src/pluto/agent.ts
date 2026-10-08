@@ -39,6 +39,8 @@ import { hasDaySignalsSeedFinished } from "../lib/daySignalsStore.js";
 const heartbeatIntervalMs = 45_000;
 const housekeepingIntervalMs = 60_000;
 const readinessIntervalMs = 60_000;
+/** Pluto connects to IBKR as its window opens; a connection still missing this long after the window opened (or the process started) counts as lost, as on the screen. */
+const connectionGraceMs = 2 * 60_000;
 export const plutoProcessName = "pluto_agent";
 
 // Settings that shape how Pluto operates but never what it would decide: changing only these does
@@ -70,6 +72,15 @@ export class PlutoAgent {
   /** The opening look queued or running: it counts as done only once its round has run (a failed one is re-queued by housekeeping). */
   private pendingOpeningLook: { todayIso: string; decision: OpeningLookDecision } | null = null;
   private watching = false;
+  /** Today's window position, from the last housekeeping tick: the loop stops at the window's end without waiting for the next tick. */
+  private tradingWindow: TradingWindowClock | null = null;
+  /** Inside the window and allowed to act: the heartbeat reports IBKR connection changes only then. */
+  private activeInWindow = false;
+  private connectionLostAtMs: number | null = null;
+  /** window_opened / window_closed already written for this date, read from the timeline once per day so a restart does not repeat them. */
+  private windowEventsWritten: { dateIso: string; opened: boolean; closed: boolean } | null = null;
+  /** The opening analysis already announced, as "date:decision": a re-queued look is not announced twice. */
+  private analysisStartedAnnouncedFor: string | null = null;
   private readinessInFlight = false;
   private stopped = false;
   private readonly startedAtMs = Date.now();
@@ -170,21 +181,70 @@ export class PlutoAgent {
         .insert({ process_name: plutoProcessName, connected: health.connected, uptime_ms: Date.now() - this.startedAtMs, total_reconnects: health.totalReconnects, git_sha: readGitSha(), app_environment: readAppEnvironment(), updated_at: db.fn.now() })
         .onConflict("process_name")
         .merge();
+      await this.recordConnectionChange(health.connected);
     } catch (error) {
       console.warn(`Pluto heartbeat failed: ${error instanceof Error ? error.message : error}`);
     }
   }
 
-  private async isAllowedToAct(): Promise<{ allowed: boolean; reason: string | null; insideWindow: boolean }> {
-    const settings = this.settings!;
-    const state = await loadPlutoState();
-    const block = describePlutoBlock(state);
-    if (block) return { allowed: false, reason: block, insideWindow: false };
+  /** "IBKR connection lost / restored", sampled by the heartbeat while Pluto is inside its window and allowed to act. */
+  private async recordConnectionChange(connected: boolean): Promise<void> {
+    if (!this.activeInWindow || !this.tradingWindow) {
+      this.connectionLostAtMs = null;
+      return;
+    }
+    const now = Date.now();
+    if (!connected && this.connectionLostAtMs === null && now - Math.max(this.tradingWindow.windowStartAtMs, this.startedAtMs) > connectionGraceMs) {
+      this.connectionLostAtMs = now;
+      await recordPlutoEvent("connection_lost", {});
+    } else if (connected && this.connectionLostAtMs !== null) {
+      const downMinutes = Math.max(1, Math.round((now - this.connectionLostAtMs) / 60_000));
+      this.connectionLostAtMs = null;
+      await recordPlutoEvent("connection_restored", { downMinutes });
+    }
+  }
+
+  private async isAllowedToAct(): Promise<{ allowed: boolean; reason: string | null; window: TradingWindowClock }> {
+    const window = await this.readTradingWindow();
+    const block = describePlutoBlock(await loadPlutoState());
+    if (block) return { allowed: false, reason: block, window };
+    return { allowed: true, reason: null, window };
+  }
+
+  private async readTradingWindow(): Promise<TradingWindowClock> {
     const now = new Date();
+    const dateIso = easternIsoDate(now);
     const session = await computeMarketSessionStatus(now).catch(() => ({ state: "closed" as const }));
-    const plutoSession = await resolvePlutoSession(now, settings);
-    const insideWindow = session.state === "open" && isInsideTradingWindow(now, easternIsoDate(now), plutoSession.windowStartEt, plutoSession.windowEndEt);
-    return { allowed: true, reason: null, insideWindow };
+    const plutoSession = await resolvePlutoSession(now, this.settings!);
+    return {
+      dateIso,
+      insideWindow: session.state === "open" && isInsideTradingWindow(now, dateIso, plutoSession.windowStartEt, plutoSession.windowEndEt),
+      isOpenDay: plutoSession.isOpen,
+      windowStartAtMs: plutoSession.windowStartAtMs,
+      windowEndAtMs: plutoSession.windowEndAtMs,
+      windowEndEt: plutoSession.windowEndEt,
+    };
+  }
+
+  /**
+   * "Trading window opened" the first time today Pluto is inside its window and allowed to act, "closed" once the window has
+   * ended after that (the close is also when Pluto stops analysing).
+   */
+  private async recordWindowEvents(window: TradingWindowClock, active: boolean): Promise<void> {
+    const pastWindowEnd = window.isOpenDay && Date.now() >= window.windowEndAtMs;
+    if (!active && !pastWindowEnd) return;
+    if (this.windowEventsWritten?.dateIso !== window.dateIso) {
+      const written: string[] = await db("pluto_events").whereIn("type", ["window_opened", "window_closed"]).whereRaw("payload->>'date' = ?", [window.dateIso]).pluck("type");
+      this.windowEventsWritten = { dateIso: window.dateIso, opened: written.includes("window_opened"), closed: written.includes("window_closed") };
+    }
+    const written = this.windowEventsWritten;
+    if (active && !written.opened) {
+      await recordPlutoEvent("window_opened", { date: window.dateIso, windowEndEt: window.windowEndEt, windowEndAt: new Date(window.windowEndAtMs).toISOString() });
+      written.opened = true;
+    } else if (pastWindowEnd && written.opened && !written.closed) {
+      await recordPlutoEvent("window_closed", { date: window.dateIso, windowEndEt: window.windowEndEt });
+      written.closed = true;
+    }
   }
 
   private housekeepingInFlight = false;
@@ -206,15 +266,20 @@ export class PlutoAgent {
       this.marketWatch.updateSettings(this.settings);
       await this.adoptWorkingOrders();
       await this.labelCandidateOutcomesOncePerDay();
-      const { allowed, insideWindow } = await this.isAllowedToAct();
+      const { allowed, window } = await this.isAllowedToAct();
+      const insideWindow = window.insideWindow;
+      this.tradingWindow = window;
+      this.activeInWindow = allowed && insideWindow;
       if (!allowed || !insideWindow) {
         if (this.watching) {
           await this.marketWatch.stop();
           this.watching = false;
           await recordPlutoEvent("lines_changed", { held: 0, reason: allowed ? "outside the trading window" : "not allowed to act" });
         }
+        await this.recordWindowEvents(window, false);
         return;
       }
+      await this.recordWindowEvents(window, true);
       const enabled: { symbol: string }[] = await db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").where("se.bot_enabled", true).select("t.symbol");
       const symbols = enabled.map((row) => row.symbol).sort();
       const result = await this.marketWatch.watch(symbols);
@@ -322,6 +387,11 @@ export class PlutoAgent {
     const decision = decideOpeningLook({ todayIso, nowEtMinutes: easternMinutesOfDay(now), seedFinished: await hasDaySignalsSeedFinished(todayIso), progress: this.openingLook });
     if (decision === "wait" || decision === "done") return;
     const detail = decision === "run_after_late_seed" ? { date: todayIso, afterLateSeed: true } : decision === "run_incomplete" ? { date: todayIso, dataIncomplete: true, reason: "today's Day Signals seed had not finished by 10:30 ET" } : { date: todayIso };
+    const announcement = `${todayIso}:${decision}`;
+    if (this.analysisStartedAnnouncedFor !== announcement) {
+      await recordPlutoEvent("analysis_started", { date: todayIso, data: decision === "run_incomplete" ? "incomplete" : decision === "run_after_late_seed" ? "complete_after_early_start" : "complete" });
+      this.analysisStartedAnnouncedFor = announcement;
+    }
     this.pendingOpeningLook = { todayIso, decision };
     // It looks at every ticker, so it replaces any every-ticker round already waiting, and goes first.
     for (let index = this.forcedRounds.length - 1; index >= 0; index -= 1) if (this.forcedRounds[index]!.symbols === null) this.forcedRounds.splice(index, 1);
@@ -396,6 +466,12 @@ export class PlutoAgent {
   }
 
   private async loopIteration(): Promise<void> {
+    if (this.watching && this.tradingWindow && Date.now() >= this.tradingWindow.windowEndAtMs) {
+      // The window has just ended: housekeeping releases the lines and writes the close now, not at its next tick.
+      await this.housekeeping();
+      // A tick already running returns at once: skip the round, the next iteration looks again.
+      if (this.watching) return;
+    }
     if (!this.watching) {
       // Not allowed to act, outside the window, or no market data (housekeeping decides). Events queued meanwhile are
       // moot: the first round once Pluto may act again analyses every contract quoted today anyway.
@@ -471,6 +547,16 @@ export class PlutoAgent {
     await Promise.race([Promise.allSettled([...this.watches]), new Promise((resolve) => setTimeout(resolve, 10_000))]);
     await recordPlutoEvent("agent_stopped", {}).catch(() => {});
   }
+}
+
+interface TradingWindowClock {
+  dateIso: string;
+  /** Regular session open and the clock inside Pluto's window. */
+  insideWindow: boolean;
+  isOpenDay: boolean;
+  windowStartAtMs: number;
+  windowEndAtMs: number;
+  windowEndEt: string;
 }
 
 function currentRelease(): string | null {

@@ -3,6 +3,7 @@ import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
 import type { PlutoGateResult } from "./ledger.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { describeOptionContract } from "../lib/optionContractLabel.js";
 
 // Post-model validation (design round 3, item 21, approved 2026-09-28). Nothing the model said
 // is trusted: the chosen candidate is re-scored on fresh quotes and re-filtered by the caller,
@@ -139,7 +140,7 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
       : `last filled Pluto action on this symbol ${Math.floor(minutesSinceLastFill)} min ago (cooldown ${settings.tickerCooldownMinutes} min)`,
   );
   if (!isRoll) gate("open_positions_cap", book.openPositionCount < settings.maxOpenPositions, `${book.openPositionCount} of ${settings.maxOpenPositions} managed positions`);
-  gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${candidate.expiry} $${candidate.strike}`);
+  gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${describeOptionContract({ strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", expiry: candidate.expiry, dte: candidate.dte })}`);
 
   // Sizing in dollars: the standard order size, less only where a tighter limit binds; contracts follow from it.
   const room = computeSizingRoom(settings, book, input.sector !== null);

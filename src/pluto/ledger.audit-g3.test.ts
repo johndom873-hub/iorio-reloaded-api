@@ -60,7 +60,9 @@ describe("plutoEventCategoryByType (audit)", () => {
   it("places the types the PROGRESS entry names where it says", () => {
     expect(plutoEventCategoryByType.pass_started).toBe("info");
     expect(plutoEventCategoryByType.pass_skipped).toBe("info");
-    expect(plutoEventCategoryByType.session_schedule).toBe("system");
+    expect(plutoEventCategoryByType.window_opened).toBe("system");
+    expect(plutoEventCategoryByType.analysis_started).toBe("analysis");
+    expect(plutoEventCategoryByType.no_trade).toBe("analysis");
     expect(plutoEventCategoryByType.warning).toBe("system");
     expect(plutoEventCategoryByType.lines_changed).toBe("system");
     expect(plutoEventCategoryByType.readiness_check).toBe("system");

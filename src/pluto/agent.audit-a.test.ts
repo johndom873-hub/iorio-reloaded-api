@@ -11,14 +11,17 @@ const harness = vi.hoisted(() => ({
   events: [] as { type: string; payload: Record<string, unknown> }[],
   telegrams: [] as string[],
   watchOk: true,
+  insideWindow: true,
+  connected: true,
   quoteStamps: [] as { symbol: string; expiry: string; strike: number; right: string; quotedAtMs: number }[],
 }));
 
 vi.mock("../db/connection.js", () => {
   const chain = () => {
     const query: Record<string, unknown> = {};
-    for (const method of ["join", "whereNull", "where", "whereNot", "whereNotNull", "whereIn", "orderBy", "limit", "insert", "onConflict"]) query[method] = () => query;
+    for (const method of ["join", "whereNull", "where", "whereNot", "whereNotNull", "whereIn", "whereRaw", "orderBy", "limit", "insert", "onConflict"]) query[method] = () => query;
     query.select = async () => [{ symbol: "AAA" }];
+    query.pluck = async () => [];
     query.merge = async () => {};
     query.count = () => ({ then: (resolve: (rows: { count: string }[]) => unknown) => resolve([{ count: "0" }]) });
     return query;
@@ -27,7 +30,7 @@ vi.mock("../db/connection.js", () => {
 });
 vi.mock("../ibkr/marketDataPool.js", () => ({ marketDataPoolSnapshot: () => ({ contractCount: 0 }) }));
 vi.mock("../ibkr/sharedReadConnection.js", () => {
-  const connection = { setLabel: () => {}, setBorrowTimeoutMs: () => {}, getHealthSnapshot: () => ({ connected: true, totalReconnects: 0 }), listenerCount: () => 0 };
+  const connection = { setLabel: () => {}, setBorrowTimeoutMs: () => {}, getHealthSnapshot: () => ({ connected: harness.connected, totalReconnects: 0 }), listenerCount: () => 0 };
   return { sharedLiveConnection: connection, sharedReadConnection: connection };
 });
 vi.mock("../lib/processMemoryMonitor.js", () => ({ startProcessMemoryMonitor: () => () => {} }));
@@ -69,7 +72,7 @@ vi.mock("./passRunner.js", () => ({
     return { passId: `pass-${harness.passRequests.length}`, modelCalled: next === null, skippedReason: next, outcome: next === null ? "no_trade" : null };
   }),
 }));
-vi.mock("./sessionSchedule.js", () => ({ resolvePlutoSession: async () => ({ windowStartEt: "09:45", windowEndEt: "15:30", cancelByMs: 0 }) }));
+vi.mock("./sessionSchedule.js", () => ({ resolvePlutoSession: async () => ({ isOpen: true, windowStartEt: "09:45", windowEndEt: "15:30", windowStartAtMs: Date.parse("2026-10-07T13:45:00Z"), windowEndAtMs: Date.parse("2026-10-07T19:30:00Z"), cancelByMs: 0 }) }));
 vi.mock("./settingsStore.js", () => ({ loadPlutoSettings: async () => ({ daySignalsPollSeconds: 1, tickerCooldownMinutes: 0, crashLoopRestartsPerHour: 5, dailyCostCeilingUsd: 5 }) }));
 vi.mock("./readiness.js", () => ({ decidePlutoReadinessRun: () => null, describePlutoReadinessOutcome: vi.fn(), evaluatePlutoRunning: vi.fn(), runPlutoReadinessTests: vi.fn() }));
 vi.mock("./readinessProbes.js", () => ({ createPlutoReadinessProbes: vi.fn() }));
@@ -84,7 +87,7 @@ vi.mock("./daySignalsWatermark.js", async () => {
   const actual = await vi.importActual<typeof import("./daySignalsWatermark.js")>("./daySignalsWatermark.js");
   return { ...actual, loadTodaysDaySignalQuoteStamps: async () => harness.quoteStamps };
 });
-vi.mock("./systemChecks.js", () => ({ isInsideTradingWindow: () => true }));
+vi.mock("./systemChecks.js", () => ({ isInsideTradingWindow: () => harness.insideWindow }));
 vi.mock("../lib/daySignalsStore.js", () => ({ hasDaySignalsSeedFinished: async () => harness.seedFinished }));
 
 const { PlutoAgent } = await import("./agent.js");
@@ -108,6 +111,8 @@ beforeEach(() => {
   harness.events.length = 0;
   harness.telegrams.length = 0;
   harness.watchOk = true;
+  harness.insideWindow = true;
+  harness.connected = true;
   harness.quoteStamps = [];
 });
 
@@ -279,5 +284,68 @@ describe("PlutoAgent forced-round retry and failure alert (audit A)", () => {
     await agent.loopIteration();
     expect(harness.passRequests[0]).toMatchObject({ trigger: "day_signals_update", force: false });
     expect(harness.passRequests[0]!.heldPositionsOnly).toBeUndefined();
+  });
+});
+
+describe("PlutoAgent window, analysis and connection events", () => {
+  const eventTypes = () => harness.events.map((event) => event.type);
+
+  it("announces the window and the opening analysis once each, however often housekeeping runs", async () => {
+    const agent = makeAgent();
+    await agent.housekeeping();
+    await agent.housekeeping();
+    expect(eventTypes().filter((type) => type === "window_opened")).toHaveLength(1);
+    expect(harness.events.find((event) => event.type === "window_opened")!.payload).toMatchObject({ date: "2026-10-07", windowEndEt: "15:30", windowEndAt: "2026-10-07T19:30:00.000Z" });
+    expect(eventTypes()).not.toContain("analysis_started");
+    harness.seedFinished = true;
+    await agent.housekeeping();
+    harness.passScript.push("trading_window: outside");
+    await agent.loopIteration();
+    await agent.housekeeping();
+    expect(harness.events.filter((event) => event.type === "analysis_started").map((event) => event.payload)).toEqual([{ date: "2026-10-07", data: "complete" }]);
+  });
+
+  it("at the window's end the loop runs no more rounds: housekeeping releases the lines and writes the close at once", async () => {
+    const agent = makeAgent();
+    await agent.housekeeping();
+    expect(agent.watching).toBe(true);
+    vi.setSystemTime(etInstant("15:30"));
+    harness.insideWindow = false;
+    harness.quoteStamps = [{ symbol: "AAA", expiry: "2026-10-16", strike: 30, right: "C", quotedAtMs: etInstant("15:29").getTime() }];
+    await agent.loopIteration();
+    expect(harness.passRequests).toHaveLength(0);
+    expect(agent.watching).toBe(false);
+    expect(eventTypes().slice(-2)).toEqual(["lines_changed", "window_closed"]);
+    await agent.housekeeping();
+    expect(eventTypes().filter((type) => type === "window_closed")).toHaveLength(1);
+  });
+
+  it("no window events when Pluto never entered its window today", async () => {
+    harness.insideWindow = false;
+    vi.setSystemTime(etInstant("16:00"));
+    const agent = makeAgent();
+    await agent.housekeeping();
+    expect(eventTypes()).toEqual([]);
+  });
+
+  it("reports a lost IBKR connection after the grace and its return, only inside the window", async () => {
+    const agent = makeAgent();
+    await agent.housekeeping();
+    harness.connected = false;
+    await agent.heartbeat();
+    expect(eventTypes()).not.toContain("connection_lost");
+    vi.setSystemTime(etInstant("10:13"));
+    await agent.heartbeat();
+    await agent.heartbeat();
+    expect(eventTypes().filter((type) => type === "connection_lost")).toHaveLength(1);
+    vi.setSystemTime(etInstant("10:16"));
+    harness.connected = true;
+    await agent.heartbeat();
+    expect(harness.events.at(-1)).toEqual({ type: "connection_restored", payload: { downMinutes: 3 } });
+    harness.insideWindow = false;
+    await agent.housekeeping();
+    harness.connected = false;
+    await agent.heartbeat();
+    expect(eventTypes().filter((type) => type === "connection_lost")).toHaveLength(1);
   });
 });

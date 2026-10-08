@@ -4,6 +4,8 @@ import { computeInFlightOrderNotional } from "../lib/orderLimits.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { positionSelect } from "../lib/positionQueries.js";
 import type { OccupiedContract } from "./candidateFilters.js";
+import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "../lib/optionContractLabel.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // Pluto's book (Marcelo, 2026-10-07): every open position on a ticker Pluto is enabled on, whoever opened it, except hedges
 // (Pluto has no way to act on a long option). An enabled ticker is Pluto's to manage (2026-10-06), so all of it counts toward
@@ -115,8 +117,8 @@ export async function loadInFlightNotionals(symbol: string): Promise<{ totalNoti
 }
 
 function describeContract(symbol: string, expiry: string, strike: number, right: string | null): string {
-  const kind = right === "call" || right === "C" ? "call" : right === "put" || right === "P" ? "put" : "option";
-  return `${symbol} ${expiry} $${strike} ${kind}`;
+  if (right === null) return `${symbol} ${formatStrike(strike)} option · ${formatDayMonth(expiry)}`;
+  return describeOptionContract({ symbol, strike, right, expiry, dte: daysToExpiry(expiry, easternIsoDate(new Date())) });
 }
 
 /**

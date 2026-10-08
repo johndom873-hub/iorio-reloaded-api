@@ -2,6 +2,8 @@ import { db } from "../db/connection.js";
 import { InternalApiClient, InternalApiError } from "../lib/internalApiClient.js";
 import { finalOrderRequestStatuses, isFinalOrderRequestStatus } from "../lib/orderRequestStatuses.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
+import { daysToExpiry, describeOptionContract, describeOrderSize, formatStrike } from "../lib/optionContractLabel.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
@@ -81,12 +83,17 @@ function isoToIbkrExpiry(expiryIso: string): string {
   return expiryIso.replace(/-/g, "");
 }
 
-function describeOrder(input: ExecuteInput): string {
+/** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39"; "MU Roll $105 Put · 10 Oct → $100 Put · 17 Oct (9DTE) · 2× @ 0.40". */
+export function describeOrder(input: ExecuteInput): string {
+  const size = describeOrderSize(input.plan.quantity, input.plan.limitPrice);
   if (input.kind === "open") {
-    const right = input.candidate.strategyKey === "covered_call" ? "C" : "P";
-    return `${input.symbol} ${input.plan.quantity}× $${input.candidate.strike}${right} ${input.candidate.expiry} @ ${input.plan.limitPrice.toFixed(2)}`;
+    const { candidate } = input;
+    return `${input.symbol} Sell ${describeOptionContract({ strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", expiry: candidate.expiry, dte: candidate.dte })}${size}`;
   }
-  return `${input.symbol} roll ${input.plan.quantity}× $${input.heldLeg.strike} → $${input.roll.replacement.strike} ${input.roll.replacement.expiry} @ ${input.plan.limitPrice.toFixed(2)}`;
+  const { heldLeg, roll } = input;
+  const from = describeOptionContract({ strike: heldLeg.strike, right: heldLeg.right, expiry: heldLeg.expiry, dte: null });
+  const to = describeOptionContract({ strike: roll.replacement.strike, right: heldLeg.right, expiry: roll.replacement.expiry, dte: roll.replacement.dte });
+  return `${input.symbol} Roll ${from} → ${to}${size}`;
 }
 
 /** Builds and confirms; returns once IBKR has the order (confirmed) or the route refused it (blocked). */
@@ -268,15 +275,31 @@ export interface AdoptableOrder {
   description: string;
 }
 
+/** The order an action row describes, in the platform's order wording; DTE counted from `todayIso`. */
+export function describeActionOrder(action: { kind: string; symbol: string; limit_price: unknown; quantity: unknown; contract: unknown }, todayIso: string): string {
+  const num = (value: unknown) => (value === null || value === undefined || Number.isNaN(Number(value)) ? null : Number(value));
+  const quantity = num(action.quantity);
+  const price = num(action.limit_price);
+  const contract = (action.contract ?? {}) as { strike?: number; expiry?: string; strategyKey?: string; right?: string; fromStrike?: number; fromExpiry?: string };
+  const right = contract.right ?? (contract.strategyKey === "covered_call" ? "C" : "P");
+  const option = (strike: number | undefined, expiry: string | undefined, withDte: boolean) =>
+    strike !== undefined && expiry ? describeOptionContract({ strike: Number(strike), right, expiry, dte: withDte ? daysToExpiry(expiry, todayIso) : null }) : `${strike !== undefined ? formatStrike(Number(strike)) : "?"} ${right === "C" ? "Call" : "Put"}`;
+  if (action.kind === "close_shares") return `${action.symbol} Sell ${quantity ?? "?"} shares${price === null ? "" : ` @ ${price.toFixed(2)}`}`;
+  // A close_position's quantity is its shares: one contract per 100.
+  if (action.kind === "close_position") return `${action.symbol} Close ${option(contract.strike, contract.expiry, true)} + sell ${quantity ?? "?"} shares${quantity === null ? "" : ` · ${Math.round(quantity / 100)}×`}`;
+  const size = quantity === null ? "" : describeOrderSize(quantity, price);
+  if (action.kind === "roll") return `${action.symbol} Roll ${option(contract.fromStrike, contract.fromExpiry, false)} → ${option(contract.strike, contract.expiry, true)}${size}`;
+  return `${action.symbol} ${action.kind === "close_leg" ? "Buy back" : "Sell"} ${option(contract.strike, contract.expiry, true)}${size}`;
+}
+
 /** Pure: the watch reference for an order found working after a restart, rebuilt from its action row. */
-export function referenceForAdoptedOrder(action: { kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs?: unknown }): AdoptableOrder["reference"] & { description: string } {
+export function referenceForAdoptedOrder(action: { kind: string; symbol: string; reference_bid: unknown; reference_mid: unknown; limit_price: unknown; quantity: unknown; contract: unknown; reference_other_legs?: unknown }, todayIso = easternIsoDate(new Date())): AdoptableOrder["reference"] & { description: string } {
   const num = (value: unknown) => (value === null || value === undefined || Number.isNaN(Number(value)) ? null : Number(value));
   const price = num(action.reference_bid) ?? num(action.reference_mid) ?? num(action.limit_price) ?? 0;
   const side: "sell" | "buy" = action.kind === "close_leg" ? "buy" : "sell";
   // A close_position (covered call before earnings) is referenced on its shares, the call being its other leg.
   const multiplier = action.kind === "close_shares" || action.kind === "close_position" ? 1 : 100;
-  const contract = (action.contract ?? {}) as { strike?: number; expiry?: string; strategyKey?: string };
-  const description = `${action.symbol} ${num(action.quantity) ?? ""}× ${action.kind}${contract.strike !== undefined ? ` $${contract.strike}` : ""}${contract.expiry ? ` ${contract.expiry}` : ""}`.replace(/\s+/g, " ").trim();
+  const description = describeActionOrder(action, todayIso);
   const otherLegs = Array.isArray(action.reference_other_legs) ? (action.reference_other_legs as PlutoReferenceLeg[]) : undefined;
   return { price, side, multiplier, ...(otherLegs ? { otherLegs } : {}), description };
 }

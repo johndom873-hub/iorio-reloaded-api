@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareFillsWithReference, impliedChosenLegPrice, otherLegOrderPrices, referenceForAdoptedOrder } from "./executor.js";
+import { compareFillsWithReference, describeActionOrder, impliedChosenLegPrice, otherLegOrderPrices, referenceForAdoptedOrder } from "./executor.js";
 
 describe("compareFillsWithReference", () => {
   const option = (side: "sell" | "buy", quantity: number, price: number) => ({ side, quantity, price, multiplier: 100 });
@@ -39,9 +39,21 @@ describe("compareFillsWithReference", () => {
 
 describe("referenceForAdoptedOrder", () => {
   it("rebuilds side, multiplier, price and a description from the action row", () => {
-    expect(referenceForAdoptedOrder({ kind: "open_cash_secured_put", symbol: "HOOD", reference_bid: "2.0500", reference_mid: "2.1", limit_price: "2.1", quantity: 2, contract: { strike: 100, expiry: "2026-10-16" } })).toEqual({ price: 2.05, side: "sell", multiplier: 100, description: "HOOD 2× open_cash_secured_put $100 2026-10-16" });
+    expect(referenceForAdoptedOrder({ kind: "open_cash_secured_put", symbol: "HOOD", reference_bid: "2.0500", reference_mid: "2.1", limit_price: "2.1", quantity: 2, contract: { strike: 100, expiry: "2026-10-16" } }, "2026-10-07")).toEqual({ price: 2.05, side: "sell", multiplier: 100, description: "HOOD Sell $100 Put · 16 Oct (9DTE) · 2× @ 2.10" });
     expect(referenceForAdoptedOrder({ kind: "close_leg", symbol: "COIN", reference_bid: null, reference_mid: null, limit_price: "0.40", quantity: 1, contract: null })).toMatchObject({ price: 0.4, side: "buy", multiplier: 100 });
     expect(referenceForAdoptedOrder({ kind: "close_shares", symbol: "AAOI", reference_bid: "101.4", reference_mid: null, limit_price: null, quantity: 40, contract: null })).toMatchObject({ price: 101.4, side: "sell", multiplier: 1 });
+  });
+});
+
+describe("describeActionOrder", () => {
+  const today = "2026-10-07";
+  it("words every kind in the platform's order standard", () => {
+    expect(describeActionOrder({ kind: "open_covered_call", symbol: "SMCI", limit_price: "0.39", quantity: 11, contract: { strategyKey: "covered_call", strike: 46, expiry: "2026-10-09" } }, today)).toBe("SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39");
+    expect(describeActionOrder({ kind: "close_leg", symbol: "COIN", limit_price: 0.65, quantity: 2, contract: { strike: 300, expiry: "2026-10-10", right: "P" } }, today)).toBe("COIN Buy back $300 Put · 10 Oct (3DTE) · 2× @ 0.65");
+    expect(describeActionOrder({ kind: "roll", symbol: "MU", limit_price: 0.4, quantity: 2, contract: { strategyKey: "cash_secured_put", strike: 100, expiry: "2026-10-16", right: "P", fromStrike: 105, fromExpiry: "2026-10-09" } }, today)).toBe("MU Roll $105 Put · 9 Oct → $100 Put · 16 Oct (9DTE) · 2× @ 0.40");
+    expect(describeActionOrder({ kind: "close_position", symbol: "SMCI", limit_price: 45.1, quantity: 100, contract: { strategyKey: "covered_call", strike: 46, expiry: "2026-10-09", right: "C" } }, today)).toBe("SMCI Close $46 Call · 9 Oct (2DTE) + sell 100 shares · 1×");
+    expect(describeActionOrder({ kind: "close_shares", symbol: "AAOI", limit_price: 101.4, quantity: 40, contract: null }, today)).toBe("AAOI Sell 40 shares @ 101.40");
+    expect(describeActionOrder({ kind: "open_cash_secured_put", symbol: "HOOD", limit_price: 42.5, quantity: null, contract: { strike: 42.5, expiry: "2026-10-09" } }, today)).toBe("HOOD Sell $42.5 Put · 9 Oct (2DTE)");
   });
 });
 

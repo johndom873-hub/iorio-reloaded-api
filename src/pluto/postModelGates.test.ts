@@ -103,7 +103,7 @@ describe("runPostModelGates — the gates", () => {
     const held = runPostModelGates(input({ book: { ...book, sameContractConflict: "open position on HOOD 2026-10-16 $100 (call)" } }));
     expect(failed(held)).toEqual(["same_contract"]);
     expect(held.gates.find((gate) => gate.gate === "same_contract")?.detail).toBe("open position on HOOD 2026-10-16 $100 (call)");
-    expect(runPostModelGates(input()).gates.find((gate) => gate.gate === "same_contract")).toEqual({ gate: "same_contract", ok: true, detail: "no open position or working order on 2026-10-16 $100" });
+    expect(runPostModelGates(input()).gates.find((gate) => gate.gate === "same_contract")).toEqual({ gate: "same_contract", ok: true, detail: "no open position or working order on $100 Put · 16 Oct (18DTE)" });
   });
   it("lists every failing gate, not just the first", () => {
     expect(failed(runPostModelGates(input({ decision: { ...trade, confidence: 0.1 }, book: { ...book, workingOrderOnSymbol: true } })))).toEqual(["confidence_floor", "working_order"]);
