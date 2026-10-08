@@ -15,8 +15,11 @@ import { describeCandidateId, deterministicTopPick, filterTickerForPluto, findSa
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { updatePlutoConcernAlerts } from "./concernAlerts.js";
 import { executePlutoClose, executePlutoOrder, watchPlutoOrder } from "./executor.js";
-import { buildCloseOffersForTicker, type CloseOffer } from "./closeActions.js";
-import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
+import { buildCloseOffersForTicker, type CloseOffer, type CloseOffersForTickerInput } from "./closeActions.js";
+import { loadOpenDaysBetween, previousOpenSessionDate } from "../lib/marketSessionStatus.js";
+import { addCalendarDays } from "../lib/signalsRoadmap.js";
+import { flatCommissionEstimator, type CommissionEstimator } from "../lib/commissionEstimate.js";
+import type { HeldPositionEntry } from "./heldPositionMetrics.js";
 import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
 import { fetchPlutoAccountSummary } from "./accountSummaryCache.js";
 import { candidateSetFingerprint, classifyFingerprintChange, tickerFingerprint } from "./inputHash.js";
@@ -83,6 +86,47 @@ interface EvaluatedTicker {
   occupiedContracts: OccupiedContract[];
   fingerprint: string;
   closeOffers: CloseOffer[];
+  /** Every held short put and covered call on the ticker, as the model sees it (set with the close offers). */
+  heldPositions: HeldPositionEntry[];
+}
+
+/** What every close build of the round shares: the calendar the event sessions count on, and the commission estimate. */
+interface RoundCloseContext {
+  previousSessionDateIso: string;
+  todayIso: string;
+  openDaysIso: string[];
+  commissionEstimator: CommissionEstimator;
+}
+
+function closeOffersInput(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, round: RoundCloseContext): CloseOffersForTickerInput {
+  const watched = context.marketWatch.snapshot(ticker.row.symbol);
+  return {
+    symbol: ticker.row.symbol,
+    heldLegs: ticker.scored.heldLegs,
+    rolls: ticker.scored.rolls,
+    settings,
+    stockBid: watched?.bid ?? null,
+    stockAsk: watched?.ask ?? null,
+    previousSessionDateIso: round.previousSessionDateIso,
+    todayIso: round.todayIso,
+    spotPrice: ticker.scored.spotPrice,
+    forecastVolatility: ticker.scored.forecast?.volatility ?? null,
+    macroEvents: ticker.scored.macroEvents,
+    nowMs: Date.now(),
+    openDaysIso: round.openDaysIso,
+    commissionEstimator: round.commissionEstimator,
+  };
+}
+
+/** The last expiry anything on the tickers reaches (held legs, candidates, roll replacements): how far the round's calendar must go. */
+function lastExpiryOf(tickers: EvaluatedTicker[], todayIso: string): string {
+  const expiries = tickers.flatMap((ticker) => [...ticker.scored.heldLegs.map((leg) => leg.expiry), ...ticker.scored.candidates.map((candidate) => candidate.expiry), ...ticker.scored.rolls.map((roll) => roll.replacement.expiry)]);
+  return expiries.reduce((latest, expiry) => (expiry > latest ? expiry : latest), todayIso);
+}
+
+/** The change-check key of a close offer: an event close also moves with its review step (F4). */
+function closeOfferFingerprintKey(offer: CloseOffer): string {
+  return offer.reviewKey ? `${offer.id}@${offer.reviewKey}` : offer.id;
 }
 
 async function loadEnabledTickerRows(): Promise<SignalsTickerRow[]> {
@@ -123,7 +167,7 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   const scored = scoreTicker(inputs, account, tradingSettings, live);
   const occupiedContracts = await loadOccupiedContracts(row.symbol);
   const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason });
-  return { row, inputs, scored, filtered, occupiedContracts, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [] };
+  return { row, inputs, scored, filtered, occupiedContracts, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [], heldPositions: [] };
 }
 
 /** What the sizing gate's stress cap needs about the ticker today. */
@@ -154,9 +198,9 @@ async function loadMoveContext(ticker: EvaluatedTicker): Promise<MoveContext | n
  * Formulas P1/P2 offers for one ticker; automatic (odd-lot) closes are executed here (only when `executeAutomatic`: the re-score
  * after a burst rebuilds the offers but must never send an automatic close twice), the rest go to the model.
  */
-async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, previousSessionDateIso: string, passId: string, cancelByMs: number, executeAutomatic: boolean, automaticBudget: { remaining: number } = { remaining: 0 }): Promise<boolean> {
-  const watched = context.marketWatch.snapshot(ticker.row.symbol);
-  const { offers } = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: ticker.scored.heldLegs, rolls: ticker.scored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso, todayIso: ticker.inputs.todayEasternIso });
+async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSettings, context: PassRunnerContext, round: RoundCloseContext, passId: string, cancelByMs: number, executeAutomatic: boolean, automaticBudget: { remaining: number } = { remaining: 0 }): Promise<boolean> {
+  const { offers, heldPositions } = await buildCloseOffersForTicker(closeOffersInput(ticker, settings, context, round));
+  ticker.heldPositions = heldPositions;
   let automaticCloseWorking = false;
   for (const offer of offers) {
     if (!offer.automatic || !executeAutomatic) continue;
@@ -302,15 +346,22 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     evaluated.push(ticker);
   }
   const previousSessionDateIso = await previousOpenSessionDate(checks.context.todayEasternIso);
+  const roundClose: RoundCloseContext = {
+    previousSessionDateIso,
+    todayIso: checks.context.todayEasternIso,
+    // A week past the last expiry: a re-score after a burst can only see the same expiries, and the slack costs nothing.
+    openDaysIso: await loadOpenDaysBetween(checks.context.todayEasternIso, addCalendarDays(lastExpiryOf(evaluated, checks.context.todayEasternIso), 7)),
+    commissionEstimator: tradingSettings.commissionEstimator ?? flatCommissionEstimator,
+  };
   const automaticBudget = { remaining: settings.maxActionsPerSession - checks.context.counters.actionsToday };
   // What the round looked at, before any live quote: what the next round compares against.
   const lookedAtFingerprintBySymbol = new Map<string, string>();
   let offeredCount = 0;
   const automaticCloseWorkingSymbols = new Set<string>();
   for (const ticker of evaluated) {
-    if (await attachCloseOffers(ticker, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs, true, automaticBudget)) automaticCloseWorkingSymbols.add(ticker.row.symbol);
+    if (await attachCloseOffers(ticker, settings, context, roundClose, passId, checks.context.session.cancelByMs, true, automaticBudget)) automaticCloseWorkingSymbols.add(ticker.row.symbol);
     const requotable = opensBlockedBecause ? [] : candidatesEligibleOnceRequoted(ticker.scored, ticker.filtered);
-    lookedAtFingerprintBySymbol.set(ticker.row.symbol, tickerFingerprint([...ticker.filtered.eligible, ...requotable], ticker.filtered.eligibleRolls, ticker.closeOffers.map((offer) => offer.id)));
+    lookedAtFingerprintBySymbol.set(ticker.row.symbol, tickerFingerprint([...ticker.filtered.eligible, ...requotable], ticker.filtered.eligibleRolls, ticker.closeOffers.map(closeOfferFingerprintKey)));
     offeredCount += ticker.filtered.eligible.length + requotable.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length;
   }
 
@@ -346,7 +397,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     }
     const requoted = await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now(), liveQuotes, tickerCooldownReason(ticker.row.symbol));
     blockOpensWhenBarred(requoted);
-    await attachCloseOffers(requoted, settings, context, previousSessionDateIso, passId, checks.context.session.cancelByMs, false);
+    await attachCloseOffers(requoted, settings, context, roundClose, passId, checks.context.session.cancelByMs, false);
     refreshed.push(requoted);
   }
   evaluated = refreshed;
@@ -383,7 +434,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const openPositionsBySymbol: Record<string, string[]> = {};
   for (const position of book.openPositions) (openPositionsBySymbol[position.symbol] ??= []).push(position.strategyKey);
   const tickersForPrompt: PlutoPromptTickerInput[] = await Promise.all(
-    evaluated.map(async (ticker) => ({ scored: ticker.scored, eligible: ticker.filtered.eligible, eligibleRolls: ticker.filtered.eligibleRolls, closeActions: ticker.closeOffers, moveContext: await loadMoveContext(ticker) })),
+    evaluated.map(async (ticker) => ({ scored: ticker.scored, eligible: ticker.filtered.eligible, eligibleRolls: ticker.filtered.eligibleRolls, closeActions: ticker.closeOffers, heldPositions: ticker.heldPositions, moveContext: await loadMoveContext(ticker) })),
   );
   const windowEnd = checks.context.session.windowEndEt.split(":").map(Number);
   const minutesToWindowEnd = (windowEnd[0]! * 60 + windowEnd[1]!) - easternMinutesOfDay(now);
@@ -412,6 +463,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     ),
     trigger: { kind: trigger, detail: triggerDetail },
     plutoOpenedPositionIds: book.plutoOpenedPositionIds,
+    openDaysIso: roundClose.openDaysIso,
   });
   const systemPrompt = buildPlutoSystemPrompt(settings);
   const promptId = await ensurePlutoPrompt(settings.promptVersion, systemPrompt);
@@ -570,9 +622,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
 
   async function runChosenClose(ticker: EvaluatedTicker, offer: CloseOffer): Promise<PassSummary> {
     // Re-derive the offer fresh: the cycle P&L, the quote and the leg's edge can all have moved.
-    const watched = context.marketWatch.snapshot(ticker.row.symbol);
-    const freshScored = (await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now())).scored;
-    const rebuilt = await buildCloseOffersForTicker({ symbol: ticker.row.symbol, heldLegs: freshScored.heldLegs, rolls: freshScored.rolls, settings, stockBid: watched?.bid ?? null, stockAsk: watched?.ask ?? null, previousSessionDateIso, todayIso: checks.context.todayEasternIso });
+    const freshTicker = await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now());
+    const rebuilt = await buildCloseOffersForTicker(closeOffersInput(freshTicker, settings, context, roundClose));
     const freshOffer = rebuilt.offers.find((entry) => entry.id === offer.id) ?? null;
     const gateResults: PlutoGateResult[] = [
       { gate: "verdict", ok: true, detail: "trade" },
@@ -587,8 +638,10 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       return { passId, modelCalled: true, skippedReason: null, outcome: "blocked" };
     }
     await recordPlutoEvent("action_validated", { passId, actionId, symbol: offer.symbol, candidateId: offer.id, quantity: freshOffer!.quantity, limitPrice: freshOffer!.limitPrice, reasons: decision.reasons });
-    const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: freshOffer!.positionId, legs: freshOffer!.legIds.map((legId) => ({ legId, limitPrice: freshOffer!.limitPrice })), description: freshOffer!.description, reasons: decision.reasons });
-    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: freshOffer!.limitPrice, side: freshOffer!.side, multiplier: freshOffer!.multiplier }, description: freshOffer!.description, cancelByMs: checks.context.session.cancelByMs }), result.orderId, offer.symbol);
+    // A combo close (a whole covered call) prices each leg on its own and is referenced on its shares with the call as its other leg.
+    if (freshOffer!.otherReferenceLegs) await updatePlutoAction(actionId, { referenceOtherLegs: freshOffer!.otherReferenceLegs });
+    const result = await executePlutoClose(context.api, settings, { actionId, symbol: offer.symbol, positionId: freshOffer!.positionId, legs: freshOffer!.legIds.map((legId) => ({ legId, limitPrice: freshOffer!.legLimitPrices?.[legId] ?? freshOffer!.limitPrice })), description: freshOffer!.description, reasons: decision.reasons });
+    if (result.outcome === "confirmed" && result.orderId) context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: offer.symbol, reference: { price: freshOffer!.limitPrice, side: freshOffer!.side, multiplier: freshOffer!.multiplier, ...(freshOffer!.otherReferenceLegs ? { otherLegs: freshOffer!.otherReferenceLegs } : {}) }, description: freshOffer!.description, cancelByMs: checks.context.session.cancelByMs }), result.orderId, offer.symbol);
     return { passId, modelCalled: true, skippedReason: null, outcome: result.outcome };
   }
 

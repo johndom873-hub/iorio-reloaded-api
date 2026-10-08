@@ -35,6 +35,7 @@ vi.mock("./ledger.js", () => ({
     return `action-${harness.recordedActions.length}`;
   },
   recordPlutoDecision: vi.fn(),
+  updatePlutoAction: vi.fn(),
 }));
 vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => ({ breakers: {} }), recordPlutoPass: vi.fn(), tripPlutoBreaker: vi.fn() }));
 vi.mock("./systemChecks.js", () => ({
@@ -74,10 +75,10 @@ vi.mock("./book.js", () => ({ loadPlutoBook: async () => ({ openPositions: [], c
 vi.mock("./closeActions.js", () => ({
   buildCloseOffersForTicker: async (input: { todayIso: string }) => {
     harness.closeBuilds.push({ todayIso: input.todayIso });
-    return { offers: harness.closeOffers.map((offer) => ({ ...offer })), skipped: [] };
+    return { offers: harness.closeOffers.map((offer) => ({ ...offer })), skipped: [], heldPositions: [] };
   },
 }));
-vi.mock("../lib/marketSessionStatus.js", () => ({ previousOpenSessionDate: async () => "2026-10-06" }));
+vi.mock("../lib/marketSessionStatus.js", () => ({ previousOpenSessionDate: async () => "2026-10-06", loadOpenDaysBetween: async () => [] }));
 vi.mock("../lib/tradingSettingsStore.js", () => ({ loadTradingSettings: async () => ({ spreadCostChargedPct: 50 }) }));
 vi.mock("./accountSummaryCache.js", () => ({ fetchPlutoAccountSummary: async () => ({}) }));
 vi.mock("../lib/ivMetrics.js", () => ({ computeIvMetrics: async () => ({ ivRank: null }) }));
@@ -88,7 +89,7 @@ vi.mock("./prompt.js", () => ({
   buildPlutoSystemPrompt: () => "system",
   buildPlutoUserPayload: (input: { tickers: { closeActions: { id: string }[] }[] }) => {
     harness.promptCloseActionIds.push(input.tickers.flatMap((ticker) => ticker.closeActions.map((offer) => offer.id)));
-    return { payload: {}, offeredIds: new Set<string>(["AAA:covered_call:2026-10-16:30", "AAA:close_leg:leg-p2"]) };
+    return { payload: {}, offeredIds: new Set<string>(["AAA:covered_call:2026-10-16:30", "AAA:close_leg:leg-p2", "AAA:close_position:pos-cc"]) };
   },
   plutoPromptVersion: "test",
   recentDecisionsForPrompt: () => [],
@@ -102,6 +103,7 @@ vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn()
 
 const { runPlutoPass } = await import("./passRunner.js");
 const executor = await import("./executor.js");
+const ledger = await import("./ledger.js");
 
 function makeContext() {
   return {
@@ -175,5 +177,45 @@ describe("automatic close offers in a round", () => {
     expect(harness.closeBuilds.at(-1)!.todayIso).toBe("2026-10-07");
     expect(executor.executePlutoClose).toHaveBeenCalledTimes(1);
     expect(vi.mocked(executor.executePlutoClose).mock.calls[0]![2]).toMatchObject({ positionId: "pos-p2", reasons: ["take the profit"] });
+  });
+});
+
+describe("a model-chosen whole covered-call close (v3.8, an event close)", () => {
+  const coveredCallClose = {
+    id: "AAA:close_position:pos-cc", kind: "close_position", symbol: "AAA", description: "AAA Close $32 Call + sell 100 shares before the Fed", cycle_pnl: 246, detail: {}, positionId: "pos-cc", legIds: ["call-leg", "stock-leg"],
+    automatic: false, automaticReason: null, reviewKey: "c80s3", limitPrice: 30, side: "sell", multiplier: 1, quantity: 100,
+    legLimitPrices: { "call-leg": 0.14, "stock-leg": 30 }, otherReferenceLegs: [{ side: "buy", price: 0.14, multiplier: 100 }],
+    contract: { strategyKey: "covered_call", expiry: "2026-10-16", strike: 32, right: "C" },
+  };
+
+  it("sends each leg at its own limit and references the shares with the call as the other leg", async () => {
+    harness.closeOffers = [coveredCallClose];
+    harness.modelAnswer = { decision: "trade", action_kind: "close_position", candidate_id: "AAA:close_position:pos-cc", confidence: 0.9, reasons: ["$14 left to earn against a $390 stress loss on the Fed"], risks_acknowledged: [], system_concerns: [] };
+    vi.mocked(ledger.updatePlutoAction).mockClear();
+    const summary = await runPlutoPass(dayRound, makeContext());
+    expect(summary.outcome).toBe("confirmed");
+    expect(vi.mocked(executor.executePlutoClose).mock.calls[0]![2]).toMatchObject({ positionId: "pos-cc", legs: [{ legId: "call-leg", limitPrice: 0.14 }, { legId: "stock-leg", limitPrice: 30 }] });
+    expect(ledger.updatePlutoAction).toHaveBeenCalledWith("action-1", { referenceOtherLegs: [{ side: "buy", price: 0.14, multiplier: 100 }] });
+    expect(vi.mocked(executor.watchPlutoOrder).mock.calls[0]![2]).toMatchObject({ reference: { price: 30, side: "sell", multiplier: 1, otherLegs: [{ side: "buy", price: 0.14, multiplier: 100 }] } });
+    expect(harness.recordedActions.at(-1)!.kind).toBe("close_position");
+  });
+});
+
+describe("an event close is asked about again as its review step moves (F4)", () => {
+  const eventClose = (reviewKey: string) => ({ ...p2Offer, reviewKey });
+
+  it("same id and step: no new model call; a new step (more captured, or a session closer): asked again", async () => {
+    const context = makeContext();
+    harness.closeOffers = [eventClose("c80s3")];
+    expect((await runPlutoPass(dayRound, context)).modelCalled).toBe(true);
+    // Past the per-ticker cooldown, nothing moved: skipped.
+    context.lastModelEvaluationAtBySymbol.set("AAA", 0);
+    harness.closeOffers = [eventClose("c80s3")];
+    expect((await runPlutoPass(dayRound, context)).skippedReason).toBe("no material change since the model last looked");
+    harness.closeOffers = [eventClose("c90s3")];
+    expect((await runPlutoPass(dayRound, context)).modelCalled).toBe(true);
+    context.lastModelEvaluationAtBySymbol.set("AAA", 0);
+    harness.closeOffers = [eventClose("c90s2")];
+    expect((await runPlutoPass(dayRound, context)).modelCalled).toBe(true);
   });
 });

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
-import { countSessionsLeftBeforeEarnings, evaluateEarningsBuyback, evaluateShortLegBuyback, evaluateUnstructuredClose, orderedEntryPremium, type UnstructuredSharePosition } from "./closeActions.js";
+import { countSessionsLeftBeforeEarnings, evaluateEarningsBuyback, evaluateEventCoveredCallClose, evaluateEventPutClose, evaluateShortLegBuyback, evaluateUnstructuredClose, eventCloseWindowSessions, mergeEventAndHoldEdgeBuybacks, orderedEntryPremium, type UnstructuredSharePosition } from "./closeActions.js";
+import { heldCoveredCallEntry, heldPutEntry } from "./heldPositionMetrics.js";
+import type { MacroEventBeforeExpiry } from "../lib/macroEventTiming.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 const settings = { unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50, buybackMinDte: 2 } as PlutoSettings;
@@ -124,5 +126,76 @@ describe("countSessionsLeftBeforeEarnings", () => {
   it("is 1 on the last day, and while an unknown-time report today is still ahead", () => {
     expect(countSessionsLeftBeforeEarnings("2026-10-27", { dateIso: "2026-10-27", time: "1" }, ["2026-10-27"])).toBe(1);
     expect(countSessionsLeftBeforeEarnings("2026-10-27", { dateIso: "2026-10-27", time: "0" }, ["2026-10-27"])).toBe(1);
+  });
+});
+
+describe("Formula F3 — event closes", () => {
+  const forecastVolatility = 0.02 * Math.sqrt(252);
+  const fed = (sessionsUntil: number): MacroEventBeforeExpiry => ({ title: "Fed rate decision", weight: "heavy", dateIso: "2026-10-27", sessionIso: "2026-10-27", sessionsUntil, sessionsAfter: 4 });
+  const put: HeldLegScore = {
+    legId: "leg7", positionId: "pos7", strategyKey: "cash_secured_put", expiry: "2026-10-30", strike: 95, right: "P", quantity: 1, entryPrice: 1, entryAtIso: "2026-10-09T14:00:00Z",
+    dte: 6, delta: -0.08, bid: 0.12, ask: 0.16, mid: 0.14, surfaceImpliedVolatility: 0.45, midImpliedVolatility: 0.45, edge: 0.1, frictionVolatility: 0.01, vega: 0.03, holdEdgeDollars: 30, closeCostDollars: 3, dollarRisk: 9486, quoteSource: "day", quotedAt: "2026-10-24T15:00:00Z", flags: [], unscoredReason: null,
+  };
+  const putEntry = (sessionsUntil: number, overrides: Partial<HeldLegScore> = {}, entryCredit = 1) => heldPutEntry({ leg: { ...put, ...overrides }, entryCredit, spot: 101, forecastVolatility, event: fed(sessionsUntil), commissionPerContract: 0.68 });
+  const putInput = (sessionsUntil: number, overrides: Partial<HeldLegScore> = {}, entryCredit = 1) => ({ symbol: "HOOD", leg: { ...put, ...overrides }, entry: putEntry(sessionsUntil, overrides, entryCredit), singleLegPosition: true, gateBlockReason: null });
+
+  it("offers a put's buyback to the model inside the window even though holding edge is positive (P2 would not)", () => {
+    const { offer, reason } = evaluateEventPutClose(putInput(3));
+    expect(reason).toBeNull();
+    expect(offer).toMatchObject({ id: "HOOD:close_leg:leg7", kind: "close_leg", automatic: false, side: "buy", multiplier: 100, quantity: 1, limitPrice: 0.14, reviewKey: "c80s3" });
+    expect(offer!.description).toMatch(/before the 27 Oct Fed rate decision \(heavy, 3 sessions away\); locks 84 at the ask$/);
+    expect(offer!.detail).toMatchObject({ event: "Fed rate decision", sessions_until: 3, captured_pct: 84, max_remaining_gain_dollars: 14, event_stress_loss_dollars: 25, close_cost_dollars: 3 });
+    expect(evaluateShortLegBuyback({ symbol: "HOOD", leg: put, rolls: [], settings, singleLegPosition: true }).offer).toBeNull();
+  });
+
+  it("the window: exactly eventCloseWindowSessions sessions away is in, one more is out (null/null)", () => {
+    expect(eventCloseWindowSessions).toBe(5);
+    expect(evaluateEventPutClose(putInput(5)).offer).not.toBeNull();
+    expect(evaluateEventPutClose(putInput(6))).toEqual({ offer: null, reason: null });
+    expect(evaluateEventPutClose({ ...putInput(3), entry: { ...putEntry(3), event: null } })).toEqual({ offer: null, reason: null });
+  });
+
+  it("never at break-even or a loss, never on a blocked gate, a multi-leg position or a one-sided quote", () => {
+    expect(evaluateEventPutClose(putInput(3, {}, 0.16)).reason).toMatch(/only break even, so it is held through it$/);
+    expect(evaluateEventPutClose(putInput(3, {}, 0.1)).reason).toMatch(/would lose \$6, so it is held through it$/);
+    expect(evaluateEventPutClose({ ...putInput(3), gateBlockReason: "Closing is blocked: the cycle has inconsistent data" }).reason).toMatch(/inconsistent data/);
+    expect(evaluateEventPutClose({ ...putInput(3), singleLegPosition: false }).reason).toMatch(/single-leg positions/);
+    expect(evaluateEventPutClose(putInput(3, { bid: null })).reason).toMatch(/two-sided quote/);
+  });
+
+  it("one offer per leg when P2 also applies: the event close, saying holding no longer pays", () => {
+    const eventOffer = evaluateEventPutClose(putInput(3)).offer!;
+    const p2 = evaluateShortLegBuyback({ symbol: "HOOD", leg: { ...put, holdEdgeDollars: -10 }, rolls: [], settings, singleLegPosition: true }).offer!;
+    const merged = mergeEventAndHoldEdgeBuybacks(eventOffer, p2);
+    expect(merged.id).toBe(p2.id);
+    expect(merged.reviewKey).toBe("c80s3");
+    expect(merged.description).toMatch(/holding also no longer pays its closing cost$/);
+    expect(merged.detail).toMatchObject({ hold_edge_dollars: -10, also_hold_edge_negative: true, sessions_until: 3 });
+    expect(mergeEventAndHoldEdgeBuybacks(eventOffer, null)).toBe(eventOffer);
+  });
+
+  describe("covered call (whole position)", () => {
+    const call: HeldLegScore = { ...put, legId: "call1", positionId: "cc1", strategyKey: "covered_call", strike: 97, right: "C", bid: 4.18, ask: 4.22, mid: 4.2, entryPrice: 5 };
+    const ccInput = (cycleTotal: number | null, sessionsUntil = 3) => {
+      const entry = heldCoveredCallEntry({ callLeg: call, shares: 100, entryCredit: 5, spot: 101, stockBid: 100.99, stockAsk: 101.01, forecastVolatility, event: fed(sessionsUntil), commissionPerContract: 0.68, cycleTotal });
+      return { symbol: "HOOD", positionId: "cc1", callLeg: call, stockLeg: { legId: "stock1", shares: 100 }, entry, stockBid: 100.99, stockAsk: 101.01, gateBlockReason: null };
+    };
+
+    it("offers the combo close to the model, each leg at its own mid, referenced on the shares", () => {
+      const { offer } = evaluateEventCoveredCallClose(ccInput(250));
+      expect(offer).toMatchObject({
+        id: "HOOD:close_position:cc1", kind: "close_position", automatic: false, side: "sell", multiplier: 1, quantity: 100, limitPrice: 101,
+        legIds: ["call1", "stock1"], legLimitPrices: { call1: 4.2, stock1: 101 }, otherReferenceLegs: [{ side: "buy", price: 4.2, multiplier: 100 }],
+      });
+      expect(offer!.cycle_pnl).toBeCloseTo(250 - 3.68, 9);
+      expect(offer!.detail).toMatchObject({ max_remaining_gain_dollars: 20, event_stress_loss_dollars: 93, cycle_pnl_after_costs_dollars: 246 });
+    });
+
+    it("never when the cycle closed now is not in profit after the close cost, or unread", () => {
+      expect(evaluateEventCoveredCallClose(ccInput(3)).reason).toMatch(/would lose \$1 after the close cost, so it is held through it$/);
+      expect(evaluateEventCoveredCallClose(ccInput(null)).reason).toMatch(/no live cycle P&L/);
+      expect(evaluateEventCoveredCallClose(ccInput(250, 6))).toEqual({ offer: null, reason: null });
+      expect(evaluateEventCoveredCallClose({ ...ccInput(250), stockBid: null }).reason).toMatch(/two-sided quote/);
+    });
   });
 });

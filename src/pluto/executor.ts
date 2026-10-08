@@ -299,7 +299,7 @@ export function referenceForAdoptedOrder(action: { kind: string; symbol: string;
   const num = (value: unknown) => (value === null || value === undefined || Number.isNaN(Number(value)) ? null : Number(value));
   const price = num(action.reference_bid) ?? num(action.reference_mid) ?? num(action.limit_price) ?? 0;
   const side: "sell" | "buy" = action.kind === "close_leg" ? "buy" : "sell";
-  // A close_position (covered call before earnings) is referenced on its shares, the call being its other leg.
+  // A close_position (a whole covered call) is referenced on its shares, the call being its other leg.
   const multiplier = action.kind === "close_shares" || action.kind === "close_position" ? 1 : 100;
   const description = describeActionOrder(action, todayIso);
   const otherLegs = Array.isArray(action.reference_other_legs) ? (action.reference_other_legs as PlutoReferenceLeg[]) : undefined;

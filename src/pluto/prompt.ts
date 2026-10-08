@@ -3,6 +3,8 @@ import type { TickerSignals } from "../lib/signalsTypes.js";
 import type { PlutoOpenCandidate, PlutoRollCandidate } from "./candidateFilters.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import type { MoveContext } from "./moveContext.js";
+import { heaviestMacroEventBeforeExpiry, type MacroEventBeforeExpiry } from "../lib/macroEventTiming.js";
+import type { HeldPositionEntry } from "./heldPositionMetrics.js";
 
 // The prompt contract (design round 3, item 23, approved 2026-09-28). A stable system prompt
 // (role, objective, hard rules, output schema) and one compact JSON user message per call.
@@ -10,7 +12,7 @@ import type { MoveContext } from "./moveContext.js";
 // deterministic filter, the top few per ticker per strategy, short field names, no nulls.
 // Shortlist notes never enter the prompt (Marcelo, 2026-09-28).
 
-export const plutoPromptVersion = "v3.7";
+export const plutoPromptVersion = "v3.8";
 
 /** How many open candidates per ticker per strategy the model sees (best Edge $ first). */
 export const candidatesPerTickerPerStrategy = 3;
@@ -28,14 +30,15 @@ export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
     `- grade: strong (net edge >= 10 vp), good (5-10), weak (0-5). ${settings.minGrade === "strong" ? "Only strong reaches you." : `Only ${settings.minGrade} or better reaches you.`}`,
     "- ann_yield_pct: annualised premium yield on capital at risk; it scales with 1/sqrt(time) so very short-dated contracts look richest. Short-dated premium is real on average but tail-heavy.",
     "- surface_iv vs mid_iv: how far the contract's own market price sits from the fitted surface. A big gap means the surface may be wrong for that contract.",
-    "- flags: macro_event_before_expiry means a major US macro release still to come falls on or before expiry (macro_events lists them). The IV may be partly pricing that event, so the measured edge is probably overstated, not wrong: ask for a clearly stronger net edge before trading through one, the more so the heavier the release. Heavy: the Fed rate decision, CPI, the US presidential election. Medium: the US midterm elections. Light: GDP. A light release alone is no reason to pass on a strong edge.",
+    "- flags and event: macro_event_before_expiry means a major US macro release still to come falls on or before expiry (macro_events lists them), and the contract's event names the heaviest one in its life (on a tie, the one with the fewest sessions after it). Heavy: the Fed rate decision, CPI, the US presidential election. Medium: the US midterm elections. Light: GDP. The IV may be partly pricing the release, so the measured edge is probably overstated, not wrong. How much that matters depends on where the release lands in the contract's life: sessions_until is how many sessions away it is, sessions_after how many sessions the contract is still open from the release's session through expiry. A release many sessions away leaves time for the position to decay and to be reviewed for an early close before it (see held_positions and close actions); few sessions_after leave little time to recover if the position is still held through it. Riskiest: a heavy release in the last one or two sessions of a short contract; ask for a clearly stronger net edge there, or pass. Mildest: a release well ahead, with several sessions after it, in a longer contract. A light release alone is no reason to pass on a strong edge.",
     "- next_earnings: the ticker's next earnings date. Earnings are the heaviest event there is, far above any macro release: a single report can move the stock more than its options price in. Never open a position, or roll one, so that it is still open when the company reports. Code already removes every open and roll whose expiry is on or after a known earnings date, and does not trade a ticker whose earnings date is unknown; if anything you are offered would still be open on next_earnings, do not choose it.",
     "- elevated_vol: the ticker's short-term realized volatility is unusually high versus its own history.",
     "- day_change_pct and spy_day_change_pct: today's moves. A sharp drop usually has a cause; selling puts into a falling market is exactly the tail risk this strategy carries.",
     "- move_context: today's move measured against the stock's own normal. day_move_sigmas is day_change_pct divided by the one-day move the realized-volatility forecast implies (expected_daily_move_pct); within ±1.5 is an ordinary day for this stock. change_1w_pct, change_1m_pct and change_3m_pct are the recent path; realized_vol_21d and realized_vol_126d (annualised %) say whether the last month is calmer or wilder than the last six; iv_rank is where today's implied volatility sits in its own one-year range (0-100).",
-    "- rolls: replacing a held short leg with a lower-delta credit roll; net_roll_edge_vp is the new contract's net edge minus what holding the current leg still offers minus the cost of closing it.",
-    "- close actions: selling unstructured shares at a positive cycle P&L, or buying back a short leg whose remaining edge is negative while locking a profit.",
-    "- positions: Pluto manages every position on the tickers it is enabled on, whoever opened it. account.managed_positions counts all of them and they all use Pluto's capital budget; each close action and roll says opened_by (pluto or a person). A close action on a position a person opened is normal, not an inconsistency.",
+    "- held_positions: every short put and covered call Pluto manages on the ticker, whatever Signals thinks of it. captured_pct is how much of the credit is already earned at the ask. max_remaining_gain_dollars is the most the position can still add by expiry: for a put its mid; for a covered call the rise to the strike plus the call's mid, which needs the stock to finish at or above the strike, so it is a ceiling, not an expectation. close_cost_dollars is what closing now costs (half the spread and commission). strike_distance_days is how many normal days of movement separate the stock from the strike. event is the heaviest macro release before expiry, with stress_normal_days (2 heavy, 1 medium, 0.5 light); event_stress_loss_dollars is how much worse the position would be right after a move of that many normal days against it on the release. A covered call's cycle_pnl_after_costs_dollars is the whole wheel cycle's P&L if closed now, after the close cost.",
+    "- rolls: replacing a held short leg with a lower-delta credit roll; net_roll_edge_vp is the new contract's net edge minus what holding the current leg still offers minus the cost of closing it. held_leg_id is the leg_id of the position in held_positions; judge the roll against that position, and the replacement's own event like a new open's.",
+    "- close actions: selling unstructured shares at a positive cycle P&L; buying back a short put whose remaining edge is negative while locking a profit; and, in the five sessions before a macro release, closing a short put (a buyback) or a whole covered call (the call bought back and the shares sold together, kind close_position) while it is in profit. For these event closes weigh max_remaining_gain_dollars against event_stress_loss_dollars and close_cost_dollars, given captured_pct and strike_distance_days: when what is left to earn is small next to what one plausible move on the release could cost, close and bank the profit; that is a good outcome, not a missed one. A covered call whose strike is well above the stock mostly carries ordinary stock exposure, which the wheel holds on purpose: its gain and its stress loss are of similar size and holding is reasonable; one whose call is in the money has its upside capped and its downside open, like a put. Code never offers an event close at a loss and never sends one itself; it offers the close again as the profit grows or the release gets closer.",
+    "- positions: Pluto manages every position on the tickers it is enabled on, whoever opened it. account.managed_positions counts all of them and they all use Pluto's capital budget; each held position, close action and roll says opened_by (pluto or a person). A close action on a position a person opened is normal, not an inconsistency.",
     "- open_covered_call candidates: Pluto writes the call against shares the account already holds free; when there are not enough, code buys the missing 100 shares per contract at the live price in the same order. dollar_risk counts those shares. In reasons, call it a covered call, never a buy-write. Holding no shares is normal for a covered-call candidate.",
     "- recent_decisions: your latest decisions, newest first. A trade carries its outcome: blocked (a code check refused it before any order was sent; outcome_detail says why), validated, order_built or confirmed (an order is on its way or working), filled, cancelled_partially_filled (part filled, the rest cancelled), cancelled, rejected or error (outcome_detail says why), not_executed (no order was attempted). Only a filled or cancelled_partially_filled trade changed the book; the account, positions and close actions in this message always show the book as it is now.",
     "",
@@ -64,7 +67,11 @@ function round(value: number | null | undefined, digits: number): number | undef
   return Math.round(value * factor) / factor;
 }
 
-function compactCandidate(id: string, kind: string, candidate: SignalCandidate, snapshotCapturedAt: string | null, nowMs: number) {
+function compactEvent(event: MacroEventBeforeExpiry | null, stressNormalDays?: number) {
+  return event ? stripUndefined({ title: event.title, weight: event.weight, date: event.dateIso, sessions_until: event.sessionsUntil, sessions_after: event.sessionsAfter, stress_normal_days: stressNormalDays }) : undefined;
+}
+
+function compactCandidate(id: string, kind: string, candidate: SignalCandidate, snapshotCapturedAt: string | null, nowMs: number, event: MacroEventBeforeExpiry | null) {
   const quotedAt = candidate.quotedAt ?? (candidate.quoteSource === "snapshot" ? snapshotCapturedAt : null);
   return stripUndefined({
     id,
@@ -90,6 +97,31 @@ function compactCandidate(id: string, kind: string, candidate: SignalCandidate, 
     quote_source: candidate.quoteSource,
     quote_age_min: quotedAt ? round((nowMs - new Date(quotedAt).getTime()) / 60_000, 0) : undefined,
     flags: candidate.flags.length > 0 ? candidate.flags : undefined,
+    event: compactEvent(event),
+  });
+}
+
+function compactHeldPosition(entry: HeldPositionEntry, plutoOpenedPositionIds: ReadonlySet<string>) {
+  return stripUndefined({
+    leg_id: entry.legId,
+    strategy: entry.strategy,
+    opened_by: plutoOpenedPositionIds.has(entry.positionId) ? "pluto" : "a person",
+    strike: entry.strike,
+    expiry: entry.expiry,
+    dte: entry.dte ?? undefined,
+    delta: round(entry.delta, 3),
+    quantity: entry.quantity,
+    shares: entry.shares,
+    entry_credit: round(entry.entryCredit, 2),
+    bid: entry.bid ?? undefined,
+    ask: entry.ask ?? undefined,
+    captured_pct: round(entry.capturedPct, 0),
+    max_remaining_gain_dollars: round(entry.maxRemainingGainDollars, 0),
+    close_cost_dollars: round(entry.closeCostDollars, 0),
+    strike_distance_days: round(entry.strikeDistanceDays, 1),
+    event: compactEvent(entry.event, entry.event?.stressNormalDays),
+    event_stress_loss_dollars: round(entry.eventStressLossDollars, 0),
+    cycle_pnl_after_costs_dollars: round(entry.cyclePnlAfterCostsDollars, 0),
   });
 }
 
@@ -102,7 +134,7 @@ export interface PlutoCloseActionOffer {
   id: string;
   /** The position the action closes; labels it opened_by pluto or a person. */
   positionId?: string;
-  /** close_position (a whole covered call before earnings) is only ever executed by code, never offered to the model. */
+  /** close_position closes a whole covered call: by code before earnings (P3b), offered to the model before a macro event (F3). */
   kind: "close_shares" | "close_leg" | "close_position";
   symbol: string;
   description: string;
@@ -117,6 +149,8 @@ export interface PlutoPromptTickerInput {
   eligible: PlutoOpenCandidate[];
   eligibleRolls: PlutoRollCandidate[];
   closeActions: PlutoCloseActionOffer[];
+  /** Every held short put and covered call on the ticker (buildCloseOffersForTicker). */
+  heldPositions: HeldPositionEntry[];
 }
 
 export interface PlutoPromptAccountInput {
@@ -146,6 +180,8 @@ export interface PlutoPromptInput {
   trigger: { kind: string; detail: Record<string, unknown> };
   /** Positions a Pluto order opened (book.ts): every other managed position was opened by a person. */
   plutoOpenedPositionIds: ReadonlySet<string>;
+  /** Open days from today, sorted, reaching every offered expiry (loadOpenDaysBetween): the event sessions count on them. */
+  openDaysIso: string[];
 }
 
 export interface PlutoRecentDecision {
@@ -197,9 +233,10 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
         if (list.length < candidatesPerTickerPerStrategy) list.push(entry);
         byStrategy.set(entry.kind, list);
       }
+      const eventFor = (expiryIso: string) => heaviestMacroEventBeforeExpiry({ events: ticker.scored.macroEvents, nowMs, todayIso: input.todayEasternIso, expiryIso, openDaysIso: input.openDaysIso });
       const candidates = [...byStrategy.values()].flat().map((entry) => {
         offeredIds.add(entry.id);
-        return compactCandidate(entry.id, entry.kind, entry.candidate, ticker.scored.snapshotCapturedAt, nowMs);
+        return compactCandidate(entry.id, entry.kind, entry.candidate, ticker.scored.snapshotCapturedAt, nowMs, eventFor(entry.candidate.expiry));
       });
       const rolls = ticker.eligibleRolls.map((entry) => {
         offeredIds.add(entry.id);
@@ -216,14 +253,16 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
           delta_change: round(roll.deltaChange, 3),
           grade: roll.grade,
           flags: roll.flags.length > 0 ? roll.flags : undefined,
-          replacement: compactCandidate(`${entry.id}#replacement`, roll.replacement.strategyKey, roll.replacement, ticker.scored.snapshotCapturedAt, nowMs),
+          replacement: compactCandidate(`${entry.id}#replacement`, roll.replacement.strategyKey, roll.replacement, ticker.scored.snapshotCapturedAt, nowMs, eventFor(roll.replacement.expiry)),
         });
       });
       const closes = ticker.closeActions.map((action) => {
         offeredIds.add(action.id);
         return { id: action.id, kind: action.kind, opened_by: action.positionId && input.plutoOpenedPositionIds.has(action.positionId) ? "pluto" : "a person", description: action.description, cycle_pnl: round(action.cycle_pnl, 0), ...action.detail };
       });
-      if (candidates.length === 0 && rolls.length === 0 && closes.length === 0) return null;
+      const heldPositions = ticker.heldPositions.map((entry) => compactHeldPosition(entry, input.plutoOpenedPositionIds));
+      // A ticker with nothing on offer still shows what Pluto holds on it.
+      if (candidates.length === 0 && rolls.length === 0 && closes.length === 0 && heldPositions.length === 0) return null;
       const scored = ticker.scored;
       const tickerEntry: Record<string, unknown> = stripUndefined({
         symbol: scored.symbol,
@@ -238,6 +277,7 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
         next_earnings: scored.nextEarningsDateIso ?? undefined,
         macro_events: upcomingMacroEvents(scored.macroEvents, nowMs),
         open_positions: input.account.openPositionsBySymbol[scored.symbol] ?? undefined,
+        held_positions: heldPositions.length > 0 ? heldPositions : undefined,
         move_context: ticker.moveContext
           ? stripUndefined({
               day_move_sigmas: round(ticker.moveContext.dayMoveSigmas, 2),

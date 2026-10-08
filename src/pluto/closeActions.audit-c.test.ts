@@ -2,6 +2,9 @@ import knexLibrary, { type Knex } from "knex";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { flatCommissionEstimator } from "../lib/commissionEstimate.js";
+import { easternInstant } from "../lib/easternIsoDate.js";
+import { openDaysFromCalendarRows } from "../lib/marketSessionStatus.js";
 
 // Audit C (2026-10-07): Formula P3 (earnings buyback) and its integration in buildCloseOffersForTicker, plus the
 // automaticReason labels on P1/P2. DB-backed parts run on TEST_DATABASE_URL; positions are inserted closed (the
@@ -16,7 +19,7 @@ vi.mock("../db/connection.js", async () => {
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => true), notifyPlutoTelegram: vi.fn(async () => true) }));
 // The close gate (live quotes, cycle data) as each test sets it: passing with a profitable cycle unless a test says otherwise.
 const gate = vi.hoisted(() => ({ verdict: { blocked: false, reason: null as string | null, cycleTotal: 1000 as number | null } }));
-vi.mock("../lib/closeGate.js", () => ({ evaluateCloseGateForPosition: vi.fn(async () => gate.verdict) }));
+vi.mock("../lib/closeGate.js", () => ({ evaluateCloseGateForPosition: vi.fn(async () => gate.verdict), closeGateVerdictFromQuotes: vi.fn(async () => gate.verdict) }));
 
 // Market holidays the test controls; any other weekday is an open session.
 const holidays = new Set<string>();
@@ -37,6 +40,8 @@ const closeActions = await import("./closeActions.js");
 const { countSessionsLeftBeforeEarnings, evaluateEarningsBuyback, evaluateShortLegBuyback, evaluateUnstructuredClose, loadUpcomingEarnings, buildCloseOffersForTicker, earningsBuybackWindowSessions } = closeActions;
 
 const settings = { unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50, buybackMinDte: 2 } as PlutoSettings;
+// No macro release in these tests: only the earnings rules (P3/P3b) and P2 are exercised.
+const noEventInputs = { spotPrice: null, forecastVolatility: null, macroEvents: [], nowMs: 0, openDaysIso: [], commissionEstimator: flatCommissionEstimator };
 
 function heldLeg(overrides: Partial<HeldLegScore> = {}): HeldLegScore {
   return {
@@ -243,7 +248,7 @@ describe("loadUpcomingEarnings (test DB)", () => {
 describe("buildCloseOffersForTicker with Formula P3 (test DB)", () => {
   // Mon 2031-03-10; an after-close report Thu 2031-03-13 → sessions 10, 11, 12, 13 = 4 (in the window).
   const todayIso = "2031-03-10";
-  const build = (symbol: string, heldLegs: HeldLegScore[]) => buildCloseOffersForTicker({ symbol, heldLegs, rolls: [], settings, stockBid: null, stockAsk: null, previousSessionDateIso: "2031-03-07", todayIso });
+  const build = (symbol: string, heldLegs: HeldLegScore[]) => buildCloseOffersForTicker({ symbol, heldLegs, rolls: [], settings, stockBid: null, stockAsk: null, previousSessionDateIso: "2031-03-07", todayIso, ...noEventInputs });
 
   it("a single-leg put spanning the report inside the window is bought back automatically", async () => {
     const ticker = await createTicker();
@@ -296,14 +301,14 @@ describe("buildCloseOffersForTicker with Formula P3 (test DB)", () => {
     expect(noQuote.offers).toEqual([]);
     expect(noQuote.skipped).toEqual([{ id: `${ticker.symbol}:close_position:${positionId}`, reason: expect.stringMatching(/no live two-sided quote on the call or the shares/) }]);
     // With quotes and a profitable cycle (1000 at mids; half spreads 0.025 × 200 + 0.05 × 200 = 15): one combo close.
-    const { offers } = await buildCloseOffersForTicker({ symbol: ticker.symbol, heldLegs: [callLeg], rolls: [], settings, stockBid: 51.9, stockAsk: 52.0, previousSessionDateIso: "2031-03-07", todayIso });
+    const { offers } = await buildCloseOffersForTicker({ symbol: ticker.symbol, heldLegs: [callLeg], rolls: [], settings, stockBid: 51.9, stockAsk: 52.0, previousSessionDateIso: "2031-03-07", todayIso, ...noEventInputs });
     expect(offers).toHaveLength(1);
     expect(offers[0]).toMatchObject({ kind: "close_position", automatic: true, positionId, legIds: [legIds[1], legIds[0]], side: "sell", multiplier: 1, quantity: 200, limitPrice: 51.95, legLimitPrices: { [legIds[1]!]: 0.53, [legIds[0]!]: 51.95 }, otherReferenceLegs: [{ side: "buy", price: 0.53, multiplier: 100 }] });
     expect(offers[0]!.cycle_pnl).toBeCloseTo(1000 - (0.55 - 0.525) * 200 - (51.95 - 51.9) * 200, 6);
     expect(offers[0]!.automaticReason).toMatch(/Formula P3b/);
     // Not in profit after half the spreads: stays open.
     gate.verdict = { blocked: false, reason: null, cycleTotal: 10 };
-    const unprofitable = await buildCloseOffersForTicker({ symbol: ticker.symbol, heldLegs: [callLeg], rolls: [], settings, stockBid: 51.9, stockAsk: 52.0, previousSessionDateIso: "2031-03-07", todayIso });
+    const unprofitable = await buildCloseOffersForTicker({ symbol: ticker.symbol, heldLegs: [callLeg], rolls: [], settings, stockBid: 51.9, stockAsk: 52.0, previousSessionDateIso: "2031-03-07", todayIso, ...noEventInputs });
     expect(unprofitable.offers).toEqual([]);
     expect(unprofitable.skipped[0]!.reason).toMatch(/would lose \$5 after half the spreads, so it stays open/);
   });
@@ -397,5 +402,86 @@ describe("buildCloseOffersForTicker with Formula P3 (test DB)", () => {
     const { offers, skipped } = await build(ticker.symbol, [heldLeg({ legId: legIds[0]!, positionId })]);
     expect(offers).toEqual([]);
     expect(skipped.find((entry) => entry.id.includes(":earnings_close:"))?.reason).toMatch(/would lose \$10/);
+  });
+});
+
+describe("buildCloseOffersForTicker with Formula F3 (test DB)", () => {
+  // Mon 2031-03-10; a Fed decision Wed 2031-03-12 14:00 ET → 2 sessions away, inside the window; legs expire Fri 03-21.
+  const todayIso = "2031-03-10";
+  const fedRelease = { title: "Fed rate decision", dateIso: "2031-03-12", eventAtIso: easternInstant("2031-03-12", 14, 0).toISOString() };
+  const eventInputs = (macroEvents = [fedRelease]) => ({
+    spotPrice: 52, forecastVolatility: 0.4, macroEvents, nowMs: easternInstant(todayIso, 10, 30).getTime(),
+    openDaysIso: openDaysFromCalendarRows(todayIso, "2031-04-30", []), commissionEstimator: flatCommissionEstimator,
+  });
+  const build = (symbol: string, heldLegs: HeldLegScore[], macroEvents = [fedRelease], stock = { stockBid: 51.9, stockAsk: 52.0 }) =>
+    buildCloseOffersForTicker({ symbol, heldLegs, rolls: [], settings, ...stock, previousSessionDateIso: "2031-03-07", todayIso, ...eventInputs(macroEvents) });
+
+  it("a put inside the window is offered to the model (not automatic) with its review key, and listed in held_positions", async () => {
+    const ticker = await createTicker();
+    const { positionId, legIds } = await createPosition(ticker.id, "cash_secured_put", [putLeg("2031-03-21")]);
+    const leg = heldLeg({ legId: legIds[0]!, positionId });
+    const { offers, heldPositions } = await build(ticker.symbol, [leg]);
+    expect(offers).toHaveLength(1);
+    // (2.40 − 0.55) / 2.40 = 77% captured → step 70; 2 sessions away.
+    expect(offers[0]).toMatchObject({ id: `${ticker.symbol}:close_leg:${legIds[0]}`, kind: "close_leg", automatic: false, reviewKey: "c70s2", limitPrice: 0.53 });
+    expect(heldPositions).toEqual([expect.objectContaining({ legId: legIds[0], strategy: "cash_secured_put", event: expect.objectContaining({ title: "Fed rate decision", sessionsUntil: 2, sessionsAfter: 8, stressNormalDays: 2 }) })]);
+    expect(heldPositions[0]!.eventStressLossDollars).toBeGreaterThan(0);
+  });
+
+  it("no release in the window: held_positions still lists the put, nothing is offered on event grounds", async () => {
+    const ticker = await createTicker();
+    const { positionId, legIds } = await createPosition(ticker.id, "cash_secured_put", [putLeg("2031-03-21")]);
+    const { offers, heldPositions } = await build(ticker.symbol, [heldLeg({ legId: legIds[0]!, positionId })], []);
+    expect(offers).toEqual([]);
+    expect(heldPositions).toHaveLength(1);
+    expect(heldPositions[0]!.event).toBeNull();
+  });
+
+  it("a blocked close gate withholds the event close with its reason", async () => {
+    const ticker = await createTicker();
+    const { positionId, legIds } = await createPosition(ticker.id, "cash_secured_put", [putLeg("2031-03-21")]);
+    gate.verdict = { blocked: true, reason: "Closing is blocked: the cycle has inconsistent data.", cycleTotal: null };
+    const { offers, skipped } = await build(ticker.symbol, [heldLeg({ legId: legIds[0]!, positionId })]);
+    expect(offers).toEqual([]);
+    expect(skipped[0]!.reason).toMatch(/inconsistent data/);
+  });
+
+  it("a working order withholds every offer, but the position stays in held_positions", async () => {
+    const ticker = await createTicker();
+    const { positionId, legIds } = await createPosition(ticker.id, "cash_secured_put", [putLeg("2031-03-21")]);
+    const [order] = await testDb("order_requests").insert({ requested_by_user_id: userId, request_type: "close_position", payload: JSON.stringify({ symbol: ticker.symbol, strategyKey: "cash_secured_put", legs: [] }), status: "submitted", related_position_id: positionId }).returning(["id"]);
+    createdOrderIds.push(order.id);
+    const { offers, heldPositions } = await build(ticker.symbol, [heldLeg({ legId: legIds[0]!, positionId })]);
+    expect(offers).toEqual([]);
+    expect(heldPositions).toHaveLength(1);
+  });
+
+  it("a covered call inside the window is offered whole to the model, with its cycle P&L after the close cost", async () => {
+    const ticker = await createTicker();
+    const { positionId, legIds } = await createPosition(ticker.id, "covered_call", [
+      { leg_type: "stock", side: "long", quantity: 200, multiplier: 1, entry_price: 48 },
+      { leg_type: "option", side: "short", quantity: 2, option_type: "call", strike_price: 55, expiry_date: "2031-03-21", entry_price: 2.4 },
+    ]);
+    const callLeg = heldLeg({ legId: legIds[1]!, positionId, right: "C", strategyKey: "covered_call", strike: 55 });
+    const { offers, heldPositions } = await build(ticker.symbol, [callLeg]);
+    expect(offers).toHaveLength(1);
+    expect(offers[0]).toMatchObject({ kind: "close_position", automatic: false, legIds: [legIds[1], legIds[0]], legLimitPrices: { [legIds[1]!]: 0.53, [legIds[0]!]: 51.95 }, otherReferenceLegs: [{ side: "buy", price: 0.53, multiplier: 100 }] });
+    // Close cost: call (0.55 − 0.525) × 100 + 0.68 commission, × 2 contracts, + shares (51.95 − 51.90) × 200.
+    const closeCost = (0.025 * 100 + flatCommissionEstimator.perContractDollars("buy", 2)) * 2 + 0.05 * 200;
+    expect(heldPositions[0]).toMatchObject({ strategy: "covered_call", shares: 200 });
+    expect(heldPositions[0]!.cyclePnlAfterCostsDollars).toBeCloseTo(1000 - closeCost, 6);
+    expect(offers[0]!.cycle_pnl).toBeCloseTo(1000 - closeCost, 6);
+  });
+
+  it("a covered call outside the window is listed but the gate is not read (no cycle P&L field)", async () => {
+    const ticker = await createTicker();
+    const { positionId, legIds } = await createPosition(ticker.id, "covered_call", [
+      { leg_type: "stock", side: "long", quantity: 200, multiplier: 1, entry_price: 48 },
+      { leg_type: "option", side: "short", quantity: 2, option_type: "call", strike_price: 55, expiry_date: "2031-03-21", entry_price: 2.4 },
+    ]);
+    const { offers, heldPositions } = await build(ticker.symbol, [heldLeg({ legId: legIds[1]!, positionId, right: "C", strategyKey: "covered_call", strike: 55 })], []);
+    expect(offers).toEqual([]);
+    expect(heldPositions).toHaveLength(1);
+    expect(heldPositions[0]).not.toHaveProperty("cyclePnlAfterCostsDollars");
   });
 });

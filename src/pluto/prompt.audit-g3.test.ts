@@ -45,11 +45,12 @@ describe("recent_decisions in the user payload (audit)", () => {
     spyDayChangePct: 0.6,
     account: { netLiquidationValue: 1_000_000, freeCash: 700_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 10, managedPositions: 1, maxOpenPositions: 15, actionsToday: 0, maxActionsPerSession: 10, openPositionsBySymbol: {} },
     settings: { minGrade: "weak", maxAbsDelta: 0.4, minDte: 1, maxDte: 45, maxTickerExposurePct: 10, orderSizePctOfBudget: 10, confidenceFloor: 0.6 } as PlutoPromptInput["settings"],
-    tickers: [{ scored, eligible: [], eligibleRolls: [], closeActions: [] }],
+    tickers: [{ scored, eligible: [], eligibleRolls: [], closeActions: [], heldPositions: [] }],
     spreadCostSharePct: 50,
     recentDecisions,
     trigger: { kind: "opening_look", detail: {} },
     plutoOpenedPositionIds: new Set(),
+    openDaysIso: [],
   });
 
   it("sends a blocked trade with its outcome and why, and leaves the keys off a no-trade", () => {

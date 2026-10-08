@@ -4,6 +4,11 @@ import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandida
 import type { PlutoCloseActionOffer } from "./prompt.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { formatSignedDollars } from "../lib/formatSignedDollars.js";
+import { closeGateVerdictFromQuotes } from "../lib/closeGate.js";
+import type { CommissionEstimator } from "../lib/commissionEstimate.js";
+import { heaviestMacroEventBeforeExpiry } from "../lib/macroEventTiming.js";
+import type { MacroEvent } from "../lib/macroEventCalendar.js";
+import { eventReviewKey, heldCoveredCallEntry, heldPutEntry, type HeldPositionEntry, type HeldPositionEvent } from "./heldPositionMetrics.js";
 import { describeOptionContract, describeOrderSize, formatDayMonth } from "../lib/optionContractLabel.js";
 import { resolveIsOpenDay } from "../lib/marketSessionStatus.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
@@ -34,6 +39,11 @@ import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 //   combo order) is closed by code on the same timing, when the wheel cycle closed now is in profit after paying half the
 //   spread on both legs: cycleTotal (the close gate's live figure, at mids) − (call ask − mid) × 100 × contracts
 //   − (stock mid − bid) × shares > 0. The call alone is never bought back (09-29 rule).
+// F3 — before a macro event (approved 2026-10-08): inside the eventCloseWindowSessions sessions before the heaviest release
+//   in a held short's life, the model is offered the close and judges it on the held-position figures (heldPositionMetrics.ts):
+//   a cash-secured put's buyback when the ask locks a profit (P2's hold-edge test does not apply, the event premium inflates
+//   it), a covered call's whole position (P3b's combo order) when the cycle closed now is in profit after the close cost.
+//   Never at a loss, never by code alone; the close gate is read from the round's own quotes (closeGateVerdictFromQuotes).
 // Every automatic close: never while an order on the position is working, never again within an hour of an automatic
 // attempt on the position that did not fill, and only when the close gate passes (live quotes, consistent cycle data).
 
@@ -53,6 +63,8 @@ export interface CloseOffer extends PlutoCloseActionOffer {
   /** Executed by code without a model call (odd lots, earnings buybacks), with the rule that did it. */
   automatic: boolean;
   automaticReason: string | null;
+  /** An event close (F3/F4): what moves the offer for the change check, so the model looks again as the position or the event moves. */
+  reviewKey?: string;
   /** A combo close (P3b): each leg's own limit; legs not listed use limitPrice. */
   legLimitPrices?: Record<string, number>;
   /** A combo close: the other legs' reference for the fill comparison (the chosen leg is the one limitPrice/side/multiplier describe). */
@@ -376,6 +388,141 @@ export function evaluateEarningsCoveredCallClose(input: P3bInput): { offer: Clos
   };
 }
 
+/** F3: a held position is reviewed for an event close from this many sessions before the event's session. */
+export const eventCloseWindowSessions = 5;
+
+/** Whether an event close is in its window at all; the close gate is only read then. */
+export function eventCloseDue(event: HeldPositionEvent | null): event is HeldPositionEvent {
+  return event !== null && event.sessionsUntil <= eventCloseWindowSessions;
+}
+
+function describeEvent(event: HeldPositionEvent): string {
+  return `the ${formatDayMonth(event.dateIso)} ${event.title} (${event.weight}, ${event.sessionsUntil} session${event.sessionsUntil === 1 ? "" : "s"} away)`;
+}
+
+function eventDetail(entry: HeldPositionEntry): Record<string, unknown> {
+  const round = (value: number | null | undefined) => (value === null || value === undefined ? undefined : Math.round(value));
+  return {
+    event: entry.event?.title,
+    event_weight: entry.event?.weight,
+    event_date: entry.event?.dateIso,
+    sessions_until: entry.event?.sessionsUntil,
+    sessions_after: entry.event?.sessionsAfter,
+    captured_pct: entry.capturedPct === null ? undefined : Math.round(entry.capturedPct),
+    max_remaining_gain_dollars: round(entry.maxRemainingGainDollars),
+    event_stress_loss_dollars: round(entry.eventStressLossDollars),
+    close_cost_dollars: round(entry.closeCostDollars),
+    strike_distance_days: entry.strikeDistanceDays === null ? undefined : Math.round(entry.strikeDistanceDays * 10) / 10,
+  };
+}
+
+export interface EventPutCloseInput {
+  symbol: string;
+  leg: HeldLegScore;
+  entry: HeldPositionEntry;
+  singleLegPosition: boolean;
+  /** The close gate's verdict from the round's quotes; null when the gate passed. */
+  gateBlockReason: string | null;
+}
+
+/**
+ * Pure F3 for a cash-secured put (approved 2026-10-08): a buyback offered to the model, never sent by code, inside the window
+ * before a macro event when the ask locks a profit. P2's hold-edge test does not apply: before an event the event premium
+ * makes holding look richer than it is. Null/null when no event is in the window.
+ */
+export function evaluateEventPutClose(input: EventPutCloseInput): { offer: CloseOffer | null; reason: string | null } {
+  const { leg, entry } = input;
+  if (!eventCloseDue(entry.event)) return { offer: null, reason: null };
+  const before = `before ${describeEvent(entry.event)}`;
+  if (leg.strategyKey !== "cash_secured_put" || leg.right !== "P") return { offer: null, reason: `${before}: only a cash-secured put is bought back on its own` };
+  if (!input.singleLegPosition) return { offer: null, reason: `${before}: buybacks are limited to single-leg positions` };
+  if (leg.ask === null || leg.bid === null || !(leg.ask > 0) || leg.ask < leg.bid) return { offer: null, reason: `${before}: no live two-sided quote on the held leg` };
+  const pnlAtAsk = (entry.entryCredit - leg.ask) * leg.quantity * 100;
+  if (pnlAtAsk <= 0) return { offer: null, reason: `${before}: buying back at the ask would ${pnlAtAsk < 0 ? `lose ${formatSignedDollars(-pnlAtAsk, 0)}` : "only break even"}, so it is held through it` };
+  if (input.gateBlockReason) return { offer: null, reason: `${before}: ${input.gateBlockReason}` };
+  const limitPrice = Math.round(((leg.bid + leg.ask) / 2) * 100) / 100;
+  return {
+    offer: {
+      id: `${input.symbol}:close_leg:${leg.legId}`,
+      kind: "close_leg",
+      symbol: input.symbol,
+      description: `${input.symbol} Buy back ${describeOptionContract({ strike: leg.strike, right: leg.right, expiry: leg.expiry, dte: leg.dte })}${describeOrderSize(leg.quantity, limitPrice)} (sold at ${entry.entryCredit.toFixed(2)}) ${before}; locks ${pnlAtAsk.toFixed(0)} at the ask`,
+      cycle_pnl: pnlAtAsk,
+      detail: { dte: leg.dte, entry_credit: entry.entryCredit, recorded_entry_credit: leg.entryPrice, ask: leg.ask, pnl_at_ask: Math.round(pnlAtAsk), ...eventDetail(entry) },
+      positionId: leg.positionId,
+      legIds: [leg.legId],
+      automatic: false,
+      automaticReason: null,
+      reviewKey: eventReviewKey(entry),
+      limitPrice,
+      side: "buy",
+      multiplier: 100,
+      quantity: leg.quantity,
+      contract: { strategyKey: "cash_secured_put", expiry: leg.expiry, strike: leg.strike, right: "P" },
+    },
+    reason: null,
+  };
+}
+
+/** One offer per leg: the event buyback, also saying when P2 (holding no longer pays) applies to the same leg. */
+export function mergeEventAndHoldEdgeBuybacks(eventOffer: CloseOffer, holdEdgeOffer: CloseOffer | null): CloseOffer {
+  if (!holdEdgeOffer) return eventOffer;
+  return { ...eventOffer, description: `${eventOffer.description}; holding also no longer pays its closing cost`, detail: { ...holdEdgeOffer.detail, ...eventOffer.detail, also_hold_edge_negative: true } };
+}
+
+export interface EventCoveredCallCloseInput {
+  symbol: string;
+  positionId: string;
+  callLeg: HeldLegScore;
+  stockLeg: { legId: string; shares: number };
+  entry: HeldPositionEntry;
+  stockBid: number | null;
+  stockAsk: number | null;
+  gateBlockReason: string | null;
+}
+
+/**
+ * Pure F3 for a covered call (approved 2026-10-08): the whole position (the call bought back and the shares sold, one combo
+ * order, as P3b) offered to the model inside the window before a macro event when the wheel cycle closed now is in profit
+ * after the close cost. The call alone is never bought back (09-29 rule). Null/null when no event is in the window.
+ */
+export function evaluateEventCoveredCallClose(input: EventCoveredCallCloseInput): { offer: CloseOffer | null; reason: string | null } {
+  const { callLeg, entry } = input;
+  if (!eventCloseDue(entry.event)) return { offer: null, reason: null };
+  const before = `covered call before ${describeEvent(entry.event)}`;
+  if (input.gateBlockReason) return { offer: null, reason: `${before}: ${input.gateBlockReason}` };
+  const { bid: callBid, ask: callAsk } = callLeg;
+  if (callBid === null || callAsk === null || !(callAsk > 0) || callAsk < callBid || input.stockBid === null || input.stockAsk === null || !(input.stockBid > 0) || input.stockAsk < input.stockBid) return { offer: null, reason: `${before}: no live two-sided quote on the call or the shares` };
+  const profit = entry.cyclePnlAfterCostsDollars;
+  if (profit === null || profit === undefined) return { offer: null, reason: `${before}: no live cycle P&L` };
+  if (profit <= 0) return { offer: null, reason: `${before}: closing now would ${profit < 0 ? `lose ${formatSignedDollars(-profit, 0)}` : "only break even"} after the close cost, so it is held through it` };
+  const callLimit = centsUp((callBid + callAsk) / 2);
+  const stockLimit = centsUp((input.stockBid + input.stockAsk) / 2);
+  return {
+    offer: {
+      id: `${input.symbol}:close_position:${input.positionId}`,
+      kind: "close_position",
+      symbol: input.symbol,
+      description: `${input.symbol} Close ${describeOptionContract({ strike: callLeg.strike, right: "C", expiry: callLeg.expiry, dte: callLeg.dte })} + sell ${input.stockLeg.shares} shares · ${callLeg.quantity}× ${before.replace("covered call ", "")}: Call @ ${callLimit.toFixed(2)}, shares @ ${stockLimit.toFixed(2)}; cycle ${formatSignedDollars(profit, 0)} after the close cost`,
+      cycle_pnl: profit,
+      detail: { cycle_pnl_after_costs_dollars: Math.round(profit), call_ask: callAsk, stock_bid: input.stockBid, shares: input.stockLeg.shares, ...eventDetail(entry) },
+      positionId: input.positionId,
+      legIds: [callLeg.legId, input.stockLeg.legId],
+      automatic: false,
+      automaticReason: null,
+      reviewKey: eventReviewKey(entry),
+      limitPrice: stockLimit,
+      side: "sell",
+      multiplier: 1,
+      quantity: input.stockLeg.shares,
+      legLimitPrices: { [callLeg.legId]: callLimit, [input.stockLeg.legId]: stockLimit },
+      otherReferenceLegs: [{ side: "buy", price: callLimit, multiplier: 100 }],
+      contract: { strategyKey: "covered_call", expiry: callLeg.expiry, strike: callLeg.strike, right: "C" },
+    },
+    reason: null,
+  };
+}
+
 /** Positions with an automatic close in the last hour that did not fill: not retried until the hour is up. */
 async function loadRecentUnfilledAutomaticAttempts(symbol: string): Promise<Set<string>> {
   const rows: { position_id: string | null }[] = await db("pluto_actions")
@@ -392,8 +539,7 @@ async function positionHasActiveOrder(positionId: string): Promise<boolean> {
   return Boolean(await db("order_requests").where({ related_position_id: positionId }).whereIn("status", activeOrderRequestStatuses).first("id"));
 }
 
-/** Everything close-related for one ticker this pass: offers for the model, automatic ones for code, and why the rest were skipped. */
-export async function buildCloseOffersForTicker(input: {
+export interface CloseOffersForTickerInput {
   symbol: string;
   heldLegs: HeldLegScore[];
   rolls: RollSignalCandidate[];
@@ -402,9 +548,25 @@ export async function buildCloseOffersForTicker(input: {
   stockAsk: number | null;
   previousSessionDateIso: string;
   todayIso: string;
-}): Promise<{ offers: CloseOffer[]; skipped: { id: string; reason: string }[] }> {
+  /** Live spot and the realized-volatility forecast (annualised, decimal): the held-position metrics' inputs. */
+  spotPrice: number | null;
+  forecastVolatility: number | null;
+  /** The ticker's upcoming major macro releases (TickerSignals.macroEvents). */
+  macroEvents: MacroEvent[];
+  nowMs: number;
+  /** Open days from today, sorted, reaching every held leg's expiry (loadOpenDaysBetween). */
+  openDaysIso: string[];
+  commissionEstimator: CommissionEstimator;
+}
+
+/**
+ * Everything close-related for one ticker this pass: offers for the model, automatic ones for code, why the rest were
+ * skipped, and every held short leg as the model sees it (held_positions, whatever the offers).
+ */
+export async function buildCloseOffersForTicker(input: CloseOffersForTickerInput): Promise<{ offers: CloseOffer[]; skipped: { id: string; reason: string }[]; heldPositions: HeldPositionEntry[] }> {
   const offers: CloseOffer[] = [];
   const skipped: { id: string; reason: string }[] = [];
+  const heldPositions: HeldPositionEntry[] = [];
   const sharePositions = await loadUnstructuredSharePositions([input.symbol]);
   for (const position of sharePositions) {
     const gate = await evaluateCloseGateForPosition(position.positionId);
@@ -429,27 +591,46 @@ export async function buildCloseOffersForTicker(input: {
     const earningsDays = earnings && Date.parse(earnings.dateIso) - Date.parse(input.todayIso) <= 14 * 86_400_000 ? calendarDaysThrough(input.todayIso, earnings.dateIso) : null;
     const openDays = earningsDays ? (await Promise.all(earningsDays.map(async (day) => ((await resolveIsOpenDay(day)) ? day : null)))).filter((day): day is string => day !== null) : null;
     const sessionsLeft = earnings && openDays ? countSessionsLeftBeforeEarnings(input.todayIso, earnings, openDays) : null;
+    const stockQuote = { bid: input.stockBid, ask: input.stockAsk, last: input.spotPrice };
     for (const leg of input.heldLegs) {
       const singleLegPosition = (openLegCountByPosition.get(leg.positionId) ?? 0) === 1;
       const orderedPremium = orderedEntryPremium(leg.entryPrice, openingTradesByLeg.get(leg.legId) ?? []);
+      const positionLegs = openLegsByPosition.get(leg.positionId) ?? [];
+      const stockLeg = positionLegs.length === 2 && leg.right === "C" ? positionLegs.find((row) => row.leg_type === "stock" && row.side === "long") : undefined;
+      const coveredCallStockLeg = stockLeg && Number(stockLeg.quantity) === leg.quantity * 100 ? { legId: stockLeg.id, shares: Number(stockLeg.quantity) } : null;
+      const event = heaviestMacroEventBeforeExpiry({ events: input.macroEvents, nowMs: input.nowMs, todayIso: input.todayIso, expiryIso: leg.expiry, openDaysIso: input.openDaysIso });
+      const commissionPerContract = input.commissionEstimator.perContractDollars("buy", leg.quantity);
+      const metricsInput = { spot: input.spotPrice, forecastVolatility: input.forecastVolatility, event, commissionPerContract, entryCredit: orderedPremium ?? leg.entryPrice };
+      // Every held short put and covered call is shown to the model; a lone short call (no matching shares) is not Pluto's to manage.
+      const entry = leg.right === "P" ? heldPutEntry({ leg, ...metricsInput }) : coveredCallStockLeg ? heldCoveredCallEntry({ callLeg: leg, shares: coveredCallStockLeg.shares, stockBid: input.stockBid, stockAsk: input.stockAsk, ...metricsInput }) : null;
+      if (entry) heldPositions.push(entry);
       // An order on the position is working (Pluto's or a person's): nothing more is offered on it until it ends.
       if (await hasActiveOrder(leg.positionId)) {
         skipped.push({ id: `${input.symbol}:close_leg:${leg.legId}`, reason: "an order on this position is still working" });
         continue;
       }
-      const positionLegs = openLegsByPosition.get(leg.positionId) ?? [];
-      const stockLeg = positionLegs.length === 2 && leg.right === "C" ? positionLegs.find((row) => row.leg_type === "stock" && row.side === "long") : undefined;
-      if (stockLeg && Number(stockLeg.quantity) === leg.quantity * 100) {
-        // A covered call: the whole position closes before earnings (P3b); the call alone is never bought back.
-        if (!coveredCallEarningsCloseDue(leg, earnings, sessionsLeft)) continue;
-        if (recentAttempts.has(leg.positionId)) {
-          skipped.push({ id: `${input.symbol}:close_position:${leg.positionId}`, reason: "an automatic close of this position did not fill within the last hour" });
+      if (coveredCallStockLeg) {
+        // A covered call: the whole position closes before earnings (P3b, by code) or is offered before a macro event (F3);
+        // the call alone is never bought back.
+        const closeId = `${input.symbol}:close_position:${leg.positionId}`;
+        if (coveredCallEarningsCloseDue(leg, earnings, sessionsLeft)) {
+          if (recentAttempts.has(leg.positionId)) {
+            skipped.push({ id: closeId, reason: "an automatic close of this position did not fill within the last hour" });
+            continue;
+          }
+          const gate = await evaluateCloseGateForPosition(leg.positionId);
+          const result = evaluateEarningsCoveredCallClose({ symbol: input.symbol, positionId: leg.positionId, callLeg: leg, stockLeg: coveredCallStockLeg, earnings, sessionsLeft, stockBid: input.stockBid, stockAsk: input.stockAsk, cycleTotal: gate.cycleTotal, gateBlockReason: gate.blocked ? gate.reason : null });
+          if (result.offer) offers.push(result.offer);
+          else if (result.reason) skipped.push({ id: closeId, reason: result.reason });
           continue;
         }
-        const gate = await evaluateCloseGateForPosition(leg.positionId);
-        const result = evaluateEarningsCoveredCallClose({ symbol: input.symbol, positionId: leg.positionId, callLeg: leg, stockLeg: { legId: stockLeg.id, shares: Number(stockLeg.quantity) }, earnings, sessionsLeft, stockBid: input.stockBid, stockAsk: input.stockAsk, cycleTotal: gate.cycleTotal, gateBlockReason: gate.blocked ? gate.reason : null });
+        if (!entry || !eventCloseDue(entry.event)) continue;
+        const gate = await closeGateVerdictFromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote);
+        const reviewed = heldCoveredCallEntry({ callLeg: leg, shares: coveredCallStockLeg.shares, stockBid: input.stockBid, stockAsk: input.stockAsk, ...metricsInput, cycleTotal: gate.cycleTotal });
+        heldPositions[heldPositions.indexOf(entry)] = reviewed;
+        const result = evaluateEventCoveredCallClose({ symbol: input.symbol, positionId: leg.positionId, callLeg: leg, stockLeg: coveredCallStockLeg, entry: reviewed, stockBid: input.stockBid, stockAsk: input.stockAsk, gateBlockReason: gate.blocked ? gate.reason : null });
         if (result.offer) offers.push(result.offer);
-        else if (result.reason) skipped.push({ id: `${input.symbol}:close_position:${leg.positionId}`, reason: result.reason });
+        else if (result.reason) skipped.push({ id: closeId, reason: result.reason });
         continue;
       }
       const earningsResult = evaluateEarningsBuyback({ symbol: input.symbol, leg, singleLegPosition, orderedEntryPremium: orderedPremium, earnings, sessionsLeft });
@@ -472,9 +653,13 @@ export async function buildCloseOffersForTicker(input: {
         singleLegPosition,
         orderedEntryPremium: orderedPremium,
       });
-      if (result.offer) offers.push(result.offer);
-      else skipped.push({ id: `${input.symbol}:close_leg:${leg.legId}`, reason: result.reason ?? "not offered" });
+      // F3 before a macro event: the close gate is only read inside the window, for a buyback the ask would not lose on.
+      const eventGate = entry && eventCloseDue(entry.event) && leg.ask !== null && leg.ask < entry.entryCredit ? await closeGateVerdictFromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote) : null;
+      const eventResult = entry ? evaluateEventPutClose({ symbol: input.symbol, leg, entry, singleLegPosition, gateBlockReason: eventGate?.blocked ? eventGate.reason ?? "the close gate blocked the buyback" : null }) : { offer: null, reason: null };
+      if (eventResult.offer) offers.push(mergeEventAndHoldEdgeBuybacks(eventResult.offer, result.offer));
+      else if (result.offer) offers.push(result.offer);
+      else skipped.push({ id: `${input.symbol}:close_leg:${leg.legId}`, reason: [result.reason ?? "not offered", eventResult.reason].filter(Boolean).join("; ") });
     }
   }
-  return { offers, skipped };
+  return { offers, skipped, heldPositions };
 }

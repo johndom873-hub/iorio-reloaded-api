@@ -121,13 +121,16 @@ export function parseFomcRateDecisionDates(html: string): string[] {
   return [...new Set(decisionDates)].sort();
 }
 
+export const presidentialElectionTitle = "US presidential election";
+export const midtermElectionsTitle = "US midterm elections";
+
 /** US federal election days (Tuesday after the first Monday in November, even years) from `fromYear` to `toYear`. */
 export function generateUsFederalElectionDays(fromYear: number, toYear: number): { dateIso: string; title: string }[] {
   const elections: { dateIso: string; title: string }[] = [];
   for (let year = fromYear + (fromYear % 2); year <= toYear; year += 2) {
     const novemberFirstWeekday = new Date(Date.UTC(year, 10, 1)).getUTCDay(); // 0 = Sunday
     const firstMonday = 1 + ((1 - novemberFirstWeekday + 7) % 7);
-    elections.push({ dateIso: isoDate(year, 11, firstMonday + 1), title: year % 4 === 0 ? "US presidential election" : "US midterm elections" });
+    elections.push({ dateIso: isoDate(year, 11, firstMonday + 1), title: year % 4 === 0 ? presidentialElectionTitle : midtermElectionsTitle });
   }
   return elections;
 }

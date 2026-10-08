@@ -42,6 +42,25 @@ export async function resolveIsOpenDay(dateIso: string): Promise<boolean> {
   return isWeekday(dateIso);
 }
 
+/** Pure: the open days from `fromIso` to `toIso` inclusive, sorted; a day with a calendar row follows it, any other is a plain weekday check (as resolveIsOpenDay). */
+export function openDaysFromCalendarRows(fromIso: string, toIso: string, rows: { dateIso: string; isOpen: boolean }[]): string[] {
+  const isOpenByDate = new Map(rows.map((row) => [row.dateIso, row.isOpen]));
+  const openDays: string[] = [];
+  for (let at = Date.parse(`${fromIso}T12:00:00Z`); at <= Date.parse(`${toIso}T12:00:00Z`); at += 86_400_000) {
+    const dateIso = new Date(at).toISOString().slice(0, 10);
+    if (isOpenByDate.get(dateIso) ?? isWeekday(dateIso)) openDays.push(dateIso);
+  }
+  return openDays;
+}
+
+/** The open days from `fromIso` to `toIso` inclusive in one query (resolveIsOpenDay per day would be one query each). */
+export async function loadOpenDaysBetween(fromIso: string, toIso: string): Promise<string[]> {
+  const rows: { dateIso: string; isOpen: boolean }[] = await db("market_calendar")
+    .whereBetween("calendar_date", [fromIso, toIso])
+    .select(db.raw(`calendar_date::text as "dateIso"`), "is_open as isOpen");
+  return openDaysFromCalendarRows(fromIso, toIso, rows);
+}
+
 export type SessionCloseSource = "ibkr_liquid_hours" | "regular";
 
 /** One day's schedule: open or not, and when the regular session closes (16:00 ET unless the calendar knows better). */

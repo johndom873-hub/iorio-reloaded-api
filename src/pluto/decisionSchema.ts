@@ -5,7 +5,7 @@
 // server-side enforcement varies by model, client-side validation does not.
 
 export type PlutoDecisionVerdict = "trade" | "no_trade" | "abstain_system_concern";
-export type PlutoDecisionActionKind = "open_covered_call" | "open_cash_secured_put" | "roll" | "close_shares" | "close_leg";
+export type PlutoDecisionActionKind = "open_covered_call" | "open_cash_secured_put" | "roll" | "close_shares" | "close_leg" | "close_position";
 
 /**
  * A data problem the model saw (prompt v3.3, Marcelo 2026-10-07): `symbol` is a ticker of the message, or null when the
@@ -32,7 +32,7 @@ export const plutoDecisionJsonSchema = {
   required: ["decision", "action_kind", "candidate_id", "confidence", "reasons", "risks_acknowledged", "system_concerns"],
   properties: {
     decision: { type: "string", enum: ["trade", "no_trade", "abstain_system_concern"] },
-    action_kind: { type: ["string", "null"], enum: ["open_covered_call", "open_cash_secured_put", "roll", "close_shares", "close_leg", null] },
+    action_kind: { type: ["string", "null"], enum: ["open_covered_call", "open_cash_secured_put", "roll", "close_shares", "close_leg", "close_position", null] },
     candidate_id: { type: ["string", "null"] },
     confidence: { type: "number", minimum: 0, maximum: 1 },
     reasons: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 5 },
@@ -46,7 +46,7 @@ export const plutoDecisionJsonSchema = {
 } as const;
 
 const verdicts = new Set<string>(["trade", "no_trade", "abstain_system_concern"]);
-const actionKinds = new Set<string>(["open_covered_call", "open_cash_secured_put", "roll", "close_shares", "close_leg"]);
+const actionKinds = new Set<string>(["open_covered_call", "open_cash_secured_put", "roll", "close_shares", "close_leg", "close_position"]);
 
 export type ParsedPlutoDecision = { ok: true; decision: PlutoDecision } | { ok: false; error: string };
 
@@ -156,6 +156,7 @@ export function kindFromCandidateId(id: string): PlutoDecisionActionKind | null 
   if (kind === "roll") return "roll";
   if (kind === "close_shares") return "close_shares";
   if (kind === "close_leg") return "close_leg";
+  if (kind === "close_position") return "close_position";
   return null;
 }
 

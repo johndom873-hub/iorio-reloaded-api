@@ -179,6 +179,28 @@ export async function evaluateCloseGateForPosition(positionId: string): Promise<
   }
 }
 
+/**
+ * The same derivation from quotes the caller already holds: no subscription, no wait. For a caller that reviews many
+ * positions every round (Pluto's event closes), where a line burst per position would be too costly; the close order
+ * routes still run the live gate before anything is sent.
+ */
+export async function closeGateVerdictFromQuotes(positionId: string, optionQuotesByLegId: Record<string, CloseLiveQuote | null>, stockQuote: CloseLiveQuote | null): Promise<CloseGateVerdict> {
+  let inputs: CloseLiveInputs | null;
+  try {
+    inputs = await loadCloseLiveInputs(positionId);
+  } catch (error) {
+    return { blocked: true, reason: `Closing is blocked: the position's data could not be loaded (${error instanceof Error ? error.message : String(error)}).`, cycleTotal: null };
+  }
+  if (!inputs) return { blocked: true, reason: "Closing is blocked: the position is not open or its wheel-cycle data could not be loaded.", cycleTotal: null };
+  let marketState: MarketSessionState;
+  try {
+    marketState = (await computeMarketSessionStatus()).state;
+  } catch {
+    marketState = "closed";
+  }
+  return closeGateVerdictFromState(deriveCloseLiveState({ ...inputsForDerivation(inputs, optionQuotesByLegId, stockQuote), marketState, waitedMs: settleGraceMs, settleGraceMs }));
+}
+
 export function inputsForDerivation(inputs: CloseLiveInputs, optionQuotesByLegId: Record<string, CloseLiveQuote | null>, stockQuote: CloseLiveQuote | null) {
   return {
     symbol: inputs.symbol,

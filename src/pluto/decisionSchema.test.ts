@@ -41,6 +41,7 @@ describe("kindFromCandidateId", () => {
     expect(kindFromCandidateId("HOOD:covered_call:2026-10-16:130")).toBe("open_covered_call");
     expect(kindFromCandidateId("COIN:roll:leg1:2026-10-23:250")).toBe("roll");
     expect(kindFromCandidateId("AAOI:close_shares:pos1")).toBe("close_shares");
+    expect(kindFromCandidateId("NOK:close_position:pos2")).toBe("close_position");
     expect(kindFromCandidateId("garbage")).toBeNull();
   });
 });
@@ -90,5 +91,12 @@ describe("normalizeSystemConcerns", () => {
     expect(normalizeSystemConcerns(["old concern"])).toEqual([{ symbol: null, concern: "old concern" }]);
     expect(normalizeSystemConcerns([{ symbol: "SMCI", concern: "new" }])).toEqual([{ symbol: "SMCI", concern: "new" }]);
     expect(normalizeSystemConcerns(null)).toEqual([]);
+  });
+});
+
+describe("close_position (v3.8: a whole covered call the model may close before a macro event)", () => {
+  it("parses a trade on an offered close_position id", () => {
+    const parsed = parsePlutoDecision(JSON.stringify({ decision: "trade", action_kind: "close_position", candidate_id: "NOK:close_position:pos2", confidence: 0.8, reasons: ["Little left to earn before CPI."], risks_acknowledged: [], system_concerns: [] }), new Set(["NOK:close_position:pos2"]));
+    expect(parsed).toMatchObject({ ok: true, decision: { decision: "trade", actionKind: "close_position", candidateId: "NOK:close_position:pos2" } });
   });
 });

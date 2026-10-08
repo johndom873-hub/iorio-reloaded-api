@@ -29,11 +29,12 @@ function input(overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput {
     spyDayChangePct: 0.2,
     account: { netLiquidationValue: 1_000_000, freeCash: 700_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 10, managedPositions: 4, maxOpenPositions: 15, actionsToday: 1, maxActionsPerSession: 10, openPositionsBySymbol: {} },
     settings: { minGrade: "good", maxAbsDelta: 0.4, minDte: 1, maxDte: 45, maxTickerExposurePct: 10, orderSizePctOfBudget: 10, confidenceFloor: 0.6 } as PlutoPromptInput["settings"],
-    tickers: [{ scored, eligible: [{ id: "SMCI:cash_secured_put:2026-10-16:40", kind: "open_cash_secured_put", symbol: "SMCI", candidate: candidate() }], eligibleRolls: [], closeActions: [] }],
+    tickers: [{ scored, eligible: [{ id: "SMCI:cash_secured_put:2026-10-16:40", kind: "open_cash_secured_put", symbol: "SMCI", candidate: candidate() }], eligibleRolls: [], closeActions: [], heldPositions: [] }],
     spreadCostSharePct: 50,
     recentDecisions: [],
     trigger: { kind: "day_signals_update", detail: { symbols: ["SMCI"], secret: "internal detail" } },
     plutoOpenedPositionIds: new Set<string>(),
+    openDaysIso: [],
     ...overrides,
   };
 }
@@ -41,8 +42,8 @@ function input(overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput {
 const tickerOf = (payload: Record<string, unknown>, index = 0) => (payload.tickers as Record<string, unknown>[])[index]!;
 
 describe("prompt version", () => {
-  it("is v3.7, matching the v3.7 migration", () => {
-    expect(plutoPromptVersion).toBe("v3.7");
+  it("is v3.8, matching the v3.8 migration", () => {
+    expect(plutoPromptVersion).toBe("v3.8");
   });
 });
 
@@ -51,7 +52,8 @@ describe("buildPlutoUserPayload — opened_by", () => {
     const { payload, offeredIds } = buildPlutoUserPayload(
       input({
         plutoOpenedPositionIds: new Set(["pos-pluto"]),
-        tickers: [{ scored, eligible: [], closeActions: [], eligibleRolls: [{ id: "SMCI:roll:leg-a:2026-10-23:38", kind: "roll", symbol: "SMCI", roll: roll("pos-pluto", "leg-a") }, { id: "SMCI:roll:leg-b:2026-10-23:38", kind: "roll", symbol: "SMCI", roll: roll("pos-human", "leg-b") }] }],
+        openDaysIso: [],
+        tickers: [{ scored, eligible: [], closeActions: [], heldPositions: [], eligibleRolls: [{ id: "SMCI:roll:leg-a:2026-10-23:38", kind: "roll", symbol: "SMCI", roll: roll("pos-pluto", "leg-a") }, { id: "SMCI:roll:leg-b:2026-10-23:38", kind: "roll", symbol: "SMCI", roll: roll("pos-human", "leg-b") }] }],
       }),
     );
     const rolls = tickerOf(payload).rolls as { id: string; opened_by: string }[];
@@ -60,12 +62,12 @@ describe("buildPlutoUserPayload — opened_by", () => {
   });
 
   it("a close action without a positionId is labelled a person", () => {
-    const { payload } = buildPlutoUserPayload(input({ plutoOpenedPositionIds: new Set(["pos-pluto"]), tickers: [{ scored, eligible: [], eligibleRolls: [], closeActions: [{ id: "SMCI:close_shares:pos-pluto", kind: "close_shares", symbol: "SMCI", description: "Sell 100 SMCI", cycle_pnl: 10, detail: {} }] }] }));
+    const { payload } = buildPlutoUserPayload(input({ plutoOpenedPositionIds: new Set(["pos-pluto"]), tickers: [{ scored, eligible: [], eligibleRolls: [], closeActions: [{ id: "SMCI:close_shares:pos-pluto", kind: "close_shares", symbol: "SMCI", description: "Sell 100 SMCI", cycle_pnl: 10, detail: {} }], heldPositions: [] }] }));
     expect((tickerOf(payload).close_actions as { opened_by: string }[])[0]!.opened_by).toBe("a person");
   });
 
   it("a close action's detail is merged after opened_by (no current detail key collides with it)", () => {
-    const { payload } = buildPlutoUserPayload(input({ plutoOpenedPositionIds: new Set(["pos-pluto"]), tickers: [{ scored, eligible: [], eligibleRolls: [], closeActions: [{ id: "SMCI:close_leg:leg-1", positionId: "pos-pluto", kind: "close_leg", symbol: "SMCI", description: "Buy back", cycle_pnl: 10, detail: { remaining_edge_dollars: -3 } }] }] }));
+    const { payload } = buildPlutoUserPayload(input({ plutoOpenedPositionIds: new Set(["pos-pluto"]), tickers: [{ scored, eligible: [], eligibleRolls: [], closeActions: [{ id: "SMCI:close_leg:leg-1", positionId: "pos-pluto", kind: "close_leg", symbol: "SMCI", description: "Buy back", cycle_pnl: 10, detail: { remaining_edge_dollars: -3 } }], heldPositions: [] }] }));
     const close = (tickerOf(payload).close_actions as Record<string, unknown>[])[0]!;
     expect(close.opened_by).toBe("pluto");
     expect(close.remaining_edge_dollars).toBe(-3);
@@ -124,7 +126,7 @@ describe("buildPlutoUserPayload — trigger, macro events, recent decisions", ()
   });
 
   it("a ticker with nothing offered is left out, so it cannot be named in a concern", () => {
-    const { payload, offeredIds } = buildPlutoUserPayload(input({ tickers: [input().tickers[0]!, { scored: { ...scored, symbol: "NOK" } as PlutoPromptTickerInput["scored"], eligible: [], eligibleRolls: [], closeActions: [] }] }));
+    const { payload, offeredIds } = buildPlutoUserPayload(input({ tickers: [input().tickers[0]!, { scored: { ...scored, symbol: "NOK" } as PlutoPromptTickerInput["scored"], eligible: [], eligibleRolls: [], closeActions: [], heldPositions: [] }] }));
     expect((payload.tickers as { symbol: string }[]).map((ticker) => ticker.symbol)).toEqual(["SMCI"]);
     expect([...offeredIds].every((id) => id.startsWith("SMCI:"))).toBe(true);
   });

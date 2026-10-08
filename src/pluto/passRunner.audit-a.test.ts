@@ -115,9 +115,9 @@ vi.mock("./book.js", () => ({
   anyOpenPositionOn: async (symbols: string[]) => harness.tickers.some((entry) => symbols.includes(entry.symbol) && entry.closeOffers.length > 0),
 }));
 vi.mock("./closeActions.js", () => ({
-  buildCloseOffersForTicker: async ({ symbol }: { symbol: string }) => ({ offers: harness.tickers.find((entry) => entry.symbol === symbol)?.closeOffers ?? [], skipped: [] }),
+  buildCloseOffersForTicker: async ({ symbol }: { symbol: string }) => ({ offers: harness.tickers.find((entry) => entry.symbol === symbol)?.closeOffers ?? [], skipped: [], heldPositions: [] }),
 }));
-vi.mock("../lib/marketSessionStatus.js", () => ({ previousOpenSessionDate: async () => "2026-10-06" }));
+vi.mock("../lib/marketSessionStatus.js", () => ({ previousOpenSessionDate: async () => "2026-10-06", loadOpenDaysBetween: async () => [] }));
 vi.mock("../lib/tradingSettingsStore.js", () => ({ loadTradingSettings: async () => ({ spreadCostChargedPct: 50 }) }));
 vi.mock("./accountSummaryCache.js", () => ({ fetchPlutoAccountSummary: async () => ({}) }));
 vi.mock("../lib/ivMetrics.js", () => ({ computeIvMetrics: async () => ({ ivRank: null }) }));

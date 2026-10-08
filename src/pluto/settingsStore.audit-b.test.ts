@@ -56,8 +56,8 @@ describe("maxDayMoveMultiple setting", () => {
     expect(actionColumns).not.toContain("pessimistic_pnl");
   });
 
-  it("the prompt_version default follows the last prompt migration (v3.7)", async () => {
+  it("the prompt_version default follows the last prompt migration (v3.8)", async () => {
     const column = await testDb("information_schema.columns").where({ table_name: "pluto_settings", column_name: "prompt_version" }).first("column_default");
-    expect(String(column.column_default)).toContain("v3.7");
+    expect(String(column.column_default)).toContain("v3.8");
   });
 });
