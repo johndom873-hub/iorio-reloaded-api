@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrderFill } from "../lib/orderFills.js";
 
 // Audit (G1, 2026-10-07) of Genosuke's order follow-up after it started waiting for fills (shared shouldWaitForFills).
@@ -39,6 +39,15 @@ function fake(rows: Row[], fills: Record<string, OrderFill[]>, send: (text: stri
 }
 
 describe("sendDueOrderNotices (audit)", () => {
+  // The contract wording counts days to expiry from today's Eastern date: pin it to the pass time.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: now });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("a roll filled with only its buy-back waits; once both fills land it is told with both", async () => {
     const waiting = fake([row()], { o1: [buyBack] });
     expect(await sendDueOrderNotices(waiting.dependencies)).toBe(0);
@@ -47,14 +56,14 @@ describe("sendDueOrderNotices (audit)", () => {
 
     const complete = fake([row()], { o1: [buyBack, sellNew] });
     expect(await sendDueOrderNotices(complete.dependencies)).toBe(1);
-    expect(complete.sent[0]).toBe("✅ GEN order filled — IBKR confirmed the trade:\n• BUY 1 put $52 exp 2031-10-10 at 0.50\n• SELL 1 put $50 exp 2031-10-17 at 1.25");
+    expect(complete.sent[0]).toBe("✅ GEN order filled — IBKR confirmed the trade:\n• Buy $52 Put · 10 Oct (1829DTE) · 1× @ 0.50\n• Sell $50 Put · 17 Oct (1836DTE) · 1× @ 1.25");
     expect(complete.marked).toEqual([["o1", "filled"]]);
   });
 
   it("after 5 minutes with only the buy-back recorded it is told with that fill and says some are missing", async () => {
     const late = fake([row({ updatedAt: new Date(now - 5 * 60_000) })], { o1: [buyBack] });
     expect(await sendDueOrderNotices(late.dependencies)).toBe(1);
-    expect(late.sent[0]).toBe("✅ GEN order filled — IBKR confirmed the trade:\n• BUY 1 put $52 exp 2031-10-10 at 0.50\n(some fills not recorded yet)");
+    expect(late.sent[0]).toBe("✅ GEN order filled — IBKR confirmed the trade:\n• Buy $52 Put · 10 Oct (1829DTE) · 1× @ 0.50\n(some fills not recorded yet)");
   });
 
   it("after 5 minutes with no fills recorded it is told anyway, saying the prices are not recorded yet", async () => {
@@ -85,7 +94,7 @@ describe("sendDueOrderNotices (audit)", () => {
     expect(await sendDueOrderNotices(waiting.dependencies)).toBe(0);
     const ready = fake([row({ status: "partially_filled" })], { o1: [buyBack] });
     expect(await sendDueOrderNotices(ready.dependencies)).toBe(1);
-    expect(ready.sent[0]).toBe("⚠️ GEN order partly filled so far, the rest is still working:\n• BUY 1 put $52 exp 2031-10-10 at 0.50");
+    expect(ready.sent[0]).toBe("⚠️ GEN order partly filled so far, the rest is still working:\n• Buy $52 Put · 10 Oct (1829DTE) · 1× @ 0.50");
   });
 });
 

@@ -1,5 +1,7 @@
 import knexLibrary, { type Knex } from "knex";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { easternIsoDate } from "./easternIsoDate.js";
+import { daysToExpiry } from "./optionContractLabel.js";
 
 // Audit (G1, 2026-10-07) of the position side of the trading-events catch-all against the real test database.
 // sendDuePositionTelegramNotices reads and marks EVERY position needing a notice, so each test runs inside one database
@@ -30,6 +32,8 @@ const { sendDuePositionTelegramNotices, describePositionClosedNotice } = await i
 const base = connection.db.__base;
 let trx: Knex.Transaction;
 let counter = Date.now() % 100_000;
+// The pass runs on the real clock (its rows are stamped by the database), so the legs' DTE counts from today's Eastern date.
+const jan17 = () => `17 Jan (${daysToExpiry("2031-01-17", easternIsoDate(new Date()))}DTE)`;
 
 beforeEach(async () => {
   trx = await base.transaction();
@@ -104,7 +108,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
 
     const second = sender();
     expect(await sendDuePositionTelegramNotices(second.send)).toBe(1);
-    expect(second.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• BUY 1 put $50 exp 2031-01-17 at 0.40\nP&L: +$85.00 (+1.70%)`]);
+    expect(second.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• Buy $50 Put · ${jan17()} · 1× @ 0.40\nP&L: +$85.00 (+1.70%)`]);
   });
 
   it("the first undelivered message ends the pass: a later position is not even tried", async () => {
@@ -128,7 +132,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
     // (0 − 2.00) × 1 × 100 = −$200.00 over capitalDeployed (premium paid, $200) = −100.00%.
-    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} hedge — expired worthless\n• SELL 1 call $90 exp 2031-01-17 at 0.00\nP&L: −$200.00 (−100.00%)`]);
+    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} hedge — expired worthless\n• Sell $90 Call · ${jan17()} · 1× @ 0.00\nP&L: −$200.00 (−100.00%)`]);
   });
 
   it("a close with a missing exit price says the P&L is unknown and the leg's price is unknown", async () => {
@@ -137,7 +141,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     await insertLeg(positionId, { exit_price: null, exit_at: new Date() });
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
-    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — reason unknown\n• BUY 1 put $50 exp 2031-01-17 price unknown\nP&L: unknown (an exit price is missing)`]);
+    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — reason unknown\n• Buy $50 Put · ${jan17()} · 1× (price unknown)\nP&L: unknown (an exit price is missing)`]);
   });
 
   it("realized P&L is net of closing commissions", async () => {
@@ -148,7 +152,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
     // (1.25 − 0.40) × 100 − 1.30 = +$83.70 over $5,000 collateral = +1.67%.
-    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• BUY 1 put $50 exp 2031-01-17 at 0.40\nP&L: +$83.70 (+1.67%)`]);
+    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• Buy $50 Put · ${jan17()} · 1× @ 0.40\nP&L: +$83.70 (+1.67%)`]);
   });
 
   it("an opening lists slices of one contract as one leg; the close lists each slice at its own exit", async () => {
@@ -158,8 +162,8 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
     const sorted = (text: string) => text.split("\n").slice(1, 3).sort();
-    expect(pass.sent[0]).toBe(`📥 New position: ${symbol} cash-secured put\n• SELL 3 put $50 exp 2031-01-17 at 1.25`);
-    expect(sorted(pass.sent[1]!)).toEqual(["• BUY 1 put $50 exp 2031-01-17 at 0.40", "• BUY 2 put $50 exp 2031-01-17 at 0.30"]);
+    expect(pass.sent[0]).toBe(`📥 New position: ${symbol} cash-secured put\n• Sell $50 Put · ${jan17()} · 3× @ 1.25`);
+    expect(sorted(pass.sent[1]!)).toEqual([`• Buy $50 Put · ${jan17()} · 1× @ 0.40`, `• Buy $50 Put · ${jan17()} · 2× @ 0.30`]);
     // (1.25−0.40)×100 + (1.25−0.30)×2×100 = 85 + 190 = +$275.00 over the 3 contracts' collateral ($15,000) = +1.83%.
     expect(pass.sent[1]!.split("\n")[3]).toBe("P&L: +$275.00 (+1.83%)");
   });
@@ -183,9 +187,9 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
     expect(pass.sent).toHaveLength(1);
-    expect(pass.sent[0]).not.toContain("SELL 100 shares");
+    expect(pass.sent[0]).not.toContain("Sell 100 shares");
     expect(pass.sent[0]).toContain("• 100 shares moved to the next position");
-    expect(pass.sent[0]).toContain("• BUY 1 call $55");
+    expect(pass.sent[0]).toContain(`• Buy $55 Call · ${jan17()} · 1× @ 0.40`);
   });
 
   it("leftover shares absorbed into a covered call are told as such (reason label)", async () => {

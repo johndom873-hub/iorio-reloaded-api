@@ -3,7 +3,7 @@ import type { SignalCandidate, SignalSurfaceSlice } from "../lib/signalCandidate
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { TickerSignals } from "../lib/signalsTypes.js";
 import { candidateSetFingerprint } from "./inputHash.js";
-import { deterministicTopPick, filterTickerForPluto, openCandidateId, type PlutoTickerFilterInput } from "./candidateFilters.js";
+import { describeCandidateId, deterministicTopPick, filterTickerForPluto, openCandidateId, type PlutoTickerFilterInput } from "./candidateFilters.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 const now = Date.parse("2026-09-28T15:00:00Z"); // 11:00 ET
@@ -148,5 +148,16 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
     expect(candidateSetFingerprint([base], [])).toBe(candidateSetFingerprint([noisy], []));
     expect(candidateSetFingerprint([base], [])).not.toBe(candidateSetFingerprint([{ ...base, candidate: candidate({ grade: "good" }) }], []));
     expect(candidateSetFingerprint([base], [])).not.toBe(candidateSetFingerprint([], []));
+  });
+});
+
+describe("describeCandidateId", () => {
+  it("words each candidate id kind in the platform's contract standard", () => {
+    expect(describeCandidateId("SMCI:covered_call:2026-10-09:47", "2026-10-07")).toBe("SMCI $47 Call · 9 Oct (2DTE)");
+    expect(describeCandidateId("HOOD:cash_secured_put:2026-10-17:42.5", "2026-10-07")).toBe("HOOD $42.5 Put · 17 Oct (10DTE)");
+    expect(describeCandidateId("MU:roll:leg-1:2026-10-16:100", "2026-10-07")).toBe("MU Roll → $100 · 16 Oct (9DTE)");
+    expect(describeCandidateId("COIN:close_leg:leg-1", "2026-10-07")).toBe("COIN Buy back");
+    expect(describeCandidateId("SMCI:close_position:p-1", "2026-10-07")).toBe("SMCI Close covered Call");
+    expect(describeCandidateId("not-an-id", "2026-10-07")).toBe("not-an-id");
   });
 });

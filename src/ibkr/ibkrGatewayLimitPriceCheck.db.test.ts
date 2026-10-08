@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import knexLibrary, { type Knex } from "knex";
 import type { IBApi } from "@stoqey/ib";
 import type { OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
@@ -41,9 +41,15 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  // The leg description counts days to expiry from today's Eastern date: pin it (Date only, so pg keeps its timers).
+  vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-07T15:00:00Z") });
   publishNotificationMock.mockReset();
   await testDb("order_requests").where({ requested_by_user_id: userId }).del();
   await testDb("trading_settings").update({ price_check_max_deviation_pct: 10, price_check_min_tolerance_dollars: 0.05 });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 afterAll(async () => {
@@ -66,7 +72,7 @@ describe("endOrderIfLimitPriceUnsafe", () => {
     const result = await endOrderIfLimitPriceUnsafe(order, fakeIb, quotes({ bid: 3.9, ask: 4.1 }));
     expect(result).toMatchObject({ ended: true });
     expect(result!.reason).toContain("failed the live-quote check at placement");
-    expect(result!.reason).toContain("SELL 2 ZZZP 2026-10-16 $50 put");
+    expect(result!.reason).toContain("for ZZZP Sell $50 Put · 16 Oct (9DTE) · 2× is");
     expect(result!.reason).toContain("below the live mid 4.00");
     const row = await rowOf(order.id);
     expect(row.status).toBe("error");
@@ -108,8 +114,8 @@ describe("endOrderIfLimitPriceUnsafe", () => {
     const combo = { symbol: "ZZZP", strategyKey: "covered_call", legs: [{ role: "stock", action: "BUY", symbol: "ZZZP", quantity: 200, unitPrice: 48.2 }, { ...putLeg, right: "C", strike: 55, unitPrice: 0.11 }] };
     const order = await insertConfirmedOrder(combo);
     const result = await endOrderIfLimitPriceUnsafe(order, fakeIb, quotes({ bid: 48.15, ask: 48.25 }, { bid: 1.05, ask: 1.15 }));
-    expect(result!.reason).toContain("SELL 2 ZZZP 2026-10-16 $55 call");
-    expect(result!.reason).not.toContain("BUY 200 ZZZP shares");
+    expect(result!.reason).toContain("for ZZZP Sell $55 Call · 16 Oct (9DTE) · 2× is");
+    expect(result!.reason).not.toContain("ZZZP Buy 200 shares");
   });
 
   it("a cancel that landed first keeps its status: the block is reported but nothing is ended or announced", async () => {

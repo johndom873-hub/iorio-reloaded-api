@@ -39,6 +39,11 @@ vi.mock("../lib/marketSessionStatus.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { streamCloseLiveHandler } = await import("./positionCloseLive.js");
+const { daysToExpiry } = await import("../lib/optionContractLabel.js");
+const { easternIsoDate } = await import("../lib/easternIsoDate.js");
+
+/** The short put's close-check label: "CLV123 $100 Put · 18 Jun (253DTE)". */
+const shortPutLabel = (symbol: string) => `${symbol} $${shortPutStrike} Put · 18 Jun (${daysToExpiry(shortPutExpiry, easternIsoDate(new Date()))}DTE)`;
 
 const testDb: Knex = db;
 
@@ -264,7 +269,7 @@ describe("GET /positions/:id/close-live/stream: the stream", () => {
   });
 
   it("says it is waiting for quotes while inside the settle grace, then flips to unavailable naming the leg once it passes", async () => {
-    const { positionId } = await createOpenShortPutPosition();
+    const { positionId, symbol } = await createOpenShortPutPosition();
 
     const stream = await openStream(positionId);
     const waitingFrame = await stream.nextFrame();
@@ -274,12 +279,12 @@ describe("GET /positions/:id/close-live/stream: the stream", () => {
     expect(unavailableFrame.data).toMatchObject({
       live: false,
       pending: false,
-      blockReason: `Live bid/ask is unavailable for $${shortPutStrike}P ${shortPutExpiry}. Closing needs live prices.`,
+      blockReason: `Live bid/ask is unavailable for ${shortPutLabel(symbol)}. Closing needs live prices.`,
     });
   });
 
   it("treats a one-sided option quote (no ask) as unavailable", async () => {
-    const { positionId } = await createOpenShortPutPosition();
+    const { positionId, symbol } = await createOpenShortPutPosition();
     subscribeBehaviour = (subscription) => {
       if (subscription.contract.legType === "option") subscription.onUpdate(quote(1.4, null));
     };
@@ -290,7 +295,7 @@ describe("GET /positions/:id/close-live/stream: the stream", () => {
 
     expect(firstFrame.data).toMatchObject({ live: false, pending: true });
     expect(settledFrame.data).toMatchObject({ live: false, pending: false });
-    expect(settledFrame.data.blockReason).toContain(`$${shortPutStrike}P ${shortPutExpiry}`);
+    expect(settledFrame.data.blockReason).toContain(shortPutLabel(symbol));
     expect(settledFrame.data.legQuotes[Object.keys(settledFrame.data.legQuotes)[0]!]).toEqual({ bid: 1.4, ask: null, last: null, mid: null });
   });
 

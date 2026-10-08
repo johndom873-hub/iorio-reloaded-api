@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import knexLibrary, { type Knex } from "knex";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { daysToExpiry } from "../lib/optionContractLabel.js";
 
 // createDatabaseDependencies / sendDueOrderNotices against real order_requests, trades and position_legs rows in the test database.
 vi.mock("../db/connection.js", async () => {
@@ -221,7 +223,9 @@ describe("markNotified and the notice life cycle", () => {
     const orderId = await insertOrder({ status: "filled" });
     await insertTrade(legId, orderId, { side: "sell", quantity: 2, price: 1.35, executedAt: hoursAgo(1) });
     expect(await sendDueOrderNotices(wired)).toBe(1);
-    expect(sent[0]).toBe("✅ FUA order filled — IBKR confirmed the trade:\n• SELL 2 put $90 exp 2030-01-18 at 1.35");
+    // The real loaders run on the real clock: DTE counts from today's Eastern date.
+    const dte = daysToExpiry("2030-01-18", easternIsoDate(new Date()));
+    expect(sent[0]).toBe(`✅ FUA order filled — IBKR confirmed the trade:\n• Sell $90 Put · 18 Jan (${dte}DTE) · 2× @ 1.35`);
   });
 });
 

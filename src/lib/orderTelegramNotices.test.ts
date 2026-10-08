@@ -1,5 +1,5 @@
 import { OrderAction } from "@stoqey/ib";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import type { OrderFill } from "./orderFills.js";
 import {
@@ -43,22 +43,31 @@ describe("describePlacedBy", () => {
 });
 
 describe("describeOrderTelegramNotice", () => {
+  // The contract wording counts days to expiry from today's Eastern date: pin it.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-07T15:00:00Z") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("lists the order with its limit while it works, and the fills once filled", () => {
-    expect(describeOrderTelegramNotice(order(), [])).toBe("⏳ AAPL order working at IBKR (Marce, web):\n• SELL 2 put $180 exp 2026-10-17, limit 1.25");
+    expect(describeOrderTelegramNotice(order(), [])).toBe("⏳ AAPL order working at IBKR (Marce, web):\n• Sell $180 Put · 17 Oct (10DTE) · 2× @ 1.25 limit");
     expect(describeOrderTelegramNotice(order({ status: "partially_filled", placedBy: "Pluto" }), [{ ...putFill, quantity: 1 }])).toBe(
-      "⚠️ AAPL order partly filled, rest still working (Pluto):\n• SELL 1 put $180 exp 2026-10-17 at 1.25",
+      "⚠️ AAPL order partly filled, rest still working (Pluto):\n• Sell $180 Put · 17 Oct (10DTE) · 1× @ 1.25",
     );
-    expect(describeOrderTelegramNotice(order({ status: "filled", placedBy: "Genosuke" }), [putFill])).toBe("✅ AAPL order filled (Genosuke):\n• SELL 2 put $180 exp 2026-10-17 at 1.25");
+    expect(describeOrderTelegramNotice(order({ status: "filled", placedBy: "Genosuke" }), [putFill])).toBe("✅ AAPL order filled (Genosuke):\n• Sell $180 Put · 17 Oct (10DTE) · 2× @ 1.25");
   });
 
   it("lists the order instead of fills when the fills were never recorded", () => {
     expect(describeOrderTelegramNotice(order({ status: "filled" }), [])).toBe(
-      "✅ AAPL order filled (Marce, web):\n• SELL 2 put $180 exp 2026-10-17, limit 1.25\n(fill prices not recorded yet)",
+      "✅ AAPL order filled (Marce, web):\n• Sell $180 Put · 17 Oct (10DTE) · 2× @ 1.25 limit\n(fill prices not recorded yet)",
     );
   });
 
   it("says who or what cancelled it, always with the order's details", () => {
-    const lines = "\n• SELL 2 put $180 exp 2026-10-17, limit 1.25";
+    const lines = "\n• Sell $180 Put · 17 Oct (10DTE) · 2× @ 1.25 limit";
     expect(describeOrderTelegramNotice(order({ status: "cancelled", cancelledByDisplayName: "Marce" }), [])).toBe(`🚫 AAPL order cancelled by Marce — nothing filled:${lines}`);
     expect(describeOrderTelegramNotice(order({ status: "cancelled", cancellationReason: "expired_at_close" }), [])).toBe(
       `🚫 AAPL order expired unfilled at the close (Marce, web) — nothing filled:${lines}`,
@@ -72,23 +81,23 @@ describe("describeOrderTelegramNotice", () => {
 
   it("lists both the order and what filled when a partly filled order ends", () => {
     expect(describeOrderTelegramNotice(order({ status: "cancelled_partially_filled", cancellationReason: "expired_at_close", placedBy: "Pluto" }), [{ ...putFill, quantity: 1 }])).toBe(
-      "⚠️ AAPL order expired at the close after partly filling (Pluto):\n• SELL 2 put $180 exp 2026-10-17, limit 1.25\nFilled:\n• SELL 1 put $180 exp 2026-10-17 at 1.25",
+      "⚠️ AAPL order expired at the close after partly filling (Pluto):\n• Sell $180 Put · 17 Oct (10DTE) · 2× @ 1.25 limit\nFilled:\n• Sell $180 Put · 17 Oct (10DTE) · 1× @ 1.25",
     );
     expect(describeOrderTelegramNotice(order({ status: "cancelled_partially_filled" }), [])).toContain("Filled:\n(fill prices not recorded yet)");
   });
 
   it("gives the reason for a rejection or an error, with the order's details", () => {
     expect(describeOrderTelegramNotice(order({ status: "rejected", errorMessage: "Insufficient margin" }), [])).toBe(
-      "❌ IBKR rejected the AAPL order (Marce, web): Insufficient margin\n• SELL 2 put $180 exp 2026-10-17, limit 1.25",
+      "❌ IBKR rejected the AAPL order (Marce, web): Insufficient margin\n• Sell $180 Put · 17 Oct (10DTE) · 2× @ 1.25 limit",
     );
-    expect(describeOrderTelegramNotice(order({ status: "error", errorMessage: null }), [])).toBe("❌ AAPL order failed (Marce, web): unknown error\n• SELL 2 put $180 exp 2026-10-17, limit 1.25");
+    expect(describeOrderTelegramNotice(order({ status: "error", errorMessage: null }), [])).toBe("❌ AAPL order failed (Marce, web): unknown error\n• Sell $180 Put · 17 Oct (10DTE) · 2× @ 1.25 limit");
   });
 
   it("calls a roll a roll and shows its single net limit on its own line", () => {
     const buyBack: OrderLegPayload = { ...sellPut, action: OrderAction.BUY, quantity: 1, unitPrice: 0.4 };
     const sellNew: OrderLegPayload = { ...sellPut, quantity: 1, unitPrice: 1.25, strike: 175, expiry: "20261121" };
     expect(describeOrderTelegramNotice(order({ requestType: "roll_leg", legs: [buyBack, sellNew] }), [])).toBe(
-      "⏳ AAPL roll working at IBKR (Marce, web):\n• BUY 1 put $180 exp 2026-10-17\n• SELL 1 put $175 exp 2026-11-21\nLimit: 0.85 net credit",
+      "⏳ AAPL roll working at IBKR (Marce, web):\n• Buy $180 Put · 17 Oct (10DTE) · 1×\n• Sell $175 Put · 21 Nov (45DTE) · 1×\nLimit: 0.85 net credit",
     );
     expect(describeOrderTelegramNotice(order({ requestType: "roll_leg", legs: [{ ...buyBack, unitPrice: 2 }, sellNew] }), [])).toContain("Limit: 0.75 net debit");
   });

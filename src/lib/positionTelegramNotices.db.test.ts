@@ -1,5 +1,7 @@
 import knexLibrary, { type Knex } from "knex";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import { easternIsoDate } from "./easternIsoDate.js";
+import { daysToExpiry } from "./optionContractLabel.js";
 
 // The position side of the trading-events Telegram catch-all against the real positions and legs tables of the test
 // database. Other files' leftover positions may be picked up too, so every assertion looks only at this file's tickers.
@@ -16,6 +18,8 @@ const testDb: Knex = db;
 
 const createdTickerIds: string[] = [];
 let counter = Date.now() % 100_000;
+// The pass runs on the real clock (its rows are stamped by the database), so the legs' DTE counts from today's Eastern date.
+const jan17 = () => `17 Jan (${daysToExpiry("2031-01-17", easternIsoDate(new Date()))}DTE)`;
 
 async function createPosition(options: { strategyKey: string; closedAt?: Date; closeReason?: string; unstructuredReason?: string }): Promise<{ positionId: string; symbol: string }> {
   const symbol = `PT${(counter += 1)}`;
@@ -87,7 +91,7 @@ describe("sendDuePositionTelegramNotices", () => {
 
     const first = recordingSender();
     await sendDuePositionTelegramNotices(first.send);
-    expect(first.sent.filter((message) => message.includes(symbol))).toEqual([`📥 New position: ${symbol} cash-secured put\n• SELL 1 put $180 exp 2031-01-17 at 1.25`]);
+    expect(first.sent.filter((message) => message.includes(symbol))).toEqual([`📥 New position: ${symbol} cash-secured put\n• Sell $180 Put · ${jan17()} · 1× @ 1.25`]);
     expect((await noticeState(positionId)).opened).not.toBeNull();
 
     const second = recordingSender();
@@ -117,7 +121,7 @@ describe("sendDuePositionTelegramNotices", () => {
     await testDb("order_requests").where({ id: order.id }).update({ status: "filled" });
     const afterFill = recordingSender();
     await sendDuePositionTelegramNotices(afterFill.send);
-    expect(afterFill.sent.filter((message) => message.includes(symbol))).toEqual([`📥 New position: ${symbol} cash-secured put\n• SELL 3 put $180 exp 2031-01-17 at 1.25`]);
+    expect(afterFill.sent.filter((message) => message.includes(symbol))).toEqual([`📥 New position: ${symbol} cash-secured put\n• Sell $180 Put · ${jan17()} · 3× @ 1.25`]);
   });
 
   it("tells a position opened and closed between two passes in order, with the realized P&L", async () => {
@@ -130,7 +134,7 @@ describe("sendDuePositionTelegramNotices", () => {
     expect(mine).toHaveLength(2);
     expect(mine[0]).toContain("📥 New position:");
     // (1.25 − 0.40) × 1 × 100 = +$85.00 over capitalDeployed (the $180 × 100 collateral) = +0.47%.
-    expect(mine[1]).toBe(`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• BUY 1 put $180 exp 2031-01-17 at 0.40\nP&L: +$85.00 (+0.47%)`);
+    expect(mine[1]).toBe(`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• Buy $180 Put · ${jan17()} · 1× @ 0.40\nP&L: +$85.00 (+0.47%)`);
     const state = await noticeState(positionId);
     expect(state.opened).not.toBeNull();
     expect(state.closed).not.toBeNull();
@@ -147,7 +151,7 @@ describe("sendDuePositionTelegramNotices", () => {
     await sendDuePositionTelegramNotices(sender.send);
     expect(sender.sent.filter((message) => message.includes(expired.symbol))).toEqual([]);
     expect(sender.sent.filter((message) => message.includes(leftover.symbol))).toEqual([
-      `📥 New position: ${leftover.symbol} stock, no strategy (left over from a put assignment)\n• BUY 100 shares at 180.00`,
+      `📥 New position: ${leftover.symbol} stock, no strategy (left over from a put assignment)\n• Buy 100 shares @ 180.00`,
     ]);
   });
 

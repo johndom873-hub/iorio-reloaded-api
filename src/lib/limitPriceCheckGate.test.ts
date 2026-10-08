@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 
 // The confirm-time limit-price check with the quote pool and the settings replaced: which contracts it subscribes, what it makes of
@@ -46,8 +46,14 @@ function feedQuotes(quoteFor: (contract: { legType: string }) => { bid: number |
 }
 
 beforeEach(() => {
+  // The leg description counts days to expiry from today's Eastern date: pin it.
+  vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-07T15:00:00Z") });
   subscribeToPooledQuoteMock.mockReset();
   loadPriceCheckToleranceMock.mockReset().mockResolvedValue({ maxDeviationPct: 10, minToleranceDollars: 0.05 });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("evaluateLimitPriceCheckForOrderRequest", () => {
@@ -62,7 +68,7 @@ describe("evaluateLimitPriceCheckForOrderRequest", () => {
     feedQuotes(() => ({ bid: 3.9, ask: 4.1 }));
     const result = await evaluateLimitPriceCheckForOrderRequest({ payload: putOpen });
     expect(result!.blocked).toBe(true);
-    expect(result!.reasons[0]).toContain("SELL 2 AAOI 2026-10-16 $50 put");
+    expect(result!.reasons[0]).toContain("for AAOI Sell $50 Put · 16 Oct (9DTE) · 2× is");
     expect(result!.reasons[0]).toContain("below the live mid 4.00");
   });
 

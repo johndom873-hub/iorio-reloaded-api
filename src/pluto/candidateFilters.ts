@@ -3,6 +3,7 @@ import { expectedDailyMovePct } from "./moveContext.js";
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { TickerSignals } from "../lib/signalsTypes.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "../lib/optionContractLabel.js";
 
 // Pluto's deterministic candidate filters (design round 3, item 20, approved 2026-09-28). Pure:
 // the agent feeds it a scored ticker (every existing Signals filter already applied), the fit
@@ -75,6 +76,23 @@ export function openCandidateId(symbol: string, candidate: Pick<SignalCandidate,
 
 export function rollCandidateId(symbol: string, roll: Pick<RollSignalCandidate, "legId" | "replacement">): string {
   return `${symbol}:roll:${roll.legId}:${roll.replacement.expiry}:${roll.replacement.strike}`;
+}
+
+/** A candidate id in the platform's contract wording ("SMCI $47 Call · 9 Oct (2DTE)"); a roll's id names only its new contract, a close only its kind. */
+export function describeCandidateId(candidateId: string, todayIso: string): string {
+  const [symbol, kind, ...rest] = candidateId.split(":");
+  if ((kind === "covered_call" || kind === "cash_secured_put") && rest.length === 2) {
+    const [expiry, strike] = rest as [string, string];
+    return describeOptionContract({ symbol, strike: Number(strike), right: kind === "covered_call" ? "C" : "P", expiry, dte: daysToExpiry(expiry, todayIso) });
+  }
+  if (kind === "roll" && rest.length === 3) {
+    const [, expiry, strike] = rest as [string, string, string];
+    return `${symbol} Roll → ${formatStrike(Number(strike))} · ${formatDayMonth(expiry)} (${daysToExpiry(expiry, todayIso)}DTE)`;
+  }
+  if (kind === "close_leg") return `${symbol} Buy back`;
+  if (kind === "close_shares") return `${symbol} Sell shares`;
+  if (kind === "close_position") return `${symbol} Close covered Call`;
+  return candidateId;
 }
 
 function quoteAgeMinutes(candidate: Pick<SignalCandidate, "quoteSource" | "quotedAt">, snapshotCapturedAt: string | null, nowMs: number): number | null {

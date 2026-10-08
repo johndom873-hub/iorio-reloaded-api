@@ -2,7 +2,7 @@ import { db } from "../db/connection.js";
 import { computeNetLimitPrice, type OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { describeOrderFillLine, fillBearingOrderStatuses, fillsAreComplete, loadOrderFills, orderCancelledBeforeSentSql, shouldWaitForFills, type OrderFill } from "./orderFills.js";
 import { notifyTelegram } from "./notifyTelegram.js";
-import { describeTradeContract, formatTradePrice } from "./tradeMessageFormatting.js";
+import { describeTradeContract, formatTradePrice, tradeVerb } from "./tradeMessageFormatting.js";
 
 // Trading-events catch-all, order side (approved 2026-10-07): every status change of every app order, whoever placed it
 // (web, Genosuke or Pluto), is told once to the alerts chat. Pluto's and Genosuke's own messages about their orders stay
@@ -47,11 +47,12 @@ function describeOrderLines(legs: OrderLegPayload[]): string[] {
       expiryDate: leg.expiry ?? null,
     });
   const [onlyLeg] = legs;
-  if (legs.length === 1 && onlyLeg) return [`• ${onlyLeg.action} ${contract(onlyLeg)}, limit ${formatTradePrice(onlyLeg.unitPrice)}`];
+  // "limit" after the price: the same message may list fills, whose lines read "@ <fill price>".
+  if (legs.length === 1 && onlyLeg) return [`• ${tradeVerb(onlyLeg.action)} ${contract(onlyLeg)} @ ${formatTradePrice(onlyLeg.unitPrice)} limit`];
   // A combo has one net limit (computeNetLimitPrice: positive = paid, negative = received).
   const netLimit = computeNetLimitPrice(legs);
   const netLabel = netLimit < 0 ? " net credit" : netLimit > 0 ? " net debit" : " net";
-  return [...legs.map((leg) => `• ${leg.action} ${contract(leg)}`), `Limit: ${formatTradePrice(Math.abs(netLimit))}${netLabel}`];
+  return [...legs.map((leg) => `• ${tradeVerb(leg.action)} ${contract(leg)}`), `Limit: ${formatTradePrice(Math.abs(netLimit))}${netLabel}`];
 }
 
 /** Pure: the Telegram message for one status change. With no fills recorded, a fill-bearing status lists the order instead. */

@@ -1,10 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { describeOrderUpdate, sendDueOrderNotices, type OrderFill, type OrderFollowUpDependencies, type OrderNoticeInput, type OrderNoticeRow } from "./orderFollowUp.js";
 
 const order = (status: string, errorMessage: string | null = null, cancellationReason: string | null = null): OrderNoticeInput => ({ id: "o1", status, errorMessage, cancellationReason, symbol: "AAOI" });
 const putFill: OrderFill = { side: "sell", quantity: 2, price: 1.35, optionType: "put", strikePrice: 50, expiryDate: "2026-10-16" };
 
 describe("describeOrderUpdate", () => {
+  // The contract wording counts days to expiry from today's Eastern date: pin it.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-07T15:00:00Z") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("says a day order expired at the close, or was never confirmed, instead of a plain cancel", () => {
     expect(describeOrderUpdate(order("cancelled", null, "expired_at_close"), [])).toContain("expired unfilled at the market close");
     expect(describeOrderUpdate(order("cancelled_partially_filled", null, "expired_at_close"), [putFill])).toContain("expired at the market close after partly filling");
@@ -19,14 +28,14 @@ describe("describeOrderUpdate", () => {
   });
 
   it("lists what was filled for a full fill, a partial fill and a cancel after a partial fill", () => {
-    expect(describeOrderUpdate(order("filled"), [putFill])).toBe("✅ AAOI order filled — IBKR confirmed the trade:\n• SELL 2 put $50 exp 2026-10-16 at 1.35");
+    expect(describeOrderUpdate(order("filled"), [putFill])).toBe("✅ AAOI order filled — IBKR confirmed the trade:\n• Sell $50 Put · 16 Oct (9DTE) · 2× @ 1.35");
     expect(describeOrderUpdate(order("partially_filled"), [putFill])).toContain("partly filled so far, the rest is still working");
     expect(describeOrderUpdate(order("cancelled_partially_filled"), [putFill])).toContain("cancelled at IBKR after partly filling");
   });
 
   it("describes a stock fill without option details", () => {
     const stockFill: OrderFill = { side: "buy", quantity: 100, price: 48.2, optionType: null, strikePrice: null, expiryDate: null };
-    expect(describeOrderUpdate(order("filled"), [stockFill])).toContain("• BUY 100 shares at 48.2");
+    expect(describeOrderUpdate(order("filled"), [stockFill])).toContain("• Buy 100 shares @ 48.20");
   });
 
   it("gives the reason for a rejection or an error, and a plain cancel", () => {

@@ -12,8 +12,8 @@ describe("toIsoExpiry", () => {
 
 describe("describeTradeLine", () => {
   it("describes an option or stock trade with a two-decimal price, or says the price is unknown", () => {
-    expect(describeTradeLine("sell", { legType: "option", quantity: 1, optionType: "put", strikePrice: 42.5, expiryDate: "20261009" }, 0.6)).toBe("• SELL 1 put $42.5 exp 2026-10-09 at 0.60");
-    expect(describeTradeLine("BUY", { legType: "stock", quantity: 100, optionType: null, strikePrice: null, expiryDate: null }, null)).toBe("• BUY 100 shares price unknown");
+    expect(describeTradeLine("sell", { legType: "option", quantity: 1, optionType: "put", strikePrice: 42.5, expiryDate: "20261009" }, 0.6, "2026-10-07")).toBe("• Sell $42.5 Put · 9 Oct (2DTE) · 1× @ 0.60");
+    expect(describeTradeLine("BUY", { legType: "stock", quantity: 100, optionType: null, strikePrice: null, expiryDate: null }, null, "2026-10-07")).toBe("• Buy 100 shares (price unknown)");
   });
 });
 

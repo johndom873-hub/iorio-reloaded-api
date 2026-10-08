@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrderFill } from "./orderFills.js";
 
 // Audit (G1, 2026-10-07): the shared fill-wait rule used by the trading-events catch-all and Genosuke's follow-up.
@@ -69,12 +69,21 @@ describe("shouldWaitForFills", () => {
 });
 
 describe("describeOrderFillLine", () => {
+  // The contract wording counts days to expiry from today's Eastern date: pin it.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-07T15:00:00Z") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("describes an option fill and a stock fill", () => {
-    expect(describeOrderFillLine(buyBack)).toBe("• BUY 1 put $50 exp 2026-10-16 at 0.50");
-    expect(describeOrderFillLine({ side: "sell", quantity: 100, price: 52.1, optionType: null, strikePrice: null, expiryDate: null })).toBe("• SELL 100 shares at 52.10");
+    expect(describeOrderFillLine(buyBack)).toBe("• Buy $50 Put · 16 Oct (9DTE) · 1× @ 0.50");
+    expect(describeOrderFillLine({ side: "sell", quantity: 100, price: 52.1, optionType: null, strikePrice: null, expiryDate: null })).toBe("• Sell 100 shares @ 52.10");
   });
 
   it("a fill on an option leg with a missing expiry still reads", () => {
-    expect(describeOrderFillLine({ ...buyBack, expiryDate: null })).toBe("• BUY 1 put $50 exp ? at 0.50");
+    expect(describeOrderFillLine({ ...buyBack, expiryDate: null })).toBe("• Buy $50 Put · 1× @ 0.50");
   });
 });

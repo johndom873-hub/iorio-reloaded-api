@@ -1,3 +1,6 @@
+import { easternIsoDate } from "./easternIsoDate.js";
+import { daysToExpiry, describeOptionContract } from "./optionContractLabel.js";
+
 // The limit-price check (Marcelo 2026-10-05: mid-based, thresholds editable on Risk & Limits).
 //
 // Formula, per leg, against that leg's own live two-sided quote:
@@ -81,9 +84,12 @@ export function evaluateLimitPrices(legs: PriceCheckLeg[], tolerance: PriceCheck
   return { blocked: reasons.length > 0, reasons, legs: details };
 }
 
-/** The leg as an order line reads, from the stored payload leg: "SELL 2 AAOI 2026-11-20 $100 put" or "BUY 200 AAOI shares". */
-export function describeOrderLegForPriceCheck(leg: { role: "stock" | "option"; action: string; symbol: string; quantity: number; strike?: number; expiry?: string; right?: "C" | "P" }): string {
-  if (leg.role === "stock") return `${leg.action} ${leg.quantity} ${leg.symbol} shares`;
-  const expiry = leg.expiry && /^\d{8}$/.test(leg.expiry) ? `${leg.expiry.slice(0, 4)}-${leg.expiry.slice(4, 6)}-${leg.expiry.slice(6, 8)}` : (leg.expiry ?? "?");
-  return `${leg.action} ${leg.quantity} ${leg.symbol} ${expiry} $${leg.strike} ${leg.right === "C" ? "call" : "put"}`;
+/** The leg in the platform's order wording, from the stored payload leg: "AAOI Sell $100 Put · 20 Nov (43DTE) · 2×" or "AAOI Buy 200 shares". */
+export function describeOrderLegForPriceCheck(leg: { role: "stock" | "option"; action: string; symbol: string; quantity: number; strike?: number; expiry?: string; right?: "C" | "P" }, todayIso = easternIsoDate(new Date())): string {
+  const verb = leg.action.charAt(0).toUpperCase() + leg.action.slice(1).toLowerCase();
+  if (leg.role === "stock") return `${leg.symbol} ${verb} ${leg.quantity} shares`;
+  const expiry = leg.expiry && /^\d{8}$/.test(leg.expiry) ? `${leg.expiry.slice(0, 4)}-${leg.expiry.slice(4, 6)}-${leg.expiry.slice(6, 8)}` : leg.expiry;
+  if (!expiry || !/^\d{4}-\d{2}-\d{2}$/.test(expiry) || leg.strike === undefined) return `${leg.symbol} ${verb} ${leg.strike === undefined ? "?" : `$${leg.strike}`} ${leg.right === "C" ? "Call" : "Put"}${expiry ? ` · ${expiry}` : ""} · ${leg.quantity}×`;
+  const dte = daysToExpiry(expiry, todayIso);
+  return `${leg.symbol} ${verb} ${describeOptionContract({ strike: leg.strike, right: leg.right ?? "P", expiry, dte: dte < 0 ? null : dte })} · ${leg.quantity}×`;
 }

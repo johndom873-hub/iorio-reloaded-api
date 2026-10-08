@@ -11,13 +11,13 @@ import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js"
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
 import { anyOpenPositionOn, loadInFlightNotionals, loadOccupiedContracts, loadPlutoBook } from "./book.js";
-import { deterministicTopPick, filterTickerForPluto, findSameContractConflict, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
+import { describeCandidateId, deterministicTopPick, filterTickerForPluto, findSameContractConflict, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { updatePlutoConcernAlerts } from "./concernAlerts.js";
 import { executePlutoClose, executePlutoOrder, watchPlutoOrder } from "./executor.js";
 import { buildCloseOffersForTicker, type CloseOffer } from "./closeActions.js";
 import { previousOpenSessionDate } from "../lib/marketSessionStatus.js";
-import { easternMinutesOfDay } from "../lib/easternIsoDate.js";
+import { easternIsoDate, easternMinutesOfDay } from "../lib/easternIsoDate.js";
 import { fetchPlutoAccountSummary } from "./accountSummaryCache.js";
 import { candidateSetFingerprint, classifyFingerprintChange, tickerFingerprint } from "./inputHash.js";
 import { ensurePlutoPrompt } from "./prompts.js";
@@ -443,7 +443,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const chosenId = decision.candidateId!;
   const owner = evaluated.find((ticker) => ticker.filtered.eligible.some((entry) => entry.id === chosenId) || ticker.filtered.eligibleRolls.some((entry) => entry.id === chosenId) || ticker.closeOffers.some((offer) => offer.id === chosenId));
   if (!owner) {
-    await recordPlutoAction({ passId, kind: "no_trade", symbol: "—", tickerId: null, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: [{ gate: "candidate_present", ok: false, detail: `${chosenId} not found among the offers` }], sizeTier: null, quantity: null, limitPrice: null, outcome: "blocked", blockReason: "chosen candidate not found", referenceBid: null, referenceMid: null });
+    await recordPlutoAction({ passId, kind: "no_trade", symbol: "—", tickerId: null, contract: null, candidateScores: null, deterministicTopPick: topPickSummary, gateResults: [{ gate: "candidate_present", ok: false, detail: `${describeCandidateId(chosenId, easternIsoDate(now))} not found among the offers` }], sizeTier: null, quantity: null, limitPrice: null, outcome: "blocked", blockReason: "chosen candidate not found", referenceBid: null, referenceMid: null });
     return { passId, modelCalled: true, skippedReason: null, outcome: "blocked" };
   }
   // Never trade a ticker the model itself flagged in the same answer (prompt v3.3), nor anything when it flagged the whole message.

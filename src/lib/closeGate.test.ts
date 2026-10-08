@@ -177,15 +177,24 @@ describe("loadCloseLiveInputs", () => {
   });
 
   it("builds option legs with numeric prices, call/put labels and an IBKR contract per leg after the stock contract", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-07T15:00:00Z") });
     seedPosition([shortCallLegRow, shortPutLegRow]);
     const inputs = (await loadCloseLiveInputs("pos-1"))!;
-    expect(inputs.legs.map((leg) => leg.label)).toEqual(["$152.5C 2026-10-16", "$45P 2026-10-16"]);
+    expect(inputs.legs.map((leg) => leg.label)).toEqual(["ABC $152.5 Call · 16 Oct (9DTE)", "ABC $45 Put · 16 Oct (9DTE)"]);
     expect(inputs.legs.map((leg) => leg.entryPrice)).toEqual([1.2, 2.5]);
     expect(inputs.contracts).toEqual([
       { key: "stock", contract: { key: "stock", legType: "stock", symbol: "ABC" } },
       { key: "leg-call", contract: { key: "leg-call", legType: "option", symbol: "ABC", expiry: "20261016", strike: 152.5, right: OptionType.Call } },
       { key: "leg-put", contract: { key: "leg-put", legType: "option", symbol: "ABC", expiry: "20261016", strike: 45, right: OptionType.Put } },
     ]);
+  });
+
+  it("labels a leg on its expiry day 0DTE, and never a negative DTE once the expiry has passed", async () => {
+    seedPosition([shortCallLegRow]);
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-16T15:00:00Z") });
+    expect((await loadCloseLiveInputs("pos-1"))!.legs[0]!.label).toBe("ABC $152.5 Call · 16 Oct (0DTE)");
+    vi.setSystemTime(new Date("2026-10-19T15:00:00Z"));
+    expect((await loadCloseLiveInputs("pos-1"))!.legs[0]!.label).toBe("ABC $152.5 Call · 16 Oct (0DTE)");
   });
 
   it("a covered call yields the stock contract once (shared by the stock leg) plus the option contract", async () => {
@@ -320,14 +329,14 @@ describe("evaluateCloseGateForPosition fails closed", () => {
   });
 
   it("never reports 'waiting' as the final answer: quotes that stay incomplete past the grace are a real block naming every missing leg", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ now: new Date("2026-10-07T15:00:00Z") });
     seedPosition([stockLegRow, shortCallLegRow, shortPutLegRow]);
     deliverQuotesOnSubscribe({ stock: pooledQuote({ bid: 59.9, ask: 60.1, last: 60 }) });
     const resultPromise = evaluateCloseGateForPosition("pos-1");
     await vi.advanceTimersByTimeAsync(settleGraceMs);
     const verdict = await resultPromise;
     expect(verdict.blocked).toBe(true);
-    expect(verdict.reason).toBe("Live bid/ask is unavailable for $152.5C 2026-10-16, $45P 2026-10-16. Closing needs live prices.");
+    expect(verdict.reason).toBe("Live bid/ask is unavailable for ABC $152.5 Call · 16 Oct (9DTE), ABC $45 Put · 16 Oct (9DTE). Closing needs live prices.");
   });
 
   it("blocks when a leg has only one side of the market", async () => {

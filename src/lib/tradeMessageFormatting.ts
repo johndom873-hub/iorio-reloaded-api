@@ -1,6 +1,9 @@
 // Plain-text pieces shared by every Telegram message that describes a trade: Genosuke's order follow-up, the trading-events
 // catch-all (orderTelegramNotices.ts, positionTelegramNotices.ts) and Genosuke's confirmation cards.
 
+import { easternIsoDate } from "./easternIsoDate.js";
+import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "./optionContractLabel.js";
+
 const strategyLabels: Record<string, string> = {
   covered_call: "covered call",
   cash_secured_put: "cash-secured put",
@@ -33,14 +36,29 @@ export interface TradeLineContract {
   expiryDate: string | null;
 }
 
-/** "1 put $180 exp 2026-10-17" or "100 shares". */
-export function describeTradeContract(contract: TradeLineContract): string {
+/**
+ * The platform's contract wording without the symbol (the message's headline names it): "$180 Put · 17 Oct (9DTE) · 1×",
+ * or "100 shares". DTE counts from `todayIso` and is left out once the expiry has passed.
+ */
+export function describeTradeContract(contract: TradeLineContract, todayIso = easternIsoDate(new Date())): string {
   if (contract.legType === "stock") return `${contract.quantity} shares`;
-  return `${contract.quantity} ${contract.optionType} $${contract.strikePrice} exp ${contract.expiryDate ? toIsoExpiry(contract.expiryDate) : "?"}`;
+  const right = contract.optionType ?? "put";
+  const expiry = contract.expiryDate ? toIsoExpiry(contract.expiryDate) : null;
+  const readableExpiry = expiry && /^\d{4}-\d{2}-\d{2}$/.test(expiry) ? expiry : null;
+  const dte = readableExpiry ? daysToExpiry(readableExpiry, todayIso) : null;
+  if (contract.strikePrice !== null && readableExpiry) return `${describeOptionContract({ strike: contract.strikePrice, right, expiry: readableExpiry, dte: dte !== null && dte >= 0 ? dte : null })} · ${contract.quantity}×`;
+  // A leg missing its strike or a readable expiry: what is known, in the same order.
+  const date = readableExpiry ? ` · ${formatDayMonth(readableExpiry)}` : expiry ? ` · ${expiry}` : "";
+  return `${contract.strikePrice === null ? "?" : formatStrike(contract.strikePrice)} ${right === "call" ? "Call" : "Put"}${date} · ${contract.quantity}×`;
 }
 
-/** "• SELL 1 put $180 exp 2026-10-17 at 1.25" — a fill, or a position leg at its entry/exit price. A null price reads "price unknown". */
-export function describeTradeLine(action: string, contract: TradeLineContract, price: number | null): string {
-  const priceText = price === null ? "price unknown" : `at ${formatTradePrice(price)}`;
-  return `• ${action.toUpperCase()} ${describeTradeContract(contract)} ${priceText}`;
+/** "• Sell $180 Put · 17 Oct (9DTE) · 1× @ 1.25", "• Buy 100 shares @ 45.10" — a fill, or a position leg at its entry/exit price. A null price reads "price unknown". */
+export function describeTradeLine(action: string, contract: TradeLineContract, price: number | null, todayIso = easternIsoDate(new Date())): string {
+  const priceText = price === null ? " (price unknown)" : ` @ ${formatTradePrice(price)}`;
+  return `• ${tradeVerb(action)} ${describeTradeContract(contract, todayIso)}${priceText}`;
+}
+
+/** "SELL" → "Sell", "BUY" → "Buy". */
+export function tradeVerb(action: string): string {
+  return action.charAt(0).toUpperCase() + action.slice(1).toLowerCase();
 }

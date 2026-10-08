@@ -1,6 +1,8 @@
 import { OrderAction } from "@stoqey/ib";
 import knexLibrary, { type Knex } from "knex";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { easternIsoDate } from "./easternIsoDate.js";
+import { daysToExpiry } from "./optionContractLabel.js";
 import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import type { OrderFill } from "./orderFills.js";
 
@@ -71,6 +73,15 @@ function fakeDependencies(rows: Row[], options: { fills?: Record<string, OrderFi
 }
 
 describe("sendDueOrderTelegramNotices (fakes)", () => {
+  // The contract wording counts days to expiry from today's Eastern date: pin it to the pass time.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: passNow });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("one undelivered order does not hold back the others, and stays unmarked", async () => {
     const rows: Row[] = [
       { ...notice({ id: "a" }), updatedAt: new Date(passNow) },
@@ -115,7 +126,7 @@ describe("sendDueOrderTelegramNotices (fakes)", () => {
     const sellFill: OrderFill = { side: "sell", quantity: 1, price: 1.25, optionType: "put", strikePrice: 50, expiryDate: "2031-10-17" };
     const complete = fakeDependencies([roll], { fills: { roll: [buyBackFill, sellFill] } });
     expect(await sendDueOrderTelegramNotices(complete.dependencies)).toBe(1);
-    expect(complete.sent[0]).toBe("✅ AUD roll filled (Marce, web):\n• BUY 1 put $52 exp 2031-10-10 at 0.50\n• SELL 1 put $50 exp 2031-10-17 at 1.25");
+    expect(complete.sent[0]).toBe("✅ AUD roll filled (Marce, web):\n• Buy $52 Put · 10 Oct (1829DTE) · 1× @ 0.50\n• Sell $50 Put · 17 Oct (1836DTE) · 1× @ 1.25");
   });
 
   // After the 5-minute wait a "filled" roll whose new leg's fill was never recorded goes out with the fills it has.
@@ -123,7 +134,7 @@ describe("sendDueOrderTelegramNotices (fakes)", () => {
     const roll: Row = { ...notice({ id: "roll", status: "filled", requestType: "roll_leg", legs: [buyBackPut, sellPut] }), updatedAt: new Date(passNow - 6 * 60_000) };
     const fake = fakeDependencies([roll], { fills: { roll: [buyBackFill] } });
     expect(await sendDueOrderTelegramNotices(fake.dependencies)).toBe(1);
-    expect(fake.sent[0]).toBe("✅ AUD roll filled (Marce, web):\n• BUY 1 put $52 exp 2031-10-10 at 0.50\n(some fills not recorded yet)");
+    expect(fake.sent[0]).toBe("✅ AUD roll filled (Marce, web):\n• Buy $52 Put · 10 Oct (1829DTE) · 1× @ 0.50\n(some fills not recorded yet)");
   });
 
   it("a mark that fails after a delivered send means the next pass sends the same message again (accepted duplicate)", async () => {
@@ -141,17 +152,26 @@ describe("sendDueOrderTelegramNotices (fakes)", () => {
 });
 
 describe("describeOrderTelegramNotice (corner cases)", () => {
-  it("a covered-call buy-write shows both legs and one net debit (stock price minus call premium)", () => {
+  // The contract wording counts days to expiry from today's Eastern date: pin it to the pass time.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: passNow });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a covered-call opening (stock plus call) shows both legs and one net debit (stock price minus call premium)", () => {
     const buyStock: OrderLegPayload = { role: "stock", action: OrderAction.BUY, symbol: "AUD", quantity: 100, unitPrice: 50.1 };
     const sellCall: OrderLegPayload = { ...sellPut, right: "C", strike: 55, unitPrice: 1.35 };
     expect(describeOrderTelegramNotice(notice({ requestType: "open_covered_call", legs: [buyStock, sellCall] }), [])).toBe(
-      "⏳ AUD order working at IBKR (Marce, web):\n• BUY 100 shares\n• SELL 1 call $55 exp 2031-10-17\nLimit: 48.75 net debit",
+      "⏳ AUD order working at IBKR (Marce, web):\n• Buy 100 shares\n• Sell $55 Call · 17 Oct (1836DTE) · 1×\nLimit: 48.75 net debit",
     );
   });
 
   it("a single stock leg (closing leftover shares) shows its limit", () => {
     const sellStock: OrderLegPayload = { role: "stock", action: OrderAction.SELL, symbol: "AUD", quantity: 100, unitPrice: 49 };
-    expect(describeOrderTelegramNotice(notice({ requestType: "close_position", legs: [sellStock] }), [])).toBe("⏳ AUD order working at IBKR (Marce, web):\n• SELL 100 shares, limit 49.00");
+    expect(describeOrderTelegramNotice(notice({ requestType: "close_position", legs: [sellStock] }), [])).toBe("⏳ AUD order working at IBKR (Marce, web):\n• Sell 100 shares @ 49.00 limit");
   });
 
   it("a combo whose legs net to zero says 'net' with no direction", () => {
@@ -160,7 +180,7 @@ describe("describeOrderTelegramNotice (corner cases)", () => {
 
   it("a cancelled-after-partial order cancelled by a user names them", () => {
     expect(describeOrderTelegramNotice(notice({ status: "cancelled_partially_filled", cancelledByDisplayName: "Juan" }), [buyBackFill])).toBe(
-      "⚠️ AUD order cancelled by Juan after partly filling:\n• SELL 1 put $50 exp 2031-10-17, limit 1.25\nFilled:\n• BUY 1 put $52 exp 2031-10-10 at 0.50",
+      "⚠️ AUD order cancelled by Juan after partly filling:\n• Sell $50 Put · 17 Oct (1836DTE) · 1× @ 1.25 limit\nFilled:\n• Buy $52 Put · 10 Oct (1829DTE) · 1× @ 0.50",
     );
   });
 });
@@ -281,7 +301,11 @@ describe("order Telegram notices against the test database", () => {
     const newLeg = await createLeg({});
     await insertTrade(roll, newLeg, { ibkr_exec_id: `g1-${stamp}-r2` });
     expect(await sendDueOrderTelegramNotices(wired)).toBe(1);
-    expect(sends).toEqual(["✅ AUD roll filled (G1 Web, web):\n• BUY 1 put $52 exp 2031-10-10 at 0.50\n• SELL 1 put $50 exp 2031-10-17 at 1.25"]);
+    // The real loaders run on the real clock: DTE counts from today's Eastern date.
+    const today = easternIsoDate(new Date());
+    expect(sends).toEqual([
+      `✅ AUD roll filled (G1 Web, web):\n• Buy $52 Put · 10 Oct (${daysToExpiry("2031-10-10", today)}DTE) · 1× @ 0.50\n• Sell $50 Put · 17 Oct (${daysToExpiry("2031-10-17", today)}DTE) · 1× @ 1.25`,
+    ]);
     expect((await testDb("order_requests").where({ id: roll }).first("telegram_notified_status")).telegram_notified_status).toBe("filled");
     expect(await sendDueOrderTelegramNotices(wired)).toBe(0);
     expect(telegram.notifyTelegram).not.toHaveBeenCalled();

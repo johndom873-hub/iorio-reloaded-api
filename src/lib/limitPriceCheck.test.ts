@@ -111,8 +111,13 @@ describe("evaluateLimitPrices fails closed without a usable two-sided quote", ()
 
 describe("describeOrderLegForPriceCheck", () => {
   it("reads an option leg with its date and a stock leg with its share count", () => {
-    expect(describeOrderLegForPriceCheck({ role: "option", action: "SELL", symbol: "AAOI", quantity: 2, strike: 100, expiry: "20261120", right: "P" })).toBe("SELL 2 AAOI 2026-11-20 $100 put");
-    expect(describeOrderLegForPriceCheck({ role: "option", action: "BUY", symbol: "AAOI", quantity: 1, strike: 55.5, expiry: "20261016", right: "C" })).toBe("BUY 1 AAOI 2026-10-16 $55.5 call");
-    expect(describeOrderLegForPriceCheck({ role: "stock", action: "BUY", symbol: "AAOI", quantity: 200 })).toBe("BUY 200 AAOI shares");
+    expect(describeOrderLegForPriceCheck({ role: "option", action: "SELL", symbol: "AAOI", quantity: 2, strike: 100, expiry: "20261120", right: "P" }, "2026-10-08")).toBe("AAOI Sell $100 Put · 20 Nov (43DTE) · 2×");
+    expect(describeOrderLegForPriceCheck({ role: "option", action: "BUY", symbol: "AAOI", quantity: 1, strike: 55.5, expiry: "20261016", right: "C" }, "2026-10-08")).toBe("AAOI Buy $55.5 Call · 16 Oct (8DTE) · 1×");
+    expect(describeOrderLegForPriceCheck({ role: "stock", action: "BUY", symbol: "AAOI", quantity: 200 }, "2026-10-08")).toBe("AAOI Buy 200 shares");
+  });
+  it("leaves a passed expiry's DTE out and reads a leg missing its strike or a readable expiry with what is known", () => {
+    expect(describeOrderLegForPriceCheck({ role: "option", action: "SELL", symbol: "X", quantity: 1, strike: 5, expiry: "20261001", right: "P" }, "2026-10-07")).toBe("X Sell $5 Put · 1 Oct · 1×");
+    expect(describeOrderLegForPriceCheck({ role: "option", action: "SELL", symbol: "X", quantity: 1, expiry: "20261016", right: "C" }, "2026-10-07")).toBe("X Sell ? Call · 2026-10-16 · 1×");
+    expect(describeOrderLegForPriceCheck({ role: "option", action: "SELL", symbol: "X", quantity: 1, strike: 5, expiry: "garbage", right: "C" }, "2026-10-07")).toBe("X Sell $5 Call · garbage · 1×");
   });
 });

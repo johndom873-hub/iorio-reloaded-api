@@ -6,6 +6,7 @@ import { loadCycleInputsForTickers, type SymbolCycleInput } from "./cycleQueries
 import { deriveCloseLiveState, type CloseLiveLeg, type CloseLiveQuote, type CloseLiveState } from "./closeLiveState.js";
 import { computeMarketSessionStatus, type MarketSessionState } from "./marketSessionStatus.js";
 import { easternIsoDate } from "./easternIsoDate.js";
+import { daysToExpiry, describeOptionContract } from "./optionContractLabel.js";
 
 // Server-side close gate (gap fix 4 for Pluto, 2026-09-28). The Close form's live stream
 // (routes/positionCloseLive.ts) already derives "may this position be closed right now" —
@@ -74,7 +75,7 @@ export async function loadCloseLiveInputs(positionId: string): Promise<CloseLive
     quantity: leg.quantity,
     multiplier: leg.multiplier,
     entryPrice: Number(leg.entryPrice),
-    label: leg.legType === "stock" ? `${symbol} stock` : `$${Number(leg.strikePrice)}${leg.optionType === "call" ? "C" : "P"} ${leg.expiryLabel}`,
+    label: leg.legType === "stock" || !leg.expiryLabel ? `${symbol} ${leg.legType === "stock" ? "stock" : `$${Number(leg.strikePrice)} ${leg.optionType === "call" ? "Call" : "Put"}`}` : describeOptionContract({ symbol, strike: Number(leg.strikePrice), right: leg.optionType === "call" ? "C" : "P", expiry: leg.expiryLabel, dte: Math.max(0, daysToExpiry(leg.expiryLabel, easternIsoDate(new Date()))) }),
   }));
   const contracts: CloseLiveInputs["contracts"] = [
     { key: "stock", contract: { key: "stock", legType: "stock", symbol } },

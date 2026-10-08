@@ -63,13 +63,8 @@ async function createTicker(letter: string): Promise<string> {
   return ticker.id;
 }
 
-/** A calendar date relative to the database's own CURRENT_DATE, which is what the routes compare against. */
-const relativeDate = (daysFromToday: number) => testDb.raw("CURRENT_DATE + ?::int", [daysFromToday]);
-
-async function readRelativeDateIso(daysFromToday: number): Promise<string> {
-  const result = await testDb.raw("SELECT to_char(CURRENT_DATE + ?::int, 'YYYY-MM-DD') AS iso", [daysFromToday]);
-  return result.rows[0].iso;
-}
+/** A calendar date relative to today in Eastern time, which is what the routes compare against (the database's own CURRENT_DATE is a day ahead every Singapore morning). */
+const relativeDate = (daysFromToday: number) => testDb.raw("(CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + ?::int", [daysFromToday]);
 
 async function insertTickerEvent(tickerId: string, eventType: string, daysFromToday: number, extra: { eventTime?: string | null; amount?: number | null } = {}) {
   await testDb("ticker_calendar_events").insert({
@@ -123,8 +118,8 @@ describe("GET /calendar-events: ticker events", () => {
     await insertTickerEvent(tickerZulu, "ex_dividend", 0, { amount: 0.5 });
     await insertTickerEvent(tickerPast, "earnings", -1);
     await insertTickerEvent(tickerPast, "ex_dividend", -30);
-    earlierIso = await readRelativeDateIso(3);
-    laterIso = await readRelativeDateIso(5);
+    earlierIso = await readEasternDateIso(3);
+    laterIso = await readEasternDateIso(5);
   });
 
   const mine = async () => {
@@ -133,7 +128,7 @@ describe("GET /calendar-events: ticker events", () => {
   };
 
   it("lists today's and later events, soonest first and by symbol within a day, without yesterday's or older ones", async () => {
-    const todayIso = await readRelativeDateIso(0);
+    const todayIso = await readEasternDateIso(0);
     expect((await mine()).map((event: any) => [event.symbol.slice(symbolPrefix.length), event.eventType, event.eventDate])).toEqual([
       ["Z", "ex_dividend", todayIso],
       ["A", "earnings", earlierIso],
@@ -198,7 +193,7 @@ describe("GET /calendar-events/next/:symbol", () => {
 
     const response = await call(`/calendar-events/next/${symbolPrefix}N1`);
 
-    expect(response).toEqual({ status: 200, json: { nextEarningsDate: await readRelativeDateIso(12), nextExDividendDate: await readRelativeDateIso(7) } });
+    expect(response).toEqual({ status: 200, json: { nextEarningsDate: await readEasternDateIso(12), nextExDividendDate: await readEasternDateIso(7) } });
     expect(captureTickerCalendarEventsMock).not.toHaveBeenCalled();
   });
 
@@ -206,7 +201,7 @@ describe("GET /calendar-events/next/:symbol", () => {
     const tickerId = await createTicker("N2");
     await insertTickerEvent(tickerId, "earnings", 0);
     await insertTickerEvent(tickerId, "ex_dividend", 1);
-    expect((await call(`/calendar-events/next/${symbolPrefix}N2`)).json).toEqual({ nextEarningsDate: await readRelativeDateIso(0), nextExDividendDate: await readRelativeDateIso(1) });
+    expect((await call(`/calendar-events/next/${symbolPrefix}N2`)).json).toEqual({ nextEarningsDate: await readEasternDateIso(0), nextExDividendDate: await readEasternDateIso(1) });
   });
 
   it("looks the symbol up in upper case", async () => {
@@ -214,7 +209,7 @@ describe("GET /calendar-events/next/:symbol", () => {
     await insertTickerEvent(tickerId, "earnings", 4);
     const response = await call(`/calendar-events/next/${symbolPrefix.toLowerCase()}n3`);
     expect(response.status).toBe(200);
-    expect(response.json.nextEarningsDate).toBe(await readRelativeDateIso(4));
+    expect(response.json.nextEarningsDate).toBe(await readEasternDateIso(4));
   });
 
   it("an unknown ticker is a 404 naming it in upper case, with no capture attempt", async () => {
@@ -226,7 +221,7 @@ describe("GET /calendar-events/next/:symbol", () => {
     const tickerId = await createTicker("N4");
     await insertTickerEvent(tickerId, "earnings", 20);
     const response = await call(`/calendar-events/next/${symbolPrefix}N4`);
-    expect(response.json).toEqual({ nextEarningsDate: await readRelativeDateIso(20), nextExDividendDate: null });
+    expect(response.json).toEqual({ nextEarningsDate: await readEasternDateIso(20), nextExDividendDate: null });
     expect(captureTickerCalendarEventsMock).not.toHaveBeenCalled();
   });
 
@@ -250,7 +245,7 @@ describe("GET /calendar-events/next/:symbol", () => {
 
     expect(captureTickerCalendarEventsMock).toHaveBeenCalledTimes(1);
     expect(captureTickerCalendarEventsMock).toHaveBeenCalledWith(tickerId, `${symbolPrefix}N6`);
-    expect(response).toEqual({ status: 200, json: { nextEarningsDate: await readRelativeDateIso(33), nextExDividendDate: await readRelativeDateIso(21) } });
+    expect(response).toEqual({ status: 200, json: { nextEarningsDate: await readEasternDateIso(33), nextExDividendDate: await readEasternDateIso(21) } });
   });
 
   it("a capture that finds nothing leaves both dates null", async () => {
