@@ -33,7 +33,7 @@ import { saveOptionChainSnapshot } from "../lib/optionChainSnapshotStore.js";
 import { fitAndStoreSurfacesForDate } from "../lib/optionSurfaceStore.js";
 import { excludeTickersBeingPrepared } from "../lib/tickersBeingPrepared.js";
 import { signalsEnabledShortlistTickerIdsQuery } from "../lib/shortlistQueries.js";
-import { describeMarketDataLineShortage, releaseMarketDataLines, renewMarketDataLineReservation, reserveMarketDataLines, type LineReservationResult } from "./marketDataLineBudget.js";
+import { describeMarketDataLineShortage, loadActiveMarketDataLineReservations, releaseMarketDataLines, renewMarketDataLineReservation, reserveMarketDataLines, totalMarketDataLineBudget, type LineReservationResult } from "./marketDataLineBudget.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 
 // The job holds ONE priority reservation for its whole run (approved
@@ -58,16 +58,40 @@ export function describeCaptureLineUsage(heading: string, inFlight: number | nul
     `${heading}: lines ${inFlight === null ? "" : `${inFlight}/${optionChainCaptureBatchSize} now, `}min ${stats.minInFlight ?? "—"} max ${stats.maxInFlight ?? "—"} over ${seconds(stats.intervalMs)}, ` +
     `${describeLineUsage(stats.lineUsage)}; ${released} released, held p50 ${seconds(stats.holdMsP50)} p90 ${seconds(stats.holdMsP90)} max ${seconds(stats.holdMsMax)}; ` +
     `after first reply p50/p90: price ${afterReply("price")}, delta ${afterReply("delta")}, OI ${afterReply("openInterest")}; ` +
-    `${stats.settled} full data (waited last on ${fields(stats.lastField)}), ` +
+    `${stats.settled} full data (waited last on ${fields(stats.lastField)}; ${stats.settledWithoutMarket} with "no data" on a side), ` +
     `${stats.timedOut} timed out holding ${seconds(stats.timedOutLineMs)} of line time (missing ${fields(stats.missingOnTimeout)}), ${stats.errored} errored.`
   );
 }
 const captureLineReservationTtlSeconds = 180;
 const captureLineReservationRenewIntervalMs = 60_000;
 // The live pool re-checks the budget every 15 s (marketDataPool.ts) and
-// pauses subscriptions to make room; the first batch waits this long after
-// the reservation so it never competes with lines that are still being shed.
+// pauses subscriptions to make room. After reserving, the capture waits until
+// every active reservation (its own included) fits the budget, i.e. the pool
+// has shed, checking every second (2026-10-08; a fixed 20 s wait before) —
+// usually no wait at all, since the pool only sheds when it holds more than
+// what is left — and never longer than this.
 const poolSheddingGraceMs = 20_000;
+const poolSheddingPollIntervalMs = 1_000;
+
+/** Waits until the active line reservations fit the budget, or the grace runs out; a failed ledger read just keeps waiting. */
+export async function waitForLinesToFitBudget(
+  dependencies: { loadReservations: () => Promise<{ holder: string; lines: number }[]>; sleep: (milliseconds: number) => Promise<void>; now: () => number },
+  maximumWaitMs: number = poolSheddingGraceMs,
+): Promise<{ waitedMs: number; fits: boolean }> {
+  const startedAt = dependencies.now();
+  for (;;) {
+    let reservedLines: number | null = null;
+    try {
+      reservedLines = (await dependencies.loadReservations()).reduce((sum, reservation) => sum + reservation.lines, 0);
+    } catch {
+      reservedLines = null;
+    }
+    const waitedMs = dependencies.now() - startedAt;
+    if (reservedLines !== null && reservedLines <= totalMarketDataLineBudget) return { waitedMs, fits: true };
+    if (waitedMs >= maximumWaitMs) return { waitedMs, fits: false };
+    await dependencies.sleep(Math.min(poolSheddingPollIntervalMs, maximumWaitMs - waitedMs));
+  }
+}
 
 // Nightly option-chain archive (IORIO Signal Engine, Phase 0). One rolling
 // window of optionChainCaptureBatchSize lines across every ticker's contracts
@@ -370,7 +394,10 @@ const defaultCaptureDependencies: OptionChainCaptureDependencies = {
     renew: renewMarketDataLineReservation,
     release: releaseMarketDataLines,
   },
-  waitForPoolShedding: () => new Promise((resolve) => setTimeout(resolve, poolSheddingGraceMs)),
+  waitForPoolShedding: async () => {
+    const { waitedMs, fits } = await waitForLinesToFitBudget({ loadReservations: loadActiveMarketDataLineReservations, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)), now: Date.now });
+    console.log(fits ? `Capture: line reservations fit the budget after ${(waitedMs / 1000).toFixed(1)}s.` : `Capture: line reservations still over the budget after ${(waitedMs / 1000).toFixed(1)}s; starting anyway.`);
+  },
 };
 
 export interface OptionChainCaptureOptions {

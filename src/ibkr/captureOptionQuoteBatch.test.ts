@@ -83,6 +83,51 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
     window.close();
   });
 
+  it("settles on IBKR's \"no data\" for a side once delta and open interest are in, instead of waiting out the timeout for a two-sided price", async () => {
+    vi.useFakeTimers();
+    try {
+      const ib = new FakeIb();
+      const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 1, timeoutMs: 8_000 });
+      const pending = window.capture("TEST", [put100]);
+      const reqId = ib.reqIdForContract(0);
+      ib.emit(EventName.tickPrice, reqId, 1, -1, {}); // no bid
+      ib.emit(EventName.tickPrice, reqId, 2, 0.15, {});
+      ib.emit(EventName.tickOptionComputation, reqId, 13, 0, 1.2, -0.02, 0.07, 0, 0.001, 0.01, -0.01, 101);
+      expect(ib.cancelMktData).not.toHaveBeenCalled(); // still waiting for open interest
+      ib.emit(EventName.tickSize, reqId, 28, 12);
+      const quotes = await pending;
+      expect(quotes[0]).toMatchObject({ bid: null, ask: 0.15, delta: -0.02, openInterest: 12 });
+      expect(window.wholeRunSettleStats()).toMatchObject({ settled: 1, timedOut: 0, settledWithoutMarket: 1 });
+      window.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts the timeout from IBKR's first tick, and releases a contract IBKR never answers that long after its request", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const ib = new FakeIb();
+      const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 2, timeoutMs: 8_000 });
+      const pending = window.capture("TEST", [put100, call105]);
+      const [answered, silent] = [ib.reqIdForContract(0), ib.reqIdForContract(1)];
+      await vi.advanceTimersByTimeAsync(3_000);
+      ib.emit(EventName.tickPrice, answered, 1, 1.1, {}); // first tick at 3 s: its 8 s now run to 11 s
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(ib.cancelMktData.mock.calls.map((call) => call[0])).toEqual([silent]); // released at 8 s, never answered
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(ib.cancelMktData).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ib.cancelMktData.mock.calls.map((call) => call[0])).toEqual([silent, answered]);
+      await pending;
+      expect(window.wholeRunSettleStats()).toMatchObject({ timedOut: 2, holdMsMax: 11_000, lineUsage: { releasedUnanswered: 1, firstReplyMsP50: 3_000 } });
+      window.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("close() cancels in-flight lines, resolves open captures with what they have, and detaches every listener", async () => {
     const ib = new FakeIb();
     const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 1, timeoutMs: 5_000 });
@@ -121,26 +166,27 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
       for (const reqId of [first, second]) ib.emit(EventName.tickOptionComputation, reqId, 13, 0, 0.6, -0.3, 1.1, 0, 0.04, 0.09, -0.05, 101);
       await vi.advanceTimersByTimeAsync(3_000);
       ib.emit(EventName.tickSize, first, 28, 1520); // open interest arrives last; the second contract never gets it
-      await vi.advanceTimersByTimeAsync(4_000); // the second contract's 8 s timeout
+      await vi.advanceTimersByTimeAsync(4_500); // the second contract's timeout: 8 s after its first tick at 0.5 s
       await pending;
       const expected = {
-        intervalMs: 8_000,
+        intervalMs: 8_500,
         minInFlight: 0,
         maxInFlight: 2,
-        lineBusyMs: 12_000,
-        timedOutLineMs: 8_000,
+        lineBusyMs: 12_500,
+        timedOutLineMs: 8_500,
         settled: 1,
         timedOut: 1,
         errored: 0,
+        settledWithoutMarket: 0,
         holdMsP50: 4_000,
-        holdMsP90: 8_000,
-        holdMsMax: 8_000,
+        holdMsP90: 8_500,
+        holdMsMax: 8_500,
         lastField: { price: 0, delta: 0, openInterest: 1 },
         missingOnTimeout: { price: 0, delta: 0, openInterest: 1 },
         // After the first tick (500 ms): prices at once, delta 500 ms later, OI 3.5 s later (first contract only).
         afterFirstReplyMs: { price: { p50: 0, p90: 0 }, delta: { p50: 500, p90: 500 }, openInterest: { p50: 3_500, p90: 3_500 } },
-        // 2 lines for 4 s then 1 for 4 s; answered from 500 ms; 2 subscribes + 2 cancels over 8 s.
-        lineUsage: { periodMs: 8_000, averageSubscribed: 1.5, averageAnswered: 1.375, messagesPerSecond: 0.5, released: 2, releasedUnanswered: 0, firstReplyMsP50: 500, firstReplyMsP90: 500, holdMsP50: 4_000, holdMsP90: 8_000 },
+        // 2 lines for 4 s then 1 for 4.5 s; answered from 500 ms; 2 subscribes + 2 cancels over 8.5 s.
+        lineUsage: { periodMs: 8_500, averageSubscribed: 12_500 / 8_500, averageAnswered: 11_500 / 8_500, messagesPerSecond: 4_000 / 8_500, released: 2, releasedUnanswered: 0, firstReplyMsP50: 500, firstReplyMsP90: 500, holdMsP50: 4_000, holdMsP90: 8_500 },
       };
       expect(window.drainSettleStats()).toEqual(expected);
       expect(window.drainSettleStats()).toMatchObject({ settled: 0, timedOut: 0, lineBusyMs: 0, holdMsP50: null, minInFlight: 0, maxInFlight: 0 });

@@ -82,10 +82,14 @@ export interface CapturedOptionQuote extends OptionContractRequest {
   errorCode: number | null;
 }
 
-/** Default: a price (two-sided or last), a model delta and an open-interest reading, or an error that means no data is coming. */
-export function isOptionQuoteSettledByDefault(quote: CapturedOptionQuote): boolean {
+/**
+ * Default: a price (two-sided or last), a model delta and an open-interest reading, or an error that means no data is coming.
+ * IBKR's explicit "no data" (-1 or 0) on the bid or ask also settles the price: no two-sided quote is coming, so the line
+ * stops waiting for one and only waits for delta and open interest (approved 2026-10-08).
+ */
+export function isOptionQuoteSettledByDefault(quote: CapturedOptionQuote, noMarketOnASide = false): boolean {
   if (quote.errorCode !== null) return true;
-  const hasPrice = (quote.bid !== null && quote.ask !== null) || quote.last !== null;
+  const hasPrice = (quote.bid !== null && quote.ask !== null) || quote.last !== null || noMarketOnASide;
   return hasPrice && quote.delta !== null && quote.openInterest !== null;
 }
 
@@ -134,9 +138,13 @@ function normalizeModelPrice(value: number | undefined): number | null {
 export interface CaptureQuoteWindowOptions {
   /** Lines kept in flight — the caller's line reservation must cover this many. */
   concurrency: number;
-  /** Per-contract safety net; a contract that never settles is reported after this long. */
+  /**
+   * Per-contract safety net, counted from IBKR's first tick for the contract (approved 2026-10-08), so time spent in our
+   * own outgoing message queue does not eat into it; a contract IBKR never answers is released this long after its request.
+   */
   timeoutMs?: number;
-  isSettled?: (quote: CapturedOptionQuote) => boolean;
+  /** `noMarketOnASide`: IBKR answered "no data" (-1 or 0) on the bid or ask. */
+  isSettled?: (quote: CapturedOptionQuote, noMarketOnASide: boolean) => boolean;
 }
 
 export interface CaptureQuoteWindow {
@@ -182,6 +190,8 @@ export interface CaptureSettleStats {
   lastField: Record<SettleField, number>;
   /** On timed-out contracts, the fields that never arrived. */
   missingOnTimeout: Record<SettleField, number>;
+  /** Full-data contracts settled with no two-sided quote or last because IBKR answered "no data" on a side. */
+  settledWithoutMarket: number;
   /** Each settle field's arrival after IBKR's first tick for the contract (IBKR's own delay, without our queue wait). */
   afterFirstReplyMs: Record<SettleField, { p50: number | null; p90: number | null }>;
   /** Time-weighted subscribed vs answered lines, message rate and the wait for IBKR's first tick (lineUsageMeter.ts). */
@@ -202,6 +212,8 @@ interface WindowPending {
   subscribedAt: number;
   /** IBKR's first tick of any kind for the contract (ms since epoch), for drainSettleStats. */
   firstTickAt: number | null;
+  /** IBKR answered "no data" (-1 or 0) on the bid or ask. */
+  noMarketOnASide: boolean;
   /** When each settle field first arrived (ms since epoch), for drainSettleStats. */
   arrivedAt: Record<SettleField, number | null>;
 }
@@ -247,6 +259,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     settled: 0,
     timedOut: 0,
     errored: 0,
+    settledWithoutMarket: 0,
     lastField: emptyFieldCounts(),
     missingOnTimeout: emptyFieldCounts(),
     afterFirstReplyMs: { price: [] as number[], delta: [] as number[], openInterest: [] as number[] },
@@ -277,6 +290,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       settled: stats.settled,
       timedOut: stats.timedOut,
       errored: stats.errored,
+      settledWithoutMarket: stats.settledWithoutMarket,
       holdMsP50: percentileOfSorted(sortedHolds, 50),
       holdMsP90: percentileOfSorted(sortedHolds, 90),
       holdMsMax: sortedHolds.at(-1) ?? null,
@@ -310,14 +324,18 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       } else {
         stats.settled += 1;
         stats.lastField[lastField] += 1;
+        if (entry.quote.last === null && (entry.quote.bid === null || entry.quote.ask === null)) stats.settledWithoutMarket += 1;
       }
     }
   }
 
+  // The first tick restarts the timeout: until then the contract was on the no-reply clock started at its request.
   function noteFirstTick(reqId: number, entry: WindowPending): void {
     if (entry.firstTickAt !== null) return;
     entry.firstTickAt = Date.now();
     meter.answered(reqId);
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => settle(reqId, true), timeoutMs);
   }
 
   function markTick(quote: CapturedOptionQuote, tickType: number): void {
@@ -348,7 +366,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     const entry = pending.get(reqId);
     if (!entry) return;
     noteArrivals(entry);
-    if (isSettled(entry.quote)) settle(reqId);
+    if (isSettled(entry.quote, entry.noMarketOnASide)) settle(reqId);
   }
 
   function pump(): void {
@@ -364,7 +382,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       const reqId = nextReqIdFor(ib, () => nextFallbackReqId++);
       const quote = emptyCapturedQuote(contract);
       group.quotes.push(quote);
-      pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId, true), timeoutMs), subscribedAt: Date.now(), firstTickAt: null, arrivedAt: { price: null, delta: null, openInterest: null } });
+      pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId, true), timeoutMs), subscribedAt: Date.now(), firstTickAt: null, noMarketOnASide: false, arrivedAt: { price: null, delta: null, openInterest: null } });
       meter.subscribed(reqId);
       const right = contract.right === "C" ? OptionType.Call : OptionType.Put;
       try {
@@ -384,6 +402,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     markTick(entry.quote, tickType);
     if (bidPriceTicks.has(tickType)) entry.quote.bid = normalizePrice(price);
     if (askPriceTicks.has(tickType)) entry.quote.ask = normalizePrice(price);
+    if ((bidPriceTicks.has(tickType) || askPriceTicks.has(tickType)) && !(price > 0)) entry.noMarketOnASide = true;
     if (lastPriceTicks.has(tickType)) entry.quote.last = normalizePrice(price);
     checkSettled(reqId);
   }

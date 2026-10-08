@@ -31,7 +31,7 @@ import type { MarketDataFeedRefusal } from "../lib/notificationChannel.js";
 // issued — until then the pool only warned on a failed reservation and kept
 // subscribing, so it could silently exceed the budget. When the budget hands
 // the pool fewer lines than it has contracts (the 10:00 ET chain capture
-// holding its 50-line priority reservation), the pool SHEDS to fit: paused
+// holding its priority reservation), the pool SHEDS to fit: paused
 // subscriptions keep their subscribers and last values, stop ticking, and
 // resume by themselves once lines free up (planPoolCapacity decides which).
 //

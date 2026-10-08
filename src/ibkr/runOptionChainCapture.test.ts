@@ -27,6 +27,7 @@ const emptySettleStats = () => ({
   settled: 0,
   timedOut: 0,
   errored: 0,
+  settledWithoutMarket: 0,
   holdMsP50: null,
   holdMsP90: null,
   holdMsMax: null,
@@ -220,7 +221,7 @@ describe("runOptionChainCapture", () => {
     });
     await runOptionChainCapture(undefined, { ...dependencies, waitForPoolShedding, connect });
     expect(order).toEqual(["reserve", "wait", "connect"]);
-    expect(lineReservation.reserve).toHaveBeenCalledWith("optionChainCapture", 50, expect.any(Number));
+    expect(lineReservation.reserve).toHaveBeenCalledWith("optionChainCapture", 30, expect.any(Number));
     expect(lineReservation.release).toHaveBeenCalledWith("optionChainCapture");
 
     const failing = runDependencies({
@@ -513,30 +514,73 @@ describe("runOptionChainCapture", () => {
   });
 });
 
+describe("waitForLinesToFitBudget", () => {
+  function ledger(totals: (number | Error)[]) {
+    let nowMs = 0;
+    const sleeps: number[] = [];
+    return {
+      sleeps,
+      dependencies: {
+        loadReservations: async () => {
+          const next = totals.length > 1 ? totals.shift()! : totals[0]!;
+          if (next instanceof Error) throw next;
+          return [{ holder: "optionChainCapture", lines: 30 }, { holder: "marketDataPool", lines: next - 30 }];
+        },
+        sleep: async (milliseconds: number) => {
+          sleeps.push(milliseconds);
+          nowMs += milliseconds;
+        },
+        now: () => nowMs,
+      },
+    };
+  }
+
+  it("starts at once when every reservation already fits the budget", async () => {
+    const { waitForLinesToFitBudget } = await import("./runOptionChainCapture.js");
+    const { dependencies, sleeps } = ledger([72]);
+    await expect(waitForLinesToFitBudget(dependencies)).resolves.toEqual({ waitedMs: 0, fits: true });
+    expect(sleeps).toEqual([]);
+  });
+
+  it("checks every second until the live pool has shed, and keeps checking through a failed read", async () => {
+    const { waitForLinesToFitBudget } = await import("./runOptionChainCapture.js");
+    const { dependencies } = ledger([110, new Error("db hiccup"), 110, 90]);
+    await expect(waitForLinesToFitBudget(dependencies)).resolves.toEqual({ waitedMs: 3_000, fits: true });
+  });
+
+  it("gives up after the grace and reports that the lines still do not fit", async () => {
+    const { waitForLinesToFitBudget } = await import("./runOptionChainCapture.js");
+    const { dependencies, sleeps } = ledger([110]);
+    await expect(waitForLinesToFitBudget(dependencies, 2_500)).resolves.toEqual({ waitedMs: 2_500, fits: false });
+    expect(sleeps).toEqual([1_000, 1_000, 500]);
+  });
+});
+
 describe("describeCaptureLineUsage", () => {
   it("reports lines subscribed and answered, the message rate, the wait for IBKR, hold times, field arrival and where line time went", async () => {
     const { describeCaptureLineUsage } = await import("./runOptionChainCapture.js");
-    const line = describeCaptureLineUsage("Capture window", 50, {
+    const line = describeCaptureLineUsage("Capture window", 30, {
       ...emptySettleStats(),
       intervalMs: 10_000,
-      minInFlight: 48,
-      maxInFlight: 50,
+      minInFlight: 28,
+      maxInFlight: 30,
       lineBusyMs: 495_000,
       timedOutLineMs: 72_000,
       settled: 101,
       timedOut: 9,
+      settledWithoutMarket: 4,
       holdMsP50: 3_900,
       holdMsP90: 7_200,
       holdMsMax: 8_000,
       lastField: { price: 6, delta: 15, openInterest: 80 },
       missingOnTimeout: { price: 0, delta: 2, openInterest: 9 },
       afterFirstReplyMs: { price: { p50: 0, p90: 100 }, delta: { p50: 1_200, p90: 2_400 }, openInterest: { p50: 300, p90: 900 } },
-      lineUsage: { periodMs: 10_000, averageSubscribed: 49.6, averageAnswered: 21, messagesPerSecond: 19.8, released: 110, releasedUnanswered: 2, firstReplyMsP50: 2_900, firstReplyMsP90: 3_400, holdMsP50: 3_900, holdMsP90: 7_200 },
+      lineUsage: { periodMs: 10_000, averageSubscribed: 29.6, averageAnswered: 21, messagesPerSecond: 19.8, released: 110, releasedUnanswered: 2, firstReplyMsP50: 2_900, firstReplyMsP90: 3_400, holdMsP50: 3_900, holdMsP90: 7_200 },
     });
     expect(line).toBe(
-      "Capture window: lines 50/50 now, min 48 max 50 over 10.0s, subscribed avg 49.6, answered avg 21.0, 19.8 msg/s, first reply p50 2.9s p90 3.4s (2 never answered of 110); " +
+      "Capture window: lines 30/30 now, min 28 max 30 over 10.0s, subscribed avg 29.6, answered avg 21.0, 19.8 msg/s, first reply p50 2.9s p90 3.4s (2 never answered of 110); " +
         "110 released, held p50 3.9s p90 7.2s max 8.0s; after first reply p50/p90: price 0.0s/0.1s, delta 1.2s/2.4s, OI 0.3s/0.9s; " +
-        "101 full data (waited last on price 6, delta 15, OI 80), 9 timed out holding 72.0s of line time (missing price 0, delta 2, OI 9), 0 errored.",
+        "101 full data (waited last on price 6, delta 15, OI 80; 4 with \"no data\" on a side), 9 timed out holding 72.0s of line time (missing price 0, delta 2, OI 9), 0 errored.",
     );
   });
 });

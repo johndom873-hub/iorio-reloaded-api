@@ -419,6 +419,15 @@ Plain language: the list of big US events that the Signals "M" flag, Pluto, the 
 - TradingView's `economic_calendar_events` table and fetch are removed (migration `20261007400001` drops the table). The "Economic calendar" data check is now "Major macro events" (stalest source's capture time). Earnings and ex-dividend stay on TradingView.
 - Verified: real FRED + Fed page into dev DB (9 events, correct ET times across the Nov 1 clock change); Signals API flags every expiry from 10-14 on (expiries out to 11-20); Calendar page in Playwright (desktop + 390px, light + dark); 4561 API tests, both typechecks. Staging: capture run by hand after the deploy, 9 events stored, job success, no horizon shortfall. Pluto prompt v3.5 (`d7a9d11`) weighs the new set. Prod needs no new Scheduler entry; `FRED_API_KEY` is set there.
 
+## IBKR line use: measurement + leaner morning capture (built 2026-10-08, not pushed)
+
+**In plain terms:** the morning option-chain capture held 50 of our 90 IBKR market-data lines, but its speed is limited by how many messages per second we may send IBKR, not by lines. Most of those lines sat waiting. It now holds 30, so the screens keep more live prices while it runs. New logs measure how the capture and the Day Signals loop really use their lines, so the line counts can be set from data.
+
+- Logging (`a231258`): `lineUsageMeter.ts` (lines subscribed vs answered by IBKR, msg/s, wait for IBKR's first reply), per-field arrival after the first reply, Day Signals cycle time split + "pool streaming X of Y" dry run (`pooledLineState`), capture start-up idle time.
+- Capture: 30 lines (provisional, `optionChainCaptureBatchSize`); IBKR "no data" on a side settles the price (still waits for delta + OI); the 8 s timeout runs from IBKR's first tick (no-reply contracts still released 8 s after the request); start-up waits for the line ledger to fit the budget (polled every 1 s, max 20 s) instead of a fixed 20 s.
+- Found: the `@stoqey/ib` limiter rounds per 100 ms (15/s = 20/s, ≤10/s = 10/s), so the capture runs at ~10 contracts/s whatever its line count, and the real per-connection caps sum to 60, not 50. Pending after the logs: raising the capture's message share (Gateway pacing setting unknown), and whether to stop waiting for IBKR delta (only a display fallback, the Recovery Path trim and the IV+delta ≥70% data check use it).
+- Dropped: moving Pluto's stock prices onto Day Signals (too risky for ~8 lines).
+
 ## Open decisions — Juan's Iorio Upgrades feedback (2026-08-24)
 Full IBKR trading-book/depth visibility, full option chain w/ all bid-ask, richer trade tab, and a new upcoming-events tab. Broken into independently-decidable pieces:
 - [x] **Order confirmation needs real-time prices and the live option chain (Juan) — built, corrected 2026-09-25.** This was stale: `OrderReviewPanel.tsx` has had a live-streaming "Live Quote" card (bid/ask/greeks/IV via genuine SSE) since app commit `e9e8d07` (2026-08-25) — a month before this checkbox's own "unblocked 2026-09-14" note was even added.
