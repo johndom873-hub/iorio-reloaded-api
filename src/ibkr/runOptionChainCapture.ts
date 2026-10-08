@@ -163,14 +163,15 @@ export interface PreparedTicker {
 /**
  * Shortlist with Signals on (not removed) + tickers with an open position, de-duplicated. No hardcoded symbols (approved 2026-09-21).
  * Shortlist tickers still being prepared by the new-ticker backfill are skipped (approved 2026-09-21); a held ticker never is, since
- * its open position needs the capture whatever setup is running for it.
+ * its open position needs the capture whatever setup is running for it. A hedge (long option bought outside the app) does not
+ * count as a held position here: nothing reads a snapshot for it, so a hedge alone keeps its ticker out (approved 2026-10-08).
  */
 export async function loadCaptureUniverse(): Promise<UniverseTicker[]> {
   const rows: { tickerId: string; symbol: string; contractId: number | null }[] = await db("tickers as t")
     .where((builder) =>
       builder
         .where((shortlisted) => excludeTickersBeingPrepared(shortlisted.whereIn("t.id", signalsEnabledShortlistTickerIdsQuery()), "t.id"))
-        .orWhereIn("t.id", db("positions").where({ status: "open" }).select("ticker_id")),
+        .orWhereIn("t.id", db("positions").where({ status: "open" }).whereNot({ strategy_key: "hedge" }).select("ticker_id")),
     )
     .select("t.id as tickerId", "t.symbol", "t.ibkr_contract_id as contractId")
     .orderBy("t.symbol");

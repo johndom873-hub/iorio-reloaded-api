@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import knexLibrary, { type Knex } from "knex";
 
 // The per-ticker Signals flag against the test database: which universes a Signals-off shortlist ticker is in (price data) and
-// out of (option-chain capture, Signals), and the Price Performance SQL's 3M/1Y reference closes. Only the session clock is mocked.
+// out of (option-chain capture, Signals), when an open position brings it back into the capture (any but a hedge), and the
+// Price Performance SQL's 3M/1Y reference closes. Only the session clock is mocked.
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
   config();
@@ -24,6 +25,8 @@ const testDb: Knex = db;
 const suffix = String(Date.now() % 1_000_000);
 const signalsOnSymbol = `SGON${suffix}`;
 const signalsOffSymbol = `SGOF${suffix}`;
+const hedgeOnlySymbol = `SGHO${suffix}`;
+const hedgeAndPutSymbol = `SGHP${suffix}`;
 const createdTickerIds: string[] = [];
 let userId: string;
 
@@ -42,9 +45,18 @@ beforeAll(async () => {
   userId = user.id;
   const signalsOnId = await insertTicker(signalsOnSymbol);
   const signalsOffId = await insertTicker(signalsOffSymbol);
+  const hedgeOnlyId = await insertTicker(hedgeOnlySymbol);
+  const hedgeAndPutId = await insertTicker(hedgeAndPutSymbol);
   await testDb("shortlist_entries").insert([
     { ticker_id: signalsOnId, added_by_user_id: userId, signals_enabled: true },
     { ticker_id: signalsOffId, added_by_user_id: userId, signals_enabled: false },
+    { ticker_id: hedgeOnlyId, added_by_user_id: userId, signals_enabled: false },
+    { ticker_id: hedgeAndPutId, added_by_user_id: userId, signals_enabled: false },
+  ]);
+  await testDb("positions").insert([
+    { strategy_key: "hedge", ticker_id: hedgeOnlyId, status: "open" },
+    { strategy_key: "hedge", ticker_id: hedgeAndPutId, status: "open" },
+    { strategy_key: "cash_secured_put", ticker_id: hedgeAndPutId, status: "open" },
   ]);
   // Latest completed session 2026-10-05. 3M looks up the last close on or before 2026-07-06 (91 days back), 1Y on or before
   // 2025-10-05 (365 days back, a Sunday, so the Friday 2025-10-03 close). The bars just after each cutoff must not be used.
@@ -62,6 +74,7 @@ afterAll(async () => {
   await testDb("market_data_snapshots").whereIn("ticker_id", createdTickerIds).del();
   await testDb("daily_price_bars").whereIn("ticker_id", createdTickerIds).del();
   await testDb("shortlist_entries").whereIn("ticker_id", createdTickerIds).del();
+  await testDb("positions").whereIn("ticker_id", createdTickerIds).del();
   await testDb("tickers").whereIn("id", createdTickerIds).del();
   await testDb("users").where({ id: userId }).del();
   await testDb.destroy();
@@ -72,6 +85,12 @@ const mine = (symbols: string[]) => symbols.filter((symbol) => symbol === signal
 describe("a Signals-off shortlist ticker", () => {
   it("is left out of the option-chain capture universe", async () => {
     expect(mine((await loadCaptureUniverse()).map((ticker) => ticker.symbol))).toEqual([signalsOnSymbol]);
+  });
+
+  it("is left out of the option-chain capture universe when its only open position is a hedge, and kept in with any other", async () => {
+    const symbols = (await loadCaptureUniverse()).map((ticker) => ticker.symbol);
+    expect(symbols).not.toContain(hedgeOnlySymbol);
+    expect(symbols).toContain(hedgeAndPutSymbol);
   });
 
   it("is left out of the Signals universe", async () => {
