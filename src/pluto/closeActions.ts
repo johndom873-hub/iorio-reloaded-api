@@ -408,6 +408,7 @@ function eventDetail(entry: HeldPositionEntry): Record<string, unknown> {
     event_date: entry.event?.dateIso,
     sessions_until: entry.event?.sessionsUntil,
     sessions_after: entry.event?.sessionsAfter,
+    stress_normal_days: entry.event?.stressNormalDays,
     captured_pct: entry.capturedPct === null ? undefined : Math.round(entry.capturedPct),
     max_remaining_gain_dollars: round(entry.maxRemainingGainDollars),
     event_stress_loss_dollars: round(entry.eventStressLossDollars),

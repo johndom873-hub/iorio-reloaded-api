@@ -144,7 +144,7 @@ describe("Formula F3 — event closes", () => {
     expect(reason).toBeNull();
     expect(offer).toMatchObject({ id: "HOOD:close_leg:leg7", kind: "close_leg", automatic: false, side: "buy", multiplier: 100, quantity: 1, limitPrice: 0.14, reviewKey: "c80s3" });
     expect(offer!.description).toMatch(/before the 27 Oct Fed rate decision \(heavy, 3 sessions away\); locks 84 at the ask$/);
-    expect(offer!.detail).toMatchObject({ event: "Fed rate decision", sessions_until: 3, captured_pct: 84, max_remaining_gain_dollars: 14, event_stress_loss_dollars: 25, close_cost_dollars: 3 });
+    expect(offer!.detail).toMatchObject({ event: "Fed rate decision", sessions_until: 3, stress_normal_days: 2, captured_pct: 84, max_remaining_gain_dollars: 14, event_stress_loss_dollars: 25, close_cost_dollars: 3 });
     expect(evaluateShortLegBuyback({ symbol: "HOOD", leg: put, rolls: [], settings, singleLegPosition: true }).offer).toBeNull();
   });
 
