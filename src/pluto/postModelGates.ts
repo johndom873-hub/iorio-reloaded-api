@@ -165,13 +165,13 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     if (book.spotPrice === null || !(book.spotPrice > 0)) {
       unitNotional = 0;
       fullSizeQuantity = Math.min(coveredByShares, liquidityCap);
-      gate("sizing", fullSizeQuantity >= 1, `no live spot to price a buy-write; ${book.freeShares} free shares cover ${coveredByShares} contract(s), volume share allows ${liquidityCap}`);
+      gate("sizing", fullSizeQuantity >= 1, `no live spot to price the shares to buy; ${book.freeShares} free shares cover ${coveredByShares} contract(s), volume share allows ${liquidityCap}`);
     } else {
       unitNotional = book.spotPrice * 100;
       const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
       const buyWriteContracts = Math.floor(Math.max(0, roomDollars) / unitNotional);
       fullSizeQuantity = Math.min(coveredByShares + buyWriteContracts, liquidityCap);
-      gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${coveredByShares} contract(s), room allows ${buyWriteContracts} buy-write contract(s) at ${book.spotPrice.toFixed(2)} (${describeRoom(room)}), volume share allows ${liquidityCap}`);
+      gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${coveredByShares} contract(s), room allows ${buyWriteContracts} more contract(s) buying 100 shares each at ${book.spotPrice.toFixed(2)} (${describeRoom(room)}), volume share allows ${liquidityCap}`);
     }
     // Only the shares actually bought count as notional: the free-share contracts commit no new cash.
     unitNotional = fullSizeQuantity > 0 ? (Math.max(0, fullSizeQuantity - coveredByShares) * unitNotional) / fullSizeQuantity : 0;

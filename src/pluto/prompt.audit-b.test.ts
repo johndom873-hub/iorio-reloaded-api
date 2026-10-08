@@ -41,8 +41,8 @@ function input(overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput {
 const tickerOf = (payload: Record<string, unknown>, index = 0) => (payload.tickers as Record<string, unknown>[])[index]!;
 
 describe("prompt version", () => {
-  it("is v3.6, matching the v3.6 migration", () => {
-    expect(plutoPromptVersion).toBe("v3.6");
+  it("is v3.7, matching the v3.7 migration", () => {
+    expect(plutoPromptVersion).toBe("v3.7");
   });
 });
 

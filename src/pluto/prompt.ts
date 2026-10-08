@@ -10,7 +10,7 @@ import type { MoveContext } from "./moveContext.js";
 // deterministic filter, the top few per ticker per strategy, short field names, no nulls.
 // Shortlist notes never enter the prompt (Marcelo, 2026-09-28).
 
-export const plutoPromptVersion = "v3.6";
+export const plutoPromptVersion = "v3.7";
 
 /** How many open candidates per ticker per strategy the model sees (best Edge $ first). */
 export const candidatesPerTickerPerStrategy = 3;
@@ -36,7 +36,7 @@ export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
     "- rolls: replacing a held short leg with a lower-delta credit roll; net_roll_edge_vp is the new contract's net edge minus what holding the current leg still offers minus the cost of closing it.",
     "- close actions: selling unstructured shares at a positive cycle P&L, or buying back a short leg whose remaining edge is negative while locking a profit.",
     "- positions: Pluto manages every position on the tickers it is enabled on, whoever opened it. account.managed_positions counts all of them and they all use Pluto's capital budget; each close action and roll says opened_by (pluto or a person). A close action on a position a person opened is normal, not an inconsistency.",
-    "- open_covered_call candidates: Pluto writes the call against shares the account already holds free; when there are not enough, code buys the missing 100 shares per contract at the live price in the same order (a buy-write). dollar_risk counts those shares. Holding no shares is normal for a covered-call candidate.",
+    "- open_covered_call candidates: Pluto writes the call against shares the account already holds free; when there are not enough, code buys the missing 100 shares per contract at the live price in the same order. dollar_risk counts those shares. In reasons, call it a covered call, never a buy-write. Holding no shares is normal for a covered-call candidate.",
     "- recent_decisions: your latest decisions, newest first. A trade carries its outcome: blocked (a code check refused it before any order was sent; outcome_detail says why), validated, order_built or confirmed (an order is on its way or working), filled, cancelled_partially_filled (part filled, the rest cancelled), cancelled, rejected or error (outcome_detail says why), not_executed (no order was attempted). Only a filled or cancelled_partially_filled trade changed the book; the account, positions and close actions in this message always show the book as it is now.",
     "",
     "Hard rules you must obey:",

@@ -69,13 +69,14 @@ describe("prompt v3.3 payload and wording (2026-10-07)", () => {
     expect(payload.trigger).toEqual({ kind: "grade_crossing" });
   });
 
-  it("states the grade floor actually in force and explains managed positions and buy-writes", () => {
+  it("states the grade floor actually in force and explains managed positions and covered calls that buy shares", () => {
     const weak = buildPlutoSystemPrompt(input().settings);
     expect(weak).toContain("Only weak or better reaches you.");
     expect(weak).not.toContain("Only good or better reaches you.");
     expect(buildPlutoSystemPrompt({ ...input().settings, minGrade: "strong" })).toContain("Only strong reaches you.");
     expect(weak).toContain("Pluto manages every position on the tickers it is enabled on, whoever opened it.");
-    expect(weak).toContain("(a buy-write)");
+    expect(weak).toContain("code buys the missing 100 shares per contract at the live price in the same order.");
+    expect(weak).toContain("In reasons, call it a covered call, never a buy-write.");
     expect(weak).toContain("code never trades a ticker you flagged");
   });
 
