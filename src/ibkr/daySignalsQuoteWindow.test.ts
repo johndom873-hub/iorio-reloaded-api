@@ -42,7 +42,7 @@ describe("runRollingQuoteWindow", () => {
       ib.emit(EventName.tickPrice, ib.reqIdAt(index), 1, 4.9, {});
       ib.emit(EventName.tickPrice, ib.reqIdAt(index), 2, 5.1, {});
     }
-    await expect(result).resolves.toEqual({ settled: 4, disconnected: false, aborted: false });
+    await expect(result).resolves.toEqual({ settled: 4, disconnected: false, aborted: false, outcomes: { twoSided: 4, noData: 0, errored: 0, timedOut: 0 } });
     expect(settled.map((entry) => entry.contract.key)).toEqual(["t1|2026-10-16|90|P", "t1|2026-10-16|95|P", "t1|2026-10-16|100|P", "t1|stock"]);
     expect(settled[3]!.quote.last).toBe(5);
     expect(ib.listenerCount(EventName.tickPrice)).toBe(0);
@@ -55,7 +55,7 @@ describe("runRollingQuoteWindow", () => {
     ib.emit(EventName.error, new Error("using delayed data"), 10167, ib.reqIdAt(1)); // informational, must not settle
     ib.emit(EventName.error, new Error("No security definition"), 200, ib.reqIdAt(1));
     await vi.advanceTimersByTimeAsync(4_000);
-    await expect(result).resolves.toMatchObject({ settled: 3 });
+    await expect(result).resolves.toMatchObject({ settled: 3, outcomes: { twoSided: 0, noData: 1, errored: 1, timedOut: 1 } });
     expect(settled.map((entry) => entry.quote)).toMatchObject([
       { bid: null, ask: null, errorCode: null, timedOut: false },
       { errorCode: 200, timedOut: false },
@@ -67,13 +67,13 @@ describe("runRollingQuoteWindow", () => {
   it("stops on a connection drop without reporting the in-flight contracts, and stops on abort", async () => {
     const dropped = harness([option(90), option(95), option(100)], 2);
     dropped.ib.emit(EventName.disconnected);
-    await expect(dropped.result).resolves.toEqual({ settled: 0, disconnected: true, aborted: false });
+    await expect(dropped.result).resolves.toEqual({ settled: 0, disconnected: true, aborted: false, outcomes: { twoSided: 0, noData: 0, errored: 0, timedOut: 0 } });
     expect(dropped.settled).toHaveLength(0);
     expect(dropped.ib.reqMktData).toHaveBeenCalledTimes(2);
 
     const aborted = harness([option(90), option(95)], 1);
     aborted.abort.abort();
-    await expect(aborted.result).resolves.toEqual({ settled: 0, disconnected: false, aborted: true });
+    await expect(aborted.result).resolves.toEqual({ settled: 0, disconnected: false, aborted: true, outcomes: { twoSided: 0, noData: 0, errored: 0, timedOut: 0 } });
     expect(aborted.ib.cancelMktData).toHaveBeenCalledTimes(1);
   });
 
@@ -84,6 +84,23 @@ describe("runRollingQuoteWindow", () => {
     await vi.advanceTimersByTimeAsync(4_000);
     await result;
     const empty = harness([], 2);
-    await expect(empty.result).resolves.toEqual({ settled: 0, disconnected: false, aborted: false });
+    await expect(empty.result).resolves.toEqual({ settled: 0, disconnected: false, aborted: false, outcomes: { twoSided: 0, noData: 0, errored: 0, timedOut: 0 } });
+  });
+
+  it("tells a meter of every subscribe, first price tick and release (measurement only)", async () => {
+    const meter = { subscribed: vi.fn(), answered: vi.fn(), released: vi.fn(), drain: vi.fn(), wholeRun: vi.fn() };
+    const ib = new FakeIb();
+    let nextReqId = 100;
+    const result = runRollingQuoteWindow([option(90), option(95)], { ib: asIb(ib), allocateReqId: () => nextReqId++, concurrency: 1, timeoutMs: 4_000, signal: new AbortController().signal, onSettled: () => {}, meter });
+    expect(meter.subscribed).toHaveBeenCalledWith(100);
+    ib.emit(EventName.tickPrice, 100, 1, 1.1, {});
+    ib.emit(EventName.tickPrice, 100, 2, 1.2, {});
+    expect(meter.answered).toHaveBeenCalledWith(100);
+    expect(meter.released).toHaveBeenCalledWith(100);
+    expect(meter.subscribed).toHaveBeenCalledWith(101);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await expect(result).resolves.toMatchObject({ settled: 2, outcomes: { twoSided: 1, timedOut: 1 } });
+    expect(meter.released).toHaveBeenCalledWith(101);
+    expect(meter.answered).toHaveBeenCalledTimes(2); // once per price tick; the meter itself keeps only the first per request
   });
 });

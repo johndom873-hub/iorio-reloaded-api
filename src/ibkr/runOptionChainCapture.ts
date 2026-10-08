@@ -4,6 +4,7 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { refreshStoredOptionChain, loadStoredOptionChain, type OptionChainRefreshTimings, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { fetchLivePrices } from "./fetchLivePrices.js";
 import { openCaptureQuoteWindow, type CaptureQuoteWindow, type CaptureSettleStats, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
+import { describeLineUsage } from "./lineUsageMeter.js";
 import { getRiskFreeRateForJob } from "../lib/riskFreeRate.js";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "../lib/realizedVolatility.js";
 import {
@@ -44,16 +45,19 @@ const captureProgressLogIntervalMs = 10_000;
 
 /**
  * One line of empirical line usage: how many lines were subscribed (now, and the lowest/highest during
- * the period), the time-weighted average in use, and how long each released contract held its line.
+ * the period), the time-weighted averages subscribed and answered by IBKR, the message rate, the wait for
+ * IBKR's first tick, how long each released contract held its line and when each settle field arrived
+ * after that first tick.
  */
 export function describeCaptureLineUsage(heading: string, inFlight: number | null, stats: CaptureSettleStats): string {
   const seconds = (ms: number | null) => (ms === null ? "—" : `${(ms / 1000).toFixed(1)}s`);
   const fields = (counts: CaptureSettleStats["lastField"]) => `price ${counts.price}, delta ${counts.delta}, OI ${counts.openInterest}`;
-  const averageInUse = stats.intervalMs > 0 ? (stats.lineBusyMs / stats.intervalMs).toFixed(1) : "—";
+  const afterReply = (field: keyof CaptureSettleStats["afterFirstReplyMs"]) => `${seconds(stats.afterFirstReplyMs[field].p50)}/${seconds(stats.afterFirstReplyMs[field].p90)}`;
   const released = stats.settled + stats.timedOut + stats.errored;
   return (
-    `${heading}: lines ${inFlight === null ? "" : `${inFlight}/${optionChainCaptureBatchSize} now, `}min ${stats.minInFlight ?? "—"} max ${stats.maxInFlight ?? "—"}, ` +
-    `avg in use ${averageInUse} over ${seconds(stats.intervalMs)}; ${released} released, held p50 ${seconds(stats.holdMsP50)} p90 ${seconds(stats.holdMsP90)} max ${seconds(stats.holdMsMax)}; ` +
+    `${heading}: lines ${inFlight === null ? "" : `${inFlight}/${optionChainCaptureBatchSize} now, `}min ${stats.minInFlight ?? "—"} max ${stats.maxInFlight ?? "—"} over ${seconds(stats.intervalMs)}, ` +
+    `${describeLineUsage(stats.lineUsage)}; ${released} released, held p50 ${seconds(stats.holdMsP50)} p90 ${seconds(stats.holdMsP90)} max ${seconds(stats.holdMsMax)}; ` +
+    `after first reply p50/p90: price ${afterReply("price")}, delta ${afterReply("delta")}, OI ${afterReply("openInterest")}; ` +
     `${stats.settled} full data (waited last on ${fields(stats.lastField)}), ` +
     `${stats.timedOut} timed out holding ${seconds(stats.timedOutLineMs)} of line time (missing ${fields(stats.missingOnTimeout)}), ${stats.errored} errored.`
   );
@@ -411,6 +415,7 @@ export async function runOptionChainCapture(
   const snapshotQualityBySymbol = new Map<string, { coverage: SnapshotCoverage; marketDataType: OptionChainMarketDataType }>();
 
   const releaseLines = options.linesAlreadyHeld ? async () => {} : await holdCaptureLineReservation(dependencies.lineReservation);
+  const linesReservedAt = dependencies.now().getTime();
 
   let connection: { ib: IbkrApi; disconnect: () => void } | null = null;
   let window: CaptureQuoteWindow | null = null;
@@ -454,6 +459,8 @@ export async function runOptionChainCapture(
     // window as soon as they are known, and its snapshot is saved (in the
     // background) once its last contract settles. Failures stay per ticker.
     const spotBySymbol = universe.length > 0 ? await dependencies.fetchSpotPrices(universe.map((ticker) => ticker.symbol), (symbols) => result.fallbackSpotSymbols.push(...symbols)) : {};
+    // How long the reserved lines sat unused before the first contract could be queued (shedding grace, connect, spot prices).
+    console.log(`Capture: first contracts queued ${((dependencies.now().getTime() - linesReservedAt) / 1000).toFixed(1)}s after the line reservation${options.linesAlreadyHeld ? " (lines held from an earlier round)" : ""}.`);
     const captures: Promise<void>[] = [];
     for (const ticker of universe) {
       if (connectionLost) break;

@@ -1,5 +1,6 @@
 import { EventName, Option, OptionType, Stock, type Contract, type IBApi } from "@stoqey/ib";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import type { LineUsageMeter } from "./lineUsageMeter.js";
 
 // The Day Signals loop's quote fetcher (approved 2026-09-24): a rolling
 // window of N market-data lines over a list of contracts. Every contract
@@ -47,6 +48,17 @@ export interface RollingQuoteWindowOptions {
   signal: AbortSignal;
   onSettled: (contract: WindowContract, quote: WindowQuote) => void;
   now?: () => Date;
+  /** Measurement only (lineUsageMeter.ts): told of every subscribe, first price tick and release. */
+  meter?: LineUsageMeter;
+}
+
+/** How the window's contracts settled, for the loop's cycle log. */
+export interface RollingQuoteWindowOutcomes {
+  twoSided: number;
+  /** IBKR answered -1 ("no data") on bid or ask. */
+  noData: number;
+  errored: number;
+  timedOut: number;
 }
 
 export interface RollingQuoteWindowResult {
@@ -54,6 +66,8 @@ export interface RollingQuoteWindowResult {
   /** True when the IBKR connection dropped mid-run: in-flight contracts were abandoned (not reported) and the rest of the list never ran. */
   disconnected: boolean;
   aborted: boolean;
+  /** Absent only from test doubles. */
+  outcomes?: RollingQuoteWindowOutcomes;
 }
 
 interface Pending {
@@ -76,12 +90,14 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
     const pending = new Map<number, Pending>();
     let settledCount = 0;
     let finished = false;
+    const outcomes: RollingQuoteWindowOutcomes = { twoSided: 0, noData: 0, errored: 0, timedOut: 0 };
 
-    function finish(result: Omit<RollingQuoteWindowResult, "settled">): void {
+    function finish(result: Omit<RollingQuoteWindowResult, "settled" | "outcomes">): void {
       if (finished) return;
       finished = true;
       for (const [reqId, entry] of pending) {
         clearTimeout(entry.timer);
+        options.meter?.released(reqId);
         try {
           options.ib.cancelMktData(reqId);
         } catch {
@@ -93,7 +109,7 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
       options.ib.removeListener(EventName.error, onError);
       options.ib.removeListener(EventName.disconnected, onDisconnected);
       options.signal.removeEventListener("abort", onAbort);
-      resolve({ ...result, settled: settledCount });
+      resolve({ ...result, settled: settledCount, outcomes });
     }
 
     function settle(reqId: number, errorCode: number | null, timedOut: boolean): void {
@@ -101,8 +117,13 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
       if (!entry) return;
       clearTimeout(entry.timer);
       pending.delete(reqId);
+      options.meter?.released(reqId);
       options.ib.cancelMktData(reqId);
       settledCount += 1;
+      if (errorCode !== null) outcomes.errored += 1;
+      else if (timedOut) outcomes.timedOut += 1;
+      else if (entry.bid !== null && entry.ask !== null) outcomes.twoSided += 1;
+      else outcomes.noData += 1;
       options.onSettled(entry.contract, { bid: entry.bid, ask: entry.ask, last: entry.last, errorCode, timedOut, settledAt: now() });
       pump();
     }
@@ -114,6 +135,7 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
         const reqId = options.allocateReqId();
         const entry: Pending = { contract, bid: null, ask: null, last: null, noDataOnASide: false, timer: setTimeout(() => settle(reqId, null, true), options.timeoutMs) };
         pending.set(reqId, entry);
+        options.meter?.subscribed(reqId);
         options.ib.reqMktData(reqId, buildIbkrContract(contract), "", false, false);
       }
       if (pending.size === 0 && queue.length === 0) finish({ disconnected: false, aborted: false });
@@ -122,6 +144,7 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
     function onTickPrice(reqId: number, tickType: number, price: number): void {
       const entry = pending.get(reqId);
       if (!entry) return;
+      options.meter?.answered(reqId);
       const value = price > 0 ? price : null;
       if (bidTickTypes.has(tickType)) {
         entry.bid = value;
@@ -150,11 +173,11 @@ export function runRollingQuoteWindow(contracts: WindowContract[], options: Roll
     }
 
     if (contracts.length === 0) {
-      resolve({ settled: 0, disconnected: false, aborted: false });
+      resolve({ settled: 0, disconnected: false, aborted: false, outcomes });
       return;
     }
     if (options.signal.aborted) {
-      resolve({ settled: 0, disconnected: false, aborted: true });
+      resolve({ settled: 0, disconnected: false, aborted: true, outcomes });
       return;
     }
     options.ib.on(EventName.tickPrice, onTickPrice);

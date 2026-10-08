@@ -277,6 +277,35 @@ describe("DaySignalsLoop", () => {
     expect(harness.loop.getStatus()).toMatchObject({ cycleNumber: 1, contractsInPool: 6, tradingDateIso });
   });
 
+  it("logs where a logged cycle's time went, how its windows used their lines and what the screens' pool already streamed (measurement only)", async () => {
+    const harness = createHarness();
+    const askedFor: string[] = [];
+    harness.deps.pooledLineState = (contract) => {
+      askedFor.push(contract.legType === "stock" ? `stock|${contract.symbol}` : `${contract.symbol}|${contract.expiry}|${contract.strike}|${contract.right}`);
+      return contract.legType === "stock" ? "streaming" : contract.strike === strikes[0]![0] ? "paused" : null;
+    };
+    const originalWindow = harness.deps.runQuoteWindow;
+    harness.deps.runQuoteWindow = async (contracts, options) => {
+      const result = await originalWindow(contracts, options);
+      harness.loop.stop();
+      return { ...result, outcomes: { twoSided: contracts.length, noData: 0, errored: 0, timedOut: 0 } };
+    };
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await harness.loop.start();
+      const line = log.mock.calls.map((call) => String(call[0])).find((message) => message.startsWith("day signals loop: cycle 1 lines —"));
+      expect(line).toContain("10 lines; spot pass ");
+      expect(line).toContain("outcomes not reported"); // the spot-pass fake reports none
+      expect(line).toContain("pool streaming 1 of 1 (paused 0, not yet answered 0)");
+      expect(line).toContain("7 two-sided, 0 no data, 0 errored, 0 timed out");
+      expect(line).toContain("pool streaming 1 of 7 (paused 1, not yet answered 0)");
+      expect(line).toMatch(/Writes and re-scoring after the last quote -?\d+\.\ds\.$/);
+      expect(askedFor).toContain(`AAA|20261021|${strikes[0]![0]}|${strikes[0]![1]}`);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   describe("tracking the live spot", () => {
     const listedStrikes = [80, 85, 90, 95, 100, 105, 110, 115, 120];
     function contextAt(overrides: Partial<DayTickerContractContext> = {}): DayTickerContractContext {

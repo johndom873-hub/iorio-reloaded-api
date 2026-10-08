@@ -204,6 +204,21 @@ describe("subscribing and the line budget", () => {
     expect(pool.marketDataPoolSnapshot()).toMatchObject({ contractCount: 1, subscriberCount: 2, openLineCount: 1 });
   });
 
+  it("reports a contract's line state: not pooled, waiting for IBKR's first tick, streaming, paused (measurement only)", async () => {
+    poolHarness.availableLines = 1;
+    const pool = await loadPool();
+    expect(pool.pooledLineState(stockAlpha)).toBeNull();
+    await pool.subscribeToPooledQuote(stockAlpha, () => {});
+    await settle();
+    expect(pool.pooledLineState(stockAlpha)).toBe("waiting");
+    ib.emit(EventName.tickPrice, 1000, 4, 12.5);
+    expect(pool.pooledLineState(stockAlpha)).toBe("streaming");
+    await pool.subscribeToPooledQuote(optionAlpha, () => {}); // one line only: the newest (the option) is paused
+    await settle();
+    expect(pool.pooledLineState(optionAlpha)).toBe("paused");
+    expect(pool.pooledLineState(stockAlpha)).toBe("streaming");
+  });
+
   it("sheds the newest options first when the budget hands out fewer lines than contracts, holding exactly what fits", async () => {
     poolHarness.availableLines = 2;
     const pool = await loadPool();

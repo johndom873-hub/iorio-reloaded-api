@@ -137,6 +137,10 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
         holdMsMax: 8_000,
         lastField: { price: 0, delta: 0, openInterest: 1 },
         missingOnTimeout: { price: 0, delta: 0, openInterest: 1 },
+        // After the first tick (500 ms): prices at once, delta 500 ms later, OI 3.5 s later (first contract only).
+        afterFirstReplyMs: { price: { p50: 0, p90: 0 }, delta: { p50: 500, p90: 500 }, openInterest: { p50: 3_500, p90: 3_500 } },
+        // 2 lines for 4 s then 1 for 4 s; answered from 500 ms; 2 subscribes + 2 cancels over 8 s.
+        lineUsage: { periodMs: 8_000, averageSubscribed: 1.5, averageAnswered: 1.375, messagesPerSecond: 0.5, released: 2, releasedUnanswered: 0, firstReplyMsP50: 500, firstReplyMsP90: 500, holdMsP50: 4_000, holdMsP90: 8_000 },
       };
       expect(window.drainSettleStats()).toEqual(expected);
       expect(window.drainSettleStats()).toMatchObject({ settled: 0, timedOut: 0, lineBusyMs: 0, holdMsP50: null, minInFlight: 0, maxInFlight: 0 });

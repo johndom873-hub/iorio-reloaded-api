@@ -32,6 +32,8 @@ const emptySettleStats = () => ({
   holdMsMax: null,
   lastField: { price: 0, delta: 0, openInterest: 0 },
   missingOnTimeout: { price: 0, delta: 0, openInterest: 0 },
+  afterFirstReplyMs: { price: { p50: null, p90: null }, delta: { p50: null, p90: null }, openInterest: { p50: null, p90: null } },
+  lineUsage: { periodMs: 0, averageSubscribed: 0, averageAnswered: 0, messagesPerSecond: 0, released: 0, releasedUnanswered: 0, firstReplyMsP50: null, firstReplyMsP90: null, holdMsP50: null, holdMsP90: null },
 });
 const ticker = (symbol: string, contractId: number | null = 1): UniverseTicker => ({ tickerId: `id-${symbol}`, symbol, contractId });
 
@@ -512,7 +514,7 @@ describe("runOptionChainCapture", () => {
 });
 
 describe("describeCaptureLineUsage", () => {
-  it("reports lines in use, the time-weighted average, hold times and where line time went", async () => {
+  it("reports lines subscribed and answered, the message rate, the wait for IBKR, hold times, field arrival and where line time went", async () => {
     const { describeCaptureLineUsage } = await import("./runOptionChainCapture.js");
     const line = describeCaptureLineUsage("Capture window", 50, {
       ...emptySettleStats(),
@@ -528,9 +530,12 @@ describe("describeCaptureLineUsage", () => {
       holdMsMax: 8_000,
       lastField: { price: 6, delta: 15, openInterest: 80 },
       missingOnTimeout: { price: 0, delta: 2, openInterest: 9 },
+      afterFirstReplyMs: { price: { p50: 0, p90: 100 }, delta: { p50: 1_200, p90: 2_400 }, openInterest: { p50: 300, p90: 900 } },
+      lineUsage: { periodMs: 10_000, averageSubscribed: 49.6, averageAnswered: 21, messagesPerSecond: 19.8, released: 110, releasedUnanswered: 2, firstReplyMsP50: 2_900, firstReplyMsP90: 3_400, holdMsP50: 3_900, holdMsP90: 7_200 },
     });
     expect(line).toBe(
-      "Capture window: lines 50/50 now, min 48 max 50, avg in use 49.5 over 10.0s; 110 released, held p50 3.9s p90 7.2s max 8.0s; " +
+      "Capture window: lines 50/50 now, min 48 max 50 over 10.0s, subscribed avg 49.6, answered avg 21.0, 19.8 msg/s, first reply p50 2.9s p90 3.4s (2 never answered of 110); " +
+        "110 released, held p50 3.9s p90 7.2s max 8.0s; after first reply p50/p90: price 0.0s/0.1s, delta 1.2s/2.4s, OI 0.3s/0.9s; " +
         "101 full data (waited last on price 6, delta 15, OI 80), 9 timed out holding 72.0s of line time (missing price 0, delta 2, OI 9), 0 errored.",
     );
   });

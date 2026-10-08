@@ -1,8 +1,11 @@
-import type { IBApi } from "@stoqey/ib";
+import { OptionType, type IBApi } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { runRollingQuoteWindow, type RollingQuoteWindowOptions, type RollingQuoteWindowResult, type WindowContract, type WindowQuote } from "../ibkr/daySignalsQuoteWindow.js";
 import { releaseMarketDataLines, reserveMarketDataLines, type LineReservationResult } from "../ibkr/marketDataLineBudget.js";
 import { sharedLiveConnection } from "../ibkr/sharedReadConnection.js";
+import { createLineUsageMeter, describeLineUsage, type LineUsageMeter } from "../ibkr/lineUsageMeter.js";
+import { pooledLineState } from "../ibkr/marketDataPool.js";
+import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { emitDayQuotesUpdated } from "./daySignalsEvents.js";
 import { selectContractsToCapture, computeStrikeWindow, calendarDaysUntilExpiry } from "./optionChainCaptureWindow.js";
@@ -155,10 +158,35 @@ export interface DaySignalsLoopDependencies {
   reportFailure?(source: string, message: string): void;
   reportRecovery?(source: string, message: string): void;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
+  /** Measurement only: what the live screens' pool holds for a contract (marketDataPool.ts). Optional so tests can omit it. */
+  pooledLineState?(contract: PriceContract): "streaming" | "paused" | "waiting" | null;
 }
 
 function spotFromQuote(quote: WindowQuote): number | null {
   return quote.last ?? (quote.bid !== null && quote.ask !== null ? (quote.bid + quote.ask) / 2 : null);
+}
+
+/**
+ * Measurement only (no behaviour depends on it): how many of a window's contracts the live screens' pool was
+ * already streaming when the window started — the lines this loop could have borrowed instead of opening.
+ */
+function describePoolCoverage(contracts: WindowContract[], lineState: DaySignalsLoopDependencies["pooledLineState"]): string {
+  if (!lineState) return "pool coverage not measured";
+  const counts = { streaming: 0, paused: 0, waiting: 0 };
+  for (const contract of contracts) {
+    const priceContract: PriceContract =
+      contract.legType === "stock" ? { key: contract.key, legType: "stock", symbol: contract.symbol } : { key: contract.key, legType: "option", symbol: contract.symbol, expiry: contract.expiry, strike: contract.strike, right: contract.right === "C" ? OptionType.Call : OptionType.Put };
+    const state = lineState(priceContract);
+    if (state) counts[state] += 1;
+  }
+  return `pool streaming ${counts.streaming} of ${contracts.length} (paused ${counts.paused}, not yet answered ${counts.waiting})`;
+}
+
+function describeWindowOutcomes(result: RollingQuoteWindowResult, meter: LineUsageMeter, durationMs: number): string {
+  const usage = meter.wholeRun();
+  const seconds = (ms: number | null) => (ms === null ? "—" : `${(ms / 1000).toFixed(1)}s`);
+  const outcomes = result.outcomes ? `${result.outcomes.twoSided} two-sided, ${result.outcomes.noData} no data, ${result.outcomes.errored} errored, ${result.outcomes.timedOut} timed out` : "outcomes not reported";
+  return `${seconds(durationMs)}: ${outcomes}; held p50 ${seconds(usage.holdMsP50)} p90 ${seconds(usage.holdMsP90)}; ${describeLineUsage(usage)}`;
 }
 
 export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
@@ -175,6 +203,7 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   allocateReqId: () => sharedLiveConnection.allocateReqId(),
   runQuoteWindow: runRollingQuoteWindow,
   runSpotPass: runRollingQuoteWindow,
+  pooledLineState,
   upsertDayQuotes,
   loadContractContexts: loadDayTickerContractContexts,
   loadUnpooledTickers: loadDayUnpooledTickers,
@@ -385,6 +414,10 @@ export class DaySignalsLoop {
     // Tracked = pooled tickers plus tickers scored at 10:00 with no pool: a stock that jumped after the open may only now have puts worth selling.
     let trackedTickers = await this.trackedTickersFor(pool, tradingDateIso);
     const spotWindowContracts: WindowContract[] = trackedTickers.map((ticker) => ({ key: `${ticker.tickerId}|stock`, legType: "stock", symbol: ticker.symbol }));
+    const meterClock = () => this.deps.now().getTime();
+    const spotPoolCoverage = describePoolCoverage(spotWindowContracts, this.deps.pooledLineState);
+    const spotMeter = createLineUsageMeter(meterClock);
+    const spotPassStartedAt = meterClock();
     const spotPass = await this.deps.runSpotPass(spotWindowContracts, {
       ib,
       allocateReqId: this.deps.allocateReqId,
@@ -393,7 +426,9 @@ export class DaySignalsLoop {
       signal,
       onSettled: (contract, quote) => spotByTicker.set(contract.key.split("|")[0]!, spotFromQuote(quote)),
       now: this.deps.now,
+      meter: spotMeter,
     });
+    const spotPassMs = meterClock() - spotPassStartedAt;
     if (spotPass.disconnected || spotPass.aborted) return spotPass;
 
     let activePool = pool;
@@ -508,12 +543,26 @@ export class DaySignalsLoop {
     };
 
     try {
-      const result = await this.deps.runQuoteWindow(windowContracts, { ib, allocateReqId: this.deps.allocateReqId, concurrency: daySignalsLoopLines, timeoutMs: daySignalsContractTimeoutMs, signal, onSettled, now: this.deps.now });
+      const quotePoolCoverage = describePoolCoverage(windowContracts, this.deps.pooledLineState);
+      const quoteMeter = createLineUsageMeter(meterClock);
+      const quoteWindowStartedAt = meterClock();
+      const prepareMs = quoteWindowStartedAt - spotPassStartedAt - spotPassMs;
+      const result = await this.deps.runQuoteWindow(windowContracts, { ib, allocateReqId: this.deps.allocateReqId, concurrency: daySignalsLoopLines, timeoutMs: daySignalsContractTimeoutMs, signal, onSettled, now: this.deps.now, meter: quoteMeter });
+      const quoteWindowMs = meterClock() - quoteWindowStartedAt;
       await flush();
       await tickerWorkChain;
       this.status.lastCycleDurationMs = this.deps.now().getTime() - startedAt.getTime();
       if (shouldLogCycle({ cycleNumber, settled: result.settled, total: windowContracts.length, durationMs: this.status.lastCycleDurationMs, disconnected: result.disconnected, aborted: result.aborted })) {
         console.log(`day signals loop: cycle ${cycleNumber} — ${result.settled}/${windowContracts.length} settled in ${Math.round(this.status.lastCycleDurationMs / 1000)}s${result.disconnected ? " (disconnected)" : ""}${result.aborted ? " (aborted)" : ""}`);
+        // Measurement for line sizing: where the cycle's time went, how each window used its lines, and what the screens' pool already streamed.
+        const tailMs = this.status.lastCycleDurationMs - (spotPassStartedAt - startedAt.getTime()) - spotPassMs - prepareMs - quoteWindowMs;
+        console.log(
+          `day signals loop: cycle ${cycleNumber} lines — ${daySignalsLoopLines} lines; ` +
+            `spot pass ${describeWindowOutcomes(spotPass, spotMeter, spotPassMs)}; ${spotPoolCoverage}. ` +
+            `Re-ranks and setup ${(prepareMs / 1000).toFixed(1)}s. ` +
+            `Quotes ${describeWindowOutcomes(result, quoteMeter, quoteWindowMs)}; ${quotePoolCoverage}. ` +
+            `Writes and re-scoring after the last quote ${(tailMs / 1000).toFixed(1)}s.`,
+        );
       }
       return result;
     } finally {

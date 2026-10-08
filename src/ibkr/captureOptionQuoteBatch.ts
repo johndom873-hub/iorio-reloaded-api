@@ -2,6 +2,9 @@ import { EventName, Option, OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
+import { createLineUsageMeter, percentileOfSorted, type LineUsageSummary } from "./lineUsageMeter.js";
+
+export { percentileOfSorted };
 
 // Quote collector for the nightly option-chain archive (IORIO Signal Engine,
 // Phase 0). Captures what a plain live quote ignores — bid/ask sizes, open
@@ -179,12 +182,10 @@ export interface CaptureSettleStats {
   lastField: Record<SettleField, number>;
   /** On timed-out contracts, the fields that never arrived. */
   missingOnTimeout: Record<SettleField, number>;
-}
-
-/** Pure: nearest-rank percentile of an ascending list; null when empty. */
-export function percentileOfSorted(sortedValues: number[], percentile: number): number | null {
-  if (sortedValues.length === 0) return null;
-  return sortedValues[Math.min(sortedValues.length - 1, Math.max(0, Math.ceil((percentile / 100) * sortedValues.length) - 1))]!;
+  /** Each settle field's arrival after IBKR's first tick for the contract (IBKR's own delay, without our queue wait). */
+  afterFirstReplyMs: Record<SettleField, { p50: number | null; p90: number | null }>;
+  /** Time-weighted subscribed vs answered lines, message rate and the wait for IBKR's first tick (lineUsageMeter.ts). */
+  lineUsage: LineUsageSummary;
 }
 
 interface WindowGroup {
@@ -199,6 +200,8 @@ interface WindowPending {
   group: WindowGroup;
   timer: ReturnType<typeof setTimeout>;
   subscribedAt: number;
+  /** IBKR's first tick of any kind for the contract (ms since epoch), for drainSettleStats. */
+  firstTickAt: number | null;
   /** When each settle field first arrived (ms since epoch), for drainSettleStats. */
   arrivedAt: Record<SettleField, number | null>;
 }
@@ -234,6 +237,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
   const pending = new Map<number, WindowPending>();
   let closed = false;
   const emptyFieldCounts = (): Record<SettleField, number> => ({ price: 0, delta: 0, openInterest: 0 });
+  const meter = createLineUsageMeter();
   const freshStats = () => ({
     periodStartedAt: Date.now(),
     holdsMs: [] as number[],
@@ -245,6 +249,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     errored: 0,
     lastField: emptyFieldCounts(),
     missingOnTimeout: emptyFieldCounts(),
+    afterFirstReplyMs: { price: [] as number[], delta: [] as number[], openInterest: [] as number[] },
   });
   let intervalStats = freshStats();
   const wholeRunStats = freshStats();
@@ -257,8 +262,12 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     }
   }
 
-  function summarize(stats: ReturnType<typeof freshStats>): CaptureSettleStats {
+  function summarize(stats: ReturnType<typeof freshStats>, lineUsage: LineUsageSummary): CaptureSettleStats {
     const sortedHolds = [...stats.holdsMs].sort((a, b) => a - b);
+    const percentiles = (values: number[]) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return { p50: percentileOfSorted(sorted, 50), p90: percentileOfSorted(sorted, 90) };
+    };
     return {
       intervalMs: Date.now() - stats.periodStartedAt,
       minInFlight: stats.minInFlight,
@@ -273,6 +282,8 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       holdMsMax: sortedHolds.at(-1) ?? null,
       lastField: { ...stats.lastField },
       missingOnTimeout: { ...stats.missingOnTimeout },
+      afterFirstReplyMs: { price: percentiles(stats.afterFirstReplyMs.price), delta: percentiles(stats.afterFirstReplyMs.delta), openInterest: percentiles(stats.afterFirstReplyMs.openInterest) },
+      lineUsage,
     };
   }
 
@@ -290,6 +301,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     const [lastField] = fields.reduce((latest, current) => ((current[1] ?? 0) > (latest[1] ?? 0) ? current : latest));
     for (const stats of [intervalStats, wholeRunStats]) {
       stats.holdsMs.push(holdMs);
+      if (entry.firstTickAt !== null) for (const [field, at] of fields) if (at !== null) stats.afterFirstReplyMs[field].push(at - entry.firstTickAt);
       if (entry.quote.errorCode !== null) stats.errored += 1;
       else if (timedOut) {
         stats.timedOut += 1;
@@ -300,6 +312,12 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
         stats.lastField[lastField] += 1;
       }
     }
+  }
+
+  function noteFirstTick(reqId: number, entry: WindowPending): void {
+    if (entry.firstTickAt !== null) return;
+    entry.firstTickAt = Date.now();
+    meter.answered(reqId);
   }
 
   function markTick(quote: CapturedOptionQuote, tickType: number): void {
@@ -314,6 +332,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     recordSettle(entry, timedOut);
     clearTimeout(entry.timer);
     pending.delete(reqId);
+    meter.released(reqId);
     try {
       ib.cancelMktData(reqId);
     } catch {
@@ -345,7 +364,8 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       const reqId = nextReqIdFor(ib, () => nextFallbackReqId++);
       const quote = emptyCapturedQuote(contract);
       group.quotes.push(quote);
-      pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId, true), timeoutMs), subscribedAt: Date.now(), arrivedAt: { price: null, delta: null, openInterest: null } });
+      pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId, true), timeoutMs), subscribedAt: Date.now(), firstTickAt: null, arrivedAt: { price: null, delta: null, openInterest: null } });
+      meter.subscribed(reqId);
       const right = contract.right === "C" ? OptionType.Call : OptionType.Put;
       try {
         ib.reqMktData(reqId, new Option(group.symbol, contract.expiry, contract.strike, right, "SMART"), openInterestGenericTickList, false, false);
@@ -360,6 +380,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
   function onTickPrice(reqId: number, tickType: number, price: number): void {
     const entry = pending.get(reqId);
     if (!entry) return;
+    noteFirstTick(reqId, entry);
     markTick(entry.quote, tickType);
     if (bidPriceTicks.has(tickType)) entry.quote.bid = normalizePrice(price);
     if (askPriceTicks.has(tickType)) entry.quote.ask = normalizePrice(price);
@@ -371,6 +392,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     const entry = pending.get(reqId);
     if (!entry || tickType === undefined) return;
     const { quote } = entry;
+    noteFirstTick(reqId, entry);
     markTick(quote, tickType);
     if (bidSizeTicks.has(tickType)) quote.bidSize = normalizeSize(size);
     if (askSizeTicks.has(tickType)) quote.askSize = normalizeSize(size);
@@ -396,6 +418,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     const entry = pending.get(reqId);
     if (!entry) return;
     const { quote } = entry;
+    noteFirstTick(reqId, entry);
     markTick(quote, tickType);
     if (modelComputationTicks.has(tickType)) {
       quote.impliedVolatility = normalizeImpliedVolatility(impliedVolatility);
@@ -438,6 +461,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       const openGroups = new Set<WindowGroup>();
       for (const [reqId, entry] of pending) {
         clearTimeout(entry.timer);
+        meter.released(reqId);
         try {
           ib.cancelMktData(reqId);
         } catch {
@@ -456,11 +480,11 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     },
     inFlightCount: () => pending.size,
     drainSettleStats() {
-      const drained = summarize(intervalStats);
+      const drained = summarize(intervalStats, meter.drain());
       intervalStats = freshStats();
       intervalStats.minInFlight = intervalStats.maxInFlight = pending.size;
       return drained;
     },
-    wholeRunSettleStats: () => summarize(wholeRunStats),
+    wholeRunSettleStats: () => summarize(wholeRunStats, meter.wholeRun()),
   };
 }

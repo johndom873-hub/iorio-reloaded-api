@@ -165,6 +165,8 @@ interface PoolEntry {
    * then would open a line nobody booked.
    */
   planned: boolean;
+  /** IBKR has sent at least one tick since the current subscription (reqId) was made; false while unsubscribed. */
+  answered: boolean;
 }
 
 export function poolKeyFor(contract: PriceContract): string {
@@ -284,10 +286,22 @@ export function peekPooledQuote(contract: PriceContract): PooledQuote | null {
   return entriesByPoolKey.get(poolKeyFor(contract))?.quote ?? null;
 }
 
+/**
+ * Whether the pool holds a contract and in what state: "streaming" = subscribed and answered by IBKR since,
+ * "paused" = shed for budget (its quote is frozen), "waiting" = pooled but not yet answered (its quote may still
+ * be a stored fallback price). Null when not pooled. Read-only; used by the Day Signals loop's measurement log.
+ */
+export function pooledLineState(contract: PriceContract): "streaming" | "paused" | "waiting" | null {
+  const entry = entriesByPoolKey.get(poolKeyFor(contract));
+  if (!entry) return null;
+  if (entry.paused) return "paused";
+  return entry.reqId !== -1 && entry.answered ? "streaming" : "waiting";
+}
+
 export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: (quote: PooledQuote) => void): Promise<() => void> {
   const poolKey = poolKeyFor(contract);
   if (!entriesByPoolKey.has(poolKey)) {
-    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sequence: nextSequence++, paused: false, planned: false, cancelTimer: null };
+    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sequence: nextSequence++, paused: false, planned: false, answered: false, cancelTimer: null };
     entriesByPoolKey.set(poolKey, newEntry);
     if (contract.legType === "stock") {
       // Fast first paint while the live subscription is still being
@@ -335,6 +349,7 @@ function cancelIbkrSubscription(entry: PoolEntry): void {
   reqIdToPoolKey.delete(entry.reqId);
   listenersAttachedTo?.cancelMktData(entry.reqId);
   entry.reqId = -1;
+  entry.answered = false;
 }
 
 function ensureReconcileTimerRunning(): void {
@@ -442,6 +457,7 @@ function attachListeners(ib: IBApi): void {
   function updateEntry(poolKey: string, reqId: number, patch: Partial<PooledQuote>): void {
     const entry = entriesByPoolKey.get(poolKey);
     if (!entry || entry.reqId !== reqId) return;
+    entry.answered = true;
     const next: PooledQuote = { ...entry.quote, ...patch };
     if (quoteEqual(entry.quote, next)) return;
     entry.quote = next;
@@ -519,7 +535,10 @@ function handleUnderlyingDisconnect(): void {
   // and their subscribers stay registered — only the IBKR-side reqId is
   // invalidated — so subscribeUnsubscribedEntries() transparently restores
   // them once sharedLiveConnection reconnects, with no caller ever knowing.
-  for (const entry of entriesByPoolKey.values()) entry.reqId = -1;
+  for (const entry of entriesByPoolKey.values()) {
+    entry.reqId = -1;
+    entry.answered = false;
+  }
   reqIdToPoolKey.clear();
   listenersAttachedTo = null;
   scheduleResubscribeRetry();
@@ -551,6 +570,7 @@ async function subscribeUnsubscribedEntries(): Promise<void> {
   for (const [poolKey, entry] of entriesByPoolKey) {
     if (entry.reqId !== -1 || entry.paused || !entry.planned) continue;
     entry.reqId = sharedLiveConnection.allocateReqId();
+    entry.answered = false;
     reqIdToPoolKey.set(entry.reqId, poolKey);
     // Empty generic tick list: IBKR sends bid/ask/last AND the computed
     // greeks (for an option contract) on a plain subscription — no special
