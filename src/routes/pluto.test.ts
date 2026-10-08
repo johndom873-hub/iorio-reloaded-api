@@ -173,6 +173,89 @@ describe("GET /pluto/events", () => {
   });
 });
 
+describe("History pages: GET /pluto/model-decisions and GET /pluto/orders", () => {
+  // Passes from 2099-02-01 on, so ?since isolates them from every other row; newest last.
+  const historySince = "2099-02-01T00:00:00Z";
+  const historyTrigger = "pluto_route_history_test";
+  const passIds: Record<string, string> = {};
+
+  beforeAll(async () => {
+    const insertPass = async (name: string, minute: number, symbols: string[], modelCalled = true) => {
+      const [row] = await testDb("pluto_passes").insert({ started_at: `2099-02-01T10:0${minute}:00Z`, trigger: historyTrigger, trigger_detail: { symbols }, model_called: modelCalled }).returning("id");
+      passIds[name] = row.id;
+      return row.id as string;
+    };
+    const decision = (passId: string, callIndex: number, parsedOutput: unknown) => ({ pass_id: passId, call_index: callIndex, model_id: "test-model", input_payload: {}, parsed_output: parsedOutput === null ? null : JSON.stringify(parsedOutput) });
+    const action = (passId: string, minute: number, kind: string, symbol: string, outcome: string) => ({ pass_id: passId, created_at: `2099-02-01T10:0${minute}:30Z`, kind, symbol, outcome });
+    const ordered = await insertPass("ordered", 1, ["ZZDA"]);
+    const noOrder = await insertPass("noOrder", 2, ["ZZDB"]);
+    const failed = await insertPass("failed", 3, ["ZZDB"]);
+    await insertPass("skipped", 4, ["ZZDA"], false);
+    // The first call failed to parse, the second ordered: an order, on a ticker the trigger did not name.
+    const retried = await insertPass("retried", 5, []);
+    await testDb("pluto_decisions").insert([decision(ordered, 1, { decision: "trade" }), decision(noOrder, 1, { decision: "no_trade" }), decision(failed, 1, null), decision(retried, 1, null), decision(retried, 2, { decision: "trade" })]);
+    await testDb("pluto_actions").insert([action(ordered, 1, "open", "ZZDA", "filled"), action(ordered, 2, "open", "ZZDA", "error"), action(noOrder, 2, "no_trade", "—", "no_trade"), action(retried, 5, "roll", "ZZDC", "blocked")]);
+  });
+
+  afterAll(async () => {
+    await testDb("pluto_passes").where({ trigger: historyTrigger }).del();
+  });
+
+  const passNames = (json: any) => json.passes.map((pass: any) => Object.keys(passIds).find((name) => passIds[name] === pass.id));
+  const orderSymbolsAndOutcomes = (json: any) => json.actions.map((action: any) => `${action.symbol} ${action.outcome}`);
+
+  it("model decisions: only passes that asked the model, newest first, with their calls and actions, paged with a full total", async () => {
+    const all = await get(`/model-decisions?since=${historySince}`);
+    expect(all.status).toBe(200);
+    expect(all.json.total).toBe(4);
+    expect(passNames(all.json)).toEqual(["retried", "failed", "noOrder", "ordered"]);
+    expect(all.json.passes[3].decisions[0].parsedOutput.decision).toBe("trade");
+    expect(all.json.passes[3].actions).toHaveLength(2);
+    const secondPage = await get(`/model-decisions?since=${historySince}&limit=2&offset=2`);
+    expect(passNames(secondPage.json)).toEqual(["noOrder", "ordered"]);
+    expect(secondPage.json.total).toBe(4);
+  });
+
+  it("model decisions: the verdict comes from the first answer that parsed, none parsed is failed", async () => {
+    expect(passNames((await get(`/model-decisions?since=${historySince}&verdict=order`)).json)).toEqual(["retried", "ordered"]);
+    expect(passNames((await get(`/model-decisions?since=${historySince}&verdict=no_order`)).json)).toEqual(["noOrder"]);
+    expect(passNames((await get(`/model-decisions?since=${historySince}&verdict=failed`)).json)).toEqual(["failed"]);
+  });
+
+  it("model decisions: the ticker matches part of a symbol the pass was asked about or ordered on, any case, never as a pattern", async () => {
+    expect(passNames((await get(`/model-decisions?since=${historySince}&ticker=zzdb`)).json)).toEqual(["failed", "noOrder"]);
+    expect(passNames((await get(`/model-decisions?since=${historySince}&ticker=ZZDC`)).json)).toEqual(["retried"]);
+    expect(passNames((await get(`/model-decisions?since=${historySince}&ticker=ZZD`)).json)).toEqual(["retried", "failed", "noOrder", "ordered"]);
+    expect((await get(`/model-decisions?since=${historySince}&ticker=%25`)).json.total).toBe(0);
+  });
+
+  it("model decisions: rejects an unreadable since or an unknown verdict", async () => {
+    expect((await get("/model-decisions?since=yesterday")).status).toBe(400);
+    expect((await get(`/model-decisions?since=${historySince}&verdict=maybe`)).status).toBe(400);
+  });
+
+  it("orders: every action but the no-order rows, newest first, paged with a full total", async () => {
+    const all = await get(`/orders?since=${historySince}`);
+    expect(all.status).toBe(200);
+    expect(all.json.total).toBe(3);
+    expect(orderSymbolsAndOutcomes(all.json)).toEqual(["ZZDC blocked", "ZZDA error", "ZZDA filled"]);
+    const secondPage = await get(`/orders?since=${historySince}&limit=2&offset=2`);
+    expect(orderSymbolsAndOutcomes(secondPage.json)).toEqual(["ZZDA filled"]);
+    expect(secondPage.json.total).toBe(3);
+  });
+
+  it("orders: filters by outcome group and by part of the symbol", async () => {
+    expect(orderSymbolsAndOutcomes((await get(`/orders?since=${historySince}&outcome=rejected`)).json)).toEqual(["ZZDA error"]);
+    expect(orderSymbolsAndOutcomes((await get(`/orders?since=${historySince}&outcome=filled`)).json)).toEqual(["ZZDA filled"]);
+    expect(orderSymbolsAndOutcomes((await get(`/orders?since=${historySince}&ticker=zzdc`)).json)).toEqual(["ZZDC blocked"]);
+  });
+
+  it("orders: rejects an unknown outcome, including an object's built-in keys", async () => {
+    expect((await get(`/orders?since=${historySince}&outcome=bogus`)).status).toBe(400);
+    expect((await get(`/orders?since=${historySince}&outcome=toString`)).status).toBe(400);
+  });
+});
+
 describe("GET /pluto/tickers", () => {
   it("lists only Signals tickers: a Signals-off shortlist ticker is hidden", async () => {
     const suffix = String(Date.now() % 1_000_000);

@@ -270,21 +270,65 @@ function limitFrom(request: Request, fallback: number): number {
 plutoRouter.get("/passes", async (request: Request, response: Response) => {
   const passesQuery = db("pluto_passes").orderBy("started_at", "desc").limit(limitFrom(request, 50));
   if (request.query.modelCalled === "true") passesQuery.where({ model_called: true });
-  const rows = await passesQuery;
-  const passIds = rows.map((row) => row.id);
+  response.json(await serializePassesWithDetails(await passesQuery));
+});
+
+/** Passes with each one's model calls (a compact summary; the full input payload stays on GET /passes/:id) and actions. */
+async function serializePassesWithDetails(rows: Record<string, unknown>[]) {
+  const passIds = rows.map((row) => row.id as string);
   const [decisions, actions] = passIds.length === 0 ? [[], []] : await Promise.all([
     db("pluto_decisions").whereIn("pass_id", passIds).orderBy("call_index"),
     db("pluto_actions").whereIn("pass_id", passIds).orderBy("created_at"),
   ]);
   const [realized, orderRequests] = await Promise.all([loadRealizedPnlByActionId(actions.map((action) => String(action.id))), loadPlutoOrderRequestsByActionId(actions.map((action) => String(action.id)))]);
-  response.json(
-    rows.map((row) => ({
-      ...serializePass(row),
-      // Compact per-call summary for the Decisions card (the full input payload stays on GET /passes/:id).
-      decisions: decisions.filter((decision) => decision.pass_id === row.id).map((decision) => ({ callIndex: decision.call_index, servedModelId: decision.served_model_id ?? null, serviceTier: decision.service_tier ?? null, parsedOutput: serializeParsedOutput(decision.parsed_output), schemaValid: Boolean(decision.schema_valid), latencyMs: decision.latency_ms ?? null, tokensIn: decision.tokens_in ?? null, tokensOut: decision.tokens_out ?? null, costUsd: decision.cost_usd === null ? null : Number(decision.cost_usd), error: decision.error ?? null })),
-      actions: actions.filter((action) => action.pass_id === row.id).map((action) => serializeAction(action, realized.get(String(action.id)), orderRequests.get(String(action.id)))),
-    })),
-  );
+  return rows.map((row) => ({
+    ...serializePass(row),
+    decisions: decisions.filter((decision) => decision.pass_id === row.id).map((decision) => ({ callIndex: decision.call_index, servedModelId: decision.served_model_id ?? null, serviceTier: decision.service_tier ?? null, parsedOutput: serializeParsedOutput(decision.parsed_output), schemaValid: Boolean(decision.schema_valid), latencyMs: decision.latency_ms ?? null, tokensIn: decision.tokens_in ?? null, tokensOut: decision.tokens_out ?? null, costUsd: decision.cost_usd === null ? null : Number(decision.cost_usd), error: decision.error ?? null })),
+    actions: actions.filter((action) => action.pass_id === row.id).map((action) => serializeAction(action, realized.get(String(action.id)), orderRequests.get(String(action.id)))),
+  }));
+}
+
+/** ?since=<ISO time> for the History filters; null when absent, undefined when it is not a time. */
+function sinceFrom(request: Request): Date | null | undefined {
+  if (request.query.since === undefined || request.query.since === "") return null;
+  const since = typeof request.query.since === "string" ? new Date(request.query.since) : new Date(Number.NaN);
+  return Number.isNaN(since.getTime()) ? undefined : since;
+}
+
+const pageOffsetFrom = (request: Request) => Math.max(0, Math.floor(Number(request.query.offset)) || 0);
+const tickerSearchFrom = (request: Request) => (typeof request.query.ticker === "string" ? request.query.ticker.trim().toUpperCase() : "");
+
+// The History verdicts, read from the first model answer that parsed (the screen's verdictKind): none parsed is "failed".
+const firstParsedVerdictSql = "(select d.parsed_output->>'decision' from pluto_decisions d where d.pass_id = pluto_passes.id and jsonb_typeof(d.parsed_output) = 'object' order by d.call_index limit 1)";
+const historyVerdicts = ["order", "no_order", "failed"] as const;
+
+/**
+ * History's Model decisions, one page: passes that asked the model, newest first, as `{ passes, total }` with total counting
+ * every match. Filters: ?since=<ISO time>, ?ticker=<text> (a symbol the pass was asked about or placed an order on contains
+ * it), ?verdict=order|no_order|failed. ?limit and ?offset page it.
+ */
+plutoRouter.get("/model-decisions", async (request: Request, response: Response) => {
+  const since = sinceFrom(request);
+  const verdict = typeof request.query.verdict === "string" && request.query.verdict !== "" ? request.query.verdict : null;
+  if (since === undefined || (verdict !== null && !historyVerdicts.includes(verdict as (typeof historyVerdicts)[number]))) {
+    response.status(400).json({ error: `since must be a time and verdict one of: ${historyVerdicts.join(", ")}.` });
+    return;
+  }
+  const ticker = tickerSearchFrom(request);
+  const filtered = db("pluto_passes").where({ model_called: true });
+  if (since !== null) filtered.where("started_at", ">=", since);
+  if (ticker !== "") {
+    filtered.where((builder) => {
+      builder
+        .whereRaw("jsonb_typeof(trigger_detail->'symbols') = 'array' and exists (select 1 from jsonb_array_elements_text(trigger_detail->'symbols') listed where strpos(upper(listed), ?) > 0)", [ticker])
+        .orWhereExists(db("pluto_actions as a").whereRaw("a.pass_id = pluto_passes.id and strpos(upper(a.symbol), ?) > 0", [ticker]));
+    });
+  }
+  if (verdict === "order") filtered.whereRaw(`${firstParsedVerdictSql} = 'trade'`);
+  if (verdict === "no_order") filtered.whereRaw(`${firstParsedVerdictSql} <> 'trade'`);
+  if (verdict === "failed") filtered.whereRaw(`${firstParsedVerdictSql} is null`);
+  const [rows, countRows] = await Promise.all([filtered.clone().orderBy("started_at", "desc").orderBy("id", "desc").limit(limitFrom(request, 50)).offset(pageOffsetFrom(request)), filtered.clone().count({ total: "*" })]);
+  response.json({ passes: await serializePassesWithDetails(rows), total: Number(countRows[0]?.total ?? 0) });
 });
 
 plutoRouter.get("/passes/:id", async (request: Request, response: Response) => {
@@ -312,6 +356,38 @@ plutoRouter.get("/actions", async (request: Request, response: Response) => {
   const rows = await db("pluto_actions").orderBy("created_at", "desc").limit(limitFrom(request, 100));
   const [realized, orderRequests] = await Promise.all([loadRealizedPnlByActionId(rows.map((row) => String(row.id))), loadPlutoOrderRequestsByActionId(rows.map((row) => String(row.id)))]);
   response.json(rows.map((row) => serializeAction(row, realized.get(String(row.id)), orderRequests.get(String(row.id)))));
+});
+
+// History's outcome filter, as the stored action outcomes each choice covers.
+const outcomesByHistoryFilter: Record<string, string[]> = {
+  filled: ["filled", "partially_filled", "cancelled_partially_filled"],
+  working: ["confirmed", "order_built", "validated"],
+  blocked: ["blocked"],
+  cancelled: ["cancelled"],
+  rejected: ["rejected", "error"],
+};
+
+/**
+ * History's Orders, one page: every action but the no-order rows, newest first, as `{ actions, total }` with total counting
+ * every match. Filters: ?since=<ISO time>, ?ticker=<text> (the symbol contains it), ?outcome=filled|working|blocked|cancelled|rejected.
+ * ?limit and ?offset page it.
+ */
+plutoRouter.get("/orders", async (request: Request, response: Response) => {
+  const since = sinceFrom(request);
+  const outcome = typeof request.query.outcome === "string" && request.query.outcome !== "" ? request.query.outcome : null;
+  const outcomes = outcome === null ? null : Object.hasOwn(outcomesByHistoryFilter, outcome) ? outcomesByHistoryFilter[outcome] : undefined;
+  if (since === undefined || outcomes === undefined) {
+    response.status(400).json({ error: `since must be a time and outcome one of: ${Object.keys(outcomesByHistoryFilter).join(", ")}.` });
+    return;
+  }
+  const ticker = tickerSearchFrom(request);
+  const filtered = db("pluto_actions").whereNot({ kind: "no_trade" });
+  if (since !== null) filtered.where("created_at", ">=", since);
+  if (ticker !== "") filtered.whereRaw("strpos(upper(symbol), ?) > 0", [ticker]);
+  if (outcomes !== null) filtered.whereIn("outcome", outcomes);
+  const [rows, countRows] = await Promise.all([filtered.clone().orderBy("created_at", "desc").orderBy("id", "desc").limit(limitFrom(request, 50)).offset(pageOffsetFrom(request)), filtered.clone().count({ total: "*" })]);
+  const [realized, orderRequests] = await Promise.all([loadRealizedPnlByActionId(rows.map((row) => String(row.id))), loadPlutoOrderRequestsByActionId(rows.map((row) => String(row.id)))]);
+  response.json({ actions: rows.map((row) => serializeAction(row, realized.get(String(row.id)), orderRequests.get(String(row.id)))), total: Number(countRows[0]?.total ?? 0) });
 });
 
 /** The payload keys that tie an event to tickers or to a pass; an event with none of them applies to every ticker. */
