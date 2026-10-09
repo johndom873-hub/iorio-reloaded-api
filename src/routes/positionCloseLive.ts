@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { settleGraceMs, subscribeToPooledQuote } from "../ibkr/marketDataPool.js";
 import { loadCloseLiveInputs, toCloseLiveQuote } from "../lib/closeGate.js";
+import { closeCommissionRates, flatCommissionEstimator, flatStockCommissionEstimator, loadCommissionEstimator, loadStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import { deriveCloseLiveState, type CloseLiveQuote } from "../lib/closeLiveState.js";
 import { computeMarketSessionStatus, type MarketSessionState } from "../lib/marketSessionStatus.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
@@ -8,6 +9,7 @@ import { easternIsoDate } from "../lib/easternIsoDate.js";
 // Live data behind the Close form only (approved 2026-09-28): one SSE stream per open modal carrying the
 // position's live bid/ask, the live wheel-cycle P&L and whether closing is allowed right now. It reads the
 // shared quote pool exactly like the other streams (no extra IBKR lines), and nothing else consumes it.
+// Each state also carries the commission rates the form uses to estimate the cycle P&L at its limit prices.
 
 const positionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const emitThrottleMs = 500;
@@ -49,23 +51,27 @@ export async function streamCloseLiveHandler(request: Request, response: Respons
   const unsubscribers: Array<() => void> = [];
   const timers: Array<ReturnType<typeof setTimeout>> = [];
   let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+  let commissionRates = closeCommissionRates(flatCommissionEstimator, flatStockCommissionEstimator);
 
   const emit = () => {
     if (closed) return;
     send({
       type: "state",
-      data: deriveCloseLiveState({
-        symbol,
-        positionId,
-        legs,
-        marketState,
-        optionQuotesByLegId,
-        stockQuote,
-        cycleInput: inputs.cycleInput,
-        todayIso: easternIsoDate(new Date()),
-        waitedMs: Date.now() - startedAt,
-        settleGraceMs,
-      }),
+      data: {
+        ...deriveCloseLiveState({
+          symbol,
+          positionId,
+          legs,
+          marketState,
+          optionQuotesByLegId,
+          stockQuote,
+          cycleInput: inputs.cycleInput,
+          todayIso: easternIsoDate(new Date()),
+          waitedMs: Date.now() - startedAt,
+          settleGraceMs,
+        }),
+        commissionRates,
+      },
     });
   };
   const scheduleEmit = () => {
@@ -102,7 +108,8 @@ export async function streamCloseLiveHandler(request: Request, response: Respons
   }, heartbeatIntervalMs));
 
   try {
-    await refreshMarketState();
+    const [, optionCommissionEstimator, stockCommissionEstimator] = await Promise.all([refreshMarketState(), loadCommissionEstimator(), loadStockCommissionEstimator()]);
+    commissionRates = closeCommissionRates(optionCommissionEstimator, stockCommissionEstimator);
     const contracts = inputs.contracts.map(({ key, contract }) => ({
       contract,
       onQuote: (quote: CloseLiveQuote) => {
