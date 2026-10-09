@@ -148,12 +148,15 @@ export class PlutoAgent {
     console.log("Pluto agent started.");
   }
 
-  /** Deploy and crash-loop detection: both pause before anything else happens (design item 6, refined round 2). */
+  /**
+   * Deploy and crash-loop detection, before anything else happens (design item 6, refined round 2). Outside production a new
+   * release keeps Pluto's previous state, running or paused (Marcelo, 2026-10-09); production still pauses on one.
+   */
   private async guardBoot(): Promise<void> {
     const settings = this.settings!;
     const state = await loadPlutoState();
     const release = currentRelease();
-    if (state.lastSeenRelease !== null && release !== null && state.lastSeenRelease !== release) {
+    if (readAppEnvironment() === "production" && state.lastSeenRelease !== null && release !== null && state.lastSeenRelease !== release) {
       // A person's pause (and its reason) outranks the deploy pause: never let "resume once you're happy with the release"
       // replace "paused by Juan" (Marcelo, 2026-10-06).
       if (state.paused) {
@@ -165,7 +168,10 @@ export class PlutoAgent {
       }
     }
     if (release !== null) await recordPlutoRelease(release);
-    const recentStarts = await db("pluto_events").where({ type: "agent_started" }).where("occurred_at", ">", new Date(Date.now() - 60 * 60_000)).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0));
+    // Only starts on this release count: a burst of deploys is not a crash loop, a release that keeps restarting is.
+    const recentStartsQuery = db("pluto_events").where({ type: "agent_started" }).where("occurred_at", ">", new Date(Date.now() - 60 * 60_000));
+    if (release !== null) recentStartsQuery.whereRaw("payload->>'release' = ?", [release]);
+    const recentStarts = await recentStartsQuery.count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0));
     if (recentStarts >= settings.crashLoopRestartsPerHour) {
       const current = await loadPlutoState();
       if (!current.paused) {
