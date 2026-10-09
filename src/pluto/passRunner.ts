@@ -12,6 +12,7 @@ import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
 import { anyOpenPositionOn, loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol, loadOccupiedContracts, loadPlutoBook } from "./book.js";
 import { describeCandidateId, deterministicTopPick, filterTickerForPluto, findSameContractConflict, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
+import { summarizeTickerRejections } from "./rejectionSummary.js";
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { updatePlutoConcernAlerts } from "./concernAlerts.js";
 import { executePlutoClose, executePlutoOrder, watchPlutoOrder } from "./executor.js";
@@ -171,7 +172,7 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
 }
 
 /** What the sizing gate's stress cap needs about the ticker today. */
-function stressCapInputFor(scored: TickerSignals, todayEasternIso: string): StressCapInput {
+function stressCapInputFor(scored: TickerSignals, todayEasternIso: string, openSessionDatesIso: string[]): StressCapInput {
   const forecastVolatility = scored.forecast?.volatility ?? null;
   const normalDayMovePct = expectedDailyMovePct(forecastVolatility);
   return {
@@ -179,6 +180,7 @@ function stressCapInputFor(scored: TickerSignals, todayEasternIso: string): Stre
     elevatedVolatility: scored.elevatedVolatility?.elevated === true,
     dayMoveSigmas: scored.dayChangePercent !== null && normalDayMovePct !== null ? scored.dayChangePercent / normalDayMovePct : null,
     todayEasternIso,
+    openSessionDatesIso,
   };
 }
 
@@ -330,7 +332,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const opensBlockedBecause = marketStress ? "market stress: new opens blocked while SPY is down" : request.heldPositionsOnly ? "opens wait for today's opening look" : null;
   const blockOpensWhenBarred = (ticker: EvaluatedTicker) => {
     if (!opensBlockedBecause) return;
-    ticker.filtered.rejected.push(...ticker.filtered.eligible.map((entry) => ({ id: entry.id, reasons: [opensBlockedBecause] })));
+    ticker.filtered.rejected.push(...ticker.filtered.eligible.map((entry) => ({ id: entry.id, reasons: [opensBlockedBecause], codes: ["opens_blocked" as const] })));
     ticker.filtered.eligible = [];
   };
   // The ticker cooldown after a filled Pluto action keeps the ticker's opens from the model too: the post-model gate would refuse them.
@@ -370,7 +372,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const skipNothingEligible = async (reason: string) => {
     for (const ticker of evaluated) context.lastFingerprintBySymbol.set(ticker.row.symbol, lookedAtFingerprintBySymbol.get(ticker.row.symbol) ?? ticker.fingerprint);
     await finishPass({ candidateCount: 0, systemChecks: checks.checks, modelCalled: false, skippedReason: reason });
-    await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason: "nothing eligible", tickers: evaluated.map((ticker) => ({ symbol: ticker.row.symbol, blocks: ticker.filtered.tickerBlocks, rejected: ticker.filtered.rejected.length })) });
+    await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason: "nothing eligible", tickers: evaluated.map((ticker) => summarizeTickerRejections(ticker.filtered)) });
     await recordPlutoPass();
     return { passId, modelCalled: false, skippedReason: "nothing eligible", outcome: null };
   };
@@ -491,7 +493,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   }
   const topPick = deterministicTopPick(evaluated.flatMap((ticker) => ticker.filtered.eligible));
   const topPickSummary = topPick ? { id: topPick.id, edgeDollars: topPick.candidate.edgeDollars, netEdge: topPick.candidate.netEdge, grade: topPick.candidate.grade } : null;
-  const modelCalledEvent = { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, confidence: decision.confidence, actionKind: decision.actionKind, agreement: agreementDetail, reasons: decision.reasons, systemConcerns: decision.systemConcerns, deterministicTopPick: topPickSummary };
+  const modelCalledEvent = { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, confidence: decision.confidence, actionKind: decision.actionKind, agreement: agreementDetail, reasons: decision.reasons, systemConcerns: decision.systemConcerns, deterministicTopPick: topPickSummary, tickers: evaluated.map((ticker) => summarizeTickerRejections(ticker.filtered)) };
   if (decision.decision === "trade") await recordPlutoEvent("model_called", modelCalledEvent);
   await finishPass({ inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, skippedReason: null, tokensIn, tokensOut, costUsd, servedModelIds });
   await recordPlutoPass();
@@ -575,7 +577,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       nowMs: Date.now(),
       sameContractConflict: freshContractForGate ? findSameContractConflict(fresh.occupiedContracts, freshContractForGate.expiry, freshContractForGate.strike) : null,
     },
-    stress: stressCapInputFor(fresh.scored, fresh.inputs.todayEasternIso),
+    stress: stressCapInputFor(fresh.scored, fresh.inputs.todayEasternIso, fresh.inputs.openSessionDatesIso),
   });
   const contract = freshCandidate ?? freshRoll?.replacement ?? null;
   const gateResults: PlutoGateResult[] = gates.gates;

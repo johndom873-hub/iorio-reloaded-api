@@ -116,6 +116,18 @@ describe("filterTickerForPluto — candidate level", () => {
   it("lists every reason at once, not just the first", () => {
     expect(rejectionsFor({ grade: "weak", volume: 1 })).toHaveLength(2);
   });
+  it("records the rule behind each reason, in the same order", () => {
+    const codesFor = (overrides: Partial<SignalCandidate>, extra: Partial<PlutoTickerFilterInput> = {}) => filterTickerForPluto(input({ scored: scored({ candidates: [candidate(overrides)] }), ...extra })).rejected[0]?.codes ?? [];
+    expect(codesFor({ grade: "weak", edgeDollars: 12, delta: -0.35, dte: 1, annualizedYield: 0.3, spreadPercent: 22, openInterest: null, volume: 3 })).toEqual(["grade", "edge_dollars", "delta", "dte", "yield", "spread", "open_interest", "volume"]);
+    expect(codesFor({ quoteSource: "snapshot", quotedAt: null })).toEqual(["quote_age"]);
+    expect(codesFor({}, { slices: [] })).toEqual(["no_slice"]);
+    expect(codesFor({}, { slices: [slice({ rmseVolatility: 0.031, pointCount: 6, calendarViolations: 1 })] })).toEqual(["slice_rmse", "slice_points", "calendar_arbitrage"]);
+    expect(codesFor({ midImpliedVolatility: null })).toEqual(["no_mid_iv"]);
+    expect(codesFor({ midImpliedVolatility: 0.54 })).toEqual(["mid_iv_gap"]);
+    expect(codesFor({ flags: ["outside_fitted_range", "insufficient_cash", "earnings_calendar_unresolved"], executable: false })).toEqual(["outside_fitted_range", "insufficient_cash", "earnings_unresolved", "not_executable"]);
+    expect(codesFor({}, { opensBlockedReason: "ticker cooldown" })).toEqual(["opens_blocked"]);
+    expect(codesFor({}, { occupiedContracts: [{ expiry: "2026-10-16", strike: 100, detail: "held" }] })).toEqual(["same_contract"]);
+  });
   it("a ticker whose opens are barred for the round (the ticker cooldown) offers no open, whatever its quality", () => {
     expect(rejectionsFor({}, { opensBlockedReason: "ticker cooldown: last filled Pluto action on this symbol 20 min ago (cooldown 60 min)" })).toEqual(["ticker cooldown: last filled Pluto action on this symbol 20 min ago (cooldown 60 min)"]);
     expect(filterTickerForPluto(input({ scored: scored({ candidates: [candidate()] }), opensBlockedReason: "ticker cooldown" })).eligible).toEqual([]);
@@ -138,6 +150,11 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
     const result = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, netRollEdgeDollarsPerContract: 20, netRollEdgeDollars: 40 }] }) }));
     expect(result.eligibleRolls).toEqual([]);
     expect(result.rejectedRolls[0]!.reasons).toEqual(["net roll Edge $20/contract below $30"]);
+    expect(result.rejectedRolls[0]!.codes).toEqual(["edge_dollars"]);
+  });
+  it("a roll's replacement keeps the rule codes of an open, under the replacement's reason text", () => {
+    const bad = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, grade: "weak", replacement: candidate({ strike: 95, spreadPercent: 30 }) }] }) }));
+    expect(bad.rejectedRolls[0]!.codes).toEqual(["grade", "spread"]);
   });
   it("the deterministic pick is Edge $ first, net Edge second", () => {
     const a = { id: "a", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ edgeDollars: 50, netEdge: 0.06 }) };

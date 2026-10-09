@@ -144,7 +144,7 @@ describe("Formula F3 — event closes", () => {
     expect(reason).toBeNull();
     expect(offer).toMatchObject({ id: "HOOD:close_leg:leg7", kind: "close_leg", automatic: false, side: "buy", multiplier: 100, quantity: 1, limitPrice: 0.14, reviewKey: "c80s3" });
     expect(offer!.description).toMatch(/before the 27 Oct Fed rate decision \(heavy, 3 sessions away\); locks 84 at the ask$/);
-    expect(offer!.detail).toMatchObject({ event: "Fed rate decision", sessions_until: 3, stress_normal_days: 2, captured_pct: 84, max_remaining_gain_dollars: 14, event_stress_loss_dollars: 25, close_cost_dollars: 3 });
+    expect(offer!.detail).toMatchObject({ event: "Fed rate decision", sessions_until: 3, stress_normal_days: 2, captured_pct: 84, max_remaining_gain_dollars: 14, event_stress_loss_dollars: 43, close_cost_dollars: 3 });
     expect(evaluateShortLegBuyback({ symbol: "HOOD", leg: put, rolls: [], settings, singleLegPosition: true }).offer).toBeNull();
   });
 
@@ -188,7 +188,7 @@ describe("Formula F3 — event closes", () => {
         legIds: ["call1", "stock1"], legLimitPrices: { call1: 4.2, stock1: 101 }, otherReferenceLegs: [{ side: "buy", price: 4.2, multiplier: 100 }],
       });
       expect(offer!.cycle_pnl).toBeCloseTo(250 - 3.68, 9);
-      expect(offer!.detail).toMatchObject({ max_remaining_gain_dollars: 20, event_stress_loss_dollars: 93, cycle_pnl_after_costs_dollars: 246 });
+      expect(offer!.detail).toMatchObject({ max_remaining_gain_dollars: 20, event_stress_loss_dollars: 116, cycle_pnl_after_costs_dollars: 246 });
     });
 
     it("never when the cycle closed now is not in profit after the close cost, or unread", () => {

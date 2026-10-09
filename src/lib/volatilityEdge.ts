@@ -17,6 +17,8 @@ import { sviTotalVariance, type RawSviParameters, type SviSliceStatus } from "./
 // premium, so a high Edge there is not the same thing as a rich premium.
 
 export const primaryForecastWindowDays = 63;
+/** The forecast's own year: Yang-Zhang gives variance per trading session (realizedVolatility.ts annualizes × 252). */
+export const tradingSessionsPerYear = 252;
 export const fallbackForecastWindowDays = 21;
 /** Daily bars needed for any forecast at all: the shorter window plus the prior close. */
 export const minimumBarsForAnyForecast = fallbackForecastWindowDays + 1;
@@ -66,19 +68,49 @@ export interface VolatilityEdge {
   insideFittedRange: boolean;
 }
 
+/**
+ * The forecast on one option's clock (approved 2026-10-09). The forecast is per trading session × 252; the option's
+ * implied volatility is per calendar day × 365 (the fit's convention). Comparing them as they are flatters contracts that
+ * span no weekend and penalizes those that do, so the forecast is put on the option's clock first:
+ *
+ *   forecast on the option's clock = forecast × √( (N ÷ 252) ÷ (D ÷ 365) )
+ *
+ * N = trading sessions from the scoring date to expiry (weekends and holidays don't count), D ÷ 365 = the option's
+ * calendar years (`calendarYearsToExpiry`). SMCI Thu → Fri: 76.6% × √((1/252) ÷ (1/365)) = 92.2%. Edge = IV − this.
+ * Null when N is unknown or zero (an expiry-day contract has no fitted slice anyway).
+ */
+export function forecastOnOptionClock(forecastVolatility: number, tradingSessionsToExpiry: number | undefined, calendarYearsToExpiry: number): number | null {
+  if (tradingSessionsToExpiry === undefined || !(tradingSessionsToExpiry > 0) || !(calendarYearsToExpiry > 0)) return null;
+  return forecastVolatility * Math.sqrt(tradingSessionsToExpiry / tradingSessionsPerYear / calendarYearsToExpiry);
+}
+
+/** Per expiry, the open days in `openSessionDatesIso` after `scoringDateIso`, up to and including the expiry. */
+export function tradingSessionsByExpiry(expiries: string[], openSessionDatesIso: string[], scoringDateIso: string): Map<string, number> {
+  const sessions = openSessionDatesIso.filter((dateIso) => dateIso > scoringDateIso).sort();
+  const result = new Map<string, number>();
+  for (const expiry of expiries) {
+    let count = 0;
+    while (count < sessions.length && sessions[count]! <= expiry) count++;
+    result.set(expiry, count);
+  }
+  return result;
+}
+
 /** Null (unscored) unless the slice is 'ok' and a forecast exists; flagged slices are never used silently. */
-export function computeVolatilityEdge(slice: EdgeSlice, strike: number, forecast: RealizedVolatilityForecast | null): VolatilityEdge | null {
+export function computeVolatilityEdge(slice: EdgeSlice, strike: number, forecast: RealizedVolatilityForecast | null, tradingSessionsToExpiry: number): VolatilityEdge | null {
   if (forecast === null || slice.status !== "ok" || slice.parameters === null || slice.kMin === null || slice.kMax === null) return null;
   if (!(strike > 0) || !(slice.forwardPrice > 0) || !(slice.yearsToExpiry > 0)) return null;
   const logMoneyness = Math.log(strike / slice.forwardPrice);
   const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
   if (!(totalVariance > 0)) return null;
   const impliedVolatility = Math.sqrt(totalVariance / slice.yearsToExpiry);
+  const contractForecast = forecastOnOptionClock(forecast.volatility, tradingSessionsToExpiry, slice.yearsToExpiry);
+  if (contractForecast === null) return null;
   return {
     impliedVolatility,
-    forecastVolatility: forecast.volatility,
+    forecastVolatility: contractForecast,
     forecastWindowDays: forecast.windowDays,
-    edge: impliedVolatility - forecast.volatility,
+    edge: impliedVolatility - contractForecast,
     insideFittedRange: logMoneyness >= slice.kMin && logMoneyness <= slice.kMax,
   };
 }

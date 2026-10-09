@@ -290,6 +290,16 @@ export async function lookupLatestDailyBar(
   reqId = 1,
   whatToShow: WhatToShow = WhatToShow.TRADES,
 ): Promise<PriceBar | null> {
+  return (await lookupRecentDailyBars(connection, symbol, reqId, whatToShow)).at(-1) ?? null;
+}
+
+/** Every bar of lookupLatestDailyBar's "2 D" request, oldest first: the earlier one is a day already stored, which the split check compares. */
+export async function lookupRecentDailyBars(
+  connection: IbkrConnection,
+  symbol: string,
+  reqId = 1,
+  whatToShow: WhatToShow = WhatToShow.TRADES,
+): Promise<PriceBar[]> {
   const { ib } = connection;
 
   return new Promise((resolve, reject) => {
@@ -310,7 +320,7 @@ export async function lookupLatestDailyBar(
       if (id !== reqId) return;
       if (date.startsWith("finished")) {
         cleanup();
-        resolve(bars.at(-1) ?? null);
+        resolve(bars);
         return;
       }
       bars.push({ time: parseIbkrBarTime(date), open, high, low, close, volume });

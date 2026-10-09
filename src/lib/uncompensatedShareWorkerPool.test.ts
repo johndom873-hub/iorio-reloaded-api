@@ -1,8 +1,12 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSignalCandidates, gradeSignalCandidates, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, gradeSignalCandidates, type SignalQuote, type SignalSurfaceSlice , type SignalCandidatesInput } from "./signalCandidates.js";
 import { candidateContractKey, computeUncompensatedByContract } from "./signalsLiveScoring.js";
 import { computeUncompensatedSharesInWorker, shutdownUncompensatedShareWorker } from "./uncompensatedShareWorkerPool.js";
+
+// These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
+const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
+const buildSignalCandidates = (input: Omit<SignalCandidatesInput, "tradingSessionsByExpiry"> & { tradingSessionsByExpiry?: ReadonlyMap<string, number> }) => buildSignalCandidatesOnAnyClock({ ...input, tradingSessionsByExpiry: input.tradingSessionsByExpiry ?? sameClockSessions(input.slices) });
 
 const forward = 100;
 const rate = 0.04;

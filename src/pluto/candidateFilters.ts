@@ -29,9 +29,45 @@ export interface PlutoRollCandidate {
   roll: RollSignalCandidate;
 }
 
+/** One stable code per filter rule, for counting why contracts were out; the reason text carries the numbers. */
+export type PlutoRejectionCode =
+  | "grade"
+  | "edge_dollars"
+  | "delta"
+  | "dte"
+  | "yield"
+  | "spread"
+  | "open_interest"
+  | "volume"
+  | "quote_age"
+  | "no_slice"
+  | "slice_rmse"
+  | "slice_points"
+  | "calendar_arbitrage"
+  | "no_mid_iv"
+  | "mid_iv_gap"
+  | "iv_shift"
+  | "outside_fitted_range"
+  | "insufficient_cash"
+  | "earnings_unresolved"
+  | "not_executable"
+  | "same_contract"
+  | "opens_blocked";
+
+export interface PlutoRejectionReason {
+  code: PlutoRejectionCode;
+  reason: string;
+}
+
 export interface PlutoRejection {
   id: string;
   reasons: string[];
+  /** The rule behind each entry of `reasons`, same order. */
+  codes: PlutoRejectionCode[];
+}
+
+export function plutoRejection(id: string, failures: PlutoRejectionReason[]): PlutoRejection {
+  return { id, reasons: failures.map((failure) => failure.reason), codes: failures.map((failure) => failure.code) };
 }
 
 export interface PlutoTickerFilterResult {
@@ -104,44 +140,52 @@ function quoteAgeMinutes(candidate: Pick<SignalCandidate, "quoteSource" | "quote
   return Math.max(0, (nowMs - new Date(at).getTime()) / 60_000);
 }
 
+type OpenCandidateFilterContext = { scored: TickerSignals; slicesByExpiry: Map<string, SignalSurfaceSlice>; settings: PlutoSettings; nowMs: number };
+
 /** Every reason one open candidate is out; empty means eligible. Shared with the roll path for the replacement leg. */
-export function rejectOpenCandidate(candidate: SignalCandidate, context: { scored: TickerSignals; slicesByExpiry: Map<string, SignalSurfaceSlice>; settings: PlutoSettings; nowMs: number }): string[] {
+export function rejectOpenCandidate(candidate: SignalCandidate, context: OpenCandidateFilterContext): string[] {
+  return openCandidateFailures(candidate, context).map((failure) => failure.reason);
+}
+
+/** As rejectOpenCandidate, with the rule behind each reason. */
+export function openCandidateFailures(candidate: SignalCandidate, context: OpenCandidateFilterContext): PlutoRejectionReason[] {
   const { settings, scored } = context;
-  const reasons: string[] = [];
-  if (gradeRank[candidate.grade] < gradeRank[settings.minGrade]) reasons.push(`grade ${candidate.grade} below ${settings.minGrade}`);
-  if (candidate.edgeDollars < settings.minEdgeDollars) reasons.push(`Edge $${candidate.edgeDollars.toFixed(0)} below $${settings.minEdgeDollars}`);
-  if (Math.abs(candidate.delta) > settings.maxAbsDelta) reasons.push(`|delta| ${Math.abs(candidate.delta).toFixed(2)} above ${settings.maxAbsDelta}`);
-  if (candidate.dte < settings.minDte || candidate.dte > settings.maxDte) reasons.push(`DTE ${candidate.dte} outside ${settings.minDte}–${settings.maxDte}`);
-  if (candidate.annualizedYield * 100 < settings.minAnnualizedYieldPct) reasons.push(`annualized yield ${(candidate.annualizedYield * 100).toFixed(0)}% below ${settings.minAnnualizedYieldPct}%`);
-  if (candidate.spreadPercent > settings.maxSpreadPct) reasons.push(`spread ${candidate.spreadPercent.toFixed(1)}% above ${settings.maxSpreadPct}%`);
-  if (candidate.openInterest === null || candidate.openInterest < settings.minOpenInterest) reasons.push(`open interest ${candidate.openInterest ?? "unknown"} below ${settings.minOpenInterest}`);
-  if (candidate.volume === null || candidate.volume < settings.minSessionVolume) reasons.push(`session volume ${candidate.volume ?? "unknown"} below ${settings.minSessionVolume}`);
+  const failures: PlutoRejectionReason[] = [];
+  const fail = (code: PlutoRejectionCode, reason: string) => failures.push({ code, reason });
+  if (gradeRank[candidate.grade] < gradeRank[settings.minGrade]) fail("grade", `grade ${candidate.grade} below ${settings.minGrade}`);
+  if (candidate.edgeDollars < settings.minEdgeDollars) fail("edge_dollars", `Edge $${candidate.edgeDollars.toFixed(0)} below $${settings.minEdgeDollars}`);
+  if (Math.abs(candidate.delta) > settings.maxAbsDelta) fail("delta", `|delta| ${Math.abs(candidate.delta).toFixed(2)} above ${settings.maxAbsDelta}`);
+  if (candidate.dte < settings.minDte || candidate.dte > settings.maxDte) fail("dte", `DTE ${candidate.dte} outside ${settings.minDte}–${settings.maxDte}`);
+  if (candidate.annualizedYield * 100 < settings.minAnnualizedYieldPct) fail("yield", `annualized yield ${(candidate.annualizedYield * 100).toFixed(0)}% below ${settings.minAnnualizedYieldPct}%`);
+  if (candidate.spreadPercent > settings.maxSpreadPct) fail("spread", `spread ${candidate.spreadPercent.toFixed(1)}% above ${settings.maxSpreadPct}%`);
+  if (candidate.openInterest === null || candidate.openInterest < settings.minOpenInterest) fail("open_interest", `open interest ${candidate.openInterest ?? "unknown"} below ${settings.minOpenInterest}`);
+  if (candidate.volume === null || candidate.volume < settings.minSessionVolume) fail("volume", `session volume ${candidate.volume ?? "unknown"} below ${settings.minSessionVolume}`);
 
   const ageMinutes = quoteAgeMinutes(candidate, scored.snapshotCapturedAt, context.nowMs);
-  if (ageMinutes === null) reasons.push("quote age unknown");
-  else if (ageMinutes > settings.maxQuoteAgeMinutes) reasons.push(`quote ${ageMinutes.toFixed(0)} min old (${candidate.quoteSource}), max ${settings.maxQuoteAgeMinutes}`);
+  if (ageMinutes === null) fail("quote_age", "quote age unknown");
+  else if (ageMinutes > settings.maxQuoteAgeMinutes) fail("quote_age", `quote ${ageMinutes.toFixed(0)} min old (${candidate.quoteSource}), max ${settings.maxQuoteAgeMinutes}`);
 
   const slice = context.slicesByExpiry.get(candidate.expiry);
-  if (!slice) reasons.push("no fitted slice for the expiry");
+  if (!slice) fail("no_slice", "no fitted slice for the expiry");
   else {
-    if (slice.rmseVolatility === null || slice.rmseVolatility * 100 > settings.maxSliceRmseVp) reasons.push(`slice RMSE ${slice.rmseVolatility === null ? "unknown" : (slice.rmseVolatility * 100).toFixed(1) + " vp"} above ${settings.maxSliceRmseVp} vp`);
-    if (slice.pointCount < settings.minSlicePointCount) reasons.push(`slice fitted on ${slice.pointCount} points, min ${settings.minSlicePointCount}`);
-    if (slice.calendarViolations > 0) reasons.push(`slice has ${slice.calendarViolations} calendar-arbitrage violation(s)`);
+    if (slice.rmseVolatility === null || slice.rmseVolatility * 100 > settings.maxSliceRmseVp) fail("slice_rmse", `slice RMSE ${slice.rmseVolatility === null ? "unknown" : (slice.rmseVolatility * 100).toFixed(1) + " vp"} above ${settings.maxSliceRmseVp} vp`);
+    if (slice.pointCount < settings.minSlicePointCount) fail("slice_points", `slice fitted on ${slice.pointCount} points, min ${settings.minSlicePointCount}`);
+    if (slice.calendarViolations > 0) fail("calendar_arbitrage", `slice has ${slice.calendarViolations} calendar-arbitrage violation(s)`);
   }
 
-  if (candidate.midImpliedVolatility === null) reasons.push("no mid IV to check the surface against");
+  if (candidate.midImpliedVolatility === null) fail("no_mid_iv", "no mid IV to check the surface against");
   else {
     const gapVp = Math.abs(candidate.midImpliedVolatility - candidate.surfaceImpliedVolatility) * 100;
-    if (gapVp > settings.maxMidVsSurfaceIvVp) reasons.push(`mid IV is ${gapVp.toFixed(1)} vp from the surface, max ${settings.maxMidVsSurfaceIvVp}`);
+    if (gapVp > settings.maxMidVsSurfaceIvVp) fail("mid_iv_gap", `mid IV is ${gapVp.toFixed(1)} vp from the surface, max ${settings.maxMidVsSurfaceIvVp}`);
   }
   const shift = scored.ivShiftByExpiry[candidate.expiry];
-  if (shift && Math.abs(shift.shiftVolatilityPoints) > settings.maxIvShiftVp) reasons.push(`intraday IV shift ${shift.shiftVolatilityPoints.toFixed(1)} vp beyond ±${settings.maxIvShiftVp}`);
+  if (shift && Math.abs(shift.shiftVolatilityPoints) > settings.maxIvShiftVp) fail("iv_shift", `intraday IV shift ${shift.shiftVolatilityPoints.toFixed(1)} vp beyond ±${settings.maxIvShiftVp}`);
 
-  if (candidate.flags.includes("outside_fitted_range")) reasons.push("strike outside the fitted range (extrapolated surface)");
-  if (candidate.flags.includes("insufficient_cash")) reasons.push("insufficient free cash");
-  if (candidate.flags.includes("earnings_calendar_unresolved")) reasons.push("earnings calendar unresolved for this ticker");
-  if (!candidate.executable) reasons.push("not executable");
-  return reasons;
+  if (candidate.flags.includes("outside_fitted_range")) fail("outside_fitted_range", "strike outside the fitted range (extrapolated surface)");
+  if (candidate.flags.includes("insufficient_cash")) fail("insufficient_cash", "insufficient free cash");
+  if (candidate.flags.includes("earnings_calendar_unresolved")) fail("earnings_unresolved", "earnings calendar unresolved for this ticker");
+  if (!candidate.executable) fail("not_executable", "not executable");
+  return failures;
 }
 
 /** Reasons the whole ticker is out this pass. */
@@ -172,26 +216,26 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
   const occupied = input.occupiedContracts ?? [];
   for (const candidate of scored.candidates) {
     const id = openCandidateId(scored.symbol, candidate);
-    const reasons = rejectOpenCandidate(candidate, context);
+    const failures = openCandidateFailures(candidate, context);
     const conflict = findSameContractConflict(occupied, candidate.expiry, candidate.strike);
-    if (conflict) reasons.push(`same contract: ${conflict}`);
-    if (input.opensBlockedReason) reasons.push(input.opensBlockedReason);
-    if (reasons.length === 0) result.eligible.push({ id, kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate });
-    else result.rejected.push({ id, reasons });
+    if (conflict) failures.push({ code: "same_contract", reason: `same contract: ${conflict}` });
+    if (input.opensBlockedReason) failures.push({ code: "opens_blocked", reason: input.opensBlockedReason });
+    if (failures.length === 0) result.eligible.push({ id, kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate });
+    else result.rejected.push(plutoRejection(id, failures));
   }
 
   for (const roll of scored.rolls) {
     const id = rollCandidateId(scored.symbol, roll);
-    const reasons: string[] = [];
-    if (gradeRank[roll.grade] < gradeRank[input.settings.minGrade]) reasons.push(`roll grade ${roll.grade} below ${input.settings.minGrade}`);
-    if (roll.netRollEdgeDollarsPerContract < input.settings.minEdgeDollars) reasons.push(`net roll Edge $${roll.netRollEdgeDollarsPerContract.toFixed(0)}/contract below $${input.settings.minEdgeDollars}`);
+    const failures: PlutoRejectionReason[] = [];
+    if (gradeRank[roll.grade] < gradeRank[input.settings.minGrade]) failures.push({ code: "grade", reason: `roll grade ${roll.grade} below ${input.settings.minGrade}` });
+    if (roll.netRollEdgeDollarsPerContract < input.settings.minEdgeDollars) failures.push({ code: "edge_dollars", reason: `net roll Edge $${roll.netRollEdgeDollarsPerContract.toFixed(0)}/contract below $${input.settings.minEdgeDollars}` });
     // The replacement leg must be tradeable on its own terms, minus the grade/Edge $ rules already judged on the roll.
-    const replacementReasons = rejectOpenCandidate({ ...roll.replacement, grade: "strong", edgeDollars: Number.MAX_SAFE_INTEGER }, context);
-    reasons.push(...replacementReasons.map((reason) => `replacement: ${reason}`));
+    const replacementFailures = openCandidateFailures({ ...roll.replacement, grade: "strong", edgeDollars: Number.MAX_SAFE_INTEGER }, context);
+    failures.push(...replacementFailures.map((failure) => ({ code: failure.code, reason: `replacement: ${failure.reason}` })));
     const conflict = findSameContractConflict(occupied, roll.replacement.expiry, roll.replacement.strike);
-    if (conflict) reasons.push(`replacement: same contract: ${conflict}`);
-    if (reasons.length === 0) result.eligibleRolls.push({ id, kind: "roll", symbol: scored.symbol, roll });
-    else result.rejectedRolls.push({ id, reasons });
+    if (conflict) failures.push({ code: "same_contract", reason: `replacement: same contract: ${conflict}` });
+    if (failures.length === 0) result.eligibleRolls.push({ id, kind: "roll", symbol: scored.symbol, roll });
+    else result.rejectedRolls.push(plutoRejection(id, failures));
   }
   return result;
 }

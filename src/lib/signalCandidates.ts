@@ -2,7 +2,7 @@ import { blackScholesDelta, impliedVolatilityFromPrice, sviTotalVariance, type R
 import { blackScholesVega, computeFrictionCost, computeNetEdge } from "./optionFriction.js";
 import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
 import { computeUncompensatedShare, type UncompensatedShareOptions } from "./uncompensatedShare.js";
-import { expirySpansEarnings, expirySpansMacroEvent, type RealizedVolatilityForecast } from "./volatilityEdge.js";
+import { expirySpansEarnings, expirySpansMacroEvent, forecastOnOptionClock, type RealizedVolatilityForecast } from "./volatilityEdge.js";
 
 // Signals screen: turns one ticker's fitted surface (one row per expiry, from
 // option_surface_fits) + that day's raw quotes into graded, tradable candidates.
@@ -72,6 +72,8 @@ export interface SignalCandidatesInput {
   spotPrice: number;
   riskFreeRate: number;
   forecast: RealizedVolatilityForecast | null;
+  /** Trading sessions from the scoring date to each slice's expiry: the forecast is put on each contract's clock with them (forecastOnOptionClock). */
+  tradingSessionsByExpiry: ReadonlyMap<string, number>;
   slices: SignalSurfaceSlice[];
   quotes: SignalQuote[];
   earningsDatesIso: string[];
@@ -300,8 +302,9 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       exclude(quote, { kind: "no_friction", delta });
       continue;
     }
-    const edge = input.forecast ? surfaceIv - input.forecast.volatility : null;
-    const netEdge = edge === null ? null : computeNetEdge({ impliedVolatility: surfaceIv, forecastVolatility: input.forecast!.volatility, forecastWindowDays: input.forecast!.windowDays, edge, insideFittedRange: true }, friction);
+    const contractForecast = input.forecast ? forecastOnOptionClock(input.forecast.volatility, input.tradingSessionsByExpiry.get(quote.expiry), slice.yearsToExpiry) : null;
+    const edge = contractForecast === null ? null : surfaceIv - contractForecast;
+    const netEdge = edge === null ? null : computeNetEdge({ impliedVolatility: surfaceIv, forecastVolatility: contractForecast!, forecastWindowDays: input.forecast!.windowDays, edge, insideFittedRange: true }, friction);
     if (netEdge === null) {
       // no forecast: unscored, not shown as a candidate at all (caller shows the ticker as "Unscored")
       exclude(quote, { kind: "no_forecast", delta });
@@ -351,7 +354,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       askSize: quote.askSize ?? null,
       surfaceImpliedVolatility: surfaceIv,
       midImpliedVolatility: midIv,
-      forecastVolatility: input.forecast!.volatility,
+      forecastVolatility: contractForecast!,
       edge: edge!,
       frictionVolatility: friction.frictionVolatility,
       commissionPerContractDollars: commissionPerContract,

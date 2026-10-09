@@ -11,6 +11,10 @@ import { assignmentRiskAlertAbsoluteDelta, assignmentRiskRearmAbsoluteDelta, cle
 import type { AssignmentRiskAlertState, DayRerankState } from "./daySignalsStore.js";
 import type { DayContractRef } from "./daySignalsContractSet.js";
 import type { DayTickerContractContext, DayTrackedTicker } from "./daySignalsContractContextStore.js";
+import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
+
+// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
+const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 const forward = 100;
 const rate = 0.04;
@@ -53,6 +57,7 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
     dailyBarCount: 1000,
     dividendCadenceUnknown: false,
     todayEasternIso: tradingDateIso,
+    openSessionDatesIso: fixtureWeekdaySessions,
   };
 }
 

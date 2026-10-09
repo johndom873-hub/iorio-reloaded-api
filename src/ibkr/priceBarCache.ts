@@ -7,6 +7,10 @@ import { fetchHistoricalBarsRaw, type ChartRange, type PriceBar } from "./fetchT
 import { minDaysForIvPercentile } from "../lib/ivMetrics.js";
 import { normalizeBarVolume } from "../lib/normalizeBarVolume.js";
 import { lastCompletedSessionDate } from "../lib/marketSessionStatus.js";
+import { notifyTelegram } from "../lib/notifyTelegram.js";
+import { readAppEnvironment } from "../lib/appEnvironment.js";
+import { storeDailyBarsCheckingForSplit, type DailyBarStoreResult, type DailyHistory, type StoredBarPrices } from "./dailyBarSplitCheck.js";
+import type { Knex } from "knex";
 
 // MA99 (technicalIndicators.ts) is the deeper of the two indicator
 // thresholds this backfill exists for — IV Percentile only needs
@@ -33,13 +37,10 @@ type IbkrConnection = Awaited<ReturnType<typeof connectToIbkrGateway>>;
  *   5Y/All resample it to weekly bars in SQL rather than caching a separate
  *   weekly granularity. A single cold backfill (20 years) covers all three.
  *
- * Known limitation, deliberately not handled (approved as an acceptable
- * tradeoff, not an oversight): bars are unadjusted (`WhatToShow.TRADES`), so
- * a stock split will leave a visible price discontinuity between
- * pre-existing cached bars and newly fetched ones until that ticker's cache
- * rows are manually cleared. No automatic split detection — splits are rare
- * enough for this 2-user tool that a manual `DELETE ... WHERE ticker_id = x`
- * is an acceptable fix when it happens.
+ * Splits: IBKR returns daily bars adjusted for every split up to the request, while stored rows keep the prices of
+ * the day they were fetched. Every daily write goes through storeFreshDailyBars, which compares the days it shares
+ * with the stored rows and re-fetches the whole history when a split shows (dailyBarSplitCheck.ts). The intraday
+ * cache is cleared on such a re-fetch and refills on the next chart view.
  */
 
 // Found 2026-08-28: the cache below was write-through but not actually
@@ -189,7 +190,7 @@ async function getLatestDailyBarDate(tickerId: string): Promise<Date | null> {
 // IBKR's OPTION_IMPLIED_VOLATILITY series doesn't necessarily have a bar on
 // every date TRADES does (e.g. a brand-new ticker), so a missing entry
 // merges as null rather than dropping the price bar.
-export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDate: Map<string, number> = new Map()): Promise<void> {
+export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDate: Map<string, number> = new Map(), executor: Knex = db): Promise<void> {
   if (bars.length === 0) return;
   const rows = bars.map((bar) => {
     const tradingDate = new Date(bar.time * 1000).toISOString().slice(0, 10);
@@ -209,17 +210,52 @@ export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDa
   // request comes back with a gap for one date (the two series aren't
   // guaranteed to share every date), a plain merge would null out an
   // already-cached value instead of just leaving it alone.
-  await db("daily_price_bars")
+  await executor("daily_price_bars")
     .insert(rows)
     .onConflict(["ticker_id", "trading_date"])
     .merge({
-      open_price: db.raw("excluded.open_price"),
-      high_price: db.raw("excluded.high_price"),
-      low_price: db.raw("excluded.low_price"),
-      close_price: db.raw("excluded.close_price"),
-      volume: db.raw("excluded.volume"),
-      implied_volatility: db.raw("COALESCE(excluded.implied_volatility, daily_price_bars.implied_volatility)"),
+      open_price: executor.raw("excluded.open_price"),
+      high_price: executor.raw("excluded.high_price"),
+      low_price: executor.raw("excluded.low_price"),
+      close_price: executor.raw("excluded.close_price"),
+      volume: executor.raw("excluded.volume"),
+      implied_volatility: executor.raw("COALESCE(excluded.implied_volatility, daily_price_bars.implied_volatility)"),
     });
+}
+
+/**
+ * Every write of freshly fetched daily bars: stores them, or, when IBKR's prices show a split since the stored rows
+ * were fetched, replaces the ticker's whole history with a fresh 20-year fetch (see dailyBarSplitCheck.ts).
+ */
+export async function storeFreshDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, history: DailyHistory, reqId: number): Promise<DailyBarStoreResult> {
+  return storeDailyBarsCheckingForSplit(
+    { tickerId, symbol, environment: readAppEnvironment(), ...history },
+    {
+      loadStoredPrices: async (id, tradingDates): Promise<StoredBarPrices[]> => {
+        const rows: { tradingDate: string; open: string; high: string; low: string; close: string }[] = await db("daily_price_bars")
+          .where({ ticker_id: id })
+          .whereIn("trading_date", tradingDates)
+          .select(db.raw('trading_date::text as "tradingDate"'), "open_price as open", "high_price as high", "low_price as low", "close_price as close");
+        return rows.map((row) => ({ tradingDate: row.tradingDate, open: Number(row.open), high: Number(row.high), low: Number(row.low), close: Number(row.close) }));
+      },
+      loadNewestStoredDate: async (id) => {
+        const row: { newest: string | null } | undefined = await db("daily_price_bars").where({ ticker_id: id }).first(db.raw('max(trading_date)::text as "newest"'));
+        return row?.newest ?? null;
+      },
+      fetchSince: (tradingDate) => fetchDailyHistoryFromIbkr(connection, symbol, dailyTopUpDurationFor(new Date(`${tradingDate}T00:00:00Z`), new Date()), nextReqIdFor(connection.ib, () => reqId + 5000)),
+      upsertBars: (id, fresh) => upsertDailyBars(id, fresh.bars, fresh.ivByDate),
+      fetchFullHistory: () => fetchDailyHistoryFromIbkr(connection, symbol, dailyBackfillDuration, nextReqIdFor(connection.ib, () => reqId + 2000)),
+      replaceHistory: (id, full) =>
+        db.transaction(async (trx) => {
+          await upsertDailyBars(id, full.bars, full.ivByDate, trx);
+          const firstTradingDate = full.bars.map((bar) => new Date(bar.time * 1000).toISOString().slice(0, 10)).sort()[0]!;
+          const removedEarlierDays = await trx("daily_price_bars").where({ ticker_id: id }).whereRaw("trading_date::text < ?", [firstTradingDate]).del();
+          await trx("intraday_price_bars").where({ ticker_id: id }).del();
+          return { removedEarlierDays };
+        }),
+      notify: notifyTelegram,
+    },
+  );
 }
 
 // Explicit backfill for indicator work (MA99/RSI/MACD, 2026-09-01) and IV
@@ -257,7 +293,7 @@ export async function fetchDailyHistoryFromIbkr(connection: IbkrConnection, symb
 
 export async function backfillOneYearOfTickerHistory(connection: IbkrConnection, tickerId: string, symbol: string, reqId = 1): Promise<number> {
   const { bars, ivByDate } = await fetchDailyHistoryFromIbkr(connection, symbol, "1 Y", reqId);
-  await upsertDailyBars(tickerId, bars, ivByDate);
+  await storeFreshDailyBars(connection, tickerId, symbol, { bars, ivByDate }, reqId);
   return bars.length;
 }
 
@@ -389,7 +425,7 @@ async function fetchAndUpsertDailyBars(connection: IbkrConnection, tickerId: str
     nextReqIdFor(connection.ib, () => reqId + 1000),
     WhatToShow.OPTION_IMPLIED_VOLATILITY,
   ).catch(() => []);
-  await upsertDailyBars(tickerId, freshBars, ivBarsToDateMap(freshIvBars));
+  await storeFreshDailyBars(connection, tickerId, symbol, { bars: freshBars, ivByDate: ivBarsToDateMap(freshIvBars) }, reqId);
   return freshBars;
 }
 

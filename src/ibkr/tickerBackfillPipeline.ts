@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import { connectToIbkrGateway } from "./connectIbkr.js";
-import { fetchDailyHistoryFromIbkr, upsertDailyBars } from "./priceBarCache.js";
+import { fetchDailyHistoryFromIbkr, storeFreshDailyBars } from "./priceBarCache.js";
 import { prepareTicker, type PreparedTicker, type UniverseTicker } from "./runOptionChainCapture.js";
 import { captureTickerCalendarEvents } from "../lib/tradingviewCalendarService.js";
 import { captureHistoricalEarnings } from "../lib/apiNinjasEarningsService.js";
@@ -65,7 +65,7 @@ export async function fetchAndStoreFiveYearHistory(connection: IbkrConnection, t
   const { bars, ivByDate } = await fetchDailyHistoryFromIbkr(connection, symbol, fiveYearHistoryDuration, options.reqId ?? 1);
   const ohlcvBars: DailyOhlcvBar[] = bars.map((bar) => ({ tradingDate: new Date(bar.time * 1000).toISOString().slice(0, 10), open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume }));
   const summary = summarizeBackfillBars(ohlcvBars);
-  if (!options.dryRun) await upsertDailyBars(tickerId, bars, ivByDate);
+  if (!options.dryRun) await storeFreshDailyBars(connection, tickerId, symbol, { bars, ivByDate }, options.reqId ?? 1);
   return { ...summary, ivPointCount: ivByDate.size };
 }
 

@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, computeFrictionCost } from "./optionFriction.js";
-import { buildSignalCandidates, gradeForNetEdge, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, gradeForNetEdge, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice , type SignalCandidatesInput } from "./signalCandidates.js";
 import { buildCommissionEstimator } from "./commissionEstimate.js";
-import { assignmentRiskDeltaThreshold, buildRollCandidates, recostReplacementCommission, scoreRollPair, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs, type OpenShortLeg } from "./rollSignalCandidates.js";
+import { assignmentRiskDeltaThreshold, buildRollCandidates, recostReplacementCommission, scoreRollPair, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs as scoreHeldLegsOnAnyClock, type HeldLegScoringInput, type OpenShortLeg } from "./rollSignalCandidates.js";
+
+// These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
+const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
+const buildSignalCandidates = (input: Omit<SignalCandidatesInput, "tradingSessionsByExpiry"> & { tradingSessionsByExpiry?: ReadonlyMap<string, number> }) => buildSignalCandidatesOnAnyClock({ ...input, tradingSessionsByExpiry: input.tradingSessionsByExpiry ?? sameClockSessions(input.slices) });
+const scoreHeldLegs = (legs: OpenShortLeg[], input: Omit<HeldLegScoringInput, "tradingSessionsByExpiry">) => scoreHeldLegsOnAnyClock(legs, { ...input, tradingSessionsByExpiry: sameClockSessions(input.slices) });
 
 // Formula 3j (approved 2026-09-24). Fixtures mirror signalsLiveScoring.test.ts: one
 // SVI surface, a 30-day and a 60-day slice with the SAME implied volatility at every

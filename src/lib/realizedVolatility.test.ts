@@ -184,7 +184,7 @@ describe("computeYangZhangVolatility — availability", () => {
 describe("split guard", () => {
   const baseBars = buildSteadyBars(40);
 
-  it("flags a 2-for-1 split (the ±70% rule alone would miss it) when volume roughly doubles", () => {
+  it("flags a 2-for-1 split when volume roughly doubles", () => {
     const bars = withLastBarGap(baseBars, 0.5, 2_000_000);
     expect(computeYangZhangVolatility(bars, 21)).toMatchObject({ available: false, reason: "suspected_split" });
   });
@@ -194,12 +194,17 @@ describe("split guard", () => {
     expect(computeYangZhangVolatility(bars, 21)).toMatchObject({ available: false, reason: "suspected_split" });
   });
 
-  it("flags a 10-for-1 split from the ±70% rule alone, even with normal volume", () => {
-    const bars = withLastBarGap(baseBars, 0.1, 1_000_000);
-    expect(computeYangZhangVolatility(bars, 21)).toMatchObject({ available: false, reason: "suspected_split" });
+  it("flags a 10-for-1 split when volume confirms it, and no longer on the size of the move alone", () => {
+    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 0.1, 6_000_000), 21)).toMatchObject({ available: false, reason: "suspected_split" });
+    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 0.1, 1_000_000), 21).available).toBe(true);
   });
 
-  it("flags reverse splits (1-for-2 and 1-for-10) from the ±70% rule", () => {
+  it("keeps a real move far beyond ±70% that volume does not mark as a split (MRNA's +84% open on 2026-08-19)", () => {
+    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 1.84, 8_000_000), 21).available).toBe(true);
+    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 3.5, 8_000_000), 21).available).toBe(true);
+  });
+
+  it("flags reverse splits (1-for-2 and 1-for-10) when volume falls as a reverse split's does", () => {
     expect(computeYangZhangVolatility(withLastBarGap(baseBars, 2, 500_000), 21)).toMatchObject({ available: false, reason: "suspected_split" });
     expect(computeYangZhangVolatility(withLastBarGap(baseBars, 10, 100_000), 21)).toMatchObject({ available: false, reason: "suspected_split" });
   });

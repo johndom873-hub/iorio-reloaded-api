@@ -18,12 +18,12 @@ import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { EventName, WhatToShow } from "@stoqey/ib";
 import type { IbkrConnection } from "../src/ibkr/connectIbkr.js";
-import { normalizeBarVolume } from "../src/lib/normalizeBarVolume.js";
 import { db } from "../src/db/connection.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { isDelayedDataFallbackNotice, requestRealtimeMarketData } from "../src/ibkr/requestMarketData.js";
 import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot.js";
-import { lookupLatestDailyBar } from "../src/ibkr/fetchTickerOverview.js";
+import { lookupLatestDailyBar, lookupRecentDailyBars } from "../src/ibkr/fetchTickerOverview.js";
+import { storeFreshDailyBars } from "../src/ibkr/priceBarCache.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { assessDailyBar, buildMarketDataFailureMessage, type TickerProblem } from "../src/lib/marketDataJobOutcome.js";
 import { lastCompletedSessionDate } from "../src/lib/marketSessionStatus.js";
@@ -87,7 +87,9 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
         });
     }
 
-    const bar = await lookupLatestDailyBar(connection, ticker.symbol, nextReqId++);
+    // Both bars of the 2-day window: the earlier one is a day already stored, which the split check compares.
+    const recentBars = await lookupRecentDailyBars(connection, ticker.symbol, nextReqId++);
+    const bar = recentBars.at(-1) ?? null;
     // The daily IV bar isn't guaranteed the same day the price bar is (e.g. a brand-new
     // ticker with no IV history yet), so a miss doesn't fail the ticker (price data is the
     // higher-priority half of this job) but it is reported: IV rank and percentile rot without it.
@@ -96,26 +98,9 @@ async function captureTicker(connection: IbkrConnection, ticker: TickerRow, snap
     const barTradingDate = bar ? new Date(bar.time * 1000).toISOString().slice(0, 10) : null;
     const barProblem = assessDailyBar(barTradingDate, expectedSessionDate);
     if (bar && barTradingDate) {
-      await db("daily_price_bars")
-        .insert({
-          ticker_id: ticker.id,
-          trading_date: barTradingDate,
-          open_price: bar.open,
-          high_price: bar.high,
-          low_price: bar.low,
-          close_price: bar.close,
-          volume: normalizeBarVolume(bar.volume),
-          implied_volatility: ivBar?.close ?? null,
-        })
-        .onConflict(["ticker_id", "trading_date"])
-        .merge({
-          open_price: db.raw("excluded.open_price"),
-          high_price: db.raw("excluded.high_price"),
-          low_price: db.raw("excluded.low_price"),
-          close_price: db.raw("excluded.close_price"),
-          volume: db.raw("excluded.volume"),
-          implied_volatility: db.raw("COALESCE(excluded.implied_volatility, daily_price_bars.implied_volatility)"),
-        });
+      const ivByDate = new Map<string, number>(ivBar ? [[barTradingDate, ivBar.close]] : []);
+      const stored = await storeFreshDailyBars(connection, ticker.id, ticker.symbol, { bars: recentBars, ivByDate }, nextReqId++);
+      if (stored.adjustment) console.log(`${ticker.symbol}: price history replaced after a split (${stored.replacedDays} days)`);
     }
 
     console.log(

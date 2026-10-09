@@ -59,8 +59,9 @@ export async function callJevDecision(input: { apiKey: string; modelId: string; 
       body: JSON.stringify({ model: input.modelId, state: input.state, questions: input.questions }),
       signal: controller.signal,
     });
-    const latencyMs = Date.now() - startedAt;
     const json = (await response.json().catch(() => null)) as { model?: string; answers?: Record<string, JevAnswer>; usage?: { input_tokens?: number; output_tokens?: number; cost?: number }; error?: { message?: string } } | null;
+    // After the body, as in modelClient: headers can arrive long before the answer.
+    const latencyMs = Date.now() - startedAt;
     if (!response.ok || !json?.answers) {
       return { ok: false, servedModelId: json?.model ?? null, answers: null, latencyMs, tokensIn: null, tokensOut: null, costUsd: null, error: `OpenRouter decisions ${response.status}: ${json?.error?.message ?? "no answers"}`, httpStatus: response.status };
     }

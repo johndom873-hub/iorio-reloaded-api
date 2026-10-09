@@ -2,7 +2,7 @@ import { blackScholesDelta, sviTotalVariance } from "./impliedVolatilitySurface.
 import { blackScholesVega, commissionPerContractDollars as flatCommissionPerContractDollars, computeFrictionCost } from "./optionFriction.js";
 import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
 import { gradeForNetEdge, impliedVolatilityFromMid, type SignalCandidate, type SignalGrade, type SignalQuote, type SignalQuoteSource, type SignalStrategyKey, type SignalSurfaceSlice } from "./signalCandidates.js";
-import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
+import { forecastOnOptionClock, type RealizedVolatilityForecast } from "./volatilityEdge.js";
 
 // Roll Signals (Formula 3j, approved 2026-09-24): an open short option leg
 // is scored as a contract to KEEP, every new-trade candidate on the same
@@ -100,6 +100,8 @@ export interface HeldLegScoringInput {
   spotPrice: number;
   riskFreeRate: number;
   forecast: RealizedVolatilityForecast | null;
+  /** Trading sessions from the scoring date to each slice's expiry (forecastOnOptionClock). */
+  tradingSessionsByExpiry: ReadonlyMap<string, number>;
   slices: SignalSurfaceSlice[];
   /** Merged quotes (live > day > snapshot), including contracts the new-trade candidate build ignores (the ITM side). */
   quotes: SignalQuote[];
@@ -171,7 +173,9 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
 
     const delta = blackScholesDelta(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
     const vega = blackScholesVega(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv);
-    const edge = surfaceIv - input.forecast.volatility;
+    const contractForecast = forecastOnOptionClock(input.forecast.volatility, input.tradingSessionsByExpiry.get(leg.expiry), slice.yearsToExpiry);
+    if (contractForecast === null) return unscored(leg, "no_forecast", { ...quoteFields, dte, flags: flagsWithoutQuote });
+    const edge = surfaceIv - contractForecast;
     const flags: RollSignalFlag[] = [...flagsWithoutQuote];
     if (Math.abs(delta) >= assignmentRiskDeltaThreshold) flags.push("assignment_risk");
     if (leg.entryPrice > 0 && quoteFields.mid <= leg.entryPrice * decayedFractionOfEntryCredit) flags.push("decayed");

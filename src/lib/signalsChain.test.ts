@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSignalCandidates, type SignalCandidatesInput, type SignalContractExclusion, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, type SignalCandidatesInput, type SignalContractExclusion, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { assembleSignalsChain, describeContractExclusion, scoreSignalContract, scoreTickerWithExclusions } from "./signalsChain.js";
 import { candidateContractKey, computeUncompensatedByContract, contractKey, scoreTicker } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
+import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
+
+// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
+const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
+
+// These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
+const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
+const buildSignalCandidates = (input: Omit<SignalCandidatesInput, "tradingSessionsByExpiry"> & { tradingSessionsByExpiry?: ReadonlyMap<string, number> }) => buildSignalCandidatesOnAnyClock({ ...input, tradingSessionsByExpiry: input.tradingSessionsByExpiry ?? sameClockSessions(input.slices) });
 
 const forward = 100;
 const rate = 0.04;
@@ -72,6 +80,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     dailyBarCount: 1253,
     dividendCadenceUnknown: false,
     todayEasternIso: "2026-09-21",
+    openSessionDatesIso: fixtureWeekdaySessions,
     ...overrides,
   };
 }
@@ -85,6 +94,7 @@ describe("buildSignalCandidates exclusion reporting", () => {
     riskFreeRate: rate,
     forecast: { volatility: 0.15, windowDays: 63 as const },
     slices: [slice(near, years30), slice(far, years60, { status: "poor_fit", parameters: null })],
+    tradingSessionsByExpiry: sameClockSessions([slice(near, years30), slice(far, years60)]),
     quotes: [...nearQuotes, quoteAt(85, "P", far, years60), quoteAt(95, "P", "2026-12-18", 88 / 365)],
     earningsDatesIso: [],
     earningsCalendarResolved: true,

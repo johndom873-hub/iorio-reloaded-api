@@ -4,7 +4,7 @@ import { buildRollCandidates, pickBestRoll, scoreHeldLegs, type HeldLegScore, ty
 import { buildTickerCaveats } from "./signalsRoadmap.js";
 import type { TradingSettings } from "./tradingSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
-import { minimumBarsForAnyForecast } from "./volatilityEdge.js";
+import { minimumBarsForAnyForecast, tradingSessionsByExpiry } from "./volatilityEdge.js";
 import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsNoCandidatesReason, SignalsPriceSource, SignalsScreenRow, SignalsUnscoredDetail, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
 
 // Pure re-scoring for the Signals live layer (stage 2, decisions with Marcelo 2026-09-22):
@@ -195,7 +195,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     candidates: [],
     best: null,
     gradeCounts: { strong: 0, good: 0, weak: 0, avoid: 0 },
-    heldLegs: scoreHeldLegs(inputs.openShortLegs, { spotPrice: spotPrice ?? 0, riskFreeRate: 0, forecast: null, slices: [], quotes: [], spreadShareCharged }),
+    heldLegs: scoreHeldLegs(inputs.openShortLegs, { spotPrice: spotPrice ?? 0, riskFreeRate: 0, forecast: null, tradingSessionsByExpiry: new Map(), slices: [], quotes: [], spreadShareCharged }),
     rolls: [],
     bestRoll: null,
     rollCount: 0,
@@ -247,6 +247,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const quotes = appendMissingContractQuotes(mergedQuotes, [...heldLegRefs, ...inputs.dayQuotes, ...(live?.liveQuotes ?? [])], inputs.dayQuotes, live?.liveQuotes ?? []);
   const riskFreeRate = header.riskFreeRatePercent / 100;
   const ivShifts = computeExpiryIvShifts(slices, quotes, riskFreeRate);
+  const sessionsByExpiry = tradingSessionsByExpiry(slices.map((slice) => slice.expiry), inputs.openSessionDatesIso, inputs.todayEasternIso);
   observer?.onScoringQuotes?.(quotes);
 
   const exclusionTally = emptyCandidateExclusionTally();
@@ -256,6 +257,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       spotPrice,
       riskFreeRate,
       forecast: inputs.forecast,
+      tradingSessionsByExpiry: sessionsByExpiry,
       slices,
       quotes,
       earningsDatesIso: inputs.earningsDatesIso,
@@ -286,6 +288,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     spotPrice,
     riskFreeRate,
     forecast: inputs.forecast,
+    tradingSessionsByExpiry: sessionsByExpiry,
     slices,
     quotes,
     ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),

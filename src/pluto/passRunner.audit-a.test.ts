@@ -88,13 +88,14 @@ vi.mock("./candidateFilters.js", () => ({
   openCandidateId: (_symbol: string, candidate: { id: string }) => candidate.id,
   filterTickerForPluto: ({ scored, opensBlockedReason }: { scored: { symbol: string; candidates: { id: string }[]; live: number }; opensBlockedReason?: string | null }) => {
     const ticker = harness.tickers.find((entry) => entry.symbol === scored.symbol)!;
-    if (opensBlockedReason) return { symbol: scored.symbol, tickerBlocks: [], eligible: [], eligibleRolls: [], rejected: scored.candidates.map((candidate) => ({ id: candidate.id, reasons: [opensBlockedReason] })) };
+    if (opensBlockedReason) return { symbol: scored.symbol, tickerBlocks: [], eligible: [], eligibleRolls: [], rejected: scored.candidates.map((candidate) => ({ id: candidate.id, reasons: [opensBlockedReason], codes: ["opens_blocked"] })), rejectedRolls: [] };
     return {
       symbol: scored.symbol,
       tickerBlocks: [],
       eligible: scored.candidates.filter((candidate) => ticker.eligibleIds.includes(candidate.id) || scored.live > 0).map((candidate) => ({ id: candidate.id, kind: "open_covered_call", symbol: scored.symbol, candidate })),
       eligibleRolls: [],
-      rejected: scored.live > 0 ? [] : ticker.requotableIds.map((id) => ({ id, reasons: ["quote 14 min old (live), max 10"] })),
+      rejected: scored.live > 0 ? [] : ticker.requotableIds.map((id) => ({ id, reasons: ["quote 14 min old (live), max 10"], codes: ["quote_age"] })),
+      rejectedRolls: [],
     };
   },
   deterministicTopPick: () => null,
@@ -222,8 +223,19 @@ describe("runPlutoPass: failure handling (audit A)", () => {
     const payload = vi.mocked(ledger.recordPlutoEvent).mock.calls[modelCalledIndex]![1];
     expect(payload).toMatchObject({ verdict: "no_trade", systemConcerns: [] });
     expect(payload).toHaveProperty("deterministicTopPick");
+    expect(payload).toMatchObject({ tickers: [{ symbol: "AAA", blocks: [], rejected: 0, rejectedBy: {}, onlyBlocker: {} }] });
     const actionOrder = vi.mocked(ledger.recordPlutoAction).mock.invocationCallOrder.at(-1)!;
     expect(vi.mocked(ledger.recordPlutoEvent).mock.invocationCallOrder[modelCalledIndex]!).toBeGreaterThan(actionOrder);
+  });
+
+  it("a round with nothing eligible records, per ticker, how many contracts each rule kept out", async () => {
+    vi.mocked(ledger.recordPlutoEvent).mockClear();
+    harness.tickers = [ticker("AAA", { eligibleIds: [openId("AAA", 30), openId("AAA", 31)] })];
+    harness.lastFilledActionAtBySymbol = new Map([["AAA", new Date()]]);
+    const result = await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(result.skippedReason).toBe("nothing eligible");
+    const skipped = vi.mocked(ledger.recordPlutoEvent).mock.calls.find((call) => call[0] === "pass_skipped")![1];
+    expect(skipped).toMatchObject({ tickers: [{ symbol: "AAA", rejected: 2, rejectedBy: { opens_blocked: 2 }, onlyBlocker: { opens_blocked: 2 } }] });
   });
 
   it("records a non-Error throw as its string", async () => {

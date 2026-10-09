@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega } from "./optionFriction.js";
-import { attachUncompensatedShare, buildSignalCandidates, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, wideSpreadThreshold, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { attachUncompensatedShare, buildSignalCandidates as buildSignalCandidatesOnAnyClock, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, wideSpreadThreshold, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedShare } from "./uncompensatedShare.js";
+
+// These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
+const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
+const buildSignalCandidates = (input: Omit<SignalCandidatesInput, "tradingSessionsByExpiry"> & { tradingSessionsByExpiry?: ReadonlyMap<string, number> }) => buildSignalCandidatesOnAnyClock({ ...input, tradingSessionsByExpiry: input.tradingSessionsByExpiry ?? sameClockSessions(input.slices) });
 
 const forward = 100;
 const rate = 0.04;
@@ -34,7 +38,7 @@ function quoteAt(strike: number, right: "C" | "P", spreadFraction = 0.04, expiry
   return { expiry, strike, right, bid: mid * (1 - spreadFraction / 2), ask: mid * (1 + spreadFraction / 2) };
 }
 
-function baseInput(overrides: Partial<SignalCandidatesInput> = {}): SignalCandidatesInput {
+function baseInput(overrides: Partial<SignalCandidatesInput> = {}): Parameters<typeof buildSignalCandidates>[0] {
   return {
     spotPrice: forward,
     riskFreeRate: rate,
@@ -100,6 +104,19 @@ describe("buildSignalCandidates: computed fields", () => {
     expect(c.edge).toBeCloseTo(c.surfaceImpliedVolatility - 0.2, 10);
     expect(c.netEdge).toBeLessThan(c.edge); // friction is always subtracted
     expect(c.netEdge).toBeCloseTo(c.edge - c.frictionVolatility, 6);
+  });
+
+  it("puts the forecast on the contract's clock: 21 sessions in 30 calendar days raise it by √((21/252) ÷ (30/365))", () => {
+    const expiry = slice30().expiry;
+    const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], tradingSessionsByExpiry: new Map([[expiry, 21]]) }))[0]!;
+    const contractForecast = 0.2 * Math.sqrt(21 / 252 / (30 / 365));
+    expect(c.forecastVolatility).toBeCloseTo(contractForecast, 12);
+    expect(c.edge).toBeCloseTo(c.surfaceImpliedVolatility - contractForecast, 12);
+    expect(c.netEdge).toBeCloseTo(c.edge - c.frictionVolatility, 6);
+  });
+
+  it("a contract with no session count is left out, not scored against the plain forecast", () => {
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], tradingSessionsByExpiry: new Map() }))).toHaveLength(0);
   });
 
   it("edge dollars scales with net Edge and is not simply proportional to the option's own price", () => {

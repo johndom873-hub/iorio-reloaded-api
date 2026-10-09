@@ -19,20 +19,19 @@
 // why it is used rather than close-to-close (ignores overnight gaps) or
 // Parkinson/Garman-Klass (assume no gaps / zero drift).
 //
-// SPLIT GUARD — the stored bars are NOT split-adjusted (see priceBarCache.ts),
-// so a split would read as a huge overnight "move" and wreck the estimate. A
-// window returns "unavailable / suspected_split" — never a wrong number — if
-// any of its overnight moves is:
-//   (a) beyond ±70% (simple return), on its own; or
-//   (b) within ±15% (relative) of a common split ratio — 1/m for a forward
-//       split or m for a reverse split, m in {2, 3, 4, 5, 10, 20} — AND the
-//       bar's volume confirms it (forward: volume ≥ 0.5·m × the prior-20-bar
-//       median; reverse: volume ≤ (2/m) × that median).
-// Rule (b) exists because rule (a) alone misses 2-for-1 (−50%) and 3-for-1
-// (−67%) splits. A real −50% crash on doubled volume looks identical to a
-// 2-for-1 split and is excluded too: that errs toward "insufficient clean
-// history", the safe direction. With fewer than 5 prior bars the volume can't
-// be checked, so a ratio-match is conservatively treated as a suspected split.
+// SPLIT GUARD — stored bars keep the prices of the day they were fetched, and
+// splits are detected for certain when bars are written (dailyBarSplitCheck.ts:
+// IBKR's re-fetched prices for a stored day differ by the split ratio, and the
+// whole history is replaced). A window still returns "unavailable /
+// suspected_split" if any of its overnight moves is within ±15% (relative) of a
+// common split ratio — 1/m for a forward split or m for a reverse split, m in
+// {2, 3, 4, 5, 10, 20} — AND the bar's volume confirms it (forward: volume ≥
+// 0.5·m × the prior-20-bar median; reverse: volume ≤ (2/m) × that median).
+// A real −50% crash on doubled volume looks identical to a 2-for-1 split and is
+// excluded too. With fewer than 5 prior bars the volume can't be checked, so a
+// ratio-match is treated as a suspected split. A large move that matches no
+// split ratio is a real move and stays in the estimate (MRNA opened +84% on
+// 2026-08-19 on a trial result).
 //
 // Bars must be in ascending date order.
 
@@ -51,7 +50,6 @@ export type YangZhangWindowDays = (typeof yangZhangWindowDays)[number];
 const tradingDaysPerYear = 252;
 const yangZhangWeightConstant = 0.34;
 
-const suspectedSplitSimpleReturnThreshold = 0.7;
 const splitRatioRelativeTolerance = 0.15;
 const commonSplitFactors = [2, 3, 4, 5, 10, 20] as const;
 const forwardSplitMinimumVolumeFraction = 0.5;
@@ -91,13 +89,11 @@ function sampleVariance(values: number[]): number {
   return values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
 }
 
-/** True when the overnight move into bars[index] looks like a stock split (rules (a)/(b) in the file header). */
+/** True when the overnight move into bars[index] looks like a stock split (the ratio and volume rule in the file header). */
 function isSuspectedSplitAt(bars: DailyOhlcvBar[], index: number): boolean {
   const previousClose = bars[index - 1]!.close;
   const bar = bars[index]!;
   const overnightRatio = bar.open / previousClose;
-
-  if (Math.abs(overnightRatio - 1) > suspectedSplitSimpleReturnThreshold) return true;
 
   const matchingForwardFactors = commonSplitFactors.filter((factor) => Math.abs(overnightRatio * factor - 1) <= splitRatioRelativeTolerance);
   const matchingReverseFactors = commonSplitFactors.filter((factor) => Math.abs(overnightRatio / factor - 1) <= splitRatioRelativeTolerance);

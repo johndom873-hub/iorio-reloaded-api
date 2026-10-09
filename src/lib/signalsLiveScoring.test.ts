@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSignalCandidates, emptyCandidateExclusionTally, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, emptyCandidateExclusionTally, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice , type SignalCandidatesInput } from "./signalCandidates.js";
 import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, countGrades, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
+import { tradingSessionsByExpiry } from "./volatilityEdge.js";
+import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
+
+// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
+const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
+
+// These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
+const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
+const buildSignalCandidates = (input: Omit<SignalCandidatesInput, "tradingSessionsByExpiry"> & { tradingSessionsByExpiry?: ReadonlyMap<string, number> }) => buildSignalCandidatesOnAnyClock({ ...input, tradingSessionsByExpiry: input.tradingSessionsByExpiry ?? sameClockSessions(input.slices) });
 
 const forward = 100;
 const rate = 0.04;
@@ -58,6 +67,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     dividendCadenceUnknown: false,
     // Same day as the snapshot: the surface is scored as fitted. See the rebaseSlicesToToday tests for a stale snapshot.
     todayEasternIso: "2026-09-21",
+    openSessionDatesIso: fixtureWeekdaySessions,
     ...overrides,
   };
 }
@@ -203,7 +213,7 @@ describe("scoreTicker", () => {
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {
     const in1 = inputs();
     const scored = scoreTicker(in1, account, permissiveSettings);
-    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEvents: [], todayEasternIso: "2026-09-21", scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct, spreadShareCharged: permissiveSettings.spreadCostChargedPct / 100 }));
+    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, tradingSessionsByExpiry: tradingSessionsByExpiry(in1.slices.map((slice) => slice.expiry), in1.openSessionDatesIso, in1.todayEasternIso), slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEvents: [], todayEasternIso: "2026-09-21", scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct, spreadShareCharged: permissiveSettings.spreadCostChargedPct / 100 }));
     expect(scored.candidates).toEqual(direct);
     expect(scored.unscoredReason).toBeNull();
     expect(scored.priceSource).toBe("snapshot");

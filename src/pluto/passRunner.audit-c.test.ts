@@ -64,6 +64,7 @@ vi.mock("./candidateFilters.js", () => ({
     eligible: scored.candidates.map((candidate) => ({ id: candidate.id, kind: "open_covered_call", symbol: "AAA", candidate })),
     eligibleRolls: [],
     rejected: [],
+    rejectedRolls: [],
   }),
   deterministicTopPick: () => null,
   findSameContractConflict: () => null,

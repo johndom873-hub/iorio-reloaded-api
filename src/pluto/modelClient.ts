@@ -73,8 +73,9 @@ export async function callPlutoModel(input: PlutoModelCallInput, fetchImpl: type
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    const latencyMs = Date.now() - startedAt;
+    // After the body: OpenRouter answers with headers (and keep-alive whitespace) long before the model has finished.
     const text = await response.text();
+    const latencyMs = Date.now() - startedAt;
     let json: OpenRouterResponse;
     try {
       json = JSON.parse(text) as OpenRouterResponse;

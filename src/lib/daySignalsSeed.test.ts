@@ -3,6 +3,10 @@ import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } f
 import { buildSeedFailureMessage, seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
 import type { SignalCandidate, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
+import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
+
+// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
+const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 const candidate = (expiry: string, netEdge: number, edgeDollars: number): SignalCandidate => ({ expiry, netEdge, edgeDollars, strike: 100, strategyKey: "cash_secured_put" }) as SignalCandidate;
 
@@ -101,6 +105,7 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     dailyBarCount: 1000,
     dividendCadenceUnknown: false,
     todayEasternIso: tradingDateIso,
+    openSessionDatesIso: fixtureWeekdaySessions,
   };
 }
 const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100, orderUnfilledCancelMinutes: 15 };

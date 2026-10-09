@@ -53,6 +53,8 @@ export interface TickerSignalsInputs {
   /** The Day Signals loop's latest bid/ask for this ticker's pooled contracts, from the same snapshot date as `header`; empty when none. */
   dayQuotes: LiveOptionQuote[];
   forecast: RealizedVolatilityForecast | null;
+  /** The open sessions after todayEasternIso through the furthest slice expiry (market calendar, weekdays past its end): each contract's trading sessions to expiry. */
+  openSessionDatesIso: string[];
   /** Trading date the split guard flagged when it left the ticker without a forecast; null otherwise. */
   suspectedSplitDateIso: string | null;
   earningsDatesIso: string[];

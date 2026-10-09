@@ -4,6 +4,10 @@ import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
 import { computeSizingRoom, computeStressCap, midLimitPrice, runPostModelGates, tickerCooldownStatus, type PostModelBookInput, type PostModelGateInput } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { openDaysFromCalendarRows } from "../lib/marketSessionStatus.js";
+
+// Every weekday of 2026-27 (the scoring inputs list only open sessions; counts start after the scoring date).
+const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 const settings: PlutoSettings = {
   capitalBudgetPct: 50, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
@@ -32,7 +36,7 @@ const book: PostModelBookInput = {
   workingOrderOnSymbol: false, lastFilledActionAt: null, nowMs: Date.parse("2026-09-28T16:00:00Z"), spotPrice: 110, sameContractConflict: null,
 };
 
-const stress = { forecastVolatility: 0.5, elevatedVolatility: false, dayMoveSigmas: 0.2, todayEasternIso: "2026-09-28" };
+const stress = { forecastVolatility: 0.5, elevatedVolatility: false, dayMoveSigmas: 0.2, todayEasternIso: "2026-09-28", openSessionDatesIso: fixtureWeekdaySessions };
 
 const trade: PlutoDecision = { decision: "trade", actionKind: "open_cash_secured_put", candidateId: "HOOD:cash_secured_put:2026-10-16:100", confidence: 0.8, reasons: ["r"], risksAcknowledged: [], systemConcerns: [] };
 
@@ -161,7 +165,7 @@ describe("stress cap (Marcelo, 2026-10-08)", () => {
   const on = { ...settings, stressRiskBudgetPct: 1, stressSigmas: 2 };
   // SMCI on 2026-10-07: spot 44.02, forecast 76.1%, $46 call 2026-10-09 at 0.37/0.40, Wed → Fri = 2 trading days.
   const smciCall = { strategyKey: "covered_call" as const, strike: 46, expiry: "2026-10-09", bid: 0.37, ask: 0.4 };
-  const smciDay = { forecastVolatility: 0.761, elevatedVolatility: false, dayMoveSigmas: 0.31, todayEasternIso: "2026-10-07" };
+  const smciDay = { forecastVolatility: 0.761, elevatedVolatility: false, dayMoveSigmas: 0.31, todayEasternIso: "2026-10-07", openSessionDatesIso: fixtureWeekdaySessions };
   it("sizes a buy-write from a 2σ move to expiry: σ_T 6.78%, stressed spot 38.05, loss $558/contract, 18 contracts within $10,383", () => {
     const cap = computeStressCap(on, smciDay, smciCall, 44.02, 1_038_326);
     expect(cap.contracts).toBe(18);
@@ -173,6 +177,10 @@ describe("stress cap (Marcelo, 2026-10-08)", () => {
     const nearPut = { strategyKey: "cash_secured_put" as const, strike: 43, expiry: "2026-10-09", bid: 0.56, ask: 0.61 };
     // stressed spot 44.02 × (1 − 0.1356) = 38.05 → (43 − 38.05) × 100 − 58.5 = $436 → floor(10,000 / 436) = 22
     expect(computeStressCap(on, smciDay, nearPut, 44.02, 1_000_000).contracts).toBe(22);
+  });
+  it("counts market sessions, not weekdays: Tue 24 Nov → Fri 27 Nov is 2 sessions around Thanksgiving", () => {
+    const thanksgivingWeek = { ...smciDay, todayEasternIso: "2026-11-24", openSessionDatesIso: fixtureWeekdaySessions.filter((dateIso) => dateIso !== "2026-11-26") };
+    expect(computeStressCap(on, thanksgivingWeek, { ...smciCall, expiry: "2026-11-27" }, 44.02, 1_038_326).detail).toContain("in 2 trading day(s)");
   });
   it("adds 0.5σ for an elevated-volatility stretch and 0.5σ on a day down more than one normal day", () => {
     expect(computeStressCap(on, { ...smciDay, elevatedVolatility: true }, smciCall, 44.02, 1_038_326).detail).toContain("a 2.5σ (elevated volatility) move");

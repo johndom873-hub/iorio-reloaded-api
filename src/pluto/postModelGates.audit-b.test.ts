@@ -3,6 +3,7 @@ import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
 import { computeSizingRoom, runPostModelGates, type PostModelBookInput, type PostModelGateInput } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { openDaysFromCalendarRows } from "../lib/marketSessionStatus.js";
 
 // Audit B (2026-10-07): the budget nets the managed book's in-flight orders (managedNotional), the positions cap counts managed positions.
 const settings = {
@@ -27,7 +28,7 @@ const candidate = {
 } as SignalCandidate;
 
 const trade: PlutoDecision = { decision: "trade", actionKind: "open_cash_secured_put", candidateId: "HOOD:cash_secured_put:2026-10-16:100", confidence: 0.8, reasons: ["r"], risksAcknowledged: [], systemConcerns: [] };
-const input = (overrides: Partial<PostModelGateInput> = {}): PostModelGateInput => ({ decision: trade, candidate, roll: null, freshRejectionReasons: [], netEdgeAtDecision: 0.1, settings, book, sector: "Financial", stress: { forecastVolatility: 0.5, elevatedVolatility: false, dayMoveSigmas: 0, todayEasternIso: "2026-09-28" }, ...overrides });
+const input = (overrides: Partial<PostModelGateInput> = {}): PostModelGateInput => ({ decision: trade, candidate, roll: null, freshRejectionReasons: [], netEdgeAtDecision: 0.1, settings, book, sector: "Financial", stress: { forecastVolatility: 0.5, elevatedVolatility: false, dayMoveSigmas: 0, todayEasternIso: "2026-09-28", openSessionDatesIso: openDaysFromCalendarRows("2026-09-29", "2027-12-31", []) }, ...overrides });
 
 describe("computeSizingRoom — managedNotional", () => {
   it("budget room = NLV × budget % − committed − the managed book's in-flight notional; total and ticker notionals do not touch it", () => {

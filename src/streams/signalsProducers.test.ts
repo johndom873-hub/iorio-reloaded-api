@@ -8,6 +8,10 @@ import type { SignalsTickerRow } from "../lib/signalsStore.js";
 import type { TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { createSignalsProducers, firstFramePriceGraceMs, snapshotChangePollIntervalMs, type SignalsQuotesFrame, type SignalsProducerDependencies, type SignalsScreenFrame, type SignalsTickerFrame } from "./signalsProducers.js";
 import { StreamRequestError } from "./streamProtocol.js";
+import { openDaysFromCalendarRows } from "../lib/marketSessionStatus.js";
+
+// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
+const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 const forward = 100;
 const rate = 0.04;
@@ -59,6 +63,7 @@ function inputsFor(ticker: SignalsTickerRow, withSnapshot: boolean, freeShares =
     dailyBarCount: 1253,
     dividendCadenceUnknown: false,
     todayEasternIso: easternIsoDate(new Date()),
+    openSessionDatesIso: fixtureWeekdaySessions,
   };
 }
 

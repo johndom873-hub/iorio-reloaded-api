@@ -64,7 +64,8 @@ vi.mock("./candidateFilters.js", () => ({
     // A re-quoted candidate becomes eligible once the burst brought live quotes.
     eligible: scored.candidates.filter((candidate) => harness.eligibleIds.includes(candidate.id) || scored.live > 0).map((candidate) => ({ id: candidate.id, kind: "open_covered_call", symbol: "AAA", candidate })),
     eligibleRolls: [],
-    rejected: scored.live > 0 ? [] : harness.requotableIds.map((id) => ({ id, reasons: ["quote 14 min old (max 10)"] })),
+    rejected: scored.live > 0 ? [] : harness.requotableIds.map((id) => ({ id, reasons: ["quote 14 min old (max 10)"], codes: ["quote_age"] })),
+    rejectedRolls: [],
   }),
   deterministicTopPick: () => null,
   findSameContractConflict: () => null,

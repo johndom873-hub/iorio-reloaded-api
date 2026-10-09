@@ -1,4 +1,4 @@
-import { weekdaysAfterUntil } from "../lib/easternIsoDate.js";
+import { tradingSessionsByExpiry } from "../lib/volatilityEdge.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
@@ -68,6 +68,8 @@ export interface StressCapInput {
   /** Today's move in normal days (day change ÷ forecast daily move); null when either is unknown. */
   dayMoveSigmas: number | null;
   todayEasternIso: string;
+  /** Open sessions after todayEasternIso (the scoring inputs' list, which reaches every fitted expiry). */
+  openSessionDatesIso: string[];
 }
 
 export interface PlutoOrderPlan {
@@ -156,7 +158,7 @@ export interface StressCap {
 export function computeStressCap(settings: PlutoSettings, stress: StressCapInput, contract: Pick<SignalCandidate, "strategyKey" | "strike" | "expiry" | "bid" | "ask">, spotPrice: number | null, netLiquidationValue: number): StressCap {
   if (settings.stressRiskBudgetPct <= 0) return { contracts: Number.POSITIVE_INFINITY, detail: "stress cap off" };
   if (stress.forecastVolatility === null || !(stress.forecastVolatility > 0) || spotPrice === null || !(spotPrice > 0)) return { contracts: 0, detail: "stress cap: no volatility forecast or live spot to size it" };
-  const tradingDays = Math.max(1, weekdaysAfterUntil(stress.todayEasternIso, contract.expiry));
+  const tradingDays = Math.max(1, tradingSessionsByExpiry([contract.expiry], stress.openSessionDatesIso, stress.todayEasternIso).get(contract.expiry) ?? 0);
   const sigmaToExpiry = stress.forecastVolatility * Math.sqrt(tradingDays / 252);
   const adverseDay = stress.dayMoveSigmas !== null && stress.dayMoveSigmas <= -adverseDayMoveSigmas;
   const sigmas = settings.stressSigmas + (stress.elevatedVolatility ? stressSigmasElevatedVolatilityAddOn : 0) + (adverseDay ? stressSigmasAdverseDayAddOn : 0);

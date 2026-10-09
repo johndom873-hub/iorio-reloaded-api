@@ -7,7 +7,8 @@ import type { SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import { computeUncompensatedByContract, scoreTicker, toScreenRow, type LiveOptionQuote } from "./signalsLiveScoring.js";
 import { loadDayQuotesForTicker } from "./daySignalsStore.js";
 import { loadUpcomingMajorMacroEvents } from "./macroEventCalendar.js";
-import type { RoadmapCounts } from "./signalsRoadmap.js";
+import { addCalendarDays, type RoadmapCounts } from "./signalsRoadmap.js";
+import { loadOpenDaysBetween } from "./marketSessionStatus.js";
 import { loadTradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, TickerSignalsDetail, TickerSignalsInputs } from "./signalsTypes.js";
 import { loadVolatilityForecast } from "./volatilityForecastStore.js";
@@ -293,8 +294,10 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
   const [slices, quotes, forecastSelection, dayQuotes] = header
     ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
     : [[], [], { forecast: null, suspectedSplitDateIso: null }, []];
+  const furthestExpiry = slices.map((slice) => slice.expiry).sort().at(-1);
+  const openSessionDatesIso = furthestExpiry && furthestExpiry > todayEastern ? await loadOpenDaysBetween(addCalendarDays(todayEastern, 1), furthestExpiry) : [];
 
-  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
+  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, openSessionDatesIso, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
 }
 
 /**

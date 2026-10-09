@@ -1,6 +1,7 @@
 import { blackScholesPriceOnForward } from "../lib/impliedVolatilitySurface.js";
 import { eventStressNormalDaysByWeight, type MacroEventBeforeExpiry } from "../lib/macroEventTiming.js";
 import { expectedDailyMovePct } from "./moveContext.js";
+import { tradingSessionsPerYear } from "../lib/volatilityEdge.js";
 
 // What Pluto sees about each held short leg, whatever Signals thinks of it (Formulas F2 and the covered-call variant,
 // approved 2026-10-08). d is the stock's normal daily move (forecast volatility ÷ √252), k the event's stress move in
@@ -14,12 +15,11 @@ import { expectedDailyMovePct } from "./moveContext.js";
 //   strike distance (days)  put: (spot − strike) ÷ spot ÷ d;  call: (strike − spot) ÷ spot ÷ d
 //   event stress loss $     put: (BS put(S*) − mid) × 100 × qty
 //                           covered call: (spot − S*) × shares − (call mid − BS call(S*)) × 100 × qty
-//                           BS at forecast volatility with the calendar days from the event's session to expiry ÷ 365
-//                           (the event premium is gone once it is out); intrinsic value when the event lands on expiry day.
+//                           BS at forecast volatility with the trading sessions left after the event's session ÷ 252, the
+//                           forecast's own clock (2026-10-09; was calendar days ÷ 365); the event premium is gone once it is
+//                           out; intrinsic value when the event lands on expiry day.
 //   cycle P&L after costs $ covered call: the close gate's live cycle P&L (at mids) − close cost
 // No stock commission estimate exists on the platform, so the covered call's close cost carries the option's only.
-
-export const daysPerYear = 365;
 
 export interface HeldPositionEvent extends MacroEventBeforeExpiry {
   /** k: the adverse move it is stressed with, in normal days. */
@@ -65,13 +65,9 @@ export function withStressMove(event: MacroEventBeforeExpiry | null): HeldPositi
   return event ? { ...event, stressNormalDays: eventStressNormalDaysByWeight[event.weight] } : null;
 }
 
-function calendarDaysBetween(fromIso: string, toIso: string): number {
-  return Math.round((Date.parse(`${toIso}T12:00:00Z`) - Date.parse(`${fromIso}T12:00:00Z`)) / 86_400_000);
-}
-
 /** The option's value right after the event at the stressed spot: Black-Scholes at forecast volatility, intrinsic when it lands on expiry day. */
-export function optionValueAfterEvent(input: { stressedSpot: number; strike: number; isCall: boolean; eventSessionIso: string; expiryIso: string; forecastVolatility: number }): number {
-  const yearsLeft = calendarDaysBetween(input.eventSessionIso, input.expiryIso) / daysPerYear;
+export function optionValueAfterEvent(input: { stressedSpot: number; strike: number; isCall: boolean; sessionsLeftAfterEvent: number; forecastVolatility: number }): number {
+  const yearsLeft = input.sessionsLeftAfterEvent / tradingSessionsPerYear;
   if (!(yearsLeft > 0)) return Math.max(0, input.isCall ? input.stressedSpot - input.strike : input.strike - input.stressedSpot);
   return blackScholesPriceOnForward(input.stressedSpot, input.strike, yearsLeft, 0, input.forecastVolatility, input.isCall);
 }
@@ -112,7 +108,7 @@ export function heldPutEntry(input: HeldPutInput): HeldPositionEntry {
   let eventStressLossDollars: number | null = null;
   if (event && mid !== null && spot !== null && d !== null && input.forecastVolatility !== null) {
     const stressedSpot = Math.max(0, spot * (1 - event.stressNormalDays * d));
-    const putAfter = optionValueAfterEvent({ stressedSpot, strike: leg.strike, isCall: false, eventSessionIso: event.sessionIso, expiryIso: leg.expiry, forecastVolatility: input.forecastVolatility });
+    const putAfter = optionValueAfterEvent({ stressedSpot, strike: leg.strike, isCall: false, sessionsLeftAfterEvent: event.sessionsAfter - 1, forecastVolatility: input.forecastVolatility });
     eventStressLossDollars = (putAfter - mid) * 100 * leg.quantity;
   }
   return {
@@ -161,7 +157,7 @@ export function heldCoveredCallEntry(input: HeldCoveredCallInput): HeldPositionE
   let eventStressLossDollars: number | null = null;
   if (event && callMid !== null && spot !== null && d !== null && input.forecastVolatility !== null) {
     const stressedSpot = Math.max(0, spot * (1 - event.stressNormalDays * d));
-    const callAfter = optionValueAfterEvent({ stressedSpot, strike: callLeg.strike, isCall: true, eventSessionIso: event.sessionIso, expiryIso: callLeg.expiry, forecastVolatility: input.forecastVolatility });
+    const callAfter = optionValueAfterEvent({ stressedSpot, strike: callLeg.strike, isCall: true, sessionsLeftAfterEvent: event.sessionsAfter - 1, forecastVolatility: input.forecastVolatility });
     eventStressLossDollars = (spot - stressedSpot) * shares - (callMid - callAfter) * 100 * callLeg.quantity;
   }
   const closeCostDollars =

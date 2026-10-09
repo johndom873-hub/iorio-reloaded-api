@@ -3,6 +3,10 @@ import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } f
 import { emptyCandidateExclusionTally, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { describeNoCandidates, scoreTicker } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
+import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
+
+// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
+const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 // Audit E (2026-10-07): scoreTicker scores the macro flag against the clock (Date.now) and the earnings exclusion against
 // todayEasternIso, not against the snapshot date. Fixture copied from signalsLiveScoring.test.ts.
@@ -57,6 +61,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     dailyBarCount: 1253,
     dividendCadenceUnknown: false,
     todayEasternIso: "2026-09-21",
+    openSessionDatesIso: fixtureWeekdaySessions,
     ...overrides,
   };
 }
