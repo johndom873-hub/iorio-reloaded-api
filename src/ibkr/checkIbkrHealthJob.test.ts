@@ -77,11 +77,13 @@ const {
   checkHistoricalData,
   findOtherRunningJobName,
   isCompetingSessionHistoricalDataError,
+  postRestartConnectRetryDelayMs,
   previousHealthCheckProbeFailed,
   reconciliationNotifyMessage,
   runIbkrHealthCheckJob,
   runReconciliationSafely,
   tryConnect,
+  unreachableRetryDelayMs,
 } = await import("./checkIbkrHealthJob.js");
 const { blockedAfterReloginMessage, blockedRestartDeferredMessage } = await import("../lib/competingLiveSessionAlert.js");
 
@@ -108,6 +110,7 @@ function successfulRestartResult(output = "GATEWAY_CONTROL_RESULT=recovered\n") 
 interface JobOutput {
   details: {
     output: string;
+    handshakeErrors: string[];
     probe: { failed: boolean; reason: string | null; restarted: boolean };
     worker: { active: boolean; restarted: boolean };
     reconciliationProblems: string[];
@@ -122,6 +125,18 @@ interface JobOutput {
 
 function lastJobOutput(): JobOutput {
   return mocks.runJobOutcome.result as JobOutput;
+}
+
+// For runs that wait between handshake attempts: advances fake time until the job settles.
+async function runIbkrHealthCheckJobAdvancingTimers(options?: Parameters<typeof runIbkrHealthCheckJob>[0]): Promise<void> {
+  let settled = false;
+  const run = runIbkrHealthCheckJob(options);
+  run.then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  while (!settled) await vi.advanceTimersByTimeAsync(1_000);
+  return run;
 }
 
 beforeEach(() => {
@@ -241,16 +256,16 @@ describe("captureFarmStatusMessages and tryConnect", () => {
     expect(captured).toEqual([{ at: fixedNow.toISOString(), code: 2105, message: "HMDS data farm connection is broken:ushmds" }]);
   });
 
-  it("returns null instead of throwing when the connection cannot be opened", async () => {
+  it("returns the error message instead of throwing when the connection cannot be opened", async () => {
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("tunnel refused"));
-    await expect(tryConnect([])).resolves.toBeNull();
+    await expect(tryConnect([])).resolves.toEqual({ connection: null, errorMessage: "tunnel refused" });
   });
 
   it("returns the connection with farm capture attached to the caller's buffer", async () => {
     const connection = createFakeConnection();
     mocks.connectToIbkrGateway.mockResolvedValue(connection);
     const buffer: Array<{ at: string; code: number; message: string }> = [];
-    await expect(tryConnect(buffer)).resolves.toBe(connection);
+    await expect(tryConnect(buffer)).resolves.toEqual({ connection, errorMessage: null });
     connection.emitter.emit(EventName.error, new Error("farm ok"), 2106, -1);
     expect(buffer).toHaveLength(1);
   });
@@ -294,6 +309,7 @@ describe("runIbkrHealthCheckJob: healthy path", () => {
     expect(output.notify).toBeUndefined();
     expect(output.details).toEqual({
       output: "healthy",
+      handshakeErrors: [],
       probe: { failed: false, reason: null, restarted: false },
       worker: { active: true, restarted: false },
       reconciliationProblems: [],
@@ -340,12 +356,17 @@ describe("runIbkrHealthCheckJob: healthy path", () => {
 describe("runIbkrHealthCheckJob: handshake failure", () => {
   it("restarts the Gateway with the healthcheck key, reconnects, re-probes and announces the recovery", async () => {
     const reconnected = createFakeConnection();
-    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("handshake timeout")).mockResolvedValueOnce(reconnected);
+    mocks.connectToIbkrGateway
+      .mockRejectedValueOnce(new Error("handshake timeout"))
+      .mockRejectedValueOnce(new Error("handshake timeout again"))
+      .mockResolvedValueOnce(reconnected);
     mocks.restartIbkrGatewayOnVps.mockResolvedValue(successfulRestartResult("GATEWAY_CONTROL_RESULT=recovered\n"));
 
-    await runIbkrHealthCheckJob();
+    await runIbkrHealthCheckJobAdvancingTimers();
 
+    expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(3);
     expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
+    expect(mocks.restartIbkrGatewayOnVps.mock.invocationCallOrder[0]!).toBeGreaterThan(mocks.connectToIbkrGateway.mock.invocationCallOrder[1]!);
     const restartOptions = mocks.restartIbkrGatewayOnVps.mock.calls[0]![0];
     expect(restartOptions).toMatchObject({ sshHost: "vps.example", sshPort: 2222, sshUsername: "healthcheck" });
     expect(restartOptions.sshPrivateKey.toString()).toBe("gateway-key");
@@ -353,13 +374,14 @@ describe("runIbkrHealthCheckJob: handshake failure", () => {
     const output = lastJobOutput();
     expect(output.notify).toBe("⚠️ IBKR Gateway was unreachable — restarted, recovery confirmed via a real handshake and a reqHistoricalData probe.");
     expect(output.details.output).toBe("unhealthy (was unreachable), restarted, recovered — restart script output: GATEWAY_CONTROL_RESULT=recovered");
+    expect(output.details.handshakeErrors).toEqual(["first: handshake timeout", "retry: handshake timeout again"]);
     expect(mocks.checkPositionReconciliation).toHaveBeenCalledWith(reconnected.ib);
     expect(reconnected.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("does not restart from the manual check while the market is open, and reports it as a failure", async () => {
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("handshake timeout"));
-    await expect(runIbkrHealthCheckJob({ allowGatewayRestart: false })).rejects.toThrow(
+    await expect(runIbkrHealthCheckJobAdvancingTimers({ allowGatewayRestart: false })).rejects.toThrow(
       "IBKR Gateway was unreachable — not restarted: restarts are not allowed from the manual check while the market is open (the scheduled check will handle it).",
     );
     expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
@@ -371,9 +393,11 @@ describe("runIbkrHealthCheckJob: handshake failure", () => {
   it("fails when the restart does not bring the handshake back and includes the exit code and trimmed script output", async () => {
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("still down"));
     mocks.restartIbkrGatewayOnVps.mockResolvedValue({ exitCode: 3, output: "  GATEWAY_CONTROL_RESULT=restart_failed\n" });
-    await expect(runIbkrHealthCheckJob()).rejects.toThrow(
-      "IBKR Gateway was unreachable and restart didn't recover it (script exit 3): GATEWAY_CONTROL_RESULT=restart_failed",
+    await expect(runIbkrHealthCheckJobAdvancingTimers()).rejects.toThrow(
+      "IBKR Gateway was unreachable and restart didn't recover it (script exit 3): GATEWAY_CONTROL_RESULT=restart_failed\n" +
+        "Handshake errors: first: still down; retry: still down; after restart 1/3: still down; after restart 2/3: still down; after restart 3/3: still down",
     );
+    expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(5);
     expect(mocks.checkWorkerOnVps).not.toHaveBeenCalled();
     expect(mocks.reportWorkerHeartbeat).toHaveBeenCalledWith({ serviceActive: null, restartedJustNow: false });
   });
@@ -382,7 +406,7 @@ describe("runIbkrHealthCheckJob: handshake failure", () => {
     mocks.environment.ibkrTradingMode = "live";
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("down"));
     mocks.restartIbkrGatewayOnVps.mockResolvedValue({ exitCode: 1, output: "GATEWAY_CONTROL_RESULT=needs_manual_login\n" });
-    const error = await runIbkrHealthCheckJob().catch((caught: Error) => caught);
+    const error = await runIbkrHealthCheckJobAdvancingTimers().catch((caught: Error) => caught);
     expect((error as Error).message).toContain("IBKR live Gateway is not logged in and needs a manual login");
     expect((error as Error).message).not.toContain("restart didn't recover it");
     expect((error as Error).message).toContain("(script exit 1): GATEWAY_CONTROL_RESULT=needs_manual_login");
@@ -391,28 +415,28 @@ describe("runIbkrHealthCheckJob: handshake failure", () => {
   it("keeps the generic diagnosis on paper even when the script reports needs_manual_login", async () => {
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("down"));
     mocks.restartIbkrGatewayOnVps.mockResolvedValue({ exitCode: 1, output: "GATEWAY_CONTROL_RESULT=needs_manual_login\n" });
-    await expect(runIbkrHealthCheckJob()).rejects.toThrow("restart didn't recover it");
+    await expect(runIbkrHealthCheckJobAdvancingTimers()).rejects.toThrow("restart didn't recover it");
   });
 
   it("propagates a failure of the restart script itself", async () => {
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("down"));
     mocks.restartIbkrGatewayOnVps.mockRejectedValue(new Error("Timed out running IBKR Gateway restart script on VPS."));
-    await expect(runIbkrHealthCheckJob()).rejects.toThrow("Timed out running IBKR Gateway restart script on VPS.");
+    await expect(runIbkrHealthCheckJobAdvancingTimers()).rejects.toThrow("Timed out running IBKR Gateway restart script on VPS.");
     expect(mocks.reportWorkerHeartbeat).toHaveBeenCalledTimes(1);
   });
 
   it("refuses to restart when the gateway ssh key variable is missing", async () => {
     vi.stubEnv("IBKR_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64", "");
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("down"));
-    await expect(runIbkrHealthCheckJob()).rejects.toThrow("Missing required environment variable: IBKR_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64");
+    await expect(runIbkrHealthCheckJobAdvancingTimers()).rejects.toThrow("Missing required environment variable: IBKR_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64");
     expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
   });
 
   it("fails and disconnects when the restart recovers the handshake but historical data is still broken", async () => {
     const reconnected = createFakeConnection();
-    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("down")).mockResolvedValueOnce(reconnected);
+    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("down")).mockRejectedValueOnce(new Error("down")).mockResolvedValueOnce(reconnected);
     mocks.lookupLatestDailyBar.mockRejectedValue(new Error(historicalTimeoutError));
-    await expect(runIbkrHealthCheckJob()).rejects.toThrow(
+    await expect(runIbkrHealthCheckJobAdvancingTimers()).rejects.toThrow(
       `IBKR Gateway was unreachable and restart didn't recover reqHistoricalData either (${historicalTimeoutError}) (script exit 0): GATEWAY_CONTROL_RESULT=recovered`,
     );
     expect(reconnected.disconnect).toHaveBeenCalledTimes(1);
@@ -420,10 +444,10 @@ describe("runIbkrHealthCheckJob: handshake failure", () => {
 
   it("notifies instead of failing when the post-restart historical-data failure is a competing session", async () => {
     const reconnected = createFakeConnection();
-    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("down")).mockResolvedValueOnce(reconnected);
+    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("down")).mockRejectedValueOnce(new Error("down")).mockResolvedValueOnce(reconnected);
     mocks.lookupLatestDailyBar.mockRejectedValue(new Error(competingSessionHistoricalError));
 
-    await runIbkrHealthCheckJob();
+    await runIbkrHealthCheckJobAdvancingTimers();
 
     const output = lastJobOutput();
     expect(output.notify).toContain("IBKR Gateway was unreachable — restarted, handshake recovered, but reqHistoricalData is still blocked");
@@ -433,6 +457,58 @@ describe("runIbkrHealthCheckJob: handshake failure", () => {
     );
     expect(reconnected.disconnect).toHaveBeenCalledTimes(1);
     expect(mocks.checkWorkerOnVps).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries the handshake once after 10 s and does not restart when the retry connects", async () => {
+    const retried = createFakeConnection();
+    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("Timed out connecting to IBKR Gateway.")).mockResolvedValueOnce(retried);
+
+    const run = runIbkrHealthCheckJob();
+    await vi.advanceTimersByTimeAsync(unreachableRetryDelayMs - 1);
+    expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await run;
+
+    expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(2);
+    expect(mocks.restartIbkrGatewayOnVps).not.toHaveBeenCalled();
+    const output = lastJobOutput();
+    expect(output.notify).toBeUndefined();
+    expect(output.details.output).toBe("healthy (first handshake failed, retry ok: first: Timed out connecting to IBKR Gateway.)");
+    expect(output.details.handshakeErrors).toEqual(["first: Timed out connecting to IBKR Gateway."]);
+    expect(mocks.lookupLatestDailyBar).toHaveBeenCalledWith(retried, "SPY", 999_001);
+    expect(retried.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps reconnecting after a restart, 10 s apart, and recovers on a later attempt", async () => {
+    const reconnected = createFakeConnection();
+    mocks.connectToIbkrGateway
+      .mockRejectedValueOnce(new Error("down"))
+      .mockRejectedValueOnce(new Error("down"))
+      .mockRejectedValueOnce(new Error("not ready yet"))
+      .mockResolvedValueOnce(reconnected);
+    mocks.restartIbkrGatewayOnVps.mockResolvedValue(successfulRestartResult("GATEWAY_CONTROL_RESULT=session_restarted\n"));
+
+    const run = runIbkrHealthCheckJob();
+    await vi.advanceTimersByTimeAsync(unreachableRetryDelayMs);
+    expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(postRestartConnectRetryDelayMs - 1);
+    expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    await run;
+
+    expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(4);
+    expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
+    const output = lastJobOutput();
+    expect(output.notify).toBe("⚠️ IBKR Gateway was unreachable — restarted, recovery confirmed via a real handshake and a reqHistoricalData probe.");
+    expect(output.details.handshakeErrors).toEqual(["first: down", "retry: down", "after restart 1/3: not ready yet"]);
+    expect(reconnected.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the Telegram summary free of handshake error text", async () => {
+    mocks.connectToIbkrGateway.mockRejectedValue(new Error("connect timed out after 15571ms"));
+    const error = await runIbkrHealthCheckJobAdvancingTimers().catch((caught: Error) => caught);
+    const { telegramFailureSummary } = await vi.importActual<typeof import("../lib/runJob.js")>("../lib/runJob.js");
+    expect(telegramFailureSummary((error as Error).message)).not.toContain("15571");
   });
 
   it("captures farm status broadcasts from both the first and the post-restart connection", async () => {
@@ -602,9 +678,10 @@ describe("runIbkrHealthCheckJob: a step that throws after the Gateway connection
     const first = createFakeConnection();
     const replacement = createFakeConnection();
     mocks.connectToIbkrGateway.mockReset();
-    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("handshake refused")).mockResolvedValue(replacement);
+    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("handshake refused")).mockRejectedValueOnce(new Error("handshake refused")).mockResolvedValue(replacement);
     mocks.checkWorkerOnVps.mockRejectedValue(new Error("worker check failed"));
-    await expect(runIbkrHealthCheckJob()).rejects.toThrow("worker check failed");
+    await expect(runIbkrHealthCheckJobAdvancingTimers()).rejects.toThrow("worker check failed");
+    expect(mocks.restartIbkrGatewayOnVps).toHaveBeenCalledTimes(1);
     expect(replacement.disconnect).toHaveBeenCalledTimes(1);
     expect(first.disconnect).not.toHaveBeenCalled();
   });
@@ -714,9 +791,10 @@ describe("runIbkrHealthCheckJob: competing live session (IBKR 10197)", () => {
 
   it("fails the job when the 10197 restart cannot reconnect", async () => {
     mocks.connectToIbkrGateway.mockReset();
-    mocks.connectToIbkrGateway.mockResolvedValueOnce(createFakeConnection()).mockRejectedValueOnce(new Error("gone"));
+    mocks.connectToIbkrGateway.mockResolvedValueOnce(createFakeConnection()).mockRejectedValue(new Error("gone"));
     mocks.probeCompetingLiveSession.mockResolvedValue("blocked");
-    await expect(runIbkrHealthCheckJob()).rejects.toThrow("IBKR Gateway was refused real-time market data (IBKR 10197) and restart didn't recover it");
+    await expect(runIbkrHealthCheckJobAdvancingTimers()).rejects.toThrow("IBKR Gateway was refused real-time market data (IBKR 10197) and restart didn't recover it");
+    expect(mocks.connectToIbkrGateway).toHaveBeenCalledTimes(4);
     expect(mocks.reportWorkerHeartbeat).toHaveBeenCalledTimes(1);
   });
 });
@@ -744,10 +822,10 @@ describe("runIbkrHealthCheckJob: reconciliation, liveness and notify assembly", 
   });
 
   it("joins several notifications with a blank line in the order they happened", async () => {
-    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("down")).mockResolvedValueOnce(createFakeConnection());
+    mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("down")).mockRejectedValueOnce(new Error("down")).mockResolvedValueOnce(createFakeConnection());
     mocks.checkWorkerOnVps.mockResolvedValue({ active: true, restarted: true, output: "" });
     mocks.checkPositionReconciliation.mockResolvedValue(["x"]);
-    await runIbkrHealthCheckJob();
+    await runIbkrHealthCheckJobAdvancingTimers();
     const sections = lastJobOutput().notify!.split("\n\n");
     expect(sections).toHaveLength(3);
     expect(sections[0]).toContain("was unreachable — restarted");
@@ -767,7 +845,7 @@ describe("runIbkrHealthCheckJob: reconciliation, liveness and notify assembly", 
   it("runs the liveness checks before touching IBKR so an outage cannot blind them", async () => {
     mocks.connectToIbkrGateway.mockRejectedValue(new Error("down"));
     mocks.restartIbkrGatewayOnVps.mockRejectedValue(new Error("vps unreachable"));
-    await expect(runIbkrHealthCheckJob()).rejects.toThrow("vps unreachable");
+    await expect(runIbkrHealthCheckJobAdvancingTimers()).rejects.toThrow("vps unreachable");
     expect(mocks.reportDaySignalsLoopLiveness).toHaveBeenCalledTimes(1);
     expect(mocks.reportOpsMonitorLiveness).toHaveBeenCalledTimes(1);
     expect(mocks.reportDaySignalsLoopLiveness.mock.invocationCallOrder[0]!).toBeLessThan(mocks.connectToIbkrGateway.mock.invocationCallOrder[0]!);

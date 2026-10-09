@@ -138,14 +138,29 @@ export function captureFarmStatusMessages(connection: IbkrConnection, into: Farm
 // on-demand from System Health's button on the long-lived web dyno, where a
 // module-level buffer would leak across invocations and mix one run's farm
 // events into another's job_runs row.
-export async function tryConnect(farmStatusMessages: FarmStatusMessage[]): Promise<IbkrConnection | null> {
+export type ConnectAttempt = { connection: IbkrConnection; errorMessage: null } | { connection: null; errorMessage: string };
+
+export async function tryConnect(farmStatusMessages: FarmStatusMessage[]): Promise<ConnectAttempt> {
   try {
     const connection = await connectToIbkrGateway();
     captureFarmStatusMessages(connection, farmStatusMessages);
-    return connection;
-  } catch {
-    return null;
+    return { connection, errorMessage: null };
+  } catch (error) {
+    return { connection: null, errorMessage: error instanceof Error ? error.message : String(error) };
   }
+}
+
+// One failed handshake from Heroku is not proof the Gateway is down: the VPS's own handshake and the long-lived web/agent
+// connections can all be fine while this one-off connect times out, and a restart drops every one of those connections.
+// So an unreachable Gateway gets one more handshake before it is restarted.
+export const unreachableRetryDelayMs = 10_000;
+// gateway-control.sh reports the Gateway back once the API sends its version bytes, which comes before a full handshake
+// (nextValidId) works again, so a single reconnect right after the script can fail on a Gateway that recovers seconds later.
+export const postRestartConnectAttempts = 3;
+export const postRestartConnectRetryDelayMs = 10_000;
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export function reconciliationNotifyMessage(problems: string[]): string {
@@ -231,16 +246,28 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       closedConnections.add(connection);
       connection.disconnect();
     }
-    async function connectTracked(): Promise<IbkrConnection | null> {
-      const opened = await tryConnect(farmStatusMessages);
-      if (opened) openedConnections.push(opened);
-      return opened;
+    // Every failed handshake's error, labelled by attempt: kept in details on success and appended to the failure message
+    // after the script output (past the first "): ", so the Telegram text stays constant and the throttle holds).
+    const handshakeErrors: string[] = [];
+    async function connectTracked(attemptLabel: string): Promise<IbkrConnection | null> {
+      const attempt = await tryConnect(farmStatusMessages);
+      if (!attempt.connection) {
+        handshakeErrors.push(`${attemptLabel}: ${attempt.errorMessage}`);
+        return null;
+      }
+      openedConnections.push(attempt.connection);
+      return attempt.connection;
     }
 
     try {
-    let connection = await connectTracked();
     let gatewayOutput = "healthy";
     let probe: { failed: boolean; reason: string | null; restarted: boolean } = { failed: false, reason: null, restarted: false };
+    let connection = await connectTracked("first");
+    if (!connection) {
+      await wait(unreachableRetryDelayMs);
+      connection = await connectTracked("retry");
+      if (connection) gatewayOutput = `healthy (first handshake failed, retry ok: ${handshakeErrors[0]})`;
+    }
 
     async function restartAndReconnect(problemDescription: string): Promise<IbkrConnection> {
       if (!allowGatewayRestart) {
@@ -255,11 +282,15 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
         sshPrivateKey,
       });
 
-      const reconnected = await connectTracked();
+      let reconnected: IbkrConnection | null = null;
+      for (let attempt = 1; attempt <= postRestartConnectAttempts && !reconnected; attempt++) {
+        if (attempt > 1) await wait(postRestartConnectRetryDelayMs);
+        reconnected = await connectTracked(`after restart ${attempt}/${postRestartConnectAttempts}`);
+      }
       if (!reconnected) {
         const manualLoginHeadline = describeLiveGatewayManualLoginHeadline(parseGatewayControlResultKind(result.output), environment.ibkrTradingMode);
         const diagnosis = manualLoginHeadline ?? `IBKR Gateway ${problemDescription} and restart didn't recover it`;
-        throw new Error(`${diagnosis} (script exit ${result.exitCode}): ${result.output.trim()}`);
+        throw new Error(`${diagnosis} (script exit ${result.exitCode}): ${result.output.trim()}\nHandshake errors: ${handshakeErrors.join("; ")}`);
       }
 
       // Previously this declared victory on the handshake alone — but the
@@ -381,6 +412,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
     return {
       details: {
         output: gatewayOutput,
+        handshakeErrors,
         probe,
         worker: { active: workerCheck.active, restarted: workerCheck.restarted },
         reconciliationProblems: problems,
