@@ -57,7 +57,6 @@ export interface HistoryStepResult {
   ivPointCount: number;
   firstTradingDate: string | null;
   lastTradingDate: string | null;
-  suspectedSplitDates: string[];
   invalidBarDates: string[];
 }
 
@@ -301,8 +300,7 @@ export async function executeBackfillRun(runId: string, tickerId: string, symbol
     if (scope === "full") {
       await runStep("history", async () => {
         const result = await workers.fetchHistory(await getConnection(), tickerId, symbol);
-        const splitNote = result.suspectedSplitDates.length > 0 ? ` Possible stock split on ${result.suspectedSplitDates.join(", ")}: check the price history.` : "";
-        return { status: "done", message: `${result.barCount} daily bars (${result.firstTradingDate} to ${result.lastTradingDate}), ${result.ivPointCount} implied-volatility points.${splitNote}` };
+        return { status: "done", message: `${result.barCount} daily bars (${result.firstTradingDate} to ${result.lastTradingDate}), ${result.ivPointCount} implied-volatility points.` };
       });
 
       await runStep("calendar", async () => {

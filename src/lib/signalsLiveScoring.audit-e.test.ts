@@ -47,7 +47,6 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60)],
     dayQuotes: [],
     forecast: { volatility: 0.15, windowDays: 63 },
-    suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],

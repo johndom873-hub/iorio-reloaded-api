@@ -223,18 +223,14 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     ...base,
     unscoredReason,
     unscoredDetail,
-    caveats: buildTickerCaveats({ unscoredReason, suspectedSplitDateIso: inputs.suspectedSplitDateIso, dailyBarCount: inputs.dailyBarCount, dividendCadenceUnknown: inputs.dividendCadenceUnknown, snapshotDateIso: base.snapshotDateIso }, inputs.todayEasternIso),
+    caveats: buildTickerCaveats({ unscoredReason, dailyBarCount: inputs.dailyBarCount, dividendCadenceUnknown: inputs.dividendCadenceUnknown, snapshotDateIso: base.snapshotDateIso }, inputs.todayEasternIso),
   });
 
   if (!header) return withCaveats("no_snapshot");
   // Saved but not yet analysed: pending, not a problem (the fit finishes within seconds of the capture).
   if (header.fitCompletedAt === null) return withCaveats("analysing", { kind: "analysing", snapshotCapturedAt: header.capturedAt });
   if (base.fittedSliceCount === 0 || header.underlyingPrice === null || header.riskFreeRatePercent === null) return withCaveats("no_surface_fit", describeFitIssue(inputs));
-  if (!inputs.forecast) {
-    return inputs.suspectedSplitDateIso !== null
-      ? withCaveats("suspected_split", { kind: "split", splitDateIso: inputs.suspectedSplitDateIso })
-      : withCaveats("no_forecast", { kind: "forecast", dailyBarCount: inputs.dailyBarCount, barsNeeded: minimumBarsForAnyForecast });
-  }
+  if (!inputs.forecast) return withCaveats("no_forecast", { kind: "forecast", dailyBarCount: inputs.dailyBarCount, barsNeeded: minimumBarsForAnyForecast });
   if (spotPrice === null) return withCaveats("no_snapshot");
 
   const todaySlices = rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso);

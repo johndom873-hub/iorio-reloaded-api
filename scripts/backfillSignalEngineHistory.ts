@@ -7,10 +7,9 @@ import { loadCaptureUniverse } from "../src/ibkr/runOptionChainCapture.js";
 // One-off 5-year daily-history backfill for the IORIO Signal Engine (Phase 0):
 // the Yang-Zhang realized-volatility windows (up to 126 days), the IV history
 // and, later, the backtest all need more than the 1 year the shortlist-add path
-// pulls. Bars are stored UNADJUSTED (WhatToShow.TRADES), so before writing,
-// each ticker's fetched bars are run through the split guard and any suspected
-// split is printed — that is the check that the guard flags e.g. SMCI's
-// Oct-2024 10:1 split on real data.
+// pulls. Bars go through storeFreshDailyBars, which replaces a ticker's history
+// when IBKR's split-adjusted prices differ from the stored ones; any bad bars
+// (non-positive prices, high below low) are printed.
 //
 // Pacing (needs Marcelo's approval, see PROGRESS.md): tickers run one at a
 // time, 2 IBKR historical requests each (TRADES + implied volatility), with a
@@ -55,7 +54,6 @@ async function main(): Promise<void> {
         nextReqId += 2;
         console.log(
           `${ticker.symbol}: ${summary.barCount} bars ${summary.firstTradingDate}..${summary.lastTradingDate}, ${summary.ivPointCount} IV points` +
-            `${summary.suspectedSplitDates.length > 0 ? `, SUSPECTED SPLIT: ${summary.suspectedSplitDates.join(", ")}` : ""}` +
             `${summary.invalidBarDates.length > 0 ? `, INVALID BARS: ${summary.invalidBarDates.join(", ")}` : ""}` +
             `${dryRun ? "" : " — written"}`,
         );

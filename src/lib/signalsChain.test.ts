@@ -66,7 +66,6 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     quotes: [...nearQuotes, quoteAt(85, "P", far, years60), quoteAt(115, "C", far, years60)],
     dayQuotes: [],
     forecast: { volatility: 0.15, windowDays: 63 },
-    suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],

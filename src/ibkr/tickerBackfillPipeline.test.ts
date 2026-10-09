@@ -45,7 +45,7 @@ function inMemoryStore(tickers: Record<string, { symbol: string; onShortlist: bo
   return { store, runs, progressLog };
 }
 
-const history: HistoryStepResult = { barCount: 1253, ivPointCount: 1250, firstTradingDate: "2021-09-22", lastTradingDate: "2026-09-18", suspectedSplitDates: [], invalidBarDates: [] };
+const history: HistoryStepResult = { barCount: 1253, ivPointCount: 1250, firstTradingDate: "2021-09-22", lastTradingDate: "2026-09-18", invalidBarDates: [] };
 const prepared = (): PreparedTicker => ({
   ticker: { tickerId: "t1", symbol: "SMCI", contractId: 1 },
   spotPrice: 40,
@@ -153,14 +153,6 @@ describe("executeBackfillRun", () => {
     expect(finished.steps[0]!.message).toBe("Timed out connecting to IBKR Gateway.");
     expect(finished.status).toBe("partial");
     error.mockRestore();
-  });
-
-  it("adds a note to the history message when the split guard flagged a date", async () => {
-    const { store } = inMemoryStore();
-    const { workers: w } = workers({ fetchHistory: async () => ({ ...history, suspectedSplitDates: ["2024-10-01"] }) });
-    const run = await store.create("t1", []);
-    await executeBackfillRun(run.id, "t1", "SMCI", { store, workers: w });
-    expect((await store.getLatest("t1"))!.steps[0]!.message).toContain("Possible stock split on 2024-10-01");
   });
 
   it("reports progress in step order: each step goes running then finished, percent never decreases, and ends at 100", async () => {

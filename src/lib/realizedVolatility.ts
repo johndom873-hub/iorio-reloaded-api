@@ -19,19 +19,8 @@
 // why it is used rather than close-to-close (ignores overnight gaps) or
 // Parkinson/Garman-Klass (assume no gaps / zero drift).
 //
-// SPLIT GUARD — stored bars keep the prices of the day they were fetched, and
-// splits are detected for certain when bars are written (dailyBarSplitCheck.ts:
-// IBKR's re-fetched prices for a stored day differ by the split ratio, and the
-// whole history is replaced). A window still returns "unavailable /
-// suspected_split" if any of its overnight moves is within ±15% (relative) of a
-// common split ratio — 1/m for a forward split or m for a reverse split, m in
-// {2, 3, 4, 5, 10, 20} — AND the bar's volume confirms it (forward: volume ≥
-// 0.5·m × the prior-20-bar median; reverse: volume ≤ (2/m) × that median).
-// A real −50% crash on doubled volume looks identical to a 2-for-1 split and is
-// excluded too. With fewer than 5 prior bars the volume can't be checked, so a
-// ratio-match is treated as a suspected split. A large move that matches no
-// split ratio is a real move and stays in the estimate (MRNA opened +84% on
-// 2026-08-19 on a trial result).
+// Splits: stored bars are kept on IBKR's split-adjusted basis when they are written
+// (dailyBarSplitCheck.ts), so every overnight move here is a real one and counts.
 //
 // Bars must be in ascending date order.
 
@@ -50,14 +39,7 @@ export type YangZhangWindowDays = (typeof yangZhangWindowDays)[number];
 const tradingDaysPerYear = 252;
 const yangZhangWeightConstant = 0.34;
 
-const splitRatioRelativeTolerance = 0.15;
-const commonSplitFactors = [2, 3, 4, 5, 10, 20] as const;
-const forwardSplitMinimumVolumeFraction = 0.5;
-const reverseSplitVolumeCeilingNumerator = 2;
-const volumeMedianLookbackBars = 20;
-const minimumPriorBarsToConfirmVolume = 5;
-
-export type YangZhangUnavailableReason = "insufficient_history" | "suspected_split" | "invalid_bar";
+export type YangZhangUnavailableReason = "insufficient_history" | "invalid_bar";
 
 export interface YangZhangComponents {
   overnightVariance: number;
@@ -69,7 +51,7 @@ export interface YangZhangComponents {
 
 export type YangZhangResult =
   | { available: true; windowDays: number; annualizedVolatility: number; components: YangZhangComponents }
-  | { available: false; windowDays: number; reason: YangZhangUnavailableReason; detail: string; /** Trading date of the flagged overnight move; only with reason "suspected_split". */ splitDateIso?: string };
+  | { available: false; windowDays: number; reason: YangZhangUnavailableReason; detail: string };
 
 function isValidBar(bar: DailyOhlcvBar): boolean {
   const { open, high, low, close, volume } = bar;
@@ -78,43 +60,9 @@ function isValidBar(bar: DailyOhlcvBar): boolean {
   return high >= Math.max(open, close) && low <= Math.min(open, close) && high >= low;
 }
 
-function medianOf(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[middle - 1]! + sorted[middle]!) / 2 : sorted[middle]!;
-}
-
 function sampleVariance(values: number[]): number {
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
   return values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
-}
-
-/** True when the overnight move into bars[index] looks like a stock split (the ratio and volume rule in the file header). */
-function isSuspectedSplitAt(bars: DailyOhlcvBar[], index: number): boolean {
-  const previousClose = bars[index - 1]!.close;
-  const bar = bars[index]!;
-  const overnightRatio = bar.open / previousClose;
-
-  const matchingForwardFactors = commonSplitFactors.filter((factor) => Math.abs(overnightRatio * factor - 1) <= splitRatioRelativeTolerance);
-  const matchingReverseFactors = commonSplitFactors.filter((factor) => Math.abs(overnightRatio / factor - 1) <= splitRatioRelativeTolerance);
-  if (matchingForwardFactors.length === 0 && matchingReverseFactors.length === 0) return false;
-
-  const priorVolumes = bars.slice(Math.max(0, index - volumeMedianLookbackBars), index).map((priorBar) => priorBar.volume);
-  if (priorVolumes.length < minimumPriorBarsToConfirmVolume) return true;
-  const medianPriorVolume = medianOf(priorVolumes);
-
-  const forwardConfirmed = matchingForwardFactors.some((factor) => bar.volume >= forwardSplitMinimumVolumeFraction * factor * medianPriorVolume);
-  const reverseConfirmed = matchingReverseFactors.some((factor) => bar.volume <= (reverseSplitVolumeCeilingNumerator / factor) * medianPriorVolume);
-  return forwardConfirmed || reverseConfirmed;
-}
-
-/** Indices (into `bars`) of every bar whose overnight move is a suspected split. Index 0 has no prior close and is never flagged. */
-export function findSuspectedSplitBarIndices(bars: DailyOhlcvBar[]): number[] {
-  const suspectedIndices: number[] = [];
-  for (let index = 1; index < bars.length; index++) {
-    if (isSuspectedSplitAt(bars, index)) suspectedIndices.push(index);
-  }
-  return suspectedIndices;
 }
 
 /**
@@ -136,11 +84,6 @@ export function computeYangZhangVolatility(bars: DailyOhlcvBar[], windowDays: nu
   for (let index = firstWindowIndex - 1; index < endIndex; index++) {
     if (!isValidBar(bars[index]!)) {
       return { available: false, windowDays, reason: "invalid_bar", detail: `invalid OHLCV bar on ${bars[index]!.tradingDate}` };
-    }
-  }
-  for (let index = firstWindowIndex; index < endIndex; index++) {
-    if (isSuspectedSplitAt(bars, index)) {
-      return { available: false, windowDays, reason: "suspected_split", detail: `suspected split on ${bars[index]!.tradingDate}`, splitDateIso: bars[index]!.tradingDate };
     }
   }
 

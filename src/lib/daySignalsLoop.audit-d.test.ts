@@ -48,7 +48,6 @@ function inputsFor(tickerId: string, symbol: string): TickerSignalsInputs {
     quotes: strikes.map(([strike, right]) => quoteAt(strike, right)),
     dayQuotes: [],
     forecast: { volatility: surfaceIvAt(100) - 0.02, windowDays: 63 },
-    suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],

@@ -23,32 +23,28 @@ describe("selectRealizedVolatilityForecast", () => {
     const bars = makeBars(200);
     const expected = computeYangZhangVolatility(bars, 63);
     if (!expected.available) throw new Error("fixture must be fittable");
-    expect(selectRealizedVolatilityForecast(bars)).toEqual({ forecast: { volatility: expected.annualizedVolatility, windowDays: 63 }, suspectedSplitDateIso: null });
+    expect(selectRealizedVolatilityForecast(bars)).toEqual({ volatility: expected.annualizedVolatility, windowDays: 63 });
   });
 
   it("needs 64 bars for the 63-day window: with 63 bars it falls back to the 21-day window", () => {
-    expect(selectRealizedVolatilityForecast(makeBars(64)).forecast!.windowDays).toBe(63);
-    const fallback = selectRealizedVolatilityForecast(makeBars(63)).forecast!;
+    expect(selectRealizedVolatilityForecast(makeBars(64))!.windowDays).toBe(63);
+    const fallback = selectRealizedVolatilityForecast(makeBars(63))!;
     expect(fallback.windowDays).toBe(21);
     const expected = computeYangZhangVolatility(makeBars(63), 21);
     if (!expected.available) throw new Error("fixture must be fittable");
     expect(fallback.volatility).toBe(expected.annualizedVolatility);
   });
 
-  it("returns no forecast (no Edge) with fewer than 22 bars, without blaming a split", () => {
-    expect(selectRealizedVolatilityForecast(makeBars(22)).forecast!.windowDays).toBe(21);
-    expect(selectRealizedVolatilityForecast(makeBars(21))).toEqual({ forecast: null, suspectedSplitDateIso: null });
-    expect(selectRealizedVolatilityForecast([])).toEqual({ forecast: null, suspectedSplitDateIso: null });
+  it("returns no forecast (no Edge) with fewer than 22 bars", () => {
+    expect(selectRealizedVolatilityForecast(makeBars(22))!.windowDays).toBe(21);
+    expect(selectRealizedVolatilityForecast(makeBars(21))).toBeNull();
+    expect(selectRealizedVolatilityForecast([])).toBeNull();
   });
 
-  it("falls back when the 63-day window contains a suspected split, and records the split day if the 21-day one does too", () => {
+  it("keeps a real 84% overnight jump in the 63-day window instead of falling back (MRNA, 2026-08-19)", () => {
     const bars = makeBars(100);
-    const splitAt = 60; // inside the last 63 but outside the last 21
-    for (let index = splitAt; index < bars.length; index++) bars[index] = { ...bars[index]!, open: bars[index]!.open / 10, high: bars[index]!.high / 10, low: bars[index]!.low / 10, close: bars[index]!.close / 10, volume: 12_000_000 };
-    expect(selectRealizedVolatilityForecast(bars)).toMatchObject({ forecast: { windowDays: 21 }, suspectedSplitDateIso: null });
-    const recentSplit = makeBars(100);
-    for (let index = 95; index < recentSplit.length; index++) recentSplit[index] = { ...recentSplit[index]!, open: recentSplit[index]!.open / 10, high: recentSplit[index]!.high / 10, low: recentSplit[index]!.low / 10, close: recentSplit[index]!.close / 10, volume: 12_000_000 };
-    expect(selectRealizedVolatilityForecast(recentSplit)).toEqual({ forecast: null, suspectedSplitDateIso: recentSplit[95]!.tradingDate });
+    for (let index = 60; index < bars.length; index++) bars[index] = { ...bars[index]!, open: bars[index]!.open * 1.84, high: bars[index]!.high * 1.84, low: bars[index]!.low * 1.84, close: bars[index]!.close * 1.84, volume: 12_000_000 };
+    expect(selectRealizedVolatilityForecast(bars)!.windowDays).toBe(63);
   });
 });
 

@@ -64,7 +64,6 @@ const unscoredTickerReasons: Record<SignalsUnscoredReason, string> = {
   analysing: "Snapshot saved, surface fit pending",
   no_surface_fit: "No volatility surface for this ticker today",
   no_forecast: "No volatility forecast for this ticker",
-  suspected_split: "Volatility forecast held back (suspected stock split)",
 };
 
 export function describeUnscoredTicker(reason: SignalsUnscoredReason): string {

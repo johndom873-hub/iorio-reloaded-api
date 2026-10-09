@@ -130,10 +130,9 @@ export function buildSignalsRoadmap(counts: RoadmapCounts, todayIso: string): Ro
   ];
 }
 
-/** Per-ticker caveats derived from a row's own facts (no snapshot, suspected split, short history, dividend payer). */
+/** Per-ticker caveats derived from a row's own facts (no snapshot, short history, dividend payer, stale surface). */
 export interface TickerCaveatInputs {
   unscoredReason: string | null;
-  suspectedSplitDateIso: string | null;
   dailyBarCount: number;
   /** True when there is an upcoming ex-dividend but no regular cadence could be inferred to project later ones into the forward. */
   dividendCadenceUnknown: boolean;
@@ -142,7 +141,7 @@ export interface TickerCaveatInputs {
 }
 
 export interface TickerCaveat {
-  id: "no_snapshot" | "suspected_split" | "short_history" | "dividend_payer" | "stale_surface";
+  id: "no_snapshot" | "short_history" | "dividend_payer" | "stale_surface";
   title: string;
   summary: string;
   needs: string;
@@ -154,16 +153,6 @@ export function buildTickerCaveats(inputs: TickerCaveatInputs, todayIso: string)
   const caveats: TickerCaveat[] = [];
   if (inputs.unscoredReason === "no_snapshot") {
     caveats.push({ id: "no_snapshot", title: "No option-chain snapshot yet", summary: "Nothing to fit a surface from, so no scores.", needs: "The nightly capture to run for this ticker", status: "waiting_on_data", eta: { kind: "text", text: "First night after the capture runs" } });
-  }
-  if (inputs.suspectedSplitDateIso !== null) {
-    caveats.push({
-      id: "suspected_split",
-      title: `Suspected stock split on ${inputs.suspectedSplitDateIso}: no volatility forecast`,
-      summary: "The stored daily prices jump across that day the way a split does, so the forecast refuses to use them and the ticker is not scored. IBKR returns split-adjusted prices on a fresh fetch.",
-      needs: "Backfill history for this ticker (re-fetches five years of adjusted prices)",
-      status: "waiting_on_data",
-      eta: { kind: "text", text: "Scored on the next refresh after the backfill" },
-    });
   }
   if (inputs.snapshotDateIso !== null && inputs.snapshotDateIso !== todayIso) {
     caveats.push({

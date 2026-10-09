@@ -281,7 +281,7 @@ export interface DailyHistoryFromIbkr {
 }
 
 // Fetch half of the backfill, split out so the Signal Engine's 5-year backfill
-// (scripts/backfillSignalEngineHistory.ts) can inspect the bars (split guard,
+// (scripts/backfillSignalEngineHistory.ts) can inspect the bars (bad bars,
 // dry run) before deciding to write them.
 export async function fetchDailyHistoryFromIbkr(connection: IbkrConnection, symbol: string, duration: string, reqId = 1): Promise<DailyHistoryFromIbkr> {
   const bars = await fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, duration, reqId);

@@ -49,7 +49,6 @@ function inputsFor(ticker: SignalsTickerRow, withSnapshot: boolean, freeShares =
     quotes: withSnapshot ? [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)] : [],
     dayQuotes: [],
     forecast: withSnapshot ? { volatility: 0.15, windowDays: 63 } : null,
-    suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],

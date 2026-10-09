@@ -9,15 +9,10 @@ function bar(day: number, open: number, close: number, volume = 1_000_000): Dail
 describe("summarizeBackfillBars", () => {
   it("reports range and count for clean bars", () => {
     const bars = Array.from({ length: 10 }, (_, i) => bar(i + 1, 100 + i, 100.5 + i));
-    expect(summarizeBackfillBars(bars)).toEqual({ barCount: 10, firstTradingDate: "2024-10-01", lastTradingDate: "2024-10-10", suspectedSplitDates: [], invalidBarDates: [] });
-  });
-  it("flags a 10:1 forward split confirmed by volume", () => {
-    const bars = Array.from({ length: 25 }, (_, i) => bar(i + 1, 1000, 1000));
-    bars.push({ ...bar(26, 100, 100), volume: 12_000_000 });
-    expect(summarizeBackfillBars(bars).suspectedSplitDates).toEqual(["2024-10-26"]);
+    expect(summarizeBackfillBars(bars)).toEqual({ barCount: 10, firstTradingDate: "2024-10-01", lastTradingDate: "2024-10-10", invalidBarDates: [] });
   });
   it("flags invalid bars and handles no bars", () => {
     expect(summarizeBackfillBars([bar(1, 100, 100), { ...bar(2, 100, 100), close: 0 }]).invalidBarDates).toEqual(["2024-10-02"]);
-    expect(summarizeBackfillBars([])).toEqual({ barCount: 0, firstTradingDate: null, lastTradingDate: null, suspectedSplitDates: [], invalidBarDates: [] });
+    expect(summarizeBackfillBars([])).toEqual({ barCount: 0, firstTradingDate: null, lastTradingDate: null, invalidBarDates: [] });
   });
 });

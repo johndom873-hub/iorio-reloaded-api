@@ -291,13 +291,13 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
   const momentum = computeMomentum(bars.map((bar) => bar.close));
   const elevatedVolatility = computeElevatedVolatilityFlag(bars);
 
-  const [slices, quotes, forecastSelection, dayQuotes] = header
+  const [slices, quotes, forecast, dayQuotes] = header
     ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
-    : [[], [], { forecast: null, suspectedSplitDateIso: null }, []];
+    : [[], [], null, []];
   const furthestExpiry = slices.map((slice) => slice.expiry).sort().at(-1);
   const openSessionDatesIso = furthestExpiry && furthestExpiry > todayEastern ? await loadOpenDaysBetween(addCalendarDays(todayEastern, 1), furthestExpiry) : [];
 
-  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecastSelection.forecast, openSessionDatesIso, suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
+  return { ...ticker, header, slices, quotes, dayQuotes, forecast, openSessionDatesIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
 }
 
 /**

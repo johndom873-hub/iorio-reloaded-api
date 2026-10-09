@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   computeYangZhangVolatility,
   computeYangZhangVolatilityAllWindows,
-  findSuspectedSplitBarIndices,
   yangZhangWindowDays,
   type DailyOhlcvBar,
 } from "./realizedVolatility.js";
@@ -181,70 +180,17 @@ describe("computeYangZhangVolatility — availability", () => {
   });
 });
 
-describe("split guard", () => {
+describe("large overnight moves", () => {
   const baseBars = buildSteadyBars(40);
 
-  it("flags a 2-for-1 split when volume roughly doubles", () => {
-    const bars = withLastBarGap(baseBars, 0.5, 2_000_000);
-    expect(computeYangZhangVolatility(bars, 21)).toMatchObject({ available: false, reason: "suspected_split" });
-  });
-
-  it("flags a 3-for-1 split when volume roughly triples", () => {
-    const bars = withLastBarGap(baseBars, 1 / 3, 3_000_000);
-    expect(computeYangZhangVolatility(bars, 21)).toMatchObject({ available: false, reason: "suspected_split" });
-  });
-
-  it("flags a 10-for-1 split when volume confirms it, and no longer on the size of the move alone", () => {
-    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 0.1, 6_000_000), 21)).toMatchObject({ available: false, reason: "suspected_split" });
-    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 0.1, 1_000_000), 21).available).toBe(true);
-  });
-
-  it("keeps a real move far beyond ±70% that volume does not mark as a split (MRNA's +84% open on 2026-08-19)", () => {
-    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 1.84, 8_000_000), 21).available).toBe(true);
-    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 3.5, 8_000_000), 21).available).toBe(true);
-  });
-
-  it("flags reverse splits (1-for-2 and 1-for-10) when volume falls as a reverse split's does", () => {
-    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 2, 500_000), 21)).toMatchObject({ available: false, reason: "suspected_split" });
-    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 10, 100_000), 21)).toMatchObject({ available: false, reason: "suspected_split" });
-  });
-
-  it("does NOT flag a split-like ratio when volume does not confirm it", () => {
-    // −50% on normal (below 0.5 × 2 × median) volume: a ratio match with no volume jump.
-    const halfOnNormalVolume = withLastBarGap(baseBars, 0.5, 900_000);
-    expect(computeYangZhangVolatility(halfOnNormalVolume, 21).available).toBe(true);
-    const thirdOnNormalVolume = withLastBarGap(baseBars, 1 / 3, 1_000_000);
-    expect(computeYangZhangVolatility(thirdOnNormalVolume, 21).available).toBe(true);
-  });
-
-  it("does not flag an ordinary large earnings gap (−25%) at any volume", () => {
-    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 0.75, 8_000_000), 21).available).toBe(true);
-  });
-
-  it("excludes a real −50% crash on a volume spike — the accepted, safe-direction false positive", () => {
-    expect(computeYangZhangVolatility(withLastBarGap(baseBars, 0.5, 6_000_000), 21)).toMatchObject({ available: false, reason: "suspected_split" });
-  });
-
-  it("only looks at overnight moves inside the window", () => {
-    const withOldSplit = buildSteadyBars(60);
-    const oldSplitIndex = 5;
-    const previousClose = withOldSplit[oldSplitIndex - 1]!.close;
-    const open = previousClose * 0.5;
-    withOldSplit[oldSplitIndex] = { ...withOldSplit[oldSplitIndex]!, open, high: open * 1.01, low: open * 0.99, close: open, volume: 2_000_000 };
-    expect(findSuspectedSplitBarIndices(withOldSplit)).toContain(oldSplitIndex);
-    expect(computeYangZhangVolatility(withOldSplit, 21).available).toBe(true); // window is the last 21 bars
-    expect(computeYangZhangVolatility(withOldSplit, 55)).toMatchObject({ available: false, reason: "suspected_split" });
-  });
-
-  it("treats a ratio match as a suspected split when there are too few prior bars to check volume", () => {
-    const shortBars = withLastBarGap(buildSteadyBars(4), 0.5, 900_000); // only 3 prior bars
-    expect(computeYangZhangVolatility(shortBars, 3)).toMatchObject({ available: false, reason: "suspected_split" });
-  });
-
-  it("findSuspectedSplitBarIndices never flags index 0 and returns every flagged index", () => {
-    const bars = withLastBarGap(baseBars, 0.5, 2_000_000);
-    expect(findSuspectedSplitBarIndices(bars)).toEqual([bars.length - 1]);
-    expect(findSuspectedSplitBarIndices(baseBars)).toEqual([]);
+  it("count as real moves: splits are handled when bars are stored (dailyBarSplitCheck.ts), not guessed here", () => {
+    const steady = computeYangZhangVolatility(baseBars, 21);
+    if (!steady.available) throw new Error("fixture must be fittable");
+    for (const [ratio, volume] of [[0.5, 2_000_000], [0.5, 6_000_000], [0.1, 12_000_000], [1.84, 8_000_000], [2, 500_000]] as const) {
+      const withGap = computeYangZhangVolatility(withLastBarGap(baseBars, ratio, volume), 21);
+      if (!withGap.available) throw new Error(`a ${ratio}× overnight move was refused`);
+      expect(withGap.annualizedVolatility).toBeGreaterThan(steady.annualizedVolatility);
+    }
   });
 });
 

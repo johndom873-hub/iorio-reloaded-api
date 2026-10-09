@@ -41,7 +41,7 @@ function scopedStore(overrides: Partial<Store> = {}): Store {
 }
 
 function fakeWorkers(overrides: Partial<Workers> = {}) {
-  const fetchHistory = vi.fn(async () => ({ barCount: 10, ivPointCount: 10, firstTradingDate: "2021-10-01", lastTradingDate: "2026-10-06", suspectedSplitDates: [], invalidBarDates: [] }));
+  const fetchHistory = vi.fn(async () => ({ barCount: 10, ivPointCount: 10, firstTradingDate: "2021-10-01", lastTradingDate: "2026-10-06", invalidBarDates: [] }));
   const prepareChain = vi.fn(async () => ({
     ticker: { tickerId: "x", symbol: "X", contractId: 1 },
     spotPrice: 10,

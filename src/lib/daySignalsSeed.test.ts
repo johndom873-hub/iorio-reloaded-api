@@ -91,7 +91,6 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30)],
     dayQuotes: [],
     forecast: { volatility: forecastVolatility, windowDays: 63 },
-    suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],

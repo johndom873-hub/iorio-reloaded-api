@@ -52,7 +52,6 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)],
     dayQuotes: [],
     forecast: { volatility: 0.15, windowDays: 63 },
-    suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],
@@ -178,9 +177,6 @@ describe("scoreTicker", () => {
     expect(scoreTicker(inputs({ header: null }), account, permissiveSettings).unscoredReason).toBe("no_snapshot");
     expect(scoreTicker(inputs({ slices: [slice("2026-10-21", years30, { status: "insufficient_points" as never })] }), account, permissiveSettings).unscoredReason).toBe("no_surface_fit");
     expect(scoreTicker(inputs({ forecast: null }), account, permissiveSettings).unscoredReason).toBe("no_forecast");
-    const split = scoreTicker(inputs({ forecast: null, suspectedSplitDateIso: "2026-09-15" }), account, permissiveSettings);
-    expect(split.unscoredReason).toBe("suspected_split");
-    expect(split.caveats.map((caveat) => caveat.id)).toContain("suspected_split");
   });
 
   it("a snapshot whose fit has not finished is Analysing (pending, with no problem implied), ahead of every fit and forecast check", () => {
@@ -206,7 +202,6 @@ describe("scoreTicker", () => {
     expect(noRate.unscoredReason).toBe("no_surface_fit");
     expect(noRate.unscoredDetail).toMatchObject({ kind: "fit", fitIssue: "no_risk_free_rate" });
     expect(scoreTicker(inputs({ forecast: null, dailyBarCount: 18 }), account, permissiveSettings).unscoredDetail).toEqual({ kind: "forecast", dailyBarCount: 18, barsNeeded: 22 });
-    expect(scoreTicker(inputs({ forecast: null, suspectedSplitDateIso: "2026-09-15" }), account, permissiveSettings).unscoredDetail).toEqual({ kind: "split", splitDateIso: "2026-09-15" });
     expect(scoreTicker(inputs(), account, permissiveSettings).unscoredDetail).toBeNull();
   });
 

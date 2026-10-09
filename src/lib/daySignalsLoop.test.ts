@@ -43,7 +43,6 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
     dayQuotes,
     // Forecast just under the surface: every candidate starts Weak at snapshot quotes.
     forecast: { volatility: surfaceIvAt(100) - 0.02, windowDays: 63 },
-    suspectedSplitDateIso: null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],

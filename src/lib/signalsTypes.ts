@@ -7,7 +7,7 @@ import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
 import type { HeldLegScore, OpenShortLeg, RollSignalCandidate } from "./rollSignalCandidates.js";
 
 /** "analysing": today's snapshot is saved but its surface fit has not finished yet (a pending state, not a problem). */
-export type SignalsUnscoredReason = "no_snapshot" | "analysing" | "no_surface_fit" | "no_forecast" | "suspected_split";
+export type SignalsUnscoredReason = "no_snapshot" | "analysing" | "no_surface_fit" | "no_forecast";
 
 /** The facts behind an unscored reason, so the screen can say what the issue is rather than only that there is one. */
 export type SignalsUnscoredDetail =
@@ -20,8 +20,7 @@ export type SignalsUnscoredDetail =
       /** Why the fit produced nothing: a skip reason (no_spot_price, no_risk_free_rate, no_quotes) or "error: <message>"; null when it ran and no slice was usable. */
       fitIssue: string | null;
     }
-  | { kind: "forecast"; dailyBarCount: number; barsNeeded: number }
-  | { kind: "split"; splitDateIso: string };
+  | { kind: "forecast"; dailyBarCount: number; barsNeeded: number };
 export type SignalsPriceSource = "live" | "frozen" | "snapshot";
 
 export interface SnapshotHeader {
@@ -55,8 +54,6 @@ export interface TickerSignalsInputs {
   forecast: RealizedVolatilityForecast | null;
   /** The open sessions after todayEasternIso through the furthest slice expiry (market calendar, weekdays past its end): each contract's trading sessions to expiry. */
   openSessionDatesIso: string[];
-  /** Trading date the split guard flagged when it left the ticker without a forecast; null otherwise. */
-  suspectedSplitDateIso: string | null;
   earningsDatesIso: string[];
   /** False when the ticker has never resolved to a TradingView symbol -- earningsDatesIso is necessarily
    * empty either way, so this is what actually tells the guard "no earnings scheduled" from "unchecked". */

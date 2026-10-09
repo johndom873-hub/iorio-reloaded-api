@@ -1,5 +1,4 @@
 import { db } from "../db/connection.js";
-import { loadVolatilityForecast } from "./volatilityForecastStore.js";
 import { loadDividendCadenceUnknown, loadEarningsDatesForForecastWindow, loadNextEarningsDate } from "./signalsStore.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { loadDailyBarsStatus, type DailyBarsStatus } from "./dailyBarsStatus.js";
@@ -11,8 +10,6 @@ import { easternIsoDate } from "./easternIsoDate.js";
 
 export interface ShortlistDataReadiness extends DailyBarsStatus {
   dailyBarCount: number;
-  /** From the same split guard Signals itself uses (volatilityForecastStore.ts) -- independent of whether an option-chain snapshot exists yet. */
-  suspectedSplitDateIso: string | null;
   earningsCount: number;
   nextEarningsDateIso: string | null;
   isEtf: boolean;
@@ -30,10 +27,9 @@ export interface ShortlistDataReadiness extends DailyBarsStatus {
 export async function loadShortlistDataReadiness(tickerId: string, sector: string | null, now: Date = new Date()): Promise<ShortlistDataReadiness> {
   const todayIso = easternIsoDate(now);
 
-  const [dailyBarsStatus, barCountRow, forecastSelection, earningsDatesIso, nextEarningsDateIso, dividendHistoryCountRow, dividendCadenceUnknown, chainCountRow, latestSnapshot, storedOptionChain] = await Promise.all([
+  const [dailyBarsStatus, barCountRow, earningsDatesIso, nextEarningsDateIso, dividendHistoryCountRow, dividendCadenceUnknown, chainCountRow, latestSnapshot, storedOptionChain] = await Promise.all([
     loadDailyBarsStatus(tickerId, now),
     db("daily_price_bars").where({ ticker_id: tickerId }).count<{ count: string }[]>("* as count"),
-    loadVolatilityForecast(tickerId, todayIso),
     loadEarningsDatesForForecastWindow(tickerId),
     loadNextEarningsDate(tickerId, todayIso),
     db("ticker_calendar_events").where({ ticker_id: tickerId, event_type: "ex_dividend" }).count<{ count: string }[]>("* as count"),
@@ -58,7 +54,6 @@ export async function loadShortlistDataReadiness(tickerId: string, sector: strin
   return {
     ...dailyBarsStatus,
     dailyBarCount: Number(barCountRow[0]?.count ?? 0),
-    suspectedSplitDateIso: forecastSelection.suspectedSplitDateIso,
     earningsCount: earningsDatesIso.length,
     nextEarningsDateIso,
     isEtf: sector === "ETF",
