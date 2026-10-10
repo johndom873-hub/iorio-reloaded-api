@@ -2,6 +2,7 @@ import { workerHeartbeatStaleAfterSeconds } from "./tradingGate.js";
 import { describeTradingHaltBlock, type TradingHalt } from "./platformControls.js";
 import type { InvariantResult } from "./dataInvariants.js";
 import { easternInstant } from "./marketSessionStatus.js";
+import { formatEasternTime } from "./easternIsoDate.js";
 
 // Pre-open readiness (approved 2026-10-05): "can Iorio trade when the market opens?", answered by one list of checks at
 // 6:00 ET (3.5 hours to fix anything), re-checked while red, summed up at 9:20 ET, and confirmed against live option data at
@@ -291,11 +292,18 @@ export function evaluateDataChecks(invariants: InvariantResult[], dataSessionIso
 
 // --- Market data ---
 
+/** How long a readiness probe waits for a fresh line's full quote: above the option-chain capture's 8 s per-contract cutoff, since delta arrives last. */
+export const readinessQuoteWaitMs = 10_000;
+
 export interface QuoteProbe {
   symbol: string;
   bid: number | null;
   ask: number | null;
   delta: number | null;
+  /** The pool shed the probe's line to fit the market-data budget, so it could not tick. */
+  paused: boolean;
+  /** What IBKR answered the subscription with, when it refused it. */
+  ibkrError: { code: number; message: string } | null;
 }
 
 export interface MarketDataFigures {
@@ -321,9 +329,12 @@ export function evaluateMarketData(figures: MarketDataFigures, stage: ReadinessS
   if (stage === "open") {
     const option = figures.optionProbe;
     if (!option) checks.push(check("Live option quote", "fail", "no option contract could be probed"));
-    else if (!hasTwoSidedQuote(option)) checks.push(check("Live option quote", "fail", `no live two-sided quote on the ${option.symbol} option: the option entitlements (OPRA) are not delivering`));
-    else if (option.delta === null) checks.push(check("Live option quote", "fail", `the ${option.symbol} option quotes but has no live delta: the delta band cannot be checked, so opening orders would be blocked`));
-    else checks.push(check("Live option quote", "ok", `${option.symbol} option bid ${option.bid} / ask ${option.ask}, delta ${option.delta.toFixed(2)}`));
+    else if (hasTwoSidedQuote(option) && option.delta !== null) checks.push(check("Live option quote", "ok", `${option.symbol} option bid ${option.bid} / ask ${option.ask}, delta ${option.delta.toFixed(2)}`));
+    // Only an answer from IBKR can blame the account's option data; a quote that is merely slow or shed says nothing about it.
+    else if (option.ibkrError) checks.push(check("Live option quote", "fail", `IBKR refused the ${option.symbol} option quote (code ${option.ibkrError.code}: ${option.ibkrError.message})`));
+    else if (option.paused) checks.push(check("Live option quote", "warn", `not tested: the ${option.symbol} option probe was paused because the market-data line budget was full (the option-chain capture holds most lines while it runs)`));
+    else if (!hasTwoSidedQuote(option)) checks.push(check("Live option quote", "fail", `no two-sided ${option.symbol} option quote within ${readinessQuoteWaitMs / 1000} s (IBKR returned no error)`));
+    else checks.push(check("Live option quote", "fail", `the ${option.symbol} option quotes but has no live delta: the delta band cannot be checked, so opening orders would be blocked`));
   }
   return checks;
 }
@@ -359,6 +370,9 @@ export interface ReadinessVerdict {
   signature: string;
 }
 
+/** A check's identity across runs: its name without the data-session date, so "Data: Surface fits (2026-10-08)" is the same check the next day. */
+export const readinessCheckKey = (name: string): string => name.replace(/ \(\d{4}-\d{2}-\d{2}\)$/, "");
+
 export function summarizeReadiness(checks: ReadinessCheck[]): ReadinessVerdict {
   const failing = checks.filter((entry) => entry.status === "fail");
   return {
@@ -366,8 +380,49 @@ export function summarizeReadiness(checks: ReadinessCheck[]): ReadinessVerdict {
     failing,
     warnings: checks.filter((entry) => entry.status === "warn"),
     passing: checks.filter((entry) => entry.status === "ok"),
-    signature: failing.map((entry) => entry.name).sort().join("|"),
+    signature: failing.map((entry) => readinessCheckKey(entry.name)).sort().join("|"),
   };
+}
+
+// --- What the last message said, so later messages list only what changed ---
+
+const releaseCheckName = "Release";
+
+/** The live-data lines the market-open confirmation always shows, green or red: they are the reason that run exists. */
+const liveDataCheckNames: ReadonlySet<string> = new Set(["Market data", "Live stock quote", "Live option quote"]);
+
+/** The last message sent today: each check's status by key, and the release text (the one detail compared, since a deploy between runs is worth seeing). */
+export interface ReadinessSnapshot {
+  sentAtMs: number;
+  statuses: Record<string, ReadinessStatus>;
+  release: string | null;
+}
+
+const allChecks = (verdict: ReadinessVerdict): ReadinessCheck[] => [...verdict.failing, ...verdict.warnings, ...verdict.passing];
+
+export function snapshotReadiness(verdict: ReadinessVerdict, sentAt: Date): ReadinessSnapshot {
+  const checks = allChecks(verdict);
+  return {
+    sentAtMs: sentAt.getTime(),
+    statuses: Object.fromEntries(checks.map((entry) => [readinessCheckKey(entry.name), entry.status])),
+    release: checks.find((entry) => entry.name === releaseCheckName)?.detail ?? null,
+  };
+}
+
+const statusIcons: Record<ReadinessStatus, string> = { ok: "✅", warn: "⚠️", fail: "❌" };
+const wasWords: Record<ReadinessStatus, string> = { ok: "passing", warn: "warning", fail: "failing" };
+const nowWords: Record<ReadinessStatus, string> = { ok: "passes", warn: "warns", fail: "fails" };
+
+/** One line per check whose status moved since the snapshot, plus the release when it changed. A check the snapshot did not have is not a change. */
+export function describeReadinessChanges(verdict: ReadinessVerdict, previous: ReadinessSnapshot): string[] {
+  const lines: string[] = [];
+  for (const entry of allChecks(verdict)) {
+    const previousStatus = previous.statuses[readinessCheckKey(entry.name)];
+    if (previousStatus === undefined) continue;
+    if (previousStatus !== entry.status) lines.push(`${statusIcons[entry.status]} ${entry.name}: was ${wasWords[previousStatus]}, now ${nowWords[entry.status]}`);
+    else if (entry.name === releaseCheckName && previous.release !== null && previous.release !== entry.detail) lines.push(`🔄 ${releaseCheckName}: ${previous.release} → ${entry.detail}`);
+  }
+  return lines;
 }
 
 export type ReadinessMessageKind = "first" | "changed" | "final" | "open";
@@ -379,13 +434,29 @@ const headlines: Record<ReadinessMessageKind, { ready: string; notReady: string 
   open: { ready: "✅ Market-open confirmation: live data is flowing, GO", notReady: "🛑 Market-open confirmation: NOT READY" },
 };
 
-export function buildReadinessMessage(input: { kind: ReadinessMessageKind; dateIso: string; environment: string; verdict: ReadinessVerdict }): string {
-  const { verdict } = input;
+/**
+ * The first message of the day (no `previous`) is the full report. Every later one lists problems and warnings in full, the
+ * live-data lines at the market open, and only what changed since `previous`; the remaining passing checks become a count.
+ */
+export function buildReadinessMessage(input: { kind: ReadinessMessageKind; dateIso: string; environment: string; verdict: ReadinessVerdict; previous: ReadinessSnapshot | null }): string {
+  const { verdict, previous } = input;
   const headline = headlines[input.kind];
+  const describe = (entry: ReadinessCheck) => `${statusIcons[entry.status]} ${entry.name}: ${entry.detail}`;
   const lines = [`${verdict.ready ? headline.ready : headline.notReady} — ${input.environment} ${input.dateIso}`];
-  if (verdict.failing.length > 0) lines.push("", "Problems", ...verdict.failing.map((entry) => `❌ ${entry.name}: ${entry.detail}`));
-  if (verdict.warnings.length > 0) lines.push("", "Look at", ...verdict.warnings.map((entry) => `⚠️ ${entry.name}: ${entry.detail}`));
-  if (verdict.passing.length > 0) lines.push("", "Fine", ...verdict.passing.map((entry) => `✅ ${entry.name}: ${entry.detail}`));
+  if (verdict.failing.length > 0) lines.push("", "Problems", ...verdict.failing.map(describe));
+  if (verdict.warnings.length > 0) lines.push("", "Look at", ...verdict.warnings.map(describe));
+  if (previous === null) {
+    if (verdict.passing.length > 0) lines.push("", "Fine", ...verdict.passing.map(describe));
+  } else {
+    const liveData = input.kind === "open" ? verdict.passing.filter((entry) => liveDataCheckNames.has(entry.name)) : [];
+    if (liveData.length > 0) lines.push("", "Live data", ...liveData.map(describe));
+    const changes = describeReadinessChanges(verdict, previous);
+    const since = formatEasternTime(new Date(previous.sentAtMs));
+    if (changes.length > 0) lines.push("", `Changed since ${since}`, ...changes);
+    const countedPassing = verdict.passing.length - liveData.length;
+    const listedAbove = verdict.failing.length + verdict.warnings.length + liveData.length > 0;
+    if (countedPassing > 0) lines.push("", `${countedPassing} ${listedAbove ? "other " : ""}${countedPassing === 1 ? "check passes" : "checks pass"}${changes.length === 0 ? `, unchanged since ${since}` : ""}.`);
+  }
   if (!verdict.ready) lines.push("", "If the Gateway needs a phone approval, reply to this message and Genosuke can send the 2FA push.");
   return lines.join("\n");
 }

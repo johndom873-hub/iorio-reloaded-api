@@ -80,15 +80,15 @@ export const settleGraceMs = 3_000;
 /**
  * Waits for the first reading of a pooled stream: resolves as soon as
  * `isComplete()` says every contract has what the caller needs (call
- * `check` after each update), or after settleGraceMs with whatever arrived
+ * `check` after each update), or after `graceMs` (default settleGraceMs) with whatever arrived
  * (2026-09-24 — a warm pool used to make every caller wait the full grace).
  */
-export function waitForFirstReading(isComplete: () => boolean): { settled: Promise<void>; check: () => void } {
+export function waitForFirstReading(isComplete: () => boolean, graceMs: number = settleGraceMs): { settled: Promise<void>; check: () => void } {
   let resolveSettled: () => void = () => {};
   const settled = new Promise<void>((resolve) => {
     resolveSettled = resolve;
   });
-  const timer = setTimeout(resolveSettled, settleGraceMs);
+  const timer = setTimeout(resolveSettled, graceMs);
   const check = () => {
     if (!isComplete()) return;
     clearTimeout(timer);
@@ -167,6 +167,8 @@ interface PoolEntry {
   planned: boolean;
   /** IBKR has sent at least one tick since the current subscription (reqId) was made; false while unsubscribed. */
   answered: boolean;
+  /** The last error IBKR returned for the current subscription; cleared when a new one is made. */
+  lastError: { code: number; message: string } | null;
 }
 
 export function poolKeyFor(contract: PriceContract): string {
@@ -298,10 +300,15 @@ export function pooledLineState(contract: PriceContract): "streaming" | "paused"
   return entry.reqId !== -1 && entry.answered ? "streaming" : "waiting";
 }
 
+/** The last error IBKR returned for a pooled contract's current subscription, or null (none, or not pooled). Read-only, like pooledLineState. */
+export function pooledLineError(contract: PriceContract): { code: number; message: string } | null {
+  return entriesByPoolKey.get(poolKeyFor(contract))?.lastError ?? null;
+}
+
 export async function subscribeToPooledQuote(contract: PriceContract, onUpdate: (quote: PooledQuote) => void): Promise<() => void> {
   const poolKey = poolKeyFor(contract);
   if (!entriesByPoolKey.has(poolKey)) {
-    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sequence: nextSequence++, paused: false, planned: false, answered: false, cancelTimer: null };
+    const newEntry: PoolEntry = { contract, reqId: -1, quote: emptyPooledQuote, subscribers: new Set(), sequence: nextSequence++, paused: false, planned: false, answered: false, lastError: null, cancelTimer: null };
     entriesByPoolKey.set(poolKey, newEntry);
     if (contract.legType === "stock") {
       // Fast first paint while the live subscription is still being
@@ -521,9 +528,13 @@ function attachListeners(ib: IBApi): void {
     },
   );
   ib.on(EventName.error, (error: Error, code: number, reqId: number) => {
-    if (isDelayedDataFallbackNotice(code)) return;
     const poolKey = reqIdToPoolKey.get(reqId);
     if (!poolKey) return;
+    // Kept even for a delayed-data notice: on this REALTIME-only connection it means the contract is not entitled to live
+    // data, which is what the readiness option probe reports. Only the logging below skips it.
+    const entry = entriesByPoolKey.get(poolKey);
+    if (entry && entry.reqId === reqId) entry.lastError = { code, message: error.message };
+    if (isDelayedDataFallbackNotice(code)) return;
     if (code === competingLiveSessionErrorCode && feedRefusal === null) setFeedRefusal({ code, message: error.message, since: new Date().toISOString() });
     console.error(`marketDataPool: error for ${poolKey} (code ${code}): ${error.message}`);
   });
@@ -571,6 +582,7 @@ async function subscribeUnsubscribedEntries(): Promise<void> {
     if (entry.reqId !== -1 || entry.paused || !entry.planned) continue;
     entry.reqId = sharedLiveConnection.allocateReqId();
     entry.answered = false;
+    entry.lastError = null;
     reqIdToPoolKey.set(entry.reqId, poolKey);
     // Empty generic tick list: IBKR sends bid/ask/last AND the computed
     // greeks (for an option contract) on a plain subscription — no special

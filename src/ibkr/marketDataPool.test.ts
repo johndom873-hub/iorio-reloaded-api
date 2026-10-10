@@ -435,6 +435,17 @@ describe("tick handling", () => {
     expect(pool.marketDataFeedRefusal()).toBeNull();
   });
 
+  it("keeps the last IBKR error of a contract's subscription, delayed-data notices included, without logging those", async () => {
+    const { pool, reqId } = await subscribedStock();
+    expect(pool.pooledLineError(stockAlpha)).toBeNull();
+    ib.emit(EventName.error, new Error("Requested market data requires additional subscription for API."), 10089, reqId);
+    expect(pool.pooledLineError(stockAlpha)).toEqual({ code: 10089, message: "Requested market data requires additional subscription for API." });
+    expect(console.error).not.toHaveBeenCalled();
+    ib.emit(EventName.error, new Error("No security definition"), 200, reqId);
+    expect(pool.pooledLineError(stockAlpha)).toMatchObject({ code: 200 });
+    expect(pool.pooledLineError(stockBravo)).toBeNull();
+  });
+
   it("attaches its listeners once per connection however many subscribe passes run", async () => {
     const pool = await loadPool();
     await pool.subscribeToPooledQuote(stockAlpha, () => {});

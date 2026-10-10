@@ -21,6 +21,7 @@ import {
   evaluateWorker,
   productionConfigurationExpectations,
   stagingConfigurationExpectations,
+  snapshotReadiness,
   summarizeReadiness,
   type ReadinessCheck,
   type ReadinessState,
@@ -258,7 +259,7 @@ describe("evaluateDataChecks", () => {
 });
 
 describe("evaluateMarketData", () => {
-  const live = { symbol: "SPY", bid: 500.1, ask: 500.12, delta: null };
+  const live = { symbol: "SPY", bid: 500.1, ask: 500.12, delta: null, paused: false, ibkrError: null };
   const base = { linesEnabled: true, feedRefusal: null, stockProbe: live, optionProbe: null };
   it("passes before the open with a live stock quote", () => {
     expect(evaluateMarketData(base, "pre_open").map((entry) => entry.status)).toEqual(["ok", "ok"]);
@@ -268,19 +269,29 @@ describe("evaluateMarketData", () => {
     expect(evaluateMarketData({ ...base, feedRefusal: { code: 10197, message: "competing live session" } }, "pre_open")[0]).toMatchObject({ status: "fail", detail: expect.stringContaining("10197") });
   });
   it("only warns about a missing stock quote before the open but fails it at the open", () => {
-    const empty = { ...base, stockProbe: { symbol: "SPY", bid: null, ask: null, delta: null } };
+    const empty = { ...base, stockProbe: { symbol: "SPY", bid: null, ask: null, delta: null, paused: false, ibkrError: null } };
     expect(evaluateMarketData(empty, "pre_open")[1]!.status).toBe("warn");
     expect(evaluateMarketData({ ...empty, optionProbe: null }, "open")[1]!.status).toBe("fail");
     expect(evaluateMarketData({ ...base, stockProbe: null }, "pre_open")[1]!.status).toBe("warn");
-    expect(evaluateMarketData({ ...base, stockProbe: { symbol: "SPY", bid: 0, ask: 0, delta: null } }, "open")[1]!.status).toBe("fail");
+    expect(evaluateMarketData({ ...base, stockProbe: { symbol: "SPY", bid: 0, ask: 0, delta: null, paused: false, ibkrError: null } }, "open")[1]!.status).toBe("fail");
   });
   it("at the open also needs a two-sided option quote with a live delta", () => {
-    const option = { symbol: "SPY", bid: 1.1, ask: 1.15, delta: -0.25 };
+    const option = { symbol: "SPY", bid: 1.1, ask: 1.15, delta: -0.25, paused: false, ibkrError: null };
     expect(evaluateMarketData({ ...base, optionProbe: option }, "open")[2]).toMatchObject({ status: "ok", detail: expect.stringContaining("delta -0.25") });
-    expect(evaluateMarketData({ ...base, optionProbe: { ...option, delta: null } }, "open")[2]).toMatchObject({ status: "fail", detail: expect.stringContaining("no live delta") });
-    expect(evaluateMarketData({ ...base, optionProbe: { ...option, bid: null } }, "open")[2]).toMatchObject({ status: "fail", detail: expect.stringContaining("OPRA") });
+    expect(evaluateMarketData({ ...base, optionProbe: { ...option, delta: null, paused: false, ibkrError: null } }, "open")[2]).toMatchObject({ status: "fail", detail: expect.stringContaining("no live delta") });
+    expect(evaluateMarketData({ ...base, optionProbe: { ...option, bid: null } }, "open")[2]).toMatchObject({ status: "fail", detail: "no two-sided SPY option quote within 10 s (IBKR returned no error)" });
     expect(evaluateMarketData(base, "open")[2]).toMatchObject({ status: "fail", detail: "no option contract could be probed" });
     expect(evaluateMarketData(base, "pre_open")).toHaveLength(2);
+  });
+  it("blames the option data only when IBKR refused the quote, and only warns when the probe was shed for budget", () => {
+    const option = { symbol: "DRAM", bid: null, ask: null, delta: null, paused: false, ibkrError: null };
+    const refused = { ...option, ibkrError: { code: 10089, message: "Requested market data requires additional subscription for API." } };
+    expect(evaluateMarketData({ ...base, optionProbe: refused }, "open")[2]).toMatchObject({ status: "fail", detail: "IBKR refused the DRAM option quote (code 10089: Requested market data requires additional subscription for API.)" });
+    expect(evaluateMarketData({ ...base, optionProbe: { ...refused, paused: true } }, "open")[2]!.status).toBe("fail");
+    expect(evaluateMarketData({ ...base, optionProbe: { ...option, paused: true } }, "open")[2]).toMatchObject({ status: "warn", detail: expect.stringContaining("not tested") });
+    expect(evaluateMarketData({ ...base, optionProbe: { ...option, bid: 1.1, ask: 1.15, paused: true } }, "open")[2]!.status).toBe("warn");
+    const quoted = { ...option, bid: 1.1, ask: 1.15, delta: -0.2 };
+    expect(evaluateMarketData({ ...base, optionProbe: { ...quoted, paused: true, ibkrError: { code: 10167, message: "delayed" } } }, "open")[2]!.status).toBe("ok");
   });
 });
 
@@ -315,19 +326,88 @@ describe("summarizeReadiness and buildReadinessMessage", () => {
   });
   it("words each message kind and lists problems, warnings and passes", () => {
     const verdict = summarizeReadiness(checks);
-    const message = buildReadinessMessage({ kind: "first", dateIso: "2026-10-05", environment: "production", verdict });
+    const message = buildReadinessMessage({ kind: "first", dateIso: "2026-10-05", environment: "production", verdict, previous: null });
     expect(message.split("\n")[0]).toBe("🚫 Pre-open check: NOT READY — production 2026-10-05");
     expect(message).toContain("❌ Worker: offline");
     expect(message).toContain("⚠️ Telegram: 1 undelivered");
     expect(message).toContain("✅ Account: funded");
     expect(message).toContain("reply to this message and Genosuke can send the 2FA push");
-    expect(buildReadinessMessage({ kind: "final", dateIso: "d", environment: "production", verdict }).startsWith("🛑 FINAL pre-open check: NO-GO")).toBe(true);
-    expect(buildReadinessMessage({ kind: "changed", dateIso: "d", environment: "production", verdict }).startsWith("🚫 Pre-open check: still NOT READY")).toBe(true);
-    expect(buildReadinessMessage({ kind: "open", dateIso: "d", environment: "production", verdict }).startsWith("🛑 Market-open confirmation: NOT READY")).toBe(true);
+    expect(buildReadinessMessage({ kind: "final", dateIso: "d", environment: "production", verdict, previous: null }).startsWith("🛑 FINAL pre-open check: NO-GO")).toBe(true);
+    expect(buildReadinessMessage({ kind: "changed", dateIso: "d", environment: "production", verdict, previous: null }).startsWith("🚫 Pre-open check: still NOT READY")).toBe(true);
+    expect(buildReadinessMessage({ kind: "open", dateIso: "d", environment: "production", verdict, previous: null }).startsWith("🛑 Market-open confirmation: NOT READY")).toBe(true);
     const green = summarizeReadiness([checks[1]!]);
-    expect(buildReadinessMessage({ kind: "final", dateIso: "d", environment: "production", verdict: green }).split("\n")[0]).toContain("GO");
-    expect(buildReadinessMessage({ kind: "final", dateIso: "d", environment: "production", verdict: green })).not.toContain("2FA");
-    expect(buildReadinessMessage({ kind: "open", dateIso: "d", environment: "production", verdict: green }).startsWith("✅ Market-open confirmation")).toBe(true);
+    expect(buildReadinessMessage({ kind: "final", dateIso: "d", environment: "production", verdict: green, previous: null }).split("\n")[0]).toContain("GO");
+    expect(buildReadinessMessage({ kind: "final", dateIso: "d", environment: "production", verdict: green, previous: null })).not.toContain("2FA");
+    expect(buildReadinessMessage({ kind: "open", dateIso: "d", environment: "production", verdict: green, previous: null }).startsWith("✅ Market-open confirmation")).toBe(true);
+  });
+  it("signs a data check without its session date, so the next day's run is the same check", () => {
+    const yesterday = summarizeReadiness([{ name: "Data: Surface fits (2026-10-08)", status: "fail", detail: "missing" }]);
+    const today = summarizeReadiness([{ name: "Data: Surface fits (2026-10-09)", status: "fail", detail: "missing" }]);
+    expect(today.signature).toBe("Data: Surface fits");
+    expect(today.signature).toBe(yesterday.signature);
+  });
+});
+
+describe("buildReadinessMessage after an earlier message the same day", () => {
+  // 6:00 ET on 2026-10-09 (daylight time) = 10:00 UTC; 9:20 ET = 13:20 UTC.
+  const sixAm = new Date("2026-10-09T10:00:00Z");
+  const nineTwenty = new Date("2026-10-09T13:20:00Z");
+  const green: ReadinessCheck[] = [
+    { name: "Trading worker", status: "ok", detail: "connected" },
+    { name: "Data: Surface fits (2026-10-08)", status: "ok", detail: "every snapshot has fitted expiries" },
+    { name: "Market data", status: "ok", detail: "real-time lines on" },
+    { name: "Live stock quote", status: "ok", detail: "SPY bid 776.52 / ask 776.55" },
+    { name: "Release", status: "ok", detail: "v179 (commit af89df4)" },
+  ];
+  const message = (kind: "changed" | "final" | "open", checks: ReadinessCheck[], previousChecks: ReadinessCheck[]) =>
+    buildReadinessMessage({ kind, dateIso: "2026-10-09", environment: "staging", verdict: summarizeReadiness(checks), previous: snapshotReadiness(summarizeReadiness(previousChecks), sixAm) });
+
+  it("shrinks an unchanged green FINAL to a count", () => {
+    expect(message("final", green, green)).toBe("✅ FINAL pre-open check: GO — staging 2026-10-09\n\n5 checks pass, unchanged since 06:00 ET.");
+  });
+
+  it("names a new release and status changes, and lists every problem in full", () => {
+    const later = green.map((entry) =>
+      entry.name === "Release" ? { ...entry, detail: "v186 (commit 466a82c)" } : entry.name === "Trading worker" ? { ...entry, status: "fail" as const, detail: "not connected" } : entry,
+    );
+    const text = message("final", later, green);
+    expect(text).toContain("🛑 FINAL pre-open check: NO-GO");
+    expect(text).toContain("Problems\n❌ Trading worker: not connected");
+    expect(text).toContain("Changed since 06:00 ET\n❌ Trading worker: was passing, now fails\n🔄 Release: v179 (commit af89df4) → v186 (commit 466a82c)");
+    expect(text).toContain("4 other checks pass.");
+    expect(text).not.toContain("Fine");
+    expect(text).toContain("2FA push");
+  });
+
+  it("matches a data check across a change of session date and reports a recovery", () => {
+    const failing = green.map((entry) => (entry.name.startsWith("Data:") ? { ...entry, status: "fail" as const } : entry));
+    const recovered = green.map((entry) => (entry.name.startsWith("Data:") ? { ...entry, name: "Data: Surface fits (2026-10-09)" } : entry));
+    expect(message("changed", recovered, failing)).toContain("✅ Data: Surface fits (2026-10-09): was failing, now passes");
+  });
+
+  it("does not report a check the earlier message did not have", () => {
+    const withOption = [...green, { name: "Live option quote", status: "ok" as const, detail: "TLT option bid 0.51 / ask 0.54, delta -0.18" }];
+    const text = buildReadinessMessage({ kind: "open", dateIso: "2026-10-09", environment: "staging", verdict: summarizeReadiness(withOption), previous: snapshotReadiness(summarizeReadiness(green), nineTwenty) });
+    expect(text).toBe(
+      [
+        "✅ Market-open confirmation: live data is flowing, GO — staging 2026-10-09",
+        "",
+        "Live data",
+        "✅ Market data: real-time lines on",
+        "✅ Live stock quote: SPY bid 776.52 / ask 776.55",
+        "✅ Live option quote: TLT option bid 0.51 / ask 0.54, delta -0.18",
+        "",
+        "3 other checks pass, unchanged since 09:20 ET.",
+      ].join("\n"),
+    );
+  });
+
+  it("shows a failing live-data line under Problems only", () => {
+    const red = [...green, { name: "Live option quote", status: "fail" as const, detail: "no live two-sided quote" }];
+    const text = message("open", red, green);
+    expect(text).toContain("Problems\n❌ Live option quote: no live two-sided quote");
+    expect(text.match(/Live option quote/g)).toHaveLength(1);
+    expect(text).toContain("Live data\n✅ Market data");
   });
 });
 

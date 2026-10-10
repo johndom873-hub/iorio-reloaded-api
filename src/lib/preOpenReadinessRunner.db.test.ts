@@ -155,6 +155,29 @@ describe("runPreOpenReadinessIfDue", () => {
     expect(state.stages).toEqual(["open", "open", "open"]);
   });
 
+  it("sends the full report first, then only what changed since the last message", async () => {
+    state.checks = [ok("Trading worker"), ok("Market data"), { name: "Release", status: "ok", detail: "v1" }];
+    await runPreOpenReadinessIfDue(at("11:00"));
+    expect(sentMessages[0]).toContain("Fine\n✅ Trading worker: fine");
+
+    await runPreOpenReadinessIfDue(at("14:20"));
+    expect(sentMessages[1]).toBe("✅ FINAL pre-open check: GO — production 2031-03-03\n\n3 checks pass, unchanged since 06:00 ET.");
+
+    state.checks = [ok("Trading worker"), ok("Market data"), { name: "Release", status: "ok", detail: "v2" }, ok("Live option quote")];
+    await runPreOpenReadinessIfDue(at("14:35"));
+    expect(sentMessages[2]).toBe(
+      "✅ Market-open confirmation: live data is flowing, GO — production 2031-03-03\n\nLive data\n✅ Market data: fine\n✅ Live option quote: fine\n\nChanged since 09:20 ET\n🔄 Release: v1 → v2\n\n2 other checks pass.",
+    );
+  });
+
+  it("compares the market-open message with the FINAL sent in the same minute", async () => {
+    await runPreOpenReadinessIfDue(at("11:00"));
+    sentMessages.length = 0;
+    await runPreOpenReadinessIfDue(at("14:40"));
+    expect(sentMessages).toHaveLength(2);
+    expect(sentMessages[1]).toContain("unchanged since 09:40 ET");
+  });
+
   it("gives up for the day at 10:15 ET: nothing runs and nothing is sent", async () => {
     expect(await runPreOpenReadinessIfDue(at("15:15"))).toEqual([]);
     expect(await runPreOpenReadinessIfDue(at("18:00"))).toEqual([]);

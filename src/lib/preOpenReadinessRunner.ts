@@ -8,9 +8,11 @@ import {
   buildReadinessMessage,
   decideReadinessActions,
   emptyReadinessState,
+  snapshotReadiness,
   summarizeReadiness,
   type ReadinessAction,
   type ReadinessMessageKind,
+  type ReadinessSnapshot,
   type ReadinessState,
   type ReadinessStage,
   type ReadinessVerdict,
@@ -25,6 +27,7 @@ const claimKeyPrefix = "readiness-run:";
 const greenSignature = "ok";
 
 const stateKey = (stage: "pre_open" | "final" | "open", dateIso: string) => `${stateKeyPrefix}${stage}:${dateIso}`;
+const lastSentKey = (dateIso: string) => `${stateKeyPrefix}last-sent:${dateIso}`;
 
 export async function loadReadinessState(dateIso: string): Promise<ReadinessState> {
   const rows: { alert_key: string; last_alerted_at: Date; last_message: string | null }[] = await db("alert_state").where("alert_key", "like", `${stateKeyPrefix}%:${dateIso}`).select("alert_key", "last_alerted_at", "last_message");
@@ -49,6 +52,27 @@ async function saveReadinessRun(stage: "pre_open" | "final" | "open", dateIso: s
     .merge({ last_alerted_at: ranAt, last_message: signature === "" ? greenSignature : signature });
 }
 
+/** The last message sent today, or null when none was (or its row cannot be read): the next message is then the full report. */
+export async function loadLastSentReadiness(dateIso: string): Promise<ReadinessSnapshot | null> {
+  const row: { last_alerted_at: Date; last_message: string | null } | undefined = await db("alert_state").where("alert_key", lastSentKey(dateIso)).first("last_alerted_at", "last_message");
+  if (!row?.last_message) return null;
+  try {
+    const stored = JSON.parse(row.last_message) as Pick<ReadinessSnapshot, "statuses" | "release">;
+    return { sentAtMs: new Date(row.last_alerted_at).getTime(), statuses: stored.statuses, release: stored.release };
+  } catch {
+    return null;
+  }
+}
+
+async function saveLastSentReadiness(dateIso: string, snapshot: ReadinessSnapshot): Promise<void> {
+  const sentAt = new Date(snapshot.sentAtMs);
+  const message = JSON.stringify({ statuses: snapshot.statuses, release: snapshot.release });
+  await db("alert_state")
+    .insert({ alert_key: lastSentKey(dateIso), first_alerted_at: sentAt, last_alerted_at: sentAt, last_message: message })
+    .onConflict("alert_key")
+    .merge({ last_alerted_at: sentAt, last_message: message });
+}
+
 /** Two web dynos can both see a run as due: only the one whose insert wins the claim does it. */
 async function claimRun(action: ReadinessAction, dateIso: string, now: Date): Promise<boolean> {
   const slotMinutes = action.kind === "final" ? 24 * 60 : action.kind === "pre_open" ? 10 : 2;
@@ -65,22 +89,29 @@ async function runStage(stage: ReadinessStage, now: Date, dependencies: Readines
   return summarizeReadiness(await collectReadinessChecks(stage, now, dependencies));
 }
 
-async function performAction(action: ReadinessAction, dateIso: string, now: Date, state: ReadinessState, dependencies: ReadinessDependencies): Promise<void> {
-  if (!(await claimRun(action, dateIso, now))) return;
+/** Returns the snapshot of the message it sent, or `lastSent` unchanged when it sent none. */
+async function performAction(action: ReadinessAction, dateIso: string, now: Date, state: ReadinessState, lastSent: ReadinessSnapshot | null, dependencies: ReadinessDependencies): Promise<ReadinessSnapshot | null> {
+  if (!(await claimRun(action, dateIso, now))) return lastSent;
   const stage: ReadinessStage = action.kind === "open" ? "open" : "pre_open";
   const verdict = await runStage(stage, now, dependencies);
   const environment = dependencies.appEnvironment;
-  const send = (kind: ReadinessMessageKind) => notifyTelegramTracked(buildReadinessMessage({ kind, dateIso, environment, verdict }));
+  let sent = lastSent;
+  const send = async (kind: ReadinessMessageKind) => {
+    await notifyTelegramTracked(buildReadinessMessage({ kind, dateIso, environment, verdict, previous: lastSent }));
+    sent = snapshotReadiness(verdict, now);
+    await saveLastSentReadiness(dateIso, sent);
+  };
 
   if (action.kind === "final") {
     await send("final");
     await saveReadinessRun("final", dateIso, verdict.signature, now);
-    return;
+    return sent;
   }
   const previousSignature = action.kind === "pre_open" ? state.preOpenSignature : state.openSignature;
   if (action.announce === "always") await send(action.kind === "open" ? "open" : "first");
   else if (verdict.signature !== (previousSignature ?? "")) await send(action.kind === "open" ? "open" : "changed");
   await saveReadinessRun(action.kind, dateIso, verdict.signature, now);
+  return sent;
 }
 
 /** The monitor's per-minute entry point. Only production and staging run it, and only on market-open days. Returns the actions it took. */
@@ -93,7 +124,8 @@ export async function runPreOpenReadinessIfDue(now: Date = new Date(), dependenc
   const actions = decideReadinessActions(now, dateIso, state);
   if (actions.length === 0) return [];
   const resolvedDependencies = dependencies ?? createDefaultReadinessDependencies();
-  for (const action of actions) await performAction(action, dateIso, now, state, resolvedDependencies);
+  let lastSent = await loadLastSentReadiness(dateIso).catch(() => null);
+  for (const action of actions) lastSent = await performAction(action, dateIso, now, state, lastSent, resolvedDependencies);
   return actions;
 }
 

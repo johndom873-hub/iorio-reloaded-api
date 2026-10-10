@@ -1,8 +1,8 @@
 import { OptionType, OrderAction } from "@stoqey/ib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { settleGraceMs, type PooledQuote } from "../ibkr/marketDataPool.js";
+import type { PooledQuote } from "../ibkr/marketDataPool.js";
 import { collectReadinessChecks, createDefaultReadinessDependencies, type ProbeContract, type ReadinessDependencies } from "./preOpenReadinessCollectors.js";
-import { productionConfigurationExpectations, type ReadinessCheck } from "./preOpenReadiness.js";
+import { productionConfigurationExpectations, readinessQuoteWaitMs, type ReadinessCheck } from "./preOpenReadiness.js";
 
 const mocks = vi.hoisted(() => {
   const state = { resultsByTable: {} as Record<string, unknown>, rawRows: [] as unknown[] };
@@ -40,6 +40,8 @@ const mocks = vi.hoisted(() => {
     fetchWhatIfCommissionRange: vi.fn(),
     subscribeToPooledQuote: vi.fn(),
     marketDataFeedRefusal: vi.fn(),
+    pooledLineState: vi.fn(),
+    pooledLineError: vi.fn(),
     evaluateDataInvariants: vi.fn(),
     loadDataInvariantInputs: vi.fn(),
     lastCompletedSessionDate: vi.fn(),
@@ -60,6 +62,8 @@ vi.mock("../ibkr/marketDataPool.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../ibkr/marketDataPool.js")>()),
   subscribeToPooledQuote: mocks.subscribeToPooledQuote,
   marketDataFeedRefusal: mocks.marketDataFeedRefusal,
+  pooledLineState: mocks.pooledLineState,
+  pooledLineError: mocks.pooledLineError,
 }));
 vi.mock("./dataInvariants.js", () => ({ evaluateDataInvariants: mocks.evaluateDataInvariants, loadDataInvariantInputs: mocks.loadDataInvariantInputs }));
 vi.mock("./marketSessionStatus.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./marketSessionStatus.js")>()), lastCompletedSessionDate: mocks.lastCompletedSessionDate }));
@@ -96,7 +100,7 @@ function healthyDependencies(overrides: Partial<ReadinessDependencies> = {}): Re
     loadDataInvariants: async () => [{ name: "Surface fits", ok: true, detail: "every snapshot has fitted expiries" }],
     loadMarketDataFigures: async (stage, contract) => {
       calls.push(`marketData:${stage}:${contract?.symbol}`);
-      return { linesEnabled: true, feedRefusal: null, stockProbe: { symbol: "SPY", bid: 500, ask: 500.1, delta: null }, optionProbe: stage === "open" ? { symbol: "SPY", bid: 1.2, ask: 1.25, delta: -0.25 } : null };
+      return { linesEnabled: true, feedRefusal: null, stockProbe: { symbol: "SPY", bid: 500, ask: 500.1, delta: null, paused: false, ibkrError: null }, optionProbe: stage === "open" ? { symbol: "SPY", bid: 1.2, ask: 1.25, delta: -0.25, paused: false, ibkrError: null } : null };
     },
     countUndeliveredAlerts: async () => 0,
     loadDatabaseFigures: async () => ({ totalConnections: 5, maxConnections: 20, sizeBytes: 10, maxSizeBytes: 100 }),
@@ -550,6 +554,8 @@ describe("createDefaultReadinessDependencies", () => {
       quoteByContractKey = {};
       mocks.ibkrMarketDataLinesEnabled.mockReturnValue(true);
       mocks.marketDataFeedRefusal.mockReturnValue(null);
+      mocks.pooledLineState.mockReturnValue("streaming");
+      mocks.pooledLineError.mockReturnValue(null);
       // The pool hands a subscriber its current value at once; a contract with no entry never ticks.
       mocks.subscribeToPooledQuote.mockImplementation(async (contract: { key: string }, onQuote: (value: PooledQuote) => void) => {
         const current = quoteByContractKey[contract.key];
@@ -565,7 +571,7 @@ describe("createDefaultReadinessDependencies", () => {
     it("probes SPY as a stock before the open and reads no option", async () => {
       quoteByContractKey["readiness-stock"] = quote({ bid: 500, ask: 500.1, last: 500.05 });
       const figures = await createDefaultReadinessDependencies().loadMarketDataFigures("pre_open", optionContract);
-      expect(figures).toEqual({ linesEnabled: true, feedRefusal: null, stockProbe: { symbol: "SPY", bid: 500, ask: 500.1, delta: null }, optionProbe: null });
+      expect(figures).toEqual({ linesEnabled: true, feedRefusal: null, stockProbe: { symbol: "SPY", bid: 500, ask: 500.1, delta: null, paused: false, ibkrError: null }, optionProbe: null });
       expect(mocks.subscribeToPooledQuote).toHaveBeenCalledTimes(1);
       expect(mocks.subscribeToPooledQuote.mock.calls[0]![0]).toEqual({ key: "readiness-stock", legType: "stock", symbol: "SPY" });
     });
@@ -573,25 +579,25 @@ describe("createDefaultReadinessDependencies", () => {
     it("answers as soon as the stock has both a bid and an ask, without waiting out the grace period, and gives the line back", async () => {
       quoteByContractKey["readiness-stock"] = quote({ bid: 500, ask: 500.1 });
       const figures = await createDefaultReadinessDependencies().loadMarketDataFigures("pre_open", null);
-      expect(figures.stockProbe).toEqual({ symbol: "SPY", bid: 500, ask: 500.1, delta: null });
+      expect(figures.stockProbe).toEqual({ symbol: "SPY", bid: 500, ask: 500.1, delta: null , paused: false, ibkrError: null });
       expect(vi.getTimerCount()).toBe(0);
       expect(unsubscribe).toHaveBeenCalledTimes(1);
     });
 
-    it("waits the settle grace for a stock that never ticks, then reports a probe with every figure null and gives the line back", async () => {
+    it("waits the readiness wait for a stock that never ticks, then reports a probe with every figure null and gives the line back", async () => {
       const pending = createDefaultReadinessDependencies().loadMarketDataFigures("pre_open", null);
-      await vi.advanceTimersByTimeAsync(settleGraceMs - 1);
+      await vi.advanceTimersByTimeAsync(readinessQuoteWaitMs - 1);
       expect(unsubscribe).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect((await pending).stockProbe).toEqual({ symbol: "SPY", bid: null, ask: null, delta: null });
+      expect((await pending).stockProbe).toEqual({ symbol: "SPY", bid: null, ask: null, delta: null , paused: false, ibkrError: null });
       expect(unsubscribe).toHaveBeenCalledTimes(1);
     });
 
     it("reports a one-sided quote after the grace period (bid but no ask)", async () => {
       quoteByContractKey["readiness-stock"] = quote({ bid: 500, ask: null });
       const pending = createDefaultReadinessDependencies().loadMarketDataFigures("pre_open", null);
-      await vi.advanceTimersByTimeAsync(settleGraceMs);
-      expect((await pending).stockProbe).toEqual({ symbol: "SPY", bid: 500, ask: null, delta: null });
+      await vi.advanceTimersByTimeAsync(readinessQuoteWaitMs);
+      expect((await pending).stockProbe).toEqual({ symbol: "SPY", bid: 500, ask: null, delta: null , paused: false, ibkrError: null });
     });
 
     it("does not need a delta from the stock probe", async () => {
@@ -612,7 +618,7 @@ describe("createDefaultReadinessDependencies", () => {
       quoteByContractKey["readiness-stock"] = quote({ bid: 500, ask: 500.1 });
       quoteByContractKey["readiness-option"] = quote({ bid: 1.2, ask: 1.25, delta: -0.25 });
       const figures = await createDefaultReadinessDependencies().loadMarketDataFigures("open", optionContract);
-      expect(figures.optionProbe).toEqual({ symbol: "SPY", bid: 1.2, ask: 1.25, delta: -0.25 });
+      expect(figures.optionProbe).toEqual({ symbol: "SPY", bid: 1.2, ask: 1.25, delta: -0.25 , paused: false, ibkrError: null });
       expect(mocks.subscribeToPooledQuote.mock.calls[1]![0]).toEqual({ key: "readiness-option", legType: "option", symbol: "SPY", expiry: "20261120", strike: 500, right: OptionType.Put });
       expect(unsubscribe).toHaveBeenCalledTimes(2);
     });
@@ -621,11 +627,11 @@ describe("createDefaultReadinessDependencies", () => {
       quoteByContractKey["readiness-stock"] = quote({ bid: 500, ask: 500.1 });
       quoteByContractKey["readiness-option"] = quote({ bid: 1.2, ask: 1.25, delta: null });
       const pending = createDefaultReadinessDependencies().loadMarketDataFigures("open", optionContract);
-      await vi.advanceTimersByTimeAsync(settleGraceMs - 1);
+      await vi.advanceTimersByTimeAsync(readinessQuoteWaitMs - 1);
       expect(mocks.subscribeToPooledQuote).toHaveBeenCalledTimes(2);
       expect(unsubscribe).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(1);
-      expect((await pending).optionProbe).toEqual({ symbol: "SPY", bid: 1.2, ask: 1.25, delta: null });
+      expect((await pending).optionProbe).toEqual({ symbol: "SPY", bid: 1.2, ask: 1.25, delta: null , paused: false, ibkrError: null });
     });
 
     it("probes a call contract with the Call right", async () => {
@@ -660,7 +666,31 @@ describe("createDefaultReadinessDependencies", () => {
         onQuote(quote({ bid: 500, ask: 500.1 }));
         return unsubscribe;
       });
-      expect((await createDefaultReadinessDependencies().loadMarketDataFigures("pre_open", null)).stockProbe).toEqual({ symbol: "SPY", bid: 500, ask: 500.1, delta: null });
+      expect((await createDefaultReadinessDependencies().loadMarketDataFigures("pre_open", null)).stockProbe).toEqual({ symbol: "SPY", bid: 500, ask: 500.1, delta: null , paused: false, ibkrError: null });
+    });
+
+    it("starts the option probe without waiting for the stock probe", async () => {
+      quoteByContractKey["readiness-option"] = quote({ bid: 1.2, ask: 1.25, delta: -0.25 });
+      const pending = createDefaultReadinessDependencies().loadMarketDataFigures("open", optionContract);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.subscribeToPooledQuote).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(readinessQuoteWaitMs);
+      expect((await pending).optionProbe).toMatchObject({ delta: -0.25 });
+    });
+
+    it("reads whether the line was paused and IBKR's error while still subscribed", async () => {
+      quoteByContractKey["readiness-stock"] = quote({ bid: 500, ask: 500.1 });
+      const refusal = { code: 10089, message: "Requested market data requires additional subscription for API." };
+      mocks.pooledLineState.mockImplementation((contract: { key: string }) => (contract.key === "readiness-option" ? "paused" : "streaming"));
+      mocks.pooledLineError.mockImplementation((contract: { key: string }) => {
+        expect(unsubscribe).toHaveBeenCalledTimes(contract.key === "readiness-option" ? 1 : 0);
+        return contract.key === "readiness-option" ? refusal : null;
+      });
+      const pending = createDefaultReadinessDependencies().loadMarketDataFigures("open", optionContract);
+      await vi.advanceTimersByTimeAsync(readinessQuoteWaitMs);
+      const figures = await pending;
+      expect(figures.optionProbe).toEqual({ symbol: "SPY", bid: null, ask: null, delta: null, paused: true, ibkrError: refusal });
+      expect(figures.stockProbe).toMatchObject({ paused: false, ibkrError: null });
     });
 
     it("reports whether real-time lines are enabled and the feed refusal with only its code and message", async () => {

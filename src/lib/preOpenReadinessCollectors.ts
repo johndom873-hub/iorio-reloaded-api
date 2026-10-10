@@ -4,7 +4,7 @@ import { db } from "../db/connection.js";
 import { ibkrMarketDataLinesEnabled } from "../config/env.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { fetchWhatIfCommissionRange } from "../ibkr/ibkrWhatIfCommission.js";
-import { marketDataFeedRefusal, subscribeToPooledQuote, waitForFirstReading, type PooledQuote } from "../ibkr/marketDataPool.js";
+import { marketDataFeedRefusal, pooledLineError, pooledLineState, subscribeToPooledQuote, waitForFirstReading, type PooledQuote } from "../ibkr/marketDataPool.js";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { evaluateDataInvariants, loadDataInvariantInputs, type InvariantResult } from "./dataInvariants.js";
@@ -34,6 +34,7 @@ import {
   type LatestJobRun,
   type MarketDataFigures,
   type OrderPathProbeResult,
+  readinessQuoteWaitMs,
   type QuoteProbe,
   type ReadinessCheck,
   type ReadinessStage,
@@ -151,18 +152,23 @@ export async function collectReadinessChecks(stage: ReadinessStage, now: Date, d
 async function probeQuote(contract: PriceContract, symbol: string, needsDelta: boolean): Promise<QuoteProbe> {
   let latest: PooledQuote | null = null;
   let unsubscribe: (() => void) | null = null;
-  const { settled, check } = waitForFirstReading(() => latest !== null && latest.bid !== null && latest.ask !== null && (!needsDelta || latest.delta !== null));
+  const { settled, check } = waitForFirstReading(() => latest !== null && latest.bid !== null && latest.ask !== null && (!needsDelta || latest.delta !== null), readinessQuoteWaitMs);
+  let paused = false;
+  let ibkrError: QuoteProbe["ibkrError"] = null;
   try {
     unsubscribe = await subscribeToPooledQuote(contract, (quote) => {
       latest = quote;
       check();
     });
     await settled;
+    // Read while still subscribed: once the last subscriber leaves, the pool forgets the contract.
+    paused = pooledLineState(contract) === "paused";
+    ibkrError = pooledLineError(contract);
   } finally {
     unsubscribe?.();
   }
   const quote = latest as PooledQuote | null;
-  return { symbol, bid: quote?.bid ?? null, ask: quote?.ask ?? null, delta: quote?.delta ?? null };
+  return { symbol, bid: quote?.bid ?? null, ask: quote?.ask ?? null, delta: quote?.delta ?? null, paused, ibkrError };
 }
 
 function probeOptionLeg(contract: ProbeContract): OrderLegPayload {
@@ -237,11 +243,12 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
     },
     loadDataInvariants: async (now, dataSessionIso) => evaluateDataInvariants(await loadDataInvariantInputs(now, dataSessionIso)),
     loadMarketDataFigures: async (stage, contract) => {
-      const stockProbe = await probeQuote({ key: "readiness-stock", legType: "stock", symbol: "SPY" }, "SPY", false).catch(() => null);
-      const optionProbe =
+      const [stockProbe, optionProbe] = await Promise.all([
+        probeQuote({ key: "readiness-stock", legType: "stock", symbol: "SPY" }, "SPY", false).catch(() => null),
         stage === "open" && contract
-          ? await probeQuote({ key: "readiness-option", legType: "option", symbol: contract.symbol, expiry: contract.expiryYyyymmdd, strike: contract.strike, right: contract.right === "C" ? OptionType.Call : OptionType.Put }, contract.symbol, true).catch(() => null)
-          : null;
+          ? probeQuote({ key: "readiness-option", legType: "option", symbol: contract.symbol, expiry: contract.expiryYyyymmdd, strike: contract.strike, right: contract.right === "C" ? OptionType.Call : OptionType.Put }, contract.symbol, true).catch(() => null)
+          : null,
+      ]);
       const refusal = marketDataFeedRefusal();
       return { linesEnabled: ibkrMarketDataLinesEnabled(), feedRefusal: refusal ? { code: refusal.code, message: refusal.message } : null, stockProbe, optionProbe };
     },
