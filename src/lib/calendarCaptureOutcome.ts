@@ -2,6 +2,8 @@
 // exclusion and the order warnings, so a fetch that fails (or a ticker that never resolves) silently lets
 // a trade through a report date: every such case is a failed run, on every run it persists.
 
+import { isEtfSector } from "./tickerCalendarRelevance.js";
+
 export interface CalendarFetchFailure {
   /** "earnings", "dividends", or "major macro events, <source>". */
   source: string;
@@ -22,7 +24,7 @@ export interface UnresolvedTicker {
  * job would fail every night for the 7 ETFs on the shortlist.
  */
 export function selectAlertWorthyUnresolved(unresolved: UnresolvedTicker[]): string[] {
-  return unresolved.filter((ticker) => ticker.reason === "lookup_error" || ticker.sector !== "ETF").map((ticker) => ticker.symbol);
+  return unresolved.filter((ticker) => ticker.reason === "lookup_error" || !isEtfSector(ticker.sector)).map((ticker) => ticker.symbol);
 }
 
 /** One line for the job alert, or undefined when every fetch worked and every ticker that should resolve did. Free of "): " (Telegram truncation). */

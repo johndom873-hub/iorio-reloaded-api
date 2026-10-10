@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import { isEtfSector } from "./tickerCalendarRelevance.js";
 
 // Historical earnings dates via API Ninjas (chosen 2026-09-23): TradingView's scanner
 // endpoint (tradingviewCalendarService.ts) only ever returns the most recent + next
@@ -85,7 +86,7 @@ export interface HistoricalEarningsCaptureResult {
  */
 export async function isEtfTicker(tickerId: string): Promise<boolean> {
   const row = await db("tickers").where({ id: tickerId }).first("sector");
-  return row?.sector === "ETF";
+  return isEtfSector(row?.sector);
 }
 
 /** Resolves and writes one ticker's full earnings history. Used by the new-ticker backfill pipeline and any manual re-trigger. Always a no-op for ETFs (see isEtfTicker). */

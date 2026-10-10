@@ -17,6 +17,7 @@ import { computeElevatedVolatilityFlag, computeMomentum, computeSkew } from "./t
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
 import { signalsEnabledShortlistTickerIdsQuery } from "./shortlistQueries.js";
 import { easternIsoDate } from "./easternIsoDate.js";
+import { tickerCalendarProfile } from "./tickerCalendarRelevance.js";
 
 // DB side of the Signals screen (mockup approved 2026-09-22). Loads one ticker's
 // inputs once (loadTickerSignalsInputs); scoring itself is the pure scoreTicker in
@@ -114,12 +115,6 @@ export async function loadEarningsDatesNotYetReported(tickerId: string, todayIso
     .whereRaw("not (event_date = ?::date and event_time is not distinct from '-1')", [todayIso])
     .select(db.raw('event_date::text as "eventDate"'));
   return rows.map((row) => row.eventDate);
-}
-
-/** Same "resolved" check calendarConflict.ts uses: no TradingView symbol means earningsDatesIso is necessarily empty regardless of what's actually scheduled. */
-export async function loadEarningsCalendarResolved(tickerId: string): Promise<boolean> {
-  const row = await db("tickers").where({ id: tickerId }).first("tradingview_ticker");
-  return !!row?.tradingview_ticker;
 }
 
 export async function loadLatestSnapshot(tickerId: string): Promise<SnapshotHeader | null> {
@@ -275,11 +270,11 @@ export async function loadOpenShortLegs(tickerId: string): Promise<OpenShortLeg[
 /** Everything scoring needs for one ticker, from the DB only (no IBKR). Loaded once per REST call or stream start. */
 export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {
   const todayEastern = easternIsoDate(now);
-  const [bars, nextEarningsDateIso, earningsDatesIso, earningsCalendarResolved, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs] = await Promise.all([
+  const [bars, storedNextEarningsDateIso, storedEarningsDatesIso, calendarProfile, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs] = await Promise.all([
     loadBarsForTilt(ticker.tickerId, todayEastern),
     loadNextEarningsDate(ticker.tickerId, todayEastern),
     loadEarningsDatesNotYetReported(ticker.tickerId, todayEastern),
-    loadEarningsCalendarResolved(ticker.tickerId),
+    db("tickers").where({ id: ticker.tickerId }).first("tradingview_ticker", "sector").then(tickerCalendarProfile),
     loadPreviousClose(ticker.tickerId, todayEastern),
     loadLatestSnapshot(ticker.tickerId),
     fetchAvailableUncoveredShares(ticker.tickerId),
@@ -288,6 +283,10 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
     loadUpcomingMajorMacroEvents(),
     loadOpenShortLegs(ticker.tickerId),
   ]);
+  // Same "resolved" rule as calendarConflict.ts. An ETF has no earnings, so a stray row (a symbol collision) cannot exclude anything.
+  const { earningsCalendarResolved } = calendarProfile;
+  const earningsDatesIso = calendarProfile.calendarChecksApply ? storedEarningsDatesIso : [];
+  const nextEarningsDateIso = calendarProfile.calendarChecksApply ? storedNextEarningsDateIso : null;
   const momentum = computeMomentum(bars.map((bar) => bar.close));
   const elevatedVolatility = computeElevatedVolatilityFlag(bars);
 

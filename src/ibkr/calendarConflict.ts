@@ -1,5 +1,6 @@
 import { db } from "../db/connection.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { tickerCalendarProfile } from "../lib/tickerCalendarRelevance.js";
 import type { SignalStrategyKey } from "../lib/signalCandidates.js";
 
 export interface CalendarConflict {
@@ -11,6 +12,7 @@ export interface CalendarConflictContext {
   // False when the ticker has never resolved to a TradingView symbol, so
   // `events` is necessarily empty regardless of what's actually scheduled —
   // callers should treat this as "not checked," not "confirmed clear."
+  // An ETF is resolved with no events: neither check applies to it (tickerCalendarRelevance.ts).
   resolved: boolean;
   events: CalendarConflict[];
 }
@@ -22,8 +24,9 @@ export interface CalendarConflictContext {
  * candidate expiry for that ticker rather than querying per-candidate.
  */
 export async function fetchCalendarConflictContext(tickerId: string, now: Date = new Date()): Promise<CalendarConflictContext> {
-  const tickerRow = await db("tickers").where({ id: tickerId }).first("tradingview_ticker");
-  const resolved = !!tickerRow?.tradingview_ticker;
+  const profile = tickerCalendarProfile(await db("tickers").where({ id: tickerId }).first("tradingview_ticker", "sector"));
+  if (!profile.calendarChecksApply) return { resolved: true, events: [] };
+  const resolved = profile.earningsCalendarResolved;
 
   // Cast to ::text — a bare `date` column round-trips through node-pg's
   // local-timezone Date parsing otherwise, see project_postgres_date_local_timezone_parsing.

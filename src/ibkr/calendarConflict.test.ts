@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const database = vi.hoisted(() => {
   const state = {
-    tickerRow: undefined as { tradingview_ticker: string | null } | undefined,
+    tickerRow: undefined as { tradingview_ticker: string | null; sector?: string | null } | undefined,
     eventRows: [] as { eventType: string; eventDate: string }[],
     macroEventRows: [] as unknown[],
     calls: [] as { table: string; operations: [string, ...unknown[]][] }[],
@@ -113,6 +113,21 @@ describe("fetchCalendarConflictContext", () => {
     expect((await fetchCalendarConflictContext("t")).resolved).toBe(false);
     database.state.tickerRow = undefined;
     expect((await fetchCalendarConflictContext("t")).resolved).toBe(false);
+  });
+
+  it("skips both checks for an ETF: resolved, no events, even with stored rows and no TradingView symbol", async () => {
+    database.state.tickerRow = { tradingview_ticker: null, sector: "ETF" };
+    database.state.eventRows = [earningsOn("2026-10-29"), exDividendOn("2026-10-14")];
+    const context = await fetchCalendarConflictContext("ticker-etf");
+    expect(context).toEqual({ resolved: true, events: [] });
+    expect(findCalendarConflict(context, "covered_call", "2026-10-16")).toBeNull();
+    expect(database.state.calls.some((call) => call.table === "ticker_calendar_events")).toBe(false);
+  });
+
+  it("reads the sector with the TradingView symbol", async () => {
+    await fetchCalendarConflictContext("ticker-1");
+    const tickerCall = database.state.calls.find((call) => call.table === "tickers")!;
+    expect(tickerCall.operations).toContainEqual(["first", "tradingview_ticker", "sector"]);
   });
 });
 
