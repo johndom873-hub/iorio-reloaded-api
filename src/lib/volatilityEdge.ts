@@ -59,17 +59,17 @@ export interface VolatilityEdge {
 }
 
 /**
- * The forecast on one option's clock (approved 2026-10-09). The forecast is per trading session × 252; the option's
- * implied volatility is per calendar day × 365 (the fit's convention). Comparing them as they are flatters contracts that
- * span no weekend and penalizes those that do, so the forecast is put on the option's clock first:
+ * The forecast on one option's day-count basis (approved 2026-10-09). The forecast is per trading session × 252; the
+ * option's implied volatility is per calendar day × 365 (the fit's convention). Comparing them as they are flatters
+ * contracts that span no weekend and penalizes those that do, so the forecast is put on the option's basis first:
  *
- *   forecast on the option's clock = forecast × √( (N ÷ 252) ÷ (D ÷ 365) )
+ *   forecast on the calendar-day basis = forecast × √( (N ÷ 252) ÷ (D ÷ 365) )
  *
  * N = trading sessions from the scoring date to expiry (weekends and holidays don't count), D ÷ 365 = the option's
  * calendar years (`calendarYearsToExpiry`). SMCI Thu → Fri: 76.6% × √((1/252) ÷ (1/365)) = 92.2%. Edge = IV − this.
  * Null when N is unknown or zero (an expiry-day contract has no fitted slice anyway).
  */
-export function forecastOnOptionClock(forecastVolatility: number, tradingSessionsToExpiry: number | undefined, calendarYearsToExpiry: number): number | null {
+export function forecastOnCalendarDayBasis(forecastVolatility: number, tradingSessionsToExpiry: number | undefined, calendarYearsToExpiry: number): number | null {
   if (tradingSessionsToExpiry === undefined || !(tradingSessionsToExpiry > 0) || !(calendarYearsToExpiry > 0)) return null;
   return forecastVolatility * Math.sqrt(tradingSessionsToExpiry / tradingSessionsPerYear / calendarYearsToExpiry);
 }
@@ -94,7 +94,7 @@ export function computeVolatilityEdge(slice: EdgeSlice, strike: number, forecast
   const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
   if (!(totalVariance > 0)) return null;
   const impliedVolatility = Math.sqrt(totalVariance / slice.yearsToExpiry);
-  const contractForecast = forecastOnOptionClock(forecast.volatility, tradingSessionsToExpiry, slice.yearsToExpiry);
+  const contractForecast = forecastOnCalendarDayBasis(forecast.volatility, tradingSessionsToExpiry, slice.yearsToExpiry);
   if (contractForecast === null) return null;
   return {
     impliedVolatility,

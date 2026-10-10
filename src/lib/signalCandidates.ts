@@ -2,7 +2,7 @@ import { blackScholesDelta, impliedVolatilityFromPrice, sviTotalVariance, type R
 import { blackScholesVega, computeFrictionCost, computeNetEdge } from "./optionFriction.js";
 import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
 import { computeUncompensatedShare, type UncompensatedShareOptions } from "./uncompensatedShare.js";
-import { expirySpansEarnings, expirySpansMacroEvent, forecastOnOptionClock, type RealizedVolatilityForecast } from "./volatilityEdge.js";
+import { expirySpansEarnings, expirySpansMacroEvent, forecastOnCalendarDayBasis, type RealizedVolatilityForecast } from "./volatilityEdge.js";
 
 // Signals screen: turns one ticker's fitted surface (one row per expiry, from
 // option_surface_fits) + that day's raw quotes into graded, tradable candidates.
@@ -72,7 +72,7 @@ export interface SignalCandidatesInput {
   spotPrice: number;
   riskFreeRate: number;
   forecast: RealizedVolatilityForecast | null;
-  /** Trading sessions from the scoring date to each slice's expiry: the forecast is put on each contract's clock with them (forecastOnOptionClock). */
+  /** Trading sessions from the scoring date to each slice's expiry: the forecast is put on each contract's calendar-day basis with them (forecastOnCalendarDayBasis). */
   tradingSessionsByExpiry: ReadonlyMap<string, number>;
   slices: SignalSurfaceSlice[];
   quotes: SignalQuote[];
@@ -302,7 +302,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       exclude(quote, { kind: "no_friction", delta });
       continue;
     }
-    const contractForecast = input.forecast ? forecastOnOptionClock(input.forecast.volatility, input.tradingSessionsByExpiry.get(quote.expiry), slice.yearsToExpiry) : null;
+    const contractForecast = input.forecast ? forecastOnCalendarDayBasis(input.forecast.volatility, input.tradingSessionsByExpiry.get(quote.expiry), slice.yearsToExpiry) : null;
     const edge = contractForecast === null ? null : surfaceIv - contractForecast;
     const netEdge = edge === null ? null : computeNetEdge({ impliedVolatility: surfaceIv, forecastVolatility: contractForecast!, forecastWindowDays: input.forecast!.windowDays, edge, insideFittedRange: true }, friction);
     if (netEdge === null) {

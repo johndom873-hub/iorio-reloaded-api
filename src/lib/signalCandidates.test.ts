@@ -106,7 +106,7 @@ describe("buildSignalCandidates: computed fields", () => {
     expect(c.netEdge).toBeCloseTo(c.edge - c.frictionVolatility, 6);
   });
 
-  it("puts the forecast on the contract's clock: 21 sessions in 30 calendar days raise it by √((21/252) ÷ (30/365))", () => {
+  it("puts the forecast on the contract's calendar-day basis: 21 sessions in 30 calendar days raise it by √((21/252) ÷ (30/365))", () => {
     const expiry = slice30().expiry;
     const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], tradingSessionsByExpiry: new Map([[expiry, 21]]) }))[0]!;
     const contractForecast = 0.2 * Math.sqrt(21 / 252 / (30 / 365));

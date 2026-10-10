@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "./realizedVolatility.js";
 import { sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { computeVolatilityEdge, expirySpansEarnings, forecastOnOptionClock, tradingSessionsByExpiry, expirySpansMacroEvent, selectRealizedVolatilityForecast, type EdgeSlice } from "./volatilityEdge.js";
+import { computeVolatilityEdge, expirySpansEarnings, forecastOnCalendarDayBasis, tradingSessionsByExpiry, expirySpansMacroEvent, selectRealizedVolatilityForecast, type EdgeSlice } from "./volatilityEdge.js";
 
 // Deterministic synthetic bars: a slow random walk with a fixed seed.
 function makeBars(count: number, dailyMove = 0.02, seed = 42): DailyOhlcvBar[] {
@@ -48,19 +48,19 @@ describe("selectRealizedVolatilityForecast", () => {
   });
 });
 
-describe("forecastOnOptionClock (approved 2026-10-09)", () => {
+describe("forecastOnCalendarDayBasis (approved 2026-10-09)", () => {
   it("puts the 252-session forecast on the option's calendar clock: SMCI Thu → Fri, 76.6% → 92.2%", () => {
-    expect(forecastOnOptionClock(0.766, 1, 1 / 365)).toBeCloseTo(0.766 * Math.sqrt(365 / 252), 12);
-    expect(forecastOnOptionClock(0.766, 1, 1 / 365)! * 100).toBeCloseTo(92.19, 2);
+    expect(forecastOnCalendarDayBasis(0.766, 1, 1 / 365)).toBeCloseTo(0.766 * Math.sqrt(365 / 252), 12);
+    expect(forecastOnCalendarDayBasis(0.766, 1, 1 / 365)! * 100).toBeCloseTo(92.19, 2);
   });
   it("lowers it across a weekend (Thu → Mon, 2 sessions in 4 days) and barely moves it at 30 days", () => {
-    expect(forecastOnOptionClock(0.296, 2, 4 / 365)! * 100).toBeCloseTo(25.19, 2);
-    expect(forecastOnOptionClock(0.296, 21, 29 / 365)! * 100).toBeCloseTo(30.31, 2);
+    expect(forecastOnCalendarDayBasis(0.296, 2, 4 / 365)! * 100).toBeCloseTo(25.19, 2);
+    expect(forecastOnCalendarDayBasis(0.296, 21, 29 / 365)! * 100).toBeCloseTo(30.31, 2);
   });
   it("is null without sessions", () => {
-    expect(forecastOnOptionClock(0.5, undefined, 1 / 365)).toBeNull();
-    expect(forecastOnOptionClock(0.5, 0, 1 / 365)).toBeNull();
-    expect(forecastOnOptionClock(0.5, 3, 0)).toBeNull();
+    expect(forecastOnCalendarDayBasis(0.5, undefined, 1 / 365)).toBeNull();
+    expect(forecastOnCalendarDayBasis(0.5, 0, 1 / 365)).toBeNull();
+    expect(forecastOnCalendarDayBasis(0.5, 3, 0)).toBeNull();
   });
 });
 
