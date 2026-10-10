@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import v8 from "node:v8";
 import { db } from "../db/connection.js";
 import { clearDownState, notifyDownThrottled } from "./throttledAlert.js";
 import { notifyTelegramTracked } from "./undeliveredAlerts.js";
@@ -64,6 +65,97 @@ export function formatMemoryLine(processName: string, usage: NodeJS.MemoryUsage,
   return `memory ${processName}: rss=${toMb(usage.rss)}MB swap=${toMb(swapBytes)}MB heapUsed=${toMb(usage.heapUsed)}MB heapTotal=${toMb(usage.heapTotal)}MB external=${toMb(usage.external)}MB arrayBuffers=${toMb(usage.arrayBuffers)}MB${limit}${extra}`;
 }
 
+// Diagnostic detail on the same line (Marcelo, 2026-10-10): the staging web process held ~137 MB of resident 256 KB
+// heap pages beyond what V8 reported as heapTotal, which an isolated Node 24 run did not reproduce. V8's own physical,
+// malloced and per-space figures next to what the kernel sees tell V8-held pages from native (malloc) memory.
+
+/** V8 allocates its heap in 256 KB pages, one mapping each, so resident 256 KB anonymous rw mappings are heap pages. */
+const v8PageBytes = 256 * 1024;
+
+export interface ProcessMemoryBreakdown {
+  anonymousBytes: number;
+  fileBackedBytes: number;
+  v8PageMappings: number;
+  v8PageResidentBytes: number;
+}
+
+/** Pure: totals from /proc/self/smaps text. File-backed is the resident part of mappings of a file (the node binary, libraries). */
+export function parseSmapsBreakdown(smaps: string): ProcessMemoryBreakdown {
+  const breakdown: ProcessMemoryBreakdown = { anonymousBytes: 0, fileBackedBytes: 0, v8PageMappings: 0, v8PageResidentBytes: 0 };
+  let mapping: { sizeBytes: number; permissions: string; name: string } | null = null;
+  for (const line of smaps.split("\n")) {
+    const header = /^([0-9a-f]+)-([0-9a-f]+) (\S{4}) \S+ \S+ \S+\s*(.*)$/.exec(line);
+    if (header) {
+      const [, start = "0", end = "0", permissions = "", name = ""] = header;
+      mapping = { sizeBytes: parseInt(end, 16) - parseInt(start, 16), permissions, name };
+      continue;
+    }
+    if (!mapping) continue;
+    const rss = /^Rss:\s+(\d+) kB$/.exec(line);
+    if (rss) {
+      const residentBytes = Number(rss[1]) * 1024;
+      if (mapping.name.startsWith("/")) breakdown.fileBackedBytes += residentBytes;
+      if (mapping.name === "" && mapping.sizeBytes === v8PageBytes && mapping.permissions === "rw-p" && residentBytes > 0) {
+        breakdown.v8PageMappings += 1;
+        breakdown.v8PageResidentBytes += residentBytes;
+      }
+      continue;
+    }
+    const anonymous = /^Anonymous:\s+(\d+) kB$/.exec(line);
+    if (anonymous) breakdown.anonymousBytes += Number(anonymous[1]) * 1024;
+  }
+  return breakdown;
+}
+
+/** The breakdown of this process, or null where /proc is not there to read (a laptop). */
+export function readProcessMemoryBreakdown(readFile: (file: string) => string = (file) => fs.readFileSync(file, "utf8")): ProcessMemoryBreakdown | null {
+  try {
+    return parseSmapsBreakdown(readFile("/proc/self/smaps"));
+  } catch {
+    return null;
+  }
+}
+
+export interface V8MemoryDetail {
+  physicalBytes: number;
+  mallocedBytes: number;
+  peakMallocedBytes: number;
+  nativeContexts: number;
+  detachedContexts: number;
+  /** Committed bytes per group of heap spaces: new, old, code, lo (large objects), other. */
+  spaceCommittedBytes: Record<"new" | "old" | "code" | "lo" | "other", number>;
+}
+
+/** Pure: committed size per space group from v8.getHeapSpaceStatistics(). */
+export function summarizeHeapSpaces(spaces: { space_name: string; space_size: number }[]): V8MemoryDetail["spaceCommittedBytes"] {
+  const groups: V8MemoryDetail["spaceCommittedBytes"] = { new: 0, old: 0, code: 0, lo: 0, other: 0 };
+  for (const space of spaces) {
+    const group = space.space_name === "new_space" || space.space_name === "new_large_object_space" ? "new" : space.space_name === "old_space" ? "old" : space.space_name.startsWith("code_") ? "code" : space.space_name === "large_object_space" ? "lo" : "other";
+    groups[group] += space.space_size;
+  }
+  return groups;
+}
+
+export function readV8MemoryDetail(): V8MemoryDetail {
+  const heap = v8.getHeapStatistics();
+  return {
+    physicalBytes: heap.total_physical_size,
+    mallocedBytes: heap.malloced_memory,
+    peakMallocedBytes: heap.peak_malloced_memory,
+    nativeContexts: heap.number_of_native_contexts,
+    detachedContexts: heap.number_of_detached_contexts,
+    spaceCommittedBytes: summarizeHeapSpaces(v8.getHeapSpaceStatistics()),
+  };
+}
+
+/** Pure: the detail appended to the memory line, e.g. " v8Physical=44MB malloced=3MB … anon=249MB fileBacked=65MB v8Pages=731 (183MB)". */
+export function formatMemoryDetail(detail: V8MemoryDetail, breakdown: ProcessMemoryBreakdown | null): string {
+  const spaces = Object.entries(detail.spaceCommittedBytes).map(([name, bytes]) => `${name}:${toMb(bytes)}`).join(",");
+  const v8Part = ` v8Physical=${toMb(detail.physicalBytes)}MB malloced=${toMb(detail.mallocedBytes)}MB peakMalloced=${toMb(detail.peakMallocedBytes)}MB contexts=${detail.nativeContexts} detached=${detail.detachedContexts} spaces=${spaces}`;
+  if (!breakdown) return v8Part;
+  return `${v8Part} anon=${toMb(breakdown.anonymousBytes)}MB fileBacked=${toMb(breakdown.fileBackedBytes)}MB v8Pages=${breakdown.v8PageMappings} (${toMb(breakdown.v8PageResidentBytes)}MB)`;
+}
+
 /** Starts the minute line and the alert; returns a stop function. `label` names the process in the alert ("Pluto's agent"). */
 export function startProcessMemoryMonitor(options: { processName: string; label: string; counts?: () => Record<string, number> }): () => void {
   const limitBytes = readContainerMemoryLimitBytes();
@@ -84,7 +176,13 @@ export function startProcessMemoryMonitor(options: { processName: string; label:
       counts = {};
     }
     const swapBytes = readProcessSwapBytes();
-    console.log(formatMemoryLine(options.processName, usage, limitBytes, counts, swapBytes));
+    let detail = "";
+    try {
+      detail = formatMemoryDetail(readV8MemoryDetail(), readProcessMemoryBreakdown());
+    } catch {
+      detail = "";
+    }
+    console.log(formatMemoryLine(options.processName, usage, limitBytes, counts, swapBytes) + detail);
     if (limitBytes === null) return;
     const decision = decideMemoryAlert(state, usage.rss + swapBytes, limitBytes);
     if (decision === "alert") {

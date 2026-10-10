@@ -93,7 +93,8 @@ describe("startProcessMemoryMonitor", () => {
     await tick(5_000);
     await tick(5_000);
     expect(console.log).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(console.log).mock.calls[0]![0]).toBe("memory web: rss=5000MB swap=0MB heapUsed=20MB heapTotal=30MB external=2MB arrayBuffers=1MB");
+    // The line, then V8's own figures (the kernel part only where /proc exists, i.e. not on a laptop).
+    expect(vi.mocked(console.log).mock.calls[0]![0]).toMatch(/^memory web: rss=5000MB swap=0MB heapUsed=20MB heapTotal=30MB external=2MB arrayBuffers=1MB v8Physical=\d+MB malloced=\d+MB peakMalloced=\d+MB contexts=\d+ detached=\d+ spaces=new:\d+,old:\d+,code:\d+,lo:\d+,other:\d+( anon=.*)?$/);
     expect(mocks.alertStateReads).toEqual([]);
     expect(mocks.notifyDownThrottled).not.toHaveBeenCalled();
   });
