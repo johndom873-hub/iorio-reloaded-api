@@ -88,8 +88,76 @@ export function nextReqIdFor(ib: IBApi, fallback: () => number): number {
   return allocateFromSharedConnection ? allocateFromSharedConnection() : fallback();
 }
 
+/**
+ * One outage alert per process across all of its shared connections. They reach the same Gateway through the
+ * same tunnel host, so a Gateway or tunnel outage takes them all down together; one alert per connection only
+ * repeated the same news. Alerts once any connection has been down outageAlertAfterMs, naming the ones that have;
+ * announces recovery only once every connection is back, timed from the first drop of the episode.
+ */
+export class SharedConnectionOutageTracker {
+  private ownerName = "API";
+  private ownerPossessive = "The API's";
+  private readonly connectionLabels: string[] = [];
+  private readonly downSinceByLabel = new Map<string, number>();
+  private readonly labelsDownThisEpisode = new Set<string>();
+  private episodeStartedAt: number | null = null;
+
+  /**
+   * For another process holding its own copies of the shared connections (the Pluto agent): its alerts (keyed
+   * shared-ibkr:<ownerName>) must not share the web dyno's alert state. Call before the first borrow.
+   */
+  setOwner(ownerName: string, ownerPossessive: string): void {
+    this.ownerName = ownerName;
+    this.ownerPossessive = ownerPossessive;
+  }
+
+  register(connectionLabel: string): void {
+    if (!this.connectionLabels.includes(connectionLabel)) this.connectionLabels.push(connectionLabel);
+  }
+
+  /** Called on every failed connect or drop: starts this connection's outage clock and alerts once any clock has run past outageAlertAfterMs (rate-limited by reportBackgroundFailure). */
+  markDown(connectionLabel: string): void {
+    const now = Date.now();
+    if (!this.downSinceByLabel.has(connectionLabel)) this.downSinceByLabel.set(connectionLabel, now);
+    if (this.episodeStartedAt === null) this.episodeStartedAt = now;
+    this.labelsDownThisEpisode.add(connectionLabel);
+
+    const labelsDownTooLong = this.inConnectionOrder([...this.downSinceByLabel].filter(([, downSince]) => now - downSince >= outageAlertAfterMs).map(([label]) => label));
+    if (labelsDownTooLong.length === 0) return;
+    reportBackgroundFailure(
+      this.alertSource(),
+      `${this.ownerPossessive} shared IBKR ${this.describeConnections(labelsDownTooLong)} been down for over ${outageAlertAfterMs / 60_000} min. Live prices, quotes, greeks, Ticker Detail and Day Signals fall back to one-shot connections or stay stale. The 10-minute health check reports the Gateway itself separately.`,
+    );
+  }
+
+  /** Called on every successful connect: once no connection is down, reports recovery (sent only if an outage alert went out). */
+  markUp(connectionLabel: string): void {
+    if (!this.downSinceByLabel.delete(connectionLabel)) return;
+    if (this.downSinceByLabel.size > 0 || this.episodeStartedAt === null) return;
+    const labelsThatWereDown = this.inConnectionOrder([...this.labelsDownThisEpisode]);
+    reportBackgroundRecovery(this.alertSource(), `${this.ownerPossessive} shared IBKR ${labelsThatWereDown.length === 1 ? `${labelsThatWereDown[0]} connection is` : "connections are"} back`, this.episodeStartedAt);
+    this.episodeStartedAt = null;
+    this.labelsDownThisEpisode.clear();
+  }
+
+  private alertSource(): string {
+    return `shared-ibkr:${this.ownerName}`;
+  }
+
+  private inConnectionOrder(labels: string[]): string[] {
+    return this.connectionLabels.filter((label) => labels.includes(label));
+  }
+
+  /** "live connection has" or "connections (read, live) have". */
+  private describeConnections(labels: string[]): string {
+    return labels.length === 1 ? `${labels[0]} connection has` : `connections (${labels.join(", ")}) have`;
+  }
+}
+
+export const sharedConnectionOutageTracker = new SharedConnectionOutageTracker();
+
 interface SharedConnectionOptions {
-  /** Used in log lines and error messages, e.g. "read" or "live". */
+  /** Used in log lines, error messages and outage alerts, e.g. "read" or "live". */
   label: string;
   /** Per-instance outbound message cap — see ibkrMessagesPerSecondBudget in constants.ts. */
   maxRequestsPerSecond: number;
@@ -103,10 +171,17 @@ interface SharedConnectionOptions {
    * borrowers each set their own type right before requesting.
    */
   fixedMarketDataType?: MarketDataType;
+  /** Defaults to the process-wide sharedConnectionOutageTracker; tests pass their own. */
+  outageTracker?: SharedConnectionOutageTracker;
 }
 
 export class SharedReadConnection {
-  constructor(private options: SharedConnectionOptions) {}
+  private readonly outageTracker: SharedConnectionOutageTracker;
+
+  constructor(private options: SharedConnectionOptions) {
+    this.outageTracker = options.outageTracker ?? sharedConnectionOutageTracker;
+    this.outageTracker.register(options.label);
+  }
 
   private ib: IBApi | null = null;
   private tunnel: IbkrTunnel | null = null;
@@ -115,7 +190,6 @@ export class SharedReadConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connecting: Promise<void> | null = null;
   private connectedSince: number | null = null;
-  private disconnectedSince: number | null = null;
   private totalReconnects = 0;
   private shuttingDown = false;
   // Shared across every concurrent borrower — replaces each read helper's
@@ -136,14 +210,6 @@ export class SharedReadConnection {
    */
   setBorrowTimeoutMs(timeoutMs: number): void {
     this.borrowTimeoutMs = timeoutMs;
-  }
-
-  /**
-   * For another process holding its own copy of this connection (the Pluto agent): its log lines and outage alerts
-   * (keyed shared-ibkr:<label>) must not share the web dyno's alert state. Call before the first borrow.
-   */
-  setLabel(label: string): void {
-    this.options = { ...this.options, label };
   }
 
   /**
@@ -292,10 +358,7 @@ export class SharedReadConnection {
       this.tunnel = tunnel;
       this.reconnectAttempt = 0;
       this.connectedSince = Date.now();
-      if (this.disconnectedSince !== null) {
-        this.disconnectedSince = null;
-        reportBackgroundRecovery(`shared-ibkr:${this.options.label}`, `The shared IBKR ${this.options.label} connection is back`);
-      }
+      this.outageTracker.markUp(this.options.label);
       console.log(
         `IBKR shared ${this.options.label} connection: connected (took ${Date.now() - connectStartedAt}ms total, lifetime reconnects=${this.totalReconnects}).`,
       );
@@ -313,23 +376,15 @@ export class SharedReadConnection {
     } catch (error) {
       // A connect that fails before it ever succeeded (Gateway down at boot) never reaches handleDisconnect,
       // so without this the outage clock would never start and no alert could fire.
-      this.startOutageClockAndAlertIfLong();
+      this.markDown();
       throw error;
     } finally {
       this.connecting = null;
     }
   }
 
-  /** Starts the outage clock on the first failure and alerts once it has run past outageAlertAfterMs (rate-limited by reportBackgroundFailure). */
-  private startOutageClockAndAlertIfLong(): void {
-    if (this.shuttingDown) return;
-    if (this.disconnectedSince === null) this.disconnectedSince = Date.now();
-    const downForMs = Date.now() - this.disconnectedSince;
-    if (downForMs < outageAlertAfterMs) return;
-    reportBackgroundFailure(
-      `shared-ibkr:${this.options.label}`,
-      `The shared IBKR ${this.options.label} connection has been down for over ${outageAlertAfterMs / 60_000} min. Live prices, quotes and greeks fall back to one-shot connections or stay stale. The 10-minute health check reports the Gateway itself separately.`,
-    );
+  private markDown(): void {
+    if (!this.shuttingDown) this.outageTracker.markDown(this.options.label);
   }
 
   private handleDisconnect(): void {
@@ -341,7 +396,7 @@ export class SharedReadConnection {
     this.tunnel?.close();
     this.tunnel = null;
     this.totalReconnects++;
-    this.startOutageClockAndAlertIfLong();
+    this.markDown();
 
     const delay = reconnectDelaysMs[Math.min(this.reconnectAttempt, reconnectDelaysMs.length - 1)];
     this.reconnectAttempt++;

@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import { marketDataPoolSnapshot } from "../ibkr/marketDataPool.js";
-import { sharedLiveConnection, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
+import { sharedConnectionOutageTracker, sharedLiveConnection, sharedReadConnection } from "../ibkr/sharedReadConnection.js";
 import { startProcessMemoryMonitor } from "../lib/processMemoryMonitor.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { InternalApiClient } from "../lib/internalApiClient.js";
@@ -112,8 +112,8 @@ export class PlutoAgent {
   }
 
   async start(): Promise<void> {
-    // The agent's own copy of the live connection: its outage alerts are its own, not the web dyno's.
-    sharedLiveConnection.setLabel("Pluto live");
+    // The agent's own copies of the shared connections: their outage alerts are its own, not the web dyno's.
+    sharedConnectionOutageTracker.setOwner("Pluto", "Pluto's");
     // The first ticks borrow the IBKR connection while it is still connecting; the default 3 s borrow timeout is too short.
     sharedLiveConnection.setBorrowTimeoutMs(30_000);
     this.settings = await loadPlutoSettings();

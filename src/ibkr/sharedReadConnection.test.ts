@@ -47,13 +47,13 @@ vi.mock("../config/env.js", () => ({
   },
 }));
 
-const { SharedReadConnection, borrowSharedConnectionOrConnect, nextReqIdFor, pickClientId } = await import("./sharedReadConnection.js");
+const { SharedReadConnection, SharedConnectionOutageTracker, borrowSharedConnectionOrConnect, nextReqIdFor, pickClientId } = await import("./sharedReadConnection.js");
 const { requestRealtimeMarketData } = await import("./requestMarketData.js");
 
 type SharedConnectionInstance = InstanceType<typeof SharedReadConnection>;
 
 function createConnection(overrides: Partial<ConstructorParameters<typeof SharedReadConnection>[0]> = {}): SharedConnectionInstance {
-  return new SharedReadConnection({ label: "read", maxRequestsPerSecond: 10, clientIdRangeStart: 1_000_000, clientIdRangeSize: 500_000, ...overrides });
+  return new SharedReadConnection({ label: "read", maxRequestsPerSecond: 10, clientIdRangeStart: 1_000_000, clientIdRangeSize: 500_000, outageTracker: new SharedConnectionOutageTracker(), ...overrides });
 }
 
 function latestFakeIb() {
@@ -408,20 +408,42 @@ describe("reconnect after a drop", () => {
 });
 
 describe("outage alert and recovery", () => {
-  it("does not alert for a short blip such as the daily Gateway restart, but announces recovery once reconnected", async () => {
+  function gatewayGoesDown() {
+    openIbkrTunnelMock.mockRejectedValue(new Error("gateway down"));
+  }
+
+  function gatewayComesBack() {
+    openIbkrTunnelMock.mockImplementation(async () => {
+      const tunnel = { localPort: 45_000 + fakeGateway.openedTunnels.length, close: vi.fn() };
+      fakeGateway.openedTunnels.push(tunnel);
+      return tunnel;
+    });
+  }
+
+  async function connectReadAndLiveOnOneTracker(outageTracker = new SharedConnectionOutageTracker()) {
+    const read = createConnection({ label: "read", outageTracker });
+    await read.borrow();
+    const readIb = latestFakeIb();
+    const live = createConnection({ label: "live", outageTracker });
+    await live.borrow();
+    const liveIb = latestFakeIb();
+    return { read, readIb, live, liveIb };
+  }
+
+  it("does not alert for a short blip such as the daily Gateway restart, but checks for recovery once reconnected", async () => {
     const connection = createConnection();
     await connection.borrow();
     latestFakeIb().emit(EventName.disconnected);
     await advance(1_000);
     expect(reportBackgroundFailureMock).not.toHaveBeenCalled();
     expect(reportBackgroundRecoveryMock).toHaveBeenCalledTimes(1);
-    expect(reportBackgroundRecoveryMock).toHaveBeenCalledWith("shared-ibkr:read", "The shared IBKR read connection is back");
+    expect(reportBackgroundRecoveryMock).toHaveBeenCalledWith("shared-ibkr:API", "The API's shared IBKR read connection is back", Date.parse("2026-10-06T12:00:00.000Z"));
   });
 
-  it("alerts only once the outage has lasted 10 minutes, naming the connection label", async () => {
+  it("alerts only once the outage has lasted 10 minutes, naming the connection that is down", async () => {
     const connection = createConnection({ label: "live" });
     await connection.borrow();
-    openIbkrTunnelMock.mockRejectedValue(new Error("gateway down"));
+    gatewayGoesDown();
     latestFakeIb().emit(EventName.disconnected);
 
     await advance(10 * 60_000 - 1);
@@ -429,8 +451,77 @@ describe("outage alert and recovery", () => {
     await advance(60_000);
     expect(reportBackgroundFailureMock).toHaveBeenCalled();
     const [source, message] = reportBackgroundFailureMock.mock.calls[0]!;
-    expect(source).toBe("shared-ibkr:live");
-    expect(message).toContain("The shared IBKR live connection has been down for over 10 min.");
+    expect(source).toBe("shared-ibkr:API");
+    expect(message).toContain("The API's shared IBKR live connection has been down for over 10 min.");
+  });
+
+  it("sends one alert for both connections when the Gateway takes them down together, and one recovery once both are back", async () => {
+    const { readIb, liveIb } = await connectReadAndLiveOnOneTracker();
+    gatewayGoesDown();
+    readIb.emit(EventName.disconnected);
+    liveIb.emit(EventName.disconnected);
+    await advance(11 * 60_000);
+
+    const sources = new Set(reportBackgroundFailureMock.mock.calls.map(([source]) => source));
+    expect(sources).toEqual(new Set(["shared-ibkr:API"]));
+    expect(reportBackgroundFailureMock.mock.calls.at(-1)![1]).toContain("The API's shared IBKR connections (read, live) have been down for over 10 min.");
+
+    gatewayComesBack();
+    await advance(60_000);
+    expect(reportBackgroundRecoveryMock).toHaveBeenCalledTimes(1);
+    expect(reportBackgroundRecoveryMock).toHaveBeenCalledWith("shared-ibkr:API", "The API's shared IBKR connections are back", Date.parse("2026-10-06T12:00:00.000Z"));
+  });
+
+  it("names only the connection that has been down 10 minutes when the other dropped later", async () => {
+    const { readIb, liveIb } = await connectReadAndLiveOnOneTracker();
+    gatewayGoesDown();
+    readIb.emit(EventName.disconnected);
+    await advance(5 * 60_000);
+    liveIb.emit(EventName.disconnected);
+    // The read connection's next failed attempt after the 10-minute mark lands at 10:48 (backoff 1, 2, 5, 10, 30, then every 60 s).
+    await advance(6 * 60_000);
+
+    expect(reportBackgroundFailureMock).toHaveBeenCalled();
+    expect(reportBackgroundFailureMock.mock.calls[0]![1]).toContain("The API's shared IBKR read connection has been down for over 10 min.");
+  });
+
+  it("waits for every connection before announcing recovery, timed from the first drop", async () => {
+    const outageTracker = new SharedConnectionOutageTracker();
+    const { readIb, live, liveIb } = await connectReadAndLiveOnOneTracker(outageTracker);
+    gatewayGoesDown();
+    readIb.emit(EventName.disconnected);
+    await advance(2 * 60_000);
+    liveIb.emit(EventName.disconnected);
+    await advance(10 * 60_000);
+
+    // Only the live connection comes back: its own connect works again, the read connection's next attempt still fails.
+    gatewayComesBack();
+    await live.borrow().catch(() => {});
+    openIbkrTunnelMock.mockRejectedValue(new Error("still down for read"));
+    expect(live.getHealthSnapshot().connected).toBe(true);
+    expect(reportBackgroundRecoveryMock).not.toHaveBeenCalled();
+
+    gatewayComesBack();
+    await advance(60_000);
+    expect(reportBackgroundRecoveryMock).toHaveBeenCalledTimes(1);
+    expect(reportBackgroundRecoveryMock.mock.calls[0]![1]).toBe("The API's shared IBKR connections are back");
+    expect(reportBackgroundRecoveryMock.mock.calls[0]![2]).toBe(Date.parse("2026-10-06T12:00:00.000Z"));
+  });
+
+  it("alerts and recovers under the owner another process sets, so its state never mixes with the web dyno's", async () => {
+    const outageTracker = new SharedConnectionOutageTracker();
+    outageTracker.setOwner("Pluto", "Pluto's");
+    const { readIb, liveIb } = await connectReadAndLiveOnOneTracker(outageTracker);
+    gatewayGoesDown();
+    readIb.emit(EventName.disconnected);
+    liveIb.emit(EventName.disconnected);
+    await advance(11 * 60_000);
+    expect(reportBackgroundFailureMock.mock.calls[0]![0]).toBe("shared-ibkr:Pluto");
+    expect(reportBackgroundFailureMock.mock.calls[0]![1]).toContain("Pluto's shared IBKR connections (read, live) have been down for over 10 min.");
+
+    gatewayComesBack();
+    await advance(60_000);
+    expect(reportBackgroundRecoveryMock).toHaveBeenCalledWith("shared-ibkr:Pluto", "Pluto's shared IBKR connections are back", Date.parse("2026-10-06T12:00:00.000Z"));
   });
 
   it("starts the outage clock on a first connect that fails before it ever succeeded", async () => {
@@ -446,25 +537,21 @@ describe("outage alert and recovery", () => {
     await advance(60_000);
     await expect(connection.borrow()).rejects.toThrow();
     expect(reportBackgroundFailureMock).toHaveBeenCalledTimes(1);
-    expect(reportBackgroundFailureMock.mock.calls[0]![0]).toBe("shared-ibkr:read");
+    expect(reportBackgroundFailureMock.mock.calls[0]![0]).toBe("shared-ibkr:API");
   });
 
   it("announces recovery after a long outage ends and stops alerting", async () => {
     const connection = createConnection();
     await connection.borrow();
-    openIbkrTunnelMock.mockRejectedValue(new Error("gateway down"));
+    gatewayGoesDown();
     latestFakeIb().emit(EventName.disconnected);
     await advance(11 * 60_000);
     expect(reportBackgroundFailureMock).toHaveBeenCalled();
 
-    openIbkrTunnelMock.mockImplementation(async () => {
-      const tunnel = { localPort: 45_000, close: vi.fn() };
-      fakeGateway.openedTunnels.push(tunnel);
-      return tunnel;
-    });
+    gatewayComesBack();
     await advance(60_000);
     expect(connection.getHealthSnapshot().connected).toBe(true);
-    expect(reportBackgroundRecoveryMock).toHaveBeenCalledWith("shared-ibkr:read", "The shared IBKR read connection is back");
+    expect(reportBackgroundRecoveryMock).toHaveBeenCalledWith("shared-ibkr:API", "The API's shared IBKR read connection is back", Date.parse("2026-10-06T12:00:00.000Z"));
 
     reportBackgroundFailureMock.mockClear();
     await advance(15 * 60_000);
@@ -484,7 +571,7 @@ describe("outage alert and recovery", () => {
     expect(connection.getHealthSnapshot().connected).toBe(true);
 
     await advance(9 * 60_000);
-    openIbkrTunnelMock.mockRejectedValue(new Error("gateway down"));
+    gatewayGoesDown();
     latestFakeIb().emit(EventName.disconnected);
     await advance(2 * 60_000);
     expect(reportBackgroundFailureMock).not.toHaveBeenCalled();

@@ -71,6 +71,13 @@ describe("reportBackgroundRecovery", () => {
     expect(notifyTelegramTracked.mock.calls[0]![0]).toContain("✅ Day Signals loop cycles are completing again (was failing ~");
   });
 
+  it("measures the duration from when the failure began when given, not from the first alert", async () => {
+    markRateLimitedRecovered.mockResolvedValueOnce(3 * 60_000);
+    reportBackgroundRecovery("shared-ibkr:API", "The API's shared IBKR connections are back", Date.now() - 14 * 60_000);
+    await flush();
+    expect(notifyTelegramTracked).toHaveBeenCalledWith("✅ The API's shared IBKR connections are back (was failing ~14m).");
+  });
+
   it("does not throw when the database is unavailable", async () => {
     markRateLimitedRecovered.mockRejectedValue(new Error("db down"));
     reportBackgroundRecovery("x", "y");

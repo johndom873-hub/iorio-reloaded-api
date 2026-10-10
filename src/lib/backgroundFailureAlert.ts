@@ -42,10 +42,18 @@ export function reportBackgroundFailure(source: string, message: string, now: nu
   }).catch((error) => console.error(`Could not report background failure "${source}": ${error instanceof Error ? error.message : error}`));
 }
 
-/** Sends a "recovered" message only if an unrecovered failure alert for this source exists. Fire-and-forget. */
-export function reportBackgroundRecovery(source: string, message: string): void {
+/**
+ * Sends a "recovered" message only if an unrecovered failure alert for this source exists. Fire-and-forget.
+ * `failingSinceMs` is when the failure actually began, for a source that alerts only after a delay; without it the
+ * duration is measured from the first alert, which understates such an outage by that delay.
+ */
+export function reportBackgroundRecovery(source: string, message: string, failingSinceMs?: number): void {
   markRateLimitedRecovered(`${backgroundFailureKeyPrefix}${source}`)
-    .then((downForMs) => (downForMs === null ? undefined : notifyTelegramTracked(`✅ ${message} (was failing ~${formatDurationHuman(downForMs)}).`)))
+    .then((downSinceAlertMs) => {
+      if (downSinceAlertMs === null) return undefined;
+      const downForMs = failingSinceMs === undefined ? downSinceAlertMs : Date.now() - failingSinceMs;
+      return notifyTelegramTracked(`✅ ${message} (was failing ~${formatDurationHuman(downForMs)}).`);
+    })
     .catch((error) => console.error(`Could not report background recovery "${source}": ${error instanceof Error ? error.message : error}`));
 }
 

@@ -30,8 +30,8 @@ vi.mock("../db/connection.js", () => {
 });
 vi.mock("../ibkr/marketDataPool.js", () => ({ marketDataPoolSnapshot: () => ({ contractCount: 0 }) }));
 vi.mock("../ibkr/sharedReadConnection.js", () => {
-  const connection = { setLabel: () => {}, setBorrowTimeoutMs: () => {}, getHealthSnapshot: () => ({ connected: harness.connected, totalReconnects: 0 }), listenerCount: () => 0 };
-  return { sharedLiveConnection: connection, sharedReadConnection: connection };
+  const connection = { setBorrowTimeoutMs: () => {}, getHealthSnapshot: () => ({ connected: harness.connected, totalReconnects: 0 }), listenerCount: () => 0 };
+  return { sharedLiveConnection: connection, sharedReadConnection: connection, sharedConnectionOutageTracker: { setOwner: () => {} } };
 });
 vi.mock("../lib/processMemoryMonitor.js", () => ({ startProcessMemoryMonitor: () => () => {} }));
 vi.mock("../lib/appEnvironment.js", () => ({ readAppEnvironment: () => "test" }));
