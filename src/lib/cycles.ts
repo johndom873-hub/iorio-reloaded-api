@@ -204,7 +204,21 @@ export function deriveOpenCycle(input: CycleInput): Cycle | null {
   return lastWindow && lastWindow.end === null ? deriveOneCycle(lastWindow, input) : null;
 }
 
+/**
+ * The windows read from each option-leg list (with its stock legs): a caller deriving again from the same, unchanged
+ * lists (the backtest keeps a book's lists until the book changes) gets them without reading every leg again.
+ */
+const windowsByOptionLegs = new WeakMap<readonly CycleOptionLeg[], { stockLegs: readonly CycleStockLeg[]; optionLegCount: number; stockLegCount: number; windows: { start: number; end: number | null }[] }>();
+
 function cycleWindows(input: CycleInput): { start: number; end: number | null }[] {
+  const kept = windowsByOptionLegs.get(input.optionLegs);
+  if (kept && kept.stockLegs === input.stockLegs && kept.optionLegCount === input.optionLegs.length && kept.stockLegCount === input.stockLegs.length) return kept.windows;
+  const windows = readCycleWindows(input);
+  windowsByOptionLegs.set(input.optionLegs, { stockLegs: input.stockLegs, optionLegCount: input.optionLegs.length, stockLegCount: input.stockLegs.length, windows });
+  return windows;
+}
+
+function readCycleWindows(input: CycleInput): { start: number; end: number | null }[] {
   const { optionLegs, stockLegs } = input;
 
   // 1. Boundaries from the legs (the closest thing to real holdings): flat = no stock legs open and no option legs open.

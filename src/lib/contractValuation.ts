@@ -129,23 +129,26 @@ function pricesAtExpiry(buckets: readonly number[], totalStandardDeviation: numb
 }
 
 /**
- * Valuations already made, by their exact inputs, per tables: a quote that has not moved is valued again at every look
- * of its day with the same figures. Each answer is handed out as a copy (its fields are all plain values). Bounded:
- * started afresh when full.
+ * Valuations already made, by their exact inputs and tables: a quote that has not moved is valued again with the same
+ * figures (the next look scored ahead, then for real). Each answer is handed out as a copy (its fields are all plain
+ * values). Bounded: started afresh when full.
  */
-const valuationsByTables = new WeakMap<VolatilityModelTables, Map<string, ContractValuation | null>>();
-const valuationsPerTablesLimit = 100_000;
+const valuationsByKey = new Map<string, ContractValuation | null>();
+const valuationsLimit = 100_000;
+const tablesIds = new WeakMap<VolatilityModelTables, number>();
+let nextTablesId = 1;
 
 export function valueContract(tables: VolatilityModelTables, input: ContractValuationInput): ContractValuation | null {
-  let valuations = valuationsByTables.get(tables);
-  if (!valuations) valuationsByTables.set(tables, (valuations = new Map()));
-  const key = `${input.isCall ? "C" : "P"}|${input.strike}|${input.forward}|${input.mid}|${input.frictionDollars}|${input.perSessionVariance}|${input.varianceSessions}|${input.calendarYears}|${input.riskFreeRate}|${input.group}|${input.spot}`;
+  let tablesId = tablesIds.get(tables);
+  if (tablesId === undefined) tablesIds.set(tables, (tablesId = nextTablesId++));
+  const valuations = valuationsByKey;
+  const key = `${tablesId}|${input.isCall ? "C" : "P"}|${input.strike}|${input.forward}|${input.mid}|${input.frictionDollars}|${input.perSessionVariance}|${input.varianceSessions}|${input.calendarYears}|${input.riskFreeRate}|${input.group}|${input.spot}`;
   if (valuations.has(key)) {
     const valued = valuations.get(key)!;
     return valued === null ? null : { ...valued };
   }
   const valued = computeContractValuation(tables, input);
-  if (valuations.size >= valuationsPerTablesLimit) valuations.clear();
+  if (valuations.size >= valuationsLimit) valuations.clear();
   valuations.set(key, valued);
   return valued === null ? null : { ...valued };
 }

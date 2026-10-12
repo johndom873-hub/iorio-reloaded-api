@@ -122,8 +122,8 @@ const impliedVolatilityUpperBound = 5;
 
 /**
  * Answers already solved, by their exact inputs: one scoring solves a contract's volatility for the expiry shift, the
- * filters and the model, and the looks of a day ask again for every quote that has not moved. Bounded: started afresh
- * when full.
+ * filters and the model, and a look scored ahead is scored again for real. Bounded: started
+ * afresh when full.
  */
 const solvedImpliedVolatilities = new Map<string, number | null>();
 const solvedImpliedVolatilityLimit = 200_000;
@@ -277,6 +277,10 @@ export function minimumButterflyDensity(parameters: RawSviParameters, kMin: numb
   return minimum;
 }
 
+/** Each fit point's k − m and √((k − m)² + σ²) in the inner fit under way, kept for its error sum. */
+let fitPointShifts = new Float64Array(64);
+let fitPointRoots = new Float64Array(64);
+
 /** The inner fit's augmented 3×4 system [normal equations | target], row r and column c at r × 4 + c: one buffer, filled and solved in place. */
 const augmentedSystem = new Float64Array(12);
 
@@ -319,10 +323,17 @@ function fitInner(points: SviFitPoint[], m: number, sigma: number): InnerFit | n
   // (or × total variance), written out so the loop allocates nothing; 1 × x is x exactly.
   let normal00 = 0, normal01 = 0, normal02 = 0, normal10 = 0, normal11 = 0, normal12 = 0, normal20 = 0, normal21 = 0, normal22 = 0;
   let target0 = 0, target1 = 0, target2 = 0;
-  for (const point of points) {
+  if (fitPointShifts.length < points.length) {
+    fitPointShifts = new Float64Array(points.length * 2);
+    fitPointRoots = new Float64Array(points.length * 2);
+  }
+  for (let index = 0; index < points.length; index++) {
+    const point = points[index]!;
     const weight = point.weight;
     const shifted = point.logMoneyness - m;
     const root = Math.sqrt(shifted * shifted + sigma * sigma);
+    fitPointShifts[index] = shifted;
+    fitPointRoots[index] = root;
     const weightedShifted = weight * shifted;
     const weightedRoot = weight * root;
     target0 += weight * point.totalVariance;
@@ -359,8 +370,13 @@ function fitInner(points: SviFitPoint[], m: number, sigma: number): InnerFit | n
   c = Math.max(-maximumAbsoluteRho * d, Math.min(maximumAbsoluteRho * d, c)); // |rho| <= 0.98
   a = Math.max(a, -sigma * Math.sqrt(Math.max(d * d - c * c, 0))); // a + b*sigma*sqrt(1-rho^2) >= 0
   const parameters: RawSviParameters = { a, b: d, rho: c / d, m, sigma };
+  // sviTotalVariance at each point, on the k − m and the root worked out above (the same expressions on the same values).
   let weightedSquaredError = 0;
-  for (const point of points) weightedSquaredError += point.weight * (sviTotalVariance(parameters, point.logMoneyness) - point.totalVariance) ** 2;
+  for (let index = 0; index < points.length; index++) {
+    const point = points[index]!;
+    const totalVariance = parameters.a + parameters.b * (parameters.rho * fitPointShifts[index]! + fitPointRoots[index]!);
+    weightedSquaredError += point.weight * (totalVariance - point.totalVariance) ** 2;
+  }
   return { parameters, weightedSquaredError };
 }
 

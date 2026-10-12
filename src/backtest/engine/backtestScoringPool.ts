@@ -34,7 +34,9 @@ interface BacktestScoringRequestBody {
   /** A score only: true when its day quotes are the ones the symbol's last warm request carried (sent empty then, read from the worker's copy). */
   dayQuotesOfLastWarm?: boolean;
   freeCash: number;
-  trading: TradingSettings;
+  /** The trading settings by id: sent the first time a worker needs them (the session's settings never change while it runs). */
+  tradingId: number;
+  trading: TradingSettings | null;
   live: LiveScoringOverrides;
   modelTablesId: number;
   /** Sent the first time a worker needs these tables. */
@@ -78,12 +80,14 @@ interface PoolWorker {
   worker: Worker;
   pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void }>;
   modelTablesIds: Set<number>;
+  tradingIds: Set<number>;
 }
 
 export class BacktestScoringPool {
   private readonly workers: PoolWorker[];
   private readonly workerBySymbol = new Map<string, PoolWorker>();
   private readonly modelTablesIds = new WeakMap<VolatilityModelTables, number>();
+  private readonly tradingIds = new WeakMap<TradingSettings, number>();
   /** Each symbol's last scoring request as sent, for warm(). */
   private readonly lastScoreRequestBySymbol = new Map<string, Extract<BacktestScoringWorkerRequest, { type: "score" }>>();
   /** Days built ahead (prepareDayAhead), by symbol and day. */
@@ -96,7 +100,7 @@ export class BacktestScoringPool {
   constructor(setup: BacktestScoringPoolSetup) {
     if (setup.workerCount < 1) throw new Error("A scoring pool needs at least one worker.");
     this.workers = Array.from({ length: setup.workerCount }, () => {
-      const poolWorker: PoolWorker = { worker: new Worker(engineWorkerModuleUrl("backtestScoringWorker"), { execArgv: engineWorkerExecArgv() }), pending: new Map(), modelTablesIds: new Set() };
+      const poolWorker: PoolWorker = { worker: new Worker(engineWorkerModuleUrl("backtestScoringWorker"), { execArgv: engineWorkerExecArgv() }), pending: new Map(), modelTablesIds: new Set(), tradingIds: new Set() };
       poolWorker.worker.on("message", (reply: BacktestScoringWorkerReply) => {
         const waiting = poolWorker.pending.get(reply.id);
         if (!waiting) return;
@@ -162,7 +166,7 @@ export class BacktestScoringPool {
   }
 
   /** scoreTicker on the symbol's worker, over its inputs of the day with the book's figures of this pass. */
-  async score(request: Omit<Extract<BacktestScoringWorkerRequest, { type: "score" }>, "type" | "modelTablesId" | "modelTables"> & { modelTables: VolatilityModelTables }): Promise<TickerSignals> {
+  async score(request: Omit<Extract<BacktestScoringWorkerRequest, { type: "score" }>, "type" | "modelTablesId" | "modelTables" | "tradingId" | "trading"> & { modelTables: VolatilityModelTables; trading: TradingSettings }): Promise<TickerSignals> {
     const poolWorker = this.workerOf(request.symbol);
     let modelTablesId = this.modelTablesIds.get(request.modelTables);
     if (modelTablesId === undefined) {
@@ -171,7 +175,14 @@ export class BacktestScoringPool {
     }
     const firstTime = !poolWorker.modelTablesIds.has(modelTablesId);
     poolWorker.modelTablesIds.add(modelTablesId);
-    const sent: Extract<BacktestScoringWorkerRequest, { type: "score" }> = { ...request, type: "score", modelTablesId, modelTables: firstTime ? request.modelTables : null };
+    let tradingId = this.tradingIds.get(request.trading);
+    if (tradingId === undefined) {
+      tradingId = this.nextRequestId++;
+      this.tradingIds.set(request.trading, tradingId);
+    }
+    const tradingFirstTime = !poolWorker.tradingIds.has(tradingId);
+    poolWorker.tradingIds.add(tradingId);
+    const sent: Extract<BacktestScoringWorkerRequest, { type: "score" }> = { ...request, type: "score", modelTablesId, modelTables: firstTime ? request.modelTables : null, tradingId, trading: tradingFirstTime ? request.trading : null };
     this.lastScoreRequestBySymbol.set(request.symbol, sent);
     const dayQuotesOfLastWarm = this.lastWarmDayQuotesBySymbol.get(request.symbol) === request.dayQuotes;
     return (await this.send(poolWorker, dayQuotesOfLastWarm ? { ...sent, dayQuotes: [], dayQuotesOfLastWarm } : sent)) as TickerSignals;
@@ -187,7 +198,7 @@ export class BacktestScoringPool {
     const last = this.lastScoreRequestBySymbol.get(symbol);
     if (!last || last.todayIso !== nextLook.todayIso || this.failure) return;
     this.lastWarmDayQuotesBySymbol.set(symbol, nextLook.dayQuotes);
-    void this.send(this.workerOf(symbol), { ...last, type: "warm", dayQuotesOfLastWarm: false, modelTables: null, dayQuotes: nextLook.dayQuotes, live: { ...last.live, spotPrice: nextLook.spotPrice }, scoredAtMs: nextLook.scoredAtMs }).catch(() => {});
+    void this.send(this.workerOf(symbol), { ...last, type: "warm", dayQuotesOfLastWarm: false, modelTables: null, trading: null, dayQuotes: nextLook.dayQuotes, live: { ...last.live, spotPrice: nextLook.spotPrice }, scoredAtMs: nextLook.scoredAtMs }).catch(() => {});
   }
 
   async close(): Promise<void> {

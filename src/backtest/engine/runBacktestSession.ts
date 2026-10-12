@@ -576,7 +576,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       for (const entry of symbols) {
         const ownDayIndex = entry.ownSessionDays.indexOf(todayIso);
         const nextDayIndex = ownDayIndex === -1 ? entry.ownSessionDays.findIndex((dateIso) => dateIso > todayIso) : ownDayIndex;
-        if (nextDayIndex !== -1) for (const dateIso of entry.ownSessionDays.slice(nextDayIndex, nextDayIndex + prefetchDaysAhead)) dayDataReader.prefetch(entry.symbol, dateIso, captureLookTimeEt);
+        // A day already taken (the next one, when it was built ahead) is not read again.
+        if (nextDayIndex !== -1) for (const dateIso of entry.ownSessionDays.slice(nextDayIndex, nextDayIndex + prefetchDaysAhead)) if (!entry.prefetchedDays.has(dateIso)) dayDataReader.prefetch(entry.symbol, dateIso, captureLookTimeEt);
         if (ownDayIndex === -1) continue;
         await takePrefetchedDay(entry, todayIso);
       }

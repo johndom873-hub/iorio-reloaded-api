@@ -20,6 +20,7 @@ const symbolState = new Map<string, { profile: Extract<BacktestScoringWorkerRequ
 /** A symbol's inputs are kept for its two latest days: the next day's can be built while today's looks are still scored. */
 const daysKeptPerSymbol = 2;
 const modelTablesById = new Map<number, VolatilityModelTables>();
+const tradingById = new Map<number, NonNullable<Extract<BacktestScoringWorkerRequest, { type: "score" }>["trading"]>>();
 /** Each symbol's day quotes from its last warm request: a score whose quotes are the same is sent without them. */
 const lastWarmDayQuotesBySymbol = new Map<string, Extract<BacktestScoringWorkerRequest, { type: "warm" }>["dayQuotes"]>();
 /** Each symbol's last warm request and what scoring it gave: a score of the same day quotes on the same book gets that answer. */
@@ -41,7 +42,7 @@ function sameData(a: unknown, b: unknown): boolean {
 }
 
 /** What a scoring reads besides its day quotes: when these are the same data, scoreTicker gives the same answer. */
-const scoringBookOf = (request: Extract<BacktestScoringWorkerRequest, { type: "score" | "warm" }>) => ({ symbol: request.symbol, todayIso: request.todayIso, freeShares: request.freeShares, openShortLegs: request.openShortLegs, freeCash: request.freeCash, trading: request.trading, live: request.live, modelTablesId: request.modelTablesId, scoredAtMs: request.scoredAtMs });
+const scoringBookOf = (request: Extract<BacktestScoringWorkerRequest, { type: "score" | "warm" }>) => ({ symbol: request.symbol, todayIso: request.todayIso, freeShares: request.freeShares, openShortLegs: request.openShortLegs, freeCash: request.freeCash, tradingId: request.tradingId, live: request.live, modelTablesId: request.modelTablesId, scoredAtMs: request.scoredAtMs });
 
 function stateOf(symbol: string) {
   const state = symbolState.get(symbol);
@@ -90,12 +91,15 @@ function handle(request: BacktestScoringWorkerRequest): unknown {
       if (request.modelTables) modelTablesById.set(request.modelTablesId, request.modelTables);
       const modelTables = modelTablesById.get(request.modelTablesId);
       if (!modelTables) throw new Error(`The scoring worker was not given the model tables ${request.modelTablesId}.`);
+      if (request.trading) tradingById.set(request.tradingId, request.trading);
+      const trading = tradingById.get(request.tradingId);
+      if (!trading) throw new Error(`The scoring worker was not given the trading settings ${request.tradingId}.`);
       const warmed = request.dayQuotesOfLastWarm ? lastWarmScoringBySymbol.get(request.symbol) : undefined;
       if (warmed && sameData(scoringBookOf(warmed.request), scoringBookOf(request))) return warmed.result;
       const dayQuotes = request.dayQuotesOfLastWarm ? lastWarmDayQuotesBySymbol.get(request.symbol) : request.dayQuotes;
       if (!dayQuotes) throw new Error(`The scoring worker has no warmed day quotes for ${request.symbol}.`);
       const inputs: TickerSignalsInputs = { ...dayInputs, freeShares: request.freeShares, openShortLegs: request.openShortLegs, dayQuotes };
-      return scoreTicker(inputs, { freeCash: request.freeCash }, request.trading, request.live, undefined, { modelTables, scoredAtMs: request.scoredAtMs });
+      return scoreTicker(inputs, { freeCash: request.freeCash }, trading, request.live, undefined, { modelTables, scoredAtMs: request.scoredAtMs });
     }
   }
 }
