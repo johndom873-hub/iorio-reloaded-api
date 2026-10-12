@@ -139,7 +139,7 @@ describe("runBacktestSession", () => {
     // Buy and hold: ~10,000 shares bought at the first 10:00 price, marked at the last one.
     expect(session.baseline_metrics.endValue).toBeCloseTo(Number(days.at(-1).baseline_value), 1);
     expect(progressCalls.at(-1)!.done).toBe(sessionDates.length);
-    expect(progressCalls.some((call) => call.label.includes(`of ${sessionDates.length} days`))).toBe(true);
+    expect(progressCalls.some((call) => call.label === `at ${sessionDates[0]}`)).toBe(true);
   });
 
   it("is re-runnable from scratch and stops on a cancel request", async () => {

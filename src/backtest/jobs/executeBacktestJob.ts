@@ -166,7 +166,7 @@ async function runThetaDataDownloader(job: BacktestJobRow, control: JobProcessCo
       return;
     }
     if (event.type === "progress") lastSavedDate = event.lastDate;
-    void control.reportProgress(event.daysDone, event.daysTotal, formatDownloadProgressLabel(lastSavedDate, event.daysDone, event.daysTotal));
+    void control.reportProgress(event.daysDone, event.daysTotal, formatDownloadProgressLabel(lastSavedDate));
   });
 
   try {

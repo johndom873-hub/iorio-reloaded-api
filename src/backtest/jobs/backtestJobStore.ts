@@ -3,6 +3,7 @@ import { db } from "../../db/connection.js";
 import type { BacktestJobKind, BacktestJobStatus, BacktestJobView } from "../backtestTypes.js";
 import {
   appendProgressSample,
+  computeJobRunSeconds,
   deriveJobDisplayStatus,
   estimateSecondsLeft,
   finishedJobListingDays,
@@ -44,6 +45,7 @@ export interface BacktestJobRow {
   created_at: Date;
   started_at: Date | null;
   finished_at: Date | null;
+  earlier_run_seconds: number;
 }
 
 function selectJobRows(connection: Knex = db): Knex.QueryBuilder {
@@ -68,6 +70,7 @@ function selectJobRows(connection: Knex = db): Knex.QueryBuilder {
       "j.created_at",
       "j.started_at",
       "j.finished_at",
+      "j.earlier_run_seconds",
     );
 }
 
@@ -101,6 +104,11 @@ export function toBacktestJobView(row: BacktestJobRow, now: Date = new Date()): 
     progressTotal: Number(row.progress_total),
     progressLabel: row.progress_label,
     etaSeconds: displayStatus === "running" ? estimateJobSecondsLeft(row) : null,
+    runSeconds: computeJobRunSeconds(
+      { earlierRunSeconds: Number(row.earlier_run_seconds ?? 0), startedAt: row.started_at ? new Date(row.started_at) : null, finishedAt: row.finished_at ? new Date(row.finished_at) : null, heartbeatAt: row.heartbeat_at ? new Date(row.heartbeat_at) : null },
+      displayStatus,
+      now,
+    ),
     heartbeatAt: isoTimestamp(row.heartbeat_at),
     createdAt: new Date(row.created_at).toISOString(),
     startedAt: isoTimestamp(row.started_at),
@@ -254,10 +262,23 @@ export async function resumeBacktestJob(jobId: string): Promise<BacktestJobView>
 
   terminateLeftoverJobProcesses(job.pid, jobId);
   if (job.kind === "download") {
-    await db("backtest_jobs").where({ id: jobId }).update({ status: "queued", pid: null, cancel_requested: false, error: null, finished_at: null, heartbeat_at: null });
+    // The run that just ended counts toward the total: it ran from started_at to its finish, else its last heartbeat.
+    await db("backtest_jobs")
+      .where({ id: jobId })
+      .update({
+        earlier_run_seconds: db.raw("earlier_run_seconds + CASE WHEN started_at IS NULL THEN 0 ELSE GREATEST(0, ROUND(EXTRACT(EPOCH FROM (COALESCE(finished_at, heartbeat_at, started_at) - started_at))))::integer END"),
+        status: "queued",
+        pid: null,
+        cancel_requested: false,
+        error: null,
+        finished_at: null,
+        heartbeat_at: null,
+      });
     await kickDownloadQueue();
   } else {
     await db("backtest_sessions").where({ id: job.session_id }).update({ status: "queued", error: null, finished_at: null });
+    // A backtest runs again from its first day, so its run time starts again too.
+    await db("backtest_jobs").where({ id: jobId }).update({ earlier_run_seconds: 0 });
     await claimJob(db, jobId, { resetProgress: true });
     await spawnClaimedJob(jobId);
   }

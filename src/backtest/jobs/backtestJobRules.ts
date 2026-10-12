@@ -56,10 +56,19 @@ export function lastFinishedBacktestSessionDate(now: Date): string {
   return day;
 }
 
-/** "2024-03-15 · 1,201 of 1,700 days"; without a date while nothing new is saved yet. */
-export function formatDownloadProgressLabel(lastDate: string | null, daysDone: number, daysTotal: number): string {
-  const counts = `${daysDone.toLocaleString("en-US")} of ${daysTotal.toLocaleString("en-US")} days`;
-  return lastDate ? `${lastDate} · ${counts}` : counts;
+/**
+ * A job's total run time in seconds: its earlier runs (a resumed download) plus the current one, which ends at the
+ * finish, at the last heartbeat when it stopped, or now while it runs. Null for a job that has never run.
+ */
+export function computeJobRunSeconds(job: { earlierRunSeconds: number; startedAt: Date | null; finishedAt: Date | null; heartbeatAt: Date | null }, displayStatus: BacktestJobDisplayStatus, now: Date): number | null {
+  if (displayStatus === "queued" || !job.startedAt) return job.earlierRunSeconds > 0 ? job.earlierRunSeconds : null;
+  const currentRunEnd = job.finishedAt ?? (displayStatus === "stopped" ? (job.heartbeatAt ?? job.startedAt) : now);
+  return job.earlierRunSeconds + Math.max(0, Math.round((currentRunEnd.getTime() - job.startedAt.getTime()) / 1000));
+}
+
+/** "saved up to 2024-03-15" (the screen shows the day counts beside it); "starting" while nothing new is saved yet. */
+export function formatDownloadProgressLabel(lastDate: string | null): string {
+  return lastDate ? `saved up to ${lastDate}` : "starting";
 }
 
 export interface ProgressSample {

@@ -253,7 +253,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       }
       if (nowMs - lastProgressAtMs >= progressIntervalMs) {
         lastProgressAtMs = nowMs;
-        await hooks.reportProgress(dayIndex, sessionDays.length, `${todayIso} · ${formatCount(dayIndex + 1)} of ${formatCount(sessionDays.length)} days`);
+        await hooks.reportProgress(dayIndex, sessionDays.length, `at ${todayIso}`);
       }
       const notes: string[] = [];
       const splitFactor = splitFactorByDay.get(todayIso)!;

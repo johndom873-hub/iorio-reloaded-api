@@ -3,6 +3,7 @@ import {
   appendProgressSample,
   deriveJobDisplayStatus,
   estimateSecondsLeft,
+  computeJobRunSeconds,
   formatDownloadProgressLabel,
   isIsoCalendarDate,
   lastFinishedBacktestSessionDate,
@@ -57,9 +58,9 @@ describe("weekdaysBetweenInclusive", () => {
 });
 
 describe("formatDownloadProgressLabel", () => {
-  it("shows the last saved day and the counts", () => {
-    expect(formatDownloadProgressLabel("2024-03-15", 1201, 1700)).toBe("2024-03-15 · 1,201 of 1,700 days");
-    expect(formatDownloadProgressLabel(null, 1200, 1700)).toBe("1,200 of 1,700 days");
+  it("shows the last saved day (the counts are shown beside it)", () => {
+    expect(formatDownloadProgressLabel("2024-03-15")).toBe("saved up to 2024-03-15");
+    expect(formatDownloadProgressLabel(null)).toBe("starting");
   });
 });
 
@@ -85,5 +86,25 @@ describe("appendProgressSample", () => {
   });
   it("starts over when progress goes backwards (a re-run)", () => {
     expect(appendProgressSample([{ atMilliseconds: 0, done: 50 }], { atMilliseconds: 5_000, done: 2 })).toEqual([{ atMilliseconds: 5_000, done: 2 }]);
+  });
+});
+
+describe("computeJobRunSeconds", () => {
+  const startedAt = new Date("2026-10-12T04:00:00Z");
+  const now = new Date("2026-10-12T05:30:00Z");
+
+  it("counts a running job up to now, a finished one up to its finish and a stopped one up to its last heartbeat", () => {
+    expect(computeJobRunSeconds({ earlierRunSeconds: 0, startedAt, finishedAt: null, heartbeatAt: now }, "running", now)).toBe(5_400);
+    expect(computeJobRunSeconds({ earlierRunSeconds: 0, startedAt, finishedAt: new Date("2026-10-12T04:12:30Z"), heartbeatAt: null }, "succeeded", now)).toBe(750);
+    expect(computeJobRunSeconds({ earlierRunSeconds: 0, startedAt, finishedAt: null, heartbeatAt: new Date("2026-10-12T04:20:00Z") }, "stopped", now)).toBe(1_200);
+  });
+
+  it("adds the earlier runs of a resumed download, and shows only those while it waits in the queue", () => {
+    expect(computeJobRunSeconds({ earlierRunSeconds: 3_600, startedAt, finishedAt: null, heartbeatAt: now }, "running", now)).toBe(9_000);
+    expect(computeJobRunSeconds({ earlierRunSeconds: 3_600, startedAt, finishedAt: null, heartbeatAt: null }, "queued", now)).toBe(3_600);
+  });
+
+  it("is null for a job that has never run", () => {
+    expect(computeJobRunSeconds({ earlierRunSeconds: 0, startedAt: null, finishedAt: null, heartbeatAt: null }, "queued", now)).toBeNull();
   });
 });

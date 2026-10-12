@@ -36,6 +36,8 @@ export interface BacktestJobView {
   progressLabel: string | null;
   /** Seconds left at the recent pace; null until it can be estimated. */
   etaSeconds: number | null;
+  /** Total run time so far (a resumed download adds its earlier runs; a resumed backtest starts again); null if it never ran. */
+  runSeconds: number | null;
   heartbeatAt: string | null;
   createdAt: string;
   startedAt: string | null;
