@@ -15,3 +15,8 @@ tmp/
 .claude/settings.json
 
 coverage/
+
+# Model backtesting (local only): ThetaData files and the downloader venv.
+backtest-data/
+.venv-backtest/
+__pycache__/

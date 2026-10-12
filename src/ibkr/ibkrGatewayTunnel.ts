@@ -33,12 +33,20 @@ export function openIbkrTunnel(options: OpenIbkrTunnelOptions): Promise<IbkrTunn
     // the persistent worker's reconnect loop in particular has nothing else
     // guarding this step and would freeze silently until the process was
     // restarted by hand.
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       sshClient.end();
       reject(new Error("Timed out opening SSH tunnel to IBKR Gateway."));
     }, 15_000);
 
     sshClient.on("ready", () => {
+      // The handshake can still complete after the timeout has rejected: close that session instead of opening a
+      // local server that no caller holds and so nothing would ever close.
+      if (timedOut) {
+        sshClient.end();
+        return;
+      }
       clearTimeout(timer);
       const localServer = net.createServer((localSocket) => {
         sshClient.forwardOut(

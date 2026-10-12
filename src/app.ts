@@ -29,6 +29,7 @@ import { errorHandler } from "./middleware/errorHandler.js";
 import { installDbQueryTimingTracker } from "./lib/dbQueryTimingTracker.js";
 import { emitPulse, pulseOnRequestMiddleware } from "./lib/pulseEmitter.js";
 import { db } from "./db/connection.js";
+import { readBacktestDataDirectory } from "./backtest/backtestDataDirectory.js";
 
 export const app = express();
 
@@ -87,6 +88,15 @@ app.use("/order-checks", orderChecksRouter);
 app.use("/system-health", systemHealthRouter);
 app.use("/calendar-events", calendarEventsRouter);
 app.use("/dashboard", dashboardRouter);
+// Model backtesting is local only (docs/backtesting/): mounted only when BACKTEST_DATA_DIR is set, and loaded lazily so
+// staging and prod never load it.
+if (readBacktestDataDirectory()) {
+  const backtestRouterLoading = import("./routes/backtest.js").then((module) => module.backtestRouter);
+  backtestRouterLoading.catch((error: unknown) => console.error("The backtest routes could not be loaded:", error));
+  app.use("/backtest", (request, response, next) => {
+    backtestRouterLoading.then((backtestRouter) => backtestRouter(request, response, next), next);
+  });
+}
 
 // Same { error } JSON shape as every route, instead of Express's default HTML "Cannot GET /x" page.
 app.use((_request, response) => {

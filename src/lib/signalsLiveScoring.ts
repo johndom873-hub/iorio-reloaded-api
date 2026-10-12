@@ -3,6 +3,7 @@ import { easternInstant, easternIsoDate, easternMinutesOfDay } from "./easternIs
 import type { TradingSession } from "./marketSessionStatus.js";
 import { varianceSessionsToExpiry } from "./varianceClock.js";
 import { volatilityModelTables } from "./volatilityModelTables.generated.js";
+import type { VolatilityModelTables } from "./volatilityModelTables.js";
 import { attachUncompensatedShare, buildSignalCandidates, type CandidateModelContext, computeExpiryIvShifts, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { buildRollCandidates, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
@@ -191,8 +192,16 @@ export interface ScoreTickerObserver {
   onContractExcluded?: SignalCandidatesInput["onContractExcluded"];
 }
 
+/** For replaying a past day (the backtest): the model tables of that time and the scoring instant. Live leaves both out. */
+export interface ScoreTickerHistoryOptions {
+  /** The valuation model's tables; the generated module's when omitted. */
+  modelTables?: VolatilityModelTables;
+  /** The scoring instant; the clock when omitted. */
+  scoredAtMs?: number;
+}
+
 /** Scores one ticker from its loaded inputs; `live` re-reads the snapshot at the live spot and merges live quotes. */
-export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: TradingSettings, live?: LiveScoringOverrides, observer?: ScoreTickerObserver): TickerSignals {
+export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext, settings: TradingSettings, live?: LiveScoringOverrides, observer?: ScoreTickerObserver, history: ScoreTickerHistoryOptions = {}): TickerSignals {
   const { header } = inputs;
   const spotPrice = live?.spotPrice ?? header?.underlyingPrice ?? null;
   const spreadShareCharged = settings.spreadCostChargedPct / 100;
@@ -256,11 +265,11 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const slices = live ? scaleSlicesToLiveSpot(todaySlices, header.underlyingPrice, live.spotPrice) : todaySlices;
   const fittedForwardByExpiry = new Map(todaySlices.map((slice) => [slice.expiry, slice.forwardPrice]));
   const snapshotSpot = header.underlyingPrice;
-  const scoredAtMs = Date.now();
+  const scoredAtMs = history.scoredAtMs ?? Date.now();
   // The valuation model (model review P2–P5): each quote valued at its own instant, forward and spot (signalCandidates.ts).
   const model: CandidateModelContext | null = inputs.modelForecast
     ? {
-        tables: volatilityModelTables,
+        tables: history.modelTables ?? volatilityModelTables,
         forecast: inputs.modelForecast,
         group: inputs.valuationGroup,
         varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, inputs.tradingSessions),

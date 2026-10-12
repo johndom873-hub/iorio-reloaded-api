@@ -1,0 +1,187 @@
+import { DatabaseSync } from "node:sqlite";
+import { blackScholesPriceOnForward, yearsBetweenIsoDates } from "../../../lib/impliedVolatilitySurface.js";
+import type { PlutoSettings } from "../../../pluto/settingsStore.js";
+import type { BacktestSettings } from "../../backtestTypes.js";
+import type { StoredDailyBar } from "../backtestBarHistory.js";
+import type { SymbolFileQuote } from "../backtestSymbolFile.js";
+
+// Synthetic market data for the engine's tests: a seeded random-walk bar history, Black-Scholes option quotes at a flat
+// implied volatility, settings shaped like the dev database's, and a schema-version-1 symbol file.
+
+/** Deterministic standard normal draws (LCG + Box-Muller), so a test's data is the same on every run. */
+export function seededNormalGenerator(seed: number): () => number {
+  let state = seed >>> 0;
+  const uniform = () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return (state + 0.5) / 4294967296;
+  };
+  return () => Math.sqrt(-2 * Math.log(uniform())) * Math.cos(2 * Math.PI * uniform());
+}
+
+/** Weekdays from `fromIso` to `toIso` inclusive. */
+export function weekdaysBetween(fromIso: string, toIso: string): string[] {
+  const days: string[] = [];
+  for (let at = Date.parse(`${fromIso}T12:00:00Z`); at <= Date.parse(`${toIso}T12:00:00Z`); at += 86_400_000) {
+    const day = new Date(at);
+    if (day.getUTCDay() !== 0 && day.getUTCDay() !== 6) days.push(day.toISOString().slice(0, 10));
+  }
+  return days;
+}
+
+/** Daily bars on `dates` ending near `endPrice`, with the given annualized volatility (open = previous close, small high/low range). */
+export function syntheticDailyBars(dates: string[], endPrice: number, annualizedVolatility: number, seed: number, impliedVolatility: number | null = null): StoredDailyBar[] {
+  const normal = seededNormalGenerator(seed);
+  const dailyVolatility = annualizedVolatility / Math.sqrt(252);
+  const logReturns = dates.map(() => dailyVolatility * normal());
+  const totalLogReturn = logReturns.reduce((sum, value) => sum + value, 0);
+  let close = endPrice * Math.exp(-totalLogReturn);
+  return dates.map((tradingDate, index) => {
+    const open = close;
+    close = open * Math.exp(logReturns[index]!);
+    const high = Math.max(open, close) * (1 + dailyVolatility * 0.3);
+    const low = Math.min(open, close) * (1 - dailyVolatility * 0.3);
+    return { tradingDate, open, high, low, close, volume: 1_000_000, impliedVolatility };
+  });
+}
+
+/** Two-sided quotes priced at a flat implied volatility on the forward S·e^(rT), bid/ask = price ∓ max($0.01, 2% of the price). */
+export function syntheticOptionQuotes(todayIso: string, stockPrice: number, expiries: string[], impliedVolatility: number, riskFreeRate: number, strikeStep: number, strikesEachSide: number): SymbolFileQuote[] {
+  const quotes: SymbolFileQuote[] = [];
+  const atTheMoney = Math.round(stockPrice / strikeStep) * strikeStep;
+  for (const expiry of expiries) {
+    const years = yearsBetweenIsoDates(todayIso, expiry);
+    for (let offset = -strikesEachSide; offset <= strikesEachSide; offset++) {
+      const strike = Math.round((atTheMoney + offset * strikeStep) * 100) / 100;
+      for (const right of ["C", "P"] as const) {
+        const price = years > 0 ? blackScholesPriceOnForward(stockPrice * Math.exp(riskFreeRate * years), strike, years, riskFreeRate, impliedVolatility, right === "C") : Math.max(0, right === "C" ? stockPrice - strike : strike - stockPrice);
+        const halfSpread = Math.max(0.01, price * 0.02);
+        const bid = Math.round((price - halfSpread) * 100) / 100;
+        const ask = Math.round((price + halfSpread) * 100) / 100;
+        quotes.push({ expiry, strike, right, bid: bid > 0 ? bid : 0, ask: Math.max(ask, 0.01), bidSize: 10, askSize: 10 });
+      }
+    }
+  }
+  return quotes;
+}
+
+/** Pluto's settings as on the dev database (2026-10-12). */
+export function fixturePlutoSettings(overrides: Partial<PlutoSettings> = {}): PlutoSettings {
+  return {
+    capitalBudgetPct: 50,
+    maxTickerExposurePct: 10,
+    maxSectorExposurePct: 100,
+    maxOpenPositions: 15,
+    maxActionsPerSession: 10,
+    orderSizePctOfBudget: 10,
+    minCashReservePct: 5,
+    minGrade: "weak",
+    minEdgeYieldPct: 15,
+    maxAbsDelta: 0.4,
+    minDte: 1,
+    maxDte: 45,
+    minAnnualizedYieldPct: 50,
+    maxSpreadPct: 15,
+    minOpenInterest: 0,
+    minSessionVolume: 0,
+    maxQuoteAgeMinutes: 10,
+    maxContractsVolumeSharePct: 20,
+    maxSliceRmseVp: 2,
+    minSlicePointCount: 10,
+    maxMidVsSurfaceIvVp: 5,
+    maxIvShiftVp: 8,
+    maxDayMoveMultiple: 3,
+    stressRiskBudgetPct: 1,
+    stressSigmas: 2,
+    windowStartEt: "10:00",
+    windowEndEt: "15:30",
+    dailyLossBreakerPct: 5,
+    spyStressBreakerPct: 3,
+    maxEdgeMarginDriftPts: 10,
+    tickerCooldownMinutes: 60,
+    maxFillSlippagePct: 5,
+    modelId: "test",
+    reasoningEffort: "medium",
+    callTimeoutSeconds: 90,
+    dailyCostCeilingUsd: 1,
+    confidenceFloor: 0.6,
+    consecutiveModelFailuresBreaker: 3,
+    promptVersion: "test",
+    daySignalsPollSeconds: 1,
+    burstLines: 10,
+    burstSettleSeconds: 4,
+    perTickerModelCooldownMinutes: 5,
+    maxEnabledTickers: 15,
+    messageRateLimitPerSecond: 8,
+    crashLoopRestartsPerHour: 3,
+    telegramVerbosity: "off",
+    unstructuredCloseMinPct: 1,
+    unstructuredCloseMinDollars: 50,
+    buybackMinDte: 2,
+    updatedAt: "2026-10-12T00:00:00.000Z",
+    updatedByUserId: null,
+    ...overrides,
+  };
+}
+
+/** A session's settings: the dev values, with the trading settings' and Pluto's minimum yield lowered so synthetic chains trade. */
+export function fixtureBacktestSettings(plutoOverrides: Partial<PlutoSettings> = {}): BacktestSettings {
+  return {
+    pluto: fixturePlutoSettings({ minAnnualizedYieldPct: 10, minEdgeYieldPct: 5, ...plutoOverrides }),
+    trading: {
+      maxPositionPctOfPortfolio: 10,
+      maxConcentrationPerTickerPct: 20,
+      minCashReservePct: 5,
+      deltaTargetMin: 0.1,
+      deltaTargetMax: 0.5,
+      recoveryDteMin: 1,
+      recoveryDteMax: 14,
+      minAnnualizedYieldPct: 10,
+      commissionWarnSharePctOfPremium: 5,
+      priceCheckMaxDeviationPct: 2,
+      priceCheckMinToleranceDollars: 0.05,
+      spreadCostChargedPct: 50,
+      orderUnfilledCancelMinutes: 15,
+    },
+    kellyFraction: 0.25,
+  };
+}
+
+export interface SyntheticSymbolFileDay {
+  tradingDate: string;
+  quotes: SymbolFileQuote[];
+  /** End-of-day rows: volume per contract (closing NBBO = the 10:00 quote). */
+  endOfDayVolume: number;
+  openInterest: number;
+}
+
+/** Writes a schema-version-1 symbol file (docs/backtesting/DATA-FILES.md). */
+export function writeSyntheticSymbolFile(filePath: string, symbol: string, days: SyntheticSymbolFileDay[], noDataDates: string[] = []): void {
+  const database = new DatabaseSync(filePath);
+  try {
+    database.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE days (trading_date TEXT PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('complete', 'no_data')), quote_rows INTEGER NOT NULL, eod_rows INTEGER NOT NULL, open_interest_rows INTEGER NOT NULL, fetched_at TEXT NOT NULL);
+      CREATE TABLE quotes (trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')), bid REAL, ask REAL, bid_size INTEGER, ask_size INTEGER, quoted_at TEXT, PRIMARY KEY (trading_date, expiry, strike, option_right)) WITHOUT ROWID;
+      CREATE TABLE eod (trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')), close REAL, volume INTEGER, bid REAL, ask REAL, PRIMARY KEY (trading_date, expiry, strike, option_right)) WITHOUT ROWID;
+      CREATE TABLE open_interest (trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')), open_interest INTEGER NOT NULL, PRIMARY KEY (trading_date, expiry, strike, option_right)) WITHOUT ROWID;
+    `);
+    const insertMeta = database.prepare("INSERT INTO meta (key, value) VALUES (?, ?)");
+    const meta: [string, string][] = [["symbol", symbol], ["schema_version", "1"], ["quote_time_et", "10:00:00"], ["max_dte", "45"], ["created_at", "2026-10-12T00:00:00Z"]];
+    for (const [key, value] of meta) insertMeta.run(key, value);
+    const insertDay = database.prepare("INSERT INTO days VALUES (?, ?, ?, ?, ?, ?)");
+    const insertQuote = database.prepare("INSERT INTO quotes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    const insertEndOfDay = database.prepare("INSERT INTO eod VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    const insertOpenInterest = database.prepare("INSERT INTO open_interest VALUES (?, ?, ?, ?, ?)");
+    for (const day of days) {
+      insertDay.run(day.tradingDate, "complete", day.quotes.length, day.quotes.length, day.quotes.length, "2026-10-12T00:00:00Z");
+      for (const quote of day.quotes) {
+        insertQuote.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid, quote.ask, quote.bidSize, quote.askSize, `${day.tradingDate}T09:59:58-04:00`);
+        insertEndOfDay.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid === null || quote.ask === null ? null : (quote.bid + quote.ask) / 2, day.endOfDayVolume, quote.bid, quote.ask);
+        insertOpenInterest.run(day.tradingDate, quote.expiry, quote.strike, quote.right, day.openInterest);
+      }
+    }
+    for (const dateIso of noDataDates) insertDay.run(dateIso, "no_data", 0, 0, 0, "2026-10-12T00:00:00Z");
+  } finally {
+    database.close();
+  }
+}

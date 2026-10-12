@@ -62,6 +62,8 @@ export interface PostModelGateInput {
   sector: string | null;
   /** What the stress cap needs about the ticker today (fresh re-score). */
   stress: StressCapInput;
+  /** Share of full Kelly to size with; Pluto's fixed kellyFraction when omitted (a backtest session passes its own). */
+  kellyFraction?: number;
   /** The ticker's open cycle, for the break-even rule on a call written on held shares (heldShareCalls.ts); absent blocks such a call. */
   cycleBreakEven?: CycleBreakEven | null;
 }
@@ -208,7 +210,8 @@ export interface KellyCap {
   detail: string;
 }
 
-export function computeKellyCap(settings: PlutoSettings, contract: Pick<SignalCandidate, "strategyKey"> & { model: Pick<CandidateModelScore, "calibratedExpectedPnlDollars" | "pnlVarianceDollars" | "coveredPositionPnlVarianceDollars"> | null }, netLiquidationValue: number): KellyCap {
+/** `fraction` is Pluto's fixed kellyFraction live; a backtest session sizes with its own. */
+export function computeKellyCap(settings: PlutoSettings, contract: Pick<SignalCandidate, "strategyKey"> & { model: Pick<CandidateModelScore, "calibratedExpectedPnlDollars" | "pnlVarianceDollars" | "coveredPositionPnlVarianceDollars"> | null }, netLiquidationValue: number, fraction: number = kellyFraction): KellyCap {
   const model = contract.model;
   if (!model) return { contracts: 0, detail: "Kelly cap: the contract has no model valuation" };
   const bankroll = (netLiquidationValue * settings.capitalBudgetPct) / 100;
@@ -216,10 +219,10 @@ export function computeKellyCap(settings: PlutoSettings, contract: Pick<SignalCa
   if (!(mu > 0)) return { contracts: 0, detail: `Kelly cap: Hist Edge $${mu.toFixed(0)}/contract ≤ 0, so no contracts` };
   const isCall = contract.strategyKey === "covered_call";
   const variance = isCall ? model.coveredPositionPnlVarianceDollars : model.pnlVarianceDollars;
-  const contracts = variance !== null && variance > 0 ? Math.floor((kellyFraction * bankroll * mu) / variance) : 0;
+  const contracts = variance !== null && variance > 0 ? Math.floor((fraction * bankroll * mu) / variance) : 0;
   return {
     contracts,
-    detail: `Kelly cap: ${kellyFraction} × $${bankroll.toFixed(0)} budget × Hist Edge $${mu.toFixed(0)}/contract ÷ P&L variance${isCall ? " (shares + call)" : ""} → ${contracts} contract(s)`,
+    detail: `Kelly cap: ${fraction} × $${bankroll.toFixed(0)} budget × Hist Edge $${mu.toFixed(0)}/contract ÷ P&L variance${isCall ? " (shares + call)" : ""} → ${contracts} contract(s)`,
   };
 }
 
@@ -265,7 +268,7 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
     const byRoom = Math.floor(Math.max(0, roomDollars) / unitNotional);
     const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
-    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue);
+    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction);
     fullSizeQuantity = Math.min(byRoom, liquidityCap, stressCap.contracts, kellyCap.contracts);
     gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at $${unitNotional.toFixed(0)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → $${(fullSizeQuantity * unitNotional).toFixed(0)}`);
   } else if (book.freeShares >= 100) {
@@ -290,7 +293,7 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
   } else {
     // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
     // contract is a buy-write that buys 100 shares at the live spot, sized from the same room as a put.
-    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue);
+    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction);
     // One Kelly cap for all the call's contracts, on shares + call: free-share contracts first, buy-writes within what is left.
     const coveredByShares = Math.min(Math.floor(book.freeShares / 100), kellyCap.contracts);
     if (book.spotPrice === null || !(book.spotPrice > 0)) {

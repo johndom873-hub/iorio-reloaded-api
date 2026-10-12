@@ -118,6 +118,15 @@ describe("openIbkrTunnel", () => {
     expect(latestSshClient().end).toHaveBeenCalledTimes(1);
   });
 
+  it("closes a session whose handshake completes after the timeout instead of opening a local server", async () => {
+    const outcome = openIbkrTunnel(options).catch((error: Error) => error.message);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(outcome).resolves.toBe("Timed out opening SSH tunnel to IBKR Gateway.");
+    latestSshClient().emit("ready");
+    expect(tunnelHarness.localServers).toHaveLength(0);
+    expect(latestSshClient().end).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects with the ssh error and clears the timeout", async () => {
     const outcome = openIbkrTunnel(options);
     latestSshClient().emit("error", new Error("All configured authentication methods failed"));

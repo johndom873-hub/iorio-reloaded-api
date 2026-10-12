@@ -1,0 +1,21 @@
+# Python dependencies of the backtest downloader (scripts/backtest/), installed by `npm run backtest:setup` into .venv-backtest/.
+# Imported directly by the downloader and its tests:
+thetadata==1.0.14
+python-dotenv==1.2.4
+polars==2.0.0
+grpcio==1.84.0
+httpx==0.28.1
+# Pulled in by thetadata (pinned so a new upstream release cannot break a fresh setup):
+anyio==4.15.1
+certifi==2026.7.22
+h11==0.16.0
+httpcore==1.0.9
+idna==3.20
+numpy==2.5.4
+pandas==3.0.6
+polars-runtime-32==2.0.0
+protobuf==7.36.2
+python-dateutil==2.9.0.post0
+six==1.17.0
+typing_extensions==4.16.0
+zstandard==0.25.0

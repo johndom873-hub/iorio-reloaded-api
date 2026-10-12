@@ -4,7 +4,7 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { fetchPricesPoolFirst } from "../ibkr/pricePool.js";
 import { computeCashLockedInCsps, computeTickerExposure } from "./positionExposure.js";
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
-import { loadTradingSettings } from "./tradingSettingsStore.js";
+import { loadTradingSettings, type TradingSettings } from "./tradingSettingsStore.js";
 import { orderFillsPendingSql } from "./orderFills.js";
 
 // The three trading settings that block *placing* an order: max position %, max concentration per ticker %
@@ -130,7 +130,7 @@ export function computeInFlightOrderNotional(requestType: string, payload: Order
   return stockLeg ? stockLeg.quantity * Math.max(0, stockLeg.unitPrice - (callLeg?.unitPrice ?? 0)) : 0;
 }
 
-interface InFlightTotals {
+export interface InFlightTotals {
   totalNotional: number;
   tickerNotional: number;
 }
@@ -193,8 +193,26 @@ export async function evaluateOrderLimits(input: OrderLimitsInput): Promise<Orde
     return { blocked: true, reasons: ["Could not verify position limits: total portfolio value is unavailable."] };
   }
 
-  const freeCash = Math.max(0, (account.totalCashValue ?? 0) - cashLockedInCsps - inFlight.totalNotional);
   const orderNotional = await computeOrderNotionalForInput(input, spotPrice);
+  return evaluateOrderLimitFigures({ symbol: input.symbol, orderNotional, totalPortfolioValue, totalCashValue: account.totalCashValue, cashLockedInCsps, existingTickerExposure, inFlight, settings });
+}
+
+export interface OrderLimitFigures {
+  symbol: string;
+  orderNotional: number;
+  /** Net liquidation value, > 0. */
+  totalPortfolioValue: number;
+  totalCashValue: number | null;
+  cashLockedInCsps: number;
+  existingTickerExposure: number;
+  inFlight: InFlightTotals;
+  settings: Pick<TradingSettings, "maxPositionPctOfPortfolio" | "maxConcentrationPerTickerPct" | "minCashReservePct">;
+}
+
+/** Pure: the three limits on figures already read (the live gate reads them from IBKR and the book; a backtest from its simulated book). */
+export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimitsResult {
+  const { orderNotional, totalPortfolioValue, existingTickerExposure, inFlight, settings } = figures;
+  const freeCash = Math.max(0, (figures.totalCashValue ?? 0) - figures.cashLockedInCsps - inFlight.totalNotional);
   const workingOrdersNote = inFlight.totalNotional > 0 ? ` (counting ${formatDollars(inFlight.totalNotional)} of orders still working)` : "";
 
   const reasons: string[] = [];
@@ -211,7 +229,7 @@ export async function evaluateOrderLimits(input: OrderLimitsInput): Promise<Orde
   const tickerExposureAfter = existingTickerExposure + inFlight.tickerNotional + orderNotional;
   const concentrationAfterPct = tickerExposureAfter / totalPortfolioValue;
   if (tickerExposureAfter > limitInDollars(settings.maxConcentrationPerTickerPct)) {
-    reasons.push(`${input.symbol} would be ${formatPct(concentrationAfterPct)} of portfolio value, above the ${settings.maxConcentrationPerTickerPct}% max concentration per ticker${workingOrdersNote}.`);
+    reasons.push(`${figures.symbol} would be ${formatPct(concentrationAfterPct)} of portfolio value, above the ${settings.maxConcentrationPerTickerPct}% max concentration per ticker${workingOrdersNote}.`);
   }
 
   const cashAfter = freeCash - orderNotional;
