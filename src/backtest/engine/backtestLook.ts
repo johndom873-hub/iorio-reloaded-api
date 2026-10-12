@@ -31,7 +31,7 @@ import { classifyOpenRefusal, orderLimitBreachesOf, type OpenRefusalInput } from
 import { decideWithLlm, findOfferedChoice, ivRankFromHistory, type BacktestLlmRound, type BacktestLlmSession, type BacktestLlmTicker } from "./backtestLlmDecider.js";
 import { chooseBacktestAction, openClosedAtOnceByEventRule, type BacktestPolicyChoice } from "./backtestPolicy.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
-import { buildHistoricalTickerInputs, captureLookTimeEt, earningsKnownOn, lookInstantMs, selectLookDayQuotes, type BacktestDayMarket, type BacktestTickerProfile } from "./backtestTickerInputs.js";
+import { buildHistoricalTickerInputs, captureLookTimeEt, ContractSet, earningsKnownOn, lookInstantMs, selectLookDayQuotes, type BacktestDayMarket, type BacktestTickerProfile } from "./backtestTickerInputs.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import type { BacktestScoringPool } from "./backtestScoringPool.js";
 import { buyBackPut, closeCoveredCall, openCashSecuredPut, openCoveredCall, rollLeg, sellShares } from "./ledger/ledgerEvents.js";
@@ -126,7 +126,8 @@ export interface BacktestPreparedSymbolDay {
   inputs: TickerSignalsInputs;
   fitIssue: string | null;
   referenceVolatility: number | null;
-  capturedContractKeys: ReadonlySet<string>;
+  /** The contracts of the 10:00 capture. */
+  capturedContracts: ContractSet;
   earnings: UpcomingEarnings | null;
   sessionsLeftBeforeEarnings: number | null;
   /** IBKR's daily closes before today on a cycle's scale. */
@@ -291,7 +292,7 @@ function completePreparedSymbolDay(built: ReturnType<typeof buildHistoricalTicke
   const cycleScaledClosesByFactor = new Map<number, { date: string; close: number }[]>();
   return {
     ...built,
-    capturedContractKeys: new Set(built.inputs.quotes.map(contractKey)),
+    capturedContracts: ContractSet.of(built.inputs.quotes),
     earnings,
     sessionsLeftBeforeEarnings: earnings && Date.parse(earnings.dateIso) - Date.parse(todayIso) <= 14 * 86_400_000 ? countSessionsLeftBeforeEarnings(todayIso, earnings, calendar.openDaysBetween(todayIso, earnings.dateIso)) : null,
     dailyClosesOnCycleScale: (cycleSplitFactor) => {
@@ -358,8 +359,8 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
     let lookQuoteIndex: Map<string, SymbolFileQuote> | null = null;
     const lookQuoteOfContract = (key: string): SymbolFileQuote | undefined => (lookQuoteIndex ??= new Map(lookQuotes.map((quote) => [contractKey({ expiry: quote.expiry, strike: roundedStrike(quote.strike), right: quote.right }), quote]))).get(key);
     // After 10:00 the look's quotes are the day's fresh quotes over the capture's.
-    const lookDayQuotes: LiveOptionQuote[] = lookSymbol.intraday ? (lookSymbol.intraday.dayQuotes ?? selectLookDayQuotes(lookQuotes, day.capturedContractKeys, todayIso, stockPrice, day.referenceVolatility, at.toISOString())) : [];
-    const freshlyQuotedContractKeys: ReadonlySet<string> = lookSymbol.intraday ? new Set(lookDayQuotes.map(contractKey)) : day.capturedContractKeys;
+    const lookDayQuotes: LiveOptionQuote[] = lookSymbol.intraday ? (lookSymbol.intraday.dayQuotes ?? selectLookDayQuotes(lookQuotes, day.capturedContracts, todayIso, stockPrice, day.referenceVolatility, at.toISOString())) : [];
+    const freshlyQuotedContracts: ContractSet = lookSymbol.intraday ? ContractSet.of(lookDayQuotes) : day.capturedContracts;
 
     /**
      * The close gate of a position of the symbol as the close route reads it, on a book and its marks: the look's quotes
@@ -421,7 +422,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
       const freeSharesToday = roundedShares(ledgerFreeShares(ledger, symbol) * priceToCycleScale);
       const heldLegQuotesNotYetRead: LiveOptionQuote[] = openShortLegs.flatMap((leg) => {
         const key = contractKey(leg);
-        const quote = freshlyQuotedContractKeys.has(key) ? undefined : lookQuoteOfContract(key);
+        const quote = freshlyQuotedContracts.has(leg) ? undefined : lookQuoteOfContract(key);
         return quote && quote.bid !== null && quote.ask !== null ? [{ expiry: leg.expiry, strike: leg.strike, right: leg.right, bid: quote.bid, ask: quote.ask }] : [];
       });
 

@@ -90,17 +90,43 @@ export function lookInstantMs(todayIso: string, lookTimeEt: string): number {
   return easternInstant(todayIso, hour, minute).getTime();
 }
 
-/** The contracts the live 10:00 capture would have requested on this day (runOptionChainCapture.ts prepareTicker). */
-export function selectCapturedQuotes(quotes: readonly SymbolFileQuote[], todayIso: string, stockPrice: number, referenceVolatility: number | null): SymbolFileQuote[] {
-  const selected = capturedContractKeysOf(quotes, todayIso, stockPrice, referenceVolatility);
-  return quotes.filter((quote) => selected.has(contractKey(quote)));
+/**
+ * A set of contracts by expiry, strike and right: membership as contractKey's would answer it (two strikes give the same
+ * key text exactly when they are the same number), without building a key per quote.
+ */
+export class ContractSet {
+  private readonly rightsByStrikeByExpiry = new Map<string, Map<number, Set<string>>>();
+
+  static of(contracts: Iterable<{ expiry: string; strike: number; right: string }>): ContractSet {
+    const set = new ContractSet();
+    for (const contract of contracts) set.add(contract);
+    return set;
+  }
+
+  add(contract: { expiry: string; strike: number; right: string }): void {
+    let rightsByStrike = this.rightsByStrikeByExpiry.get(contract.expiry);
+    if (!rightsByStrike) this.rightsByStrikeByExpiry.set(contract.expiry, (rightsByStrike = new Map()));
+    let rights = rightsByStrike.get(contract.strike);
+    if (!rights) rightsByStrike.set(contract.strike, (rights = new Set()));
+    rights.add(contract.right);
+  }
+
+  has(contract: { expiry: string; strike: number; right: string }): boolean {
+    return this.rightsByStrikeByExpiry.get(contract.expiry)?.get(contract.strike)?.has(contract.right) ?? false;
+  }
 }
 
-/** selectCapturedQuotes as contract keys: every key of a quote it keeps (and possibly keys of contracts the quotes lack). */
-function capturedContractKeysOf(quotes: readonly SymbolFileQuote[], todayIso: string, stockPrice: number, referenceVolatility: number | null): Set<string> {
+/** The contracts the live 10:00 capture would have requested on this day (runOptionChainCapture.ts prepareTicker). */
+export function selectCapturedQuotes(quotes: readonly SymbolFileQuote[], todayIso: string, stockPrice: number, referenceVolatility: number | null): SymbolFileQuote[] {
+  const selected = capturedContractsOf(quotes, todayIso, stockPrice, referenceVolatility);
+  return quotes.filter((quote) => selected.has(quote));
+}
+
+/** selectCapturedQuotes as contracts: every contract of a quote it keeps (and possibly contracts the quotes lack). */
+function capturedContractsOf(quotes: readonly SymbolFileQuote[], todayIso: string, stockPrice: number, referenceVolatility: number | null): ContractSet {
   const strikesByExpiry = new Map<string, Set<number>>();
   for (const quote of quotes) strikesByExpiry.set(quote.expiry, (strikesByExpiry.get(quote.expiry) ?? new Set()).add(quote.strike));
-  const selected = new Set<string>();
+  const selected = new ContractSet();
   for (const [expiry, strikes] of strikesByExpiry) {
     const daysToExpiryCount = calendarDaysUntilExpiry(todayIso, expiry.replaceAll("-", ""));
     if (daysToExpiryCount < captureMinimumDaysToExpiry || daysToExpiryCount > captureMaximumDaysToExpiry) continue;
@@ -109,7 +135,7 @@ function capturedContractKeysOf(quotes: readonly SymbolFileQuote[], todayIso: st
         ? computeStrikeWindow({ spotPrice: stockPrice, atmImpliedVolatility: referenceVolatility, daysToExpiry: daysToExpiryCount })
         : { halfWidth: widestStrikeWindowHalfWidth, lowerBound: stockPrice * Math.exp(-widestStrikeWindowHalfWidth), upperBound: stockPrice * Math.exp(widestStrikeWindowHalfWidth) };
     if (!window) continue;
-    for (const contract of selectContractsToCapture([...strikes], stockPrice, window, { bothSidesWithinFractionOfSpot: captureBothSidesWithinFractionOfSpot })) selected.add(contractKey({ expiry, ...contract }));
+    for (const contract of selectContractsToCapture([...strikes], stockPrice, window, { bothSidesWithinFractionOfSpot: captureBothSidesWithinFractionOfSpot })) selected.add({ expiry, ...contract });
   }
   return selected;
 }
@@ -120,13 +146,12 @@ function capturedContractKeysOf(quotes: readonly SymbolFileQuote[], todayIso: st
  * its contract set at the live price, so a contract that moved into the strike window since 10:00 is quoted too).
  * A held leg outside both is added by the look.
  */
-export function selectLookDayQuotes(lookQuotes: readonly SymbolFileQuote[], capturedContractKeys: ReadonlySet<string>, todayIso: string, lookStockPrice: number, referenceVolatility: number | null, quotedAtIso: string): LiveOptionQuote[] {
-  // A look quote's key is among these exactly when selectCapturedQuotes keeps that quote.
-  const inWindowNow = capturedContractKeysOf(lookQuotes, todayIso, lookStockPrice, referenceVolatility);
+export function selectLookDayQuotes(lookQuotes: readonly SymbolFileQuote[], capturedContracts: ContractSet, todayIso: string, lookStockPrice: number, referenceVolatility: number | null, quotedAtIso: string): LiveOptionQuote[] {
+  // A look quote is among these exactly when selectCapturedQuotes keeps it.
+  const inWindowNow = capturedContractsOf(lookQuotes, todayIso, lookStockPrice, referenceVolatility);
   const dayQuotes: LiveOptionQuote[] = [];
   for (const quote of lookQuotes) {
-    const key = contractKey(quote);
-    if (capturedContractKeys.has(key) || inWindowNow.has(key)) dayQuotes.push({ expiry: quote.expiry, strike: quote.strike, right: quote.right, bid: quote.bid, ask: quote.ask, quotedAt: quotedAtIso });
+    if (capturedContracts.has(quote) || inWindowNow.has(quote)) dayQuotes.push({ expiry: quote.expiry, strike: quote.strike, right: quote.right, bid: quote.bid, ask: quote.ask, quotedAt: quotedAtIso });
   }
   return dayQuotes;
 }

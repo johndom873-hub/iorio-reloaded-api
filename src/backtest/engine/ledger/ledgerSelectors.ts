@@ -8,7 +8,7 @@ import { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalA
 import type { OpenShortLeg } from "../../../lib/rollSignalCandidates.js";
 import { findSameContractConflict, type OccupiedContract } from "../../../pluto/candidateFilters.js";
 import type { PostModelBookInput } from "../../../pluto/postModelGates.js";
-import { findLeg, findPosition, ledgerRevision, legsOfPosition, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type LedgerTrade, type SimulatedLedger } from "./simulatedLedger.js";
+import { findLeg, findPosition, ledgerRevision, legsOfPosition, rememberedForRevision, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type LedgerTrade, type SimulatedLedger } from "./simulatedLedger.js";
 
 // Pluto's view of the simulated book. The figures come from the functions the platform itself uses, fed with the
 // ledger's rows: position figures from positionSelectors.ts (tested against the positions SQL), cycles and the
@@ -22,16 +22,19 @@ export function ledgerPositionFigures(ledger: SimulatedLedger, position: LedgerP
   return { strategyKey: position.strategyKey, status: position.status, legs: legsOfPosition(ledger, position.id) };
 }
 
-function openPositions(ledger: SimulatedLedger): LedgerPosition[] {
-  return ledger.positions.filter((position) => position.status === "open");
+/** Open positions, in the ledger's order (one list per ledger revision). */
+function openPositions(ledger: SimulatedLedger): readonly LedgerPosition[] {
+  return rememberedForRevision(ledger, "openPositions", () => ledger.positions.filter((position) => position.status === "open"));
 }
 
-/** Open legs of open positions, in the ledger's order. */
-function openLegs(ledger: SimulatedLedger): { leg: LedgerLeg; position: LedgerPosition }[] {
-  const openPositionById = new Map(openPositions(ledger).map((position) => [position.id, position]));
-  return ledger.legs.flatMap((leg) => {
-    const position = openPositionById.get(leg.positionId);
-    return position && isOpen(leg) ? [{ leg, position }] : [];
+/** Open legs of open positions, in the ledger's order (one list per ledger revision). */
+function openLegs(ledger: SimulatedLedger): readonly { leg: LedgerLeg; position: LedgerPosition }[] {
+  return rememberedForRevision(ledger, "openLegs", () => {
+    const openPositionById = new Map(openPositions(ledger).map((position) => [position.id, position]));
+    return ledger.legs.flatMap((leg) => {
+      const position = openPositionById.get(leg.positionId);
+      return position && isOpen(leg) ? [{ leg, position }] : [];
+    });
   });
 }
 

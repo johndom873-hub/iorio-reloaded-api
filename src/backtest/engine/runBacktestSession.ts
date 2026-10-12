@@ -30,7 +30,7 @@ import { BacktestLlmSession, type BacktestLlmRound } from "./backtestLlmDecider.
 
 import { alignOpenOptionLegsToSplitFactor, creditInterest, settleExpiry } from "./ledger/ledgerEvents.js";
 import { ledgerCommittedDollars, ledgerLastFilledActionAt, ledgerLegsDueForSettlement, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
-import { createSimulatedLedger, cycleSplitFactorFor, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
+import { createSimulatedLedger, cycleSplitFactorFor, rememberedForRevision, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
 import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestTradingCalendar.js";
 import { BacktestScoringPool, scoringWorkerCount } from "./backtestScoringPool.js";
@@ -290,10 +290,12 @@ function formatCount(count: number): string {
   return count.toLocaleString("en-US");
 }
 
-/** Open legs of open positions. */
-function openLegsOf(ledger: SimulatedLedger): LedgerLeg[] {
-  const openPositionIds = new Set(ledger.positions.filter((position) => position.status === "open").map((position) => position.id));
-  return ledger.legs.filter((leg) => leg.exitAt === null && openPositionIds.has(leg.positionId));
+/** Open legs of open positions, in the ledger's order (one list per ledger revision). */
+function openLegsOf(ledger: SimulatedLedger): readonly LedgerLeg[] {
+  return rememberedForRevision(ledger, "openLegsOf", () => {
+    const openPositionIds = new Set(ledger.positions.filter((position) => position.status === "open").map((position) => position.id));
+    return ledger.legs.filter((leg) => leg.exitAt === null && openPositionIds.has(leg.positionId));
+  });
 }
 
 export interface SimulatedSessionResult {
@@ -746,7 +748,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (!ahead) {
           const parity = quotes ? computeParityStockPrice(quotes, todayIso, (riskFreeRatePercent ?? 0) / 100, maximumSpreadFractionOfMid) : null;
           const prepared = preparedDayBySymbol.get(entry.symbol);
-          const dayQuotes = quotes && parity && prepared ? selectLookDayQuotes(quotes, prepared.capturedContractKeys, todayIso, parity.price, prepared.referenceVolatility, new Date(lookInstantMs(todayIso, lookTimeEt)).toISOString()) : null;
+          const dayQuotes = quotes && parity && prepared ? selectLookDayQuotes(quotes, prepared.capturedContracts, todayIso, parity.price, prepared.referenceVolatility, new Date(lookInstantMs(todayIso, lookTimeEt)).toISOString()) : null;
           lookAheadBySymbolAndTime.set(key, (ahead = { parity, dayQuotes }));
         }
         return { quotes, ...ahead };

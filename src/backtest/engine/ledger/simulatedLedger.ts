@@ -121,6 +121,25 @@ export function markLedgerChanged(ledger: SimulatedLedger): void {
   revisionByLedger.set(ledger, ledgerRevision(ledger) + 1);
 }
 
+/** Values read from a ledger, by name, kept for the revision they were read at. */
+const rememberedByLedger = new WeakMap<SimulatedLedger, Map<string, { revision: number; value: unknown }>>();
+
+/**
+ * What `read` gives on the book as it stands, worked out once per ledger revision under `name`. The value is shared by
+ * every caller until the book changes: an array comes back frozen.
+ */
+export function rememberedForRevision<T>(ledger: SimulatedLedger, name: string, read: () => T): T {
+  let byName = rememberedByLedger.get(ledger);
+  if (!byName) rememberedByLedger.set(ledger, (byName = new Map()));
+  const revision = ledgerRevision(ledger);
+  const kept = byName.get(name);
+  if (kept && kept.revision === revision) return kept.value as T;
+  const value = read();
+  if (Array.isArray(value)) Object.freeze(value);
+  byName.set(name, { revision, value });
+  return value;
+}
+
 /** Applies a change to the book, its revision raised before and after it. */
 export function changingLedger<T>(ledger: SimulatedLedger, apply: () => T): T {
   markLedgerChanged(ledger);
