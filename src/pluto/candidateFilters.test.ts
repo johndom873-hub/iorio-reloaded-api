@@ -219,54 +219,74 @@ describe("describeCandidateId", () => {
   });
 });
 
-describe("covered calls on held shares (Marcelo, 2026-10-12)", () => {
+describe("covered calls on held shares (Marcelo, 2026-10-12): code sells them, ranked by premium yield", () => {
   // 100 shares acquired for $10,800 (average $108) with $300 of premium: break-even $105, floor max(1% × $108 × 100, $50) = $108.
   const cycle = { breakEvenPerShare: 105, unavailableReason: null, sharesAcquired: 100, acquisitionCost: 10_800 };
-  const weakCall = (overrides: Partial<SignalCandidate> = {}) =>
-    candidate({ strategyKey: "covered_call", strike: 112, delta: 0.25, bid: 1.0, ask: 1.1, model: model({ edgeMargin: 0.05, expectedAnnualizedReturn: 0.05, premiumYield: 0.2, calibratedExpectedPnlDollars: 4, calibratedAnnualizedReturn: 0.1 }), ...overrides });
-  const held = (overrides: Partial<TickerSignals> = {}, extra: Partial<PlutoTickerFilterInput> = {}) => filterTickerForPluto(input({ scored: scored({ freeShares: 100, candidates: [weakCall()], ...overrides }), cycleBreakEven: cycle, ...extra }));
+  const call = (overrides: Partial<SignalCandidate> = {}, modelOverrides: Partial<CandidateModelScore> = {}) =>
+    candidate({ strategyKey: "covered_call", strike: 112, delta: 0.25, bid: 1.0, ask: 1.1, model: model({ edgeMargin: 0.05, expectedAnnualizedReturn: 0.05, premiumYield: 0.2, premiumAfterCostsDollars: 104, ...modelOverrides }), ...overrides });
+  const held = (heldShareCallCandidates: SignalCandidate[], scoredOverrides: Partial<TickerSignals> = {}, extra: Partial<PlutoTickerFilterInput> = {}) =>
+    filterTickerForPluto(input({ scored: scored({ freeShares: 100, candidates: [call(), candidate()], ...scoredOverrides }), cycleBreakEven: cycle, heldShareCallCandidates, ...extra }));
 
-  it("drops the grade, Edge Yield and premium-yield minimums for a call on held shares, and carries the cycle if assigned", () => {
-    const result = held();
-    expect(result.rejected).toEqual([]);
-    // $112 at 1.05 mid less $0.0068 commission: break-even 103.9568, (112 − 103.9568) × 100 = $804.32
-    expect(result.eligible[0]!.heldShares!.contracts).toBe(1);
-    expect(result.eligible[0]!.heldShares!.breakEvenAfter).toBeCloseTo(103.9568, 6);
-    expect(result.eligible[0]!.heldShares!.profitIfCalledAway).toBeCloseTo(804.32, 6);
-    // the same call with no free shares is a buy-write and meets the usual minimums
-    expect(filterTickerForPluto(input({ scored: scored({ candidates: [weakCall()] }) })).rejected[0]!.codes).toEqual(["grade", "edge_yield", "yield"]);
+  it("offers the model no call on a ticker with free shares; its puts are unaffected", () => {
+    const result = held([call()]);
+    expect(result.eligible.map((entry) => entry.id)).toEqual(["HOOD:cash_secured_put:2026-10-16:100"]);
+    expect(result.rejected).toEqual([{ id: "HOOD:covered_call:2026-10-16:112", codes: ["held_shares_sold_by_code"], reasons: ["100 free shares: code sells the call on them"] }]);
   });
-  it("still asks for a positive Edge, whatever Hist Edge says", () => {
-    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.05, expectedPnlDollars: 0, calibratedExpectedPnlDollars: 9 }) })] }).rejected[0]).toMatchObject({ codes: ["edge"], reasons: ["Edge $0/contract not above 0"] });
-    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.05, expectedPnlDollars: 4, calibratedExpectedPnlDollars: -9 }) })] }).eligible).toHaveLength(1);
+  it("picks the highest premium yield, whatever its Edge Yield, grade, Edge, delta, DTE, open interest, volume or surface fit", () => {
+    const edgy = call({ strike: 113 }, { expectedAnnualizedReturn: 0.5, premiumYield: 0.3 });
+    const unloved = call({ strike: 112, delta: 0.62, dte: 80, expiry: "2026-12-18", openInterest: 0, volume: 0, midImpliedVolatility: null, flags: ["outside_fitted_range", "earnings_calendar_unresolved"] }, { expectedPnlDollars: -40, edgeMargin: -0.2, expectedAnnualizedReturn: -0.3, grade: "avoid", premiumYield: 0.65 });
+    const selection = held([edgy, unloved]).heldShareCall!;
+    expect(selection.chosen!.id).toBe("HOOD:covered_call:2026-12-18:112");
+    expect(selection.ranked.map((choice) => choice.id)).toEqual(["HOOD:covered_call:2026-12-18:112", "HOOD:covered_call:2026-10-16:113"]);
+    // $112 at 1.05 mid less $0.0068 commission: break-even 103.9568, (112 − 103.9568) × 100 = $804.32
+    expect(selection.chosen).toMatchObject({ contracts: 1, premiumYield: 0.65 });
+    expect(selection.chosen!.breakEvenAfter).toBeCloseTo(103.9568, 6);
+    expect(selection.chosen!.profitIfCalledAway).toBeCloseTo(804.32, 6);
+  });
+  it("ties go to the higher strike", () => {
+    expect(held([call({ strike: 112 }, { premiumYield: 0.3 }), call({ strike: 113 }, { premiumYield: 0.3 })]).heldShareCall!.chosen!.candidate.strike).toBe(113);
   });
   it("blocks a strike whose assignment would close the shares below the break-even plus the floor", () => {
     // $104: (104 − 103.9568) × 100 = $4.32, below $108
-    const result = held({ candidates: [weakCall({ strike: 104 })] });
-    expect(result.eligible).toEqual([]);
-    expect(result.rejected[0]).toEqual({ id: "HOOD:covered_call:2026-10-16:104", codes: ["below_break_even"], reasons: ["if assigned, the $104 strike closes 100 shares $4 over the cycle break-even of 103.96 (after this premium), below the $108 minimum profit"] });
+    const result = held([call({ strike: 104 }, { premiumYield: 0.9 }), call()]).heldShareCall!;
+    expect(result.chosen!.candidate.strike).toBe(112);
+    expect(result.rejected).toEqual([{ id: "HOOD:covered_call:2026-10-16:104", codes: ["below_break_even"], reasons: ["if assigned, the $104 strike closes 100 shares $4 over the cycle break-even of 103.96 (after this premium), below the $108 minimum profit"] }]);
+    // the strike itself must reach the $105 break-even before the premium: $104.50 at 5.05 clears the floor only thanks to it
+    expect(held([call({ strike: 104.5, bid: 5.0, ask: 5.1 })]).heldShareCall!.rejected[0]).toEqual({ id: "HOOD:covered_call:2026-10-16:104.5", codes: ["below_break_even"], reasons: ["the $104.5 strike is below the cycle break-even of 105.00 before this premium"] });
     // the floor is 103.9568 + 1.08 = 105.0368 a share: $105.04 passes ($108.32), $105.03 does not ($107.32)
-    expect(held({ candidates: [weakCall({ strike: 105.04 })] }).eligible).toHaveLength(1);
-    expect(held({ candidates: [weakCall({ strike: 105.03 })] }).rejected[0]!.codes).toEqual(["below_break_even"]);
+    expect(held([call({ strike: 105.04 })]).heldShareCall!.chosen).not.toBeNull();
+    expect(held([call({ strike: 105.03 })]).heldShareCall!.rejected[0]!.codes).toEqual(["below_break_even"]);
   });
-  it("blocks every call on held shares when the break-even is unknown or was not loaded", () => {
-    const unknown = held({}, { cycleBreakEven: { ...cycle, breakEvenPerShare: null, unavailableReason: "ledger says 100 sh held but the open stock legs total 200 sh" } });
+  it("blocks every call when the break-even is unknown or was not loaded", () => {
+    const unknown = held([call()], {}, { cycleBreakEven: { ...cycle, breakEvenPerShare: null, unavailableReason: "ledger says 100 sh held but the open stock legs total 200 sh" } }).heldShareCall!;
+    expect(unknown.chosen).toBeNull();
     expect(unknown.rejected[0]).toMatchObject({ codes: ["no_break_even"], reasons: ["no cycle break-even for the held shares: ledger says 100 sh held but the open stock legs total 200 sh"] });
-    expect(held({}, { cycleBreakEven: undefined }).rejected[0]!.codes).toEqual(["no_break_even"]);
+    expect(held([call()], {}, { cycleBreakEven: undefined }).heldShareCall!.rejected[0]!.codes).toEqual(["no_break_even"]);
   });
-  it("offers the held shares one call, the best by Edge Yield; puts on the ticker are unaffected", () => {
-    const better = weakCall({ strike: 114, model: model({ edgeMargin: 0.05, expectedPnlDollars: 6, expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.5 }) });
-    const put = candidate();
-    const result = held({ candidates: [weakCall(), better, put] });
-    expect(result.eligible.map((entry) => entry.id).sort()).toEqual(["HOOD:cash_secured_put:2026-10-16:100", "HOOD:covered_call:2026-10-16:114"]);
-    expect(result.rejected).toEqual([{ id: "HOOD:covered_call:2026-10-16:112", codes: ["held_shares_runner_up"], reasons: ["the held shares are offered one call, the best by Edge Yield: HOOD:covered_call:2026-10-16:114"] }]);
+  it("keeps the execution rules: a premium after costs, the spread limit, a free contract and no bar on opens", () => {
+    expect(held([call({}, { premiumAfterCostsDollars: 0 })]).heldShareCall!.rejected[0]!.codes).toEqual(["no_premium"]);
+    expect(held([call({}, { premiumAfterCostsDollars: 0 })]).heldShareCall!.rejected[0]!.reasons).toEqual(["premium after costs $0/contract not above 0"]);
+    expect(held([call({ model: null })]).heldShareCall!.rejected[0]!.codes).toEqual(["no_model"]);
+    expect(held([call({ spreadPercent: 16 })]).heldShareCall!.rejected[0]!.codes).toEqual(["spread"]);
+    expect(held([call()], {}, { occupiedContracts: [{ expiry: "2026-10-16", strike: 112, detail: "open position" }] }).heldShareCall!.rejected[0]!.codes).toEqual(["same_contract"]);
+    expect(held([call()], {}, { opensBlockedReason: "ticker cooldown: 10 min ago" }).heldShareCall!.rejected[0]!.codes).toEqual(["opens_blocked"]);
   });
-  it("sizes the floor on every free round lot, and treats an odd lot as no held shares", () => {
+  it("a stale quote is not chosen but stays ranked for a burst to re-quote", () => {
+    const stale = held([call({ quoteSource: "snapshot", quotedAt: null })]).heldShareCall!;
+    expect(stale.chosen).toBeNull();
+    expect(stale.rankedIgnoringQuoteAge.map((choice) => choice.id)).toEqual(["HOOD:covered_call:2026-10-16:112"]);
+    expect(stale.rejected[0]!.codes).toEqual(["quote_age"]);
+    // another failure as well: not worth a burst
+    expect(held([call({ quoteSource: "snapshot", quotedAt: null, spreadPercent: 16 })]).heldShareCall!.rankedIgnoringQuoteAge).toEqual([]);
+  });
+  it("covers every free round lot; an odd lot is no held shares, and its calls go to the model as buy-writes", () => {
     // 300 shares: 3 contracts, floor max(1% × $108 × 300, $50) = $324; break-even after 105 − 1.0432 × 300 / 300 = 103.9568 → $2,412.96
-    const three = held({ freeShares: 350 }, { cycleBreakEven: { ...cycle, sharesAcquired: 300, acquisitionCost: 32_400 } });
-    expect(three.eligible[0]!.heldShares!.contracts).toBe(3);
-    expect(three.eligible[0]!.heldShares!.profitIfCalledAway).toBeCloseTo(2412.96, 6);
-    expect(held({ freeShares: 80 }).rejected[0]!.codes).toEqual(["grade", "edge_yield", "yield"]);
+    const three = held([call()], { freeShares: 350 }, { cycleBreakEven: { ...cycle, sharesAcquired: 300, acquisitionCost: 32_400 } }).heldShareCall!;
+    expect(three.chosen!.contracts).toBe(3);
+    expect(three.chosen!.profitIfCalledAway).toBeCloseTo(2412.96, 6);
+    const oddLot = held([call()], { freeShares: 80 });
+    expect(oddLot.heldShareCall).toBeNull();
+    expect(oddLot.rejected[0]!.codes).toEqual(["grade", "edge_yield", "yield"]);
   });
 
   describe("covered-call rolls", () => {

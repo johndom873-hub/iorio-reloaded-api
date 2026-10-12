@@ -13,8 +13,8 @@ import { chooseBacktestAction, eventCloseRuleApplies, openClosedAtOnceByEventRul
 function candidate(strategyKey: "cash_secured_put" | "covered_call", strike: number, edgeYield: number, edgeDollars = 20): SignalCandidate {
   return { strategyKey, expiry: "2026-03-20", strike, dte: 10, delta: strategyKey === "covered_call" ? 0.25 : -0.25, bid: 0.95, ask: 1.05, model: fixtureCandidateModel({ expectedAnnualizedReturn: edgeYield, expectedPnlDollars: edgeDollars }) } as SignalCandidate;
 }
-function openOffer(symbol: string, strategyKey: "cash_secured_put" | "covered_call", strike: number, edgeYield: number, heldShares = false): PlutoOpenCandidate {
-  return { id: `${symbol}:${strategyKey}:2026-03-20:${strike}`, kind: strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol, candidate: candidate(strategyKey, strike, edgeYield), ...(heldShares ? { heldShares: { contracts: 1, breakEvenAfter: 48, profitIfCalledAway: 300 } } : {}) };
+function openOffer(symbol: string, strategyKey: "cash_secured_put" | "covered_call", strike: number, edgeYield: number): PlutoOpenCandidate {
+  return { id: `${symbol}:${strategyKey}:2026-03-20:${strike}`, kind: strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol, candidate: candidate(strategyKey, strike, edgeYield) };
 }
 function rollOffer(symbol: string, legId: string, netRollDollars: number, flags: RollSignalFlag[]): PlutoRollCandidate {
   const roll = { legId, positionId: `position-of-${legId}`, strategyKey: "cash_secured_put", quantity: 1, replacement: candidate("cash_secured_put", 45, 0.3), flags, warnings: [], netRollEdgeDollars: netRollDollars, netRollEdge: 0.01, model: fixtureRollModel({ netExpectedPnl: netRollDollars, netExpectedPnlPerContract: netRollDollars }) } as unknown as RollSignalCandidate;
@@ -78,18 +78,12 @@ describe("a buyback because holding no longer pays", () => {
   });
 });
 
-describe("shares in profit above the floor", () => {
-  const callOnThem = openOffer("AAA", "covered_call", 52, 0.1, true);
+describe("shares in profit above the floor (no call on them cleared Pluto's rules: code would have sold it first)", () => {
   const betterPut = openOffer("AAA", "cash_secured_put", 45, 0.9);
 
-  it("sells a call on them when one clears the break-even rule, whatever else ranks higher", () => {
-    const decision = chooseBacktestAction(policy(), offers({ closeOffers: [sharesInProfit], eligibleOpens: [betterPut, callOnThem] }));
-    expect(decision.choice).toEqual({ kind: "open", open: callOnThem, chosenBecause: "shares in profit above the floor: a call on them clears the break-even rule" });
-  });
-
-  it("sells the shares when no call clears it", () => {
+  it("sells the shares", () => {
     const decision = chooseBacktestAction(policy(), offers({ closeOffers: [sharesInProfit], eligibleOpens: [betterPut] }));
-    expect(decision.choice).toMatchObject({ kind: "close", offer: sharesInProfit, chosenBecause: "shares in profit above the floor: no call on them clears the break-even rule" });
+    expect(decision.choice).toMatchObject({ kind: "close", offer: sharesInProfit, chosenBecause: "shares in profit above the floor: no call on them clears Pluto's rules" });
   });
 
   it("waits when the ticker is cooling down after a fill, since no call can be offered then", () => {
@@ -111,8 +105,7 @@ describe("shares in profit above the floor", () => {
   });
 
   it("always sells, or never sells, when the rule says so", () => {
-    expect(chooseBacktestAction(policy({ sharesInProfit: "always_sell" }), offers({ closeOffers: [sharesInProfit], eligibleOpens: [callOnThem] })).choice).toMatchObject({ kind: "close", offer: sharesInProfit });
-    expect(chooseBacktestAction(policy({ sharesInProfit: "always_keep" }), offers({ closeOffers: [sharesInProfit], eligibleOpens: [callOnThem] })).choice).toMatchObject({ kind: "open", open: callOnThem });
+    expect(chooseBacktestAction(policy({ sharesInProfit: "always_sell" }), offers({ closeOffers: [sharesInProfit], eligibleOpens: [betterPut] })).choice).toMatchObject({ kind: "close", offer: sharesInProfit });
     const kept = chooseBacktestAction(policy({ sharesInProfit: "always_keep" }), offers({ closeOffers: [sharesInProfit], eligibleOpens: [betterPut] }));
     // Nothing sold: the pass goes on to its open.
     expect(kept.choice).toMatchObject({ kind: "open", open: betterPut });
@@ -176,13 +169,4 @@ describe("offers the gates refused earlier in the look", () => {
     expect(choiceWithout(buyback.id, bestRoll.id, nextRoll.id, topOpen.id, nextOpen.id)).toBeNull();
   });
 
-  it("move shares in profit from the best call on them to the next, then to selling them", () => {
-    const bestCall = openOffer("AAA", "covered_call", 52, 0.6, true);
-    const nextCall = openOffer("AAA", "covered_call", 53, 0.3, true);
-    const withShares = offers({ closeOffers: [sharesInProfit], eligibleOpens: [nextCall, bestCall] });
-    expect(chooseBacktestAction(policy(), withShares).choice).toMatchObject({ kind: "open", open: bestCall });
-    expect(chooseBacktestAction(policy(), withShares, new Set([bestCall.id])).choice).toMatchObject({ kind: "open", open: nextCall });
-    expect(chooseBacktestAction(policy(), withShares, new Set([bestCall.id, nextCall.id])).choice).toMatchObject({ kind: "close", offer: sharesInProfit });
-    expect(chooseBacktestAction(policy(), withShares, new Set([bestCall.id, nextCall.id, sharesInProfit.id])).choice).toBeNull();
-  });
 });

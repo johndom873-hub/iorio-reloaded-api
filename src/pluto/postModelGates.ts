@@ -8,7 +8,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 import { describeOptionContract } from "../lib/optionContractLabel.js";
 import { formatSignedDollars } from "../lib/formatSignedDollars.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
-import { checkCalledAway, commissionPerShare, describeCalledAwayShortfall, type CycleBreakEven } from "./heldShareCalls.js";
+import { checkHeldShareCallStrike, commissionPerShare, describeCalledAwayShortfall, type CycleBreakEven } from "./heldShareCalls.js";
 
 // Post-model validation (design round 3, item 21, approved 2026-09-28). Nothing the model said
 // is trusted: the chosen candidate is re-scored on fresh quotes and re-filtered by the caller,
@@ -32,7 +32,7 @@ export interface PostModelBookInput {
   /** Every open position's exposure on this symbol and sector, humans' included (computePositionExposures). */
   existingTickerExposure: number;
   existingSectorExposure: number;
-  /** Uncovered shares of the symbol Pluto may write calls against without buying any. */
+  /** Uncovered shares of the symbol: a buy-write buys only what they do not cover; a round lot of them is code's (runHeldShareCallGates). */
   freeShares: number;
   /** Live underlying price: a covered call buys 100 shares per contract beyond the free ones (buy-write). */
   spotPrice: number | null;
@@ -65,8 +65,6 @@ export interface PostModelGateInput {
   stress: StressCapInput;
   /** Share of full Kelly to size with; Pluto's fixed kellyFraction when omitted (a backtest session passes its own). */
   kellyFraction?: number;
-  /** The ticker's open cycle, for the break-even rule on a call written on held shares (heldShareCalls.ts); absent blocks such a call. */
-  cycleBreakEven?: CycleBreakEven | null;
 }
 
 export interface StressCapInput {
@@ -95,7 +93,7 @@ export function stressCapInputFromFigures(forecastVolatility: number | null, ele
 export interface PlutoOrderPlan {
   quantity: number;
   limitPrice: number;
-  /** Cash this order commits (0 for a covered call on held shares). */
+  /** Cash this order commits (0 for a call code sells on held shares). */
   notional: number;
   fullSizeQuantity: number;
 }
@@ -248,15 +246,7 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
   gate("working_order", !book.workingOrderOnSymbol, book.workingOrderOnSymbol ? "a Pluto order on this symbol is already working" : "no working Pluto order on the symbol");
   const cooldown = tickerCooldownStatus(book.lastFilledActionAt, book.nowMs, settings.tickerCooldownMinutes);
   gate("ticker_cooldown", cooldown.cooledDown, cooldown.detail);
-  // A call on shares already held covers a position the book already counts (the shares): the cap is for new exposure only.
-  const coversHeldShares = !isRoll && candidate.strategyKey === "covered_call" && book.freeShares >= 100;
-  if (!isRoll) {
-    gate(
-      "open_positions_cap",
-      coversHeldShares || book.openPositionCount < settings.maxOpenPositions,
-      coversHeldShares ? `a call on shares already held adds no new exposure (${book.openPositionCount} of ${settings.maxOpenPositions} managed positions)` : `${book.openPositionCount} of ${settings.maxOpenPositions} managed positions`,
-    );
-  }
+  if (!isRoll) gate("open_positions_cap", book.openPositionCount < settings.maxOpenPositions, `${book.openPositionCount} of ${settings.maxOpenPositions} managed positions`);
   gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${describeOptionContract({ strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", expiry: candidate.expiry, dte: candidate.dte })}`);
 
   // Sizing in dollars: the standard order size, less only where a tighter limit binds; contracts follow from it. A contract's
@@ -280,25 +270,6 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction);
     fullSizeQuantity = Math.min(byRoom, liquidityCap, stressCap.contracts, kellyCap.contracts);
     gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at ${formatWholeDollars(unitNotional)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → ${formatWholeDollars(fullSizeQuantity * unitNotional)}`);
-  } else if (book.freeShares >= 100) {
-    // A call on shares already held (Marcelo, 2026-10-12): it covers every free round lot, buys no shares and has no Kelly
-    // cap, since it lowers the risk of shares the book already carries; the Edge > 0 filter stands in for the cap's
-    // "no contracts when μ ≤ 0". The break-even rule is checked again on the size sent and the limit price.
-    const heldShareContracts = Math.floor(book.freeShares / 100);
-    fullSizeQuantity = Math.min(heldShareContracts, liquidityCap);
-    unitNotional = 0;
-    gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${heldShareContracts} contract(s), no shares bought and no Kelly cap on held shares; volume share allows ${liquidityCap}`);
-    const contracts = Math.max(1, fullSizeQuantity);
-    const calledAway = checkCalledAway({ cycle: input.cycleBreakEven ?? null, strike: candidate.strike, contracts, cashPerShareCovered: limitPrice - commissionPerShare(candidate.commissionPerContractDollars), settings });
-    gate(
-      "break_even",
-      calledAway.check?.passes === true,
-      !calledAway.check
-        ? `no cycle break-even for the held shares: ${calledAway.unavailableReason}`
-        : calledAway.check.passes
-          ? `if assigned, ${100 * contracts} shares close ${formatSignedDollars(calledAway.check.profitIfCalledAway, 0)} over the cycle break-even of ${calledAway.check.breakEvenAfter.toFixed(2)}, minimum ${formatSignedDollars(calledAway.check.floor, 0)}`
-          : describeCalledAwayShortfall(candidate.strike, contracts, calledAway.check),
-    );
   } else {
     // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
     // contract is a buy-write that buys 100 shares at the live spot, sized from the same room as a put.
@@ -327,4 +298,52 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
 
   const ok = gates.every((entry) => entry.ok);
   return { ok, gates, plan: ok ? { quantity, limitPrice, notional: unitNotional * quantity, fullSizeQuantity } : null };
+}
+
+export interface HeldShareCallGateInput {
+  /** The call code chose on fresh quotes (selectHeldShareCall), or null when none is left. */
+  candidate: SignalCandidate | null;
+  settings: PlutoSettings;
+  book: Pick<PostModelBookInput, "freeShares" | "workingOrderOnSymbol" | "lastFilledActionAt" | "nowMs" | "sameContractConflict">;
+  /** The ticker's open cycle: the break-even rule is checked again at the size sent and the limit price. */
+  cycleBreakEven: CycleBreakEven | null;
+  /** False in a backtest, whose quotes are taken at the look's own instant: no live-quote gate. True when omitted. */
+  requireLiveQuote?: boolean;
+}
+
+/**
+ * The gates on a call code sells on free shares (Marcelo, 2026-10-12), in place of the post-model gates: no verdict,
+ * confidence or edge drift (no model chose it), no budget, exposure, positions, stress, Kelly or volume cap (it adds no
+ * exposure and covers every free round lot). The kill switch, pause, breakers and the session's action cap are the
+ * round's own checks; the order route's gates run on top.
+ */
+export function runHeldShareCallGates(input: HeldShareCallGateInput): PostModelGateOutput {
+  const { candidate, settings, book } = input;
+  const gates: PlutoGateResult[] = [];
+  const gate = (name: string, ok: boolean, detail: string) => gates.push({ gate: name, ok, detail });
+  if (!candidate) {
+    gate("candidate_present", false, "no call on the held shares passes every rule on fresh quotes");
+    return { ok: false, gates, plan: null };
+  }
+  if (input.requireLiveQuote !== false) gate("live_quote", candidate.quoteSource === "live", candidate.quoteSource === "live" ? "priced from a live quote" : `priced from a ${candidate.quoteSource} quote, not a live one`);
+  gate("working_order", !book.workingOrderOnSymbol, book.workingOrderOnSymbol ? "a Pluto order on this symbol is already working" : "no working Pluto order on the symbol");
+  const cooldown = tickerCooldownStatus(book.lastFilledActionAt, book.nowMs, settings.tickerCooldownMinutes);
+  gate("ticker_cooldown", cooldown.cooledDown, cooldown.detail);
+  gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${describeOptionContract({ strike: candidate.strike, right: "C", expiry: candidate.expiry, dte: candidate.dte })}`);
+  const contracts = Math.floor(book.freeShares / 100);
+  gate("sizing", contracts >= 1, `${book.freeShares} free shares cover ${contracts} contract(s), no shares bought`);
+  const limitPrice = midLimitPrice(candidate.bid, candidate.ask);
+  const calledAway = checkHeldShareCallStrike({ cycle: input.cycleBreakEven, strike: candidate.strike, contracts: Math.max(1, contracts), cashPerShareCovered: limitPrice - commissionPerShare(candidate.commissionPerContractDollars), settings });
+  gate(
+    "break_even",
+    calledAway.check?.passes === true,
+    !calledAway.check
+      ? `no cycle break-even for the held shares: ${calledAway.unavailableReason}`
+      : calledAway.check.passes
+        ? `strike at or above the cycle break-even of ${calledAway.check.breakEvenBefore.toFixed(2)}; if assigned, ${100 * contracts} shares close ${formatSignedDollars(calledAway.check.profitIfCalledAway, 0)} over the break-even of ${calledAway.check.breakEvenAfter.toFixed(2)} after this premium, minimum ${formatSignedDollars(calledAway.check.floor, 0)}`
+        : describeCalledAwayShortfall(candidate.strike, contracts, calledAway.check),
+  );
+  gate("limit_price", limitPrice >= candidate.bid && limitPrice <= candidate.ask && limitPrice > 0, `mid ${limitPrice.toFixed(2)} inside ${candidate.bid.toFixed(2)}–${candidate.ask.toFixed(2)}`);
+  const ok = gates.every((entry) => entry.ok);
+  return { ok, gates, plan: ok ? { quantity: contracts, limitPrice, notional: 0, fullSizeQuantity: contracts } : null };
 }

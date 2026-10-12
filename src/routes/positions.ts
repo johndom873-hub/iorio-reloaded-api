@@ -27,6 +27,7 @@ import { evaluateOrderGates, evaluateOrderLimitsForOrderRequest } from "../lib/o
 import { evaluateCloseGateForPosition } from "../lib/closeGate.js";
 import { withOrderConfirmationLock } from "../lib/orderConfirmationLock.js";
 import { loadRecoveryTargetWindow } from "../lib/recoveryTargetWindow.js";
+import { isDeltaBandGated } from "../lib/deltaBandScope.js";
 import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
 import { findNonLiveSnapshotQuoteReason } from "../lib/signalSnapshotLiveQuotes.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
@@ -1170,8 +1171,8 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
     return;
   }
 
-  const isOpeningOrder = Boolean(payload.strategyKey) && (orderRequest.request_type as string).startsWith("open_");
-  const deltaBand = isOpeningOrder ? await loadRecoveryTargetWindow() : null;
+  const deltaBandGated = isDeltaBandGated({ request_type: orderRequest.request_type as string, payload });
+  const deltaBand = deltaBandGated ? await loadRecoveryTargetWindow() : null;
   // λ (0..1), the Risk & Limits spread cost: the panel's yield is after the same costs as the option chain's.
   const spreadShareCharged = (await loadTradingSettings()).spreadCostChargedPct / 100;
 
@@ -1232,7 +1233,7 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
       optionLeg.strike,
       optionLeg.right === "C" ? OptionType.Call : OptionType.Put,
       (quote) => {
-        const compliance = isOpeningOrder ? checkDeltaCompliance(quote.delta, deltaBand?.deltaTargetMin ?? null, deltaBand?.deltaTargetMax ?? null) : null;
+        const compliance = deltaBandGated ? checkDeltaCompliance(quote.delta, deltaBand?.deltaTargetMin ?? null, deltaBand?.deltaTargetMax ?? null) : null;
         send({ type: "quote", data: { ...quote, compliance, signalLimits: latestSignalLimits, spreadShareCharged } });
       },
       abortController.signal,

@@ -63,6 +63,13 @@ describe("isDeltaBandGated", () => {
     expect(isDeltaBandGated({ request_type: "open_covered_call", payload: callOpen })).toBe(true);
   });
 
+  it("does not gate a covered call written entirely on held shares (no stock leg)", () => {
+    const callOnHeldShares = { ...callOpen, legs: [{ ...optionLeg, right: "C", strike: 110 }] } as unknown as OrderRequestPayload;
+    expect(isDeltaBandGated({ request_type: "open_covered_call", payload: callOnHeldShares })).toBe(false);
+    // A cash-secured put has no stock leg either and stays gated.
+    expect(isDeltaBandGated({ request_type: "open_cash_secured_put", payload: putOpen })).toBe(true);
+  });
+
   it("does not gate a roll or a close, nor any request type that is not an open", () => {
     expect(isDeltaBandGated({ request_type: "roll_leg", payload: putOpen })).toBe(false);
     expect(isDeltaBandGated({ request_type: "close_position", payload: putOpen })).toBe(false);

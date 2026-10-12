@@ -112,11 +112,11 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Shares in profit above the floor",
     unit: "choice",
     editable: true,
-    note: "round lots; a call must clear the cycle break-even rule",
+    note: "round lots, when no call on them clears Pluto's rules (code sells such a call first, as live)",
     choices: [
-      { value: "call_else_sell", label: "Sell a call on them, else sell the shares" },
+      { value: "call_else_sell", label: "Sell the shares when no call can be sent now" },
       { value: "always_sell", label: "Always sell the shares" },
-      { value: "always_keep", label: "Keep them (calls only)" },
+      { value: "always_keep", label: "Keep them" },
     ],
   },
   {

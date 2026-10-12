@@ -7,7 +7,6 @@ import { daysToExpiry, describeOptionContract, describeOrderSize, formatStrike }
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
-import type { PlutoDecision } from "./decisionSchema.js";
 import { recordPlutoEvent, updatePlutoAction, type PlutoActionOutcome } from "./ledger.js";
 import type { PlutoOrderPlan } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
@@ -37,7 +36,8 @@ export interface ExecuteOpenInput {
   symbol: string;
   candidate: SignalCandidate;
   plan: PlutoOrderPlan;
-  decision: PlutoDecision;
+  /** Why the order is sent, for the Telegram message: the model's reasons, or code's for an automatic order. */
+  reasons: string[];
   scoresSnapshot: unknown;
 }
 
@@ -48,7 +48,8 @@ export interface ExecuteRollInput {
   roll: RollSignalCandidate;
   heldLeg: HeldLegScore;
   plan: PlutoOrderPlan;
-  decision: PlutoDecision;
+  /** Why the order is sent, for the Telegram message: the model's reasons, or code's for an automatic order. */
+  reasons: string[];
   scoresSnapshot: unknown;
 }
 
@@ -148,7 +149,7 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
 
   await updatePlutoAction(input.actionId, { outcome: "confirmed" });
   await recordPlutoEvent("order_confirmed", { actionId: input.actionId, orderId: built.id, symbol: input.symbol, description });
-  if (settings.telegramVerbosity !== "off") await notifyPlutoTelegram(`🪐 Pluto sent an order: ${description}\n${input.decision.reasons.join(" ")}`);
+  if (settings.telegramVerbosity !== "off") await notifyPlutoTelegram(`🪐 Pluto sent an order: ${description}\n${input.reasons.join(" ")}`);
   return { outcome: "confirmed", orderId: built.id, detail: description, otherReferenceLegs };
 
   async function blocked(action: ExecuteInput, reason: string, orderId: string | null = null): Promise<ExecuteResult> {

@@ -3,6 +3,7 @@ import { Worker } from "node:worker_threads";
 import type { LiveOptionQuote, LiveScoringOverrides } from "../../lib/signalsLiveScoring.js";
 import type { OpenShortLeg } from "../../lib/rollSignalCandidates.js";
 import type { TickerSignals, TickerSignalsInputs } from "../../lib/signalsTypes.js";
+import type { SignalCandidate } from "../../lib/signalCandidates.js";
 import type { TradingSettings } from "../../lib/tradingSettingsStore.js";
 import type { VolatilityModelTables } from "../../lib/volatilityModelTables.js";
 import type { MacroEvent } from "../../lib/macroEventCalendar.js";
@@ -48,6 +49,12 @@ interface BacktestScoringRequestBody {
   /** Sent the first time a worker needs these tables. */
   modelTables: VolatilityModelTables | null;
   scoredAtMs: number;
+}
+
+/** A symbol's look scored: scoreTicker's answer, and the calls Pluto may sell on its free shares (scoreHeldShareCalls). */
+export interface BacktestScoredTicker {
+  scored: TickerSignals;
+  heldShareCallCandidates: SignalCandidate[];
 }
 
 export type BacktestScoringWorkerRequest =
@@ -213,13 +220,13 @@ export class BacktestScoringPool {
     this.preparedAheadByKey.set(`${request.symbol}|${request.market.todayIso}`, { request, prepared });
   }
 
-  /** scoreTicker on the symbol's worker, over its inputs of the day with the book's figures of this pass. */
-  async score(request: Omit<Extract<BacktestScoringWorkerRequest, { type: "score" }>, "type" | "modelTablesId" | "modelTables" | "tradingId" | "trading"> & { modelTables: VolatilityModelTables; trading: TradingSettings }): Promise<TickerSignals> {
+  /** scoreTicker and scoreHeldShareCalls on the symbol's worker, over its inputs of the day with the book's figures of this pass. */
+  async score(request: Omit<Extract<BacktestScoringWorkerRequest, { type: "score" }>, "type" | "modelTablesId" | "modelTables" | "tradingId" | "trading"> & { modelTables: VolatilityModelTables; trading: TradingSettings }): Promise<BacktestScoredTicker> {
     const { poolWorker, laneKey } = this.workerOfLook(request.symbol, request.scoredAtMs);
     const sent: Extract<BacktestScoringWorkerRequest, { type: "score" }> = { ...request, type: "score", ...this.idsFor(poolWorker, request.modelTables, request.trading) };
     this.lastScoreRequestBySymbol.set(request.symbol, { sent, modelTables: request.modelTables, trading: request.trading });
     const dayQuotesOfLastWarm = this.lastWarmDayQuotesBySymbolWorker.get(laneKey) === request.dayQuotes;
-    return (await this.send(poolWorker, dayQuotesOfLastWarm ? { ...sent, dayQuotes: [], dayQuotesOfLastWarm } : sent)) as TickerSignals;
+    return (await this.send(poolWorker, dayQuotesOfLastWarm ? { ...sent, dayQuotes: [], dayQuotesOfLastWarm } : sent)) as BacktestScoredTicker;
   }
 
   /**

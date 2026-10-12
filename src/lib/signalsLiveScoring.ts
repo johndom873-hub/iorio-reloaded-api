@@ -198,6 +198,8 @@ export interface ScoreTickerHistoryOptions {
   modelTables?: VolatilityModelTables;
   /** The scoring instant; the clock when omitted. */
   scoredAtMs?: number;
+  /** Keep contracts whose expiry spans a known earnings date (Pluto's calls on held shares only). */
+  includeContractsSpanningEarnings?: boolean;
 }
 
 /** Scores one ticker from its loaded inputs; `live` re-reads the snapshot at the live spot and merges live quotes. */
@@ -302,6 +304,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       quotes,
       earningsDatesIso: inputs.earningsDatesIso,
       earningsCalendarResolved: inputs.earningsCalendarResolved,
+      includeContractsSpanningEarnings: history.includeContractsSpanningEarnings,
       macroEvents: inputs.macroEvents.map((event) => ({ dateIso: event.dateIso, eventAtMs: Date.parse(event.eventAtIso) })),
       todayEasternIso: inputs.todayEasternIso,
       // The clock, not the snapshot: an event earlier today is over, a release later today is still ahead.
@@ -352,6 +355,17 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     quoteSourceCounts: countQuoteSources(candidates),
     noCandidatesReason: candidates.length > 0 ? null : describeNoCandidates(exclusionTally, inputs.earningsDatesIso, inputs.todayEasternIso, settings),
   };
+}
+
+/**
+ * The calls Pluto may sell on free shares (Marcelo, 2026-10-12): the same scoring as scoreTicker, without the delta band,
+ * the minimum yield or the earnings exclusion, so every out-of-the-money call the chain carries is a candidate. Empty when
+ * the ticker holds no free round lot. Never shown on the Signals screen.
+ */
+export function scoreHeldShareCalls(inputs: TickerSignalsInputs, account: AccountContext, settings: TradingSettings, live?: LiveScoringOverrides, history: ScoreTickerHistoryOptions = {}): SignalCandidate[] {
+  if (inputs.freeShares < 100) return [];
+  const unfiltered: TradingSettings = { ...settings, deltaTargetMin: 0, deltaTargetMax: Number.POSITIVE_INFINITY, minAnnualizedYieldPct: Number.NEGATIVE_INFINITY };
+  return scoreTicker(inputs, account, unfiltered, live, undefined, { ...history, includeContractsSpanningEarnings: true }).candidates.filter((candidate) => candidate.strategyKey === "covered_call");
 }
 
 /** Pure: what the fit left behind for a snapshot with no usable surface: slice counts by status, plus why the fit produced nothing when it did not run to the end. */

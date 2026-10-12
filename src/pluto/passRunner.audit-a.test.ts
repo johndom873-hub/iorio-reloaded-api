@@ -73,6 +73,7 @@ vi.mock("../lib/signalsStore.js", () => ({
   loadBarsForTilt: async () => [],
 }));
 vi.mock("../lib/signalsLiveScoring.js", () => ({
+  scoreHeldShareCalls: () => [],
   scoreTicker: (inputs: { symbol: string }, _account: unknown, _settings: unknown, live?: { liveQuotes: unknown[] }) => {
     const ticker = harness.tickers.find((entry) => entry.symbol === inputs.symbol)!;
     return {
@@ -171,6 +172,7 @@ function makeContext() {
     } as never,
     lastFingerprintBySymbol: new Map<string, string>(),
     lastModelEvaluationAtBySymbol: new Map<string, number>(),
+    lastHeldShareCallAttemptAtBySymbol: new Map<string, number>(),
     trackWatch: () => {},
   };
 }

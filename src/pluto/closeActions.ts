@@ -542,6 +542,13 @@ async function loadRecentUnfilledAutomaticAttempts(symbol: string): Promise<Set<
   return new Set(rows.map((row) => row.position_id).filter((id): id is string => id !== null));
 }
 
+/** The positions among these whose shares came from another position (a call written on shares already held). */
+async function loadPositionsWithShareSources(positionIds: string[]): Promise<Set<string>> {
+  if (positionIds.length === 0) return new Set();
+  const rows: { position_id: string }[] = await db("position_share_sources").whereIn("position_id", positionIds).distinct("position_id");
+  return new Set(rows.map((row) => row.position_id));
+}
+
 /** The positions among these that already have an order that may still be working (a second one would be refused by the order route). */
 async function loadPositionsWithActiveOrder(positionIds: string[]): Promise<Set<string>> {
   if (positionIds.length === 0) return new Set();
@@ -592,6 +599,11 @@ export interface CloseOffersBook {
   earnings: UpcomingEarnings | null;
   /** countSessionsLeftBeforeEarnings; null when there is no announcement or it is more than 14 calendar days off. */
   sessionsLeftBeforeEarnings: number | null;
+  /**
+   * Covered calls written on shares the account already held (their shares came from another position,
+   * position_share_sources), not bought with the call: P3b leaves them through earnings (Marcelo, 2026-10-12).
+   */
+  heldShareCallPositionIds: Set<string>;
 }
 
 /** The close gate as the offers read it: live it subscribes quotes (closeGate.ts); a simulated book derives it from its own quotes. */
@@ -609,15 +621,16 @@ export async function loadCloseOffersBook(input: Pick<CloseOffersForTickerInput,
   const hasHeldLegs = input.heldLegs.length > 0;
   const heldPositionIds = [...new Set(input.heldLegs.map((leg) => leg.positionId))];
   // None of these reads depends on another; those about held legs are skipped when there is none.
-  const [sharePositions, openLegs, recentUnfilledAutomaticAttemptPositionIds, activeOrderPositionIds, openingTradesByLegId, earnings] = await Promise.all([
+  const [sharePositions, openLegs, recentUnfilledAutomaticAttemptPositionIds, activeOrderPositionIds, openingTradesByLegId, earnings, heldShareCallPositionIds] = await Promise.all([
     loadUnstructuredSharePositions([input.symbol]),
     hasHeldLegs ? (db("position_legs").whereIn("position_id", heldPositionIds).whereNull("exit_at").select("position_id", "id", "leg_type", "side", "quantity") as Promise<{ position_id: string; id: string; leg_type: string; side: string; quantity: string }[]>) : [],
     hasHeldLegs ? loadRecentUnfilledAutomaticAttempts(input.symbol) : new Set<string>(),
     hasHeldLegs ? loadPositionsWithActiveOrder(heldPositionIds) : new Set<string>(),
     hasHeldLegs ? loadOpeningTradesForPremium(input.heldLegs.map((leg) => leg.legId)) : new Map<string, OpeningTradeForPremium[]>(),
     hasHeldLegs ? loadUpcomingEarnings(input.symbol, input.todayIso) : null,
+    hasHeldLegs ? loadPositionsWithShareSources(heldPositionIds) : new Set<string>(),
   ]);
-  const book: CloseOffersBook = { sharePositions, openLegsByPositionId: new Map(), recentUnfilledAutomaticAttemptPositionIds, activeOrderPositionIds, openingTradesByLegId, earnings, sessionsLeftBeforeEarnings: null };
+  const book: CloseOffersBook = { sharePositions, openLegsByPositionId: new Map(), recentUnfilledAutomaticAttemptPositionIds, activeOrderPositionIds, openingTradesByLegId, earnings, sessionsLeftBeforeEarnings: null, heldShareCallPositionIds };
   for (const row of openLegs) book.openLegsByPositionId.set(row.position_id, [...(book.openLegsByPositionId.get(row.position_id) ?? []), { id: row.id, legType: row.leg_type, side: row.side, quantity: Number(row.quantity) }]);
   // Five sessions never reach past fourteen calendar days, so a later announcement needs no calendar lookups.
   const earningsDays = earnings && Date.parse(earnings.dateIso) - Date.parse(input.todayIso) <= 14 * 86_400_000 ? calendarDaysThrough(input.todayIso, earnings.dateIso) : null;
@@ -669,7 +682,9 @@ export async function buildCloseOffersFromBook(input: CloseOffersForTickerInput,
         // A covered call: the whole position closes before earnings (P3b, by code) or is offered before a macro event (F3);
         // the call alone is never bought back.
         const closeId = `${input.symbol}:close_position:${leg.positionId}`;
-        if (coveredCallEarningsCloseDue(leg, earnings, sessionsLeft)) {
+        const earningsCloseDue = coveredCallEarningsCloseDue(leg, earnings, sessionsLeft);
+        if (earningsCloseDue && book.heldShareCallPositionIds.has(leg.positionId)) skipped.push({ id: closeId, reason: "a call written on shares already held rides through earnings: no automatic close before the report" });
+        else if (earningsCloseDue) {
           if (book.recentUnfilledAutomaticAttemptPositionIds.has(leg.positionId)) {
             skipped.push({ id: closeId, reason: "an automatic close of this position did not fill within the last hour" });
             continue;

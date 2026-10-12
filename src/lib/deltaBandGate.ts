@@ -1,24 +1,16 @@
 import { OptionType } from "@stoqey/ib";
 import { subscribeToPooledQuote, waitForFirstReading } from "../ibkr/marketDataPool.js";
 import { checkDeltaCompliance, type DeltaComplianceResult } from "../ibkr/streamOrderLegQuote.js";
-import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
+import { isDeltaBandGated, type OrderRequestForDeltaBand } from "./deltaBandScope.js";
 import { loadRecoveryTargetWindow } from "./recoveryTargetWindow.js";
 
 // The delta band at the real transmit point (and at order preview, for every origin). The Order Review panel has
 // gated Confirm on the option leg's live delta being inside the band since 2026-08-27, but only in the browser;
 // this runs the same check on the server with the panel's exact semantics: opening orders only, fail closed when
 // the delta is not available, the same checkDeltaCompliance the quote stream feeds the panel. The band is the
-// single one in trading_settings (the same band Signals and the Recovery Path scan use).
+// single one in trading_settings (the same band Signals and the Recovery Path scan use). Which orders it gates: deltaBandScope.ts.
 
-export interface OrderRequestForDeltaBand {
-  request_type: string;
-  payload: OrderRequestPayload;
-}
-
-export function isDeltaBandGated(orderRequest: OrderRequestForDeltaBand): boolean {
-  const optionLeg = orderRequest.payload.legs.find((leg) => leg.role === "option");
-  return Boolean(orderRequest.payload.strategyKey) && orderRequest.request_type.startsWith("open_") && Boolean(optionLeg?.strike && optionLeg.expiry && optionLeg.right);
-}
+export { isDeltaBandGated, writesCallOnHeldSharesOnly, type OrderRequestForDeltaBand } from "./deltaBandScope.js";
 
 /** Null when the order is not delta-gated (closes, rolls, no option leg); otherwise the panel's verdict from a live pooled delta. */
 export async function evaluateDeltaBandForOrderRequest(orderRequest: OrderRequestForDeltaBand): Promise<DeltaComplianceResult | null> {

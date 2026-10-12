@@ -83,6 +83,8 @@ export interface SignalCandidatesInput {
    * empty regardless of what's actually scheduled -- candidates are still produced but flagged, not excluded
    * (Marcelo 2026-09-23: don't block on missing data, but surface that earnings risk is unchecked). */
   earningsCalendarResolved: boolean;
+  /** Keep contracts whose expiry spans a known earnings date (only Pluto's calls on held shares ask for this, Marcelo 2026-10-12). */
+  includeContractsSpanningEarnings?: boolean;
   /** Formula 3i (approved 2026-09-24): major US macro events (Fed rate decision, CPI, GDP, US elections), Eastern date and release time; a candidate whose
    * expiry spans one is FLAGGED, never excluded -- with one flat forecast per ticker, a short-dated IV spike into such a
    * date scores like mispricing, and the flag says so. See macroEventCalendar.ts for the curated list. */
@@ -338,7 +340,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     // Only excludes when the calendar
     // is actually resolved -- an unresolved ticker can't tell true "no earnings" apart from "unchecked", so
     // it falls through to the earnings_calendar_unresolved flag below instead of being silently allowed.
-    if (input.earningsCalendarResolved && expirySpansEarnings(input.todayEasternIso, quote.expiry, input.earningsDatesIso)) {
+    if (!input.includeContractsSpanningEarnings && input.earningsCalendarResolved && expirySpansEarnings(input.todayEasternIso, quote.expiry, input.earningsDatesIso)) {
       tally?.spansEarningsExpiries.add(quote.expiry);
       if (input.onContractExcluded) exclude(quote, { kind: "spans_earnings", earningsDateIso: [...input.earningsDatesIso].sort().find((dateIso) => dateIso >= input.todayEasternIso && dateIso <= quote.expiry) ?? null });
       continue;

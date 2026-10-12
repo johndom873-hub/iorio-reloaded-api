@@ -19,7 +19,7 @@ describe("countPlutoRejections", () => {
 });
 
 describe("summarizeTickerRejections", () => {
-  const base: PlutoTickerFilterResult = { symbol: "SMCI", tickerBlocks: [], eligible: [], eligibleRolls: [], rejected: [{ id: "a", reasons: ["quote 12 min old (snapshot), max 10"], codes: ["quote_age"] }], rejectedRolls: [] };
+  const base: PlutoTickerFilterResult = { symbol: "SMCI", tickerBlocks: [], heldShareCall: null, eligible: [], eligibleRolls: [], rejected: [{ id: "a", reasons: ["quote 12 min old (snapshot), max 10"], codes: ["quote_age"] }], rejectedRolls: [] };
   it("keeps the event's symbol, blocks and rejected count, and adds rolls only when some were rejected", () => {
     expect(summarizeTickerRejections(base)).toEqual({ symbol: "SMCI", blocks: [], rejected: 1, rejectedBy: { quote_age: 1 }, onlyBlocker: { quote_age: 1 } });
     const withRolls = summarizeTickerRejections({ ...base, rejectedRolls: [{ id: "r", reasons: ["net roll Edge Yield 4% below 15%"], codes: ["edge_yield"] }] });

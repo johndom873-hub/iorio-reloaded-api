@@ -10,14 +10,12 @@ import type { BacktestPolicySettings } from "../backtestTypes.js";
 // offers Pluto's code built (closes, eligible rolls, eligible opens) and answers with one of them or with nothing. Here
 // the session's decision rules answer, in this order, taking the first that applies:
 //   1. closes, in the order offered
-//        shares in profit above the floor (P1, round lots):
-//          call_else_sell  a call on them when one clears the break-even rule (Pluto's top pick among the eligible
-//                          held-share calls);
-//                          otherwise sell them, unless the ticker is cooling down after a fill, market stress bars
-//                          its opens or the account has no room for one (no call can be offered then, so the choice
-//                          waits for a later look)
+//        shares in profit above the floor (P1, round lots). A call on them that clears Pluto's rules is not a choice: code
+//        sells it before the pass, as live (backtestLook.ts, Marcelo 2026-10-12), so shares still offered here had none:
+//          call_else_sell  sell them, unless the ticker is cooling down after a fill, market stress bars its opens or the
+//                          account has no room for one (no call could be sent then, so the choice waits for a later look)
 //          always_sell     sell them
-//          always_keep     the call when one is eligible, never a sale
+//          always_keep     never a sale
 //        a buyback because holding no longer pays (P2): when_offered takes it, never does not
 //        a close before a macro event (F3): stress_vs_remaining takes it when the event's stress loss is at least what
 //          is left to earn less the close cost; always; never. A put's event buyback that P2 also applies to follows
@@ -86,13 +84,11 @@ export function chooseBacktestAction(policy: BacktestPolicySettings, allOffers: 
 
   for (const offer of offers.closeOffers) {
     if (offer.kind === "close_shares") {
-      const heldShareCall = deterministicTopPick(offers.eligibleOpens.filter((open) => open.symbol === offer.symbol && open.heldShares !== undefined));
       if (policy.sharesInProfit === "always_sell") return { choice: { kind: "close", offer, chosenBecause: "shares in profit above the floor: the rule is to sell them" }, declined };
-      if (heldShareCall) return { choice: { kind: "open", open: heldShareCall, chosenBecause: "shares in profit above the floor: a call on them clears the break-even rule" }, declined };
-      if (policy.sharesInProfit === "always_keep") declined.push({ id: offer.id, reason: "shares in profit: the rule is to keep them, and no call on them is eligible" });
+      if (policy.sharesInProfit === "always_keep") declined.push({ id: offer.id, reason: "shares in profit: the rule is to keep them, and no call on them clears Pluto's rules" });
       else if (offers.coolingDownSymbols.has(offer.symbol)) declined.push({ id: offer.id, reason: "shares in profit: the ticker is cooling down after a fill, so no call can be offered yet; decided at a later look" });
       else if (offers.opensBarredBySymbol?.has(offer.symbol)) declined.push({ id: offer.id, reason: `shares in profit: ${offers.opensBarredBySymbol.get(offer.symbol)}, so no call can be offered now; decided at a later look` });
-      else return { choice: { kind: "close", offer, chosenBecause: "shares in profit above the floor: no call on them clears the break-even rule" }, declined };
+      else return { choice: { kind: "close", offer, chosenBecause: "shares in profit above the floor: no call on them clears Pluto's rules" }, declined };
       continue;
     }
     const isEventClose = offer.reviewKey !== undefined;

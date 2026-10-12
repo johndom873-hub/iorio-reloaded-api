@@ -186,9 +186,12 @@ describe("shares put to the book", () => {
 
     expect(look.actions).toHaveLength(1);
     const action = look.actions[0]!;
-    expect(action).toMatchObject({ kind: "open_covered_call", outcome: "filled", quantity: 1, chosenBecause: "shares in profit above the floor: a call on them clears the break-even rule" });
+    // Code's own order, before any choice (Marcelo 2026-10-12): the highest premium yield whose strike reaches the break-even.
+    expect(action).toMatchObject({ kind: "open_covered_call", outcome: "filled", quantity: 1, automatic: true });
+    expect(action.chosenBecause).toMatch(/^code sells calls on held shares: the highest premium yield, \d+% a year; if called away the cycle ends \$\d+$/);
     expect(action.description).toContain("on 100 held shares");
-    expect(action.gateResults.find((gate) => gate.gate === "break_even")).toMatchObject({ ok: true });
+    expect(action.gateResults.map((gate) => gate.gate)).toEqual(["automatic_held_share_call", "working_order", "ticker_cooldown", "same_contract", "sizing", "break_even", "limit_price", "order_limits"]);
+    expect(action.gateResults.every((gate) => gate.ok)).toBe(true);
     expect(action.candidateScores).toMatchObject({ heldShares: { contracts: 1 } });
     expect(sharesPosition).toMatchObject({ status: "closed", closeReason: "stock_rolled_into_covered_call" });
     const coveredCall = requirePosition(context.ledger, action.positionIds[0]!);
@@ -199,22 +202,23 @@ describe("shares put to the book", () => {
     // The call's strike leaves the cycle above its break-even plus the floor if assigned.
     const sale = look.optionSales[0]!;
     expect(sale).toMatchObject({ strategyKey: "covered_call", optionRight: "C", contracts: 1, sharePriceAtOpen: marketOf(richQuotes).stockPrice });
+    expect(sale.strike).toBeGreaterThanOrEqual(93.5068);
     expect((sale.strike - (93.5068 - (sale.fillPrice - 0.0068))) * 100).toBeGreaterThanOrEqual(95);
     // EXP $ is what Positions shows for the covered call: the shares at their cost in the book less the premium.
     expect(sale.exposureDollars).toBeCloseTo(95 * 100 - (sale.fillPrice - 0.0068) * 100, 6);
     expect(ledgerOpenCycleSummary(context.ledger, "SYN")!.breakEvenPerShare).toBeCloseTo(93.5068 - (sale.fillPrice - 0.0068), 6);
   });
 
-  it("sells them when no call is worth selling", async () => {
-    // Options priced at 15% volatility against a 25% forecast: no call has a positive edge.
-    const context = lookContext({ ledger: ledgerWithAssignedShares(), market: marketOf(cheapQuotes) });
+  it("sells them when no call on them clears Pluto's rules", async () => {
+    // Every quote's spread is over the limit, one of the execution rules a call on held shares keeps.
+    const context = lookContext({ ledger: ledgerWithAssignedShares(), plutoOverrides: { maxSpreadPct: 0 } });
     const sharesPosition = context.ledger.positions.find((position) => position.status === "open")!;
     const stockPrice = context.symbols[0]!.market.stockPrice;
     const cashBefore = context.ledger.cash;
     const look = await runBacktestLook(context);
 
     expect(look.actions).toHaveLength(1);
-    expect(look.actions[0]).toMatchObject({ kind: "close_shares", outcome: "filled", automatic: false, quantity: 100, chosenBecause: "shares in profit above the floor: no call on them clears the break-even rule", positionIds: [sharesPosition.id] });
+    expect(look.actions[0]).toMatchObject({ kind: "close_shares", outcome: "filled", automatic: false, quantity: 100, chosenBecause: "shares in profit above the floor: no call on them clears Pluto's rules", positionIds: [sharesPosition.id] });
     expect(look.actions[0]!.fillPrice).toBeCloseTo(stockPrice - 0.01, 10);
     expect(look.actions[0]!.gateResults.find((gate) => gate.gate === "close_gate")).toMatchObject({ ok: true });
     expect(look.summary).toMatch(/^Closed SYN Sell 100 shares @ /);
@@ -228,12 +232,14 @@ describe("shares put to the book", () => {
   });
 
   it("sells them at once when the rule is to always sell, and keeps them when the shares are younger than one session", async () => {
-    const selling = await runBacktestLook(lookContext({ ledger: ledgerWithAssignedShares(), policy: { sharesInProfit: "always_sell" } }));
+    // No call on them clears Pluto's rules (every spread over the limit): otherwise code would have sold one first.
+    const noCall = { maxSpreadPct: 0 };
+    const selling = await runBacktestLook(lookContext({ ledger: ledgerWithAssignedShares(), policy: { sharesInProfit: "always_sell" }, plutoOverrides: noCall }));
     expect(selling.actions[0]).toMatchObject({ kind: "close_shares", outcome: "filled", chosenBecause: "shares in profit above the floor: the rule is to sell them" });
 
     // Seen from the session of 23 February, the shares put to the book on the 20th are not yet a full session old: no
-    // sale is offered, and with cheap options nothing else is either.
-    const young = await runBacktestLook(lookContext({ ledger: ledgerWithAssignedShares(), market: marketOf(cheapQuotes), policy: { sharesInProfit: "always_sell" }, previousSessionDateIso: "2026-02-20" }));
+    // sale is offered, and with no call clearing the rules nothing else is either.
+    const young = await runBacktestLook(lookContext({ ledger: ledgerWithAssignedShares(), market: marketOf(cheapQuotes), policy: { sharesInProfit: "always_sell" }, previousSessionDateIso: "2026-02-20", plutoOverrides: noCall }));
     expect(young.actions).toEqual([]);
     expect(young.summary).toMatch(/^No action: /);
   });
@@ -394,7 +400,8 @@ describe("a choice the gates refuse", () => {
     const context = lookContext({ ledger: ledgerWithAssignedShares(), plutoOverrides: { maxOpenPositions: 1 } });
     const look = await runBacktestLook(context);
     expect(look.actions.map((action) => [action.kind, action.outcome])).toEqual([["open_covered_call", "filled"]]);
-    expect(look.actions[0]!.gateResults.find((gate) => gate.gate === "open_positions_cap")).toMatchObject({ ok: true, detail: "a call on shares already held adds no new exposure (1 of 1 managed positions)" });
+    // Code's own call on held shares has no positions cap at all (runHeldShareCallGates).
+    expect(look.actions[0]!.gateResults.map((gate) => gate.gate)).not.toContain("open_positions_cap");
     expect(ledgerFreeShares(context.ledger, "SYN")).toBe(0);
   });
 
@@ -422,15 +429,17 @@ describe("an open the event-close rule would close at once", () => {
   const cpi = [{ dateIso: "2026-03-04", eventAtIso: easternInstant("2026-03-04", 8, 30).toISOString(), title: "CPI" }];
   const lookBefore = (eventClose: BacktestPolicySettings["eventClose"]) => lookContext({ ledger: ledgerWithAssignedShares(), macroEvents: cpi, policy: { sharesInProfit: "always_keep", eventClose } });
 
-  it("is skipped by the rules, with why, and the next candidate is chosen", async () => {
+  it("does not hold back the call code sells on held shares: the rules' event close then takes the whole position", async () => {
+    // The skip is the rules' own (openClosedAtOnceByEventRule): code's call on held shares is no choice of theirs, as live.
     const context = lookBefore("always");
     const look = await runBacktestLook(context);
-    // No call is sold on the shares: each one the rules chose was skipped; Pluto's next pick, a put, is sold instead.
-    expect(look.actions.map((action) => [action.kind, action.outcome])).toEqual([["open_cash_secured_put", "filled"]]);
-    expect(look.summary).toMatch(/^Opened SYN Sell \$\d+(\.\d+)? Put .* · skipped SYN Sell \$\d+(\.\d+)? Call · \d+ Mar \(\d+DTE\) · \d+× @ \d+\.\d\d: the event-close rule would close it at once before the 4 Mar CPI \(heavy, 2 sessions away\): the rule is to close/);
-    // The copy of the book the skipped calls were judged on left the session's own untouched: the shares are still free.
-    expect(ledgerFreeShares(context.ledger, "SYN")).toBe(100);
-    expect(context.ledger.positions.filter((position) => position.strategyKey === "covered_call")).toEqual([]);
+    expect(look.actions.map((action) => [action.kind, action.outcome, action.automatic])).toEqual([
+      ["open_covered_call", "filled", true],
+      ["close_position", "filled", false],
+    ]);
+    expect(look.actions[1]!.chosenBecause).toBe("before a macro event: the rule is to close");
+    expect(look.summary).not.toContain("skipped");
+    expect(isSymbolFlat(context.ledger, "SYN")).toBe(true);
   });
 
   it("is kept when what is left to earn exceeds the event's stress loss (the default rule)", async () => {
@@ -488,11 +497,13 @@ describe("when every offer is refused", () => {
 });
 
 describe("a symbol sold flat and reopened in the same look", () => {
+  // No call is quoted, so code has no call to sell on the shares and the rule sells them (the stock price still comes from both sides).
+  const putsOnly = { ...marketOf(richQuotes), quotes: richQuotes.filter((quote) => quote.right === "P") };
   it("stays in its wheel cycle, on the cycle's price scale, as the platform's cycle derivation counts it", async () => {
     // With no ticker cooldown a later pass may open again at once. The cycle began before a 10-for-1 split (100 shares
     // at 950 in the book, 1,000 at 95 as traded today): the shares are sold, and the put sold in the next pass is put on
     // that same scale, because the platform keeps one cycle when a close and an open are within two minutes.
-    const context = lookContext({ ledger: ledgerWithAssignedShares(10), policy: { sharesInProfit: "always_sell" }, plutoOverrides: { tickerCooldownMinutes: 0 } });
+    const context = lookContext({ ledger: ledgerWithAssignedShares(10), market: putsOnly, policy: { sharesInProfit: "always_sell" }, plutoOverrides: { tickerCooldownMinutes: 0 } });
     const look = await runBacktestLook(context);
 
     const filled = look.actions.filter((action) => action.outcome === "filled");
@@ -515,7 +526,7 @@ describe("a symbol sold flat and reopened in the same look", () => {
 
   it("starts a new cycle on today's scale when it is reopened at a later look", async () => {
     const ledger = ledgerWithAssignedShares(10);
-    const selling = lookContext({ ledger, policy: { sharesInProfit: "always_sell" } });
+    const selling = lookContext({ ledger, market: putsOnly, policy: { sharesInProfit: "always_sell" } });
     await runBacktestLook(selling);
     expect(isSymbolFlat(ledger, "SYN")).toBe(true);
     // The next session's look: the same quotes a day later.

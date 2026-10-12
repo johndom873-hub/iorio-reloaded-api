@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { emptyCandidateExclusionTally, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
-import { describeNoCandidates, scoreTicker } from "./signalsLiveScoring.js";
+import { describeNoCandidates, scoreHeldShareCalls, scoreTicker } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
 import { fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
@@ -125,6 +125,21 @@ describe("scoreTicker earnings exclusion uses todayEasternIso, not the snapshot 
     expect(scored.candidates).toEqual([]); // the far expiry also spans 10-21
     const afterNear = scoreTicker(inputs({ earningsDatesIso: ["2026-10-22"] }), account, permissiveSettings);
     expect([...new Set(afterNear.candidates.map((candidate) => candidate.expiry))]).toEqual(["2026-10-21"]);
+  });
+});
+
+describe("scoreHeldShareCalls: the calls Pluto may sell on free shares (Marcelo, 2026-10-12)", () => {
+  const calls = [quoteAt(105, "C", "2026-10-21", years30), quoteAt(130, "C", "2026-10-21", years30), quoteAt(110, "C", "2026-11-20", years60)];
+  const strict = { ...permissiveSettings, minAnnualizedYieldPct: 500, deltaTargetMin: 0.3, deltaTargetMax: 0.35 };
+  it("keeps every out-of-the-money call the trading settings and an earnings date would drop, and only calls", () => {
+    const withCalls = inputs({ quotes: [...inputs().quotes, ...calls], earningsDatesIso: ["2026-10-01"] });
+    expect(scoreTicker(withCalls, account, strict).candidates).toEqual([]);
+    const held = scoreHeldShareCalls(withCalls, account, strict);
+    expect(held.map((candidate) => `${candidate.expiry}:${candidate.strike}`).sort()).toEqual(["2026-10-21:105", "2026-10-21:130", "2026-11-20:110"]);
+    expect(held.every((candidate) => candidate.strategyKey === "covered_call" && candidate.model !== null)).toBe(true);
+  });
+  it("is empty without a free round lot", () => {
+    expect(scoreHeldShareCalls(inputs({ quotes: calls, freeShares: 99 }), account, permissiveSettings)).toEqual([]);
   });
 });
 

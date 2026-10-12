@@ -5,7 +5,7 @@ import type { TickerSignals } from "../lib/signalsTypes.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "../lib/optionContractLabel.js";
 import { yieldOnExposure } from "../lib/contractValuation.js";
-import { checkCalledAway, commissionPerShare, describeCalledAwayShortfall, type CycleBreakEven } from "./heldShareCalls.js";
+import { checkCalledAway, checkHeldShareCallStrike, commissionPerShare, describeCalledAwayShortfall, type CycleBreakEven } from "./heldShareCalls.js";
 
 // Pluto's deterministic candidate filters (design round 3, item 20, approved 2026-09-28). Since the model review
 // (approved by Marcelo 2026-10-10) every value rule reads the valuation model's block (grade, Edge Yield, premium
@@ -23,8 +23,27 @@ export interface PlutoOpenCandidate {
   kind: "open_covered_call" | "open_cash_secured_put";
   symbol: string;
   candidate: SignalCandidate;
-  /** Set on a covered call written on shares already held: the contracts it covers and the cycle if it is assigned (heldShareCalls.ts). */
-  heldShares?: { contracts: number; breakEvenAfter: number; profitIfCalledAway: number };
+}
+
+/** A call code may sell on the ticker's free shares (selectHeldShareCall): every free round lot, priced at the mid. */
+export interface HeldShareCallChoice {
+  id: string;
+  candidate: SignalCandidate;
+  contracts: number;
+  /** Premium after costs as a yearly rate on the exposure (the valuation model's premiumYield). */
+  premiumYield: number;
+  breakEvenAfter: number;
+  profitIfCalledAway: number;
+}
+
+export interface HeldShareCallSelection {
+  /** The call to sell: the highest premium yield among the calls that pass every rule (ranked[0]). */
+  chosen: HeldShareCallChoice | null;
+  /** Every call that passes every rule, best first. */
+  ranked: HeldShareCallChoice[];
+  /** Every call that passes every rule but the quote's age, best first: what a burst should re-quote. */
+  rankedIgnoringQuoteAge: HeldShareCallChoice[];
+  rejected: PlutoRejection[];
 }
 
 export interface PlutoRollCandidate {
@@ -63,7 +82,8 @@ export type PlutoRejectionCode =
   | "edge"
   | "below_break_even"
   | "no_break_even"
-  | "held_shares_runner_up";
+  | "no_premium"
+  | "held_shares_sold_by_code";
 
 export interface PlutoRejectionReason {
   code: PlutoRejectionCode;
@@ -85,6 +105,8 @@ export interface PlutoTickerFilterResult {
   symbol: string;
   /** Reasons the whole ticker is out this pass (nothing below it is evaluated). */
   tickerBlocks: string[];
+  /** The call code sells on the ticker's free shares; null when it holds fewer than 100 free shares or the ticker is out. */
+  heldShareCall: HeldShareCallSelection | null;
   eligible: PlutoOpenCandidate[];
   eligibleRolls: PlutoRollCandidate[];
   rejected: PlutoRejection[];
@@ -107,6 +129,11 @@ export interface PlutoTickerFilterInput {
    * lower the strike (heldShareCalls.ts). Absent or null blocks exactly those, as an unknown break-even does.
    */
   cycleBreakEven?: CycleBreakEven | null;
+  /**
+   * The ticker's calls scored without the delta band, the minimum yield or the earnings exclusion (scoreHeldShareCalls), for
+   * the call code sells on free shares. Absent or empty: no such call this round.
+   */
+  heldShareCallCandidates?: SignalCandidate[];
 }
 
 /** A contract on the ticker that is already taken: an open option leg (anyone's) or a leg of a working order. */
@@ -149,7 +176,7 @@ export function describeCandidateId(candidateId: string, todayIso: string): stri
   return candidateId;
 }
 
-function quoteAgeMinutes(candidate: Pick<SignalCandidate, "quoteSource" | "quotedAt">, snapshotCapturedAt: string | null, nowMs: number): number | null {
+export function quoteAgeMinutes(candidate: Pick<SignalCandidate, "quoteSource" | "quotedAt">, snapshotCapturedAt: string | null, nowMs: number): number | null {
   if (candidate.quoteSource === "live" && !candidate.quotedAt) return 0; // a pooled tick received this instant
   const at = candidate.quotedAt ?? (candidate.quoteSource === "snapshot" ? snapshotCapturedAt : null);
   if (!at) return null;
@@ -159,25 +186,21 @@ function quoteAgeMinutes(candidate: Pick<SignalCandidate, "quoteSource" | "quote
 type OpenCandidateFilterContext = { scored: TickerSignals; slicesByExpiry: Map<string, SignalSurfaceSlice>; settings: PlutoSettings; nowMs: number };
 
 /** Every reason one open candidate is out; empty means eligible. Shared with the roll path for the replacement leg. */
-export function rejectOpenCandidate(candidate: SignalCandidate, context: OpenCandidateFilterContext, options: { onHeldShares?: boolean } = {}): string[] {
-  return openCandidateFailures(candidate, context, options).map((failure) => failure.reason);
+export function rejectOpenCandidate(candidate: SignalCandidate, context: OpenCandidateFilterContext): string[] {
+  return openCandidateFailures(candidate, context).map((failure) => failure.reason);
 }
 
 /**
  * As rejectOpenCandidate, with the rule behind each reason. `skipValueRules` leaves out the grade and Edge Yield rules: a
- * roll's replacement is judged on the roll's own grade and net Edge Yield instead. `onHeldShares` (a covered call on shares
- * already held, Marcelo 2026-10-12) leaves out the grade, Edge Yield and premium-yield minimums and asks only for a positive
- * Edge: the call lowers the risk of shares the book already carries, and the break-even rule guards its strike.
+ * roll's replacement is judged on the roll's own grade and net Edge Yield instead.
  */
-export function openCandidateFailures(candidate: SignalCandidate, context: OpenCandidateFilterContext, options: { skipValueRules?: boolean; onHeldShares?: boolean } = {}): PlutoRejectionReason[] {
+export function openCandidateFailures(candidate: SignalCandidate, context: OpenCandidateFilterContext, options: { skipValueRules?: boolean } = {}): PlutoRejectionReason[] {
   const { settings, scored } = context;
   const failures: PlutoRejectionReason[] = [];
   const fail = (code: PlutoRejectionCode, reason: string) => failures.push({ code, reason });
   const model = candidate.model;
   if (!model) fail("no_model", "not valued by the model (no YZ21 forecast or no variance time left)");
-  else if (options.onHeldShares) {
-    if (!(model.expectedPnlDollars > 0)) fail("edge", `Edge $${model.expectedPnlDollars.toFixed(0)}/contract not above 0`);
-  } else {
+  else {
     if (!options.skipValueRules && gradeRank[model.grade] < gradeRank[settings.minGrade]) fail("grade", `grade ${model.grade} (edge margin ${(model.edgeMargin * 100).toFixed(0)}%) below ${settings.minGrade}`);
     if (!options.skipValueRules && model.expectedAnnualizedReturn * 100 < settings.minEdgeYieldPct) fail("edge_yield", `Edge Yield ${(model.expectedAnnualizedReturn * 100).toFixed(0)}% below ${settings.minEdgeYieldPct}%`);
     if (model.premiumYield * 100 < settings.minAnnualizedYieldPct) fail("yield", `premium yield ${(model.premiumYield * 100).toFixed(0)}% a year below ${settings.minAnnualizedYieldPct}%`);
@@ -235,7 +258,7 @@ export function rejectTicker(input: PlutoTickerFilterInput): string[] {
 
 export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTickerFilterResult {
   const { scored } = input;
-  const result: PlutoTickerFilterResult = { symbol: scored.symbol, tickerBlocks: rejectTicker(input), eligible: [], eligibleRolls: [], rejected: [], rejectedRolls: [] };
+  const result: PlutoTickerFilterResult = { symbol: scored.symbol, tickerBlocks: rejectTicker(input), heldShareCall: null, eligible: [], eligibleRolls: [], rejected: [], rejectedRolls: [] };
   if (result.tickerBlocks.length > 0) return result;
 
   const slicesByExpiry = new Map(input.slices.map((slice) => [slice.expiry, slice]));
@@ -247,29 +270,20 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
   const heldShareContracts = Math.floor(scored.freeShares / 100);
   for (const candidate of scored.candidates) {
     const id = openCandidateId(scored.symbol, candidate);
-    const onHeldShares = candidate.strategyKey === "covered_call" && heldShareContracts > 0;
-    const failures = openCandidateFailures(candidate, context, { onHeldShares });
-    let heldShares: PlutoOpenCandidate["heldShares"];
-    if (onHeldShares) {
-      const cashPerShareCovered = (candidate.bid + candidate.ask) / 2 - commissionPerShare(candidate.commissionPerContractDollars);
-      const calledAway = checkCalledAway({ cycle, strike: candidate.strike, contracts: heldShareContracts, cashPerShareCovered, settings: input.settings });
-      if (!calledAway.check) failures.push({ code: "no_break_even", reason: `no cycle break-even for the held shares: ${calledAway.unavailableReason}` });
-      else if (!calledAway.check.passes) failures.push({ code: "below_break_even", reason: describeCalledAwayShortfall(candidate.strike, heldShareContracts, calledAway.check) });
-      else heldShares = { contracts: heldShareContracts, breakEvenAfter: calledAway.check.breakEvenAfter, profitIfCalledAway: calledAway.check.profitIfCalledAway };
+    // Calls on free shares are code's (selectHeldShareCall), never the model's: it is offered no call on such a ticker.
+    if (candidate.strategyKey === "covered_call" && heldShareContracts > 0) {
+      result.rejected.push(plutoRejection(id, [{ code: "held_shares_sold_by_code", reason: `${scored.freeShares} free shares: code sells the call on them` }]));
+      continue;
     }
+    const failures = openCandidateFailures(candidate, context);
     const conflict = findSameContractConflict(occupied, candidate.expiry, candidate.strike);
     if (conflict) failures.push({ code: "same_contract", reason: `same contract: ${conflict}` });
     if (input.opensBlockedReason) failures.push({ code: "opens_blocked", reason: input.opensBlockedReason });
-    if (failures.length === 0) result.eligible.push({ id, kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate, ...(heldShares ? { heldShares } : {}) });
+    if (failures.length === 0) result.eligible.push({ id, kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate });
     else result.rejected.push(plutoRejection(id, failures));
   }
-
-  // The held shares get one call, the best by Edge Yield among those that pass (Marcelo, 2026-10-12).
-  const [bestHeldShareCall, ...runnersUp] = rankEligibleOpens(result.eligible.filter((entry) => entry.heldShares));
-  if (bestHeldShareCall && runnersUp.length > 0) {
-    const runnerUpIds = new Set(runnersUp.map((entry) => entry.id));
-    result.eligible = result.eligible.filter((entry) => !runnerUpIds.has(entry.id));
-    for (const entry of runnersUp) result.rejected.push(plutoRejection(entry.id, [{ code: "held_shares_runner_up", reason: `the held shares are offered one call, the best by Edge Yield: ${bestHeldShareCall.id}` }]));
+  if (heldShareContracts > 0) {
+    result.heldShareCall = selectHeldShareCall({ symbol: scored.symbol, candidates: input.heldShareCallCandidates ?? [], contracts: heldShareContracts, cycle, settings: input.settings, snapshotCapturedAt: scored.snapshotCapturedAt, nowMs: input.nowMs, occupiedContracts: occupied, opensBlockedReason: input.opensBlockedReason ?? null });
   }
 
   for (const roll of scored.rolls) {
@@ -292,6 +306,70 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
     else result.rejectedRolls.push(plutoRejection(id, failures));
   }
   return result;
+}
+
+export interface HeldShareCallSelectionInput {
+  symbol: string;
+  /** The ticker's calls, scored without the delta band, the minimum yield or the earnings exclusion (scoreHeldShareCalls). */
+  candidates: SignalCandidate[];
+  /** Free round lots: the call covers all of them and buys no shares. */
+  contracts: number;
+  cycle: CycleBreakEven | null;
+  settings: PlutoSettings;
+  snapshotCapturedAt: string | null;
+  nowMs: number;
+  occupiedContracts: OccupiedContract[];
+  opensBlockedReason: string | null;
+}
+
+/**
+ * The call code sells on free shares (Marcelo, 2026-10-12): the highest premium yield, across every expiry the chain carries
+ * (earnings included), among the calls whose strike is at or above the cycle break-even before their premium and whose
+ * assignment would close the cycle at or above the minimum profit, premium counted (checkHeldShareCallStrike). Only execution rules apply on top: a priced premium
+ * after costs, the spread and quote-age limits, a free contract and no bar on opens. No grade, Edge, Edge Yield, delta,
+ * DTE, open interest, volume or surface-fit rule: selling a call on shares already held adds no exposure.
+ *   premium yield = premium after costs ÷ (spot × 100 − mid × 100) × 365 ÷ calendar days to expiry
+ * Example: SMCI $43.5 Call · 30 Oct (18DTE) at 1.24/1.33 with spot 40.26: $126 after costs on $3,897 is 65% a year.
+ * Ties go to the higher strike (more of the shares' rise kept).
+ */
+export function selectHeldShareCall(input: HeldShareCallSelectionInput): HeldShareCallSelection {
+  const { settings } = input;
+  const passing: HeldShareCallChoice[] = [];
+  const passingIgnoringQuoteAge: HeldShareCallChoice[] = [];
+  const rejected: PlutoRejection[] = [];
+  for (const candidate of input.candidates) {
+    if (candidate.strategyKey !== "covered_call") continue;
+    const id = openCandidateId(input.symbol, candidate);
+    const failures: PlutoRejectionReason[] = [];
+    let quoteAgeFailure: PlutoRejectionReason | null = null;
+    const model = candidate.model;
+    if (!model) failures.push({ code: "no_model", reason: "no premium yield (the valuation model could not value the contract)" });
+    else if (!(model.premiumAfterCostsDollars > 0)) failures.push({ code: "no_premium", reason: `premium after costs $${model.premiumAfterCostsDollars.toFixed(0)}/contract not above 0` });
+    if (candidate.spreadPercent > settings.maxSpreadPct) failures.push({ code: "spread", reason: `spread ${candidate.spreadPercent.toFixed(1)}% above ${settings.maxSpreadPct}%` });
+    if (!candidate.executable) failures.push({ code: "not_executable", reason: "not executable" });
+    const ageMinutes = quoteAgeMinutes(candidate, input.snapshotCapturedAt, input.nowMs);
+    if (ageMinutes === null) quoteAgeFailure = { code: "quote_age", reason: "quote age unknown" };
+    else if (ageMinutes > settings.maxQuoteAgeMinutes) quoteAgeFailure = { code: "quote_age", reason: `quote ${ageMinutes.toFixed(0)} min old (${candidate.quoteSource}), max ${settings.maxQuoteAgeMinutes}` };
+    const cashPerShareCovered = (candidate.bid + candidate.ask) / 2 - commissionPerShare(candidate.commissionPerContractDollars);
+    const calledAway = checkHeldShareCallStrike({ cycle: input.cycle, strike: candidate.strike, contracts: input.contracts, cashPerShareCovered, settings });
+    if (!calledAway.check) failures.push({ code: "no_break_even", reason: `no cycle break-even for the held shares: ${calledAway.unavailableReason}` });
+    else if (!calledAway.check.passes) failures.push({ code: "below_break_even", reason: describeCalledAwayShortfall(candidate.strike, input.contracts, calledAway.check) });
+    const conflict = findSameContractConflict(input.occupiedContracts, candidate.expiry, candidate.strike);
+    if (conflict) failures.push({ code: "same_contract", reason: `same contract: ${conflict}` });
+    if (input.opensBlockedReason) failures.push({ code: "opens_blocked", reason: input.opensBlockedReason });
+    if (failures.length > 0) {
+      rejected.push(plutoRejection(id, quoteAgeFailure ? [...failures, quoteAgeFailure] : failures));
+      continue;
+    }
+    const choice: HeldShareCallChoice = { id, candidate, contracts: input.contracts, premiumYield: model!.premiumYield, breakEvenAfter: calledAway.check!.breakEvenAfter, profitIfCalledAway: calledAway.check!.profitIfCalledAway };
+    passingIgnoringQuoteAge.push(choice);
+    if (quoteAgeFailure) rejected.push(plutoRejection(id, [quoteAgeFailure]));
+    else passing.push(choice);
+  }
+  const byPremiumYield = (a: HeldShareCallChoice, b: HeldShareCallChoice) => b.premiumYield - a.premiumYield || b.candidate.strike - a.candidate.strike || a.id.localeCompare(b.id);
+  passing.sort(byPremiumYield);
+  passingIgnoringQuoteAge.sort(byPremiumYield);
+  return { chosen: passing[0] ?? null, ranked: passing, rankedIgnoringQuoteAge: passingIgnoringQuoteAge, rejected };
 }
 
 /**

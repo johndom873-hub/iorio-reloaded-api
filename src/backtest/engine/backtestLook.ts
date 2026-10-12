@@ -4,12 +4,13 @@ import { deriveCloseLiveState, type CloseLiveLeg, type CloseLiveQuote } from "..
 import { flatCommissionEstimator } from "../../lib/commissionEstimate.js";
 import { commissionPerContractDollars } from "../../lib/optionFriction.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
+import { formatSignedDollars } from "../../lib/formatSignedDollars.js";
 import { computeOrderNotional, evaluateOrderLimitFigures } from "../../lib/orderLimits.js";
 import type { HeldLegScore, OpenShortLeg } from "../../lib/rollSignalCandidates.js";
 import type { MacroEvent } from "../../lib/macroEventCalendar.js";
 import { heaviestMacroEventBeforeExpiry } from "../../lib/macroEventTiming.js";
 import type { SignalCandidate } from "../../lib/signalCandidates.js";
-import { contractKey, scoreTicker, type LiveOptionQuote } from "../../lib/signalsLiveScoring.js";
+import { contractKey, scoreHeldShareCalls, scoreTicker, type LiveOptionQuote } from "../../lib/signalsLiveScoring.js";
 import type { TickerSignals, TickerSignalsInputs } from "../../lib/signalsTypes.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import type { ElevatedVolatilityFlag } from "../../lib/tiltMeasures.js";
@@ -20,9 +21,9 @@ import { buildCloseOffersFromBook, countSessionsLeftBeforeEarnings, eventCloseDu
 import { heldCoveredCallEntry, withStressMove } from "../../pluto/heldPositionMetrics.js";
 import { flaggedSymbols, type PlutoDecision } from "../../pluto/decisionSchema.js";
 import { computeMoveContext } from "../../pluto/moveContext.js";
-import type { CycleBreakEven } from "../../pluto/heldShareCalls.js";
+import { heldShareCallGate, type CycleBreakEven } from "../../pluto/heldShareCalls.js";
 import type { PlutoGateResult } from "../../pluto/ledger.js";
-import { computeKellyCap, computeSizingRoom, computeStressCap, midLimitPrice, runPostModelGates, stressCapInputFor, tickerCooldownStatus } from "../../pluto/postModelGates.js";
+import { computeKellyCap, computeSizingRoom, computeStressCap, midLimitPrice, runHeldShareCallGates, runPostModelGates, stressCapInputFor, tickerCooldownStatus } from "../../pluto/postModelGates.js";
 import { countPlutoRejections } from "../../pluto/rejectionSummary.js";
 import type { BacktestAction, BacktestActionKind, EffectiveBacktestSettings } from "../backtestTypes.js";
 import { toOhlcvBars, type BacktestBarHistory } from "./backtestBarHistory.js";
@@ -60,7 +61,9 @@ import { cycleSplitFactorFor, legsOfPosition, positionsOfSymbol, requireLeg, req
 //      stay
 //   2. close offers per symbol (buildCloseOffersFromBook) with the close gate derived from the look's own quotes
 //      (deriveCloseLiveState, market open); an automatic one (an odd lot in profit, a close before earnings) is sent at
-//      once, before anything is chosen, and the pass starts again on the changed book
+//      once, before anything is chosen, and the pass starts again on the changed book; so is, after them, the call code
+//      sells on a symbol's free shares (selectHeldShareCall, runHeldShareCallGates; Marcelo 2026-10-12), unless market
+//      stress bars opens. A covered call written on shares already held is left through earnings (no P3b close).
 //   3. the decision rules stand in for the AI model (backtestPolicy.ts): one offer across all symbols, or nothing; in
 //      LLM mode the model decides instead, through the live agent's rounds and change check (backtestLlmDecider.ts),
 //      and its own decision (confidence, data concerns) goes through the gates
@@ -430,16 +433,17 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
       const freeCash = ledgerFreeCash(ledger);
       const inputs = { ...baseInputs, freeShares: freeSharesToday, openShortLegs, dayQuotes: lookDayQuotes };
       const live = { spotPrice: stockPrice, priceSource: "live" as const, liveQuotes: heldLegQuotesNotYetRead };
-      const scored = scoringPool
+      const scoringHistory = { modelTables: context.modelTables, scoredAtMs: nowMs };
+      const { scored, heldShareCallCandidates } = scoringPool
         ? await scoringPool.score({ symbol, todayIso, freeShares: freeSharesToday, openShortLegs, dayQuotes: lookDayQuotes, freeCash, trading, live, modelTables: context.modelTables, scoredAtMs: nowMs })
-        : scoreTicker(inputs, { freeCash }, trading, live, undefined, { modelTables: context.modelTables, scoredAtMs: nowMs });
+        : { scored: scoreTicker(inputs, { freeCash }, trading, live, undefined, scoringHistory), heldShareCallCandidates: scoreHeldShareCalls(inputs, { freeCash }, trading, live, scoringHistory) };
       if (!scoringPool) scoredBySymbol.set(symbol, scored);
       const cooldown = tickerCooldownStatus(ledgerLastFilledActionAt(ledger, symbol), nowMs, pluto.tickerCooldownMinutes);
       const opensBlockedReason = !lookSymbol.optionContractsRepresentable ? "the open cycle spans a split whose contracts do not fit its share scale" : cooldown.cooledDown ? null : `ticker cooldown: ${cooldown.detail}`;
       const needsCycle = scored.freeShares >= sharesPerContract || scored.rolls.some((roll) => roll.strategyKey === "covered_call");
       const cycleSummary = needsCycle ? ledgerOpenCycleSummary(ledger, symbol) : null;
       const cycleBreakEven: CycleBreakEven | null = cycleSummary ? { breakEvenPerShare: cycleSummary.breakEvenPerShare === null ? null : cycleSummary.breakEvenPerShare / priceToCycleScale, unavailableReason: cycleSummary.unavailableReason, sharesAcquired: roundedShares(cycleSummary.sharesAcquired * priceToCycleScale), acquisitionCost: cycleSummary.acquisitionCost } : null;
-      const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings: pluto, todayEasternIso: todayIso, nowMs, botEnabled: true, occupiedContracts, opensBlockedReason, cycleBreakEven });
+      const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings: pluto, todayEasternIso: todayIso, nowMs, botEnabled: true, occupiedContracts, opensBlockedReason, cycleBreakEven, heldShareCallCandidates });
       // Market stress bars every open of the look, as passRunner does after the filters; rolls and closes stay.
       if (opensBlockedBecause !== null) {
         filtered.rejected.push(...filtered.eligible.map((entry) => ({ id: entry.id, reasons: [opensBlockedBecause], codes: ["opens_blocked" as const] })));
@@ -467,6 +471,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
         openingTradesByLegId: new Map(),
         earnings: scored.heldLegs.length > 0 ? earnings : null,
         sessionsLeftBeforeEarnings: scored.heldLegs.length > 0 ? sessionsLeftBeforeEarnings : null,
+        heldShareCallPositionIds: new Set(ledger.shareSources.map((source) => source.positionId)),
       };
       const { offers: closeOffers, heldPositions } = await buildCloseOffersFromBook(closeInput, closeBook, { forPosition: closeGateFor, fromQuotes: (positionId) => closeGateFor(positionId) });
       return { freeCash, priceToCycleScale, toCyclePrice, freeSharesToday, scored, cooldown, cycleBreakEven, filtered, closeGateFor, closeOffers, heldPositions };
@@ -701,11 +706,22 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
       continue;
     }
 
+    // The call on a symbol's free shares is code too (passRunner.ts sendHeldShareCall): the first symbol with one is sent
+    // through the open path below, with its own gates, and the pass starts again. Market stress bars it, as every open.
+    const heldShareCallLook = opensBlockedBecause !== null ? undefined : scoredLooks.find((entry) => {
+      const chosen = entry.scored.filtered.heldShareCall?.chosen ?? null;
+      return chosen !== null && !refusedCandidateIds.has(chosen.id);
+    });
+    const heldShareCall = heldShareCallLook?.scored.filtered.heldShareCall?.chosen ?? null;
+    const heldShareCallChoice: BacktestPolicyChoice | null = heldShareCall
+      ? { kind: "open", open: { id: heldShareCall.id, kind: "open_covered_call", symbol: heldShareCallLook!.symbol, candidate: heldShareCall.candidate }, chosenBecause: `code sells calls on held shares: the highest premium yield, ${formatPercent(heldShareCall.premiumYield)} a year; if called away the cycle ends ${formatSignedDollars(heldShareCall.profitIfCalledAway, 0)}` }
+      : null;
+
     // 3. LLM mode: the model decides, as live, and a pass is one round.
     let modelDecision: PlutoDecision | null = null;
     let modelCallSequence: number | null = null;
     let llmChoice: BacktestPolicyChoice | null = null;
-    if (llm) {
+    if (llm && !heldShareCallChoice) {
       const round = currentRound!;
       const llmTickers: BacktestLlmTicker[] = scoredLooks.map((entry) => ({
         symbol: entry.symbol,
@@ -800,7 +816,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
     };
 
     // 3. The decision rules stand in for the model, across every symbol.
-    const decided = llm ? { choice: llmChoice, declined: [] as { id: string; reason: string }[] } : chooseBacktestAction(
+    const decided = heldShareCallChoice ? { choice: heldShareCallChoice, declined: [] as { id: string; reason: string }[] } : llm ? { choice: llmChoice, declined: [] as { id: string; reason: string }[] } : chooseBacktestAction(
       settings.policy,
       {
         closeOffers: scoredLooks.flatMap((entry) => entry.scored.closeOffers),
@@ -862,19 +878,21 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
     const decision: PlutoDecision = modelDecision ?? { decision: "trade", actionKind: kind, candidateId, confidence: 1, reasons: [decided.choice.chosenBecause], risksAcknowledged: [], systemConcerns: [] };
     const book = { ...ledgerPostModelBook(ledger, { symbol, sector: profile.sector, contract: { expiry: candidate.expiry, strike: toCyclePrice(candidate.strike) }, priceByLegId: context.priceByLegId, sectorBySymbol, spotPrice: stockPrice, todayIso, nowMs }), freeShares: freeSharesToday };
     const stress = stressCapInputFor(scored);
-    const gates = runPostModelGates({
-      decision,
-      candidate: chosenOpen ? candidate : null,
-      roll: chosenRoll ? chosenRoll.roll : null,
-      freshRejectionReasons: [],
-      marginAtDecision: chosenOpen ? candidate.model!.edgeMargin : chosenRoll!.roll.model!.edgeMargin,
-      settings: pluto,
-      sector: profile.sector,
-      book,
-      stress,
-      kellyFraction: settings.kellyFraction,
-      cycleBreakEven,
-    });
+    const automaticHeldShareCall = heldShareCallChoice !== null;
+    const gates = automaticHeldShareCall
+      ? runHeldShareCallGates({ candidate, settings: pluto, book: { freeShares: freeSharesToday, workingOrderOnSymbol: false, lastFilledActionAt: ledgerLastFilledActionAt(ledger, symbol), nowMs, sameContractConflict: null }, cycleBreakEven, requireLiveQuote: false })
+      : runPostModelGates({
+          decision,
+          candidate: chosenOpen ? candidate : null,
+          roll: chosenRoll ? chosenRoll.roll : null,
+          freshRejectionReasons: [],
+          marginAtDecision: chosenOpen ? candidate.model!.edgeMargin : chosenRoll!.roll.model!.edgeMargin,
+          settings: pluto,
+          sector: profile.sector,
+          book,
+          stress,
+          kellyFraction: settings.kellyFraction,
+        });
     const contract = { strategyKey: candidate.strategyKey, expiry: candidate.expiry, strike: candidate.strike, right, ...(heldLegToRoll ? { fromStrike: heldLegToRoll.strike, fromExpiry: heldLegToRoll.expiry } : {}) };
     const contractLabel = describeOptionContract({ strike: candidate.strike, right, expiry: candidate.expiry, dte: candidate.dte });
     const describeOrder = (quantity: number | null, price: number | null) =>
@@ -883,24 +901,29 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
         : `${symbol} Sell ${contractLabel}${quantity === null ? "" : describeOrderSize(quantity, price)}`;
     const candidateScores = chosenRoll
       ? { netCreditPerShare: chosenRoll.roll.netCreditPerShare, deltaChange: chosenRoll.roll.deltaChange, dollarRiskChange: chosenRoll.roll.dollarRiskChange, flags: chosenRoll.roll.flags, model: chosenRoll.roll.model, replacement: summarizeCandidate(candidate), heldLeg: heldLegToRoll ? { expiry: heldLegToRoll.expiry, strike: heldLegToRoll.strike, right: heldLegToRoll.right, quantity: heldLegToRoll.quantity, entryPrice: heldLegToRoll.entryPrice, bid: heldLegToRoll.bid, ask: heldLegToRoll.ask, dte: heldLegToRoll.dte, delta: heldLegToRoll.delta } : null }
-      : { ...summarizeCandidate(candidate), ...(chosenOpen?.heldShares ? { heldShares: chosenOpen.heldShares } : {}) };
-    const base = { kind, candidateId, automatic: false, chosenBecause: decided.choice.chosenBecause, contract, candidateScores };
-    const gateResults: PlutoGateResult[] = [...gates.gates];
+      : { ...summarizeCandidate(candidate), ...(heldShareCall ? { heldShares: { contracts: heldShareCall.contracts, premiumYield: heldShareCall.premiumYield, breakEvenAfter: heldShareCall.breakEvenAfter, profitIfCalledAway: heldShareCall.profitIfCalledAway } } : {}) };
+    const base = { kind, candidateId, automatic: automaticHeldShareCall, chosenBecause: decided.choice.chosenBecause, contract, candidateScores };
+    const gateResults: PlutoGateResult[] = [...(automaticHeldShareCall ? [{ gate: heldShareCallGate, ok: true, detail: decided.choice.chosenBecause }] : []), ...gates.gates];
     const blockWith = (quantity: number | null, limitPrice: number | null): "blocked" => {
       recordAction(symbol, { ...base, description: describeOrder(quantity, limitPrice), outcome: "blocked", blockReason: gateResults.filter((entry) => !entry.ok).map((entry) => `${entry.gate}: ${entry.detail}`).join(" | "), gateResults, quantity, limitPrice, fillPrice: null, positionIds: chosenRoll ? [chosenRoll.roll.positionId] : [] });
       return "blocked";
     };
     /** Whether the look goes on after this refusal: a refused roll is only left out; a refused open may end the opens on its ticker or on the book. In LLM mode the round ends (one decision a round). */
     const chooseAgainAfterRefusal = (orderLimits: ReturnType<typeof evaluateOrderLimitFigures> | null): boolean => {
+      // A refused call on held shares is code's, like an automatic close: left out for the rest of the look.
+      if (automaticHeldShareCall) {
+        if (!llm) return chooseAgainWithout(candidateId);
+        refusedCandidateIds.add(candidateId);
+        return true;
+      }
       if (llm) return afterModelAction(symbol, "blocked");
       if (!chosenOpen) return chooseAgainWithout(candidateId);
-      // What one more contract commits, as the sizing gate counts it; a call on shares already held commits nothing.
+      // What one more contract commits, as the sizing gate counts it.
       const limitPrice = midLimitPrice(candidate.bid, candidate.ask);
-      const onHeldShares = candidate.strategyKey === "covered_call" && freeSharesToday >= sharesPerContract;
       const dollarsPerContract = ((candidate.strategyKey === "cash_secured_put" ? candidate.strike : stockPrice) - limitPrice) * sharesPerContract;
       return chooseAgainAfterRefusedOpen(candidateId, symbol, {
         failedGates: gateResults.filter((entry) => !entry.ok),
-        sizing: onHeldShares ? null : { room: computeSizingRoom(pluto, book, profile.sector !== null), dollarsPerContract },
+        sizing: { room: computeSizingRoom(pluto, book, profile.sector !== null), dollarsPerContract },
         orderLimitBreaches: orderLimits === null ? null : orderLimitBreachesOf(orderLimits),
       });
     };
@@ -929,7 +952,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
 
     // Rules mode (Marcelo 2026-10-12): no open that the session's own event-close rule would close at once, judged on
     // the position as Pluto would show it right after the fill (a copy of the book takes the open).
-    if (!llm && chosenOpen) {
+    if (!llm && chosenOpen && !automaticHeldShareCall) {
       const skipReason = eventCloseAtOnceReason(owner, chosenOpen, plan.quantity);
       if (skipReason !== null) {
         refusedCandidateIds.add(candidateId);
@@ -1005,10 +1028,16 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
       stressContracts: Number.isFinite(stressCap.contracts) ? stressCap.contracts : null,
       priceToCycleScale,
     });
-    recordAction(symbol, { ...base, actionId, description: `${describeOrder(plan.quantity, fillPrice)}${sharesNote} (grade ${model.grade}, Edge Yield ${formatPercent(model.expectedAnnualizedReturn)}, Hist Yield ${formatPercent(model.calibratedAnnualizedReturn)}; ${filtered.eligible.length} of ${scored.candidates.length} eligible)`, outcome: "filled", blockReason: null, gateResults, quantity: plan.quantity, limitPrice: plan.limitPrice, fillPrice, positionIds });
+    const choiceNote = heldShareCall
+      ? `premium yield ${formatPercent(heldShareCall.premiumYield)}, grade ${model.grade}; ${filtered.heldShareCall!.ranked.length} call(s) on the held shares passed`
+      : `grade ${model.grade}, Edge Yield ${formatPercent(model.expectedAnnualizedReturn)}, Hist Yield ${formatPercent(model.calibratedAnnualizedReturn)}; ${filtered.eligible.length} of ${scored.candidates.length} eligible`;
+    recordAction(symbol, { ...base, actionId, description: `${describeOrder(plan.quantity, fillPrice)}${sharesNote} (${choiceNote})`, outcome: "filled", blockReason: null, gateResults, quantity: plan.quantity, limitPrice: plan.limitPrice, fillPrice, positionIds });
     owner.scored = null;
     filledActionCount += 1;
-    if (llm && !afterModelAction(symbol, "filled")) break;
+    // Code's own order does not end the model's round; its fill queues an order_ended round, as an automatic close's.
+    if (automaticHeldShareCall) {
+      if (llm) queueOrderEnded(symbol);
+    } else if (llm && !afterModelAction(symbol, "filled")) break;
   }
 
   // LLM mode: what each round that took no action ended on.

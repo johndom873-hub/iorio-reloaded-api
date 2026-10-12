@@ -266,34 +266,36 @@ describe("a session through the wheel", () => {
     expectAccountToReconcile(session);
 
     // What was done, in order: the put on the 7th, its roll the next day (near expiry, a later put for a credit), the
-    // call on the assigned shares once they showed a profit, and a new position after the shares were called away.
+    // call code sold on the assigned shares at the next session (the highest premium yield whose strike reaches the
+    // cycle break-even), and a new position after the shares were called away.
     const filled = filledActionsOf(session);
-    expect(filled.map((action) => `${action.tradingDate} ${action.kind}`)).toEqual(["2026-04-07 open_cash_secured_put", "2026-04-08 roll", "2026-04-28 open_covered_call", "2026-05-04 open_covered_call"]);
+    expect(filled.map((action) => `${action.tradingDate} ${action.kind}`)).toEqual(["2026-04-07 open_cash_secured_put", "2026-04-08 roll", "2026-04-27 open_covered_call", "2026-05-04 open_covered_call"]);
     const [openPut, roll, callOnShares, nextCycleOpen] = filled as [(typeof filled)[number], (typeof filled)[number], (typeof filled)[number], (typeof filled)[number]];
     expect(openPut).toMatchObject({ quantity: 5, contract: { strategyKey: "cash_secured_put", expiry: "2026-04-17", strike: 98, right: "P" }, chosenBecause: "Pluto's top pick by Edge Yield" });
     expect(roll).toMatchObject({ quantity: 5, contract: { strategyKey: "cash_secured_put", expiry: "2026-04-24", strike: 97, right: "P", fromStrike: 98, fromExpiry: "2026-04-17" }, chosenBecause: "the best eligible roll on a leg flagged near expiry" });
-    expect(callOnShares).toMatchObject({ quantity: 5, contract: { strategyKey: "covered_call", expiry: "2026-05-01", strike: 100, right: "C" }, chosenBecause: "shares in profit above the floor: a call on them clears the break-even rule" });
+    expect(callOnShares).toMatchObject({ quantity: 5, automatic: true, contract: { strategyKey: "covered_call", expiry: "2026-05-01", strike: 97, right: "C" } });
+    expect(callOnShares.chosenBecause).toMatch(/^code sells calls on held shares: the highest premium yield, \d+% a year; if called away the cycle ends \$\d+$/);
     expect(callOnShares.description).toContain("on 500 held shares");
     expect(nextCycleOpen.description).toContain("with 500 shares bought @");
 
     const firstPut = quoteOf(session, "2026-04-07", "2026-04-17", 98, "P");
     const firstPutBuyback = quoteOf(session, "2026-04-08", "2026-04-17", 98, "P");
     const rolledPut = quoteOf(session, "2026-04-08", "2026-04-24", 97, "P");
-    const call = quoteOf(session, "2026-04-28", "2026-05-01", 100, "C");
+    const call = quoteOf(session, "2026-04-27", "2026-05-01", 97, "C");
     expect(openPut.fillPrice).toBeCloseTo(firstPut.saleFill, 8);
     expect(roll.fillPrice).toBeCloseTo(rolledPut.saleFill, 8);
     expect(callOnShares.fillPrice).toBeCloseTo(call.saleFill, 8);
 
     // The settlements, in the next session's summary.
     expect(dayOf(session, "2026-04-27").decisionSummary).toContain("$97 Put · 24 Apr assigned at the 95.40 close: 500 shares bought at the strike");
-    expect(dayOf(session, "2026-05-04").decisionSummary).toContain("$100 Call · 1 May assigned at the 101.00 close: 500 shares called away at the strike");
+    expect(dayOf(session, "2026-05-04").decisionSummary).toContain("$97 Call · 1 May assigned at the 101.00 close: 500 shares called away at the strike");
 
     // The first wheel cycle, by hand: the roll's cost, the second put's premium, the call's premium, and 500 shares put
-    // at 97 and called away at 100. Five sessions from the assignment (24 April) to the close (1 May).
+    // at 97 and called away at 97. Five sessions from the assignment (24 April) to the close (1 May).
     const rollCost = (firstPut.saleFill - firstPutBuyback.purchaseFill) * 500 - 2 * 5 * commissionPerContract;
     const putPremium = rolledPut.saleFill * 500 - 5 * commissionPerContract;
     const callPremium = call.saleFill * 500 - 5 * commissionPerContract;
-    const cycleTotal = rollCost + putPremium + callPremium + (100 - 97) * 500;
+    const cycleTotal = rollCost + putPremium + callPremium + (97 - 97) * 500;
     expect(detail.cycles).toHaveLength(2);
     const [cycle, nextCycle] = detail.cycles as [(typeof detail.cycles)[number], (typeof detail.cycles)[number]];
     expect(cycle).toMatchObject({ symbol: "WHLA", cycleNumber: 1, status: "closed", openedOn: "2026-04-07", assignedOn: "2026-04-24", closedOn: "2026-05-01", closedAt: "2026-05-01T20:00:00.000Z", recoverySessions: 5, ageSessions: null, sharesHeld: 0, dataFlags: [] });
@@ -303,7 +305,7 @@ describe("a session through the wheel", () => {
     expect(cycle.buckets.cc.premium).toBeCloseTo(callPremium, 2);
     // The put's bucket carries the shares' loss to the assignment close; the shares' buckets what they did after it.
     expect(cycle.buckets.csp.stock).toBeCloseTo((95.4 - 97) * 500, 2);
-    expect(cycle.buckets.unstructured.stock + cycle.buckets.cc.stock).toBeCloseTo((100 - 95.4) * 500, 2);
+    expect(cycle.buckets.unstructured.stock + cycle.buckets.cc.stock).toBeCloseTo((97 - 95.4) * 500, 2);
     expect(nextCycle).toMatchObject({ cycleNumber: 2, status: "open", openedOn: "2026-05-04", assignedOn: null, recoverySessions: null, ageSessions: 0, sharesHeld: 500 });
 
     // The book behind it.
@@ -316,10 +318,10 @@ describe("a session through the wheel", () => {
     expect(rolledPosition.realizedPnlDollars).toBeCloseTo(putPremium, 2);
     expect(sharesPosition).toMatchObject({ strategyKey: "unstructured", unstructuredReason: "csp_assigned_stock", status: "closed", closeReason: "stock_rolled_into_covered_call", openedAt: "2026-04-24T20:00:00.000Z", shareSourcePositionIds: [rolledPosition.positionId], realizedPnlDollars: 0 });
     expect(sharesPosition.legs[0]).toMatchObject({ legType: "stock", quantity: 500, entryPrice: 97, exitPrice: 97 });
-    expect(coveredCall).toMatchObject({ strategyKey: "covered_call", status: "closed", closeReason: "assigned", closedAt: "2026-05-01T20:00:00.000Z", shareSourcePositionIds: [sharesPosition.positionId], realizedStockPnlDollars: 1500 });
+    expect(coveredCall).toMatchObject({ strategyKey: "covered_call", status: "closed", closeReason: "assigned", closedAt: "2026-05-01T20:00:00.000Z", shareSourcePositionIds: [sharesPosition.positionId], realizedStockPnlDollars: 0 });
     expect(coveredCall.realizedPremiumPnlDollars).toBeCloseTo(callPremium, 2);
-    expect(coveredCall.legs.find((leg) => leg.legType === "stock")).toMatchObject({ quantity: 500, entryPrice: 97, exitPrice: 100, exitAt: "2026-05-01T20:00:00.000Z" });
-    expect(coveredCall.legs.find((leg) => leg.legType === "option")).toMatchObject({ optionType: "call", strike: 100, settledAs: "assigned", expiryClose: 101, dteAtEntry: 3 });
+    expect(coveredCall.legs.find((leg) => leg.legType === "stock")).toMatchObject({ quantity: 500, entryPrice: 97, exitPrice: 97, exitAt: "2026-05-01T20:00:00.000Z" });
+    expect(coveredCall.legs.find((leg) => leg.legType === "option")).toMatchObject({ optionType: "call", strike: 97, settledAs: "assigned", expiryClose: 101, dteAtEntry: 4 });
     expect(nextPosition).toMatchObject({ strategyKey: "covered_call", status: "open" });
     expect(callOnShares.positionIds).toEqual([coveredCall.positionId]);
     expect(roll.positionIds).toEqual([putPosition.positionId, rolledPosition.positionId]);
@@ -332,7 +334,7 @@ describe("a session through the wheel", () => {
     expect(session.fills.filter((fill) => fill.positionId === coveredCall.positionId && fill.instrument === "stock")).toEqual([]);
 
     // One row per option sold, with how it ended, its position's P&L and its wheel cycle (no P&L of its own).
-    expect(detail.trades.map((trade) => `${trade.openedOn} ${trade.optionRight}${trade.strike} ${trade.endedBy} ${trade.settledOn}`)).toEqual(["2026-04-07 P98 rolled 2026-04-08", "2026-04-08 P97 assigned 2026-04-24", "2026-04-28 C100 assigned 2026-05-01", "2026-05-04 C103 null null"]);
+    expect(detail.trades.map((trade) => `${trade.openedOn} ${trade.optionRight}${trade.strike} ${trade.endedBy} ${trade.settledOn}`)).toEqual(["2026-04-07 P98 rolled 2026-04-08", "2026-04-08 P97 assigned 2026-04-24", "2026-04-27 C97 assigned 2026-05-01", "2026-05-04 C103 null null"]);
     expect(detail.trades.map((trade) => [trade.pnlDollars, trade.cycleLabel, trade.cycleStatus])).toEqual([
       [null, "WHLA #1", "closed"],
       [null, "WHLA #1", "closed"],
@@ -343,7 +345,7 @@ describe("a session through the wheel", () => {
     expect(detail.trades[0]!.positionPnlDollars).toBeCloseTo(rollCost, 2);
     expect(detail.trades[1]!.positionPnlDollars).toBeCloseTo(putPremium, 2);
     expect(detail.trades[1]).toMatchObject({ settlementClose: 95.4, inTheMoneyAtExpiry: true, legId: rolledPosition.legs[0]!.legId, positionId: rolledPosition.positionId, positionStatus: "closed" });
-    expect(detail.trades[2]!.positionPnlDollars).toBeCloseTo(callPremium + 1500, 2);
+    expect(detail.trades[2]!.positionPnlDollars).toBeCloseTo(callPremium, 2);
 
     // The account on the last day, flat at its mark: the start, the interest and the closed cycle.
     const lastDay = detail.days.at(-1)!;
@@ -353,7 +355,7 @@ describe("a session through the wheel", () => {
     // The per-ticker statistics.
     expect(detail.tickerStatistics).toHaveLength(1);
     const statistics = detail.tickerStatistics[0]!;
-    expect(statistics).toMatchObject({ symbol: "WHLA", optionSaleCount: 4, averageTradedDte: (10 + 16 + 3 + 4) / 4, putPositionCount: 2, putPositionsEnded: 2, putPositionsAssigned: 1, putAssignedShare: 0.5, closedCycleCount: 1, openCycleCount: 1, recoverySessions: { count: 1, mean: 5, median: 5, longest: 5 } });
+    expect(statistics).toMatchObject({ symbol: "WHLA", optionSaleCount: 4, averageTradedDte: (10 + 16 + 4 + 4) / 4, putPositionCount: 2, putPositionsEnded: 2, putPositionsAssigned: 1, putAssignedShare: 0.5, closedCycleCount: 1, openCycleCount: 1, recoverySessions: { count: 1, mean: 5, median: 5, longest: 5 } });
     expect(statistics.realizedPnlDollars).toBeCloseTo(cycleTotal, 2);
     expect(statistics.totalPnlDollars).toBeCloseTo(cycleTotal + nextCycle.totalDollars, 2);
     expect(statistics.openCycles).toEqual([{ symbol: "WHLA", cycleNumber: 2, openedOn: "2026-05-04", assignedOn: null, ageSessions: 0, totalDollars: nextCycle.totalDollars, sharesHeld: 500 }]);
@@ -374,10 +376,10 @@ describe("a session through the wheel", () => {
     }
   }, 60_000);
 
-  it("buys a put back when holding no longer pays, and sells assigned shares in profit when no call is worth selling", async () => {
+  it("buys a put back when holding no longer pays, and code sells a call on the assigned shares at the next session", async () => {
     // Options trade at 15% volatility on 8 and 21 April (against a 25% forecast) and at 60% otherwise: on the 8th the
-    // put sold the day before is worth less than holding it pays; on the 21st, with the shares assigned on the 17th back
-    // in profit, no call has a positive edge.
+    // put sold the day before is worth less than holding it pays. The shares assigned on the 17th get a call from code on
+    // the 20th, whatever its edge (Marcelo 2026-10-12): selling the shares (P1) is for when no call clears Pluto's rules.
     const fileDates = weekdaysBetween("2026-04-06", "2026-04-22");
     //                        6     7      8      9     10    13    14    15    16    17    20    21    22
     const tenOClockPrices = [100, 100.2, 100.6, 100.4, 99.6, 98.8, 98.2, 97.8, 97.4, 97.2, 97.6, 99.0, 99.2];
@@ -396,8 +398,8 @@ describe("a session through the wheel", () => {
     expectAccountToReconcile(session);
 
     const filled = filledActionsOf(session);
-    expect(filled.map((action) => `${action.tradingDate} ${action.kind}`)).toEqual(["2026-04-07 open_cash_secured_put", "2026-04-08 close_leg", "2026-04-09 open_cash_secured_put", "2026-04-21 close_shares", "2026-04-22 open_cash_secured_put"]);
-    const [, buyback, secondPutOpen, shareSale] = filled as [(typeof filled)[number], (typeof filled)[number], (typeof filled)[number], (typeof filled)[number], (typeof filled)[number]];
+    expect(filled.map((action) => `${action.tradingDate} ${action.kind}`)).toEqual(["2026-04-07 open_cash_secured_put", "2026-04-08 close_leg", "2026-04-09 open_cash_secured_put", "2026-04-20 open_covered_call"]);
+    const [, buyback, secondPutOpen, callOnShares] = filled as [(typeof filled)[number], (typeof filled)[number], (typeof filled)[number], (typeof filled)[number]];
 
     // The buyback: offered because holding no longer pays, taken by the rule, filled at mid + λ × half-spread.
     const firstPut = quoteOf(session, "2026-04-07", "2026-04-17", 98, "P");
@@ -408,42 +410,34 @@ describe("a session through the wheel", () => {
     expect(dayOf(session, "2026-04-08").decisionSummary).toMatch(/^Closed WHLB Buy back \$98 Put · 17 Apr \(9DTE\) · 5× @ /);
     const buybackProfit = (firstPut.saleFill - firstPutBuyback.purchaseFill) * 500 - 2 * 5 * commissionPerContract;
 
-    // The share sale: 500 shares put at 98 on the 17th (close 97), sold on the 21st at the 10:00 price less a cent.
+    // The call: 500 shares put at 98 on the 17th (close 97); on the 20th code sells the highest premium yield whose
+    // strike reaches the cycle break-even (98 less the put's premium), on the held shares, buying none.
     const secondPut = quoteOf(session, "2026-04-09", "2026-04-17", 98, "P");
-    const saleFill = stockPriceOn(session, "2026-04-21") - 0.01;
     expect(secondPutOpen.fillPrice).toBeCloseTo(secondPut.saleFill, 8);
-    expect(shareSale).toMatchObject({ automatic: false, quantity: 500, chosenBecause: "shares in profit above the floor: no call on them clears the break-even rule" });
-    expect(shareSale.fillPrice).toBeCloseTo(saleFill, 6);
     expect(dayOf(session, "2026-04-20").decisionSummary).toContain("$98 Put · 17 Apr assigned at the 97.00 close: 500 shares bought at the strike");
-    const secondPutPremium = secondPut.saleFill * 500 - 5 * commissionPerContract;
-    const sharesProfit = (saleFill - 98) * 500 - 500 * 0.005;
+    expect(callOnShares).toMatchObject({ automatic: true, quantity: 5, contract: { strategyKey: "covered_call", expiry: "2026-04-24", strike: 98, right: "C" } });
+    expect(callOnShares.chosenBecause).toMatch(/^code sells calls on held shares: the highest premium yield, \d+% a year; if called away the cycle ends \$\d+$/);
+    expect(callOnShares.description).toContain("on 500 held shares");
+    expect(callOnShares.fillPrice).toBeCloseTo(quoteOf(session, "2026-04-20", "2026-04-24", 98, "C").saleFill, 8);
+    expect(session.fills.filter((fill) => fill.actionId === callOnShares.actionId).map((fill) => `${fill.instrument} ${fill.side}`)).toEqual(["option sell"]);
 
-    // Three cycles: the put bought back; the put assigned and its shares sold two sessions later; the put still open.
-    expect(detail.cycles.map((cycle) => ({ number: cycle.cycleNumber, status: cycle.status, openedOn: cycle.openedOn, assignedOn: cycle.assignedOn, closedOn: cycle.closedOn, recoverySessions: cycle.recoverySessions }))).toEqual([
-      { number: 1, status: "closed", openedOn: "2026-04-07", assignedOn: null, closedOn: "2026-04-08", recoverySessions: null },
-      { number: 2, status: "closed", openedOn: "2026-04-09", assignedOn: "2026-04-17", closedOn: "2026-04-21", recoverySessions: 2 },
-      { number: 3, status: "open", openedOn: "2026-04-22", assignedOn: null, closedOn: null, recoverySessions: null },
+    // Two cycles: the put bought back; the put assigned, its shares now under the call.
+    expect(detail.cycles.map((cycle) => ({ number: cycle.cycleNumber, status: cycle.status, openedOn: cycle.openedOn, assignedOn: cycle.assignedOn, closedOn: cycle.closedOn }))).toEqual([
+      { number: 1, status: "closed", openedOn: "2026-04-07", assignedOn: null, closedOn: "2026-04-08" },
+      { number: 2, status: "open", openedOn: "2026-04-09", assignedOn: "2026-04-17", closedOn: null },
     ]);
     expect(detail.cycles[0]!.totalDollars).toBeCloseTo(buybackProfit, 2);
-    expect(detail.cycles[1]!.totalDollars).toBeCloseTo(secondPutPremium + sharesProfit, 2);
-    expect(detail.cycles[1]!.buckets.csp.premium).toBeCloseTo(secondPutPremium, 2);
-    expect(detail.cycles[1]!.buckets.csp.stock + detail.cycles[1]!.buckets.unstructured.stock).toBeCloseTo(sharesProfit, 2);
-
     const sharesPosition = detail.positions.find((position) => position.strategyKey === "unstructured")!;
-    expect(sharesPosition).toMatchObject({ status: "closed", closeReason: "closed_via_app", unstructuredReason: "csp_assigned_stock", realizedPremiumPnlDollars: 0 });
-    expect(sharesPosition.realizedStockPnlDollars).toBeCloseTo(sharesProfit, 2);
-    expect(session.fills.filter((fill) => fill.actionId === shareSale.actionId)).toEqual([expect.objectContaining({ instrument: "stock", side: "sell", quantity: 500, commissionDollars: 2.5, isClosing: true })]);
-    expect(detail.trades.map((trade) => `${trade.openedOn} ${trade.endedBy} ${trade.settledOn}`)).toEqual(["2026-04-07 bought_back 2026-04-08", "2026-04-09 assigned 2026-04-17", "2026-04-22 null null"]);
+    expect(sharesPosition).toMatchObject({ status: "closed", closeReason: "stock_rolled_into_covered_call", unstructuredReason: "csp_assigned_stock" });
+    expect(detail.trades.map((trade) => `${trade.openedOn} ${trade.optionRight}${trade.strike} ${trade.endedBy} ${trade.settledOn}`)).toEqual(["2026-04-07 P98 bought_back 2026-04-08", "2026-04-09 P98 assigned 2026-04-17", "2026-04-20 C98 null null"]);
     expect(detail.trades[0]!.pnlDollars).toBeNull();
     expect(detail.trades[0]!.positionPnlDollars).toBeCloseTo(buybackProfit, 2);
 
-    // Flat at the last mark: the start, the interest and the two closed cycles.
-    expect(detail.days.at(-1)!.accountValue).toBeCloseTo(startingValue + totalInterest(session) + buybackProfit + secondPutPremium + sharesProfit, 1);
-
     const statistics = detail.tickerStatistics[0]!;
-    expect(statistics).toMatchObject({ optionSaleCount: 3, averageTradedDte: (10 + 8 + 2) / 3, putPositionCount: 3, putPositionsEnded: 2, putPositionsAssigned: 1, putAssignedShare: 0.5, closedCycleCount: 2, openCycleCount: 1, recoverySessions: { count: 1, mean: 2, median: 2, longest: 2 } });
-    expect(statistics.realizedPnlDollars).toBeCloseTo(buybackProfit + secondPutPremium + sharesProfit, 2);
-    expect(statistics.openCycles.map((cycle) => cycle.cycleNumber)).toEqual([3]);
+    expect(statistics).toMatchObject({ optionSaleCount: 3, averageTradedDte: (10 + 8 + 4) / 3, putPositionCount: 2, putPositionsEnded: 2, putPositionsAssigned: 1, putAssignedShare: 0.5, closedCycleCount: 1, openCycleCount: 1 });
+    // Realized: the bought-back put and the assigned put's premium (its position closed at the assignment).
+    expect(statistics.realizedPnlDollars).toBeCloseTo(buybackProfit + secondPut.saleFill * 500 - 5 * commissionPerContract, 2);
+    expect(statistics.openCycles.map((cycle) => cycle.cycleNumber)).toEqual([2]);
   }, 60_000);
 
   it("buys a put back by code before an earnings report it would be held through", async () => {

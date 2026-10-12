@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
-import { computeKellyCap, computeSizingRoom, computeStressCap, kellyFraction, midLimitPrice, runPostModelGates, tickerCooldownStatus, type PostModelBookInput, type PostModelGateInput } from "./postModelGates.js";
+import { computeKellyCap, computeSizingRoom, computeStressCap, kellyFraction, midLimitPrice, runHeldShareCallGates, runPostModelGates, tickerCooldownStatus, type HeldShareCallGateInput, type PostModelBookInput, type PostModelGateInput } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import type { CandidateModelScore } from "../lib/signalCandidates.js";
 import { fixtureCandidateModel, fixtureRollModel } from "../lib/testSupport/valuationModelFixtures.js";
@@ -140,62 +140,21 @@ describe("runPostModelGates — the gates", () => {
 });
 
 describe("runPostModelGates — covered calls and rolls", () => {
-  it("a covered call on held shares covers the free round lots and buys none; without them it is a buy-write sized like a put", () => {
+  it("a covered call the model chose is a buy-write sized like a put; an odd lot of free shares covers nothing", () => {
     const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ coveredPositionPnlVarianceDollars: buyWriteVariance }) });
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
-    // 350 free shares → 3 contracts on them, the 50-share odd lot left over, no buy-writes on top
-    const held = runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350 }, cycleBreakEven: heldCycle }));
-    expect(held.plan).toEqual({ quantity: 3, limitPrice: 2.05, notional: 0, fullSizeQuantity: 3 });
-    expect(held.gates.find((gate) => gate.gate === "sizing")?.detail).toBe("350 free shares cover 3 contract(s), no shares bought and no Kelly cap on held shares; volume share allows 60");
-    // no free shares at all: a pure buy-write, order size 50k / ((110 − 2.05) × 100) = 4
+    // order size 50k / ((110 − 2.05) × 100) = 4
     expect(runPostModelGates(input({ decision, candidate: call })).plan).toEqual({ quantity: 4, limitPrice: 2.05, notional: 43_180, fullSizeQuantity: 4 });
     // an odd lot covers nothing: no room and no round lot → nothing
     const none = runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 80, freeCash: 40_000 } }));
     expect(failed(none)).toEqual(["sizing"]);
-    // no live spot: the held shares need none
-    expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350, spotPrice: null }, cycleBreakEven: heldCycle })).plan).toEqual({ quantity: 3, limitPrice: 2.05, notional: 0, fullSizeQuantity: 3 });
   });
-
-  it("the open-positions cap does not refuse a call on shares already held, but still refuses a buy-write or a put", () => {
+  it("the open-positions cap refuses a buy-write or a put at the cap", () => {
     const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ coveredPositionPnlVarianceDollars: buyWriteVariance }) });
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
     const atCap = { ...book, openPositionCount: 8 };
-    const held = runPostModelGates(input({ decision, candidate: call, book: { ...atCap, freeShares: 350 }, cycleBreakEven: heldCycle }));
-    expect(held.plan?.quantity).toBe(3);
-    expect(held.gates.find((gate) => gate.gate === "open_positions_cap")).toEqual({ gate: "open_positions_cap", ok: true, detail: "a call on shares already held adds no new exposure (8 of 8 managed positions)" });
-    // no round lot held: it would buy shares, so the cap applies
-    expect(failed(runPostModelGates(input({ decision, candidate: call, book: { ...atCap, freeShares: 80 } })))).toContain("open_positions_cap");
+    expect(failed(runPostModelGates(input({ decision, candidate: call, book: atCap })))).toContain("open_positions_cap");
     expect(failed(runPostModelGates(input({ book: atCap })))).toEqual(["open_positions_cap"]);
-  });
-  it("re-checks the break-even rule on held shares at the size sent and the limit price", () => {
-    const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:39" };
-    // 100 shares assigned at $40 with $1.00 of put premium: break-even $39.00, floor max(1% × $40 × 100, $50) = $50
-    const assigned = { breakEvenPerShare: 39, unavailableReason: null, sharesAcquired: 100, acquisitionCost: 4000 };
-    const callAt = (strike: number, bid: number, ask: number) => candidate({ strategyKey: "covered_call", strike, bid, ask, delta: 0.25 });
-    // $39 at 0.55 mid: 39 − (0.55 − 0.0068) = 38.4568 → $54.32 if assigned
-    const passes = runPostModelGates(input({ decision, candidate: callAt(39, 0.5, 0.6), book: { ...book, freeShares: 100 }, cycleBreakEven: assigned }));
-    expect(failed(passes)).toEqual([]);
-    expect(passes.gates.find((gate) => gate.gate === "break_even")?.detail).toBe("if assigned, 100 shares close $54 over the cycle break-even of 38.46, minimum $50");
-    // $38.50 at 0.60: $9.32
-    const blocked = runPostModelGates(input({ decision, candidate: callAt(38.5, 0.55, 0.65), book: { ...book, freeShares: 100 }, cycleBreakEven: assigned }));
-    expect(failed(blocked)).toEqual(["break_even"]);
-    expect(blocked.gates.find((gate) => gate.gate === "break_even")?.detail).toBe("if assigned, the $38.5 strike closes 100 shares $9 over the cycle break-even of 38.41 (after this premium), below the $50 minimum profit");
-    // no break-even: blocked, never priced from the stock leg's entry price
-    const unknown = runPostModelGates(input({ decision, candidate: callAt(39, 0.5, 0.6), book: { ...book, freeShares: 100 }, cycleBreakEven: { ...assigned, breakEvenPerShare: null, unavailableReason: "no expiry-date price bar for put $40 (2026-10-09)" } }));
-    expect(unknown.gates.find((gate) => gate.gate === "break_even")).toEqual({ gate: "break_even", ok: false, detail: "no cycle break-even for the held shares: no expiry-date price bar for put $40 (2026-10-09)" });
-    expect(failed(runPostModelGates(input({ decision, candidate: callAt(39, 0.5, 0.6), book: { ...book, freeShares: 100 } })))).toEqual(["break_even"]);
-  });
-  it("the floor's $50 minimum binds harder when the volume cap cuts the contracts", () => {
-    const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:40" };
-    // 300 shares at $40, $3.00 of premium: break-even $39; a $39.10 call at 0.20 adds $0.1932/share over the 300
-    const cycle = { breakEvenPerShare: 39, unavailableReason: null, sharesAcquired: 300, acquisitionCost: 12_000 };
-    const call = candidate({ strategyKey: "covered_call", strike: 39.1, bid: 0.15, ask: 0.25, delta: 0.25 });
-    // 3 contracts: (39.10 − 38.8068) × 300 = $87.96 vs max($120, $50) = $120 → blocked; the 1% binds
-    expect(failed(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 300 }, cycleBreakEven: cycle })))).toEqual(["break_even"]);
-    // volume 5 at 20% allows 1 contract: (39.10 − (39 − 0.1932 / 3)) × 100 = $16.44 vs $50 → blocked
-    const one = runPostModelGates(input({ decision, candidate: { ...call, volume: 5 }, book: { ...book, freeShares: 300 }, cycleBreakEven: cycle }));
-    expect(one.plan).toBeNull();
-    expect(one.gates.find((gate) => gate.gate === "break_even")?.detail).toContain("closes 100 shares $16 over");
   });
   it("a roll keeps the held quantity and only counts a rise in exposure (strike increase less net credit) as notional", () => {
     const roll: RollSignalCandidate = { legId: "leg1", positionId: "p1", strategyKey: "cash_secured_put", quantity: 3, replacement: candidate({ strike: 95 }), netRollEdge: 0.07, netRollEdgeDollarsPerContract: 40, netRollEdgeDollars: 120, netCreditPerShare: 0.4, deltaChange: -0.02, dollarRiskChange: -500, flags: [], warnings: [], grade: "good", model: fixtureRollModel({ edgeMargin: 0.25, netExpectedPnlPerContract: 40, netExpectedPnl: 120 }) };
@@ -276,12 +235,11 @@ describe("stress cap (Marcelo, 2026-10-08; on the model's τ since 2026-10-10)",
     expect(runPostModelGates(input({ settings: { ...on, stressRiskBudgetPct: 0.5 } })).gates.find((gate) => gate.gate === "sizing")?.detail).toContain("stress cap: a 2σ move to expiry");
     expect(runPostModelGates(input({ settings: on })).plan?.quantity).toBe(5); // the 5-contract order size binds first
   });
-  it("caps only the contracts that buy shares: calls on shares already held are never capped", () => {
+  it("caps a buy-write's contracts: they buy shares", () => {
     const callTrade = { ...trade, actionKind: "open_covered_call" as const, candidateId: "HOOD:covered_call:2026-10-16:120" };
     const call = candidate({ strategyKey: "covered_call", strike: 120, delta: 0.25, bid: 1.5, ask: 1.6, volume: 1000, model: model({ coveredPositionPnlVarianceDollars: buyWriteVariance }) });
     const capped = { ...on, stressRiskBudgetPct: 0.2 }; // $2,000: a buy-write's 2σ loss (~$2,440 here) allows none
     expect(runPostModelGates(input({ decision: callTrade, candidate: call, settings: capped, book: { ...book, freeShares: 0 } })).plan).toBeNull();
-    expect(runPostModelGates(input({ decision: callTrade, candidate: call, settings: capped, book: { ...book, freeShares: 300 }, cycleBreakEven: heldCycle })).plan?.quantity).toBe(3);
   });
 });
 
@@ -311,15 +269,53 @@ describe("half-Kelly cap on Edge $ (model review P5, 2026-10-10; half-Kelly on E
     expect(tight.gates.find((gate) => gate.gate === "sizing")?.detail).toContain("→ 2 contract(s)");
     expect(failed(runPostModelGates(input({ candidate: candidate({ model: model({ expectedPnlDollars: 0 }) }) })))).toEqual(["sizing"]);
   });
-  it("caps a buy-write's contracts on shares + call, but never a call on held shares", () => {
+  it("caps a buy-write's contracts on shares + call", () => {
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
     // shares + call Kelly: 0.5 × 500,000 × 2.5 ÷ 250,000 = 2.5 → 2
     const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ expectedPnlDollars: 2.5, coveredPositionPnlVarianceDollars: buyWriteVariance }) });
     // a buy-write: the order size allows 4, the cap 2
     expect(runPostModelGates(input({ decision, candidate: call })).plan).toEqual({ quantity: 2, limitPrice: 2.05, notional: 21_590, fullSizeQuantity: 2 });
-    // 500 free shares: all 5 covered, the cap does not apply
-    expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 500 }, cycleBreakEven: heldCycle })).plan).toEqual({ quantity: 5, limitPrice: 2.05, notional: 0, fullSizeQuantity: 5 });
-    // 100 free shares: 1 contract on them, no buy-write on top
-    expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 100 }, cycleBreakEven: heldCycle })).plan).toEqual({ quantity: 1, limitPrice: 2.05, notional: 0, fullSizeQuantity: 1 });
+  });
+});
+
+describe("runHeldShareCallGates — a call code sells on held shares", () => {
+  const callAt = (strike: number, bid: number, ask: number, overrides: Partial<SignalCandidate> = {}) => candidate({ strategyKey: "covered_call", strike, bid, ask, delta: 0.25, volume: 0, openInterest: 0, ...overrides });
+  // 100 shares assigned at $40 with $1.00 of put premium: break-even $39.00, floor max(1% × $40 × 100, $50) = $50
+  const assigned = { breakEvenPerShare: 39, unavailableReason: null, sharesAcquired: 100, acquisitionCost: 4000 };
+  const heldBook = { freeShares: 100, workingOrderOnSymbol: false, lastFilledActionAt: null, nowMs: book.nowMs, sameContractConflict: null };
+  const heldInput = (overrides: Partial<HeldShareCallGateInput> = {}): HeldShareCallGateInput => ({ candidate: callAt(39, 0.5, 0.6), settings, book: heldBook, cycleBreakEven: assigned, ...overrides });
+
+  it("covers every free round lot at the mid, buys no shares and has no volume, budget, Kelly or positions cap", () => {
+    const output = runHeldShareCallGates(heldInput({ book: { ...heldBook, freeShares: 350 }, cycleBreakEven: heldCycle, candidate: callAt(130, 2.0, 2.1) }));
+    expect(failed(output)).toEqual([]);
+    expect(output.plan).toEqual({ quantity: 3, limitPrice: 2.05, notional: 0, fullSizeQuantity: 3 });
+    expect(output.gates.map((gate) => gate.gate)).toEqual(["live_quote", "working_order", "ticker_cooldown", "same_contract", "sizing", "break_even", "limit_price"]);
+    expect(output.gates.find((gate) => gate.gate === "sizing")?.detail).toBe("350 free shares cover 3 contract(s), no shares bought");
+  });
+  it("re-checks the break-even rule at the size sent and the limit price", () => {
+    // $39 at 0.55 mid: 39 − (0.55 − 0.0068) = 38.4568 → $54.32 if assigned
+    const passes = runHeldShareCallGates(heldInput());
+    expect(failed(passes)).toEqual([]);
+    expect(passes.gates.find((gate) => gate.gate === "break_even")?.detail).toBe("strike at or above the cycle break-even of 39.00; if assigned, 100 shares close $54 over the break-even of 38.46 after this premium, minimum $50");
+    // $38.90 at 1.20: $109.32 with the premium counted, but the strike is under the $39.00 break-even before it
+    const underStrike = runHeldShareCallGates(heldInput({ candidate: callAt(38.9, 1.15, 1.25) }));
+    expect(underStrike.gates.find((gate) => gate.gate === "break_even")).toEqual({ gate: "break_even", ok: false, detail: "the $38.9 strike is below the cycle break-even of 39.00 before this premium" });
+    // $38.50 at 0.60: $9.32
+    const blocked = runHeldShareCallGates(heldInput({ candidate: callAt(38.5, 0.55, 0.65) }));
+    expect(failed(blocked)).toEqual(["break_even"]);
+    expect(blocked.gates.find((gate) => gate.gate === "break_even")?.detail).toBe("if assigned, the $38.5 strike closes 100 shares $9 over the cycle break-even of 38.41 (after this premium), below the $50 minimum profit");
+    const unknown = runHeldShareCallGates(heldInput({ cycleBreakEven: { ...assigned, breakEvenPerShare: null, unavailableReason: "no expiry-date price bar for put $40 (2026-10-09)" } }));
+    expect(unknown.gates.find((gate) => gate.gate === "break_even")).toEqual({ gate: "break_even", ok: false, detail: "no cycle break-even for the held shares: no expiry-date price bar for put $40 (2026-10-09)" });
+    expect(failed(runHeldShareCallGates(heldInput({ cycleBreakEven: null })))).toEqual(["break_even"]);
+  });
+  it("refuses a quote that is not live, a working order, the ticker cooldown, a taken contract and an odd lot", () => {
+    expect(failed(runHeldShareCallGates(heldInput({ candidate: callAt(39, 0.5, 0.6, { quoteSource: "day" }) })))).toEqual(["live_quote"]);
+    expect(failed(runHeldShareCallGates(heldInput({ book: { ...heldBook, workingOrderOnSymbol: true } })))).toEqual(["working_order"]);
+    expect(failed(runHeldShareCallGates(heldInput({ book: { ...heldBook, lastFilledActionAt: new Date(book.nowMs - 10 * 60_000) } })))).toEqual(["ticker_cooldown"]);
+    expect(failed(runHeldShareCallGates(heldInput({ book: { ...heldBook, sameContractConflict: "open position on SMCI $39 Call" } })))).toEqual(["same_contract"]);
+    expect(failed(runHeldShareCallGates(heldInput({ book: { ...heldBook, freeShares: 80 } })))).toContain("sizing");
+  });
+  it("refuses when no call is left on fresh quotes", () => {
+    expect(runHeldShareCallGates(heldInput({ candidate: null }))).toEqual({ ok: false, gates: [{ gate: "candidate_present", ok: false, detail: "no call on the held shares passes every rule on fresh quotes" }], plan: null });
   });
 });

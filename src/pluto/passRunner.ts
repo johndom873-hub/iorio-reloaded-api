@@ -3,14 +3,15 @@ import type { InternalApiClient } from "../lib/internalApiClient.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { computePositionExposures } from "../lib/positionExposure.js";
 import { loadTradingSettings, type TradingSettings } from "../lib/tradingSettingsStore.js";
-import { scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
+import { scoreHeldShareCalls, scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import { accountContextFromTotalCash, loadBarsForTilt, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
+import { formatSignedDollars } from "../lib/formatSignedDollars.js";
 import { computeMoveContext, type MoveContext } from "./moveContext.js";
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { compareCandidatesByModel, type SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
-import { anyOpenPositionOn, loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol, loadOccupiedContracts, loadPlutoBook } from "./book.js";
+import { anyOpenPositionOn, loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol, loadOccupiedContracts, loadPlutoBook, type PlutoBook } from "./book.js";
 import { coveredCallRollBreakEvenFailure, describeCandidateId, filterTickerForPluto, findSameContractConflict, summarizeTopPick, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { summarizeTickerRejections } from "./rejectionSummary.js";
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
@@ -28,9 +29,9 @@ import { ensurePlutoPrompt } from "./prompts.js";
 import { finishPlutoPass, type FinishPlutoPassInput, recordPlutoAction, updatePlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { callPlutoModel } from "./modelClient.js";
-import { runPostModelGates, stressCapInputFor, tickerCooldownStatus } from "./postModelGates.js";
+import { runHeldShareCallGates, runPostModelGates, stressCapInputFor, tickerCooldownStatus } from "./postModelGates.js";
 import { fetchOpenCycleSummaryByTickerId } from "../lib/cycleBreakEvenQueries.js";
-import type { CycleBreakEven } from "./heldShareCalls.js";
+import { heldShareCallGate, type CycleBreakEven } from "./heldShareCalls.js";
 import { buildPlutoSystemPrompt, buildPlutoUserPayload, plutoPromptVersion, recentDecisionsForPrompt, type PlutoPromptTickerInput } from "./prompt.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState, recordPlutoPass, tripPlutoBreaker } from "./stateStore.js";
@@ -49,6 +50,8 @@ export interface PassRunnerContext {
   lastFingerprintBySymbol: Map<string, string>;
   /** Per-symbol time of the last model evaluation, for the per-ticker cooldown. */
   lastModelEvaluationAtBySymbol: Map<string, number>;
+  /** Per-symbol time code last re-quoted a call on held shares: at most one try per ticker per perTickerModelCooldownMinutes. */
+  lastHeldShareCallAttemptAtBySymbol: Map<string, number>;
   /** Order watches the agent keeps alive after the pass returns. */
   trackWatch: (promise: Promise<unknown>, orderId: string, symbol: string) => void;
 }
@@ -170,10 +173,11 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   const spot = watched?.last ?? null;
   const live = spot !== null ? { spotPrice: spot, priceSource: "live" as const, liveQuotes: extraLiveQuotes } : undefined;
   const scored = scoreTicker(inputs, account, tradingSettings, live);
+  const heldShareCallCandidates = scoreHeldShareCalls(inputs, account, tradingSettings, live);
   const needsCycle = scored.freeShares >= 100 || scored.rolls.some((roll) => roll.strategyKey === "covered_call");
   const [occupiedContracts, cycleSummaries] = await Promise.all([loadOccupiedContracts(row.symbol), needsCycle ? fetchOpenCycleSummaryByTickerId([row.tickerId]) : null]);
   const cycleBreakEven = cycleSummaries?.get(row.tickerId) ?? null;
-  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason, cycleBreakEven });
+  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason, cycleBreakEven, heldShareCallCandidates });
   return { row, inputs, scored, filtered, occupiedContracts, cycleBreakEven, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [], heldPositions: [] };
 }
 
@@ -222,6 +226,113 @@ async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSetting
   }
   ticker.closeOffers = offers.filter((offer) => !offer.automatic);
   return false;
+}
+
+/** What a round shares with sendHeldShareCall. */
+interface HeldShareCallRound {
+  passId: string;
+  settings: PlutoSettings;
+  context: PassRunnerContext;
+  account: { freeCash: number };
+  tradingSettings: TradingSettings;
+  automaticBudget: { remaining: number };
+  cancelByMs: number;
+  opensBlockedBecause: string | null;
+  tickerCooldownReason: (symbol: string) => string | null;
+  loadBook: () => Promise<PlutoBook>;
+}
+
+/**
+ * Whether a call code sent on the symbol's held shares in the last hour reached the order route and did not fill
+ * (cancelled unfilled, refused, rejected, errored): code waits an hour before trying again, as it does after an
+ * automatic close that did not fill. A try whose own gates failed is not counted: no order was attempted.
+ */
+async function heldShareCallUnfilledWithinTheHour(symbol: string): Promise<boolean> {
+  const row = await db("pluto_actions")
+    .where({ symbol })
+    .where("created_at", ">", new Date(Date.now() - 60 * 60_000))
+    .whereRaw("coalesce(gate_results, '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ gate: heldShareCallGate }])])
+    .where((builder) => builder.whereIn("outcome", ["cancelled", "rejected", "error"]).orWhere((blocked) => blocked.where("outcome", "blocked").whereRaw("not coalesce(gate_results, '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ ok: false }])])))
+    .first("id");
+  return Boolean(row);
+}
+
+/**
+ * Sells the call on the ticker's free shares by code, before the model (Marcelo, 2026-10-12): the best calls by premium
+ * yield that pass every rule but the quote's age are re-quoted live, the best live one goes through runHeldShareCallGates
+ * and the same routes as any Pluto open. At most one try per ticker per perTickerModelCooldownMinutes; nothing while opens
+ * are barred for the round, an order is working on the symbol, the session's order cap is reached, or one of these calls
+ * did not fill within the hour. True when an order is now working: the ticker is then offered nothing else this round.
+ */
+async function sendHeldShareCall(ticker: EvaluatedTicker, round: HeldShareCallRound): Promise<boolean> {
+  const { settings, context } = round;
+  const symbol = ticker.row.symbol;
+  const selection = ticker.filtered.heldShareCall;
+  if (!selection || selection.rankedIgnoringQuoteAge.length === 0 || round.opensBlockedBecause) return false;
+  if (Date.now() - (context.lastHeldShareCallAttemptAtBySymbol.get(symbol) ?? 0) < settings.perTickerModelCooldownMinutes * 60_000) return false;
+  const book = await round.loadBook();
+  if (book.workingOrderSymbols.has(symbol) || (await heldShareCallUnfilledWithinTheHour(symbol))) return false;
+  if (round.automaticBudget.remaining <= 0) {
+    await recordPlutoEvent("warning", { message: "call on held shares not sent, the session's order cap is reached", symbol });
+    return false;
+  }
+  context.lastHeldShareCallAttemptAtBySymbol.set(symbol, Date.now());
+
+  const burstContracts = selection.rankedIgnoringQuoteAge.slice(0, settings.burstLines).map((choice) => ({ expiry: choice.candidate.expiry, strike: choice.candidate.strike, right: "C" as const }));
+  const liveQuotes = await context.marketWatch.burst(symbol, burstContracts);
+  const fresh = await evaluateTicker(ticker.row, settings, context, round.account, round.tradingSettings, true, Date.now(), liveQuotes, round.tickerCooldownReason(symbol));
+  // The order routes accept only live quotes: the best call that a burst just quoted.
+  const choice = fresh.filtered.heldShareCall?.ranked.find((entry) => entry.candidate.quoteSource === "live") ?? null;
+  const candidate = choice?.candidate ?? null;
+  const gates = runHeldShareCallGates({
+    candidate,
+    settings,
+    book: {
+      freeShares: fresh.scored.freeShares,
+      workingOrderOnSymbol: book.workingOrderSymbols.has(symbol),
+      lastFilledActionAt: book.lastFilledActionAtBySymbol.get(symbol) ?? null,
+      nowMs: Date.now(),
+      sameContractConflict: candidate ? findSameContractConflict(fresh.occupiedContracts, candidate.expiry, candidate.strike) : null,
+    },
+    cycleBreakEven: fresh.cycleBreakEven,
+  });
+  const premiumYieldPct = choice ? Math.round(choice.premiumYield * 100) : null;
+  const why = choice
+    ? `the highest premium yield on the ${fresh.scored.freeShares} held shares: ${premiumYieldPct}% a year; if called away the cycle ends ${formatSignedDollars(choice.profitIfCalledAway, 0)} (break-even ${choice.breakEvenAfter.toFixed(2)} after this premium)`
+    : "no call on the held shares passes every rule on live quotes";
+  const gateResults: PlutoGateResult[] = [{ gate: heldShareCallGate, ok: true, detail: `code sells calls on held shares: ${why}` }, ...gates.gates];
+  const actionId = await recordPlutoAction({
+    passId: round.passId,
+    kind: "open_covered_call",
+    symbol,
+    tickerId: ticker.row.tickerId,
+    contract: candidate ? { strategyKey: "covered_call", expiry: candidate.expiry, strike: candidate.strike, right: "C" } : null,
+    candidateScores: choice ? { ...candidate, heldShares: { contracts: choice.contracts, premiumYield: choice.premiumYield, breakEvenAfter: choice.breakEvenAfter, profitIfCalledAway: choice.profitIfCalledAway } } : null,
+    deterministicTopPick: null,
+    gateResults,
+    sizeTier: null,
+    quantity: gates.plan?.quantity ?? null,
+    limitPrice: gates.plan?.limitPrice ?? null,
+    outcome: gates.ok ? "validated" : "blocked",
+    blockReason: gates.ok ? null : gates.gates.filter((gate) => !gate.ok).map((gate) => `${gate.gate}: ${gate.detail}`).join(" | "),
+    referenceBid: candidate?.bid ?? null,
+    referenceMid: candidate ? (candidate.bid + candidate.ask) / 2 : null,
+  });
+  if (!gates.ok || !choice || !candidate) {
+    await recordPlutoEvent("action_blocked", { passId: round.passId, actionId, symbol, candidateId: choice?.id ?? null, stage: "automatic", failed: gates.gates.filter((gate) => !gate.ok) });
+    return false;
+  }
+  const reasons = [`Code sells calls on held shares: ${why}.`];
+  await recordPlutoEvent("action_validated", { passId: round.passId, actionId, symbol, candidateId: choice.id, quantity: gates.plan!.quantity, limitPrice: gates.plan!.limitPrice, reasons });
+  round.automaticBudget.remaining -= 1;
+  const scoresSnapshot = { ...signalsSnapshotForOpen(candidate), version: `pluto-${plutoPromptVersion}`, candidateId: choice.id, contract: candidate, ticker: { spreadShareCharged: fresh.scored.spreadShareCharged, spotPrice: fresh.scored.spotPrice, snapshotDateIso: fresh.scored.snapshotDateIso, modelForecast: fresh.scored.modelForecast, dayChangePercent: fresh.scored.dayChangePercent }, decision: null, automatic: heldShareCallGate, heldShares: { contracts: choice.contracts, premiumYield: choice.premiumYield, breakEvenAfter: choice.breakEvenAfter, profitIfCalledAway: choice.profitIfCalledAway }, plan: gates.plan };
+  const result = await executePlutoOrder(context.api, settings, { kind: "open", actionId, symbol, candidate, plan: gates.plan!, reasons, scoresSnapshot });
+  if (result.outcome !== "confirmed" || !result.orderId) return false;
+  context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol, reference: { price: candidate.bid, side: "sell", multiplier: 100, otherLegs: result.otherReferenceLegs }, description: result.detail, cancelByMs: round.cancelByMs }), result.orderId, symbol);
+  // With the call working, anything the model chose on the ticker would be refused by the working-order gate.
+  ticker.filtered = { ...ticker.filtered, eligible: [], eligibleRolls: [] };
+  ticker.closeOffers = [];
+  return true;
 }
 
 /**
@@ -352,9 +463,12 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   // What the round looked at, before any live quote: what the next round compares against.
   const lookedAtFingerprintBySymbol = new Map<string, string>();
   let offeredCount = 0;
-  const automaticCloseWorkingSymbols = new Set<string>();
+  const automaticOrderWorkingSymbols = new Set<string>();
+  let automaticCallsBook: PlutoBook | null = null;
+  const heldShareCallRound = { passId, settings, context, account, tradingSettings, automaticBudget, cancelByMs: checks.context.session.cancelByMs, opensBlockedBecause, tickerCooldownReason, loadBook: async () => (automaticCallsBook ??= await loadPlutoBook()) };
   for (const ticker of evaluated) {
-    if (await attachCloseOffers(ticker, settings, context, roundClose, passId, checks.context.session.cancelByMs, true, automaticBudget)) automaticCloseWorkingSymbols.add(ticker.row.symbol);
+    if (await attachCloseOffers(ticker, settings, context, roundClose, passId, checks.context.session.cancelByMs, true, automaticBudget)) automaticOrderWorkingSymbols.add(ticker.row.symbol);
+    else if (await sendHeldShareCall(ticker, heldShareCallRound)) automaticOrderWorkingSymbols.add(ticker.row.symbol);
     const requotable = opensBlockedBecause ? [] : candidatesEligibleOnceRequoted(ticker.scored, ticker.filtered);
     lookedAtFingerprintBySymbol.set(ticker.row.symbol, tickerFingerprint([...ticker.filtered.eligible, ...requotable], ticker.filtered.eligibleRolls, ticker.closeOffers.map(closeOfferFingerprintKey)));
     offeredCount += ticker.filtered.eligible.length + requotable.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length;
@@ -378,8 +492,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   // 4b. The model will be called: only now burst the promising contracts and re-score with the live quotes.
   const refreshed: EvaluatedTicker[] = [];
   for (const ticker of evaluated) {
-    // A ticker with an automatic close just sent stays empty for the model (see attachCloseOffers): no burst, no re-score.
-    if (automaticCloseWorkingSymbols.has(ticker.row.symbol)) {
+    // A ticker with an automatic order just sent stays empty for the model (see attachCloseOffers, sendHeldShareCall): no burst, no re-score.
+    if (automaticOrderWorkingSymbols.has(ticker.row.symbol)) {
       refreshed.push(ticker);
       continue;
     }
@@ -414,8 +528,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const book = await loadPlutoBook();
   const recentDecisions: { pass_id: string; parsed_output: { decision?: string; candidate_id?: string | null; reasons?: string[] } | null; created_at: Date }[] = await db("pluto_decisions").whereNotNull("parsed_output").orderBy("created_at", "desc").limit(10).select("pass_id", "parsed_output", "created_at");
   const tradePassIds = recentDecisions.filter((row) => row.parsed_output?.decision === "trade").map((row) => row.pass_id);
-  // The model's own action per pass: not an automatic close recorded in the same round (those carry the automatic_close
-  // gate), and the "chosen candidate not found" row (kind no_trade, outcome blocked) included. Oldest first, so the last wins.
+  // The model's own action per pass: not an automatic order recorded in the same round (those carry the automatic_close or
+  // automatic_held_share_call gate), and the "chosen candidate not found" row (kind no_trade, outcome blocked) included. Oldest first, so the last wins.
   const tradeActions: { pass_id: string; outcome: string; block_reason: string | null }[] =
     tradePassIds.length === 0
       ? []
@@ -423,6 +537,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
           .whereIn("pass_id", tradePassIds)
           .whereNot((builder) => builder.where({ kind: "no_trade", outcome: "no_trade" }))
           .whereRaw("not coalesce(gate_results, '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ gate: "automatic_close" }])])
+          .whereRaw("not coalesce(gate_results, '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ gate: "automatic_held_share_call" }])])
           .orderBy("created_at")
           .orderBy("id")
           .select("pass_id", "outcome", "block_reason");
@@ -541,7 +656,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const slicesByExpiry = new Map(fresh.inputs.slices.map((slice) => [slice.expiry, slice]));
   const freshRejectionReasons = [
     ...rejectTicker({ scored: fresh.scored, slices: fresh.inputs.slices, settings, todayEasternIso: fresh.inputs.todayEasternIso, nowMs: Date.now(), botEnabled: true }),
-    ...(freshCandidate ? rejectOpenCandidate(freshCandidate, { scored: fresh.scored, slicesByExpiry, settings, nowMs: Date.now() }, { onHeldShares: freshCandidate.strategyKey === "covered_call" && fresh.scored.freeShares >= 100 }) : chosenOpen ? ["the chosen contract is no longer a candidate"] : []),
+    ...(freshCandidate ? rejectOpenCandidate(freshCandidate, { scored: fresh.scored, slicesByExpiry, settings, nowMs: Date.now() }) : chosenOpen ? ["the chosen contract is no longer a candidate"] : []),
+    ...(freshCandidate?.strategyKey === "covered_call" && fresh.scored.freeShares >= 100 ? [`${fresh.scored.freeShares} free shares now: code sells the call on them`] : []),
     ...(chosenRoll && !freshRoll ? ["the chosen roll is no longer a candidate"] : []),
     ...(freshRoll ? [coveredCallRollBreakEvenFailure(freshRoll, fresh.scored, fresh.cycleBreakEven, settings)?.reason].filter((reason): reason is string => reason !== undefined) : []),
   ];
@@ -572,7 +688,6 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       sameContractConflict: freshContractForGate ? findSameContractConflict(fresh.occupiedContracts, freshContractForGate.expiry, freshContractForGate.strike) : null,
     },
     stress: stressCapInputFor(fresh.scored),
-    cycleBreakEven: fresh.cycleBreakEven,
   });
   const contract = freshCandidate ?? freshRoll?.replacement ?? null;
   const gateResults: PlutoGateResult[] = gates.gates;
@@ -609,8 +724,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     context.api,
     settings,
     chosenOpen
-      ? { kind: "open", actionId, symbol: owner.row.symbol, candidate: freshCandidate!, plan: gates.plan!, decision, scoresSnapshot }
-      : { kind: "roll", actionId, symbol: owner.row.symbol, roll: freshRoll!, heldLeg: fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll!.roll.legId)!, plan: gates.plan!, decision, scoresSnapshot },
+      ? { kind: "open", actionId, symbol: owner.row.symbol, candidate: freshCandidate!, plan: gates.plan!, reasons: decision.reasons, scoresSnapshot }
+      : { kind: "roll", actionId, symbol: owner.row.symbol, roll: freshRoll!, heldLeg: fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll!.roll.legId)!, plan: gates.plan!, reasons: decision.reasons, scoresSnapshot },
   );
   if (result.outcome === "confirmed" && result.orderId) {
     context.trackWatch(watchPlutoOrder(context.api, settings, { actionId, orderId: result.orderId, symbol: owner.row.symbol, reference: { price: contract!.bid, side: "sell", multiplier: 100, otherLegs: result.otherReferenceLegs }, description: result.detail, cancelByMs: checks.context.session.cancelByMs }), result.orderId, owner.row.symbol);

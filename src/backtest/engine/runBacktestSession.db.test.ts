@@ -195,21 +195,25 @@ describe("runBacktestSession", () => {
       expect(action.fill_price).toBeNull();
       expect(dayOn(new Date(action.at).toISOString().slice(0, 10)).decision_summary).toContain(`Blocked ${action.description}: sizing: `);
     }
-    // The calls sold after the assignment are on the held shares: no share is bought.
-    const callsOnHeldShares = actions.filter((action) => action.kind === "open_covered_call" && action.outcome === "filled");
+    // The calls sold after the assignment are code's, on the held shares: no share is bought.
+    const callsOnHeldShares = actions.filter((action) => action.kind === "open_covered_call" && action.outcome === "filled" && action.automatic);
     expect(callsOnHeldShares.length).toBeGreaterThanOrEqual(1);
     for (const action of callsOnHeldShares) {
       expect(action.description).toContain(`on ${sharesAssigned} held shares`);
-      expect(action.chosen_because).toBe("shares in profit above the floor: a call on them clears the break-even rule");
+      expect(action.chosen_because).toMatch(/^code sells calls on held shares: the highest premium yield, \d+% a year; if called away the cycle ends \$\d+$/);
       expect(fills.filter((fill) => fill.action_id === action.action_id).map((fill) => fill.instrument)).toEqual(["option"]);
     }
 
-    // One wheel cycle, still open, assigned on the 13th: its total is the positions' realized and unrealized P&L.
-    const cycles = await db("backtest_cycles").where({ session_id: sessionId }).select("*", db.raw('opened_on::text as "openedOn"'), db.raw('assigned_on::text as "assignedOn"'));
-    expect(cycles).toHaveLength(1);
-    expect(cycles[0]).toMatchObject({ cycle_number: 1, status: "open", openedOn: trades[0].openedOn, assignedOn: "2026-03-13", closed_on: null, recovery_sessions: null, age_sessions: sessionDates.filter((dateIso) => dateIso > "2026-03-13").length, data_flags: [] });
-    expect(Number(cycles[0].shares_held)).toBe(sharesAssigned);
-    expect(Number(cycles[0].total_dollars)).toBeCloseTo(positions.reduce((sum, position) => sum + Number(position.realized_pnl_dollars) + Number(position.unrealized_pnl_dollars ?? 0), 0), 1);
+    // The wheel cycle assigned on the 13th ends when code's call on its shares is assigned; the next one opens on the
+    // 23rd. Together their totals are the positions' realized and unrealized P&L.
+    const cycles = await db("backtest_cycles").where({ session_id: sessionId }).orderBy("cycle_number").select("*", db.raw('opened_on::text as "openedOn"'), db.raw('assigned_on::text as "assignedOn"'));
+    expect(cycles.map((cycle) => [cycle.cycle_number, cycle.status, cycle.openedOn, cycle.assignedOn])).toEqual([
+      [1, "closed", trades[0].openedOn, "2026-03-13"],
+      [2, "open", "2026-03-23", null],
+    ]);
+    expect(cycles[0]).toMatchObject({ data_flags: [] });
+    expect(Number(cycles[0].shares_held)).toBe(0);
+    expect(cycles.reduce((sum, cycle) => sum + Number(cycle.total_dollars), 0)).toBeCloseTo(positions.reduce((sum, position) => sum + Number(position.realized_pnl_dollars) + Number(position.unrealized_pnl_dollars ?? 0), 0), 1);
 
     // The stored metrics are the analytics of the stored series.
     const recomputed = computeSessionMetrics(
@@ -221,9 +225,9 @@ describe("runBacktestSession", () => {
     expect(session.metrics.tradeCount).toBe(trades.length);
     expect(session.metrics.endValue).toBeCloseTo(Number(days.at(-1).account_value), 1);
     expect(session.metrics.totalReturn).toBeCloseTo(recomputed.metrics.totalReturn, 6);
-    // One wheel cycle, still open: no closed cycle to take a win rate from.
-    expect(session.metrics).toMatchObject({ cycleCount: 1, closedCycleCount: 0, winRate: null });
-    expect(recomputed.metrics).toMatchObject({ cycleCount: 1, closedCycleCount: 0, winRate: null });
+    // Two wheel cycles, the first closed at a profit: a win rate of 1 out of 1.
+    expect(session.metrics).toMatchObject({ cycleCount: 2, closedCycleCount: 1, winRate: 1 });
+    expect(recomputed.metrics).toMatchObject({ cycleCount: 2, closedCycleCount: 1, winRate: 1 });
     expect(session.pnl_basis).toBe("wheel_cycle");
     // The test tables hold no SPY prices: no SPY baseline, and the session says so.
     expect(session.spy_baseline_metrics).toBeNull();

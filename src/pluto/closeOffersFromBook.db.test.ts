@@ -74,6 +74,7 @@ const handWrittenBook: CloseOffersBook = {
   ]),
   earnings: { dateIso: "2031-03-13", time: "1" },
   sessionsLeftBeforeEarnings: 4,
+  heldShareCallPositionIds: new Set(),
 };
 
 beforeAll(async () => {
@@ -155,5 +156,21 @@ describe("the close offers' loader and builder", () => {
     expect(fromDatabase.skipped).toContainEqual({ id: `PAR:close_leg:${legIds.workingPut}`, reason: "an order on this position is still working" });
     expect(fromDatabase.skipped).toContainEqual({ id: `PAR:earnings_close:${legIds.retriedPut}`, reason: "an automatic buyback of this leg did not fill within the last hour" });
     expect(fromDatabase.heldPositions.map((entry) => entry.legId)).toEqual(heldLegs.map((leg) => leg.legId));
+  });
+
+  it("leaves a covered call written on shares already held through earnings (no P3b close); the rest is unchanged", async () => {
+    await testDb("position_share_sources").insert({ position_id: positionIds.coveredCall, source_position_id: positionIds.otherShares });
+    try {
+      const book = await loadCloseOffersBook(input);
+      expect(book.heldShareCallPositionIds).toEqual(new Set([positionIds.coveredCall]));
+      const built = await buildCloseOffersForTicker(input);
+      expect(built.offers.map((offer) => [offer.kind, offer.positionId])).toEqual([
+        ["close_shares", positionIds.shares],
+        ["close_leg", positionIds.comboPut],
+      ]);
+      expect(built.skipped).toContainEqual({ id: `PAR:close_position:${positionIds.coveredCall}`, reason: "a call written on shares already held rides through earnings: no automatic close before the report" });
+    } finally {
+      await testDb("position_share_sources").where({ position_id: positionIds.coveredCall }).delete();
+    }
   });
 });

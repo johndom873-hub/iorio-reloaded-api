@@ -1,15 +1,15 @@
 import { parentPort } from "node:worker_threads";
-import { scoreTicker } from "../../lib/signalsLiveScoring.js";
+import { scoreHeldShareCalls, scoreTicker } from "../../lib/signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "../../lib/signalsTypes.js";
 import type { VolatilityModelTables } from "../../lib/volatilityModelTables.js";
 import { BacktestBarHistory } from "./backtestBarHistory.js";
-import type { BacktestScoringWorkerReply, BacktestScoringWorkerRequest } from "./backtestScoringPool.js";
+import type { BacktestScoredTicker, BacktestScoringWorkerReply, BacktestScoringWorkerRequest } from "./backtestScoringPool.js";
 import { buildHistoricalTickerInputs } from "./backtestTickerInputs.js";
 import { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 
 // One scoring worker of a session (backtestScoringPool.ts): it keeps the session's calendar, the bars and profile of the
 // symbols given to it, and each one's Signals inputs of the day, and runs the two heavy steps of a symbol's look on them:
-// building the day's inputs (the surface fit among them) and scoring the ticker. The same functions as the look runs
+// building the day's inputs (the surface fit among them) and scoring the ticker, with the calls Pluto may sell on its free shares. The same functions as the look runs
 // without a pool, on structured copies of the same values, so the results are the same.
 
 if (!parentPort) throw new Error("backtestScoringWorker.ts runs as a worker thread of a backtest session.");
@@ -99,7 +99,10 @@ function handle(request: BacktestScoringWorkerRequest): unknown {
       const dayQuotes = request.dayQuotesOfLastWarm ? lastWarmDayQuotesBySymbol.get(request.symbol) : request.dayQuotes;
       if (!dayQuotes) throw new Error(`The scoring worker has no warmed day quotes for ${request.symbol}.`);
       const inputs: TickerSignalsInputs = { ...dayInputs, freeShares: request.freeShares, openShortLegs: request.openShortLegs, dayQuotes };
-      return scoreTicker(inputs, { freeCash: request.freeCash }, trading, request.live, undefined, { modelTables, scoredAtMs: request.scoredAtMs });
+      const account = { freeCash: request.freeCash };
+      const history = { modelTables, scoredAtMs: request.scoredAtMs };
+      const result: BacktestScoredTicker = { scored: scoreTicker(inputs, account, trading, request.live, undefined, history), heldShareCallCandidates: scoreHeldShareCalls(inputs, account, trading, request.live, history) };
+      return result;
     }
   }
 }
