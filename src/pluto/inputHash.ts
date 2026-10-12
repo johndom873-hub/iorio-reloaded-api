@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import type { PlutoOpenCandidate, PlutoRollCandidate } from "./candidateFilters.js";
 
 // The model is called only when the filtered set changed materially (design round 4, 2026-09-28).
-// "Materially" = a candidate entered or left, its grade moved, or its Edge $ / net Edge moved
-// past a coarse step; sub-step quote noise never re-triggers a call. The hash is the pass row's
+// "Materially" = a candidate entered or left, its grade moved, or its Edge $ / edge margin moved
+// past a coarse step (the valuation model's figures since 2026-10-10; a margin step is a tenth of
+// the 10-point gap between grades); sub-step quote noise never re-triggers a call. The hash is the pass row's
 // input_hash and the trigger engine's memory of what the model last saw.
 
 const edgeDollarsStep = 5;
-const netEdgeStepVp = 0.5;
+const edgeMarginStepPoints = 1;
 
 function bucket(value: number, step: number): number {
   return Math.round(value / step) * step;
@@ -35,8 +36,8 @@ export function classifyFingerprintChange(previous: string | undefined, current:
 
 export function candidateSetFingerprint(eligible: PlutoOpenCandidate[], rolls: PlutoRollCandidate[]): string {
   const parts = [
-    ...eligible.map((entry) => `${entry.id}|${entry.candidate.grade}|${bucket(entry.candidate.edgeDollars, edgeDollarsStep)}|${bucket(entry.candidate.netEdge * 100, netEdgeStepVp)}`),
-    ...rolls.map((entry) => `${entry.id}|${entry.roll.grade}|${bucket(entry.roll.netRollEdgeDollars, edgeDollarsStep)}`),
+    ...eligible.map((entry) => `${entry.id}|${entry.candidate.model?.grade ?? "none"}|${bucket(entry.candidate.model?.expectedPnlDollars ?? 0, edgeDollarsStep)}|${bucket((entry.candidate.model?.edgeMargin ?? 0) * 100, edgeMarginStepPoints)}`),
+    ...rolls.map((entry) => `${entry.id}|${entry.roll.model?.grade ?? "none"}|${bucket(entry.roll.model?.netExpectedPnl ?? 0, edgeDollarsStep)}`),
   ].sort();
   return createHash("sha256").update(parts.join("\n")).digest("hex");
 }

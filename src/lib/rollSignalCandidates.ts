@@ -1,7 +1,8 @@
 import { blackScholesDelta, sviTotalVariance } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, commissionPerContractDollars as flatCommissionPerContractDollars, computeFrictionCost } from "./optionFriction.js";
 import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
-import { gradeForNetEdge, impliedVolatilityFromMid, type SignalCandidate, type SignalGrade, type SignalQuote, type SignalQuoteSource, type SignalStrategyKey, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { frictionDollarsPerContract, gradeForNetEdge, impliedVolatilityFromMid, scoreContractWithModel, type CandidateModelContext, type CandidateModelScore, type SignalCandidate, type SignalGrade, type SignalQuote, type SignalQuoteSource, type SignalStrategyKey, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { gradeForEdgeMargin, yieldOnExposure } from "./contractValuation.js";
 import { forecastOnCalendarDayBasis, type RealizedVolatilityForecast } from "./volatilityEdge.js";
 
 // Roll Signals (Formula 3j, approved 2026-09-24): an open short option leg
@@ -21,6 +22,12 @@ import { forecastOnCalendarDayBasis, type RealizedVolatilityForecast } from "./v
 // points. Hard filters (Marcelo): |delta(B)| ≤ |delta(A)| -- never roll into
 // a riskier contract -- and a positive net credit at the mid. The old Trade
 // Alerts triggers (50 % decay, 21 DTE, |delta| ≥ 0.5) survive as flags only.
+//
+// The valuation model's roll (model review P5, approved by Marcelo 2026-10-10; what Pluto acts on), per contract:
+//   hold value A        = (mid(A) − fair(A)) × 100        what staying short still earns versus buying back at the mid
+//   close cost A        = λ × half-spread(A) × 100 + buy commission
+//   net roll expected $ = expected P&L(B) − hold value A − close cost A        (expected P&L(B) is after B's own friction)
+//   roll edge margin    = ((mid(B) − fair(B)) × 100 − hold value A) ÷ (mid(B) × 100)   before friction, graded like an open
 
 const annualDays = 365;
 export const nearExpiryDaysThreshold = 21;
@@ -64,12 +71,29 @@ export interface HeldLegScore extends OpenShortLeg {
   holdEdgeDollars: number | null;
   /** frictionVolatility × vega × 100: the per-contract dollar cost of closing. */
   closeCostDollars: number | null;
-  /** Max theoretical loss per contract at the mid: strike×100 − mid (CSP) or spot×100 − mid (CC). */
+  /** Exposure per contract at the mid: (strike − mid) × 100 for a put, (spot − mid) × 100 for a covered call. */
   dollarRisk: number | null;
   quoteSource: SignalQuoteSource | null;
   quotedAt: string | null;
   flags: RollSignalFlag[];
   unscoredReason: HeldLegUnscoredReason | null;
+  /** The valuation model's view of the held leg; null without a model forecast or when it cannot be valued. */
+  model: HeldLegModelScore | null;
+}
+
+export interface HeldLegModelScore {
+  valuation: CandidateModelScore;
+  /** (mid − fair) × 100 per contract: what holding still earns versus buying back at the mid (negative = the leg is now cheap to keep short no longer). */
+  holdValueDollars: number;
+  /** λ × half-spread × 100 + buy commission, per contract. */
+  closeCostDollars: number;
+}
+
+export interface RollModelScore {
+  netExpectedPnlPerContract: number;
+  netExpectedPnl: number;
+  edgeMargin: number;
+  grade: SignalGrade;
 }
 
 export interface RollSignalCandidate {
@@ -94,6 +118,8 @@ export interface RollSignalCandidate {
   /** Always empty for the list (those are hard filters); set only for a roll to a contract the user picked on the chain. */
   warnings: RollSignalWarning[];
   grade: SignalGrade;
+  /** The valuation model's roll (Pluto acts on it); null unless both legs carry a model score. */
+  model: RollModelScore | null;
 }
 
 export interface HeldLegScoringInput {
@@ -110,6 +136,8 @@ export interface HeldLegScoringInput {
   commissionEstimator?: CommissionEstimator;
   /** λ (0..1): the share of the half-spread friction charges, from the Risk & Limits spread cost. */
   spreadShareCharged: number;
+  /** The valuation model; absent or null leaves every held leg's `model` null. */
+  model?: CandidateModelContext | null;
 }
 
 export function heldLegContractKey(leg: Pick<OpenShortLeg, "expiry" | "strike" | "right">): string {
@@ -137,14 +165,15 @@ function unscored(leg: OpenShortLeg, reason: HeldLegUnscoredReason, partial: Par
     flags: [],
     ...partial,
     unscoredReason: reason,
+    model: null,
   };
 }
 
 /** The held leg's quote and what it implies without any surface: what a roll needs to price the close, so an unscored leg with a real quote still carries it. */
 function heldLegQuoteFields(leg: OpenShortLeg, quote: { bid: number; ask: number; source?: SignalQuoteSource; quotedAt?: string }, spotPrice: number): { bid: number; ask: number; mid: number; dollarRisk: number; quoteSource: SignalQuoteSource; quotedAt: string | null } {
   const mid = (quote.bid + quote.ask) / 2;
-  const capitalAtRisk = leg.strategyKey === "covered_call" ? spotPrice : leg.strike;
-  return { bid: quote.bid, ask: quote.ask, mid, dollarRisk: capitalAtRisk * 100 - mid, quoteSource: quote.source ?? "snapshot", quotedAt: quote.quotedAt ?? null };
+  const exposurePerShare = (leg.strategyKey === "covered_call" ? spotPrice : leg.strike) - mid;
+  return { bid: quote.bid, ask: quote.ask, mid, dollarRisk: exposurePerShare * 100, quoteSource: quote.source ?? "snapshot", quotedAt: quote.quotedAt ?? null };
 }
 
 /** Scores every open short leg through the same surface, forecast and friction as a new-trade candidate; ITM legs included. An unscored leg with a two-sided quote keeps its bid, ask and mid (a roll can still be priced at the quotes). */
@@ -163,18 +192,22 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
     if (!input.forecast) return unscored(leg, "no_forecast", { ...quoteFields, dte, flags: flagsWithoutQuote });
 
     const isCall = leg.right === "C";
+    const buyCommission = (input.commissionEstimator ?? flatCommissionEstimator).perContractDollars("buy", leg.quantity);
+    const closeCostDollars = frictionDollarsPerContract(twoSidedQuote.bid, twoSidedQuote.ask, input.spreadShareCharged, buyCommission);
+    const modelValuation = input.model ? scoreContractWithModel(input.model, slice, twoSidedQuote, input.riskFreeRate, closeCostDollars) : null;
+    const model: HeldLegModelScore | null = modelValuation ? { valuation: modelValuation, holdValueDollars: (quoteFields.mid - modelValuation.fairPrice) * 100, closeCostDollars } : null;
     const logMoneyness = Math.log(leg.strike / slice.forwardPrice);
     const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
     if (!(totalVariance > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
     const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry) + (input.ivShiftByExpiry?.get(leg.expiry) ?? 0);
     if (!(surfaceIv > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
-    const friction = computeFrictionCost({ bid: twoSidedQuote.bid, ask: twoSidedQuote.ask, forward: slice.forwardPrice, strike: leg.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: (input.commissionEstimator ?? flatCommissionEstimator).perContractDollars("buy", leg.quantity), spreadShareCharged: input.spreadShareCharged });
+    const friction = computeFrictionCost({ bid: twoSidedQuote.bid, ask: twoSidedQuote.ask, forward: slice.forwardPrice, strike: leg.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: buyCommission, spreadShareCharged: input.spreadShareCharged });
     if (!friction) return unscored(leg, "no_quote", { dte, flags: flagsWithoutQuote });
 
     const delta = blackScholesDelta(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
     const vega = blackScholesVega(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv);
     const contractForecast = forecastOnCalendarDayBasis(input.forecast.volatility, input.tradingSessionsByExpiry.get(leg.expiry), slice.yearsToExpiry);
-    if (contractForecast === null) return unscored(leg, "no_forecast", { ...quoteFields, dte, flags: flagsWithoutQuote });
+    if (contractForecast === null) return { ...unscored(leg, "no_forecast", { ...quoteFields, dte, flags: flagsWithoutQuote }), model };
     const edge = surfaceIv - contractForecast;
     const flags: RollSignalFlag[] = [...flagsWithoutQuote];
     if (Math.abs(delta) >= assignmentRiskDeltaThreshold) flags.push("assignment_risk");
@@ -193,6 +226,7 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
       closeCostDollars: friction.frictionVolatility * vega * 100,
       flags,
       unscoredReason: null,
+      model,
     };
   });
 }
@@ -215,6 +249,21 @@ export function recostReplacementCommission(replacement: SignalCandidate, contra
   const extraCommissionVolatility = extraCommissionDollars / 100 / replacement.vega;
   const netEdge = replacement.netEdge - extraCommissionVolatility;
   const edgeDollars = replacement.edgeDollars - extraCommissionDollars;
+  const model = replacement.model
+    ? {
+        ...replacement.model,
+        expectedPnlDollars: replacement.model.expectedPnlDollars - extraCommissionDollars,
+        calibratedExpectedPnlDollars: replacement.model.calibratedExpectedPnlDollars - extraCommissionDollars,
+        premiumAfterCostsDollars: replacement.model.premiumAfterCostsDollars - extraCommissionDollars,
+        expectedAnnualizedReturn: replacement.model.expectedAnnualizedReturn - annualizedPerContract(extraCommissionDollars, replacement.model),
+        calibratedAnnualizedReturn: replacement.model.calibratedAnnualizedReturn - annualizedPerContract(extraCommissionDollars, replacement.model),
+        premiumYield: replacement.model.premiumYield - annualizedPerContract(extraCommissionDollars, replacement.model),
+        averageWinDollars: replacement.model.averageWinDollars - extraCommissionDollars,
+        averageLossDollars: replacement.model.averageLossDollars - extraCommissionDollars,
+        expectedShortfallDollars: replacement.model.expectedShortfallDollars - extraCommissionDollars,
+        stressPnlDollars: replacement.model.stressPnlDollars - extraCommissionDollars,
+      }
+    : null;
   return {
     ...replacement,
     commissionPerContractDollars: legCommission,
@@ -223,7 +272,22 @@ export function recostReplacementCommission(replacement: SignalCandidate, contra
     edgeDollars,
     riskAdjustedRatio: edgeDollars / replacement.dollarRisk,
     grade: gradeForNetEdge(netEdge),
+    model,
   };
+}
+
+/** A per-contract dollar amount as a yearly rate on the contract's capital over its calendar time to expiry. */
+function annualizedPerContract(dollars: number, model: Pick<CandidateModelScore, "capitalAtRiskDollars" | "calendarYears">): number {
+  return yieldOnExposure(dollars, model.capitalAtRiskDollars, model.calendarYears);
+}
+
+/** The valuation model's roll for one pair; null unless both legs carry a model score. */
+export function scoreRollModel(leg: Pick<HeldLegScore, "model" | "quantity">, replacement: Pick<SignalCandidate, "model" | "bid" | "ask">): RollModelScore | null {
+  if (!leg.model || !replacement.model) return null;
+  const replacementMid = (replacement.bid + replacement.ask) / 2;
+  const netExpectedPnlPerContract = replacement.model.expectedPnlDollars - leg.model.holdValueDollars - leg.model.closeCostDollars;
+  const edgeMargin = ((replacementMid - replacement.model.fairPrice) * 100 - leg.model.holdValueDollars) / (replacementMid * 100);
+  return { netExpectedPnlPerContract, netExpectedPnl: netExpectedPnlPerContract * leg.quantity, edgeMargin, grade: gradeForEdgeMargin(edgeMargin) };
 }
 
 export function scoreRollPair(leg: HeldLegScore, scoredReplacement: SignalCandidate, commissionEstimator: CommissionEstimator = flatCommissionEstimator): RollSignalCandidate | null {
@@ -254,10 +318,21 @@ export function scoreRollPair(leg: HeldLegScore, scoredReplacement: SignalCandid
     flags: leg.flags,
     warnings,
     grade: gradeForNetEdge(netRollEdge),
+    model: scoreRollModel(leg, replacement),
   };
 }
 
-/** Every (held leg, replacement) pair passing the hard filters, graded and sorted by net roll Edge $ (then vol points). */
+/**
+ * Rolls in the order Pluto acts on them (mockup approved 2026-10-10): the valuation model's net roll $ across the held quantity,
+ * highest first; rolls the model could not value come last, by the old net roll Edge $ (then vol points).
+ */
+export function compareRollsByModel(a: Pick<RollSignalCandidate, "model" | "netRollEdgeDollars" | "netRollEdge">, b: Pick<RollSignalCandidate, "model" | "netRollEdgeDollars" | "netRollEdge">): number {
+  if (a.model && b.model && b.model.netExpectedPnl !== a.model.netExpectedPnl) return b.model.netExpectedPnl - a.model.netExpectedPnl;
+  if (Boolean(a.model) !== Boolean(b.model)) return a.model ? -1 : 1;
+  return b.netRollEdgeDollars - a.netRollEdgeDollars || b.netRollEdge - a.netRollEdge;
+}
+
+/** Every (held leg, replacement) pair passing the hard filters, graded and sorted by compareRollsByModel. */
 export function buildRollCandidates(heldLegs: HeldLegScore[], candidates: SignalCandidate[], commissionEstimator?: CommissionEstimator): RollSignalCandidate[] {
   const rolls: RollSignalCandidate[] = [];
   for (const leg of heldLegs) {
@@ -266,13 +341,13 @@ export function buildRollCandidates(heldLegs: HeldLegScore[], candidates: Signal
       if (roll && roll.warnings.length === 0) rolls.push(roll);
     }
   }
-  return rolls.sort((a, b) => b.netRollEdgeDollars - a.netRollEdgeDollars || b.netRollEdge - a.netRollEdge);
+  return rolls.sort(compareRollsByModel);
 }
 
-/** The roll the screen badge and the modal pre-select: highest net roll Edge $, ties by vol points. */
+/** The roll the screen badge and the modal pre-select: the first by compareRollsByModel. */
 export function pickBestRoll(rolls: RollSignalCandidate[]): RollSignalCandidate | null {
   if (rolls.length === 0) return null;
-  return [...rolls].sort((a, b) => b.netRollEdgeDollars - a.netRollEdgeDollars || b.netRollEdge - a.netRollEdge)[0]!;
+  return [...rolls].sort(compareRollsByModel)[0]!;
 }
 
 export function rollCandidateKey(roll: Pick<RollSignalCandidate, "legId" | "replacement">): string {

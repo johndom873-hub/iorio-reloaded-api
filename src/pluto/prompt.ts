@@ -1,4 +1,4 @@
-import type { SignalCandidate } from "../lib/signalCandidates.js";
+import { compareCandidatesByModel, type SignalCandidate } from "../lib/signalCandidates.js";
 import type { TickerSignals } from "../lib/signalsTypes.js";
 import type { PlutoOpenCandidate, PlutoRollCandidate } from "./candidateFilters.js";
 import type { PlutoSettings } from "./settingsStore.js";
@@ -12,9 +12,9 @@ import type { HeldPositionEntry } from "./heldPositionMetrics.js";
 // deterministic filter, the top few per ticker per strategy, short field names, no nulls.
 // Shortlist notes never enter the prompt (Marcelo, 2026-09-28).
 
-export const plutoPromptVersion = "v3.8";
+export const plutoPromptVersion = "v4.0";
 
-/** How many open candidates per ticker per strategy the model sees (best Edge $ first). */
+/** How many open candidates per ticker per strategy the model sees (best first, compareCandidatesByModel). */
 export const candidatesPerTickerPerStrategy = 3;
 
 export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
@@ -26,20 +26,23 @@ export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
     "Objective: maximise long-run risk-adjusted return. Doing nothing is the default and costs nothing; a trade must justify itself. Prefer no_trade whenever the evidence is mixed, the market looks stressed, or the model inputs look inconsistent with each other.",
     "",
     "What the numbers mean:",
-    "- edge_vp: fitted implied volatility minus forecast_vol, in volatility points. forecast_vol is the ticker's forecast_rv on the contract's own clock: forecast_rv counts trading sessions, implied volatility counts calendar days, so forecast_vol is higher than forecast_rv for a contract with no weekend in its life and lower for a short one that spans a weekend. net_edge_vp subtracts friction: the share of the half-spread given in parameters.spread_cost_share_pct, plus the estimated commission. edge_dollars is net edge in dollars per contract. These are the headline mispricing signals; they are expected values with no variance term.",
-    `- grade: strong (net edge >= 10 vp), good (5-10), weak (0-5). ${settings.minGrade === "strong" ? "Only strong reaches you." : `Only ${settings.minGrade} or better reaches you.`}`,
-    "- ann_yield_pct: annualised premium yield on capital at risk; it scales with 1/sqrt(time) so very short-dated contracts look richest. Short-dated premium is real on average but tail-heavy.",
-    "- surface_iv vs mid_iv: how far the contract's own market price sits from the fitted surface. A big gap means the surface may be wrong for that contract.",
-    "- flags and event: macro_event_before_expiry means a major US macro release still to come falls on or before expiry (macro_events lists them), and the contract's event names the heaviest one in its life (on a tie, the one with the fewest sessions after it). Heavy: the Fed rate decision, CPI, the US presidential election. Medium: the US midterm elections. Light: GDP. The IV may be partly pricing the release, so the measured edge is probably overstated, not wrong. How much that matters depends on where the release lands in the contract's life: sessions_until is how many sessions away it is, sessions_after how many sessions the contract is still open from the release's session through expiry. A release many sessions away leaves time for the position to decay and to be reviewed for an early close before it (see held_positions and close actions); few sessions_after leave little time to recover if the position is still held through it. Riskiest: a heavy release in the last one or two sessions of a short contract; ask for a clearly stronger net edge there, or pass. Mildest: a release well ahead, with several sessions after it, in a longer contract. A light release alone is no reason to pass on a strong edge.",
+    "- How Iorio values a contract (since v4.0): forecast_vol is the stock's own realized volatility over the last 21 sessions, annualized on trading sessions. sessions_to_expiry is the variance time left until the 16:00 close on expiry, counted in trading sessions: the rest of today (about 0.31 of a session at 10:00, less as the day goes on) plus every session to expiry; weekends and holidays add nothing. implied_vol is the contract's own market price on that same clock, so it compares directly with forecast_vol; the ticker's atm_iv is the at-the-money implied volatility about 30 days out, on the same clock. Iorio prices each contract over its sessions_to_expiry with the forecast and the fat-tailed return distribution these stocks have shown historically (no view on direction), and every figure below comes from that one distribution, so they are consistent with each other.",
+    "- edge_dollars: the expected profit per contract of selling at the mid and holding to expiry, after friction (the share of the half-spread in parameters.spread_cost_share_pct plus the estimated commission). edge_margin_pct: the same before friction, as a share of the premium (1 − fair value ÷ mid).",
+    `- grade: strong (edge_margin_pct >= 30), good (20-30), weak (10-20). ${settings.minGrade === "strong" ? "Only strong reaches you." : `Only ${settings.minGrade} or better reaches you.`} History (five years, at the money, 1 to 10 sessions to expiry): margins of 30% or more delivered about +20 to +25% of the premium; 20-30% about +5 to +10%; below 10% about nothing. Beyond about 10 sessions the relationship was not reliable.`,
+    "- edge_yield_ann_pct: edge_dollars as a yearly rate on the contract's exposure (100 shares at the strike for a put, at the share price for a covered call, less the premium received), over the calendar days to expiry: the capital is tied up on weekends too. hist_edge_dollars and hist_yield_ann_pct: what history actually delivered for sales with the same edge margin and time to expiry: the model's figures shrunk to realized outcomes (measured at the money). The model alone is optimistic; when the two disagree, believe hist_*. Candidates reach you ordered by hist_yield_ann_pct.",
+    "- pop_pct, avg_win and avg_loss: the probability the sale ends in profit, and the average result when it does and when it does not. worst5_avg is the average of the worst 5% of outcomes; stress_2sd the result after the stock falls two standard deviations by expiry. For a covered call these are for the shares and the call together, the same payoff as a cash-secured put at that strike. These describe the risk: a high pop_pct with a large avg_loss is not a good trade by itself, and the expected value already weighs them.",
+    "- premium_after_costs and premium_yield_ann_pct: the premium kept after friction and its annualized yield on the exposure: income, not an expectation (a put's best case; a covered call's shares can add the rise to the strike). Short-dated, near-the-money contracts show the richest premium_yield_ann_pct and carry the sharpest tail.",
+    "- surface_gap_vp: how far the contract's own price sits from the fitted volatility surface, in volatility points. A big gap means the quote or the surface may be off for that contract.",
+    "- flags and event: macro_event_before_expiry means a major US macro release still to come falls on or before expiry (macro_events lists them), and the contract's event names the heaviest one in its life (on a tie, the one with the fewest sessions after it). Heavy: the Fed rate decision, CPI, the jobs report, the US presidential election. Medium: the US midterm elections. Light: GDP. The IV may be partly pricing the release, so the measured edge is probably overstated, not wrong. How much that matters depends on where the release lands in the contract's life: sessions_until is how many sessions away it is, sessions_after how many sessions the contract is still open from the release's session through expiry. A release many sessions away leaves time for the position to decay and to be reviewed for an early close before it (see held_positions and close actions); few sessions_after leave little time to recover if the position is still held through it. Riskiest: a heavy release in the last one or two sessions of a short contract; ask for a clearly stronger edge there, or pass. Mildest: a release well ahead, with several sessions after it, in a longer contract. A light release alone is no reason to pass on a strong grade.",
     "- next_earnings: the ticker's next earnings date. Earnings are the heaviest event there is, far above any macro release: a single report can move the stock more than its options price in. Never open a position, or roll one, so that it is still open when the company reports. Code already removes every open and roll whose expiry is on or after a known earnings date, and does not trade a ticker whose earnings date is unknown; if anything you are offered would still be open on next_earnings, do not choose it.",
     "- elevated_vol: the ticker's short-term realized volatility is unusually high versus its own history.",
     "- day_change_pct and spy_day_change_pct: today's moves. A sharp drop usually has a cause; selling puts into a falling market is exactly the tail risk this strategy carries.",
     "- move_context: today's move measured against the stock's own normal. day_move_sigmas is day_change_pct divided by the one-day move the realized-volatility forecast implies (expected_daily_move_pct); within ±1.5 is an ordinary day for this stock. change_1w_pct, change_1m_pct and change_3m_pct are the recent path; realized_vol_21d and realized_vol_126d (annualised %) say whether the last month is calmer or wilder than the last six; iv_rank is where today's implied volatility sits in its own one-year range (0-100).",
     "- held_positions: every short put and covered call Pluto manages on the ticker, whatever Signals thinks of it. captured_pct is how much of the credit is already earned at the ask. max_remaining_gain_dollars is the most the position can still add by expiry: for a put its mid; for a covered call the rise to the strike plus the call's mid, which needs the stock to finish at or above the strike, so it is a ceiling, not an expectation. close_cost_dollars is what closing now costs (half the spread and commission). strike_distance_days is how many normal days of movement separate the stock from the strike. event is the heaviest macro release before expiry, with stress_normal_days (2 heavy, 1 medium, 0.5 light); event_stress_loss_dollars is how much worse the position would be right after a move of that many normal days against it on the release. A covered call's cycle_pnl_after_costs_dollars is the whole wheel cycle's P&L if closed now, after the close cost.",
-    "- rolls: replacing a held short leg with a lower-delta credit roll; net_roll_edge_vp is the new contract's net edge minus what holding the current leg still offers minus the cost of closing it. held_leg_id is the leg_id of the position in held_positions; judge the roll against that position, and the replacement's own event like a new open's.",
+    "- rolls: replacing a held short leg with a lower-delta credit roll. net_roll_edge_dollars is the new contract's edge_dollars minus what holding the current leg still offers (its mid minus its fair value) minus the cost of closing it, for the whole quantity (per_contract alongside); roll_edge_margin_pct is the same before friction as a share of the new premium, and grade reads it like an open's. held_leg_id is the leg_id of the position in held_positions; judge the roll against that position, and the replacement's own event like a new open's.",
     "- close actions: selling unstructured shares at a positive cycle P&L; buying back a short put whose remaining edge is negative while locking a profit; and, in the five sessions before a macro release, closing a short put (a buyback) or a whole covered call (the call bought back and the shares sold together, kind close_position) while it is in profit. For these event closes weigh max_remaining_gain_dollars against event_stress_loss_dollars and close_cost_dollars, given captured_pct and strike_distance_days: when what is left to earn is small next to what one plausible move on the release could cost, close and bank the profit; that is a good outcome, not a missed one. A covered call whose strike is well above the stock mostly carries ordinary stock exposure, which the wheel holds on purpose: its gain and its stress loss are of similar size and holding is reasonable; one whose call is in the money has its upside capped and its downside open, like a put. Code never offers an event close at a loss and never sends one itself; it offers the close again as the profit grows or the release gets closer.",
     "- positions: Pluto manages every position on the tickers it is enabled on, whoever opened it. account.managed_positions counts all of them and they all use Pluto's capital budget; each held position, close action and roll says opened_by (pluto or a person). A close action on a position a person opened is normal, not an inconsistency.",
-    "- open_covered_call candidates: Pluto writes the call against shares the account already holds free; when there are not enough, code buys the missing 100 shares per contract at the live price in the same order. dollar_risk counts those shares. In reasons, call it a covered call, never a buy-write. Holding no shares is normal for a covered-call candidate.",
+    "- open_covered_call candidates: Pluto writes the call against shares the account already holds free; when there are not enough, code buys the missing 100 shares per contract at the live price in the same order. dollar_risk counts those shares, less the premium. In reasons, call it a covered call, never a buy-write. Holding no shares is normal for a covered-call candidate.",
     "- recent_decisions: your latest decisions, newest first. A trade carries its outcome: blocked (a code check refused it before any order was sent; outcome_detail says why), validated, order_built or confirmed (an order is on its way or working), filled, cancelled_partially_filled (part filled, the rest cancelled), cancelled, rejected or error (outcome_detail says why), not_executed (no order was attempted). Only a filled or cancelled_partially_filled trade changed the book; the account, positions and close actions in this message always show the book as it is now.",
     "",
     "Hard rules you must obey:",
@@ -49,7 +52,7 @@ export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
     `4. Confidence below ${settings.confidenceFloor} is treated as no_trade by code, so do not pad it.`,
     "5. Reasons are for the human operators: short, specific, in plain language, at most five.",
     "",
-    "Judgement guidance, not a formula. The objective is yield in proportion to the risk taken, not yield for its own sake. Prefer the contract whose net edge in dollars is largest relative to the capital it commits and the tail it carries, when the liquidity is real (open interest, volume, tight spread), the contract's market price agrees with the fitted surface, the ticker is not moving violently today, no earnings sits before expiry, any macro release before expiry is paid for by a stronger edge, and the position diversifies the book rather than concentrating it. Short-dated, near-the-money contracts (a week or less to expiry, |delta| above 0.25) carry the richest annualised yield and the sharpest tail. Their yield is compensation the model has measured, not a warning, when ALL of these hold: today's move is within the stock's normal range (|day_move_sigmas| at most 1.5), the stock is not in an unusually volatile stretch (elevated_vol absent), no earnings falls before expiry, liquidity is real (open interest and volume in the hundreds or more, spread_pct within the configured maximum), and the net edge is strong. When any of these fails, prefer a longer-dated or lower-delta contract, or no trade. A good roll on a leg near expiry or drifting toward assignment is usually worth more than a new position. Doing nothing is always acceptable.",
+    "Judgement guidance, not a formula. The objective is return in proportion to the risk taken, not yield for its own sake. Prefer the contract with the highest hist_yield_ann_pct relative to the tail it carries (worst5_avg, stress_2sd), when the liquidity is real (open interest, volume, tight spread), the contract's market price agrees with the fitted surface, the ticker is not moving violently today, no earnings sits before expiry, any macro release before expiry is paid for by a stronger edge margin, and the position diversifies the book rather than concentrating it. Short-dated, near-the-money contracts (a week or less to expiry, |delta| above 0.25) carry the richest yield and the sharpest tail. Their premium is compensation the model has measured, not a warning, when ALL of these hold: today's move is within the stock's normal range (|day_move_sigmas| at most 1.5), the stock is not in an unusually volatile stretch (elevated_vol absent), no earnings falls before expiry, liquidity is real (open interest and volume in the hundreds or more, spread_pct within the configured maximum), and the grade is strong. When any of these fails, prefer a longer-dated or lower-delta contract, or no trade. A good roll on a leg near expiry or drifting toward assignment is usually worth more than a new position. Doing nothing is always acceptable.",
     "",
     "Answer with a single JSON object matching the provided schema and nothing else.",
   ].join("\n");
@@ -73,28 +76,36 @@ function compactEvent(event: MacroEventBeforeExpiry | null, stressNormalDays?: n
 
 function compactCandidate(id: string, kind: string, candidate: SignalCandidate, snapshotCapturedAt: string | null, nowMs: number, event: MacroEventBeforeExpiry | null) {
   const quotedAt = candidate.quotedAt ?? (candidate.quoteSource === "snapshot" ? snapshotCapturedAt : null);
+  const model = candidate.model;
   return stripUndefined({
     id,
     kind,
     expiry: candidate.expiry,
     dte: candidate.dte,
+    sessions_to_expiry: round(model?.varianceSessions, 2),
     strike: candidate.strike,
     delta: round(candidate.delta, 3),
     bid: candidate.bid,
     ask: candidate.ask,
     spread_pct: round(candidate.spreadPercent, 1),
-    surface_iv: round(candidate.surfaceImpliedVolatility * 100, 1),
-    mid_iv: round((candidate.midImpliedVolatility ?? NaN) * 100, 1),
-    forecast_vol: round(candidate.forecastVolatility * 100, 1),
-    edge_vp: round(candidate.edge * 100, 1),
-    net_edge_vp: round(candidate.netEdge * 100, 1),
-    edge_dollars: round(candidate.edgeDollars, 0),
-    ann_yield_pct: round(candidate.annualizedYield * 100, 0),
+    implied_vol: round((model?.impliedVolatility ?? NaN) * 100, 1),
+    surface_gap_vp: candidate.midImpliedVolatility === null ? undefined : round(Math.abs(candidate.midImpliedVolatility - candidate.surfaceImpliedVolatility) * 100, 1),
+    grade: model?.grade,
+    edge_dollars: round(model?.expectedPnlDollars, 0),
+    edge_margin_pct: round((model?.edgeMargin ?? NaN) * 100, 1),
+    hist_edge_dollars: round(model?.calibratedExpectedPnlDollars, 0),
+    hist_yield_ann_pct: round((model?.calibratedAnnualizedReturn ?? NaN) * 100, 0),
+    edge_yield_ann_pct: round((model?.expectedAnnualizedReturn ?? NaN) * 100, 0),
+    pop_pct: round((model?.probabilityOfProfit ?? NaN) * 100, 0),
+    avg_win: round(model?.averageWinDollars, 0),
+    avg_loss: round(model?.averageLossDollars, 0),
+    worst5_avg: round(model?.expectedShortfallDollars, 0),
+    stress_2sd: round(model?.stressPnlDollars, 0),
+    premium_after_costs: round(model?.premiumAfterCostsDollars, 0),
+    premium_yield_ann_pct: round((model?.premiumYield ?? NaN) * 100, 0),
     dollar_risk: round(candidate.dollarRisk, 0),
-    risk_adj_ratio: round(candidate.riskAdjustedRatio, 4),
     oi: candidate.openInterest ?? undefined,
     vol: candidate.volume ?? undefined,
-    grade: candidate.grade,
     quote_source: candidate.quoteSource,
     quote_age_min: quotedAt ? round((nowMs - new Date(quotedAt).getTime()) / 60_000, 0) : undefined,
     flags: candidate.flags.length > 0 ? candidate.flags : undefined,
@@ -229,7 +240,7 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
   const tickers = input.tickers
     .map((ticker) => {
       const byStrategy = new Map<string, PlutoOpenCandidate[]>();
-      for (const entry of [...ticker.eligible].sort((a, b) => b.candidate.edgeDollars - a.candidate.edgeDollars)) {
+      for (const entry of [...ticker.eligible].sort((a, b) => compareCandidatesByModel(a.candidate, b.candidate))) {
         const list = byStrategy.get(entry.kind) ?? [];
         if (list.length < candidatesPerTickerPerStrategy) list.push(entry);
         byStrategy.set(entry.kind, list);
@@ -248,11 +259,12 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
           held_leg_id: roll.legId,
           opened_by: input.plutoOpenedPositionIds.has(roll.positionId) ? "pluto" : "a person",
           quantity: roll.quantity,
-          net_roll_edge_vp: round(roll.netRollEdge * 100, 1),
-          net_roll_edge_dollars: round(roll.netRollEdgeDollars, 0),
+          net_roll_edge_dollars: round(roll.model?.netExpectedPnl, 0),
+          per_contract: round(roll.model?.netExpectedPnlPerContract, 0),
+          roll_edge_margin_pct: round((roll.model?.edgeMargin ?? NaN) * 100, 1),
           net_credit_per_share: round(roll.netCreditPerShare, 2),
           delta_change: round(roll.deltaChange, 3),
-          grade: roll.grade,
+          grade: roll.model?.grade,
           flags: roll.flags.length > 0 ? roll.flags : undefined,
           replacement: compactCandidate(`${entry.id}#replacement`, roll.replacement.strategyKey, roll.replacement, ticker.scored.snapshotCapturedAt, nowMs, eventFor(roll.replacement.expiry)),
         });
@@ -270,8 +282,8 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
         sector: scored.sector ?? undefined,
         spot: round(scored.spotPrice, 2),
         day_change_pct: round(scored.dayChangePercent, 2),
-        atm_iv: round((scored.atmImpliedVolatility ?? NaN) * 100, 1),
-        forecast_rv: round((scored.forecast?.volatility ?? NaN) * 100, 1),
+        atm_iv: round((scored.atmImpliedVolatilityPerSession ?? NaN) * 100, 1),
+        forecast_vol: round((scored.modelForecast?.annualizedVolatility ?? NaN) * 100, 1),
         momentum_12_1: round(scored.momentum, 3),
         skew_vp: round(scored.skew ? scored.skew.skew * 100 : NaN, 1),
         elevated_vol: scored.elevatedVolatility?.elevated ? true : undefined,

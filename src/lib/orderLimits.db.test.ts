@@ -54,17 +54,18 @@ async function setLimits(limits: { maxPosition?: number; maxConcentration?: numb
   });
 }
 
-function putOpenPayload(symbol: string, strike: number, contracts: number) {
-  return { symbol, strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", symbol, quantity: contracts, unitPrice: 1, strike, expiry: "20261120", right: "P" }] };
+// The limit mechanics below run at a zero premium (gross figures); "net of the premium" tests the premium on its own.
+function putOpenPayload(symbol: string, strike: number, contracts: number, premium = 0) {
+  return { symbol, strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", symbol, quantity: contracts, unitPrice: premium, strike, expiry: "20261120", right: "P" }] };
 }
 
-function buyWritePayload(symbol: string, shares: number, stockPrice: number, contracts: number) {
+function buyWritePayload(symbol: string, shares: number, stockPrice: number, contracts: number, premium = 0) {
   return {
     symbol,
     strategyKey: "covered_call",
     legs: [
       { role: "stock", action: "BUY", symbol, quantity: shares, unitPrice: stockPrice },
-      { role: "option", action: "SELL", symbol, quantity: contracts, unitPrice: 1, strike: stockPrice + 5, expiry: "20261120", right: "C" },
+      { role: "option", action: "SELL", symbol, quantity: contracts, unitPrice: premium, strike: stockPrice + 5, expiry: "20261120", right: "C" },
     ],
   };
 }
@@ -113,6 +114,8 @@ const cashSecuredPut = (symbol: string, strike: number, quantity: number, extra:
   tickerId: "unused-for-puts",
   quantity,
   strike,
+  premium: 0,
+  ...("rollFromStrike" in extra ? { rollFromPremium: 0 } : {}),
   ...extra,
 });
 
@@ -141,7 +144,7 @@ describe("max position size: exactly at the boundary", () => {
   it("a covered-call buy-write is measured as the share shortfall times the spot price", async () => {
     await setLimits({ maxPosition: 10 });
     const ticker = await createTicker();
-    const callOrder = (spotPrice: number) => ({ strategyKey: "covered_call" as const, symbol: ticker.symbol, tickerId: ticker.id, quantity: 10, strike: 120, spotPrice });
+    const callOrder = (spotPrice: number) => ({ strategyKey: "covered_call" as const, premium: 0, symbol: ticker.symbol, tickerId: ticker.id, quantity: 10, strike: 120, spotPrice });
     const at = await evaluateOrderLimits(callOrder(100));
     expect(at.blocked).toBe(false);
     expect(at.details?.orderNotional).toBe(100_000);
@@ -156,7 +159,7 @@ describe("max position size: exactly at the boundary", () => {
     const ticker = await createTicker();
     const [position] = await testDb("positions").insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open" }).returning("id");
     await testDb("position_legs").insert({ position_id: position.id, leg_type: "stock", side: "long", quantity: 1000, multiplier: 1, entry_price: 100, entry_at: new Date(Date.now() - 86_400_000) });
-    const result = await evaluateOrderLimits({ strategyKey: "covered_call", symbol: ticker.symbol, tickerId: ticker.id, quantity: 10, strike: 120, spotPrice: 100 });
+    const result = await evaluateOrderLimits({ strategyKey: "covered_call", premium: 0, symbol: ticker.symbol, tickerId: ticker.id, quantity: 10, strike: 120, spotPrice: 100 });
     expect(result.blocked).toBe(false);
     expect(result.details?.orderNotional).toBe(0);
   });
@@ -166,7 +169,7 @@ describe("max position size: exactly at the boundary", () => {
     const ticker = await createTicker();
     const [position] = await testDb("positions").insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open" }).returning("id");
     await testDb("position_legs").insert({ position_id: position.id, leg_type: "stock", side: "long", quantity: 300, multiplier: 1, entry_price: 100, entry_at: new Date(Date.now() - 86_400_000) });
-    const result = await evaluateOrderLimits({ strategyKey: "covered_call", symbol: ticker.symbol, tickerId: ticker.id, quantity: 5, strike: 120, spotPrice: 50 });
+    const result = await evaluateOrderLimits({ strategyKey: "covered_call", premium: 0, symbol: ticker.symbol, tickerId: ticker.id, quantity: 5, strike: 120, spotPrice: 50 });
     expect(result.details?.orderNotional).toBe(10_000); // (500 - 300) shares x $50
   });
 
@@ -175,7 +178,7 @@ describe("max position size: exactly at the boundary", () => {
     const ticker = await createTicker();
     const [closedPosition] = await testDb("positions").insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "closed", closed_at: new Date() }).returning("id");
     await testDb("position_legs").insert({ position_id: closedPosition.id, leg_type: "stock", side: "long", quantity: 1000, multiplier: 1, entry_price: 100, entry_at: new Date(Date.now() - 86_400_000), exit_price: 101, exit_at: new Date() });
-    const result = await evaluateOrderLimits({ strategyKey: "covered_call", symbol: ticker.symbol, tickerId: ticker.id, quantity: 1, strike: 120, spotPrice: 50 });
+    const result = await evaluateOrderLimits({ strategyKey: "covered_call", premium: 0, symbol: ticker.symbol, tickerId: ticker.id, quantity: 1, strike: 120, spotPrice: 50 });
     expect(result.details?.orderNotional).toBe(5_000);
   });
 });
@@ -212,6 +215,33 @@ describe("exactly at the limit with values where fraction x 100 is not exact", (
   });
 });
 
+describe("net of the premium (Marcelo 2026-10-12: the exposure Positions shows)", () => {
+  it("a cash-secured put counts its strike less the premium: at the boundary passes, one cent more blocks", async () => {
+    await setLimits({ maxPosition: 10 });
+    const at = await evaluateOrderLimits(cashSecuredPut("AAA", 102, 10, { premium: 2 })); // (102 − 2) × 100 × 10 = 100,000
+    expect(at.blocked).toBe(false);
+    expect(at.details?.orderNotional).toBe(100_000);
+    expect((await evaluateOrderLimits(cashSecuredPut("AAA", 102.01, 10, { premium: 2 }))).blocked).toBe(true);
+  });
+
+  it("a buy-write counts the shares it buys less the call's premium on them", async () => {
+    const ticker = await createTicker();
+    const result = await evaluateOrderLimits({ strategyKey: "covered_call", premium: 1.5, symbol: ticker.symbol, tickerId: ticker.id, quantity: 10, strike: 120, spotPrice: 100 });
+    expect(result.details?.orderNotional).toBe(98_500); // 1,000 shares × (100 − 1.50)
+  });
+
+  it("a put rolled up counts the strike difference less the roll's net credit", async () => {
+    const result = await evaluateOrderLimits(cashSecuredPut("AAA", 105, 10, { rollFromStrike: 100, premium: 3, rollFromPremium: 1 }));
+    expect(result.details?.orderNotional).toBe(3_000); // (5 − (3 − 1)) × 100 × 10
+  });
+
+  it("orders in flight count at their limit prices, net of the premium", async () => {
+    await insertOrder("open_cash_secured_put", "submitted", putOpenPayload("OTH", 100, 5, 2)); // (100 − 2) × 500 = 49,000
+    await insertOrder("open_covered_call", "submitted", buyWritePayload("OTH", 200, 50, 2, 1)); // 200 × (50 − 1) = 9,800
+    expect((await evaluateOrderLimits(cashSecuredPut("AAA", 10, 1))).details?.inFlightNotional).toBe(58_800);
+  });
+});
+
 describe("max position size for rolls", () => {
   it("a cash-secured put rolled UP adds only the strike difference: at the boundary passes, one cent more blocks", async () => {
     await setLimits({ maxPosition: 0.5 });
@@ -234,7 +264,7 @@ describe("max position size for rolls", () => {
 
   it("a covered-call roll adds nothing whatever the strikes, and never asks for a live stock price", async () => {
     await setLimits({ maxPosition: 0 });
-    const result = await evaluateOrderLimits({ strategyKey: "covered_call", symbol: "AAA", tickerId: "unused", quantity: 10, strike: 150, rollFromStrike: 100 });
+    const result = await evaluateOrderLimits({ strategyKey: "covered_call", premium: 0, symbol: "AAA", tickerId: "unused", quantity: 10, strike: 150, rollFromStrike: 100 });
     expect(result.blocked).toBe(false);
     expect(result.details?.orderNotional).toBe(0);
     expect(fetchPricesPoolFirstMock).not.toHaveBeenCalled();
@@ -396,9 +426,9 @@ describe("orders still in flight", () => {
         { role: "option", action: "BUY", symbol: "INF", quantity: 2, unitPrice: 1, strike: 90, expiry: "20261009", right: "P", positionLegId: "leg-1" },
         { role: "option", action: "SELL", symbol: "INF", quantity: 2, unitPrice: 2, strike: 95, expiry: "20261120", right: "P" },
       ],
-    }); // 1,000
+    }); // (95 − 90 − the $1 net credit) × 100 × 2 = 800
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 10, 1));
-    expect(result.details?.inFlightNotional).toBe(61_000);
+    expect(result.details?.inFlightNotional).toBe(60_800);
   });
 
   it("the order being evaluated is left out of the in-flight total", async () => {
@@ -514,7 +544,7 @@ describe("fail closed", () => {
 
   it("blocks a covered-call open when no spot price can be fetched, and when the price fetch throws", async () => {
     const ticker = await createTicker();
-    const input = { strategyKey: "covered_call" as const, symbol: ticker.symbol, tickerId: ticker.id, quantity: 1, strike: 120 };
+    const input = { strategyKey: "covered_call" as const, premium: 0, symbol: ticker.symbol, tickerId: ticker.id, quantity: 1, strike: 120 };
     fetchPricesPoolFirstMock.mockResolvedValue({ stock: null });
     expect(await evaluateOrderLimits(input)).toEqual({ blocked: true, reasons: ["Could not fetch a live stock price to verify position limits."] });
     fetchPricesPoolFirstMock.mockResolvedValue({});
@@ -527,14 +557,14 @@ describe("fail closed", () => {
     await setLimits({ maxPosition: 100 });
     const ticker = await createTicker();
     fetchPricesPoolFirstMock.mockResolvedValue({ stock: 42 });
-    const result = await evaluateOrderLimits({ strategyKey: "covered_call", symbol: ticker.symbol, tickerId: ticker.id, quantity: 2, strike: 50 });
+    const result = await evaluateOrderLimits({ strategyKey: "covered_call", premium: 0, symbol: ticker.symbol, tickerId: ticker.id, quantity: 2, strike: 50 });
     expect(fetchPricesPoolFirstMock).toHaveBeenCalledWith([{ key: "stock", legType: "stock", symbol: ticker.symbol }]);
     expect(result.details?.orderNotional).toBe(8_400); // 200 shares x $42
   });
 
   it("does not ask the pool for a price when the caller passes one", async () => {
     const ticker = await createTicker();
-    await evaluateOrderLimits({ strategyKey: "covered_call", symbol: ticker.symbol, tickerId: ticker.id, quantity: 1, strike: 50, spotPrice: 10 });
+    await evaluateOrderLimits({ strategyKey: "covered_call", premium: 0, symbol: ticker.symbol, tickerId: ticker.id, quantity: 1, strike: 50, spotPrice: 10 });
     expect(fetchPricesPoolFirstMock).not.toHaveBeenCalled();
   });
 });

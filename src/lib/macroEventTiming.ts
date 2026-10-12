@@ -8,13 +8,14 @@ import { expirySpansMacroEvent } from "./volatilityEdge.js";
 
 export type MacroEventWeight = "heavy" | "medium" | "light";
 
-const fredTitle = (eventKey: "cpi" | "gdp") => fredMajorReleases.find((release) => release.eventKey === eventKey)!.title;
+const fredTitle = (eventKey: "cpi" | "gdp" | "jobs_report") => fredMajorReleases.find((release) => release.eventKey === eventKey)!.title;
 
 // The weights Pluto's prompt has used since v3.x (Marcelo): heavy the Fed, CPI and the presidential election, medium the
-// midterms, light GDP.
+// midterms, light GDP. The jobs report (added 2026-10-10) is heavy, the same as the cautious default for an unnamed release.
 const weightByTitle: Record<string, MacroEventWeight> = {
   [fedRateDecisionTitle]: "heavy",
   [fredTitle("cpi")]: "heavy",
+  [fredTitle("jobs_report")]: "heavy",
   [presidentialElectionTitle]: "heavy",
   [midtermElectionsTitle]: "medium",
   [fredTitle("gdp")]: "light",

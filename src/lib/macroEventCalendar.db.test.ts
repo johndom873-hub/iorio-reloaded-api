@@ -33,7 +33,7 @@ const { db } = await import("../db/connection.js");
 const store = await import("./macroEventCalendar.js");
 const testDb: Knex = db;
 
-const realEventKeys = ["cpi", "gdp", "fed_rate_decision", "us_federal_election"];
+const realEventKeys = ["cpi", "gdp", "jobs_report", "fed_rate_decision", "us_federal_election"];
 const loaderKeyPrefix = `loader-test-${Date.now() % 100_000_000}`;
 
 function fomcPage(meetingsByYear: Record<number, [string, string][]>): string {
@@ -72,6 +72,7 @@ describe("captureMajorMacroEvents", () => {
   beforeEach(() => {
     sources.fredDatesByReleaseId.set(10, ["2026-09-11", "2026-10-14", "2026-11-10", "2026-12-10"]);
     sources.fredDatesByReleaseId.set(53, ["2026-10-29", "2026-11-25", "2026-12-23"]);
+    sources.fredDatesByReleaseId.set(50, ["2026-10-02", "2026-11-06", "2026-12-04", "2027-01-08"]);
     sources.fomcPage = fomcPage({ 2026: [["September", "15-16*"], ["October", "27-28"], ["December", "8-9*"]], 2027: [["January", "26-27"], ["March", "16-17*"]] });
   });
 
@@ -84,13 +85,15 @@ describe("captureMajorMacroEvents", () => {
       { event_key: "fed_rate_decision", title: "Fed rate decision", event_at: "2026-10-28T18:00:00Z", source: "federal_reserve" }, // 14:00 EDT
       { event_key: "gdp", title: "GDP", event_at: "2026-10-29T12:30:00Z", source: "fred" },
       { event_key: "us_federal_election", title: "US midterm elections", event_at: "2026-11-04T00:00:00Z", source: "election_rule" }, // 19:00 EST on 11-03
+      { event_key: "jobs_report", title: "Jobs report", event_at: "2026-11-06T13:30:00Z", source: "fred" }, // 08:30 EST; 10-02 is already past
       { event_key: "cpi", title: "CPI", event_at: "2026-11-10T13:30:00Z", source: "fred" }, // 08:30 EST
       { event_key: "gdp", title: "GDP", event_at: "2026-11-25T13:30:00Z", source: "fred" },
+      { event_key: "jobs_report", title: "Jobs report", event_at: "2026-12-04T13:30:00Z", source: "fred" },
       { event_key: "fed_rate_decision", title: "Fed rate decision", event_at: "2026-12-09T19:00:00Z", source: "federal_reserve" }, // 14:00 EST
       { event_key: "cpi", title: "CPI", event_at: "2026-12-10T13:30:00Z", source: "fred" },
       { event_key: "gdp", title: "GDP", event_at: "2026-12-23T13:30:00Z", source: "fred" },
-    ]); // 2027-01-27 is past now + 90 days
-    expect(result.writtenBySource).toEqual({ "CPI (FRED)": 3, "GDP (FRED)": 3, "Fed rate decision (Federal Reserve)": 2, "US federal elections (rule)": 1 });
+    ]); // 2027-01-08 and 2027-01-27 are past now + 90 days
+    expect(result.writtenBySource).toEqual({ "CPI (FRED)": 3, "GDP (FRED)": 3, "Jobs report (FRED)": 2, "Fed rate decision (Federal Reserve)": 2, "US federal elections (rule)": 1 });
   });
 
   it("drops a date the source moved on the next run", async () => {
@@ -121,6 +124,7 @@ describe("captureMajorMacroEvents", () => {
     const lateNovember = new Date("2026-11-20T21:00:00Z"); // + 45 days = 2027-01-04
     sources.fredDatesByReleaseId.set(53, ["2026-10-29", "2026-11-25", "2026-12-23"]);
     sources.fredDatesByReleaseId.set(10, ["2026-11-10"]); // nothing left after 11-20
+    sources.fredDatesByReleaseId.set(50, ["2026-12-04", "2027-01-08"]); // reaches past 2027-01-04
     const result = await store.captureMajorMacroEvents(lateNovember);
     expect(result.failures).toEqual([]);
     expect(result.horizonShortfalls).toEqual(["CPI (FRED)", "GDP (FRED)"]); // the Fed page already lists 2027

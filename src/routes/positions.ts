@@ -103,8 +103,9 @@ function expiryYyyymmddColumn() {
 //     * (short ? -1 : 1) — same shape as the Trade Blotter's approved formula
 //     (2026-08-20), aggregated per position. Includes a rolled-away leg's
 //     locked-in gain even while the position is still open.
-//   capitalAtRisk = entry-time capital committed: spot for covered calls,
-//     strike for CSPs, from entry actuals rather than a scan-time estimate. Keyed
+//   capitalAtRisk = entry-time capital committed, net of the premium received
+//     (2026-10-12): the shares' cost less the open call's premium for covered
+//     calls, (strike − premium) × 100 × qty for CSPs, from entry actuals rather than a scan-time estimate. Keyed
 //     on leg composition (open stock leg present?), not strategy_key, so a
 //     bare-stock unstructured (N/S) position — e.g. leftover shares after a
 //     covered call's short call expired/was assigned away — still gets a

@@ -2,18 +2,18 @@ import { requireEnvironmentVariable } from "../config/env.js";
 import { runWithRetries } from "./riskFreeRate.js";
 
 // Where the major US macro events come from (stored by macroEventCalendar.ts):
-//  - CPI and GDP: FRED's release calendar. FRED returns dates only; the releases are at 08:30 ET by convention.
+//  - CPI, GDP and the jobs report (BLS Employment Situation, added 2026-10-10 by the model review): FRED's release calendar. FRED returns dates only; the releases are at 08:30 ET by convention.
 //    Future dates are only returned with include_release_dates_with_no_data=true, and FRED carries them up to
 //    the end of the year the agencies have published.
 //  - Fed rate decision: the second day of each FOMC meeting, 14:00 ET, from the Federal Reserve's FOMC calendar
 //    page (no API publishes it). Dates are tentative until the previous meeting confirms them, so it is re-read daily.
 //  - US federal elections: fixed by law (the Tuesday after the first Monday in November, even years), 19:00 ET.
 
-export type MajorMacroEventKey = "fed_rate_decision" | "cpi" | "gdp" | "us_federal_election";
+export type MajorMacroEventKey = "fed_rate_decision" | "cpi" | "gdp" | "jobs_report" | "us_federal_election";
 export type MajorMacroEventSource = "federal_reserve" | "fred" | "election_rule";
 
 export interface FredMajorRelease {
-  eventKey: Extract<MajorMacroEventKey, "cpi" | "gdp">;
+  eventKey: Extract<MajorMacroEventKey, "cpi" | "gdp" | "jobs_report">;
   title: string;
   releaseId: number;
 }
@@ -21,6 +21,7 @@ export interface FredMajorRelease {
 export const fredMajorReleases: readonly FredMajorRelease[] = [
   { eventKey: "cpi", title: "CPI", releaseId: 10 },
   { eventKey: "gdp", title: "GDP", releaseId: 53 }, // advance, second and third estimates
+  { eventKey: "jobs_report", title: "Jobs report", releaseId: 50 }, // BLS Employment Situation (nonfarm payrolls)
 ];
 
 export const fedRateDecisionTitle = "Fed rate decision";

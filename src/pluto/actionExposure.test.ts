@@ -8,7 +8,7 @@ const rollPayload = { symbol: "MU", strategyKey: "cash_secured_put", legs: [{ ro
 const closePayload = { symbol: "COIN", strategyKey: "cash_secured_put", legs: [] } as unknown as OrderRequestPayload;
 
 const action = (overrides: Partial<PlutoActionExposureInput>): PlutoActionExposureInput => ({ kind: "open_cash_secured_put", outcome: "filled", contract: null, quantity: 2, limitPrice: 0.62, fillPrice: null, ...overrides });
-const order = (requestType: string, payload: OrderRequestPayload, filledQuantity: number | null = null): PlutoActionOrderRequest => ({ requestType, payload, filledQuantity });
+const order = (requestType: string, payload: OrderRequestPayload, filledQuantity: number | null = null, closedLegPremium: number | null = null): PlutoActionOrderRequest => ({ requestType, payload, filledQuantity, closedLegPremium });
 
 describe("computePlutoActionExposure", () => {
   it("is nothing for an action that never became an order, or whose order never filled", () => {
@@ -18,23 +18,25 @@ describe("computePlutoActionExposure", () => {
     }
   });
 
-  it("opens add what the order gate counts: strike × 100 per put, the shares for a buy-write; a working order counts its ordered quantity", () => {
-    expect(computePlutoActionExposure(action({ outcome: "confirmed" }), order("open_cash_secured_put", cspPayload))).toBe(4800);
-    expect(computePlutoActionExposure(action({ kind: "open_covered_call", quantity: 5, limitPrice: 2.45 }), order("open_covered_call", ccPayload, 5))).toBe(46_500);
+  it("opens add what the order gate counts, net of the premium: (strike − limit) × 100 per put, the shares less the call's premium for a buy-write; a working order counts its ordered quantity", () => {
+    expect(computePlutoActionExposure(action({ outcome: "confirmed" }), order("open_cash_secured_put", cspPayload))).toBeCloseTo(4676, 9); // (24 − 0.62) × 100 × 2
+    expect(computePlutoActionExposure(action({ kind: "open_covered_call", quantity: 5, limitPrice: 2.45 }), order("open_covered_call", ccPayload, 5))).toBeCloseTo(45_275, 9); // 500 × (93 − 2.45)
   });
 
   it("a partial fill scales the order's figure by the filled share", () => {
-    expect(computePlutoActionExposure(action({ outcome: "cancelled_partially_filled", quantity: 3 }), order("open_cash_secured_put", { ...cspPayload, legs: [{ role: "option", quantity: 3, strike: 88, unitPrice: 2.1 }] } as unknown as OrderRequestPayload, 2))).toBe(17_600);
-    expect(computePlutoActionExposure(action({ kind: "open_covered_call", outcome: "partially_filled", quantity: 5 }), order("open_covered_call", ccPayload, 2))).toBe(18_600);
+    expect(computePlutoActionExposure(action({ outcome: "cancelled_partially_filled", quantity: 3 }), order("open_cash_secured_put", { ...cspPayload, legs: [{ role: "option", quantity: 3, strike: 88, unitPrice: 2.1 }] } as unknown as OrderRequestPayload, 2))).toBeCloseTo(17_180, 9);
+    expect(computePlutoActionExposure(action({ kind: "open_covered_call", outcome: "partially_filled", quantity: 5 }), order("open_covered_call", ccPayload, 2))).toBeCloseTo(18_110, 9);
   });
 
-  it("a roll down adds nothing; a roll up adds the strike difference", () => {
+  it("a roll down adds nothing; a roll up adds the strike difference less its net credit (here a net debit, so more)", () => {
     expect(computePlutoActionExposure(action({ kind: "roll", quantity: 1, limitPrice: 0.85 }), order("roll_leg", rollPayload, 1))).toBe(0);
     const rollUp = { ...rollPayload, legs: [{ role: "option", quantity: 1, strike: 100, unitPrice: 1.9, positionLegId: "leg-1" }, { role: "option", quantity: 1, strike: 105, unitPrice: 0.85 }] } as unknown as OrderRequestPayload;
-    expect(computePlutoActionExposure(action({ kind: "roll", quantity: 1, limitPrice: 0.85 }), order("roll_leg", rollUp, 1))).toBe(500);
+    expect(computePlutoActionExposure(action({ kind: "roll", quantity: 1, limitPrice: 0.85 }), order("roll_leg", rollUp, 1))).toBeCloseTo(605, 9); // (105 − 100 − (0.85 − 1.90)) × 100
   });
 
-  it("closes release exposure: a put buyback frees the strike, selling shares frees their value (filled shares), a call buyback frees nothing", () => {
+  it("closes release exposure: a put buyback frees the strike less the premium it was sold for, selling shares frees their value (filled shares), a call buyback frees nothing", () => {
+    expect(computePlutoActionExposure(action({ kind: "close_leg", contract: { strike: 300, right: "P" }, quantity: 1, limitPrice: 0.35, fillPrice: 0.35 }), order("close_position", closePayload, 1, 4.2))).toBeCloseTo(-29_580, 9);
+    // A leg whose sale price is unknown frees its whole strike.
     expect(computePlutoActionExposure(action({ kind: "close_leg", contract: { strike: 300, right: "P" }, quantity: 1, limitPrice: 0.35, fillPrice: 0.35 }), order("close_position", closePayload, 1))).toBe(-30_000);
     expect(computePlutoActionExposure(action({ kind: "close_leg", contract: { strike: 95, right: "C" }, quantity: 1, limitPrice: 0.35 }), order("close_position", closePayload, 1))).toBe(0);
     expect(computePlutoActionExposure(action({ kind: "close_shares", quantity: 100, limitPrice: 24.8, fillPrice: 24.82 }), order("close_position", closePayload, 100))).toBe(-2482);

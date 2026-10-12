@@ -347,8 +347,8 @@ describe("GET /positions", () => {
     expect(row).toMatchObject({ id: positionId, symbol, strategyKey: "cash_secured_put", status: "open", tickerId: ticker.id, companyName: "Positions Reads Test Co", sector: "Technology" });
     expect(row.legs).toHaveLength(2);
     expect(Number(row.realizedPnl)).toBe(150);
-    // Open leg: strike 90 x multiplier 100 x 2 contracts.
-    expect(Number(row.capitalAtRisk)).toBe(18_000);
+    // Open leg: (strike 90 − its 2.00 premium) x multiplier 100 x 2 contracts.
+    expect(Number(row.capitalAtRisk)).toBe(17_600);
     expect(row).toHaveProperty("breakEven");
     expect(row).toHaveProperty("breakEvenUnavailableReason");
   });

@@ -1,39 +1,42 @@
-import type { SignalCandidate } from "./signalCandidates.js";
+import { compareCandidatesByModel, type SignalCandidate } from "./signalCandidates.js";
 import { scoreTicker } from "./signalsLiveScoring.js";
 import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
 import { loadTradingSettings, type TradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, TickerSignalsInputs } from "./signalsTypes.js";
 import { replaceDaySignalPool, type DaySignalExpirySeed, type DaySignalTickerSeed } from "./daySignalsStore.js";
+import { modelPredictionsFromCandidates, recordSignalModelPredictions, type SignalModelPrediction } from "./signalModelPredictionsStore.js";
 
 // Seeds the day's pool from the 10:00 ET snapshot scoring (approved
 // 2026-09-24 over a live first pass, which would take 17-45 min on 10 lines
 // and duplicate the capture that just finished): per ticker with TODAY's
-// snapshot, positive-net-Edge candidates ranked by Edge $, the distinct
-// expiries of the top 10, capped at 3. Runs inside the capture orchestrator
-// right after the surface fit; the loop (daySignalsLoop.ts) picks the pool
-// up on its next state check.
+// snapshot, the candidates the valuation model expects to earn on (model
+// review, 2026-10-10: Pluto acts on the model, so its live pool is picked by
+// it too) ranked as Pluto ranks them, the distinct expiries of the top 10,
+// capped at 3. Runs inside the capture orchestrator right after the surface
+// fit; the loop (daySignalsLoop.ts) picks the pool up on its next state check.
+// Every valued candidate's prediction is logged (signal_model_predictions).
 
 export const daySignalsSeedTopCandidates = 10;
 export const daySignalsSeedMaxExpiries = 3;
 
 /**
- * Pure: which expiries make the pool, in first-appearance order among the top candidates by Edge $, then
- * (Roll Signals, 2026-09-24) every open short leg's expiry that is not already in, ranked after them and
- * outside the cap -- the held contract needs fresh quotes all session, and its expiry is where the
- * same-expiry replacements live.
+ * Pure: which expiries make the pool, in first-appearance order among the top candidates with a positive expected P&L
+ * by compareCandidatesByModel, then (Roll Signals, 2026-09-24) every open short leg's expiry that is not already in,
+ * ranked after them and outside the cap -- the held contract needs fresh quotes all session, and its expiry is where
+ * the same-expiry replacements live.
  */
 export function selectDaySignalExpiries(candidates: SignalCandidate[], options = { topCandidates: daySignalsSeedTopCandidates, maxExpiries: daySignalsSeedMaxExpiries }, heldLegExpiries: string[] = []): DaySignalExpirySeed[] {
-  const ranked = candidates.filter((candidate) => candidate.netEdge > 0).sort((a, b) => b.edgeDollars - a.edgeDollars || b.netEdge - a.netEdge);
+  const ranked = candidates.filter((candidate) => candidate.model !== null && candidate.model.expectedPnlDollars > 0).sort(compareCandidatesByModel);
   const seeds: DaySignalExpirySeed[] = [];
   for (const candidate of ranked.slice(0, options.topCandidates)) {
     if (seeds.some((seed) => seed.expiry === candidate.expiry)) continue;
     if (seeds.length >= options.maxExpiries) break;
-    seeds.push({ expiry: candidate.expiry, rank: seeds.length + 1, seedBestEdgeDollars: candidate.edgeDollars, seedBestNetEdge: candidate.netEdge });
+    seeds.push({ expiry: candidate.expiry, rank: seeds.length + 1, seedBestExpectedPnlDollars: candidate.model!.expectedPnlDollars, seedBestEdgeMargin: candidate.model!.edgeMargin });
   }
   for (const expiry of [...new Set(heldLegExpiries)].sort()) {
     if (seeds.some((seed) => seed.expiry === expiry)) continue;
     const best = ranked.find((candidate) => candidate.expiry === expiry);
-    seeds.push({ expiry, rank: seeds.length + 1, seedBestEdgeDollars: best?.edgeDollars ?? 0, seedBestNetEdge: best?.netEdge ?? 0 });
+    seeds.push({ expiry, rank: seeds.length + 1, seedBestExpectedPnlDollars: best?.model?.expectedPnlDollars ?? 0, seedBestEdgeMargin: best?.model?.edgeMargin ?? 0 });
   }
   return seeds;
 }
@@ -44,6 +47,7 @@ export interface DaySignalsSeedDependencies {
   loadAccountContext(): Promise<AccountContext>;
   loadTradingSettings(): Promise<TradingSettings>;
   replaceDaySignalPool(tradingDateIso: string, seeds: DaySignalTickerSeed[], seededAt: Date): Promise<void>;
+  recordSignalModelPredictions(predictions: SignalModelPrediction[]): Promise<void>;
   now(): Date;
 }
 
@@ -53,6 +57,7 @@ export const defaultDaySignalsSeedDependencies: DaySignalsSeedDependencies = {
   loadAccountContext,
   loadTradingSettings,
   replaceDaySignalPool,
+  recordSignalModelPredictions,
   now: () => new Date(),
 };
 
@@ -61,12 +66,14 @@ export interface DaySignalsSeedResult {
   tickersScored: number;
   tickersPooled: number;
   expiriesPooled: number;
-  /** Symbols with today's snapshot but no positive-net-Edge candidate — no pool today. */
+  /** Symbols with today's snapshot but no candidate with a positive expected P&L — no pool today. */
   symbolsWithoutPool: string[];
   /** Symbols skipped because their latest snapshot is not today's. */
   symbolsWithoutTodaySnapshot: string[];
   /** True when the account summary could not be read: free cash was taken as 0, so every candidate is marked non-executable. */
   accountContextUnavailable: boolean;
+  /** Candidates whose model prediction was logged; null when the log write failed (the pool is written regardless). */
+  modelPredictionsRecorded: number | null;
 }
 
 /** One line for the job alert when the seed ran but its pool is missing tickers or is scored without the account, or undefined when clean. */
@@ -87,8 +94,9 @@ export async function seedDaySignals(tradingDateIso: string, deps: DaySignalsSee
     return { freeCash: 0 };
   });
 
-  const result: DaySignalsSeedResult = { tradingDateIso, tickersScored: 0, tickersPooled: 0, expiriesPooled: 0, symbolsWithoutPool: [], symbolsWithoutTodaySnapshot: [], accountContextUnavailable };
+  const result: DaySignalsSeedResult = { tradingDateIso, tickersScored: 0, tickersPooled: 0, expiriesPooled: 0, symbolsWithoutPool: [], symbolsWithoutTodaySnapshot: [], accountContextUnavailable, modelPredictionsRecorded: null };
   const seeds: DaySignalTickerSeed[] = [];
+  const predictions: SignalModelPrediction[] = [];
   for (const ticker of tickers) {
     const inputs = await deps.loadTickerSignalsInputs(ticker);
     if (!inputs.header || inputs.header.tradingDateIso !== tradingDateIso) {
@@ -97,6 +105,7 @@ export async function seedDaySignals(tradingDateIso: string, deps: DaySignalsSee
     }
     result.tickersScored += 1;
     const scored = scoreTicker(inputs, account, settings);
+    predictions.push(...modelPredictionsFromCandidates(ticker.tickerId, tradingDateIso, scored.candidates));
     // Only an expiry the snapshot actually holds can be refreshed; an expired leg's expiry never is.
     const snapshotExpiries = new Set(inputs.slices.map((slice) => slice.expiry));
     const heldLegExpiries = inputs.openShortLegs.map((leg) => leg.expiry).filter((expiry) => snapshotExpiries.has(expiry));
@@ -111,5 +120,12 @@ export async function seedDaySignals(tradingDateIso: string, deps: DaySignalsSee
   }
 
   await deps.replaceDaySignalPool(tradingDateIso, seeds, deps.now());
+  // The prediction log is evidence for the monthly model check, never a reason to lose the day's pool.
+  try {
+    await deps.recordSignalModelPredictions(predictions);
+    result.modelPredictionsRecorded = predictions.length;
+  } catch (error) {
+    console.warn(`day signals seed: logging ${predictions.length} model predictions failed (${error instanceof Error ? error.message : error})`);
+  }
   return result;
 }

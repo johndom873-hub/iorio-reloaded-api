@@ -15,10 +15,13 @@ import { orderFillsPendingSql } from "./orderFills.js";
 // exposure is computePositionExposures (same as the concentration-by-ticker figure there), and free cash is
 // totalCashValue minus CSP collateral.
 //
-// This order's own notional contribution: a cash-secured put reserves strike*100*quantity in cash; a covered
-// call only adds notional for the shares it has to buy (the shortfall beyond what's already held uncovered),
-// using the exact same shortfall math positions.ts's order-build auto-fill uses -- a fully-covered covered call
-// therefore contributes 0.
+// This order's own notional contribution, net of the premium it sells for (Marcelo 2026-10-12, the same exposure
+// as Positions' EXP $): a cash-secured put reserves (strike − premium) × 100 × quantity, since the premium lands in
+// cash as the strike is reserved; a covered call only adds notional for the shares it has to buy (the shortfall
+// beyond what's already held uncovered, the same shortfall math positions.ts's order-build auto-fill uses), less
+// the premium on those shares -- a fully-covered covered call therefore contributes 0. Free cash is IBKR's cash
+// balance (which already holds every premium received) less the full strike of each open put, so cash after a
+// fill is exactly free cash less this net notional.
 //
 // Orders still on their way to or working at IBKR (confirmed, submitted, partially filled, cancel requested) are
 // counted too (approved 2026-10-05): their notional is added to the ticker's exposure and subtracted from free
@@ -36,14 +39,18 @@ export interface OrderLimitsInput {
   tickerId: string;
   quantity: number;
   strike: number;
+  /** Price per share the option is sold at (the limit, or the mid for a preview): the order's notional is net of it. */
+  premium: number;
   /** Underlying stock price, used only for a covered call's share-shortfall notional. Omit to read the pool, then fetch a live price. */
   spotPrice?: number;
   /**
    * Roll: the strike of the short leg this order closes. A roll re-uses the closed leg's notional, so
    * only the difference counts -- a covered-call roll adds nothing (the shares are already held), a
-   * cash-secured-put roll adds (newStrike − oldStrike) × 100 × quantity when it moves up, never a negative.
+   * cash-secured-put roll adds (newStrike − oldStrike − net credit) × 100 × quantity, never a negative.
    */
   rollFromStrike?: number;
+  /** Roll: the price per share paid to buy the closed leg back; the roll's net credit is premium − rollFromPremium. Required with rollFromStrike. */
+  rollFromPremium?: number;
   /** The order being evaluated, left out of the in-flight totals (it is not in flight against itself). */
   excludeOrderRequestId?: string;
 }
@@ -80,21 +87,28 @@ async function resolveSpotPrice(input: OrderLimitsInput): Promise<number | null>
   return prices["stock"] ?? null;
 }
 
+/** A put roll's added notional per share: the strike difference less the roll's net credit, never a negative. */
+function putRollNotionalPerShare(newStrike: number, oldStrike: number, newPremium: number, buybackPrice: number): number {
+  return Math.max(0, newStrike - oldStrike - (newPremium - buybackPrice));
+}
+
 /** Pure: this order's own added notional -- see file header for the CSP/covered-call formulas and the roll rule. */
-export function computeOrderNotional(input: Pick<OrderLimitsInput, "strategyKey" | "strike" | "quantity" | "rollFromStrike">, spotPrice: number, availableUncoveredShares: number): number {
+export function computeOrderNotional(input: Pick<OrderLimitsInput, "strategyKey" | "strike" | "quantity" | "premium" | "rollFromStrike" | "rollFromPremium">, spotPrice: number, availableUncoveredShares: number): number {
   if (input.rollFromStrike !== undefined) {
     if (input.strategyKey === "covered_call") return 0;
-    return Math.max(0, input.strike - input.rollFromStrike) * 100 * input.quantity;
+    if (input.rollFromPremium === undefined) throw new Error("A roll's limit check needs the closed leg's buyback price (rollFromPremium).");
+    return putRollNotionalPerShare(input.strike, input.rollFromStrike, input.premium, input.rollFromPremium) * 100 * input.quantity;
   }
-  if (input.strategyKey === "cash_secured_put") return input.strike * 100 * input.quantity;
+  if (input.strategyKey === "cash_secured_put") return Math.max(0, input.strike - input.premium) * 100 * input.quantity;
   const shortfallShares = Math.max(0, input.quantity * 100 - availableUncoveredShares);
-  return shortfallShares * spotPrice;
+  return shortfallShares * Math.max(0, spotPrice - input.premium);
 }
 
 /**
- * Pure: the notional an order already on its way to IBKR still ties up, read from its stored payload (no market data needed):
- * a put open reserves strike*100*contracts, a covered-call open costs its buy-write stock leg (shares x limit price; nothing when it
- * is written against shares already held), a put roll adds the strike difference when it moves up, a call roll and every close add nothing.
+ * Pure: the notional an order already on its way to IBKR still ties up, read from its stored payload (no market data needed), net of
+ * the premium at its limit prices: a put open reserves (strike − premium) × 100 × contracts, a covered-call open costs its buy-write
+ * stock leg less the call's premium on those shares (nothing when it is written against shares already held), a put roll adds the
+ * strike difference less its net credit when that is positive, a call roll and every close add nothing.
  */
 export function computeInFlightOrderNotional(requestType: string, payload: OrderRequestPayload): number {
   const strategyKey = payload.strategyKey;
@@ -104,15 +118,16 @@ export function computeInFlightOrderNotional(requestType: string, payload: Order
     const openLeg = payload.legs.find((leg) => leg.role === "option" && !leg.positionLegId);
     const closeLeg = payload.legs.find((leg) => leg.role === "option" && leg.positionLegId);
     if (!openLeg?.strike || !closeLeg?.strike) return 0;
-    return Math.max(0, openLeg.strike - closeLeg.strike) * 100 * openLeg.quantity;
+    return putRollNotionalPerShare(openLeg.strike, closeLeg.strike, openLeg.unitPrice, closeLeg.unitPrice) * 100 * openLeg.quantity;
   }
   if (!requestType.startsWith("open_")) return 0;
   if (strategyKey === "cash_secured_put") {
     const putLeg = payload.legs.find((leg) => leg.role === "option");
-    return putLeg?.strike ? putLeg.strike * 100 * putLeg.quantity : 0;
+    return putLeg?.strike ? Math.max(0, putLeg.strike - putLeg.unitPrice) * 100 * putLeg.quantity : 0;
   }
   const stockLeg = payload.legs.find((leg) => leg.role === "stock");
-  return stockLeg ? stockLeg.quantity * stockLeg.unitPrice : 0;
+  const callLeg = payload.legs.find((leg) => leg.role === "option");
+  return stockLeg ? stockLeg.quantity * Math.max(0, stockLeg.unitPrice - (callLeg?.unitPrice ?? 0)) : 0;
 }
 
 interface InFlightTotals {

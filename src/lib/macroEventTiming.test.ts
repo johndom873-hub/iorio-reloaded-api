@@ -18,8 +18,8 @@ const describeFor = (expiryIso: string, overrides: Partial<Parameters<typeof hea
   heaviestMacroEventBeforeExpiry({ events, nowMs, todayIso: "2026-10-08", expiryIso, openDaysIso, ...overrides });
 
 describe("macro event weights", () => {
-  it("heavy the Fed, CPI and the presidential election; medium the midterms; light GDP; an unknown title is heavy", () => {
-    expect(["Fed rate decision", "CPI", "US presidential election", "US midterm elections", "GDP", "Something new"].map(macroEventWeight)).toEqual(["heavy", "heavy", "heavy", "medium", "light", "heavy"]);
+  it("heavy the Fed, CPI, the jobs report and the presidential election; medium the midterms; light GDP; an unknown title is heavy", () => {
+    expect(["Fed rate decision", "CPI", "Jobs report", "US presidential election", "US midterm elections", "GDP", "Something new"].map(macroEventWeight)).toEqual(["heavy", "heavy", "heavy", "heavy", "medium", "light", "heavy"]);
     expect(eventStressNormalDaysByWeight).toEqual({ heavy: 2, medium: 1, light: 0.5 });
   });
 });

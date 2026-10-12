@@ -20,7 +20,7 @@ orderChecksRouter.use(requireAuth);
 // reused as-is by the confirm-step hard gate and the order's live quote-
 // stream compliance check (positions.ts). Approved 2026-09-24.
 orderChecksRouter.get("/limits", async (request, response) => {
-  const { symbol, strategyKey, quantity, strike, spotPrice, rollFromStrike } = request.query;
+  const { symbol, strategyKey, quantity, strike, premium, spotPrice, rollFromStrike, rollFromPremium } = request.query;
   if (typeof symbol !== "string" || !symbol.trim()) {
     response.status(400).json({ error: "symbol is required." });
     return;
@@ -37,6 +37,12 @@ orderChecksRouter.get("/limits", async (request, response) => {
   }
   if (!Number.isFinite(parsedStrike) || parsedStrike <= 0) {
     response.status(400).json({ error: "strike must be a positive number." });
+    return;
+  }
+  // The option's price per share (the limit, or the mid): the order's exposure is net of the premium it sells for.
+  const parsedPremium = typeof premium === "string" && premium.trim() !== "" ? Number(premium) : Number.NaN;
+  if (!Number.isFinite(parsedPremium) || parsedPremium < 0) {
+    response.status(400).json({ error: "premium must be a number of dollars per share, 0 or more." });
     return;
   }
 
@@ -61,6 +67,12 @@ orderChecksRouter.get("/limits", async (request, response) => {
     response.status(400).json({ error: "rollFromStrike must be a positive number." });
     return;
   }
+  // A roll's buyback price per share: the roll's net credit (premium − rollFromPremium) comes off its added notional.
+  const parsedRollFromPremium = rollFromPremium === undefined ? undefined : typeof rollFromPremium === "string" && rollFromPremium.trim() !== "" ? Number(rollFromPremium) : Number.NaN;
+  if ((parsedRollFromStrike === undefined) !== (parsedRollFromPremium === undefined) || (parsedRollFromPremium !== undefined && (!Number.isFinite(parsedRollFromPremium) || parsedRollFromPremium < 0))) {
+    response.status(400).json({ error: "A roll needs both rollFromStrike and rollFromPremium (dollars per share, 0 or more)." });
+    return;
+  }
 
   const result = await evaluateOrderLimits({
     strategyKey,
@@ -68,8 +80,10 @@ orderChecksRouter.get("/limits", async (request, response) => {
     tickerId: ticker.tickerId,
     quantity: parsedQuantity,
     strike: parsedStrike,
+    premium: parsedPremium,
     spotPrice: parsedSpotPrice,
     rollFromStrike: parsedRollFromStrike,
+    rollFromPremium: parsedRollFromPremium,
   });
   response.json(result);
 });

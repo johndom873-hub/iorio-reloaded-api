@@ -42,8 +42,8 @@ beforeAll(async () => {
     { ticker_id: tickerId, expiry: yyyymmdd(farExpiryIso), strikes: [100, 200] },
   ]);
   await testDb("day_signal_expiries").insert([
-    { ticker_id: tickerId, expiry: nearExpiryIso, trading_date: tradingDateIso, snapshot_id: snapshotId, rank: 1, seed_best_edge_dollars: 10, seed_best_net_edge: 0.1, seeded_at: new Date() },
-    { ticker_id: tickerId, expiry: "2026-10-30", trading_date: tradingDateIso, snapshot_id: snapshotId, rank: 2, seed_best_edge_dollars: 5, seed_best_net_edge: 0.05, seeded_at: new Date() },
+    { ticker_id: tickerId, expiry: nearExpiryIso, trading_date: tradingDateIso, snapshot_id: snapshotId, rank: 1, seed_best_expected_pnl_dollars: 10, seed_best_edge_margin: 0.1, seeded_at: new Date() },
+    { ticker_id: tickerId, expiry: "2026-10-30", trading_date: tradingDateIso, snapshot_id: snapshotId, rank: 2, seed_best_expected_pnl_dollars: 5, seed_best_edge_margin: 0.05, seeded_at: new Date() },
   ]);
   await insertQuote(280, "P");
   await insertQuote(285, "C");
@@ -82,7 +82,7 @@ describe("day signals store, against the database", () => {
   });
 
   it("replaces one ticker's pooled expiries keeping its snapshot, and deletes the day quotes of expiries that left", async () => {
-    const changed = await replaceTickerPoolExpiries(tickerId, tradingDateIso, snapshotId, [{ expiry: "2026-10-30", rank: 1, seedBestEdgeDollars: 99, seedBestNetEdge: 0.9 }], new Date());
+    const changed = await replaceTickerPoolExpiries(tickerId, tradingDateIso, snapshotId, [{ expiry: "2026-10-30", rank: 1, seedBestExpectedPnlDollars: 99, seedBestEdgeMargin: 0.9 }], new Date());
     expect(changed).toBe(true);
     const pool = (await loadDaySignalExpiries(tradingDateIso)).filter((row) => row.tickerId === tickerId);
     expect(pool.map((row) => [row.expiry, row.rank, row.snapshotId])).toEqual([["2026-10-30", 1, snapshotId]]);
@@ -102,7 +102,7 @@ describe("day signals store, against the database", () => {
     await testDb("day_signal_expiries").where({ ticker_id: tickerId }).del();
     await testDb("day_signal_quotes").where({ ticker_id: tickerId }).del();
     await insertQuote(280, "P");
-    expect(await replaceTickerPoolExpiries(tickerId, tradingDateIso, snapshotId, [{ expiry: nearExpiryIso, rank: 1, seedBestEdgeDollars: 1, seedBestNetEdge: 1 }], new Date())).toBe(true);
+    expect(await replaceTickerPoolExpiries(tickerId, tradingDateIso, snapshotId, [{ expiry: nearExpiryIso, rank: 1, seedBestExpectedPnlDollars: 1, seedBestEdgeMargin: 1 }], new Date())).toBe(true);
     const pool = (await loadDaySignalExpiries(tradingDateIso)).filter((row) => row.tickerId === tickerId);
     expect(pool.map((row) => [row.expiry, row.snapshotId])).toEqual([[nearExpiryIso, snapshotId]]);
     expect(await quotedContracts()).toEqual([`${nearExpiryIso}|280|P`]); // its quote of a pooled expiry survives
@@ -120,7 +120,7 @@ describe("day signals store, against the database", () => {
       await testDb("shortlist_entries").where({ id: entry.id }).update({ signals_enabled: true });
       const unpooled = (await loadDayUnpooledTickers(tradingDateIso)).find((ticker) => ticker.tickerId === tickerId);
       expect(unpooled).toMatchObject({ tickerId, snapshotId });
-      expect(await replaceTickerPoolExpiries(tickerId, tradingDateIso, snapshotId, [{ expiry: nearExpiryIso, rank: 1, seedBestEdgeDollars: 1, seedBestNetEdge: 1 }], new Date())).toBe(true);
+      expect(await replaceTickerPoolExpiries(tickerId, tradingDateIso, snapshotId, [{ expiry: nearExpiryIso, rank: 1, seedBestExpectedPnlDollars: 1, seedBestEdgeMargin: 1 }], new Date())).toBe(true);
       expect((await loadDayUnpooledTickers(tradingDateIso)).some((ticker) => ticker.tickerId === tickerId)).toBe(false);
       expect((await loadDayUnpooledTickers("2026-09-30")).some((ticker) => ticker.tickerId === tickerId)).toBe(false); // no snapshot that day
     } finally {

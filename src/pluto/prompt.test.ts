@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildPlutoSystemPrompt, buildPlutoUserPayload, recentDecisionsForPrompt, type PlutoPromptInput, type PlutoPromptTickerInput } from "./prompt.js";
+import { fixtureCandidateModel, fixtureModelForecast } from "../lib/testSupport/valuationModelFixtures.js";
 
 describe("recentDecisionsForPrompt", () => {
   const at = new Date("2026-10-06T14:16:27.572Z");
@@ -89,8 +90,8 @@ describe("prompt v3.3 payload and wording (2026-10-07)", () => {
     const { payload } = buildPlutoUserPayload(input({ tickers: [{ scored: { ...scored, macroEvents } as PlutoPromptTickerInput["scored"], eligible: [], eligibleRolls: [], closeActions: [closeOn("position-human", "SMCI:close_leg:leg-1")], heldPositions: [] }] }));
     expect((payload.tickers as { macro_events?: unknown }[])[0]!.macro_events).toEqual([{ date: "2026-10-07", title: "Fed rate decision" }]);
     const prompt = buildPlutoSystemPrompt(input().settings);
-    expect(prompt).toContain("Riskiest: a heavy release in the last one or two sessions of a short contract; ask for a clearly stronger net edge there, or pass.");
-    expect(prompt).toContain("Heavy: the Fed rate decision, CPI, the US presidential election. Medium: the US midterm elections. Light: GDP.");
+    expect(prompt).toContain("Riskiest: a heavy release in the last one or two sessions of a short contract; ask for a clearly stronger edge there, or pass.");
+    expect(prompt).toContain("Heavy: the Fed rate decision, CPI, the jobs report, the US presidential election. Medium: the US midterm elections. Light: GDP.");
     expect(prompt).not.toContain("no earnings or major macro release falls before expiry");
     expect(prompt).toContain("no earnings falls before expiry, liquidity is real");
     expect(prompt).toContain("Earnings are the heaviest event there is, far above any macro release");
@@ -128,6 +129,21 @@ describe("prompt v3.8: held positions and event timing (2026-10-08)", () => {
     const { payload } = buildPlutoUserPayload(input([{ scored, eligible: [{ id: "SMCI:cash_secured_put:2026-10-16:40", kind: "open_cash_secured_put", symbol: "SMCI", candidate: candidate as never }], eligibleRolls: [], closeActions: [], heldPositions: [] }]));
     const [offered] = (payload.tickers as { candidates: { event: unknown }[] }[])[0]!.candidates;
     expect(offered!.event).toEqual({ title: "CPI", weight: "heavy", date: "2026-10-14", sessions_until: 4, sessions_after: 3 });
+  });
+
+  it("v4.0: a candidate carries the valuation model's figures, not the old Edge's; the ticker its session-clock IV and YZ21", () => {
+    const valued = { ...candidate, edgeDollars: 999, netEdge: 0.5, grade: "weak", model: fixtureCandidateModel({ varianceSessions: 6.193, impliedVolatility: 0.8123, edgeMargin: 0.3456, expectedPnlDollars: 21.4, calibratedExpectedPnlDollars: 9.6, calibratedAnnualizedReturn: 0.2149, expectedAnnualizedReturn: 0.4321, probabilityOfProfit: 0.873, averageWinDollars: 44.2, averageLossDollars: -150.6, expectedShortfallDollars: -612.3, stressPnlDollars: -301.7, premiumAfterCostsDollars: 50.3, premiumYield: 0.5234 }) };
+    const withModel = { ...scored, atmImpliedVolatilityPerSession: 0.8771, modelForecast: fixtureModelForecast(0.6543) } as PlutoPromptTickerInput["scored"];
+    const { payload } = buildPlutoUserPayload(input([{ scored: withModel, eligible: [{ id: "SMCI:cash_secured_put:2026-10-16:40", kind: "open_cash_secured_put", symbol: "SMCI", candidate: valued as never }], eligibleRolls: [], closeActions: [], heldPositions: [] }]));
+    const ticker = (payload.tickers as Record<string, unknown>[])[0]!;
+    expect(ticker).toMatchObject({ atm_iv: 87.7, forecast_vol: 65.4 });
+    const [offered] = ticker.candidates as Record<string, unknown>[];
+    expect(offered).toMatchObject({
+      sessions_to_expiry: 6.19, implied_vol: 81.2, grade: "strong", edge_dollars: 21, edge_margin_pct: 34.6, hist_edge_dollars: 10, hist_yield_ann_pct: 21, edge_yield_ann_pct: 43,
+      pop_pct: 87, avg_win: 44, avg_loss: -151, worst5_avg: -612, stress_2sd: -302, premium_after_costs: 50, premium_yield_ann_pct: 52, dollar_risk: 3950,
+    });
+    expect(offered).not.toHaveProperty("net_edge_vp");
+    expect(offered).not.toHaveProperty("annualized_yield_pct");
   });
 
   it("held_positions lists every held put with its figures and who opened it, even when nothing is on offer for the ticker", () => {

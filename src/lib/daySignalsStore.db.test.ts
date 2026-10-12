@@ -35,7 +35,7 @@ async function createSnapshot(tickerId: string, contracts: { expiry: string; str
   return snapshot.id;
 }
 
-const seedExpiry = (expiry: string, rank: number) => ({ expiry, rank, seedBestEdgeDollars: 100 * rank, seedBestNetEdge: 0.01 * rank });
+const seedExpiry = (expiry: string, rank: number) => ({ expiry, rank, seedBestExpectedPnlDollars: 100 * rank, seedBestEdgeMargin: 0.01 * rank });
 const quoteWrite = (tickerId: string, overrides: Partial<Parameters<typeof store.upsertDayQuotes>[0][number]> = {}) => ({
   tickerId,
   expiry: "2031-03-21",

@@ -108,7 +108,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
 
     const second = sender();
     expect(await sendDuePositionTelegramNotices(second.send)).toBe(1);
-    expect(second.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• Buy $50 Put · ${jan17()} · 1× @ 0.40\nP&L: +$85.00 (+1.70%)`]);
+    expect(second.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• Buy $50 Put · ${jan17()} · 1× @ 0.40\nP&L: +$85.00 (+1.74%)`]); // over (50 − 1.25) × 100 = $4,875
   });
 
   it("the first undelivered message ends the pass: a later position is not even tried", async () => {
@@ -151,8 +151,8 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     await trx("trades").insert({ position_leg_id: legId, side: "buy", quantity: 1, price: 0.4, commission: 1.3, executed_at: new Date(), is_closing_trade: true });
     const pass = sender();
     await sendDuePositionTelegramNotices(pass.send);
-    // (1.25 − 0.40) × 100 − 1.30 = +$83.70 over $5,000 collateral = +1.67%.
-    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• Buy $50 Put · ${jan17()} · 1× @ 0.40\nP&L: +$83.70 (+1.67%)`]);
+    // (1.25 − 0.40) × 100 − 1.30 = +$83.70 over $4,875 (the $5,000 collateral less the $125 premium) = +1.72%.
+    expect(pass.sent).toEqual([`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• Buy $50 Put · ${jan17()} · 1× @ 0.40\nP&L: +$83.70 (+1.72%)`]);
   });
 
   it("an opening lists slices of one contract as one leg; the close lists each slice at its own exit", async () => {
@@ -164,8 +164,8 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     const sorted = (text: string) => text.split("\n").slice(1, 3).sort();
     expect(pass.sent[0]).toBe(`📥 New position: ${symbol} cash-secured put\n• Sell $50 Put · ${jan17()} · 3× @ 1.25`);
     expect(sorted(pass.sent[1]!)).toEqual([`• Buy $50 Put · ${jan17()} · 1× @ 0.40`, `• Buy $50 Put · ${jan17()} · 2× @ 0.30`]);
-    // (1.25−0.40)×100 + (1.25−0.30)×2×100 = 85 + 190 = +$275.00 over the 3 contracts' collateral ($15,000) = +1.83%.
-    expect(pass.sent[1]!.split("\n")[3]).toBe("P&L: +$275.00 (+1.83%)");
+    // (1.25−0.40)×100 + (1.25−0.30)×2×100 = 85 + 190 = +$275.00 over the 3 contracts' collateral less their premium ($14,625) = +1.88%.
+    expect(pass.sent[1]!.split("\n")[3]).toBe("P&L: +$275.00 (+1.88%)");
   });
 
   it("the most common close reason (closed_via_app) is named in the headline", async () => {

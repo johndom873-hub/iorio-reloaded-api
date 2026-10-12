@@ -2,7 +2,9 @@ import { blackScholesDelta, impliedVolatilityFromPrice, sviTotalVariance, type R
 import { blackScholesVega, computeFrictionCost, computeNetEdge } from "./optionFriction.js";
 import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
 import { computeUncompensatedShare, type UncompensatedShareOptions } from "./uncompensatedShare.js";
-import { expirySpansEarnings, expirySpansMacroEvent, forecastOnCalendarDayBasis, type RealizedVolatilityForecast } from "./volatilityEdge.js";
+import { expirySpansEarnings, expirySpansMacroEvent, forecastOnCalendarDayBasis, type ModelVolatilityForecast, type RealizedVolatilityForecast } from "./volatilityEdge.js";
+import { valueContract, type ContractValuation } from "./contractValuation.js";
+import type { ValuationGroup, VolatilityModelTables } from "./volatilityModelTables.js";
 
 // Signals screen: turns one ticker's fitted surface (one row per expiry, from
 // option_surface_fits) + that day's raw quotes into graded, tradable candidates.
@@ -107,6 +109,74 @@ export interface SignalCandidatesInput {
   spreadShareCharged: number;
   /** When given, told about every quote that did not become a candidate and why (the Signals chain grid). Never changes which contracts are candidates. */
   onContractExcluded?: (quote: SignalQuote, exclusion: SignalContractExclusion) => void;
+  /** The valuation model (model review P2–P5); absent or null when there is no model forecast: every candidate's `model` is then null. */
+  model?: CandidateModelContext | null;
+}
+
+/**
+ * What the valuation model needs beyond the old Edge's inputs. A quote is valued at its own moment: the variance clock
+ * from that instant, and the forward and spot of that instant (the fitted ones for a 10:00 snapshot quote, the live
+ * ones for a fresh quote), so a stale price is never compared with a forecast over a different stretch of time.
+ */
+export interface CandidateModelContext {
+  tables: VolatilityModelTables;
+  forecast: ModelVolatilityForecast;
+  group: ValuationGroup;
+  /** τ from an instant to an expiry's close (varianceClock.ts). */
+  varianceSessionsAt(atMs: number, expiryIso: string): number;
+  /** The instant a quote describes. */
+  quoteInstantMs(quote: SignalQuote): number;
+  forwardForQuote(slice: SignalSurfaceSlice, quote: SignalQuote): number;
+  spotForQuote(quote: SignalQuote): number;
+}
+
+/** A candidate's valuation-model block: what Pluto acts on (the old Edge fields stay for the Signals screen). */
+export interface CandidateModelScore extends ContractValuation {
+  /** The market's price as a volatility on the forecast's clock: √(252 × the mid's total variance ÷ τ); null when the mid has no implied volatility. */
+  impliedVolatility: number | null;
+  /** The instant the quote was valued at (ISO). */
+  valuedAtIso: string;
+  /** The forward and spot it was valued against (the fitted ones for a snapshot quote, the live ones for a fresh quote). */
+  forward: number;
+  spot: number;
+}
+
+/** The friction a sale or buy-back is charged, in dollars per contract: λ × half-spread × 100 + commission (optionFriction.ts in dollars). */
+export function frictionDollarsPerContract(bid: number, ask: number, spreadShareCharged: number, commissionPerContract: number): number {
+  return (spreadShareCharged * (ask - bid)) / 2 * 100 + commissionPerContract;
+}
+
+/** Values one quoted contract with the model; null when it cannot (no τ left, no usable inputs). */
+export function scoreContractWithModel(context: CandidateModelContext, slice: SignalSurfaceSlice, quote: SignalQuote & { bid: number; ask: number }, riskFreeRate: number, frictionDollars: number): CandidateModelScore | null {
+  const atMs = context.quoteInstantMs(quote);
+  const varianceSessions = context.varianceSessionsAt(atMs, quote.expiry);
+  if (!(varianceSessions > 0)) return null;
+  const forward = context.forwardForQuote(slice, quote);
+  const spot = context.spotForQuote(quote);
+  const mid = (quote.bid + quote.ask) / 2;
+  const isCall = quote.right === "C";
+  const valuation = valueContract(context.tables, {
+    isCall,
+    strike: quote.strike,
+    forward,
+    mid,
+    frictionDollars,
+    perSessionVariance: context.forecast.perSessionVariance,
+    varianceSessions,
+    calendarYears: slice.yearsToExpiry,
+    riskFreeRate,
+    group: context.group,
+    spot,
+  });
+  if (!valuation) return null;
+  const midIv = slice.yearsToExpiry > 0 ? impliedVolatilityFromPrice(mid, forward, quote.strike, slice.yearsToExpiry, riskFreeRate, isCall) : null;
+  return {
+    ...valuation,
+    impliedVolatility: midIv === null ? null : Math.sqrt((252 * midIv * midIv * slice.yearsToExpiry) / varianceSessions),
+    valuedAtIso: new Date(atMs).toISOString(),
+    forward,
+    spot,
+  };
 }
 
 /** Why one quote did not become a candidate, in the order buildSignalCandidates checks. */
@@ -149,7 +219,7 @@ export interface SignalCandidate {
   /** net Edge x vega x 100 (Marcelo approved 2026-09-22). */
   edgeDollars: number;
   vega: number;
-  /** Max theoretical loss per contract at the mid premium: strike*100-premium (CSP) or spot*100-premium (CC). Marcelo approved 2026-09-23. */
+  /** The contract's exposure (EXP $) at the mid: (strike − mid) × 100 for a put, (spot − mid) × 100 for a covered call, its max loss. */
   dollarRisk: number;
   /** edgeDollars / dollarRisk. */
   riskAdjustedRatio: number;
@@ -161,6 +231,8 @@ export interface SignalCandidate {
   flags: SignalFlag[];
   executable: boolean;
   grade: SignalGrade; // filled in by gradeSignalCandidates; "avoid" until then
+  /** The valuation model's figures (Pluto acts on these); null without a model forecast or when the contract cannot be valued. */
+  model: CandidateModelScore | null;
 }
 
 /** Mid-quote implied volatility through the surface library's own Black-76 inversion, so mid IV, surface IV and the fitter never disagree on pricing. */
@@ -316,8 +388,10 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     const strategyKey: SignalStrategyKey = isCall ? "covered_call" : "cash_secured_put";
     const dte = Math.round(slice.yearsToExpiry * annualDays);
     const premium = (quote.bid + quote.ask) / 2;
-    const capitalAtRisk = strategyKey === "covered_call" ? input.spotPrice : quote.strike;
-    const annualizedYield = (premium / capitalAtRisk) * (annualDays / dte);
+    // Exposure per share, net of the premium received (Marcelo 2026-10-12): the cash reserved at the strike for a put, the
+    // shares bought for a covered call, less what the sale brings in.
+    const exposurePerShare = (strategyKey === "covered_call" ? input.spotPrice : quote.strike) - premium;
+    const annualizedYield = (premium / exposurePerShare) * (annualDays / dte);
     if (tally) tally.bestAnnualizedYieldPct = Math.max(tally.bestAnnualizedYieldPct ?? -Infinity, annualizedYield * 100);
     if (annualizedYield * 100 < input.minAnnualizedYieldPct) {
       // trading settings: min annualised yield
@@ -325,7 +399,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       exclude(quote, { kind: "below_min_yield", delta, annualizedYieldPct: annualizedYield * 100, minAnnualizedYieldPct: input.minAnnualizedYieldPct });
       continue;
     }
-    const dollarRisk = capitalAtRisk * 100 - premium;
+    const dollarRisk = exposurePerShare * 100;
     const riskAdjustedRatio = edgeDollars / dollarRisk;
     const spreadPercent = ((quote.ask - quote.bid) / premium) * 100;
     const insideRange = logMoneyness >= slice.kMin && logMoneyness <= slice.kMax;
@@ -333,11 +407,14 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
     if (!input.earningsCalendarResolved) flags.push("earnings_calendar_unresolved");
     if (!insideRange) flags.push("outside_fitted_range");
     if (spreadPercent / 100 > wideSpreadThreshold) flags.push("wide_spread");
-    if (strategyKey === "cash_secured_put" && input.freeCash < quote.strike * 100) flags.push("insufficient_cash");
+    // The premium lands in cash when the put is sold, so the sale needs its net exposure, not the whole strike.
+    if (strategyKey === "cash_secured_put" && input.freeCash < dollarRisk) flags.push("insufficient_cash");
     if (expirySpansMacroEvent(input.scoredAtMs, quote.expiry, input.macroEvents)) flags.push("macro_event_before_expiry");
     // A covered call always ships as one order (buy the shares, sell the call), so free shares
     // aren't a precondition -- only a cash-secured put needs the cash upfront.
     const executable = !flags.includes("insufficient_cash");
+
+    const model = input.model ? scoreContractWithModel(input.model, slice, { ...quote, bid: quote.bid, ask: quote.ask }, input.riskFreeRate, frictionDollarsPerContract(quote.bid, quote.ask, input.spreadShareCharged, commissionPerContract)) : null;
 
     candidates.push({
       strategyKey,
@@ -370,6 +447,7 @@ export function buildSignalCandidates(input: SignalCandidatesInput): SignalCandi
       flags,
       executable,
       grade: "avoid",
+      model,
     });
   }
   return candidates;
@@ -422,8 +500,21 @@ export function gradeSignalCandidates(candidates: SignalCandidate[]): SignalCand
   return candidates.map((candidate) => ({ ...candidate, grade: gradeForNetEdge(candidate.netEdge) }));
 }
 
-/** The candidate the Signals screen shows as a ticker's headline: highest Edge $, ties broken by net Edge. */
+/**
+ * The valuation model's order of preference (model review P5, approved 2026-10-10): the expected annualized return on
+ * capital that history delivered for that signal (calibrated), then the model's expected P&L per contract. Unvalued
+ * contracts last. Pluto ranks its offers by it and the Day Signals seed picks its pool expiries by it.
+ */
+export function compareCandidatesByModel(a: Pick<SignalCandidate, "model">, b: Pick<SignalCandidate, "model">): number {
+  if (!a.model || !b.model) return (b.model ? 1 : 0) - (a.model ? 1 : 0);
+  return b.model.calibratedAnnualizedReturn - a.model.calibratedAnnualizedReturn || b.model.expectedPnlDollars - a.model.expectedPnlDollars;
+}
+
+/**
+ * The candidate the Signals screen shows as a ticker's top signal, in Pluto's order (mockup approved 2026-10-10): highest Hist Yield,
+ * then Edge $. Candidates the model could not value come last, by the old Edge $ and net Edge.
+ */
 export function pickBestCandidate(candidates: SignalCandidate[]): SignalCandidate | null {
   if (candidates.length === 0) return null;
-  return [...candidates].sort((a, b) => b.edgeDollars - a.edgeDollars || b.netEdge - a.netEdge)[0]!;
+  return [...candidates].sort((a, b) => compareCandidatesByModel(a, b) || b.edgeDollars - a.edgeDollars || b.netEdge - a.netEdge)[0]!;
 }

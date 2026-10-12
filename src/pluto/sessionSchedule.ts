@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { easternInstant, hhmmParts, resolveSessionSchedule, type SessionCloseSource } from "../lib/marketSessionStatus.js";
+import { earlyCloseDatesIso, easternInstant, hhmmParts, resolveSessionSchedule, type SessionCloseSource } from "../lib/marketSessionStatus.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 
@@ -12,9 +12,6 @@ import { easternIsoDate } from "../lib/easternIsoDate.js";
 export const closeMarginMinutes = 30;
 /** Working Pluto orders are cancelled this long before the close at the latest. */
 export const cancelMarginMinutes = 2;
-
-// Fallback only, used when IBKR has not answered yet today: NYSE early closes (13:00 ET).
-export const earlyCloseDatesIso = new Set(["2026-11-27", "2026-12-24", "2027-11-26", "2027-12-23"]);
 
 export type PlutoSessionCloseSource = SessionCloseSource | "fallback_list";
 

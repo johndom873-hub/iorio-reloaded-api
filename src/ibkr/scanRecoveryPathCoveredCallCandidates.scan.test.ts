@@ -168,7 +168,7 @@ describe("scanRecoveryPathCoveredCallCandidates: ranking the quotes", () => {
       bid: 1.0,
       ask: 1.4,
       dte: 10,
-      annualizedYield: (1.2 / 100) * (365 / 10),
+      annualizedYield: (1.2 / (100 - 1.2)) * (365 / 10),
       spotPrice: 100,
       calendarUnverified: false,
     });

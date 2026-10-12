@@ -42,7 +42,10 @@ describe("Pluto schema", () => {
     expect(Number(settings[0].order_size_pct_of_budget)).toBe(10);
     expect(settings[0].max_open_positions).toBe(15);
     expect(Number(settings[0].daily_cost_ceiling_usd)).toBe(1);
-    expect(settings[0].prompt_version).toBe("v3.9");
+    expect(settings[0].prompt_version).toBe("v4.0");
+    // Model review (2026-10-10): the drift gate measures the edge margin in points, default 10.
+    expect(Number(settings[0].max_edge_margin_drift_pts)).toBe(10);
+    expect(settings[0]).not.toHaveProperty("max_edge_drift_vp");
     expect(settings[0].day_signals_poll_seconds).toBe(1);
     await expect(db("pluto_settings").insert({ id: 2 })).rejects.toThrow();
 

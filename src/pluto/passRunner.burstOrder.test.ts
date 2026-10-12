@@ -67,7 +67,7 @@ vi.mock("./candidateFilters.js", () => ({
     rejected: scored.live > 0 ? [] : harness.requotableIds.map((id) => ({ id, reasons: ["quote 14 min old (max 10)"], codes: ["quote_age"] })),
     rejectedRolls: [],
   }),
-  deterministicTopPick: () => null,
+  summarizeTopPick: () => null,
   findSameContractConflict: () => null,
   rejectOpenCandidate: () => [],
   rejectTicker: () => [],

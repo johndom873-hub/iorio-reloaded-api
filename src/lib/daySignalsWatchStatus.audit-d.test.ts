@@ -115,7 +115,7 @@ describe("loadDaySignalsWatchStatuses — audit D (test DB)", () => {
   it("returns every kind from real rows: watched, not watched with its clock, no surface (old snapshot, short slices only, no snapshot)", async () => {
     const pooled = await createTicker();
     const pooledSnapshot = await createSnapshot(pooled, tradingDate, 50, [30]);
-    await testDb("day_signal_expiries").insert({ ticker_id: pooled, expiry: "2031-03-14", trading_date: tradingDate, snapshot_id: pooledSnapshot, rank: 1, seed_best_edge_dollars: 10, seed_best_net_edge: 0.01, seeded_at: new Date("2031-03-03T15:07:00Z") });
+    await testDb("day_signal_expiries").insert({ ticker_id: pooled, expiry: "2031-03-14", trading_date: tradingDate, snapshot_id: pooledSnapshot, rank: 1, seed_best_expected_pnl_dollars: 10, seed_best_edge_margin: 0.01, seeded_at: new Date("2031-03-03T15:07:00Z") });
     const unpooled = await createTicker();
     await createSnapshot(unpooled, tradingDate, 200, [7, 30, 60]);
     const firstSeenAt = new Date("2031-03-03T15:07:30Z");

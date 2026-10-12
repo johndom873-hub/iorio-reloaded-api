@@ -1186,8 +1186,8 @@ describe("GET /positions/:id", () => {
     expect(found.status).toBe(200);
     expect(found.json).toMatchObject({ id: positionId, symbol, strategyKey: "cash_secured_put", status: "open" });
     expect(found.json.legs).toHaveLength(1);
-    // A short put of 2 contracts at strike 90 x multiplier 100: 18,000 of collateral.
-    expect(Number(found.json.capitalAtRisk)).toBe(18_000);
+    // A short put of 2 contracts at strike 90 sold at 2.00: (90 − 2) × 100 × 2 = 17,600 of collateral net of the premium.
+    expect(Number(found.json.capitalAtRisk)).toBe(17_600);
 
     const missing = await call("GET", `/positions/${missingId}`);
     expect(missing.status).toBe(404);

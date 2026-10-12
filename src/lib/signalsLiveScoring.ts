@@ -1,5 +1,9 @@
 import { sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
-import { attachUncompensatedShare, buildSignalCandidates, computeExpiryIvShifts, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { easternInstant, easternIsoDate, easternMinutesOfDay } from "./easternIsoDate.js";
+import type { TradingSession } from "./marketSessionStatus.js";
+import { varianceSessionsToExpiry } from "./varianceClock.js";
+import { volatilityModelTables } from "./volatilityModelTables.generated.js";
+import { attachUncompensatedShare, buildSignalCandidates, type CandidateModelContext, computeExpiryIvShifts, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { buildRollCandidates, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
 import type { TradingSettings } from "./tradingSettingsStore.js";
@@ -103,8 +107,9 @@ export function appendMissingContractQuotes(quotes: SignalQuote[], wanted: Contr
   return appended.length === 0 ? quotes : [...quotes, ...appended];
 }
 
+/** Held legs with at least one roll the valuation model grades above Avoid (what Pluto could act on): the screen badge's count. */
 export function countRollableLegs(rolls: RollSignalCandidate[]): number {
-  return new Set(rolls.filter((roll) => roll.grade !== "avoid").map((roll) => roll.legId)).size;
+  return new Set(rolls.filter((roll) => roll.model !== null && roll.model.grade !== "avoid").map((roll) => roll.legId)).size;
 }
 
 export function summarizeDayQuotes(dayQuotes: LiveOptionQuote[]): DayQuotesAsOf | null {
@@ -138,27 +143,25 @@ export function countGrades(candidates: SignalCandidate[]): GradeCounts {
 }
 
 /**
- * Re-times a surface fitted on an earlier day to today (2026-09-24): after a
- * missed capture the screen scored yesterday's slices with yesterday's
- * yearsToExpiry, so every DTE and yield was a day off and an expiry that
- * has since passed still appeared. Time to expiry is recomputed from today's
- * Eastern date; expiries already past are dropped. The SVI total variance is
- * scaled by T_today / T_fit (a and b are linear in it), which keeps every
- * strike's implied volatility exactly as fitted — only the time changes.
- * The alternative, leaving the total variance untouched, would inflate a
- * 7-day slice's IV by ~8% per elapsed day.
+ * Re-times a surface fitted on an earlier day to today (2026-09-24; on the variance clock since 2026-10-10, model review
+ * P2): after a missed capture the screen scored yesterday's slices with yesterday's time to expiry. Expiries already past
+ * are dropped; yearsToExpiry is recomputed from today's Eastern date (calendar days, for discounting and the old Edge);
+ * the SVI total variance (a and b are linear in it) is scaled by the variance the market will still price today at the
+ * capture's time of day over what it priced at the capture: τ(today, same time → expiry) ÷ τ(capture → expiry). The
+ * weekend therefore removes about one session of variance, as the market does, not three calendar days. A surface
+ * fitted today is returned as fitted. `sessions` must cover the capture's date through the furthest expiry.
  */
-export function rebaseSlicesToToday(slices: SignalSurfaceSlice[], todayEasternIso: string): SignalSurfaceSlice[] {
+export function rebaseSlicesToToday(slices: SignalSurfaceSlice[], todayEasternIso: string, fitCapturedAtMs: number, sessions: readonly TradingSession[]): SignalSurfaceSlice[] {
+  if (easternIsoDate(new Date(fitCapturedAtMs)) >= todayEasternIso) return slices;
+  const todayAtFitTimeMs = sameTimeToday(fitCapturedAtMs, todayEasternIso);
   const rebased: SignalSurfaceSlice[] = [];
   for (const slice of slices) {
-    // Same convention as the fit itself (optionSurfaceFitting.ts): calendar days / 365.
     const yearsToExpiry = yearsBetweenIsoDates(todayEasternIso, slice.expiry);
     if (!(yearsToExpiry > 0)) continue;
-    if (!(slice.yearsToExpiry > 0) || Math.abs(yearsToExpiry - slice.yearsToExpiry) < 1e-9) {
-      rebased.push(slice);
-      continue;
-    }
-    const scale = yearsToExpiry / slice.yearsToExpiry;
+    const varianceAtFit = varianceSessionsToExpiry(fitCapturedAtMs, slice.expiry, sessions);
+    const varianceToday = varianceSessionsToExpiry(todayAtFitTimeMs, slice.expiry, sessions);
+    if (!(varianceAtFit > 0) || !(varianceToday > 0)) continue;
+    const scale = varianceToday / varianceAtFit;
     rebased.push({
       ...slice,
       yearsToExpiry,
@@ -166,6 +169,19 @@ export function rebaseSlicesToToday(slices: SignalSurfaceSlice[], todayEasternIs
     });
   }
   return rebased;
+}
+
+/**
+ * At-the-money IV of the same slice computeAtmImpliedVolatility reads, on the forecast's clock: √(252 × total variance ÷ τ)
+ * with τ from `atMs` (the instant the slices describe) to that expiry's close.
+ */
+export function computeAtmImpliedVolatilityPerSession(slices: SignalSurfaceSlice[], atMs: number, sessions: readonly TradingSession[]): number | null {
+  const eligible = slices.filter((slice) => slice.status === "ok" && slice.parameters && slice.yearsToExpiry * 365 >= skewMinimumDaysToExpiry);
+  if (eligible.length === 0) return null;
+  const nearest = eligible.reduce((best, slice) => (Math.abs(slice.yearsToExpiry * 365 - skewTargetDaysToExpiry) < Math.abs(best.yearsToExpiry * 365 - skewTargetDaysToExpiry) ? slice : best));
+  const totalVariance = sviTotalVariance(nearest.parameters!, 0);
+  const varianceSessions = varianceSessionsToExpiry(atMs, nearest.expiry, sessions);
+  return totalVariance > 0 && varianceSessions > 0 ? Math.sqrt((252 * totalVariance) / varianceSessions) : null;
 }
 
 /** Read-only hooks into one scoreTicker run (the Signals chain grid and the any-contract scorer); never change the result. */
@@ -206,8 +222,10 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     elevatedVolatility: inputs.elevatedVolatility,
     nextEarningsDateIso: inputs.nextEarningsDateIso,
     macroEvents: inputs.macroEvents,
-    atmImpliedVolatility: computeAtmImpliedVolatility(rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso)),
+    atmImpliedVolatility: header ? computeAtmImpliedVolatility(rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso, Date.parse(header.capturedAt), inputs.tradingSessions)) : null,
+    atmImpliedVolatilityPerSession: header ? computeAtmImpliedVolatilityPerSession(rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso, Date.parse(header.capturedAt), inputs.tradingSessions), sameTimeToday(Date.parse(header.capturedAt), inputs.todayEasternIso), inputs.tradingSessions) : null,
     forecast: inputs.forecast,
+    modelForecast: inputs.modelForecast,
     dailyBarCount: inputs.dailyBarCount,
     dividendCadenceUnknown: inputs.dividendCadenceUnknown,
     caveats: [],
@@ -233,8 +251,25 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   if (!inputs.forecast) return withCaveats("no_forecast", { kind: "forecast", dailyBarCount: inputs.dailyBarCount, barsNeeded: minimumBarsForAnyForecast });
   if (spotPrice === null) return withCaveats("no_snapshot");
 
-  const todaySlices = rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso);
+  const capturedAtMs = Date.parse(header.capturedAt);
+  const todaySlices = rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso, capturedAtMs, inputs.tradingSessions);
   const slices = live ? scaleSlicesToLiveSpot(todaySlices, header.underlyingPrice, live.spotPrice) : todaySlices;
+  const fittedForwardByExpiry = new Map(todaySlices.map((slice) => [slice.expiry, slice.forwardPrice]));
+  const snapshotSpot = header.underlyingPrice;
+  const scoredAtMs = Date.now();
+  // The valuation model (model review P2–P5): each quote valued at its own instant, forward and spot (signalCandidates.ts).
+  const model: CandidateModelContext | null = inputs.modelForecast
+    ? {
+        tables: volatilityModelTables,
+        forecast: inputs.modelForecast,
+        group: inputs.valuationGroup,
+        varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, inputs.tradingSessions),
+        // A snapshot quote's instant is the capture, on any later day too: its price is valued over the variance left then.
+        quoteInstantMs: (quote) => (quote.quotedAt ? Date.parse(quote.quotedAt) : quote.source === "live" ? scoredAtMs : capturedAtMs),
+        forwardForQuote: (slice, quote) => (quote.source === "live" || quote.source === "day" ? slice.forwardPrice : fittedForwardByExpiry.get(slice.expiry) ?? slice.forwardPrice),
+        spotForQuote: (quote) => (quote.source === "live" || quote.source === "day" ? spotPrice : snapshotSpot),
+      }
+    : null;
   // Precedence per contract: pooled live (modal / screen best line) > day (refresh loop) > 10:00 snapshot.
   const withDayQuotes = mergeLiveQuotes(inputs.quotes, inputs.dayQuotes, "day");
   const mergedQuotes = live?.liveQuotes ? mergeLiveQuotes(withDayQuotes, live.liveQuotes, "live") : withDayQuotes;
@@ -261,7 +296,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       macroEvents: inputs.macroEvents.map((event) => ({ dateIso: event.dateIso, eventAtMs: Date.parse(event.eventAtIso) })),
       todayEasternIso: inputs.todayEasternIso,
       // The clock, not the snapshot: an event earlier today is over, a release later today is still ahead.
-      scoredAtMs: Date.now(),
+      scoredAtMs,
       freeShares: inputs.freeShares,
       freeCash: account.freeCash,
       deltaTargetMin: settings.deltaTargetMin,
@@ -271,6 +306,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       commissionEstimator: settings.commissionEstimator,
       spreadShareCharged,
       onContractExcluded: observer?.onContractExcluded,
+      model,
     }),
   );
   // settings.maxDeltaDriftPct is deliberately not applied: the drift share is only known for the open
@@ -290,6 +326,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
     commissionEstimator: settings.commissionEstimator,
     spreadShareCharged,
+    model,
   });
   const rolls = buildRollCandidates(heldLegs, candidates, settings.commissionEstimator);
 
@@ -359,6 +396,16 @@ export function candidateContractRef(candidate: SignalCandidate): ContractRef {
   return { expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" };
 }
 
+
+/**
+ * The instant on today's date at the capture's Eastern time of day: the instant a surface rolled to today describes
+ * (rebaseSlicesToToday). The capture itself on the capture's own day.
+ */
+export function sameTimeToday(capturedAtMs: number, todayEasternIso: string): number {
+  if (easternIsoDate(new Date(capturedAtMs)) >= todayEasternIso) return capturedAtMs;
+  const minutes = easternMinutesOfDay(new Date(capturedAtMs));
+  return easternInstant(todayEasternIso, Math.floor(minutes / 60), minutes % 60).getTime();
+}
 
 export function toScreenRow(signals: TickerSignals): SignalsScreenRow {
   const { candidates: _candidates, rolls: _rolls, ...row } = signals;

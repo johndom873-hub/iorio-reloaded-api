@@ -104,8 +104,8 @@ describe("evaluateOrderGates: what runs for each kind of order", () => {
     const signalsResult = await evaluateOrderGates(fromSignals);
 
     expect(evaluateOrderLimitsMock).toHaveBeenCalledTimes(2);
-    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toEqual({ strategyKey: "cash_secured_put", symbol: ticker.symbol, tickerId: ticker.id, quantity: 2, strike: 90, rollFromStrike: undefined, excludeOrderRequestId: "order-plain", spotPrice: undefined });
-    expect(evaluateOrderLimitsMock.mock.calls[1]![0]).toEqual({ strategyKey: "cash_secured_put", symbol: ticker.symbol, tickerId: ticker.id, quantity: 2, strike: 90, rollFromStrike: undefined, excludeOrderRequestId: "order-signals", spotPrice: undefined });
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toEqual({ strategyKey: "cash_secured_put", symbol: ticker.symbol, tickerId: ticker.id, quantity: 2, strike: 90, premium: 1.5, rollFromStrike: undefined, rollFromPremium: undefined, excludeOrderRequestId: "order-plain", spotPrice: undefined });
+    expect(evaluateOrderLimitsMock.mock.calls[1]![0]).toEqual({ strategyKey: "cash_secured_put", symbol: ticker.symbol, tickerId: ticker.id, quantity: 2, strike: 90, premium: 1.5, rollFromStrike: undefined, rollFromPremium: undefined, excludeOrderRequestId: "order-signals", spotPrice: undefined });
     expect(subscribeToPooledQuoteMock).toHaveBeenCalledTimes(2);
     for (const result of [plainResult, signalsResult]) {
       expect(result.limits).toEqual(clearLimits);
@@ -162,7 +162,7 @@ describe("evaluateOrderGates: what runs for each kind of order", () => {
     const ticker = await createTicker();
     const result = await evaluateOrderGates({ id: "roll-1", request_type: "roll_leg", payload: putRollPayload(ticker.symbol), related_position_id: "position-3" });
     expect(evaluateOrderLimitsMock).toHaveBeenCalledTimes(1);
-    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toMatchObject({ symbol: ticker.symbol, strike: 90, rollFromStrike: 85, quantity: 2, excludeOrderRequestId: "roll-1" });
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toMatchObject({ symbol: ticker.symbol, strike: 90, premium: 2, rollFromStrike: 85, rollFromPremium: 1, quantity: 2, excludeOrderRequestId: "roll-1" });
     expect(subscribeToPooledQuoteMock).not.toHaveBeenCalled();
     expect(evaluateCloseGateForPositionMock).not.toHaveBeenCalled();
     expect(result.deltaBand).toBeNull();

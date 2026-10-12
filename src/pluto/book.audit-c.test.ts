@@ -127,11 +127,11 @@ describe("loadPlutoBook (test DB)", () => {
       expect(book.plutoOpenedPositionIds.has(plutoOnDisabled.positionId)).toBe(false);
       for (const id of book.plutoOpenedPositionIds) expect(ids).toContain(id);
 
-      // The person's put counts in the budget like Pluto's: strike × 100.
+      // The person's put counts in the budget like Pluto's: (strike − the $1 premium) × 100.
       const byId = new Map(book.openPositions.map((position) => [position.positionId, position]));
-      expect(byId.get(human.positionId)!.capitalAtRisk).toBeCloseTo(4000, 6);
-      expect(byId.get(plutoOwn.positionId)!.capitalAtRisk).toBeCloseTo(4500, 6);
-      expect(byId.get(fromPluto.positionId)!.capitalAtRisk).toBeCloseTo(4500, 6);
+      expect(byId.get(human.positionId)!.capitalAtRisk).toBeCloseTo(3900, 6);
+      expect(byId.get(plutoOwn.positionId)!.capitalAtRisk).toBeCloseTo(4400, 6);
+      expect(byId.get(fromPluto.positionId)!.capitalAtRisk).toBeCloseTo(4500, 6); // shares with no call: their cost
       expect(book.committedDollars).toBeCloseTo(book.openPositions.reduce((sum, position) => sum + position.capitalAtRisk, 0), 6);
       expect(book.openSymbols.has(enabled.symbol)).toBe(true);
       expect(book.openSymbols.has(disabled.symbol)).toBe(false);
@@ -174,19 +174,20 @@ describe("loadInFlightNotionals (test DB)", () => {
     const removed = await createTicker({ botEnabled: true, removed: true });
     const before = await loadInFlightNotionals(enabled.symbol);
 
-    await insertOrder(enabled.symbol, "confirmed", { strike: 50, quantity: 2 }); // person, enabled: 10,000 managed
-    await insertOrder(disabled.symbol, "submitted", { strike: 30 }); // person, disabled: 3,000 not managed
-    await insertOrder(disabled.symbol, "partially_filled", { strike: 20, pluto: true }); // Pluto, disabled: 2,000 managed
-    await insertOrder(removed.symbol, "cancel_requested", { strike: 10 }); // person, removed entry: 1,000 not managed
+    // Each at a $1 limit, so (strike − 1) × 100 per contract.
+    await insertOrder(enabled.symbol, "confirmed", { strike: 50, quantity: 2 }); // person, enabled: 9,800 managed
+    await insertOrder(disabled.symbol, "submitted", { strike: 30 }); // person, disabled: 2,900 not managed
+    await insertOrder(disabled.symbol, "partially_filled", { strike: 20, pluto: true }); // Pluto, disabled: 1,900 managed
+    await insertOrder(removed.symbol, "cancel_requested", { strike: 10 }); // person, removed entry: 900 not managed
     await insertOrder(enabled.symbol, "pending_confirmation", { strike: 70 }); // not in flight yet
     const filledOrderId = await insertOrder(enabled.symbol, "filled", { strike: 80 }); // done (past the fill wait)
     await testDb("order_requests").where({ id: filledOrderId }).update({ updated_at: new Date(Date.now() - 10 * 60_000) });
     await insertOrder(enabled.symbol, "confirmed", { strike: 90, requestType: "close_position" }); // a close adds nothing
 
     const after = await loadInFlightNotionals(enabled.symbol);
-    expect(after.totalNotional - before.totalNotional).toBeCloseTo(10_000 + 3_000 + 2_000 + 1_000, 6);
-    expect(after.tickerNotional - before.tickerNotional).toBeCloseTo(10_000, 6);
-    expect(after.managedNotional - before.managedNotional).toBeCloseTo(10_000 + 2_000, 6);
+    expect(after.totalNotional - before.totalNotional).toBeCloseTo(9_800 + 2_900 + 1_900 + 900, 6);
+    expect(after.tickerNotional - before.tickerNotional).toBeCloseTo(9_800, 6);
+    expect(after.managedNotional - before.managedNotional).toBeCloseTo(9_800 + 1_900, 6);
   });
 });
 
@@ -196,7 +197,7 @@ describe("an order IBKR reported filled whose fills are not recorded yet (test D
     const orderId = await insertOrder(enabled.symbol, "filled", { strike: 61, quantity: 2, pluto: true });
     expect(await loadOccupiedContracts(enabled.symbol)).toEqual([expect.objectContaining({ expiry: "2031-03-21", strike: 61 })]);
     expect((await loadPlutoBook()).workingOrderSymbols.has(enabled.symbol)).toBe(true);
-    expect((await loadInFlightNotionals(enabled.symbol)).tickerNotional).toBeCloseTo(61 * 100 * 2, 6);
+    expect((await loadInFlightNotionals(enabled.symbol)).tickerNotional).toBeCloseTo((61 - 1) * 100 * 2, 6);
 
     await testDb("order_requests").where({ id: orderId }).update({ updated_at: new Date(Date.now() - 10 * 60_000) });
     expect(await loadOccupiedContracts(enabled.symbol)).toEqual([]);

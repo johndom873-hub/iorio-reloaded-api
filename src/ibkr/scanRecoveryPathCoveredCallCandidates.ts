@@ -107,8 +107,8 @@ export function filterStrikesByArchivedCallDelta(expiryStrikes: ExpiryStrikes[],
 
 /**
  * Covered-call candidates for one ticker inside the covered_call delta/DTE
- * target window, ranked by annualized premium yield (formula approved
- * 2026-08-20): annualizedYield = (premium / spot) × (365 / dte). Drops any
+ * target window, ranked by annualized premium yield on the exposure net of the
+ * premium (Marcelo 2026-10-12): annualizedYield = premium / (spot − premium) × (365 / dte). Drops any
  * expiry that would leave the call open across a known earnings or
  * ex-dividend date (calendarConflict.ts). Strike grids come from the stored
  * chain (the nightly capture), quotes from quoteContracts (pool first).
@@ -164,7 +164,7 @@ function rankCoveredCallCandidates(
       bid: quote.bid,
       ask: quote.ask,
       dte,
-      annualizedYield: (premium / spotPrice) * (365 / dte),
+      annualizedYield: (premium / (spotPrice - premium)) * (365 / dte),
       spotPrice,
       calendarUnverified,
     });

@@ -48,7 +48,7 @@ beforeAll(async () => {
     const [snapshot] = await testDb("option_chain_snapshots").insert({ ticker_id: tickerId, trading_date: tradingDate, captured_at: new Date("2031-03-03T15:00:00Z"), status: "complete", underlying_price: 100 }).returning(["id"]);
     ids.snapshots.push(snapshot.id);
     await testDb("option_surface_fits").insert({ snapshot_id: snapshot.id, expiry: "2031-04-02", years_to_expiry: 30 / 365, forward_price: 100, status: "ok", point_count: 20, dropped_counts: JSON.stringify({}), param_a: 0.09 * (30 / 365), param_b: 0, param_rho: 0, param_m: 0, param_sigma: 0.1 });
-    if (tickerId === pooled) await testDb("day_signal_expiries").insert({ ticker_id: tickerId, expiry: "2031-03-14", trading_date: tradingDate, snapshot_id: snapshot.id, rank: 1, seed_best_edge_dollars: 10, seed_best_net_edge: 0.01, seeded_at: new Date("2031-03-03T15:07:00Z") });
+    if (tickerId === pooled) await testDb("day_signal_expiries").insert({ ticker_id: tickerId, expiry: "2031-03-14", trading_date: tradingDate, snapshot_id: snapshot.id, rank: 1, seed_best_expected_pnl_dollars: 10, seed_best_edge_margin: 0.01, seeded_at: new Date("2031-03-03T15:07:00Z") });
   }
   const [run] = await testDb("job_runs").insert({ job_name: "day_signals_seed", started_at: "2031-03-03T15:05:00Z", finished_at: "2031-03-03T15:07:00Z", status: "success" }).returning(["id"]);
   ids.jobRuns.push(run.id);

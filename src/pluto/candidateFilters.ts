@@ -1,11 +1,14 @@
-import type { SignalCandidate, SignalGrade, SignalSurfaceSlice } from "../lib/signalCandidates.js";
+import { compareCandidatesByModel, type SignalCandidate, type SignalGrade, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
 import { expectedDailyMovePct } from "./moveContext.js";
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { TickerSignals } from "../lib/signalsTypes.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "../lib/optionContractLabel.js";
+import { yieldOnExposure } from "../lib/contractValuation.js";
 
-// Pluto's deterministic candidate filters (design round 3, item 20, approved 2026-09-28). Pure:
+// Pluto's deterministic candidate filters (design round 3, item 20, approved 2026-09-28). Since the model review
+// (approved by Marcelo 2026-10-10) every value rule reads the valuation model's block (grade, Edge Yield, premium
+// yield, both on calendar days); the old Edge fields stay for the Signals screen only. Pure:
 // the agent feeds it a scored ticker (every existing Signals filter already applied), the fit
 // slices and the settings, and gets back exactly what the model may see, with a reason for
 // everything it may not. Nothing here is a judgement call — every rule is a dial on the Pluto
@@ -31,8 +34,9 @@ export interface PlutoRollCandidate {
 
 /** One stable code per filter rule, for counting why contracts were out; the reason text carries the numbers. */
 export type PlutoRejectionCode =
+  | "no_model"
   | "grade"
-  | "edge_dollars"
+  | "edge_yield"
   | "delta"
   | "dte"
   | "yield"
@@ -147,16 +151,23 @@ export function rejectOpenCandidate(candidate: SignalCandidate, context: OpenCan
   return openCandidateFailures(candidate, context).map((failure) => failure.reason);
 }
 
-/** As rejectOpenCandidate, with the rule behind each reason. */
-export function openCandidateFailures(candidate: SignalCandidate, context: OpenCandidateFilterContext): PlutoRejectionReason[] {
+/**
+ * As rejectOpenCandidate, with the rule behind each reason. `skipValueRules` leaves out the grade and Edge Yield rules: a
+ * roll's replacement is judged on the roll's own grade and net Edge Yield instead.
+ */
+export function openCandidateFailures(candidate: SignalCandidate, context: OpenCandidateFilterContext, options: { skipValueRules?: boolean } = {}): PlutoRejectionReason[] {
   const { settings, scored } = context;
   const failures: PlutoRejectionReason[] = [];
   const fail = (code: PlutoRejectionCode, reason: string) => failures.push({ code, reason });
-  if (gradeRank[candidate.grade] < gradeRank[settings.minGrade]) fail("grade", `grade ${candidate.grade} below ${settings.minGrade}`);
-  if (candidate.edgeDollars < settings.minEdgeDollars) fail("edge_dollars", `Edge $${candidate.edgeDollars.toFixed(0)} below $${settings.minEdgeDollars}`);
+  const model = candidate.model;
+  if (!model) fail("no_model", "not valued by the model (no YZ21 forecast or no variance time left)");
+  else {
+    if (!options.skipValueRules && gradeRank[model.grade] < gradeRank[settings.minGrade]) fail("grade", `grade ${model.grade} (edge margin ${(model.edgeMargin * 100).toFixed(0)}%) below ${settings.minGrade}`);
+    if (!options.skipValueRules && model.expectedAnnualizedReturn * 100 < settings.minEdgeYieldPct) fail("edge_yield", `Edge Yield ${(model.expectedAnnualizedReturn * 100).toFixed(0)}% below ${settings.minEdgeYieldPct}%`);
+    if (model.premiumYield * 100 < settings.minAnnualizedYieldPct) fail("yield", `premium yield ${(model.premiumYield * 100).toFixed(0)}% a year below ${settings.minAnnualizedYieldPct}%`);
+  }
   if (Math.abs(candidate.delta) > settings.maxAbsDelta) fail("delta", `|delta| ${Math.abs(candidate.delta).toFixed(2)} above ${settings.maxAbsDelta}`);
   if (candidate.dte < settings.minDte || candidate.dte > settings.maxDte) fail("dte", `DTE ${candidate.dte} outside ${settings.minDte}–${settings.maxDte}`);
-  if (candidate.annualizedYield * 100 < settings.minAnnualizedYieldPct) fail("yield", `annualized yield ${(candidate.annualizedYield * 100).toFixed(0)}% below ${settings.minAnnualizedYieldPct}%`);
   if (candidate.spreadPercent > settings.maxSpreadPct) fail("spread", `spread ${candidate.spreadPercent.toFixed(1)}% above ${settings.maxSpreadPct}%`);
   if (candidate.openInterest === null || candidate.openInterest < settings.minOpenInterest) fail("open_interest", `open interest ${candidate.openInterest ?? "unknown"} below ${settings.minOpenInterest}`);
   if (candidate.volume === null || candidate.volume < settings.minSessionVolume) fail("volume", `session volume ${candidate.volume ?? "unknown"} below ${settings.minSessionVolume}`);
@@ -195,9 +206,10 @@ export function rejectTicker(input: PlutoTickerFilterInput): string[] {
   if (!input.botEnabled) reasons.push("ticker not enabled for Pluto");
   if (scored.unscoredReason) reasons.push(`not scored: ${scored.unscoredReason}`);
   if (scored.snapshotDateIso !== todayEasternIso) reasons.push(`surface is from ${scored.snapshotDateIso ?? "no snapshot"}, Pluto requires today's fit`);
-  if (scored.forecast && scored.forecast.windowDays !== 63) reasons.push(`forecast window is ${scored.forecast.windowDays} days, not the 63-day one`);
+  if (!scored.modelForecast) reasons.push("no 21-day volatility forecast for the valuation model (fewer than 22 daily bars before today)");
   // Each stock against its own normal day (Marcelo, 2026-10-07): 3 × NOK's 4.2% is 12.7%, 3 × BSBR's 2.4% is 7.2%.
-  const normalDayMovePct = expectedDailyMovePct(scored.forecast?.volatility ?? null);
+  // The normal day is the valuation model's forecast (YZ21) since the model review (2026-10-10).
+  const normalDayMovePct = expectedDailyMovePct(scored.modelForecast?.annualizedVolatility ?? null);
   // No usable forecast (zero or missing volatility) means no normal day to measure against: the ticker is out, not unlimited.
   if (scored.dayChangePercent !== null && normalDayMovePct === null) reasons.push("no volatility forecast to judge today's move against");
   else if (scored.dayChangePercent !== null && normalDayMovePct !== null && Math.abs(scored.dayChangePercent) > settings.maxDayMoveMultiple * normalDayMovePct) reasons.push(`day change ${scored.dayChangePercent.toFixed(1)}% is ${(Math.abs(scored.dayChangePercent) / normalDayMovePct).toFixed(2)}× its normal ${normalDayMovePct.toFixed(2)}% day, beyond ${settings.maxDayMoveMultiple}×`);
@@ -227,10 +239,14 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
   for (const roll of scored.rolls) {
     const id = rollCandidateId(scored.symbol, roll);
     const failures: PlutoRejectionReason[] = [];
-    if (gradeRank[roll.grade] < gradeRank[input.settings.minGrade]) failures.push({ code: "grade", reason: `roll grade ${roll.grade} below ${input.settings.minGrade}` });
-    if (roll.netRollEdgeDollarsPerContract < input.settings.minEdgeDollars) failures.push({ code: "edge_dollars", reason: `net roll Edge $${roll.netRollEdgeDollarsPerContract.toFixed(0)}/contract below $${input.settings.minEdgeDollars}` });
-    // The replacement leg must be tradeable on its own terms, minus the grade/Edge $ rules already judged on the roll.
-    const replacementFailures = openCandidateFailures({ ...roll.replacement, grade: "strong", edgeDollars: Number.MAX_SAFE_INTEGER }, context);
+    if (!roll.model) failures.push({ code: "no_model", reason: "roll not valued by the model (a leg has no model score)" });
+    else {
+      if (gradeRank[roll.model.grade] < gradeRank[input.settings.minGrade]) failures.push({ code: "grade", reason: `roll grade ${roll.model.grade} (edge margin ${(roll.model.edgeMargin * 100).toFixed(0)}%) below ${input.settings.minGrade}` });
+      const rollEdgeYield = roll.replacement.model ? yieldOnExposure(roll.model.netExpectedPnlPerContract, roll.replacement.model.capitalAtRiskDollars, roll.replacement.model.calendarYears) : Number.NEGATIVE_INFINITY;
+      if (rollEdgeYield * 100 < input.settings.minEdgeYieldPct) failures.push({ code: "edge_yield", reason: `net roll Edge Yield ${(rollEdgeYield * 100).toFixed(0)}% below ${input.settings.minEdgeYieldPct}%` });
+    }
+    // The replacement leg must be tradeable on its own terms, minus the grade/Edge Yield rules already judged on the roll.
+    const replacementFailures = openCandidateFailures(roll.replacement, context, { skipValueRules: true });
     failures.push(...replacementFailures.map((failure) => ({ code: failure.code, reason: `replacement: ${failure.reason}` })));
     const conflict = findSameContractConflict(occupied, roll.replacement.expiry, roll.replacement.strike);
     if (conflict) failures.push({ code: "same_contract", reason: `replacement: same contract: ${conflict}` });
@@ -240,8 +256,29 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
   return result;
 }
 
-/** Edge $ ranking, ties by net Edge — the deterministic pick the ledger logs next to the model's. */
+/** Eligible opens in the deterministic order (compareCandidatesByModel: Hist Yield, then Edge $). */
+export function rankEligibleOpens(eligible: PlutoOpenCandidate[]): PlutoOpenCandidate[] {
+  return [...eligible].sort((a, b) => compareCandidatesByModel(a.candidate, b.candidate));
+}
+
+/** The best eligible open by compareCandidatesByModel — the deterministic pick the ledger logs next to the model's. */
 export function deterministicTopPick(eligible: PlutoOpenCandidate[]): PlutoOpenCandidate | null {
-  if (eligible.length === 0) return null;
-  return [...eligible].sort((a, b) => b.candidate.edgeDollars - a.candidate.edgeDollars || b.candidate.netEdge - a.candidate.netEdge)[0]!;
+  return rankEligibleOpens(eligible)[0] ?? null;
+}
+
+/** What the ledger keeps of the top pick (and the one after it, for the screen's "next"): the model's figures. */
+export function summarizeTopPick(eligible: PlutoOpenCandidate[]) {
+  const [topPick, runnerUp] = rankEligibleOpens(eligible);
+  const model = topPick?.candidate.model;
+  if (!topPick || !model) return null;
+  return {
+    id: topPick.id,
+    edgeDollars: model.expectedPnlDollars,
+    edgeMargin: model.edgeMargin,
+    grade: model.grade,
+    calibratedAnnualizedReturn: model.calibratedAnnualizedReturn,
+    expectedAnnualizedReturn: model.expectedAnnualizedReturn,
+    capitalAtRiskDollars: model.capitalAtRiskDollars,
+    runnerUp: runnerUp?.candidate.model ? { id: runnerUp.id, calibratedAnnualizedReturn: runnerUp.candidate.model.calibratedAnnualizedReturn } : null,
+  };
 }

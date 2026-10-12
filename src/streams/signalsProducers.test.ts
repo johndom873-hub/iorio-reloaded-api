@@ -9,6 +9,7 @@ import type { TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { createSignalsProducers, firstFramePriceGraceMs, snapshotChangePollIntervalMs, type SignalsQuotesFrame, type SignalsProducerDependencies, type SignalsScreenFrame, type SignalsTickerFrame } from "./signalsProducers.js";
 import { StreamRequestError } from "./streamProtocol.js";
 import { openDaysFromCalendarRows } from "../lib/marketSessionStatus.js";
+import { fixtureModelForecast, fixtureTradingSessions } from "../lib/testSupport/valuationModelFixtures.js";
 
 // Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
 const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
@@ -63,6 +64,9 @@ function inputsFor(ticker: SignalsTickerRow, withSnapshot: boolean, freeShares =
     dividendCadenceUnknown: false,
     todayEasternIso: easternIsoDate(new Date()),
     openSessionDatesIso: fixtureWeekdaySessions,
+    modelForecast: withSnapshot ? fixtureModelForecast(0.15) : null,
+    tradingSessions: fixtureTradingSessions,
+    valuationGroup: "stock",
   };
 }
 
@@ -270,7 +274,8 @@ describe("signalsScreen producer", () => {
     expect(harness.optionSubscriptions[0]).toMatchObject({ symbol: "AAOI", contracts: [{ expiry: best.expiry, strike: best.strike, right: best.strategyKey === "covered_call" ? "C" : "P" }] });
     expect(frames[0]!.dayQuotes).toEqual({ loop: expect.objectContaining({ state: "running", cycleNumber: 3 }), status: expect.objectContaining({ quoteCount: 0 }) });
 
-    harness.optionSubscriptions[0]!.push([{ expiry: best.expiry, strike: best.strike, right: best.strategyKey === "covered_call" ? "C" : "P", bid: best.bid * 0.99, ask: best.ask * 1.01 }]);
+    // A richer live quote: the seller's edge only grows, so the contract stays the top signal (ranked by the model).
+    harness.optionSubscriptions[0]!.push([{ expiry: best.expiry, strike: best.strike, right: best.strategyKey === "covered_call" ? "C" : "P", bid: best.bid * 1.02, ask: best.ask * 1.02 }]);
     await vi.advanceTimersByTimeAsync(1000);
     const liveBest = frames.at(-1)!.rows.find((row) => row.symbol === "AAOI")!.best!;
     expect(liveBest.quoteSource).toBe("live");

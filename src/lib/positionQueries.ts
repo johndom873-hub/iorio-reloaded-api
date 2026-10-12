@@ -7,9 +7,13 @@ import { legRealizedPnlSql } from "./legRealizedPnlSql.js";
 // the worker's post-close Telegram notification (ibkrGatewayWorker.ts) — see
 // positions.ts's own header comment for the approved realizedPnl/
 // capitalAtRisk formulas (2026-08-21).
-// The option leg's strike collateral (a position with no open stock leg): the open leg if there is one, else the latest.
+// Exposure is net of the premium received (Marcelo 2026-10-12): a put's cash reserved less its premium, a covered call's
+// shares less the call's premium. A long leg brought nothing in.
+const premiumReceivedPerShareSql = (alias: string) => `CASE WHEN ${alias}.side = 'short' THEN COALESCE(${alias}.entry_price, 0) ELSE 0 END`;
+
+// The option leg's strike collateral less its premium (a position with no open stock leg): the open leg if there is one, else the latest.
 const optionCollateralSql = `
-        SELECT pl.strike_price * pl.multiplier * pl.quantity
+        SELECT (pl.strike_price - ${premiumReceivedPerShareSql("pl")}) * pl.multiplier * pl.quantity
         FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.leg_type = 'option'
         ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
@@ -20,7 +24,7 @@ const optionCollateralSql = `
 // contracts at a time leaves closed slices of one contract, and the P&L they realized is earned on all of them. A rolled-away leg
 // is a different contract and stays out. Approved 2026-10-01 (the option half of capitalDeployed).
 const optionDeployedSql = `
-        SELECT SUM(same_contract.strike_price * same_contract.multiplier * same_contract.quantity)
+        SELECT SUM((same_contract.strike_price - ${premiumReceivedPerShareSql("same_contract")}) * same_contract.multiplier * same_contract.quantity)
         FROM position_legs same_contract
         JOIN (
           SELECT pl.strike_price, pl.expiry_date, pl.option_type
@@ -33,6 +37,30 @@ const optionDeployedSql = `
           AND same_contract.expiry_date IS NOT DISTINCT FROM chosen.expiry_date
           AND same_contract.option_type = chosen.option_type
         WHERE same_contract.position_id = p.id AND same_contract.leg_type = 'option'
+      `;
+
+// The premium of the short calls open on a position's shares: what comes off the shares' cost in its exposure.
+const openShortCallPremiumSql = `
+        SELECT COALESCE(SUM(pl.entry_price * pl.multiplier * pl.quantity), 0)
+        FROM position_legs pl
+        WHERE pl.position_id = p.id AND pl.leg_type = 'option' AND pl.option_type = 'call' AND pl.side = 'short' AND pl.exit_at IS NULL
+      `;
+
+// The same for the P&L % base: every slice of the short call contract chosen the way optionDeployedSql chooses (the open one,
+// else the latest), so a closed covered call's base is its shares' cost less the premium of the call it ended with.
+const shortCallDeployedPremiumSql = `
+        SELECT COALESCE(SUM(same_contract.entry_price * same_contract.multiplier * same_contract.quantity), 0)
+        FROM position_legs same_contract
+        JOIN (
+          SELECT pl.strike_price, pl.expiry_date
+          FROM position_legs pl
+          WHERE pl.position_id = p.id AND pl.leg_type = 'option' AND pl.option_type = 'call' AND pl.side = 'short'
+          ORDER BY (pl.exit_at IS NULL) DESC, pl.entry_at DESC
+          LIMIT 1
+        ) chosen
+          ON same_contract.strike_price = chosen.strike_price
+          AND same_contract.expiry_date IS NOT DISTINCT FROM chosen.expiry_date
+        WHERE same_contract.position_id = p.id AND same_contract.leg_type = 'option' AND same_contract.option_type = 'call' AND same_contract.side = 'short'
       `;
 
 export const positionSelect = `
@@ -112,6 +140,7 @@ export const positionSelect = `
     -- fixed for Stock P&L display 2026-08-30, see positionHasStockLeg's
     -- doc comment in positionPnl.ts. Fixed 2026-09-24.
     -- A hedge (long option) can lose at most the premium paid, not the strike (approved 2026-10-01).
+    -- Every other branch is net of the premium received (see premiumReceivedPerShareSql).
     CASE
       WHEN p.strategy_key = 'hedge' THEN (
         SELECT SUM(pl.entry_price * pl.multiplier * pl.quantity)
@@ -126,7 +155,7 @@ export const positionSelect = `
         FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.exit_at IS NULL
         LIMIT 1
-      )
+      ) - (${openShortCallPremiumSql})
       ELSE (${optionCollateralSql})
     END AS "capitalAtRisk",
     -- The base for P&L %, approved 2026-10-01: the same as capitalAtRisk, except that it also counts what
@@ -148,7 +177,7 @@ export const positionSelect = `
         SELECT SUM(pl.entry_price * pl.quantity)
         FROM position_legs pl
         WHERE pl.position_id = p.id AND pl.leg_type = 'stock'
-      )
+      ) - (${shortCallDeployedPremiumSql})
       ELSE (${optionDeployedSql})
     END AS "capitalDeployed"
   FROM positions p

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega, computeFrictionCost } from "./optionFriction.js";
-import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, gradeForNetEdge, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice , type SignalCandidatesInput } from "./signalCandidates.js";
-import { buildCommissionEstimator } from "./commissionEstimate.js";
-import { assignmentRiskDeltaThreshold, buildRollCandidates, recostReplacementCommission, scoreRollPair, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs as scoreHeldLegsOnAnyClock, type HeldLegScoringInput, type OpenShortLeg } from "./rollSignalCandidates.js";
+import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, frictionDollarsPerContract, gradeForNetEdge, gradeSignalCandidates, scoreContractWithModel, type CandidateModelContext, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice , type SignalCandidatesInput } from "./signalCandidates.js";
+import { buildCommissionEstimator, flatCommissionEstimator } from "./commissionEstimate.js";
+import { gradeForEdgeMargin } from "./contractValuation.js";
+import { varianceSessionsToExpiry } from "./varianceClock.js";
+import { volatilityModelTables } from "./volatilityModelTables.generated.js";
+import { fixtureCandidateModel, fixtureHeldLegModel, fixtureModelForecast, fixtureRollModel, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
+import { assignmentRiskDeltaThreshold, buildRollCandidates, compareRollsByModel, recostReplacementCommission, scoreRollModel, scoreRollPair, decayedFractionOfEntryCredit, heldLegContractKey, nearExpiryDaysThreshold, pickBestRoll, rollCandidateKey, scoreHeldLegs as scoreHeldLegsOnAnyClock, type HeldLegScoringInput, type OpenShortLeg } from "./rollSignalCandidates.js";
 
 // These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
 const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
@@ -59,7 +63,7 @@ for (const expiry of [expiry30, expiry60]) {
   for (const strike of [105, 110, 115]) otmQuotes.push(quoteAt(strike, "C", expiry));
 }
 
-function candidates(quotes = otmQuotes): SignalCandidate[] {
+function candidates(quotes = otmQuotes, model: CandidateModelContext | null = null): SignalCandidate[] {
   return gradeSignalCandidates(
     buildSignalCandidates({
       spotPrice: forward,
@@ -78,6 +82,7 @@ function candidates(quotes = otmQuotes): SignalCandidate[] {
       deltaTargetMax: 1,
       minAnnualizedYieldPct: 0,
       spreadShareCharged: 1,
+      model,
     }),
   );
 }
@@ -95,8 +100,8 @@ const leg = (overrides: Partial<OpenShortLeg> = {}): OpenShortLeg => ({
   ...overrides,
 });
 
-function scoreOne(theLeg: OpenShortLeg, quotes: SignalQuote[] = otmQuotes) {
-  return scoreHeldLegs([theLeg], { spotPrice: forward, riskFreeRate: rate, forecast, slices, quotes, spreadShareCharged: 1 })[0]!;
+function scoreOne(theLeg: OpenShortLeg, quotes: SignalQuote[] = otmQuotes, model: CandidateModelContext | null = null) {
+  return scoreHeldLegs([theLeg], { spotPrice: forward, riskFreeRate: rate, forecast, slices, quotes, spreadShareCharged: 1, model })[0]!;
 }
 
 describe("scoreHeldLegs", () => {
@@ -114,7 +119,7 @@ describe("scoreHeldLegs", () => {
     expect(held.holdEdgeDollars).toBeCloseTo(held.edge! * held.vega! * 100, 9);
     expect(held.closeCostDollars).toBeCloseTo(held.frictionVolatility! * held.vega! * 100, 9);
     expect(held.dte).toBe(30);
-    expect(held.dollarRisk).toBeCloseTo(95 * 100 - held.mid!, 9);
+    expect(held.dollarRisk).toBeCloseTo((95 - held.mid!) * 100, 9);
     expect(held.quoteSource).toBe("snapshot");
     // Rich enough IV versus the forecast on both sides, but a 30 DTE, |delta| < 0.5, fresh leg: no flags.
     expect(held.flags).toEqual([]);
@@ -164,19 +169,27 @@ describe("scoreHeldLegs", () => {
     expect(rejectedFit.unscoredReason).toBe("no_slice");
     expect(rejectedFit).toMatchObject({ bid: putQuote.bid, ask: putQuote.ask, quoteSource: "day", quotedAt: "2026-09-24T15:00:00Z", edge: null, delta: null });
     expect(rejectedFit.mid).toBeCloseTo(midOfPut, 12);
-    expect(rejectedFit.dollarRisk).toBeCloseTo(95 * 100 - midOfPut, 9);
+    expect(rejectedFit.dollarRisk).toBeCloseTo((95 - midOfPut) * 100, 9);
 
     const coveredCall = leg({ strategyKey: "covered_call", right: "C", strike: 105 });
     const callQuote = otmQuotes.find((q) => q.expiry === expiry30 && q.strike === 105 && q.right === "C")!;
     const noSlice = scoreHeldLegs([coveredCall], { spotPrice: 98, riskFreeRate: rate, forecast, slices: [], quotes: [callQuote], spreadShareCharged: 1 })[0]!;
     expect(noSlice.unscoredReason).toBe("no_slice");
-    expect(noSlice.dollarRisk).toBeCloseTo(98 * 100 - (callQuote.bid! + callQuote.ask!) / 2, 9);
+    expect(noSlice.dollarRisk).toBeCloseTo((98 - (callQuote.bid! + callQuote.ask!) / 2) * 100, 9);
 
     const noForecast = scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast: null, slices, quotes: [putQuote], spreadShareCharged: 1 })[0]!;
     expect(noForecast).toMatchObject({ unscoredReason: "no_forecast", bid: putQuote.bid, ask: putQuote.ask, quoteSource: "day" });
 
     expect(scoreHeldLegs([leg()], { spotPrice: forward, riskFreeRate: rate, forecast, slices: [], quotes: [], spreadShareCharged: 1 })[0]).toMatchObject({ unscoredReason: "no_slice", bid: null, ask: null, mid: null, dollarRisk: null });
     expect(scoreRollPair(rejectedFit, candidates()[0]!)).toBeNull();
+  });
+});
+
+describe("compareRollsByModel", () => {
+  const roll = (netExpectedPnl: number | null, netRollEdgeDollars: number) => ({ model: netExpectedPnl === null ? null : fixtureRollModel({ netExpectedPnl }), netRollEdgeDollars, netRollEdge: 0.01 });
+  it("orders by the model's net roll $, then puts rolls the model could not value last, by the old net roll Edge $", () => {
+    const sorted = [roll(null, 500), roll(40, 1), roll(120, -20), roll(null, 900)].sort(compareRollsByModel);
+    expect(sorted.map((entry) => [entry.model?.netExpectedPnl ?? null, entry.netRollEdgeDollars])).toEqual([[120, -20], [40, 1], [null, 900], [null, 500]]);
   });
 });
 
@@ -225,10 +238,11 @@ describe("buildRollCandidates", () => {
     expect(all.some((B) => B.strategyKey === "covered_call")).toBe(true);
   });
 
-  it("sorts by net roll Edge $ then vol points, and pickBestRoll agrees; keys are unique per (leg, replacement)", () => {
+  it("sorts rolls the model could not value by net roll Edge $ then vol points, and pickBestRoll agrees; keys are unique per (leg, replacement)", () => {
     for (let index = 1; index < rolls.length; index += 1) {
       const previous = rolls[index - 1]!;
       const current = rolls[index]!;
+      expect(previous.model).toBeNull();
       expect(previous.netRollEdgeDollars > current.netRollEdgeDollars || (previous.netRollEdgeDollars === current.netRollEdgeDollars && previous.netRollEdge >= current.netRollEdge)).toBe(true);
     }
     expect(pickBestRoll(rolls)).toBe(rolls[0]);
@@ -254,7 +268,7 @@ describe("buildRollCandidates", () => {
     const callLeg = leg({ legId: "leg-c", strategyKey: "covered_call", strike: 105, right: "C" });
     const heldCall = scoreOne(callLeg);
     expect(heldCall.unscoredReason).toBeNull();
-    expect(heldCall.dollarRisk).toBeCloseTo(forward * 100 - heldCall.mid!, 9);
+    expect(heldCall.dollarRisk).toBeCloseTo((forward - heldCall.mid!) * 100, 9);
     const callRolls = buildRollCandidates([heldCall], all);
     expect(callRolls.every((roll) => roll.replacement.strategyKey === "covered_call")).toBe(true);
   });
@@ -321,5 +335,72 @@ describe("scoreRollPair", () => {
       expect(sized.netRollEdge).toBeCloseTo(flat.netRollEdge - (1.0 - 0.68) / 100 / replacement.vega, 12);
       expect(sized.replacement.commissionPerContractDollars).toBe(1.0);
     });
+  });
+});
+
+describe("valuation model on held legs and rolls (model review, 2026-10-10)", () => {
+  // Valued at the 10:00 ET snapshot with a YZ21 forecast 3 points under the 30-day ATM IV, fitted forward and spot 100.
+  const valuedAtMs = Date.parse(`${snapshotDateIso}T14:00:00Z`);
+  const modelContext: CandidateModelContext = {
+    tables: volatilityModelTables,
+    forecast: fixtureModelForecast(forecast.volatility),
+    group: "stock",
+    varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, fixtureTradingSessions),
+    quoteInstantMs: () => valuedAtMs,
+    forwardForQuote: (fittedSlice) => fittedSlice.forwardPrice,
+    spotForQuote: () => forward,
+  };
+  const heldQuote = otmQuotes.find((q) => q.expiry === expiry30 && q.strike === 95 && q.right === "P")!;
+
+  it("values a held leg like a sale at its quote, charged the buy-back's friction: hold value = (mid − fair) × 100", () => {
+    const held = scoreOne(leg(), otmQuotes, modelContext);
+    const closeCost = frictionDollarsPerContract(heldQuote.bid!, heldQuote.ask!, 1, flatCommissionEstimator.perContractDollars("buy", 2));
+    const valuation = scoreContractWithModel(modelContext, slices[0]!, { ...heldQuote, bid: heldQuote.bid!, ask: heldQuote.ask! }, rate, closeCost)!;
+    expect(held.model).toEqual({ valuation, holdValueDollars: (held.mid! - valuation.fairPrice) * 100, closeCostDollars: closeCost });
+    expect(scoreOne(leg()).model).toBeNull();
+  });
+
+  it("nets a roll as the replacement's expected P&L less the held leg's hold value and close cost; margin before friction", () => {
+    const held = scoreOne(leg(), otmQuotes, modelContext);
+    const rolls = buildRollCandidates([held], candidates(otmQuotes, modelContext));
+    expect(rolls.length).toBeGreaterThan(0);
+    for (const roll of rolls) {
+      const replacement = roll.replacement.model!;
+      const replacementMid = (roll.replacement.bid + roll.replacement.ask) / 2;
+      const perContract = replacement.expectedPnlDollars - held.model!.holdValueDollars - held.model!.closeCostDollars;
+      const margin = ((replacementMid - replacement.fairPrice) * 100 - held.model!.holdValueDollars) / (replacementMid * 100);
+      expect(roll.model!.netExpectedPnlPerContract).toBeCloseTo(perContract, 9);
+      expect(roll.model!.netExpectedPnl).toBeCloseTo(perContract * 2, 9);
+      expect(roll.model!.edgeMargin).toBeCloseTo(margin, 12);
+      expect(roll.model!.grade).toBe(gradeForEdgeMargin(margin));
+    }
+    // Without the model on either leg there is no model roll; the old Edge roll is still scored.
+    const oldOnly = buildRollCandidates([scoreOne(leg())], candidates());
+    expect(oldOnly.length).toBe(rolls.length);
+    expect(oldOnly.every((roll) => roll.model === null)).toBe(true);
+  });
+
+  it("scoreRollModel on round numbers: $60 expected on a $1.00 mid valued at $0.80, holding worth $30 and $5 to close", () => {
+    const rollModel = scoreRollModel({ quantity: 2, model: fixtureHeldLegModel(30, 5) }, { bid: 0.95, ask: 1.05, model: fixtureCandidateModel({ expectedPnlDollars: 60, fairPrice: 0.8 }) })!;
+    expect(rollModel.netExpectedPnlPerContract).toBeCloseTo(25, 12); // 60 − 30 − 5
+    expect(rollModel.netExpectedPnl).toBeCloseTo(50, 12);
+    expect(rollModel.edgeMargin).toBeCloseTo(-0.1, 12); // ((1.00 − 0.80) × 100 − 30) ÷ 100
+    expect(rollModel.grade).toBe("avoid");
+    expect(scoreRollModel({ quantity: 2, model: null }, { bid: 0.95, ask: 1.05, model: fixtureCandidateModel() })).toBeNull();
+  });
+
+  it("re-pricing the commission at the leg's size moves every model dollar figure and return with it, never the margin", () => {
+    const largeSizeEstimator = buildCommissionEstimator(Array.from({ length: 10 }, () => ({ side: "sell" as const, contracts: 6, commissionDollars: 6 })));
+    const held = scoreOne(leg(), otmQuotes, modelContext);
+    const replacement = buildRollCandidates([held], candidates(otmQuotes, modelContext))[0]!.replacement;
+    const recosted = recostReplacementCommission(replacement, 6, largeSizeEstimator);
+    const extra = 1.0 - 0.68;
+    const before = replacement.model!;
+    const after = recosted.model!;
+    const annualized = extra / before.capitalAtRiskDollars / before.calendarYears;
+    for (const key of ["expectedPnlDollars", "calibratedExpectedPnlDollars", "premiumAfterCostsDollars", "averageWinDollars", "averageLossDollars", "expectedShortfallDollars", "stressPnlDollars"] as const) expect(after[key]).toBeCloseTo(before[key] - extra, 10);
+    for (const key of ["expectedAnnualizedReturn", "calibratedAnnualizedReturn", "premiumYield"] as const) expect(after[key]).toBeCloseTo(before[key] - annualized, 12);
+    expect(after.edgeMargin).toBe(before.edgeMargin);
+    expect(after.grade).toBe(before.grade);
   });
 });

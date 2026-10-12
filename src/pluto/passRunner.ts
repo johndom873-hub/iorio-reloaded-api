@@ -6,12 +6,12 @@ import { loadTradingSettings, type TradingSettings } from "../lib/tradingSetting
 import { scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import { accountContextFromTotalCash, loadBarsForTilt, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
 import { computeIvMetrics } from "../lib/ivMetrics.js";
-import { computeMoveContext, expectedDailyMovePct, type MoveContext } from "./moveContext.js";
+import { computeMoveContext, type MoveContext } from "./moveContext.js";
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
-import type { SignalCandidate } from "../lib/signalCandidates.js";
+import { compareCandidatesByModel, type SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
 import { anyOpenPositionOn, loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol, loadOccupiedContracts, loadPlutoBook } from "./book.js";
-import { describeCandidateId, deterministicTopPick, filterTickerForPluto, findSameContractConflict, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
+import { describeCandidateId, filterTickerForPluto, findSameContractConflict, summarizeTopPick, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { summarizeTickerRejections } from "./rejectionSummary.js";
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { updatePlutoConcernAlerts } from "./concernAlerts.js";
@@ -28,7 +28,7 @@ import { ensurePlutoPrompt } from "./prompts.js";
 import { finishPlutoPass, type FinishPlutoPassInput, recordPlutoAction, updatePlutoAction, recordPlutoDecision, recordPlutoEvent, startPlutoPass, type PlutoGateResult, type PlutoSystemCheck, type PlutoTrigger, relabelPlutoPass } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { callPlutoModel } from "./modelClient.js";
-import { runPostModelGates, tickerCooldownStatus, type StressCapInput } from "./postModelGates.js";
+import { runPostModelGates, stressCapInputFor, tickerCooldownStatus } from "./postModelGates.js";
 import { buildPlutoSystemPrompt, buildPlutoUserPayload, plutoPromptVersion, recentDecisionsForPrompt, type PlutoPromptTickerInput } from "./prompt.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState, recordPlutoPass, tripPlutoBreaker } from "./stateStore.js";
@@ -111,7 +111,7 @@ function closeOffersInput(ticker: EvaluatedTicker, settings: PlutoSettings, cont
     previousSessionDateIso: round.previousSessionDateIso,
     todayIso: round.todayIso,
     spotPrice: ticker.scored.spotPrice,
-    forecastVolatility: ticker.scored.forecast?.volatility ?? null,
+    forecastVolatility: ticker.scored.modelForecast?.annualizedVolatility ?? null,
     macroEvents: ticker.scored.macroEvents,
     nowMs: Date.now(),
     openDaysIso: round.openDaysIso,
@@ -154,9 +154,9 @@ function candidatesEligibleOnceRequoted(scored: TickerSignals, filtered: PlutoTi
     .map((candidate) => ({ id: openCandidateId(scored.symbol, candidate), kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate }));
 }
 
-/** Contracts worth a quote burst: the best candidates by Edge $ that pass every filter except quote age. */
+/** Contracts worth a quote burst: the best candidates in Pluto's order that pass every filter except quote age. */
 function burstContractsFor(scored: TickerSignals, filtered: PlutoTickerFilterResult, settings: PlutoSettings): { expiry: string; strike: number; right: "C" | "P" }[] {
-  const ranked = [...scored.candidates].filter((candidate) => passesAllButQuoteAge(scored, filtered, candidate)).sort((a, b) => b.edgeDollars - a.edgeDollars);
+  const ranked = [...scored.candidates].filter((candidate) => passesAllButQuoteAge(scored, filtered, candidate)).sort(compareCandidatesByModel);
   return ranked.slice(0, settings.burstLines).map((candidate) => ({ expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" }));
 }
 
@@ -171,25 +171,12 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   return { row, inputs, scored, filtered, occupiedContracts, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [], heldPositions: [] };
 }
 
-/** What the sizing gate's stress cap needs about the ticker today. */
-function stressCapInputFor(scored: TickerSignals, todayEasternIso: string, openSessionDatesIso: string[]): StressCapInput {
-  const forecastVolatility = scored.forecast?.volatility ?? null;
-  const normalDayMovePct = expectedDailyMovePct(forecastVolatility);
-  return {
-    forecastVolatility,
-    elevatedVolatility: scored.elevatedVolatility?.elevated === true,
-    dayMoveSigmas: scored.dayChangePercent !== null && normalDayMovePct !== null ? scored.dayChangePercent / normalDayMovePct : null,
-    todayEasternIso,
-    openSessionDatesIso,
-  };
-}
-
 /** The move-context block for the prompt: bars up to the last completed session, the forecast, today's move and IV rank. A failure costs the block, not the round. */
 async function loadMoveContext(ticker: EvaluatedTicker): Promise<MoveContext | null> {
   try {
     const [bars, ivMetrics] = await Promise.all([loadBarsForTilt(ticker.row.tickerId, ticker.inputs.todayEasternIso), computeIvMetrics(ticker.row.tickerId)]);
     const completedBars = bars.filter((bar) => bar.tradingDate < ticker.inputs.todayEasternIso);
-    return computeMoveContext({ bars: completedBars, forecastVolatility: ticker.scored.forecast?.volatility ?? null, dayChangePct: ticker.scored.dayChangePercent, ivRank: ivMetrics.ivRank });
+    return computeMoveContext({ bars: completedBars, forecastVolatility: ticker.scored.modelForecast?.annualizedVolatility ?? null, dayChangePct: ticker.scored.dayChangePercent, ivRank: ivMetrics.ivRank });
   } catch (error) {
     console.warn(`Pluto: move context for ${ticker.row.symbol} unavailable — ${error instanceof Error ? error.message : error}`);
     return null;
@@ -491,8 +478,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     decision = call.decision;
     agreementDetail = "single call";
   }
-  const topPick = deterministicTopPick(evaluated.flatMap((ticker) => ticker.filtered.eligible));
-  const topPickSummary = topPick ? { id: topPick.id, edgeDollars: topPick.candidate.edgeDollars, netEdge: topPick.candidate.netEdge, grade: topPick.candidate.grade } : null;
+  const topPickSummary = summarizeTopPick(evaluated.flatMap((ticker) => ticker.filtered.eligible));
   const modelCalledEvent = { passId, trigger, triggerDetail, servedModelIds, costUsd, verdict: decision.decision, candidateId: decision.candidateId, confidence: decision.confidence, actionKind: decision.actionKind, agreement: agreementDetail, reasons: decision.reasons, systemConcerns: decision.systemConcerns, deterministicTopPick: topPickSummary, tickers: evaluated.map((ticker) => summarizeTickerRejections(ticker.filtered)) };
   if (decision.decision === "trade") await recordPlutoEvent("model_called", modelCalledEvent);
   await finishPass({ inputHash: candidateSetFingerprint(evaluated.flatMap((ticker) => ticker.filtered.eligible), evaluated.flatMap((ticker) => ticker.filtered.eligibleRolls)), candidateCount: offeredCount, systemChecks: checks.checks, modelCalled: true, skippedReason: null, tokensIn, tokensOut, costUsd, servedModelIds });
@@ -530,7 +516,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   if (chosenClose) return runChosenClose(owner, chosenClose);
   const chosenOpen: PlutoOpenCandidate | undefined = owner.filtered.eligible.find((entry) => entry.id === chosenId);
   const chosenRoll: PlutoRollCandidate | undefined = owner.filtered.eligibleRolls.find((entry) => entry.id === chosenId);
-  const netEdgeAtDecision = chosenOpen ? chosenOpen.candidate.netEdge : chosenRoll!.roll.netRollEdge;
+  // Every eligible open and roll carries a model valuation (the filters require it).
+  const marginAtDecision = chosenOpen ? chosenOpen.candidate.model!.edgeMargin : chosenRoll!.roll.model!.edgeMargin;
 
   // 8. Fresh re-score of the chosen contract only, then the post-model gates.
   // A roll bursts the held leg too: its buyback is priced from it, and the order routes accept only live quotes for both legs.
@@ -559,7 +546,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     candidate: freshCandidate,
     roll: freshRoll,
     freshRejectionReasons,
-    netEdgeAtDecision,
+    marginAtDecision,
     settings,
     sector,
     book: {
@@ -577,7 +564,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       nowMs: Date.now(),
       sameContractConflict: freshContractForGate ? findSameContractConflict(fresh.occupiedContracts, freshContractForGate.expiry, freshContractForGate.strike) : null,
     },
-    stress: stressCapInputFor(fresh.scored, fresh.inputs.todayEasternIso, fresh.inputs.openSessionDatesIso),
+    stress: stressCapInputFor(fresh.scored),
   });
   const contract = freshCandidate ?? freshRoll?.replacement ?? null;
   const gateResults: PlutoGateResult[] = gates.gates;
@@ -609,7 +596,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   // 9. Execute through the real routes, then watch the order without holding the pass.
   const freshHeldLeg = chosenRoll ? fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll.roll.legId) ?? null : null;
   const signalsSnapshotShape = chosenOpen ? signalsSnapshotForOpen(freshCandidate) : signalsSnapshotForRoll(freshHeldLeg, freshRoll?.replacement ?? null);
-  const scoresSnapshot = { ...signalsSnapshotShape, version: `pluto-${plutoPromptVersion}`, candidateId: chosenId, contract: freshCandidate ?? freshRoll, ticker: { spreadShareCharged: fresh.scored.spreadShareCharged, spotPrice: fresh.scored.spotPrice, snapshotDateIso: fresh.scored.snapshotDateIso, atmImpliedVolatility: fresh.scored.atmImpliedVolatility, forecast: fresh.scored.forecast, dayChangePercent: fresh.scored.dayChangePercent }, decision, plan: gates.plan, deterministicTopPick: topPickSummary };
+  const scoresSnapshot = { ...signalsSnapshotShape, version: `pluto-${plutoPromptVersion}`, candidateId: chosenId, contract: freshCandidate ?? freshRoll, ticker: { spreadShareCharged: fresh.scored.spreadShareCharged, spotPrice: fresh.scored.spotPrice, snapshotDateIso: fresh.scored.snapshotDateIso, atmImpliedVolatility: fresh.scored.atmImpliedVolatility, atmImpliedVolatilityPerSession: fresh.scored.atmImpliedVolatilityPerSession, forecast: fresh.scored.forecast, modelForecast: fresh.scored.modelForecast, dayChangePercent: fresh.scored.dayChangePercent }, decision, plan: gates.plan, deterministicTopPick: topPickSummary };
   const result = await executePlutoOrder(
     context.api,
     settings,

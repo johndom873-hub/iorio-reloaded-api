@@ -159,7 +159,8 @@ export function createChainCellResolver(scoring: ChainCellScoring | null, captur
     const key = contractKey(ref);
     const candidate = candidatesByKey.get(key);
     if (candidate) {
-      return { state: "candidate", bid: candidate.bid, ask: candidate.ask, delta: candidate.delta, quoteSource: candidate.quoteSource, quotedAt: candidate.quotedAt, grade: candidate.grade, netEdge: candidate.netEdge, reason: null };
+      // The valuation model's grade, as the opportunity list shows it (mockup approved 2026-10-10); none when it could not value the contract.
+      return { state: "candidate", bid: candidate.bid, ask: candidate.ask, delta: candidate.delta, quoteSource: candidate.quoteSource, quotedAt: candidate.quotedAt, grade: candidate.model?.grade ?? null, netEdge: candidate.netEdge, reason: null };
     }
     const quote = quotesByKey.get(key);
     if (!quote) return notCapturedCell;

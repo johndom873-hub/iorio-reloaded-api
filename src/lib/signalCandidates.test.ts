@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega } from "./optionFriction.js";
-import { attachUncompensatedShare, buildSignalCandidates as buildSignalCandidatesOnAnyClock, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, wideSpreadThreshold, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { attachUncompensatedShare, buildSignalCandidates as buildSignalCandidatesOnAnyClock, compareCandidatesByModel, emptyCandidateExclusionTally, frictionDollarsPerContract, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, scoreContractWithModel, wideSpreadThreshold, type CandidateModelContext, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { impliedVolatilityFromPrice } from "./impliedVolatilitySurface.js";
+import { valueContract } from "./contractValuation.js";
+import { varianceSessionsToExpiry } from "./varianceClock.js";
+import { volatilityModelTables } from "./volatilityModelTables.generated.js";
+import { fixtureCandidateModel, fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
 import { computeUncompensatedShare } from "./uncompensatedShare.js";
 
 // These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
@@ -131,13 +136,13 @@ describe("buildSignalCandidates: computed fields", () => {
     expect(candidates[0]!.spreadPercent).toBeCloseTo(10, 3);
   });
 
-  it("annualized yield matches the existing app formula: premium / capitalAtRisk * 365/dte, spot for calls, strike for puts", () => {
+  it("annualized yield is premium / exposure net of the premium * 365/dte: spot for calls, strike for puts", () => {
     const call = buildSignalCandidates(baseInput({ quotes: [quoteAt(110, "C")], spotPrice: 100 }))[0]!;
     const put = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spotPrice: 100 }))[0]!;
     const premiumCall = (call.bid + call.ask) / 2;
     const premiumPut = (put.bid + put.ask) / 2;
-    expect(call.annualizedYield).toBeCloseTo((premiumCall / 100) * (365 / call.dte), 6);
-    expect(put.annualizedYield).toBeCloseTo((premiumPut / 90) * (365 / put.dte), 6);
+    expect(call.annualizedYield).toBeCloseTo((premiumCall / (100 - premiumCall)) * (365 / call.dte), 6);
+    expect(put.annualizedYield).toBeCloseTo((premiumPut / (90 - premiumPut)) * (365 / put.dte), 6);
   });
 
   it("friction charges the spread share of the half-spread: 0 concedes only the commission, 0.5 sits halfway to a fill at the bid", () => {
@@ -153,13 +158,13 @@ describe("buildSignalCandidates: computed fields", () => {
     expect(atMid.vega).toBeCloseTo(blackScholesVega(forward, 90, 30 / 365, rate, atMid.surfaceImpliedVolatility), 12);
   });
 
-  it("dollar risk is max theoretical loss (strike or spot x 100, minus mid premium), and the risk-adjusted ratio follows from it", () => {
+  it("dollar risk is the exposure net of the premium ((strike or spot − mid) × 100), and the risk-adjusted ratio follows from it", () => {
     const call = buildSignalCandidates(baseInput({ quotes: [quoteAt(110, "C")], spotPrice: 100 }))[0]!;
     const put = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spotPrice: 100 }))[0]!;
     const premiumCall = (call.bid + call.ask) / 2;
     const premiumPut = (put.bid + put.ask) / 2;
-    expect(call.dollarRisk).toBeCloseTo(100 * 100 - premiumCall, 10);
-    expect(put.dollarRisk).toBeCloseTo(90 * 100 - premiumPut, 10);
+    expect(call.dollarRisk).toBeCloseTo((100 - premiumCall) * 100, 10);
+    expect(put.dollarRisk).toBeCloseTo((90 - premiumPut) * 100, 10);
     expect(put.riskAdjustedRatio).toBeCloseTo(put.edgeDollars / put.dollarRisk, 10);
   });
 
@@ -280,6 +285,11 @@ describe("buildSignalCandidates: flags and executability", () => {
     const funded = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], freeCash: 9_000 }))[0]!;
     expect(funded.flags).not.toContain("insufficient_cash");
     expect(funded.executable).toBe(true);
+    // The premium lands in cash at the sale, so the strike less the premium is enough.
+    const justEnough = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], freeCash: funded.dollarRisk }))[0]!;
+    expect(funded.dollarRisk).toBeLessThan(9_000);
+    expect(justEnough.flags).not.toContain("insufficient_cash");
+    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], freeCash: funded.dollarRisk - 1 }))[0]!.flags).toContain("insufficient_cash");
   });
 
   it("a put can be flagged AND executable is false, while its net Edge/grade are still computed (shown, not hidden)", () => {
@@ -495,7 +505,7 @@ describe("gradeSignalCandidates", () => {
   function fakeCandidates(netEdgesVolatilityPoints: number[]) {
     return netEdgesVolatilityPoints.map((vp, index) => {
       const netEdge = vp / 100;
-      return { netEdge, strategyKey: "cash_secured_put" as const, expiry: "2026-10-21", strike: 90 - index, dte: 30, delta: -0.2, bid: 1, ask: 1.1, spreadPercent: 5, openInterest: null, volume: null, bidSize: null, askSize: null, surfaceImpliedVolatility: 0.2, midImpliedVolatility: 0.2, forecastVolatility: 0.15, edge: netEdge, frictionVolatility: 0, edgeDollars: netEdge * 10, vega: 0.1, netEdgeAtMid: netEdge, edgeDollarsAtMid: netEdge * 10, dollarRisk: 8999, riskAdjustedRatio: (netEdge * 10) / 8999, riskAdjustedRatioAtMid: (netEdge * 10) / 8999, annualizedYield: 0.2, uncompensatedSharePercent: 30, quoteSource: "snapshot" as const, quotedAt: null, flags: [], executable: true, grade: "avoid" as const };
+      return { netEdge, strategyKey: "cash_secured_put" as const, expiry: "2026-10-21", strike: 90 - index, dte: 30, delta: -0.2, bid: 1, ask: 1.1, spreadPercent: 5, openInterest: null, volume: null, bidSize: null, askSize: null, surfaceImpliedVolatility: 0.2, midImpliedVolatility: 0.2, forecastVolatility: 0.15, edge: netEdge, frictionVolatility: 0, edgeDollars: netEdge * 10, vega: 0.1, netEdgeAtMid: netEdge, edgeDollarsAtMid: netEdge * 10, dollarRisk: 8999, riskAdjustedRatio: (netEdge * 10) / 8999, riskAdjustedRatioAtMid: (netEdge * 10) / 8999, annualizedYield: 0.2, uncompensatedSharePercent: 30, quoteSource: "snapshot" as const, quotedAt: null, flags: [], executable: true, grade: "avoid" as const, model: null };
     });
   }
 
@@ -526,10 +536,71 @@ describe("gradeSignalCandidates", () => {
 });
 
 describe("pickBestCandidate", () => {
-  it("picks the highest Edge $, ties broken by net Edge, and is null for an empty list", () => {
-    const c = (edgeDollars: number, netEdge: number) => ({ edgeDollars, netEdge } as ReturnType<typeof gradeSignalCandidates>[number]);
+  type Candidate = ReturnType<typeof gradeSignalCandidates>[number];
+  const c = (edgeDollars: number, netEdge: number, model: Candidate["model"] = null) => ({ edgeDollars, netEdge, model }) as Candidate;
+  it("picks Pluto's order: the highest Hist Yield, then the model's Edge $, whatever the old Edge says", () => {
+    const histYield10 = c(5, 0.01, fixtureCandidateModel({ calibratedAnnualizedReturn: 0.1, expectedPnlDollars: 20 }));
+    const histYield20 = c(1, 0.01, fixtureCandidateModel({ calibratedAnnualizedReturn: 0.2, expectedPnlDollars: 8 }));
+    const histYield20MoreEdge = c(1, 0.01, fixtureCandidateModel({ calibratedAnnualizedReturn: 0.2, expectedPnlDollars: 9 }));
+    expect(pickBestCandidate([histYield10, histYield20, histYield20MoreEdge, c(90, 0.2)])).toBe(histYield20MoreEdge);
+  });
+  it("puts candidates the model could not value last, ordered by the old Edge $ then net Edge; null for an empty list", () => {
     expect(pickBestCandidate([c(10, 0.01), c(50, 0.02), c(30, 0.05)])!.edgeDollars).toBe(50);
     expect(pickBestCandidate([c(10, 0.01), c(10, 0.05)])!.netEdge).toBe(0.05);
+    expect(pickBestCandidate([c(90, 0.2), c(1, 0.01, fixtureCandidateModel({ calibratedAnnualizedReturn: -0.5 }))])!.model).not.toBeNull();
     expect(pickBestCandidate([])).toBeNull();
+  });
+});
+
+describe("valuation model on candidates (model review, 2026-10-10)", () => {
+  // Valued Monday 2026-09-21 at 10:30 ET with a 40% YZ21 forecast; the forward and spot of the quote's instant are 101 and 100.5.
+  const valuedAtMs = Date.parse("2026-09-21T14:30:00Z");
+  const context = (overrides: Partial<CandidateModelContext> = {}): CandidateModelContext => ({
+    tables: volatilityModelTables,
+    forecast: fixtureModelForecast(0.4),
+    group: "stock",
+    varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, fixtureTradingSessions),
+    quoteInstantMs: () => valuedAtMs,
+    forwardForQuote: () => 101,
+    spotForQuote: () => 100.5,
+    ...overrides,
+  });
+
+  it("friction in dollars per contract is λ × half-spread × 100 + commission", () => {
+    expect(frictionDollarsPerContract(1.0, 1.1, 0.5, 0.65)).toBeCloseTo(0.5 * 0.05 * 100 + 0.65, 12);
+    expect(frictionDollarsPerContract(1.0, 1.1, 0, 0.65)).toBeCloseTo(0.65, 12);
+  });
+
+  it("values a quote at its own instant, forward and spot: the same figures valueContract gives, plus its session-clock IV", () => {
+    const quote = { ...quoteAt(90, "P"), bid: 0.9, ask: 1.0 };
+    const scored = scoreContractWithModel(context(), slice30(), quote, rate, 3)!;
+    const tau = varianceSessionsToExpiry(valuedAtMs, "2026-10-21", fixtureTradingSessions);
+    expect(tau).toBeCloseTo(0.251 + 22, 9); // 10:30 ET: halfway along the rest-of-day curve from 0.309 (10:00) to 0.193 (11:00), then 22 sessions
+    const direct = valueContract(volatilityModelTables, { isCall: false, strike: 90, forward: 101, mid: 0.95, frictionDollars: 3, perSessionVariance: 0.4 ** 2 / 252, varianceSessions: tau, calendarYears: 30 / 365, riskFreeRate: rate, group: "stock", spot: 100.5 })!;
+    expect(scored).toMatchObject({ ...direct, valuedAtIso: "2026-09-21T14:30:00.000Z", forward: 101, spot: 100.5 });
+    // The mid's Black-76 IV (calendar years) restated per session: √(252 × IV² × T ÷ τ).
+    const midIv = impliedVolatilityFromPrice(0.95, 101, 90, 30 / 365, rate, false)!;
+    expect(scored.impliedVolatility).toBeCloseTo(Math.sqrt((252 * midIv ** 2 * (30 / 365)) / tau), 12);
+  });
+
+  it("returns null when no variance time is left (after the expiry's close)", () => {
+    const afterClose = context({ quoteInstantMs: () => Date.parse("2026-10-21T20:30:00Z") });
+    expect(scoreContractWithModel(afterClose, slice30(), { ...quoteAt(90, "P"), bid: 0.9, ask: 1.0 }, rate, 3)).toBeNull();
+  });
+
+  it("buildSignalCandidates attaches the model block with the sale's friction, and leaves it null without a model", () => {
+    const withoutModel = buildSignalCandidates(baseInput());
+    expect(withoutModel.every((candidate) => candidate.model === null)).toBe(true);
+    const withModel = buildSignalCandidates(baseInput({ model: context(), spreadShareCharged: 0.5 }));
+    const put = withModel.find((candidate) => candidate.strategyKey === "cash_secured_put")!;
+    const friction = frictionDollarsPerContract(put.bid, put.ask, 0.5, put.commissionPerContractDollars!);
+    expect(put.model).toEqual(scoreContractWithModel(context(), slice30(), { ...quoteAt(90, "P"), bid: put.bid, ask: put.ask }, rate, friction));
+    expect(put.model!.premiumAfterCostsDollars).toBeCloseTo(((put.bid + put.ask) / 2) * 100 - friction, 9);
+  });
+
+  it("compareCandidatesByModel ranks by calibrated annualized return, then expected P&L, unvalued last", () => {
+    const valued = (calibratedAnnualizedReturn: number, expectedPnlDollars: number) => ({ model: fixtureCandidateModel({ calibratedAnnualizedReturn, expectedPnlDollars }) });
+    const ranked = [valued(0.1, 90), { model: null }, valued(0.3, 10), valued(0.3, 40)].sort(compareCandidatesByModel);
+    expect(ranked.map((entry) => (entry.model ? [entry.model.calibratedAnnualizedReturn, entry.model.expectedPnlDollars] : null))).toEqual([[0.3, 40], [0.3, 10], [0.1, 90], null]);
   });
 });

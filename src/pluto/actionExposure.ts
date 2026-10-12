@@ -3,10 +3,10 @@ import { db } from "../db/connection.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { computeInFlightOrderNotional } from "../lib/orderLimits.js";
 
-// EXP $ per Pluto order, the way Positions counts exposure (mockup approved 2026-10-06): an open or a roll adds
-// what the order gate counts for it (orderLimits.computeInFlightOrderNotional); a close releases exposure, shown
-// negative — a put buyback frees strike × 100 per contract, selling shares frees shares × price; buying back a
-// call frees nothing (the shares stay). A working order counts its ordered quantity, a filled one what filled
+// EXP $ per Pluto order, the way Positions counts exposure (mockup approved 2026-10-06; net of the premium since
+// 2026-10-12): an open or a roll adds what the order gate counts for it (orderLimits.computeInFlightOrderNotional); a
+// close releases exposure, shown negative — a put buyback frees (strike − the premium it was sold for) × 100 per
+// contract, selling shares frees shares × price; buying back a call frees nothing (the shares stay). A working order counts its ordered quantity, a filled one what filled
 // (a partial fill scales the order's figure by the filled share); an order that never filled, was blocked or
 // rejected shows nothing.
 
@@ -24,6 +24,8 @@ export interface PlutoActionOrderRequest {
   payload: OrderRequestPayload;
   /** Contracts (or shares, for a share sale) the order's trades filled so far; null before any fill. */
   filledQuantity: number | null;
+  /** A buyback: the premium per share the bought-back leg was sold for; null for other orders or a leg not found. */
+  closedLegPremium: number | null;
 }
 
 const outcomesWithExposure = new Set(["order_built", "confirmed", "filled", "partially_filled", "cancelled_partially_filled"]);
@@ -34,7 +36,9 @@ export function computePlutoActionExposure(action: PlutoActionExposureInput, ord
   const quantity = order.filledQuantity ?? ordered;
   if (action.kind === "close_leg") {
     const strike = Number(action.contract?.strike ?? 0);
-    return action.contract?.right === "P" && strike > 0 ? -strike * 100 * quantity : 0;
+    // A leg whose sale price is unknown releases its whole strike: the exposure it was counted at before the premium rule.
+    const premium = order.closedLegPremium ?? 0;
+    return action.contract?.right === "P" && strike > 0 ? -Math.max(0, strike - premium) * 100 * quantity : 0;
   }
   if (action.kind === "close_shares" || action.kind === "close_position") {
     const price = action.fillPrice ?? action.limitPrice ?? 0;
@@ -68,5 +72,19 @@ export async function loadPlutoOrderRequestsByActionId(actionIds: string[], conn
     const counts = kind === "close_shares" || kind === "close_position" ? fill.leg_type === "stock" && fill.is_closing_trade : kind === "close_leg" ? fill.leg_type === "option" && fill.is_closing_trade : fill.leg_type === "option" && !fill.is_closing_trade;
     if (counts) filledQuantity.set(fill.pluto_action_id, (filledQuantity.get(fill.pluto_action_id) ?? 0) + Number(fill.quantity));
   }
-  return new Map(rows.map((row) => [row.pluto_action_id, { requestType: row.request_type, payload: row.payload, filledQuantity: filledQuantity.get(row.pluto_action_id) ?? null }]));
+  // A buyback's closed leg, for the premium it was sold for.
+  const closedLegIdByAction = new Map<string, string>();
+  for (const row of rows) {
+    const closedLegId = row.kind === "close_leg" ? row.payload.legs.find((leg) => leg.role === "option" && leg.positionLegId)?.positionLegId : undefined;
+    if (closedLegId) closedLegIdByAction.set(row.pluto_action_id, closedLegId);
+  }
+  const closedLegs: { id: string; entry_price: string | null }[] = closedLegIdByAction.size === 0 ? [] : await connection("position_legs").whereIn("id", [...new Set(closedLegIdByAction.values())]).select("id", "entry_price");
+  const premiumByLegId = new Map(closedLegs.filter((leg) => leg.entry_price !== null).map((leg) => [leg.id, Number(leg.entry_price)]));
+  return new Map(
+    rows.map((row) => {
+      const closedLegId = closedLegIdByAction.get(row.pluto_action_id);
+      const closedLegPremium = closedLegId === undefined ? null : premiumByLegId.get(closedLegId) ?? null;
+      return [row.pluto_action_id, { requestType: row.request_type, payload: row.payload, filledQuantity: filledQuantity.get(row.pluto_action_id) ?? null, closedLegPremium }];
+    }),
+  );
 }

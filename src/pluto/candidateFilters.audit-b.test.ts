@@ -6,16 +6,17 @@ import type { TickerSignals } from "../lib/signalsTypes.js";
 import { filterTickerForPluto, rejectTicker, type PlutoTickerFilterInput } from "./candidateFilters.js";
 import { expectedDailyMovePct } from "./moveContext.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { fixtureCandidateModel, fixtureModelForecast } from "../lib/testSupport/valuationModelFixtures.js";
 
 const now = Date.parse("2026-09-28T15:00:00Z"); // 11:00 ET
 const today = "2026-09-28";
 
 const settings: PlutoSettings = {
   capitalBudgetPct: 30, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
-  minGrade: "good", minEdgeDollars: 30, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
+  minGrade: "good", minEdgeYieldPct: 15, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 0, stressSigmas: 2,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
-  maxEdgeDriftVp: 1, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
+  maxEdgeMarginDriftPts: 10, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
   modelId: "openai/gpt-6-luna", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 3, confidenceFloor: 0.6, consecutiveModelFailuresBreaker: 3, promptVersion: "v1",
   daySignalsPollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, perTickerModelCooldownMinutes: 5, maxEnabledTickers: 15, messageRateLimitPerSecond: 8,
   crashLoopRestartsPerHour: 3, telegramVerbosity: "actions",
@@ -30,6 +31,7 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
     surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, forecastVolatility: 0.5, edge: 0.12, frictionVolatility: 0.02, netEdge: 0.1, edgeDollars: 80, vega: 0.08,
     dollarRisk: 9795, riskAdjustedRatio: 0.008, annualizedYield: 0.83, uncompensatedSharePercent: null,
     quoteSource: "day", quotedAt: new Date(now - 2 * 60_000).toISOString(), flags: [], executable: true, grade: "strong",
+    model: fixtureCandidateModel({ edgeMargin: 0.35, expectedPnlDollars: 80, premiumYield: 0.83 }),
     ...overrides,
   };
 }
@@ -43,7 +45,7 @@ function scored(overrides: Partial<TickerSignals> = {}): TickerSignals {
     tickerId: "t1", symbol: "HOOD", companyName: "Robinhood", sector: "Financial", snapshotDateIso: today, snapshotCapturedAt: "2026-09-28T14:05:00Z", spotPrice: 110, priceSource: "live",
     previousClose: { close: 108, dateIso: "2026-09-25" }, dayChangePercent: 1.85, candidates: [candidate()], best: null, gradeCounts: { strong: 1, good: 0, weak: 0, avoid: 0 },
     heldLegs: [], rolls: [], bestRoll: null, rollCount: 0, fittedSliceCount: 3, totalSliceCount: 3, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: "2026-11-04", macroEvents: [],
-    atmImpliedVolatility: 0.6, forecast: { volatility: 0.5, windowDays: 63 }, dailyBarCount: 1250, dividendCadenceUnknown: false, caveats: [], freeShares: 0, freeCash: 500_000,
+    atmImpliedVolatility: 0.6, atmImpliedVolatilityPerSession: 0.66, forecast: { volatility: 0.5, windowDays: 63 }, modelForecast: fixtureModelForecast(0.5), dailyBarCount: 1250, dividendCadenceUnknown: false, caveats: [], freeShares: 0, freeCash: 500_000,
     dayQuotesAsOf: null, ivShiftByExpiry: { "2026-10-16": { shiftVolatilityPoints: 1.2, quoteCount: 9 } }, quoteSourceCounts: { live: 0, day: 1, snapshot: 0 }, unscoredReason: null,
     ...overrides,
   } as TickerSignals;
@@ -52,7 +54,8 @@ function scored(overrides: Partial<TickerSignals> = {}): TickerSignals {
 function input(overrides: Partial<PlutoTickerFilterInput> = {}): PlutoTickerFilterInput {
   return { scored: scored(), slices: [slice()], settings, todayEasternIso: today, nowMs: now, botEnabled: true, ...overrides };
 }
-// Audit B (2026-10-07): the day-move limit relative to each ticker's normal day (maxDayMoveMultiple × forecast / √252).
+// Audit B (2026-10-07): the day-move limit relative to each ticker's normal day (maxDayMoveMultiple × forecast / √252);
+// the forecast is the valuation model's YZ21 since the model review (2026-10-10).
 const normalDay = (volatility: number) => (volatility * 100) / Math.sqrt(252);
 
 describe("rejectTicker — maxDayMoveMultiple", () => {
@@ -65,8 +68,10 @@ describe("rejectTicker — maxDayMoveMultiple", () => {
 
   it("scales with the ticker's own forecast: the same 7% move is out for a calm stock and fine for a wild one", () => {
     // 30%: normal day 1.89%, 3× = 5.67%. 80%: normal day 5.04%, 3× = 15.1%.
-    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 7, forecast: { volatility: 0.3, windowDays: 63 } as TickerSignals["forecast"] }) }))).toHaveLength(1);
-    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 7, forecast: { volatility: 0.8, windowDays: 63 } as TickerSignals["forecast"] }) }))).toEqual([]);
+    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 7, modelForecast: fixtureModelForecast(0.3) }) }))).toHaveLength(1);
+    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 7, modelForecast: fixtureModelForecast(0.8) }) }))).toEqual([]);
+    // The old Edge's YZ63 plays no part.
+    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 7, modelForecast: fixtureModelForecast(0.8), forecast: { volatility: 0.3, windowDays: 63 } }) }))).toEqual([]);
   });
 
   it("follows the setting: 2× blocks what 3× allows, and 0× blocks any move at all", () => {
@@ -81,16 +86,16 @@ describe("rejectTicker — maxDayMoveMultiple", () => {
     expect(rejectTicker(input({ scored: scored({ dayChangePercent: null }) }))).toEqual([]);
   });
 
-  // RISK (characterised): with a zero or missing forecast volatility there is no normal day, so the day-move limit is
-  // skipped entirely (the old fixed ±6% applied regardless). A missing forecast is caught by unscoredReason "no_forecast";
-  // a zero one is not caught anywhere here.
+  // With a zero or missing forecast volatility there is no normal day: the ticker is blocked rather than the day-move
+  // limit being switched off.
   it("a zero forecast volatility blocks the ticker instead of switching the day-move limit off", () => {
-    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 40, forecast: { volatility: 0, windowDays: 63 } as TickerSignals["forecast"] }) }))).toContain("no volatility forecast to judge today's move against");
+    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 40, modelForecast: { perSessionVariance: 0, annualizedVolatility: 0, windowDays: 21 } }) }))).toEqual(["no volatility forecast to judge today's move against"]);
   });
 
-  it("a missing forecast blocks the ticker too, next to the unscored reason", () => {
-    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 40, forecast: null }) }))).toEqual(["no volatility forecast to judge today's move against"]);
-    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 40, forecast: null, unscoredReason: "no_forecast" }) }))).toEqual(["not scored: no_forecast", "no volatility forecast to judge today's move against"]);
+  it("a missing model forecast blocks the ticker too, next to the unscored reason", () => {
+    const noModelForecast = "no 21-day volatility forecast for the valuation model (fewer than 22 daily bars before today)";
+    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 40, modelForecast: null }) }))).toEqual([noModelForecast, "no volatility forecast to judge today's move against"]);
+    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 40, modelForecast: null, unscoredReason: "no_forecast" }) }))).toEqual(["not scored: no_forecast", noModelForecast, "no volatility forecast to judge today's move against"]);
   });
 
   it("uses the same normal day as move_context's expected_daily_move_pct", () => {

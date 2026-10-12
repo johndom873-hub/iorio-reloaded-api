@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "./realizedVolatility.js";
 import { sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { computeVolatilityEdge, expirySpansEarnings, forecastOnCalendarDayBasis, tradingSessionsByExpiry, expirySpansMacroEvent, selectRealizedVolatilityForecast, type EdgeSlice } from "./volatilityEdge.js";
+import { computeVolatilityEdge, expirySpansEarnings, forecastOnCalendarDayBasis, tradingSessionsByExpiry, expirySpansMacroEvent, selectModelVolatilityForecast, selectRealizedVolatilityForecast, type EdgeSlice } from "./volatilityEdge.js";
 
 // Deterministic synthetic bars: a slow random walk with a fixed seed.
 function makeBars(count: number, dailyMove = 0.02, seed = 42): DailyOhlcvBar[] {
@@ -17,6 +17,24 @@ function makeBars(count: number, dailyMove = 0.02, seed = 42): DailyOhlcvBar[] {
     return { tradingDate: new Date(start + index * 86_400_000).toISOString().slice(0, 10), open, high, low, close, volume: 1_000_000 };
   });
 }
+
+describe("selectModelVolatilityForecast (the valuation model's YZ21, model review P3)", () => {
+  it("is the 21-day Yang-Zhang volatility, with its variance per session = volatility² ÷ 252, whatever longer history exists", () => {
+    for (const count of [22, 200]) {
+      const bars = makeBars(count);
+      const expected = computeYangZhangVolatility(bars, 21);
+      if (!expected.available) throw new Error("fixture must be fittable");
+      const forecast = selectModelVolatilityForecast(bars)!;
+      expect(forecast.annualizedVolatility).toBe(expected.annualizedVolatility);
+      expect(forecast.perSessionVariance).toBeCloseTo(expected.annualizedVolatility ** 2 / 252, 15);
+      expect(forecast.windowDays).toBe(21);
+    }
+  });
+
+  it("needs 22 bars (21 returns and the prior close)", () => {
+    expect(selectModelVolatilityForecast(makeBars(21))).toBeNull();
+  });
+});
 
 describe("selectRealizedVolatilityForecast", () => {
   it("uses the 63-day Yang-Zhang volatility when there is enough history", () => {

@@ -4,46 +4,56 @@ import { buildSeedFailureMessage, seedDaySignals, selectDaySignalExpiries, type 
 import type { SignalCandidate, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
+import { fixtureCandidateModel, fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
+import type { SignalModelPrediction } from "./signalModelPredictionsStore.js";
 
 // Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
 const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
-const candidate = (expiry: string, netEdge: number, edgeDollars: number): SignalCandidate => ({ expiry, netEdge, edgeDollars, strike: 100, strategyKey: "cash_secured_put" }) as SignalCandidate;
+// A candidate ranked by the model: calibrated annualized return first, then expected P&L per contract.
+const candidate = (expiry: string, calibratedAnnualizedReturn: number, expectedPnlDollars: number, edgeMargin = 0.25): SignalCandidate =>
+  ({ expiry, strike: 100, strategyKey: "cash_secured_put", model: fixtureCandidateModel({ calibratedAnnualizedReturn, expectedPnlDollars, edgeMargin }) }) as SignalCandidate;
 
 describe("selectDaySignalExpiries", () => {
-  it("takes the distinct expiries of the top 10 positive-net-Edge candidates by Edge $, in first-appearance order, capped at 3", () => {
+  it("takes the distinct expiries of the top 10 candidates with a positive expected P&L, ranked as Pluto ranks them, in first-appearance order, capped at 3", () => {
     const candidates = [
       candidate("2026-12-18", 0.02, 30),
-      candidate("2026-10-16", 0.06, 140),
-      candidate("2026-10-16", 0.05, 120),
-      candidate("2026-11-20", 0.04, 100),
-      candidate("2026-10-09", 0.03, 90),
-      candidate("2026-10-30", 0.03, 80),
+      candidate("2026-10-16", 0.6, 140, 0.35),
+      candidate("2026-10-16", 0.5, 120),
+      candidate("2026-11-20", 0.4, 100),
+      candidate("2026-10-09", 0.3, 90),
+      candidate("2026-10-30", 0.3, 80),
       candidate("2026-10-16", 0.01, 10),
     ];
     const seeds = selectDaySignalExpiries(candidates);
     expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-10-16", "2026-11-20", "2026-10-09"]);
     expect(seeds.map((seed) => seed.rank)).toEqual([1, 2, 3]);
-    expect(seeds[0]).toMatchObject({ seedBestEdgeDollars: 140, seedBestNetEdge: 0.06 });
+    expect(seeds[0]).toMatchObject({ seedBestExpectedPnlDollars: 140, seedBestEdgeMargin: 0.35 });
   });
 
-  it("ignores Avoid candidates (net Edge <= 0) even when their Edge $ would rank them", () => {
-    const seeds = selectDaySignalExpiries([candidate("2026-10-16", -0.01, 500), candidate("2026-11-20", 0, 400), candidate("2026-12-18", 0.01, 5)]);
+  it("ignores candidates the model expects to lose on, and unvalued ones, however they would rank", () => {
+    const unvalued = { expiry: "2026-10-23", strike: 100, strategyKey: "cash_secured_put", model: null } as SignalCandidate;
+    const seeds = selectDaySignalExpiries([candidate("2026-10-16", 2, -1), candidate("2026-11-20", 1, 0), unvalued, candidate("2026-12-18", 0.01, 5)]);
     expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-12-18"]);
   });
 
+  it("ranks by the calibrated annualized return before the expected P&L", () => {
+    const seeds = selectDaySignalExpiries([candidate("2026-10-16", 0.1, 500), candidate("2026-11-20", 0.3, 20)], { topCandidates: 10, maxExpiries: 1 });
+    expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-11-20"]);
+  });
+
   it("only looks at the top 10 candidates: an expiry that first appears at rank 11 is not pooled", () => {
-    const top = Array.from({ length: 10 }, (_, index) => candidate("2026-10-16", 0.05, 1000 - index));
-    const seeds = selectDaySignalExpiries([...top, candidate("2026-11-20", 0.05, 1)]);
+    const top = Array.from({ length: 10 }, (_, index) => candidate("2026-10-16", 1 - index * 0.01, 100));
+    const seeds = selectDaySignalExpiries([...top, candidate("2026-11-20", 0.5, 100)]);
     expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-10-16"]);
   });
 
   it("appends every open short leg's expiry after the ranked ones, outside the cap, without duplicating one already pooled (Roll Signals)", () => {
-    const list = [candidate("2026-10-16", 100, 200), candidate("2026-10-23", 90, 150), candidate("2026-10-30", 80, 100), candidate("2026-11-06", 70, 90)];
+    const list = [candidate("2026-10-16", 1, 200), candidate("2026-10-23", 0.9, 150), candidate("2026-10-30", 0.8, 100), candidate("2026-11-06", 0.7, 90)];
     const seeds = selectDaySignalExpiries(list, undefined, ["2026-11-20", "2026-10-23", "2026-11-20"]);
     expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-10-16", "2026-10-23", "2026-10-30", "2026-11-20"]);
     expect(seeds.map((seed) => seed.rank)).toEqual([1, 2, 3, 4]);
-    expect(seeds[3]).toMatchObject({ seedBestEdgeDollars: 0, seedBestNetEdge: 0 });
+    expect(seeds[3]).toMatchObject({ seedBestExpectedPnlDollars: 0, seedBestEdgeMargin: 0 });
     // A held leg on a ticker with no positive candidate still gets a pool.
     expect(selectDaySignalExpiries([candidate("2026-10-16", -1, -10)], undefined, ["2026-10-16"]).map((seed) => seed.expiry)).toEqual(["2026-10-16"]);
   });
@@ -105,12 +115,16 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     dividendCadenceUnknown: false,
     todayEasternIso: tradingDateIso,
     openSessionDatesIso: fixtureWeekdaySessions,
+    modelForecast: fixtureModelForecast(forecastVolatility),
+    tradingSessions: fixtureTradingSessions,
+    valuationGroup: "stock",
   };
 }
 const settings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100, orderUnfilledCancelMinutes: 15 };
 
 function seedDependencies(overrides: Partial<DaySignalsSeedDependencies> = {}) {
   const replaceDaySignalPool = vi.fn(async () => {});
+  const recordSignalModelPredictions = vi.fn(async (_predictions: SignalModelPrediction[]) => {});
   const deps: DaySignalsSeedDependencies = {
     loadSignalsUniverseTickers: async () => [
       { tickerId: "id-RICH", symbol: "RICH", companyName: null, sector: null },
@@ -122,17 +136,19 @@ function seedDependencies(overrides: Partial<DaySignalsSeedDependencies> = {}) {
     loadAccountContext: async () => ({ freeCash: 50_000 }),
     loadTradingSettings: async () => settings,
     replaceDaySignalPool,
+    recordSignalModelPredictions,
     now: () => new Date("2026-09-24T14:40:00Z"),
     ...overrides,
   };
-  return { deps, replaceDaySignalPool };
+  return { deps, replaceDaySignalPool, recordSignalModelPredictions };
 }
 
 describe("seedDaySignals", () => {
   it("pools only tickers with today's snapshot and a positive candidate, and replaces the whole pool in one call", async () => {
-    const { deps, replaceDaySignalPool } = seedDependencies();
+    const { deps, replaceDaySignalPool, recordSignalModelPredictions } = seedDependencies();
     const result = await seedDaySignals("2026-09-24", deps);
-    expect(result).toEqual({ tradingDateIso: "2026-09-24", tickersScored: 2, tickersPooled: 1, expiriesPooled: 1, symbolsWithoutPool: ["CHEAP"], symbolsWithoutTodaySnapshot: ["OLD"], accountContextUnavailable: false });
+    const predictions = recordSignalModelPredictions.mock.calls[0]![0];
+    expect(result).toEqual({ tradingDateIso: "2026-09-24", tickersScored: 2, tickersPooled: 1, expiriesPooled: 1, symbolsWithoutPool: ["CHEAP"], symbolsWithoutTodaySnapshot: ["OLD"], accountContextUnavailable: false, modelPredictionsRecorded: predictions.length });
     expect(replaceDaySignalPool).toHaveBeenCalledTimes(1);
     const [tradingDateIso, seeds, seededAt] = replaceDaySignalPool.mock.calls[0]! as unknown as [string, { tickerId: string; snapshotId: string; expiries: { expiry: string; rank: number }[] }[], Date];
     expect(tradingDateIso).toBe("2026-09-24");
@@ -158,6 +174,34 @@ describe("seedDaySignals", () => {
     const result = await seedDaySignals("2026-09-24", deps);
     expect(result.tickersPooled).toBe(0);
     expect(replaceDaySignalPool).toHaveBeenCalledWith("2026-09-24", [], expect.any(Date));
+  });
+});
+
+describe("seed model prediction log", () => {
+  it("logs every valued candidate of every scored ticker, priced at the snapshot's own moment, the ones the model expects to lose on included", async () => {
+    const { deps, recordSignalModelPredictions } = seedDependencies();
+    await seedDaySignals("2026-09-24", deps);
+    expect(recordSignalModelPredictions).toHaveBeenCalledTimes(1);
+    const predictions = recordSignalModelPredictions.mock.calls[0]![0];
+    expect(new Set(predictions.map((prediction) => prediction.tickerId))).toEqual(new Set(["id-RICH", "id-CHEAP"]));
+    expect(predictions).toHaveLength(4);
+    const richPut = predictions.find((prediction) => prediction.tickerId === "id-RICH" && prediction.right === "P")!;
+    const cheapPut = predictions.find((prediction) => prediction.tickerId === "id-CHEAP" && prediction.right === "P")!;
+    expect(richPut).toMatchObject({ tradingDateIso: "2026-09-24", expiry: "2026-10-21", strike: 90, quoteSource: "snapshot", valuedAtIso: "2026-09-24T14:00:00.000Z", spot: forward });
+    expect(richPut.expectedPnlDollars).toBeGreaterThan(0);
+    expect(cheapPut.expectedPnlDollars).toBeLessThan(0);
+    expect(cheapPut.grade).toBe("avoid");
+  });
+
+  it("still writes the pool when the log write fails, and says so in the result", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { deps, replaceDaySignalPool } = seedDependencies({ recordSignalModelPredictions: async () => { throw new Error("pg down"); } });
+    const result = await seedDaySignals("2026-09-24", deps);
+    expect(replaceDaySignalPool).toHaveBeenCalledTimes(1);
+    expect(result.tickersPooled).toBe(1);
+    expect(result.modelPredictionsRecorded).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("pg down"));
+    warn.mockRestore();
   });
 });
 

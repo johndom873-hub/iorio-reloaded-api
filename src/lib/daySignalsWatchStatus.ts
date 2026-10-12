@@ -3,7 +3,7 @@ import { daySignalsRerankTriggerFraction, daySignalsUnpooledRecheckIntervalMs } 
 import { hasDaySignalsSeedFinished, loadDayRerankStates, type DayRerankState } from "./daySignalsStore.js";
 import { easternIsoDate } from "./easternIsoDate.js";
 import { computeMarketSessionStatus, resolveIsOpenDay } from "./marketSessionStatus.js";
-import { computeAtmImpliedVolatility, rebaseSlicesToToday } from "./signalsLiveScoring.js";
+import { computeAtmImpliedVolatility } from "./signalsLiveScoring.js";
 import { loadLatestSnapshot, loadSlices } from "./signalsStore.js";
 
 // Whether Day Signals is watching a ticker today, and why not (Marcelo, 2026-10-07, Pluto Tickers tab). Pluto analyses only
@@ -70,7 +70,7 @@ export async function loadDaySignalsWatchStatuses(tickerIds: string[], now: Date
   for (const tickerId of tickerIds) {
     const header = await loadLatestSnapshot(tickerId);
     const today = header && header.tradingDateIso === tradingDateIso ? header : null;
-    const atmImpliedVolatility = today ? computeAtmImpliedVolatility(rebaseSlicesToToday(await loadSlices(today.snapshotId), tradingDateIso)) : null;
+    const atmImpliedVolatility = today ? computeAtmImpliedVolatility(await loadSlices(today.snapshotId)) : null;
     statuses.set(tickerId, describeDaySignalsWatch({
       openDay,
       seedFinished,

@@ -22,7 +22,8 @@ export interface PlutoSettings {
   minCashReservePct: number;
   // Candidate quality
   minGrade: PlutoGrade;
-  minEdgeDollars: number;
+  /** Lowest Edge Yield, % a year on the exposure, a candidate needs (rolls: the net roll Edge $ on the new leg's exposure and days). */
+  minEdgeYieldPct: number;
   maxAbsDelta: number;
   minDte: number;
   maxDte: number;
@@ -49,7 +50,8 @@ export interface PlutoSettings {
   dailyLossBreakerPct: number;
   spyStressBreakerPct: number;
   // Execution
-  maxEdgeDriftVp: number;
+  /** Refuse an order when the edge margin moved more than this many percentage points since the model decided (2026-10-10). */
+  maxEdgeMarginDriftPts: number;
   /** Minutes after a filled Pluto action on a symbol before Pluto may act on it again; 0 = no cooldown. */
   tickerCooldownMinutes: number;
   /** A fill this far (% of the reference price) past the reference trips the fill_slippage breaker. */
@@ -93,7 +95,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   orderSizePctOfBudget: { column: "order_size_pct_of_budget", kind: "number", min: 0, max: 100 },
   minCashReservePct: { column: "min_cash_reserve_pct", kind: "number", min: 0, max: 100 },
   minGrade: { column: "min_grade", kind: "text", oneOf: ["strong", "good", "weak"] },
-  minEdgeDollars: { column: "min_edge_dollars", kind: "number", min: 0 },
+  minEdgeYieldPct: { column: "min_edge_yield_pct", kind: "number", min: 0 },
   maxAbsDelta: { column: "max_abs_delta", kind: "number", min: 0, max: 1 },
   minDte: { column: "min_dte", kind: "integer", min: 0 },
   maxDte: { column: "max_dte", kind: "integer", min: 0 },
@@ -115,7 +117,7 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   windowEndEt: { column: "window_end_et", kind: "text" },
   dailyLossBreakerPct: { column: "daily_loss_breaker_pct", kind: "number", min: 0, max: 100 },
   spyStressBreakerPct: { column: "spy_stress_breaker_pct", kind: "number", min: 0, max: 100 },
-  maxEdgeDriftVp: { column: "max_edge_drift_vp", kind: "number", min: 0 },
+  maxEdgeMarginDriftPts: { column: "max_edge_margin_drift_pts", kind: "number", min: 0, max: 100 },
   tickerCooldownMinutes: { column: "ticker_cooldown_minutes", kind: "integer", min: 0 },
   maxFillSlippagePct: { column: "max_fill_slippage_pct", kind: "number", min: 0, max: 100 },
   modelId: { column: "model_id", kind: "text" },

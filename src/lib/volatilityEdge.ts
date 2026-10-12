@@ -38,6 +38,24 @@ export function selectRealizedVolatilityForecast(bars: DailyOhlcvBar[]): Realize
   return null;
 }
 
+/** The valuation model's forecast (model review P3, approved by Marcelo 2026-10-10): Yang-Zhang over the last 21 sessions. */
+export const modelForecastWindowDays = 21;
+
+export interface ModelVolatilityForecast {
+  /** Variance per trading session (what the variance clock multiplies). */
+  perSessionVariance: number;
+  /** √(252 × per-session variance): the same forecast annualized on sessions. */
+  annualizedVolatility: number;
+  windowDays: typeof modelForecastWindowDays;
+}
+
+/** `bars` in date order, ending before the scoring day (never a partial session). Null without 22 valid bars. */
+export function selectModelVolatilityForecast(bars: DailyOhlcvBar[]): ModelVolatilityForecast | null {
+  const result = computeYangZhangVolatility(bars, modelForecastWindowDays);
+  if (!result.available || !Number.isFinite(result.annualizedVolatility) || !(result.annualizedVolatility > 0)) return null;
+  return { perSessionVariance: result.annualizedVolatility ** 2 / tradingSessionsPerYear, annualizedVolatility: result.annualizedVolatility, windowDays: modelForecastWindowDays };
+}
+
 export interface EdgeSlice {
   status: SviSliceStatus;
   parameters: RawSviParameters | null;

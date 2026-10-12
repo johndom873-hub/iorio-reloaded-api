@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, emptyCandidateExclusionTally, gradeSignalCandidates, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice , type SignalCandidatesInput } from "./signalCandidates.js";
-import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeDayChangePercent, computeUncompensatedByContract, countGrades, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
+import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, emptyCandidateExclusionTally, gradeSignalCandidates, pickBestCandidate, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice , type SignalCandidatesInput, type CandidateModelContext } from "./signalCandidates.js";
+import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeAtmImpliedVolatilityPerSession, computeDayChangePercent, countRollableLegs, sameTimeToday, computeUncompensatedByContract, countGrades, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 import { tradingSessionsByExpiry } from "./volatilityEdge.js";
 import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
+import { varianceSessionsToExpiry } from "./varianceClock.js";
+import { volatilityModelTables } from "./volatilityModelTables.generated.js";
+import { fixtureModelForecast, fixtureRollModel, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
+import type { RollSignalCandidate } from "./rollSignalCandidates.js";
 
 // Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
 const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
@@ -67,10 +71,25 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     // Same day as the snapshot: the surface is scored as fitted. See the rebaseSlicesToToday tests for a stale snapshot.
     todayEasternIso: "2026-09-21",
     openSessionDatesIso: fixtureWeekdaySessions,
+    modelForecast: fixtureModelForecast(0.15),
+    tradingSessions: fixtureTradingSessions,
+    valuationGroup: "stock",
     ...overrides,
   };
 }
 const account = { freeCash: 1_000_000 };
+/** The model context scoreTicker builds for 10:00 snapshot quotes on the capture day: valued at the capture, fitted forward, snapshot spot. */
+function snapshotModelContext(tickerInputs: TickerSignalsInputs): CandidateModelContext {
+  return {
+    tables: volatilityModelTables,
+    forecast: tickerInputs.modelForecast!,
+    group: tickerInputs.valuationGroup,
+    varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, tickerInputs.tradingSessions),
+    quoteInstantMs: () => Date.parse(tickerInputs.header!.capturedAt),
+    forwardForQuote: (fittedSlice) => fittedSlice.forwardPrice,
+    spotForQuote: () => tickerInputs.header!.underlyingPrice!,
+  };
+}
 // No test in this file is about the Signals tab's own limits (see signalCandidates.test.ts and
 // signalOrderLimits.test.ts for those) -- wide open here so every existing candidate stays in.
 const permissiveSettings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100, orderUnfilledCancelMinutes: 15 };
@@ -93,33 +112,46 @@ describe("computeAtmImpliedVolatility", () => {
   });
 });
 
-describe("rebaseSlicesToToday (stale snapshot)", () => {
-  it("re-times each slice to today, keeps the surface IV at every strike, and drops expiries already past", () => {
+describe("rebaseSlicesToToday (stale snapshot, variance clock)", () => {
+  // Captured Monday 2026-09-21 at 10:00 ET.
+  const capturedAtMs = Date.parse("2026-09-21T14:00:00Z");
+  const totalVariance = (s: SignalSurfaceSlice, k: number) => sviTotalVariance(s.parameters!, k);
+
+  it("drops expiries already past, re-times the calendar years, and scales total variance by τ(today, same time) ÷ τ(capture)", () => {
     const stale = [slice("2026-09-22", 1 / 365), slice("2026-10-21", years30), slice("2026-11-20", years60)];
-    const rebased = rebaseSlicesToToday(stale, "2026-09-23");
+    const rebased = rebaseSlicesToToday(stale, "2026-09-23", capturedAtMs, fixtureTradingSessions);
     expect(rebased.map((s) => s.expiry)).toEqual(["2026-10-21", "2026-11-20"]);
     expect(rebased[0]!.yearsToExpiry).toBeCloseTo(28 / 365, 12);
     expect(rebased[1]!.yearsToExpiry).toBeCloseTo(58 / 365, 12);
-    for (const k of [-0.2, 0, 0.15]) {
-      const ivBefore = Math.sqrt(sviTotalVariance(params, k) / years30);
-      const ivAfter = Math.sqrt(sviTotalVariance(rebased[0]!.parameters!, k) / rebased[0]!.yearsToExpiry);
-      expect(ivAfter).toBeCloseTo(ivBefore, 12);
+    const todayAtCaptureTimeMs = Date.parse("2026-09-23T14:00:00Z");
+    for (const [index, expiry] of [[0, "2026-10-21"], [1, "2026-11-20"]] as const) {
+      const scale = varianceSessionsToExpiry(todayAtCaptureTimeMs, expiry, fixtureTradingSessions) / varianceSessionsToExpiry(capturedAtMs, expiry, fixtureTradingSessions);
+      for (const k of [-0.2, 0, 0.15]) expect(totalVariance(rebased[index]!, k)).toBeCloseTo(totalVariance(stale[index + 1]!, k) * scale, 12);
     }
   });
 
-  it("is the identity when today is the snapshot day", () => {
-    const same = [slice("2026-10-21", years30)];
-    expect(rebaseSlicesToToday(same, "2026-09-21")).toEqual(same);
+  it("removes one session of variance over a weekend, not three calendar days' worth", () => {
+    const fridayCaptureMs = Date.parse("2026-09-25T14:00:00Z");
+    const fitted = [slice("2026-10-21", years30)];
+    const monday = rebaseSlicesToToday(fitted, "2026-09-28", fridayCaptureMs, fixtureTradingSessions);
+    const tauAtFit = varianceSessionsToExpiry(fridayCaptureMs, "2026-10-21", fixtureTradingSessions);
+    expect(totalVariance(monday[0]!, 0) / totalVariance(fitted[0]!, 0)).toBeCloseTo((tauAtFit - 1) / tauAtFit, 12);
   });
 
-  it("makes yesterday's snapshot score one day shorter today", () => {
+  it("is the identity when today is the capture day", () => {
+    const same = [slice("2026-10-21", years30)];
+    expect(rebaseSlicesToToday(same, "2026-09-21", capturedAtMs, fixtureTradingSessions)).toEqual(same);
+  });
+
+  it("makes yesterday's snapshot score one day shorter today, with one session less of variance", () => {
     const today = scoreTicker(inputs(), account, permissiveSettings);
     const stale = scoreTicker(inputs({ todayEasternIso: "2026-09-22" }), account, permissiveSettings);
     const todayPut = today.candidates.find((c) => c.expiry === "2026-10-21" && c.strike === 90)!;
     const stalePut = stale.candidates.find((c) => c.expiry === "2026-10-21" && c.strike === 90)!;
     expect(todayPut.dte).toBe(30);
     expect(stalePut.dte).toBe(29);
-    expect(stalePut.surfaceImpliedVolatility).toBeCloseTo(todayPut.surfaceImpliedVolatility, 12);
+    const scale = varianceSessionsToExpiry(Date.parse("2026-09-22T14:00:00Z"), "2026-10-21", fixtureTradingSessions) / varianceSessionsToExpiry(capturedAtMs, "2026-10-21", fixtureTradingSessions);
+    expect(stalePut.surfaceImpliedVolatility ** 2 * (29 / 365)).toBeCloseTo(todayPut.surfaceImpliedVolatility ** 2 * (30 / 365) * scale, 12);
   });
 });
 
@@ -208,14 +240,16 @@ describe("scoreTicker", () => {
   it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {
     const in1 = inputs();
     const scored = scoreTicker(in1, account, permissiveSettings);
-    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, tradingSessionsByExpiry: tradingSessionsByExpiry(in1.slices.map((slice) => slice.expiry), in1.openSessionDatesIso, in1.todayEasternIso), slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEvents: [], todayEasternIso: "2026-09-21", scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct, spreadShareCharged: permissiveSettings.spreadCostChargedPct / 100 }));
+    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, tradingSessionsByExpiry: tradingSessionsByExpiry(in1.slices.map((slice) => slice.expiry), in1.openSessionDatesIso, in1.todayEasternIso), slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEvents: [], todayEasternIso: "2026-09-21", scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct, spreadShareCharged: permissiveSettings.spreadCostChargedPct / 100, model: snapshotModelContext(in1) }));
     expect(scored.candidates).toEqual(direct);
+    // Valued at the capture (Mon 10:00 ET): τ = 0.309 left of Monday + 22 sessions to the 2026-10-21 close.
+    expect(scored.candidates.find((c) => c.expiry === "2026-10-21")!.model!.varianceSessions).toBeCloseTo(0.309 + 22, 12);
     expect(scored.unscoredReason).toBeNull();
     expect(scored.priceSource).toBe("snapshot");
     expect(scored.spotPrice).toBe(forward);
     expect(scored.dayChangePercent).toBeNull(); // snapshot spot vs the same day's close is not a day change
     expect(Object.values(scored.gradeCounts).reduce((a, b) => a + b, 0)).toBe(4);
-    expect(scored.best).toEqual(direct.slice().sort((a, b) => b.edgeDollars - a.edgeDollars || b.netEdge - a.netEdge)[0]);
+    expect(scored.best).toEqual(pickBestCandidate(direct));
   });
 
   it("re-reads the surface at the live spot: surface IV at the strike follows the scaled forward (independent SVI reference)", () => {
@@ -547,5 +581,73 @@ describe("rolls never cross earnings (Marcelo 2026-10-07)", () => {
     expect(scoreTicker(rollInputs([]), account, permissiveSettings).rolls.map((roll) => `${roll.replacement.expiry} ${roll.replacement.strike}`)).toEqual(["2026-11-20 86"]);
     expect(scoreTicker(rollInputs(["2026-11-05"]), account, permissiveSettings).rolls).toEqual([]);
     expect(scoreTicker(rollInputs(["2026-11-25"]), account, permissiveSettings).rolls).toHaveLength(1); // after the new expiry: allowed
+  });
+});
+
+describe("scoreTicker: the valuation model's clock and prices (model review, 2026-10-10)", () => {
+  // The snapshot was captured Monday 2026-09-21 at 10:00 ET (14:00 UTC); the 30-day expiry is 2026-10-21.
+  const sessionsAfter = (fromIso: string, expiryIso: string) => fixtureTradingSessions.filter((session) => session.dateIso > fromIso && session.dateIso <= expiryIso).length;
+  const put90 = (candidates: SignalCandidate[]) => candidates.find((c) => c.expiry === "2026-10-21" && c.strike === 90 && c.strategyKey === "cash_secured_put")!;
+
+  it("sameTimeToday is the capture's Eastern time of day on today's date, through a clock change, and the capture itself on its own day", () => {
+    const capture = Date.parse("2026-09-21T14:00:00Z");
+    expect(sameTimeToday(capture, "2026-09-21")).toBe(capture);
+    expect(new Date(sameTimeToday(capture, "2026-09-23")).toISOString()).toBe("2026-09-23T14:00:00.000Z");
+    // 10:00 EDT on Friday 30 Oct is 10:00 EST on Monday 2 Nov: 15:00 UTC.
+    expect(new Date(sameTimeToday(Date.parse("2026-10-30T14:00:00Z"), "2026-11-02")).toISOString()).toBe("2026-11-02T15:00:00.000Z");
+  });
+
+  it("restates the 30-day ATM IV on the forecast's clock: √(252 × total variance ÷ τ from the capture)", () => {
+    const tau = 0.309 + sessionsAfter("2026-09-21", "2026-10-21");
+    const expected = Math.sqrt((252 * sviTotalVariance(params, 0)) / tau);
+    expect(computeAtmImpliedVolatilityPerSession(inputs().slices, Date.parse("2026-09-21T14:00:00Z"), fixtureTradingSessions)).toBeCloseTo(expected, 12);
+    expect(scoreTicker(inputs(), account, permissiveSettings).atmImpliedVolatilityPerSession).toBeCloseTo(expected, 12);
+    expect(scoreTicker(inputs(), account, permissiveSettings).modelForecast).toEqual(inputs().modelForecast);
+  });
+
+  it("values a stale snapshot's quotes at the capture, never against a later day's shorter variance time", () => {
+    // Monday's price already holds Monday's variance: valued a day later over one session less, the decay its price has
+    // not yet shown would read as edge.
+    const today = put90(scoreTicker(inputs(), account, permissiveSettings).candidates).model!;
+    const stale = put90(scoreTicker(inputs({ todayEasternIso: "2026-09-22" }), account, permissiveSettings).candidates).model!;
+    expect(stale.valuedAtIso).toBe("2026-09-21T14:00:00.000Z");
+    expect(stale.varianceSessions).toBeCloseTo(0.309 + sessionsAfter("2026-09-21", "2026-10-21"), 12);
+    // The same valuation, but for one day less of discounting (the rolled slice's calendar years): about 2e-6.
+    expect(stale.edgeMargin).toBeCloseTo(today.edgeMargin, 4);
+  });
+
+  it("values a day quote at its own time, against the live forward and spot", () => {
+    const fresh = quoteAt(95, "P", "2026-10-21", years30);
+    const dayQuote = { expiry: "2026-10-21", strike: 95, right: "P" as const, bid: fresh.bid, ask: fresh.ask, quotedAt: "2026-09-21T15:00:00Z" };
+    const scored = scoreTicker(inputs({ dayQuotes: [dayQuote] }), account, permissiveSettings, { spotPrice: 105, priceSource: "live" });
+    const day = scored.candidates.find((c) => c.expiry === "2026-10-21" && c.strike === 95)!.model!;
+    expect(day.valuedAtIso).toBe("2026-09-21T15:00:00.000Z");
+    expect(day.varianceSessions).toBeCloseTo(0.193 + sessionsAfter("2026-09-21", "2026-10-21"), 12); // 11:00 ET
+    expect(day.forward).toBeCloseTo(105, 12); // the fitted forward of 100 scaled to the live spot
+    expect(day.spot).toBe(105);
+    // A snapshot quote in the same pass keeps the snapshot's own instant, forward and spot.
+    const snapshot = put90(scored.candidates).model!;
+    expect(snapshot).toMatchObject({ valuedAtIso: "2026-09-21T14:00:00.000Z", forward: 100, spot: 100 });
+  });
+
+  it("without a YZ21 forecast no candidate is valued, and the old Edge still is", () => {
+    const scored = scoreTicker(inputs({ modelForecast: null }), account, permissiveSettings);
+    expect(scored.candidates.length).toBeGreaterThan(0);
+    expect(scored.candidates.every((c) => c.model === null)).toBe(true);
+    expect(scored.candidates.every((c) => Number.isFinite(c.netEdge))).toBe(true);
+  });
+
+  it("an ETF is valued on the ETF tail table, a stock on the stock one", () => {
+    const stock = put90(scoreTicker(inputs(), account, permissiveSettings).candidates).model!;
+    const etf = put90(scoreTicker(inputs({ valuationGroup: "etf" }), account, permissiveSettings).candidates).model!;
+    expect(etf.fairPrice).not.toBe(stock.fairPrice);
+    expect(etf.varianceSessions).toBe(stock.varianceSessions);
+  });
+});
+
+describe("countRollableLegs", () => {
+  const roll = (legId: string, modelGrade: "strong" | "avoid" | null, oldGrade: "strong" | "avoid") => ({ legId, grade: oldGrade, model: modelGrade === null ? null : fixtureRollModel({ grade: modelGrade }) }) as unknown as RollSignalCandidate;
+  it("counts held legs with a roll the model grades above Avoid, whatever the old grade", () => {
+    expect(countRollableLegs([roll("a", "strong", "avoid"), roll("a", "strong", "strong"), roll("b", "avoid", "strong"), roll("c", null, "strong")])).toBe(1);
   });
 });

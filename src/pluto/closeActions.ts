@@ -22,7 +22,7 @@ import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 //   is older than one full session, and the cycle has no data flags (the close gate says so).
 //   Odd lots below 100 shares are closed on the same condition without a model call.
 //   Never at a cycle loss.
-// P2 — short-leg buyback: offered only when holdEdge$ − closeCost$ < 0, no credit roll on the leg
+// P2 — short-leg buyback: offered only when hold value $ − closeCost$ < 0 (the valuation model's, since 2026-10-10), no credit roll on the leg
 //   grades Weak or better, the leg's own P&L at the ask is positive, and at least buybackMinDte
 //   remain. Never at a loss. Limited to single-leg positions (cash-secured puts): closing only the
 //   call of a covered call is not allowed for anyone (Marcelo 2026-09-29), so it never becomes unstructured.
@@ -207,9 +207,12 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
   const entryPremium = input.orderedEntryPremium ?? leg.entryPrice;
   if (leg.unscoredReason) return { offer: null, reason: `held leg not scored: ${leg.unscoredReason}` };
   if (!input.singleLegPosition) return { offer: null, reason: "buybacks are limited to single-leg positions for now" };
-  if (leg.holdEdgeDollars === null || leg.closeCostDollars === null) return { offer: null, reason: "no hold edge / close cost" };
-  if (leg.holdEdgeDollars - leg.closeCostDollars >= 0) return { offer: null, reason: `holding is still worth ${formatSignedDollars(leg.holdEdgeDollars - leg.closeCostDollars, 0)} per contract more than buying back, after closing costs` };
-  if (input.rolls.some((roll) => roll.legId === leg.legId && roll.grade !== "avoid")) return { offer: null, reason: "a credit roll grades Weak or better" };
+  // The valuation model's hold value (model review, 2026-10-10): (mid − fair) × 100 against the cost of closing.
+  if (!leg.model) return { offer: null, reason: "the held leg has no model valuation" };
+  const holdValueDollars = leg.model.holdValueDollars;
+  const closeCostDollars = leg.model.closeCostDollars;
+  if (holdValueDollars - closeCostDollars >= 0) return { offer: null, reason: `holding is still worth ${formatSignedDollars(holdValueDollars - closeCostDollars, 0)} per contract more than buying back, after closing costs` };
+  if (input.rolls.some((roll) => roll.legId === leg.legId && roll.model !== null && roll.model.grade !== "avoid")) return { offer: null, reason: "a credit roll grades Weak or better" };
   if (leg.dte === null || leg.dte < settings.buybackMinDte) return { offer: null, reason: `DTE ${leg.dte ?? "unknown"} below ${settings.buybackMinDte}` };
   if (leg.ask === null || leg.bid === null || !(leg.ask > 0) || leg.ask < leg.bid) return { offer: null, reason: "no live two-sided quote on the held leg" };
   const pnlAtAsk = (entryPremium - leg.ask) * leg.quantity * 100;
@@ -222,7 +225,7 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
       symbol: input.symbol,
       description: `${input.symbol} Buy back ${describeOptionContract({ strike: leg.strike, right: leg.right, expiry: leg.expiry, dte: leg.dte })}${describeOrderSize(leg.quantity, limitPrice)} (sold at ${entryPremium.toFixed(2)}); locks ${pnlAtAsk.toFixed(0)} at the ask`,
       cycle_pnl: pnlAtAsk,
-      detail: { dte: leg.dte, entry_credit: entryPremium, recorded_entry_credit: leg.entryPrice, ask: leg.ask, hold_edge_dollars: Math.round(leg.holdEdgeDollars), close_cost_dollars: Math.round(leg.closeCostDollars), pnl_at_ask: Math.round(pnlAtAsk) },
+      detail: { dte: leg.dte, entry_credit: entryPremium, recorded_entry_credit: leg.entryPrice, ask: leg.ask, hold_value_dollars: Math.round(holdValueDollars), close_cost_dollars: Math.round(closeCostDollars), pnl_at_ask: Math.round(pnlAtAsk) },
       positionId: leg.positionId,
       legIds: [leg.legId],
       automatic: false,
@@ -466,9 +469,9 @@ export function evaluateEventPutClose(input: EventPutCloseInput): { offer: Close
 }
 
 /** One offer per leg: the event buyback, also saying when P2 (holding no longer pays) applies to the same leg. */
-export function mergeEventAndHoldEdgeBuybacks(eventOffer: CloseOffer, holdEdgeOffer: CloseOffer | null): CloseOffer {
-  if (!holdEdgeOffer) return eventOffer;
-  return { ...eventOffer, description: `${eventOffer.description}; holding also no longer pays its closing cost`, detail: { ...holdEdgeOffer.detail, ...eventOffer.detail, also_hold_edge_negative: true } };
+export function mergeEventAndHoldValueBuybacks(eventOffer: CloseOffer, holdValueOffer: CloseOffer | null): CloseOffer {
+  if (!holdValueOffer) return eventOffer;
+  return { ...eventOffer, description: `${eventOffer.description}; holding also no longer pays its closing cost`, detail: { ...holdValueOffer.detail, ...eventOffer.detail, also_hold_value_negative: true } };
 }
 
 export interface EventCoveredCallCloseInput {
@@ -657,7 +660,7 @@ export async function buildCloseOffersForTicker(input: CloseOffersForTickerInput
       // F3 before a macro event: the close gate is only read inside the window, for a buyback the ask would not lose on.
       const eventGate = entry && eventCloseDue(entry.event) && leg.ask !== null && leg.ask < entry.entryCredit ? await closeGateVerdictFromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote) : null;
       const eventResult = entry ? evaluateEventPutClose({ symbol: input.symbol, leg, entry, singleLegPosition, gateBlockReason: eventGate?.blocked ? eventGate.reason ?? "the close gate blocked the buyback" : null }) : { offer: null, reason: null };
-      if (eventResult.offer) offers.push(mergeEventAndHoldEdgeBuybacks(eventResult.offer, result.offer));
+      if (eventResult.offer) offers.push(mergeEventAndHoldValueBuybacks(eventResult.offer, result.offer));
       else if (result.offer) offers.push(result.offer);
       else skipped.push({ id: `${input.symbol}:close_leg:${leg.legId}`, reason: [result.reason ?? "not offered", eventResult.reason].filter(Boolean).join("; ") });
     }

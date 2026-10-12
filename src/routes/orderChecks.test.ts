@@ -72,7 +72,7 @@ async function call(method: "GET" | "POST", path: string, body?: unknown, option
 }
 
 const limitsQuery = (overrides: Record<string, string | undefined> = {}) => {
-  const parameters = { symbol: "AAA", strategyKey: "cash_secured_put", quantity: "2", strike: "90", ...overrides };
+  const parameters = { symbol: "AAA", strategyKey: "cash_secured_put", quantity: "2", strike: "90", premium: "1.2", ...overrides };
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(parameters)) if (value !== undefined) search.set(key, value);
   return `/order-checks/limits?${search.toString()}`;
@@ -111,6 +111,11 @@ describe("GET /order-checks/limits: input validation", () => {
     await expectBadRequest("/order-checks/limits?symbol=AAA&strategyKey=cash_secured_put&quantity=1&strike=1&strike=2", message);
   });
 
+  it("requires the premium per share, 0 or more: the order's exposure is net of it", async () => {
+    const message = "premium must be a number of dollars per share, 0 or more.";
+    for (const premium of [undefined, "", "-0.1", "abc", "Infinity"]) await expectBadRequest(limitsQuery({ premium }), message);
+  });
+
   it("answers 400 'Unknown symbol.' for a symbol the platform does not have", async () => {
     await expectBadRequest(limitsQuery({ symbol: "ZZZ" }), "Unknown symbol.");
     expect(loadTickerBySymbolMock).toHaveBeenCalledWith("ZZZ");
@@ -124,6 +129,13 @@ describe("GET /order-checks/limits: input validation", () => {
   it("requires a positive rollFromStrike when one is given", async () => {
     const message = "rollFromStrike must be a positive number.";
     for (const rollFromStrike of ["abc", "0", "-3", ""]) await expectBadRequest(limitsQuery({ rollFromStrike }), message);
+  });
+
+  it("requires a roll's buyback price with its strike, and neither alone", async () => {
+    const message = "A roll needs both rollFromStrike and rollFromPremium (dollars per share, 0 or more).";
+    await expectBadRequest(limitsQuery({ rollFromStrike: "85" }), message);
+    await expectBadRequest(limitsQuery({ rollFromPremium: "0.5" }), message);
+    for (const rollFromPremium of ["abc", "-1", ""]) await expectBadRequest(limitsQuery({ rollFromStrike: "85", rollFromPremium }), message);
   });
 
   it("is refused without a session", async () => {
@@ -149,12 +161,12 @@ describe("GET /order-checks/limits: a valid call", () => {
   it("calls the evaluator with parsed numbers, the canonical symbol and ticker id, and no spot or roll strike when none is given", async () => {
     await call("GET", limitsQuery({ symbol: " aaa ", quantity: "3", strike: "92.5" }));
     expect(evaluateOrderLimitsMock).toHaveBeenCalledTimes(1);
-    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toEqual({ strategyKey: "cash_secured_put", symbol: "AAA", tickerId: "ticker-1", quantity: 3, strike: 92.5, spotPrice: undefined, rollFromStrike: undefined });
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toEqual({ strategyKey: "cash_secured_put", symbol: "AAA", tickerId: "ticker-1", quantity: 3, strike: 92.5, premium: 1.2, spotPrice: undefined, rollFromStrike: undefined, rollFromPremium: undefined });
   });
 
-  it("passes spotPrice and rollFromStrike through as numbers", async () => {
-    await call("GET", limitsQuery({ strategyKey: "covered_call", spotPrice: "101.5", rollFromStrike: "90" }));
-    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toEqual({ strategyKey: "covered_call", symbol: "AAA", tickerId: "ticker-1", quantity: 2, strike: 90, spotPrice: 101.5, rollFromStrike: 90 });
+  it("passes the premium, spotPrice and a roll's strike and buyback price through as numbers", async () => {
+    await call("GET", limitsQuery({ strategyKey: "covered_call", premium: "0", spotPrice: "101.5", rollFromStrike: "90", rollFromPremium: "0.4" }));
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toEqual({ strategyKey: "covered_call", symbol: "AAA", tickerId: "ticker-1", quantity: 2, strike: 90, premium: 0, spotPrice: 101.5, rollFromStrike: 90, rollFromPremium: 0.4 });
   });
 
   it("does not carry an excludeOrderRequestId: a setup form's check is not an existing order", async () => {

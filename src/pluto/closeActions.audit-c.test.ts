@@ -5,6 +5,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 import { flatCommissionEstimator } from "../lib/commissionEstimate.js";
 import { easternInstant } from "../lib/easternIsoDate.js";
 import { openDaysFromCalendarRows } from "../lib/marketSessionStatus.js";
+import { fixtureHeldLegModel } from "../lib/testSupport/valuationModelFixtures.js";
 
 // Audit C (2026-10-07): Formula P3 (earnings buyback) and its integration in buildCloseOffersForTicker, plus the
 // automaticReason labels on P1/P2. DB-backed parts run on TEST_DATABASE_URL; positions are inserted closed (the
@@ -47,8 +48,9 @@ function heldLeg(overrides: Partial<HeldLegScore> = {}): HeldLegScore {
   return {
     legId: "leg1", positionId: "pos1", strategyKey: "cash_secured_put", expiry: "2031-03-21", strike: 50, right: "P", quantity: 2, entryPrice: 2.4, entryAtIso: "2031-02-20T15:00:00Z",
     dte: 11, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42, edge: 0.05, frictionVolatility: 0.01, vega: 0.05,
-    // Positive hold edge: P2 would never offer this leg, so any offer below is P3's.
     holdEdgeDollars: 25, closeCostDollars: 5, dollarRisk: 9948, quoteSource: "day", quotedAt: "2031-03-10T15:00:00Z", flags: [], unscoredReason: null,
+    // Positive hold value: P2 would never offer this leg, so any offer below is P3's.
+    model: fixtureHeldLegModel(25, 5),
     ...overrides,
   };
 }
@@ -67,12 +69,12 @@ describe("Formula P3 — pure edge cases", () => {
 
   it("uses the same offer id as P2 for the same leg (runChosenClose matches fresh offers by id)", () => {
     const p3 = evaluateEarningsBuyback(base).offer!;
-    const p2 = evaluateShortLegBuyback({ symbol: "AUD", leg: heldLeg({ holdEdgeDollars: -25 }), rolls: [], settings, singleLegPosition: true }).offer!;
+    const p2 = evaluateShortLegBuyback({ symbol: "AUD", leg: heldLeg({ model: fixtureHeldLegModel(-25, 5) }), rolls: [], settings, singleLegPosition: true }).offer!;
     expect(p3.id).toBe(p2.id);
   });
 
-  it("ignores P2's hold-edge, roll and minimum-DTE conditions", () => {
-    expect(evaluateEarningsBuyback({ ...base, leg: heldLeg({ dte: 0, holdEdgeDollars: 500 }) }).offer).not.toBeNull();
+  it("ignores P2's hold-value, roll and minimum-DTE conditions", () => {
+    expect(evaluateEarningsBuyback({ ...base, leg: heldLeg({ dte: 0, model: fixtureHeldLegModel(500, 5) }) }).offer).not.toBeNull();
   });
 
   it("the window edge: exactly earningsBuybackWindowSessions sessions left is in, one more is out", () => {
@@ -144,7 +146,7 @@ describe("automaticReason on P1 and P2", () => {
     expect(odd.automaticReason).toMatch(/Formula P1/);
   });
   it("P2 is never automatic", () => {
-    expect(evaluateShortLegBuyback({ symbol: "AUD", leg: heldLeg({ holdEdgeDollars: -25 }), rolls: [], settings, singleLegPosition: true }).offer).toMatchObject({ automatic: false, automaticReason: null });
+    expect(evaluateShortLegBuyback({ symbol: "AUD", leg: heldLeg({ model: fixtureHeldLegModel(-25, 5) }), rolls: [], settings, singleLegPosition: true }).offer).toMatchObject({ automatic: false, automaticReason: null });
   });
 });
 
@@ -272,7 +274,7 @@ describe("buildCloseOffersForTicker with Formula P3 (test DB)", () => {
     expect(withheld.offers).toEqual([]);
     expect(withheld.skipped).toEqual([{ id: `${ticker.symbol}:close_leg:${legIds[0]}`, reason: "an order on this position is still working" }]);
     // Nor is P2 offered to the model while the order works.
-    expect((await build(ticker.symbol, [{ ...leg, holdEdgeDollars: -25 }])).offers).toEqual([]);
+    expect((await build(ticker.symbol, [{ ...leg, model: fixtureHeldLegModel(-25, 5) }])).offers).toEqual([]);
 
     // Once the order is final, P3 takes over again.
     await testDb("order_requests").where({ id: order.id }).update({ status: "cancelled" });

@@ -2,7 +2,7 @@ import { db } from "../db/connection.js";
 import { loadStoredOptionChain } from "../ibkr/fetchOptionChain.js";
 import { calendarDaysUntilExpiry, captureMaximumDaysToExpiry, captureMinimumDaysToExpiry } from "./optionChainCaptureWindow.js";
 import type { DayContractRef } from "./daySignalsContractSet.js";
-import { computeAtmImpliedVolatility, rebaseSlicesToToday } from "./signalsLiveScoring.js";
+import { computeAtmImpliedVolatility } from "./signalsLiveScoring.js";
 import { yyyymmddToIso } from "./signalsChain.js";
 import { loadOpenShortLegs, loadSignalsUniverseTickers, loadSlices } from "./signalsStore.js";
 
@@ -67,7 +67,7 @@ export async function loadDayTickerContractContexts(trackedTickers: DayTrackedTi
         symbol: row.symbol,
         snapshotId: row.snapshotId,
         snapshotSpotPrice: snapshot?.underlying_price === null || snapshot?.underlying_price === undefined ? null : Number(snapshot.underlying_price),
-        atmImpliedVolatility: computeAtmImpliedVolatility(rebaseSlicesToToday(slices, tradingDateIso)),
+        atmImpliedVolatility: computeAtmImpliedVolatility(slices),
         strikesByExpiry,
         heldContracts: legs.map((leg) => ({ expiry: leg.expiry, strike: leg.strike, right: leg.right })),
         previousContracts: previousRows.map((quote: { expiry: string; strike: string; right: "C" | "P" }) => ({ expiry: quote.expiry, strike: Number(quote.strike), right: quote.right })),

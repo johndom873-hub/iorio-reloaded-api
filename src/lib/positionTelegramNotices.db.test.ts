@@ -133,8 +133,8 @@ describe("sendDuePositionTelegramNotices", () => {
     const mine = sender.sent.filter((message) => message.includes(symbol));
     expect(mine).toHaveLength(2);
     expect(mine[0]).toContain("📥 New position:");
-    // (1.25 − 0.40) × 1 × 100 = +$85.00 over capitalDeployed (the $180 × 100 collateral) = +0.47%.
-    expect(mine[1]).toBe(`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• Buy $180 Put · ${jan17()} · 1× @ 0.40\nP&L: +$85.00 (+0.47%)`);
+    // (1.25 − 0.40) × 1 × 100 = +$85.00 over capitalDeployed (the $180 × 100 collateral less the $125 premium) = +0.48%.
+    expect(mine[1]).toBe(`📤 Position closed: ${symbol} cash-secured put — closed in the app\n• Buy $180 Put · ${jan17()} · 1× @ 0.40\nP&L: +$85.00 (+0.48%)`);
     const state = await noticeState(positionId);
     expect(state.opened).not.toBeNull();
     expect(state.closed).not.toBeNull();

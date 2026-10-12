@@ -8,16 +8,16 @@ import { computeUncompensatedByContract, scoreTicker, toScreenRow, type LiveOpti
 import { loadDayQuotesForTicker } from "./daySignalsStore.js";
 import { loadUpcomingMajorMacroEvents } from "./macroEventCalendar.js";
 import { addCalendarDays, type RoadmapCounts } from "./signalsRoadmap.js";
-import { loadOpenDaysBetween } from "./marketSessionStatus.js";
+import { loadOpenDaysBetween, loadTradingSessionsBetween } from "./marketSessionStatus.js";
 import { loadTradingSettings } from "./tradingSettingsStore.js";
 import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, TickerSignalsDetail, TickerSignalsInputs } from "./signalsTypes.js";
-import { loadVolatilityForecast } from "./volatilityForecastStore.js";
+import { loadVolatilityForecasts } from "./volatilityForecastStore.js";
 import type { OpenShortLeg } from "./rollSignalCandidates.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew } from "./tiltMeasures.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
 import { signalsEnabledShortlistTickerIdsQuery } from "./shortlistQueries.js";
 import { easternIsoDate } from "./easternIsoDate.js";
-import { tickerCalendarProfile } from "./tickerCalendarRelevance.js";
+import { isEtfSector, tickerCalendarProfile } from "./tickerCalendarRelevance.js";
 
 // DB side of the Signals screen (mockup approved 2026-09-22). Loads one ticker's
 // inputs once (loadTickerSignalsInputs); scoring itself is the pure scoreTicker in
@@ -270,11 +270,11 @@ export async function loadOpenShortLegs(tickerId: string): Promise<OpenShortLeg[
 /** Everything scoring needs for one ticker, from the DB only (no IBKR). Loaded once per REST call or stream start. */
 export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Date = new Date()): Promise<TickerSignalsInputs> {
   const todayEastern = easternIsoDate(now);
-  const [bars, storedNextEarningsDateIso, storedEarningsDatesIso, calendarProfile, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs] = await Promise.all([
+  const [bars, storedNextEarningsDateIso, storedEarningsDatesIso, tickerRow, previousClose, header, freeShares, dailyBarCount, dividendCadenceUnknown, macroEvents, openShortLegs] = await Promise.all([
     loadBarsForTilt(ticker.tickerId, todayEastern),
     loadNextEarningsDate(ticker.tickerId, todayEastern),
     loadEarningsDatesNotYetReported(ticker.tickerId, todayEastern),
-    db("tickers").where({ id: ticker.tickerId }).first("tradingview_ticker", "sector").then(tickerCalendarProfile),
+    db("tickers").where({ id: ticker.tickerId }).first<{ tradingview_ticker: string | null; sector: string | null } | undefined>("tradingview_ticker", "sector"),
     loadPreviousClose(ticker.tickerId, todayEastern),
     loadLatestSnapshot(ticker.tickerId),
     fetchAvailableUncoveredShares(ticker.tickerId),
@@ -284,19 +284,24 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
     loadOpenShortLegs(ticker.tickerId),
   ]);
   // Same "resolved" rule as calendarConflict.ts. An ETF has no earnings, so a stray row (a symbol collision) cannot exclude anything.
+  const calendarProfile = tickerCalendarProfile(tickerRow);
   const { earningsCalendarResolved } = calendarProfile;
   const earningsDatesIso = calendarProfile.calendarChecksApply ? storedEarningsDatesIso : [];
   const nextEarningsDateIso = calendarProfile.calendarChecksApply ? storedNextEarningsDateIso : null;
   const momentum = computeMomentum(bars.map((bar) => bar.close));
   const elevatedVolatility = computeElevatedVolatilityFlag(bars);
 
-  const [slices, quotes, forecast, dayQuotes] = header
-    ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecast(ticker.tickerId, header.tradingDateIso), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
-    : [[], [], null, []];
+  const [slices, quotes, forecasts, dayQuotes] = header
+    ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecasts(ticker.tickerId, header.tradingDateIso, todayEastern), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
+    : [[], [], { edge: null, model: null }, []];
   const furthestExpiry = slices.map((slice) => slice.expiry).sort().at(-1);
-  const openSessionDatesIso = furthestExpiry && furthestExpiry > todayEastern ? await loadOpenDaysBetween(addCalendarDays(todayEastern, 1), furthestExpiry) : [];
+  const [openSessionDatesIso, tradingSessions] = await Promise.all([
+    furthestExpiry && furthestExpiry > todayEastern ? loadOpenDaysBetween(addCalendarDays(todayEastern, 1), furthestExpiry) : [],
+    // From the snapshot's own date: a surface fitted on an earlier day is rolled to today on the variance clock.
+    header && furthestExpiry ? loadTradingSessionsBetween(header.tradingDateIso < todayEastern ? header.tradingDateIso : todayEastern, furthestExpiry) : [],
+  ]);
 
-  return { ...ticker, header, slices, quotes, dayQuotes, forecast, openSessionDatesIso, earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
+  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecasts.edge, modelForecast: forecasts.model, openSessionDatesIso, tradingSessions, valuationGroup: isEtfSector(tickerRow?.sector) ? "etf" : "stock", earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
 }
 
 /**

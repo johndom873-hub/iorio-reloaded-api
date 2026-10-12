@@ -1,0 +1,176 @@
+import type { SignalGrade } from "./signalCandidates.js";
+import { calibratedEdgeMargin, standardizedReturnBucketsFor, type ValuationGroup, type VolatilityModelTables } from "./volatilityModelTables.js";
+
+// One contract's value to a seller (model review P2, P4, P5, approved by Marcelo 2026-10-10;
+// docs/signal-engine-model-review/REPORT.md). Every figure comes from ONE distribution of the price at expiry, so they
+// cannot contradict each other:
+//
+//   s   = √(forecast per-session variance × τ)                    τ = variance sessions from the quote to the expiry close
+//   S_i = F · e^{s·z_i} ÷ mean_j e^{s·z_j}                         z_i = the group's standardized-return buckets (fat tails),
+//                                                                  normalized so the mean is the forward (no drift view)
+//   fair price      = e^{−rT} · mean_i payoff(S_i)                 T = calendar years (money accrues on calendar days)
+//   seller P&L_i    = (mid − e^{−rT} · payoff(S_i)) × 100 − friction          per contract, held to expiry
+//   expected P&L    = mean_i P&L_i  (the new Edge $)
+//   edge margin     = 1 − fair ÷ mid                                (before friction; the grade and the calibration use it)
+//   calibrated P&L  = calibrated margin(edge margin, τ) × mid × 100 − friction   (what history delivered, ATM proxy)
+//   Edge Yield      = expected P&L ÷ capital at risk ÷ T            (a yearly rate on calendar time, as every yield on the
+//                                                                  platform: the capital is tied up on weekends too;
+//                                                                  capital = EXP $, net of the premium (Marcelo
+//                                                                  2026-10-12): (strike − mid)×100 for a put, the cash
+//                                                                  reserved less the premium; (spot − mid)×100 for a call,
+//                                                                  the shares bought less the premium)
+//   Hist Yield      = calibrated P&L ÷ capital at risk ÷ T
+//   risk outcome_i  = P&L_i for a put; for a call, the shares and the call together (Marcelo 2026-10-10: the strategy holds
+//                     shares only with the call, so a covered call is judged like a cash-secured put, the same payoff):
+//                     P&L_i + (S_i − F) × 100, the shares' move from the forward (zero on average, so Edge $ is unchanged)
+//   PoP = share of risk outcomes > 0; average win / loss; 5% expected shortfall = mean of the worst 5% of risk outcomes
+//   (25 of the 500); 2σ stress = the risk outcome at S = F·e^{−2s} (the stock down two standard deviations by expiry).
+//   premium after costs = mid × 100 − friction, and its premium yield on capital over T (the sale's own income; a covered
+//   call's shares can add the rise to the strike on top of it).
+// The variance clock (τ) values the contract; calendar time (T) annualizes what the capital earns.
+// Grades on the edge margin (approved 2026-10-10): strong ≥ 30%, good ≥ 20%, weak ≥ 10%, else avoid.
+
+export const gradeMarginCutPoints = { strong: 0.3, good: 0.2, weak: 0.1 } as const;
+export const expectedShortfallTailShare = 0.05;
+export const stressStandardDeviations = 2;
+/** Annualization floor: a contract is never annualized over less than one calendar day. */
+const minimumAnnualizationYears = 1 / 365;
+
+
+/** A per-contract dollar amount as a yearly rate on the contract's exposure over its calendar time to expiry (a yield). */
+export function yieldOnExposure(dollars: number, exposureDollars: number, calendarYears: number): number {
+  return dollars / exposureDollars / Math.max(calendarYears, minimumAnnualizationYears);
+}
+
+export function gradeForEdgeMargin(edgeMargin: number): SignalGrade {
+  if (edgeMargin >= gradeMarginCutPoints.strong) return "strong";
+  if (edgeMargin >= gradeMarginCutPoints.good) return "good";
+  if (edgeMargin >= gradeMarginCutPoints.weak) return "weak";
+  return "avoid";
+}
+
+export interface ContractValuationInput {
+  isCall: boolean;
+  strike: number;
+  /** The forward at the quote's moment. */
+  forward: number;
+  /** Bid/ask mid per share. */
+  mid: number;
+  /** Friction charged per contract: λ × half-spread × 100 + commission. */
+  frictionDollars: number;
+  /** Forecast per-session variance (YZ21). */
+  perSessionVariance: number;
+  /** τ: variance sessions from the quote to the expiry close. */
+  varianceSessions: number;
+  /** Calendar years to expiry, for discounting only. */
+  calendarYears: number;
+  riskFreeRate: number;
+  group: ValuationGroup;
+  /** Spot at the quote (a covered call's shares, and its capital at risk with the premium taken off). */
+  spot: number;
+}
+
+export interface ContractValuation {
+  /** Fair price per share under the forecast distribution. */
+  fairPrice: number;
+  /** 1 − fair ÷ mid, before friction. */
+  edgeMargin: number;
+  /** Per contract, after friction: the new Edge $. */
+  expectedPnlDollars: number;
+  calibratedEdgeMargin: number;
+  calibratedExpectedPnlDollars: number;
+  /** Edge Yield: expected P&L ÷ capital at risk, annualized on calendar time (0.25 = 25% a year). */
+  expectedAnnualizedReturn: number;
+  calibratedAnnualizedReturn: number;
+  probabilityOfProfit: number;
+  averageWinDollars: number;
+  /** Mean P&L of the losing outcomes (≤ 0); 0 when there are none. */
+  averageLossDollars: number;
+  /** Mean P&L of the worst 5% of outcomes. */
+  expectedShortfallDollars: number;
+  /** P&L after a 2σ move against the position by expiry. */
+  stressPnlDollars: number;
+  /** The premium kept after friction, per contract: a put's best case; a covered call's shares can add the rise to the strike. */
+  premiumAfterCostsDollars: number;
+  /** Premium after costs ÷ capital at risk, annualized on calendar time. */
+  premiumYield: number;
+  /** Variance of the per-contract P&L of the option alone (dollars²). */
+  pnlVarianceDollars: number;
+  /** A call only: variance of the per-contract P&L of 100 shares plus the short call (the risk outcomes). */
+  coveredPositionPnlVarianceDollars: number | null;
+  capitalAtRiskDollars: number;
+  /** Forecast volatility per session, annualized ×252 (the forecast's own units). */
+  forecastVolatility: number;
+  /** τ the contract was valued over. */
+  varianceSessions: number;
+  /** Calendar years to expiry the yields are annualized over. */
+  calendarYears: number;
+  grade: SignalGrade;
+}
+
+export function valueContract(tables: VolatilityModelTables, input: ContractValuationInput): ContractValuation | null {
+  if (!(input.mid > 0) || !(input.mid < (input.isCall ? input.spot : input.strike)) || !(input.forward > 0) || !(input.strike > 0) || !(input.perSessionVariance > 0) || !(input.varianceSessions > 0) || !(input.spot > 0)) return null;
+  const buckets = standardizedReturnBucketsFor(tables, input.group, input.varianceSessions);
+  const totalStandardDeviation = Math.sqrt(input.perSessionVariance * input.varianceSessions);
+  let normalizer = 0;
+  for (const z of buckets) normalizer += Math.exp(totalStandardDeviation * z);
+  normalizer /= buckets.length;
+  const discount = Math.exp(-input.riskFreeRate * Math.max(0, input.calendarYears));
+  const payoffAt = (price: number) => (input.isCall ? Math.max(price - input.strike, 0) : Math.max(input.strike - price, 0));
+  const premiumDollars = input.mid * 100;
+
+  const pnl: number[] = new Array(buckets.length);
+  // The outcomes risk is judged on: the option alone for a put; shares + call for a call.
+  const riskPnl: number[] = new Array(buckets.length);
+  let payoffSum = 0;
+  for (let index = 0; index < buckets.length; index++) {
+    const price = (input.forward * Math.exp(totalStandardDeviation * buckets[index]!)) / normalizer;
+    const payoff = payoffAt(price);
+    payoffSum += payoff;
+    pnl[index] = premiumDollars - input.frictionDollars - discount * payoff * 100;
+    riskPnl[index] = input.isCall ? pnl[index]! + (price - input.forward) * 100 : pnl[index]!;
+  }
+  const fairPrice = (discount * payoffSum) / buckets.length;
+  const expectedPnlDollars = pnl.reduce((sum, value) => sum + value, 0) / pnl.length;
+  const variance = (values: number[]) => {
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    return values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  };
+  const wins = riskPnl.filter((value) => value > 0);
+  const losses = riskPnl.filter((value) => value <= 0);
+  const sorted = [...riskPnl].sort((a, b) => a - b);
+  const tail = sorted.slice(0, Math.max(1, Math.round(sorted.length * expectedShortfallTailShare)));
+  const stressPrice = input.forward * Math.exp(-stressStandardDeviations * totalStandardDeviation);
+  const stressShareMove = input.isCall ? (stressPrice - input.forward) * 100 : 0;
+  const capitalAtRiskDollars = ((input.isCall ? input.spot : input.strike) - input.mid) * 100;
+  const annualizationYears = Math.max(input.calendarYears, minimumAnnualizationYears);
+  const annualize = (dollars: number) => yieldOnExposure(dollars, capitalAtRiskDollars, annualizationYears);
+  const edgeMargin = 1 - fairPrice / input.mid;
+  const calibrated = calibratedEdgeMargin(tables, edgeMargin, input.varianceSessions);
+  const calibratedExpectedPnlDollars = calibrated * premiumDollars - input.frictionDollars;
+  const premiumAfterCostsDollars = premiumDollars - input.frictionDollars;
+
+  return {
+    fairPrice,
+    edgeMargin,
+    expectedPnlDollars,
+    calibratedEdgeMargin: calibrated,
+    calibratedExpectedPnlDollars,
+    expectedAnnualizedReturn: annualize(expectedPnlDollars),
+    calibratedAnnualizedReturn: annualize(calibratedExpectedPnlDollars),
+    probabilityOfProfit: wins.length / riskPnl.length,
+    averageWinDollars: wins.length > 0 ? wins.reduce((sum, value) => sum + value, 0) / wins.length : 0,
+    averageLossDollars: losses.length > 0 ? losses.reduce((sum, value) => sum + value, 0) / losses.length : 0,
+    expectedShortfallDollars: tail.reduce((sum, value) => sum + value, 0) / tail.length,
+    stressPnlDollars: premiumDollars - input.frictionDollars - discount * payoffAt(stressPrice) * 100 + stressShareMove,
+    premiumAfterCostsDollars,
+    premiumYield: annualize(premiumAfterCostsDollars),
+    pnlVarianceDollars: variance(pnl),
+    coveredPositionPnlVarianceDollars: input.isCall ? variance(riskPnl) : null,
+    capitalAtRiskDollars,
+    forecastVolatility: Math.sqrt(input.perSessionVariance * 252),
+    varianceSessions: input.varianceSessions,
+    calendarYears: annualizationYears,
+    grade: gradeForEdgeMargin(edgeMargin),
+  };
+}

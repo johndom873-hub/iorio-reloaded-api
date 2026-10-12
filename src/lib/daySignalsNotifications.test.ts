@@ -81,7 +81,7 @@ describe("assignment-risk notification", () => {
     spotPrice: 113.42,
     leg: {
       legId: "leg-1", positionId: "pos-1", strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 116, right: "P", quantity: 1, entryPrice: 2.1, entryAtIso: "2026-09-10T14:00:00Z",
-      dte: 17, delta: -0.5234, bid: 3.9, ask: 4.1, mid: 4, surfaceImpliedVolatility: 0.6, midImpliedVolatility: 0.61, edge: 0.05, frictionVolatility: 0.01, vega: 0.12, holdEdgeDollars: 60, closeCostDollars: 12, dollarRisk: 11_200, quoteSource: "day", quotedAt: null, flags: ["assignment_risk"], unscoredReason: null,
+      dte: 17, delta: -0.5234, bid: 3.9, ask: 4.1, mid: 4, surfaceImpliedVolatility: 0.6, midImpliedVolatility: 0.61, edge: 0.05, frictionVolatility: 0.01, vega: 0.12, holdEdgeDollars: 60, closeCostDollars: 12, dollarRisk: 11_200, quoteSource: "day", quotedAt: null, flags: ["assignment_risk"], unscoredReason: null, model: null,
     },
   };
 

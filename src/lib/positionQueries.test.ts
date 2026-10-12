@@ -72,7 +72,7 @@ describe("positionSelect — capitalAtRisk (exposed now) vs capitalDeployed (bas
     expect(Number(position!.capitalDeployed)).toBe(5550);
   });
 
-  it("a short put bought back in slices: exposure is the open contracts' collateral, the P&L % base is all contracts of that strike and expiry", async () => {
+  it("a short put bought back in slices: exposure is the open contracts' collateral less their premium, the P&L % base is all contracts of that strike and expiry", async () => {
     const positionId = await insertPosition(await createTicker(), "cash_secured_put");
     const optionLeg = (quantity: number, strikePrice: number, expiryDate: string, exitPrice: number | null) => ({
       position_id: positionId,
@@ -91,8 +91,9 @@ describe("positionSelect — capitalAtRisk (exposed now) vs capitalDeployed (bas
     await testDb("position_legs").insert([optionLeg(2, 300, "2030-01-18", 0.8), optionLeg(3, 300, "2030-01-18", null)]);
 
     const position = await fetchPositionById(positionId);
-    expect(Number(position!.capitalAtRisk)).toBe(90000);
-    expect(Number(position!.capitalDeployed)).toBe(150000);
+    // ($300 strike − $2 premium) × 100 × 3 open contracts; × 5 contracts for the base.
+    expect(Number(position!.capitalAtRisk)).toBe(89400);
+    expect(Number(position!.capitalDeployed)).toBe(149000);
   });
 
   it("a leg of another strike or expiry (rolled away) is a different contract and stays out of the base", async () => {
@@ -114,6 +115,43 @@ describe("positionSelect — capitalAtRisk (exposed now) vs capitalDeployed (bas
     await testDb("position_legs").insert([optionLeg(2, 290, "2030-01-11", 1), optionLeg(2, 300, "2030-01-18", 0.8), optionLeg(3, 300, "2030-01-18", null)]);
 
     const position = await fetchPositionById(positionId);
-    expect(Number(position!.capitalDeployed)).toBe(150000);
+    expect(Number(position!.capitalDeployed)).toBe(149000);
+  });
+
+  const shortCall = (positionId: string, strikePrice: number, entryPrice: number, exitPrice: number | null, entryDaysAgo: number) => ({
+    position_id: positionId,
+    leg_type: "option",
+    side: "short",
+    quantity: 1,
+    option_type: "call",
+    strike_price: strikePrice,
+    expiry_date: "2030-01-18",
+    multiplier: 100,
+    entry_price: entryPrice,
+    entry_at: new Date(Date.now() - entryDaysAgo * 86_400_000),
+    exit_price: exitPrice,
+    exit_at: exitPrice === null ? null : new Date(),
+  });
+
+  it("a covered call: exposure and base are the shares' cost less the open call's premium, not an earlier call's", async () => {
+    const positionId = await insertPosition(await createTicker(), "covered_call");
+    await insertStockLeg(positionId, 100, 50, null);
+    await testDb("position_legs").insert([shortCall(positionId, 52, 1, 0.2, 3), shortCall(positionId, 55, 1.5, null, 1)]);
+
+    const position = await fetchPositionById(positionId);
+    expect(Number(position!.capitalAtRisk)).toBe(4850);
+    expect(Number(position!.capitalDeployed)).toBe(4850);
+  });
+
+  it("shares with no call open: exposure is their cost; a closed covered call's base keeps the call it ended with", async () => {
+    const positionId = await insertPosition(await createTicker(), "covered_call");
+    await insertStockLeg(positionId, 100, 50, null);
+    await testDb("position_legs").insert(shortCall(positionId, 55, 1.5, 0.1, 1));
+    expect(Number((await fetchPositionById(positionId))!.capitalAtRisk)).toBe(5000);
+
+    const calledAway = await insertPosition(await createTicker(), "covered_call");
+    await insertStockLeg(calledAway, 100, 50, 55);
+    await testDb("position_legs").insert(shortCall(calledAway, 55, 1.5, 0, 1));
+    expect(Number((await fetchPositionById(calledAway))!.capitalDeployed)).toBe(4850);
   });
 });

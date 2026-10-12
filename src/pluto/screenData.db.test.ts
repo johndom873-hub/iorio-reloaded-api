@@ -75,4 +75,24 @@ describe("loadPlutoOrderRequestsByActionId", () => {
     expect(request.payload.legs[0]?.strike).toBe(24);
     expect(await loadPlutoOrderRequestsByActionId([], db)).toEqual(new Map());
   });
+
+  it("carries a buyback's premium: the price the bought-back leg was sold for", async () => {
+    const [ticker] = await db("tickers").insert({ symbol: `${symbol}B`, company_name: "Buyback Test Co", sector: "Technology" }).returning("id");
+    // Closed on purpose: the reconcile tests sharing this database close an open position with no open leg.
+    const [position] = await db("positions").insert({ strategy_key: "cash_secured_put", ticker_id: ticker.id, status: "closed", closed_at: new Date() }).returning("id");
+    const [leg] = await db("position_legs").insert({ position_id: position.id, leg_type: "option", side: "short", quantity: 1, option_type: "put", strike_price: 24, expiry_date: "2026-12-18", multiplier: 100, entry_price: 0.62, entry_at: new Date() }).returning("id");
+    const [action] = await db("pluto_actions").insert({ pass_id: passId, kind: "close_leg", symbol, contract: JSON.stringify({ strike: 24, right: "P" }), gate_results: "[]", quantity: 1, limit_price: 0.1, outcome: "confirmed" }).returning("id");
+    actionIds.push(action.id);
+    await db("order_requests").insert({ requested_by_user_id: userId, request_type: "close_position", payload: JSON.stringify({ symbol, legs: [{ role: "option", right: "P", action: "BUY", expiry: "20261218", strike: 24, quantity: 1, unitPrice: 0.1, positionLegId: leg.id }] }), status: "submitted", pluto_action_id: action.id });
+    try {
+      const requests = await loadPlutoOrderRequestsByActionId([action.id, actionIds[0]!], db);
+      expect(requests.get(action.id)?.closedLegPremium).toBe(0.62);
+      expect(requests.get(actionIds[0]!)?.closedLegPremium).toBeNull();
+    } finally {
+      await db("order_requests").where({ pluto_action_id: action.id }).del();
+      await db("position_legs").where({ id: leg.id }).del();
+      await db("positions").where({ id: position.id }).del();
+      await db("tickers").where({ id: ticker.id }).del();
+    }
+  });
 });

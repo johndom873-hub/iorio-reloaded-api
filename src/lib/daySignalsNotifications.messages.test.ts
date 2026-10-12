@@ -53,6 +53,7 @@ const candidate: SignalCandidate = {
   flags: [],
   executable: true,
   grade: "good",
+  model: null,
 };
 
 const signalUpgrade: SignalUpgrade = { symbol: "HOOD", candidate, previousGrade: "weak", spotPrice: 113.4, quotedAt: "2026-10-06T14:06:00Z" };
@@ -72,6 +73,7 @@ const roll: RollSignalCandidate = {
   flags: [],
   warnings: [],
   grade: "strong",
+  model: null,
 };
 const rollUpgrade: RollSignalUpgrade = { symbol: "AAPL", roll, held: { strike: 115, expiry: "2026-10-16", dte: 10 }, previousGrade: "avoid", spotPrice: 118, quotedAt: "2026-12-07T15:30:00Z" };
 
@@ -222,7 +224,7 @@ describe("assignment-risk message variants and failure handling", () => {
     spotPrice: 120.5,
     leg: {
       legId: "leg-1", positionId: "pos-1", strategyKey: "covered_call", expiry: "2026-10-16", strike: 118, right: "C", quantity: 1, entryPrice: 2.1, entryAtIso: "2026-09-10T14:00:00Z",
-      dte: null, delta: 0.6, bid: 3.9, ask: 4.1, mid: 4, surfaceImpliedVolatility: 0.6, midImpliedVolatility: 0.61, edge: 0.05, frictionVolatility: 0.01, vega: 0.12, holdEdgeDollars: 60, closeCostDollars: 12, dollarRisk: 11_200, quoteSource: "day", quotedAt: null, flags: ["assignment_risk"], unscoredReason: null,
+      dte: null, delta: 0.6, bid: 3.9, ask: 4.1, mid: 4, surfaceImpliedVolatility: 0.6, midImpliedVolatility: 0.61, edge: 0.05, frictionVolatility: 0.01, vega: 0.12, holdEdgeDollars: 60, closeCostDollars: 12, dollarRisk: 11_200, quoteSource: "day", quotedAt: null, flags: ["assignment_risk"], unscoredReason: null, model: null,
     },
   };
 

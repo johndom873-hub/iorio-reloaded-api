@@ -15,6 +15,7 @@ import { loadOrderUnfilledCancelMinutes } from "../lib/tradingSettingsStore.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { normalizeSystemConcerns } from "../pluto/decisionSchema.js";
 import { loadDaySignalsWatchStatuses } from "../lib/daySignalsWatchStatus.js";
+import { computeKellyCap, computeStressCap, stressCapInputFromFigures } from "../pluto/postModelGates.js";
 
 // The Pluto screen's API. Any signed-in user can operate every control (Marcelo, 2026-09-28:
 // both users share one access level); the UI puts confirm modals in front of the risky ones.
@@ -171,6 +172,67 @@ plutoRouter.put("/stress-override", async (request: Request, response: Response)
   await recordPlutoEvent("stress_override_changed", { enabled, dateIso: todayIso, by: who });
   await notifyPlutoTelegram(enabled ? `⚠️ Pluto: ${who} allowed new opens under SPY stress for ${todayIso}.` : `Pluto: ${who} removed today's SPY stress override.`);
   response.json(state);
+});
+
+interface SizingCapsRequest {
+  strategyKey: "covered_call" | "cash_secured_put";
+  strike: number;
+  bid: number;
+  ask: number;
+  spotPrice: number | null;
+  model: { calibratedExpectedPnlDollars: number; pnlVarianceDollars: number; coveredPositionPnlVarianceDollars: number | null; varianceSessions: number };
+  ticker: { forecastVolatility: number | null; elevatedVolatility: boolean; dayChangePercent: number | null };
+}
+
+/** The contract and ticker figures the caps need, as the Signals payload carries them; null with the first problem found. */
+function parseSizingCapsRequest(body: unknown): SizingCapsRequest | { error: string } {
+  const value = (body ?? {}) as Record<string, unknown>;
+  const model = (value.model ?? {}) as Record<string, unknown>;
+  const ticker = (value.ticker ?? {}) as Record<string, unknown>;
+  const finite = (input: unknown) => typeof input === "number" && Number.isFinite(input);
+  const finiteOrNull = (input: unknown) => input === null || finite(input);
+  if (value.strategyKey !== "covered_call" && value.strategyKey !== "cash_secured_put") return { error: "strategyKey must be covered_call or cash_secured_put." };
+  if (!finite(value.strike) || !finite(value.bid) || !finite(value.ask) || !finiteOrNull(value.spotPrice)) return { error: "strike, bid and ask must be numbers; spotPrice a number or null." };
+  if (!finite(model.calibratedExpectedPnlDollars) || !finite(model.pnlVarianceDollars) || !finiteOrNull(model.coveredPositionPnlVarianceDollars) || !finite(model.varianceSessions)) return { error: "model must carry calibratedExpectedPnlDollars, pnlVarianceDollars, coveredPositionPnlVarianceDollars and varianceSessions." };
+  if (!finiteOrNull(ticker.forecastVolatility) || typeof ticker.elevatedVolatility !== "boolean" || !finiteOrNull(ticker.dayChangePercent)) return { error: "ticker must carry forecastVolatility, elevatedVolatility and dayChangePercent." };
+  return {
+    strategyKey: value.strategyKey,
+    strike: value.strike as number,
+    bid: value.bid as number,
+    ask: value.ask as number,
+    spotPrice: value.spotPrice as number | null,
+    model: { calibratedExpectedPnlDollars: model.calibratedExpectedPnlDollars as number, pnlVarianceDollars: model.pnlVarianceDollars as number, coveredPositionPnlVarianceDollars: model.coveredPositionPnlVarianceDollars as number | null, varianceSessions: model.varianceSessions as number },
+    ticker: { forecastVolatility: ticker.forecastVolatility as number | null, elevatedVolatility: ticker.elevatedVolatility, dayChangePercent: ticker.dayChangePercent as number | null },
+  };
+}
+
+// Pluto's Kelly and stress caps for one contract, for the Signals order panel (mockup approved 2026-10-10). Display only: the
+// sizing gate's own functions with Pluto's settings, at last night's account value (no IBKR round trip; passes use the live one).
+plutoRouter.post("/sizing-caps", async (request: Request, response: Response) => {
+  const parsed = parseSizingCapsRequest(request.body);
+  if ("error" in parsed) {
+    response.status(400).json({ error: parsed.error });
+    return;
+  }
+  const [settings, lastSnapshot] = await Promise.all([
+    loadPlutoSettings(),
+    db("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value", db.raw("snapshot_date::text as snapshot_date_iso")),
+  ]);
+  if (!lastSnapshot) {
+    response.status(503).json({ error: "No account value recorded yet." });
+    return;
+  }
+  const netLiquidationValue = Number(lastSnapshot.net_liquidation_value);
+  const stressInput = stressCapInputFromFigures(parsed.ticker.forecastVolatility, parsed.ticker.elevatedVolatility, parsed.ticker.dayChangePercent);
+  const kelly = computeKellyCap(settings, parsed, netLiquidationValue);
+  const stress = computeStressCap(settings, stressInput, parsed, parsed.spotPrice, netLiquidationValue);
+  response.json({
+    kelly: { contracts: kelly.contracts, detail: kelly.detail },
+    // Infinity (the cap is off or never binds) does not survive JSON: null says "no limit".
+    stress: { contracts: Number.isFinite(stress.contracts) ? stress.contracts : null, detail: stress.detail },
+    netLiquidationValue,
+    accountValueDateIso: lastSnapshot.snapshot_date_iso as string,
+  });
 });
 
 plutoRouter.get("/scoreboard", async (_request: Request, response: Response) => {

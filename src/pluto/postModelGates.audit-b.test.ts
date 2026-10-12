@@ -3,14 +3,14 @@ import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
 import { computeSizingRoom, runPostModelGates, type PostModelBookInput, type PostModelGateInput } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
-import { openDaysFromCalendarRows } from "../lib/marketSessionStatus.js";
+import { fixtureCandidateModel } from "../lib/testSupport/valuationModelFixtures.js";
 
 // Audit B (2026-10-07): the budget nets the managed book's in-flight orders (managedNotional), the positions cap counts managed positions.
 const settings = {
   capitalBudgetPct: 50, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
-  minGrade: "good", minEdgeDollars: 30, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
+  minGrade: "good", minEdgeYieldPct: 15, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 0, stressSigmas: 2,
-  windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3, maxEdgeDriftVp: 1, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
+  windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3, maxEdgeMarginDriftPts: 10, tickerCooldownMinutes: 60, maxFillSlippagePct: 25,
   modelId: "m", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 3, confidenceFloor: 0.6, consecutiveModelFailuresBreaker: 3, promptVersion: "v3.5",
   daySignalsPollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, perTickerModelCooldownMinutes: 5, maxEnabledTickers: 15, messageRateLimitPerSecond: 8, crashLoopRestartsPerHour: 3, telegramVerbosity: "actions",
   unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50, buybackMinDte: 2, updatedAt: "2026-10-07T00:00:00.000Z", updatedByUserId: null,
@@ -25,10 +25,11 @@ const candidate = {
   strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, dte: 9, delta: -0.22, bid: 2.0, ask: 2.1, spreadPercent: 4.9, openInterest: 1200, volume: 300, bidSize: 40, askSize: 35,
   surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, forecastVolatility: 0.5, edge: 0.12, frictionVolatility: 0.02, netEdge: 0.1, edgeDollars: 80, vega: 0.08,
   dollarRisk: 9795, riskAdjustedRatio: 0.008, annualizedYield: 0.83, uncompensatedSharePercent: null, quoteSource: "live", quotedAt: null, flags: [], executable: true, grade: "strong",
+  model: fixtureCandidateModel({ edgeMargin: 0.35, calibratedExpectedPnlDollars: 30, pnlVarianceDollars: 150 ** 2, varianceSessions: 7 }),
 } as SignalCandidate;
 
 const trade: PlutoDecision = { decision: "trade", actionKind: "open_cash_secured_put", candidateId: "HOOD:cash_secured_put:2026-10-16:100", confidence: 0.8, reasons: ["r"], risksAcknowledged: [], systemConcerns: [] };
-const input = (overrides: Partial<PostModelGateInput> = {}): PostModelGateInput => ({ decision: trade, candidate, roll: null, freshRejectionReasons: [], netEdgeAtDecision: 0.1, settings, book, sector: "Financial", stress: { forecastVolatility: 0.5, elevatedVolatility: false, dayMoveSigmas: 0, todayEasternIso: "2026-09-28", openSessionDatesIso: openDaysFromCalendarRows("2026-09-29", "2027-12-31", []) }, ...overrides });
+const input = (overrides: Partial<PostModelGateInput> = {}): PostModelGateInput => ({ decision: trade, candidate, roll: null, freshRejectionReasons: [], marginAtDecision: 0.35, settings, book, sector: "Financial", stress: { forecastVolatility: 0.5, elevatedVolatility: false, dayMoveSigmas: 0 }, ...overrides });
 
 describe("computeSizingRoom — managedNotional", () => {
   it("budget room = NLV × budget % − committed − the managed book's in-flight notional; total and ticker notionals do not touch it", () => {

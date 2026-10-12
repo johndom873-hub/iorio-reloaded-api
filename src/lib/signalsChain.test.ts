@@ -5,6 +5,7 @@ import { assembleSignalsChain, describeContractExclusion, scoreSignalContract, s
 import { candidateContractKey, computeUncompensatedByContract, contractKey, scoreTicker } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
+import { fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
 
 // Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
 const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
@@ -80,6 +81,9 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     dividendCadenceUnknown: false,
     todayEasternIso: "2026-09-21",
     openSessionDatesIso: fixtureWeekdaySessions,
+    modelForecast: fixtureModelForecast(0.15),
+    tradingSessions: fixtureTradingSessions,
+    valuationGroup: "stock",
     ...overrides,
   };
 }

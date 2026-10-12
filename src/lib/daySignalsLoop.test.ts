@@ -12,6 +12,7 @@ import type { AssignmentRiskAlertState, DayRerankState } from "./daySignalsStore
 import type { DayContractRef } from "./daySignalsContractSet.js";
 import type { DayTickerContractContext, DayTrackedTicker } from "./daySignalsContractContextStore.js";
 import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
+import { fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
 
 // Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
 const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
@@ -57,6 +58,9 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
     dividendCadenceUnknown: false,
     todayEasternIso: tradingDateIso,
     openSessionDatesIso: fixtureWeekdaySessions,
+    modelForecast: fixtureModelForecast(surfaceIvAt(100) - 0.02),
+    tradingSessions: fixtureTradingSessions,
+    valuationGroup: "stock",
   };
 }
 
@@ -625,12 +629,14 @@ describe("DaySignalsLoop", () => {
 
   it("notifies roll upgrades per (held leg, replacement) against the recorded roll grade, and records the grades (Roll Signals)", async () => {
     const harness = createHarness();
-    // A 60-day slice with the same IV at every log-moneyness (total variance doubled) so a 30-day held 95 put
-    // has credit, lower-delta replacements out in time; the same-expiry puts are debits or riskier.
+    // A 60-day slice about 5% richer in IV at every log-moneyness (total variance × 2.2 over twice the time) so a 30-day
+    // held 95 put has credit, lower-delta replacements out in time that clear the notification hysteresis; the
+    // same-expiry puts are debits or riskier.
+    const termStructure = 2.2;
     const expiry60 = "2026-11-20";
-    const slice60: SignalSurfaceSlice = { ...slice, expiry: expiry60, yearsToExpiry: 60 / 365, parameters: { ...params, a: params.a * 2, b: params.b * 2 } };
+    const slice60: SignalSurfaceSlice = { ...slice, expiry: expiry60, yearsToExpiry: 60 / 365, parameters: { ...params, a: params.a * termStructure, b: params.b * termStructure } };
     const quotes60: SignalQuote[] = [80, 85, 90, 95].map((strike) => {
-      const mid = blackScholesPriceOnForward(forward, strike, 60 / 365, rate, surfaceIvAt(strike), false);
+      const mid = blackScholesPriceOnForward(forward, strike, 60 / 365, rate, surfaceIvAt(strike) * Math.sqrt(termStructure / 2), false);
       return { expiry: expiry60, strike, right: "P", bid: mid * 0.98, ask: mid * 1.02, source: "snapshot" };
     });
     const heldLeg = { legId: "leg-1", positionId: "pos-1", strategyKey: "cash_secured_put" as const, expiry, strike: 95, right: "P" as const, quantity: 1, entryPrice: 2, entryAtIso: "2026-09-10T14:00:00Z" };

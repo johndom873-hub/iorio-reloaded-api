@@ -10,8 +10,10 @@ import type { SignalGrade } from "./signalCandidates.js";
 export interface DaySignalExpirySeed {
   expiry: string; // ISO date
   rank: number;
-  seedBestEdgeDollars: number;
-  seedBestNetEdge: number;
+  /** The model's expected P&L per contract (after friction) of the expiry's top-ranked candidate; 0 for a held leg's expiry with none. */
+  seedBestExpectedPnlDollars: number;
+  /** That candidate's edge margin (1 − fair ÷ mid). */
+  seedBestEdgeMargin: number;
 }
 
 export interface DaySignalTickerSeed {
@@ -94,8 +96,8 @@ export async function replaceDaySignalPool(tradingDateIso: string, seeds: DaySig
         trading_date: tradingDateIso,
         snapshot_id: seed.snapshotId,
         rank: expiry.rank,
-        seed_best_edge_dollars: expiry.seedBestEdgeDollars,
-        seed_best_net_edge: expiry.seedBestNetEdge,
+        seed_best_expected_pnl_dollars: expiry.seedBestExpectedPnlDollars,
+        seed_best_edge_margin: expiry.seedBestEdgeMargin,
         seeded_at: seededAt,
       })),
     );
@@ -119,8 +121,8 @@ export async function replaceTickerPoolExpiries(tickerId: string, tradingDateIso
         trading_date: tradingDateIso,
         snapshot_id: snapshotId,
         rank: expiry.rank,
-        seed_best_edge_dollars: expiry.seedBestEdgeDollars,
-        seed_best_net_edge: expiry.seedBestNetEdge,
+        seed_best_expected_pnl_dollars: expiry.seedBestExpectedPnlDollars,
+        seed_best_edge_margin: expiry.seedBestEdgeMargin,
         seeded_at: seededAt,
       })),
     );

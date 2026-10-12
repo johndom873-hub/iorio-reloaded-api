@@ -688,7 +688,7 @@ export class DaySignalsLoop {
       const snapshotExpiries = new Set(inputs.slices.map((slice) => slice.expiry));
       const heldLegExpiries = inputs.openShortLegs.map((leg) => leg.expiry).filter((expiry) => snapshotExpiries.has(expiry));
       const expiries = selectDaySignalExpiries(candidates, undefined, heldLegExpiries);
-      // No positive-Edge candidate anywhere: keep the pool as it is rather than emptying a ticker mid-session.
+      // No candidate with a positive expected P&L anywhere: keep the pool as it is rather than emptying a ticker mid-session.
       if (expiries.length === 0) return "unchanged";
       const changed = await this.deps.replaceTickerPool(context.tickerId, tradingDateIso, context.snapshotId, expiries, this.deps.now());
       if (changed) console.log(`day signals loop: re-ranked ${context.symbol} at ${spot} — pooled expiries ${expiries.map((entry) => entry.expiry).join(", ")}`);

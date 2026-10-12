@@ -42,8 +42,8 @@ function input(overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput {
 const tickerOf = (payload: Record<string, unknown>, index = 0) => (payload.tickers as Record<string, unknown>[])[index]!;
 
 describe("prompt version", () => {
-  it("is v3.8, matching the v3.8 migration", () => {
-    expect(plutoPromptVersion).toBe("v3.8");
+  it("is v4.0, matching the v4.0 migration", () => {
+    expect(plutoPromptVersion).toBe("v4.0");
   });
 });
 
@@ -148,10 +148,10 @@ describe("buildPlutoSystemPrompt — v3.3 to v3.5 wording", () => {
     expect(prompt).not.toContain("say why in system_concerns. Doubts");
   });
 
-  it("v3.5 macro weights: heavy Fed/CPI/presidential, medium midterms, light GDP; no jobs/PCE/PPI weights left", () => {
+  it("v4.0 macro weights: heavy Fed/CPI/jobs report/presidential, medium midterms, light GDP; no PCE/PPI weights", () => {
     const prompt = buildPlutoSystemPrompt(settings);
-    expect(prompt).toContain("Heavy: the Fed rate decision, CPI, the US presidential election. Medium: the US midterm elections. Light: GDP.");
-    expect(prompt).not.toMatch(/\bPPI\b|\bPCE\b|jobs|Minutes/);
+    expect(prompt).toContain("Heavy: the Fed rate decision, CPI, the jobs report, the US presidential election. Medium: the US midterm elections. Light: GDP.");
+    expect(prompt).not.toMatch(/\bPPI\b|\bPCE\b|Minutes/);
   });
 
   it("explains recent_decisions outcomes with every action outcome the ledger can record", () => {

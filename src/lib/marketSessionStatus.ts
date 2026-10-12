@@ -61,6 +61,33 @@ export async function loadOpenDaysBetween(fromIso: string, toIso: string): Promi
   return openDaysFromCalendarRows(fromIso, toIso, rows);
 }
 
+// Fallback only, used when IBKR has not answered for the day: NYSE early closes (13:00 ET).
+export const earlyCloseDatesIso = new Set(["2026-11-27", "2026-12-24", "2027-11-26", "2027-12-23"]);
+
+/** One open session and its close in minutes after midnight ET (960 = 16:00, 780 = a 13:00 half day). */
+export interface TradingSession {
+  dateIso: string;
+  closeMinutesEt: number;
+}
+
+/** Pure: the open sessions from `fromIso` to `toIso` inclusive with their closes: the stored close, else the early-close list, else 16:00. */
+export function tradingSessionsFromCalendarRows(fromIso: string, toIso: string, rows: { dateIso: string; isOpen: boolean; closeTime: string | null }[]): TradingSession[] {
+  const closeByDate = new Map(rows.map((row) => [row.dateIso, row.closeTime]));
+  return openDaysFromCalendarRows(fromIso, toIso, rows).map((dateIso) => {
+    const stored = closeByDate.get(dateIso);
+    const { hour, minute } = stored ? hhmmParts(stored.slice(0, 5)) : earlyCloseDatesIso.has(dateIso) ? { hour: 13, minute: 0 } : REGULAR_CLOSE;
+    return { dateIso, closeMinutesEt: hour * 60 + minute };
+  });
+}
+
+/** The open sessions from `fromIso` to `toIso` inclusive, with half days, in one query. */
+export async function loadTradingSessionsBetween(fromIso: string, toIso: string): Promise<TradingSession[]> {
+  const rows: { dateIso: string; isOpen: boolean; closeTime: string | null }[] = await db("market_calendar")
+    .whereBetween("calendar_date", [fromIso, toIso])
+    .select(db.raw(`calendar_date::text as "dateIso"`), "is_open as isOpen", db.raw(`close_time::text as "closeTime"`));
+  return tradingSessionsFromCalendarRows(fromIso, toIso, rows);
+}
+
 export type SessionCloseSource = "ibkr_liquid_hours" | "regular";
 
 /** One day's schedule: open or not, and when the regular session closes (16:00 ET unless the calendar knows better). */

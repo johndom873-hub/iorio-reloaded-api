@@ -3,7 +3,9 @@ import type { MacroEvent } from "./macroEventCalendar.js";
 import type { LiveOptionQuote } from "./signalsLiveScoring.js";
 import type { TickerCaveat } from "./signalsRoadmap.js";
 import type { ElevatedVolatilityFlag, SkewMeasure } from "./tiltMeasures.js";
-import type { RealizedVolatilityForecast } from "./volatilityEdge.js";
+import type { ModelVolatilityForecast, RealizedVolatilityForecast } from "./volatilityEdge.js";
+import type { TradingSession } from "./marketSessionStatus.js";
+import type { ValuationGroup } from "./volatilityModelTables.js";
 import type { HeldLegScore, OpenShortLeg, RollSignalCandidate } from "./rollSignalCandidates.js";
 
 /** "analysing": today's snapshot is saved but its surface fit has not finished yet (a pending state, not a problem). */
@@ -52,8 +54,14 @@ export interface TickerSignalsInputs {
   /** The Day Signals loop's latest bid/ask for this ticker's pooled contracts, from the same snapshot date as `header`; empty when none. */
   dayQuotes: LiveOptionQuote[];
   forecast: RealizedVolatilityForecast | null;
+  /** The valuation model's forecast (YZ21 per session, model review P3); null without 22 bars before today. */
+  modelForecast: ModelVolatilityForecast | null;
   /** The open sessions after todayEasternIso through the furthest slice expiry (market calendar, weekdays past its end): each contract's trading sessions to expiry. */
   openSessionDatesIso: string[];
+  /** Every open session, with its close, from the earlier of the snapshot date and today through the furthest slice expiry: the variance clock's input. */
+  tradingSessions: TradingSession[];
+  /** Which fat-tail table the ticker is valued with (ETFs incl. TLT, or single stocks). */
+  valuationGroup: ValuationGroup;
   earningsDatesIso: string[];
   /** False when the ticker has never resolved to a TradingView symbol -- earningsDatesIso is necessarily
    * empty either way, so this is what actually tells the guard "no earnings scheduled" from "unchecked". */
@@ -127,7 +135,11 @@ export interface TickerSignals {
   macroEvents: MacroEvent[];
   /** At-the-money IV of the fitted slice nearest 30 days (constant across spot moves under sticky moneyness). */
   atmImpliedVolatility: number | null;
+  /** The same at-the-money total variance on the forecast's clock: √(252 × w ÷ τ), comparable with modelForecast. */
+  atmImpliedVolatilityPerSession: number | null;
   forecast: RealizedVolatilityForecast | null;
+  /** The valuation model's forecast (YZ21 per session) every candidate's model block was computed with. */
+  modelForecast: ModelVolatilityForecast | null;
   dailyBarCount: number;
   dividendCadenceUnknown: boolean;
   /** Ticker-specific "not accounted for" caveats (no snapshot, short history, dividend payer). */

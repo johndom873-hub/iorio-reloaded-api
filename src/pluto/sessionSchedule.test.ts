@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { earlyCloseDatesIso, effectiveWindowEndEt } from "./sessionSchedule.js";
+import { effectiveWindowEndEt } from "./sessionSchedule.js";
+import { earlyCloseDatesIso } from "../lib/marketSessionStatus.js";
 
 describe("effectiveWindowEndEt", () => {
   it("keeps the configured end on a full day and pulls it to 30 min before an early close", () => {

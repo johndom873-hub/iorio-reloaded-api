@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
-import { countSessionsLeftBeforeEarnings, evaluateEarningsBuyback, evaluateEventCoveredCallClose, evaluateEventPutClose, evaluateShortLegBuyback, evaluateUnstructuredClose, eventCloseWindowSessions, mergeEventAndHoldEdgeBuybacks, orderedEntryPremium, type UnstructuredSharePosition } from "./closeActions.js";
+import { countSessionsLeftBeforeEarnings, evaluateEarningsBuyback, evaluateEventCoveredCallClose, evaluateEventPutClose, evaluateShortLegBuyback, evaluateUnstructuredClose, eventCloseWindowSessions, mergeEventAndHoldValueBuybacks, orderedEntryPremium, type UnstructuredSharePosition } from "./closeActions.js";
 import { heldCoveredCallEntry, heldPutEntry } from "./heldPositionMetrics.js";
 import type { MacroEventBeforeExpiry } from "../lib/macroEventTiming.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { fixtureHeldLegModel, fixtureRollModel } from "../lib/testSupport/valuationModelFixtures.js";
 
 const settings = { unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50, buybackMinDte: 2 } as PlutoSettings;
 
@@ -43,8 +44,9 @@ describe("Formula P2 — short-leg buyback", () => {
   const leg: HeldLegScore = {
     legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, right: "P", quantity: 2, entryPrice: 2.4, entryAtIso: "2026-09-10T14:00:00Z",
     dte: 18, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42, edge: -0.05, frictionVolatility: 0.01, vega: 0.05, holdEdgeDollars: -25, closeCostDollars: 5, dollarRisk: 9948, quoteSource: "day", quotedAt: "2026-09-28T15:00:00Z", flags: [], unscoredReason: null,
+    model: fixtureHeldLegModel(-25, 5),
   };
-  const roll = (grade: RollSignalCandidate["grade"]): RollSignalCandidate => ({ legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", quantity: 2, replacement: {} as never, netRollEdge: 0.01, netRollEdgeDollarsPerContract: 5, netRollEdgeDollars: 10, netCreditPerShare: 0.1, deltaChange: -0.01, dollarRiskChange: 0, flags: [], warnings: [], grade });
+  const roll = (grade: RollSignalCandidate["grade"]): RollSignalCandidate => ({ legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", quantity: 2, replacement: {} as never, netRollEdge: 0.01, netRollEdgeDollarsPerContract: 5, netRollEdgeDollars: 10, netCreditPerShare: 0.1, deltaChange: -0.01, dollarRiskChange: 0, flags: [], warnings: [], grade, model: fixtureRollModel({ grade }) });
   const base = { symbol: "HOOD", leg, rolls: [], settings, singleLegPosition: true };
 
   it("offers the buyback at the mid when holding has negative net value and the ask locks a profit", () => {
@@ -53,10 +55,18 @@ describe("Formula P2 — short-leg buyback", () => {
     expect(offer).toMatchObject({ id: "HOOD:close_leg:leg9", kind: "close_leg", side: "buy", multiplier: 100, quantity: 2, limitPrice: 0.53, automatic: false });
     expect(offer!.cycle_pnl).toBeCloseTo((2.4 - 0.55) * 200, 6);
   });
+  it("judges holding on the model's hold value, never the old Edge's, and needs a valuation", () => {
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, holdEdgeDollars: 500 } }).offer).not.toBeNull();
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, model: null } }).reason).toBe("the held leg has no model valuation");
+    expect(evaluateShortLegBuyback(base).offer!.detail).toMatchObject({ hold_value_dollars: -25, close_cost_dollars: 5 });
+  });
   it("is withheld when holding still has value, a roll grades Weak or better, DTE is too short, or the ask would realise a loss", () => {
-    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, holdEdgeDollars: 20 } }).reason).toBe("holding is still worth $15 per contract more than buying back, after closing costs");
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, model: fixtureHeldLegModel(20, 5) } }).reason).toBe("holding is still worth $15 per contract more than buying back, after closing costs");
     expect(evaluateShortLegBuyback({ ...base, rolls: [roll("weak")] }).reason).toMatch(/credit roll/);
     expect(evaluateShortLegBuyback({ ...base, rolls: [roll("avoid")] }).offer).not.toBeNull();
+    // The roll's model grade decides, not its old-Edge grade.
+    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("strong"), model: fixtureRollModel({ grade: "avoid", edgeMargin: 0.02 }) }] }).offer).not.toBeNull();
+    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("avoid"), model: null }] }).offer).not.toBeNull();
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, dte: 1 } }).reason).toMatch(/DTE 1 below 2/);
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.6, bid: 2.5 } }).reason).toMatch(/^buying back at the ask would lose \$\d+$/);
     // Recorded 2.40, but we set 2.00 on the leg in a combo: an ask of 2.20 is a loss on what we really received.
@@ -88,6 +98,7 @@ describe("Formula P3 — earnings buyback", () => {
   const leg: HeldLegScore = {
     legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, right: "P", quantity: 2, entryPrice: 2.4, entryAtIso: "2026-09-10T14:00:00Z",
     dte: 18, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42, edge: -0.05, frictionVolatility: 0.01, vega: 0.05, holdEdgeDollars: -25, closeCostDollars: 5, dollarRisk: 9948, quoteSource: "day", quotedAt: "2026-09-28T15:00:00Z", flags: [], unscoredReason: null,
+    model: fixtureHeldLegModel(-25, 5),
   };
   // HOOD reports 2026-10-27 after the close; the put expires 2026-10-30.
   const earnings = { dateIso: "2026-10-27", time: "1" };
@@ -135,6 +146,7 @@ describe("Formula F3 — event closes", () => {
   const put: HeldLegScore = {
     legId: "leg7", positionId: "pos7", strategyKey: "cash_secured_put", expiry: "2026-10-30", strike: 95, right: "P", quantity: 1, entryPrice: 1, entryAtIso: "2026-10-09T14:00:00Z",
     dte: 6, delta: -0.08, bid: 0.12, ask: 0.16, mid: 0.14, surfaceImpliedVolatility: 0.45, midImpliedVolatility: 0.45, edge: 0.1, frictionVolatility: 0.01, vega: 0.03, holdEdgeDollars: 30, closeCostDollars: 3, dollarRisk: 9486, quoteSource: "day", quotedAt: "2026-10-24T15:00:00Z", flags: [], unscoredReason: null,
+    model: fixtureHeldLegModel(30, 3),
   };
   const putEntry = (sessionsUntil: number, overrides: Partial<HeldLegScore> = {}, entryCredit = 1) => heldPutEntry({ leg: { ...put, ...overrides }, entryCredit, spot: 101, forecastVolatility, event: fed(sessionsUntil), commissionPerContract: 0.68 });
   const putInput = (sessionsUntil: number, overrides: Partial<HeldLegScore> = {}, entryCredit = 1) => ({ symbol: "HOOD", leg: { ...put, ...overrides }, entry: putEntry(sessionsUntil, overrides, entryCredit), singleLegPosition: true, gateBlockReason: null });
@@ -165,13 +177,13 @@ describe("Formula F3 — event closes", () => {
 
   it("one offer per leg when P2 also applies: the event close, saying holding no longer pays", () => {
     const eventOffer = evaluateEventPutClose(putInput(3)).offer!;
-    const p2 = evaluateShortLegBuyback({ symbol: "HOOD", leg: { ...put, holdEdgeDollars: -10 }, rolls: [], settings, singleLegPosition: true }).offer!;
-    const merged = mergeEventAndHoldEdgeBuybacks(eventOffer, p2);
+    const p2 = evaluateShortLegBuyback({ symbol: "HOOD", leg: { ...put, model: fixtureHeldLegModel(-10, 3) }, rolls: [], settings, singleLegPosition: true }).offer!;
+    const merged = mergeEventAndHoldValueBuybacks(eventOffer, p2);
     expect(merged.id).toBe(p2.id);
     expect(merged.reviewKey).toBe("c80s3");
     expect(merged.description).toMatch(/holding also no longer pays its closing cost$/);
-    expect(merged.detail).toMatchObject({ hold_edge_dollars: -10, also_hold_edge_negative: true, sessions_until: 3 });
-    expect(mergeEventAndHoldEdgeBuybacks(eventOffer, null)).toBe(eventOffer);
+    expect(merged.detail).toMatchObject({ hold_value_dollars: -10, also_hold_value_negative: true, sessions_until: 3 });
+    expect(mergeEventAndHoldValueBuybacks(eventOffer, null)).toBe(eventOffer);
   });
 
   describe("covered call (whole position)", () => {

@@ -19,8 +19,8 @@ import {
   type MajorMacroEventSource,
 } from "./majorMacroEventSources.js";
 
-// Major US macro events (decided by Marcelo): the Fed rate decision, CPI, GDP and US federal elections, nothing
-// else. They feed the Signals "macro_event_before_expiry" flag (a flag, never an exclusion), Pluto's per-ticker
+// Major US macro events (decided by Marcelo): the Fed rate decision, CPI, GDP, the jobs report (added 2026-10-10, model
+// review P6) and US federal elections, nothing else. They feed the Signals "macro_event_before_expiry" flag (a flag, never an exclusion), Pluto's per-ticker
 // macro_events, the Calendar page and the order-review warning. Sources: majorMacroEventSources.ts.
 
 /** How far ahead events are stored. */

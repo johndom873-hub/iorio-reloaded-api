@@ -66,7 +66,7 @@ vi.mock("./candidateFilters.js", () => ({
     rejected: [],
     rejectedRolls: [],
   }),
-  deterministicTopPick: () => null,
+  summarizeTopPick: () => null,
   findSameContractConflict: () => null,
   rejectOpenCandidate: () => [],
   rejectTicker: () => [],

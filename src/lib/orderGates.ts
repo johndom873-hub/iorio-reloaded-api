@@ -54,7 +54,7 @@ export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGa
   const optionLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && !leg.positionLegId) : payload.legs.find((leg) => leg.role === "option");
   const closeLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && leg.positionLegId) : undefined;
   if (!optionLeg || !optionLeg.strike || (isRoll && !closeLeg?.strike)) return null;
-  return { strategyKey: strategyKey as OrderLimitsStrategyKey, symbol: payload.symbol, quantity: optionLeg.quantity, strike: optionLeg.strike, rollFromStrike: closeLeg?.strike, excludeOrderRequestId: orderRequest.id };
+  return { strategyKey: strategyKey as OrderLimitsStrategyKey, symbol: payload.symbol, quantity: optionLeg.quantity, strike: optionLeg.strike, premium: optionLeg.unitPrice, rollFromStrike: closeLeg?.strike, rollFromPremium: closeLeg?.unitPrice, excludeOrderRequestId: orderRequest.id };
 }
 
 /** Null when the order is not limit-checked; otherwise the shared limits verdict. A ticker unknown to the platform fails closed. */

@@ -19,13 +19,15 @@ describe("limitsInputFromOrderRequest", () => {
       symbol: "AAA",
       quantity: 2,
       strike: 90,
+      premium: 1.5,
       rollFromStrike: undefined,
+      rollFromPremium: undefined,
       excludeOrderRequestId: "o1",
     });
   });
 
-  it("reads a roll's new leg and the strike it closes", () => {
-    expect(limitsInputFromOrderRequest({ id: "o2", request_type: "roll_leg", payload: putRoll })).toMatchObject({ strike: 95, rollFromStrike: 90, quantity: 2 });
+  it("reads a roll's new leg and the strike it closes, with both limit prices", () => {
+    expect(limitsInputFromOrderRequest({ id: "o2", request_type: "roll_leg", payload: putRoll })).toMatchObject({ strike: 95, premium: 2, rollFromStrike: 90, rollFromPremium: 1, quantity: 2 });
   });
 
   it("does not limit-check a close, or an order without a strategy or option leg", () => {

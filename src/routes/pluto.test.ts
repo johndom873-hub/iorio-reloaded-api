@@ -50,6 +50,7 @@ beforeAll(async () => {
   ]);
 
   const app = express();
+  app.use(express.json());
   app.use((request, _response, next) => {
     (request as unknown as { session: { userId?: string } }).session = { userId };
     next();
@@ -74,6 +75,70 @@ async function get(path: string) {
   const response = await fetch(`${baseUrl}/pluto${path}`, { headers: { "x-test-user-id": userId } });
   return { status: response.status, json: (await response.json()) as any };
 }
+
+async function put(path: string, body: unknown) {
+  const response = await fetch(`${baseUrl}/pluto${path}`, { method: "PUT", headers: { "content-type": "application/json", "x-test-user-id": userId }, body: JSON.stringify(body) });
+  return { status: response.status, json: (await response.json()) as any };
+}
+
+describe("PUT /pluto/settings: the edge-margin drift gate (model review, 2026-10-10)", () => {
+  // The settings row is shared by every test file, so this writes back the value it holds instead of changing it.
+  it("stores and returns maxEdgeMarginDriftPts, and refuses the retired volatility-point field and out-of-range values", async () => {
+    const { status, json: current } = await get("/settings");
+    expect(status).toBe(200);
+    expect(typeof current.maxEdgeMarginDriftPts).toBe("number");
+    expect(current).not.toHaveProperty("maxEdgeDriftVp");
+    const saved = await put("/settings", { maxEdgeMarginDriftPts: current.maxEdgeMarginDriftPts });
+    expect(saved.status).toBe(200);
+    expect(saved.json.maxEdgeMarginDriftPts).toBe(current.maxEdgeMarginDriftPts);
+    expect((await get("/settings")).json.maxEdgeMarginDriftPts).toBe(current.maxEdgeMarginDriftPts);
+    const retired = await put("/settings", { maxEdgeDriftVp: 1 });
+    expect(retired.status).toBe(400);
+    expect(retired.json.error).toMatch(/not a Pluto setting/);
+    expect((await put("/settings", { maxEdgeMarginDriftPts: 101 })).status).toBe(400);
+    expect((await put("/settings", { maxEdgeMarginDriftPts: -1 })).status).toBe(400);
+  });
+});
+
+async function post(path: string, body: unknown) {
+  const response = await fetch(`${baseUrl}/pluto${path}`, { method: "POST", headers: { "content-type": "application/json", "x-test-user-id": userId }, body: JSON.stringify(body) });
+  return { status: response.status, json: (await response.json()) as any };
+}
+
+describe("POST /pluto/sizing-caps (the Signals order panel's Kelly and stress caps)", () => {
+  // A far-future snapshot is the newest whatever else the shared test database holds.
+  const snapshotDate = "2099-01-02";
+  beforeAll(async () => {
+    await testDb("account_pnl_snapshots").insert({ snapshot_date: snapshotDate, net_liquidation_value: 1_000_000 });
+  });
+  afterAll(async () => {
+    await testDb("account_pnl_snapshots").where({ snapshot_date: snapshotDate }).del();
+  });
+  const put100 = { strategyKey: "cash_secured_put", strike: 100, bid: 1.9, ask: 2.1, spotPrice: 102, model: { calibratedExpectedPnlDollars: 5, pnlVarianceDollars: 150 ** 2, coveredPositionPnlVarianceDollars: null, varianceSessions: 5 }, ticker: { forecastVolatility: 0.5, elevatedVolatility: false, dayChangePercent: 0 } };
+
+  it("applies the sizing gate's Kelly and stress caps with Pluto's settings and the latest account value", async () => {
+    const { json: settings } = await get("/settings");
+    const { status, json } = await post("/sizing-caps", put100);
+    expect(status).toBe(200);
+    expect(json.netLiquidationValue).toBe(1_000_000);
+    expect(json.accountValueDateIso).toBe(snapshotDate);
+    // Kelly: 0.25 × the budget × $5 ÷ $150².
+    expect(json.kelly.contracts).toBe(Math.floor((0.25 * 1_000_000 * (settings.capitalBudgetPct / 100) * 5) / 150 ** 2));
+    // Stress: the stock down stressSigmas × 50% × √(5/252) by expiry, less the $200 premium.
+    const stressedSpot = 102 * (1 - settings.stressSigmas * 0.5 * Math.sqrt(5 / 252));
+    const loss = Math.max(0, 100 - stressedSpot) * 100 - 200;
+    const expected = settings.stressRiskBudgetPct <= 0 || loss <= 0 ? null : Math.floor((1_000_000 * settings.stressRiskBudgetPct) / 100 / loss);
+    expect(json.stress.contracts).toBe(expected);
+  });
+
+  it("gives no Kelly contracts when history says the sale lost money, and refuses a body missing a figure", async () => {
+    const losing = await post("/sizing-caps", { ...put100, model: { ...put100.model, calibratedExpectedPnlDollars: -3 } });
+    expect(losing.json.kelly.contracts).toBe(0);
+    expect((await post("/sizing-caps", { ...put100, model: { ...put100.model, varianceSessions: undefined } })).status).toBe(400);
+    expect((await post("/sizing-caps", { ...put100, strategyKey: "hedge" })).status).toBe(400);
+    expect((await post("/sizing-caps", { ...put100, ticker: { forecastVolatility: 0.5 } })).status).toBe(400);
+  });
+});
 
 describe("GET /pluto/passes", () => {
   it("returns the newest passes of any kind by default", async () => {
