@@ -107,24 +107,25 @@ afterEach(() => {
 });
 
 describe("runReadinessIfDue with Pluto off, paused or on (audit)", () => {
-  it("runs at 6:00 ET while Pluto is Off and alerts that it is not running, without a pause promise", async () => {
+  it("runs at 6:00 ET while Pluto is Off and warns that it will not trade today, with nothing failing and no pause promise", async () => {
     await runReadinessAt("2097-07-15T10:00:30Z", state({ mode: "off" }));
     expect(harness.saved).toHaveLength(1);
-    expect(harness.saved[0]).toMatchObject({ dateIso: "2097-07-15", lastRunKind: "first", signature: "Pluto running", finalDone: false });
+    expect(harness.saved[0]).toMatchObject({ dateIso: "2097-07-15", lastRunKind: "first", signature: "", finalDone: false });
     expect(harness.telegrams).toHaveLength(1);
-    expect(harness.telegrams[0]).toContain("❌ Pluto running: switched off");
+    expect(harness.telegrams[0]).toContain("⚠️ Pluto running: switched off, so it will not trade today");
     expect(harness.telegrams[0]).not.toContain("Pluto pauses at");
     expect(harness.pauses).toEqual([]);
     expect(harness.events.map((event) => event.type)).toEqual(["readiness_check"]);
   });
 
-  it("at 9:20 ET never pauses an Off Pluto, even when a probe fails, and says it is not running", async () => {
+  it("at 9:20 ET never pauses an Off Pluto, even when a probe fails: the probe is a warning and it says Pluto is off", async () => {
     harness.probeFailures = { IBKR: "Gateway refused the connection" };
     await runReadinessAt("2097-07-15T13:20:10Z", state({ mode: "off" }));
     expect(harness.pauses).toEqual([]);
     expect(harness.events.map((event) => event.type)).toEqual(["readiness_check"]);
-    expect(harness.telegrams[0]).toContain("Pluto is not running");
-    expect(harness.saved[0]).toMatchObject({ lastRunKind: "final", finalDone: true, signature: "IBKR|Pluto running" });
+    expect(harness.telegrams[0]).toContain("Pluto is switched off at the 9:20 ET check");
+    expect(harness.telegrams[0]).toContain("⚠️ IBKR: Gateway refused the connection");
+    expect(harness.saved[0]).toMatchObject({ lastRunKind: "final", finalDone: true, signature: "" });
   });
 
   it("at 9:20 ET never re-pauses a Pluto a person paused, even when a probe fails", async () => {
@@ -151,9 +152,9 @@ describe("runReadinessIfDue with Pluto off, paused or on (audit)", () => {
     expect(harness.telegrams[0]).not.toContain("so Pluto is paused");
   });
 
-  it("at 9:20 ET with every probe passing tells an Off Pluto it is not running, never 'ready'", async () => {
+  it("at 9:20 ET with every probe passing tells an Off Pluto it will not trade today, never 'ready'", async () => {
     await runReadinessAt("2097-07-15T13:20:10Z", state({ mode: "off" }));
-    expect(harness.telegrams[0]).toContain("Pluto is not running at the 9:20 ET check");
+    expect(harness.telegrams[0]).toContain("Pluto is switched off at the 9:20 ET check, so it will not trade today");
     expect(harness.telegrams[0]).not.toContain("ready for today");
   });
 
@@ -170,10 +171,17 @@ describe("runReadinessIfDue with Pluto off, paused or on (audit)", () => {
     expect(harness.telegrams).toEqual([]);
   });
 
-  it("stays quiet on a re-check while Pluto is still Off (same failing set)", async () => {
+  it("stays quiet on a re-check while Pluto is still paused (same failing set)", async () => {
     const sixAm = { dateIso: "2097-07-15", lastRunAt: "2097-07-15T10:00:30.000Z", lastRunKind: "first", signature: "Pluto running", finalDone: false, results: [] };
-    await runReadinessAt("2097-07-15T10:10:40Z", state({ mode: "off", readiness: sixAm }));
+    await runReadinessAt("2097-07-15T10:10:40Z", state({ paused: true, pauseReason: "manual", readiness: sixAm }));
     expect(harness.saved).toHaveLength(1);
+    expect(harness.telegrams).toEqual([]);
+  });
+
+  it("never re-checks an Off Pluto after its 6:00 ET run: nothing failed", async () => {
+    const sixAm = { dateIso: "2097-07-15", lastRunAt: "2097-07-15T10:00:30.000Z", lastRunKind: "first", signature: "", finalDone: false, results: [] };
+    await runReadinessAt("2097-07-15T10:10:40Z", state({ mode: "off", readiness: sixAm }));
+    expect(harness.saved).toEqual([]);
     expect(harness.telegrams).toEqual([]);
   });
 });

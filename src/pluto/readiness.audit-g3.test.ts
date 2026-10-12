@@ -3,8 +3,8 @@ import { decidePlutoReadinessRun, describePlutoReadinessOutcome, evaluatePlutoRu
 
 // Audit (G3, 2026-10-07): readiness.ts edges not covered by readiness.test.ts.
 
-const ok = (name: PlutoReadinessResult["name"]): PlutoReadinessResult => ({ name, ok: true, detail: "fine" });
-const failed = (name: PlutoReadinessResult["name"], detail = "broken"): PlutoReadinessResult => ({ name, ok: false, detail });
+const ok = (name: PlutoReadinessResult["name"]): PlutoReadinessResult => ({ name, ok: true, status: "ok", detail: "fine" });
+const failed = (name: PlutoReadinessResult["name"], detail = "broken"): PlutoReadinessResult => ({ name, ok: false, status: "fail", detail });
 const record = (dateIso: string, overrides: Partial<PlutoReadinessRecord> = {}): PlutoReadinessRecord => ({ dateIso, lastRunAt: `${dateIso}T11:00:00.000Z`, lastRunKind: "first", signature: "", finalDone: false, results: [], ...overrides });
 
 describe("decidePlutoReadinessRun in winter time (EST, UTC-5) (audit)", () => {
@@ -31,8 +31,8 @@ describe("evaluatePlutoRunning wording (audit)", () => {
     expect(evaluatePlutoRunning({ mode: "on", paused: true, pauseReason: "something_new" }).detail).toBe("paused");
     expect(evaluatePlutoRunning({ mode: "on", paused: true, pauseReason: null }).detail).toBe("paused");
   });
-  it("treats any mode other than on as switched off", () => {
-    expect(evaluatePlutoRunning({ mode: "paper", paused: false, pauseReason: null })).toEqual({ name: "Pluto running", ok: false, detail: "switched off" });
+  it("treats any mode other than on as switched off, a warning", () => {
+    expect(evaluatePlutoRunning({ mode: "paper", paused: false, pauseReason: null })).toEqual({ name: "Pluto running", ok: false, status: "warn", detail: "switched off, so it will not trade today" });
   });
   it("is the fourth named test", () => {
     expect(plutoReadinessTestNames).toEqual(["IBKR", "API sign-in", "OpenRouter", "Pluto running"]);
@@ -40,27 +40,27 @@ describe("evaluatePlutoRunning wording (audit)", () => {
 });
 
 describe("describePlutoReadinessOutcome transitions involving Pluto running (audit)", () => {
-  const notRunning = failed("Pluto running", "switched off");
-  it("posts a change when a probe starts failing on an Off Pluto, still without a pause promise", () => {
+  const notRunning = failed("Pluto running", "paused after a deploy");
+  it("posts a change when a probe starts failing on a paused Pluto, still without a pause promise", () => {
     const outcome = describePlutoReadinessOutcome("recheck", "Pluto running", [failed("IBKR"), ok("API sign-in"), ok("OpenRouter"), notRunning]);
     expect(outcome.signature).toBe("IBKR|Pluto running");
     expect(outcome.message).toContain("Pluto pre-open check changed");
     expect(outcome.message).not.toContain("Pluto pauses at");
     expect(outcome.pause).toBe(false);
   });
-  it("adds the pause promise once Pluto is switched on while a probe still fails", () => {
+  it("adds the pause promise once Pluto is resumed while a probe still fails", () => {
     const outcome = describePlutoReadinessOutcome("recheck", "IBKR|Pluto running", [failed("IBKR"), ok("API sign-in"), ok("OpenRouter"), ok("Pluto running")]);
     expect(outcome.signature).toBe("IBKR");
     expect(outcome.message).toContain("Pluto pauses at 9:20 ET if it still fails");
   });
-  it("stays quiet when only the reason Pluto is not running changes (paused -> off)", () => {
-    const outcome = describePlutoReadinessOutcome("recheck", "Pluto running", [ok("IBKR"), ok("API sign-in"), ok("OpenRouter"), failed("Pluto running", "switched off and paused by a person")]);
+  it("stays quiet when only the reason Pluto is paused changes (deploy -> a person)", () => {
+    const outcome = describePlutoReadinessOutcome("recheck", "Pluto running", [ok("IBKR"), ok("API sign-in"), ok("OpenRouter"), failed("Pluto running", "paused by a person")]);
     expect(outcome.message).toBeNull();
   });
   it("lists failures before passes in the message, whatever order the results come in", () => {
     const outcome = describePlutoReadinessOutcome("first", null, [ok("IBKR"), ok("API sign-in"), ok("OpenRouter"), notRunning]);
     const lines = outcome.message!.split("\n");
-    expect(lines[1]).toBe("❌ Pluto running: switched off");
+    expect(lines[1]).toBe("❌ Pluto running: paused after a deploy");
     expect(lines.slice(2, 5).every((line) => line.startsWith("✅"))).toBe(true);
   });
   it("builds the signature from failing names in result order", () => {

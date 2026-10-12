@@ -40,7 +40,6 @@ export interface DataInvariantInputs {
   universeSymbols: string[];
   /** Today's (Eastern) snapshots, one per symbol. */
   snapshots: SnapshotFacts[];
-  dayPoolExpiryCount: number;
   lastCompletedSession: string;
   latestBarDateBySymbol: Record<string, string | null>;
   riskFreeRateFetchedAt: Date | null;
@@ -93,11 +92,6 @@ export function evaluateDataInvariants(input: DataInvariantInputs): InvariantRes
     ),
   );
   results.push(result("Surface fits", input.snapshots.filter((snapshot) => snapshot.status !== "failed" && snapshot.okFitCount === 0).map((snapshot) => snapshot.symbol), "every snapshot has fitted expiries", "no fitted expiry for"));
-  results.push(
-    input.dayPoolExpiryCount > 0
-      ? { name: "Day Signals pool", ok: true, detail: `${input.dayPoolExpiryCount} expiries seeded` }
-      : { name: "Day Signals pool", ok: false, detail: "empty for today" },
-  );
 
   const staleBars = Object.entries(input.latestBarDateBySymbol)
     .filter(([, latest]) => latest === null || latest < input.lastCompletedSession)
@@ -170,8 +164,7 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
     .groupBy("t.symbol")
     .select("t.symbol", db.raw("max(b.trading_date)::text as latest"));
 
-  const [poolRow, rateRow, calendarRow, tickerCalendarRow, majorMacroEventsRow, earningsRows] = await Promise.all([
-    db("day_signal_expiries").whereRaw("trading_date::text = ?", [todayEasternIso]).count<{ count: string }[]>("* as count").first(),
+  const [rateRow, calendarRow, tickerCalendarRow, majorMacroEventsRow, earningsRows] = await Promise.all([
     db("risk_free_rates").max<{ fetched_at: Date | null }[]>("fetched_at as fetched_at").first(),
     db("market_calendar").whereRaw("calendar_date > ?::date and calendar_date <= (?::date + ?::int)", [todayEasternIso, todayEasternIso, marketCalendarCoverageDays]).count<{ count: string }[]>("* as count").first(),
     db("ticker_calendar_events").max<{ captured_at: Date | null }[]>("captured_at as captured_at").first(),
@@ -199,7 +192,6 @@ export async function loadDataInvariantInputs(now: Date, todayEasternIso: string
       contractsWithImpliedVolatility: Number(row.contracts_with_implied_volatility),
       okFitCount: Number(row.ok_fit_count),
     })),
-    dayPoolExpiryCount: Number(poolRow?.count ?? 0),
     lastCompletedSession,
     latestBarDateBySymbol: Object.fromEntries(barRows.map((row) => [row.symbol, row.latest])),
     riskFreeRateFetchedAt: rateRow?.fetched_at ? new Date(rateRow.fetched_at) : null,

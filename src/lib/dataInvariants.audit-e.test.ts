@@ -28,7 +28,6 @@ const base = (earningsDatesBySymbol: Record<string, string[]>): DataInvariantInp
   now,
   universeSymbols: [],
   snapshots: [],
-  dayPoolExpiryCount: 5,
   lastCompletedSession: "2026-10-06",
   latestBarDateBySymbol: {},
   riskFreeRateFetchedAt: new Date("2026-10-01T12:00:00Z"),

@@ -7,8 +7,9 @@ import { formatEasternTime } from "./easternIsoDate.js";
 // Pre-open readiness (approved 2026-10-05): "can Iorio trade when the market opens?", answered by one list of checks at
 // 6:00 ET (3.5 hours to fix anything), re-checked while red, summed up at 9:20 ET, and confirmed against live option data at
 // 9:35 ET. Everything here is pure: the collectors (preOpenReadinessCollectors.ts) read the world, these functions judge it,
-// so every rule is unit tested. A check is "fail" when trading cannot be trusted, "warn" when a human should look but trading
-// can go ahead, "ok" otherwise; the order is ready when nothing fails.
+// so every rule is unit tested. A check is "fail" only when normal operations would stop at the open and someone has to fix
+// it now (Marcelo, 2026-10-12), "warn" when it may need attention but trading goes ahead, "ok" otherwise; the order is ready
+// when nothing fails.
 
 export type ReadinessStatus = "ok" | "warn" | "fail";
 export type ReadinessStage = "pre_open" | "open";
@@ -33,24 +34,31 @@ export interface ConfigurationExpectation {
   secret?: boolean;
   /** Absent, empty or "false" is required (a kill-switch style flag that must stay off). */
   mustBeOff?: boolean;
+  /** Wrong or missing only degrades a side feature (recovery tools, reports, Genosuke, the calendar sync): a warning, not a stop. */
+  warnOnly?: boolean;
 }
 
-const requiredSecrets = [
-  "SESSION_SECRET",
+/** Without these the open cannot go ahead: no sign-in, no IBKR connection from this app, no alerts. */
+const blockingSecrets = ["SESSION_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "IBKR_TUNNEL_SSH_PRIVATE_KEY_BASE64"];
+
+/** Each feeds a side feature: the stored rate covers a FRED outage, Pluto's own check covers OpenRouter, the SSH keys are recovery tools. */
+const warnOnlySecrets = [
   "FRED_API_KEY",
   "MARKETDATA_API_TOKEN",
-  "TELEGRAM_BOT_TOKEN",
-  "TELEGRAM_CHAT_ID",
   "IBKR_FLEX_TOKEN",
   "IBKR_FLEX_QUERY_ID",
   "IBKR_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64",
   "IORIO_WORKER_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64",
   "IBKR_GATEWAY_LOGIN_SSH_PRIVATE_KEY_BASE64",
-  "IBKR_TUNNEL_SSH_PRIVATE_KEY_BASE64",
   "OPENROUTER_API_KEY",
   "GENOSUKE_WEBHOOK_URL",
   "GENOSUKE_WEBHOOK_SECRET",
   "DEPLOY_NOTICE_SECRET",
+];
+
+const requiredSecretExpectations: ConfigurationExpectation[] = [
+  ...blockingSecrets.map((name) => ({ name, secret: true })),
+  ...warnOnlySecrets.map((name) => ({ name, secret: true, warnOnly: true })),
 ];
 
 /** What production must look like (live account, every feature on). Changing one of these is a deliberate edit here, never a silent drift. */
@@ -60,10 +68,10 @@ export const productionConfigurationExpectations: ConfigurationExpectation[] = [
   { name: "IBKR_EXPECTED_ACCOUNT_ID", pattern: /^U\d+$/ },
   { name: "IBKR_MARKET_DATA_LINES_ENABLED", expected: "true" },
   { name: "DAY_SIGNALS_LOOP_ENABLED", expected: "true" },
-  { name: "EXPIRY_SETTLEMENT_MODE", expected: "apply" },
-  { name: "GENOSUKE_ENABLED", expected: "true" },
+  { name: "EXPIRY_SETTLEMENT_MODE", expected: "apply", warnOnly: true },
+  { name: "GENOSUKE_ENABLED", expected: "true", warnOnly: true },
   { name: "TELEGRAM_NOTIFICATIONS_DISABLED", mustBeOff: true },
-  ...requiredSecrets.map((name) => ({ name, secret: true })),
+  ...requiredSecretExpectations,
 ];
 
 /** Staging trades the paper account; the same features must be on. */
@@ -73,7 +81,7 @@ export const stagingConfigurationExpectations: ConfigurationExpectation[] = [
   { name: "IBKR_EXPECTED_ACCOUNT_ID", pattern: /^DU\w+$/ },
   { name: "IBKR_MARKET_DATA_LINES_ENABLED", expected: "true" },
   { name: "TELEGRAM_NOTIFICATIONS_DISABLED", mustBeOff: true },
-  ...requiredSecrets.map((name) => ({ name, secret: true })),
+  ...requiredSecretExpectations,
 ];
 
 export function configurationExpectationsFor(appEnvironment: string): ConfigurationExpectation[] | null {
@@ -82,23 +90,26 @@ export function configurationExpectationsFor(appEnvironment: string): Configurat
   return null;
 }
 
+function describeConfigurationProblem(expectation: ConfigurationExpectation, value: string | undefined): string | null {
+  if (expectation.secret) return value ? null : `${expectation.name} is not set`;
+  if (expectation.mustBeOff) return value && value.toLowerCase() !== "false" ? `${expectation.name} is "${value}" (must be off)` : null;
+  if (expectation.expected !== undefined) return value !== expectation.expected ? `${expectation.name} is ${value ? `"${value}"` : "not set"} (expected "${expectation.expected}")` : null;
+  if (expectation.pattern) return !value || !expectation.pattern.test(value) ? `${expectation.name} is ${value ? `"${value}"` : "not set"} (not the expected kind of account id)` : null;
+  return null;
+}
+
 export function evaluateConfiguration(environment: Record<string, string | undefined>, expectations: ConfigurationExpectation[]): ReadinessCheck {
-  const problems: string[] = [];
+  const blockingProblems: string[] = [];
+  const warnOnlyProblems: string[] = [];
   for (const expectation of expectations) {
-    const value = environment[expectation.name]?.trim();
-    if (expectation.secret) {
-      if (!value) problems.push(`${expectation.name} is not set`);
-    } else if (expectation.mustBeOff) {
-      if (value && value.toLowerCase() !== "false") problems.push(`${expectation.name} is "${value}" (must be off)`);
-    } else if (expectation.expected !== undefined) {
-      if (value !== expectation.expected) problems.push(`${expectation.name} is ${value ? `"${value}"` : "not set"} (expected "${expectation.expected}")`);
-    } else if (expectation.pattern) {
-      if (!value || !expectation.pattern.test(value)) problems.push(`${expectation.name} is ${value ? `"${value}"` : "not set"} (not the expected kind of account id)`);
-    }
+    const problem = describeConfigurationProblem(expectation, environment[expectation.name]?.trim());
+    if (problem) (expectation.warnOnly ? warnOnlyProblems : blockingProblems).push(problem);
   }
-  return problems.length === 0
-    ? check("Configuration", "ok", `${expectations.length} values checked against what this environment must have`)
-    : check("Configuration", "fail", problems.join("; "));
+  if (blockingProblems.length > 0) {
+    return check("Configuration", "fail", `${blockingProblems.join("; ")}${warnOnlyProblems.length > 0 ? `; not blocking: ${warnOnlyProblems.join("; ")}` : ""}`);
+  }
+  if (warnOnlyProblems.length > 0) return check("Configuration", "warn", `${warnOnlyProblems.join("; ")} (none of these blocks trading)`);
+  return check("Configuration", "ok", `${expectations.length} values checked against what this environment must have`);
 }
 
 // --- The trading worker on the VPS ---
@@ -205,7 +216,7 @@ export function evaluateSettings(settings: TradingSettingsFigures | null): Readi
     settings.maxConcentrationPerTickerPct === 0 ? "max exposure per ticker" : null,
   ].filter((name): name is string => name !== null);
   const summary = `max position ${settings.maxPositionPctOfPortfolio}%, per ticker ${settings.maxConcentrationPerTickerPct}%, cash reserve ${settings.minCashReservePct}%, delta band ${settings.deltaTargetMin}-${settings.deltaTargetMax}`;
-  if (zeroLimits.length > 0) return check("Trading settings", "warn", `${zeroLimits.join(" and ")} is 0%, which blocks every new order (${summary})`);
+  if (zeroLimits.length > 0) return check("Trading settings", "fail", `${zeroLimits.join(" and ")} is 0%, which blocks every new order (${summary})`);
   return check("Trading settings", "ok", summary);
 }
 
@@ -217,15 +228,13 @@ export interface ActiveOrderRow {
   createdAt: Date;
 }
 
-export const staleUnconfirmedOrderMinutes = 15;
-
-export function evaluateOrderHygiene(rows: ActiveOrderRow[], now: Date): ReadinessCheck {
+// Every order is a DAY order, so one still in flight before the open is a record IBKR has already closed. A built order that was
+// never confirmed is left to the sweep that cancels it.
+export function evaluateOrderHygiene(rows: ActiveOrderRow[]): ReadinessCheck {
   const inFlight = rows.filter((row) => row.status !== "pending_confirmation");
-  const staleUnconfirmed = rows.filter((row) => row.status === "pending_confirmation" && now.getTime() - row.createdAt.getTime() > staleUnconfirmedOrderMinutes * 60_000);
   if (inFlight.length > 0) {
     return check("Open orders", "fail", `${inFlight.length} order(s) still in flight from before: ${[...new Set(inFlight.map((row) => `${row.symbol} ${row.status}`))].join(", ")}. They count against the limits and block closes of their positions`);
   }
-  if (staleUnconfirmed.length > 0) return check("Open orders", "warn", `${staleUnconfirmed.length} built order(s) were never confirmed and are older than ${staleUnconfirmedOrderMinutes} minutes (the sweep cancels them)`);
   return check("Open orders", "ok", "no order left in flight");
 }
 
@@ -238,56 +247,62 @@ export interface LatestJobRun {
   errorMessage: string | null;
 }
 
-// Jobs whose output is reporting or advisory data, never an input to placing or checking an order: the Dashboard and cycle
-// P&L history, the screener's candidate list, and the earnings / ex-dividend / macro warnings (whose data is checked on its
-// own as warn-only invariants). A failed or missing run of one is a "look at" warning; any other job, including one not
-// listed here, stays blocking, so a new job is safe by default.
-export const nonGatingScheduledJobs: ReadonlySet<string> = new Set(["daily_pnl_snapshot", "daily_screener_scan", "daily_calendar_capture"]);
-
+// A job's status never blocks on its own: before the open, the latest run of most jobs is the previous day's, and today's
+// capture redoes it. What a job feeds into today's open is judged on that output instead: today's chain structure (the one
+// job that must have run today) and the live probes.
 export function evaluateJobs(latestRuns: LatestJobRun[], dueButMissing: string[]): ReadinessCheck {
   const failedRuns = latestRuns.filter((run) => run.status === "failure");
-  const describeFailedRun = (run: LatestJobRun) => `failed: ${run.jobName}${run.errorMessage ? ` (${run.errorMessage.split("\n")[0]!.slice(0, 120)})` : ""}`;
-  const describeMissingRun = (jobName: string) => `not started although due: ${jobName}`;
   const neverRun = latestRuns.filter((run) => run.status === null).map((run) => run.jobName);
-
-  const blockingProblems = [
-    ...failedRuns.filter((run) => !nonGatingScheduledJobs.has(run.jobName)).map(describeFailedRun),
-    ...dueButMissing.filter((jobName) => !nonGatingScheduledJobs.has(jobName)).map(describeMissingRun),
+  const warnings = [
+    ...failedRuns.map((run) => `failed: ${run.jobName}${run.errorMessage ? ` (${run.errorMessage.split("\n")[0]!.slice(0, 120)})` : ""}`),
+    ...dueButMissing.map((jobName) => `not started although due: ${jobName}`),
+    ...(neverRun.length > 0 ? [`never run: ${neverRun.join(", ")}`] : []),
   ];
-  const nonBlockingProblems = [
-    ...failedRuns.filter((run) => nonGatingScheduledJobs.has(run.jobName)).map(describeFailedRun),
-    ...dueButMissing.filter((jobName) => nonGatingScheduledJobs.has(jobName)).map(describeMissingRun),
-  ];
-  if (blockingProblems.length > 0) {
-    const alsoNotBlocking = nonBlockingProblems.length > 0 ? `; not blocking: ${nonBlockingProblems.join("; ")}` : "";
-    return check("Scheduled jobs", "fail", `${blockingProblems.join("; ")}${alsoNotBlocking}`);
-  }
-  const warnings = [...nonBlockingProblems, ...(neverRun.length > 0 ? [`never run: ${neverRun.join(", ")}`] : [])];
-  if (warnings.length > 0) {
-    return check("Scheduled jobs", "warn", `${warnings.join("; ")}${nonBlockingProblems.length > 0 ? " (none of these blocks trading)" : ""}`);
-  }
+  if (warnings.length > 0) return check("Scheduled jobs", "warn", `${warnings.join("; ")} (none of these blocks trading)`);
   return check("Scheduled jobs", "ok", `latest run of each of ${latestRuns.length} jobs succeeded`);
 }
 
 export const healthCheckMaxSilenceMinutesForReadiness = 25;
 
+// Warn-only: the worker, account and order-path checks already prove the Gateway works right now. A silent or failing health
+// check means the automatic Gateway restart is not covering the day.
 export function evaluateHealthCheck(latest: { startedAt: Date; status: "running" | "success" | "failure" } | null, now: Date): ReadinessCheck {
-  if (!latest) return check("Gateway health check", "fail", "the 10-minute IBKR health check has never run");
+  if (!latest) return check("Gateway health check", "warn", "the 10-minute IBKR health check has never run, so a dropped Gateway is not restarted automatically");
   const ageMinutes = (now.getTime() - latest.startedAt.getTime()) / 60_000;
-  if (ageMinutes > healthCheckMaxSilenceMinutesForReadiness) return check("Gateway health check", "fail", `the IBKR health check has not run for over ${healthCheckMaxSilenceMinutesForReadiness} minutes`);
-  if (latest.status === "failure") return check("Gateway health check", "fail", "the latest IBKR health check failed");
+  if (ageMinutes > healthCheckMaxSilenceMinutesForReadiness) return check("Gateway health check", "warn", `the IBKR health check has not run for over ${healthCheckMaxSilenceMinutesForReadiness} minutes, so a dropped Gateway is not restarted automatically`);
+  if (latest.status === "failure") return check("Gateway health check", "warn", "the latest IBKR health check failed");
   return check("Gateway health check", "ok", "ran within the last 25 minutes and passed");
 }
 
 // --- Data produced by the jobs, for the previous session ---
 
-const warnOnlyInvariantNames = new Set(["Ticker calendar (earnings, dividends)", "Major macro events"]);
+// The only data check that stops the open: with no ticker to capture there are no Signals at all. Every other one describes a
+// past session's data (today's capture rebuilds it) or a stale input that degrades, but does not stop, today's run.
+const blockingInvariantNames = new Set(["Capture universe"]);
 
 /** The data checks of the morning digest, run against the session named in each check (the previous one until today's 10:00 ET capture has finished, then today). */
 export function evaluateDataChecks(invariants: InvariantResult[], dataSessionIso: string): ReadinessCheck[] {
   return invariants.map((invariant) =>
-    check(`Data: ${invariant.name} (${dataSessionIso})`, invariant.ok ? "ok" : warnOnlyInvariantNames.has(invariant.name) ? "warn" : "fail", invariant.detail),
+    check(`Data: ${invariant.name} (${dataSessionIso})`, invariant.ok ? "ok" : blockingInvariantNames.has(invariant.name) ? "fail" : "warn", invariant.detail),
   );
+}
+
+// --- Today's chain structure: the one input of today's 10:00 ET capture made before the open ---
+
+/**
+ * The capture refuses a ticker whose stored chain structure (expiries and strike grids) is not from today, so the 09:00 UTC
+ * structure job decides which tickers today's capture can take. None: no snapshot, fit, Signals or Day Signals today.
+ */
+export function evaluateTodaysChainStructure(input: { todayIso: string; universeSymbols: string[]; symbolsWithTodaysStructure: string[] }): ReadinessCheck {
+  const name = `Data: Today's chain structure (${input.todayIso})`;
+  // An empty universe is the "Capture universe" check's failure; repeating it here would say the same thing twice.
+  if (input.universeSymbols.length === 0) return check(name, "ok", "no tickers to capture");
+  const missing = input.universeSymbols.filter((symbol) => !input.symbolsWithTodaysStructure.includes(symbol));
+  if (missing.length === input.universeSymbols.length) {
+    return check(name, "fail", `no ticker has today's chain structure, so today's 10:00 ET capture would capture nothing (the 09:00 UTC structure job failed or did not run)`);
+  }
+  if (missing.length > 0) return check(name, "warn", `today's 10:00 ET capture will skip ${missing.join(", ")}: no chain structure stored today`);
+  return check(name, "ok", `${input.universeSymbols.length} of ${input.universeSymbols.length} tickers have today's structure`);
 }
 
 // --- Market data ---

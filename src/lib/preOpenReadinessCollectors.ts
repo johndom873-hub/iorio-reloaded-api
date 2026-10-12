@@ -8,6 +8,7 @@ import { marketDataFeedRefusal, pooledLineError, pooledLineState, subscribeToPoo
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
 import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { evaluateDataInvariants, loadDataInvariantInputs, type InvariantResult } from "./dataInvariants.js";
+import { loadCaptureUniverse } from "../ibkr/runOptionChainCapture.js";
 import { readAppEnvironment } from "./appEnvironment.js";
 import { lastCompletedSessionDate } from "./marketSessionStatus.js";
 import { loadUndeliveredAlerts } from "./undeliveredAlerts.js";
@@ -26,6 +27,7 @@ import {
   evaluateOrderHygiene,
   evaluateOrderPath,
   evaluateSettings,
+  evaluateTodaysChainStructure,
   evaluateTradingHalt,
   evaluateUndeliveredAlerts,
   evaluateWorker,
@@ -77,6 +79,8 @@ export interface ReadinessDependencies {
   /** The trading date the data checks describe: today once today's chain capture has finished, otherwise the last completed session. */
   dataSessionIso(now: Date): Promise<string>;
   loadDataInvariants(now: Date, dataSessionIso: string): Promise<InvariantResult[]>;
+  /** The capture universe and which of its tickers have chain structure stored today (Eastern). */
+  loadTodaysChainStructure(now: Date): Promise<{ todayIso: string; universeSymbols: string[]; symbolsWithTodaysStructure: string[] }>;
   loadMarketDataFigures(stage: ReadinessStage, contract: ProbeContract | null): Promise<MarketDataFigures>;
   countUndeliveredAlerts(): Promise<number>;
   loadDatabaseFigures(): Promise<DatabaseFigures>;
@@ -132,13 +136,14 @@ export async function collectReadinessChecks(stage: ReadinessStage, now: Date, d
       const contract = await probeContractPromise;
       return evaluateOrderPath(await withTimeout(dependencies.probeOrderPath(contract), "the IBKR what-if probe").catch((error): OrderPathProbeResult => ({ ok: false, reason: error instanceof Error ? error.message : String(error) })));
     }),
-    guarded("Open orders", async () => evaluateOrderHygiene(await dependencies.loadActiveOrders(), now)),
+    guarded("Open orders", async () => evaluateOrderHygiene(await dependencies.loadActiveOrders())),
     guarded("Scheduled jobs", async () => evaluateJobs(await dependencies.loadLatestJobRuns(), await dependencies.loadJobsDueButNotStarted(now))),
     guarded("Gateway health check", async () => evaluateHealthCheck(await dependencies.loadLatestHealthCheck(), now)),
     guarded("Data", async () => {
       const dataSession = await dependencies.dataSessionIso(now);
       return evaluateDataChecks(await dependencies.loadDataInvariants(now, dataSession), dataSession);
     }),
+    guarded("Data: Today's chain structure", async () => evaluateTodaysChainStructure(await dependencies.loadTodaysChainStructure(now))),
     guarded("Market data", async () => evaluateMarketData(await withTimeout(dependencies.loadMarketDataFigures(stage, await probeContractPromise), "the live quote probe"), stage)),
     guarded("Telegram", async () => evaluateUndeliveredAlerts(await dependencies.countUndeliveredAlerts())),
     guarded("Database", async () => evaluateDatabase(await dependencies.loadDatabaseFigures())),
@@ -236,12 +241,24 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
       return row ? { startedAt: new Date(row.started_at), status: row.status } : null;
     },
     // Today once the morning chain is done: the Day Signals seed runs last (after the capture, the fit and the retries, even
-    // when the capture failed), so the surface and pool checks never describe a today that is still being built.
+    // when the capture failed), so the snapshot and surface checks never describe a today that is still being built.
     dataSessionIso: async (now) => {
       const todayIso = easternIsoDate(now);
       return (await hasDaySignalsSeedFinished(todayIso)) ? todayIso : lastCompletedSessionDate(now);
     },
     loadDataInvariants: async (now, dataSessionIso) => evaluateDataInvariants(await loadDataInvariantInputs(now, dataSessionIso)),
+    // The capture's own rule (ticksOnlyPrepareDependencies): option_chain_params.fetched_at on today's Eastern date.
+    loadTodaysChainStructure: async (now) => {
+      const todayIso = easternIsoDate(now);
+      const universe = await loadCaptureUniverse();
+      const rows: { ticker_id: string; fetched_at: Date }[] = await db("option_chain_params").whereIn("ticker_id", universe.map((ticker) => ticker.tickerId)).select("ticker_id", "fetched_at");
+      const tickerIdsWithTodaysStructure = new Set(rows.filter((row) => easternIsoDate(new Date(row.fetched_at)) === todayIso).map((row) => row.ticker_id));
+      return {
+        todayIso,
+        universeSymbols: universe.map((ticker) => ticker.symbol),
+        symbolsWithTodaysStructure: universe.filter((ticker) => tickerIdsWithTodaysStructure.has(ticker.tickerId)).map((ticker) => ticker.symbol),
+      };
+    },
     loadMarketDataFigures: async (stage, contract) => {
       const [stockProbe, optionProbe] = await Promise.all([
         probeQuote({ key: "readiness-stock", legType: "stock", symbol: "SPY" }, "SPY", false).catch(() => null),

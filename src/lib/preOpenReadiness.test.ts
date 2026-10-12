@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import type { InvariantResult } from "./dataInvariants.js";
-import { expectedScheduledJobs } from "./jobDeadlines.js";
 import {
   buildReadinessMessage,
   configurationExpectationsFor,
@@ -12,11 +11,11 @@ import {
   evaluateDataChecks,
   evaluateHealthCheck,
   evaluateJobs,
-  nonGatingScheduledJobs,
   evaluateMarketData,
   evaluateOrderHygiene,
   evaluateOrderPath,
   evaluateSettings,
+  evaluateTodaysChainStructure,
   evaluateUndeliveredAlerts,
   evaluateWorker,
   productionConfigurationExpectations,
@@ -56,11 +55,21 @@ describe("evaluateConfiguration", () => {
     expect(result.detail).toContain('DAY_SIGNALS_LOOP_ENABLED is "false" (expected "true")');
   });
 
-  it("fails on a missing secret without ever printing the secret's value", () => {
+  it("fails on a missing blocking secret, lists a missing side-feature secret beside it, and never prints a secret's value", () => {
     const result = evaluateConfiguration({ ...goodProductionEnvironment, FRED_API_KEY: "", TELEGRAM_CHAT_ID: undefined, OPENROUTER_API_KEY: "sk-very-secret" }, productionConfigurationExpectations);
-    expect(result.detail).toContain("FRED_API_KEY is not set");
-    expect(result.detail).toContain("TELEGRAM_CHAT_ID is not set");
+    expect(result.status).toBe("fail");
+    expect(result.detail).toContain("TELEGRAM_CHAT_ID is not set; not blocking: FRED_API_KEY is not set");
     expect(result.detail).not.toContain("sk-very-secret");
+  });
+
+  it("only warns when what is wrong feeds a side feature (recovery keys, reports, Genosuke, settlement)", () => {
+    for (const name of ["FRED_API_KEY", "MARKETDATA_API_TOKEN", "IBKR_FLEX_TOKEN", "IBKR_HEALTHCHECK_SSH_PRIVATE_KEY_BASE64", "OPENROUTER_API_KEY", "GENOSUKE_WEBHOOK_SECRET", "DEPLOY_NOTICE_SECRET"]) {
+      expect(evaluateConfiguration({ ...goodProductionEnvironment, [name]: "" }, productionConfigurationExpectations)).toMatchObject({ status: "warn", detail: `${name} is not set (none of these blocks trading)` });
+    }
+    expect(evaluateConfiguration({ ...goodProductionEnvironment, EXPIRY_SETTLEMENT_MODE: "dry_run", GENOSUKE_ENABLED: "false" }, productionConfigurationExpectations).status).toBe("warn");
+    for (const name of ["SESSION_SECRET", "TELEGRAM_BOT_TOKEN", "IBKR_TUNNEL_SSH_PRIVATE_KEY_BASE64"]) {
+      expect(evaluateConfiguration({ ...goodProductionEnvironment, [name]: "" }, productionConfigurationExpectations).status).toBe("fail");
+    }
   });
 
   it("fails when notifications are switched off, accepts false and empty", () => {
@@ -170,26 +179,25 @@ describe("evaluateSettings", () => {
   it("lists the limits and the band", () => {
     expect(evaluateSettings(settings)).toMatchObject({ status: "ok", detail: "max position 15%, per ticker 20%, cash reserve 5%, delta band 0.2-0.4" });
   });
-  it("fails when unreadable and warns when a 0% limit would block every order", () => {
+  it("fails when unreadable and when a 0% limit would block every order", () => {
     expect(evaluateSettings(null).status).toBe("fail");
-    expect(evaluateSettings({ ...settings, maxPositionPctOfPortfolio: 0 })).toMatchObject({ status: "warn", detail: expect.stringContaining("max position size is 0%") });
+    expect(evaluateSettings({ ...settings, maxPositionPctOfPortfolio: 0 })).toMatchObject({ status: "fail", detail: expect.stringContaining("max position size is 0%") });
     expect(evaluateSettings({ ...settings, maxPositionPctOfPortfolio: 0, maxConcentrationPerTickerPct: 0 }).detail).toContain("max position size and max exposure per ticker is 0%");
   });
 });
 
 describe("evaluateOrderHygiene", () => {
   it("passes with no active order", () => {
-    expect(evaluateOrderHygiene([], now).status).toBe("ok");
+    expect(evaluateOrderHygiene([]).status).toBe("ok");
   });
   it("fails for any order still in flight, naming symbol and status once each", () => {
-    const result = evaluateOrderHygiene([{ status: "submitted", symbol: "AAOI", createdAt: minutesAgo(900) }, { status: "submitted", symbol: "AAOI", createdAt: minutesAgo(800) }, { status: "confirmed", symbol: "COIN", createdAt: minutesAgo(5) }], now);
+    const result = evaluateOrderHygiene([{ status: "submitted", symbol: "AAOI", createdAt: minutesAgo(900) }, { status: "submitted", symbol: "AAOI", createdAt: minutesAgo(800) }, { status: "confirmed", symbol: "COIN", createdAt: minutesAgo(5) }]);
     expect(result.status).toBe("fail");
     expect(result.detail).toContain("3 order(s) still in flight");
     expect(result.detail).toContain("AAOI submitted, COIN confirmed");
   });
-  it("warns only for built orders older than 15 minutes and ignores fresh ones", () => {
-    expect(evaluateOrderHygiene([{ status: "pending_confirmation", symbol: "AAOI", createdAt: minutesAgo(16) }], now).status).toBe("warn");
-    expect(evaluateOrderHygiene([{ status: "pending_confirmation", symbol: "AAOI", createdAt: minutesAgo(14) }], now).status).toBe("ok");
+  it("leaves built orders that were never confirmed to the sweep, however old", () => {
+    expect(evaluateOrderHygiene([{ status: "pending_confirmation", symbol: "AAOI", createdAt: minutesAgo(600) }]).status).toBe("ok");
   });
 });
 
@@ -198,49 +206,24 @@ describe("evaluateJobs and evaluateHealthCheck", () => {
   it("passes when every latest run succeeded", () => {
     expect(evaluateJobs([run("a", "success"), run("b", "success")], [])).toMatchObject({ status: "ok", detail: expect.stringContaining("2 jobs") });
   });
-  it("fails on a failed latest run (first line of the error) and on a job due but not started", () => {
-    const result = evaluateJobs([run("daily_market_data_capture", "failure", "FRED timed out\nstack"), run("b", "success")], ["option_chain_structure_refresh"]);
-    expect(result.status).toBe("fail");
+  it("only warns on a failed latest run (first line of the error) or a job due but not started, whatever the job", () => {
+    const result = evaluateJobs([run("daily_market_data_capture", "failure", "FRED timed out\nstack"), run("option_chain_capture", "failure", "weak snapshots: TLT"), run("b", "success")], ["option_chain_structure_refresh"]);
+    expect(result.status).toBe("warn");
     expect(result.detail).toContain("failed: daily_market_data_capture (FRED timed out)");
+    expect(result.detail).toContain("failed: option_chain_capture (weak snapshots: TLT)");
     expect(result.detail).toContain("not started although due: option_chain_structure_refresh");
-  });
-  it("only warns when the failed or missing job is reporting / advisory data, naming it every time", () => {
-    const failedSnapshot = evaluateJobs([run("daily_pnl_snapshot", "failure", "8 of 12 positions skipped for a missing price: COIN\nstack"), run("b", "success")], []);
-    expect(failedSnapshot.status).toBe("warn");
-    expect(failedSnapshot.detail).toContain("failed: daily_pnl_snapshot (8 of 12 positions skipped for a missing price: COIN)");
-    expect(failedSnapshot.detail).toContain("none of these blocks trading");
-    expect(evaluateJobs([run("daily_calendar_capture", "failure", "TradingView 503")], []).status).toBe("warn");
-    expect(evaluateJobs([run("daily_screener_scan", "failure", "no scans")], []).status).toBe("warn");
-    const missingSnapshot = evaluateJobs([run("daily_pnl_snapshot", "success")], ["daily_pnl_snapshot"]);
-    expect(missingSnapshot.status).toBe("warn");
-    expect(missingSnapshot.detail).toContain("not started although due: daily_pnl_snapshot");
-  });
-  it("leaves the order ready when only reporting jobs failed, and not ready when a trading job did", () => {
-    const readyWithWarning = summarizeReadiness([evaluateJobs([run("daily_pnl_snapshot", "failure", "skipped")], [])]);
-    expect(readyWithWarning.ready).toBe(true);
-    expect(readyWithWarning.warnings).toHaveLength(1);
-    expect(summarizeReadiness([evaluateJobs([run("market_calendar_sync", "failure", "boom")], [])]).ready).toBe(false);
-  });
-  it("still fails on a trading job and lists the reporting failure beside it as not blocking", () => {
-    const result = evaluateJobs([run("option_chain_capture", "failure", "no chain"), run("daily_pnl_snapshot", "failure", "skipped")], []);
-    expect(result.status).toBe("fail");
-    expect(result.detail).toContain("failed: option_chain_capture (no chain)");
-    expect(result.detail).toContain("not blocking: failed: daily_pnl_snapshot (skipped)");
-  });
-  it("treats a job nobody classified as blocking, and only classifies jobs that exist", () => {
-    expect(evaluateJobs([run("some_new_job", "failure", "x")], []).status).toBe("fail");
-    const scheduledNames = new Set(expectedScheduledJobs.map((job) => job.jobName));
-    for (const jobName of nonGatingScheduledJobs) expect(scheduledNames.has(jobName)).toBe(true);
+    expect(result.detail).toContain("none of these blocks trading");
+    expect(summarizeReadiness([result]).ready).toBe(true);
   });
   it("warns for a job that never ran, and treats a still-running job as not failing", () => {
     expect(evaluateJobs([run("a", null)], []).status).toBe("warn");
     expect(evaluateJobs([run("a", "running")], []).status).toBe("ok");
   });
-  it("judges the health check by recency and result", () => {
-    expect(evaluateHealthCheck(null, now).status).toBe("fail");
-    expect(evaluateHealthCheck({ startedAt: minutesAgo(26), status: "success" }, now).status).toBe("fail");
+  it("judges the health check by recency and result, warning only (the live checks prove the Gateway works)", () => {
+    expect(evaluateHealthCheck(null, now).status).toBe("warn");
+    expect(evaluateHealthCheck({ startedAt: minutesAgo(26), status: "success" }, now).status).toBe("warn");
     expect(evaluateHealthCheck({ startedAt: minutesAgo(25), status: "success" }, now).status).toBe("ok");
-    expect(evaluateHealthCheck({ startedAt: minutesAgo(3), status: "failure" }, now).status).toBe("fail");
+    expect(evaluateHealthCheck({ startedAt: minutesAgo(3), status: "failure" }, now).status).toBe("warn");
     expect(evaluateHealthCheck({ startedAt: minutesAgo(3), status: "running" }, now).status).toBe("ok");
   });
 });
@@ -250,11 +233,28 @@ describe("evaluateDataChecks", () => {
     { name: "Today's option-chain snapshots", ok: true, detail: "9 complete" },
     { name: "Surface fits", ok: false, detail: "no fitted expiry for AAOI" },
     { name: "Major macro events", ok: false, detail: "captured 40 h ago" },
+    { name: "Capture universe", ok: false, detail: "no tickers to capture" },
   ];
-  it("names the session being judged, fails real problems and only warns for the calendars", () => {
+  it("names the session being judged, fails only an empty capture universe and warns for every other data problem", () => {
     const checks = evaluateDataChecks(invariants, "2026-10-02");
-    expect(checks.map((entry) => entry.status)).toEqual(["ok", "fail", "warn"]);
+    expect(checks.map((entry) => entry.status)).toEqual(["ok", "warn", "warn", "fail"]);
     expect(checks[1]!.name).toBe("Data: Surface fits (2026-10-02)");
+  });
+});
+
+describe("evaluateTodaysChainStructure", () => {
+  const universeSymbols = ["AAOI", "COIN", "TLT"];
+  it("passes when every capture ticker has today's structure", () => {
+    expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols, symbolsWithTodaysStructure: universeSymbols })).toEqual({ name: "Data: Today's chain structure (2026-10-12)", status: "ok", detail: "3 of 3 tickers have today's structure" });
+  });
+  it("warns naming the tickers today's capture will skip", () => {
+    expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols, symbolsWithTodaysStructure: ["COIN"] })).toMatchObject({ status: "warn", detail: "today's 10:00 ET capture will skip AAOI, TLT: no chain structure stored today" });
+  });
+  it("fails when no ticker has today's structure: today's capture would capture nothing", () => {
+    expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols, symbolsWithTodaysStructure: [] })).toMatchObject({ status: "fail", detail: expect.stringContaining("would capture nothing") });
+  });
+  it("leaves an empty universe to the capture-universe check", () => {
+    expect(evaluateTodaysChainStructure({ todayIso: "2026-10-12", universeSymbols: [], symbolsWithTodaysStructure: [] }).status).toBe("ok");
   });
 });
 

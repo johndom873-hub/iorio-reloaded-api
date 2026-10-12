@@ -5,17 +5,23 @@ import { readinessSchedule } from "../lib/preOpenReadiness.js";
 // failure alerts at once), re-run every 10 minutes while anything fails (announced only when the set of failures changes),
 // and a final run at 9:20 ET that pauses Pluto if anything still fails. It proves the three things only Pluto's own process
 // can: its IBKR connection, its sign-in to the API, and its OpenRouter key with enough credit. A fourth test, "Pluto running"
-// (Marcelo, 2026-10-07), is not a probe: it fails when Pluto is switched off or paused, so a Pluto that will not act today is
-// announced at 6:00 and 9:20 ET instead of being reported "ready". The check therefore runs whether Pluto is on, paused or off.
+// (Marcelo, 2026-10-07), is not a probe: a Pluto that will not act today is announced at 6:00 and 9:20 ET instead of being
+// reported "ready". The check runs whether Pluto is on, paused or off. A failure is an error only when Pluto is meant to trade
+// today (Marcelo, 2026-10-12): switched off, Pluto itself and any failed probe are warnings; on but paused is an error.
 
 export type PlutoProbeTestName = "IBKR" | "API sign-in" | "OpenRouter";
 export type PlutoReadinessTestName = PlutoProbeTestName | "Pluto running";
 export const plutoReadinessTestNames: PlutoReadinessTestName[] = ["IBKR", "API sign-in", "OpenRouter", "Pluto running"];
 const plutoRunningTestName: PlutoReadinessTestName = "Pluto running";
 
+export type PlutoReadinessStatus = "ok" | "warn" | "fail";
+
 export interface PlutoReadinessResult {
   name: PlutoReadinessTestName;
+  /** The test passed. */
   ok: boolean;
+  /** What a failed test means today: "fail" only when Pluto is meant to trade. Runs stored before 2026-10-12 have none. */
+  status: PlutoReadinessStatus;
   detail: string;
 }
 
@@ -26,7 +32,7 @@ export interface PlutoReadinessRecord {
   dateIso: string;
   lastRunAt: string;
   lastRunKind: PlutoReadinessRunKind;
-  /** The failing tests' names joined, "" when every test passed. */
+  /** The names of the tests with status "fail" joined, "" when none fails. */
   signature: string;
   finalDone: boolean;
   results: PlutoReadinessResult[];
@@ -47,9 +53,9 @@ export function decidePlutoReadinessRun(now: Date, dateIso: string, record: Plut
 }
 
 /**
- * Pure: a re-check whose last run failed only "Pluto running" (Pluto off or paused, every probe passing) keeps that run's
- * probe results and re-reads just Pluto's state (Marcelo, 2026-10-07): an Off Pluto would otherwise open an IBKR probe
- * connection every 10 minutes all morning. Null: run the probes.
+ * Pure: a re-check whose last run failed only "Pluto running" (Pluto paused, every probe passing) keeps that run's probe
+ * results and re-reads just Pluto's state (Marcelo, 2026-10-07): a paused Pluto would otherwise open an IBKR probe connection
+ * every 10 minutes all morning. A switched-off Pluto has no failing test, so it is never re-checked. Null: run the probes.
  */
 export function reusableProbeResults(kind: PlutoReadinessRunKind, todaysRecord: PlutoReadinessRecord | null): PlutoReadinessResult[] | null {
   if (kind !== "recheck" || !todaysRecord) return null;
@@ -64,20 +70,26 @@ const pauseReasonDescriptions: Record<string, string> = {
   readiness: "paused by an earlier pre-open check",
 };
 
-/** Pure: the "Pluto running" test. Passes only when the mode is on and Pluto is not paused. */
-export function evaluatePlutoRunning(state: { mode: string; paused: boolean; pauseReason: string | null }): PlutoReadinessResult {
-  const problems: string[] = [];
-  if (state.mode !== "on") problems.push("switched off");
-  if (state.paused) {
-    const reason = state.pauseReason ?? "";
-    problems.push(reason.startsWith("breaker:") ? `paused, the ${reason.slice("breaker:".length).replace(/_/g, " ")} breaker is tripped` : (pauseReasonDescriptions[reason] ?? "paused"));
-  }
-  return problems.length === 0 ? { name: plutoRunningTestName, ok: true, detail: "on and not paused" } : { name: plutoRunningTestName, ok: false, detail: problems.join(" and ") };
+type PlutoStateForReadiness = { mode: string; paused: boolean; pauseReason: string | null };
+
+/** Pure: the "Pluto running" test. Passes when the mode is on and Pluto is not paused; switched off is a warning, on but paused an error. */
+export function evaluatePlutoRunning(state: PlutoStateForReadiness): PlutoReadinessResult {
+  if (state.mode !== "on") return { name: plutoRunningTestName, ok: false, status: "warn", detail: "switched off, so it will not trade today" };
+  if (!state.paused) return { name: plutoRunningTestName, ok: true, status: "ok", detail: "on and not paused" };
+  const reason = state.pauseReason ?? "";
+  const pause = reason.startsWith("breaker:") ? `paused, the ${reason.slice("breaker:".length).replace(/_/g, " ")} breaker is tripped` : (pauseReasonDescriptions[reason] ?? "paused");
+  return { name: plutoRunningTestName, ok: false, status: "fail", detail: pause };
+}
+
+/** Pure: the probe results graded for today (a failed probe is an error only when Pluto is on), followed by "Pluto running". */
+export function assemblePlutoReadinessResults(probeResults: PlutoReadinessResult[], state: PlutoStateForReadiness): PlutoReadinessResult[] {
+  const failedProbeStatus: PlutoReadinessStatus = state.mode === "on" ? "fail" : "warn";
+  return [...probeResults.map((result) => ({ ...result, status: result.ok ? ("ok" as const) : failedProbeStatus })), evaluatePlutoRunning(state)];
 }
 
 export function plutoReadinessSignature(results: PlutoReadinessResult[]): string {
   return results
-    .filter((result) => !result.ok)
+    .filter((result) => result.status === "fail")
     .map((result) => result.name)
     .join("|");
 }
@@ -86,27 +98,33 @@ const finalCheckEt = `${readinessSchedule.finalCheck.hour}:${String(readinessSch
 
 /**
  * Pure: what a run means, announced like the platform readiness check: the 6:00 ET first run and the 9:20 ET final run always
- * post (passing or not); a re-run posts only when the set of failing tests changed (including back to all-passing). The final
- * run pauses Pluto when a probe still fails, but only a Pluto that is running: "Pluto running" failing means it is already off
- * or paused, so it never causes a pause itself.
+ * post (passing or not); a re-run posts only when the set of failing tests changed (including back to none failing). The final
+ * run pauses Pluto when a probe still fails, but only a Pluto that is running: "Pluto running" failing means it is already
+ * paused, so it never causes a pause itself; a switched-off Pluto has no failing test at all.
  */
 export function describePlutoReadinessOutcome(kind: PlutoReadinessRunKind, previousSignature: string | null, results: PlutoReadinessResult[]): { signature: string; message: string | null; pause: boolean } {
   const signature = plutoReadinessSignature(results);
-  const resultLines = [...results.filter((result) => !result.ok).map((result) => `❌ ${result.name}: ${result.detail}`), ...results.filter((result) => result.ok).map((result) => `✅ ${result.name}: ${result.detail}`)].join("\n");
+  const icons: Record<PlutoReadinessStatus, string> = { fail: "❌", warn: "⚠️", ok: "✅" };
+  const resultLines = (["fail", "warn", "ok"] as const).flatMap((status) => results.filter((result) => result.status === status).map((result) => `${icons[status]} ${result.name}: ${result.detail}`)).join("\n");
   const failing = signature !== "";
-  const failingNames = results.filter((result) => !result.ok).map((result) => result.name);
+  const failingNames = results.filter((result) => result.status === "fail").map((result) => result.name);
   const notRunning = failingNames.includes(plutoRunningTestName);
   const probeFailing = failingNames.some((name) => name !== plutoRunningTestName);
+  const switchedOff = results.some((result) => result.name === plutoRunningTestName && result.status === "warn");
+  const hasWarnings = results.some((result) => result.status === "warn");
   const recheckNote = probeFailing && !notRunning ? `Re-checking every ${readinessSchedule.preOpenRecheckMinutes} minutes. Pluto pauses at ${finalCheckEt} if it still fails.` : `Re-checking every ${readinessSchedule.preOpenRecheckMinutes} minutes.`;
+  const withWarnings = hasWarnings ? ", with warnings" : "";
 
   if (kind === "final") {
-    if (!failing) return { signature, message: `✅ Pluto ready for today (${finalCheckEt} check).\n${resultLines}`, pause: false };
-    if (!probeFailing) return { signature, message: `🛑 Pluto is not running at the ${finalCheckEt} check.\n${resultLines}\nResume it (or switch it on) on the Pluto screen to let it act today.`, pause: false };
-    if (notRunning) return { signature, message: `🛑 Pluto not ready: the ${finalCheckEt} check still fails, and Pluto is not running.\n${resultLines}\nFix what failed, then resume it (or switch it on) on the Pluto screen.`, pause: false };
+    if (!failing && switchedOff) return { signature, message: `⚠️ Pluto is switched off at the ${finalCheckEt} check, so it will not trade today.\n${resultLines}\nSwitch it on on the Pluto screen to let it act today.`, pause: false };
+    if (!failing) return { signature, message: `✅ Pluto ready for today (${finalCheckEt} check)${withWarnings}.\n${resultLines}`, pause: false };
+    if (!probeFailing) return { signature, message: `🛑 Pluto is paused at the ${finalCheckEt} check.\n${resultLines}\nResume it on the Pluto screen to let it act today.`, pause: false };
+    if (notRunning) return { signature, message: `🛑 Pluto not ready: the ${finalCheckEt} check still fails, and Pluto is paused.\n${resultLines}\nFix what failed, then resume it on the Pluto screen.`, pause: false };
     return { signature, message: `🛑 Pluto not ready: the ${finalCheckEt} check still fails, so Pluto is paused.\n${resultLines}\nPress Resume on the Pluto screen once it is fixed.`, pause: true };
   }
   if (kind === "first") {
-    return { signature, message: failing ? `⚠️ Pluto pre-open check failed.\n${resultLines}\n${recheckNote}` : `✅ Pluto pre-open check passed.\n${resultLines}`, pause: false };
+    if (failing) return { signature, message: `⚠️ Pluto pre-open check failed.\n${resultLines}\n${recheckNote}`, pause: false };
+    return { signature, message: switchedOff ? `⚠️ Pluto is switched off, so it will not trade today.\n${resultLines}` : `✅ Pluto pre-open check passed${withWarnings}.\n${resultLines}`, pause: false };
   }
   if (signature === (previousSignature ?? "")) return { signature, message: null, pause: false };
   return { signature, message: failing ? `⚠️ Pluto pre-open check changed.\n${resultLines}\n${recheckNote}` : `✅ Pluto pre-open check passes again.\n${resultLines}`, pause: false };
@@ -131,9 +149,10 @@ async function runProbe(name: PlutoProbeTestName, probe: PlutoReadinessProbe): P
       timer = setTimeout(() => reject(new Error(`no answer within ${timeoutMs / 1000} s`)), timeoutMs);
     });
     const detail = await Promise.race([probe(), timeout]);
-    return { name, ok: true, detail };
+    return { name, ok: true, status: "ok", detail };
   } catch (error) {
-    return { name, ok: false, detail: error instanceof Error ? error.message : String(error) };
+    // Graded "fail" until assemblePlutoReadinessResults knows whether Pluto is meant to trade today.
+    return { name, ok: false, status: "fail", detail: error instanceof Error ? error.message : String(error) };
   } finally {
     clearTimeout(timer);
   }

@@ -98,6 +98,7 @@ function healthyDependencies(overrides: Partial<ReadinessDependencies> = {}): Re
     loadLatestHealthCheck: async () => ({ startedAt: new Date(now.getTime() - 5 * 60_000), status: "success" }),
     dataSessionIso: async () => "2026-10-02",
     loadDataInvariants: async () => [{ name: "Surface fits", ok: true, detail: "every snapshot has fitted expiries" }],
+    loadTodaysChainStructure: async () => ({ todayIso: "2026-10-05", universeSymbols: ["SPY"], symbolsWithTodaysStructure: ["SPY"] }),
     loadMarketDataFigures: async (stage, contract) => {
       calls.push(`marketData:${stage}:${contract?.symbol}`);
       return { linesEnabled: true, feedRefusal: null, stockProbe: { symbol: "SPY", bid: 500, ask: 500.1, delta: null, paused: false, ibkrError: null }, optionProbe: stage === "open" ? { symbol: "SPY", bid: 1.2, ask: 1.25, delta: -0.25, paused: false, ibkrError: null } : null };

@@ -16,7 +16,6 @@ const healthyInputs = (): DataInvariantInputs => ({
   now,
   universeSymbols: ["AAA", "BBB"],
   snapshots: [snapshot("AAA"), snapshot("BBB")],
-  dayPoolExpiryCount: 5,
   lastCompletedSession: "2026-09-30",
   latestBarDateBySymbol: { AAA: "2026-09-30", BBB: "2026-09-30" },
   riskFreeRateFetchedAt: new Date("2026-09-19T12:00:00Z"),
@@ -61,12 +60,10 @@ describe("evaluateDataInvariants", () => {
     expect(failing(inputs).find((problem) => problem.name === "Surface fits")?.detail).toBe("no fitted expiry for: AAA");
   });
 
-  it("flags an empty Day Signals pool, an empty universe and stale or missing bars", () => {
+  it("flags an empty universe and stale or missing bars, and has no Day Signals pool check (the seed job warns on an empty pool)", () => {
     const inputs = healthyInputs();
-    inputs.dayPoolExpiryCount = 0;
     inputs.latestBarDateBySymbol = { AAA: "2026-09-29", BBB: null };
-    const names = failing(inputs).map((problem) => problem.name);
-    expect(names).toContain("Day Signals pool");
+    expect(evaluateDataInvariants(healthyInputs()).some((result) => result.name === "Day Signals pool")).toBe(false);
     expect(failing(inputs).find((problem) => problem.name === "Daily price bars")?.detail).toBe("behind 2026-09-30: AAA (2026-09-29), BBB (none)");
     expect(failing({ ...healthyInputs(), universeSymbols: [], snapshots: [] }).some((problem) => problem.name === "Capture universe")).toBe(true);
   });

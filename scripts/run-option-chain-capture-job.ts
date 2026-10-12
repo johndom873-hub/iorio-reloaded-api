@@ -29,7 +29,7 @@ import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { isWithinChainCaptureClockWindow } from "../src/lib/optionChainCaptureClock.js";
 import { runOptionSurfaceFitJob } from "../src/lib/runOptionSurfaceFitJob.js";
 import { runJob } from "../src/lib/runJob.js";
-import { buildSeedFailureMessage, seedDaySignals } from "../src/lib/daySignalsSeed.js";
+import { buildSeedEmptyPoolWarning, buildSeedFailureMessage, seedDaySignals } from "../src/lib/daySignalsSeed.js";
 import { easternIsoDate } from "../src/lib/easternIsoDate.js";
 
 // This job has no user waiting on latency, so it would rather queue behind
@@ -107,7 +107,7 @@ async function main(): Promise<void> {
     async () => {
       const seed = await seedDaySignals(tradingDateIso);
       console.log(`Day Signals seed: ${seed.tickersPooled}/${seed.tickersScored} tickers pooled, ${seed.expiriesPooled} expiries; no pool: ${seed.symbolsWithoutPool.join(", ") || "-"}; no snapshot today: ${seed.symbolsWithoutTodaySnapshot.join(", ") || "-"}.`);
-      return { details: { ...seed }, failureMessage: buildSeedFailureMessage(seed) };
+      return { details: { ...seed }, failureMessage: buildSeedFailureMessage(seed), notify: buildSeedEmptyPoolWarning(seed) };
     },
     { triggeredBy: "scheduler" },
   ).catch((error) => console.error(`day_signals_seed failed: ${error instanceof Error ? error.message : error}`));

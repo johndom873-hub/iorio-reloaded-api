@@ -84,6 +84,15 @@ export function buildSeedFailureMessage(result: DaySignalsSeedResult): string | 
   return problems.length > 0 ? problems.join("; ") : undefined;
 }
 
+/**
+ * One warning line when the seed scored tickers but pooled no expiry, or undefined. An empty pool is the model's answer for the
+ * day (nothing expected to earn), not a broken pipeline: the Day Signals loop has nothing to refresh and Pluto nothing to open.
+ */
+export function buildSeedEmptyPoolWarning(result: DaySignalsSeedResult): string | undefined {
+  if (result.tickersScored === 0 || result.expiriesPooled > 0) return undefined;
+  return `⚠️ Day Signals pool is empty for ${result.tradingDateIso}: ${result.tickersScored} tickers scored, none has an expiry the model expects to earn on, so Day Signals has nothing to refresh and Pluto nothing to open today.`;
+}
+
 export async function seedDaySignals(tradingDateIso: string, deps: DaySignalsSeedDependencies = defaultDaySignalsSeedDependencies): Promise<DaySignalsSeedResult> {
   const [tickers, settings] = await Promise.all([deps.loadSignalsUniverseTickers(), deps.loadTradingSettings()]);
   // Free cash only affects the executable flag, never the ranking — a missing account summary must not block the seed.

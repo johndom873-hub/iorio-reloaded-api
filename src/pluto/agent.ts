@@ -18,7 +18,7 @@ import { advanceOpeningLook, decideOpeningLook, type OpeningLookDecision, type O
 import { forcedRoundRetryDelayMs, recordRoundOutcome, roundFailureAlertText, roundFailureRecoveryText, shouldRetryForcedRound, type RoundFailureState } from "./roundFailures.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
-import { decidePlutoReadinessRun, describePlutoReadinessOutcome, evaluatePlutoRunning, reusableProbeResults, runPlutoReadinessTests } from "./readiness.js";
+import { assemblePlutoReadinessResults, decidePlutoReadinessRun, describePlutoReadinessOutcome, reusableProbeResults, runPlutoReadinessTests } from "./readiness.js";
 import { createPlutoReadinessProbes } from "./readinessProbes.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease, savePlutoReadiness } from "./stateStore.js";
 import { findNewlyQuotedContracts, loadTodaysDaySignalQuoteStamps, rememberAnalysed } from "./daySignalsWatermark.js";
@@ -303,7 +303,7 @@ export class PlutoAgent {
 
   /**
    * The pre-open readiness check (Marcelo, 2026-10-06): on open market days, whether Pluto is on, paused or off (2026-10-07: an
-   * off or paused Pluto is reported by its "Pluto running" test), runs whatever readiness.ts says is due, stores the result,
+   * off or paused Pluto is reported by its "Pluto running" test, off as a warning since 2026-10-12), runs whatever readiness.ts says is due, stores the result,
    * alerts on failure or recovery, and pauses a running Pluto at the final run if a probe still fails. A run takes up to a
    * minute (the IBKR test), so overlapping ticks are skipped.
    */
@@ -322,7 +322,7 @@ export class PlutoAgent {
       const probeResults =
         reusableProbeResults(kind, todaysRecord) ??
         (await runPlutoReadinessTests(createPlutoReadinessProbes({ api: this.api, openRouterApiKey: this.config.openRouterApiKey, dailyCostCeilingUsd: settings.dailyCostCeilingUsd })));
-      const results = [...probeResults, evaluatePlutoRunning(await loadPlutoState())];
+      const results = assemblePlutoReadinessResults(probeResults, await loadPlutoState());
       const previousSignature = todaysRecord ? todaysRecord.signature : null;
       const outcome = describePlutoReadinessOutcome(kind, previousSignature, results);
       await savePlutoReadiness({ dateIso, lastRunAt: new Date().toISOString(), lastRunKind: kind, signature: outcome.signature, finalDone: kind === "final", results });
@@ -332,7 +332,7 @@ export class PlutoAgent {
         const current = await loadPlutoState();
         if (current.mode === "on" && !current.paused) {
           await pausePluto("readiness");
-          await recordPlutoEvent("paused", { by: "agent", reason: "readiness", failing: results.filter((result) => !result.ok).map((result) => result.name) });
+          await recordPlutoEvent("paused", { by: "agent", reason: "readiness", failing: results.filter((result) => result.status === "fail").map((result) => result.name) });
         }
       }
       if (outcome.message) await notifyPlutoTelegram(outcome.message);

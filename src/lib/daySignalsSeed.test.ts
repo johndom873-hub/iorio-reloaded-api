@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSeedFailureMessage, seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
+import { buildSeedEmptyPoolWarning, buildSeedFailureMessage, seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
 import type { SignalCandidate, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
@@ -219,5 +219,16 @@ describe("seed failure reporting", () => {
     const result = await seedDaySignals("2026-09-24", deps);
     expect(buildSeedFailureMessage(result)).toBe("no snapshot for today, so no Day Signals pool: OLD");
     expect(buildSeedFailureMessage({ ...result, symbolsWithoutTodaySnapshot: [], accountContextUnavailable: false })).toBeUndefined();
+  });
+});
+
+describe("buildSeedEmptyPoolWarning", () => {
+  const result = { tradingDateIso: "2026-10-09", tickersScored: 10, tickersPooled: 0, expiriesPooled: 0, symbolsWithoutPool: [], symbolsWithoutTodaySnapshot: [], accountContextUnavailable: false, modelPredictionsRecorded: 0 };
+  it("warns when tickers were scored and no expiry made the pool", () => {
+    expect(buildSeedEmptyPoolWarning(result)).toBe("⚠️ Day Signals pool is empty for 2026-10-09: 10 tickers scored, none has an expiry the model expects to earn on, so Day Signals has nothing to refresh and Pluto nothing to open today.");
+  });
+  it("is silent when the pool has an expiry, and when nothing was scored (the failure message covers missing snapshots)", () => {
+    expect(buildSeedEmptyPoolWarning({ ...result, tickersPooled: 1, expiriesPooled: 1 })).toBeUndefined();
+    expect(buildSeedEmptyPoolWarning({ ...result, tickersScored: 0, symbolsWithoutTodaySnapshot: ["AAOI"] })).toBeUndefined();
   });
 });

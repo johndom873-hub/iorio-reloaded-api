@@ -66,7 +66,7 @@ describe("dataSessionIso", () => {
 });
 
 describe("evaluateDataChecks", () => {
-  it("makes the new Earnings dates check a fail (not warn-only), and the macro freshness a warn", () => {
+  it("warns for an Earnings dates conflict and for stale macro events: neither stops the open", () => {
     const checks = evaluateDataChecks(
       [
         { name: "Earnings dates", ok: false, detail: "two earnings dates within 45 days: WDC (2026-08-04 and 2026-08-05)" },
@@ -75,7 +75,7 @@ describe("evaluateDataChecks", () => {
       "2026-10-06",
     );
     expect(checks.map((check) => [check.name, check.status])).toEqual([
-      ["Data: Earnings dates (2026-10-06)", "fail"],
+      ["Data: Earnings dates (2026-10-06)", "warn"],
       ["Data: Major macro events (2026-10-06)", "warn"],
     ]);
   });
