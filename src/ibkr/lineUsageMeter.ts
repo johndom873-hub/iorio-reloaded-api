@@ -135,11 +135,24 @@ export function createLineUsageMeter(now: () => number = Date.now): LineUsageMet
   };
 }
 
-/** One log fragment for a summary, e.g. "subscribed avg 49.6, answered avg 21.0, 19.8 msg/s, first reply p50 2.9s p90 3.4s (0 never answered of 98)". */
-export function describeLineUsage(summary: LineUsageSummary): string {
+/**
+ * The outgoing message rate @stoqey/ib really enforces for a `maxReqPerSec` setting. Its limiter (function-rate-limit)
+ * allows maxReqPerSec / 10 messages per 100 ms and sends while that allowance is above zero, so a fractional
+ * allowance rounds up: 15 sends 2 per 100 ms, i.e. 20 msg/s. Every message counts, cancelMktData included.
+ */
+export function effectiveMessagesPerSecondCap(maxRequestsPerSecond: number): number {
+  return Math.ceil(maxRequestsPerSecond / 10) * 10;
+}
+
+/**
+ * One log fragment for a summary, e.g. "subscribed avg 49.6, answered avg 21.0, 19.8 msg/s, first reply p50 2.9s p90 3.4s (0 never answered of 98)".
+ * With `messagesPerSecondCap`, the rate reads "19.8 of 20 msg/s". The rate counts our calls, not what the limiter has sent:
+ * at the cap, our own outgoing queue (not the lines) sets the pace; above it, that queue is growing.
+ */
+export function describeLineUsage(summary: LineUsageSummary, messagesPerSecondCap?: number): string {
   const seconds = (ms: number | null) => (ms === null ? "—" : `${(ms / 1000).toFixed(1)}s`);
   return (
-    `subscribed avg ${summary.averageSubscribed.toFixed(1)}, answered avg ${summary.averageAnswered.toFixed(1)}, ${summary.messagesPerSecond.toFixed(1)} msg/s, ` +
+    `subscribed avg ${summary.averageSubscribed.toFixed(1)}, answered avg ${summary.averageAnswered.toFixed(1)}, ${summary.messagesPerSecond.toFixed(1)}${messagesPerSecondCap === undefined ? "" : ` of ${messagesPerSecondCap}`} msg/s, ` +
     `first reply p50 ${seconds(summary.firstReplyMsP50)} p90 ${seconds(summary.firstReplyMsP90)} (${summary.releasedUnanswered} never answered of ${summary.released})`
   );
 }

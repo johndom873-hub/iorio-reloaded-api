@@ -26,7 +26,9 @@ const emptySettleStats = () => ({
   timedOutLineMs: 0,
   settled: 0,
   timedOut: 0,
+  timedOutUnanswered: 0,
   errored: 0,
+  cancelledAtClose: 0,
   settledWithoutMarket: 0,
   holdMsP50: null,
   holdMsP90: null,
@@ -194,11 +196,12 @@ function runDependencies(overrides: Partial<OptionChainCaptureDependencies> = {}
     connect: async () => ({ ib: fakeIb, disconnect }),
     fetchSpotPrices: async (symbols) => Object.fromEntries(symbols.map((symbol) => [symbol, 100])),
     prepareTicker: async (_ib, universeTicker) => preparedFor(universeTicker),
-    openQuoteWindow: () => ({ capture: async () => [], close: vi.fn(), inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+    openQuoteWindow: () => ({ capture: async () => [], close: vi.fn(), inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
     saveSnapshot: async () => coverage(10, 10),
     saveFailedSnapshot,
     lineReservation,
     waitForPoolShedding: async () => {},
+    loadLineReservations: async () => [],
     ...overrides,
   };
   return { dependencies, disconnect, saveFailedSnapshot, clock, lineReservation };
@@ -238,7 +241,7 @@ describe("runOptionChainCapture", () => {
     const waitForPoolShedding = vi.fn(async () => {});
     const fetchSpotPrices = vi.fn(async (symbols: string[]) => Object.fromEntries(symbols.map((symbol) => [symbol, 100])));
     const events: OptionChainCaptureEvent[] = [];
-    const result = await runOptionChainCapture((event) => events.push(event), { ...dependencies, waitForPoolShedding, fetchSpotPrices }, { symbols: ["BBB", "CCC"], linesAlreadyHeld: true });
+    const result = await runOptionChainCapture((event) => events.push(event), { ...dependencies, waitForPoolShedding, fetchSpotPrices }, { symbols: ["BBB", "CCC"], linesHeldSince: Date.now() });
     expect(result.tickersAttempted).toBe(2);
     expect(events.filter((event) => event.type === "tickerStart").map((event) => (event as { symbol: string }).symbol)).toEqual(["BBB", "CCC"]);
     // Fresh spots for just the retried tickers, so a retry is never priced off the first pass's stale spot.
@@ -276,7 +279,7 @@ describe("runOptionChainCapture", () => {
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
       connect: async () => ({ ib: ib as never, disconnect }),
       prepareTicker: prepareTicker as never,
-      openQuoteWindow: () => ({ capture: async () => [], close, inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+      openQuoteWindow: () => ({ capture: async () => [], close, inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
     });
     await expect(runOptionChainCapture(undefined, { ...dependencies, saveFailedSnapshot })).rejects.toThrow("IBKR connection lost mid-run; not captured: CCC");
     expect(prepareTicker).toHaveBeenCalledTimes(2);
@@ -312,7 +315,7 @@ describe("runOptionChainCapture", () => {
     const quotesBySymbol: Record<string, never[]> = { AAA: [realTimeQuote], BBB: [realTimeQuote], CCC: [delayedQuote] };
     const { dependencies } = runDependencies({
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
-      openQuoteWindow: () => ({ capture: async (symbol: string) => quotesBySymbol[symbol]!, close: vi.fn(), inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+      openQuoteWindow: () => ({ capture: async (symbol: string) => quotesBySymbol[symbol]!, close: vi.fn(), inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       saveSnapshot: async (prepared) => coverages[prepared.ticker.symbol]!,
     });
     const result = await runOptionChainCapture(undefined, dependencies);
@@ -327,7 +330,7 @@ describe("runOptionChainCapture", () => {
   });
 
   describe("buildCaptureFailureMessage", () => {
-    const cleanResult: OptionChainCaptureResult = { tickersAttempted: 9, tickersComplete: 9, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: false, fallbackSpotSymbols: [], qualityProblems: [] };
+    const cleanResult: OptionChainCaptureResult = { tickersAttempted: 9, tickersComplete: 9, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: false, fallbackSpotSymbols: [], qualityProblems: [], lineUsage: null };
 
     it("is undefined for a clean run", () => {
       expect(buildCaptureFailureMessage(cleanResult)).toBeUndefined();
@@ -458,7 +461,7 @@ describe("runOptionChainCapture", () => {
     const { dependencies } = runDependencies({
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
       fetchSpotPrices,
-      openQuoteWindow: () => ({ capture, close: vi.fn(), inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+      openQuoteWindow: () => ({ capture, close: vi.fn(), inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       saveSnapshot: async () => (++saves <= 3 ? coverage(10, 2) : coverage(10, 10)),
     });
     const run = runOptionChainCapture(undefined, dependencies);
@@ -495,7 +498,7 @@ describe("runOptionChainCapture", () => {
       return [];
     });
     const { dependencies } = runDependencies({
-      openQuoteWindow: () => ({ capture, close, inFlightCount: () => 0, drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+      openQuoteWindow: () => ({ capture, close, inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       prepareTicker: async (_ib, universeTicker) => {
         order.push(`prepare:${universeTicker.symbol}`);
         return preparedFor(universeTicker);
@@ -509,7 +512,8 @@ describe("runOptionChainCapture", () => {
 
   it("handles an empty universe", async () => {
     const { dependencies, disconnect } = runDependencies({ loadUniverse: async () => [] });
-    expect(await runOptionChainCapture(undefined, dependencies)).toEqual({ tickersAttempted: 0, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: false, fallbackSpotSymbols: [], qualityProblems: [] });
+    const result = await runOptionChainCapture(undefined, dependencies);
+    expect(result).toEqual({ tickersAttempted: 0, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: false, fallbackSpotSymbols: [], qualityProblems: [], lineUsage: expect.objectContaining({ label: "Capture" }) });
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
 });
@@ -556,10 +560,94 @@ describe("waitForLinesToFitBudget", () => {
   });
 });
 
+describe("capture line-usage record", () => {
+  it("returns the run's line usage with the ledger at the start and end, and labels a retry round held by the caller", async () => {
+    const { dependencies, lineReservation } = runDependencies({ loadLineReservations: async () => [{ holder: "optionChainCapture", lines: 30 }, { holder: "pool:live", lines: 12 }] });
+    const heldSince = Date.now() - 31_000;
+    const result = await runOptionChainCapture(undefined, dependencies, { linesHeldSince: heldSince, runLabel: "Capture retry attempt 2" });
+    expect(lineReservation.reserve).not.toHaveBeenCalled();
+    expect(result.lineUsage).toMatchObject({
+      label: "Capture retry attempt 2",
+      linesReserved: 30,
+      linesHeldByCaller: true,
+      reservationsAtStart: [{ holder: "optionChainCapture", lines: 30 }, { holder: "pool:live", lines: 12 }],
+      reservationsAtEnd: [{ holder: "optionChainCapture", lines: 30 }, { holder: "pool:live", lines: 12 }],
+      wholeRun: expect.objectContaining({ settled: 0 }),
+    });
+    expect(result.lineUsage!.timeline.heldBeforeRunMs).toBeGreaterThanOrEqual(31_000);
+    expect(result.lineUsage!.timeline.totalHeldMs).toBeGreaterThanOrEqual(31_000);
+  });
+
+  it("keeps the run going when the ledger cannot be read", async () => {
+    const { dependencies } = runDependencies({
+      loadLineReservations: async () => {
+        throw new Error("db hiccup");
+      },
+    });
+    const result = await runOptionChainCapture(undefined, dependencies);
+    expect(result.tickersComplete).toBe(2);
+    expect(result.lineUsage).toMatchObject({ label: "Capture", linesHeldByCaller: false, reservationsAtStart: null, reservationsAtEnd: null });
+  });
+
+  it("builds the timeline so the parts before, during and after subscribing add up to the hold", async () => {
+    const { buildReservationTimeline } = await import("./runOptionChainCapture.js");
+    const timeline = buildReservationTimeline({
+      linesHeldSince: 1_000,
+      runStartedAt: 31_000,
+      linesHeldByCaller: true,
+      endedAt: 400_000,
+      allTickersQueuedAt: 150_000,
+      span: { firstSubscribedAt: 40_000, lastReleasedAt: 390_000 },
+      poolWaitMs: 0,
+      connectMs: 800,
+      spotPricesMs: 6_000,
+      firstTickerPrepareMs: 300,
+    });
+    expect(timeline).toEqual({
+      heldBeforeRunMs: 30_000,
+      poolWaitMs: 0,
+      connectMs: 800,
+      spotPricesMs: 6_000,
+      firstTickerPrepareMs: 300,
+      untilFirstSubscribeMs: 39_000,
+      untilAllQueuedMs: 110_000,
+      subscribingMs: 350_000,
+      afterLastReleaseMs: 10_000,
+      totalHeldMs: 399_000,
+    });
+    expect(timeline.untilFirstSubscribeMs! + timeline.subscribingMs! + timeline.afterLastReleaseMs!).toBe(timeline.totalHeldMs);
+    // Reserved by the run itself: nothing was held before it. Never subscribed: the spans are unknown.
+    expect(buildReservationTimeline({ linesHeldSince: 5_000, runStartedAt: 1_000, linesHeldByCaller: false, endedAt: 9_000, allTickersQueuedAt: null, span: null, poolWaitMs: 2_000, connectMs: 0, spotPricesMs: 0, firstTickerPrepareMs: null })).toMatchObject({
+      heldBeforeRunMs: 0,
+      untilFirstSubscribeMs: null,
+      subscribingMs: null,
+      afterLastReleaseMs: null,
+      totalHeldMs: 4_000,
+    });
+  });
+
+  it("describes the timeline in one line", async () => {
+    const { describeCaptureReservationTimeline } = await import("./runOptionChainCapture.js");
+    const line = describeCaptureReservationTimeline({
+      label: "Capture",
+      linesReserved: 30,
+      linesHeldByCaller: false,
+      timeline: { heldBeforeRunMs: 0, poolWaitMs: 1_000, connectMs: 800, spotPricesMs: 6_200, firstTickerPrepareMs: 300, untilFirstSubscribeMs: 8_400, untilAllQueuedMs: 120_000, subscribingMs: 380_000, afterLastReleaseMs: 7_200, totalHeldMs: 395_600 },
+      reservationsAtStart: null,
+      reservationsAtEnd: null,
+      wholeRun: null,
+    });
+    expect(line).toBe(
+      "Capture: 30 lines held 395.6s — 8.4s before the first subscribe (held before this run 0.0s, pool wait 1.0s, connect 0.8s, spot prices 6.2s, first ticker prepared in 0.3s), " +
+        "380.0s subscribing (every ticker queued 120.0s in), 7.2s after the last release.",
+    );
+  });
+});
+
 describe("describeCaptureLineUsage", () => {
   it("reports lines subscribed and answered, the message rate, the wait for IBKR, hold times, field arrival and where line time went", async () => {
     const { describeCaptureLineUsage } = await import("./runOptionChainCapture.js");
-    const line = describeCaptureLineUsage("Capture window", 30, {
+    const line = describeCaptureLineUsage("Capture window", { inFlight: 30, queued: 12 }, {
       ...emptySettleStats(),
       intervalMs: 10_000,
       minInFlight: 28,
@@ -568,19 +656,22 @@ describe("describeCaptureLineUsage", () => {
       timedOutLineMs: 72_000,
       settled: 101,
       timedOut: 9,
+      timedOutUnanswered: 2,
+      cancelledAtClose: 1,
       settledWithoutMarket: 4,
       holdMsP50: 3_900,
       holdMsP90: 7_200,
       holdMsMax: 8_000,
       lastField: { price: 6, delta: 15, openInterest: 80 },
-      missingOnTimeout: { price: 0, delta: 2, openInterest: 9 },
+      missingOnTimeout: { price: 0, delta: 2, openInterest: 7 },
       afterFirstReplyMs: { price: { p50: 0, p90: 100 }, delta: { p50: 1_200, p90: 2_400 }, openInterest: { p50: 300, p90: 900 } },
       lineUsage: { periodMs: 10_000, averageSubscribed: 29.6, averageAnswered: 21, messagesPerSecond: 19.8, released: 110, releasedUnanswered: 2, firstReplyMsP50: 2_900, firstReplyMsP90: 3_400, holdMsP50: 3_900, holdMsP90: 7_200 },
     });
     expect(line).toBe(
-      "Capture window: lines 30/30 now, min 28 max 30 over 10.0s, subscribed avg 29.6, answered avg 21.0, 19.8 msg/s, first reply p50 2.9s p90 3.4s (2 never answered of 110); " +
-        "110 released, held p50 3.9s p90 7.2s max 8.0s; after first reply p50/p90: price 0.0s/0.1s, delta 1.2s/2.4s, OI 0.3s/0.9s; " +
-        "101 full data (waited last on price 6, delta 15, OI 80; 4 with \"no data\" on a side), 9 timed out holding 72.0s of line time (missing price 0, delta 2, OI 9), 0 errored.",
+      "Capture window: lines 30/30 now, 12 queued, min 28 max 30 over 10.0s, subscribed avg 29.6, answered avg 21.0, 19.8 of 20 msg/s, first reply p50 2.9s p90 3.4s (2 never answered of 110); " +
+        "111 released, held p50 3.9s p90 7.2s max 8.0s; after first reply p50/p90: price 0.0s/0.1s, delta 1.2s/2.4s, OI 0.3s/0.9s; " +
+        "101 full data (waited last on price 6, delta 15, OI 80; 4 with \"no data\" on a side), 9 timed out holding 72.0s of line time (2 never answered; the other 7 missing price 0, delta 2, OI 7), " +
+        "0 errored, 1 cancelled at close.",
     );
   });
 });

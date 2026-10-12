@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLineUsageMeter, describeLineUsage } from "./lineUsageMeter.js";
+import { createLineUsageMeter, describeLineUsage, effectiveMessagesPerSecondCap } from "./lineUsageMeter.js";
 
 function clock() {
   let nowMs = 0;
@@ -59,5 +59,20 @@ describe("describeLineUsage", () => {
     expect(
       describeLineUsage({ periodMs: 10_000, averageSubscribed: 49.64, averageAnswered: 21, messagesPerSecond: 19.8, released: 98, releasedUnanswered: 0, firstReplyMsP50: 2_900, firstReplyMsP90: 3_400, holdMsP50: 4_900, holdMsP90: 8_000 }),
     ).toBe("subscribed avg 49.6, answered avg 21.0, 19.8 msg/s, first reply p50 2.9s p90 3.4s (0 never answered of 98)");
+  });
+
+  it("shows the rate against the cap when one is given", () => {
+    expect(
+      describeLineUsage({ periodMs: 10_000, averageSubscribed: 29, averageAnswered: 21, messagesPerSecond: 19.8, released: 98, releasedUnanswered: 0, firstReplyMsP50: 2_900, firstReplyMsP90: 3_400, holdMsP50: 4_900, holdMsP90: 8_000 }, 20),
+    ).toContain("19.8 of 20 msg/s");
+  });
+});
+
+describe("effectiveMessagesPerSecondCap", () => {
+  it("rounds a fractional per-100 ms allowance up, as @stoqey/ib's limiter does (15 sends 20/s)", () => {
+    expect(effectiveMessagesPerSecondCap(15)).toBe(20);
+    expect(effectiveMessagesPerSecondCap(20)).toBe(20);
+    expect(effectiveMessagesPerSecondCap(10)).toBe(10);
+    expect(effectiveMessagesPerSecondCap(5)).toBe(10);
   });
 });

@@ -121,7 +121,8 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(ib.cancelMktData.mock.calls.map((call) => call[0])).toEqual([silent, answered]);
       await pending;
-      expect(window.wholeRunSettleStats()).toMatchObject({ timedOut: 2, holdMsMax: 11_000, lineUsage: { releasedUnanswered: 1, firstReplyMsP50: 3_000 } });
+      // The silent contract counts as never answered, so only the answered one's missing fields are counted.
+      expect(window.wholeRunSettleStats()).toMatchObject({ timedOut: 2, timedOutUnanswered: 1, missingOnTimeout: { price: 1, delta: 1, openInterest: 1 }, holdMsMax: 11_000, lineUsage: { releasedUnanswered: 1, firstReplyMsP50: 3_000 } });
       window.close();
     } finally {
       vi.useRealTimers();
@@ -132,10 +133,14 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
     const ib = new FakeIb();
     const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 1, timeoutMs: 5_000 });
     const pending = window.capture("TEST", [put100, call105]);
+    expect(window.queuedCount()).toBe(1);
     window.close();
     const quotes = await pending;
     expect(quotes.length).toBe(1);
     expect(ib.cancelMktData).toHaveBeenCalledTimes(1);
+    // The cancelled line is counted, so the summary's released total matches the line meter's.
+    expect(window.wholeRunSettleStats()).toMatchObject({ cancelledAtClose: 1, settled: 0, timedOut: 0, lineUsage: { released: 1 } });
+    expect(window.queuedCount()).toBe(0);
     expect(ib.listenerCount(EventName.tickPrice)).toBe(0);
     expect(ib.listenerCount(EventName.error)).toBe(0);
     await expect(window.capture("TEST", [put100])).rejects.toThrow("closed");
@@ -176,7 +181,9 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
         timedOutLineMs: 8_500,
         settled: 1,
         timedOut: 1,
+        timedOutUnanswered: 0,
         errored: 0,
+        cancelledAtClose: 0,
         settledWithoutMarket: 0,
         holdMsP50: 4_000,
         holdMsP90: 8_500,
@@ -191,6 +198,8 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
       expect(window.drainSettleStats()).toEqual(expected);
       expect(window.drainSettleStats()).toMatchObject({ settled: 0, timedOut: 0, lineBusyMs: 0, holdMsP50: null, minInFlight: 0, maxInFlight: 0 });
       expect(window.wholeRunSettleStats()).toEqual(expected);
+      // First reqMktData at 0, the last release (the second contract's timeout) at 8.5 s.
+      expect(window.subscribedSpan()).toEqual({ firstSubscribedAt: 0, lastReleasedAt: 8_500 });
       window.close();
     } finally {
       vi.useRealTimers();

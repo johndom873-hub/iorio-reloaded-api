@@ -8,6 +8,7 @@ function retryDependencies(queuesByCall: string[][], overrides: Partial<CaptureR
     order.push("release");
   });
   let call = 0;
+  const clock = { nowMs: 0 };
   const dependencies: CaptureRetryDependencies = {
     findSymbolsToRetry: vi.fn(async () => queuesByCall[Math.min(call++, queuesByCall.length - 1)]!),
     holdLines: vi.fn(async () => {
@@ -17,22 +18,24 @@ function retryDependencies(queuesByCall: string[][], overrides: Partial<CaptureR
     sleep: vi.fn(async (milliseconds: number) => {
       order.push(`sleep ${milliseconds}`);
     }),
-    recapture: vi.fn(async (symbols: string[]) => {
+    recapture: vi.fn(async (symbols: string[], _round: { attempt: number; linesHeldSince: number }) => {
       order.push(`recapture ${symbols.join(",")}`);
+      return null;
     }),
     refit: vi.fn(async (_tradingDate: string, symbols: string[]) => {
       order.push(`refit ${symbols.join(",")}`);
     }),
+    now: () => clock.nowMs,
     ...overrides,
   };
-  return { dependencies, order, release };
+  return { dependencies, order, release, clock };
 }
 
 describe("runCaptureRetryRounds", () => {
   it("does nothing, and never reserves lines, when no ticker needs a retry", async () => {
     const { dependencies } = retryDependencies([[]]);
     const result = await runCaptureRetryRounds("2026-10-01", dependencies);
-    expect(result).toEqual({ roundSymbols: [], roundErrors: [], stillFailingSymbols: [] });
+    expect(result).toEqual({ roundSymbols: [], roundErrors: [], stillFailingSymbols: [], roundLineUsage: [], lineHold: null });
     expect(dependencies.holdLines).not.toHaveBeenCalled();
   });
 
@@ -41,7 +44,7 @@ describe("runCaptureRetryRounds", () => {
     const result = await runCaptureRetryRounds("2026-10-01", dependencies);
     expect(captureAttemptsPerTicker).toBe(3);
     expect(order).toEqual(["hold", `sleep ${captureRetryDelayMs}`, "recapture HOOD,INTC", "refit HOOD,INTC", `sleep ${captureRetryDelayMs}`, "recapture HOOD,INTC", "refit HOOD,INTC", "release"]);
-    expect(result).toEqual({ roundSymbols: [["HOOD", "INTC"], ["HOOD", "INTC"]], roundErrors: [], stillFailingSymbols: ["HOOD"] });
+    expect(result).toMatchObject({ roundSymbols: [["HOOD", "INTC"], ["HOOD", "INTC"]], roundErrors: [], stillFailingSymbols: ["HOOD"], roundLineUsage: [null, null] });
   });
 
   it("retries only the tickers still failing, and stops as soon as the queue is empty", async () => {
@@ -66,6 +69,34 @@ describe("runCaptureRetryRounds", () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
+  it("splits the time the lines were held into pauses, capturing, refitting and choosing the next queue, and passes each round its attempt and hold start", async () => {
+    const phaseMs = { sleep: 30_000, recapture: 20_000, refit: 5_000, find: 1_000 };
+    let clockMs = 100_000;
+    const advance = (milliseconds: number) => {
+      clockMs += milliseconds;
+    };
+    const roundUsage = { label: "Capture retry attempt 2" } as never;
+    let findCalls = 0;
+    const recapture = vi.fn(async () => {
+      advance(phaseMs.recapture);
+      return roundUsage;
+    });
+    const { dependencies } = retryDependencies([], {
+      now: () => clockMs,
+      findSymbolsToRetry: vi.fn(async () => {
+        if (findCalls++ > 0) advance(phaseMs.find);
+        return findCalls < 2 ? ["HOOD"] : [];
+      }),
+      sleep: vi.fn(async () => advance(phaseMs.sleep)),
+      recapture,
+      refit: vi.fn(async () => advance(phaseMs.refit)),
+    });
+    const result = await runCaptureRetryRounds("2026-10-01", dependencies);
+    expect(recapture).toHaveBeenCalledWith(["HOOD"], { attempt: 2, linesHeldSince: 100_000 });
+    expect(result.roundLineUsage).toEqual([roundUsage]);
+    expect(result.lineHold).toEqual({ totalHeldMs: 56_000, pausedMs: 30_000, capturingMs: 20_000, refittingMs: 5_000, choosingNextQueueMs: 1_000 });
+  });
+
   it("records a failed round capture (a dropped connection) and still runs the next round", async () => {
     const recapture = vi.fn(async () => {
       throw new Error("IBKR connection lost mid-run");
@@ -74,17 +105,18 @@ describe("runCaptureRetryRounds", () => {
     const result = await runCaptureRetryRounds("2026-10-01", dependencies);
     expect(recapture).toHaveBeenCalledTimes(2);
     expect(result.roundErrors).toEqual(["attempt 2: IBKR connection lost mid-run", "attempt 3: IBKR connection lost mid-run"]);
+    expect(result.roundLineUsage).toEqual([null, null]);
     expect(result.stillFailingSymbols).toEqual(["HOOD"]);
   });
 });
 
 describe("buildCaptureRetryFailureMessage", () => {
   it("is undefined when nothing is left failing", () => {
-    expect(buildCaptureRetryFailureMessage({ roundSymbols: [["HOOD"]], roundErrors: [], stillFailingSymbols: [] })).toBeUndefined();
+    expect(buildCaptureRetryFailureMessage({ roundSymbols: [["HOOD"]], roundErrors: [], stillFailingSymbols: [], roundLineUsage: [], lineHold: null })).toBeUndefined();
   });
 
   it("names the tickers still failing and any round errors, without a colon-parenthesis pair the Telegram summary truncates at", () => {
-    const message = buildCaptureRetryFailureMessage({ roundSymbols: [["HOOD"]], roundErrors: ["attempt 2: gateway down"], stillFailingSymbols: ["HOOD", "INTC"] })!;
+    const message = buildCaptureRetryFailureMessage({ roundSymbols: [["HOOD"]], roundErrors: ["attempt 2: gateway down"], stillFailingSymbols: ["HOOD", "INTC"], roundLineUsage: [], lineHold: null })!;
     expect(message).toContain("2 tickers still have fewer than half of their expiries fitted after 3 attempts: HOOD, INTC");
     expect(message).toContain("attempt 2: gateway down");
     expect(message).not.toContain("): ");

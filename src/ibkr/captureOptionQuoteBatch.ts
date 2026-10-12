@@ -159,6 +159,10 @@ export interface CaptureQuoteWindow {
   close(): void;
   /** Contracts subscribed right now — for logs and tests. */
   inFlightCount(): number;
+  /** Contracts queued for a line right now; a free line only ever means this is 0. */
+  queuedCount(): number;
+  /** The window's first reqMktData and its latest release (ms since epoch), for the reservation timeline. */
+  subscribedSpan(): { firstSubscribedAt: number | null; lastReleasedAt: number | null };
   /** How contracts used their lines since the previous call (then resets) — for the periodic progress log. */
   drainSettleStats(): CaptureSettleStats;
   /** The same, since the window opened — for the end-of-run summary. */
@@ -181,14 +185,18 @@ export interface CaptureSettleStats {
   settled: number;
   /** Held the line for the whole timeout without the full field set. */
   timedOut: number;
+  /** Of those, IBKR never sent a single tick (released by the no-reply clock); the rest were answered but incomplete. */
+  timedOutUnanswered: number;
   errored: number;
+  /** Still subscribed when close() ran (the re-capture deadline, a dropped connection): released without settling. */
+  cancelledAtClose: number;
   /** How long each released contract held its line, subscribe to release (every outcome). */
   holdMsP50: number | null;
   holdMsP90: number | null;
   holdMsMax: number | null;
   /** On full-set contracts, the field that arrived last (what the line was waiting for). */
   lastField: Record<SettleField, number>;
-  /** On timed-out contracts, the fields that never arrived. */
+  /** On timed-out contracts IBKR did answer, the fields that never arrived. */
   missingOnTimeout: Record<SettleField, number>;
   /** Full-data contracts settled with no two-sided quote or last because IBKR answered "no data" on a side. */
   settledWithoutMarket: number;
@@ -258,7 +266,9 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     timedOutLineMs: 0,
     settled: 0,
     timedOut: 0,
+    timedOutUnanswered: 0,
     errored: 0,
+    cancelledAtClose: 0,
     settledWithoutMarket: 0,
     lastField: emptyFieldCounts(),
     missingOnTimeout: emptyFieldCounts(),
@@ -266,6 +276,8 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
   });
   let intervalStats = freshStats();
   const wholeRunStats = freshStats();
+  let firstSubscribedAt: number | null = null;
+  let lastReleasedAt: number | null = null;
 
   function sampleInFlight(): void {
     const count = pending.size;
@@ -289,7 +301,9 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       timedOutLineMs: stats.timedOutLineMs,
       settled: stats.settled,
       timedOut: stats.timedOut,
+      timedOutUnanswered: stats.timedOutUnanswered,
       errored: stats.errored,
+      cancelledAtClose: stats.cancelledAtClose,
       settledWithoutMarket: stats.settledWithoutMarket,
       holdMsP50: percentileOfSorted(sortedHolds, 50),
       holdMsP90: percentileOfSorted(sortedHolds, 90),
@@ -320,12 +334,21 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       else if (timedOut) {
         stats.timedOut += 1;
         stats.timedOutLineMs += holdMs;
-        for (const [field, at] of fields) if (at === null) stats.missingOnTimeout[field] += 1;
+        if (entry.firstTickAt === null) stats.timedOutUnanswered += 1;
+        else for (const [field, at] of fields) if (at === null) stats.missingOnTimeout[field] += 1;
       } else {
         stats.settled += 1;
         stats.lastField[lastField] += 1;
         if (entry.quote.last === null && (entry.quote.bid === null || entry.quote.ask === null)) stats.settledWithoutMarket += 1;
       }
+    }
+  }
+
+  function recordCancelAtClose(entry: WindowPending): void {
+    const holdMs = Date.now() - entry.subscribedAt;
+    for (const stats of [intervalStats, wholeRunStats]) {
+      stats.holdsMs.push(holdMs);
+      stats.cancelledAtClose += 1;
     }
   }
 
@@ -351,6 +374,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     clearTimeout(entry.timer);
     pending.delete(reqId);
     meter.released(reqId);
+    lastReleasedAt = Date.now();
     try {
       ib.cancelMktData(reqId);
     } catch {
@@ -384,6 +408,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       group.quotes.push(quote);
       pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId, true), timeoutMs), subscribedAt: Date.now(), firstTickAt: null, noMarketOnASide: false, arrivedAt: { price: null, delta: null, openInterest: null } });
       meter.subscribed(reqId);
+      firstSubscribedAt ??= Date.now();
       const right = contract.right === "C" ? OptionType.Call : OptionType.Put;
       try {
         ib.reqMktData(reqId, new Option(group.symbol, contract.expiry, contract.strike, right, "SMART"), openInterestGenericTickList, false, false);
@@ -480,7 +505,9 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       const openGroups = new Set<WindowGroup>();
       for (const [reqId, entry] of pending) {
         clearTimeout(entry.timer);
+        recordCancelAtClose(entry);
         meter.released(reqId);
+        lastReleasedAt = Date.now();
         try {
           ib.cancelMktData(reqId);
         } catch {
@@ -498,6 +525,8 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       ib.removeListener(EventName.error, onError);
     },
     inFlightCount: () => pending.size,
+    queuedCount: () => queue.length,
+    subscribedSpan: () => ({ firstSubscribedAt, lastReleasedAt }),
     drainSettleStats() {
       const drained = summarize(intervalStats, meter.drain());
       intervalStats = freshStats();

@@ -46,7 +46,7 @@ const optionChainCaptureStaleRunningThresholdMs = 60 * 60 * 1000;
 
 function logCaptureEvent(event: OptionChainCaptureEvent): void {
   if (event.type === "tickerStart") {
-    console.log(`${event.symbol}: capturing ${event.contractCount} contracts (window from ${event.referenceVolatilitySource}).`);
+    console.log(`${event.symbol}: capturing ${event.contractCount} contracts (window from ${event.referenceVolatilitySource}; prepared in ${(event.prepareMs / 1000).toFixed(1)}s).`);
   } else if (event.type === "tickerDone") console.log(`${event.symbol}: ${event.status} — ${event.coverage.contractsWithAnyTick}/${event.coverage.contractsRequested} with ticks.`);
   else if (event.type === "tickerError") console.warn(`${event.symbol}: capture failed — ${event.message}`);
   else console.log(`Re-capturing starved tickers: ${event.symbols.join(", ")}`);

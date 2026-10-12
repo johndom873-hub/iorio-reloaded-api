@@ -4,7 +4,8 @@ import { connectToIbkrGateway } from "./connectIbkr.js";
 import { refreshStoredOptionChain, loadStoredOptionChain, type OptionChainRefreshTimings, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import { fetchLivePrices } from "./fetchLivePrices.js";
 import { openCaptureQuoteWindow, type CaptureQuoteWindow, type CaptureSettleStats, type CapturedOptionQuote, type OptionContractRequest } from "./captureOptionQuoteBatch.js";
-import { describeLineUsage } from "./lineUsageMeter.js";
+import { describeLineUsage, effectiveMessagesPerSecondCap } from "./lineUsageMeter.js";
+import { ibkrMessagesPerSecondBudget } from "./constants.js";
 import { getRiskFreeRateForJob } from "../lib/riskFreeRate.js";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "../lib/realizedVolatility.js";
 import {
@@ -42,24 +43,79 @@ import { easternIsoDate } from "../lib/easternIsoDate.js";
 // under this reservation instead of reserving individually.
 export const captureLineReservationHolder = "optionChainCapture";
 const captureProgressLogIntervalMs = 10_000;
+// The capture subscribes on its own connectToIbkrGateway one-shot (defaultCaptureDependencies.connect).
+const captureMessagesPerSecondCap = effectiveMessagesPerSecondCap(ibkrMessagesPerSecondBudget.oneShot);
 
 /**
  * One line of empirical line usage: how many lines were subscribed (now, and the lowest/highest during
- * the period), the time-weighted averages subscribed and answered by IBKR, the message rate, the wait for
- * IBKR's first tick, how long each released contract held its line and when each settle field arrived
- * after that first tick.
+ * the period) and how many contracts waited for one, the time-weighted averages subscribed and answered
+ * by IBKR, the message rate against the connection's cap, the wait for IBKR's first tick, how long each
+ * released contract held its line and when each settle field arrived after that first tick.
  */
-export function describeCaptureLineUsage(heading: string, inFlight: number | null, stats: CaptureSettleStats): string {
+export function describeCaptureLineUsage(heading: string, current: { inFlight: number; queued: number } | null, stats: CaptureSettleStats): string {
   const seconds = (ms: number | null) => (ms === null ? "—" : `${(ms / 1000).toFixed(1)}s`);
   const fields = (counts: CaptureSettleStats["lastField"]) => `price ${counts.price}, delta ${counts.delta}, OI ${counts.openInterest}`;
   const afterReply = (field: keyof CaptureSettleStats["afterFirstReplyMs"]) => `${seconds(stats.afterFirstReplyMs[field].p50)}/${seconds(stats.afterFirstReplyMs[field].p90)}`;
-  const released = stats.settled + stats.timedOut + stats.errored;
+  const released = stats.settled + stats.timedOut + stats.errored + stats.cancelledAtClose;
   return (
-    `${heading}: lines ${inFlight === null ? "" : `${inFlight}/${optionChainCaptureBatchSize} now, `}min ${stats.minInFlight ?? "—"} max ${stats.maxInFlight ?? "—"} over ${seconds(stats.intervalMs)}, ` +
-    `${describeLineUsage(stats.lineUsage)}; ${released} released, held p50 ${seconds(stats.holdMsP50)} p90 ${seconds(stats.holdMsP90)} max ${seconds(stats.holdMsMax)}; ` +
+    `${heading}: lines ${current === null ? "" : `${current.inFlight}/${optionChainCaptureBatchSize} now, ${current.queued} queued, `}min ${stats.minInFlight ?? "—"} max ${stats.maxInFlight ?? "—"} over ${seconds(stats.intervalMs)}, ` +
+    `${describeLineUsage(stats.lineUsage, captureMessagesPerSecondCap)}; ${released} released, held p50 ${seconds(stats.holdMsP50)} p90 ${seconds(stats.holdMsP90)} max ${seconds(stats.holdMsMax)}; ` +
     `after first reply p50/p90: price ${afterReply("price")}, delta ${afterReply("delta")}, OI ${afterReply("openInterest")}; ` +
     `${stats.settled} full data (waited last on ${fields(stats.lastField)}; ${stats.settledWithoutMarket} with "no data" on a side), ` +
-    `${stats.timedOut} timed out holding ${seconds(stats.timedOutLineMs)} of line time (missing ${fields(stats.missingOnTimeout)}), ${stats.errored} errored.`
+    `${stats.timedOut} timed out holding ${seconds(stats.timedOutLineMs)} of line time (${stats.timedOutUnanswered} never answered; the other ${stats.timedOut - stats.timedOutUnanswered} missing ${fields(stats.missingOnTimeout)}), ` +
+    `${stats.errored} errored, ${stats.cancelledAtClose} cancelled at close.`
+  );
+}
+
+/** Where one run's reserved lines spent their time, in ms; the parts before, during and after subscribing add up to totalHeldMs. */
+export interface CaptureLineReservationTimeline {
+  /** Lines held from an earlier step (the retry rounds' pause and refits) before this run started; 0 when this run reserved them. */
+  heldBeforeRunMs: number;
+  poolWaitMs: number;
+  connectMs: number;
+  spotPricesMs: number;
+  /** The first ticker's preparation (DB reads); the others are prepared while earlier contracts hold lines. */
+  firstTickerPrepareMs: number | null;
+  /** Lines held → the window's first reqMktData; null when nothing was subscribed. */
+  untilFirstSubscribeMs: number | null;
+  /** First reqMktData → every ticker's contracts queued. Free lines before this mean preparation fell behind; after it, the end-of-run tail. */
+  untilAllQueuedMs: number | null;
+  /** First reqMktData → the window's last release. */
+  subscribingMs: number | null;
+  /** Last release → lines released (or, when held by the caller, the run's end): reserved with nothing subscribed. */
+  afterLastReleaseMs: number | null;
+  totalHeldMs: number;
+}
+
+export interface CaptureRunLineUsage {
+  label: string;
+  linesReserved: number;
+  /** True when the caller holds the lines (retry rounds), so this run neither reserved nor released them. */
+  linesHeldByCaller: boolean;
+  timeline: CaptureLineReservationTimeline;
+  /** Every active reservation in the ledger (this run's included) when the window opened and before the lines were released; null when the read failed. */
+  reservationsAtStart: { holder: string; lines: number }[] | null;
+  reservationsAtEnd: { holder: string; lines: number }[] | null;
+  /** The window's whole-run stats; null when the window never opened. */
+  wholeRun: CaptureSettleStats | null;
+}
+
+function describeReservations(reservations: { holder: string; lines: number }[] | null): string {
+  if (reservations === null) return "could not be read";
+  const total = reservations.reduce((sum, reservation) => sum + reservation.lines, 0);
+  return `${reservations.map((reservation) => `${reservation.holder} ${reservation.lines}`).join(", ") || "none"} (${total} of ${totalMarketDataLineBudget})`;
+}
+
+/** One line for the end of a run: how long the lines were held and how much of it nothing was subscribed. */
+export function describeCaptureReservationTimeline(usage: CaptureRunLineUsage): string {
+  const seconds = (ms: number | null) => (ms === null ? "—" : `${(ms / 1000).toFixed(1)}s`);
+  const { timeline } = usage;
+  const before =
+    `${seconds(timeline.untilFirstSubscribeMs)} before the first subscribe (held before this run ${seconds(timeline.heldBeforeRunMs)}, pool wait ${seconds(timeline.poolWaitMs)}, ` +
+    `connect ${seconds(timeline.connectMs)}, spot prices ${seconds(timeline.spotPricesMs)}, first ticker prepared in ${seconds(timeline.firstTickerPrepareMs)})`;
+  return (
+    `${usage.label}: ${usage.linesReserved} lines held ${seconds(timeline.totalHeldMs)}${usage.linesHeldByCaller ? " during this run (held by the caller, not released here)" : ""} — ` +
+    `${before}, ${seconds(timeline.subscribingMs)} subscribing (every ticker queued ${seconds(timeline.untilAllQueuedMs)} in), ${seconds(timeline.afterLastReleaseMs)} after the last release.`
   );
 }
 const captureLineReservationTtlSeconds = 180;
@@ -113,7 +169,7 @@ const widestWindowHalfWidth = 0.5;
 const referenceVolatilityBarCount = 40;
 
 export type OptionChainCaptureEvent =
-  | { type: "tickerStart"; symbol: string; contractCount: number; referenceVolatilitySource: ReferenceVolatilitySource; chainRefresh: OptionChainRefreshTimings }
+  | { type: "tickerStart"; symbol: string; contractCount: number; referenceVolatilitySource: ReferenceVolatilitySource; chainRefresh: OptionChainRefreshTimings; prepareMs: number }
   | { type: "tickerDone"; symbol: string; status: string; coverage: SnapshotCoverage }
   | { type: "tickerError"; symbol: string; message: string }
   | { type: "recaptureStart"; symbols: string[] };
@@ -131,6 +187,8 @@ export interface OptionChainCaptureResult {
   fallbackSpotSymbols: string[];
   /** One entry per captured snapshot that is weak (partial, thin quotes or IV, not real-time), e.g. "AAA: two-sided quotes 60% (min 75%)". */
   qualityProblems: string[];
+  /** How the run used its reserved lines — kept in job_runs.details so runs can be compared after the logs expire. */
+  lineUsage: CaptureRunLineUsage | null;
 }
 
 /** One line for the job alert when the capture ran but part of its work is unusable, or undefined when it is clean. */
@@ -378,6 +436,8 @@ export interface OptionChainCaptureDependencies {
   };
   /** Pause after the priority reservation so the live pool can shed to fit before the first batch subscribes. */
   waitForPoolShedding: () => Promise<void>;
+  /** The active line reservations ledger, logged at the start and end of the run (what else held lines meanwhile). */
+  loadLineReservations: () => Promise<{ holder: string; lines: number }[]>;
 }
 
 const defaultCaptureDependencies: OptionChainCaptureDependencies = {
@@ -399,13 +459,19 @@ const defaultCaptureDependencies: OptionChainCaptureDependencies = {
     const { waitedMs, fits } = await waitForLinesToFitBudget({ loadReservations: loadActiveMarketDataLineReservations, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)), now: Date.now });
     console.log(fits ? `Capture: line reservations fit the budget after ${(waitedMs / 1000).toFixed(1)}s.` : `Capture: line reservations still over the budget after ${(waitedMs / 1000).toFixed(1)}s; starting anyway.`);
   },
+  loadLineReservations: loadActiveMarketDataLineReservations,
 };
 
 export interface OptionChainCaptureOptions {
   /** Capture only these tickers (the retry rounds); default is the whole universe. */
   symbols?: string[];
-  /** The caller already holds the priority line reservation (and let the pool shed), so this run neither reserves nor releases it. */
-  linesAlreadyHeld?: boolean;
+  /**
+   * When the caller already holds the priority line reservation (and let the pool shed), so this run neither reserves
+   * nor releases it: the time (ms since epoch) the caller reserved it, so the logs count the lines' idle time from there.
+   */
+  linesHeldSince?: number;
+  /** Names this run in its logs and job details, e.g. "Capture retry attempt 2"; default "Capture". */
+  runLabel?: string;
 }
 
 /**
@@ -425,25 +491,71 @@ export async function holdCaptureLineReservation(lineReservation: OptionChainCap
   };
 }
 
+/** Pure: the reservation timeline from the run's marks (ms since epoch). */
+export function buildReservationTimeline(marks: {
+  linesHeldSince: number;
+  runStartedAt: number;
+  linesHeldByCaller: boolean;
+  endedAt: number;
+  allTickersQueuedAt: number | null;
+  span: { firstSubscribedAt: number | null; lastReleasedAt: number | null } | null;
+  poolWaitMs: number;
+  connectMs: number;
+  spotPricesMs: number;
+  firstTickerPrepareMs: number | null;
+}): CaptureLineReservationTimeline {
+  const firstSubscribedAt = marks.span?.firstSubscribedAt ?? null;
+  const lastReleasedAt = marks.span?.lastReleasedAt ?? null;
+  return {
+    heldBeforeRunMs: marks.linesHeldByCaller ? Math.max(0, marks.runStartedAt - marks.linesHeldSince) : 0,
+    poolWaitMs: marks.poolWaitMs,
+    connectMs: marks.connectMs,
+    spotPricesMs: marks.spotPricesMs,
+    firstTickerPrepareMs: marks.firstTickerPrepareMs,
+    untilFirstSubscribeMs: firstSubscribedAt === null ? null : firstSubscribedAt - marks.linesHeldSince,
+    untilAllQueuedMs: firstSubscribedAt === null || marks.allTickersQueuedAt === null ? null : marks.allTickersQueuedAt - firstSubscribedAt,
+    subscribingMs: firstSubscribedAt === null || lastReleasedAt === null ? null : lastReleasedAt - firstSubscribedAt,
+    afterLastReleaseMs: lastReleasedAt === null ? null : marks.endedAt - lastReleasedAt,
+    totalHeldMs: marks.endedAt - marks.linesHeldSince,
+  };
+}
+
 export async function runOptionChainCapture(
   onEvent: (event: OptionChainCaptureEvent) => void = () => {},
   dependencies: OptionChainCaptureDependencies = defaultCaptureDependencies,
   options: OptionChainCaptureOptions = {},
 ): Promise<OptionChainCaptureResult> {
   const jobStartedAt = dependencies.now().getTime();
+  // The reservation timeline's marks are wall-clock, like the window's subscribedSpan; dependencies.now() only times phases.
+  const runStartedAtWallClock = Date.now();
   const todayIso = easternIsoDate(dependencies.now());
   const fullUniverse = await dependencies.loadUniverse();
   const universe = options.symbols === undefined ? fullUniverse : fullUniverse.filter((ticker) => options.symbols!.includes(ticker.symbol));
   const riskFreeRate = await dependencies.getRiskFreeRate();
   const riskFreeRatePercent = riskFreeRate === null ? null : riskFreeRate * 100;
-  const result: OptionChainCaptureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: riskFreeRate === null, fallbackSpotSymbols: [], qualityProblems: [] };
+  const result: OptionChainCaptureResult = { tickersAttempted: universe.length, tickersComplete: 0, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: riskFreeRate === null, fallbackSpotSymbols: [], qualityProblems: [], lineUsage: null };
   const starved: { prepared: PreparedTicker; coverage: SnapshotCoverage }[] = [];
   const finalStatusBySymbol = new Map<string, string>();
   // Latest saved coverage and data type per ticker (a re-capture overwrites the first pass).
   const snapshotQualityBySymbol = new Map<string, { coverage: SnapshotCoverage; marketDataType: OptionChainMarketDataType }>();
 
-  const releaseLines = options.linesAlreadyHeld ? async () => {} : await holdCaptureLineReservation(dependencies.lineReservation);
-  const linesReservedAt = dependencies.now().getTime();
+  const linesHeldByCaller = options.linesHeldSince !== undefined;
+  const runLabel = options.runLabel ?? "Capture";
+  const releaseLines = linesHeldByCaller ? async () => {} : await holdCaptureLineReservation(dependencies.lineReservation);
+  const linesHeldSince = options.linesHeldSince ?? Date.now();
+  // Where the held lines' time goes (see CaptureLineReservationTimeline).
+  const phaseMs = { poolWaitMs: 0, connectMs: 0, spotPricesMs: 0, firstTickerPrepareMs: null as number | null };
+  let allTickersQueuedAt: number | null = null;
+  let reservationsAtStart: { holder: string; lines: number }[] | null = null;
+  const readReservations = () => dependencies.loadLineReservations().catch((error: unknown) => {
+    console.warn(`${runLabel}: could not read the line reservations: ${error instanceof Error ? error.message : error}`);
+    return null;
+  });
+  const timed = async <T>(work: () => Promise<T>): Promise<{ value: T; elapsedMs: number }> => {
+    const startedAt = dependencies.now().getTime();
+    const value = await work();
+    return { value, elapsedMs: dependencies.now().getTime() - startedAt };
+  };
 
   let connection: { ib: IbkrApi; disconnect: () => void } | null = null;
   let window: CaptureQuoteWindow | null = null;
@@ -456,14 +568,18 @@ export async function runOptionChainCapture(
     window?.close();
   };
   try {
-    if (!options.linesAlreadyHeld) await dependencies.waitForPoolShedding();
-    connection = await dependencies.connect();
+    if (!linesHeldByCaller) phaseMs.poolWaitMs = (await timed(() => dependencies.waitForPoolShedding())).elapsedMs;
+    reservationsAtStart = await readReservations();
+    console.log(`${runLabel}: active line reservations at the start: ${describeReservations(reservationsAtStart)}.`);
+    const connected = await timed(() => dependencies.connect());
+    phaseMs.connectMs = connected.elapsedMs;
+    connection = connected.value;
     const { ib } = connection;
     ib.once(EventName.disconnected, onDisconnected);
     window = dependencies.openQuoteWindow(ib);
     const quoteWindow = window;
     // How many of the reserved lines are really subscribed (Pulse counts the whole reservation as in use).
-    progressTimer = setInterval(() => console.log(describeCaptureLineUsage("Capture window", quoteWindow.inFlightCount(), quoteWindow.drainSettleStats())), captureProgressLogIntervalMs);
+    progressTimer = setInterval(() => console.log(describeCaptureLineUsage(`${runLabel} window`, { inFlight: quoteWindow.inFlightCount(), queued: quoteWindow.queuedCount() }, quoteWindow.drainSettleStats())), captureProgressLogIntervalMs);
     progressTimer.unref?.();
     const record = (symbol: string, coverage: SnapshotCoverage) => {
       const status = deriveSnapshotStatus(coverage);
@@ -486,20 +602,23 @@ export async function runOptionChainCapture(
     // Preparation runs ahead: each ticker's contracts are queued on the shared
     // window as soon as they are known, and its snapshot is saved (in the
     // background) once its last contract settles. Failures stay per ticker.
-    const spotBySymbol = universe.length > 0 ? await dependencies.fetchSpotPrices(universe.map((ticker) => ticker.symbol), (symbols) => result.fallbackSpotSymbols.push(...symbols)) : {};
-    // How long the reserved lines sat unused before the first contract could be queued (shedding grace, connect, spot prices).
-    console.log(`Capture: first contracts queued ${((dependencies.now().getTime() - linesReservedAt) / 1000).toFixed(1)}s after the line reservation${options.linesAlreadyHeld ? " (lines held from an earlier round)" : ""}.`);
+    const spots = await timed(async (): Promise<Record<string, number | null>> => (universe.length > 0 ? dependencies.fetchSpotPrices(universe.map((ticker) => ticker.symbol), (symbols) => result.fallbackSpotSymbols.push(...symbols)) : {}));
+    phaseMs.spotPricesMs = spots.elapsedMs;
+    const spotBySymbol = spots.value;
     const captures: Promise<void>[] = [];
     for (const ticker of universe) {
       if (connectionLost) break;
       let prepared: PreparedTicker;
+      const prepareStartedAt = dependencies.now().getTime();
       try {
         prepared = await dependencies.prepareTicker(ib, ticker, todayIso, spotBySymbol[ticker.symbol] ?? null);
       } catch (error) {
         await recordFailure(ticker, error instanceof Error ? error.message : String(error));
         continue;
       }
-      onEvent({ type: "tickerStart", symbol: ticker.symbol, contractCount: prepared.contracts.length, referenceVolatilitySource: prepared.referenceVolatilitySource, chainRefresh: prepared.chainRefresh });
+      const prepareMs = dependencies.now().getTime() - prepareStartedAt;
+      phaseMs.firstTickerPrepareMs ??= prepareMs;
+      onEvent({ type: "tickerStart", symbol: ticker.symbol, contractCount: prepared.contracts.length, referenceVolatilitySource: prepared.referenceVolatilitySource, chainRefresh: prepared.chainRefresh, prepareMs });
       captures.push(
         captureAndSave(prepared)
           .then((coverage) => {
@@ -509,6 +628,10 @@ export async function runOptionChainCapture(
           .catch((error: unknown) => recordFailure(ticker, error instanceof Error ? error.message : String(error))),
       );
     }
+    allTickersQueuedAt = Date.now();
+    const { firstSubscribedAt } = quoteWindow.subscribedSpan();
+    // Free lines before this point mean preparing tickers one after another fell behind the window; after it, the end-of-run tail.
+    if (firstSubscribedAt !== null) console.log(`${runLabel}: every ticker's contracts queued ${((allTickersQueuedAt - firstSubscribedAt) / 1000).toFixed(1)}s after the first subscribe, ${quoteWindow.queuedCount()} still waiting for a line.`);
     await Promise.all(captures);
     if (connectionLost) {
       const notCaptured = universe.filter((ticker) => finalStatusBySymbol.get(ticker.symbol) !== "complete" && finalStatusBySymbol.get(ticker.symbol) !== "partial").map((ticker) => ticker.symbol);
@@ -541,11 +664,25 @@ export async function runOptionChainCapture(
     }
   } finally {
     if (progressTimer) clearInterval(progressTimer);
-    if (window) console.log(describeCaptureLineUsage("Capture run total", null, window.wholeRunSettleStats()));
     connection?.ib.removeListener(EventName.disconnected, onDisconnected);
+    // Closed before the summary so contracts it cancels are counted in it.
     window?.close();
+    const wholeRun = window?.wholeRunSettleStats() ?? null;
+    if (wholeRun) console.log(describeCaptureLineUsage(`${runLabel} run total`, null, wholeRun));
     connection?.disconnect();
+    const reservationsAtEnd = await readReservations();
+    console.log(`${runLabel}: active line reservations at the end: ${describeReservations(reservationsAtEnd)}.`);
     await releaseLines();
+    result.lineUsage = {
+      label: runLabel,
+      linesReserved: optionChainCaptureBatchSize,
+      linesHeldByCaller,
+      timeline: buildReservationTimeline({ linesHeldSince, runStartedAt: runStartedAtWallClock, linesHeldByCaller, endedAt: Date.now(), allTickersQueuedAt, span: window?.subscribedSpan() ?? null, ...phaseMs }),
+      reservationsAtStart,
+      reservationsAtEnd,
+      wholeRun,
+    };
+    console.log(describeCaptureReservationTimeline(result.lineUsage));
   }
   for (const [symbol, status] of finalStatusBySymbol) {
     if (status === "complete") result.tickersComplete++;
