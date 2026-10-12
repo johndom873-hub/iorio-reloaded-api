@@ -638,6 +638,29 @@ All entries set to Basic dyno size in the Scheduler dashboard (manual, no CLI/AP
 - **Failure summaries + recovery notices (added 2026-09-12, `src/lib/runJob.ts`)** — prompted by a real ~3h20m `ibkr_health_check` outage (2026-09-12 04:50–08:10 UTC, IBKR's own login servers unreachable from the VPS overnight, self-resolved, not a code/infra bug) that produced 20 consecutive failure alerts, each dumping a ~3KB `docker logs` blob into Telegram, and then recovered completely silently. Two changes: (1) `telegramFailureSummary()` truncates the Telegram-bound failure text at the first `"): "` marker (kept full in `job_runs.error_message`) — every restart-script-backed failure message already puts its one-sentence diagnostic before that marker, so this reliably drops just the raw log dump; (2) `findPrecedingFailureStreak()` sends `✅ {job} recovered after N failed attempts (was down since <ts>, ~<duration>)` the first time a job succeeds after failing, closing the gap PROGRESS.md previously flagged as blocked on `job_runs` existing (it now does). New `src/lib/formatDurationHuman.ts` helper for the duration string. Both functions exported from `runJob.ts` for reuse by `tmp/simulateJobNotifications.ts`, a replay script that reconstructs what would have been sent for any historical window straight from `job_runs` — used to verify this change against the last 7 days before shipping (26 notifications reconstructed, including today's incident correctly summarized as 20 failed attempts / ~3h19m downtime).
 - **Trading-events catch-all (Marcelo approved 2026-10-07; built and tested, pushed to staging 2026-10-07, live check pending).** Plain-language: every trade now shows up in the alerts chat, whoever placed it (web, Genosuke or Pluto): each order's progress (working, partly filled, filled, cancelled, expired, rejected, failed) with its contracts and prices, and every position opening or closing with its legs and, for a close, the realized P&L. Pluto's and Genosuke's own messages stay, so their trades appear twice on purpose; an expiry/assignment close is not repeated (its existing message counts). Orders: `lib/orderTelegramNotices.ts` on the web dyno (5 s poll, `order_requests.telegram_notified_status`, waits up to 5 min for a new position's fills). Positions: `lib/positionTelegramNotices.ts` in the worker after each reconciliation pass (`positions.telegram_opened_notified_at`/`telegram_closed_notified_at`; a failed send ends the pass and retries next pass). Migration backfills existing rows as already told. Trim later if noisy. Same change fixes Genosuke's own order follow-up: a new contract's opening fill is written only when reconciliation creates its leg, so its "filled" message could arrive with no fills, or a roll with only its buy-back; both now wait for the fills (shared `shouldWaitForFills` in `lib/orderFills.ts`).
 
+## Atomic release phase: backup, restore on failure (2026-10-12, `35f80d7`; prod from the 2026-10-12 promotion)
+
+**In plain words:** a promotion is now one click and all-or-nothing. Before changing the database, the release checks it is safe to deploy and takes a database backup. If anything fails after the database changes, it restores that backup and keeps the old code, so the app, the database and the trading worker never end up mismatched.
+
+- **Order** (`scripts/run-release-phase.ts`, Procfile `release: npm run release-phase`):
+  1. Deploy guard. On prod it stops before anything changes when the market is open, during the 15 minutes after the close, or with an order in flight; staging only warns.
+  2. Heroku Postgres backup, only when there are migrations to run (`HEROKU_RELEASE_API_KEY`, Juan's key, used for backup and restore only).
+  3. Migrations, in one transaction.
+  4. Worker deploy over SSH.
+  5. On a failure after step 3: drop the tables this release created, restore the backup, check the table list and the latest migration, exit 1.
+  6. Record the backup in `release_backups`.
+  7. Fill `major_macro_events` once when it is empty.
+- **Restore is refused** (the release still fails, with a Telegram alert, fix forward) when orders or trades were written after the backup, or when the worker deploy broke off mid-way, so its state is unknown.
+- **Previously** the migrations committed before the guard and the worker deploy ran, so an aborted release left the old code on the new schema.
+- **Verified on staging 2026-10-12:**
+  - With `RELEASE_PHASE_TEST_FAILURE=after_migrations` (staging-only switch), v192 took backup b025, migrated, failed on purpose and restored. Afterwards the migrations, tables and order/trade/position counts matched the baseline, and staging stayed on v191.
+  - Then a clean release, v193: backup b027 → migration → staging worker redeployed over SSH (e11675c → 35f80d7, healthy, bound DUR854038) → `release_backups` row written.
+- **Limits:**
+  - Heroku's Roll back runs the *target* release's release command, so automatic restore on Roll back only works for releases made from a build that contains this script. The first prod promotion's rollback target (`7c0e137`) does not.
+  - The worker still builds `origin/main`, not the promoted commit; a mismatch sends a Telegram warning. Do not push to main during a promotion.
+- **Heroku quirk:** a config change after a FAILED release re-runs that failed build's release (seen on staging v193), so after a failed prod promotion any `config:set` retries the promotion.
+- **Pending (this week):** Roll back that restores the matching `release_backups` backup automatically.
+
 ## Staging environment (built 2026-09-21; design of record and open items below)
 
 **Design decisions 2026-09-21 (Marcelo approved; supersede anything below that conflicts). Execution starting now, step 0 = read-only inventory.**
