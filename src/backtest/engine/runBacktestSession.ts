@@ -761,8 +761,12 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         for (const { entry } of daySymbols) {
           if (!entry.intradayDays.has(todayIso) || !intradayQuotesBySymbol.has(entry.symbol)) continue;
-          const ahead = lookAheadOf(entry, nextLookTimeEt)!;
-          if (ahead.parity && ahead.dayQuotes) scoringPool.warm(entry.symbol, { todayIso, dayQuotes: ahead.dayQuotes, spotPrice: ahead.parity.price, scoredAtMs: lookInstantMs(todayIso, nextLookTimeEt) });
+          // A symbol scored on two workers in turn gets the look after next too, on the other one (each look once).
+          const lookTimesAhead = lookTimes.slice(lookTimes.indexOf(lookTimeEt) + 1, lookTimes.indexOf(lookTimeEt) + 1 + scoringPool.laneCountOf(entry.symbol));
+          for (const lookTimeAhead of lookTimesAhead) {
+            const ahead = lookAheadOf(entry, lookTimeAhead)!;
+            if (ahead.parity && ahead.dayQuotes) scoringPool.warm(entry.symbol, { todayIso, dayQuotes: ahead.dayQuotes, spotPrice: ahead.parity.price, scoredAtMs: lookInstantMs(todayIso, lookTimeAhead) });
+          }
         }
       };
       const looksOfDay: DayLookSummary[] = [];

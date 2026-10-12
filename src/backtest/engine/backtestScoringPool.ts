@@ -19,10 +19,16 @@ import type { MarketCalendarRow } from "./backtestTradingCalendar.js";
 // without the pool: the results are the same, only the wall time changes. Used by rules-mode sessions of two or more
 // symbols; an LLM-mode session stays on one thread.
 
-/** At most one worker per symbol and per core: a look waits for its slowest symbol. */
+/**
+ * Two workers per symbol when the cores allow (the session's thread and the day-data reader keep two cores): a symbol's
+ * looks alternate between its two, so one can score a look ahead while the other scores the next. At least one.
+ */
 export function scoringWorkerCount(symbolCount: number): number {
-  return Math.min(symbolCount, availableParallelism());
+  return Math.max(1, Math.min(2 * symbolCount, availableParallelism() - 2));
 }
+
+/** The half hour of an instant: a look's lane among its symbol's workers (its scoring ahead, its own and any later pass go to the same one). */
+const lookSlotOf = (scoredAtMs: number) => Math.floor(scoredAtMs / 1_800_000);
 
 /** Scoring a symbol's look on its inputs of the day, with the book's figures of the pass ("warm": the same, ahead of time, result dropped). */
 interface BacktestScoringRequestBody {
@@ -85,15 +91,18 @@ interface PoolWorker {
 
 export class BacktestScoringPool {
   private readonly workers: PoolWorker[];
-  private readonly workerBySymbol = new Map<string, PoolWorker>();
+  /** Each symbol's workers: two when the pool has at least two per symbol, else one shared round-robin. */
+  private readonly lanesBySymbol = new Map<string, PoolWorker[]>();
   private readonly modelTablesIds = new WeakMap<VolatilityModelTables, number>();
   private readonly tradingIds = new WeakMap<TradingSettings, number>();
-  /** Each symbol's last scoring request as sent, for warm(). */
-  private readonly lastScoreRequestBySymbol = new Map<string, Extract<BacktestScoringWorkerRequest, { type: "score" }>>();
+  /** Each symbol's last scoring request as sent, with the tables and settings it named, for warm(). */
+  private readonly lastScoreRequestBySymbol = new Map<string, { sent: Extract<BacktestScoringWorkerRequest, { type: "score" }>; modelTables: VolatilityModelTables; trading: TradingSettings }>();
+  /** The looks already scored ahead, by symbol and look instant. */
+  private readonly warmedLooks = new Set<string>();
   /** Days built ahead (prepareDayAhead), by symbol and day. */
   private readonly preparedAheadByKey = new Map<string, { request: PrepareDayRequest; prepared: Promise<PreparedDay> }>();
-  /** The day quotes each symbol's last warm request carried, as this thread holds them. */
-  private readonly lastWarmDayQuotesBySymbol = new Map<string, LiveOptionQuote[]>();
+  /** The day quotes each symbol's last warm request to each of its workers carried, as this thread holds them. */
+  private readonly lastWarmDayQuotesBySymbolWorker = new Map<string, LiveOptionQuote[]>();
   private nextRequestId = 1;
   private failure: Error | null = null;
 
@@ -117,10 +126,11 @@ export class BacktestScoringPool {
       poolWorker.worker.on("exit", (exitCode) => failAll(new Error(`Scoring worker exited with code ${exitCode}.`)));
       return poolWorker;
     });
-    // Symbols in session order, one worker after the other.
-    setup.symbols.forEach((entry, index) => this.workerBySymbol.set(entry.symbol, this.workers[index % this.workers.length]!));
+    // Symbols in session order: two workers each when there are enough, else one after the other.
+    const lanesPerSymbol = this.workers.length >= 2 * setup.symbols.length ? 2 : 1;
+    setup.symbols.forEach((entry, index) => this.lanesBySymbol.set(entry.symbol, lanesPerSymbol === 2 ? [this.workers[2 * index]!, this.workers[2 * index + 1]!] : [this.workers[index % this.workers.length]!]));
     for (const poolWorker of this.workers) {
-      const symbols = setup.symbols.filter((entry) => this.workerBySymbol.get(entry.symbol) === poolWorker);
+      const symbols = setup.symbols.filter((entry) => this.lanesBySymbol.get(entry.symbol)!.includes(poolWorker));
       void this.send(poolWorker, { type: "init", calendar: setup.calendar, symbols }).catch(() => {});
     }
   }
@@ -138,10 +148,48 @@ export class BacktestScoringPool {
     });
   }
 
-  private workerOf(symbol: string): PoolWorker {
-    const poolWorker = this.workerBySymbol.get(symbol);
-    if (!poolWorker) throw new Error(`The scoring pool was not given ${symbol}.`);
-    return poolWorker;
+  private lanesOf(symbol: string): PoolWorker[] {
+    const lanes = this.lanesBySymbol.get(symbol);
+    if (!lanes) throw new Error(`The scoring pool was not given ${symbol}.`);
+    return lanes;
+  }
+
+  /** The worker a look of the symbol is scored on. */
+  private workerOfLook(symbol: string, scoredAtMs: number): { poolWorker: PoolWorker; laneKey: string } {
+    const lanes = this.lanesOf(symbol);
+    const lane = lookSlotOf(scoredAtMs) % lanes.length;
+    return { poolWorker: lanes[lane]!, laneKey: `${symbol}|${lane}` };
+  }
+
+  /** How many workers score the symbol's looks in turn. */
+  laneCountOf(symbol: string): number {
+    return this.lanesOf(symbol).length;
+  }
+
+  /** The ids a worker knows the tables and the settings by; each sent along the first time that worker needs it. */
+  private idsFor(poolWorker: PoolWorker, modelTables: VolatilityModelTables, trading: TradingSettings) {
+    let modelTablesId = this.modelTablesIds.get(modelTables);
+    if (modelTablesId === undefined) {
+      modelTablesId = this.nextRequestId++;
+      this.modelTablesIds.set(modelTables, modelTablesId);
+    }
+    const modelTablesFirstTime = !poolWorker.modelTablesIds.has(modelTablesId);
+    poolWorker.modelTablesIds.add(modelTablesId);
+    let tradingId = this.tradingIds.get(trading);
+    if (tradingId === undefined) {
+      tradingId = this.nextRequestId++;
+      this.tradingIds.set(trading, tradingId);
+    }
+    const tradingFirstTime = !poolWorker.tradingIds.has(tradingId);
+    poolWorker.tradingIds.add(tradingId);
+    return { modelTablesId, modelTables: modelTablesFirstTime ? modelTables : null, tradingId, trading: tradingFirstTime ? trading : null };
+  }
+
+  /** Sends a day's build to every worker of the symbol (each keeps the day's inputs); the first one's answer. */
+  private sendPrepareDay(request: PrepareDayRequest): Promise<PreparedDay> {
+    const [first, ...others] = this.lanesOf(request.symbol).map((poolWorker) => this.send(poolWorker, { type: "prepareDay", ...request }) as Promise<PreparedDay>);
+    for (const other of others) other.catch(() => {});
+    return first!;
   }
 
   /** buildHistoricalTickerInputs on the symbol's worker, which keeps the inputs for the day's scoring. */
@@ -151,7 +199,7 @@ export class BacktestScoringPool {
     this.preparedAheadByKey.delete(key);
     // The day built ahead serves only the same request: the same market and macro events (the very objects), split factor and flag.
     if (ahead && ahead.request.market === request.market && ahead.request.macroEvents === request.macroEvents && ahead.request.splitFactor === request.splitFactor && ahead.request.elevatedVolatility === request.elevatedVolatility) return ahead.prepared;
-    return (await this.send(this.workerOf(request.symbol), { type: "prepareDay", ...request })) as PreparedDay;
+    return this.sendPrepareDay(request);
   }
 
   /**
@@ -160,31 +208,17 @@ export class BacktestScoringPool {
    */
   prepareDayAhead(request: PrepareDayRequest): void {
     if (this.failure) return;
-    const prepared = this.send(this.workerOf(request.symbol), { type: "prepareDay", ...request }) as Promise<PreparedDay>;
+    const prepared = this.sendPrepareDay(request);
     prepared.catch(() => {});
     this.preparedAheadByKey.set(`${request.symbol}|${request.market.todayIso}`, { request, prepared });
   }
 
   /** scoreTicker on the symbol's worker, over its inputs of the day with the book's figures of this pass. */
   async score(request: Omit<Extract<BacktestScoringWorkerRequest, { type: "score" }>, "type" | "modelTablesId" | "modelTables" | "tradingId" | "trading"> & { modelTables: VolatilityModelTables; trading: TradingSettings }): Promise<TickerSignals> {
-    const poolWorker = this.workerOf(request.symbol);
-    let modelTablesId = this.modelTablesIds.get(request.modelTables);
-    if (modelTablesId === undefined) {
-      modelTablesId = this.nextRequestId++;
-      this.modelTablesIds.set(request.modelTables, modelTablesId);
-    }
-    const firstTime = !poolWorker.modelTablesIds.has(modelTablesId);
-    poolWorker.modelTablesIds.add(modelTablesId);
-    let tradingId = this.tradingIds.get(request.trading);
-    if (tradingId === undefined) {
-      tradingId = this.nextRequestId++;
-      this.tradingIds.set(request.trading, tradingId);
-    }
-    const tradingFirstTime = !poolWorker.tradingIds.has(tradingId);
-    poolWorker.tradingIds.add(tradingId);
-    const sent: Extract<BacktestScoringWorkerRequest, { type: "score" }> = { ...request, type: "score", modelTablesId, modelTables: firstTime ? request.modelTables : null, tradingId, trading: tradingFirstTime ? request.trading : null };
-    this.lastScoreRequestBySymbol.set(request.symbol, sent);
-    const dayQuotesOfLastWarm = this.lastWarmDayQuotesBySymbol.get(request.symbol) === request.dayQuotes;
+    const { poolWorker, laneKey } = this.workerOfLook(request.symbol, request.scoredAtMs);
+    const sent: Extract<BacktestScoringWorkerRequest, { type: "score" }> = { ...request, type: "score", ...this.idsFor(poolWorker, request.modelTables, request.trading) };
+    this.lastScoreRequestBySymbol.set(request.symbol, { sent, modelTables: request.modelTables, trading: request.trading });
+    const dayQuotesOfLastWarm = this.lastWarmDayQuotesBySymbolWorker.get(laneKey) === request.dayQuotes;
     return (await this.send(poolWorker, dayQuotesOfLastWarm ? { ...sent, dayQuotes: [], dayQuotesOfLastWarm } : sent)) as TickerSignals;
   }
 
@@ -196,9 +230,15 @@ export class BacktestScoringPool {
    */
   warm(symbol: string, nextLook: { todayIso: string; dayQuotes: LiveOptionQuote[]; spotPrice: number; scoredAtMs: number }): void {
     const last = this.lastScoreRequestBySymbol.get(symbol);
-    if (!last || last.todayIso !== nextLook.todayIso || this.failure) return;
-    this.lastWarmDayQuotesBySymbol.set(symbol, nextLook.dayQuotes);
-    void this.send(this.workerOf(symbol), { ...last, type: "warm", dayQuotesOfLastWarm: false, modelTables: null, trading: null, dayQuotes: nextLook.dayQuotes, live: { ...last.live, spotPrice: nextLook.spotPrice }, scoredAtMs: nextLook.scoredAtMs }).catch(() => {});
+    if (!last || last.sent.todayIso !== nextLook.todayIso || this.failure) return;
+    const lookKey = `${symbol}|${nextLook.scoredAtMs}`;
+    if (this.warmedLooks.has(lookKey)) return;
+    if (this.warmedLooks.size >= 10_000) this.warmedLooks.clear();
+    this.warmedLooks.add(lookKey);
+    const { poolWorker, laneKey } = this.workerOfLook(symbol, nextLook.scoredAtMs);
+    this.lastWarmDayQuotesBySymbolWorker.set(laneKey, nextLook.dayQuotes);
+    const ids = this.idsFor(poolWorker, last.modelTables, last.trading);
+    void this.send(poolWorker, { ...last.sent, ...ids, type: "warm", dayQuotesOfLastWarm: false, dayQuotes: nextLook.dayQuotes, live: { ...last.sent.live, spotPrice: nextLook.spotPrice }, scoredAtMs: nextLook.scoredAtMs }).catch(() => {});
   }
 
   async close(): Promise<void> {

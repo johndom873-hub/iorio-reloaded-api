@@ -1,4 +1,5 @@
 import type { SignalGrade } from "./signalCandidates.js";
+import { RecentEntriesCache } from "./recentEntriesCache.js";
 import { calibratedEdgeMargin, standardizedReturnBucketsFor, type ValuationGroup, type VolatilityModelTables } from "./volatilityModelTables.js";
 
 // One contract's value to a seller (model review P2, P4, P5, approved by Marcelo 2026-10-10;
@@ -131,10 +132,9 @@ function pricesAtExpiry(buckets: readonly number[], totalStandardDeviation: numb
 /**
  * Valuations already made, by their exact inputs and tables: a quote that has not moved is valued again with the same
  * figures (the next look scored ahead, then for real). Each answer is handed out as a copy (its fields are all plain
- * values). Bounded: started afresh when full.
+ * values). About the latest day's worth are kept.
  */
-const valuationsByKey = new Map<string, ContractValuation | null>();
-const valuationsLimit = 100_000;
+const valuationsByKey = new RecentEntriesCache<string, ContractValuation | null>(50_000);
 const tablesIds = new WeakMap<VolatilityModelTables, number>();
 let nextTablesId = 1;
 
@@ -148,7 +148,6 @@ export function valueContract(tables: VolatilityModelTables, input: ContractValu
     return valued === null ? null : { ...valued };
   }
   const valued = computeContractValuation(tables, input);
-  if (valuations.size >= valuationsLimit) valuations.clear();
   valuations.set(key, valued);
   return valued === null ? null : { ...valued };
 }
