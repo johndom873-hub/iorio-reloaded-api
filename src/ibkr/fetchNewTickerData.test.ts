@@ -211,6 +211,18 @@ describe("fetchNewTickerData", () => {
     expect(mocks.disconnect).toHaveBeenCalledTimes(1);
   });
 
+  it("with captureTodaysMarketData off, runs the contract lookup alone: no real-time request, no snapshot (so no line), null market data", async () => {
+    const ib = new FakeIbApi();
+    mocks.borrowOrConnect.mockResolvedValue({ ib, disconnect: mocks.disconnect });
+    const result = fetchNewTickerData("GSAT", { captureTodaysMarketData: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.realtimeRequests).toEqual([]);
+    expect(mocks.captureSnapshot).not.toHaveBeenCalled();
+    ib.emit(EventName.contractDetails, 700, { longName: "GLOBALSTAR INC", industry: "Telecommunications", contract: { conId: 61813498, primaryExch: "NYSE" } });
+    expect(await result).toEqual({ companyName: "GLOBALSTAR INC", sector: "Telecommunications", conId: 61813498, primaryExchange: "NYSE", impliedVolatility: null, avgOptionVolume: null });
+    expect(mocks.disconnect).toHaveBeenCalledTimes(1);
+  });
+
   it("disconnects and rethrows when the market-data snapshot fails", async () => {
     const ib = new FakeIbApi();
     mocks.borrowOrConnect.mockResolvedValue({ ib, disconnect: mocks.disconnect });

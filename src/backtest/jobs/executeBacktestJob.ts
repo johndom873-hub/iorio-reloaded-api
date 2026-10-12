@@ -124,9 +124,12 @@ class JobProcessControl {
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-/** The IBKR daily-bar and implied-volatility top-up for the download's symbol, creating its ticker row the way the app does when the symbol is new. */
+/**
+ * The IBKR daily-bar and implied-volatility top-up for the download's symbol, creating its ticker row when the symbol is new.
+ * The row comes from the contract lookup alone: the bars are historical requests, so nothing here needs a market-data line.
+ */
 async function topUpIbkrHistory(symbol: string): Promise<void> {
-  const { ticker, created } = await findOrCreateTicker(symbol);
+  const { ticker, created } = await findOrCreateTicker(symbol, { captureTodaysMarketData: false });
   if (created) console.log(`${symbol}: new ticker row created from IBKR's contract details.`);
   const connection = await connectToIbkrGateway();
   try {

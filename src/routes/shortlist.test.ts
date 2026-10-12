@@ -508,7 +508,7 @@ describe("POST /shortlist", () => {
 
     const { status, json } = await call("POST", "/", { symbol: symbol.toLowerCase() });
     expect(status).toBe(201);
-    expect(fetchNewTickerDataMock).toHaveBeenCalledWith(symbol);
+    expect(fetchNewTickerDataMock).toHaveBeenCalledWith(symbol, { captureTodaysMarketData: true });
     expect(json).toMatchObject({ symbol, companyName: "Brand New Inc.", sector: "Healthcare" });
 
     const ticker = await testDb("tickers").where({ symbol }).first();

@@ -177,11 +177,16 @@ export async function getCachedContractDetails(
  * creation — connects per-request and disconnects when done, same
  * rationale as the rest of the ticker-creation path (rare manual action,
  * not a hot path, not worth a persistent server-side connection).
+ *
+ * `captureTodaysMarketData: false` skips the snapshot (no market-data line
+ * reserved) and returns null implied volatility and option volume — for
+ * callers that only need the contract, like the backtest download.
  */
-export async function fetchNewTickerData(symbol: string): Promise<NewTickerData> {
+export async function fetchNewTickerData(symbol: string, options: { captureTodaysMarketData?: boolean } = {}): Promise<NewTickerData> {
+  const captureTodaysMarketData = options.captureTodaysMarketData ?? true;
   const connection = await borrowSharedConnectionOrConnect(sharedReadConnection, "fetchNewTickerData");
   try {
-    requestRealtimeMarketData(connection.ib);
+    if (captureTodaysMarketData) requestRealtimeMarketData(connection.ib);
 
     const detailsReqId = nextReqIdFor(connection.ib, () => contractDetailsReqId);
     const contractDetailsPromise = lookupContractDetails(connection, detailsReqId);
@@ -189,7 +194,9 @@ export async function fetchNewTickerData(symbol: string): Promise<NewTickerData>
 
     const [contractDetails, marketData] = await Promise.all([
       contractDetailsPromise,
-      captureMarketDataSnapshot(connection, nextReqIdFor(connection.ib, () => marketDataReqId), symbol, interactiveMarketDataTimeoutMs),
+      captureTodaysMarketData
+        ? captureMarketDataSnapshot(connection, nextReqIdFor(connection.ib, () => marketDataReqId), symbol, interactiveMarketDataTimeoutMs)
+        : { impliedVolatility: null, avgOptionVolume: null },
     ]);
 
     return { ...contractDetails, ...marketData };

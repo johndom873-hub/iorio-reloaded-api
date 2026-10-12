@@ -26,7 +26,12 @@ export class UnknownSymbolError extends Error {
   }
 }
 
-export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTickerResult> {
+/**
+ * `captureTodaysMarketData: false` creates the row from the contract lookup alone: no market-data line and no
+ * market_data_snapshots row (the daily capture writes it). The backtest download uses it, where lines may be off.
+ */
+export async function findOrCreateTicker(symbol: string, options: { captureTodaysMarketData?: boolean } = {}): Promise<FindOrCreateTickerResult> {
+  const captureTodaysMarketData = options.captureTodaysMarketData ?? true;
   const normalizedSymbol = symbol.trim().toUpperCase();
 
   const existing = await db("tickers").where({ symbol: normalizedSymbol }).first();
@@ -34,7 +39,7 @@ export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTi
     return { ticker: existing, created: false };
   }
 
-  const tickerData = await fetchNewTickerData(normalizedSymbol);
+  const tickerData = await fetchNewTickerData(normalizedSymbol, { captureTodaysMarketData });
   // A symbol IBKR does not recognise (a typo, or a lookup that timed out)
   // used to be saved with a null contract id for good and then fail every
   // later step (2026-09-24). Refuse instead; nothing is written.
@@ -57,6 +62,7 @@ export async function findOrCreateTicker(symbol: string): Promise<FindOrCreateTi
   const ticker = inserted ?? (await db("tickers").where({ symbol: normalizedSymbol }).first());
   if (!ticker) throw new Error(`Ticker ${normalizedSymbol} could not be created.`);
   if (!inserted) return { ticker, created: false };
+  if (!captureTodaysMarketData) return { ticker, created: true };
 
   await db("market_data_snapshots")
     .insert({
