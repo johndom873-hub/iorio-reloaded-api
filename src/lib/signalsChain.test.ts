@@ -275,7 +275,12 @@ describe("assembleSignalsChain", () => {
       requestedExpiry,
       scoring: { inputs: tickerInputs, ...scoreTickerWithExclusions(tickerInputs, account, settings) },
       capturedDeltaByContract,
+      spreadShareCharged: 0.5,
     });
+
+  it("carries the spread cost share the screen's yields charge", () => {
+    expect(chainFor(inputs({ slices: [slice(near, years30)] })).spreadShareCharged).toBe(0.5);
+  });
 
   it("lists the stored expiries inside the capture range with DTE, candidate and surface flags", () => {
     const chain = chainFor(inputs({ slices: [slice(near, years30)] }));

@@ -57,6 +57,8 @@ export interface SignalsChain {
   /** The expiry `strikes` belongs to; null when the ticker has no listed expiry stored. */
   selectedExpiry: string | null;
   strikes: SignalsChainStrikeRow[];
+  /** λ (0..1), the Risk & Limits spread cost: the share of the half-spread the screen's yields charge as friction. */
+  spreadShareCharged: number;
 }
 
 const unscoredTickerReasons: Record<SignalsUnscoredReason, string> = {
@@ -140,6 +142,7 @@ export interface AssembleSignalsChainInput {
   scoring: { inputs: TickerSignalsInputs; scored: TickerSignals; scoringQuotes: SignalQuote[]; exclusions: Map<string, SignalContractExclusion> } | null;
   /** IBKR's own delta from the capture, keyed by contractKey (fallback when scoring never computed one). */
   capturedDeltaByContract: Map<string, number>;
+  spreadShareCharged: number;
 }
 
 const notCapturedCell: SignalsChainCell = { state: "not_captured", bid: null, ask: null, delta: null, quoteSource: null, quotedAt: null, grade: null, netEdge: null, reason: null };
@@ -225,6 +228,7 @@ export function assembleSignalsChain(input: AssembleSignalsChainInput): SignalsC
     expiries,
     selectedExpiry,
     strikes,
+    spreadShareCharged: input.spreadShareCharged,
   };
 }
 

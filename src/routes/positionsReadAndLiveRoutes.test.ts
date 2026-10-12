@@ -1066,7 +1066,7 @@ describe("GET /positions/orders/:id/quote/stream", () => {
     expect(status).toBe(200);
     expect(headers.get("content-type")).toContain("text/event-stream");
     expect(events).toEqual([
-      { type: "quote", data: { bid: 1.4, ask: 1.6, delta: -0.35, compliance: { compliant: false, reason: "Delta 0.35 is above the 0.2–0.3 delta band." }, signalLimits: { blocked: true, reasons: ["too big"] } } },
+      { type: "quote", data: { bid: 1.4, ask: 1.6, delta: -0.35, compliance: { compliant: false, reason: "Delta 0.35 is above the 0.2–0.3 delta band." }, signalLimits: { blocked: true, reasons: ["too big"] }, spreadShareCharged: 0.5 } },
       { type: "done" },
     ]);
     expect(checkDeltaComplianceMock).toHaveBeenCalledWith(-0.35, 0.2, 0.3);
@@ -1095,7 +1095,7 @@ describe("GET /positions/orders/:id/quote/stream", () => {
       onQuote({ bid: 0.4, ask: 0.6, delta: 0.3 });
     });
     const { events } = await readServerSentEvents(`/positions/orders/${orderId}/quote/stream`);
-    expect(events).toEqual([{ type: "quote", data: { bid: 0.4, ask: 0.6, delta: 0.3, compliance: null, signalLimits: null } }, { type: "done" }]);
+    expect(events).toEqual([{ type: "quote", data: { bid: 0.4, ask: 0.6, delta: 0.3, compliance: null, signalLimits: null, spreadShareCharged: 0.5 } }, { type: "done" }]);
     expect(loadRecoveryTargetWindowMock).not.toHaveBeenCalled();
     expect(checkDeltaComplianceMock).not.toHaveBeenCalled();
     expect(evaluateOrderLimitsMock).not.toHaveBeenCalled();

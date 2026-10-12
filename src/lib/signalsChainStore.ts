@@ -40,7 +40,7 @@ export async function loadSignalsChain(ticker: SignalsTickerRow, requestedExpiry
   const [universeTicker, storedChain, inputs, settings] = await Promise.all([loadSignalsUniverseTicker(ticker.symbol), loadStoredOptionChain(ticker.tickerId), loadTickerSignalsInputs(ticker), loadTradingSettings()]);
   const capturedDeltaByContract = inputs.header ? await loadCapturedDeltas(inputs.header.snapshotId, null) : new Map<string, number>();
   const scoring = { inputs, ...scoreTickerWithExclusions(inputs, { freeCash: 0 }, settings, liveSpot ?? undefined) };
-  return assembleSignalsChain({ symbol: ticker.symbol, inSignalsUniverse: universeTicker !== null, strikesByExpiry: storedChain.strikesByExpiry, todayEasternIso: inputs.todayEasternIso, requestedExpiry, scoring, capturedDeltaByContract });
+  return assembleSignalsChain({ symbol: ticker.symbol, inSignalsUniverse: universeTicker !== null, strikesByExpiry: storedChain.strikesByExpiry, todayEasternIso: inputs.todayEasternIso, requestedExpiry, scoring, capturedDeltaByContract, spreadShareCharged: settings.spreadCostChargedPct / 100 });
 }
 
 /**
