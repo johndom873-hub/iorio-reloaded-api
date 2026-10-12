@@ -1,5 +1,6 @@
 import { db } from "../db/connection.js";
-import { deriveCycles, type Cycle, type CycleInput, type CycleOptionLeg, type CycleStockLeg, type CycleStockTrade } from "./cycles.js";
+import { buildCycleInputFromRows, type CycleInputRows } from "./cycleInputRows.js";
+import { deriveCycles, type Cycle, type CycleInput } from "./cycles.js";
 
 export interface SymbolCycles {
   symbol: string;
@@ -72,25 +73,16 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
     db.raw(`SELECT DISTINCT p.ticker_id AS "tickerId", t.symbol FROM positions p JOIN tickers t ON t.id = p.ticker_id ${tickerIds === "all" ? "" : "WHERE p.ticker_id = ANY(?)"}`, tickerIds === "all" ? [] : [tickerIds]),
   ]);
 
-  const openPositionPremiumPnl = new Map<string, number>(snapshotRows.rows.map((row: any) => [row.positionId, Number(row.premiumPnl)]));
+  const rows: CycleInputRows = {
+    optionRows: optionRows.rows,
+    stockLegRows: stockLegRows.rows,
+    stockTradeRows: stockTradeRows.rows,
+    barRows: barRows.rows,
+    openPositionPremiumPnl: new Map<string, number>(snapshotRows.rows.map((row: any) => [row.positionId, Number(row.premiumPnl)])),
+  };
   const result: SymbolCycleInput[] = [];
   for (const { tickerId, symbol } of tickerRows.rows as { tickerId: string; symbol: string }[]) {
-    const dailyCloses = new Map<string, number>();
-    let lastPrice: { date: string; price: number } | null = null;
-    for (const bar of barRows.rows.filter((row: any) => row.tickerId === tickerId)) {
-      dailyCloses.set(bar.date, bar.close);
-      lastPrice = { date: bar.date, price: bar.close };
-    }
-    const optionLegs: CycleOptionLeg[] = optionRows.rows
-      .filter((row: any) => row.tickerId === tickerId)
-      .map((row: any) => ({ ...row, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
-    const stockLegs: CycleStockLeg[] = stockLegRows.rows
-      .filter((row: any) => row.tickerId === tickerId)
-      .map((row: any) => ({ positionId: row.positionId, quantity: row.quantity, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
-    const stockTrades: CycleStockTrade[] = stockTradeRows.rows
-      .filter((row: any) => row.tickerId === tickerId)
-      .map((row: any) => ({ at: new Date(row.at), side: row.side, quantity: row.quantity, price: row.price, commission: row.commission }));
-    result.push({ symbol, tickerId, input: { optionLegs, stockLegs, stockTrades, dailyCloses, lastPrice, openPositionPremiumPnl } });
+    result.push({ symbol, tickerId, input: buildCycleInputFromRows(tickerId, rows) });
   }
   void easternDateFormatter;
   return result.sort((a, b) => a.symbol.localeCompare(b.symbol));

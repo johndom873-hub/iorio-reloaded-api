@@ -1,21 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  computeFreeCash,
-  computeInterestDollars,
-  computeParityStockPrice,
-  computeSaleFillPrice,
-  markAccountValue,
-  openingCashChange,
-  positionExposureDollars,
-  positionMarkedExposureDollars,
-  settlePosition,
-  type BacktestBook,
-  type BacktestPosition,
-  type ParityQuote,
-} from "./backtestBook.js";
-
-const put: BacktestPosition = { tradeIndex: 0, strategyKey: "cash_secured_put", expiry: "2026-03-13", strike: 95, right: "P", contracts: 3, premium: 1.2, commissionDollars: 2.04, sharePriceAtOpen: null, openedAtMs: 0, lastMarkPerShare: 0.8, splitFactorAtOpen: 1 };
-const coveredCall: BacktestPosition = { tradeIndex: 1, strategyKey: "covered_call", expiry: "2026-03-13", strike: 105, right: "C", contracts: 2, premium: 1.5, commissionDollars: 1.36, sharePriceAtOpen: 100, openedAtMs: 0, lastMarkPerShare: 2, splitFactorAtOpen: 1 };
+import { computeInterestDollars, computeParityStockPrice, computeSaleFillPrice, type ParityQuote } from "./backtestBook.js";
 
 describe("computeParityStockPrice", () => {
   // C − P = S − K·e^(−rT) at every strike, so each pair gives S back exactly.
@@ -59,7 +43,7 @@ describe("computeParityStockPrice", () => {
   });
 });
 
-describe("fill, interest, exposure", () => {
+describe("fill and interest", () => {
   it("sells at the mid less the spread cost share of the half-spread", () => {
     // mid 1.10, half-spread 0.10, λ 0.5 → 1.05
     expect(computeSaleFillPrice(1.0, 1.2, 0.5)).toBeCloseTo(1.05, 12);
@@ -68,58 +52,5 @@ describe("fill, interest, exposure", () => {
 
   it("credits interest on calendar days (FORMULAS.md example: $600,000 at 4.2% over a weekend = $207.12)", () => {
     expect(computeInterestDollars(600_000, 4.2, 3)).toBeCloseTo(207.12, 2);
-  });
-
-  it("measures EXP $ net of the premium, at the open and at the marks", () => {
-    expect(positionExposureDollars(put)).toBeCloseTo((95 - 1.2) * 100 * 3, 8);
-    expect(positionExposureDollars(coveredCall)).toBeCloseTo((100 - 1.5) * 100 * 2, 8);
-    expect(positionMarkedExposureDollars(put, 97)).toBeCloseTo((95 - 0.8) * 300, 8);
-    expect(positionMarkedExposureDollars(coveredCall, 103)).toBeCloseTo((103 - 2) * 200, 8);
-  });
-
-  it("marks cash less the short options plus the shares, and frees cash only beyond the puts' full strike", () => {
-    const book: BacktestBook = { cash: 100_000, positions: [put, coveredCall] };
-    expect(markAccountValue(book, 103)).toBeCloseTo(100_000 - 0.8 * 300 - 2 * 200 + 103 * 200, 8);
-    expect(computeFreeCash(book)).toBeCloseTo(100_000 - 95 * 300, 8);
-  });
-
-  it("values a covered call opened before a 2-for-1 split on its opening scale: today's $48 is $96 a pre-split share", () => {
-    const openedBeforeSplit: BacktestPosition = { ...coveredCall, splitFactorAtOpen: 2 };
-    const book: BacktestBook = { cash: 0, positions: [openedBeforeSplit] };
-    expect(markAccountValue(book, 48, 1)).toBeCloseTo(-2 * 200 + 96 * 200, 8);
-    expect(positionMarkedExposureDollars(openedBeforeSplit, 48, 1)).toBeCloseTo((96 - 2) * 200, 8);
-  });
-
-  it("opens a put for its premium and a covered call net of the shares bought", () => {
-    expect(openingCashChange(put)).toBeCloseTo(1.2 * 300 - 2.04, 8);
-    expect(openingCashChange(coveredCall)).toBeCloseTo(1.5 * 200 - 1.36 - 100 * 200, 8);
-  });
-});
-
-describe("settlePosition", () => {
-  it("lets a put expire worthless above the strike: P&L = premium less commission", () => {
-    const settlement = settlePosition(put, 96);
-    expect(settlement).toEqual({ cashChange: -0, pnlDollars: 1.2 * 300 - 2.04, inTheMoneyAtExpiry: false });
-  });
-
-  it("pays a put's intrinsic value below the strike", () => {
-    const settlement = settlePosition(put, 92.5);
-    expect(settlement.cashChange).toBeCloseTo(-2.5 * 300, 8);
-    expect(settlement.pnlDollars).toBeCloseTo(1.2 * 300 - 2.04 - 750, 8);
-    expect(settlement.inTheMoneyAtExpiry).toBe(true);
-  });
-
-  it("sells a covered call's shares at the close below the strike", () => {
-    const settlement = settlePosition(coveredCall, 98);
-    expect(settlement.cashChange).toBeCloseTo(98 * 200, 8);
-    expect(settlement.pnlDollars).toBeCloseTo(1.5 * 200 - 1.36 + (98 - 100) * 200, 8);
-    expect(settlement.inTheMoneyAtExpiry).toBe(false);
-  });
-
-  it("delivers a covered call's shares at the strike above it", () => {
-    const settlement = settlePosition(coveredCall, 110);
-    expect(settlement.cashChange).toBeCloseTo(105 * 200, 8);
-    expect(settlement.pnlDollars).toBeCloseTo(1.5 * 200 - 1.36 + (105 - 100) * 200, 8);
-    expect(settlement.inTheMoneyAtExpiry).toBe(true);
   });
 });

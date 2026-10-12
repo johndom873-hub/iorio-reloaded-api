@@ -5,8 +5,8 @@ import { db } from "../db/connection.js";
 import { openBacktestDataFileReadOnly } from "./backtestDataFile.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "./backtestDataDirectory.js";
 import type { BacktestDataFileSummary } from "./backtestTypes.js";
-import { isWeekendDate, weekdaysBetweenInclusive } from "./jobs/backtestJobRules.js";
-import type { DataFileCoverage } from "./jobs/backtestSessionRequest.js";
+import { addCalendarDays, isWeekendDate, weekdaysBetweenInclusive } from "./jobs/backtestJobRules.js";
+import type { DataFileCoverage, DataFilePeriodContents } from "./jobs/backtestSessionRequest.js";
 import { readSplitScheduleCache, splitScheduleFingerprint, splitScheduleFingerprintsMatch } from "./engine/splitFactors.js";
 
 // The Data files table: what each symbol file in the data folder holds (docs/backtesting/DATA-FILES.md), read-only.
@@ -31,9 +31,15 @@ export interface DataFileContents extends DataFileCoverage {
   completeDays: number;
   /** Weekdays between firstDate and lastDate with no `days` row at all. */
   missingWeekdays: number;
+  /** Days with a day_issues row; 0 when the file has no such table. */
+  daysWithIssues: number;
+  /** unavailable_days rows; 0 when the file has no such table. */
+  unavailableDays: number;
+  /** Complete intraday_days rows; null when the file has no such table. */
+  intradayDays: number | null;
 }
 
-const emptyContents: DataFileContents = { firstDate: null, lastDate: null, completeDays: 0, missingWeekdays: 0 };
+const emptyContents: DataFileContents = { firstDate: null, lastDate: null, completeDays: 0, missingWeekdays: 0, daysWithIssues: 0, unavailableDays: 0, intradayDays: null };
 
 /** The file's complete-day range and gaps; null when the symbol has no file. A file the downloader has only just created (no tables yet) reads as empty. */
 export function readBacktestDataFileContents(symbol: string): DataFileContents | null {
@@ -47,7 +53,15 @@ export function readBacktestDataFileContents(symbol: string): DataFileContents |
       lastDate: string | null;
       completeDays: number;
     };
-    if (!range.firstDate || !range.lastDate) return { ...emptyContents, completeDays: Number(range.completeDays) };
+    // The data-quality and intraday tables were added after the first downloads: a file may lack them.
+    const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
+    const countOf = (sql: string) => Number((database.prepare(sql).get() as { count: number }).count);
+    const quality = {
+      daysWithIssues: tableNames.has("day_issues") ? countOf("SELECT count(DISTINCT trading_date) AS count FROM day_issues") : 0,
+      unavailableDays: tableNames.has("unavailable_days") ? countOf("SELECT count(*) AS count FROM unavailable_days") : 0,
+      intradayDays: tableNames.has("intraday_days") ? countOf("SELECT count(*) AS count FROM intraday_days WHERE status = 'complete'") : null,
+    };
+    if (!range.firstDate || !range.lastDate) return { ...emptyContents, ...quality, completeDays: Number(range.completeDays) };
     const storedDays = database.prepare("SELECT trading_date AS tradingDate FROM days WHERE trading_date BETWEEN ? AND ?").all(range.firstDate, range.lastDate) as { tradingDate: string }[];
     const storedWeekdays = storedDays.filter((day) => !isWeekendDate(day.tradingDate)).length;
     return {
@@ -55,10 +69,42 @@ export function readBacktestDataFileContents(symbol: string): DataFileContents |
       lastDate: range.lastDate,
       completeDays: Number(range.completeDays),
       missingWeekdays: Math.max(0, weekdaysBetweenInclusive(range.firstDate, range.lastDate) - storedWeekdays),
+      ...quality,
     };
   } catch (error) {
     if (error instanceof Error && /no such table/i.test(error.message)) return emptyContents;
     throw error;
+  } finally {
+    database.close();
+  }
+}
+
+/**
+ * What the file holds inside a session's period: the weekdays it has no `days` row for (a download not finished; a day
+ * the downloader recorded as unavailable is not one of them), and how many of its complete days lack intraday quotes.
+ * Null when the symbol has no file.
+ */
+export function readBacktestDataFilePeriodContents(symbol: string, startDate: string, endDate: string): DataFilePeriodContents | null {
+  const database = openBacktestDataFileReadOnly(symbol);
+  if (!database) return null;
+  try {
+    database.exec("PRAGMA busy_timeout = 3000");
+    const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
+    const datesOf = (sql: string) => new Set((database.prepare(sql).all(startDate, endDate) as { tradingDate: string }[]).map((row) => row.tradingDate));
+    const storedDays = tableNames.has("days") ? datesOf("SELECT trading_date AS tradingDate FROM days WHERE trading_date BETWEEN ? AND ?") : new Set<string>();
+    const completeDays = tableNames.has("days") ? datesOf("SELECT trading_date AS tradingDate FROM days WHERE status = 'complete' AND trading_date BETWEEN ? AND ?") : new Set<string>();
+    const unavailableDays = tableNames.has("unavailable_days") ? datesOf("SELECT trading_date AS tradingDate FROM unavailable_days WHERE trading_date BETWEEN ? AND ?") : new Set<string>();
+    // As the engine reads them (BacktestSymbolFile.loadIntradayDays): a day counts when its quotes are there to read.
+    const intradayDays = tableNames.has("intraday_days") && tableNames.has("intraday_quotes") ? datesOf("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' AND trading_date BETWEEN ? AND ?") : new Set<string>();
+    const missingWeekdays: string[] = [];
+    for (let day = startDate; day <= endDate; day = addCalendarDays(day, 1)) if (!isWeekendDate(day) && !storedDays.has(day) && !unavailableDays.has(day)) missingWeekdays.push(day);
+    return {
+      missingWeekdays: missingWeekdays.length,
+      firstMissingWeekday: missingWeekdays[0] ?? null,
+      lastMissingWeekday: missingWeekdays.at(-1) ?? null,
+      completeDays: completeDays.size,
+      completeDaysWithoutIntradayQuotes: [...completeDays].filter((day) => !intradayDays.has(day)).length,
+    };
   } finally {
     database.close();
   }
@@ -110,6 +156,9 @@ export async function summarizeBacktestDataFiles(connection: Knex = db): Promise
       lastDate: contents.lastDate,
       completeDays: contents.completeDays,
       missingWeekdays: contents.missingWeekdays,
+      daysWithIssues: contents.daysWithIssues,
+      unavailableDays: contents.unavailableDays,
+      intradayDays: contents.intradayDays,
       sizeBytes: dataFileSizeBytes(symbol),
       barsFirstDate: bars?.firstDate ?? null,
       barsLastDate: bars?.lastDate ?? null,

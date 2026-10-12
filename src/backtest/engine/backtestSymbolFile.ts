@@ -2,8 +2,10 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 
-// Read access to one symbol's ThetaData file (docs/backtesting/DATA-FILES.md, schema version 1): the days it holds, each
-// day's 10:00 quotes, its end-of-day rows and the open interest published for it. Read-only; the downloader writes it.
+// Read access to one symbol's ThetaData file (docs/backtesting/DATA-FILES.md, schema versions 1 and 2): the days it
+// holds, each day's 10:00 quotes, its end-of-day rows and the open interest published for it, and, where the file has
+// them, the quotes at each look inside the day (intraday_days, intraday_quotes) and what the downloader could not
+// retrieve (day_issues, unavailable_days). Read-only; the downloader writes it.
 
 export interface SymbolFileDay {
   tradingDate: string;
@@ -31,7 +33,15 @@ export interface SymbolFileEndOfDayRow {
   ask: number | null;
 }
 
-export const supportedSymbolFileSchemaVersion = "1";
+/** A part of a stored day the downloader could not retrieve: all of it (expiry null) or one expiration. */
+export interface SymbolFileDayIssue {
+  tradingDate: string;
+  part: "quotes" | "eod" | "open_interest" | "intraday_quotes";
+  expiry: string | null;
+  message: string;
+}
+
+export const supportedSymbolFileSchemaVersions: readonly string[] = ["1", "2"];
 
 const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
 
@@ -40,16 +50,29 @@ export class BacktestSymbolFile {
   private readonly quotesStatement: StatementSync;
   private readonly endOfDayStatement: StatementSync;
   private readonly openInterestStatement: StatementSync;
+  /** Null on a file downloaded before the table existed. */
+  private readonly dayIssuesStatement: StatementSync | null;
+  private readonly unavailableDaysStatement: StatementSync | null;
+  private readonly intradayDaysStatement: StatementSync | null;
+  private readonly intradayQuotesStatement: StatementSync | null;
 
   constructor(private readonly database: DatabaseSync) {
     // The downloader may be committing a day: wait for its lock instead of failing.
     database.exec("PRAGMA busy_timeout = 3000");
     const version = (database.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined)?.value;
-    if (version !== supportedSymbolFileSchemaVersion) throw new Error(`The data file has schema version ${version ?? "unknown"}; the engine reads version ${supportedSymbolFileSchemaVersion}.`);
+    if (version === undefined || !supportedSymbolFileSchemaVersions.includes(version)) throw new Error(`The data file has schema version ${version ?? "unknown"}; the engine reads versions ${supportedSymbolFileSchemaVersions.join(" and ")}.`);
     this.daysStatement = database.prepare("SELECT trading_date AS tradingDate, status FROM days ORDER BY trading_date");
     this.quotesStatement = database.prepare("SELECT expiry, strike, option_right AS right, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ?");
     this.endOfDayStatement = database.prepare("SELECT expiry, strike, option_right AS right, close, volume, bid, ask FROM eod WHERE trading_date = ?");
     this.openInterestStatement = database.prepare("SELECT expiry, strike, option_right AS right, open_interest AS openInterest FROM open_interest WHERE trading_date = ?");
+    const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
+    this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare("SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE trading_date = ? ORDER BY part, expiry") : null;
+    this.unavailableDaysStatement = tableNames.has("unavailable_days") ? database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date") : null;
+    const hasIntradayTables = tableNames.has("intraday_days") && tableNames.has("intraday_quotes");
+    this.intradayDaysStatement = hasIntradayTables ? database.prepare("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' ORDER BY trading_date") : null;
+    // Read by the thousand rows a day and look: only what a look reads (not the sizes), each row as an array.
+    this.intradayQuotesStatement = hasIntradayTables ? database.prepare("SELECT look_time, expiry, strike, option_right, bid, ask FROM intraday_quotes WHERE trading_date = ? AND look_time > ? AND look_time <= ? AND strike BETWEEN ? AND ?") : null;
+    this.intradayQuotesStatement?.setReturnArrays(true);
   }
 
   /** Opens the symbol's file from BACKTEST_DATA_DIR; throws when it has not been downloaded. */
@@ -96,6 +119,40 @@ export class BacktestSymbolFile {
   loadOpenInterest(tradingDate: string): Map<string, number> {
     const rows = this.openInterestStatement.all(tradingDate) as { expiry: string; strike: number; right: "C" | "P"; openInterest: number }[];
     return new Map(rows.map((row) => [contractKey({ expiry: String(row.expiry), strike: Number(row.strike), right: row.right }), Number(row.openInterest)]));
+  }
+
+  /** What the downloader could not retrieve of a stored day; none on a file without the table. */
+  loadDayIssues(tradingDate: string): SymbolFileDayIssue[] {
+    if (!this.dayIssuesStatement) return [];
+    return (this.dayIssuesStatement.all(tradingDate) as Record<string, unknown>[]).map((row) => ({ tradingDate: String(row.tradingDate), part: row.part as SymbolFileDayIssue["part"], expiry: row.expiry === null || row.expiry === undefined ? null : String(row.expiry), message: String(row.message) }));
+  }
+
+  /** Days the downloader could not retrieve, ascending: no 10:00 quotes (the day has no `days` row) or no intraday quotes (it has one). None on a file without the table. */
+  loadUnavailableDays(): { tradingDate: string; reason: string }[] {
+    if (!this.unavailableDaysStatement) return [];
+    return (this.unavailableDaysStatement.all() as Record<string, unknown>[]).map((row) => ({ tradingDate: String(row.tradingDate), reason: String(row.reason) }));
+  }
+
+  /** The days whose intraday quotes are stored. None on a file downloaded before intraday quotes existed. */
+  loadIntradayDays(): Set<string> {
+    if (!this.intradayDaysStatement) return new Set();
+    return new Set((this.intradayDaysStatement.all() as { tradingDate: string }[]).map((row) => String(row.tradingDate)));
+  }
+
+  /**
+   * A day's quotes at the looks after `afterLookTime` up to `throughLookTime` ("HH:MM" Eastern), by look time, for the
+   * strikes from `lowestStrike` to `highestStrike`, without their sizes. The downloader stores every look ThetaData
+   * returns, also those after an early close (repeats of the closing quotes): the caller says which looks count.
+   */
+  loadIntradayQuotes(tradingDate: string, afterLookTime: string, throughLookTime: string, lowestStrike: number, highestStrike: number): Map<string, SymbolFileQuote[]> {
+    const quotesByLookTime = new Map<string, SymbolFileQuote[]>();
+    if (!this.intradayQuotesStatement) return quotesByLookTime;
+    for (const [lookTime, expiry, strike, right, bid, ask] of this.intradayQuotesStatement.all(tradingDate, afterLookTime, throughLookTime, lowestStrike, highestStrike) as unknown as [string, string, number, "C" | "P", number | null, number | null][]) {
+      let quotes = quotesByLookTime.get(lookTime);
+      if (!quotes) quotesByLookTime.set(lookTime, (quotes = []));
+      quotes.push({ expiry, strike, right, bid, ask, bidSize: null, askSize: null });
+    }
+    return quotesByLookTime;
   }
 
   close(): void {

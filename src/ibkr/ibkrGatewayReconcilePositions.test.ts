@@ -386,6 +386,53 @@ describe("reconcileHeldPositions — every structure change is its own position"
     expect(expiryMessage!.toLowerCase()).not.toContain("no assignment");
   });
 
+  it("a whole covered call closed by an app order (call bought back, shares sold) is an app close, not an assignment", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    const stockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 50);
+    const callLegId = await insertShortOptionLeg(coveredCallId, callConId, "call", 55, isoDateDaysFromToday(20), 1.2);
+    const [closeOrder] = await testDb("order_requests")
+      .insert({ requested_by_user_id: await plutoTestUser(), request_type: "close_position", payload: JSON.stringify({ symbol: ticker.symbol, legs: [] }), status: "filled", related_position_id: coveredCallId })
+      .returning(["id"]);
+    await insertClosingTrade(callLegId, 0.4, new Date(Date.now() - 60_000), closeOrder.id);
+    await testDb("trades").insert({
+      source_order_request_id: closeOrder.id,
+      position_leg_id: stockLegId,
+      ibkr_exec_id: `reconcile-test-stock-sale-${stockLegId}`,
+      side: "sell",
+      quantity: 100,
+      price: 53,
+      executed_at: new Date(Date.now() - 60_000),
+      is_closing_trade: true,
+    });
+
+    await runPass([]);
+
+    const [coveredCall] = await positionsFor(ticker.id);
+    expect(coveredCall.status).toBe("closed");
+    expect(coveredCall.close_reason).toBe("closed_via_app");
+    const stockLeg = (await legsFor(coveredCallId)).find((leg) => leg.leg_type === "stock")!;
+    expect(Number(stockLeg.exit_price)).toBeCloseTo(53, 4);
+  });
+
+  it("shares that left by a fill while the call left with no trade of its own is still an assignment", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    const stockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 50);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 55, isoDateDaysFromToday(-2), 1.2);
+    await insertClosingFill(stockLegId, 100, 55, 0);
+
+    await runPass([]);
+
+    const [coveredCall] = await positionsFor(ticker.id);
+    expect(coveredCall.status).toBe("closed");
+    expect(coveredCall.close_reason).toBe("assigned");
+  });
+
   it("a call that vanishes before expiry with no trade (IBKR report gap) does not restructure anything", async () => {
     const ticker = await createTicker();
     const stockConId = (nextConId += 1);

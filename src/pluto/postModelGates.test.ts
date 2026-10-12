@@ -155,6 +155,18 @@ describe("runPostModelGates — covered calls and rolls", () => {
     // no live spot: the held shares need none
     expect(runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 350, spotPrice: null }, cycleBreakEven: heldCycle })).plan).toEqual({ quantity: 3, limitPrice: 2.05, notional: 0, fullSizeQuantity: 3 });
   });
+
+  it("the open-positions cap does not refuse a call on shares already held, but still refuses a buy-write or a put", () => {
+    const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ coveredPositionPnlVarianceDollars: buyWriteVariance }) });
+    const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
+    const atCap = { ...book, openPositionCount: 8 };
+    const held = runPostModelGates(input({ decision, candidate: call, book: { ...atCap, freeShares: 350 }, cycleBreakEven: heldCycle }));
+    expect(held.plan?.quantity).toBe(3);
+    expect(held.gates.find((gate) => gate.gate === "open_positions_cap")).toEqual({ gate: "open_positions_cap", ok: true, detail: "a call on shares already held adds no new exposure (8 of 8 managed positions)" });
+    // no round lot held: it would buy shares, so the cap applies
+    expect(failed(runPostModelGates(input({ decision, candidate: call, book: { ...atCap, freeShares: 80 } })))).toContain("open_positions_cap");
+    expect(failed(runPostModelGates(input({ book: atCap })))).toEqual(["open_positions_cap"]);
+  });
   it("re-checks the break-even rule on held shares at the size sent and the limit price", () => {
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:39" };
     // 100 shares assigned at $40 with $1.00 of put premium: break-even $39.00, floor max(1% × $40 × 100, $50) = $50

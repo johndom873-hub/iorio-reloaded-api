@@ -128,7 +128,7 @@ export async function loadBacktestJobView(jobId: string): Promise<BacktestJobVie
   return toBacktestJobView(row);
 }
 
-/** The overview's jobs, newest first: everything not finished, plus what finished in the last week. */
+/** The overview's jobs, latest activity first (queued or resumed, started, last progress, finished): everything not finished, plus what finished in the last week. */
 export async function listOverviewJobViews(): Promise<BacktestJobView[]> {
   const rows: BacktestJobRow[] = await selectJobRows()
     .where((query) =>
@@ -137,7 +137,7 @@ export async function listOverviewJobViews(): Promise<BacktestJobView[]> {
         .orWhereNull("j.finished_at")
         .orWhere("j.finished_at", ">", db.raw("now() - (?::int * interval '1 day')", [finishedJobListingDays])),
     )
-    .orderBy("j.created_at", "desc");
+    .orderByRaw("GREATEST(j.queued_at, COALESCE(j.started_at, j.queued_at), COALESCE(j.heartbeat_at, j.queued_at), COALESCE(j.finished_at, j.queued_at)) DESC, j.created_at DESC");
   const now = new Date();
   return rows.map((row) => toBacktestJobView(row, now));
 }
@@ -193,7 +193,7 @@ export async function kickDownloadQueue(): Promise<string | null> {
       .where("heartbeat_at", ">", transaction.raw("now() - (?::int * interval '1 millisecond')", [staleHeartbeatMilliseconds]))
       .first("id");
     if (running) return null;
-    const next = await transaction("backtest_jobs").where({ kind: "download", status: "queued" }).orderBy("created_at", "asc").first("id");
+    const next = await transaction("backtest_jobs").where({ kind: "download", status: "queued" }).orderBy("queued_at", "asc").first("id");
     if (!next) return null;
     await claimJob(transaction, next.id as string, { resetProgress: false });
     return next.id as string;
@@ -237,6 +237,12 @@ export async function cancelBacktestJob(jobId: string): Promise<BacktestJobView>
   const displayStatus = deriveJobDisplayStatus(job.status, job.heartbeat_at ? new Date(job.heartbeat_at) : null, new Date());
   if (displayStatus === "running") {
     await db("backtest_jobs").where({ id: jobId, status: "running" }).update({ cancel_requested: true });
+  } else if (displayStatus === "queued" && job.kind === "download" && job.started_at === null) {
+    // Removed from the queue before it ever ran: there is nothing to keep a record of.
+    const deleted = await db("backtest_jobs").where({ id: jobId, status: "queued" }).whereNull("started_at").delete();
+    if (deleted > 0) return { ...toBacktestJobView(job), status: "cancelled", displayStatus: "cancelled", finishedAt: new Date().toISOString() };
+    // The queue started it in between: it is cancelled as the running job it now is.
+    return cancelBacktestJob(jobId);
   } else if (displayStatus === "queued" || displayStatus === "stopped") {
     terminateLeftoverJobProcesses(job.pid, jobId);
     await db("backtest_jobs").where({ id: jobId, status: job.status }).update({ status: "cancelled", finished_at: db.fn.now() });
@@ -268,6 +274,7 @@ export async function resumeBacktestJob(jobId: string): Promise<BacktestJobView>
       .update({
         earlier_run_seconds: db.raw("earlier_run_seconds + CASE WHEN started_at IS NULL THEN 0 ELSE GREATEST(0, ROUND(EXTRACT(EPOCH FROM (COALESCE(finished_at, heartbeat_at, started_at) - started_at))))::integer END"),
         status: "queued",
+        queued_at: db.fn.now(),
         pid: null,
         cancel_requested: false,
         error: null,

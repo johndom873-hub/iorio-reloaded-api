@@ -14,7 +14,8 @@ Local-only (Marcelo's Mac). Decisions: `project_backtesting_design_decisions_202
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- keys: symbol, schema_version ('1'), quote_time_et ('10:00:00'), max_dte ('45'), created_at (ISO UTC)
+-- keys: symbol, schema_version ('2'), quote_time_et ('10:00:00'), max_dte ('45'), created_at (ISO UTC),
+--       intraday_interval ('30m'), intraday_window ('10:00-15:30')
 
 CREATE TABLE days (
   trading_date TEXT PRIMARY KEY,          -- YYYY-MM-DD (Eastern)
@@ -50,25 +51,86 @@ CREATE TABLE open_interest (
   open_interest INTEGER NOT NULL,
   PRIMARY KEY (trading_date, expiry, strike, option_right)
 ) WITHOUT ROWID;
+
+-- One row per day whose intraday quotes are stored; only days with days.status = 'complete' get one.
+CREATE TABLE intraday_days (
+  trading_date TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('complete', 'no_data')),
+  look_count INTEGER NOT NULL,            -- distinct look times stored (12 on a normal day)
+  quote_rows INTEGER NOT NULL,
+  strike_window_pct REAL,                 -- the --intraday-strike-window-pct applied to this day; NULL = every strike
+  fetched_at TEXT NOT NULL                -- ISO UTC
+);
+
+-- Every contract's NBBO at each look: the last quote at or before the look time, the same values
+-- option_at_time_quote gives for that time. Looks every 30 minutes from 10:00 to 15:30 ET, expiries 0..45 days.
+CREATE TABLE intraday_quotes (
+  trading_date TEXT NOT NULL, look_time TEXT NOT NULL,   -- 'HH:MM' Eastern
+  expiry TEXT NOT NULL, strike REAL NOT NULL,
+  option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
+  bid REAL, ask REAL, bid_size INTEGER, ask_size INTEGER,
+  quoted_at TEXT,                         -- always NULL: ThetaData stamps these rows with the look time, not the quote's own
+  PRIMARY KEY (trading_date, look_time, expiry, strike, option_right)
+) WITHOUT ROWID;
+
+-- What a stored day lacks (see "Days ThetaData cannot serve"). Each row is asked for again on up to 3 later runs.
+CREATE TABLE day_issues (
+  trading_date TEXT NOT NULL,
+  part TEXT NOT NULL CHECK (part IN ('quotes', 'eod', 'open_interest', 'intraday_quotes')),
+  expiry TEXT,                            -- the expiration left out; NULL = the whole part
+  message TEXT NOT NULL,                  -- ThetaData's error, or 'no data returned'
+  recorded_at TEXT NOT NULL,              -- ISO UTC, of the last attempt
+  attempts INTEGER NOT NULL DEFAULT 1     -- runs that tried: 1 when recorded, +1 per later run that still could not store it
+);
+
+-- Days with a part that could not be retrieved at all: the 10:00 quotes, the end of day or the open interest (no
+-- `days` row), or the intraday quotes (no `intraday_days` row).
+CREATE TABLE unavailable_days (
+  trading_date TEXT PRIMARY KEY,
+  reason TEXT NOT NULL,                   -- starts with 'quotes at 10:00: ', 'end of day: ', 'open interest: ' or 'intraday quotes: '
+  attempts INTEGER NOT NULL,              -- runs that tried
+  last_attempt_at TEXT NOT NULL           -- ISO UTC
+);
 ```
+
+`schema_version` `'2'` is a file with every table above. `intraday_days`, `intraday_quotes`, `day_issues` and `unavailable_days` were added after the first downloads, and `day_issues.attempts` after those: the downloader creates what a `'1'` file lacks (and the two intraday meta keys) when it opens it, and sets its `schema_version` to `'2'`. Readers accept both versions.
 
 Rules:
 
-- A day's rows and its `days` row are written in one transaction: a day is fully present or absent. Resuming fetches every weekday from the requested start to the last finished session that has no `days` row.
+- A day's rows and its `days` row are written in one transaction: a day is fully present or absent. The same holds for its intraday quotes and `intraday_days` row. Both parts of a day fetched in one run share one transaction.
+- A day is done when it has a `days` row and, unless that row says `no_data`, an `intraday_days` row. Resuming works through every weekday from the requested start to the last finished session that is not done, and fetches only what the day lacks: a file downloaded before intraday quotes existed gets only those, without its 10:00 parts being fetched again.
 - A weekday with no data at all (exchange holiday) is stored as `status = 'no_data'` with zero counts, so it is not fetched again.
 - The last finished session: today counts only after 18:00 ET (EOD is built ~17:15 ET); otherwise the last weekday before today.
 - Prices are dollars; strikes are dollars (ThetaData's tenth-of-a-cent strikes converted).
+- On a 13:00 early-close day ThetaData still returns every look: the looks after the close repeat the closing quotes. The downloader stores them as returned; the engine decides from the market calendar which looks count.
+- `--intraday-strike-window-pct N` keeps intraday quotes only for strikes within N% of the day's at-the-money strike: the strike whose call and put mids at 10:00 are closest, in the nearest expiry at least 1 day out. Without the flag every strike is kept. The 10:00 quotes, end of day and open interest are never narrowed.
+
+### Days ThetaData cannot serve
+
+A fault in ThetaData's data for one day (for example `INTERNAL: Corrupt FIT data`) never stops a download:
+
+1. Each part of a day (`quotes`, `eod`, `open_interest`, `intraday_quotes`) is one request for all expirations. When it still fails after its retries, or answers with rows that cannot be used (an unreadable expiration or strike), the downloader first asks again for data it has already stored (the latest stored day, one expiration, the same kind of request; while the file holds no such day yet, the symbol's list of expirations). If that fails too, ThetaData is having a problem: the run ends with an error and nothing is recorded for the day.
+2. Otherwise the fault belongs to the day: the part is asked for one expiration at a time (every expiration the symbol lists within 45 days of the trading date, 46 for `eod` and `open_interest`). What comes back is stored; each expiration that still fails gets a `day_issues` row, and the day is stored as `complete` with what was retrieved.
+3. If a part cannot be retrieved at all (the request for all expirations failed and so did every expiration asked for on its own), the day is recorded in `unavailable_days` with the part named. For the 10:00 quotes, the end of day or the open interest nothing is stored for the day (no `days` row). For the intraday quotes of a day whose 10:00 parts are stored, the day keeps its `days` row and gets no `intraday_days` row. Either way the run continues with the next day.
+4. Every later run asks once more for each unavailable day in its range (`attempts` counts the runs); when the day is finally stored its `unavailable_days` row is deleted.
+5. A part ThetaData answers with no data, on a day that has data in another part, is stored empty and gets a `day_issues` row (`expiry` NULL, message `no data returned`): for example an end-of-day report that was not built yet. A weekday with no data in any part is a `no_data` day and has no issue.
+6. Every `day_issues` row of a stored day is asked for again on up to 3 later runs (`attempts` 1 to 4), before the run fetches new days: one request for that expiration, or for the whole part when `expiry` is NULL. Rows that come back are stored, the day's row counts are updated and the issue is deleted (intraday quotes keep the strike window the day was stored with). One expiration that now answers with no data has nothing left to ask for: its issue is deleted. A request that fails again adds an attempt, but only after the check of point 1 shows ThetaData still answers; otherwise the run ends with an error and no attempt is counted. After the third later run the row stays as the record of what the day lacks.
+7. While the file holds no rows of a part yet, the check of point 1 can only ask for the symbol's expirations, which says little about that part. So a part that cannot be retrieved at all on 3 days in a row, with none of it stored yet, ends the run with an error (those days stay in `unavailable_days` and are asked for again on the next run). Once the file holds the part, each such day is checked against the stored data instead, however many follow.
+
+A permission or authentication refusal is not a day's fault: it ends the run at once.
 
 ## Downloader process protocol
 
-`scripts/backtest/download_thetadata_symbol.py --symbol AAOI --start 2020-01-01 --end 2026-10-09 --data-dir /abs/path`, run with `.venv-backtest/bin/python`. Reads `THETADATA_API_KEY` from the API repo's `.env`. At most 2 requests in flight (the plan's limit). Prints one JSON object per line on stdout, nothing else on stdout (logs go to stderr):
+`scripts/backtest/download_thetadata_symbol.py --symbol AAOI --start 2020-01-01 --end 2026-10-09 --data-dir /abs/path [--intraday-strike-window-pct 40]`, run with `.venv-backtest/bin/python`. Reads `THETADATA_API_KEY` from the API repo's `.env`. At most 2 requests in flight (the plan's limit). Prints one JSON object per line on stdout, nothing else on stdout (logs go to stderr):
 
-- `{"type":"start","symbol":"AAOI","daysTotal":1700,"daysDone":1200}` — days in range, days already in the file
-- `{"type":"progress","daysDone":1201,"daysTotal":1700,"lastDate":"2024-03-15","quoteRows":1100}`
-- `{"type":"done","daysDone":1700,"daysTotal":1700}` then exit 0
+- `{"type":"start","symbol":"AAOI","daysTotal":1700,"daysDone":1200}` — weekdays in range, and how many of them are done (see Rules)
+- `{"type":"progress","daysDone":1201,"daysTotal":1700,"lastDate":"2024-03-15","quoteRows":1100}` — one per day that became done; `quoteRows` is the day's 10:00 quote rows. An unavailable day prints nothing.
+- `{"type":"done","daysDone":1698,"daysTotal":1700,"unavailableDays":2,"daysWithIssues":3}` then exit 0 — the whole range was worked through. `unavailableDays` = `unavailable_days` rows in the range (so `daysDone` stays below `daysTotal` by that many), `daysWithIssues` = days in the range with `day_issues` rows (pieces still being asked for again, and those left after their 3 later runs).
 - `{"type":"error","message":"..."}` then a non-zero exit
 
 SIGTERM stops after the day in progress is either committed or discarded (never half-written).
+
+**One ThetaData login per API key at a time.** A second login with the same key (a probe script, a second downloader, the Theta Terminal) invalidates the session of the one already running: within a few minutes its requests fail with `UNAUTHENTICATED: Invalid session ID`. The job queue runs one download at a time for this reason as well; nothing else may log in while a download runs. When a download does lose its session it waits (10 s, then 20, 40, 80, 160), logs in again and repeats the request; after 5 new logins in one run it ends with the error "another ThetaData login keeps taking the session … only one program may use the API key at a time". Any other authentication or permission error ends the run at once.
 
 ## Jobs (`backtest_jobs`)
 
@@ -80,7 +142,7 @@ The API creates the row and spawns `scripts/run-backtest-job.ts <jobId>` detache
 
 A `running` job whose heartbeat is older than 60 s is shown as **stopped** (derived, not stored); Resume re-spawns the same job id. Downloads run one at a time (ThetaData allows 2 requests in flight and one download uses both): a new download is `queued` while another runs, and the next queued one starts when a download finishes, is cancelled, or is found stopped when the screen loads. Backtest runs can run alongside each other.
 
-A download job runs, in order: the IBKR daily-bar top-up for the symbol (back to 2016-01-01, local DB), then the ThetaData downloader.
+A download job runs, in order: the IBKR daily-bar top-up for the symbol (back to 2016-01-01, local DB), then the ThetaData downloader. A download whose range was worked through ends `succeeded` even when some days could not be stored in full; its final label says so, e.g. `saved up to 2026-10-09 · 2 days unavailable · 1 day with gaps` (`nothing new to save` when the run stored no new day).
 
 ## History in the local DB
 

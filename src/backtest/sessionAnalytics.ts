@@ -14,6 +14,7 @@ export interface AccountDay {
   interestDollars: number;
 }
 
+/** One option sold of a session measured per option (the sessions run before wheel cycles carried the P&L). */
 export interface ClosedTradeFigures {
   openedOn: string;
   settledOn: string | null;
@@ -23,6 +24,41 @@ export interface ClosedTradeFigures {
   calibratedExpectedPnlDollars: number;
   edgeMargin: number;
   inTheMoneyAtExpiry: boolean | null;
+}
+
+/** One wheel cycle with what the model predicted for the options sold in it. */
+export interface CycleFigures {
+  status: "open" | "closed";
+  /** The cycle's P&L as the platform derives it; an open cycle's counts what it holds at the last marks. */
+  totalDollars: number;
+  /** The edge margin of the first option sold in the cycle; null when it sold none. */
+  firstSaleEdgeMargin: number | null;
+  /** Σ Edge $ (and Σ history-corrected Edge $) of the options sold in the cycle. */
+  expectedPnlDollars: number;
+  calibratedExpectedPnlDollars: number;
+  optionSaleCount: number;
+}
+
+/** What a session's book gives its metrics: its options sold (for their count and how they ended) and its wheel cycles (for the P&L). */
+export interface SessionBookFigures {
+  optionSales: readonly { inTheMoneyAtExpiry: boolean | null }[];
+  cycles: readonly CycleFigures[];
+}
+
+/** The cycles of a session with the predictions of their options sold: a sale belongs to the cycle its row names. */
+export function cycleFiguresOf(cycles: readonly { symbol: string; cycleNumber: number; status: "open" | "closed"; totalDollars: number }[], optionSales: readonly { symbol: string; cycleNumber: number | null; edgeMargin: number; expectedPnlDollars: number; calibratedExpectedPnlDollars: number }[]): CycleFigures[] {
+  return cycles.map((cycle) => {
+    // In the order sold: the first is the cycle's opening sale.
+    const sales = optionSales.filter((sale) => sale.symbol === cycle.symbol && sale.cycleNumber === cycle.cycleNumber);
+    return {
+      status: cycle.status,
+      totalDollars: cycle.totalDollars,
+      firstSaleEdgeMargin: sales[0]?.edgeMargin ?? null,
+      expectedPnlDollars: sales.reduce((sum, sale) => sum + sale.expectedPnlDollars, 0),
+      calibratedExpectedPnlDollars: sales.reduce((sum, sale) => sum + sale.calibratedExpectedPnlDollars, 0),
+      optionSaleCount: sales.length,
+    };
+  });
 }
 
 export function calendarDaysBetween(fromIso: string, toIso: string): number {
@@ -68,19 +104,31 @@ export function computeMonthlyReturnsOf(days: readonly { tradingDate: string; va
   return months;
 }
 
-/** The session's and the baseline's monthly returns side by side. */
-export function computeMonthlyReturns(days: readonly { tradingDate: string; accountValue: number; baselineValue: number }[], startValue: number): BacktestMonthlyReturn[] {
+/** The session's and its two baselines' monthly returns side by side (SPY's null when the session has no SPY series). */
+export function computeMonthlyReturns(days: readonly { tradingDate: string; accountValue: number; baselineValue: number; spyBaselineValue?: number | null }[], startValue: number): BacktestMonthlyReturn[] {
   const session = computeMonthlyReturnsOf(days.map((day) => ({ tradingDate: day.tradingDate, value: day.accountValue })), startValue);
   const baseline = computeMonthlyReturnsOf(days.map((day) => ({ tradingDate: day.tradingDate, value: day.baselineValue })), startValue);
-  return session.map((entry, index) => ({ month: entry.month, sessionReturn: entry.monthlyReturn, baselineReturn: baseline[index]!.monthlyReturn }));
+  const hasSpyBaseline = days.length > 0 && days.every((day) => day.spyBaselineValue !== null && day.spyBaselineValue !== undefined);
+  const spyBaseline = hasSpyBaseline ? computeMonthlyReturnsOf(days.map((day) => ({ tradingDate: day.tradingDate, value: day.spyBaselineValue! })), startValue) : null;
+  return session.map((entry, index) => ({ month: entry.month, sessionReturn: entry.monthlyReturn, baselineReturn: baseline[index]!.monthlyReturn, spyBaselineReturn: spyBaseline?.[index]!.monthlyReturn ?? null }));
 }
 
 function mean(values: readonly number[]): number | null {
   return values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-/** The headline figures for one account series; `trades` empty for buy and hold (trade figures then null). */
-export function computeBacktestMetrics(days: readonly AccountDay[], trades: readonly ClosedTradeFigures[], startValue: number): BacktestMetrics {
+/**
+ * The headline figures for one account series. `book` is the session's options sold and wheel cycles; null for a
+ * buy-and-hold series (no trades, no cycles: those figures are then 0 or null).
+ *
+ * On the cycles (Marcelo 2026-10-12: a sale made money when its wheel cycle did):
+ *   win rate                    = closed cycles with a total above 0 ÷ closed cycles
+ *   average win / average loss  = mean total of the closed cycles above 0 / below 0
+ *   edge capture                = Σ closed cycles' totals ÷ Σ Edge $ predicted for the options sold in those cycles
+ *   return on capital in use    = Σ every cycle's total ÷ Σ over the days of (EXP $ held that day × calendar days to the
+ *                                 next session day) × 365
+ */
+export function computeBacktestMetrics(days: readonly AccountDay[], book: SessionBookFigures | null, startValue: number): BacktestMetrics {
   const values = days.map((day) => day.value);
   const endValue = values.at(-1) ?? startValue;
   const totalReturn = endValue / startValue - 1;
@@ -89,14 +137,14 @@ export function computeBacktestMetrics(days: readonly AccountDay[], trades: read
   const dailyReturns = computeDailyReturns(values).filter((r): r is number => r !== null);
   const monthly = computeMonthlyReturnsOf(days.map((day) => ({ tradingDate: day.tradingDate, value: day.value })), startValue);
 
-  const closed = trades.filter((trade) => trade.pnlDollars !== null) as (ClosedTradeFigures & { pnlDollars: number })[];
-  const wins = closed.filter((trade) => trade.pnlDollars > 0).map((trade) => trade.pnlDollars);
-  const losses = closed.filter((trade) => trade.pnlDollars < 0).map((trade) => trade.pnlDollars);
-  const totalPnl = closed.reduce((sum, trade) => sum + trade.pnlDollars, 0);
-  const totalExpected = closed.reduce((sum, trade) => sum + trade.expectedPnlDollars, 0);
-  // Return on capital in use: Σ P&L ÷ Σ (EXP $ × calendar days held) × 365; a same-day expiry counts one day.
-  const exposureDays = closed.reduce((sum, trade) => sum + trade.exposureDollars * Math.max(1, calendarDaysBetween(trade.openedOn, trade.settledOn ?? trade.openedOn)), 0);
-  const settledWithOutcome = trades.filter((trade) => trade.inTheMoneyAtExpiry !== null);
+  const closedCycles = (book?.cycles ?? []).filter((cycle) => cycle.status === "closed");
+  const wins = closedCycles.filter((cycle) => cycle.totalDollars > 0).map((cycle) => cycle.totalDollars);
+  const losses = closedCycles.filter((cycle) => cycle.totalDollars < 0).map((cycle) => cycle.totalDollars);
+  const closedTotal = closedCycles.reduce((sum, cycle) => sum + cycle.totalDollars, 0);
+  const closedExpected = closedCycles.reduce((sum, cycle) => sum + cycle.expectedPnlDollars, 0);
+  const everyCycleTotal = (book?.cycles ?? []).reduce((sum, cycle) => sum + cycle.totalDollars, 0);
+  const exposureDays = days.reduce((sum, day, index) => sum + (index < days.length - 1 ? day.exposureDollars * calendarDaysBetween(day.tradingDate, days[index + 1]!.tradingDate) : 0), 0);
+  const settledWithOutcome = (book?.optionSales ?? []).filter((sale) => sale.inTheMoneyAtExpiry !== null);
 
   return {
     startValue,
@@ -106,14 +154,15 @@ export function computeBacktestMetrics(days: readonly AccountDay[], trades: read
     sortino: computeSortino(dailyReturns),
     maxDrawdown: Math.min(0, ...computeDrawdowns(values)),
     worstMonth: monthly.length === 0 ? null : Math.min(...monthly.map((entry) => entry.monthlyReturn)),
-    tradeCount: trades.length,
-    winRate: closed.length === 0 ? null : wins.length / closed.length,
+    tradeCount: book?.optionSales.length ?? 0,
+    ...(book ? { cycleCount: book.cycles.length, closedCycleCount: closedCycles.length } : {}),
+    winRate: closedCycles.length === 0 ? null : wins.length / closedCycles.length,
     averageWinDollars: mean(wins),
     averageLossDollars: mean(losses),
-    edgeCapture: closed.length === 0 || !(totalExpected > 0) ? null : totalPnl / totalExpected,
+    edgeCapture: closedCycles.length === 0 || !(closedExpected > 0) ? null : closedTotal / closedExpected,
     capitalInUse: mean(days.map((day) => (day.value > 0 ? day.exposureDollars / day.value : 0))) ?? 0,
-    returnOnCapitalInUse: exposureDays > 0 ? (totalPnl / exposureDays) * calendarDaysPerYear : null,
-    inTheMoneyAtExpiryShare: settledWithOutcome.length === 0 ? null : settledWithOutcome.filter((trade) => trade.inTheMoneyAtExpiry).length / settledWithOutcome.length,
+    returnOnCapitalInUse: book && exposureDays > 0 ? (everyCycleTotal / exposureDays) * calendarDaysPerYear : null,
+    inTheMoneyAtExpiryShare: settledWithOutcome.length === 0 ? null : settledWithOutcome.filter((sale) => sale.inTheMoneyAtExpiry).length / settledWithOutcome.length,
     interestDollars: days.reduce((sum, day) => sum + day.interestDollars, 0),
   };
 }
@@ -126,13 +175,32 @@ const accuracyBandEdges: { label: string; from: number; to: number }[] = [
   { label: "30% and over", from: 0.3, to: Infinity },
 ];
 
-/** Closed trades grouped by the edge margin at the open: what the model predicted (raw and history-corrected) vs what they earned. */
-export function computeAccuracyBands(trades: readonly ClosedTradeFigures[]): BacktestAccuracyBand[] {
+/**
+ * Closed wheel cycles grouped by the edge margin of the first option sold in each: what the model predicted for the
+ * cycle's options sold (raw and history-corrected) vs the cycle's total.
+ */
+export function computeCycleAccuracyBands(cycles: readonly CycleFigures[]): BacktestAccuracyBand[] {
+  return accuracyBandEdges.map((band) => {
+    const inBand = cycles.filter((cycle) => cycle.status === "closed" && cycle.firstSaleEdgeMargin !== null && cycle.firstSaleEdgeMargin >= band.from && cycle.firstSaleEdgeMargin < band.to);
+    return {
+      label: band.label,
+      tradeCount: inBand.reduce((sum, cycle) => sum + cycle.optionSaleCount, 0),
+      cycleCount: inBand.length,
+      predictedPnlDollars: inBand.reduce((sum, cycle) => sum + cycle.expectedPnlDollars, 0),
+      calibratedPnlDollars: inBand.reduce((sum, cycle) => sum + cycle.calibratedExpectedPnlDollars, 0),
+      realizedPnlDollars: inBand.reduce((sum, cycle) => sum + cycle.totalDollars, 0),
+    };
+  });
+}
+
+/** For a session measured per option: its closed options grouped by their own edge margin, predicted vs what each earned. */
+export function computeTradeAccuracyBands(trades: readonly ClosedTradeFigures[]): BacktestAccuracyBand[] {
   return accuracyBandEdges.map((band) => {
     const inBand = trades.filter((trade) => trade.pnlDollars !== null && trade.edgeMargin >= band.from && trade.edgeMargin < band.to);
     return {
       label: band.label,
       tradeCount: inBand.length,
+      cycleCount: null,
       predictedPnlDollars: inBand.reduce((sum, trade) => sum + trade.expectedPnlDollars, 0),
       calibratedPnlDollars: inBand.reduce((sum, trade) => sum + trade.calibratedExpectedPnlDollars, 0),
       realizedPnlDollars: inBand.reduce((sum, trade) => sum + (trade.pnlDollars ?? 0), 0),

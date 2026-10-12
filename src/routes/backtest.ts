@@ -2,7 +2,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { requireAuth } from "../middleware/requireAuth.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtest/backtestDataDirectory.js";
 import type { BacktestOverview } from "../backtest/backtestTypes.js";
-import { readBacktestDataFileContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
+import { readBacktestDataFileContents, readBacktestDataFilePeriodContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
 import { backtestHistoryStartDate } from "../backtest/backfillDailyHistory.js";
 import { editableBacktestSettingPaths, loadBacktestSettingsTemplate, loadCurrentBacktestSettings } from "../backtest/settingsTemplate.js";
 import { defaultDownloadStartDate, isIsoCalendarDate, lastFinishedBacktestSessionDate } from "../backtest/jobs/backtestJobRules.js";
@@ -15,8 +15,12 @@ import {
   listOverviewJobViews,
   resumeBacktestJob,
 } from "../backtest/jobs/backtestJobStore.js";
-import { validateCreateBacktestSessionRequest } from "../backtest/jobs/backtestSessionRequest.js";
-import { createBacktestSession, deleteBacktestSession, listBacktestSessionItems, loadBacktestComparison, loadBacktestSessionDetail } from "../backtest/jobs/backtestSessionStore.js";
+import { validateBacktestBookPageQuery, validateCreateBacktestSessionRequest } from "../backtest/jobs/backtestSessionRequest.js";
+import { readBacktestClaudeCliPath } from "../backtest/backtestClaudeCli.js";
+import { applyBacktestOverrides } from "../backtest/backtestSettingsOverrides.js";
+import { lookTimesInWindow, regularCloseMinutesEt } from "../backtest/engine/runBacktestSession.js";
+import { estimateLlmSession } from "../backtest/llm/estimateLlmSession.js";
+import { createBacktestSession, deleteBacktestSession, listBacktestSessionItems, loadBacktestComparison, loadBacktestSessionActions, loadBacktestSessionDetail, loadBacktestSessionFills } from "../backtest/jobs/backtestSessionStore.js";
 
 // Model backtesting (docs/backtesting/), local only: app.ts mounts this router only when BACKTEST_DATA_DIR is set.
 // Shapes are backtestTypes.ts, which the app mirrors.
@@ -69,19 +73,64 @@ backtestRouter.get("/settings-template", async (_request, response) => {
   response.json(await loadBacktestSettingsTemplate());
 });
 
-backtestRouter.post("/sessions", async (request, response) => {
+/** A New session request checked as the create route checks it, with the AI model's estimate when it decides (null on the rules). */
+async function validateSessionRequestWithEstimate(body: unknown) {
   const snapshot = await loadCurrentBacktestSettings();
-  const validation = validateCreateBacktestSessionRequest(request.body, {
+  const validation = validateCreateBacktestSessionRequest(body, {
     snapshot,
     editablePaths: editableBacktestSettingPaths,
     coverageFor: (symbol) => readBacktestDataFileContents(symbol),
+    periodContentsFor: (symbol, startDate, endDate) => readBacktestDataFilePeriodContents(symbol, startDate, endDate),
+    claudeCliAvailable: readBacktestClaudeCliPath() !== null,
   });
   if (!validation.ok) throw new BacktestRequestError(validation.error, 400);
-  response.status(201).json(await createBacktestSession(validation.value, snapshot));
+  // With the AI model deciding, the calls a full day of looks may take (a day without intraday quotes has one look).
+  const effective = applyBacktestOverrides(snapshot, validation.value.overrides);
+  const llmEstimate =
+    effective.decisionMaker === "llm"
+      ? estimateLlmSession(validation.value.startDate, validation.value.endDate, lookTimesInWindow(effective.pluto.windowStartEt, effective.pluto.windowEndEt, regularCloseMinutesEt).length)
+      : null;
+  return { snapshot, value: validation.value, warnings: validation.warnings, llmEstimate };
+}
+
+backtestRouter.post("/sessions", async (request, response) => {
+  const { snapshot, value, warnings, llmEstimate } = await validateSessionRequestWithEstimate(request.body);
+  response.status(201).json({ ...(await createBacktestSession(value, snapshot)), warnings, llmEstimate });
 });
 
+// The New session screen's estimate before anything starts: the same request body, checked the same way (a name is not
+// needed yet), nothing created.
+backtestRouter.post("/sessions/estimate", async (request, response) => {
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  const { warnings, llmEstimate } = await validateSessionRequestWithEstimate({ ...body, name: typeof body.name === "string" && body.name.trim() !== "" ? body.name : "estimate" });
+  response.json({ warnings, llmEstimate });
+});
+
+// ?symbol=XYZ narrows the option sales, positions, cycles and statistics to one symbol of the session's book.
 backtestRouter.get("/sessions/:id", async (request, response) => {
-  response.json(await loadBacktestSessionDetail(requireUuidParameter(request.params.id, "session")));
+  let onlySymbol: string | null = null;
+  if (typeof request.query.symbol === "string" && request.query.symbol.trim() !== "") {
+    try {
+      onlySymbol = normalizeBacktestSymbol(request.query.symbol);
+    } catch (error) {
+      throw new BacktestRequestError(error instanceof Error ? error.message : String(error), 400);
+    }
+  }
+  response.json(await loadBacktestSessionDetail(requireUuidParameter(request.params.id, "session"), onlySymbol));
+});
+
+// A session's actions (taken and refused) and fills grow with every look, so they are read page by page, filtered by
+// trading date and symbol (BacktestBookPageQuery).
+backtestRouter.get("/sessions/:id/actions", async (request, response) => {
+  const validation = validateBacktestBookPageQuery(request.query as Record<string, unknown>, { outcomeAllowed: true });
+  if (!validation.ok) throw new BacktestRequestError(validation.error, 400);
+  response.json(await loadBacktestSessionActions(requireUuidParameter(request.params.id, "session"), validation.filters));
+});
+
+backtestRouter.get("/sessions/:id/fills", async (request, response) => {
+  const validation = validateBacktestBookPageQuery(request.query as Record<string, unknown>, { outcomeAllowed: false });
+  if (!validation.ok) throw new BacktestRequestError(validation.error, 400);
+  response.json(await loadBacktestSessionFills(requireUuidParameter(request.params.id, "session"), validation.filters));
 });
 
 backtestRouter.get("/compare", async (request, response) => {

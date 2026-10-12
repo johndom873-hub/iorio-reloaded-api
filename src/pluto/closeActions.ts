@@ -4,7 +4,8 @@ import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandida
 import type { PlutoCloseActionOffer } from "./prompt.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { formatSignedDollars } from "../lib/formatSignedDollars.js";
-import { closeGateVerdictFromQuotes } from "../lib/closeGate.js";
+import { closeGateVerdictFromQuotes, type CloseGateVerdict } from "../lib/closeGate.js";
+import type { CloseLiveQuote } from "../lib/closeLiveState.js";
 import type { CommissionEstimator } from "../lib/commissionEstimate.js";
 import { heaviestMacroEventBeforeExpiry } from "../lib/macroEventTiming.js";
 import type { MacroEvent } from "../lib/macroEventCalendar.js";
@@ -541,9 +542,11 @@ async function loadRecentUnfilledAutomaticAttempts(symbol: string): Promise<Set<
   return new Set(rows.map((row) => row.position_id).filter((id): id is string => id !== null));
 }
 
-/** Whether the position already has an order that may still be working (a second one would be refused by the order route). */
-async function positionHasActiveOrder(positionId: string): Promise<boolean> {
-  return Boolean(await db("order_requests").where({ related_position_id: positionId }).whereIn("status", activeOrderRequestStatuses).first("id"));
+/** The positions among these that already have an order that may still be working (a second one would be refused by the order route). */
+async function loadPositionsWithActiveOrder(positionIds: string[]): Promise<Set<string>> {
+  if (positionIds.length === 0) return new Set();
+  const rows: { related_position_id: string }[] = await db("order_requests").whereIn("related_position_id", positionIds).whereIn("status", activeOrderRequestStatuses).select("related_position_id");
+  return new Set(rows.map((row) => row.related_position_id));
 }
 
 export interface CloseOffersForTickerInput {
@@ -566,45 +569,91 @@ export interface CloseOffersForTickerInput {
   commissionEstimator: CommissionEstimator;
 }
 
+export interface CloseOffersOpenLeg {
+  id: string;
+  legType: string;
+  side: string;
+  quantity: number;
+}
+
+/** What the close offers read about the ticker's book, apart from quotes: loaded once per build (loadCloseOffersBook), or given by a simulated book. */
+export interface CloseOffersBook {
+  /** The ticker's open unstructured share positions. */
+  sharePositions: UnstructuredSharePosition[];
+  /** The open legs of every position that holds one of the held short legs. */
+  openLegsByPositionId: Map<string, CloseOffersOpenLeg[]>;
+  /** Positions with an automatic close in the last hour that did not fill. */
+  recentUnfilledAutomaticAttemptPositionIds: Set<string>;
+  /** Positions with an order that may still be working. */
+  activeOrderPositionIds: Set<string>;
+  /** Opening trades per held option leg (orderedEntryPremium). */
+  openingTradesByLegId: Map<string, OpeningTradeForPremium[]>;
+  /** The ticker's next earnings announcement still to come. */
+  earnings: UpcomingEarnings | null;
+  /** countSessionsLeftBeforeEarnings; null when there is no announcement or it is more than 14 calendar days off. */
+  sessionsLeftBeforeEarnings: number | null;
+}
+
+/** The close gate as the offers read it: live it subscribes quotes (closeGate.ts); a simulated book derives it from its own quotes. */
+export interface CloseGateReader {
+  /** evaluateCloseGateForPosition: read for P1, P3 and P3b. */
+  forPosition(positionId: string): CloseGateVerdict | Promise<CloseGateVerdict>;
+  /** closeGateVerdictFromQuotes: read for the event closes (F3), from the round's own quotes. */
+  fromQuotes(positionId: string, optionQuotesByLegId: Record<string, CloseLiveQuote | null>, stockQuote: CloseLiveQuote | null): CloseGateVerdict | Promise<CloseGateVerdict>;
+}
+
+const liveCloseGates: CloseGateReader = { forPosition: evaluateCloseGateForPosition, fromQuotes: closeGateVerdictFromQuotes };
+
+/** Reads the book the close offers are built from. With no held short leg only the share positions are read. */
+export async function loadCloseOffersBook(input: Pick<CloseOffersForTickerInput, "symbol" | "heldLegs" | "todayIso">): Promise<CloseOffersBook> {
+  const hasHeldLegs = input.heldLegs.length > 0;
+  const heldPositionIds = [...new Set(input.heldLegs.map((leg) => leg.positionId))];
+  // None of these reads depends on another; those about held legs are skipped when there is none.
+  const [sharePositions, openLegs, recentUnfilledAutomaticAttemptPositionIds, activeOrderPositionIds, openingTradesByLegId, earnings] = await Promise.all([
+    loadUnstructuredSharePositions([input.symbol]),
+    hasHeldLegs ? (db("position_legs").whereIn("position_id", heldPositionIds).whereNull("exit_at").select("position_id", "id", "leg_type", "side", "quantity") as Promise<{ position_id: string; id: string; leg_type: string; side: string; quantity: string }[]>) : [],
+    hasHeldLegs ? loadRecentUnfilledAutomaticAttempts(input.symbol) : new Set<string>(),
+    hasHeldLegs ? loadPositionsWithActiveOrder(heldPositionIds) : new Set<string>(),
+    hasHeldLegs ? loadOpeningTradesForPremium(input.heldLegs.map((leg) => leg.legId)) : new Map<string, OpeningTradeForPremium[]>(),
+    hasHeldLegs ? loadUpcomingEarnings(input.symbol, input.todayIso) : null,
+  ]);
+  const book: CloseOffersBook = { sharePositions, openLegsByPositionId: new Map(), recentUnfilledAutomaticAttemptPositionIds, activeOrderPositionIds, openingTradesByLegId, earnings, sessionsLeftBeforeEarnings: null };
+  for (const row of openLegs) book.openLegsByPositionId.set(row.position_id, [...(book.openLegsByPositionId.get(row.position_id) ?? []), { id: row.id, legType: row.leg_type, side: row.side, quantity: Number(row.quantity) }]);
+  // Five sessions never reach past fourteen calendar days, so a later announcement needs no calendar lookups.
+  const earningsDays = earnings && Date.parse(earnings.dateIso) - Date.parse(input.todayIso) <= 14 * 86_400_000 ? calendarDaysThrough(input.todayIso, earnings.dateIso) : null;
+  const openDays = earningsDays ? (await Promise.all(earningsDays.map(async (day) => ((await resolveIsOpenDay(day)) ? day : null)))).filter((day): day is string => day !== null) : null;
+  book.sessionsLeftBeforeEarnings = earnings && openDays ? countSessionsLeftBeforeEarnings(input.todayIso, earnings, openDays) : null;
+  return book;
+}
+
 /**
  * Everything close-related for one ticker this pass: offers for the model, automatic ones for code, why the rest were
  * skipped, and every held short leg as the model sees it (held_positions, whatever the offers).
  */
 export async function buildCloseOffersForTicker(input: CloseOffersForTickerInput): Promise<{ offers: CloseOffer[]; skipped: { id: string; reason: string }[]; heldPositions: HeldPositionEntry[] }> {
+  return buildCloseOffersFromBook(input, await loadCloseOffersBook(input), liveCloseGates);
+}
+
+/** buildCloseOffersForTicker on a book already read: no database, the close gate through `gates`. */
+export async function buildCloseOffersFromBook(input: CloseOffersForTickerInput, book: CloseOffersBook, gates: CloseGateReader): Promise<{ offers: CloseOffer[]; skipped: { id: string; reason: string }[]; heldPositions: HeldPositionEntry[] }> {
   const offers: CloseOffer[] = [];
   const skipped: { id: string; reason: string }[] = [];
   const heldPositions: HeldPositionEntry[] = [];
-  const sharePositions = await loadUnstructuredSharePositions([input.symbol]);
-  for (const position of sharePositions) {
-    const gate = await evaluateCloseGateForPosition(position.positionId);
+  for (const position of book.sharePositions) {
+    const gate = await gates.forPosition(position.positionId);
     const result = evaluateUnstructuredClose({ position, cycleTotal: gate.cycleTotal, cycleBlockReason: gate.blocked ? gate.reason : null, stockBid: input.stockBid, stockAsk: input.stockAsk, settings: input.settings, previousSessionDateIso: input.previousSessionDateIso });
     if (result.offer) offers.push(result.offer);
     else skipped.push({ id: `${input.symbol}:close_shares:${position.positionId}`, reason: result.reason ?? "not offered" });
   }
   if (input.heldLegs.length > 0) {
-    const openLegs: { position_id: string; id: string; leg_type: string; side: string; quantity: string }[] = await db("position_legs").whereIn("position_id", [...new Set(input.heldLegs.map((leg) => leg.positionId))]).whereNull("exit_at").select("position_id", "id", "leg_type", "side", "quantity");
-    const openLegsByPosition = new Map<string, typeof openLegs>();
-    for (const row of openLegs) openLegsByPosition.set(row.position_id, [...(openLegsByPosition.get(row.position_id) ?? []), row]);
-    const openLegCountByPosition = new Map([...openLegsByPosition].map(([positionId, legs]) => [positionId, legs.length]));
-    const recentAttempts = await loadRecentUnfilledAutomaticAttempts(input.symbol);
-    const activeOrderByPosition = new Map<string, boolean>();
-    const hasActiveOrder = async (positionId: string) => {
-      if (!activeOrderByPosition.has(positionId)) activeOrderByPosition.set(positionId, await positionHasActiveOrder(positionId));
-      return activeOrderByPosition.get(positionId)!;
-    };
-    const openingTradesByLeg = await loadOpeningTradesForPremium(input.heldLegs.map((leg) => leg.legId));
-    const earnings = await loadUpcomingEarnings(input.symbol, input.todayIso);
-    // Five sessions never reach past fourteen calendar days, so a later announcement needs no calendar lookups.
-    const earningsDays = earnings && Date.parse(earnings.dateIso) - Date.parse(input.todayIso) <= 14 * 86_400_000 ? calendarDaysThrough(input.todayIso, earnings.dateIso) : null;
-    const openDays = earningsDays ? (await Promise.all(earningsDays.map(async (day) => ((await resolveIsOpenDay(day)) ? day : null)))).filter((day): day is string => day !== null) : null;
-    const sessionsLeft = earnings && openDays ? countSessionsLeftBeforeEarnings(input.todayIso, earnings, openDays) : null;
+    const { earnings, sessionsLeftBeforeEarnings: sessionsLeft } = book;
     const stockQuote = { bid: input.stockBid, ask: input.stockAsk, last: input.spotPrice };
     for (const leg of input.heldLegs) {
-      const singleLegPosition = (openLegCountByPosition.get(leg.positionId) ?? 0) === 1;
-      const orderedPremium = orderedEntryPremium(leg.entryPrice, openingTradesByLeg.get(leg.legId) ?? []);
-      const positionLegs = openLegsByPosition.get(leg.positionId) ?? [];
-      const stockLeg = positionLegs.length === 2 && leg.right === "C" ? positionLegs.find((row) => row.leg_type === "stock" && row.side === "long") : undefined;
-      const coveredCallStockLeg = stockLeg && Number(stockLeg.quantity) === leg.quantity * 100 ? { legId: stockLeg.id, shares: Number(stockLeg.quantity) } : null;
+      const positionLegs = book.openLegsByPositionId.get(leg.positionId) ?? [];
+      const singleLegPosition = positionLegs.length === 1;
+      const orderedPremium = orderedEntryPremium(leg.entryPrice, book.openingTradesByLegId.get(leg.legId) ?? []);
+      const stockLeg = positionLegs.length === 2 && leg.right === "C" ? positionLegs.find((row) => row.legType === "stock" && row.side === "long") : undefined;
+      const coveredCallStockLeg = stockLeg && stockLeg.quantity === leg.quantity * 100 ? { legId: stockLeg.id, shares: stockLeg.quantity } : null;
       const event = heaviestMacroEventBeforeExpiry({ events: input.macroEvents, nowMs: input.nowMs, todayIso: input.todayIso, expiryIso: leg.expiry, openDaysIso: input.openDaysIso });
       const commissionPerContract = input.commissionEstimator.perContractDollars("buy", leg.quantity);
       const metricsInput = { spot: input.spotPrice, forecastVolatility: input.forecastVolatility, event, commissionPerContract, entryCredit: orderedPremium ?? leg.entryPrice };
@@ -612,7 +661,7 @@ export async function buildCloseOffersForTicker(input: CloseOffersForTickerInput
       const entry = leg.right === "P" ? heldPutEntry({ leg, ...metricsInput }) : coveredCallStockLeg ? heldCoveredCallEntry({ callLeg: leg, shares: coveredCallStockLeg.shares, stockBid: input.stockBid, stockAsk: input.stockAsk, ...metricsInput }) : null;
       if (entry) heldPositions.push(entry);
       // An order on the position is working (Pluto's or a person's): nothing more is offered on it until it ends.
-      if (await hasActiveOrder(leg.positionId)) {
+      if (book.activeOrderPositionIds.has(leg.positionId)) {
         skipped.push({ id: `${input.symbol}:close_leg:${leg.legId}`, reason: "an order on this position is still working" });
         continue;
       }
@@ -621,18 +670,18 @@ export async function buildCloseOffersForTicker(input: CloseOffersForTickerInput
         // the call alone is never bought back.
         const closeId = `${input.symbol}:close_position:${leg.positionId}`;
         if (coveredCallEarningsCloseDue(leg, earnings, sessionsLeft)) {
-          if (recentAttempts.has(leg.positionId)) {
+          if (book.recentUnfilledAutomaticAttemptPositionIds.has(leg.positionId)) {
             skipped.push({ id: closeId, reason: "an automatic close of this position did not fill within the last hour" });
             continue;
           }
-          const gate = await evaluateCloseGateForPosition(leg.positionId);
+          const gate = await gates.forPosition(leg.positionId);
           const result = evaluateEarningsCoveredCallClose({ symbol: input.symbol, positionId: leg.positionId, callLeg: leg, stockLeg: coveredCallStockLeg, earnings, sessionsLeft, stockBid: input.stockBid, stockAsk: input.stockAsk, cycleTotal: gate.cycleTotal, gateBlockReason: gate.blocked ? gate.reason : null });
           if (result.offer) offers.push(result.offer);
           else if (result.reason) skipped.push({ id: closeId, reason: result.reason });
           continue;
         }
         if (!entry || !eventCloseDue(entry.event)) continue;
-        const gate = await closeGateVerdictFromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote);
+        const gate = await gates.fromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote);
         const reviewed = heldCoveredCallEntry({ callLeg: leg, shares: coveredCallStockLeg.shares, stockBid: input.stockBid, stockAsk: input.stockAsk, ...metricsInput, cycleTotal: gate.cycleTotal });
         heldPositions[heldPositions.indexOf(entry)] = reviewed;
         const result = evaluateEventCoveredCallClose({ symbol: input.symbol, positionId: leg.positionId, callLeg: leg, stockLeg: coveredCallStockLeg, entry: reviewed, stockBid: input.stockBid, stockAsk: input.stockAsk, gateBlockReason: gate.blocked ? gate.reason : null });
@@ -642,9 +691,9 @@ export async function buildCloseOffersForTicker(input: CloseOffersForTickerInput
       }
       const earningsResult = evaluateEarningsBuyback({ symbol: input.symbol, leg, singleLegPosition, orderedEntryPremium: orderedPremium, earnings, sessionsLeft });
       if (earningsResult.offer) {
-        if (recentAttempts.has(leg.positionId)) skipped.push({ id: `${input.symbol}:earnings_close:${leg.legId}`, reason: "an automatic buyback of this leg did not fill within the last hour" });
+        if (book.recentUnfilledAutomaticAttemptPositionIds.has(leg.positionId)) skipped.push({ id: `${input.symbol}:earnings_close:${leg.legId}`, reason: "an automatic buyback of this leg did not fill within the last hour" });
         else {
-          const gate = await evaluateCloseGateForPosition(leg.positionId);
+          const gate = await gates.forPosition(leg.positionId);
           if (!gate.blocked) {
             offers.push(earningsResult.offer);
             continue;
@@ -661,7 +710,7 @@ export async function buildCloseOffersForTicker(input: CloseOffersForTickerInput
         orderedEntryPremium: orderedPremium,
       });
       // F3 before a macro event: the close gate is only read inside the window, for a buyback the ask would not lose on.
-      const eventGate = entry && eventCloseDue(entry.event) && leg.ask !== null && leg.ask < entry.entryCredit ? await closeGateVerdictFromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote) : null;
+      const eventGate = entry && eventCloseDue(entry.event) && leg.ask !== null && leg.ask < entry.entryCredit ? await gates.fromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote) : null;
       const eventResult = entry ? evaluateEventPutClose({ symbol: input.symbol, leg, entry, singleLegPosition, gateBlockReason: eventGate?.blocked ? eventGate.reason ?? "the close gate blocked the buyback" : null }) : { offer: null, reason: null };
       if (eventResult.offer) offers.push(mergeEventAndHoldValueBuybacks(eventResult.offer, result.offer));
       else if (result.offer) offers.push(result.offer);

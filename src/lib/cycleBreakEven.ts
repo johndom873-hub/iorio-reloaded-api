@@ -45,11 +45,15 @@ export interface CycleOptionLeg {
   expiryDate: string;
   /** Daily close on expiryDate, null when no bar exists. */
   expiryClose: number | null;
+  /** How the leg settled at expiry, when known rather than inferred (a simulated book); live leaves it unset (see cycles.ts). */
+  settledAs?: OptionSettlementOutcome;
   /** positions.close_reason for this leg's own position — "assigned" means ibkrGatewayWorker already
    * confirmed a real fill produced/removed the shares (see cycleBreakEven.ts's assignment-matching note
    * below), so the ledger must not also infer shares from the strike price and double them up. */
   positionCloseReason: string | null;
 }
+
+export type OptionSettlementOutcome = "assigned" | "worthless";
 
 export interface CycleStockTrade {
   at: Date;
@@ -132,25 +136,29 @@ export function summarizeOpenCycle(
     let acquiredShares = 0;
     let acquiredCost = 0;
     if (isSettledWithoutTrade(leg)) {
-      if (leg.expiryClose === null) {
+      const exitAtMs = leg.exitAt.getTime();
+      const recordAssignment = () => {
+        const shares = leg.quantity * leg.multiplier;
+        const expectedSide = leg.optionType === "put" ? "buy" : "sell";
+        const alreadyRecordedByRealTrade = leg.positionCloseReason === "assigned" && findMatchingAssignmentTrade(exitAtMs, expectedSide, shares);
+        if (!alreadyRecordedByRealTrade) {
+          sharesDelta = leg.optionType === "put" ? shares : -shares;
+          if (leg.optionType === "put") {
+            acquiredShares = shares;
+            acquiredCost = shares * leg.strike;
+          }
+        }
+      };
+      if (leg.settledAs !== undefined) {
+        // The book's own settlement: no bar and no threshold to infer from.
+        if (leg.settledAs === "assigned") recordAssignment();
+      } else if (leg.expiryClose === null) {
         unavailableReason ??= `no expiry-date price bar for ${leg.optionType} $${leg.strike} (${leg.expiryDate})`;
       } else {
         const inTheMoneyBy = leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose;
         if (inTheMoneyBy > 0 && inTheMoneyBy < marginalThreshold) {
           unavailableReason ??= `${leg.optionType} $${leg.strike} (${leg.expiryDate}) expired within $${marginalThreshold} of the strike — assignment unclear`;
-        } else if (inTheMoneyBy >= marginalThreshold) {
-          const shares = leg.quantity * leg.multiplier;
-          const expectedSide = leg.optionType === "put" ? "buy" : "sell";
-          const alreadyRecordedByRealTrade =
-            leg.positionCloseReason === "assigned" && findMatchingAssignmentTrade(leg.exitAt.getTime(), expectedSide, shares);
-          if (!alreadyRecordedByRealTrade) {
-            sharesDelta = leg.optionType === "put" ? shares : -shares;
-            if (leg.optionType === "put") {
-              acquiredShares = shares;
-              acquiredCost = shares * leg.strike;
-            }
-          }
-        }
+        } else if (inTheMoneyBy >= marginalThreshold) recordAssignment();
       }
     }
     events.push({ at: leg.exitAt.getTime(), sharesDelta, openOptionsDelta: -1, acquiredShares, acquiredCost });

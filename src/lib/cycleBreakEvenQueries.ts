@@ -1,5 +1,6 @@
 import { db } from "../db/connection.js";
-import { breakEvenForPosition, summarizeOpenCycle, type CycleOptionLeg, type CycleStockTrade, type OpenCycleSummary } from "./cycleBreakEven.js";
+import { breakEvenForPosition, type OpenCycleSummary } from "./cycleBreakEven.js";
+import { summarizeOpenCycleFromRows } from "./cycleInputRows.js";
 
 export interface PositionBreakEven {
   breakEven: number | null;
@@ -67,13 +68,7 @@ export async function fetchOpenCycleSummaryByTickerId(tickerIds: string[]): Prom
 
   const openStockSharesByTicker = new Map<string, number>(openStockRows.rows.map((row: any) => [row.tickerId, Number(row.shares)]));
   for (const tickerId of uniqueTickerIds) {
-    const optionLegs: CycleOptionLeg[] = optionRows.rows
-      .filter((row: any) => row.tickerId === tickerId)
-      .map((row: any) => ({ ...row, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
-    const stockTrades: CycleStockTrade[] = stockTradeRows.rows
-      .filter((row: any) => row.tickerId === tickerId)
-      .map((row: any) => ({ at: new Date(row.at), side: row.side, quantity: row.quantity, price: row.price, commission: row.commission }));
-    const summary = summarizeOpenCycle(optionLegs, stockTrades, openStockSharesByTicker.get(tickerId) ?? 0);
+    const summary = summarizeOpenCycleFromRows(tickerId, { optionRows: optionRows.rows, stockTradeRows: stockTradeRows.rows, openStockShares: openStockSharesByTicker.get(tickerId) ?? 0 });
     if (summary) result.set(tickerId, summary);
   }
   return result;

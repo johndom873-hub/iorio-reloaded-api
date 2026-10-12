@@ -1,9 +1,12 @@
+import { writeFileSync } from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { blackScholesPriceOnForward, yearsBetweenIsoDates } from "../../../lib/impliedVolatilitySurface.js";
 import type { PlutoSettings } from "../../../pluto/settingsStore.js";
 import type { BacktestSettings } from "../../backtestTypes.js";
 import type { StoredDailyBar } from "../backtestBarHistory.js";
 import type { SymbolFileQuote } from "../backtestSymbolFile.js";
+import type { HistoricalMacroEvent, MacroEventHistoryCache } from "../../macroEventHistory.js";
 
 // Synthetic market data for the engine's tests: a seeded random-walk bar history, Black-Scholes option quotes at a flat
 // implied volatility, settings shaped like the dev database's, and a schema-version-1 symbol file.
@@ -152,10 +155,35 @@ export interface SyntheticSymbolFileDay {
   /** End-of-day rows: volume per contract (closing NBBO = the 10:00 quote). */
   endOfDayVolume: number;
   openInterest: number;
+  /** The day is stored complete with no end-of-day rows (the downloader could not retrieve that part). */
+  withoutEndOfDay?: boolean;
+  /** The quotes at the looks after 10:00, by look time ("HH:MM"): the day then has intraday quotes, its 10:00 look being `quotes`. */
+  intradayQuotes?: Record<string, SymbolFileQuote[]>;
+  /** The closing quotes, when they differ from the 10:00 ones. */
+  closingQuotes?: SymbolFileQuote[];
 }
 
-/** Writes a schema-version-1 symbol file (docs/backtesting/DATA-FILES.md). */
-export function writeSyntheticSymbolFile(filePath: string, symbol: string, days: SyntheticSymbolFileDay[], noDataDates: string[] = []): void {
+/** What the downloader records of the data it could not retrieve; giving it creates the tables a newer file has. */
+export interface SyntheticSymbolFileQuality {
+  dayIssues?: { tradingDate: string; part: "quotes" | "eod" | "open_interest" | "intraday_quotes"; expiry: string | null; message: string }[];
+  unavailableDays?: { tradingDate: string; reason: string }[];
+  /** Days with complete intraday quotes (the quotes themselves are not written). */
+  intradayCompleteDays?: string[];
+  /** "1" unless given; a version-2 file's day_issues also counts the attempts. */
+  schemaVersion?: string;
+}
+
+/** The macro-event history a session reads from the data folder (macro-events.json), so a test never asks FRED or the Fed. */
+export function writeSyntheticMacroEventHistory(dataDirectory: string, events: HistoricalMacroEvent[] = []): void {
+  const cache: MacroEventHistoryCache = { builtAtIso: new Date().toISOString(), firstDateIso: "2019-01-01", events };
+  writeFileSync(path.join(dataDirectory, "macro-events.json"), JSON.stringify(cache));
+}
+
+/**
+ * Writes a symbol file (docs/backtesting/DATA-FILES.md): schema version 1 with the first downloads' tables, plus the
+ * data-quality tables when `quality` is given and the intraday tables when a day has intraday quotes.
+ */
+export function writeSyntheticSymbolFile(filePath: string, symbol: string, days: SyntheticSymbolFileDay[], noDataDates: string[] = [], quality: SyntheticSymbolFileQuality | null = null): void {
   const database = new DatabaseSync(filePath);
   try {
     database.exec(`
@@ -166,21 +194,50 @@ export function writeSyntheticSymbolFile(filePath: string, symbol: string, days:
       CREATE TABLE open_interest (trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')), open_interest INTEGER NOT NULL, PRIMARY KEY (trading_date, expiry, strike, option_right)) WITHOUT ROWID;
     `);
     const insertMeta = database.prepare("INSERT INTO meta (key, value) VALUES (?, ?)");
-    const meta: [string, string][] = [["symbol", symbol], ["schema_version", "1"], ["quote_time_et", "10:00:00"], ["max_dte", "45"], ["created_at", "2026-10-12T00:00:00Z"]];
+    const meta: [string, string][] = [["symbol", symbol], ["schema_version", quality?.schemaVersion ?? "1"], ["quote_time_et", "10:00:00"], ["max_dte", "45"], ["created_at", "2026-10-12T00:00:00Z"]];
     for (const [key, value] of meta) insertMeta.run(key, value);
     const insertDay = database.prepare("INSERT INTO days VALUES (?, ?, ?, ?, ?, ?)");
     const insertQuote = database.prepare("INSERT INTO quotes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
     const insertEndOfDay = database.prepare("INSERT INTO eod VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
     const insertOpenInterest = database.prepare("INSERT INTO open_interest VALUES (?, ?, ?, ?, ?)");
     for (const day of days) {
-      insertDay.run(day.tradingDate, "complete", day.quotes.length, day.quotes.length, day.quotes.length, "2026-10-12T00:00:00Z");
+      insertDay.run(day.tradingDate, "complete", day.quotes.length, day.withoutEndOfDay ? 0 : day.quotes.length, day.quotes.length, "2026-10-12T00:00:00Z");
       for (const quote of day.quotes) {
         insertQuote.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid, quote.ask, quote.bidSize, quote.askSize, `${day.tradingDate}T09:59:58-04:00`);
-        insertEndOfDay.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid === null || quote.ask === null ? null : (quote.bid + quote.ask) / 2, day.endOfDayVolume, quote.bid, quote.ask);
+        if (!day.withoutEndOfDay && !day.closingQuotes) insertEndOfDay.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid === null || quote.ask === null ? null : (quote.bid + quote.ask) / 2, day.endOfDayVolume, quote.bid, quote.ask);
         insertOpenInterest.run(day.tradingDate, quote.expiry, quote.strike, quote.right, day.openInterest);
       }
+      if (!day.withoutEndOfDay) for (const quote of day.closingQuotes ?? []) insertEndOfDay.run(day.tradingDate, quote.expiry, quote.strike, quote.right, quote.bid === null || quote.ask === null ? null : (quote.bid + quote.ask) / 2, day.endOfDayVolume, quote.bid, quote.ask);
     }
     for (const dateIso of noDataDates) insertDay.run(dateIso, "no_data", 0, 0, 0, "2026-10-12T00:00:00Z");
+    const daysWithIntradayQuotes = days.filter((day) => day.intradayQuotes !== undefined);
+    if (quality || daysWithIntradayQuotes.length > 0) database.exec("CREATE TABLE intraday_days (trading_date TEXT PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('complete', 'no_data')), look_count INTEGER NOT NULL, quote_rows INTEGER NOT NULL, strike_window_pct REAL, fetched_at TEXT NOT NULL);");
+    if (daysWithIntradayQuotes.length > 0) {
+      database.exec("CREATE TABLE intraday_quotes (trading_date TEXT NOT NULL, look_time TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL, option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')), bid REAL, ask REAL, bid_size INTEGER, ask_size INTEGER, quoted_at TEXT, PRIMARY KEY (trading_date, look_time, expiry, strike, option_right)) WITHOUT ROWID;");
+      const insertIntradayQuote = database.prepare("INSERT INTO intraday_quotes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)");
+      const insertIntradayDay = database.prepare("INSERT INTO intraday_days VALUES (?, ?, ?, ?, ?, ?)");
+      for (const day of daysWithIntradayQuotes) {
+        const quotesByLookTime = { "10:00": day.quotes, ...day.intradayQuotes };
+        let quoteRows = 0;
+        for (const [lookTime, quotes] of Object.entries(quotesByLookTime)) {
+          for (const quote of quotes) insertIntradayQuote.run(day.tradingDate, lookTime, quote.expiry, quote.strike, quote.right, quote.bid, quote.ask, quote.bidSize, quote.askSize);
+          quoteRows += quotes.length;
+        }
+        insertIntradayDay.run(day.tradingDate, "complete", Object.keys(quotesByLookTime).length, quoteRows, null, "2026-10-12T00:00:00Z");
+      }
+    }
+    if (quality) {
+      database.exec(`
+        CREATE TABLE day_issues (trading_date TEXT NOT NULL, part TEXT NOT NULL CHECK (part IN ('quotes', 'eod', 'open_interest', 'intraday_quotes')), expiry TEXT, message TEXT NOT NULL, recorded_at TEXT NOT NULL${quality.schemaVersion === "2" ? ", attempts INTEGER NOT NULL DEFAULT 1" : ""});
+        CREATE TABLE unavailable_days (trading_date TEXT PRIMARY KEY, reason TEXT NOT NULL, attempts INTEGER NOT NULL, last_attempt_at TEXT NOT NULL);
+      `);
+      const insertIssue = database.prepare("INSERT INTO day_issues (trading_date, part, expiry, message, recorded_at) VALUES (?, ?, ?, ?, ?)");
+      for (const issue of quality.dayIssues ?? []) insertIssue.run(issue.tradingDate, issue.part, issue.expiry, issue.message, "2026-10-12T00:00:00Z");
+      const insertUnavailable = database.prepare("INSERT INTO unavailable_days VALUES (?, ?, ?, ?)");
+      for (const day of quality.unavailableDays ?? []) insertUnavailable.run(day.tradingDate, day.reason, 1, "2026-10-12T00:00:00Z");
+      const insertIntradayDay = database.prepare("INSERT INTO intraday_days VALUES (?, ?, ?, ?, ?, ?)");
+      for (const dateIso of quality.intradayCompleteDays ?? []) insertIntradayDay.run(dateIso, "complete", 12, 0, 20, "2026-10-12T00:00:00Z");
+    }
   } finally {
     database.close();
   }

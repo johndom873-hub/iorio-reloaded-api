@@ -13,7 +13,7 @@ import { backfillDailyHistoryForBacktest, backtestHistoryStartDate, describeBack
 import { formatDownloadProgressLabel, jobHeartbeatIntervalMilliseconds, lastFinishedBacktestSessionDate } from "./backtestJobRules.js";
 import { finishSessionOfJob, kickDownloadQueue, loadBacktestJobRow, type BacktestJobRow } from "./backtestJobStore.js";
 import { thetaDataDownloaderScriptName } from "./spawnBacktestJobProcess.js";
-import { parseDownloaderLine } from "./thetaDataDownloaderProtocol.js";
+import { describeDownloadGaps, parseDownloaderLine } from "./thetaDataDownloaderProtocol.js";
 
 // The job process (scripts/run-backtest-job.ts, docs/backtesting/DATA-FILES.md): marks the job running, writes progress
 // and a heartbeat, honours cancel, and records the outcome. Every write is guarded by this process's pid: when the job
@@ -166,7 +166,9 @@ async function runThetaDataDownloader(job: BacktestJobRow, control: JobProcessCo
       return;
     }
     if (event.type === "progress") lastSavedDate = event.lastDate;
-    void control.reportProgress(event.daysDone, event.daysTotal, formatDownloadProgressLabel(lastSavedDate));
+    // The final label says what the range still lacks: "saved up to 2026-10-09 · 2 days unavailable".
+    const label = event.type === "done" ? `${lastSavedDate ? formatDownloadProgressLabel(lastSavedDate) : "nothing new to save"}${describeDownloadGaps(event)}` : formatDownloadProgressLabel(lastSavedDate);
+    void control.reportProgress(event.daysDone, event.daysTotal, label);
   });
 
   try {

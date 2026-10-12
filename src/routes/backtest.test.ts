@@ -8,7 +8,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { kellyFraction } from "../pluto/postModelGates.js";
 import knexLibrary, { type Knex } from "knex";
-import type { BacktestCompareResponse, BacktestJobView, BacktestOverview, BacktestSessionDetail, BacktestSessionListItem, BacktestSettingsTemplate } from "../backtest/backtestTypes.js";
+import type { BacktestActionsPage, BacktestCompareResponse, BacktestFillsPage, BacktestJobView, BacktestOverview, BacktestSessionDetail, BacktestSessionListItem, BacktestSettingsTemplate, CreateBacktestSessionResponse } from "../backtest/backtestTypes.js";
 
 // The real backtest router on a small express app against the test database, with a temporary data folder holding a
 // real symbol file. Only starting and stopping job processes is mocked.
@@ -34,19 +34,24 @@ const { backtestRouter } = await import("./backtest.js");
 const { errorHandler } = await import("../middleware/errorHandler.js");
 const { lastFinishedBacktestSessionDate } = await import("../backtest/jobs/backtestJobRules.js");
 const { splitScheduleFingerprint, writeSplitScheduleCache } = await import("../backtest/engine/splitFactors.js");
+const { lookTimesInWindow } = await import("../backtest/engine/runBacktestSession.js");
 const testDb: Knex = db;
 
 const runTag = String(Date.now() % 1_000_000).padStart(6, "0");
 const fileSymbol = `BT${runTag}F`;
+const secondFileSymbol = `BT${runTag}G`;
+const partFileSymbol = `BT${runTag}P`;
 const downloadSymbolA = `BT${runTag}A`;
 const downloadSymbolB = `BT${runTag}B`;
+const downloadSymbolC = `BT${runTag}C`;
 const sessionNamePrefix = `backtest-route-${runTag}`;
 let tickerId: string;
 
 let server: Server;
 let baseUrl: string;
 
-function writeSymbolFile(symbol: string, days: { tradingDate: string; status: "complete" | "no_data" }[]): void {
+/** `unavailableDays`: days the downloader recorded as impossible to retrieve (they have no `days` row). */
+function writeSymbolFile(symbol: string, days: { tradingDate: string; status: "complete" | "no_data" }[], unavailableDays: string[] = []): void {
   const database = new DatabaseSync(path.join(dataDirectory, `${symbol}.sqlite`));
   database.exec(`
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -58,7 +63,25 @@ function writeSymbolFile(symbol: string, days: { tradingDate: string; status: "c
   `);
   const insert = database.prepare("INSERT INTO days VALUES (?, ?, ?, ?, ?, ?)");
   for (const day of days) insert.run(day.tradingDate, day.status, day.status === "complete" ? 900 : 0, 0, 0, "2026-10-12T00:00:00Z");
+  if (unavailableDays.length > 0) {
+    database.exec("CREATE TABLE unavailable_days (trading_date TEXT PRIMARY KEY, reason TEXT NOT NULL, attempts INTEGER NOT NULL, last_attempt_at TEXT NOT NULL);");
+    const insertUnavailable = database.prepare("INSERT INTO unavailable_days VALUES (?, ?, ?, ?)");
+    for (const tradingDate of unavailableDays) insertUnavailable.run(tradingDate, "quotes at 10:00: HTTP 500", 2, "2026-10-12T00:00:00Z");
+  }
   database.close();
+}
+
+/** Runs `run` with BACKTEST_CLAUDE_CLI_PATH set to `value` (unset when undefined), then puts back what .env gave. */
+async function withClaudeCliPath<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+  const before = process.env.BACKTEST_CLAUDE_CLI_PATH;
+  if (value === undefined) delete process.env.BACKTEST_CLAUDE_CLI_PATH;
+  else process.env.BACKTEST_CLAUDE_CLI_PATH = value;
+  try {
+    return await run();
+  } finally {
+    if (before === undefined) delete process.env.BACKTEST_CLAUDE_CLI_PATH;
+    else process.env.BACKTEST_CLAUDE_CLI_PATH = before;
+  }
 }
 
 async function request(method: string, route: string, body?: unknown, authenticated = true): Promise<{ status: number; body: unknown }> {
@@ -72,17 +95,41 @@ async function request(method: string, route: string, body?: unknown, authentica
 }
 
 beforeAll(async () => {
-  // 2026-09-01..11: Labor Day stored as no_data, the 9th never fetched (one missing weekday).
-  writeSymbolFile(fileSymbol, [
+  // 2026-09-01..11: Labor Day stored as no_data; the 9th could not be retrieved (no row, recorded as unavailable).
+  writeSymbolFile(
+    fileSymbol,
+    [
+      { tradingDate: "2026-09-01", status: "complete" },
+      { tradingDate: "2026-09-02", status: "complete" },
+      { tradingDate: "2026-09-03", status: "complete" },
+      { tradingDate: "2026-09-04", status: "complete" },
+      { tradingDate: "2026-09-07", status: "no_data" },
+      { tradingDate: "2026-09-08", status: "complete" },
+      { tradingDate: "2026-09-10", status: "complete" },
+      { tradingDate: "2026-09-11", status: "complete" },
+    ],
+    ["2026-09-09"],
+  );
+  // A second file covering less: 2026-09-02..10.
+  writeSymbolFile(
+    secondFileSymbol,
+    [
+      { tradingDate: "2026-09-02", status: "complete" },
+      { tradingDate: "2026-09-03", status: "complete" },
+      { tradingDate: "2026-09-04", status: "complete" },
+      { tradingDate: "2026-09-07", status: "no_data" },
+      { tradingDate: "2026-09-08", status: "complete" },
+      { tradingDate: "2026-09-10", status: "complete" },
+    ],
+    ["2026-09-09"],
+  );
+  // A file whose download stopped part-way: nothing stored for the 3rd and the 4th.
+  writeSymbolFile(partFileSymbol, [
     { tradingDate: "2026-09-01", status: "complete" },
     { tradingDate: "2026-09-02", status: "complete" },
-    { tradingDate: "2026-09-03", status: "complete" },
-    { tradingDate: "2026-09-04", status: "complete" },
-    { tradingDate: "2026-09-07", status: "no_data" },
     { tradingDate: "2026-09-08", status: "complete" },
     { tradingDate: "2026-09-10", status: "complete" },
-    { tradingDate: "2026-09-11", status: "complete" },
-  ]);
+  ], ["2026-09-09"]);
   const [ticker] = await testDb("tickers").insert({ symbol: fileSymbol }).returning("id");
   tickerId = ticker.id;
   await testDb("daily_price_bars").insert([
@@ -114,7 +161,7 @@ beforeEach(() => {
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await testDb("backtest_sessions").where("name", "like", `${sessionNamePrefix}%`).del();
-  await testDb("backtest_jobs").whereIn("symbol", [fileSymbol, downloadSymbolA, downloadSymbolB]).del();
+  await testDb("backtest_jobs").whereIn("symbol", [fileSymbol, downloadSymbolA, downloadSymbolB, downloadSymbolC]).del();
   await testDb("daily_price_bars").where({ ticker_id: tickerId }).del();
   await testDb("tickers").where({ id: tickerId }).del();
   await testDb.destroy();
@@ -134,10 +181,23 @@ describe("backtest routes", () => {
     expect(template.settings.kellyFraction).toBe(kellyFraction);
     expect(template.settings.pluto.minEdgeYieldPct).toBe(Number(plutoRow.min_edge_yield_pct));
     expect(template.settings.trading).not.toHaveProperty("commissionEstimator");
-    expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(14).fill("Candidate quality"), ...Array(7).fill("Model")]);
+    expect(template.settings).toMatchObject({ decisionMaker: "rules", policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
+    expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(15).fill("Candidate quality"), ...Array(7).fill("Model"), ...Array(6).fill("Trading window and system checks"), ...Array(6).fill("Decisions (stand-in for the AI)")]);
     expect(template.rows[0]).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
-    expect(template.rows.find((row) => row.path === "pluto.maxActionsPerSession")).toMatchObject({ editable: false, note: "one look a day at 10:00 on one symbol: at most one order a day" });
+    // The looks inside Pluto's window and the system checks replayed at each: the window is shown, the checks can be changed.
+    expect(template.rows.filter((row) => row.group === "Trading window and system checks").map((row) => [row.path, row.unit, row.now, row.editable])).toEqual([
+      ["pluto.windowStartEt", "time", plutoRow.window_start_et, false],
+      ["pluto.windowEndEt", "time", plutoRow.window_end_et, false],
+      ["pluto.maxActionsPerSession", "integer", Number(plutoRow.max_actions_per_session), true],
+      ["pluto.tickerCooldownMinutes", "integer", Number(plutoRow.ticker_cooldown_minutes), true],
+      ["pluto.dailyLossBreakerPct", "percent", Number(plutoRow.daily_loss_breaker_pct), true],
+      ["pluto.spyStressBreakerPct", "percent", Number(plutoRow.spy_stress_breaker_pct), true],
+    ]);
+    expect(template.rows.find((row) => row.path === "pluto.maxActionsPerSession")).toMatchObject({ label: "Max orders per day", note: "across every symbol and every look of the day, automatic closes included" });
+    // The sector cap binds once a session runs several symbols on one book.
+    expect(template.rows.find((row) => row.path === "pluto.maxSectorExposurePct")).toMatchObject({ group: "Capital and sizing", label: "Max per sector", unit: "percent", editable: true, now: Number(plutoRow.max_sector_exposure_pct) });
     expect(template.rows.find((row) => row.path === "pluto.minGrade")?.now).toBe(plutoRow.min_grade);
+    expect(template.rows.find((row) => row.path === "fixed.earningsDateKnownCalendarDaysAhead")).toMatchObject({ group: "Candidate quality", label: "Earnings dates known 30 days ahead", unit: "days", now: 30, editable: false });
     const tradingRow = await testDb("trading_settings").first("max_position_pct_of_portfolio");
     expect(template.rows.slice(5, 9).map((row) => [row.path, row.label])).toEqual([
       ["pluto.minCashReservePct", "Min cash reserve"],
@@ -146,12 +206,34 @@ describe("backtest routes", () => {
       ["trading.minCashReservePct", "Min cash reserve (order gate)"],
     ]);
     expect(template.rows[6]).toMatchObject({ now: Number(tradingRow.max_position_pct_of_portfolio), editable: true, note: "% of the account" });
-    expect(template.rows.find((row) => row.path === "pluto.maxIvShiftVp")).toMatchObject({ editable: false, note: "no intraday quotes in the history: always 0 in a backtest" });
-    expect(template.rows.slice(-2).map((row) => [row.path, row.now, row.editable])).toEqual([
+    // A look after 10:00 measures how far each expiry's quotes moved from the 10:00 surface: the limit binds again.
+    expect(template.rows.find((row) => row.path === "pluto.maxIvShiftVp")).toMatchObject({ editable: true, now: Number(plutoRow.max_iv_shift_vp) });
+    expect(template.rows.slice(-14, -12).map((row) => [row.path, row.now, row.editable])).toEqual([
       ["fixed.forecastWindowDays", 21, false],
       ["fixed.gradeCutPoints", "20 / 10 / 0%", false],
     ]);
-    expect(template.notReplayed).toHaveLength(8);
+    // The decisions the AI model makes live, as choices: who decides, and the rules that stand in for it.
+    expect(template.rows.slice(-6).map((row) => [row.path, row.unit, row.now, row.editable, row.choices?.map((choice) => choice.value)])).toEqual([
+      ["decisionMaker", "choice", "rules", true, ["rules", "llm"]],
+      ["policy.roll", "choice", "flagged_legs", true, ["flagged_legs", "any_eligible", "never"]],
+      ["policy.buyback", "choice", "when_offered", true, ["when_offered", "never"]],
+      ["policy.sharesInProfit", "choice", "call_else_sell", true, ["call_else_sell", "always_sell", "always_keep"]],
+      ["policy.eventClose", "choice", "stress_vs_remaining", true, ["stress_vs_remaining", "never", "always"]],
+      ["policy.afterBlockedChoice", "choice", "try_next", true, ["try_next", "stop"]],
+    ]);
+    expect(template.rows.at(-1)).toMatchObject({ label: "After a choice Pluto's checks refuse", choices: [{ value: "try_next", label: "Choose again, but no more opens where the account has no room" }, { value: "stop", label: "Stop for this look" }] });
+    // The AI model can be picked once the Claude Code CLI is configured.
+    const decisionMakerChoices = async () => ((await request("GET", "/backtest/settings-template")).body as BacktestSettingsTemplate).rows.find((row) => row.path === "decisionMaker")?.choices;
+    expect(await withClaudeCliPath(undefined, decisionMakerChoices)).toEqual([
+      { value: "rules", label: "Rules (below)" },
+      { value: "llm", label: "The AI model", unavailableReason: "BACKTEST_CLAUDE_CLI_PATH is not set in the API's .env" },
+    ]);
+    expect(await withClaudeCliPath("/usr/local/bin/claude", decisionMakerChoices)).toEqual([
+      { value: "rules", label: "Rules (below)" },
+      { value: "llm", label: "The AI model" },
+    ]);
+    expect(template.notReplayed).toHaveLength(7);
+    expect(template.notReplayed.join(" ")).not.toMatch(/macro|daily-loss breaker and market stress|one look a day/i);
   });
 
   describe("downloads and jobs", () => {
@@ -181,6 +263,20 @@ describe("backtest routes", () => {
       expect(secondJob.displayStatus).toBe("queued");
       expect(spawnBacktestJobProcessMock).not.toHaveBeenCalled();
       expect((await request("POST", "/backtest/downloads", { symbol: downloadSymbolA })).status).toBe(409);
+    });
+
+    it("remove a queued download that never ran from the list altogether, and keep one that ran before as cancelled", async () => {
+      const [neverRan] = await testDb("backtest_jobs").insert({ kind: "download", symbol: downloadSymbolC, start_date: "2024-01-02", end_date: "2024-01-05", status: "queued" }).returning("id");
+      const removed = await request("POST", `/backtest/jobs/${neverRan.id}/cancel`);
+      expect(removed.body).toMatchObject({ id: neverRan.id, status: "cancelled", displayStatus: "cancelled" });
+      expect(await testDb("backtest_jobs").where({ id: neverRan.id }).first("id")).toBeUndefined();
+
+      const [ranBefore] = await testDb("backtest_jobs")
+        .insert({ kind: "download", symbol: downloadSymbolC, start_date: "2024-01-02", end_date: "2024-01-05", status: "queued", started_at: testDb.raw("now() - interval '1 hour'"), progress_done: 2, progress_total: 4, earlier_run_seconds: 30 })
+        .returning("id");
+      expect((await request("POST", `/backtest/jobs/${ranBefore.id}/cancel`)).body).toMatchObject({ status: "cancelled" });
+      expect((await testDb("backtest_jobs").where({ id: ranBefore.id }).first("status")).status).toBe("cancelled");
+      await testDb("backtest_jobs").where({ id: ranBefore.id }).delete();
     });
 
     it("show a running download whose heartbeat stopped as stopped, and start the next queued one", async () => {
@@ -250,6 +346,10 @@ describe("backtest routes", () => {
         lastDate: "2026-09-11",
         completeDays: 7,
         missingWeekdays: 1,
+        // One day recorded as impossible to retrieve; a file from before intraday quotes.
+        daysWithIssues: 0,
+        unavailableDays: 1,
+        intradayDays: null,
         barsFirstDate: "2016-01-04",
         barsLastDate: "2026-09-11",
         detectedSplits: null,
@@ -273,20 +373,74 @@ describe("backtest routes", () => {
     it("refuse a session outside the data file or without a file", async () => {
       expect((await request("POST", "/backtest/sessions", { ...sessionRequest("x"), endDate: "2026-09-14" })).body).toEqual({ error: `The ${fileSymbol} data file covers 2026-09-01 to 2026-09-11: the dates must be inside it.` });
       expect((await request("POST", "/backtest/sessions", { ...sessionRequest("x"), symbol: downloadSymbolA })).status).toBe(400);
-      expect((await request("POST", "/backtest/sessions", sessionRequest("x", { pluto: { maxActionsPerSession: 1 } }))).status).toBe(400);
+      expect((await request("POST", "/backtest/sessions", sessionRequest("x", { pluto: { windowStartEt: "11:00" } }))).body).toEqual({ error: "pluto.windowStartEt cannot be changed for a session." });
+      expect(await withClaudeCliPath(undefined, () => request("POST", "/backtest/sessions", sessionRequest("x", { decisionMaker: "llm" })))).toEqual({
+        status: 400,
+        body: { error: "The AI model as decision maker needs BACKTEST_CLAUDE_CLI_PATH in the API's .env (the Claude Code CLI to call): set it and restart the API." },
+      });
+      expect((await request("POST", "/backtest/sessions", sessionRequest("x", { policy: { roll: "sometimes" } }))).status).toBe(400);
+      expect((await request("POST", "/backtest/sessions", sessionRequest("x", { policy: { eventClose: "sometimes" } }))).status).toBe(400);
+    });
+
+    it("take the AI model as decision maker once the CLI is configured, with the calls and model time it may take", async () => {
+      const { status, body } = await withClaudeCliPath("/usr/local/bin/claude", () => request("POST", "/backtest/sessions", sessionRequest("llm", { decisionMaker: "llm" })));
+      expect(status).toBe(201);
+      const created = body as CreateBacktestSessionResponse;
+      // 2026-09-01 to 2026-09-11: 9 weekdays; the looks of a full day in Pluto's window, 1 to 2 calls each, 4.8 seconds a call.
+      const window = await testDb("pluto_settings").where({ id: 1 }).first("window_start_et", "window_end_et");
+      const looksPerDay = lookTimesInWindow(window.window_start_et, window.window_end_et, 16 * 60).length;
+      expect(looksPerDay).toBeGreaterThan(0);
+      expect(created.llmEstimate).toEqual({ tradingDays: 9, callsLow: 9 * looksPerDay, callsHigh: 18 * looksPerDay, modelHoursLow: Math.round(((9 * looksPerDay * 4.8) / 3600) * 10) / 10, modelHoursHigh: Math.round(((18 * looksPerDay * 4.8) / 3600) * 10) / 10 });
+      expect(created.session.overrideCount).toBe(1);
+      expect((await testDb("backtest_sessions").where({ id: created.session.id }).first("overrides")).overrides).toEqual({ decisionMaker: "llm" });
+      expect((await request("DELETE", `/backtest/sessions/${created.session.id}`)).status).toBe(204);
+    });
+
+    it("estimate a session before it starts: the AI model's calls and model time, nothing created, the same checks as creating it", async () => {
+      const sessionsBefore = await testDb("backtest_sessions").count({ total: "*" }).first();
+      const llm = await withClaudeCliPath("/usr/local/bin/claude", () => request("POST", "/backtest/sessions/estimate", sessionRequest("estimate", { decisionMaker: "llm" })));
+      expect(llm.status).toBe(200);
+      const window = await testDb("pluto_settings").where({ id: 1 }).first("window_start_et", "window_end_et");
+      const looksPerDay = lookTimesInWindow(window.window_start_et, window.window_end_et, 16 * 60).length;
+      expect((llm.body as { llmEstimate: unknown }).llmEstimate).toMatchObject({ tradingDays: 9, callsLow: 9 * looksPerDay, callsHigh: 18 * looksPerDay });
+      expect((llm.body as { warnings: string[] }).warnings).toEqual([`${fileSymbol}: 7 of its 7 days in the period have no intraday quotes: on those days it gets one look, at 10:00.`]);
+      expect((await request("POST", "/backtest/sessions/estimate", sessionRequest("estimate"))).body).toMatchObject({ llmEstimate: null });
+      const { name: _unnamed, ...withoutName } = sessionRequest("estimate");
+      expect((await request("POST", "/backtest/sessions/estimate", withoutName)).status).toBe(200);
+      expect((await withClaudeCliPath(undefined, () => request("POST", "/backtest/sessions/estimate", sessionRequest("estimate", { decisionMaker: "llm" })))).status).toBe(400);
+      expect((await request("POST", "/backtest/sessions/estimate", { ...sessionRequest("estimate"), endDate: "2026-09-14" })).status).toBe(400);
+      expect(await testDb("backtest_sessions").count({ total: "*" }).first()).toEqual(sessionsBefore);
+    });
+
+    it("refuse a period in which the file has weekdays with nothing stored, and take one with only days recorded as unavailable", async () => {
+      const partSession = (startDate: string, endDate: string) => ({ ...sessionRequest("part"), symbol: partFileSymbol, startDate, endDate });
+      expect(await request("POST", "/backtest/sessions", partSession("2026-09-01", "2026-09-10"))).toEqual({
+        status: 400,
+        // The 3rd, the 4th and Labor Day (no row says it was a holiday); the 9th is recorded as unavailable and is not one of them.
+        body: { error: `${partFileSymbol}'s file has 3 weekdays missing between 2026-09-03 and 2026-09-07: finish its download or shorten the period.` },
+      });
+      const { status, body } = await request("POST", "/backtest/sessions", partSession("2026-09-08", "2026-09-10"));
+      expect(status).toBe(201);
+      const created = body as CreateBacktestSessionResponse;
+      // The file has no intraday quotes: the session runs, and the answer says what that means.
+      expect(created.warnings).toEqual([`${partFileSymbol}: 2 of its 2 days in the period have no intraday quotes: on those days it gets one look, at 10:00.`]);
+      expect((await request("DELETE", `/backtest/sessions/${created.session.id}`)).status).toBe(204);
     });
 
     it("store the settings snapshot and only the changed values, and start the backtest job", async () => {
       const currentMinEdgeYield = Number((await testDb("pluto_settings").where({ id: 1 }).first("min_edge_yield_pct")).min_edge_yield_pct);
       const { status, body } = await request("POST", "/backtest/sessions", sessionRequest("edge", { pluto: { minEdgeYieldPct: currentMinEdgeYield + 5, maxAbsDelta: undefined }, kellyFraction }));
       expect(status).toBe(201);
-      ({ session, job: sessionJob } = body as { session: BacktestSessionListItem; job: BacktestJobView });
+      ({ session, job: sessionJob } = body as CreateBacktestSessionResponse);
+      expect((body as CreateBacktestSessionResponse).warnings).toEqual([`${fileSymbol}: 7 of its 7 days in the period have no intraday quotes: on those days it gets one look, at 10:00.`]);
+      expect((body as CreateBacktestSessionResponse).llmEstimate).toBeNull();
       expect(session).toMatchObject({ symbol: fileSymbol, startDate: "2026-09-01", endDate: "2026-09-11", startingValue: 1_000_000, tablesMode: "walk_forward", status: "queued", overrideCount: 1, metrics: null });
       expect(sessionJob).toMatchObject({ kind: "backtest", sessionId: session.id, sessionName: session.name, displayStatus: "running" });
       expect(spawnBacktestJobProcessMock).toHaveBeenCalledWith(sessionJob.id);
       const row = await testDb("backtest_sessions").where({ id: session.id }).first("settings_snapshot", "overrides");
       expect(row.overrides).toEqual({ pluto: { minEdgeYieldPct: currentMinEdgeYield + 5 } });
-      expect(Object.keys(row.settings_snapshot).sort()).toEqual(["kellyFraction", "pluto", "trading"]);
+      expect(Object.keys(row.settings_snapshot).sort()).toEqual(["decisionMaker", "kellyFraction", "pluto", "policy", "trading"]);
+      expect(row.settings_snapshot).toMatchObject({ decisionMaker: "rules", policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
       expect(row.settings_snapshot.pluto.minEdgeYieldPct).toBe(currentMinEdgeYield);
     });
 
@@ -327,7 +481,7 @@ describe("backtest routes", () => {
       const detail = body as BacktestSessionDetail;
       expect(detail.session).toMatchObject({ id: session.id, overrides: { pluto: expect.any(Object) }, baselineMetrics: null, dataLastDate: null, error: null, finishedAt: null });
       // Only the split inside 2026-09-01..11 (the cached schedule written above also has one ending on the 1st).
-      expect(detail.session.detectedSplits).toEqual([{ lastDayBefore: "2026-09-04", firstDayAfter: "2026-09-08", ratio: 2 }]);
+      expect(detail.session.detectedSplits).toEqual([{ symbol: fileSymbol, lastDayBefore: "2026-09-04", firstDayAfter: "2026-09-08", ratio: 2 }]);
       expect(detail.job?.id).toBe(sessionJob.id);
       expect(detail.days.map((day) => [day.tradingDate, day.accountValue, day.dailyReturn, day.drawdown])).toEqual([
         ["2026-09-01", 1_000_000, null, 0],
@@ -335,11 +489,111 @@ describe("backtest routes", () => {
         ["2026-09-03", 999_900, -0.01, 999_900 / 1_010_000 - 1],
       ]);
       expect(detail.days[1]).toMatchObject({ cash: 1_000_100, exposureDollars: 40_000, interestDollars: 11.5, baselineValue: 990_000, baselineDailyReturn: -0.01 });
-      expect(detail.monthlyReturns).toEqual([{ month: "2026-09", sessionReturn: 999_900 / 1_000_000 - 1, baselineReturn: 0 }]);
+      expect(detail.monthlyReturns).toEqual([{ month: "2026-09", sessionReturn: 999_900 / 1_000_000 - 1, baselineReturn: 0, spyBaselineReturn: null }]);
       expect(detail.trades).toHaveLength(1);
       expect(detail.trades[0]).toMatchObject({ openedOn: "2026-09-01", expiry: "2026-09-11", strike: 40, fillPrice: 0.525, sharePriceAtOpen: null, delta: -0.22, edgeYield: null, settledOn: "2026-09-11", inTheMoneyAtExpiry: false, pnlDollars: 518.2 });
       expect(typeof detail.trades[0]!.id).toBe("number");
-      expect(detail.accuracyByMarginBand.find((band) => band.label === "10–20%")).toEqual({ label: "10–20%", tradeCount: 1, predictedPnlDollars: 400, calibratedPnlDollars: 300, realizedPnlDollars: 518.2 });
+      expect(detail.accuracyByMarginBand.find((band) => band.label === "10–20%")).toEqual({ label: "10–20%", tradeCount: 1, cycleCount: null, predictedPnlDollars: 400, calibratedPnlDollars: 300, realizedPnlDollars: 518.2 });
+      // A session stored before the wheel was simulated has no book: its trade row has no leg or ending, the rest is empty.
+      expect(detail.trades[0]).toMatchObject({ legId: null, endedBy: null });
+      expect(detail).toMatchObject({ positions: [], cycles: [], tickerStatistics: [], allSymbolsStatistics: null, bookCounts: { filledActions: 0, blockedActions: 0, fills: 0 } });
+      // Its symbol comes from the session.
+      expect(detail.trades[0]!.symbol).toBe(fileSymbol);
+    });
+
+    it("return a session's simulated book: positions with their legs, wheel cycles and the per-ticker statistics, and its actions and fills page by page", async () => {
+      const at = "2026-09-01T14:00:00.000Z";
+      const settledAt = "2026-09-04T20:00:00.000Z";
+      const bucket = { premium: 0, stock: 0, total: 0, capital: 0 };
+      await testDb("backtest_positions").insert([
+        { session_id: session.id, position_id: "position-4", sequence: 1, symbol: fileSymbol, strategy_key: "unstructured", status: "open", opened_at: settledAt, unstructured_reason: "csp_assigned_stock", capital_at_risk_dollars: 4000, capital_deployed_dollars: 4000, realized_pnl_dollars: 0, realized_premium_pnl_dollars: 0, realized_stock_pnl_dollars: 0, unrealized_pnl_dollars: -150, share_source_position_ids: JSON.stringify(["position-1"]) },
+        { session_id: session.id, position_id: "position-1", sequence: 0, symbol: fileSymbol, strategy_key: "cash_secured_put", status: "closed", opened_at: at, closed_at: settledAt, close_reason: "assigned", capital_at_risk_dollars: 3950, capital_deployed_dollars: 3950, realized_pnl_dollars: 49.32, realized_premium_pnl_dollars: 49.32, realized_stock_pnl_dollars: 0, unrealized_pnl_dollars: null },
+      ]);
+      await testDb("backtest_position_legs").insert([
+        { session_id: session.id, leg_id: "leg-5", sequence: 1, position_id: "position-4", leg_type: "stock", side: "long", quantity: 100, multiplier: 1, entry_price: 40, entry_at: settledAt },
+        { session_id: session.id, leg_id: "leg-2", sequence: 0, position_id: "position-1", leg_type: "option", side: "short", quantity: 1, option_type: "put", strike_price: 40, expiry_date: "2026-09-04", multiplier: 100, entry_price: 0.4932, entry_at: at, exit_price: 0, exit_at: settledAt, settled_as: "assigned", expiry_close: 38.5, dte_at_entry: 3, realized_pnl_dollars: 49.32 },
+      ]);
+      await testDb("backtest_fills").insert([
+        { session_id: session.id, fill_id: "trade-6", sequence: 1, position_id: "position-4", leg_id: "leg-5", symbol: fileSymbol, instrument: "stock", side: "buy", quantity: 100, multiplier: 1, price: 40, commission_dollars: 0, executed_at: settledAt, trading_date: "2026-09-04", is_closing: false, action_id: null },
+        { session_id: session.id, fill_id: "trade-3", sequence: 0, position_id: "position-1", leg_id: "leg-2", symbol: fileSymbol, instrument: "option", side: "sell", quantity: 1, multiplier: 100, price: 0.5, commission_dollars: 0.68, executed_at: at, trading_date: "2026-09-01", is_closing: false, action_id: "action-1" },
+      ]);
+      await testDb("backtest_actions").insert([
+        { session_id: session.id, action_id: "action-2", sequence: 1, trading_date: "2026-09-02", at: "2026-09-02T14:00:00.000Z", pass_number: 1, symbol: fileSymbol, kind: "open_cash_secured_put", candidate_id: `${fileSymbol}:open:2`, description: `${fileSymbol} Sell $39 Put · 11 Sep (9DTE)`, automatic: false, chosen_because: "Pluto's top pick by Edge Yield", outcome: "blocked", block_reason: "sizing: no room", gate_results: JSON.stringify([{ gate: "sizing", ok: false, detail: "no room" }]) },
+        { session_id: session.id, action_id: "action-1", sequence: 0, trading_date: "2026-09-01", at, pass_number: 1, symbol: fileSymbol, kind: "open_cash_secured_put", candidate_id: `${fileSymbol}:open:1`, description: `${fileSymbol} Sell $40 Put · 4 Sep (3DTE) · 1× @ 0.50`, automatic: false, chosen_because: "Pluto's top pick by Edge Yield", outcome: "filled", gate_results: JSON.stringify([{ gate: "sizing", ok: true, detail: "1 contract" }]), contract: JSON.stringify({ strategyKey: "cash_secured_put", expiry: "2026-09-04", strike: 40, right: "P" }), candidate_scores: JSON.stringify({ dte: 3 }), quantity: 1, limit_price: 0.5, fill_price: 0.5, position_ids: JSON.stringify(["position-1"]) },
+      ]);
+      await testDb("backtest_cycles").insert({ session_id: session.id, symbol: fileSymbol, cycle_number: 1, status: "open", opened_at: at, opened_on: "2026-09-01", assigned_on: "2026-09-04", age_sessions: 5, total_dollars: -100.68, net_premium_dollars: 49.32, shares_held: 100, break_even_per_share: 39.5068, buckets: JSON.stringify({ csp: { ...bucket, premium: 49.32, stock: -150, total: -100.68, capital: 4000 }, unstructured: bucket, cc: bucket, hedge: bucket }), data_flags: JSON.stringify([]) });
+
+      const detail = (await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail;
+      // In the order the simulated book created them, whatever order the rows were stored in.
+      expect(detail.positions.map((position) => [position.positionId, position.strategyKey, position.status, position.closeReason, position.legs.map((leg) => leg.legId)])).toEqual([
+        ["position-1", "cash_secured_put", "closed", "assigned", ["leg-2"]],
+        ["position-4", "unstructured", "open", null, ["leg-5"]],
+      ]);
+      expect(detail.positions[0]).toMatchObject({ openedAt: at, closedAt: settledAt, realizedPnlDollars: 49.32, unrealizedPnlDollars: null, shareSourcePositionIds: [] });
+      expect(detail.positions[0]!.legs[0]).toEqual({ legId: "leg-2", parentLegId: null, legType: "option", side: "short", quantity: 1, optionType: "put", strike: 40, expiry: "2026-09-04", multiplier: 100, entryPrice: 0.4932, entryAt: at, exitPrice: 0, exitAt: settledAt, settledAs: "assigned", expiryClose: 38.5, dteAtEntry: 3, realizedPnlDollars: 49.32, priceScale: 1 });
+      expect(detail.positions[1]).toMatchObject({ unstructuredReason: "csp_assigned_stock", unrealizedPnlDollars: -150, shareSourcePositionIds: ["position-1"] });
+      // Each position names the wheel cycle running when it opened: the put and the shares it put to the book are one cycle.
+      expect(detail.positions.map((position) => [position.positionId, position.cycleNumber, position.cycleLabel])).toEqual([
+        ["position-1", 1, `${fileSymbol} #1`],
+        ["position-4", 1, `${fileSymbol} #1`],
+      ]);
+      // The actions and fills are not in the detail: it carries their counts, and they are read through their own pages.
+      expect(detail).not.toHaveProperty("actions");
+      expect(detail).not.toHaveProperty("fills");
+      expect(detail.bookCounts).toEqual({ filledActions: 1, blockedActions: 1, fills: 2 });
+      const bookUrl = `/backtest/sessions/${session.id}`;
+      const fillsPage = (await request("GET", `${bookUrl}/fills`)).body as BacktestFillsPage;
+      expect(fillsPage).toEqual({
+        fills: [
+          { fillId: "trade-3", positionId: "position-1", legId: "leg-2", symbol: fileSymbol, instrument: "option", side: "sell", quantity: 1, multiplier: 100, price: 0.5, priceScale: 1, commissionDollars: 0.68, executedAt: at, tradingDate: "2026-09-01", isClosing: false, actionId: "action-1" },
+          { fillId: "trade-6", positionId: "position-4", legId: "leg-5", symbol: fileSymbol, instrument: "stock", side: "buy", quantity: 100, multiplier: 1, price: 40, priceScale: 1, commissionDollars: 0, executedAt: settledAt, tradingDate: "2026-09-04", isClosing: false, actionId: null },
+        ],
+        total: 2,
+        limit: 200,
+        offset: 0,
+      });
+      const actionsPage = (await request("GET", `${bookUrl}/actions`)).body as BacktestActionsPage;
+      expect(actionsPage).toMatchObject({ total: 2, limit: 200, offset: 0 });
+      expect(actionsPage.actions.map((action) => [action.actionId, action.tradingDate, action.outcome, action.blockReason, action.fillPrice, action.positionIds])).toEqual([
+        ["action-1", "2026-09-01", "filled", null, 0.5, ["position-1"]],
+        ["action-2", "2026-09-02", "blocked", "sizing: no room", null, []],
+      ]);
+      expect(actionsPage.actions[0]).toMatchObject({ at, passNumber: 1, kind: "open_cash_secured_put", automatic: false, gateResults: [{ gate: "sizing", ok: true, detail: "1 contract" }], contract: { strategyKey: "cash_secured_put", expiry: "2026-09-04", strike: 40, right: "P" }, candidateScores: { dte: 3 }, quantity: 1, limitPrice: 0.5 });
+      // Filters (trading dates inclusive, symbol, the actions' outcome) and pages; total counts what the filters match.
+      const actionIds = async (query: string) => ((await request("GET", `${bookUrl}/actions?${query}`)).body as BacktestActionsPage).actions.map((action) => action.actionId);
+      const fillIds = async (query: string) => ((await request("GET", `${bookUrl}/fills?${query}`)).body as BacktestFillsPage).fills.map((fill) => fill.fillId);
+      expect(await actionIds("outcome=blocked")).toEqual(["action-2"]);
+      expect(await actionIds("from=2026-09-02")).toEqual(["action-2"]);
+      expect(await actionIds("to=2026-09-01")).toEqual(["action-1"]);
+      expect(await actionIds(`symbol=${fileSymbol.toLowerCase()}&from=2026-09-01&to=2026-09-02`)).toEqual(["action-1", "action-2"]);
+      expect(await actionIds("symbol=ZZZZ")).toEqual([]);
+      expect((await request("GET", `${bookUrl}/actions?limit=1&offset=1`)).body).toMatchObject({ actions: [expect.objectContaining({ actionId: "action-2" })], total: 2, limit: 1, offset: 1 });
+      expect(await fillIds("from=2026-09-02&to=2026-09-04")).toEqual(["trade-6"]);
+      expect(await fillIds("limit=1")).toEqual(["trade-3"]);
+      expect((await request("GET", `${bookUrl}/fills?to=2026-09-01`)).body).toMatchObject({ total: 1 });
+      expect(await request("GET", `${bookUrl}/actions?from=1%20Sep`)).toEqual({ status: 400, body: { error: "from must be a date (YYYY-MM-DD)." } });
+      expect(await request("GET", `${bookUrl}/actions?from=2026-09-05&to=2026-09-01`)).toEqual({ status: 400, body: { error: "from must be on or before to." } });
+      expect(await request("GET", `${bookUrl}/actions?outcome=maybe`)).toEqual({ status: 400, body: { error: "outcome must be filled or blocked." } });
+      expect(await request("GET", `${bookUrl}/actions?limit=1001`)).toEqual({ status: 400, body: { error: "limit must be a whole number from 1 to 1000." } });
+      expect(await request("GET", `${bookUrl}/fills?offset=-1`)).toEqual({ status: 400, body: { error: "offset must be a whole number from 0." } });
+      expect(await request("GET", `${bookUrl}/fills?outcome=filled`)).toEqual({ status: 400, body: { error: "outcome filters actions only." } });
+      expect((await request("GET", "/backtest/sessions/00000000-0000-4000-8000-000000000000/actions")).status).toBe(404);
+      expect((await request("GET", "/backtest/sessions/00000000-0000-4000-8000-000000000000/fills")).status).toBe(404);
+      expect(detail.cycles).toEqual([expect.objectContaining({ symbol: fileSymbol, cycleNumber: 1, status: "open", openedAt: at, closedAt: null, openedOn: "2026-09-01", closedOn: null, assignedOn: "2026-09-04", recoverySessions: null, ageSessions: 5, totalDollars: -100.68, netPremiumDollars: 49.32, sharesHeld: 100, breakEvenPerShare: 39.5068, dataFlags: [] })]);
+      expect(detail.cycles[0]!.buckets.csp).toEqual({ premium: 49.32, stock: -150, total: -100.68, capital: 4000 });
+      // Computed from the positions and cycles when the session is read.
+      expect(detail.tickerStatistics).toEqual([
+        { symbol: fileSymbol, optionSaleCount: 1, averageTradedDte: 3, putPositionCount: 1, putPositionsEnded: 1, putPositionsAssigned: 1, putAssignedShare: 1, realizedPnlDollars: 49.32, totalPnlDollars: -100.68, closedCycleCount: 0, openCycleCount: 1, recoverySessions: { count: 0, mean: null, median: null, longest: null }, openCycles: [{ symbol: fileSymbol, cycleNumber: 1, openedOn: "2026-09-01", assignedOn: "2026-09-04", ageSessions: 5, totalDollars: -100.68, sharesHeld: 100 }] },
+      ]);
+      // The same figures over every symbol together, and a session narrowed to one symbol.
+      expect(detail.allSymbolsStatistics).toEqual({ ...detail.tickerStatistics[0]!, symbol: "All symbols" });
+      const otherSymbol = (await request("GET", `/backtest/sessions/${session.id}?symbol=zzzz`)).body as BacktestSessionDetail;
+      expect(otherSymbol).toMatchObject({ trades: [], positions: [], cycles: [], tickerStatistics: [], allSymbolsStatistics: null });
+      expect(otherSymbol.days).toHaveLength(3);
+      const sameSymbol = (await request("GET", `/backtest/sessions/${session.id}?symbol=${fileSymbol.toLowerCase()}`)).body as BacktestSessionDetail;
+      expect(sameSymbol.positions).toHaveLength(2);
+      expect(sameSymbol.trades).toHaveLength(1);
+      expect((await request("GET", `/backtest/sessions/${session.id}?symbol=1abc`)).status).toBe(400);
     });
 
     it("compare sessions with one buy-and-hold curve per symbol, period and starting value", async () => {
@@ -357,6 +611,20 @@ describe("backtest routes", () => {
         [`baseline:${session.id}`, `Buy and hold · ${fileSymbol}`, 3],
       ]);
       expect(comparison.curves[2]!.points[1]).toEqual({ tradingDate: "2026-09-02", value: 990_000 });
+      // The wheel cycles of a finished session measured per cycle, and how each session measures P&L.
+      const { pnl_basis: pnlBasisBefore, status: statusBefore } = await testDb("backtest_sessions").where({ id: session.id }).first("pnl_basis", "status");
+      await testDb("backtest_sessions").where({ id: session.id }).update({ pnl_basis: "wheel_cycle", status: "succeeded" });
+      try {
+        const finished = (await request("GET", `/backtest/compare?ids=${session.id},${secondSession.id}`)).body as BacktestCompareResponse;
+        expect(finished.sessions.map((entry) => [entry.pnlBasis, entry.wheelCycles])).toEqual([
+          ["wheel_cycle", { cycleCount: 1, closedCycleCount: 0, openCycleCount: 1, totalPnlDollars: -100.68, openCyclePnlDollars: -100.68 }],
+          [secondSession.pnlBasis, null],
+        ]);
+        const listed = ((await request("GET", "/backtest/overview")).body as BacktestOverview).sessions.find((entry) => entry.id === session.id)!;
+        expect(listed).toMatchObject({ pnlBasis: "wheel_cycle", wheelCycles: { openCycleCount: 1, totalPnlDollars: -100.68 } });
+      } finally {
+        await testDb("backtest_sessions").where({ id: session.id }).update({ pnl_basis: pnlBasisBefore, status: statusBefore });
+      }
       expect((await request("GET", "/backtest/compare?ids=nope")).status).toBe(400);
       expect((await request("GET", "/backtest/compare?ids=00000000-0000-4000-8000-000000000000")).status).toBe(404);
     });
@@ -366,12 +634,46 @@ describe("backtest routes", () => {
       expect(sessions.map((entry) => entry.id)).toEqual([secondSession.id, session.id]);
     });
 
+    it("take a list of symbols for one book, inside the period all their files cover", async () => {
+      const several = (startDate: string, endDate: string) => ({ name: `${sessionNamePrefix} several`, symbols: [fileSymbol.toLowerCase(), secondFileSymbol], startDate, endDate, startingValue: 1_000_000, tablesMode: "walk_forward", overrides: {} });
+      expect(await request("POST", "/backtest/sessions", several("2026-09-01", "2026-09-11"))).toEqual({
+        status: 400,
+        body: { error: `The data files together cover 2026-09-02 to 2026-09-10 (${secondFileSymbol} starts 2026-09-02, ${secondFileSymbol} ends 2026-09-10): the dates must be inside that.` },
+      });
+      expect((await request("POST", "/backtest/sessions", { ...several("2026-09-02", "2026-09-10"), symbols: [fileSymbol, downloadSymbolA] })).body).toEqual({ error: `There is no data file for ${downloadSymbolA}: download it first.` });
+
+      const { status, body } = await request("POST", "/backtest/sessions", several("2026-09-02", "2026-09-10"));
+      expect(status).toBe(201);
+      const created = body as { session: BacktestSessionListItem; job: BacktestJobView };
+      const symbolsLabel = `${fileSymbol}, ${secondFileSymbol}`;
+      expect(created.session).toMatchObject({ symbol: symbolsLabel, symbols: [fileSymbol, secondFileSymbol], startDate: "2026-09-02", endDate: "2026-09-10", status: "queued" });
+      expect(created.job).toMatchObject({ kind: "backtest", symbol: symbolsLabel, sessionId: created.session.id });
+      const row = await testDb("backtest_sessions").where({ id: created.session.id }).first("symbol", "symbols");
+      expect(row).toEqual({ symbol: symbolsLabel, symbols: [fileSymbol, secondFileSymbol] });
+      // The list, the detail and the comparison show the symbols; buy and hold is one curve for the list.
+      const listed = ((await request("GET", "/backtest/overview")).body as BacktestOverview).sessions.find((entry) => entry.id === created.session.id)!;
+      expect(listed.symbols).toEqual([fileSymbol, secondFileSymbol]);
+      const detail = (await request("GET", `/backtest/sessions/${created.session.id}`)).body as BacktestSessionDetail;
+      expect(detail.session).toMatchObject({ symbol: symbolsLabel, symbols: [fileSymbol, secondFileSymbol] });
+      // Splits are listed per symbol (the cached schedule written above is the first symbol's).
+      expect(detail.session.detectedSplits).toEqual([{ symbol: fileSymbol, lastDayBefore: "2026-09-04", firstDayAfter: "2026-09-08", ratio: 2 }]);
+      const comparison = (await request("GET", `/backtest/compare?ids=${created.session.id},${session.id}`)).body as BacktestCompareResponse;
+      expect(comparison.sessions.map((entry) => entry.symbols)).toEqual([[fileSymbol, secondFileSymbol], [fileSymbol]]);
+      expect(comparison.curves.map((curve) => curve.label)).toEqual([created.session.name, session.name, `Buy and hold · ${symbolsLabel}`, `Buy and hold · ${fileSymbol}`]);
+      // A request written before sessions took a list still names one symbol.
+      const single = (await request("POST", "/backtest/sessions", { name: `${sessionNamePrefix} single`, symbol: fileSymbol, startDate: "2026-09-01", endDate: "2026-09-11", startingValue: 1_000_000, tablesMode: "walk_forward", overrides: {} })).body as { session: BacktestSessionListItem };
+      expect(single.session).toMatchObject({ symbol: fileSymbol, symbols: [fileSymbol] });
+      expect((await request("DELETE", `/backtest/sessions/${created.session.id}`)).status).toBe(204);
+      expect((await request("DELETE", `/backtest/sessions/${single.session.id}`)).status).toBe(204);
+    });
+
     it("delete a session after stopping its running job", async () => {
       expect((await request("DELETE", `/backtest/sessions/${session.id}`)).status).toBe(204);
       expect(terminateLeftoverJobProcessesMock).toHaveBeenCalledWith(424_242, sessionJob.id);
       expect(await testDb("backtest_sessions").where({ id: session.id }).first()).toBeUndefined();
       expect(await testDb("backtest_jobs").where({ id: sessionJob.id }).first()).toBeUndefined();
       expect(await testDb("backtest_session_days").where({ session_id: session.id }).first()).toBeUndefined();
+      for (const table of ["backtest_positions", "backtest_position_legs", "backtest_fills", "backtest_actions", "backtest_cycles"]) expect(await testDb(table).where({ session_id: session.id }).first()).toBeUndefined();
       expect((await request("GET", `/backtest/sessions/${session.id}`)).status).toBe(404);
       expect((await request("DELETE", `/backtest/sessions/${session.id}`)).status).toBe(404);
     });

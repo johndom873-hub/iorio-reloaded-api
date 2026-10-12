@@ -43,7 +43,14 @@ export interface CycleOptionLeg {
   expiryDate: string;
   /** Daily close on expiryDate, null when no bar exists. */
   expiryClose: number | null;
+  /**
+   * How the leg settled at expiry, when that is known rather than inferred: a simulated book settles by its own rule and says
+   * so. Live leaves it unset, and the outcome is inferred from expiryClose (in the money by $0.05 or more = assigned).
+   */
+  settledAs?: OptionSettlementOutcome;
 }
+
+export type OptionSettlementOutcome = "assigned" | "worthless";
 
 export interface CycleStockLeg {
   positionId?: string;
@@ -154,6 +161,13 @@ function isSettledWithoutTrade(leg: CycleOptionLeg): boolean {
   return leg.side === "short" && leg.exitAt !== null && !leg.hasClosingTrade && (leg.exitPrice === 0 || leg.exitPrice === null);
 }
 
+/** Whether a leg that settled without a trade was assigned: its explicit settlement when given, else in the money by the threshold at the expiry close. */
+function settledAssigned(leg: CycleOptionLeg): boolean {
+  if (leg.expiryClose === null) return false;
+  if (leg.settledAs !== undefined) return leg.settledAs === "assigned";
+  return (leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose) >= marginalThreshold;
+}
+
 // IBKR reports a put assignment as a real stock buy at the strike, which the worker records as a trade, while the
 // ledger already infers the same assignment from the expired-ITM option leg (putAssigned). Counting both doubles
 // the shares, so the trade is dropped when it matches an inferred assignment: same share count, price equal to the
@@ -169,8 +183,7 @@ function dropInferredAssignmentFills(stockTrades: CycleStockTrade[], optionLegs:
         !absorbingLegIds.has(leg.id) &&
         leg.optionType === "put" &&
         isSettledWithoutTrade(leg) &&
-        leg.expiryClose !== null &&
-        leg.strike - leg.expiryClose >= marginalThreshold &&
+        settledAssigned(leg) &&
         trade.quantity === leg.quantity * leg.multiplier &&
         Math.abs(trade.price - leg.strike) < 0.00005 &&
         Math.abs(trade.at.getTime() - leg.exitAt!.getTime()) <= assignmentFillWindowMs,
@@ -251,14 +264,17 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     events.push({ at: leg.entryAt.getTime(), kind: "optionOpen", shares: leg.quantity * leg.multiplier, price: 0, leg });
     if (leg.exitAt === null) continue;
     if (isSettledWithoutTrade(leg)) {
-      if (leg.expiryClose === null) {
+      const assignedEvent = (): RawEvent => ({ at: leg.exitAt!.getTime(), kind: leg.optionType === "put" ? "putAssigned" : "callAssigned", shares: leg.quantity * leg.multiplier, price: leg.strike, leg, expiryClose: leg.expiryClose });
+      if (leg.settledAs === "worthless") {
+        // Settled worthless by the book's own rule: no shares moved, whatever the bar says.
+      } else if (leg.expiryClose === null) {
         dataFlags.push(`no expiry-date price bar for ${leg.optionType} $${leg.strike} (${leg.expiryDate})`);
+      } else if (leg.settledAs === "assigned") {
+        events.push(assignedEvent());
       } else {
         const inTheMoneyBy = leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose;
         if (inTheMoneyBy > 0 && inTheMoneyBy < marginalThreshold) dataFlags.push(`${leg.optionType} $${leg.strike} (${leg.expiryDate}) expired within $${marginalThreshold} of the strike — assignment unclear`);
-        else if (inTheMoneyBy >= marginalThreshold) {
-          events.push({ at: leg.exitAt.getTime(), kind: leg.optionType === "put" ? "putAssigned" : "callAssigned", shares: leg.quantity * leg.multiplier, price: leg.strike, leg, expiryClose: leg.expiryClose });
-        }
+        else if (inTheMoneyBy >= marginalThreshold) events.push(assignedEvent());
       }
     }
     events.push({ at: leg.exitAt.getTime(), kind: "optionClose", shares: leg.quantity * leg.multiplier, price: 0, leg });
@@ -296,44 +312,62 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     index = groupEnd + 1;
     const poolValueBefore = { cc: pools.cc.shares * pools.cc.ref, unstructured: pools.unstructured.shares * pools.unstructured.ref };
 
-    // 3a. Disposals first: covered shares (CC pool) leave before uncovered ones.
-    for (const event of group.filter((e) => e.kind === "sell" || e.kind === "callAssigned")) {
-      let remaining = event.shares;
-      for (const pool of ["cc", "unstructured"] as const) {
-        const taken = Math.min(remaining, pools[pool].shares);
-        if (taken <= 0) continue;
-        const stockPnl = taken * (event.price - pools[pool].ref);
-        addRow(
-          event.at,
-          event.kind === "sell" ? "Sold shares" : "Call assigned: shares called away at the strike",
-          pool === "cc" ? "cc" : "unstructured",
-          0,
-          stockPnl,
-          event.kind === "sell"
-            ? { instrument: "stock", quantity: taken, strike: null, stockPrice: event.fillPrice ?? event.price }
-            : { instrument: "option", quantity: taken, strike: event.price, stockPrice: event.expiryClose ?? null },
-        );
-        pools[pool].shares -= taken;
-        remaining -= taken;
+    // 3a. Disposals: covered shares (CC pool) leave before uncovered ones.
+    const disposals = group.filter((e) => e.kind === "sell" || e.kind === "callAssigned");
+    const disposeShares = () => {
+      for (const event of disposals) {
+        let remaining = event.shares;
+        for (const pool of ["cc", "unstructured"] as const) {
+          const taken = Math.min(remaining, pools[pool].shares);
+          if (taken <= 0) continue;
+          const stockPnl = taken * (event.price - pools[pool].ref);
+          addRow(
+            event.at,
+            event.kind === "sell" ? "Sold shares" : "Call assigned: shares called away at the strike",
+            pool === "cc" ? "cc" : "unstructured",
+            0,
+            stockPnl,
+            event.kind === "sell"
+              ? { instrument: "stock", quantity: taken, strike: null, stockPrice: event.fillPrice ?? event.price }
+              : { instrument: "option", quantity: taken, strike: event.price, stockPrice: event.expiryClose ?? null },
+          );
+          pools[pool].shares -= taken;
+          remaining -= taken;
+        }
+        if (remaining > 0) dataFlags.push(`${remaining} sh sold/called away that the ledger never acquired`);
       }
-      if (remaining > 0) dataFlags.push(`${remaining} sh sold/called away that the ledger never acquired`);
-    }
+    };
 
     // 3b. Acquisitions enter the Unstructured pool at their real cost; an assigned put charges the CSP bucket first.
+    const acquisitions = group.filter((e) => e.kind === "buy" || e.kind === "putAssigned");
     let purchasedShares = 0;
     let purchaseCostTotal = 0;
     const groupBuys: RawEvent[] = [];
-    for (const event of group.filter((e) => e.kind === "buy" || e.kind === "putAssigned")) {
-      if (event.kind === "putAssigned") {
-        const marketPrice = event.expiryClose!;
-        addRow(event.at, "Put assigned: shares bought at the strike", "csp", 0, event.shares * (marketPrice - event.price), { instrument: "option", quantity: event.shares, strike: event.price, stockPrice: marketPrice });
-        enterPool("unstructured", event.shares, marketPrice);
-      } else {
-        enterPool("unstructured", event.shares, event.price);
-        purchasedShares += event.shares;
-        purchaseCostTotal += event.shares * event.price;
-        groupBuys.push(event);
+    const acquireShares = () => {
+      for (const event of acquisitions) {
+        if (event.kind === "putAssigned") {
+          const marketPrice = event.expiryClose!;
+          addRow(event.at, "Put assigned: shares bought at the strike", "csp", 0, event.shares * (marketPrice - event.price), { instrument: "option", quantity: event.shares, strike: event.price, stockPrice: marketPrice });
+          enterPool("unstructured", event.shares, marketPrice);
+        } else {
+          enterPool("unstructured", event.shares, event.price);
+          purchasedShares += event.shares;
+          purchaseCostTotal += event.shares * event.price;
+          groupBuys.push(event);
+        }
       }
+    };
+
+    // Disposals go first, unless they take more shares than the pools hold while the group also acquires some: those
+    // shares were bought and sold within the same moment (a simulated look that opens a buy-write and closes it in its
+    // next pass stamps both fills with the look's instant), so the acquisitions come first.
+    const sharesDisposed = disposals.reduce((sum, e) => sum + e.shares, 0);
+    if (acquisitions.length > 0 && sharesDisposed > pools.cc.shares + pools.unstructured.shares) {
+      acquireShares();
+      disposeShares();
+    } else {
+      disposeShares();
+      acquireShares();
     }
 
     // 3c. Premium rows and the open-call count.

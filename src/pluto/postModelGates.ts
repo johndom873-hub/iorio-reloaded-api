@@ -247,7 +247,15 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
   gate("working_order", !book.workingOrderOnSymbol, book.workingOrderOnSymbol ? "a Pluto order on this symbol is already working" : "no working Pluto order on the symbol");
   const cooldown = tickerCooldownStatus(book.lastFilledActionAt, book.nowMs, settings.tickerCooldownMinutes);
   gate("ticker_cooldown", cooldown.cooledDown, cooldown.detail);
-  if (!isRoll) gate("open_positions_cap", book.openPositionCount < settings.maxOpenPositions, `${book.openPositionCount} of ${settings.maxOpenPositions} managed positions`);
+  // A call on shares already held covers a position the book already counts (the shares): the cap is for new exposure only.
+  const coversHeldShares = !isRoll && candidate.strategyKey === "covered_call" && book.freeShares >= 100;
+  if (!isRoll) {
+    gate(
+      "open_positions_cap",
+      coversHeldShares || book.openPositionCount < settings.maxOpenPositions,
+      coversHeldShares ? `a call on shares already held adds no new exposure (${book.openPositionCount} of ${settings.maxOpenPositions} managed positions)` : `${book.openPositionCount} of ${settings.maxOpenPositions} managed positions`,
+    );
+  }
   gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${describeOptionContract({ strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", expiry: candidate.expiry, dte: candidate.dte })}`);
 
   // Sizing in dollars: the standard order size, less only where a tighter limit binds; contracts follow from it. A contract's

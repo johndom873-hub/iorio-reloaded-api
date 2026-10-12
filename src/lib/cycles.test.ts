@@ -134,3 +134,38 @@ describe("hedge (long option) legs", () => {
     expect(withHedge.breakEvenPerShare).toBeCloseTo(without.breakEvenPerShare!, 6);
   });
 });
+
+describe("shares bought and sold within the same moment", () => {
+  // 500 shares held since 10 September at 20.00; on the 15th a buy-write's 2,400 shares are bought at 23.32 and, in
+  // the same look of a simulated book, sold at 23.30: both fills carry the same instant.
+  const heldSince = new Date("2026-09-10T15:00:00Z");
+  const sameMoment = new Date("2026-09-15T15:00:00Z");
+  const input: CycleInput = {
+    optionLegs: [],
+    stockLegs: [
+      { positionId: "pos-held", quantity: 500, entryAt: heldSince, exitAt: null },
+      { positionId: "pos-buy-write", quantity: 2400, entryAt: sameMoment, exitAt: sameMoment },
+    ],
+    stockTrades: [
+      { at: heldSince, side: "buy", quantity: 500, price: 20, commission: 0 },
+      { at: sameMoment, side: "buy", quantity: 2400, price: 23.32, commission: 0 },
+      { at: sameMoment, side: "sell", quantity: 2400, price: 23.3, commission: 0 },
+    ],
+    dailyCloses: new Map([["2026-09-16", 21]]),
+    lastPrice: { date: "2026-09-16", price: 21 },
+    openPositionPremiumPnl: new Map(),
+  };
+
+  it("takes the shares in before selling them: nothing is sold that was never acquired, and the 500 stay held", () => {
+    const cycle = openCycle(input);
+    expect(cycle.dataFlags).toEqual([]);
+    expect(cycle.sharesHeld).toBe(500);
+    // 500 × (21 − 20) on the shares still held + 2,400 × (23.30 − 23.32) on the round trip.
+    expect(cycle.total).toBeCloseTo(500 - 48, 6);
+  });
+
+  it("still flags a sale larger than every share the group and the cycle acquired", () => {
+    const cycle = openCycle({ ...input, stockTrades: input.stockTrades.map((trade) => (trade.side === "sell" ? { ...trade, quantity: 3000 } : trade)) });
+    expect(cycle.dataFlags).toContain("100 sh sold/called away that the ledger never acquired");
+  });
+});

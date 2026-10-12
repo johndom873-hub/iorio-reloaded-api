@@ -131,7 +131,10 @@ async function determineLeftoverStockReason(symbol: string): Promise<string> {
 // a covered call is assigned iff its stock leg left via a real fill (a
 // closing trade, or an exit price that differs from its entry — a stock
 // leg closed at exactly its entry price is a handoff to a successor
-// position, see handOffOpenStockLegs, not a sale); a cash-secured put is
+// position, see handOffOpenStockLegs, not a sale) and its call was not
+// bought back (an assignment never generates a trade for the option
+// itself: every call leg carrying a closing trade means the call was
+// bought back and the shares sold, a close and not an assignment); a cash-secured put is
 // assigned iff IBKR now holds shares of the symbol that no open stock leg
 // accounts for — read from this pass's own held report, so it holds on the
 // very pass that closes the put, before the leftover-stock position exists.
@@ -141,20 +144,23 @@ async function determineCloseReason(positionId: string): Promise<string> {
 
   const stockLegs = position.legs.filter((leg: PositionLegRow) => leg.legType === "stock");
   if (position.strategyKey === "covered_call") {
-    const stockClosingTrade =
-      stockLegs.length > 0
-        ? await db("trades")
-            .whereIn(
-              "position_leg_id",
-              stockLegs.map((leg: PositionLegRow) => leg.id),
-            )
-            .where({ is_closing_trade: true })
-            .first()
-        : undefined;
+    const optionLegs = position.legs.filter((leg: PositionLegRow) => leg.legType === "option");
+    const legIdsWithClosingTrade = new Set<string>(
+      await db("trades")
+        .whereIn(
+          "position_leg_id",
+          [...stockLegs, ...optionLegs].map((leg: PositionLegRow) => leg.id),
+        )
+        .where({ is_closing_trade: true })
+        .distinct("position_leg_id")
+        .pluck("position_leg_id"),
+    );
+    const stockClosingTrade = stockLegs.some((leg: PositionLegRow) => legIdsWithClosingTrade.has(leg.id));
     const stockExitedAtDifferentPrice = stockLegs.some(
       (leg: PositionLegRow) => leg.exitPrice !== null && Number(leg.exitPrice) !== Number(leg.entryPrice),
     );
-    if (stockClosingTrade || stockExitedAtDifferentPrice) return "assigned";
+    const everyCallBoughtBack = optionLegs.length > 0 && optionLegs.every((leg: PositionLegRow) => legIdsWithClosingTrade.has(leg.id));
+    if ((stockClosingTrade || stockExitedAtDifferentPrice) && !everyCallBoughtBack) return "assigned";
   } else if (position.strategyKey === "cash_secured_put") {
     const ticker = await db("tickers").where({ symbol: position.symbol }).first();
     if (ticker) {

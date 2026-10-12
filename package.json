@@ -43,6 +43,7 @@
     "backtest:setup": "python3 -m venv .venv-backtest && .venv-backtest/bin/pip install -r scripts/backtest/requirements.txt",
     "backtest:job": "tsx scripts/run-backtest-job.ts",
     "backtest:backfill-history": "tsx scripts/backfill-backtest-history.ts",
+    "backtest:backfill-market-stress-bars": "tsx scripts/backfill-backtest-market-stress-bars.ts",
     "backfill:ticker-history": "tsx scripts/backfillTickerHistory.ts",
     "backfill:signal-engine-history": "tsx scripts/backfillSignalEngineHistory.ts",
     "deploy:worker:staging": "bash scripts/deploy-worker-to-vps.sh staging",
