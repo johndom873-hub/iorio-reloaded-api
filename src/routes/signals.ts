@@ -18,8 +18,7 @@ signalsRouter.get("/", async (_request, response) => {
 
 // Before "/:symbol" so "roadmap" is never read as a ticker.
 signalsRouter.get("/roadmap", async (_request, response) => {
-  const now = new Date();
-  response.json({ asOfDateIso: easternIsoDate(now), items: buildSignalsRoadmap(await loadRoadmapCounts(now), easternIsoDate(now)) });
+  response.json({ asOfDateIso: easternIsoDate(new Date()), items: buildSignalsRoadmap(await loadRoadmapCounts()) });
 });
 
 signalsRouter.get("/:symbol", async (request, response) => {

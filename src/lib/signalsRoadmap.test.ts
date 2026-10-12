@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { addCalendarDays, buildSignalsRoadmap, buildTickerCaveats, nightsForBlending, nightsForSkewValidation, nightsForSviStability, projectTradingDays, tradingDaysForMomentum, tradingDaysForOwnVolatilityThreshold, type RoadmapCounts } from "./signalsRoadmap.js";
+import { addCalendarDays, buildSignalsRoadmap, buildTickerCaveats, projectTradingDays, tradingDaysForMomentum, tradingDaysForOwnVolatilityThreshold, type RoadmapCounts } from "./signalsRoadmap.js";
 
 const today = "2026-09-22";
-const counts: RoadmapCounts = { snapshotNights: 1, fittedNights: 1, minimumPastEarningsPerTicker: 1, signalsOrderFills: 0 };
+const counts: RoadmapCounts = { signalsOrderFills: 0, spreadCostChargedPct: 50 };
 
 describe("projectTradingDays", () => {
   it("adds 7 calendar days per 5 trading days, rounded up, never negative", () => {
@@ -17,27 +17,29 @@ describe("projectTradingDays", () => {
 });
 
 describe("buildSignalsRoadmap", () => {
-  const items = buildSignalsRoadmap(counts, today);
+  const items = buildSignalsRoadmap(counts);
   const byId = Object.fromEntries(items.map((item) => [item.id, item]));
 
-  it("projects data-bound ETAs from the counts (independent arithmetic)", () => {
-    expect(byId.blend!.eta).toEqual({ kind: "date", dateIso: addCalendarDays(today, Math.ceil((nightsForBlending - 1) * 1.4)), progress: { have: 1, need: nightsForBlending, unit: "nightly chains" } });
-    expect(byId.svi!.eta).toEqual({ kind: "date", dateIso: addCalendarDays(today, Math.ceil((nightsForSviStability - 1) * 1.4)), progress: { have: 1, need: nightsForSviStability, unit: "nightly fits" } });
-    expect(byId.skew!.eta).toEqual({ kind: "date", dateIso: addCalendarDays(today, Math.ceil((nightsForSkewValidation - 1) * 1.4)), progress: { have: 1, need: nightsForSkewValidation, unit: "nightly chains" } });
-    expect(byId.earnings!.eta).toEqual({ kind: "date", dateIso: addCalendarDays(today, 3 * 91), progress: { have: 1, need: 4, unit: expect.any(String) } });
+  it("lists the open items in order", () => {
+    expect(items.map((item) => item.id)).toEqual(["blend", "ratio", "earnings", "friction", "sizing"]);
   });
 
-  it("caps progress at the target once the data exists and the ETA is today", () => {
-    const done = buildSignalsRoadmap({ ...counts, snapshotNights: 500, fittedNights: 500, minimumPastEarningsPerTicker: 9 }, today);
-    const doneById = Object.fromEntries(done.map((item) => [item.id, item]));
-    expect(doneById.blend!.eta).toMatchObject({ dateIso: today, progress: { have: nightsForBlending } });
-    expect(doneById.earnings!.eta).toMatchObject({ dateIso: today, progress: { have: 4 } });
+  it("no longer lists skew or SVI stability: the model review settled both", () => {
+    expect(byId.skew).toBeUndefined();
+    expect(byId.svi).toBeUndefined();
   });
 
-  it("keeps decision / build / later-phase items as text", () => {
-    expect(byId.ratio!.status).toBe("waiting_on_later_phase");
-    expect(byId.ratio!.eta.kind).toBe("text");
-    expect(byId.sizing!.status).toBe("waiting_on_later_phase");
+  it("earnings waits on a decision, the backtest-bound items on the ThetaData backtests", () => {
+    expect(byId.earnings!.status).toBe("waiting_on_decision");
+    for (const id of ["blend", "ratio", "sizing"]) {
+      expect(byId[id]!.status).toBe("waiting_on_data");
+      expect(byId[id]!.eta).toEqual({ kind: "text", text: "After the ThetaData backtests" });
+    }
+  });
+
+  it("friction names the spread cost setting in force", () => {
+    expect(byId.friction!.title).toBe("Friction charges 50% of the half-spread (λ = 0.50)");
+    expect(buildSignalsRoadmap({ ...counts, spreadCostChargedPct: 100 }).find((item) => item.id === "friction")!.title).toBe("Friction charges 100% of the half-spread (λ = 1.00)");
   });
 
   it("no longer lists the split-guard item: splits are detected when prices are stored", () => {
@@ -50,7 +52,7 @@ describe("buildSignalsRoadmap", () => {
 
   it("friction says counting has not started while there are no Signals fills, then counts down", () => {
     expect(byId.friction!.eta).toMatchObject({ kind: "text", text: expect.stringContaining("No filled Signals orders yet"), progress: { have: 0, need: 50 } });
-    const later = buildSignalsRoadmap({ ...counts, signalsOrderFills: 12 }, today).find((item) => item.id === "friction")!;
+    const later = buildSignalsRoadmap({ ...counts, signalsOrderFills: 12 }).find((item) => item.id === "friction")!;
     expect(later.eta).toMatchObject({ kind: "text", text: "38 more fills", progress: { have: 12 } });
   });
 });

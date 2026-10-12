@@ -1,9 +1,8 @@
-// The Signals screen's "not accounted for" roadmap (mockup approved 2026-09-22; Marcelo
-// chose computed ETAs over a static list). Every item names the measure the ranking does
-// not yet use, what it is waiting on, and an ETA projected from real data counts where the
-// wait is data (one capture per trading day, ~5 per 7 calendar days, no holiday calendar),
-// or plain text where the wait is a decision or a later phase. The counts are the only
-// thing the store supplies; everything else is pure so it can be tested.
+// The Signals screen's "not accounted for" roadmap (mockup approved 2026-09-22). Every item
+// names the measure the model does not yet use, what it is waiting on, and an ETA: progress
+// from real counts where there is one, plain text otherwise. The per-ticker caveats below
+// project dates from trading days (~5 per 7 calendar days, no holiday calendar). The counts
+// are the only thing the store supplies; everything else is pure so it can be tested.
 
 export type RoadmapStatus = "waiting_on_data" | "waiting_on_sign_off" | "waiting_on_decision" | "waiting_on_later_phase" | "waiting_on_build" | "waiting_on_next_run";
 
@@ -25,26 +24,17 @@ export interface RoadmapItem {
 }
 
 export interface RoadmapCounts {
-  /** Distinct trading dates with a complete or partial option-chain snapshot. */
-  snapshotNights: number;
-  /** Distinct snapshot dates that have at least one 'ok' surface slice. */
-  fittedNights: number;
-  /** Across shortlist tickers, the smallest number of PAST earnings dates on record. */
-  minimumPastEarningsPerTicker: number;
   /** Orders built from the Signals modal (order_requests.signal_snapshot set) that filled. */
   signalsOrderFills: number;
+  /** λ as a percentage: the share of the half-spread friction charges (Risk & Limits spread cost). */
+  spreadCostChargedPct: number;
 }
 
-export const nightsForBlending = 126; // ~6 months of trading days
-export const nightsForSkewValidation = 63; // ~3 months
-export const nightsForSviStability = 20; // ~4 weeks
-export const quartersForEarningsAdjustment = 4;
 export const fillsForFrictionCalibration = 50;
 export const tradingDaysForMomentum = 253;
 export const tradingDaysForOwnVolatilityThreshold = 377;
 
 const calendarDaysPerTradingDay = 7 / 5;
-const calendarDaysPerQuarter = 91;
 
 export function addCalendarDays(dateIso: string, days: number): string {
   const date = new Date(`${dateIso}T00:00:00Z`);
@@ -57,60 +47,38 @@ export function projectTradingDays(todayIso: string, tradingDays: number): strin
   return addCalendarDays(todayIso, Math.ceil(Math.max(0, tradingDays) * calendarDaysPerTradingDay));
 }
 
-function nightsEta(todayIso: string, have: number, need: number): RoadmapEta {
-  return { kind: "date", dateIso: projectTradingDays(todayIso, need - have), progress: { have: Math.min(have, need), need, unit: "nightly chains" } };
-}
+const afterThetaDataBacktests: RoadmapEta = { kind: "text", text: "After the ThetaData backtests" };
 
-export function buildSignalsRoadmap(counts: RoadmapCounts, todayIso: string): RoadmapItem[] {
+export function buildSignalsRoadmap(counts: RoadmapCounts): RoadmapItem[] {
   return [
     {
       id: "blend",
-      title: "UncompensatedShare and Tilt do not change the rank",
-      summary: "Shown as their own columns. Blending needs weights fitted on outcomes.",
-      needs: "About 6 months of nightly chains plus the outcomes of closed trades (Phase 2)",
+      title: "Delta drift and momentum do not change the rank",
+      summary: "Edge Yield ranks on its own. Drift (UncompensatedShare) shows in a ticker's contract list and momentum as its own figure. The valuation assumes no price direction; momentum is not validated.",
+      needs: "ThetaData backtests showing whether either one improves the outcomes of sales ranked by Edge Yield",
       status: "waiting_on_data",
-      eta: nightsEta(todayIso, counts.snapshotNights, nightsForBlending),
+      eta: afterThetaDataBacktests,
     },
     {
       id: "ratio",
       title: "Risk-adjusted ratio (Edge $ / dollar risk)",
-      summary: "Formula approved and built 2026-09-23, computed on every candidate. Kept out of ranking until Phase 2 can justify a weight for it.",
-      needs: "Phase 2 backtest data, same as Composite Rank's other weights",
-      status: "waiting_on_later_phase",
-      eta: { kind: "text", text: "Built, to be wired in Phase 2" },
-    },
-    {
-      id: "skew",
-      title: "Skew and momentum are shown, not validated",
-      summary: "Both come from the literature; six tickers cannot confirm or refute them.",
-      needs: "Skew: ~3 months of chains (the date shown). Momentum: a universe of hundreds of stocks, not planned, no ETA",
+      summary: "Computed on every candidate, used nowhere. Edge Yield ranks and half-Kelly on Edge $ sizes, which covers much of what it was for.",
+      needs: "ThetaData backtests showing whether it ranks better than Edge Yield; if not, it is dropped",
       status: "waiting_on_data",
-      eta: nightsEta(todayIso, counts.snapshotNights, nightsForSkewValidation),
+      eta: afterThetaDataBacktests,
     },
     {
       id: "earnings",
-      title: "Earnings not adjusted in the volatility forecast",
-      summary: "Expiries spanning a known earnings date are excluded (not just flagged); the forecast itself still isn't corrected for the elevated IV.",
-      needs: "Earnings-date history: the nightly calendar keeps one report date per quarter per ticker",
-      status: "waiting_on_data",
-      eta: {
-        kind: "date",
-        dateIso: addCalendarDays(todayIso, Math.max(0, quartersForEarningsAdjustment - counts.minimumPastEarningsPerTicker) * calendarDaysPerQuarter),
-        progress: { have: Math.min(counts.minimumPastEarningsPerTicker, quartersForEarningsAdjustment), need: quartersForEarningsAdjustment, unit: "past earnings dates per ticker (least-covered ticker)" },
-      },
-    },
-    {
-      id: "svi",
-      title: "SVI surface stability under review",
-      summary: "Some slices sit on their parameter bounds; the curves fit well, the wings are the risk.",
-      needs: "About 4 weeks of nightly fits",
-      status: "waiting_on_data",
-      eta: { kind: "date", dateIso: projectTradingDays(todayIso, nightsForSviStability - counts.fittedNights), progress: { have: Math.min(counts.fittedNights, nightsForSviStability), need: nightsForSviStability, unit: "nightly fits" } },
+      title: "Past earnings moves stay in the volatility forecast",
+      summary: "Contracts spanning a coming earnings date are excluded. The forecast (21 sessions of daily prices) still counts the last earnings reaction while it is in that window, which raises the forecast.",
+      needs: "A decision on how to forecast without earnings sessions; the model review found no clear winner",
+      status: "waiting_on_decision",
+      eta: { kind: "text", text: "When decided" },
     },
     {
       id: "friction",
-      title: "Friction assumes fills at the bid (λ = 1.0)",
-      summary: "Conservative by your choice. Real fills will show how much of the spread you truly pay.",
+      title: `Friction charges ${counts.spreadCostChargedPct}% of the half-spread (λ = ${(counts.spreadCostChargedPct / 100).toFixed(2)})`,
+      summary: "Set in Risk & Limits (spread cost). Real fills will show how much of the spread you truly pay.",
       needs: "About 50 fills from Signals orders",
       status: "waiting_on_data",
       eta: {
@@ -121,11 +89,11 @@ export function buildSignalsRoadmap(counts: RoadmapCounts, todayIso: string): Ro
     },
     {
       id: "sizing",
-      title: "No position-size suggestion",
-      summary: "Kelly / CVaR sizing.",
-      needs: "Phase 2 first, then the Phase 3 formulas",
-      status: "waiting_on_later_phase",
-      eta: { kind: "text", text: "After Phase 2" },
+      title: "Sizing rests on the model's Edge $, not on proven outcomes",
+      summary: "Pluto caps each sale at half-Kelly on Edge $ and a stress limit (Pluto's caps on the contract card). Kelly on the calibrated figure needs out-of-the-money history; CVaR sizing is not built.",
+      needs: "ThetaData backtests for the out-of-the-money calibration, then the CVaR formula for your sign-off",
+      status: "waiting_on_data",
+      eta: afterThetaDataBacktests,
     },
   ];
 }

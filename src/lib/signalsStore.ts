@@ -326,29 +326,14 @@ export async function loadTickerSignals(ticker: SignalsTickerRow, accountContext
   return { ...rescored, slices: inputs.slices };
 }
 
-/** The counts the roadmap's ETAs are projected from. */
-export async function loadRoadmapCounts(now: Date = new Date()): Promise<RoadmapCounts> {
-  const todayEastern = easternIsoDate(now);
-  const [snapshotNights, fittedNights, leastCoveredTicker, signalsOrderFills] = await Promise.all([
-    db("option_chain_snapshots").whereIn("status", ["complete", "partial"]).countDistinct<{ count: string }[]>("trading_date as count").then((rows) => Number(rows[0]?.count ?? 0)),
-    db("option_surface_fits as f").join("option_chain_snapshots as s", "s.id", "f.snapshot_id").where("f.status", "ok").countDistinct<{ count: string }[]>("s.trading_date as count").then((rows) => Number(rows[0]?.count ?? 0)),
-    // Only tickers that report at all (an ETF has no earnings and would otherwise pin the minimum at 0 forever).
-    db("shortlist_entries as se")
-      .whereNull("se.removed_at")
-      .where("se.signals_enabled", true)
-      .whereExists(db("ticker_calendar_events as any_earnings").whereRaw("any_earnings.ticker_id = se.ticker_id").where("any_earnings.event_type", "earnings"))
-      .select(db.raw("(SELECT count(*) FROM ticker_calendar_events e WHERE e.ticker_id = se.ticker_id AND e.event_type = 'earnings' AND e.event_date < ?) AS past_earnings", [todayEastern]))
-      .orderBy("past_earnings")
-      .first<{ past_earnings: string } | undefined>(),
+/** The counts and settings the roadmap reads. */
+export async function loadRoadmapCounts(): Promise<RoadmapCounts> {
+  const [signalsOrderFills, settings] = await Promise.all([
     // Open orders only: a roll's fill is a different friction sample (two legs, one combo), so it is counted apart (decided 2026-09-24).
     db("order_requests").whereNotNull("signal_snapshot").where("request_type", "like", "open_%").whereIn("status", ["filled", "partially_filled", "cancelled_partially_filled"]).count<{ count: string }[]>("* as count").then((rows) => Number(rows[0]?.count ?? 0)),
+    loadTradingSettings(),
   ]);
-  return {
-    snapshotNights,
-    fittedNights,
-    minimumPastEarningsPerTicker: leastCoveredTicker ? Number(leastCoveredTicker.past_earnings) : 0,
-    signalsOrderFills,
-  };
+  return { signalsOrderFills, spreadCostChargedPct: settings.spreadCostChargedPct };
 }
 
 /** The whole Signals screen at snapshot prices: one account-context fetch shared across every ticker, no candidate lists. */

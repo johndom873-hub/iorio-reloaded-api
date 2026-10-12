@@ -118,7 +118,7 @@ describe("GET /signals", () => {
 });
 
 describe("GET /signals/roadmap", () => {
-  const counts = { snapshotNights: 7, fittedNights: 3, minimumPastEarningsPerTicker: 2, signalsOrderFills: 5 };
+  const counts = { signalsOrderFills: 5, spreadCostChargedPct: 50 };
 
   it("is not read as a ticker named roadmap", async () => {
     loadRoadmapCountsMock.mockResolvedValue(counts);
@@ -136,10 +136,9 @@ describe("GET /signals/roadmap", () => {
 
     expect(response.status).toBe(200);
     expect(response.json.asOfDateIso).toBe("2026-03-09");
-    expect(response.json.items).toEqual(JSON.parse(JSON.stringify(buildSignalsRoadmap(counts, "2026-03-09"))));
+    expect(response.json.items).toEqual(JSON.parse(JSON.stringify(buildSignalsRoadmap(counts))));
     expect(response.json.items.length).toBeGreaterThan(0);
     expect(loadRoadmapCountsMock).toHaveBeenCalledTimes(1);
-    expect(loadRoadmapCountsMock.mock.calls[0]![0]).toEqual(new Date("2026-03-10T03:00:00Z"));
   });
 
   it("the Eastern date moves on at Eastern midnight", async () => {
