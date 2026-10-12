@@ -149,7 +149,7 @@ describe("backtest routes", () => {
     expect(template.rows.find((row) => row.path === "pluto.maxIvShiftVp")).toMatchObject({ editable: false, note: "no intraday quotes in the history: always 0 in a backtest" });
     expect(template.rows.slice(-2).map((row) => [row.path, row.now, row.editable])).toEqual([
       ["fixed.forecastWindowDays", 21, false],
-      ["fixed.gradeCutPoints", "30 / 20 / 10%", false],
+      ["fixed.gradeCutPoints", "20 / 10 / 0%", false],
     ]);
     expect(template.notReplayed).toHaveLength(8);
   });

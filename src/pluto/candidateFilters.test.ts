@@ -94,7 +94,7 @@ describe("filterTickerForPluto — candidate level", () => {
     return result.rejected[0]?.reasons ?? [];
   }
   it("applies every quality dial", () => {
-    expect(rejectionsFor({ model: model({ edgeMargin: 0.15, grade: "weak" }) })).toEqual(["grade weak (edge margin 15%) below good"]);
+    expect(rejectionsFor({ model: model({ edgeMargin: 0.05, grade: "weak" }) })).toEqual(["grade weak (edge margin 5%) below good"]);
     expect(rejectionsFor({ model: model({ expectedAnnualizedReturn: 0.12 }) })).toEqual(["Edge Yield 12% below 15%"]);
     expect(rejectionsFor({ delta: -0.35 })).toEqual(["|delta| 0.35 above 0.3"]);
     expect(rejectionsFor({ dte: 1 })).toEqual(["DTE 1 outside 2–45"]);
@@ -134,11 +134,11 @@ describe("filterTickerForPluto — candidate level", () => {
     expect(rejectionsFor({ flags: ["macro_event_before_expiry"] })).toEqual([]);
   });
   it("lists every reason at once, not just the first", () => {
-    expect(rejectionsFor({ model: model({ edgeMargin: 0.15, grade: "weak" }), volume: 1 })).toHaveLength(2);
+    expect(rejectionsFor({ model: model({ edgeMargin: 0.05, grade: "weak" }), volume: 1 })).toHaveLength(2);
   });
   it("records the rule behind each reason, in the same order", () => {
     const codesFor = (overrides: Partial<SignalCandidate>, extra: Partial<PlutoTickerFilterInput> = {}) => filterTickerForPluto(input({ scored: scored({ candidates: [candidate(overrides)] }), ...extra })).rejected[0]?.codes ?? [];
-    expect(codesFor({ model: model({ edgeMargin: 0.15, grade: "weak", expectedAnnualizedReturn: 0.12, premiumYield: 0.3 }), delta: -0.35, dte: 1, spreadPercent: 22, openInterest: null, volume: 3 })).toEqual(["grade", "edge_yield", "yield", "delta", "dte", "spread", "open_interest", "volume"]);
+    expect(codesFor({ model: model({ edgeMargin: 0.05, grade: "weak", expectedAnnualizedReturn: 0.12, premiumYield: 0.3 }), delta: -0.35, dte: 1, spreadPercent: 22, openInterest: null, volume: 3 })).toEqual(["grade", "edge_yield", "yield", "delta", "dte", "spread", "open_interest", "volume"]);
     expect(codesFor({ model: null })).toEqual(["no_model"]);
     expect(codesFor({ quoteSource: "snapshot", quotedAt: null })).toEqual(["quote_age"]);
     expect(codesFor({}, { slices: [] })).toEqual(["no_slice"]);
@@ -159,7 +159,7 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
   const roll: RollSignalCandidate = {
     legId: "leg1", positionId: "pos1", strategyKey: "cash_secured_put", quantity: 2,
     // The replacement alone would fail the grade and Edge Yield rules: a roll is judged on the roll's own model figures.
-    replacement: candidate({ expiry: "2026-10-16", strike: 95, model: model({ edgeMargin: 0.15, grade: "weak", expectedPnlDollars: 10, expectedAnnualizedReturn: 10 / 9000 / (7 / 365) }) }),
+    replacement: candidate({ expiry: "2026-10-16", strike: 95, model: model({ edgeMargin: 0.05, grade: "weak", expectedPnlDollars: 10, expectedAnnualizedReturn: 10 / 9000 / (7 / 365) }) }),
     netRollEdge: 0.07, netRollEdgeDollarsPerContract: 45, netRollEdgeDollars: 90, netCreditPerShare: 0.4, deltaChange: -0.03, dollarRiskChange: -500, flags: [], warnings: [], grade: "good",
     model: fixtureRollModel({ netExpectedPnlPerContract: 45, netExpectedPnl: 90, edgeMargin: 0.25 }),
   };
@@ -181,7 +181,7 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
     expect(result.rejectedRolls[0]!.codes).toEqual(["no_model"]);
   });
   it("a roll's replacement keeps the rule codes of an open, under the replacement's reason text", () => {
-    const bad = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, model: fixtureRollModel({ netExpectedPnlPerContract: 45, edgeMargin: 0.15 }), replacement: candidate({ strike: 95, spreadPercent: 30 }) }] }) }));
+    const bad = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, model: fixtureRollModel({ netExpectedPnlPerContract: 45, edgeMargin: 0.05 }), replacement: candidate({ strike: 95, spreadPercent: 30 }) }] }) }));
     expect(bad.rejectedRolls[0]!.codes).toEqual(["grade", "spread"]);
   });
   it("the deterministic pick is Edge Yield first, the model's Edge $ second, unvalued last", () => {
@@ -223,7 +223,7 @@ describe("covered calls on held shares (Marcelo, 2026-10-12)", () => {
   // 100 shares acquired for $10,800 (average $108) with $300 of premium: break-even $105, floor max(1% × $108 × 100, $50) = $108.
   const cycle = { breakEvenPerShare: 105, unavailableReason: null, sharesAcquired: 100, acquisitionCost: 10_800 };
   const weakCall = (overrides: Partial<SignalCandidate> = {}) =>
-    candidate({ strategyKey: "covered_call", strike: 112, delta: 0.25, bid: 1.0, ask: 1.1, model: model({ edgeMargin: 0.12, expectedAnnualizedReturn: 0.05, premiumYield: 0.2, calibratedExpectedPnlDollars: 4, calibratedAnnualizedReturn: 0.1 }), ...overrides });
+    candidate({ strategyKey: "covered_call", strike: 112, delta: 0.25, bid: 1.0, ask: 1.1, model: model({ edgeMargin: 0.05, expectedAnnualizedReturn: 0.05, premiumYield: 0.2, calibratedExpectedPnlDollars: 4, calibratedAnnualizedReturn: 0.1 }), ...overrides });
   const held = (overrides: Partial<TickerSignals> = {}, extra: Partial<PlutoTickerFilterInput> = {}) => filterTickerForPluto(input({ scored: scored({ freeShares: 100, candidates: [weakCall()], ...overrides }), cycleBreakEven: cycle, ...extra }));
 
   it("drops the grade, Edge Yield and premium-yield minimums for a call on held shares, and carries the cycle if assigned", () => {
@@ -237,8 +237,8 @@ describe("covered calls on held shares (Marcelo, 2026-10-12)", () => {
     expect(filterTickerForPluto(input({ scored: scored({ candidates: [weakCall()] }) })).rejected[0]!.codes).toEqual(["grade", "edge_yield", "yield"]);
   });
   it("still asks for a positive Edge, whatever Hist Edge says", () => {
-    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.12, expectedPnlDollars: 0, calibratedExpectedPnlDollars: 9 }) })] }).rejected[0]).toMatchObject({ codes: ["edge"], reasons: ["Edge $0/contract not above 0"] });
-    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.12, expectedPnlDollars: 4, calibratedExpectedPnlDollars: -9 }) })] }).eligible).toHaveLength(1);
+    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.05, expectedPnlDollars: 0, calibratedExpectedPnlDollars: 9 }) })] }).rejected[0]).toMatchObject({ codes: ["edge"], reasons: ["Edge $0/contract not above 0"] });
+    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.05, expectedPnlDollars: 4, calibratedExpectedPnlDollars: -9 }) })] }).eligible).toHaveLength(1);
   });
   it("blocks a strike whose assignment would close the shares below the break-even plus the floor", () => {
     // $104: (104 − 103.9568) × 100 = $4.32, below $108
@@ -255,7 +255,7 @@ describe("covered calls on held shares (Marcelo, 2026-10-12)", () => {
     expect(held({}, { cycleBreakEven: undefined }).rejected[0]!.codes).toEqual(["no_break_even"]);
   });
   it("offers the held shares one call, the best by Edge Yield; puts on the ticker are unaffected", () => {
-    const better = weakCall({ strike: 114, model: model({ edgeMargin: 0.12, expectedPnlDollars: 6, expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.5 }) });
+    const better = weakCall({ strike: 114, model: model({ edgeMargin: 0.05, expectedPnlDollars: 6, expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.5 }) });
     const put = candidate();
     const result = held({ candidates: [weakCall(), better, put] });
     expect(result.eligible.map((entry) => entry.id).sort()).toEqual(["HOOD:cash_secured_put:2026-10-16:100", "HOOD:covered_call:2026-10-16:114"]);

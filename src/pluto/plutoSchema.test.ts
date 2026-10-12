@@ -1,3 +1,4 @@
+import { plutoPromptVersion } from "./prompt.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import knexLibrary, { type Knex } from "knex";
 import { environment } from "../config/env.js";
@@ -42,7 +43,8 @@ describe("Pluto schema", () => {
     expect(Number(settings[0].order_size_pct_of_budget)).toBe(10);
     expect(settings[0].max_open_positions).toBe(15);
     expect(Number(settings[0].daily_cost_ceiling_usd)).toBe(1);
-    expect(settings[0].prompt_version).toBe("v4.0");
+    // Every prompt change ships a migration that moves this to the code's version.
+    expect(settings[0].prompt_version).toBe(plutoPromptVersion);
     // Model review (2026-10-10): the drift gate measures the edge margin in points, default 10.
     expect(Number(settings[0].max_edge_margin_drift_pts)).toBe(10);
     expect(settings[0]).not.toHaveProperty("max_edge_drift_vp");

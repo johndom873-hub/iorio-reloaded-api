@@ -55,7 +55,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   { path: "pluto.maxMidVsSurfaceIvVp", group: "Model", label: "Max mid vs surface IV", unit: "number", editable: true, note: "volatility points: largest gap between the mid's IV and the surface" },
   { path: "pluto.maxIvShiftVp", group: "Model", label: "Max IV shift", unit: "number", editable: false, note: "no intraday quotes in the history: always 0 in a backtest" },
   { path: "fixed.forecastWindowDays", group: "Model", label: "Forecast window", unit: "days", editable: false, note: null, fixedValue: 21 },
-  { path: "fixed.gradeCutPoints", group: "Model", label: "Grade cut points", unit: "percent", editable: false, note: null, fixedValue: "30 / 20 / 10%" },
+  { path: "fixed.gradeCutPoints", group: "Model", label: "Grade cut points", unit: "percent", editable: false, note: null, fixedValue: "20 / 10 / 0%" },
 ];
 
 /** Pluto behaviour a session does not replay, for the note under the table. */

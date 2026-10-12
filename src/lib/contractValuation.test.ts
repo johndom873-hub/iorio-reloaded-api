@@ -91,12 +91,13 @@ describe("valueContract (P4/P5, approved 2026-10-10)", () => {
     expect(valueContract(tables, { ...base, isCall: true, mid: 100 })).toBeNull();
   });
 
-  it("grades on the edge margin at 30 / 20 / 10 %", () => {
-    expect(gradeForEdgeMargin(0.3)).toBe("strong");
-    expect(gradeForEdgeMargin(0.2999)).toBe("good");
-    expect(gradeForEdgeMargin(0.2)).toBe("good");
-    expect(gradeForEdgeMargin(0.1)).toBe("weak");
-    expect(gradeForEdgeMargin(0.0999)).toBe("avoid");
+  it("grades on the edge margin at 20 / 10 / 0 %", () => {
+    expect(gradeForEdgeMargin(0.2)).toBe("strong");
+    expect(gradeForEdgeMargin(0.1999)).toBe("good");
+    expect(gradeForEdgeMargin(0.1)).toBe("good");
+    expect(gradeForEdgeMargin(0.0999)).toBe("weak");
+    expect(gradeForEdgeMargin(0)).toBe("weak");
+    expect(gradeForEdgeMargin(-0.0001)).toBe("avoid");
   });
 });
 

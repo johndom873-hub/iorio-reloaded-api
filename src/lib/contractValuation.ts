@@ -28,9 +28,9 @@ import { calibratedEdgeMargin, standardizedReturnBucketsFor, type ValuationGroup
 //   premium after costs = mid × 100 − friction, and its premium yield on capital over T (the sale's own income; a covered
 //   call's shares can add the rise to the strike on top of it).
 // The variance clock (τ) values the contract; calendar time (T) annualizes what the capital earns.
-// Grades on the edge margin (approved 2026-10-10): strong ≥ 30%, good ≥ 20%, weak ≥ 10%, else avoid.
+// Grades on the edge margin (approved 2026-10-12): strong ≥ 20%, good ≥ 10%, weak ≥ 0%, else avoid (a negative margin).
 
-export const gradeMarginCutPoints = { strong: 0.3, good: 0.2, weak: 0.1 } as const;
+export const gradeMarginCutPoints = { strong: 0.2, good: 0.1, weak: 0 } as const;
 export const expectedShortfallTailShare = 0.05;
 export const stressStandardDeviations = 2;
 /** Annualization floor: a contract is never annualized over less than one calendar day. */

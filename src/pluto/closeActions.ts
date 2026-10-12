@@ -23,7 +23,7 @@ import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 //   Odd lots below 100 shares are closed on the same condition without a model call.
 //   Never at a cycle loss.
 // P2 — short-leg buyback: offered only when hold value $ − closeCost$ < 0 (the valuation model's, since 2026-10-10), no credit roll on the leg
-//   grades Weak or better, the leg's own P&L at the ask is positive, and at least buybackMinDte
+//   has an edge margin of buybackWithheldAtRollEdgeMargin or more, the leg's own P&L at the ask is positive, and at least buybackMinDte
 //   remain. Never at a loss. Limited to single-leg positions (cash-secured puts): closing only the
 //   call of a covered call is not allowed for anyone (Marcelo 2026-09-29), so it never becomes unstructured.
 //   The leg's premium for the loss check is the price we set on it when it was opened by a two-part
@@ -201,6 +201,9 @@ export interface P2Input {
   orderedEntryPremium?: number | null;
 }
 
+/** P2: a credit roll with at least this edge margin withholds the buyback. A margin of its own, not a grade's cut point. */
+export const buybackWithheldAtRollEdgeMargin = 0.1;
+
 /** Pure P2: the buyback offer, or the reason there is none. */
 export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | null; reason: string | null } {
   const { leg, settings } = input;
@@ -212,7 +215,7 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
   const holdValueDollars = leg.model.holdValueDollars;
   const closeCostDollars = leg.model.closeCostDollars;
   if (holdValueDollars - closeCostDollars >= 0) return { offer: null, reason: `holding is still worth ${formatSignedDollars(holdValueDollars - closeCostDollars, 0)} per contract more than buying back, after closing costs` };
-  if (input.rolls.some((roll) => roll.legId === leg.legId && roll.model !== null && roll.model.grade !== "avoid")) return { offer: null, reason: "a credit roll grades Weak or better" };
+  if (input.rolls.some((roll) => roll.legId === leg.legId && roll.model !== null && roll.model.edgeMargin >= buybackWithheldAtRollEdgeMargin)) return { offer: null, reason: `a credit roll has an edge margin of ${(buybackWithheldAtRollEdgeMargin * 100).toFixed(0)}% or more` };
   if (leg.dte === null || leg.dte < settings.buybackMinDte) return { offer: null, reason: `DTE ${leg.dte ?? "unknown"} below ${settings.buybackMinDte}` };
   if (leg.ask === null || leg.bid === null || !(leg.ask > 0) || leg.ask < leg.bid) return { offer: null, reason: "no live two-sided quote on the held leg" };
   const pnlAtAsk = (entryPremium - leg.ask) * leg.quantity * 100;

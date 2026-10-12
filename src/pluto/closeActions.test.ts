@@ -60,12 +60,14 @@ describe("Formula P2 — short-leg buyback", () => {
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, model: null } }).reason).toBe("the held leg has no model valuation");
     expect(evaluateShortLegBuyback(base).offer!.detail).toMatchObject({ hold_value_dollars: -25, close_cost_dollars: 5 });
   });
-  it("is withheld when holding still has value, a roll grades Weak or better, DTE is too short, or the ask would realise a loss", () => {
+  it("is withheld when holding still has value, a roll's edge margin is 10% or more, DTE is too short, or the ask would realise a loss", () => {
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, model: fixtureHeldLegModel(20, 5) } }).reason).toBe("holding is still worth $15 per contract more than buying back, after closing costs");
-    expect(evaluateShortLegBuyback({ ...base, rolls: [roll("weak")] }).reason).toMatch(/credit roll/);
-    expect(evaluateShortLegBuyback({ ...base, rolls: [roll("avoid")] }).offer).not.toBeNull();
-    // The roll's model grade decides, not its old-Edge grade.
-    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("strong"), model: fixtureRollModel({ grade: "avoid", edgeMargin: 0.02 }) }] }).offer).not.toBeNull();
+    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("good"), model: fixtureRollModel({ edgeMargin: 0.1 }) }] }).reason).toBe("a credit roll has an edge margin of 10% or more");
+    // A roll graded Weak (margin 0% to 10%) no longer withholds the buyback: the margin decides, not the grade.
+    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("weak"), model: fixtureRollModel({ edgeMargin: 0.0999 }) }] }).offer).not.toBeNull();
+    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("avoid"), model: fixtureRollModel({ edgeMargin: -0.05 }) }] }).offer).not.toBeNull();
+    // The roll's model margin decides, not its old-Edge grade.
+    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("strong"), model: fixtureRollModel({ edgeMargin: 0.02 }) }] }).offer).not.toBeNull();
     expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("avoid"), model: null }] }).offer).not.toBeNull();
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, dte: 1 } }).reason).toMatch(/DTE 1 below 2/);
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.6, bid: 2.5 } }).reason).toMatch(/^buying back at the ask would lose \$\d+$/);

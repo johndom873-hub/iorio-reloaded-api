@@ -12,7 +12,7 @@ import type { HeldPositionEntry } from "./heldPositionMetrics.js";
 // deterministic filter, the top few per ticker per strategy, short field names, no nulls.
 // Shortlist notes never enter the prompt (Marcelo, 2026-09-28).
 
-export const plutoPromptVersion = "v4.2";
+export const plutoPromptVersion = "v4.3";
 
 /** How many open candidates per ticker per strategy the model sees (best first, compareCandidatesByModel). */
 export const candidatesPerTickerPerStrategy = 3;
@@ -28,7 +28,7 @@ export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
     "What the numbers mean:",
     "- How Iorio values a contract (since v4.0): forecast_vol is the stock's own realized volatility over the last 21 sessions, annualized on trading sessions. sessions_to_expiry is the variance time left until the 16:00 close on expiry, counted in trading sessions: the rest of today (about 0.31 of a session at 10:00, less as the day goes on) plus every session to expiry; weekends and holidays add nothing. implied_vol is the contract's own market price on that same clock, so it compares directly with forecast_vol; the ticker's atm_iv is the at-the-money implied volatility about 30 days out, on the same clock. Iorio prices each contract over its sessions_to_expiry with the forecast and the fat-tailed return distribution these stocks have shown historically (no view on direction), and every figure below comes from that one distribution, so they are consistent with each other.",
     "- edge_dollars: the expected profit per contract of selling at the mid and holding to expiry, after friction (the share of the half-spread in parameters.spread_cost_share_pct plus the estimated commission). edge_margin_pct: the same before friction, as a share of the premium (1 − fair value ÷ mid).",
-    `- grade: strong (edge_margin_pct >= 30), good (20-30), weak (10-20). ${settings.minGrade === "strong" ? "Only strong reaches you" : `Only ${settings.minGrade} or better reaches you`}, except a covered call on held shares (see open_covered_call).`,
+    `- grade: strong (edge_margin_pct >= 20), good (10-20), weak (0-10). ${settings.minGrade === "strong" ? "Only strong reaches you" : `Only ${settings.minGrade} or better reaches you`}, except a covered call on held shares (see open_covered_call).`,
     "- edge_yield_ann_pct: edge_dollars as a yearly rate on the contract's exposure (100 shares at the strike for a put, at the share price for a covered call, less the premium received), over the calendar days to expiry: the capital is tied up on weekends too. Candidates reach you ordered by edge_yield_ann_pct.",
     "- pop_pct, avg_win and avg_loss: the probability the sale ends in profit, and the average result when it does and when it does not. worst5_avg is the average of the worst 5% of outcomes; stress_2sd the result after the stock falls two standard deviations by expiry. For a covered call these are for the shares and the call together, the same payoff as a cash-secured put at that strike. These describe the risk: a high pop_pct with a large avg_loss is not a good trade by itself, and the expected value already weighs them.",
     "- premium_after_costs and premium_yield_ann_pct: the premium kept after friction and its annualized yield on the exposure: income, not an expectation (a put's best case; a covered call's shares can add the rise to the strike). Short-dated, near-the-money contracts show the richest premium_yield_ann_pct and carry the sharpest tail.",

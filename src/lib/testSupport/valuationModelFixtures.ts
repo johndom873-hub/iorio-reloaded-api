@@ -17,7 +17,7 @@ export function fixtureModelForecast(annualizedVolatility: number): ModelVolatil
 
 /**
  * A candidate's model block with plausible, self-consistent defaults: a $1.00 mid valued at $0.75 (margin 25%, grade
- * Good), $20 expected P&L after $5 friction, on $9,000 of capital over 5 sessions (7 calendar days). Grade follows the margin unless given.
+ * Strong), $20 expected P&L after $5 friction, on $9,000 of capital over 5 sessions (7 calendar days). Grade follows the margin unless given.
  */
 export function fixtureCandidateModel(overrides: Partial<CandidateModelScore> = {}): CandidateModelScore {
   const edgeMargin = overrides.edgeMargin ?? 0.25;
