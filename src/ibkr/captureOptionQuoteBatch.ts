@@ -2,7 +2,7 @@ import { EventName, Option, OptionType } from "@stoqey/ib";
 import type { IBApi } from "@stoqey/ib";
 import { nextReqIdFor } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
-import { createLineUsageMeter, percentileOfSorted, type LineUsageSummary } from "./lineUsageMeter.js";
+import { countSentMessages, createLineUsageMeter, percentileOfSorted, type LineUsageSummary } from "./lineUsageMeter.js";
 
 export { percentileOfSorted };
 
@@ -204,6 +204,10 @@ export interface CaptureSettleStats {
   afterFirstReplyMs: Record<SettleField, { p50: number | null; p90: number | null }>;
   /** Time-weighted subscribed vs answered lines, message rate and the wait for IBKR's first tick (lineUsageMeter.ts). */
   lineUsage: LineUsageSummary;
+  /** Messages the library really wrote to the Gateway socket per second (after its rate limiter); null when it cannot be counted. */
+  messagesSentPerSecond: number | null;
+  /** Our reqMktData/cancelMktData calls not yet written to the socket at the end of the period: the limiter's queue; null when it cannot be counted. */
+  messagesWaitingToSend: number | null;
 }
 
 interface WindowGroup {
@@ -258,8 +262,12 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
   let closed = false;
   const emptyFieldCounts = (): Record<SettleField, number> => ({ price: 0, delta: 0, openInterest: 0 });
   const meter = createLineUsageMeter();
+  // The window's connection carries only its own reqMktData/cancelMktData once open, so calls minus sends is the limiter's queue.
+  const sentCounter = countSentMessages(ib);
+  let messagesCalled = 0;
   const freshStats = () => ({
     periodStartedAt: Date.now(),
+    sentAtPeriodStart: sentCounter?.sentCount() ?? 0,
     holdsMs: [] as number[],
     minInFlight: null as number | null,
     maxInFlight: null as number | null,
@@ -289,12 +297,14 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
 
   function summarize(stats: ReturnType<typeof freshStats>, lineUsage: LineUsageSummary): CaptureSettleStats {
     const sortedHolds = [...stats.holdsMs].sort((a, b) => a - b);
+    const intervalMs = Date.now() - stats.periodStartedAt;
+    const sentNow = sentCounter?.sentCount() ?? null;
     const percentiles = (values: number[]) => {
       const sorted = [...values].sort((a, b) => a - b);
       return { p50: percentileOfSorted(sorted, 50), p90: percentileOfSorted(sorted, 90) };
     };
     return {
-      intervalMs: Date.now() - stats.periodStartedAt,
+      intervalMs,
       minInFlight: stats.minInFlight,
       maxInFlight: stats.maxInFlight,
       lineBusyMs: sortedHolds.reduce((sum, holdMs) => sum + holdMs, 0),
@@ -312,6 +322,8 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       missingOnTimeout: { ...stats.missingOnTimeout },
       afterFirstReplyMs: { price: percentiles(stats.afterFirstReplyMs.price), delta: percentiles(stats.afterFirstReplyMs.delta), openInterest: percentiles(stats.afterFirstReplyMs.openInterest) },
       lineUsage,
+      messagesSentPerSecond: sentNow === null ? null : intervalMs > 0 ? ((sentNow - stats.sentAtPeriodStart) * 1000) / intervalMs : 0,
+      messagesWaitingToSend: sentNow === null ? null : Math.max(0, messagesCalled - sentNow),
     };
   }
 
@@ -375,6 +387,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     pending.delete(reqId);
     meter.released(reqId);
     lastReleasedAt = Date.now();
+    messagesCalled += 1;
     try {
       ib.cancelMktData(reqId);
     } catch {
@@ -409,6 +422,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId, true), timeoutMs), subscribedAt: Date.now(), firstTickAt: null, noMarketOnASide: false, arrivedAt: { price: null, delta: null, openInterest: null } });
       meter.subscribed(reqId);
       firstSubscribedAt ??= Date.now();
+      messagesCalled += 1;
       const right = contract.right === "C" ? OptionType.Call : OptionType.Put;
       try {
         ib.reqMktData(reqId, new Option(group.symbol, contract.expiry, contract.strike, right, "SMART"), openInterestGenericTickList, false, false);
@@ -508,6 +522,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
         recordCancelAtClose(entry);
         meter.released(reqId);
         lastReleasedAt = Date.now();
+        messagesCalled += 1;
         try {
           ib.cancelMktData(reqId);
         } catch {
@@ -523,6 +538,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       ib.removeListener(EventName.tickSize, onTickSize);
       ib.removeListener(EventName.tickOptionComputation, onTickOptionComputation);
       ib.removeListener(EventName.error, onError);
+      sentCounter?.stop();
     },
     inFlightCount: () => pending.size,
     queuedCount: () => queue.length,

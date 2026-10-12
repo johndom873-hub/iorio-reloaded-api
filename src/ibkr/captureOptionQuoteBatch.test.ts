@@ -146,6 +146,30 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
     await expect(window.capture("TEST", [put100])).rejects.toThrow("closed");
   });
 
+  it("reports what the library really sent and what is still waiting in its queue", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      // The library's private socket: the limiter writes each message there once it lets it through.
+      const socket = { send: vi.fn() };
+      const ib = Object.assign(new FakeIb(), { controller: { socket } });
+      const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 3, timeoutMs: 8_000 });
+      void window.capture("TEST", [put100, call105, call110]);
+      // 3 reqMktData calls; the limiter has written 2 of them after 2 s.
+      socket.send(["reqMktData"]);
+      socket.send(["reqMktData"]);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(window.drainSettleStats()).toMatchObject({ messagesSentPerSecond: 1, messagesWaitingToSend: 1 });
+      window.close();
+      // close() cancels the 3 lines: 6 calls in all, 2 written; the library's send is put back.
+      expect(window.wholeRunSettleStats()).toMatchObject({ messagesWaitingToSend: 4 });
+      socket.send(["after close"]);
+      expect(window.wholeRunSettleStats()).toMatchObject({ messagesWaitingToSend: 4 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resolves an empty contract list without subscribing", async () => {
     const ib = new FakeIb();
     const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 1 });
@@ -194,6 +218,9 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
         afterFirstReplyMs: { price: { p50: 0, p90: 0 }, delta: { p50: 500, p90: 500 }, openInterest: { p50: 3_500, p90: 3_500 } },
         // 2 lines for 4 s then 1 for 4.5 s; answered from 500 ms; 2 subscribes + 2 cancels over 8.5 s.
         lineUsage: { periodMs: 8_500, averageSubscribed: 12_500 / 8_500, averageAnswered: 11_500 / 8_500, messagesPerSecond: 4_000 / 8_500, released: 2, releasedUnanswered: 0, firstReplyMsP50: 500, firstReplyMsP90: 500, holdMsP50: 4_000, holdMsP90: 8_500 },
+        // FakeIb has no library internals to count real sends on.
+        messagesSentPerSecond: null,
+        messagesWaitingToSend: null,
       };
       expect(window.drainSettleStats()).toEqual(expected);
       expect(window.drainSettleStats()).toMatchObject({ settled: 0, timedOut: 0, lineBusyMs: 0, holdMsP50: null, minInFlight: 0, maxInFlight: 0 });

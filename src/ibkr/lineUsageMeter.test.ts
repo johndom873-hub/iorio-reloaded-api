@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLineUsageMeter, describeLineUsage, effectiveMessagesPerSecondCap } from "./lineUsageMeter.js";
+import { countSentMessages, createLineUsageMeter, describeLineUsage, effectiveMessagesPerSecondCap } from "./lineUsageMeter.js";
 
 function clock() {
   let nowMs = 0;
@@ -65,6 +65,32 @@ describe("describeLineUsage", () => {
     expect(
       describeLineUsage({ periodMs: 10_000, averageSubscribed: 29, averageAnswered: 21, messagesPerSecond: 19.8, released: 98, releasedUnanswered: 0, firstReplyMsP50: 2_900, firstReplyMsP90: 3_400, holdMsP50: 4_900, holdMsP90: 8_000 }, 20),
     ).toContain("19.8 of 20 msg/s");
+  });
+});
+
+describe("countSentMessages", () => {
+  it("counts every message written to the library's socket and puts its send back on stop", () => {
+    class Socket {
+      written: string[] = [];
+      send(tokens: string[]) {
+        this.written.push(tokens.join(","));
+      }
+    }
+    const socket = new Socket();
+    const counter = countSentMessages({ controller: { socket } })!;
+    socket.send(["1", "a"]);
+    socket.send(["2"]);
+    expect(counter.sentCount()).toBe(2);
+    expect(socket.written).toEqual(["1,a", "2"]);
+    counter.stop();
+    socket.send(["3"]);
+    expect(counter.sentCount()).toBe(2);
+    expect(Object.prototype.hasOwnProperty.call(socket, "send")).toBe(false);
+  });
+
+  it("is null when the library has no socket to wrap", () => {
+    expect(countSentMessages({})).toBeNull();
+    expect(countSentMessages(null)).toBeNull();
   });
 });
 

@@ -135,6 +135,37 @@ export function createLineUsageMeter(now: () => number = Date.now): LineUsageMet
   };
 }
 
+export interface SentMessageCounter {
+  /** Messages written to the Gateway socket since the counter started. */
+  sentCount(): number;
+  /** Puts the library's own send back. */
+  stop(): void;
+}
+
+/**
+ * Counts the messages @stoqey/ib really writes to the Gateway socket on one connection, i.e. after its rate limiter
+ * released them, by wrapping the private `controller.socket.send` (every outgoing message passes there once; checked
+ * on @stoqey/ib 1.6.6). Measurement only. Null when the library no longer has that shape, so callers just log less.
+ */
+export function countSentMessages(ib: unknown): SentMessageCounter | null {
+  const socket = (ib as { controller?: { socket?: { send?: (...args: unknown[]) => unknown } } } | null)?.controller?.socket;
+  if (!socket || typeof socket.send !== "function") return null;
+  const hadOwnSend = Object.prototype.hasOwnProperty.call(socket, "send");
+  const originalSend = socket.send;
+  let sent = 0;
+  socket.send = function countedSend(this: unknown, ...args: unknown[]) {
+    sent += 1;
+    return originalSend.apply(this, args);
+  };
+  return {
+    sentCount: () => sent,
+    stop() {
+      if (hadOwnSend) socket.send = originalSend;
+      else delete (socket as { send?: unknown }).send;
+    },
+  };
+}
+
 /**
  * The outgoing message rate @stoqey/ib really enforces for a `maxReqPerSec` setting. Its limiter (function-rate-limit)
  * allows maxReqPerSec / 10 messages per 100 ms and sends while that allowance is above zero, so a fractional

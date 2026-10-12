@@ -59,7 +59,7 @@ export function describeCaptureLineUsage(heading: string, current: { inFlight: n
   const released = stats.settled + stats.timedOut + stats.errored + stats.cancelledAtClose;
   return (
     `${heading}: lines ${current === null ? "" : `${current.inFlight}/${optionChainCaptureBatchSize} now, ${current.queued} queued, `}min ${stats.minInFlight ?? "—"} max ${stats.maxInFlight ?? "—"} over ${seconds(stats.intervalMs)}, ` +
-    `${describeLineUsage(stats.lineUsage, captureMessagesPerSecondCap)}; ${released} released, held p50 ${seconds(stats.holdMsP50)} p90 ${seconds(stats.holdMsP90)} max ${seconds(stats.holdMsMax)}; ` +
+    `${describeLineUsage(stats.lineUsage, captureMessagesPerSecondCap)}${stats.messagesSentPerSecond === null ? "" : `, sent ${stats.messagesSentPerSecond.toFixed(1)}/s with ${stats.messagesWaitingToSend} waiting to send`}; ${released} released, held p50 ${seconds(stats.holdMsP50)} p90 ${seconds(stats.holdMsP90)} max ${seconds(stats.holdMsMax)}; ` +
     `after first reply p50/p90: price ${afterReply("price")}, delta ${afterReply("delta")}, OI ${afterReply("openInterest")}; ` +
     `${stats.settled} full data (waited last on ${fields(stats.lastField)}; ${stats.settledWithoutMarket} with "no data" on a side), ` +
     `${stats.timedOut} timed out holding ${seconds(stats.timedOutLineMs)} of line time (${stats.timedOutUnanswered} never answered; the other ${stats.timedOut - stats.timedOutUnanswered} missing ${fields(stats.missingOnTimeout)}), ` +

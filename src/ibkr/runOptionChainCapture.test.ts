@@ -37,6 +37,8 @@ const emptySettleStats = () => ({
   missingOnTimeout: { price: 0, delta: 0, openInterest: 0 },
   afterFirstReplyMs: { price: { p50: null, p90: null }, delta: { p50: null, p90: null }, openInterest: { p50: null, p90: null } },
   lineUsage: { periodMs: 0, averageSubscribed: 0, averageAnswered: 0, messagesPerSecond: 0, released: 0, releasedUnanswered: 0, firstReplyMsP50: null, firstReplyMsP90: null, holdMsP50: null, holdMsP90: null },
+  messagesSentPerSecond: null as number | null,
+  messagesWaitingToSend: null as number | null,
 });
 const ticker = (symbol: string, contractId: number | null = 1): UniverseTicker => ({ tickerId: `id-${symbol}`, symbol, contractId });
 
@@ -666,9 +668,11 @@ describe("describeCaptureLineUsage", () => {
       missingOnTimeout: { price: 0, delta: 2, openInterest: 7 },
       afterFirstReplyMs: { price: { p50: 0, p90: 100 }, delta: { p50: 1_200, p90: 2_400 }, openInterest: { p50: 300, p90: 900 } },
       lineUsage: { periodMs: 10_000, averageSubscribed: 29.6, averageAnswered: 21, messagesPerSecond: 19.8, released: 110, releasedUnanswered: 2, firstReplyMsP50: 2_900, firstReplyMsP90: 3_400, holdMsP50: 3_900, holdMsP90: 7_200 },
+      messagesSentPerSecond: 19.6,
+      messagesWaitingToSend: 3,
     });
     expect(line).toBe(
-      "Capture window: lines 30/30 now, 12 queued, min 28 max 30 over 10.0s, subscribed avg 29.6, answered avg 21.0, 19.8 of 20 msg/s, first reply p50 2.9s p90 3.4s (2 never answered of 110); " +
+      "Capture window: lines 30/30 now, 12 queued, min 28 max 30 over 10.0s, subscribed avg 29.6, answered avg 21.0, 19.8 of 20 msg/s, first reply p50 2.9s p90 3.4s (2 never answered of 110), sent 19.6/s with 3 waiting to send; " +
         "111 released, held p50 3.9s p90 7.2s max 8.0s; after first reply p50/p90: price 0.0s/0.1s, delta 1.2s/2.4s, OI 0.3s/0.9s; " +
         "101 full data (waited last on price 6, delta 15, OI 80; 4 with \"no data\" on a side), 9 timed out holding 72.0s of line time (2 never answered; the other 7 missing price 0, delta 2, OI 7), " +
         "0 errored, 1 cancelled at close.",
