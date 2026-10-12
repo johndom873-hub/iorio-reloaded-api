@@ -106,7 +106,7 @@ function getWithRawHeaders(path: string, headers: Record<string, string>): Promi
 
 describe("GET /price-performance", () => {
   const snapshot = {
-    tickers: [{ symbol: "AAA", latestClose: "10.5000", change24h: 1.25, isBehind: false }],
+    tickers: [{ symbol: "AAA", latestClose: "10.5000", change1d: 1.25, isBehind: false }],
     meta: { completedThroughDate: "2026-10-02", expectedSessionDate: "2026-10-02", isDataCurrent: true, behindSymbols: [] },
     ignoredExtraField: "must not be sent",
   };

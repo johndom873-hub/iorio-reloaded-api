@@ -12,11 +12,9 @@ vi.mock("../db/connection.js", async () => {
 });
 vi.mock("./notifyTelegram.js", () => ({ notifyTelegram: vi.fn(async () => undefined) }));
 let completedSession = "2026-10-05";
-// null: the live session is the completed one (no live session ahead of the stored bars).
-let liveSession: string | null = null;
 vi.mock("./marketSessionStatus.js", async () => {
   const actual = await vi.importActual<typeof import("./marketSessionStatus.js")>("./marketSessionStatus.js");
-  return { ...actual, lastCompletedSessionDate: async () => completedSession, liveSessionDate: async () => liveSession ?? completedSession };
+  return { ...actual, lastCompletedSessionDate: async () => completedSession };
 });
 
 const { db } = await import("../db/connection.js");
@@ -43,10 +41,10 @@ async function bars(tickerId: string, closesByDate: Record<string, number>) {
   );
 }
 
-async function rowFor(symbol: string, session: string) {
+async function rowFor(symbol: string, session: string, now = new Date(`${session}T23:59:00Z`)) {
   completedSession = session;
   invalidatePricePerformanceSnapshot();
-  const { tickers } = await getPricePerformanceSnapshot(new Date(`${session}T23:59:00Z`));
+  const { tickers } = await getPricePerformanceSnapshot(now);
   return tickers.filter((ticker) => ticker.symbol === symbol);
 }
 
@@ -57,7 +55,6 @@ beforeAll(async () => {
 
 beforeEach(() => {
   invalidatePricePerformanceSnapshot();
-  liveSession = null;
 });
 
 afterAll(async () => {
@@ -183,25 +180,32 @@ describe("shortlist membership", () => {
   });
 });
 
-describe("live reference closes (Marcelo, 2026-10-07: a live price is measured back from its own session)", () => {
-  it("during the session after the latest bar, 24hr is vs the last close, 48hr / 72hr one and two sessions before it, 1W / 1M / 3M / 1Y back from today", async () => {
-    // NOK's real closes; live session 2026-10-07 (Wednesday), latest stored bar 2026-10-06.
+describe("live reference closes (Marcelo, 2026-10-12: a live price is measured from the row's last close at any hour)", () => {
+  it("pre-market: 1D is vs the last close, not the close before it (AAOI's real closes, Monday 07:05 ET)", async () => {
+    const ticker = await shortlistedTicker();
+    // Today 2026-10-12: 1W back to Mon 10-05, 1M to Sat 09-12 -> Fri 09-11, 3M to Mon 07-13, 1Y to Sun 2025-10-12 -> Fri 10-10.
+    await bars(ticker.id, { "2025-10-10": 30, "2026-07-13": 60, "2026-09-11": 90, "2026-10-05": 115, "2026-10-07": 122.54, "2026-10-08": 105.9, "2026-10-09": 109.64 });
+    const [row] = await rowFor(ticker.symbol, "2026-10-09", new Date("2026-10-12T11:05:00Z"));
+    expect(row!.liveReferenceCloses).toEqual({ close1dAgo: 109.64, close2dAgo: 105.9, close3dAgo: 122.54, close1wAgo: 115, close1mAgo: 90, close3mAgo: 60, close1yAgo: 30 });
+    // The stored change still compares the last close with the close before it.
+    expect(row!.referenceCloses.close1dAgo).toBe(105.9);
+  });
+
+  it("during the session (today's bar not stored yet), 1D is vs the last close and 1W / 1M / 3M / 1Y count back from today", async () => {
+    // NOK's real closes; Wednesday 2026-10-07 11:00 ET, latest stored bar 2026-10-06.
     const ticker = await shortlistedTicker();
     await bars(ticker.id, { "2025-10-07": 5.07, "2026-07-08": 11.95, "2026-09-04": 10.03, "2026-09-29": 10.36, "2026-09-30": 10.14, "2026-10-01": 10.37, "2026-10-02": 10.6, "2026-10-05": 10.2, "2026-10-06": 10.97 });
-    liveSession = "2026-10-07";
-    const [row] = await rowFor(ticker.symbol, "2026-10-06");
-    expect(row!.referenceCloses).toMatchObject({ close24hAgo: 10.2, close48hAgo: 10.6, close72hAgo: 10.37, close1wAgo: 10.36 });
-    expect(row!.liveReferenceCloses).toEqual({ close24hAgo: 10.97, close48hAgo: 10.2, close72hAgo: 10.6, close1wAgo: 10.14, close1mAgo: 10.03, close3mAgo: 11.95, close1yAgo: 5.07 });
-    // The stored changes still compare the last close with the close before it.
-    expect(row!.change24h).toBeCloseTo(((10.97 - 10.2) / 10.2) * 100, 6);
+    const [row] = await rowFor(ticker.symbol, "2026-10-06", new Date("2026-10-07T15:00:00Z"));
+    expect(row!.referenceCloses).toMatchObject({ close1dAgo: 10.2, close2dAgo: 10.6, close3dAgo: 10.37, close1wAgo: 10.36 });
+    expect(row!.liveReferenceCloses).toEqual({ close1dAgo: 10.97, close2dAgo: 10.2, close3dAgo: 10.6, close1wAgo: 10.14, close1mAgo: 10.03, close3mAgo: 11.95, close1yAgo: 5.07 });
+    expect(row!.change1d).toBeCloseTo(((10.97 - 10.2) / 10.2) * 100, 6);
   });
 
-  it("once the live session's bar is stored (or before the open), the live references are the stored ones", async () => {
+  it("after-hours once today's bar is stored: 1D is vs today's close, the same Last Close the row shows", async () => {
     const ticker = await shortlistedTicker();
     await bars(ticker.id, { "2026-10-01": 10.37, "2026-10-02": 10.6, "2026-10-05": 10.2, "2026-10-06": 10.97 });
-    liveSession = "2026-10-06";
-    const [row] = await rowFor(ticker.symbol, "2026-10-06");
-    expect(row!.liveReferenceCloses).toEqual(row!.referenceCloses);
+    const [row] = await rowFor(ticker.symbol, "2026-10-06", new Date("2026-10-06T23:00:00Z"));
+    expect(row).toMatchObject({ latestClose: expect.stringMatching(/^10\.97/) });
+    expect(row!.liveReferenceCloses).toMatchObject({ close1dAgo: 10.97, close2dAgo: 10.2, close3dAgo: 10.6 });
   });
 });
-
