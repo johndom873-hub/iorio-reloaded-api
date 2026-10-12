@@ -160,3 +160,24 @@ function inverseStandardNormal(p: number): number {
   const q = p - 0.5, r = q * q;
   return ((((((a[0]! * r + a[1]!) * r + a[2]!) * r + a[3]!) * r + a[4]!) * r + a[5]!) * q) / (((((b[0]! * r + b[1]!) * r + b[2]!) * r + b[3]!) * r + b[4]!) * r + 1);
 }
+
+describe("valueContract answers the same in any order", () => {
+  // Valuations are kept by their exact inputs and the strikes of an expiry share their outcome prices: the answer may
+  // not depend on what was valued before, and each caller gets its own copy.
+  it("valued fresh, interleaved and again", () => {
+    const inputs: ContractValuationInput[] = [];
+    for (const varianceSessions of [3.5, 12.25, 30]) {
+      for (const strike of [80, 95, 100, 105, 120]) {
+        for (const isCall of [true, false]) inputs.push({ isCall, strike, forward: 101, mid: 1.5 + strike / 100, frictionDollars: 3, perSessionVariance: 0.0006, varianceSessions, calendarYears: varianceSessions / 252, riskFreeRate: 0.04, group: "stock", spot: 100.5 });
+      }
+    }
+    const inOrder = inputs.map((input) => valueContract(volatilityModelTables, input));
+    const reversed = [...inputs].reverse().map((input) => valueContract(volatilityModelTables, input)).reverse();
+    const interleaved = inputs.map((_, index) => inputs[(index * 7) % inputs.length]!).map((input) => [input, valueContract(volatilityModelTables, input)] as const);
+    expect(reversed).toStrictEqual(inOrder);
+    for (const [input, valuation] of interleaved) expect(valuation).toStrictEqual(inOrder[inputs.indexOf(input)]);
+    const first = valueContract(volatilityModelTables, inputs[0]!)!;
+    first.fairPrice = -1;
+    expect(valueContract(volatilityModelTables, inputs[0]!)).toStrictEqual(inOrder[0]);
+  });
+});

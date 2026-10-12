@@ -107,7 +107,12 @@ export interface BacktestLookSymbol {
   /** The major macro events from today on, as the calendar held them that day; none when absent. */
   macroEvents?: readonly MacroEvent[];
   /** A look after 10:00: its quotes and the stock price they imply. Absent at the 10:00 look, which reads the capture. */
-  intraday?: { quotes: readonly SymbolFileQuote[]; stockPrice: number };
+  intraday?: {
+    quotes: readonly SymbolFileQuote[];
+    stockPrice: number;
+    /** The look's day quotes when the caller selected them already (selectLookDayQuotes on these quotes, this price and the look's instant). */
+    dayQuotes?: LiveOptionQuote[];
+  };
   /** Today's cumulative split factor. */
   splitFactorToday: number;
   /** False when the open cycle spans a split whose contracts do not fit its share scale: no option order is simulated on the ticker until it ends. */
@@ -138,6 +143,8 @@ export interface BacktestLookContext {
   preparedDayBySymbol?: Map<string, BacktestPreparedSymbolDay>;
   /** Builds each symbol's day and scores it on worker threads, the symbols of a pass in parallel (backtestScoringPool.ts); on this thread when absent. */
   scoringPool?: BacktestScoringPool | null;
+  /** With a scoring pool: called once the look's first scoring requests are on the workers, so the caller can prepare the next look meanwhile. */
+  onFirstScoresSent?: () => void;
   /** Actions filled at the day's earlier looks: the actions cap counts the whole day. 0 when absent. */
   filledActionsEarlierToday?: number;
   /** Why no open may be sent at this look (market stress); rolls and closes stay. */
@@ -351,7 +358,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
     let lookQuoteIndex: Map<string, SymbolFileQuote> | null = null;
     const lookQuoteOfContract = (key: string): SymbolFileQuote | undefined => (lookQuoteIndex ??= new Map(lookQuotes.map((quote) => [contractKey({ expiry: quote.expiry, strike: roundedStrike(quote.strike), right: quote.right }), quote]))).get(key);
     // After 10:00 the look's quotes are the day's fresh quotes over the capture's.
-    const lookDayQuotes: LiveOptionQuote[] = lookSymbol.intraday ? selectLookDayQuotes(lookQuotes, day.capturedContractKeys, todayIso, stockPrice, day.referenceVolatility, at.toISOString()) : [];
+    const lookDayQuotes: LiveOptionQuote[] = lookSymbol.intraday ? (lookSymbol.intraday.dayQuotes ?? selectLookDayQuotes(lookQuotes, day.capturedContractKeys, todayIso, stockPrice, day.referenceVolatility, at.toISOString())) : [];
     const freshlyQuotedContractKeys: ReadonlySet<string> = lookSymbol.intraday ? new Set(lookDayQuotes.map(contractKey)) : day.capturedContractKeys;
 
     /**
@@ -609,7 +616,9 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
     if (scoringPool) {
       // Nothing changes the book while the symbols are scored: they are scored at once, and taken in the look's order.
       const toScore = symbolLooks.filter((symbolLook) => symbolLook.scored === null || !scoringStillHolds(symbolLook.scored, freeCashNow));
-      const scoredBooks = await Promise.all(toScore.map((symbolLook) => symbolLook.scoreBook()));
+      const scoring = toScore.map((symbolLook) => symbolLook.scoreBook());
+      if (passNumber === 1) context.onFirstScoresSent?.();
+      const scoredBooks = await Promise.all(scoring);
       toScore.forEach((symbolLook, index) => {
         symbolLook.scored = scoredBooks[index]!;
         scoredBySymbol.set(symbolLook.symbol, symbolLook.scored.scored);

@@ -106,37 +106,116 @@ export function createSimulatedLedger(startingCash: number, at: Date): Simulated
   return ledger;
 }
 
+/**
+ * Each ledger's revision: raised whenever the book may change (every ledger event, before and after it, and every
+ * cash entry or new row id), so a selector can keep what it read from a revision until the next one. Kept beside the
+ * ledger object: a structuredClone of the book starts its own.
+ */
+const revisionByLedger = new WeakMap<SimulatedLedger, number>();
+
+export function ledgerRevision(ledger: SimulatedLedger): number {
+  return revisionByLedger.get(ledger) ?? 0;
+}
+
+export function markLedgerChanged(ledger: SimulatedLedger): void {
+  revisionByLedger.set(ledger, ledgerRevision(ledger) + 1);
+}
+
+/** Applies a change to the book, its revision raised before and after it. */
+export function changingLedger<T>(ledger: SimulatedLedger, apply: () => T): T {
+  markLedgerChanged(ledger);
+  try {
+    return apply();
+  } finally {
+    markLedgerChanged(ledger);
+  }
+}
+
 /** The only way cash changes: the journal entry and the balance together. */
 export function recordCash(ledger: SimulatedLedger, entry: CashJournalEntry): void {
   if (entry.amount === 0) return;
+  markLedgerChanged(ledger);
   ledger.cashJournal.push(entry);
   ledger.cash += entry.amount;
 }
 
 export function nextLedgerId(ledger: SimulatedLedger, kind: "position" | "leg" | "trade"): string {
+  markLedgerChanged(ledger);
   const id = `${kind}-${ledger.nextRowNumber}`;
   ledger.nextRowNumber += 1;
   return id;
 }
 
+/**
+ * The ledger's rows by id, legs by position and positions by symbol, each list in the ledger's order. Rows are only ever
+ * appended (ledgerEvents.ts) and a row's id, position and symbol never change, so the index takes in the rows added
+ * since it was last read; a ledger whose arrays were replaced (a test building one by hand) is indexed afresh. Kept per
+ * ledger object: a structuredClone of the book gets its own.
+ */
+interface LedgerRowIndex {
+  positions: LedgerPosition[];
+  legs: LedgerLeg[];
+  indexedPositionCount: number;
+  indexedLegCount: number;
+  positionById: Map<string, LedgerPosition>;
+  legById: Map<string, LedgerLeg>;
+  legsByPositionId: Map<string, LedgerLeg[]>;
+  positionsBySymbol: Map<string, LedgerPosition[]>;
+}
+
+const rowIndexByLedger = new WeakMap<SimulatedLedger, LedgerRowIndex>();
+
+function rowIndexOf(ledger: SimulatedLedger): LedgerRowIndex {
+  let index = rowIndexByLedger.get(ledger);
+  if (!index || index.positions !== ledger.positions || index.legs !== ledger.legs) {
+    index = { positions: ledger.positions, legs: ledger.legs, indexedPositionCount: 0, indexedLegCount: 0, positionById: new Map(), legById: new Map(), legsByPositionId: new Map(), positionsBySymbol: new Map() };
+    rowIndexByLedger.set(ledger, index);
+  }
+  for (; index.indexedPositionCount < ledger.positions.length; index.indexedPositionCount++) {
+    const position = ledger.positions[index.indexedPositionCount]!;
+    if (!index.positionById.has(position.id)) index.positionById.set(position.id, position);
+    const ofSymbol = index.positionsBySymbol.get(position.symbol);
+    if (ofSymbol) ofSymbol.push(position);
+    else index.positionsBySymbol.set(position.symbol, [position]);
+  }
+  for (; index.indexedLegCount < ledger.legs.length; index.indexedLegCount++) {
+    const leg = ledger.legs[index.indexedLegCount]!;
+    if (!index.legById.has(leg.id)) index.legById.set(leg.id, leg);
+    const ofPosition = index.legsByPositionId.get(leg.positionId);
+    if (ofPosition) ofPosition.push(leg);
+    else index.legsByPositionId.set(leg.positionId, [leg]);
+  }
+  return index;
+}
+
 export function requirePosition(ledger: SimulatedLedger, positionId: string): LedgerPosition {
-  const position = ledger.positions.find((entry) => entry.id === positionId);
+  const position = rowIndexOf(ledger).positionById.get(positionId);
   if (!position) throw new Error(`No position ${positionId} in the ledger.`);
   return position;
 }
 
+/** The position with this id; undefined when the ledger has none. */
+export function findPosition(ledger: SimulatedLedger, positionId: string): LedgerPosition | undefined {
+  return rowIndexOf(ledger).positionById.get(positionId);
+}
+
+/** The leg with this id; undefined when the ledger has none. */
+export function findLeg(ledger: SimulatedLedger, legId: string): LedgerLeg | undefined {
+  return rowIndexOf(ledger).legById.get(legId);
+}
+
 export function requireLeg(ledger: SimulatedLedger, legId: string): LedgerLeg {
-  const leg = ledger.legs.find((entry) => entry.id === legId);
+  const leg = rowIndexOf(ledger).legById.get(legId);
   if (!leg) throw new Error(`No leg ${legId} in the ledger.`);
   return leg;
 }
 
 export function legsOfPosition(ledger: SimulatedLedger, positionId: string): LedgerLeg[] {
-  return ledger.legs.filter((leg) => leg.positionId === positionId);
+  return [...(rowIndexOf(ledger).legsByPositionId.get(positionId) ?? [])];
 }
 
 export function positionsOfSymbol(ledger: SimulatedLedger, symbol: string): LedgerPosition[] {
-  return ledger.positions.filter((position) => position.symbol === symbol);
+  return [...(rowIndexOf(ledger).positionsBySymbol.get(symbol) ?? [])];
 }
 
 /** Flat: no open position on the symbol (no shares, no open option leg), which is when a wheel cycle ends. */

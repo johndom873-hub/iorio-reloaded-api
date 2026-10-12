@@ -43,7 +43,14 @@ export interface SymbolFileDayIssue {
 
 export const supportedSymbolFileSchemaVersions: readonly string[] = ["1", "2"];
 
-const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
+export const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
+
+/** A day's 10:00 quotes, end-of-day rows and open interest: the statements the engine reads them with (also on the day-data reader thread). */
+export const quotesOfDaySql = "SELECT expiry, strike, option_right AS right, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ?";
+export const endOfDayOfDaySql = "SELECT expiry, strike, option_right AS right, close, volume, bid, ask FROM eod WHERE trading_date = ?";
+export const openInterestOfDaySql = "SELECT expiry, strike, option_right AS right, open_interest AS openInterest FROM open_interest WHERE trading_date = ?";
+/** The columns an intraday look reads, in primary-key order (look time, expiry, strike, right) within the day. */
+export const intradayQuotesColumnsSql = "SELECT look_time, expiry, strike, option_right, bid, ask FROM intraday_quotes";
 
 export class BacktestSymbolFile {
   private readonly daysStatement: StatementSync;
@@ -62,16 +69,16 @@ export class BacktestSymbolFile {
     const version = (database.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined)?.value;
     if (version === undefined || !supportedSymbolFileSchemaVersions.includes(version)) throw new Error(`The data file has schema version ${version ?? "unknown"}; the engine reads versions ${supportedSymbolFileSchemaVersions.join(" and ")}.`);
     this.daysStatement = database.prepare("SELECT trading_date AS tradingDate, status FROM days ORDER BY trading_date");
-    this.quotesStatement = database.prepare("SELECT expiry, strike, option_right AS right, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ?");
-    this.endOfDayStatement = database.prepare("SELECT expiry, strike, option_right AS right, close, volume, bid, ask FROM eod WHERE trading_date = ?");
-    this.openInterestStatement = database.prepare("SELECT expiry, strike, option_right AS right, open_interest AS openInterest FROM open_interest WHERE trading_date = ?");
+    this.quotesStatement = database.prepare(quotesOfDaySql);
+    this.endOfDayStatement = database.prepare(endOfDayOfDaySql);
+    this.openInterestStatement = database.prepare(openInterestOfDaySql);
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
     this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare("SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE trading_date = ? ORDER BY part, expiry") : null;
     this.unavailableDaysStatement = tableNames.has("unavailable_days") ? database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date") : null;
     const hasIntradayTables = tableNames.has("intraday_days") && tableNames.has("intraday_quotes");
     this.intradayDaysStatement = hasIntradayTables ? database.prepare("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' ORDER BY trading_date") : null;
     // Read by the thousand rows a day and look: only what a look reads (not the sizes), each row as an array.
-    this.intradayQuotesStatement = hasIntradayTables ? database.prepare("SELECT look_time, expiry, strike, option_right, bid, ask FROM intraday_quotes WHERE trading_date = ? AND look_time > ? AND look_time <= ? AND strike BETWEEN ? AND ?") : null;
+    this.intradayQuotesStatement = hasIntradayTables ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time > ? AND look_time <= ? AND strike BETWEEN ? AND ?`) : null;
     this.intradayQuotesStatement?.setReturnArrays(true);
   }
 

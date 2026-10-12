@@ -69,6 +69,8 @@ export function computeSkew(slices: SkewSlice[]): SkewMeasure | null {
 
 const shortWindowDays = 21;
 const longWindowDays = 126;
+/** The bars a ratio ending before `endIndex` reads: bars[endIndex − this … endIndex − 1] (the long window and the close before it). */
+export const volatilityRatioBarsRead = longWindowDays + 1;
 
 /** YZ21 / YZ126 at the end of `bars` (or ending before `endIndex`), or null when either window is unavailable. */
 export function volatilityRatio(bars: DailyOhlcvBar[], endIndex: number = bars.length): number | null {
@@ -90,13 +92,16 @@ export interface ElevatedVolatilityFlag {
   elevated: boolean;
 }
 
-/** `bars` in date order ending at the snapshot date. Only ratios observed BEFORE the last bar feed the threshold, so it never sees the present. */
-export function computeElevatedVolatilityFlag(bars: DailyOhlcvBar[]): ElevatedVolatilityFlag | null {
-  const ratio = volatilityRatio(bars);
+/**
+ * `bars` in date order ending at the snapshot date. Only ratios observed BEFORE the last bar feed the threshold, so it never sees the present.
+ * `ratioAt` stands in for volatilityRatio: a caller valuing day after day over the same history can keep the ratios it already read.
+ */
+export function computeElevatedVolatilityFlag(bars: DailyOhlcvBar[], ratioAt: (bars: DailyOhlcvBar[], endIndex: number) => number | null = volatilityRatio): ElevatedVolatilityFlag | null {
+  const ratio = ratioAt(bars, bars.length);
   if (ratio === null) return null;
   const earlierRatios: number[] = [];
   for (let end = longWindowDays; end < bars.length - 1; end++) {
-    const earlier = volatilityRatio(bars, end + 1);
+    const earlier = ratioAt(bars, end + 1);
     if (earlier !== null) earlierRatios.push(earlier);
   }
   const useOwn = earlierRatios.length >= minimumHistoryForOwnThreshold;

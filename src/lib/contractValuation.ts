@@ -108,13 +108,53 @@ export interface ContractValuation {
   grade: SignalGrade;
 }
 
+/**
+ * S_i = F · e^{s·z_i} ÷ mean_j e^{s·z_j} for every bucket. The strikes of one expiry share s and F, and a quote set is
+ * valued strike after strike, so the last result is kept and returned again for the same buckets, s and F.
+ */
+let lastPricesAtExpiry: { buckets: readonly number[]; totalStandardDeviation: number; forward: number; prices: readonly number[] } | null = null;
+
+function pricesAtExpiry(buckets: readonly number[], totalStandardDeviation: number, forward: number): readonly number[] {
+  if (lastPricesAtExpiry && lastPricesAtExpiry.buckets === buckets && lastPricesAtExpiry.totalStandardDeviation === totalStandardDeviation && lastPricesAtExpiry.forward === forward) return lastPricesAtExpiry.prices;
+  const growth: number[] = new Array(buckets.length);
+  let normalizer = 0;
+  for (let index = 0; index < buckets.length; index++) {
+    growth[index] = Math.exp(totalStandardDeviation * buckets[index]!);
+    normalizer += growth[index]!;
+  }
+  normalizer /= buckets.length;
+  const prices = growth.map((factor) => (forward * factor) / normalizer);
+  lastPricesAtExpiry = { buckets, totalStandardDeviation, forward, prices };
+  return prices;
+}
+
+/**
+ * Valuations already made, by their exact inputs, per tables: a quote that has not moved is valued again at every look
+ * of its day with the same figures. Each answer is handed out as a copy (its fields are all plain values). Bounded:
+ * started afresh when full.
+ */
+const valuationsByTables = new WeakMap<VolatilityModelTables, Map<string, ContractValuation | null>>();
+const valuationsPerTablesLimit = 100_000;
+
 export function valueContract(tables: VolatilityModelTables, input: ContractValuationInput): ContractValuation | null {
+  let valuations = valuationsByTables.get(tables);
+  if (!valuations) valuationsByTables.set(tables, (valuations = new Map()));
+  const key = `${input.isCall ? "C" : "P"}|${input.strike}|${input.forward}|${input.mid}|${input.frictionDollars}|${input.perSessionVariance}|${input.varianceSessions}|${input.calendarYears}|${input.riskFreeRate}|${input.group}|${input.spot}`;
+  if (valuations.has(key)) {
+    const valued = valuations.get(key)!;
+    return valued === null ? null : { ...valued };
+  }
+  const valued = computeContractValuation(tables, input);
+  if (valuations.size >= valuationsPerTablesLimit) valuations.clear();
+  valuations.set(key, valued);
+  return valued === null ? null : { ...valued };
+}
+
+function computeContractValuation(tables: VolatilityModelTables, input: ContractValuationInput): ContractValuation | null {
   if (!(input.mid > 0) || !(input.mid < (input.isCall ? input.spot : input.strike)) || !(input.forward > 0) || !(input.strike > 0) || !(input.perSessionVariance > 0) || !(input.varianceSessions > 0) || !(input.spot > 0)) return null;
   const buckets = standardizedReturnBucketsFor(tables, input.group, input.varianceSessions);
   const totalStandardDeviation = Math.sqrt(input.perSessionVariance * input.varianceSessions);
-  let normalizer = 0;
-  for (const z of buckets) normalizer += Math.exp(totalStandardDeviation * z);
-  normalizer /= buckets.length;
+  const prices = pricesAtExpiry(buckets, totalStandardDeviation, input.forward);
   const discount = Math.exp(-input.riskFreeRate * Math.max(0, input.calendarYears));
   const payoffAt = (price: number) => (input.isCall ? Math.max(price - input.strike, 0) : Math.max(input.strike - price, 0));
   const premiumDollars = input.mid * 100;
@@ -124,7 +164,7 @@ export function valueContract(tables: VolatilityModelTables, input: ContractValu
   const riskPnl: number[] = new Array(buckets.length);
   let payoffSum = 0;
   for (let index = 0; index < buckets.length; index++) {
-    const price = (input.forward * Math.exp(totalStandardDeviation * buckets[index]!)) / normalizer;
+    const price = prices[index]!;
     const payoff = payoffAt(price);
     payoffSum += payoff;
     pnl[index] = premiumDollars - input.frictionDollars - discount * payoff * 100;
@@ -138,8 +178,12 @@ export function valueContract(tables: VolatilityModelTables, input: ContractValu
   };
   const wins = riskPnl.filter((value) => value > 0);
   const losses = riskPnl.filter((value) => value <= 0);
-  const sorted = [...riskPnl].sort((a, b) => a - b);
-  const tail = sorted.slice(0, Math.max(1, Math.round(sorted.length * expectedShortfallTailShare)));
+  // A numeric typed-array sort orders as (a, b) => a − b does, but for where it puts −0 and +0, which no sum from 0
+  // can tell apart; with a NaN (which that comparator leaves unordered) the comparator sort is kept.
+  const sorted = riskPnl.some(Number.isNaN) ? [...riskPnl].sort((a, b) => a - b) : Float64Array.from(riskPnl).sort();
+  const tailLength = Math.min(sorted.length, Math.max(1, Math.round(sorted.length * expectedShortfallTailShare)));
+  let tailSum = 0;
+  for (let index = 0; index < tailLength; index++) tailSum += sorted[index]!;
   const stressPrice = input.forward * Math.exp(-stressStandardDeviations * totalStandardDeviation);
   const stressShareMove = input.isCall ? (stressPrice - input.forward) * 100 : 0;
   const capitalAtRiskDollars = ((input.isCall ? input.spot : input.strike) - input.mid) * 100;
@@ -161,7 +205,7 @@ export function valueContract(tables: VolatilityModelTables, input: ContractValu
     probabilityOfProfit: wins.length / riskPnl.length,
     averageWinDollars: wins.length > 0 ? wins.reduce((sum, value) => sum + value, 0) / wins.length : 0,
     averageLossDollars: losses.length > 0 ? losses.reduce((sum, value) => sum + value, 0) / losses.length : 0,
-    expectedShortfallDollars: tail.reduce((sum, value) => sum + value, 0) / tail.length,
+    expectedShortfallDollars: tailSum / tailLength,
     stressPnlDollars: premiumDollars - input.frictionDollars - discount * payoffAt(stressPrice) * 100 + stressShareMove,
     premiumAfterCostsDollars,
     premiumYield: annualize(premiumAfterCostsDollars),

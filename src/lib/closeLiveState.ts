@@ -1,4 +1,4 @@
-import { deriveCycles, type CycleInput } from "./cycles.js";
+import { deriveOpenCycle, type CycleInput } from "./cycles.js";
 import type { MarketSessionState } from "./marketSessionStatus.js";
 
 // What the Close form shows and gates on, derived from live quotes (approved 2026-09-28). Pure so it can be
@@ -114,12 +114,11 @@ export function deriveCloseLiveState(input: DeriveCloseLiveStateInput): CloseLiv
     );
     const openPositionPremiumPnl = new Map(cycleInput.openPositionPremiumPnl);
     if (optionLegs.length > 0) openPositionPremiumPnl.set(positionId, optionPremiumPnl);
-    const cycles = deriveCycles({
+    const openCycle = deriveOpenCycle({
       ...cycleInput,
       lastPrice: stockNeeded ? { date: todayIso, price: stockQuote!.last! } : cycleInput.lastPrice,
       openPositionPremiumPnl,
     });
-    const openCycle = cycles.find((cycle) => cycle.status === "open");
     if (!openCycle) return blocked(`No open wheel cycle was found for ${symbol}, so closing can't be verified. Closing is blocked.`);
     if (openCycle.dataFlags.length > 0) {
       return blocked(`The ${symbol} wheel cycle has inconsistent data (${openCycle.dataFlags.join("; ")}). Closing is blocked until it is fixed.`);

@@ -15,7 +15,8 @@ import { loadBacktestBarHistory, type BacktestBarHistory } from "./backtestBarHi
 import { computeInterestDollars, computeParityStockPrice } from "./backtestBook.js";
 import { runBacktestLook, type BacktestLookSymbol, type BacktestOptionSale, type BacktestPreparedSymbolDay } from "./backtestLook.js";
 import { buildCycleRecords, buildFillRecords, buildOptionTrades, buildPositionRecords, withPositionCycle, type SimulatedTrade } from "./backtestSessionRecords.js";
-import { captureLookTimeEt, decisionInstantMs, lookInstantMs, type BacktestTickerProfile } from "./backtestTickerInputs.js";
+import { captureLookTimeEt, decisionInstantMs, lookInstantMs, selectLookDayQuotes, type BacktestTickerProfile } from "./backtestTickerInputs.js";
+import type { LiveOptionQuote } from "../../lib/signalsLiveScoring.js";
 import { BacktestSymbolFile, type SymbolFileDayIssue, type SymbolFileEndOfDayRow, type SymbolFileQuote } from "./backtestSymbolFile.js";
 import { describeDaysWithoutIntradayQuotes } from "../jobs/backtestSessionRequest.js";
 import { loadMacroEventHistory } from "../macroEventHistory.js";
@@ -33,6 +34,7 @@ import { createSimulatedLedger, cycleSplitFactorFor, requirePosition, type Ledge
 import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
 import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestTradingCalendar.js";
 import { BacktestScoringPool, scoringWorkerCount } from "./backtestScoringPool.js";
+import { BacktestDayDataReader, type PrefetchedSymbolDay } from "./backtestDayDataReader.js";
 import { loadTreasuryBillRates, type TreasuryBillRates } from "./treasuryBillRates.js";
 import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
 
@@ -97,6 +99,8 @@ export class BacktestCancelledError extends Error {
 const progressIntervalMs = 5_000;
 const cancelCheckIntervalMs = 2_000;
 const insertBatchSize = 500;
+/** How many of a symbol's days the reader thread reads ahead of the one being replayed (today's included). */
+const prefetchDaysAhead = 3;
 
 interface SessionRow {
   id: string;
@@ -222,10 +226,15 @@ function summarizeDayLooks(looks: readonly DayLookSummary[]): string[] {
   ];
 }
 
-/** The option's mark at a look or at the close: the mid of a quote with an ask (a missing bid counts as 0). */
-function markMidByContract(quotes: readonly Pick<SymbolFileQuote, "expiry" | "strike" | "right" | "bid" | "ask">[]): Map<string, number> {
+/**
+ * The option's mark at a look or at the close: the mid of a quote with an ask (a missing bid counts as 0), for the
+ * contracts at the given strikes (as markKey rounds them): the held legs a caller marks. The last quote of a contract
+ * counts, as when every quote is read.
+ */
+function markMidByContract(quotes: readonly Pick<SymbolFileQuote, "expiry" | "strike" | "right" | "bid" | "ask">[], roundedStrikesWanted: ReadonlySet<number>): Map<string, number> {
   const marks = new Map<string, number>();
   for (const quote of quotes) {
+    if (!roundedStrikesWanted.has(roundedStrike(quote.strike))) continue;
     if (quote.ask === null || !(quote.ask > 0)) continue;
     const bid = quote.bid !== null && quote.bid > 0 ? quote.bid : 0;
     if (quote.ask < bid) continue;
@@ -299,6 +308,15 @@ export interface SimulatedSessionResult {
   runStatistics: BacktestRunStatistics;
 }
 
+/** A symbol's file day at 10:00, from the files alone: its quotes, the stock price they imply, and what Signals reads with them. */
+interface DayCapture {
+  quotes: SymbolFileQuote[];
+  parity: ReturnType<typeof computeParityStockPrice>;
+  previousSessionVolumeByContract: Map<string, number> | null;
+  /** What the day's inputs are built from; null without a price from the quotes. */
+  market: BacktestLookSymbol["market"] | null;
+}
+
 /** One symbol of a session: its file, history and price scale, and where the replay stands on it. */
 interface SessionSymbol {
   symbol: string;
@@ -316,6 +334,12 @@ interface SessionSymbol {
   endOfDayRows(tradingDate: string): readonly SymbolFileEndOfDayRow[];
   /** The complete file day before each complete day; null for the first. */
   previousFileDayOf: Map<string, string | null>;
+  /** The symbol's complete days inside the session, ascending: what the reader thread reads ahead. */
+  ownSessionDays: string[];
+  /** The days the reader thread read for the symbol, the last few kept (a day's end-of-day rows are read again the next day). */
+  prefetchedDays: Map<string, PrefetchedSymbolDay | null>;
+  /** Each file day's 10:00 capture, worked out once (the next day's ahead of it, to build its inputs early); the last few kept. */
+  captureByDay: Map<string, DayCapture>;
   lastCompleteDay: string;
   /** Days inside the period the downloader could not retrieve at all. */
   unavailableDaysInPeriod: string[];
@@ -353,6 +377,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   // Every file is opened once and stays open for the run.
   const files: BacktestSymbolFile[] = [];
   let scoringPool: BacktestScoringPool | null = null;
+  // The files are read ahead on a thread of their own (backtestDayDataReader.ts).
+  const dayDataReader = new BacktestDayDataReader();
   try {
     const fileBySymbol = new Map<string, BacktestSymbolFile>();
     for (const symbol of symbolNames) {
@@ -402,10 +428,11 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       console.log(`backtest ${sessionId} ${symbol} splits (${scheduleCached ? "cached" : "inferred"}): ${splitsInSession.length === 0 ? "none in the session" : splitsInSession.map((split) => `${split.ratio}-for-1 between ${split.lastDayBefore} and ${split.firstDayAfter}`).join("; ")}`);
       const barsOnScale = new Map<number, BacktestBarHistory>();
       const endOfDayRowsByDate = new Map<string, SymbolFileEndOfDayRow[]>();
+      const prefetchedDays = new Map<string, PrefetchedSymbolDay | null>();
       const endOfDayRows = (tradingDate: string) => {
         let rows = endOfDayRowsByDate.get(tradingDate);
         if (!rows) {
-          rows = file.loadEndOfDay(tradingDate);
+          rows = prefetchedDays.get(tradingDate)?.endOfDay() ?? file.loadEndOfDay(tradingDate);
           endOfDayRowsByDate.set(tradingDate, rows);
           // Only the last few days are ever asked for again.
           if (endOfDayRowsByDate.size > 4) endOfDayRowsByDate.delete(endOfDayRowsByDate.keys().next().value!);
@@ -424,6 +451,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         intradayDays: file.loadIntradayDays(),
         endOfDayRows,
         previousFileDayOf: new Map(completeDays.map((dateIso, index) => [dateIso, index > 0 ? completeDays[index - 1]! : null])),
+        ownSessionDays,
+        prefetchedDays,
+        captureByDay: new Map(),
         lastCompleteDay: completeDays.at(-1)!,
         unavailableDaysInPeriod,
         splitFactorByDay,
@@ -485,7 +515,53 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     let lastCancelCheckAtMs = 0;
     const startedAtMs = Date.now();
 
+    /** The risk-free rate a day reads: DTB3 on or before the session day before it. */
+    const riskFreeRatePercentOn = (dateIso: string) => rates.ratePercentOnOrBefore(addCalendarDays(dateIso, -1));
+    /** The macro events a day reads, one list per day (the same list for every symbol, and for the day built ahead). */
+    const macroEventsByDay = new Map<string, ReturnType<typeof macroEventHistory.upcomingOn>>();
+    const macroEventsOn = (dateIso: string) => macroEventsByDay.get(dateIso) ?? macroEventsByDay.set(dateIso, macroEventHistory.upcomingOn(dateIso)).get(dateIso)!;
+    /** F on a day: the symbol's own on a day its file holds, else the factor of the last segment before the date; null when it cannot be inferred. */
+    const splitFactorOnDay = (entry: SessionSymbol, dateIso: string): number | null => entry.splitFactorByDay.get(dateIso) ?? splitFactorOn(entry.schedule, dateIso);
+    /** The reader thread's copy of a symbol's file day, taken once (today's at the top of the day, the next day's maybe earlier). */
+    const takePrefetchedDay = async (entry: SessionSymbol, dateIso: string) => {
+      if (entry.prefetchedDays.has(dateIso)) return;
+      entry.prefetchedDays.set(dateIso, await dayDataReader.take(entry.symbol, dateIso, captureLookTimeEt));
+      if (entry.prefetchedDays.size > 4) entry.prefetchedDays.delete(entry.prefetchedDays.keys().next().value!);
+    };
+    /** A file day's 10:00 capture (DayCapture), worked out once. */
+    const captureOf = (entry: SessionSymbol, dateIso: string): DayCapture => {
+      let capture = entry.captureByDay.get(dateIso);
+      if (capture) return capture;
+      const riskFreeRatePercent = riskFreeRatePercentOn(dateIso);
+      const quotes = entry.prefetchedDays.get(dateIso)?.quotes() ?? entry.file.loadQuotes(dateIso);
+      const parity = computeParityStockPrice(quotes, dateIso, (riskFreeRatePercent ?? 0) / 100, maximumSpreadFractionOfMid);
+      const previousFileDay = entry.previousFileDayOf.get(dateIso) ?? null;
+      const previousSessionVolumeByContract = volumeByContract(previousFileDay === null ? null : entry.endOfDayRows(previousFileDay));
+      const market = parity ? { todayIso: dateIso, quotes, openInterestByContract: entry.prefetchedDays.get(dateIso)?.openInterest() ?? entry.file.loadOpenInterest(dateIso), previousSessionVolumeByContract, stockPrice: parity.price, riskFreeRatePercent } : null;
+      capture = { quotes, parity, previousSessionVolumeByContract, market };
+      entry.captureByDay.set(dateIso, capture);
+      if (entry.captureByDay.size > 3) entry.captureByDay.delete(entry.captureByDay.keys().next().value!);
+      return capture;
+    };
+    /** The session day being replayed: a day built ahead is not sent once its day has begun. */
+    let replayedDayIndex = 0;
+    /** With a scoring pool: builds the next session day's inputs on the workers while today's last look runs (backtestScoringPool.ts prepareDayAhead). */
+    const prepareNextDayAhead = async (dayIndexAtRequest: number) => {
+      const nextDayIso = sessionDays[dayIndexAtRequest + 1];
+      if (!scoringPool || nextDayIso === undefined) return;
+      for (const entry of symbols) {
+        if (!entry.completeDays.has(nextDayIso)) continue;
+        await takePrefetchedDay(entry, nextDayIso);
+        if (replayedDayIndex !== dayIndexAtRequest) return;
+        const splitFactor = splitFactorOnDay(entry, nextDayIso);
+        const { market } = captureOf(entry, nextDayIso);
+        if (splitFactor === null || market === null) continue;
+        scoringPool.prepareDayAhead({ symbol: entry.symbol, splitFactor, market, elevatedVolatility: undefined, macroEvents: macroEventsOn(nextDayIso) });
+      }
+    };
+
     for (let dayIndex = 0; dayIndex < sessionDays.length; dayIndex++) {
+      replayedDayIndex = dayIndex;
       const todayIso = sessionDays[dayIndex]!;
       const nowMs = Date.now();
       if (nowMs - lastCancelCheckAtMs >= cancelCheckIntervalMs) {
@@ -495,6 +571,14 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       if (nowMs - lastProgressAtMs >= progressIntervalMs) {
         lastProgressAtMs = nowMs;
         await hooks.reportProgress(dayIndex, sessionDays.length, `at ${todayIso}`);
+      }
+      // The reader thread reads each symbol's next days while this one runs; today's is taken before anything reads it.
+      for (const entry of symbols) {
+        const ownDayIndex = entry.ownSessionDays.indexOf(todayIso);
+        const nextDayIndex = ownDayIndex === -1 ? entry.ownSessionDays.findIndex((dateIso) => dateIso > todayIso) : ownDayIndex;
+        if (nextDayIndex !== -1) for (const dateIso of entry.ownSessionDays.slice(nextDayIndex, nextDayIndex + prefetchDaysAhead)) dayDataReader.prefetch(entry.symbol, dateIso, captureLookTimeEt);
+        if (ownDayIndex === -1) continue;
+        await takePrefetchedDay(entry, todayIso);
       }
       const notes: string[] = [];
       const previousSessionDay = dayIndex > 0 ? sessionDays[dayIndex - 1]! : null;
@@ -547,14 +631,14 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const spyBaselineDay = spyBuyAndHold?.markDay(todayIso, spyPriceAtTen(todayIso), interestPeriod) ?? null;
 
       // c. The 10:00 marks, symbol by symbol, and what the day's looks score.
-      const riskFreeRatePercent = rates.ratePercentOnOrBefore(addCalendarDays(todayIso, -1));
-      const macroEvents = macroEventHistory.upcomingOn(todayIso);
+      const riskFreeRatePercent = riskFreeRatePercentOn(todayIso);
+      const macroEvents = macroEventsOn(todayIso);
       const openLegs = openLegsOf(ledger);
       /** Marks a symbol's open legs at a stock price and the quotes of the same instant; an option those quotes lack keeps its last mark. */
       const markLegs = (entry: SessionSymbol, legsOfSymbol: readonly LedgerLeg[], stockPrice: number, quotes: readonly SymbolFileQuote[], splitFactor: number) => {
         if (legsOfSymbol.length === 0) return;
-        const midByContract = markMidByContract(quotes);
         const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
+        const midByContract = markMidByContract(quotes, new Set(legsOfSymbol.flatMap((leg) => (leg.legType === "stock" ? [] : [roundedStrike(leg.strikePrice! / priceToCycleScale)]))));
         for (const leg of legsOfSymbol) {
           if (leg.legType === "stock") priceByLegId.set(leg.id, stockPrice * priceToCycleScale);
           else {
@@ -575,8 +659,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const aligned = alignOpenOptionLegsToSplitFactor(ledger, entry.symbol, splitFactor);
         if (!aligned.representable) notes.push(noteFor(entry, "the open cycle spans a split whose contracts do not fit its share scale: no option order until it ends"));
         const previousFileDay = hasFileDay ? (entry.previousFileDayOf.get(todayIso) ?? null) : null;
-        const quotes = hasFileDay ? entry.file.loadQuotes(todayIso) : [];
-        const parity = hasFileDay ? computeParityStockPrice(quotes, todayIso, (riskFreeRatePercent ?? 0) / 100, maximumSpreadFractionOfMid) : null;
+        const capture = hasFileDay ? captureOf(entry, todayIso) : null;
+        const quotes = capture?.quotes ?? [];
+        const parity = capture?.parity ?? null;
         const adjustedFallbackPrice: number | null = parity ? null : (entry.bars.previousClose(todayIso)?.close ?? entry.lastAdjustedStockPrice);
         const stockPrice: number | null = parity?.price ?? (adjustedFallbackPrice === null ? null : adjustedFallbackPrice * splitFactor);
         const legsOfSymbol = openLegs.filter((leg) => symbolOfLeg(leg) === entry);
@@ -607,7 +692,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         const previousBarDate = entry.bars.previousClose(todayIso)?.dateIso ?? null;
         if (previousFileDay !== null && previousBarDate !== null && previousBarDate < previousFileDay) notes.push(noteFor(entry, `IBKR bars end ${previousBarDate}: the forecast and the day's move use that close`));
-        const previousSessionVolumeByContract = volumeByContract(previousFileDay === null ? null : entry.endOfDayRows(previousFileDay));
+        const previousSessionVolumeByContract = capture!.previousSessionVolumeByContract;
         notes.push(...describeDataGaps(entry.file, todayIso, previousFileDay, previousSessionVolumeByContract).map((note) => noteFor(entry, note)));
         daySymbols.push({
           entry,
@@ -615,7 +700,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           lookSymbol: {
             profile: entry.profile,
             bars: entry.barsOnTradedScale(splitFactor),
-            market: { todayIso, quotes, openInterestByContract: entry.file.loadOpenInterest(todayIso), previousSessionVolumeByContract, stockPrice, riskFreeRatePercent },
+            market: capture!.market!,
             macroEvents,
             splitFactorToday: splitFactor,
             optionContractsRepresentable: aligned.representable,
@@ -640,10 +725,44 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (!quotesByLookTime) {
           const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
           const heldStrikes = openLegsOf(ledger).filter((leg) => leg.legType === "option" && symbolOfLeg(leg) === entry).map((leg) => leg.strikePrice! / priceToCycleScale);
-          quotesByLookTime = entry.file.loadIntradayQuotes(todayIso, captureLookTimeEt, laterLookTimes.at(-1)!, Math.min(stockPriceAtCapture * lookStrikeRangeOfStockPrice.lowest, ...heldStrikes) - 0.005, Math.max(stockPriceAtCapture * lookStrikeRangeOfStockPrice.highest, ...heldStrikes) + 0.005);
+          const lowestStrike = Math.min(stockPriceAtCapture * lookStrikeRangeOfStockPrice.lowest, ...heldStrikes) - 0.005;
+          const highestStrike = Math.max(stockPriceAtCapture * lookStrikeRangeOfStockPrice.highest, ...heldStrikes) + 0.005;
+          quotesByLookTime = entry.prefetchedDays.get(todayIso)?.intradayQuotes(captureLookTimeEt, laterLookTimes.at(-1)!, lowestStrike, highestStrike) ?? entry.file.loadIntradayQuotes(todayIso, captureLookTimeEt, laterLookTimes.at(-1)!, lowestStrike, highestStrike);
           intradayQuotesBySymbol.set(entry.symbol, quotesByLookTime);
         }
         return quotesByLookTime;
+      };
+      /**
+       * A later look's prices and day quotes by symbol, worked out ahead while the previous look's scoring runs: they come
+       * from the files alone. Only once the day's intraday quotes are read (their strike range takes in the legs held at
+       * the first later look), so nothing is read earlier than it would be.
+       */
+      const lookAheadBySymbolAndTime = new Map<string, { parity: ReturnType<typeof computeParityStockPrice>; dayQuotes: LiveOptionQuote[] | null }>();
+      const lookAheadOf = (entry: SessionSymbol, lookTimeEt: string): { quotes: SymbolFileQuote[] | undefined; parity: ReturnType<typeof computeParityStockPrice>; dayQuotes: LiveOptionQuote[] | null } | null => {
+        const quotes = intradayQuotesBySymbol.get(entry.symbol)?.get(lookTimeEt);
+        const key = `${entry.symbol}|${lookTimeEt}`;
+        let ahead = lookAheadBySymbolAndTime.get(key);
+        if (!ahead) {
+          const parity = quotes ? computeParityStockPrice(quotes, todayIso, (riskFreeRatePercent ?? 0) / 100, maximumSpreadFractionOfMid) : null;
+          const prepared = preparedDayBySymbol.get(entry.symbol);
+          const dayQuotes = quotes && parity && prepared ? selectLookDayQuotes(quotes, prepared.capturedContractKeys, todayIso, parity.price, prepared.referenceVolatility, new Date(lookInstantMs(todayIso, lookTimeEt)).toISOString()) : null;
+          lookAheadBySymbolAndTime.set(key, (ahead = { parity, dayQuotes }));
+        }
+        return { quotes, ...ahead };
+      };
+      const warmNextLook = (lookTimeEt: string) => {
+        const nextLookTimeEt = lookTimes[lookTimes.indexOf(lookTimeEt) + 1];
+        if (!scoringPool) return;
+        if (nextLookTimeEt === undefined) {
+          // A failure here is the next day's own to report, when it reads the same data.
+          prepareNextDayAhead(dayIndex).catch(() => {});
+          return;
+        }
+        for (const { entry } of daySymbols) {
+          if (!entry.intradayDays.has(todayIso) || !intradayQuotesBySymbol.has(entry.symbol)) continue;
+          const ahead = lookAheadOf(entry, nextLookTimeEt)!;
+          if (ahead.parity && ahead.dayQuotes) scoringPool.warm(entry.symbol, { todayIso, dayQuotes: ahead.dayQuotes, spotPrice: ahead.parity.price, scoredAtMs: lookInstantMs(todayIso, nextLookTimeEt) });
+        }
       };
       const looksOfDay: DayLookSummary[] = [];
       const checkNotes: string[] = [];
@@ -662,13 +781,13 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           const openLegsAtLook = openLegsOf(ledger);
           for (const { entry, lookSymbol, splitFactor } of daySymbols) {
             if (!entry.intradayDays.has(todayIso)) continue;
-            const quotes = intradayQuotesOf(entry, lookSymbol.market.stockPrice, splitFactor).get(lookTimeEt);
-            const parity = quotes ? computeParityStockPrice(quotes, todayIso, (riskFreeRatePercent ?? 0) / 100, maximumSpreadFractionOfMid) : null;
+            intradayQuotesOf(entry, lookSymbol.market.stockPrice, splitFactor);
+            const { quotes, parity, dayQuotes } = lookAheadOf(entry, lookTimeEt)!;
             // Without a price from this look's quotes the symbol keeps its last marks and is left out of the look.
             if (!quotes || !parity) continue;
             markLegs(entry, openLegsAtLook.filter((leg) => symbolOfLeg(leg) === entry), parity.price, quotes, splitFactor);
             entry.lastAdjustedStockPrice = parity.price / splitFactor;
-            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: parity.price } });
+            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: parity.price, ...(dayQuotes ? { dayQuotes } : {}) } });
           }
         }
         if (lookSymbols.length === 0) continue;
@@ -723,6 +842,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           nextActionId,
           preparedDayBySymbol,
           scoringPool,
+          onFirstScoresSent: () => warmNextLook(lookTimeEt),
           filledActionsEarlierToday: filledActionsToday,
           opensBlockedBecause: marketStress ? marketStressOpensBlockedReason : null,
           ...(llmSession ? { llm: { session: llmSession, rounds: llmRounds, windowEndEt: effectiveWindowEndEt(pluto.windowEndEt, clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt)), spyDayChangePercent: marketDayChangePercent } } : {}),
@@ -761,7 +881,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const endOfDayRows = entry.completeDays.has(todayIso) ? entry.endOfDayRows(todayIso) : [];
         const adjustedClose = entry.bars.closeOn(todayIso);
         const closeAsTraded = adjustedClose !== null && adjustedClose > 0 ? adjustedClose * splitFactor : (computeParityStockPrice(endOfDayRows, todayIso, (riskFreeRatePercent ?? 0) / 100, null)?.price ?? null);
-        const closingMidByContract = markMidByContract(endOfDayRows);
+        const closingMidByContract = markMidByContract(endOfDayRows, new Set(legsOfSymbol.flatMap((leg) => (leg.legType === "stock" ? [] : [roundedStrike(leg.strikePrice! / priceToCycleScale)]))));
         for (const leg of legsOfSymbol) {
           if (leg.legType === "stock") {
             if (closeAsTraded !== null) closingPriceByLegId.set(leg.id, closeAsTraded * priceToCycleScale);
@@ -826,6 +946,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   } finally {
     for (const file of files) file.close();
     await scoringPool?.close();
+    await dayDataReader.close();
   }
 }
 

@@ -8,7 +8,7 @@ import { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalA
 import type { OpenShortLeg } from "../../../lib/rollSignalCandidates.js";
 import { findSameContractConflict, type OccupiedContract } from "../../../pluto/candidateFilters.js";
 import type { PostModelBookInput } from "../../../pluto/postModelGates.js";
-import { legsOfPosition, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type SimulatedLedger } from "./simulatedLedger.js";
+import { findLeg, findPosition, ledgerRevision, legsOfPosition, positionsOfSymbol, requirePosition, type LedgerLeg, type LedgerPosition, type LedgerTrade, type SimulatedLedger } from "./simulatedLedger.js";
 
 // Pluto's view of the simulated book. The figures come from the functions the platform itself uses, fed with the
 // ledger's rows: position figures from positionSelectors.ts (tested against the positions SQL), cycles and the
@@ -35,14 +35,14 @@ function openLegs(ledger: SimulatedLedger): { leg: LedgerLeg; position: LedgerPo
   });
 }
 
-/** Uncovered shares of the symbol a call may be written against (fetchAvailableUncoveredShares). */
+/** Uncovered shares of the symbol a call may be written against (fetchAvailableUncoveredShares). Only open positions count, so only they are read. */
 export function ledgerFreeShares(ledger: SimulatedLedger, symbol: string): number {
-  return availableUncoveredShares(positionsOfSymbol(ledger, symbol).map((position) => ledgerPositionFigures(ledger, position)));
+  return availableUncoveredShares(positionsOfSymbol(ledger, symbol).filter((position) => position.status === "open").map((position) => ledgerPositionFigures(ledger, position)));
 }
 
-/** Cash reserved for the open cash-secured puts at their full strike (computeCashLockedInCsps). */
+/** Cash reserved for the open cash-secured puts at their full strike (computeCashLockedInCsps). Only open positions count, so only they are read. */
 export function ledgerCashLockedInCashSecuredPuts(ledger: SimulatedLedger): number {
-  return cashLockedInCashSecuredPuts(ledger.positions.map((position) => ledgerPositionFigures(ledger, position)));
+  return cashLockedInCashSecuredPuts(openPositions(ledger).map((position) => ledgerPositionFigures(ledger, position)));
 }
 
 /** Cash not reserved for the open puts, never below zero (signalsStore's account context). */
@@ -163,15 +163,21 @@ export interface LedgerCycleMarket {
   optionMarkByLegId?: ReadonlyMap<string, number>;
 }
 
-/** The rows the cycle loader would select for the symbol (cycleQueries.ts), from the ledger. The symbol stands in for the ticker id. */
-export function ledgerCycleInputRows(ledger: SimulatedLedger, symbol: string, market: LedgerCycleMarket): CycleInputRows {
-  const symbolPositions = positionsOfSymbol(ledger, symbol);
+/** The open positions' option premium P&L at the marks given (none without marks), by position. */
+function openPositionPremiumPnlOf(ledger: SimulatedLedger, symbolPositions: readonly LedgerPosition[], market: LedgerCycleMarket): Map<string, number> {
   const openPositionPremiumPnl = new Map<string, number>();
   if (market.optionMarkByLegId) {
     const openOptionLegs = symbolPositions.filter((position) => position.status === "open").flatMap((position) => legsOfPosition(ledger, position.id)).filter((leg) => leg.legType === "option" && isOpen(leg));
     const marked = computeUnrealizedPnlByPosition([...new Set(openOptionLegs.map((leg) => leg.positionId))], openOptionLegs, Object.fromEntries(openOptionLegs.map((leg) => [leg.id, market.optionMarkByLegId!.get(leg.id) ?? null])));
     for (const [positionId, premiumPnl] of Object.entries(marked.premiumByPositionId)) if (premiumPnl !== null) openPositionPremiumPnl.set(positionId, premiumPnl);
   }
+  return openPositionPremiumPnl;
+}
+
+/** The rows the cycle loader would select for the symbol (cycleQueries.ts), from the ledger. The symbol stands in for the ticker id. */
+export function ledgerCycleInputRows(ledger: SimulatedLedger, symbol: string, market: LedgerCycleMarket): CycleInputRows {
+  const symbolPositions = positionsOfSymbol(ledger, symbol);
+  const openPositionPremiumPnl = openPositionPremiumPnlOf(ledger, symbolPositions, market);
   return {
     optionRows: optionLegRows(ledger, symbol, new Map(market.dailyCloses.map((bar) => [bar.date, bar.close]))),
     stockLegRows: symbolPositions.flatMap((position) => legsOfPosition(ledger, position.id).filter((leg) => leg.legType === "stock" && leg.side === "long").map((leg) => ({ tickerId: symbol, positionId: position.id, quantity: leg.quantity, entryAt: leg.entryAt, exitAt: leg.exitAt }))),
@@ -181,8 +187,22 @@ export function ledgerCycleInputRows(ledger: SimulatedLedger, symbol: string, ma
   };
 }
 
+/**
+ * ledgerCycleInput without the open positions' marked premium, per ledger, symbol and closes array, kept for one
+ * ledger revision: most looks read the same book over the same day's closes, and only the marks move.
+ */
+const cycleInputBookByLedger = new WeakMap<SimulatedLedger, Map<string, { revision: number; dailyCloses: LedgerCycleMarket["dailyCloses"]; input: CycleInput }>>();
+
 export function ledgerCycleInput(ledger: SimulatedLedger, symbol: string, market: LedgerCycleMarket): CycleInput {
-  return buildCycleInputFromRows(symbol, ledgerCycleInputRows(ledger, symbol, market));
+  let bySymbol = cycleInputBookByLedger.get(ledger);
+  if (!bySymbol) cycleInputBookByLedger.set(ledger, (bySymbol = new Map()));
+  const revision = ledgerRevision(ledger);
+  let kept = bySymbol.get(symbol);
+  if (!kept || kept.revision !== revision || kept.dailyCloses !== market.dailyCloses) {
+    kept = { revision, dailyCloses: market.dailyCloses, input: buildCycleInputFromRows(symbol, ledgerCycleInputRows(ledger, symbol, { dailyCloses: market.dailyCloses })) };
+    bySymbol.set(symbol, kept);
+  }
+  return { ...kept.input, openPositionPremiumPnl: openPositionPremiumPnlOf(ledger, positionsOfSymbol(ledger, symbol), market) };
 }
 
 /** The symbol's wheel cycles, open and closed (deriveCycles). */
@@ -190,8 +210,22 @@ export function ledgerCycles(ledger: SimulatedLedger, symbol: string, market: Le
   return deriveCycles(ledgerCycleInput(ledger, symbol, market));
 }
 
+/** ledgerOpenCycleSummary per ledger and symbol, kept for one ledger revision (it reads the book alone). */
+const openCycleSummaryByLedger = new WeakMap<SimulatedLedger, Map<string, { revision: number; summary: OpenCycleSummary | null }>>();
+
 /** The symbol's open cycle (summarizeOpenCycle, from the short option legs and stock fills the live loader passes); null when it is flat. */
 export function ledgerOpenCycleSummary(ledger: SimulatedLedger, symbol: string): OpenCycleSummary | null {
+  let bySymbol = openCycleSummaryByLedger.get(ledger);
+  if (!bySymbol) openCycleSummaryByLedger.set(ledger, (bySymbol = new Map()));
+  const revision = ledgerRevision(ledger);
+  const kept = bySymbol.get(symbol);
+  if (kept && kept.revision === revision) return kept.summary;
+  const summary = summarizeLedgerOpenCycle(ledger, symbol);
+  bySymbol.set(symbol, { revision, summary });
+  return summary;
+}
+
+function summarizeLedgerOpenCycle(ledger: SimulatedLedger, symbol: string): OpenCycleSummary | null {
   const openStockShares = positionsOfSymbol(ledger, symbol).flatMap((position) => legsOfPosition(ledger, position.id)).filter((leg) => leg.legType === "stock" && leg.side === "long" && isOpen(leg)).reduce((sum, leg) => sum + leg.quantity, 0);
   return summarizeOpenCycleFromRows(symbol, { optionRows: optionLegRows(ledger, symbol, new Map()).filter((row) => row.side === "short"), stockTradeRows: stockTradeRows(ledger, symbol), openStockShares });
 }
@@ -231,12 +265,26 @@ export function ledgerLegsDueForSettlement(ledger: SimulatedLedger, dateIso: str
   return openLegs(ledger).flatMap(({ leg }) => (leg.legType === "option" && leg.side === "short" && leg.expiryDate !== null && leg.expiryDate <= dateIso ? [leg] : []));
 }
 
-/** When a simulated Pluto action last filled on the symbol (the ticker cooldown's clock); null if never. */
+/**
+ * Per ledger: the latest action trade of each symbol over the trades read so far. Trades are only appended (and never
+ * changed), and a trade's leg and its position's symbol are fixed, so each read takes in only the trades added since.
+ */
+const lastFilledActionAtByLedger = new WeakMap<SimulatedLedger, { trades: LedgerTrade[]; readCount: number; latestBySymbol: Map<string, Date> }>();
+
+/** When a simulated Pluto action last filled on the symbol (the ticker cooldown's clock); null if never. The first of equally late trades, in ledger order. */
 export function ledgerLastFilledActionAt(ledger: SimulatedLedger, symbol: string): Date | null {
-  const legIds = new Set(positionsOfSymbol(ledger, symbol).flatMap((position) => legsOfPosition(ledger, position.id)).map((leg) => leg.id));
-  let latest: Date | null = null;
-  for (const trade of ledger.trades) if (trade.actionId !== null && legIds.has(trade.legId) && (latest === null || trade.executedAt.getTime() > latest.getTime())) latest = trade.executedAt;
-  return latest;
+  let read = lastFilledActionAtByLedger.get(ledger);
+  if (!read || read.trades !== ledger.trades) lastFilledActionAtByLedger.set(ledger, (read = { trades: ledger.trades, readCount: 0, latestBySymbol: new Map() }));
+  for (; read.readCount < ledger.trades.length; read.readCount++) {
+    const trade = ledger.trades[read.readCount]!;
+    if (trade.actionId === null) continue;
+    const position = (leg => leg && findPosition(ledger, leg.positionId))(findLeg(ledger, trade.legId));
+    if (!position) continue;
+    const tradeSymbol = position.symbol;
+    const latest = read.latestBySymbol.get(tradeSymbol);
+    if (latest === undefined || trade.executedAt.getTime() > latest.getTime()) read.latestBySymbol.set(tradeSymbol, trade.executedAt);
+  }
+  return read.latestBySymbol.get(symbol) ?? null;
 }
 
 export interface LedgerPostModelBookRequest {

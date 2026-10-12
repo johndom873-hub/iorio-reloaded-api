@@ -23,6 +23,8 @@
 // returned with `dataFlags` set instead of guessed: a missing expiry bar, an expiry
 // within $0.05 of the strike, or ledger shares that disagree with the stock legs.
 
+import { easternIsoDate } from "./easternIsoDate.js";
+
 export type CycleBucket = "csp" | "unstructured" | "cc" | "hedge";
 
 export interface CycleOptionLeg {
@@ -133,11 +135,6 @@ const groupingWindowMs = 120_000;
 const fillLookbackMs = 600_000;
 const marginalThreshold = 0.05;
 
-const easternDateFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" });
-function easternIsoDate(at: Date): string {
-  return easternDateFormatter.format(at);
-}
-
 function optionLegBucket(leg: Pick<CycleOptionLeg, "side" | "optionType">): CycleBucket {
   if (leg.side === "long") return "hedge";
   return leg.optionType === "put" ? "csp" : "cc";
@@ -195,7 +192,20 @@ function dropInferredAssignmentFills(stockTrades: CycleStockTrade[], optionLegs:
 }
 
 export function deriveCycles(input: CycleInput): Cycle[] {
-  const { optionLegs, stockLegs, stockTrades, dailyCloses, lastPrice, openPositionPremiumPnl } = input;
+  return cycleWindows(input).map((window) => deriveOneCycle(window, input));
+}
+
+/**
+ * The open cycle alone: deriveCycles(input).find(open), without deriving the closed ones. Only the last window can be
+ * open (a window without an end), and each window is derived on its own.
+ */
+export function deriveOpenCycle(input: CycleInput): Cycle | null {
+  const lastWindow = cycleWindows(input).at(-1);
+  return lastWindow && lastWindow.end === null ? deriveOneCycle(lastWindow, input) : null;
+}
+
+function cycleWindows(input: CycleInput): { start: number; end: number | null }[] {
+  const { optionLegs, stockLegs } = input;
 
   // 1. Boundaries from the legs (the closest thing to real holdings): flat = no stock legs open and no option legs open.
   const boundaryEvents: { at: number; sharesDelta: number; optionsDelta: number }[] = [];
@@ -232,15 +242,26 @@ export function deriveCycles(input: CycleInput): Cycle[] {
     }
     if (currentStart !== null) windows.push({ start: currentStart, end: null });
   }
-
-  return windows.map((window) => deriveOneCycle(window, input));
+  return windows;
 }
+
+/** Each closes map's dates in ascending order, for priceOnOrBefore; read again when the map's size changed. */
+const sortedDatesByCloses = new WeakMap<Map<string, number>, string[]>();
 
 function priceOnOrBefore(dailyCloses: Map<string, number>, isoDate: string): { price: number; exact: boolean } | null {
   const exact = dailyCloses.get(isoDate);
   if (exact !== undefined) return { price: exact, exact: true };
-  let bestDate: string | null = null;
-  for (const date of dailyCloses.keys()) if (date < isoDate && (bestDate === null || date > bestDate)) bestDate = date;
+  let dates = sortedDatesByCloses.get(dailyCloses);
+  if (!dates || dates.length !== dailyCloses.size) sortedDatesByCloses.set(dailyCloses, (dates = [...dailyCloses.keys()].sort()));
+  // The latest date before isoDate: binary search for the first date not before it.
+  let low = 0;
+  let high = dates.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (dates[middle]! < isoDate) low = middle + 1;
+    else high = middle;
+  }
+  const bestDate = low > 0 ? dates[low - 1]! : null;
   return bestDate === null ? null : { price: dailyCloses.get(bestDate)!, exact: false };
 }
 

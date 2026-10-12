@@ -5,6 +5,7 @@ import { optionCommissionDollars, stockCommissionDollars } from "./ledgerFills.j
 import {
   cycleSplitFactorFor,
   isSymbolFlat,
+  changingLedger,
   legsOfPosition,
   nextLedgerId,
   positionsOfSymbol,
@@ -224,7 +225,7 @@ export interface OpenCashSecuredPutEvent {
 }
 
 /** A put sold: a new cash-secured-put position with one short put leg and its opening trade. */
-export function openCashSecuredPut(ledger: SimulatedLedger, event: OpenCashSecuredPutEvent): { positionId: string; legId: string } {
+function applyOpenCashSecuredPut(ledger: SimulatedLedger, event: OpenCashSecuredPutEvent): { positionId: string; legId: string } {
   requirePositiveWholeNumber(event.contracts, "Contracts");
   requireContractNotHeld(ledger, event.symbol, event.expiryDate, event.strike);
   startCycleIfFlat(ledger, event.symbol, event.splitFactorToday, event.at);
@@ -269,7 +270,7 @@ export interface OpenCoveredCallResult {
  * shares closes (stock rolled into covered call), its leg handed off at entry; what the call did not need goes to a new
  * unstructured position.
  */
-export function openCoveredCall(ledger: SimulatedLedger, event: OpenCoveredCallEvent): OpenCoveredCallResult {
+function applyOpenCoveredCall(ledger: SimulatedLedger, event: OpenCoveredCallEvent): OpenCoveredCallResult {
   requirePositiveWholeNumber(event.contracts, "Contracts");
   requireContractNotHeld(ledger, event.symbol, event.expiryDate, event.strike);
   const sharesPerContract = event.sharesPerContract ?? standardSharesPerContract;
@@ -322,7 +323,7 @@ export interface RollLegEvent {
  * A roll: the held leg bought back and the same quantity of a new contract sold, at one instant. The old position
  * closes (closed via app) and the new contract is a new position; a covered call's shares are handed to it at entry.
  */
-export function rollLeg(ledger: SimulatedLedger, event: RollLegEvent): { closedPositionId: string; positionId: string; legId: string; stockLegId: string | null } {
+function applyRollLeg(ledger: SimulatedLedger, event: RollLegEvent): { closedPositionId: string; positionId: string; legId: string; stockLegId: string | null } {
   const oldLeg = requireLeg(ledger, event.legId);
   const oldPosition = requirePosition(ledger, oldLeg.positionId);
   if (oldLeg.legType !== "option" || oldLeg.side !== "short" || oldLeg.optionType === null || oldLeg.exitAt !== null) throw new Error(`Leg ${oldLeg.id} is not an open short option: nothing to roll.`);
@@ -353,7 +354,7 @@ export interface BuyBackPutEvent {
 }
 
 /** A cash-secured put bought back: the leg exits at the fill and its position closes (closed via app). */
-export function buyBackPut(ledger: SimulatedLedger, event: BuyBackPutEvent): void {
+function applyBuyBackPut(ledger: SimulatedLedger, event: BuyBackPutEvent): void {
   const leg = requireLeg(ledger, event.legId);
   const position = requirePosition(ledger, leg.positionId);
   if (leg.legType !== "option" || leg.side !== "short" || leg.optionType !== "put" || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open short put: only a put is bought back on its own.`);
@@ -375,7 +376,7 @@ export interface CloseCoveredCallEvent {
 }
 
 /** A whole covered call closed: the call bought back and its shares sold, both legs exiting at their fills. */
-export function closeCoveredCall(ledger: SimulatedLedger, event: CloseCoveredCallEvent): void {
+function applyCloseCoveredCall(ledger: SimulatedLedger, event: CloseCoveredCallEvent): void {
   const position = requirePosition(ledger, event.positionId);
   const { optionLeg, stockLeg } = openLegsOfPosition(ledger, position);
   if (position.status !== "open" || position.strategyKey !== "covered_call" || optionLeg === null || stockLeg === null) throw new Error(`Position ${position.id} is not an open covered call with its call and its shares.`);
@@ -420,7 +421,7 @@ export interface SellSharesEvent {
  * Uncovered shares sold. All of them: the stock leg exits at the fill and the position closes (closed via app). Some:
  * the sold shares become their own closed leg (parentLegId) carrying the closing trade, and the rest stay open.
  */
-export function sellShares(ledger: SimulatedLedger, event: SellSharesEvent): { soldLegId: string; positionClosed: boolean } {
+function applySellShares(ledger: SimulatedLedger, event: SellSharesEvent): { soldLegId: string; positionClosed: boolean } {
   requirePositiveWholeNumber(event.shares, "Shares");
   const position = requirePosition(ledger, event.positionId);
   const { stockLeg } = openLegsOfPosition(ledger, position);
@@ -455,7 +456,7 @@ export function isAssignedAtExpiry(optionType: "call" | "put", strike: number, e
  *                    expired worthless
  *   call-away      : the stock leg exits at the strike with no stock trade; the covered call closes assigned
  */
-export function settleExpiry(ledger: SimulatedLedger, event: SettleExpiryEvent): SettlementOutcome {
+function applySettleExpiry(ledger: SimulatedLedger, event: SettleExpiryEvent): SettlementOutcome {
   const leg = requireLeg(ledger, event.legId);
   const position = requirePosition(ledger, leg.positionId);
   if (leg.legType !== "option" || leg.side !== "short" || leg.optionType === null || leg.strikePrice === null || leg.expiryDate === null || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open short option: nothing to settle.`);
@@ -504,7 +505,7 @@ export function settleExpiry(ledger: SimulatedLedger, event: SettleExpiryEvent):
  * otherwise the legs are left as they are and `representable` is false (their contracts as traded today cannot be put
  * on the cycle's share scale, so nothing but their expiry can be simulated on them).
  */
-export function alignOpenOptionLegsToSplitFactor(ledger: SimulatedLedger, symbol: string, splitFactorToday: number): { representable: boolean; adjustedLegIds: string[] } {
+function applyAlignOpenOptionLegsToSplitFactor(ledger: SimulatedLedger, symbol: string, splitFactorToday: number): { representable: boolean; adjustedLegIds: string[] } {
   const cycleSplitFactor = ledger.cycleSplitFactorBySymbol.get(symbol);
   if (cycleSplitFactor === undefined) return { representable: true, adjustedLegIds: [] };
   const sharesPerContractToday = (standardSharesPerContract * splitFactorToday) / cycleSplitFactor;
@@ -525,6 +526,43 @@ export function alignOpenOptionLegsToSplitFactor(ledger: SimulatedLedger, symbol
 }
 
 /** Interest on the cash balance, in dollars as the engine computed it. */
-export function creditInterest(ledger: SimulatedLedger, at: Date, interestDollars: number): void {
+function applyCreditInterest(ledger: SimulatedLedger, at: Date, interestDollars: number): void {
   recordCash(ledger, { at, kind: "interest", amount: interestDollars, symbol: null, positionId: null, legId: null });
+}
+
+// The events as the engine calls them: each raises the ledger's revision before and after it (simulatedLedger.ts).
+export function openCashSecuredPut(...args: Parameters<typeof applyOpenCashSecuredPut>): ReturnType<typeof applyOpenCashSecuredPut> {
+  return changingLedger(args[0], () => applyOpenCashSecuredPut(...args));
+}
+
+export function openCoveredCall(...args: Parameters<typeof applyOpenCoveredCall>): ReturnType<typeof applyOpenCoveredCall> {
+  return changingLedger(args[0], () => applyOpenCoveredCall(...args));
+}
+
+export function rollLeg(...args: Parameters<typeof applyRollLeg>): ReturnType<typeof applyRollLeg> {
+  return changingLedger(args[0], () => applyRollLeg(...args));
+}
+
+export function buyBackPut(...args: Parameters<typeof applyBuyBackPut>): ReturnType<typeof applyBuyBackPut> {
+  return changingLedger(args[0], () => applyBuyBackPut(...args));
+}
+
+export function closeCoveredCall(...args: Parameters<typeof applyCloseCoveredCall>): ReturnType<typeof applyCloseCoveredCall> {
+  return changingLedger(args[0], () => applyCloseCoveredCall(...args));
+}
+
+export function sellShares(...args: Parameters<typeof applySellShares>): ReturnType<typeof applySellShares> {
+  return changingLedger(args[0], () => applySellShares(...args));
+}
+
+export function settleExpiry(...args: Parameters<typeof applySettleExpiry>): ReturnType<typeof applySettleExpiry> {
+  return changingLedger(args[0], () => applySettleExpiry(...args));
+}
+
+export function alignOpenOptionLegsToSplitFactor(...args: Parameters<typeof applyAlignOpenOptionLegsToSplitFactor>): ReturnType<typeof applyAlignOpenOptionLegsToSplitFactor> {
+  return changingLedger(args[0], () => applyAlignOpenOptionLegsToSplitFactor(...args));
+}
+
+export function creditInterest(...args: Parameters<typeof applyCreditInterest>): ReturnType<typeof applyCreditInterest> {
+  return changingLedger(args[0], () => applyCreditInterest(...args));
 }

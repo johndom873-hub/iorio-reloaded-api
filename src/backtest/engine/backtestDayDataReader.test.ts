@@ -1,0 +1,69 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { BacktestDayDataReader } from "./backtestDayDataReader.js";
+import { BacktestSymbolFile } from "./backtestSymbolFile.js";
+import { syntheticOptionQuotes, writeSyntheticSymbolFile } from "./testSupport/syntheticBacktestData.js";
+
+// The day-data reader thread reads a symbol's day ahead of the session: what it hands over must be what
+// BacktestSymbolFile reads from the same file, row for row and value for value.
+
+let dataDirectory: string;
+let previousDataDirectory: string | undefined;
+let reader: BacktestDayDataReader;
+
+beforeAll(() => {
+  dataDirectory = mkdtempSync(path.join(tmpdir(), "backtest-day-data-reader-"));
+  previousDataDirectory = process.env.BACKTEST_DATA_DIR;
+  process.env.BACKTEST_DATA_DIR = dataDirectory;
+  const quotes = syntheticOptionQuotes("2026-03-02", 100, ["2026-03-13", "2026-03-20"], 0.5, 0.04, 2.5, 8);
+  // Some quotes without a bid or an ask, as the files hold them.
+  quotes[1] = { ...quotes[1]!, bid: null };
+  quotes[4] = { ...quotes[4]!, ask: null, askSize: null };
+  writeSyntheticSymbolFile(path.join(dataDirectory, "READ.sqlite"), "READ", [
+    {
+      tradingDate: "2026-03-02",
+      quotes,
+      endOfDayVolume: 100,
+      openInterest: 200,
+      intradayQuotes: {
+        "10:30": syntheticOptionQuotes("2026-03-02", 101, ["2026-03-13", "2026-03-20"], 0.5, 0.04, 2.5, 8),
+        "11:00": syntheticOptionQuotes("2026-03-02", 99, ["2026-03-13", "2026-03-20"], 0.5, 0.04, 2.5, 8).map((quote, index) => (index === 3 ? { ...quote, bid: null } : quote)),
+        "15:30": syntheticOptionQuotes("2026-03-02", 98, ["2026-03-13"], 0.5, 0.04, 2.5, 8),
+      },
+    },
+  ]);
+  reader = new BacktestDayDataReader();
+});
+
+afterAll(async () => {
+  await reader.close();
+  if (previousDataDirectory === undefined) delete process.env.BACKTEST_DATA_DIR;
+  else process.env.BACKTEST_DATA_DIR = previousDataDirectory;
+  rmSync(dataDirectory, { recursive: true, force: true });
+});
+
+describe("BacktestDayDataReader", () => {
+  it("hands over the 10:00 quotes, end-of-day rows, open interest and intraday quotes as the file reads them", async () => {
+    const file = BacktestSymbolFile.open("READ");
+    try {
+      const day = await reader.take("READ", "2026-03-02", "10:00");
+      expect(day).not.toBeNull();
+      expect(day!.quotes()).toStrictEqual(file.loadQuotes("2026-03-02"));
+      expect(day!.endOfDay()).toStrictEqual(file.loadEndOfDay("2026-03-02"));
+      expect([...day!.openInterest()]).toStrictEqual([...file.loadOpenInterest("2026-03-02")]);
+      for (const [through, lowest, highest] of [["15:30", 0, 1e9], ["11:00", 90, 105], ["10:30", 100, 100], ["15:30", 97.495, 102.505], ["12:00", 200, 300]] as const) {
+        expect([...day!.intradayQuotes("10:00", through, lowest, highest)!]).toStrictEqual([...file.loadIntradayQuotes("2026-03-02", "10:00", through, lowest, highest)]);
+      }
+    } finally {
+      file.close();
+    }
+  });
+
+  it("leaves to the file a look range it did not read, and a day it could not read", async () => {
+    const day = await reader.take("READ", "2026-03-02", "10:00");
+    expect(day!.intradayQuotes("10:30", "15:30", 0, 1e9)).toBeNull();
+    expect(await reader.take("MISSING", "2026-03-02", "10:00")).toBeNull();
+  });
+});

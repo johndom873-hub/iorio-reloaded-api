@@ -1,18 +1,39 @@
 const easternDateFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" });
 
+/** Reading ICU is slow next to the arithmetic around it: recent answers are kept, up to this many each (then started afresh). */
+const easternCacheLimit = 20_000;
+
+/** The Eastern date changes at local midnight, a whole UTC hour (the offset is whole hours), so one reading serves its UTC hour. */
+const easternIsoDateByUtcHour = new Map<number, string>();
+
 /** Calendar date (YYYY-MM-DD) in America/New_York -- the US trading date an instant belongs to. */
 export function easternIsoDate(at: Date = new Date()): string {
-  return easternDateFormatter.format(at);
+  const utcHour = Math.floor(at.getTime() / 3_600_000);
+  const cached = easternIsoDateByUtcHour.get(utcHour);
+  if (cached !== undefined) return cached;
+  const dateIso = easternDateFormatter.format(at);
+  if (easternIsoDateByUtcHour.size >= easternCacheLimit) easternIsoDateByUtcHour.clear();
+  easternIsoDateByUtcHour.set(utcHour, dateIso);
+  return dateIso;
 }
 
 // The Eastern/UTC offset (EST vs EDT), read from ICU at an instant, so no manual DST table.
 const easternOffsetFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", timeZoneName: "shortOffset" });
 
+/** New York's offset changes only on whole UTC hours (02:00 local, EST or EDT), so one reading serves its UTC hour. */
+const easternOffsetMinutesByUtcHour = new Map<number, number>();
+
 function easternOffsetMinutesAt(at: Date): number {
+  const utcHour = Math.floor(at.getTime() / 3_600_000);
+  const cached = easternOffsetMinutesByUtcHour.get(utcHour);
+  if (cached !== undefined) return cached;
   const parts = easternOffsetFormatter.formatToParts(at);
   const offsetText = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT-5";
   const match = offsetText.match(/GMT([+-]\d+)/);
-  return match ? Number(match[1]) * 60 : -300;
+  const offsetMinutes = match ? Number(match[1]) * 60 : -300;
+  if (easternOffsetMinutesByUtcHour.size >= easternCacheLimit) easternOffsetMinutesByUtcHour.clear();
+  easternOffsetMinutesByUtcHour.set(utcHour, offsetMinutes);
+  return offsetMinutes;
 }
 
 /**
@@ -37,9 +58,20 @@ const easternPartsFormatter = new Intl.DateTimeFormat("en-US", {
   hourCycle: "h23",
 });
 
-function easternParts(at: Date): { weekday: string; month: string; day: string; hour: string; minute: string } {
+type EasternParts = { weekday: string; month: string; day: string; hour: string; minute: string };
+
+/** The fields have no seconds and the offset changes only on whole UTC hours, so one reading serves its UTC minute. */
+const easternPartsByUtcMinute = new Map<number, EasternParts>();
+
+function easternParts(at: Date): EasternParts {
+  const utcMinute = Math.floor(at.getTime() / 60_000);
+  const cached = easternPartsByUtcMinute.get(utcMinute);
+  if (cached) return { ...cached };
   const parts = Object.fromEntries(easternPartsFormatter.formatToParts(at).map((part) => [part.type, part.value]));
-  return { weekday: parts.weekday!, month: parts.month!, day: parts.day!, hour: parts.hour!, minute: parts.minute! };
+  const read: EasternParts = { weekday: parts.weekday!, month: parts.month!, day: parts.day!, hour: parts.hour!, minute: parts.minute! };
+  if (easternPartsByUtcMinute.size >= easternCacheLimit) easternPartsByUtcMinute.clear();
+  easternPartsByUtcMinute.set(utcMinute, read);
+  return { ...read };
 }
 
 /** Minutes since midnight on the America/New_York clock, e.g. 10:06 ET = 606. */

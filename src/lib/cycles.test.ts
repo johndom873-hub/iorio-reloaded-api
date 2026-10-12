@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveCycles, type CycleInput, type CycleOptionLeg, type CycleStockTrade } from "./cycles.js";
+import { deriveCycles, deriveOpenCycle, type CycleInput, type CycleOptionLeg, type CycleStockTrade } from "./cycles.js";
 
 // 3 short $104 puts sold 09-22 at 2.59, expired ITM on 09-25 (close 101.40) and were assigned: 300 shares at 104.
 const assignedAt = new Date("2026-09-26T01:45:00Z");
@@ -167,5 +167,26 @@ describe("shares bought and sold within the same moment", () => {
   it("still flags a sale larger than every share the group and the cycle acquired", () => {
     const cycle = openCycle({ ...input, stockTrades: input.stockTrades.map((trade) => (trade.side === "sell" ? { ...trade, quantity: 3000 } : trade)) });
     expect(cycle.dataFlags).toContain("100 sh sold/called away that the ledger never acquired");
+  });
+});
+
+describe("deriveOpenCycle", () => {
+  // The open cycle alone, as deriveCycles(input).find(open) gives it, without the closed ones.
+  const optionLeg = (id: string, positionId: string, entryIso: string, exitIso: string | null, overrides: Partial<CycleOptionLeg> = {}): CycleOptionLeg => ({
+    id, positionId, side: "short", optionType: "put", strike: 100, quantity: 1, multiplier: 100, entryPrice: 1.5, entryAt: new Date(entryIso), exitPrice: exitIso === null ? null : 0, exitAt: exitIso === null ? null : new Date(exitIso), closingCommission: 0, hasClosingTrade: false, expiryDate: (exitIso ?? entryIso).slice(0, 10), expiryClose: 104, ...overrides,
+  });
+  const dailyCloses = new Map([["2026-09-01", 102], ["2026-09-04", 104], ["2026-09-11", 103], ["2026-09-18", 101]]);
+  const inputOf = (optionLegs: CycleOptionLeg[]): CycleInput => ({ optionLegs, stockLegs: [], stockTrades: [], dailyCloses, lastPrice: { date: "2026-09-18", price: 101 }, openPositionPremiumPnl: new Map([["p3", -40]]) });
+
+  it("is the open one of all cycles, closed ones before it", () => {
+    const input = inputOf([optionLeg("l1", "p1", "2026-09-01T14:00:00Z", "2026-09-04T20:00:00Z"), optionLeg("l2", "p2", "2026-09-08T14:00:00Z", "2026-09-11T20:00:00Z"), optionLeg("l3", "p3", "2026-09-15T14:00:00Z", null, { expiryDate: "2026-09-26" })]);
+    const open = deriveOpenCycle(input);
+    expect(open).not.toBeNull();
+    expect(open).toStrictEqual(deriveCycles(input).find((cycle) => cycle.status === "open"));
+  });
+
+  it("is null when every cycle is closed, or there is none", () => {
+    expect(deriveOpenCycle(inputOf([optionLeg("l1", "p1", "2026-09-01T14:00:00Z", "2026-09-04T20:00:00Z")]))).toBeNull();
+    expect(deriveOpenCycle(inputOf([]))).toBeNull();
   });
 });

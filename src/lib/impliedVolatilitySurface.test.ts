@@ -399,3 +399,49 @@ describe("checkCalendarArbitrage", () => {
     expect(checkCalendarArbitrage([slice(0.1, 0.03), far])).toEqual({ checks: 0, violations: 0 });
   });
 });
+
+describe("impliedVolatilityFromPrice gives exactly the plain 80-step bisection", () => {
+  // The solver stops once the bisection has converged and keeps answers by their exact inputs; neither may change an answer.
+  function plainBisection(price: number, forward: number, strike: number, years: number, rate: number, isCall: boolean): number | null {
+    if (!(price > 0) || !(years > 0) || !(forward > 0) || !(strike > 0)) return null;
+    const priceAt = (volatility: number) => {
+      const totalStandardDeviation = volatility * Math.sqrt(years);
+      const d1 = (Math.log(forward / strike) + 0.5 * totalStandardDeviation * totalStandardDeviation) / totalStandardDeviation;
+      const d2 = d1 - totalStandardDeviation;
+      const discount = Math.exp(-rate * years);
+      const cdf = (x: number) => {
+        const sign = x / Math.SQRT2 < 0 ? -1 : 1;
+        const absX = Math.abs(x / Math.SQRT2);
+        const t = 1 / (1 + 0.3275911 * absX);
+        return 0.5 * (1 + sign * (1 - ((((1.061405429 * t + -1.453152027) * t + 1.421413741) * t + -0.284496736) * t + 0.254829592) * t * Math.exp(-absX * absX)));
+      };
+      return discount * (isCall ? forward * cdf(d1) - strike * cdf(d2) : strike * cdf(-d2) - forward * cdf(-d1));
+    };
+    let low = 0.01;
+    let high = 5;
+    if (price <= priceAt(low)) return null;
+    if (price >= priceAt(high)) return null;
+    for (let iteration = 0; iteration < 80; iteration++) {
+      const middle = (low + high) / 2;
+      if (priceAt(middle) > price) high = middle;
+      else low = middle;
+    }
+    return (low + high) / 2;
+  }
+
+  it("on thousands of contracts, asked once and again", () => {
+    let seed = 12345;
+    const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    for (let index = 0; index < 4000; index++) {
+      const forward = 5 + random() * 995;
+      const strike = forward * (0.4 + random() * 1.4);
+      const years = random() < 0.1 ? 1 / 365 : random() * 1.5;
+      const rate = random() * 0.06;
+      const isCall = random() < 0.5;
+      const price = Math.max(0.01, blackScholesPriceOnForward(forward, strike, years, rate, 0.05 + random() * 2, isCall) * (0.9 + random() * 0.2));
+      const expected = plainBisection(price, forward, strike, years, rate, isCall);
+      expect(Object.is(impliedVolatilityFromPrice(price, forward, strike, years, rate, isCall), expected)).toBe(true);
+      expect(Object.is(impliedVolatilityFromPrice(price, forward, strike, years, rate, isCall), expected)).toBe(true);
+    }
+  });
+});

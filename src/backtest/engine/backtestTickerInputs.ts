@@ -9,7 +9,8 @@ import type { SignalQuote, SignalSurfaceSlice } from "../../lib/signalCandidates
 import { contractKey, type LiveOptionQuote } from "../../lib/signalsLiveScoring.js";
 import type { SnapshotHeader, TickerSignalsInputs } from "../../lib/signalsTypes.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
-import { computeElevatedVolatilityFlag, computeMomentum, computeSkew, type ElevatedVolatilityFlag } from "../../lib/tiltMeasures.js";
+import { computeElevatedVolatilityFlag, computeMomentum, computeSkew, volatilityRatio, volatilityRatioBarsRead, type ElevatedVolatilityFlag } from "../../lib/tiltMeasures.js";
+import type { DailyOhlcvBar } from "../../lib/realizedVolatility.js";
 import { primaryForecastWindowDays, selectModelVolatilityForecast, selectRealizedVolatilityForecast } from "../../lib/volatilityEdge.js";
 import type { ValuationGroup } from "../../lib/volatilityModelTables.js";
 import { backtestCaptureLookTimeEt } from "../backtestTypes.js";
@@ -91,6 +92,12 @@ export function lookInstantMs(todayIso: string, lookTimeEt: string): number {
 
 /** The contracts the live 10:00 capture would have requested on this day (runOptionChainCapture.ts prepareTicker). */
 export function selectCapturedQuotes(quotes: readonly SymbolFileQuote[], todayIso: string, stockPrice: number, referenceVolatility: number | null): SymbolFileQuote[] {
+  const selected = capturedContractKeysOf(quotes, todayIso, stockPrice, referenceVolatility);
+  return quotes.filter((quote) => selected.has(contractKey(quote)));
+}
+
+/** selectCapturedQuotes as contract keys: every key of a quote it keeps (and possibly keys of contracts the quotes lack). */
+function capturedContractKeysOf(quotes: readonly SymbolFileQuote[], todayIso: string, stockPrice: number, referenceVolatility: number | null): Set<string> {
   const strikesByExpiry = new Map<string, Set<number>>();
   for (const quote of quotes) strikesByExpiry.set(quote.expiry, (strikesByExpiry.get(quote.expiry) ?? new Set()).add(quote.strike));
   const selected = new Set<string>();
@@ -104,7 +111,7 @@ export function selectCapturedQuotes(quotes: readonly SymbolFileQuote[], todayIs
     if (!window) continue;
     for (const contract of selectContractsToCapture([...strikes], stockPrice, window, { bothSidesWithinFractionOfSpot: captureBothSidesWithinFractionOfSpot })) selected.add(contractKey({ expiry, ...contract }));
   }
-  return quotes.filter((quote) => selected.has(contractKey(quote)));
+  return selected;
 }
 
 /**
@@ -114,7 +121,8 @@ export function selectCapturedQuotes(quotes: readonly SymbolFileQuote[], todayIs
  * A held leg outside both is added by the look.
  */
 export function selectLookDayQuotes(lookQuotes: readonly SymbolFileQuote[], capturedContractKeys: ReadonlySet<string>, todayIso: string, lookStockPrice: number, referenceVolatility: number | null, quotedAtIso: string): LiveOptionQuote[] {
-  const inWindowNow = new Set(selectCapturedQuotes(lookQuotes, todayIso, lookStockPrice, referenceVolatility).map(contractKey));
+  // A look quote's key is among these exactly when selectCapturedQuotes keeps that quote.
+  const inWindowNow = capturedContractKeysOf(lookQuotes, todayIso, lookStockPrice, referenceVolatility);
   const dayQuotes: LiveOptionQuote[] = [];
   for (const quote of lookQuotes) {
     const key = contractKey(quote);
@@ -180,6 +188,27 @@ export function earningsNotYetReported(earnings: BacktestTickerProfile["earnings
 }
 
 /**
+ * The elevated-volatility flag reads the YZ21/YZ126 ratio at every bar of its 1,500, and the next day reads the same
+ * ratios again. A ratio depends only on the bars it reads (volatilityRatioBarsRead of them, complete bars in a row of
+ * one history), named here by the dates of the first and the last, so each is computed once per history and scale.
+ */
+const volatilityRatiosByHistory = new WeakMap<BacktestBarHistory, Map<string, number | null>>();
+
+function rememberedVolatilityRatio(history: BacktestBarHistory): (bars: DailyOhlcvBar[], endIndex: number) => number | null {
+  let ratioByWindow = volatilityRatiosByHistory.get(history);
+  if (!ratioByWindow) volatilityRatiosByHistory.set(history, (ratioByWindow = new Map()));
+  const remembered = ratioByWindow;
+  return (bars, endIndex) => {
+    if (endIndex < volatilityRatioBarsRead || endIndex > bars.length) return volatilityRatio(bars, endIndex);
+    const window = `${bars[endIndex - volatilityRatioBarsRead]!.tradingDate}|${bars[endIndex - 1]!.tradingDate}`;
+    if (remembered.has(window)) return remembered.get(window)!;
+    const ratio = volatilityRatio(bars, endIndex);
+    remembered.set(window, ratio);
+    return ratio;
+  };
+}
+
+/**
  * Builds the day's TickerSignalsInputs the way loadTickerSignalsInputs does, from history, with an empty book (no free
  * shares, no open short legs): the look sets those from the simulated ledger at each pass.
  */
@@ -239,7 +268,7 @@ export function buildHistoricalTickerInputs(context: HistoricalTickerDay): { inp
     earningsCalendarResolved: profile.earningsCalendarResolved,
     macroEvents: [...(context.macroEvents ?? [])],
     momentum: computeMomentum(tiltBars.map((bar) => bar.close)),
-    elevatedVolatility: context.elevatedVolatility !== undefined ? context.elevatedVolatility : computeElevatedVolatilityFlag(tiltBars),
+    elevatedVolatility: context.elevatedVolatility !== undefined ? context.elevatedVolatility : computeElevatedVolatilityFlag(tiltBars, rememberedVolatilityRatio(bars)),
     skew: computeSkew(slices),
     nextEarningsDateIso: profile.calendarChecksApply ? (earningsDatesIso[0] ?? null) : null,
     previousClose: bars.previousClose(todayIso),

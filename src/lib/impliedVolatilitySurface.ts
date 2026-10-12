@@ -98,10 +98,14 @@ export function projectDividendSchedule(tradingDateIso: string, next: KnownExDiv
 
 /** Discounted Black-Scholes value written on the forward (Black-76). */
 export function blackScholesPriceOnForward(forward: number, strike: number, yearsToExpiry: number, riskFreeRate: number, volatility: number, isCall: boolean): number {
-  const totalStandardDeviation = volatility * Math.sqrt(yearsToExpiry);
-  const d1 = (Math.log(forward / strike) + 0.5 * totalStandardDeviation * totalStandardDeviation) / totalStandardDeviation;
+  return blackScholesPriceFromParts(forward, strike, Math.log(forward / strike), Math.sqrt(yearsToExpiry), Math.exp(-riskFreeRate * yearsToExpiry), volatility, isCall);
+}
+
+/** The same value from the parts that do not depend on the volatility, so a solver reads them once: ln(F/K), √T, e^(−rT). */
+function blackScholesPriceFromParts(forward: number, strike: number, logForwardOverStrike: number, squareRootOfYears: number, discount: number, volatility: number, isCall: boolean): number {
+  const totalStandardDeviation = volatility * squareRootOfYears;
+  const d1 = (logForwardOverStrike + 0.5 * totalStandardDeviation * totalStandardDeviation) / totalStandardDeviation;
   const d2 = d1 - totalStandardDeviation;
-  const discount = Math.exp(-riskFreeRate * yearsToExpiry);
   return discount * (isCall ? forward * standardNormalCdf(d1) - strike * standardNormalCdf(d2) : strike * standardNormalCdf(-d2) - forward * standardNormalCdf(-d1));
 }
 
@@ -116,16 +120,40 @@ export function blackScholesDelta(forward: number, strike: number, yearsToExpiry
 const impliedVolatilityLowerBound = 0.01;
 const impliedVolatilityUpperBound = 5;
 
+/**
+ * Answers already solved, by their exact inputs: one scoring solves a contract's volatility for the expiry shift, the
+ * filters and the model, and the looks of a day ask again for every quote that has not moved. Bounded: started afresh
+ * when full.
+ */
+const solvedImpliedVolatilities = new Map<string, number | null>();
+const solvedImpliedVolatilityLimit = 200_000;
+
 /** Bisection; null when the price lies outside what volatilities in [1%, 500%] can produce (below intrinsic, or absurdly high). */
 export function impliedVolatilityFromPrice(price: number, forward: number, strike: number, yearsToExpiry: number, riskFreeRate: number, isCall: boolean): number | null {
   if (!(price > 0) || !(yearsToExpiry > 0) || !(forward > 0) || !(strike > 0)) return null;
+  const key = `${price}|${forward}|${strike}|${yearsToExpiry}|${riskFreeRate}|${isCall ? "C" : "P"}`;
+  const solved = solvedImpliedVolatilities.get(key);
+  if (solved !== undefined) return solved;
+  const volatility = solveImpliedVolatility(price, forward, strike, yearsToExpiry, riskFreeRate, isCall);
+  if (solvedImpliedVolatilities.size >= solvedImpliedVolatilityLimit) solvedImpliedVolatilities.clear();
+  solvedImpliedVolatilities.set(key, volatility);
+  return volatility;
+}
+
+function solveImpliedVolatility(price: number, forward: number, strike: number, yearsToExpiry: number, riskFreeRate: number, isCall: boolean): number | null {
+  const logForwardOverStrike = Math.log(forward / strike);
+  const squareRootOfYears = Math.sqrt(yearsToExpiry);
+  const discount = Math.exp(-riskFreeRate * yearsToExpiry);
+  const priceAt = (volatility: number) => blackScholesPriceFromParts(forward, strike, logForwardOverStrike, squareRootOfYears, discount, volatility, isCall);
   let low = impliedVolatilityLowerBound;
   let high = impliedVolatilityUpperBound;
-  if (price <= blackScholesPriceOnForward(forward, strike, yearsToExpiry, riskFreeRate, low, isCall)) return null;
-  if (price >= blackScholesPriceOnForward(forward, strike, yearsToExpiry, riskFreeRate, high, isCall)) return null;
+  if (price <= priceAt(low)) return null;
+  if (price >= priceAt(high)) return null;
   for (let iteration = 0; iteration < 80; iteration++) {
     const middle = (low + high) / 2;
-    if (blackScholesPriceOnForward(forward, strike, yearsToExpiry, riskFreeRate, middle, isCall) > price) high = middle;
+    // Once the midpoint is one of the bounds the bisection has converged: every later step leaves both bounds as they are.
+    if (middle === low || middle === high) break;
+    if (priceAt(middle) > price) high = middle;
     else low = middle;
   }
   return (low + high) / 2;
@@ -249,22 +277,35 @@ export function minimumButterflyDensity(parameters: RawSviParameters, kMin: numb
   return minimum;
 }
 
-function solveThreeByThree(matrix: number[][], rightHandSide: number[]): number[] | null {
-  const augmented = matrix.map((row, index) => [...row, rightHandSide[index] as number]);
+/** The inner fit's augmented 3×4 system [normal equations | target], row r and column c at r × 4 + c: one buffer, filled and solved in place. */
+const augmentedSystem = new Float64Array(12);
+
+/**
+ * Gauss-Jordan elimination with partial pivoting on augmentedSystem, step for step as on arrays of rows (a row swap
+ * swaps its four entries); false when a pivot is under 1e-14 in size. The solution is left in column 3.
+ */
+function solveAugmentedSystemInPlace(): boolean {
+  const system = augmentedSystem;
   for (let pivotColumn = 0; pivotColumn < 3; pivotColumn++) {
     let pivotRow = pivotColumn;
-    for (let row = pivotColumn + 1; row < 3; row++) if (Math.abs(augmented[row]![pivotColumn]!) > Math.abs(augmented[pivotRow]![pivotColumn]!)) pivotRow = row;
-    [augmented[pivotColumn], augmented[pivotRow]] = [augmented[pivotRow]!, augmented[pivotColumn]!];
-    const pivot = augmented[pivotColumn]![pivotColumn]!;
-    if (Math.abs(pivot) < 1e-14) return null;
-    for (let column = pivotColumn; column <= 3; column++) augmented[pivotColumn]![column]! /= pivot;
+    for (let row = pivotColumn + 1; row < 3; row++) if (Math.abs(system[row * 4 + pivotColumn]!) > Math.abs(system[pivotRow * 4 + pivotColumn]!)) pivotRow = row;
+    if (pivotRow !== pivotColumn) {
+      for (let column = 0; column < 4; column++) {
+        const swapped = system[pivotColumn * 4 + column]!;
+        system[pivotColumn * 4 + column] = system[pivotRow * 4 + column]!;
+        system[pivotRow * 4 + column] = swapped;
+      }
+    }
+    const pivot = system[pivotColumn * 4 + pivotColumn]!;
+    if (Math.abs(pivot) < 1e-14) return false;
+    for (let column = pivotColumn; column <= 3; column++) system[pivotColumn * 4 + column]! /= pivot;
     for (let row = 0; row < 3; row++) {
       if (row === pivotColumn) continue;
-      const factor = augmented[row]![pivotColumn]!;
-      for (let column = pivotColumn; column <= 3; column++) augmented[row]![column]! -= factor * augmented[pivotColumn]![column]!;
+      const factor = system[row * 4 + pivotColumn]!;
+      for (let column = pivotColumn; column <= 3; column++) system[row * 4 + column]! -= factor * system[pivotColumn * 4 + column]!;
     }
   }
-  return augmented.map((row) => row[3] as number);
+  return true;
 }
 
 interface InnerFit {
@@ -274,19 +315,46 @@ interface InnerFit {
 
 /** For fixed (m, σ): exact weighted LS for (a, c, d), then projection onto the approved constraints. */
 function fitInner(points: SviFitPoint[], m: number, sigma: number): InnerFit | null {
-  const normal = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-  const target = [0, 0, 0];
+  // The normal equations over the basis (1, k − m, √((k − m)² + σ²)), each sum term as weight × basis[row] × basis[column]
+  // (or × total variance), written out so the loop allocates nothing; 1 × x is x exactly.
+  let normal00 = 0, normal01 = 0, normal02 = 0, normal10 = 0, normal11 = 0, normal12 = 0, normal20 = 0, normal21 = 0, normal22 = 0;
+  let target0 = 0, target1 = 0, target2 = 0;
   for (const point of points) {
+    const weight = point.weight;
     const shifted = point.logMoneyness - m;
-    const basis = [1, shifted, Math.sqrt(shifted * shifted + sigma * sigma)];
-    for (let row = 0; row < 3; row++) {
-      target[row]! += point.weight * basis[row]! * point.totalVariance;
-      for (let column = 0; column < 3; column++) normal[row]![column]! += point.weight * basis[row]! * basis[column]!;
-    }
+    const root = Math.sqrt(shifted * shifted + sigma * sigma);
+    const weightedShifted = weight * shifted;
+    const weightedRoot = weight * root;
+    target0 += weight * point.totalVariance;
+    target1 += weightedShifted * point.totalVariance;
+    target2 += weightedRoot * point.totalVariance;
+    normal00 += weight;
+    normal01 += weight * shifted;
+    normal02 += weight * root;
+    normal10 += weightedShifted;
+    normal11 += weightedShifted * shifted;
+    normal12 += weightedShifted * root;
+    normal20 += weightedRoot;
+    normal21 += weightedRoot * shifted;
+    normal22 += weightedRoot * root;
   }
-  const solution = solveThreeByThree(normal, target);
-  if (!solution) return null;
-  let [a, c, d] = solution as [number, number, number];
+  const system = augmentedSystem;
+  system[0] = normal00;
+  system[1] = normal01;
+  system[2] = normal02;
+  system[3] = target0;
+  system[4] = normal10;
+  system[5] = normal11;
+  system[6] = normal12;
+  system[7] = target1;
+  system[8] = normal20;
+  system[9] = normal21;
+  system[10] = normal22;
+  system[11] = target2;
+  if (!solveAugmentedSystemInPlace()) return null;
+  let a = augmentedSystem[3]!;
+  let c = augmentedSystem[7]!;
+  let d = augmentedSystem[11]!;
   d = Math.max(d, 1e-9); // b >= 0
   c = Math.max(-maximumAbsoluteRho * d, Math.min(maximumAbsoluteRho * d, c)); // |rho| <= 0.98
   a = Math.max(a, -sigma * Math.sqrt(Math.max(d * d - c * c, 0))); // a + b*sigma*sqrt(1-rho^2) >= 0
