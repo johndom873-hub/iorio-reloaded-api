@@ -60,7 +60,7 @@ export type PlutoRejectionCode =
   | "not_executable"
   | "same_contract"
   | "opens_blocked"
-  | "hist_edge"
+  | "edge"
   | "below_break_even"
   | "no_break_even"
   | "held_shares_runner_up";
@@ -167,7 +167,7 @@ export function rejectOpenCandidate(candidate: SignalCandidate, context: OpenCan
  * As rejectOpenCandidate, with the rule behind each reason. `skipValueRules` leaves out the grade and Edge Yield rules: a
  * roll's replacement is judged on the roll's own grade and net Edge Yield instead. `onHeldShares` (a covered call on shares
  * already held, Marcelo 2026-10-12) leaves out the grade, Edge Yield and premium-yield minimums and asks only for a positive
- * Hist Edge: the call lowers the risk of shares the book already carries, and the break-even rule guards its strike.
+ * Edge: the call lowers the risk of shares the book already carries, and the break-even rule guards its strike.
  */
 export function openCandidateFailures(candidate: SignalCandidate, context: OpenCandidateFilterContext, options: { skipValueRules?: boolean; onHeldShares?: boolean } = {}): PlutoRejectionReason[] {
   const { settings, scored } = context;
@@ -176,7 +176,7 @@ export function openCandidateFailures(candidate: SignalCandidate, context: OpenC
   const model = candidate.model;
   if (!model) fail("no_model", "not valued by the model (no YZ21 forecast or no variance time left)");
   else if (options.onHeldShares) {
-    if (!(model.calibratedExpectedPnlDollars > 0)) fail("hist_edge", `Hist Edge $${model.calibratedExpectedPnlDollars.toFixed(0)}/contract not above 0`);
+    if (!(model.expectedPnlDollars > 0)) fail("edge", `Edge $${model.expectedPnlDollars.toFixed(0)}/contract not above 0`);
   } else {
     if (!options.skipValueRules && gradeRank[model.grade] < gradeRank[settings.minGrade]) fail("grade", `grade ${model.grade} (edge margin ${(model.edgeMargin * 100).toFixed(0)}%) below ${settings.minGrade}`);
     if (!options.skipValueRules && model.expectedAnnualizedReturn * 100 < settings.minEdgeYieldPct) fail("edge_yield", `Edge Yield ${(model.expectedAnnualizedReturn * 100).toFixed(0)}% below ${settings.minEdgeYieldPct}%`);
@@ -264,12 +264,12 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
     else result.rejected.push(plutoRejection(id, failures));
   }
 
-  // The held shares get one call, the best by Hist Yield among those that pass (Marcelo, 2026-10-12).
+  // The held shares get one call, the best by Edge Yield among those that pass (Marcelo, 2026-10-12).
   const [bestHeldShareCall, ...runnersUp] = rankEligibleOpens(result.eligible.filter((entry) => entry.heldShares));
   if (bestHeldShareCall && runnersUp.length > 0) {
     const runnerUpIds = new Set(runnersUp.map((entry) => entry.id));
     result.eligible = result.eligible.filter((entry) => !runnerUpIds.has(entry.id));
-    for (const entry of runnersUp) result.rejected.push(plutoRejection(entry.id, [{ code: "held_shares_runner_up", reason: `the held shares are offered one call, the best by Hist Yield: ${bestHeldShareCall.id}` }]));
+    for (const entry of runnersUp) result.rejected.push(plutoRejection(entry.id, [{ code: "held_shares_runner_up", reason: `the held shares are offered one call, the best by Edge Yield: ${bestHeldShareCall.id}` }]));
   }
 
   for (const roll of scored.rolls) {
@@ -310,7 +310,7 @@ export function coveredCallRollBreakEvenFailure(roll: RollSignalCandidate, score
   return null;
 }
 
-/** Eligible opens in the deterministic order (compareCandidatesByModel: Hist Yield, then Edge $). */
+/** Eligible opens in the deterministic order (compareCandidatesByModel: Edge Yield, then Edge $). */
 export function rankEligibleOpens(eligible: PlutoOpenCandidate[]): PlutoOpenCandidate[] {
   return [...eligible].sort((a, b) => compareCandidatesByModel(a.candidate, b.candidate));
 }
@@ -320,7 +320,10 @@ export function deterministicTopPick(eligible: PlutoOpenCandidate[]): PlutoOpenC
   return rankEligibleOpens(eligible)[0] ?? null;
 }
 
-/** What the ledger keeps of the top pick (and the one after it, for the screen's "next"): the model's figures. */
+/**
+ * What the ledger keeps of the top pick (and the one after it, for the screen's "next"): the model's figures, and which
+ * figure ranked them (rows before 2026-10-12 carry no rankedBy and were ranked by Hist Yield).
+ */
 export function summarizeTopPick(eligible: PlutoOpenCandidate[]) {
   const [topPick, runnerUp] = rankEligibleOpens(eligible);
   const model = topPick?.candidate.model;
@@ -333,6 +336,7 @@ export function summarizeTopPick(eligible: PlutoOpenCandidate[]) {
     calibratedAnnualizedReturn: model.calibratedAnnualizedReturn,
     expectedAnnualizedReturn: model.expectedAnnualizedReturn,
     capitalAtRiskDollars: model.capitalAtRiskDollars,
-    runnerUp: runnerUp?.candidate.model ? { id: runnerUp.id, calibratedAnnualizedReturn: runnerUp.candidate.model.calibratedAnnualizedReturn } : null,
+    rankedBy: "edge_yield" as const,
+    runnerUp: runnerUp?.candidate.model ? { id: runnerUp.id, calibratedAnnualizedReturn: runnerUp.candidate.model.calibratedAnnualizedReturn, expectedAnnualizedReturn: runnerUp.candidate.model.expectedAnnualizedReturn } : null,
   };
 }

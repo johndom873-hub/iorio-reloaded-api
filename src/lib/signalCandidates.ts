@@ -501,17 +501,18 @@ export function gradeSignalCandidates(candidates: SignalCandidate[]): SignalCand
 }
 
 /**
- * The valuation model's order of preference (model review P5, approved 2026-10-10): the expected annualized return on
- * capital that history delivered for that signal (calibrated), then the model's expected P&L per contract. Unvalued
- * contracts last. Pluto ranks its offers by it and the Day Signals seed picks its pool expiries by it.
+ * The valuation model's order of preference: Edge Yield (the model's expected annualized return on exposure), then its
+ * expected P&L per contract. Unvalued contracts last. Pluto ranks its offers by it, the Day Signals seed picks its pool
+ * expiries by it and the Signals screen orders by it. Marcelo, 2026-10-12: the model's figures, not history's (Hist
+ * Yield), until there is history beyond at-the-money sales; was Hist Yield since 2026-10-10.
  */
 export function compareCandidatesByModel(a: Pick<SignalCandidate, "model">, b: Pick<SignalCandidate, "model">): number {
   if (!a.model || !b.model) return (b.model ? 1 : 0) - (a.model ? 1 : 0);
-  return b.model.calibratedAnnualizedReturn - a.model.calibratedAnnualizedReturn || b.model.expectedPnlDollars - a.model.expectedPnlDollars;
+  return b.model.expectedAnnualizedReturn - a.model.expectedAnnualizedReturn || b.model.expectedPnlDollars - a.model.expectedPnlDollars;
 }
 
 /**
- * The candidate the Signals screen shows as a ticker's top signal, in Pluto's order (mockup approved 2026-10-10): highest Hist Yield,
+ * The candidate the Signals screen shows as a ticker's top signal, in Pluto's order (mockup approved 2026-10-10): highest Edge Yield,
  * then Edge $. Candidates the model could not value come last, by the old Edge $ and net Edge.
  */
 export function pickBestCandidate(candidates: SignalCandidate[]): SignalCandidate | null {

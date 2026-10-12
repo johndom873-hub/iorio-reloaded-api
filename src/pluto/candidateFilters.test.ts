@@ -184,16 +184,16 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
     const bad = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, model: fixtureRollModel({ netExpectedPnlPerContract: 45, edgeMargin: 0.15 }), replacement: candidate({ strike: 95, spreadPercent: 30 }) }] }) }));
     expect(bad.rejectedRolls[0]!.codes).toEqual(["grade", "spread"]);
   });
-  it("the deterministic pick is the calibrated annualized return first, the model's Edge $ second, unvalued last", () => {
-    const a = { id: "a", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ calibratedAnnualizedReturn: 0.3, expectedPnlDollars: 50 }) }) };
-    const b = { id: "b", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ calibratedAnnualizedReturn: 0.3, expectedPnlDollars: 70 }) }) };
-    const c = { id: "c", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ calibratedAnnualizedReturn: 0.2, expectedPnlDollars: 200 }), edgeDollars: 500 }) };
+  it("the deterministic pick is Edge Yield first, the model's Edge $ second, unvalued last", () => {
+    const a = { id: "a", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ expectedAnnualizedReturn: 0.3, calibratedAnnualizedReturn: 0.1, expectedPnlDollars: 50 }) }) };
+    const b = { id: "b", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ expectedAnnualizedReturn: 0.3, calibratedAnnualizedReturn: 0.1, expectedPnlDollars: 70 }) }) };
+    const c = { id: "c", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: 0.9, expectedPnlDollars: 200 }), edgeDollars: 500 }) };
     const unvalued = { id: "d", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: null, edgeDollars: 900 }) };
     expect(deterministicTopPick([unvalued, a, b, c])!.id).toBe("b");
     expect(deterministicTopPick([unvalued, c])!.id).toBe("c");
     expect(deterministicTopPick([])).toBeNull();
     // The ledger keeps the top pick's model figures and the one after it.
-    expect(summarizeTopPick([unvalued, a, b, c])).toEqual({ id: "b", edgeDollars: 70, edgeMargin: b.candidate.model!.edgeMargin, grade: b.candidate.model!.grade, calibratedAnnualizedReturn: 0.3, expectedAnnualizedReturn: b.candidate.model!.expectedAnnualizedReturn, capitalAtRiskDollars: 9000, runnerUp: { id: "a", calibratedAnnualizedReturn: 0.3 } });
+    expect(summarizeTopPick([unvalued, a, b, c])).toEqual({ id: "b", edgeDollars: 70, edgeMargin: b.candidate.model!.edgeMargin, grade: b.candidate.model!.grade, calibratedAnnualizedReturn: 0.1, expectedAnnualizedReturn: 0.3, capitalAtRiskDollars: 9000, rankedBy: "edge_yield", runnerUp: { id: "a", calibratedAnnualizedReturn: 0.1, expectedAnnualizedReturn: 0.3 } });
     expect(summarizeTopPick([unvalued, c])!.runnerUp).toBeNull();
     expect(summarizeTopPick([unvalued])).toBeNull();
   });
@@ -236,8 +236,9 @@ describe("covered calls on held shares (Marcelo, 2026-10-12)", () => {
     // the same call with no free shares is a buy-write and meets the usual minimums
     expect(filterTickerForPluto(input({ scored: scored({ candidates: [weakCall()] }) })).rejected[0]!.codes).toEqual(["grade", "edge_yield", "yield"]);
   });
-  it("still asks for a positive Hist Edge", () => {
-    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.12, calibratedExpectedPnlDollars: 0 }) })] }).rejected[0]).toMatchObject({ codes: ["hist_edge"], reasons: ["Hist Edge $0/contract not above 0"] });
+  it("still asks for a positive Edge, whatever Hist Edge says", () => {
+    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.12, expectedPnlDollars: 0, calibratedExpectedPnlDollars: 9 }) })] }).rejected[0]).toMatchObject({ codes: ["edge"], reasons: ["Edge $0/contract not above 0"] });
+    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.12, expectedPnlDollars: 4, calibratedExpectedPnlDollars: -9 }) })] }).eligible).toHaveLength(1);
   });
   it("blocks a strike whose assignment would close the shares below the break-even plus the floor", () => {
     // $104: (104 − 103.9568) × 100 = $4.32, below $108
@@ -253,12 +254,12 @@ describe("covered calls on held shares (Marcelo, 2026-10-12)", () => {
     expect(unknown.rejected[0]).toMatchObject({ codes: ["no_break_even"], reasons: ["no cycle break-even for the held shares: ledger says 100 sh held but the open stock legs total 200 sh"] });
     expect(held({}, { cycleBreakEven: undefined }).rejected[0]!.codes).toEqual(["no_break_even"]);
   });
-  it("offers the held shares one call, the best by Hist Yield; puts on the ticker are unaffected", () => {
-    const better = weakCall({ strike: 114, model: model({ edgeMargin: 0.12, calibratedExpectedPnlDollars: 6, calibratedAnnualizedReturn: 0.2 }) });
+  it("offers the held shares one call, the best by Edge Yield; puts on the ticker are unaffected", () => {
+    const better = weakCall({ strike: 114, model: model({ edgeMargin: 0.12, expectedPnlDollars: 6, expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.5 }) });
     const put = candidate();
     const result = held({ candidates: [weakCall(), better, put] });
     expect(result.eligible.map((entry) => entry.id).sort()).toEqual(["HOOD:cash_secured_put:2026-10-16:100", "HOOD:covered_call:2026-10-16:114"]);
-    expect(result.rejected).toEqual([{ id: "HOOD:covered_call:2026-10-16:112", codes: ["held_shares_runner_up"], reasons: ["the held shares are offered one call, the best by Hist Yield: HOOD:covered_call:2026-10-16:114"] }]);
+    expect(result.rejected).toEqual([{ id: "HOOD:covered_call:2026-10-16:112", codes: ["held_shares_runner_up"], reasons: ["the held shares are offered one call, the best by Edge Yield: HOOD:covered_call:2026-10-16:114"] }]);
   });
   it("sizes the floor on every free round lot, and treats an odd lot as no held shares", () => {
     // 300 shares: 3 contracts, floor max(1% × $108 × 300, $50) = $324; break-even after 105 − 1.0432 × 300 / 300 = 103.9568 → $2,412.96

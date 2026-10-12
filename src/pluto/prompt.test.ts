@@ -148,10 +148,13 @@ describe("prompt v3.8: held positions and event timing (2026-10-08)", () => {
     expect(ticker).toMatchObject({ atm_iv: 87.7, forecast_vol: 65.4 });
     const [offered] = ticker.candidates as Record<string, unknown>[];
     expect(offered).toMatchObject({
-      sessions_to_expiry: 6.19, implied_vol: 81.2, grade: "strong", edge_dollars: 21, edge_margin_pct: 34.6, hist_edge_dollars: 10, hist_yield_ann_pct: 21, edge_yield_ann_pct: 43,
+      sessions_to_expiry: 6.19, implied_vol: 81.2, grade: "strong", edge_dollars: 21, edge_margin_pct: 34.6, edge_yield_ann_pct: 43,
       pop_pct: 87, avg_win: 44, avg_loss: -151, worst5_avg: -612, stress_2sd: -302, premium_after_costs: 50, premium_yield_ann_pct: 52, dollar_risk: 3950,
     });
     expect(offered).not.toHaveProperty("net_edge_vp");
+    // v4.2 (Marcelo, 2026-10-12): the history-corrected figures are no longer sent.
+    expect(offered).not.toHaveProperty("hist_edge_dollars");
+    expect(offered).not.toHaveProperty("hist_yield_ann_pct");
     expect(offered).not.toHaveProperty("annualized_yield_pct");
   });
 

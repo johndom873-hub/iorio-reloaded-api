@@ -30,8 +30,8 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
 }
 
 /**
- * The default model block: margin 35%, 14 sessions of variance, calibrated $30/contract over a $150 P&L standard deviation,
- * so the quarter-Kelly cap is floor(0.25 × $500,000 budget × 30 ÷ 22,500) = 166 contracts and never binds unless a test
+ * The default model block: margin 35%, 14 sessions of variance, Edge $80/contract (Hist Edge $30) over a $150 P&L
+ * standard deviation, so the half-Kelly cap on Edge $ is floor(0.5 × $500,000 budget × 80 ÷ 22,500) = 888 contracts and never binds unless a test
  * says so. A call's buy-write variance is set by the call fixtures.
  */
 function model(overrides: Partial<CandidateModelScore> = {}): CandidateModelScore {
@@ -79,7 +79,7 @@ describe("runPostModelGates — a clean cash-secured put", () => {
   });
   it("the volume share caps the quantity", () => {
     expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).plan?.quantity).toBe(4);
-    expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).gates.find((gate) => gate.gate === "sizing")?.detail).toBe("order size $50000, budget left $450000, ticker room $80000, cash room $550000 → 5 contract(s) at $9795 each; volume share allows 4; stress cap off; Kelly cap: 0.25 × $500000 budget × Hist Edge $30/contract ÷ P&L variance → 166 contract(s) → $39180");
+    expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).gates.find((gate) => gate.gate === "sizing")?.detail).toBe("order size $50000, budget left $450000, ticker room $80000, cash room $550000 → 5 contract(s) at $9795 each; volume share allows 4; stress cap off; Kelly cap: 0.5 × $500000 budget × Edge $80/contract ÷ P&L variance → 888 contract(s) → $39180");
     expect(failed(runPostModelGates(input({ candidate: candidate({ volume: 3 }) })))).toEqual(["sizing"]);
   });
 });
@@ -273,34 +273,36 @@ describe("stress cap (Marcelo, 2026-10-08; on the model's τ since 2026-10-10)",
   });
 });
 
-describe("quarter-Kelly cap (model review P5, 2026-10-10)", () => {
+describe("half-Kelly cap on Edge $ (model review P5, 2026-10-10; half-Kelly on Edge $ since 2026-10-12)", () => {
   // Budget = $1M × 50% = $500,000.
-  it("allows floor(0.25 × budget × Hist Edge $ ÷ P&L variance) contracts; a put on the option's variance", () => {
-    expect(kellyFraction).toBe(0.25);
-    const cap = computeKellyCap(settings, { strategyKey: "cash_secured_put", model: model({ calibratedExpectedPnlDollars: 30, pnlVarianceDollars: 150 ** 2 }) }, 1_000_000);
-    expect(cap.contracts).toBe(166); // 0.25 × 500,000 × 30 ÷ 22,500 = 166.7
-    expect(cap.detail).toBe("Kelly cap: 0.25 × $500000 budget × Hist Edge $30/contract ÷ P&L variance → 166 contract(s)");
+  it("allows floor(0.5 × budget × Edge $ ÷ P&L variance) contracts, whatever Hist Edge says; a put on the option's variance", () => {
+    expect(kellyFraction).toBe(0.5);
+    const cap = computeKellyCap(settings, { strategyKey: "cash_secured_put", model: model({ expectedPnlDollars: 30, calibratedExpectedPnlDollars: -5, pnlVarianceDollars: 150 ** 2 }) }, 1_000_000);
+    expect(cap.contracts).toBe(333); // 0.5 × 500,000 × 30 ÷ 22,500 = 333.3
+    expect(cap.detail).toBe("Kelly cap: 0.5 × $500000 budget × Edge $30/contract ÷ P&L variance → 333 contract(s)");
+    // The approved example: AAPL $330 Put · 14 Oct on staging 2026-10-09, 0.5 × $519,698 × $43 ÷ $402² = 69.1
+    expect(computeKellyCap({ ...settings, capitalBudgetPct: 50 }, { strategyKey: "cash_secured_put", model: model({ expectedPnlDollars: 43, pnlVarianceDollars: 402 ** 2 }) }, 1_039_395).contracts).toBe(69);
   });
   it("sizes every covered call on the shares + call variance, whether the shares are held or bought with it", () => {
-    const cap = computeKellyCap(settings, { strategyKey: "covered_call", model: model({ calibratedExpectedPnlDollars: 30, pnlVarianceDollars: 150 ** 2, coveredPositionPnlVarianceDollars: 500 ** 2 }) }, 1_000_000);
-    expect(cap.contracts).toBe(15); // 0.25 × 500,000 × 30 ÷ 250,000
-    expect(cap.detail).toContain("P&L variance (shares + call) → 15 contract(s)");
+    const cap = computeKellyCap(settings, { strategyKey: "covered_call", model: model({ expectedPnlDollars: 30, pnlVarianceDollars: 150 ** 2, coveredPositionPnlVarianceDollars: 500 ** 2 }) }, 1_000_000);
+    expect(cap.contracts).toBe(30); // 0.5 × 500,000 × 30 ÷ 250,000
+    expect(cap.detail).toContain("P&L variance (shares + call) → 30 contract(s)");
   });
-  it("allows nothing when history says the signal did not pay (Hist Edge $ ≤ 0) or there is no valuation", () => {
-    expect(computeKellyCap(settings, { strategyKey: "cash_secured_put", model: model({ calibratedExpectedPnlDollars: -2 }) }, 1_000_000)).toEqual({ contracts: 0, detail: "Kelly cap: Hist Edge $-2/contract ≤ 0, so no contracts" });
+  it("allows nothing when the model expects no profit (Edge $ ≤ 0) or there is no valuation", () => {
+    expect(computeKellyCap(settings, { strategyKey: "cash_secured_put", model: model({ expectedPnlDollars: -2, calibratedExpectedPnlDollars: 10 }) }, 1_000_000)).toEqual({ contracts: 0, detail: "Kelly cap: Edge $-2/contract ≤ 0, so no contracts" });
     expect(computeKellyCap(settings, { strategyKey: "cash_secured_put", model: null }, 1_000_000).contracts).toBe(0);
   });
   it("binds in the sizing gate when tighter than the order size, and refuses when it allows none", () => {
-    // 0.25 × 500,000 × 0.5 ÷ 22,500 = 2.8 → 2 of the 5 the order size allows
-    const tight = runPostModelGates(input({ candidate: candidate({ model: model({ calibratedExpectedPnlDollars: 0.5 }) }) }));
+    // 0.5 × 500,000 × 0.25 ÷ 22,500 = 2.8 → 2 of the 5 the order size allows
+    const tight = runPostModelGates(input({ candidate: candidate({ model: model({ expectedPnlDollars: 0.25 }) }) }));
     expect(tight.plan?.quantity).toBe(2);
     expect(tight.gates.find((gate) => gate.gate === "sizing")?.detail).toContain("→ 2 contract(s)");
-    expect(failed(runPostModelGates(input({ candidate: candidate({ model: model({ calibratedExpectedPnlDollars: 0 }) }) })))).toEqual(["sizing"]);
+    expect(failed(runPostModelGates(input({ candidate: candidate({ model: model({ expectedPnlDollars: 0 }) }) })))).toEqual(["sizing"]);
   });
   it("caps a buy-write's contracts on shares + call, but never a call on held shares", () => {
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
-    // shares + call Kelly: 0.25 × 500,000 × 5 ÷ 250,000 = 2.5 → 2
-    const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ calibratedExpectedPnlDollars: 5, coveredPositionPnlVarianceDollars: buyWriteVariance }) });
+    // shares + call Kelly: 0.5 × 500,000 × 2.5 ÷ 250,000 = 2.5 → 2
+    const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ expectedPnlDollars: 2.5, coveredPositionPnlVarianceDollars: buyWriteVariance }) });
     // a buy-write: the order size allows 4, the cap 2
     expect(runPostModelGates(input({ decision, candidate: call })).plan).toEqual({ quantity: 2, limitPrice: 2.05, notional: 21_590, fullSizeQuantity: 2 });
     // 500 free shares: all 5 covered, the cap does not apply

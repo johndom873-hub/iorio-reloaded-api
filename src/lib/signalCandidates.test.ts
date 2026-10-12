@@ -538,16 +538,16 @@ describe("gradeSignalCandidates", () => {
 describe("pickBestCandidate", () => {
   type Candidate = ReturnType<typeof gradeSignalCandidates>[number];
   const c = (edgeDollars: number, netEdge: number, model: Candidate["model"] = null) => ({ edgeDollars, netEdge, model }) as Candidate;
-  it("picks Pluto's order: the highest Hist Yield, then the model's Edge $, whatever the old Edge says", () => {
-    const histYield10 = c(5, 0.01, fixtureCandidateModel({ calibratedAnnualizedReturn: 0.1, expectedPnlDollars: 20 }));
-    const histYield20 = c(1, 0.01, fixtureCandidateModel({ calibratedAnnualizedReturn: 0.2, expectedPnlDollars: 8 }));
-    const histYield20MoreEdge = c(1, 0.01, fixtureCandidateModel({ calibratedAnnualizedReturn: 0.2, expectedPnlDollars: 9 }));
-    expect(pickBestCandidate([histYield10, histYield20, histYield20MoreEdge, c(90, 0.2)])).toBe(histYield20MoreEdge);
+  it("picks Pluto's order: the highest Edge Yield, then the model's Edge $, whatever Hist Yield or the old Edge says", () => {
+    const edgeYield10 = c(5, 0.01, fixtureCandidateModel({ expectedAnnualizedReturn: 0.1, calibratedAnnualizedReturn: 0.9, expectedPnlDollars: 20 }));
+    const edgeYield20 = c(1, 0.01, fixtureCandidateModel({ expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.1, expectedPnlDollars: 8 }));
+    const edgeYield20MoreEdge = c(1, 0.01, fixtureCandidateModel({ expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.1, expectedPnlDollars: 9 }));
+    expect(pickBestCandidate([edgeYield10, edgeYield20, edgeYield20MoreEdge, c(90, 0.2)])).toBe(edgeYield20MoreEdge);
   });
   it("puts candidates the model could not value last, ordered by the old Edge $ then net Edge; null for an empty list", () => {
     expect(pickBestCandidate([c(10, 0.01), c(50, 0.02), c(30, 0.05)])!.edgeDollars).toBe(50);
     expect(pickBestCandidate([c(10, 0.01), c(10, 0.05)])!.netEdge).toBe(0.05);
-    expect(pickBestCandidate([c(90, 0.2), c(1, 0.01, fixtureCandidateModel({ calibratedAnnualizedReturn: -0.5 }))])!.model).not.toBeNull();
+    expect(pickBestCandidate([c(90, 0.2), c(1, 0.01, fixtureCandidateModel({ expectedAnnualizedReturn: -0.5 }))])!.model).not.toBeNull();
     expect(pickBestCandidate([])).toBeNull();
   });
 });
@@ -598,9 +598,9 @@ describe("valuation model on candidates (model review, 2026-10-10)", () => {
     expect(put.model!.premiumAfterCostsDollars).toBeCloseTo(((put.bid + put.ask) / 2) * 100 - friction, 9);
   });
 
-  it("compareCandidatesByModel ranks by calibrated annualized return, then expected P&L, unvalued last", () => {
-    const valued = (calibratedAnnualizedReturn: number, expectedPnlDollars: number) => ({ model: fixtureCandidateModel({ calibratedAnnualizedReturn, expectedPnlDollars }) });
-    const ranked = [valued(0.1, 90), { model: null }, valued(0.3, 10), valued(0.3, 40)].sort(compareCandidatesByModel);
-    expect(ranked.map((entry) => (entry.model ? [entry.model.calibratedAnnualizedReturn, entry.model.expectedPnlDollars] : null))).toEqual([[0.3, 40], [0.3, 10], [0.1, 90], null]);
+  it("compareCandidatesByModel ranks by Edge Yield, then expected P&L, unvalued last (Marcelo, 2026-10-12: not Hist Yield)", () => {
+    const valued = (expectedAnnualizedReturn: number, expectedPnlDollars: number, calibratedAnnualizedReturn = 0) => ({ model: fixtureCandidateModel({ expectedAnnualizedReturn, expectedPnlDollars, calibratedAnnualizedReturn }) });
+    const ranked = [valued(0.1, 90, 0.9), { model: null }, valued(0.3, 10), valued(0.3, 40)].sort(compareCandidatesByModel);
+    expect(ranked.map((entry) => (entry.model ? [entry.model.expectedAnnualizedReturn, entry.model.expectedPnlDollars] : null))).toEqual([[0.3, 40], [0.3, 10], [0.1, 90], null]);
   });
 });

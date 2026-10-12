@@ -11,8 +11,8 @@ import type { SignalModelPrediction } from "./signalModelPredictionsStore.js";
 const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 // A candidate ranked by the model: calibrated annualized return first, then expected P&L per contract.
-const candidate = (expiry: string, calibratedAnnualizedReturn: number, expectedPnlDollars: number, edgeMargin = 0.25): SignalCandidate =>
-  ({ expiry, strike: 100, strategyKey: "cash_secured_put", model: fixtureCandidateModel({ calibratedAnnualizedReturn, expectedPnlDollars, edgeMargin }) }) as SignalCandidate;
+const candidate = (expiry: string, expectedAnnualizedReturn: number, expectedPnlDollars: number, edgeMargin = 0.25): SignalCandidate =>
+  ({ expiry, strike: 100, strategyKey: "cash_secured_put", model: fixtureCandidateModel({ expectedAnnualizedReturn, expectedPnlDollars, edgeMargin }) }) as SignalCandidate;
 
 describe("selectDaySignalExpiries", () => {
   it("takes the distinct expiries of the top 10 candidates with a positive expected P&L, ranked as Pluto ranks them, in first-appearance order, capped at 3", () => {
@@ -37,7 +37,7 @@ describe("selectDaySignalExpiries", () => {
     expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-12-18"]);
   });
 
-  it("ranks by the calibrated annualized return before the expected P&L", () => {
+  it("ranks by Edge Yield before the expected P&L", () => {
     const seeds = selectDaySignalExpiries([candidate("2026-10-16", 0.1, 500), candidate("2026-11-20", 0.3, 20)], { topCandidates: 10, maxExpiries: 1 });
     expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-11-20"]);
   });

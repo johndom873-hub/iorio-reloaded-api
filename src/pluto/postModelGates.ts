@@ -194,16 +194,16 @@ export function computeStressCap(settings: PlutoSettings, stress: StressCapInput
   };
 }
 
-// Quarter-Kelly cap (model review P5, approved by Marcelo 2026-10-10; quarter-Kelly chosen 2026-09-16): one more cap on the
-// number of contracts, never a reason to trade more than the other caps allow.
+// Half-Kelly cap (model review P5, approved by Marcelo 2026-10-10; half-Kelly on the model's Edge $ since 2026-10-12, was
+// quarter-Kelly on Hist Edge $): one more cap on the number of contracts, never a reason to trade more than the other caps allow.
 //   contracts ≤ floor(kellyFraction × bankroll × μ ÷ σ²)
-//   μ  = the history-corrected expected P&L per contract (Hist Edge $: what history delivered for the same horizon and edge
-//        margin, after friction)
+//   μ  = the model's expected P&L per contract after friction (Edge $)
 //   σ² = the variance of the per-contract P&L under the model's distribution, on the same basis as the risk figures: the
 //        option for a put; 100 shares plus the short call for every covered call, on shares already held or bought with it
 //   bankroll = Pluto's capital budget (net liquidation × capitalBudgetPct)
-// No contracts when μ ≤ 0: history says such a sale did not pay. A covered call's cap covers all its contracts together.
-export const kellyFraction = 0.25;
+// Example: AAPL $330 Put · 14 Oct (5DTE) on staging 2026-10-09: 0.5 × $519,698 × $43 ÷ $402² = 69.1 → 69 contracts.
+// No contracts when μ ≤ 0. A covered call's cap covers all its contracts together.
+export const kellyFraction = 0.5;
 
 export interface KellyCap {
   contracts: number;
@@ -211,18 +211,18 @@ export interface KellyCap {
 }
 
 /** `fraction` is Pluto's fixed kellyFraction live; a backtest session sizes with its own. */
-export function computeKellyCap(settings: PlutoSettings, contract: Pick<SignalCandidate, "strategyKey"> & { model: Pick<CandidateModelScore, "calibratedExpectedPnlDollars" | "pnlVarianceDollars" | "coveredPositionPnlVarianceDollars"> | null }, netLiquidationValue: number, fraction: number = kellyFraction): KellyCap {
+export function computeKellyCap(settings: PlutoSettings, contract: Pick<SignalCandidate, "strategyKey"> & { model: Pick<CandidateModelScore, "expectedPnlDollars" | "pnlVarianceDollars" | "coveredPositionPnlVarianceDollars"> | null }, netLiquidationValue: number, fraction: number = kellyFraction): KellyCap {
   const model = contract.model;
   if (!model) return { contracts: 0, detail: "Kelly cap: the contract has no model valuation" };
   const bankroll = (netLiquidationValue * settings.capitalBudgetPct) / 100;
-  const mu = model.calibratedExpectedPnlDollars;
-  if (!(mu > 0)) return { contracts: 0, detail: `Kelly cap: Hist Edge $${mu.toFixed(0)}/contract ≤ 0, so no contracts` };
+  const mu = model.expectedPnlDollars;
+  if (!(mu > 0)) return { contracts: 0, detail: `Kelly cap: Edge $${mu.toFixed(0)}/contract ≤ 0, so no contracts` };
   const isCall = contract.strategyKey === "covered_call";
   const variance = isCall ? model.coveredPositionPnlVarianceDollars : model.pnlVarianceDollars;
   const contracts = variance !== null && variance > 0 ? Math.floor((fraction * bankroll * mu) / variance) : 0;
   return {
     contracts,
-    detail: `Kelly cap: ${fraction} × $${bankroll.toFixed(0)} budget × Hist Edge $${mu.toFixed(0)}/contract ÷ P&L variance${isCall ? " (shares + call)" : ""} → ${contracts} contract(s)`,
+    detail: `Kelly cap: ${fraction} × $${bankroll.toFixed(0)} budget × Edge $${mu.toFixed(0)}/contract ÷ P&L variance${isCall ? " (shares + call)" : ""} → ${contracts} contract(s)`,
   };
 }
 
@@ -273,7 +273,7 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at $${unitNotional.toFixed(0)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → $${(fullSizeQuantity * unitNotional).toFixed(0)}`);
   } else if (book.freeShares >= 100) {
     // A call on shares already held (Marcelo, 2026-10-12): it covers every free round lot, buys no shares and has no Kelly
-    // cap, since it lowers the risk of shares the book already carries; the Hist Edge > 0 filter stands in for the cap's
+    // cap, since it lowers the risk of shares the book already carries; the Edge > 0 filter stands in for the cap's
     // "no contracts when μ ≤ 0". The break-even rule is checked again on the size sent and the limit price.
     const heldShareContracts = Math.floor(book.freeShares / 100);
     fullSizeQuantity = Math.min(heldShareContracts, liquidityCap);

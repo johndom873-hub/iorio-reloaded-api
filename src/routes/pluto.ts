@@ -180,7 +180,7 @@ interface SizingCapsRequest {
   bid: number;
   ask: number;
   spotPrice: number | null;
-  model: { calibratedExpectedPnlDollars: number; pnlVarianceDollars: number; coveredPositionPnlVarianceDollars: number | null; varianceSessions: number };
+  model: { expectedPnlDollars: number; pnlVarianceDollars: number; coveredPositionPnlVarianceDollars: number | null; varianceSessions: number };
   ticker: { forecastVolatility: number | null; elevatedVolatility: boolean; dayChangePercent: number | null };
 }
 
@@ -193,7 +193,7 @@ function parseSizingCapsRequest(body: unknown): SizingCapsRequest | { error: str
   const finiteOrNull = (input: unknown) => input === null || finite(input);
   if (value.strategyKey !== "covered_call" && value.strategyKey !== "cash_secured_put") return { error: "strategyKey must be covered_call or cash_secured_put." };
   if (!finite(value.strike) || !finite(value.bid) || !finite(value.ask) || !finiteOrNull(value.spotPrice)) return { error: "strike, bid and ask must be numbers; spotPrice a number or null." };
-  if (!finite(model.calibratedExpectedPnlDollars) || !finite(model.pnlVarianceDollars) || !finiteOrNull(model.coveredPositionPnlVarianceDollars) || !finite(model.varianceSessions)) return { error: "model must carry calibratedExpectedPnlDollars, pnlVarianceDollars, coveredPositionPnlVarianceDollars and varianceSessions." };
+  if (!finite(model.expectedPnlDollars) || !finite(model.pnlVarianceDollars) || !finiteOrNull(model.coveredPositionPnlVarianceDollars) || !finite(model.varianceSessions)) return { error: "model must carry expectedPnlDollars, pnlVarianceDollars, coveredPositionPnlVarianceDollars and varianceSessions." };
   if (!finiteOrNull(ticker.forecastVolatility) || typeof ticker.elevatedVolatility !== "boolean" || !finiteOrNull(ticker.dayChangePercent)) return { error: "ticker must carry forecastVolatility, elevatedVolatility and dayChangePercent." };
   return {
     strategyKey: value.strategyKey,
@@ -201,7 +201,7 @@ function parseSizingCapsRequest(body: unknown): SizingCapsRequest | { error: str
     bid: value.bid as number,
     ask: value.ask as number,
     spotPrice: value.spotPrice as number | null,
-    model: { calibratedExpectedPnlDollars: model.calibratedExpectedPnlDollars as number, pnlVarianceDollars: model.pnlVarianceDollars as number, coveredPositionPnlVarianceDollars: model.coveredPositionPnlVarianceDollars as number | null, varianceSessions: model.varianceSessions as number },
+    model: { expectedPnlDollars: model.expectedPnlDollars as number, pnlVarianceDollars: model.pnlVarianceDollars as number, coveredPositionPnlVarianceDollars: model.coveredPositionPnlVarianceDollars as number | null, varianceSessions: model.varianceSessions as number },
     ticker: { forecastVolatility: ticker.forecastVolatility as number | null, elevatedVolatility: ticker.elevatedVolatility, dayChangePercent: ticker.dayChangePercent as number | null },
   };
 }

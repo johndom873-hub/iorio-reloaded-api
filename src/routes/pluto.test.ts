@@ -114,7 +114,7 @@ describe("POST /pluto/sizing-caps (the Signals order panel's Kelly and stress ca
   afterAll(async () => {
     await testDb("account_pnl_snapshots").where({ snapshot_date: snapshotDate }).del();
   });
-  const put100 = { strategyKey: "cash_secured_put", strike: 100, bid: 1.9, ask: 2.1, spotPrice: 102, model: { calibratedExpectedPnlDollars: 5, pnlVarianceDollars: 150 ** 2, coveredPositionPnlVarianceDollars: null, varianceSessions: 5 }, ticker: { forecastVolatility: 0.5, elevatedVolatility: false, dayChangePercent: 0 } };
+  const put100 = { strategyKey: "cash_secured_put", strike: 100, bid: 1.9, ask: 2.1, spotPrice: 102, model: { expectedPnlDollars: 5, pnlVarianceDollars: 150 ** 2, coveredPositionPnlVarianceDollars: null, varianceSessions: 5 }, ticker: { forecastVolatility: 0.5, elevatedVolatility: false, dayChangePercent: 0 } };
 
   it("applies the sizing gate's Kelly and stress caps with Pluto's settings and the latest account value", async () => {
     const { json: settings } = await get("/settings");
@@ -122,8 +122,8 @@ describe("POST /pluto/sizing-caps (the Signals order panel's Kelly and stress ca
     expect(status).toBe(200);
     expect(json.netLiquidationValue).toBe(1_000_000);
     expect(json.accountValueDateIso).toBe(snapshotDate);
-    // Kelly: 0.25 × the budget × $5 ÷ $150².
-    expect(json.kelly.contracts).toBe(Math.floor((0.25 * 1_000_000 * (settings.capitalBudgetPct / 100) * 5) / 150 ** 2));
+    // Kelly: 0.5 × the budget × Edge $5 ÷ $150².
+    expect(json.kelly.contracts).toBe(Math.floor((0.5 * 1_000_000 * (settings.capitalBudgetPct / 100) * 5) / 150 ** 2));
     // Stress: the stock down stressSigmas × 50% × √(5/252) by expiry, less the $200 premium.
     const stressedSpot = 102 * (1 - settings.stressSigmas * 0.5 * Math.sqrt(5 / 252));
     const loss = Math.max(0, 100 - stressedSpot) * 100 - 200;
@@ -131,8 +131,8 @@ describe("POST /pluto/sizing-caps (the Signals order panel's Kelly and stress ca
     expect(json.stress.contracts).toBe(expected);
   });
 
-  it("gives no Kelly contracts when history says the sale lost money, and refuses a body missing a figure", async () => {
-    const losing = await post("/sizing-caps", { ...put100, model: { ...put100.model, calibratedExpectedPnlDollars: -3 } });
+  it("gives no Kelly contracts when the model expects a loss, and refuses a body missing a figure", async () => {
+    const losing = await post("/sizing-caps", { ...put100, model: { ...put100.model, expectedPnlDollars: -3 } });
     expect(losing.json.kelly.contracts).toBe(0);
     expect((await post("/sizing-caps", { ...put100, model: { ...put100.model, varianceSessions: undefined } })).status).toBe(400);
     expect((await post("/sizing-caps", { ...put100, strategyKey: "hedge" })).status).toBe(400);
