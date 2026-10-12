@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SignalCandidate, SignalSurfaceSlice } from "../lib/signalCandidates.js";
-import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
+import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { TickerSignals } from "../lib/signalsTypes.js";
 import { candidateSetFingerprint } from "./inputHash.js";
 import { describeCandidateId, deterministicTopPick, filterTickerForPluto, openCandidateId, summarizeTopPick, type PlutoTickerFilterInput } from "./candidateFilters.js";
@@ -216,5 +216,83 @@ describe("describeCandidateId", () => {
     expect(describeCandidateId("COIN:close_leg:leg-1", "2026-10-07")).toBe("COIN Buy back");
     expect(describeCandidateId("SMCI:close_position:p-1", "2026-10-07")).toBe("SMCI Close covered Call");
     expect(describeCandidateId("not-an-id", "2026-10-07")).toBe("not-an-id");
+  });
+});
+
+describe("covered calls on held shares (Marcelo, 2026-10-12)", () => {
+  // 100 shares acquired for $10,800 (average $108) with $300 of premium: break-even $105, floor max(1% × $108 × 100, $50) = $108.
+  const cycle = { breakEvenPerShare: 105, unavailableReason: null, sharesAcquired: 100, acquisitionCost: 10_800 };
+  const weakCall = (overrides: Partial<SignalCandidate> = {}) =>
+    candidate({ strategyKey: "covered_call", strike: 112, delta: 0.25, bid: 1.0, ask: 1.1, model: model({ edgeMargin: 0.12, expectedAnnualizedReturn: 0.05, premiumYield: 0.2, calibratedExpectedPnlDollars: 4, calibratedAnnualizedReturn: 0.1 }), ...overrides });
+  const held = (overrides: Partial<TickerSignals> = {}, extra: Partial<PlutoTickerFilterInput> = {}) => filterTickerForPluto(input({ scored: scored({ freeShares: 100, candidates: [weakCall()], ...overrides }), cycleBreakEven: cycle, ...extra }));
+
+  it("drops the grade, Edge Yield and premium-yield minimums for a call on held shares, and carries the cycle if assigned", () => {
+    const result = held();
+    expect(result.rejected).toEqual([]);
+    // $112 at 1.05 mid less $0.0068 commission: break-even 103.9568, (112 − 103.9568) × 100 = $804.32
+    expect(result.eligible[0]!.heldShares!.contracts).toBe(1);
+    expect(result.eligible[0]!.heldShares!.breakEvenAfter).toBeCloseTo(103.9568, 6);
+    expect(result.eligible[0]!.heldShares!.profitIfCalledAway).toBeCloseTo(804.32, 6);
+    // the same call with no free shares is a buy-write and meets the usual minimums
+    expect(filterTickerForPluto(input({ scored: scored({ candidates: [weakCall()] }) })).rejected[0]!.codes).toEqual(["grade", "edge_yield", "yield"]);
+  });
+  it("still asks for a positive Hist Edge", () => {
+    expect(held({ candidates: [weakCall({ model: model({ edgeMargin: 0.12, calibratedExpectedPnlDollars: 0 }) })] }).rejected[0]).toMatchObject({ codes: ["hist_edge"], reasons: ["Hist Edge $0/contract not above 0"] });
+  });
+  it("blocks a strike whose assignment would close the shares below the break-even plus the floor", () => {
+    // $104: (104 − 103.9568) × 100 = $4.32, below $108
+    const result = held({ candidates: [weakCall({ strike: 104 })] });
+    expect(result.eligible).toEqual([]);
+    expect(result.rejected[0]).toEqual({ id: "HOOD:covered_call:2026-10-16:104", codes: ["below_break_even"], reasons: ["if assigned, the $104 strike closes 100 shares $4 over the cycle break-even of 103.96 (after this premium), below the $108 minimum profit"] });
+    // the floor is 103.9568 + 1.08 = 105.0368 a share: $105.04 passes ($108.32), $105.03 does not ($107.32)
+    expect(held({ candidates: [weakCall({ strike: 105.04 })] }).eligible).toHaveLength(1);
+    expect(held({ candidates: [weakCall({ strike: 105.03 })] }).rejected[0]!.codes).toEqual(["below_break_even"]);
+  });
+  it("blocks every call on held shares when the break-even is unknown or was not loaded", () => {
+    const unknown = held({}, { cycleBreakEven: { ...cycle, breakEvenPerShare: null, unavailableReason: "ledger says 100 sh held but the open stock legs total 200 sh" } });
+    expect(unknown.rejected[0]).toMatchObject({ codes: ["no_break_even"], reasons: ["no cycle break-even for the held shares: ledger says 100 sh held but the open stock legs total 200 sh"] });
+    expect(held({}, { cycleBreakEven: undefined }).rejected[0]!.codes).toEqual(["no_break_even"]);
+  });
+  it("offers the held shares one call, the best by Hist Yield; puts on the ticker are unaffected", () => {
+    const better = weakCall({ strike: 114, model: model({ edgeMargin: 0.12, calibratedExpectedPnlDollars: 6, calibratedAnnualizedReturn: 0.2 }) });
+    const put = candidate();
+    const result = held({ candidates: [weakCall(), better, put] });
+    expect(result.eligible.map((entry) => entry.id).sort()).toEqual(["HOOD:cash_secured_put:2026-10-16:100", "HOOD:covered_call:2026-10-16:114"]);
+    expect(result.rejected).toEqual([{ id: "HOOD:covered_call:2026-10-16:112", codes: ["held_shares_runner_up"], reasons: ["the held shares are offered one call, the best by Hist Yield: HOOD:covered_call:2026-10-16:114"] }]);
+  });
+  it("sizes the floor on every free round lot, and treats an odd lot as no held shares", () => {
+    // 300 shares: 3 contracts, floor max(1% × $108 × 300, $50) = $324; break-even after 105 − 1.0432 × 300 / 300 = 103.9568 → $2,412.96
+    const three = held({ freeShares: 350 }, { cycleBreakEven: { ...cycle, sharesAcquired: 300, acquisitionCost: 32_400 } });
+    expect(three.eligible[0]!.heldShares!.contracts).toBe(3);
+    expect(three.eligible[0]!.heldShares!.profitIfCalledAway).toBeCloseTo(2412.96, 6);
+    expect(held({ freeShares: 80 }).rejected[0]!.codes).toEqual(["grade", "edge_yield", "yield"]);
+  });
+
+  describe("covered-call rolls", () => {
+    const heldCall = { legId: "leg-call", positionId: "pos-cc", strategyKey: "covered_call", expiry: "2026-10-09", strike: 112, right: "C", quantity: 1, entryPrice: 1.2, entryAtIso: "2026-10-01T15:00:00Z" } as HeldLegScore;
+    const callRoll = (strike: number, netCreditPerShare: number): RollSignalCandidate => ({
+      legId: "leg-call", positionId: "pos-cc", strategyKey: "covered_call", quantity: 1,
+      replacement: candidate({ strategyKey: "covered_call", strike, delta: 0.25 }),
+      netRollEdge: 0.07, netRollEdgeDollarsPerContract: 45, netRollEdgeDollars: 45, netCreditPerShare, deltaChange: -0.03, dollarRiskChange: 0, flags: [], warnings: [], grade: "good",
+      model: fixtureRollModel({ netExpectedPnlPerContract: 45, netExpectedPnl: 45, edgeMargin: 0.25 }),
+    });
+    const rolls = (roll: RollSignalCandidate, cycleBreakEven: PlutoTickerFilterInput["cycleBreakEven"] = cycle) =>
+      filterTickerForPluto(input({ scored: scored({ candidates: [], heldLegs: [heldCall], rolls: [roll] }), cycleBreakEven }));
+
+    it("blocks a roll that lowers the strike below the break-even plus the floor, counting the buyback", () => {
+      // net credit 0.30 less two commissions = 0.2864: break-even 104.7136; $108 → $328.64 passes, $105.50 → $78.64 is below $108
+      expect(rolls(callRoll(108, 0.3)).eligibleRolls).toHaveLength(1);
+      const low = rolls(callRoll(105.5, 0.3));
+      expect(low.rejectedRolls[0]).toEqual({ id: "HOOD:roll:leg-call:2026-10-16:105.5", codes: ["below_break_even"], reasons: ["replacement: if assigned, the $105.5 strike closes 100 shares $79 over the cycle break-even of 104.71 (after this premium), below the $108 minimum profit"] });
+    });
+    it("always allows a roll that keeps or raises the strike, even below break-even or with no break-even", () => {
+      expect(rolls(callRoll(112, 0.3), null).eligibleRolls).toHaveLength(1);
+      expect(rolls(callRoll(115, -0.1), { ...cycle, breakEvenPerShare: 120 }).eligibleRolls).toHaveLength(1);
+    });
+    it("blocks a strike-lowering roll when the break-even is unknown, and leaves put rolls alone", () => {
+      expect(rolls(callRoll(108, 0.3), null).rejectedRolls[0]!.codes).toEqual(["no_break_even"]);
+      const putRoll = { ...callRoll(95, 0.4), strategyKey: "cash_secured_put" as const, replacement: candidate({ strike: 95 }) };
+      expect(rolls(putRoll, null).eligibleRolls).toHaveLength(1);
+    });
   });
 });

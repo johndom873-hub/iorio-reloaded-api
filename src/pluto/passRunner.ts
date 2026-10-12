@@ -11,7 +11,7 @@ import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js"
 import { compareCandidatesByModel, type SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
 import { anyOpenPositionOn, loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol, loadOccupiedContracts, loadPlutoBook } from "./book.js";
-import { describeCandidateId, filterTickerForPluto, findSameContractConflict, summarizeTopPick, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
+import { coveredCallRollBreakEvenFailure, describeCandidateId, filterTickerForPluto, findSameContractConflict, summarizeTopPick, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { summarizeTickerRejections } from "./rejectionSummary.js";
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { updatePlutoConcernAlerts } from "./concernAlerts.js";
@@ -29,6 +29,8 @@ import { finishPlutoPass, type FinishPlutoPassInput, recordPlutoAction, updatePl
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { callPlutoModel } from "./modelClient.js";
 import { runPostModelGates, stressCapInputFor, tickerCooldownStatus } from "./postModelGates.js";
+import { fetchOpenCycleSummaryByTickerId } from "../lib/cycleBreakEvenQueries.js";
+import type { CycleBreakEven } from "./heldShareCalls.js";
 import { buildPlutoSystemPrompt, buildPlutoUserPayload, plutoPromptVersion, recentDecisionsForPrompt, type PlutoPromptTickerInput } from "./prompt.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState, recordPlutoPass, tripPlutoBreaker } from "./stateStore.js";
@@ -85,6 +87,8 @@ interface EvaluatedTicker {
   scored: TickerSignals;
   filtered: PlutoTickerFilterResult;
   occupiedContracts: OccupiedContract[];
+  /** The ticker's open cycle, loaded only when the break-even rule can apply (free round lots or a covered-call roll). */
+  cycleBreakEven: CycleBreakEven | null;
   fingerprint: string;
   closeOffers: CloseOffer[];
   /** Every held short put and covered call on the ticker, as the model sees it (set with the close offers). */
@@ -166,9 +170,11 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   const spot = watched?.last ?? null;
   const live = spot !== null ? { spotPrice: spot, priceSource: "live" as const, liveQuotes: extraLiveQuotes } : undefined;
   const scored = scoreTicker(inputs, account, tradingSettings, live);
-  const occupiedContracts = await loadOccupiedContracts(row.symbol);
-  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason });
-  return { row, inputs, scored, filtered, occupiedContracts, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [], heldPositions: [] };
+  const needsCycle = scored.freeShares >= 100 || scored.rolls.some((roll) => roll.strategyKey === "covered_call");
+  const [occupiedContracts, cycleSummaries] = await Promise.all([loadOccupiedContracts(row.symbol), needsCycle ? fetchOpenCycleSummaryByTickerId([row.tickerId]) : null]);
+  const cycleBreakEven = cycleSummaries?.get(row.tickerId) ?? null;
+  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason, cycleBreakEven });
+  return { row, inputs, scored, filtered, occupiedContracts, cycleBreakEven, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [], heldPositions: [] };
 }
 
 /** The move-context block for the prompt: bars up to the last completed session, the forecast, today's move and IV rank. A failure costs the block, not the round. */
@@ -535,8 +541,9 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const slicesByExpiry = new Map(fresh.inputs.slices.map((slice) => [slice.expiry, slice]));
   const freshRejectionReasons = [
     ...rejectTicker({ scored: fresh.scored, slices: fresh.inputs.slices, settings, todayEasternIso: fresh.inputs.todayEasternIso, nowMs: Date.now(), botEnabled: true }),
-    ...(freshCandidate ? rejectOpenCandidate(freshCandidate, { scored: fresh.scored, slicesByExpiry, settings, nowMs: Date.now() }) : chosenOpen ? ["the chosen contract is no longer a candidate"] : []),
+    ...(freshCandidate ? rejectOpenCandidate(freshCandidate, { scored: fresh.scored, slicesByExpiry, settings, nowMs: Date.now() }, { onHeldShares: freshCandidate.strategyKey === "covered_call" && fresh.scored.freeShares >= 100 }) : chosenOpen ? ["the chosen contract is no longer a candidate"] : []),
     ...(chosenRoll && !freshRoll ? ["the chosen roll is no longer a candidate"] : []),
+    ...(freshRoll ? [coveredCallRollBreakEvenFailure(freshRoll, fresh.scored, fresh.cycleBreakEven, settings)?.reason].filter((reason): reason is string => reason !== undefined) : []),
   ];
   const [exposures, inFlight] = await Promise.all([computePositionExposures(), loadInFlightNotionals(owner.row.symbol)]);
   const freshContractForGate = freshCandidate ?? freshRoll?.replacement ?? null;
@@ -565,6 +572,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       sameContractConflict: freshContractForGate ? findSameContractConflict(fresh.occupiedContracts, freshContractForGate.expiry, freshContractForGate.strike) : null,
     },
     stress: stressCapInputFor(fresh.scored),
+    cycleBreakEven: fresh.cycleBreakEven,
   });
   const contract = freshCandidate ?? freshRoll?.replacement ?? null;
   const gateResults: PlutoGateResult[] = gates.gates;

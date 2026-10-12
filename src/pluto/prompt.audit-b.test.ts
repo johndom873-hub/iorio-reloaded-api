@@ -42,8 +42,8 @@ function input(overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput {
 const tickerOf = (payload: Record<string, unknown>, index = 0) => (payload.tickers as Record<string, unknown>[])[index]!;
 
 describe("prompt version", () => {
-  it("is v4.0, matching the v4.0 migration", () => {
-    expect(plutoPromptVersion).toBe("v4.0");
+  it("is v4.1, matching the v4.1 migration", () => {
+    expect(plutoPromptVersion).toBe("v4.1");
   });
 });
 
@@ -135,9 +135,9 @@ describe("buildPlutoUserPayload — trigger, macro events, recent decisions", ()
 describe("buildPlutoSystemPrompt — v3.3 to v3.5 wording", () => {
   const settings = input().settings;
   it("the grade sentence follows minGrade", () => {
-    expect(buildPlutoSystemPrompt(settings)).toContain("Only good or better reaches you.");
-    expect(buildPlutoSystemPrompt({ ...settings, minGrade: "weak" })).toContain("Only weak or better reaches you.");
-    expect(buildPlutoSystemPrompt({ ...settings, minGrade: "strong" })).toContain("Only strong reaches you.");
+    expect(buildPlutoSystemPrompt(settings)).toContain("Only good or better reaches you, except a covered call on held shares");
+    expect(buildPlutoSystemPrompt({ ...settings, minGrade: "weak" })).toContain("Only weak or better reaches you, except a covered call on held shares");
+    expect(buildPlutoSystemPrompt({ ...settings, minGrade: "strong" })).toContain("Only strong reaches you, except a covered call on held shares");
   });
 
   it("rule 3: concerns per ticker, null only for the whole message, abstain only then or when every ticker is flagged", () => {

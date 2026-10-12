@@ -6,6 +6,8 @@ import type { PlutoDecision } from "./decisionSchema.js";
 import type { PlutoGateResult } from "./ledger.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { describeOptionContract } from "../lib/optionContractLabel.js";
+import { formatSignedDollars } from "../lib/formatSignedDollars.js";
+import { checkCalledAway, commissionPerShare, describeCalledAwayShortfall, type CycleBreakEven } from "./heldShareCalls.js";
 
 // Post-model validation (design round 3, item 21, approved 2026-09-28). Nothing the model said
 // is trusted: the chosen candidate is re-scored on fresh quotes and re-filtered by the caller,
@@ -60,6 +62,8 @@ export interface PostModelGateInput {
   sector: string | null;
   /** What the stress cap needs about the ticker today (fresh re-score). */
   stress: StressCapInput;
+  /** The ticker's open cycle, for the break-even rule on a call written on held shares (heldShareCalls.ts); absent blocks such a call. */
+  cycleBreakEven?: CycleBreakEven | null;
 }
 
 export interface StressCapInput {
@@ -264,6 +268,25 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue);
     fullSizeQuantity = Math.min(byRoom, liquidityCap, stressCap.contracts, kellyCap.contracts);
     gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at $${unitNotional.toFixed(0)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → $${(fullSizeQuantity * unitNotional).toFixed(0)}`);
+  } else if (book.freeShares >= 100) {
+    // A call on shares already held (Marcelo, 2026-10-12): it covers every free round lot, buys no shares and has no Kelly
+    // cap, since it lowers the risk of shares the book already carries; the Hist Edge > 0 filter stands in for the cap's
+    // "no contracts when μ ≤ 0". The break-even rule is checked again on the size sent and the limit price.
+    const heldShareContracts = Math.floor(book.freeShares / 100);
+    fullSizeQuantity = Math.min(heldShareContracts, liquidityCap);
+    unitNotional = 0;
+    gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${heldShareContracts} contract(s), no shares bought and no Kelly cap on held shares; volume share allows ${liquidityCap}`);
+    const contracts = Math.max(1, fullSizeQuantity);
+    const calledAway = checkCalledAway({ cycle: input.cycleBreakEven ?? null, strike: candidate.strike, contracts, cashPerShareCovered: limitPrice - commissionPerShare(candidate.commissionPerContractDollars), settings });
+    gate(
+      "break_even",
+      calledAway.check?.passes === true,
+      !calledAway.check
+        ? `no cycle break-even for the held shares: ${calledAway.unavailableReason}`
+        : calledAway.check.passes
+          ? `if assigned, ${100 * contracts} shares close ${formatSignedDollars(calledAway.check.profitIfCalledAway, 0)} over the cycle break-even of ${calledAway.check.breakEvenAfter.toFixed(2)}, minimum ${formatSignedDollars(calledAway.check.floor, 0)}`
+          : describeCalledAwayShortfall(candidate.strike, contracts, calledAway.check),
+    );
   } else {
     // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
     // contract is a buy-write that buys 100 shares at the live spot, sized from the same room as a put.

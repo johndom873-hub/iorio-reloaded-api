@@ -73,9 +73,9 @@ describe("prompt v3.3 payload and wording (2026-10-07)", () => {
 
   it("states the grade floor actually in force and explains managed positions and covered calls that buy shares", () => {
     const weak = buildPlutoSystemPrompt(input().settings);
-    expect(weak).toContain("Only weak or better reaches you.");
-    expect(weak).not.toContain("Only good or better reaches you.");
-    expect(buildPlutoSystemPrompt({ ...input().settings, minGrade: "strong" })).toContain("Only strong reaches you.");
+    expect(weak).toContain("Only weak or better reaches you, except a covered call on held shares");
+    expect(weak).not.toContain("Only good or better reaches you,");
+    expect(buildPlutoSystemPrompt({ ...input().settings, minGrade: "strong" })).toContain("Only strong reaches you, except a covered call on held shares");
     expect(weak).toContain("Pluto manages every position on the tickers it is enabled on, whoever opened it.");
     expect(weak).toContain("code buys the missing 100 shares per contract at the live price in the same order.");
     expect(weak).toContain("In reasons, call it a covered call, never a buy-write.");
@@ -129,6 +129,15 @@ describe("prompt v3.8: held positions and event timing (2026-10-08)", () => {
     const { payload } = buildPlutoUserPayload(input([{ scored, eligible: [{ id: "SMCI:cash_secured_put:2026-10-16:40", kind: "open_cash_secured_put", symbol: "SMCI", candidate: candidate as never }], eligibleRolls: [], closeActions: [], heldPositions: [] }]));
     const [offered] = (payload.tickers as { candidates: { event: unknown }[] }[])[0]!.candidates;
     expect(offered!.event).toEqual({ title: "CPI", weight: "heavy", date: "2026-10-14", sessions_until: 4, sessions_after: 3 });
+  });
+
+  it("v4.1: a covered call on held shares carries the contracts it covers and the cycle if assigned; other candidates do not", () => {
+    const call = { id: "SMCI:covered_call:2026-10-16:44", kind: "open_covered_call" as const, symbol: "SMCI", candidate: { ...candidate, strategyKey: "covered_call", strike: 44 } as never, heldShares: { contracts: 2, breakEvenAfter: 39.12345, profitIfCalledAway: 975.4 } };
+    const put = { id: "SMCI:cash_secured_put:2026-10-16:40", kind: "open_cash_secured_put" as const, symbol: "SMCI", candidate: candidate as never };
+    const { payload } = buildPlutoUserPayload(input([{ scored, eligible: [call, put], eligibleRolls: [], closeActions: [], heldPositions: [] }]));
+    const offered = (payload.tickers as { candidates: Record<string, unknown>[] }[])[0]!.candidates;
+    expect(offered.find((entry) => entry.id === call.id)!.on_held_shares).toEqual({ contracts: 2, break_even_after: 39.12, profit_if_called_away_dollars: 975 });
+    expect(offered.find((entry) => entry.id === put.id)).not.toHaveProperty("on_held_shares");
   });
 
   it("v4.0: a candidate carries the valuation model's figures, not the old Edge's; the ticker its session-clock IV and YZ21", () => {

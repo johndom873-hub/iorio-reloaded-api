@@ -5,6 +5,7 @@ import type { TickerSignals } from "../lib/signalsTypes.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "../lib/optionContractLabel.js";
 import { yieldOnExposure } from "../lib/contractValuation.js";
+import { checkCalledAway, commissionPerShare, describeCalledAwayShortfall, type CycleBreakEven } from "./heldShareCalls.js";
 
 // Pluto's deterministic candidate filters (design round 3, item 20, approved 2026-09-28). Since the model review
 // (approved by Marcelo 2026-10-10) every value rule reads the valuation model's block (grade, Edge Yield, premium
@@ -22,6 +23,8 @@ export interface PlutoOpenCandidate {
   kind: "open_covered_call" | "open_cash_secured_put";
   symbol: string;
   candidate: SignalCandidate;
+  /** Set on a covered call written on shares already held: the contracts it covers and the cycle if it is assigned (heldShareCalls.ts). */
+  heldShares?: { contracts: number; breakEvenAfter: number; profitIfCalledAway: number };
 }
 
 export interface PlutoRollCandidate {
@@ -56,7 +59,11 @@ export type PlutoRejectionCode =
   | "earnings_unresolved"
   | "not_executable"
   | "same_contract"
-  | "opens_blocked";
+  | "opens_blocked"
+  | "hist_edge"
+  | "below_break_even"
+  | "no_break_even"
+  | "held_shares_runner_up";
 
 export interface PlutoRejectionReason {
   code: PlutoRejectionCode;
@@ -95,6 +102,11 @@ export interface PlutoTickerFilterInput {
   occupiedContracts?: OccupiedContract[];
   /** Why no open on this ticker may be offered this round (the ticker cooldown); rolls and closes are unaffected. */
   opensBlockedReason?: string | null;
+  /**
+   * The ticker's open cycle, for the break-even rule on covered calls written on held shares and on covered-call rolls that
+   * lower the strike (heldShareCalls.ts). Absent or null blocks exactly those, as an unknown break-even does.
+   */
+  cycleBreakEven?: CycleBreakEven | null;
 }
 
 /** A contract on the ticker that is already taken: an open option leg (anyone's) or a leg of a working order. */
@@ -147,21 +159,25 @@ function quoteAgeMinutes(candidate: Pick<SignalCandidate, "quoteSource" | "quote
 type OpenCandidateFilterContext = { scored: TickerSignals; slicesByExpiry: Map<string, SignalSurfaceSlice>; settings: PlutoSettings; nowMs: number };
 
 /** Every reason one open candidate is out; empty means eligible. Shared with the roll path for the replacement leg. */
-export function rejectOpenCandidate(candidate: SignalCandidate, context: OpenCandidateFilterContext): string[] {
-  return openCandidateFailures(candidate, context).map((failure) => failure.reason);
+export function rejectOpenCandidate(candidate: SignalCandidate, context: OpenCandidateFilterContext, options: { onHeldShares?: boolean } = {}): string[] {
+  return openCandidateFailures(candidate, context, options).map((failure) => failure.reason);
 }
 
 /**
  * As rejectOpenCandidate, with the rule behind each reason. `skipValueRules` leaves out the grade and Edge Yield rules: a
- * roll's replacement is judged on the roll's own grade and net Edge Yield instead.
+ * roll's replacement is judged on the roll's own grade and net Edge Yield instead. `onHeldShares` (a covered call on shares
+ * already held, Marcelo 2026-10-12) leaves out the grade, Edge Yield and premium-yield minimums and asks only for a positive
+ * Hist Edge: the call lowers the risk of shares the book already carries, and the break-even rule guards its strike.
  */
-export function openCandidateFailures(candidate: SignalCandidate, context: OpenCandidateFilterContext, options: { skipValueRules?: boolean } = {}): PlutoRejectionReason[] {
+export function openCandidateFailures(candidate: SignalCandidate, context: OpenCandidateFilterContext, options: { skipValueRules?: boolean; onHeldShares?: boolean } = {}): PlutoRejectionReason[] {
   const { settings, scored } = context;
   const failures: PlutoRejectionReason[] = [];
   const fail = (code: PlutoRejectionCode, reason: string) => failures.push({ code, reason });
   const model = candidate.model;
   if (!model) fail("no_model", "not valued by the model (no YZ21 forecast or no variance time left)");
-  else {
+  else if (options.onHeldShares) {
+    if (!(model.calibratedExpectedPnlDollars > 0)) fail("hist_edge", `Hist Edge $${model.calibratedExpectedPnlDollars.toFixed(0)}/contract not above 0`);
+  } else {
     if (!options.skipValueRules && gradeRank[model.grade] < gradeRank[settings.minGrade]) fail("grade", `grade ${model.grade} (edge margin ${(model.edgeMargin * 100).toFixed(0)}%) below ${settings.minGrade}`);
     if (!options.skipValueRules && model.expectedAnnualizedReturn * 100 < settings.minEdgeYieldPct) fail("edge_yield", `Edge Yield ${(model.expectedAnnualizedReturn * 100).toFixed(0)}% below ${settings.minEdgeYieldPct}%`);
     if (model.premiumYield * 100 < settings.minAnnualizedYieldPct) fail("yield", `premium yield ${(model.premiumYield * 100).toFixed(0)}% a year below ${settings.minAnnualizedYieldPct}%`);
@@ -226,14 +242,34 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
   const context = { scored, slicesByExpiry, settings: input.settings, nowMs: input.nowMs };
 
   const occupied = input.occupiedContracts ?? [];
+  const cycle = input.cycleBreakEven ?? null;
+  // Round lots only: fewer than 100 free shares cover no contract (the odd lot is P1's to sell).
+  const heldShareContracts = Math.floor(scored.freeShares / 100);
   for (const candidate of scored.candidates) {
     const id = openCandidateId(scored.symbol, candidate);
-    const failures = openCandidateFailures(candidate, context);
+    const onHeldShares = candidate.strategyKey === "covered_call" && heldShareContracts > 0;
+    const failures = openCandidateFailures(candidate, context, { onHeldShares });
+    let heldShares: PlutoOpenCandidate["heldShares"];
+    if (onHeldShares) {
+      const cashPerShareCovered = (candidate.bid + candidate.ask) / 2 - commissionPerShare(candidate.commissionPerContractDollars);
+      const calledAway = checkCalledAway({ cycle, strike: candidate.strike, contracts: heldShareContracts, cashPerShareCovered, settings: input.settings });
+      if (!calledAway.check) failures.push({ code: "no_break_even", reason: `no cycle break-even for the held shares: ${calledAway.unavailableReason}` });
+      else if (!calledAway.check.passes) failures.push({ code: "below_break_even", reason: describeCalledAwayShortfall(candidate.strike, heldShareContracts, calledAway.check) });
+      else heldShares = { contracts: heldShareContracts, breakEvenAfter: calledAway.check.breakEvenAfter, profitIfCalledAway: calledAway.check.profitIfCalledAway };
+    }
     const conflict = findSameContractConflict(occupied, candidate.expiry, candidate.strike);
     if (conflict) failures.push({ code: "same_contract", reason: `same contract: ${conflict}` });
     if (input.opensBlockedReason) failures.push({ code: "opens_blocked", reason: input.opensBlockedReason });
-    if (failures.length === 0) result.eligible.push({ id, kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate });
+    if (failures.length === 0) result.eligible.push({ id, kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate, ...(heldShares ? { heldShares } : {}) });
     else result.rejected.push(plutoRejection(id, failures));
+  }
+
+  // The held shares get one call, the best by Hist Yield among those that pass (Marcelo, 2026-10-12).
+  const [bestHeldShareCall, ...runnersUp] = rankEligibleOpens(result.eligible.filter((entry) => entry.heldShares));
+  if (bestHeldShareCall && runnersUp.length > 0) {
+    const runnerUpIds = new Set(runnersUp.map((entry) => entry.id));
+    result.eligible = result.eligible.filter((entry) => !runnerUpIds.has(entry.id));
+    for (const entry of runnersUp) result.rejected.push(plutoRejection(entry.id, [{ code: "held_shares_runner_up", reason: `the held shares are offered one call, the best by Hist Yield: ${bestHeldShareCall.id}` }]));
   }
 
   for (const roll of scored.rolls) {
@@ -248,12 +284,30 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
     // The replacement leg must be tradeable on its own terms, minus the grade/Edge Yield rules already judged on the roll.
     const replacementFailures = openCandidateFailures(roll.replacement, context, { skipValueRules: true });
     failures.push(...replacementFailures.map((failure) => ({ code: failure.code, reason: `replacement: ${failure.reason}` })));
+    const breakEvenFailure = coveredCallRollBreakEvenFailure(roll, scored, cycle, input.settings);
+    if (breakEvenFailure) failures.push(breakEvenFailure);
     const conflict = findSameContractConflict(occupied, roll.replacement.expiry, roll.replacement.strike);
     if (conflict) failures.push({ code: "same_contract", reason: `replacement: same contract: ${conflict}` });
     if (failures.length === 0) result.eligibleRolls.push({ id, kind: "roll", symbol: scored.symbol, roll });
     else result.rejectedRolls.push(plutoRejection(id, failures));
   }
   return result;
+}
+
+/**
+ * The break-even rule on a covered-call roll (Marcelo, 2026-10-12): a roll that lowers the strike must, if the new call is
+ * assigned, close the shares at or above the cycle break-even plus the minimum profit, counting the buyback. A roll that
+ * keeps or raises the strike is always allowed, so a call already below break-even can still be rolled up or out.
+ */
+export function coveredCallRollBreakEvenFailure(roll: RollSignalCandidate, scored: TickerSignals, cycle: CycleBreakEven | null, settings: PlutoSettings): PlutoRejectionReason | null {
+  if (roll.strategyKey !== "covered_call") return null;
+  const heldLeg = scored.heldLegs.find((leg) => leg.legId === roll.legId);
+  if (heldLeg && roll.replacement.strike >= heldLeg.strike) return null;
+  const cashPerShareCovered = roll.netCreditPerShare - 2 * commissionPerShare(roll.replacement.commissionPerContractDollars);
+  const calledAway = checkCalledAway({ cycle, strike: roll.replacement.strike, contracts: roll.quantity, cashPerShareCovered, settings });
+  if (!calledAway.check) return { code: "no_break_even", reason: `replacement lowers the strike and the cycle has no break-even: ${calledAway.unavailableReason}` };
+  if (!calledAway.check.passes) return { code: "below_break_even", reason: `replacement: ${describeCalledAwayShortfall(roll.replacement.strike, roll.quantity, calledAway.check)}` };
+  return null;
 }
 
 /** Eligible opens in the deterministic order (compareCandidatesByModel: Hist Yield, then Edge $). */

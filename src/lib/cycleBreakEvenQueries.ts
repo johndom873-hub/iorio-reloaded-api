@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { breakEvenForPosition, summarizeOpenCycle, type CycleOptionLeg, type CycleStockTrade } from "./cycleBreakEven.js";
+import { breakEvenForPosition, summarizeOpenCycle, type CycleOptionLeg, type CycleStockTrade, type OpenCycleSummary } from "./cycleBreakEven.js";
 
 export interface PositionBreakEven {
   breakEven: number | null;
@@ -14,8 +14,27 @@ export async function fetchBreakEvenByPositionId(tickerIds: string[]): Promise<M
   const result = new Map<string, PositionBreakEven>();
   const uniqueTickerIds = [...new Set(tickerIds)];
   if (uniqueTickerIds.length === 0) return result;
+  const [summaries, openPositionRows] = await Promise.all([
+    fetchOpenCycleSummaryByTickerId(uniqueTickerIds),
+    // A hedge has no break-even, and its long leg stays out of the wheel's ledger.
+    db.raw(`SELECT p.id, p.ticker_id AS "tickerId" FROM positions p WHERE p.status = 'open' AND p.strategy_key <> 'hedge' AND p.ticker_id = ANY(?)`, [uniqueTickerIds]),
+  ]);
+  for (const [tickerId, summary] of summaries) {
+    for (const position of openPositionRows.rows.filter((row: any) => row.tickerId === tickerId)) {
+      const { breakEven, reason } = breakEvenForPosition(summary, position.id);
+      result.set(position.id, { breakEven, breakEvenUnavailableReason: reason, cycleNetPremium: summary.netPremium, cycleSharesHeld: summary.sharesHeld });
+    }
+  }
+  return result;
+}
 
-  const [optionRows, stockTradeRows, openStockRows, openPositionRows] = await Promise.all([
+/** The open cycle of each ticker (absent when the ticker is flat), from every short option leg and stock fill of the ticker. */
+export async function fetchOpenCycleSummaryByTickerId(tickerIds: string[]): Promise<Map<string, OpenCycleSummary>> {
+  const result = new Map<string, OpenCycleSummary>();
+  const uniqueTickerIds = [...new Set(tickerIds)];
+  if (uniqueTickerIds.length === 0) return result;
+
+  const [optionRows, stockTradeRows, openStockRows] = await Promise.all([
     db.raw(
       `SELECT pl.id, pl.position_id AS "positionId", p.ticker_id AS "tickerId", pl.side, pl.option_type AS "optionType",
               pl.strike_price::float AS strike, pl.quantity, pl.multiplier, pl.entry_price::float AS "entryPrice", pl.entry_at AS "entryAt",
@@ -44,8 +63,6 @@ export async function fetchBreakEvenByPositionId(tickerIds: string[]): Promise<M
        GROUP BY p.ticker_id`,
       [uniqueTickerIds],
     ),
-    // A hedge has no break-even, and its long leg stays out of the wheel's ledger above.
-    db.raw(`SELECT p.id, p.ticker_id AS "tickerId" FROM positions p WHERE p.status = 'open' AND p.strategy_key <> 'hedge' AND p.ticker_id = ANY(?)`, [uniqueTickerIds]),
   ]);
 
   const openStockSharesByTicker = new Map<string, number>(openStockRows.rows.map((row: any) => [row.tickerId, Number(row.shares)]));
@@ -57,11 +74,7 @@ export async function fetchBreakEvenByPositionId(tickerIds: string[]): Promise<M
       .filter((row: any) => row.tickerId === tickerId)
       .map((row: any) => ({ at: new Date(row.at), side: row.side, quantity: row.quantity, price: row.price, commission: row.commission }));
     const summary = summarizeOpenCycle(optionLegs, stockTrades, openStockSharesByTicker.get(tickerId) ?? 0);
-    if (!summary) continue;
-    for (const position of openPositionRows.rows.filter((row: any) => row.tickerId === tickerId)) {
-      const { breakEven, reason } = breakEvenForPosition(summary, position.id);
-      result.set(position.id, { breakEven, breakEvenUnavailableReason: reason, cycleNetPremium: summary.netPremium, cycleSharesHeld: summary.sharesHeld });
-    }
+    if (summary) result.set(tickerId, summary);
   }
   return result;
 }
