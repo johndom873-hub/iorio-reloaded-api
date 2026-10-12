@@ -3,6 +3,7 @@ import { describeTradingHaltBlock, type TradingHalt } from "./platformControls.j
 import type { InvariantResult } from "./dataInvariants.js";
 import { easternInstant } from "./marketSessionStatus.js";
 import { formatEasternTime } from "./easternIsoDate.js";
+import { formatWholeDollars } from "./formatWholeDollars.js";
 
 // Pre-open readiness (approved 2026-10-05): "can Iorio trade when the market opens?", answered by one list of checks at
 // 6:00 ET (3.5 hours to fix anything), re-checked while red, summed up at 9:20 ET, and confirmed against live option data at
@@ -171,17 +172,13 @@ export interface AccountFigures {
   excessLiquidity: number | null;
 }
 
-function formatDollars(amount: number): string {
-  return `$${Math.round(amount).toLocaleString("en-US")}`;
-}
-
 export function evaluateAccount(account: AccountFigures | null, maxPositionPctOfPortfolio: number | null): ReadinessCheck {
   if (!account) return check("Account", "fail", "the IBKR account summary could not be read");
   if (account.netLiquidationValue === null || !(account.netLiquidationValue > 0)) return check("Account", "fail", "net liquidation value is missing or zero: the account is unfunded or not reporting");
-  if (account.excessLiquidity !== null && account.excessLiquidity < 0) return check("Account", "fail", `excess liquidity is negative (${formatDollars(account.excessLiquidity)}): the account is in a margin shortfall`);
-  const parts = [`net liquidation ${formatDollars(account.netLiquidationValue)}`];
-  if (account.totalCashValue !== null) parts.push(`cash ${formatDollars(account.totalCashValue)}`);
-  if (account.buyingPower !== null) parts.push(`buying power ${formatDollars(account.buyingPower)}`);
+  if (account.excessLiquidity !== null && account.excessLiquidity < 0) return check("Account", "fail", `excess liquidity is negative (${formatWholeDollars(account.excessLiquidity)}): the account is in a margin shortfall`);
+  const parts = [`net liquidation ${formatWholeDollars(account.netLiquidationValue)}`];
+  if (account.totalCashValue !== null) parts.push(`cash ${formatWholeDollars(account.totalCashValue)}`);
+  if (account.buyingPower !== null) parts.push(`buying power ${formatWholeDollars(account.buyingPower)}`);
   if (maxPositionPctOfPortfolio !== null) {
     // One contract of a cash-secured put ties up strike x 100, which may not exceed the max position share of the account.
     const largestSingleContractStrike = (account.netLiquidationValue * maxPositionPctOfPortfolio) / 100 / 100;

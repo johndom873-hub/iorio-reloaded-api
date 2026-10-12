@@ -14,6 +14,7 @@ import { optionPurchaseFillPrice } from "./ledger/ledgerFills.js";
 import { ledgerCycles, ledgerFreeCash, ledgerFreeShares, ledgerNetLiquidationValue, ledgerOpenCycleSummary } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, cycleSplitFactorFor, isSymbolFlat, legsOfPosition, requireLeg, requirePosition, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween } from "./testSupport/syntheticBacktestData.js";
+import { dollarsAfter } from "./testSupport/gateTextDollars.js";
 
 // One 10:00 look on Monday 2 March 2026 with the stock at 100: synthetic bars with 25% realized volatility behind it,
 // option quotes priced at a flat implied volatility (60% unless a test says otherwise, so every out-of-the-money option
@@ -460,7 +461,7 @@ describe("an open larger than the order size", () => {
     for (const action of refused) {
       expect(action).toMatchObject({ outcome: "blocked", symbol: "SYN" });
       expect(action.gateResults.filter((gate) => !gate.ok).map((gate) => gate.gate)).toEqual(["sizing"]);
-      expect(action.blockReason).toContain("order size $9300");
+      expect(action.blockReason).toContain("order size $9,300");
     }
     expect(filled).toMatchObject({ outcome: "filled", symbol: "SYN", kind: "open_cash_secured_put", quantity: 1 });
     expect((filled.contract!.strike! - filled.limitPrice!) * 100).toBeLessThanOrEqual(9_300);
@@ -594,8 +595,8 @@ describe("several symbols on one book", () => {
     ]);
     const refused = look.actions[1]!;
     expect(refused.gateResults.filter((gate) => !gate.ok).map((gate) => gate.gate)).toEqual(["sizing"]);
-    const budgetLeft = Number(/budget left \$(-?\d+)/.exec(refused.blockReason!)![1]);
-    const contractCost = Number(/contract\(s\) at \$(\d+) each|buying 100 shares each at ([\d.]+)/.exec(refused.blockReason!)![1] ?? 0);
+    const budgetLeft = dollarsAfter("budget left", refused.blockReason!);
+    const contractCost = Number((/contract\(s\) at \$([\d,]+) each|buying 100 shares each at ([\d.]+)/.exec(refused.blockReason!)![1] ?? "0").replaceAll(",", ""));
     expect(budgetLeft).toBeLessThan(10_000);
     expect(budgetLeft).toBeCloseTo(50_000 - look.optionSales[0]!.exposureDollars, -3);
     if (contractCost > 0) expect(budgetLeft).toBeLessThan(contractCost);
@@ -636,12 +637,12 @@ describe("several symbols on one book", () => {
     ]);
     const refused = sameSector.actions[1]!;
     expect(refused.gateResults.filter((gate) => !gate.ok).map((gate) => gate.gate)).toEqual(["sizing"]);
-    const sectorRoom = Number(/sector room \$(-?\d+)/.exec(refused.blockReason!)![1]);
+    const sectorRoom = dollarsAfter("sector room", refused.blockReason!);
     expect(sectorRoom).toBeCloseTo(50_000 - sameSector.optionSales[0]!.exposureDollars, -3);
     expect(sectorRoom).toBeLessThan(10_000);
     // The ticker's own room and the budget were not what stopped it.
-    expect(Number(/ticker room \$(-?\d+)/.exec(refused.blockReason!)![1])).toBeGreaterThan(40_000);
-    expect(Number(/budget left \$(-?\d+)/.exec(refused.blockReason!)![1])).toBeGreaterThan(400_000);
+    expect(dollarsAfter("ticker room", refused.blockReason!)).toBeGreaterThan(40_000);
+    expect(dollarsAfter("budget left", refused.blockReason!)).toBeGreaterThan(400_000);
 
     const otherSector = await runBacktestLook(twoSymbolLook({ plutoOverrides: { maxSectorExposurePct: 5 }, altSector: "Healthcare" }));
     expect(otherSector.actions.map((action) => [action.symbol, action.outcome])).toEqual([

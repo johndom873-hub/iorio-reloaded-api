@@ -21,9 +21,18 @@ export interface ClaudeSubscriptionCallInput {
   userPayload: string;
 }
 
+/**
+ * Why a call failed, which decides what the session does (Marcelo 2026-10-12): the plan's limit and a CLI that cannot
+ * run stop the session at once; a failure that passes (overloaded, rate limited, a timeout, the CLI crashing) is retried,
+ * then stops it; the model answering without the decision's shape is a failed call, as live counts one.
+ */
+export type ClaudeCallFailureKind = "usage_limit" | "fatal" | "transient" | "answer";
+
 export interface ClaudeSubscriptionCallResult extends PlutoModelCallResult {
   /** The plan's usage limit stopped the call: the session should stop and be resumed later, not fail. */
   usageLimitReached: boolean;
+  /** Null when the call answered. */
+  failureKind: ClaudeCallFailureKind | null;
 }
 
 interface ProcessHandle {
@@ -49,7 +58,21 @@ interface CliEnvelope {
   modelUsage?: Record<string, { outputTokens?: number }>;
 }
 
-const usageLimitPattern = /usage limit|hit your limit|limit reached|limit will reset|resets at/i;
+// The plan's limits in the CLI's own words (2.1.296: "usage limit reached", "usage credit limit reached", "you have
+// reached your weekly usage limit", "… of your 5-hour usage limit"; older builds "Claude AI usage limit reached|<time>").
+const usageLimitPattern = /usage limit reached|usage credit limit reached|weekly usage limit|5-hour usage limit|hit your limit/i;
+// A CLI that cannot run at all: every later call would fail the same way.
+const fatalFailurePattern = /could not start|please run \/login|invalid api key|not logged in|authentication|unauthorized|credit balance too low/i;
+
+function classifyFailure(message: string, fallback: ClaudeCallFailureKind): ClaudeCallFailureKind {
+  if (usageLimitPattern.test(message)) return "usage_limit";
+  if (fatalFailurePattern.test(message)) return "fatal";
+  return fallback;
+}
+
+function failed(kind: ClaudeCallFailureKind) {
+  return { usageLimitReached: kind === "usage_limit", failureKind: kind };
+}
 
 export function claudeCliArguments(systemPrompt: string): string[] {
   return [
@@ -81,8 +104,9 @@ export function readClaudeCliOutput(stdout: string, stderr: string, exitCode: nu
   try {
     envelope = JSON.parse(stdout) as CliEnvelope;
   } catch {
+    // No envelope at all: the CLI crashed or printed something else; a passing failure unless it says why.
     const message = `Claude CLI exited ${exitCode}: ${(stderr || stdout).trim().slice(0, 500)}`;
-    return { ok: false, rawText: stdout.slice(0, 2000) || null, error: message, usageLimitReached: usageLimitPattern.test(message), ...empty };
+    return { ok: false, rawText: stdout.slice(0, 2000) || null, error: message, ...failed(classifyFailure(message, "transient")), ...empty };
   }
   const usage = envelope.usage ?? {};
   const figures = {
@@ -95,13 +119,14 @@ export function readClaudeCliOutput(stdout: string, stderr: string, exitCode: nu
     httpStatus: null,
   };
   if (envelope.is_error || exitCode !== 0) {
+    // An error the API or the CLI reported (overloaded, rate limited, …): passing unless it is the plan's limit or the login.
     const message = `Claude CLI ${envelope.subtype ?? "error"} (exit ${exitCode}): ${(envelope.result ?? stderr).trim().slice(0, 500)}`;
-    return { ok: false, rawText: envelope.result ?? null, error: message, usageLimitReached: usageLimitPattern.test(message), ...figures };
+    return { ok: false, rawText: envelope.result ?? null, error: message, ...failed(classifyFailure(message, "transient")), ...figures };
   }
   if (envelope.structured_output === undefined || envelope.structured_output === null) {
-    return { ok: false, rawText: envelope.result ?? null, error: "Claude CLI returned no structured output", usageLimitReached: false, ...figures };
+    return { ok: false, rawText: envelope.result ?? null, error: "Claude CLI returned no structured output", ...failed("answer"), ...figures };
   }
-  return { ok: true, rawText: JSON.stringify(envelope.structured_output), error: null, usageLimitReached: false, ...figures };
+  return { ok: true, rawText: JSON.stringify(envelope.structured_output), error: null, usageLimitReached: false, failureKind: null, ...figures };
 }
 
 export function callClaudeSubscriptionModel(input: ClaudeSubscriptionCallInput, spawn: SpawnClaudeCli = spawnClaudeCli): Promise<ClaudeSubscriptionCallResult> {
@@ -119,12 +144,12 @@ export function callClaudeSubscriptionModel(input: ClaudeSubscriptionCallInput, 
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      finish({ ok: false, rawText: null, servedModelId: null, latencyMs: Date.now() - startedAt, tokensIn: null, tokensOut: null, costUsd: null, serviceTier: "subscription", httpStatus: null, error: `timed out after ${input.timeoutSeconds}s`, usageLimitReached: false });
+      finish({ ok: false, rawText: null, servedModelId: null, latencyMs: Date.now() - startedAt, tokensIn: null, tokensOut: null, costUsd: null, serviceTier: "subscription", httpStatus: null, error: `timed out after ${input.timeoutSeconds}s`, ...failed("transient") });
     }, input.timeoutSeconds * 1000);
     child.stdout.on("data", (chunk) => (stdout += chunk));
     child.stderr.on("data", (chunk) => (stderr += chunk));
     child.on("error", (error) =>
-      finish({ ok: false, rawText: null, servedModelId: null, latencyMs: Date.now() - startedAt, tokensIn: null, tokensOut: null, costUsd: null, serviceTier: "subscription", httpStatus: null, error: `Claude CLI could not start: ${error.message}`, usageLimitReached: false }),
+      finish({ ok: false, rawText: null, servedModelId: null, latencyMs: Date.now() - startedAt, tokensIn: null, tokensOut: null, costUsd: null, serviceTier: "subscription", httpStatus: null, error: `Claude CLI could not start: ${error.message}`, ...failed("fatal") }),
     );
     child.on("close", (exitCode) => finish(readClaudeCliOutput(stdout, stderr, exitCode, Date.now() - startedAt)));
     child.stdin.write(input.userPayload);

@@ -33,13 +33,25 @@ function payloadOn(tradingDate: string) {
 function fakeModel(answer: Partial<Awaited<ReturnType<ClaudeCall>>>, seen: { payloads: string[] }): ClaudeCall {
   return async (input) => {
     seen.payloads.push(input.userPayload);
-    return { ok: true, rawText: tradeAnswer, servedModelId: "claude-sonnet-5-5", latencyMs: 4800, tokensIn: 5500, tokensOut: 350, costUsd: 0.007, serviceTier: "subscription", httpStatus: null, error: null, usageLimitReached: false, ...answer };
+    return { ok: true, rawText: tradeAnswer, servedModelId: "claude-sonnet-5-5", latencyMs: 4800, tokensIn: 5500, tokensOut: 350, costUsd: 0.007, serviceTier: "subscription", httpStatus: null, error: null, usageLimitReached: false, failureKind: null, ...answer };
   };
 }
 
+/** Answers each call with the next of `answers` (the last repeats). */
+function fakeModelInTurn(answers: Partial<Awaited<ReturnType<ClaudeCall>>>[], seen: { payloads: string[] }): ClaudeCall {
+  return async (input) => {
+    const answer = answers[Math.min(seen.payloads.length, answers.length - 1)]!;
+    return fakeModel(answer, seen)(input);
+  };
+}
+
+const overloaded = { ok: false, rawText: null, error: "Claude CLI error (exit 1): API Error: 529 overloaded_error", usageLimitReached: false, failureKind: "transient" as const };
+const waitedMilliseconds: number[] = [];
+const noWait = { sleep: async (milliseconds: number) => void waitedMilliseconds.push(milliseconds) };
+
 function ask(tradingDate: string, callModel: ClaudeCall) {
   sequence += 1;
-  return askPlutoThroughSubscription({ connection: db, cliPath: "/unused", workingDirectory: "/unused", timeoutSeconds: 90, systemPrompt, payload: payloadOn(tradingDate), masking, offeredIds, sessionId, sequence, tradingDate, lookTime: "10:30" }, callModel);
+  return askPlutoThroughSubscription({ connection: db, cliPath: "/unused", workingDirectory: "/unused", timeoutSeconds: 90, systemPrompt, payload: payloadOn(tradingDate), masking, offeredIds, sessionId, sequence, tradingDate, lookTime: "10:30" }, callModel, noWait);
 }
 
 beforeAll(async () => {
@@ -82,13 +94,47 @@ describe("a Pluto decision through the subscription in a backtest session", () =
     expect(result.decision?.candidateId).toBe(candidateId);
   });
 
-  it("a usage-limit stop is reported and logged but never cached", async () => {
+  it("a usage-limit stop is reported and logged, never retried or cached, and stops the session", async () => {
     const seen = { payloads: [] as string[] };
-    const result = await ask("2026-03-05", fakeModel({ ok: false, rawText: null, error: "Claude AI usage limit reached", usageLimitReached: true }, seen));
-    expect(result).toMatchObject({ outcome: "usage_limit", decision: null, cacheHit: false, error: "Claude AI usage limit reached" });
+    const result = await ask("2026-03-05", fakeModel({ ok: false, rawText: null, error: "Claude AI usage limit reached", usageLimitReached: true, failureKind: "usage_limit" }, seen));
+    expect(seen.payloads).toHaveLength(1);
+    expect(result).toMatchObject({ outcome: "usage_limit", decision: null, cacheHit: false, error: "Claude AI usage limit reached", stopSessionBecause: "Claude usage limit reached" });
     const hash = computeLlmRequestHash(systemPrompt, maskPlutoText(JSON.stringify(payloadOn("2026-03-05")), masking));
     expect(await db("backtest_llm_calls").where({ request_hash: hash }).first()).toBeUndefined();
     expect(await db("backtest_session_llm_calls").where({ session_id: sessionId, sequence }).first()).toMatchObject({ outcome: "usage_limit", llm_call_id: null });
+  });
+
+  it("a passing failure is retried after 10 s and 30 s and the answer that comes is used", async () => {
+    const seen = { payloads: [] as string[] };
+    waitedMilliseconds.length = 0;
+    const result = await ask("2026-03-09", fakeModelInTurn([overloaded, overloaded, {}], seen));
+    expect(seen.payloads).toHaveLength(3);
+    expect(waitedMilliseconds).toEqual([10_000, 30_000]);
+    expect(result).toMatchObject({ outcome: "decided", stopSessionBecause: null });
+    expect(result.decision?.candidateId).toBe(candidateId);
+  });
+
+  it("a passing failure that lasts through the three retries stops the session, logged as a failed call and not cached", async () => {
+    const seen = { payloads: [] as string[] };
+    waitedMilliseconds.length = 0;
+    const result = await ask("2026-03-10", fakeModel(overloaded, seen));
+    expect(seen.payloads).toHaveLength(4);
+    expect(waitedMilliseconds).toEqual([10_000, 30_000, 90_000]);
+    expect(result).toMatchObject({ outcome: "call_failed", decision: null, stopSessionBecause: "Claude did not answer after 3 retries" });
+    const hash = computeLlmRequestHash(systemPrompt, maskPlutoText(JSON.stringify(payloadOn("2026-03-10")), masking));
+    expect(await db("backtest_llm_calls").where({ request_hash: hash }).first()).toBeUndefined();
+  });
+
+  it("a CLI that cannot run stops the session at once; the model answering without the decision's shape is a failed call that does not", async () => {
+    const cannotRun = { payloads: [] as string[] };
+    const fatal = await ask("2026-03-11", fakeModel({ ok: false, rawText: null, error: "Claude CLI could not start: spawn ENOENT", failureKind: "fatal" }, cannotRun));
+    expect(cannotRun.payloads).toHaveLength(1);
+    expect(fatal).toMatchObject({ outcome: "call_failed", stopSessionBecause: "the Claude CLI cannot run" });
+
+    const shapeless = { payloads: [] as string[] };
+    const answer = await ask("2026-03-12", fakeModel({ ok: false, rawText: "I would sell the put.", error: "Claude CLI returned no structured output", failureKind: "answer" }, shapeless));
+    expect(shapeless.payloads).toHaveLength(1);
+    expect(answer).toMatchObject({ outcome: "call_failed", decision: null, stopSessionBecause: null });
   });
 
   it("an answer naming a candidate that was not offered is invalid, as live, and a re-run replays it (live makes one call per decision, no retry)", async () => {

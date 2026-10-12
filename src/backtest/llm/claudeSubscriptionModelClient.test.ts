@@ -74,7 +74,7 @@ describe("Pluto's decision through the Claude subscription CLI", () => {
     const result = await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(successEnvelope) }, seen));
     expect(seen.stdin).toBe('{"tickers":[]}');
     expect(seen.cwd).toBe("/tmp/empty");
-    expect(result).toMatchObject({ ok: true, error: null, usageLimitReached: false, servedModelId: "claude-sonnet-5-5", tokensIn: 5498, tokensOut: 368, costUsd: 0.0070326, serviceTier: "subscription" });
+    expect(result).toMatchObject({ ok: true, error: null, usageLimitReached: false, failureKind: null, servedModelId: "claude-sonnet-5-5", tokensIn: 5498, tokensOut: 368, costUsd: 0.0070326, serviceTier: "subscription" });
     expect(JSON.parse(result.rawText!)).toEqual(successEnvelope.structured_output);
   });
 
@@ -82,28 +82,44 @@ describe("Pluto's decision through the Claude subscription CLI", () => {
     const envelope = { type: "result", subtype: "success", is_error: true, result: "Claude AI usage limit reached|1760300000", usage: {} };
     const result = await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(envelope), exitCode: 1 }));
     expect(result.ok).toBe(false);
-    expect(result.usageLimitReached).toBe(true);
+    expect(result).toMatchObject({ usageLimitReached: true, failureKind: "usage_limit" });
     expect(result.error).toMatch(/usage limit reached/);
   });
 
-  it("an answer without structured output is an invalid call", async () => {
+  it("every way the CLI words the plan's limit is a usage-limit stop", async () => {
+    for (const text of ["usage limit reached", "usage credit limit reached", "you have reached your weekly usage limit", "You've used 100% of your 5-hour usage limit.", "You've hit your limit · resets 5pm"]) {
+      const envelope = { type: "result", subtype: "success", is_error: true, result: text, usage: {} };
+      expect((await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(envelope), exitCode: 1 }))).failureKind).toBe("usage_limit");
+    }
+  });
+
+  it("an API error that passes (overloaded, rate limited) is a passing failure, retried by the caller", async () => {
+    for (const text of ["API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}", "API Error: 429 rate_limit_error"]) {
+      const envelope = { type: "result", subtype: "success", is_error: true, result: text, usage: {} };
+      expect((await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(envelope), exitCode: 1 }))).failureKind).toBe("transient");
+    }
+  });
+
+  it("an answer without structured output is a failed call of the model's own, as live counts one", async () => {
     const { structured_output: _dropped, ...envelope } = successEnvelope;
     const result = await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(envelope) }));
-    expect(result).toMatchObject({ ok: false, usageLimitReached: false, error: "Claude CLI returned no structured output" });
+    expect(result).toMatchObject({ ok: false, usageLimitReached: false, failureKind: "answer", error: "Claude CLI returned no structured output" });
   });
 
-  it("output that is not JSON reports stderr", async () => {
-    const result = await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: "", stderr: "Invalid API key · Please run /login", exitCode: 1 }));
-    expect(result).toMatchObject({ ok: false, usageLimitReached: false });
-    expect(result.error).toContain("Please run /login");
+  it("output that is not JSON reports stderr: a lost login cannot run, anything else passes", async () => {
+    const loggedOut = await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: "", stderr: "Invalid API key · Please run /login", exitCode: 1 }));
+    expect(loggedOut).toMatchObject({ ok: false, usageLimitReached: false, failureKind: "fatal" });
+    expect(loggedOut.error).toContain("Please run /login");
+    const crashed = await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: "", stderr: "Segmentation fault", exitCode: 139 }));
+    expect(crashed.failureKind).toBe("transient");
   });
 
-  it("a CLI that cannot start or does not answer in time fails the call", async () => {
+  it("a CLI that cannot start cannot run; one that does not answer in time is a passing failure", async () => {
     const notFound = await callClaudeSubscriptionModel(input, fakeSpawn({ startError: new Error("spawn ENOENT") }));
-    expect(notFound.error).toBe("Claude CLI could not start: spawn ENOENT");
+    expect(notFound).toMatchObject({ error: "Claude CLI could not start: spawn ENOENT", failureKind: "fatal" });
     const seen: { killed?: boolean } = {};
     const timedOut = await callClaudeSubscriptionModel({ ...input, timeoutSeconds: 0.05 }, fakeSpawn({ hang: true }, seen));
-    expect(timedOut.error).toBe("timed out after 0.05s");
+    expect(timedOut).toMatchObject({ error: "timed out after 0.05s", failureKind: "transient" });
     expect(seen.killed).toBe(true);
   });
 });

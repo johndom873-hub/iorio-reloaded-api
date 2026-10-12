@@ -79,7 +79,7 @@ describe("runPostModelGates — a clean cash-secured put", () => {
   });
   it("the volume share caps the quantity", () => {
     expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).plan?.quantity).toBe(4);
-    expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).gates.find((gate) => gate.gate === "sizing")?.detail).toBe("order size $50000, budget left $450000, ticker room $80000, cash room $550000 → 5 contract(s) at $9795 each; volume share allows 4; stress cap off; Kelly cap: 0.5 × $500000 budget × Edge $80/contract ÷ P&L variance → 888 contract(s) → $39180");
+    expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).gates.find((gate) => gate.gate === "sizing")?.detail).toBe("order size $50,000, budget left $450,000, ticker room $80,000, cash room $550,000 → 5 contract(s) at $9,795 each; volume share allows 4; stress cap off; Kelly cap: 0.5 × $500,000 budget × Edge $80/contract ÷ P&L variance → 888 contract(s) → $39,180");
     expect(failed(runPostModelGates(input({ candidate: candidate({ volume: 3 }) })))).toEqual(["sizing"]);
   });
 });
@@ -239,7 +239,7 @@ describe("stress cap (Marcelo, 2026-10-08; on the model's τ since 2026-10-10)",
   it("sizes a buy-write from a 2σ move to expiry: σ_T 6.78%, stressed spot 38.05, loss $558/contract, 18 contracts within $10,383", () => {
     const cap = computeStressCap(on, smciDay, smciCall, 44.02, 1_038_326);
     expect(cap.contracts).toBe(18);
-    expect(cap.detail).toBe("stress cap: a 2σ move to expiry (−13.6% over 2.00 sessions of variance) loses $558/contract → 18 within $10383 (1% of account)");
+    expect(cap.detail).toBe("stress cap: a 2σ move to expiry (−13.6% over 2.00 sessions of variance) loses $558/contract → 18 within $10,383 (1% of account)");
   });
   it("a cash-secured put loses only below its strike: far out of the money, the cap does not bind", () => {
     const farPut = { strategyKey: "cash_secured_put" as const, strike: 30, expiry: "2026-10-09", bid: 0.01, ask: 0.02, model: model({ varianceSessions: 2 }) };
@@ -291,7 +291,7 @@ describe("half-Kelly cap on Edge $ (model review P5, 2026-10-10; half-Kelly on E
     expect(kellyFraction).toBe(0.5);
     const cap = computeKellyCap(settings, { strategyKey: "cash_secured_put", model: model({ expectedPnlDollars: 30, calibratedExpectedPnlDollars: -5, pnlVarianceDollars: 150 ** 2 }) }, 1_000_000);
     expect(cap.contracts).toBe(333); // 0.5 × 500,000 × 30 ÷ 22,500 = 333.3
-    expect(cap.detail).toBe("Kelly cap: 0.5 × $500000 budget × Edge $30/contract ÷ P&L variance → 333 contract(s)");
+    expect(cap.detail).toBe("Kelly cap: 0.5 × $500,000 budget × Edge $30/contract ÷ P&L variance → 333 contract(s)");
     // The approved example: AAPL $330 Put · 14 Oct on staging 2026-10-09, 0.5 × $519,698 × $43 ÷ $402² = 69.1
     expect(computeKellyCap({ ...settings, capitalBudgetPct: 50 }, { strategyKey: "cash_secured_put", model: model({ expectedPnlDollars: 43, pnlVarianceDollars: 402 ** 2 }) }, 1_039_395).contracts).toBe(69);
   });
@@ -301,7 +301,7 @@ describe("half-Kelly cap on Edge $ (model review P5, 2026-10-10; half-Kelly on E
     expect(cap.detail).toContain("P&L variance (shares + call) → 30 contract(s)");
   });
   it("allows nothing when the model expects no profit (Edge $ ≤ 0) or there is no valuation", () => {
-    expect(computeKellyCap(settings, { strategyKey: "cash_secured_put", model: model({ expectedPnlDollars: -2, calibratedExpectedPnlDollars: 10 }) }, 1_000_000)).toEqual({ contracts: 0, detail: "Kelly cap: Edge $-2/contract ≤ 0, so no contracts" });
+    expect(computeKellyCap(settings, { strategyKey: "cash_secured_put", model: model({ expectedPnlDollars: -2, calibratedExpectedPnlDollars: 10 }) }, 1_000_000)).toEqual({ contracts: 0, detail: "Kelly cap: Edge −$2/contract ≤ 0, so no contracts" });
     expect(computeKellyCap(settings, { strategyKey: "cash_secured_put", model: null }, 1_000_000).contracts).toBe(0);
   });
   it("binds in the sizing gate when tighter than the order size, and refuses when it allows none", () => {

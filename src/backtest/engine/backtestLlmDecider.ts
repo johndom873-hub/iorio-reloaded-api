@@ -62,9 +62,10 @@ export function ivRankFromHistory(impliedVolatilitiesOldestFirst: readonly numbe
   return maximum > minimum ? ((latest - minimum) / (maximum - minimum)) * 100 : null;
 }
 
+/** The subscription, not the model, stopped a call (the plan's limit, a CLI that cannot run, a failure past its retries). */
 export class BacktestLlmUsageLimitError extends Error {
-  constructor(detail: string | null) {
-    super(`Claude usage limit reached: resume the session later; answered calls are cached.${detail ? ` (${detail})` : ""}`);
+  constructor(reason: string, detail: string | null) {
+    super(`${reason}: resume the session later; answered calls are cached.${detail ? ` (${detail})` : ""}`);
     this.name = "BacktestLlmUsageLimitError";
   }
 }
@@ -247,7 +248,7 @@ export async function decideWithLlm(input: BacktestLlmPassInput): Promise<Backte
     },
     session.options.callModel,
   );
-  if (answer.outcome === "usage_limit") throw new BacktestLlmUsageLimitError(answer.error);
+  if (answer.stopSessionBecause) throw new BacktestLlmUsageLimitError(answer.stopSessionBecause, answer.error);
   if (answer.decision) session.rememberDecision(sequence, now, answer.decision);
   return { asked: true, sequence, outcome: answer.outcome, decision: answer.decision, cacheHit: answer.cacheHit, error: answer.error, trigger };
 }

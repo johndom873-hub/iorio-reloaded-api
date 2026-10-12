@@ -7,6 +7,7 @@ import type { PlutoGateResult } from "./ledger.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { describeOptionContract } from "../lib/optionContractLabel.js";
 import { formatSignedDollars } from "../lib/formatSignedDollars.js";
+import { formatWholeDollars } from "../lib/formatWholeDollars.js";
 import { checkCalledAway, commissionPerShare, describeCalledAwayShortfall, type CycleBreakEven } from "./heldShareCalls.js";
 
 // Post-model validation (design round 3, item 21, approved 2026-09-28). Nothing the model said
@@ -135,8 +136,8 @@ export function computeSizingRoom(settings: PlutoSettings, book: PostModelBookIn
 }
 
 function describeRoom(room: SizingRoom): string {
-  const parts = [`order size $${room.orderCap.toFixed(0)}`, `budget left $${room.budgetRoom.toFixed(0)}`, `ticker room $${room.tickerRoom.toFixed(0)}`, `cash room $${room.cashRoom.toFixed(0)}`];
-  if (Number.isFinite(room.sectorRoom)) parts.push(`sector room $${room.sectorRoom.toFixed(0)}`);
+  const parts = [`order size ${formatWholeDollars(room.orderCap)}`, `budget left ${formatWholeDollars(room.budgetRoom)}`, `ticker room ${formatWholeDollars(room.tickerRoom)}`, `cash room ${formatWholeDollars(room.cashRoom)}`];
+  if (Number.isFinite(room.sectorRoom)) parts.push(`sector room ${formatWholeDollars(room.sectorRoom)}`);
   return parts.join(", ");
 }
 
@@ -190,7 +191,7 @@ export function computeStressCap(settings: PlutoSettings, stress: StressCapInput
   const why = [stress.elevatedVolatility ? "elevated volatility" : null, adverseDay ? "down more than a normal day" : null].filter(Boolean).join(", ");
   return {
     contracts,
-    detail: `stress cap: a ${sigmas}σ${why ? ` (${why})` : ""} move to expiry (−${(Math.min(1, sigmas * sigmaToExpiry) * 100).toFixed(1)}% over ${varianceSessions.toFixed(2)} sessions of variance) loses $${lossPerContract.toFixed(0)}/contract → ${Number.isFinite(contracts) ? contracts : "no limit"} within $${budgetDollars.toFixed(0)} (${settings.stressRiskBudgetPct}% of account)`,
+    detail: `stress cap: a ${sigmas}σ${why ? ` (${why})` : ""} move to expiry (−${(Math.min(1, sigmas * sigmaToExpiry) * 100).toFixed(1)}% over ${varianceSessions.toFixed(2)} sessions of variance) loses ${formatWholeDollars(lossPerContract)}/contract → ${Number.isFinite(contracts) ? contracts : "no limit"} within ${formatWholeDollars(budgetDollars)} (${settings.stressRiskBudgetPct}% of account)`,
   };
 }
 
@@ -216,13 +217,13 @@ export function computeKellyCap(settings: PlutoSettings, contract: Pick<SignalCa
   if (!model) return { contracts: 0, detail: "Kelly cap: the contract has no model valuation" };
   const bankroll = (netLiquidationValue * settings.capitalBudgetPct) / 100;
   const mu = model.expectedPnlDollars;
-  if (!(mu > 0)) return { contracts: 0, detail: `Kelly cap: Edge $${mu.toFixed(0)}/contract ≤ 0, so no contracts` };
+  if (!(mu > 0)) return { contracts: 0, detail: `Kelly cap: Edge ${formatWholeDollars(mu)}/contract ≤ 0, so no contracts` };
   const isCall = contract.strategyKey === "covered_call";
   const variance = isCall ? model.coveredPositionPnlVarianceDollars : model.pnlVarianceDollars;
   const contracts = variance !== null && variance > 0 ? Math.floor((fraction * bankroll * mu) / variance) : 0;
   return {
     contracts,
-    detail: `Kelly cap: ${fraction} × $${bankroll.toFixed(0)} budget × Edge $${mu.toFixed(0)}/contract ÷ P&L variance${isCall ? " (shares + call)" : ""} → ${contracts} contract(s)`,
+    detail: `Kelly cap: ${fraction} × ${formatWholeDollars(bankroll)} budget × Edge ${formatWholeDollars(mu)}/contract ÷ P&L variance${isCall ? " (shares + call)" : ""} → ${contracts} contract(s)`,
   };
 }
 
@@ -278,7 +279,7 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
     const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction);
     fullSizeQuantity = Math.min(byRoom, liquidityCap, stressCap.contracts, kellyCap.contracts);
-    gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at $${unitNotional.toFixed(0)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → $${(fullSizeQuantity * unitNotional).toFixed(0)}`);
+    gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at ${formatWholeDollars(unitNotional)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → ${formatWholeDollars(fullSizeQuantity * unitNotional)}`);
   } else if (book.freeShares >= 100) {
     // A call on shares already held (Marcelo, 2026-10-12): it covers every free round lot, buys no shares and has no Kelly
     // cap, since it lowers the risk of shares the book already carries; the Edge > 0 filter stands in for the cap's

@@ -6,6 +6,7 @@ import { computeCashLockedInCsps, computeTickerExposure } from "./positionExposu
 import { fetchAvailableUncoveredShares } from "./positionQueries.js";
 import { loadTradingSettings, type TradingSettings } from "./tradingSettingsStore.js";
 import { orderFillsPendingSql } from "./orderFills.js";
+import { formatWholeDollars } from "./formatWholeDollars.js";
 
 // The three trading settings that block *placing* an order: max position %, max concentration per ticker %
 // and min cash reserve % (table trading_settings, edited on Risk & Limits). They apply to EVERY opening or
@@ -74,10 +75,6 @@ export interface OrderLimitsResult {
 
 function formatPct(fraction: number): string {
   return `${(fraction * 100).toFixed(1)}%`;
-}
-
-function formatDollars(amount: number): string {
-  return `$${Math.round(amount).toLocaleString("en-US")}`;
 }
 
 async function resolveSpotPrice(input: OrderLimitsInput): Promise<number | null> {
@@ -213,7 +210,7 @@ export interface OrderLimitFigures {
 export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimitsResult {
   const { orderNotional, totalPortfolioValue, existingTickerExposure, inFlight, settings } = figures;
   const freeCash = Math.max(0, (figures.totalCashValue ?? 0) - figures.cashLockedInCsps - inFlight.totalNotional);
-  const workingOrdersNote = inFlight.totalNotional > 0 ? ` (counting ${formatDollars(inFlight.totalNotional)} of orders still working)` : "";
+  const workingOrdersNote = inFlight.totalNotional > 0 ? ` (counting ${formatWholeDollars(inFlight.totalNotional)} of orders still working)` : "";
 
   const reasons: string[] = [];
 

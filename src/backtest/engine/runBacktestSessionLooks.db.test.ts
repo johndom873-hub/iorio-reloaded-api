@@ -454,15 +454,15 @@ function fakeClaude(answerFor: (call: FakeClaudeCall, callNumber: number) => Fak
     const call: FakeClaudeCall = { input, payload: JSON.parse(input.userPayload) };
     calls.push(call);
     const answer = answerFor(call, calls.length);
-    const result: Omit<ClaudeSubscriptionCallResult, "ok" | "rawText" | "error" | "usageLimitReached"> = { servedModelId: "claude-sonnet-test", latencyMs: 5, tokensIn: 100, tokensOut: 20, costUsd: 0, serviceTier: null, httpStatus: null };
-    if (answer.verdict === "usage_limit") return { ...result, ok: false, rawText: null, error: "Claude AI usage limit reached|1760000000", usageLimitReached: true };
-    if (answer.verdict === "invalid") return { ...result, ok: true, rawText: "I would sell the put.", error: null, usageLimitReached: false };
+    const result: Omit<ClaudeSubscriptionCallResult, "ok" | "rawText" | "error" | "usageLimitReached" | "failureKind"> = { servedModelId: "claude-sonnet-test", latencyMs: 5, tokensIn: 100, tokensOut: 20, costUsd: 0, serviceTier: null, httpStatus: null };
+    if (answer.verdict === "usage_limit") return { ...result, ok: false, rawText: null, error: "Claude AI usage limit reached|1760000000", usageLimitReached: true, failureKind: "usage_limit" };
+    if (answer.verdict === "invalid") return { ...result, ok: true, rawText: "I would sell the put.", error: null, usageLimitReached: false, failureKind: null };
     const chosenId = call.payload.tickers.flatMap((ticker) => ticker.candidates ?? [])[0]?.id ?? null;
     const decision =
       answer.verdict === "trade" && chosenId !== null
         ? { decision: "trade", action_kind: kindFromCandidateId(chosenId!), candidate_id: chosenId, confidence: answer.confidence ?? 0.9, reasons: [answer.reason ?? "test: the first candidate"], risks_acknowledged: [], system_concerns: [] }
         : { decision: "no_trade", action_kind: null, candidate_id: null, confidence: 0.8, reasons: [answer.reason ?? "test: nothing worth it"], risks_acknowledged: [], system_concerns: [] };
-    return { ...result, ok: true, rawText: JSON.stringify(decision), error: null, usageLimitReached: false };
+    return { ...result, ok: true, rawText: JSON.stringify(decision), error: null, usageLimitReached: false, failureKind: null };
   };
   return { callModel, calls };
 }

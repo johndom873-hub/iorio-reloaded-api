@@ -10,6 +10,7 @@ import type { BacktestAction, BacktestFill, BacktestSessionDetail, BacktestSetti
 import { computeParityStockPrice } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticSymbolFile, writeSyntheticMacroEventHistory } from "./testSupport/syntheticBacktestData.js";
+import { dollarsAfter } from "./testSupport/gateTextDollars.js";
 
 // Whole sessions through the wheel, in a private copy of the test tables: each on its own synthetic symbol (a file of
 // 10:00 quotes priced at a chosen implied volatility per day, IBKR bars with chosen closes, DTB3 at 4%, the current model
@@ -573,8 +574,8 @@ describe("a session of several symbols on one book", () => {
     const edgeYieldOf = (action: BacktestAction) => (action.candidateScores as { model: { expectedAnnualizedReturn: number } }).model.expectedAnnualizedReturn;
     expect(edgeYieldOf(session.actions[0]!)).toBeGreaterThan(edgeYieldOf(session.actions[1]!));
     // WMA's two positions hold about $94,000 of its $100,000 ticker room: less than one more contract.
-    expect(Number(/ticker room \$(-?\d+)/.exec(session.actions[4]!.blockReason!)![1])).toBeLessThan(9_000);
-    expect(session.actions[4]!.blockReason).toMatch(/^sizing: .*→ 0 contract\(s\) at \$\d+ each/);
+    expect(dollarsAfter("ticker room", session.actions[4]!.blockReason!)).toBeLessThan(9_000);
+    expect(session.actions[4]!.blockReason).toMatch(/^sizing: .*→ 0 contract\(s\) at \$[\d,]+ each/);
 
     // The day lines name the symbols.
     expect(dayOf(session, "2026-04-06").decisionSummary).toMatch(/^No action: WMA: \d+ candidates, none eligible \(rejected by volume .*\) \| WMB: \d+ candidates, none eligible \(rejected by volume /);
@@ -649,7 +650,7 @@ describe("a session of several symbols on one book", () => {
       ["WBA", "blocked"],
     ]);
     const refusedForBudget = budget.actions.find((action) => action.symbol === "WBA" && action.outcome === "blocked")!;
-    const budgetLeft = Number(/budget left \$(-?\d+)/.exec(refusedForBudget.blockReason!)![1]);
+    const budgetLeft = dollarsAfter("budget left", refusedForBudget.blockReason!);
     expect(budgetLeft).toBeCloseTo(50_000 - budget.detail.trades[0]!.exposureDollars, -3);
     expect(budgetLeft).toBeLessThan(9_000);
     expect(refusedForBudget.blockReason).toMatch(/^sizing: /);
@@ -670,8 +671,8 @@ describe("a session of several symbols on one book", () => {
       ["WSA", "blocked"],
     ]);
     const refusedForSector = sector.actions.find((action) => action.symbol === "WSA" && action.outcome === "blocked")!;
-    expect(Number(/sector room \$(-?\d+)/.exec(refusedForSector.blockReason!)![1])).toBeCloseTo(50_000 - sector.detail.trades[0]!.exposureDollars, -3);
-    expect(Number(/ticker room \$(-?\d+)/.exec(refusedForSector.blockReason!)![1])).toBeGreaterThan(40_000);
+    expect(dollarsAfter("sector room", refusedForSector.blockReason!)).toBeCloseTo(50_000 - sector.detail.trades[0]!.exposureDollars, -3);
+    expect(dollarsAfter("ticker room", refusedForSector.blockReason!)).toBeGreaterThan(40_000);
     expect(dayOf(sector, "2026-04-07").decisionSummary).toMatch(/^Opened WSB Sell .* · Blocked WSA Sell .*: sizing: .*sector room /);
     // With the second ticker in another sector the same cap refuses nothing.
     const otherSector = await twoSymbols("WOA", "WOB", { maxSectorExposurePct: 5 }, "Healthcare");
