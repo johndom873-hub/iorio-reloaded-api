@@ -129,6 +129,12 @@ const captureLineReservationRenewIntervalMs = 60_000;
 const poolSheddingGraceMs = 20_000;
 const poolSheddingPollIntervalMs = 1_000;
 
+/** The capture's pool-shedding wait on the real ledger, logged; the main run and the retry rounds both use it after reserving. */
+export async function waitForCaptureLinesToFitBudget(): Promise<void> {
+  const { waitedMs, fits } = await waitForLinesToFitBudget({ loadReservations: loadActiveMarketDataLineReservations, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)), now: Date.now });
+  console.log(fits ? `Capture: line reservations fit the budget after ${(waitedMs / 1000).toFixed(1)}s.` : `Capture: line reservations still over the budget after ${(waitedMs / 1000).toFixed(1)}s; starting anyway.`);
+}
+
 /** Waits until the active line reservations fit the budget, or the grace runs out; a failed ledger read just keeps waiting. */
 export async function waitForLinesToFitBudget(
   dependencies: { loadReservations: () => Promise<{ holder: string; lines: number }[]>; sleep: (milliseconds: number) => Promise<void>; now: () => number },
@@ -455,10 +461,7 @@ const defaultCaptureDependencies: OptionChainCaptureDependencies = {
     renew: renewMarketDataLineReservation,
     release: releaseMarketDataLines,
   },
-  waitForPoolShedding: async () => {
-    const { waitedMs, fits } = await waitForLinesToFitBudget({ loadReservations: loadActiveMarketDataLineReservations, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)), now: Date.now });
-    console.log(fits ? `Capture: line reservations fit the budget after ${(waitedMs / 1000).toFixed(1)}s.` : `Capture: line reservations still over the budget after ${(waitedMs / 1000).toFixed(1)}s; starting anyway.`);
-  },
+  waitForPoolShedding: waitForCaptureLinesToFitBudget,
   loadLineReservations: loadActiveMarketDataLineReservations,
 };
 

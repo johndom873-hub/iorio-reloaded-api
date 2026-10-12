@@ -1,16 +1,19 @@
-import { captureAttemptsPerTicker, captureRetryDelayMs, loadCaptureRetryCandidateRows, selectSymbolsToRetry } from "../lib/captureRetryQueue.js";
+import { captureAttemptsPerTicker, loadCaptureRetryCandidateRows, selectSymbolsToRetry } from "../lib/captureRetryQueue.js";
 import { fitAndStoreSurfacesForDate } from "../lib/optionSurfaceStore.js";
-import { holdCaptureLineReservation, loadCaptureUniverse, runOptionChainCapture, type CaptureRunLineUsage, type OptionChainCaptureEvent } from "./runOptionChainCapture.js";
+import { holdCaptureLineReservation, loadCaptureUniverse, runOptionChainCapture, waitForCaptureLinesToFitBudget, type CaptureRunLineUsage, type OptionChainCaptureEvent } from "./runOptionChainCapture.js";
 
 // Retry rounds of the morning capture (approved 2026-09-30), run after the first capture + fit pass:
 // every ticker whose surface came out unusable (see selectSymbolsToRetry) goes into a queue, which is
-// re-captured and re-fitted as a whole after ONE pause per round. The last attempt's data is the data
-// that stays; a retry replaces the earlier snapshot, whichever of the attempts was better.
+// re-captured and re-fitted as a whole. The last attempt's data is the data that stays; a retry replaces
+// the earlier snapshot, whichever of the attempts was better. No fixed pause before a round (Marcelo
+// 2026-10-12, was 30 s): a round starts minutes after the ticker's first capture anyway, and the lines
+// only need the live pool to shed once, which the ledger wait covers.
 
 export interface CaptureRetryDependencies {
   findSymbolsToRetry: (tradingDate: string) => Promise<string[]>;
   holdLines: () => Promise<() => Promise<void>>;
-  sleep: (milliseconds: number) => Promise<void>;
+  /** After reserving, until the live pool has shed to fit the budget (the main run's wait). */
+  waitForPoolShedding: () => Promise<void>;
   /** `linesHeldSince` (ms since epoch) lets the round's logs count the held lines' idle time from the reservation. */
   recapture: (symbols: string[], round: { attempt: number; linesHeldSince: number }) => Promise<CaptureRunLineUsage | null>;
   refit: (tradingDate: string, symbols: string[]) => Promise<void>;
@@ -20,7 +23,7 @@ export interface CaptureRetryDependencies {
 /** Where the lines held across the retry rounds spent their time, in ms; only capturingMs has anything subscribed. */
 export interface CaptureRetryLineHold {
   totalHeldMs: number;
-  pausedMs: number;
+  poolWaitMs: number;
   capturingMs: number;
   refittingMs: number;
   choosingNextQueueMs: number;
@@ -44,10 +47,10 @@ export async function runCaptureRetryRounds(tradingDate: string, dependencies: C
   let queue = await dependencies.findSymbolsToRetry(tradingDate);
   if (queue.length === 0) return result;
 
-  // Lines are reserved once and kept between rounds. The first round's pause also covers the live pool shedding its lines to make room.
+  // Lines are reserved once and kept between rounds, so the live pool sheds for them once, before the first round.
   const releaseLines = await dependencies.holdLines();
   const linesHeldSince = dependencies.now();
-  const hold: CaptureRetryLineHold = { totalHeldMs: 0, pausedMs: 0, capturingMs: 0, refittingMs: 0, choosingNextQueueMs: 0 };
+  const hold: CaptureRetryLineHold = { totalHeldMs: 0, poolWaitMs: 0, capturingMs: 0, refittingMs: 0, choosingNextQueueMs: 0 };
   const timed = async <T>(phase: Exclude<keyof CaptureRetryLineHold, "totalHeldMs">, work: () => Promise<T>): Promise<T> => {
     const startedAt = dependencies.now();
     try {
@@ -57,8 +60,8 @@ export async function runCaptureRetryRounds(tradingDate: string, dependencies: C
     }
   };
   try {
+    await timed("poolWaitMs", () => dependencies.waitForPoolShedding());
     for (let attempt = 2; attempt <= captureAttemptsPerTicker && queue.length > 0; attempt++) {
-      await timed("pausedMs", () => dependencies.sleep(captureRetryDelayMs));
       result.roundSymbols.push(queue);
       const symbols = queue;
       try {
@@ -76,7 +79,7 @@ export async function runCaptureRetryRounds(tradingDate: string, dependencies: C
     result.lineHold = hold;
     const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
     console.log(
-      `Capture retry: lines held ${seconds(hold.totalHeldMs)} over ${result.roundSymbols.length} round(s) — ${seconds(hold.pausedMs)} in the pauses before each round, ` +
+      `Capture retry: lines held ${seconds(hold.totalHeldMs)} over ${result.roundSymbols.length} round(s) — ${seconds(hold.poolWaitMs)} waiting for the pool to shed, ` +
         `${seconds(hold.capturingMs)} capturing, ${seconds(hold.refittingMs)} refitting, ${seconds(hold.choosingNextQueueMs)} choosing the next queue; only the capturing part subscribes anything.`,
     );
   }
@@ -88,7 +91,7 @@ export function buildDefaultCaptureRetryDependencies(onCaptureEvent: (event: Opt
   return {
     findSymbolsToRetry: async (tradingDate) => selectSymbolsToRetry(await loadCaptureRetryCandidateRows(tradingDate, await loadCaptureUniverse())),
     holdLines: () => holdCaptureLineReservation(),
-    sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    waitForPoolShedding: waitForCaptureLinesToFitBudget,
     recapture: async (symbols, round) => (await runOptionChainCapture(onCaptureEvent, undefined, { symbols, linesHeldSince: round.linesHeldSince, runLabel: `Capture retry attempt ${round.attempt}` })).lineUsage,
     refit: async (tradingDate, symbols) => {
       await fitAndStoreSurfacesForDate(tradingDate, (event) => console.log(`${event.symbol}: ${event.outcome} (${event.detail})`), symbols);

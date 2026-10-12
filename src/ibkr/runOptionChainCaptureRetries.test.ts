@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { captureAttemptsPerTicker, captureRetryDelayMs } from "../lib/captureRetryQueue.js";
+import { captureAttemptsPerTicker } from "../lib/captureRetryQueue.js";
 import { buildCaptureRetryFailureMessage, runCaptureRetryRounds, type CaptureRetryDependencies } from "./runOptionChainCaptureRetries.js";
 
 function retryDependencies(queuesByCall: string[][], overrides: Partial<CaptureRetryDependencies> = {}) {
@@ -15,8 +15,8 @@ function retryDependencies(queuesByCall: string[][], overrides: Partial<CaptureR
       order.push("hold");
       return release;
     }),
-    sleep: vi.fn(async (milliseconds: number) => {
-      order.push(`sleep ${milliseconds}`);
+    waitForPoolShedding: vi.fn(async () => {
+      order.push("wait for pool");
     }),
     recapture: vi.fn(async (symbols: string[], _round: { attempt: number; linesHeldSince: number }) => {
       order.push(`recapture ${symbols.join(",")}`);
@@ -39,18 +39,18 @@ describe("runCaptureRetryRounds", () => {
     expect(dependencies.holdLines).not.toHaveBeenCalled();
   });
 
-  it("makes 3 attempts in all: the first pass plus two retry rounds, one pause per round for the whole queue", async () => {
+  it("makes 3 attempts in all: the first pass plus two retry rounds, waiting for the pool to shed once, with no pause between rounds", async () => {
     const { dependencies, order } = retryDependencies([["HOOD", "INTC"], ["HOOD", "INTC"], ["HOOD"]]);
     const result = await runCaptureRetryRounds("2026-10-01", dependencies);
     expect(captureAttemptsPerTicker).toBe(3);
-    expect(order).toEqual(["hold", `sleep ${captureRetryDelayMs}`, "recapture HOOD,INTC", "refit HOOD,INTC", `sleep ${captureRetryDelayMs}`, "recapture HOOD,INTC", "refit HOOD,INTC", "release"]);
+    expect(order).toEqual(["hold", "wait for pool", "recapture HOOD,INTC", "refit HOOD,INTC", "recapture HOOD,INTC", "refit HOOD,INTC", "release"]);
     expect(result).toMatchObject({ roundSymbols: [["HOOD", "INTC"], ["HOOD", "INTC"]], roundErrors: [], stillFailingSymbols: ["HOOD"], roundLineUsage: [null, null] });
   });
 
   it("retries only the tickers still failing, and stops as soon as the queue is empty", async () => {
     const { dependencies, order } = retryDependencies([["HOOD", "INTC"], ["HOOD"], []]);
     const result = await runCaptureRetryRounds("2026-10-01", dependencies);
-    expect(order).toEqual(["hold", `sleep ${captureRetryDelayMs}`, "recapture HOOD,INTC", "refit HOOD,INTC", `sleep ${captureRetryDelayMs}`, "recapture HOOD", "refit HOOD", "release"]);
+    expect(order).toEqual(["hold", "wait for pool", "recapture HOOD,INTC", "refit HOOD,INTC", "recapture HOOD", "refit HOOD", "release"]);
     expect(result.stillFailingSymbols).toEqual([]);
 
     const recovered = retryDependencies([["HOOD"], []]);
@@ -69,8 +69,8 @@ describe("runCaptureRetryRounds", () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it("splits the time the lines were held into pauses, capturing, refitting and choosing the next queue, and passes each round its attempt and hold start", async () => {
-    const phaseMs = { sleep: 30_000, recapture: 20_000, refit: 5_000, find: 1_000 };
+  it("splits the time the lines were held into the pool wait, capturing, refitting and choosing the next queue, and passes each round its attempt and hold start", async () => {
+    const phaseMs = { wait: 2_000, recapture: 20_000, refit: 5_000, find: 1_000 };
     let clockMs = 100_000;
     const advance = (milliseconds: number) => {
       clockMs += milliseconds;
@@ -87,14 +87,14 @@ describe("runCaptureRetryRounds", () => {
         if (findCalls++ > 0) advance(phaseMs.find);
         return findCalls < 2 ? ["HOOD"] : [];
       }),
-      sleep: vi.fn(async () => advance(phaseMs.sleep)),
+      waitForPoolShedding: vi.fn(async () => advance(phaseMs.wait)),
       recapture,
       refit: vi.fn(async () => advance(phaseMs.refit)),
     });
     const result = await runCaptureRetryRounds("2026-10-01", dependencies);
     expect(recapture).toHaveBeenCalledWith(["HOOD"], { attempt: 2, linesHeldSince: 100_000 });
     expect(result.roundLineUsage).toEqual([roundUsage]);
-    expect(result.lineHold).toEqual({ totalHeldMs: 56_000, pausedMs: 30_000, capturingMs: 20_000, refittingMs: 5_000, choosingNextQueueMs: 1_000 });
+    expect(result.lineHold).toEqual({ totalHeldMs: 28_000, poolWaitMs: 2_000, capturingMs: 20_000, refittingMs: 5_000, choosingNextQueueMs: 1_000 });
   });
 
   it("records a failed round capture (a dropped connection) and still runs the next round", async () => {

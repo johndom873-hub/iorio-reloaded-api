@@ -6,8 +6,6 @@ import { db } from "../db/connection.js";
 
 /** Each ticker is captured once, then re-captured at most twice: 3 attempts in all. */
 export const captureAttemptsPerTicker = 3;
-/** One pause before each retry round of the whole queue (not per ticker), so a still-violent market has time to settle. */
-export const captureRetryDelayMs = 30_000;
 
 export interface CaptureRetryCandidateRow {
   symbol: string;
