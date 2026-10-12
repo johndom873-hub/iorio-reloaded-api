@@ -29,6 +29,12 @@ const emptySettleStats = () => ({
   timedOutUnanswered: 0,
   errored: 0,
   cancelledAtClose: 0,
+  releasedEarly: 0,
+  missingOnEarlyRelease: { price: 0, delta: 0, openInterest: 0 },
+  releasedEarlyLineMs: 0,
+  retries: 0,
+  retriesRecovered: 0,
+  retryLineMs: 0,
   settledWithoutMarket: 0,
   holdMsP50: null,
   holdMsP90: null,
@@ -198,7 +204,7 @@ function runDependencies(overrides: Partial<OptionChainCaptureDependencies> = {}
     connect: async () => ({ ib: fakeIb, disconnect }),
     fetchSpotPrices: async (symbols) => Object.fromEntries(symbols.map((symbol) => [symbol, 100])),
     prepareTicker: async (_ib, universeTicker) => preparedFor(universeTicker),
-    openQuoteWindow: () => ({ capture: async () => [], close: vi.fn(), inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+    openQuoteWindow: () => ({ capture: async () => [], close: vi.fn(), concurrency: 30, inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
     saveSnapshot: async () => coverage(10, 10),
     saveFailedSnapshot,
     lineReservation,
@@ -281,7 +287,7 @@ describe("runOptionChainCapture", () => {
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
       connect: async () => ({ ib: ib as never, disconnect }),
       prepareTicker: prepareTicker as never,
-      openQuoteWindow: () => ({ capture: async () => [], close, inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+      openQuoteWindow: () => ({ capture: async () => [], close, concurrency: 30, inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
     });
     await expect(runOptionChainCapture(undefined, { ...dependencies, saveFailedSnapshot })).rejects.toThrow("IBKR connection lost mid-run; not captured: CCC");
     expect(prepareTicker).toHaveBeenCalledTimes(2);
@@ -317,7 +323,7 @@ describe("runOptionChainCapture", () => {
     const quotesBySymbol: Record<string, never[]> = { AAA: [realTimeQuote], BBB: [realTimeQuote], CCC: [delayedQuote] };
     const { dependencies } = runDependencies({
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
-      openQuoteWindow: () => ({ capture: async (symbol: string) => quotesBySymbol[symbol]!, close: vi.fn(), inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+      openQuoteWindow: () => ({ capture: async (symbol: string) => quotesBySymbol[symbol]!, close: vi.fn(), concurrency: 30, inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       saveSnapshot: async (prepared) => coverages[prepared.ticker.symbol]!,
     });
     const result = await runOptionChainCapture(undefined, dependencies);
@@ -463,7 +469,7 @@ describe("runOptionChainCapture", () => {
     const { dependencies } = runDependencies({
       loadUniverse: async () => [ticker("AAA"), ticker("BBB"), ticker("CCC")],
       fetchSpotPrices,
-      openQuoteWindow: () => ({ capture, close: vi.fn(), inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+      openQuoteWindow: () => ({ capture, close: vi.fn(), concurrency: 30, inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       saveSnapshot: async () => (++saves <= 3 ? coverage(10, 2) : coverage(10, 10)),
     });
     const run = runOptionChainCapture(undefined, dependencies);
@@ -500,7 +506,7 @@ describe("runOptionChainCapture", () => {
       return [];
     });
     const { dependencies } = runDependencies({
-      openQuoteWindow: () => ({ capture, close, inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
+      openQuoteWindow: () => ({ capture, close, concurrency: 30, inFlightCount: () => 0, queuedCount: () => 0, subscribedSpan: () => ({ firstSubscribedAt: null, lastReleasedAt: null }), drainSettleStats: emptySettleStats, wholeRunSettleStats: emptySettleStats }),
       prepareTicker: async (_ib, universeTicker) => {
         order.push(`prepare:${universeTicker.symbol}`);
         return preparedFor(universeTicker);
@@ -649,7 +655,7 @@ describe("capture line-usage record", () => {
 describe("describeCaptureLineUsage", () => {
   it("reports lines subscribed and answered, the message rate, the wait for IBKR, hold times, field arrival and where line time went", async () => {
     const { describeCaptureLineUsage } = await import("./runOptionChainCapture.js");
-    const line = describeCaptureLineUsage("Capture window", { inFlight: 30, queued: 12 }, {
+    const line = describeCaptureLineUsage("Capture window", { inFlight: 30, queued: 12, concurrency: 30 }, {
       ...emptySettleStats(),
       intervalMs: 10_000,
       minInFlight: 28,
@@ -660,6 +666,12 @@ describe("describeCaptureLineUsage", () => {
       timedOut: 9,
       timedOutUnanswered: 2,
       cancelledAtClose: 1,
+      releasedEarly: 5,
+      missingOnEarlyRelease: { price: 0, delta: 1, openInterest: 4 },
+      releasedEarlyLineMs: 25_000,
+      retries: 5,
+      retriesRecovered: 4,
+      retryLineMs: 14_000,
       settledWithoutMarket: 4,
       holdMsP50: 3_900,
       holdMsP90: 7_200,
@@ -673,9 +685,9 @@ describe("describeCaptureLineUsage", () => {
     });
     expect(line).toBe(
       "Capture window: lines 30/30 now, 12 queued, min 28 max 30 over 10.0s, subscribed avg 29.6, answered avg 21.0, 19.8 of 20 msg/s, first reply p50 2.9s p90 3.4s (2 never answered of 110), sent 19.6/s with 3 waiting to send; " +
-        "111 released, held p50 3.9s p90 7.2s max 8.0s; after first reply p50/p90: price 0.0s/0.1s, delta 1.2s/2.4s, OI 0.3s/0.9s; " +
+        "116 released, held p50 3.9s p90 7.2s max 8.0s; after first reply p50/p90: price 0.0s/0.1s, delta 1.2s/2.4s, OI 0.3s/0.9s; " +
         "101 full data (waited last on price 6, delta 15, OI 80; 4 with \"no data\" on a side), 9 timed out holding 72.0s of line time (2 never answered; the other 7 missing price 0, delta 2, OI 7), " +
-        "0 errored, 1 cancelled at close.",
+        "0 errored, 1 cancelled at close; 5 released early holding 25.0s (missing delta 1, OI 4), 5 retried holding 14.0s: 4 recovered, 1 still incomplete.",
     );
   });
 });

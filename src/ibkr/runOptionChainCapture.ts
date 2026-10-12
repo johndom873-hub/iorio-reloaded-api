@@ -43,6 +43,9 @@ import { easternIsoDate } from "../lib/easternIsoDate.js";
 // under this reservation instead of reserving individually.
 export const captureLineReservationHolder = "optionChainCapture";
 const captureProgressLogIntervalMs = 10_000;
+// Early release and one retry (approved 2026-10-12): 99.4% of contracts that ever get open interest and delta have both
+// within 3 s of IBKR's first reply, and a second subscription recovered every contract still missing them.
+const captureRetryIncompleteAfterMs = 3_000;
 // The capture subscribes on its own connectToIbkrGateway one-shot (defaultCaptureDependencies.connect).
 const captureMessagesPerSecondCap = effectiveMessagesPerSecondCap(ibkrMessagesPerSecondBudget.oneShot);
 
@@ -52,18 +55,20 @@ const captureMessagesPerSecondCap = effectiveMessagesPerSecondCap(ibkrMessagesPe
  * by IBKR, the message rate against the connection's cap, the wait for IBKR's first tick, how long each
  * released contract held its line and when each settle field arrived after that first tick.
  */
-export function describeCaptureLineUsage(heading: string, current: { inFlight: number; queued: number } | null, stats: CaptureSettleStats): string {
+export function describeCaptureLineUsage(heading: string, current: { inFlight: number; queued: number; concurrency: number } | null, stats: CaptureSettleStats): string {
   const seconds = (ms: number | null) => (ms === null ? "—" : `${(ms / 1000).toFixed(1)}s`);
   const fields = (counts: CaptureSettleStats["lastField"]) => `price ${counts.price}, delta ${counts.delta}, OI ${counts.openInterest}`;
   const afterReply = (field: keyof CaptureSettleStats["afterFirstReplyMs"]) => `${seconds(stats.afterFirstReplyMs[field].p50)}/${seconds(stats.afterFirstReplyMs[field].p90)}`;
-  const released = stats.settled + stats.timedOut + stats.errored + stats.cancelledAtClose;
+  const released = stats.settled + stats.timedOut + stats.errored + stats.cancelledAtClose + stats.releasedEarly;
   return (
-    `${heading}: lines ${current === null ? "" : `${current.inFlight}/${optionChainCaptureBatchSize} now, ${current.queued} queued, `}min ${stats.minInFlight ?? "—"} max ${stats.maxInFlight ?? "—"} over ${seconds(stats.intervalMs)}, ` +
+    `${heading}: lines ${current === null ? "" : `${current.inFlight}/${current.concurrency} now, ${current.queued} queued, `}min ${stats.minInFlight ?? "—"} max ${stats.maxInFlight ?? "—"} over ${seconds(stats.intervalMs)}, ` +
     `${describeLineUsage(stats.lineUsage, captureMessagesPerSecondCap)}${stats.messagesSentPerSecond === null ? "" : `, sent ${stats.messagesSentPerSecond.toFixed(1)}/s with ${stats.messagesWaitingToSend} waiting to send`}; ${released} released, held p50 ${seconds(stats.holdMsP50)} p90 ${seconds(stats.holdMsP90)} max ${seconds(stats.holdMsMax)}; ` +
     `after first reply p50/p90: price ${afterReply("price")}, delta ${afterReply("delta")}, OI ${afterReply("openInterest")}; ` +
     `${stats.settled} full data (waited last on ${fields(stats.lastField)}; ${stats.settledWithoutMarket} with "no data" on a side), ` +
     `${stats.timedOut} timed out holding ${seconds(stats.timedOutLineMs)} of line time (${stats.timedOutUnanswered} never answered; the other ${stats.timedOut - stats.timedOutUnanswered} missing ${fields(stats.missingOnTimeout)}), ` +
-    `${stats.errored} errored, ${stats.cancelledAtClose} cancelled at close.`
+    `${stats.errored} errored, ${stats.cancelledAtClose} cancelled at close; ` +
+    `${stats.releasedEarly} released early holding ${seconds(stats.releasedEarlyLineMs)} (missing delta ${stats.missingOnEarlyRelease.delta}, OI ${stats.missingOnEarlyRelease.openInterest}), ` +
+    `${stats.retries} retried holding ${seconds(stats.retryLineMs)}: ${stats.retriesRecovered} recovered, ${stats.retries - stats.retriesRecovered} still incomplete.`
   );
 }
 
@@ -453,7 +458,7 @@ const defaultCaptureDependencies: OptionChainCaptureDependencies = {
   connect: connectToIbkrGateway,
   fetchSpotPrices: async (symbols, onFallbackPriceUsed) => fetchLivePrices(symbols.map((symbol) => ({ key: symbol, legType: "stock", symbol })), { priorityLines: true, onFallbackPriceUsed }),
   prepareTicker: (ib, ticker, todayIso, spotPrice) => prepareTicker(ib, ticker, todayIso, { ...ticksOnlyPrepareDependencies, fetchSpotPrice: async () => spotPrice }),
-  openQuoteWindow: (ib) => openCaptureQuoteWindow(ib, { concurrency: optionChainCaptureBatchSize }),
+  openQuoteWindow: (ib) => openCaptureQuoteWindow(ib, { concurrency: optionChainCaptureBatchSize, retryIncompleteAfterMs: captureRetryIncompleteAfterMs }),
   saveSnapshot: saveCapturedSnapshot,
   saveFailedSnapshot,
   lineReservation: {
@@ -582,7 +587,7 @@ export async function runOptionChainCapture(
     window = dependencies.openQuoteWindow(ib);
     const quoteWindow = window;
     // How many of the reserved lines are really subscribed (Pulse counts the whole reservation as in use).
-    progressTimer = setInterval(() => console.log(describeCaptureLineUsage(`${runLabel} window`, { inFlight: quoteWindow.inFlightCount(), queued: quoteWindow.queuedCount() }, quoteWindow.drainSettleStats())), captureProgressLogIntervalMs);
+    progressTimer = setInterval(() => console.log(describeCaptureLineUsage(`${runLabel} window`, { inFlight: quoteWindow.inFlightCount(), queued: quoteWindow.queuedCount(), concurrency: quoteWindow.concurrency }, quoteWindow.drainSettleStats())), captureProgressLogIntervalMs);
     progressTimer.unref?.();
     const record = (symbol: string, coverage: SnapshotCoverage) => {
       const status = deriveSnapshotStatus(coverage);

@@ -145,6 +145,14 @@ export interface CaptureQuoteWindowOptions {
   timeoutMs?: number;
   /** `noMarketOnASide`: IBKR answered "no data" (-1 or 0) on the bid or ask. */
   isSettled?: (quote: CapturedOptionQuote, noMarketOnASide: boolean) => boolean;
+  /**
+   * Early release and one retry (approved 2026-10-12, chain capture only): this long after IBKR's first tick, a contract
+   * that has its price but still lacks open interest and/or delta gives its line back and is queued once more, right after
+   * its ticker's remaining contracts. IBKR drops those fields per subscription, not per contract, and a second
+   * subscription almost always gets them. The retry's values are what is kept (open interest from either attempt).
+   * Omitted: no early release, every contract waits for `timeoutMs`.
+   */
+  retryIncompleteAfterMs?: number;
 }
 
 export interface CaptureQuoteWindow {
@@ -157,6 +165,8 @@ export interface CaptureQuoteWindow {
   capture(symbol: string, contracts: OptionContractRequest[]): Promise<CapturedOptionQuote[]>;
   /** Cancels anything still in flight, resolves every open capture with what it has, and detaches the listeners. */
   close(): void;
+  /** Lines this window keeps in flight. */
+  concurrency: number;
   /** Contracts subscribed right now — for logs and tests. */
   inFlightCount(): number;
   /** Contracts queued for a line right now; a free line only ever means this is 0. */
@@ -170,6 +180,7 @@ export interface CaptureQuoteWindow {
 }
 
 type SettleField = "price" | "delta" | "openInterest";
+type ReleaseOutcome = "settled" | "timedOut" | "releasedEarly";
 
 export interface CaptureSettleStats {
   /** Length of the period these stats cover (since the previous drain). */
@@ -190,6 +201,16 @@ export interface CaptureSettleStats {
   errored: number;
   /** Still subscribed when close() ran (the re-capture deadline, a dropped connection): released without settling. */
   cancelledAtClose: number;
+  /** Released `retryIncompleteAfterMs` after IBKR's first tick with a price but no open interest and/or delta (first attempts and retries). */
+  releasedEarly: number;
+  /** The fields those early releases were missing. */
+  missingOnEarlyRelease: Record<SettleField, number>;
+  /** The part of lineBusyMs held by early-released subscriptions. */
+  releasedEarlyLineMs: number;
+  /** Retry subscriptions released in the period, how many of them got the full field set, and the line time they held. */
+  retries: number;
+  retriesRecovered: number;
+  retryLineMs: number;
   /** How long each released contract held its line, subscribe to release (every outcome). */
   holdMsP50: number | null;
   holdMsP90: number | null;
@@ -217,10 +238,20 @@ interface WindowGroup {
   resolve: (quotes: CapturedOptionQuote[]) => void;
 }
 
+interface WindowQueued {
+  contract: OptionContractRequest;
+  group: WindowGroup;
+  /** Set on a retry: the first attempt's quote, the one the group returns, which the retry's values are merged into. */
+  retryOf?: CapturedOptionQuote;
+}
+
 interface WindowPending {
   quote: CapturedOptionQuote;
   group: WindowGroup;
+  retryOf?: CapturedOptionQuote;
   timer: ReturnType<typeof setTimeout>;
+  /** The early-release check, `retryIncompleteAfterMs` after the first tick. */
+  earlyReleaseTimer: ReturnType<typeof setTimeout> | null;
   subscribedAt: number;
   /** IBKR's first tick of any kind for the contract (ms since epoch), for drainSettleStats. */
   firstTickAt: number | null;
@@ -257,7 +288,7 @@ function emptyCapturedQuote(contract: OptionContractRequest): CapturedOptionQuot
 export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOptions): CaptureQuoteWindow {
   const timeoutMs = options.timeoutMs ?? defaultBatchCeilingMs;
   const isSettled = options.isSettled ?? isOptionQuoteSettledByDefault;
-  const queue: { contract: OptionContractRequest; group: WindowGroup }[] = [];
+  const queue: WindowQueued[] = [];
   const pending = new Map<number, WindowPending>();
   let closed = false;
   const emptyFieldCounts = (): Record<SettleField, number> => ({ price: 0, delta: 0, openInterest: 0 });
@@ -277,6 +308,12 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     timedOutUnanswered: 0,
     errored: 0,
     cancelledAtClose: 0,
+    releasedEarly: 0,
+    missingOnEarlyRelease: emptyFieldCounts(),
+    releasedEarlyLineMs: 0,
+    retries: 0,
+    retriesRecovered: 0,
+    retryLineMs: 0,
     settledWithoutMarket: 0,
     lastField: emptyFieldCounts(),
     missingOnTimeout: emptyFieldCounts(),
@@ -286,6 +323,8 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
   const wholeRunStats = freshStats();
   let firstSubscribedAt: number | null = null;
   let lastReleasedAt: number | null = null;
+  // Opens with no line in use, so the first period's low reflects the wait before the first subscribe.
+  for (const stats of [intervalStats, wholeRunStats]) stats.minInFlight = stats.maxInFlight = 0;
 
   function sampleInFlight(): void {
     const count = pending.size;
@@ -314,6 +353,12 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       timedOutUnanswered: stats.timedOutUnanswered,
       errored: stats.errored,
       cancelledAtClose: stats.cancelledAtClose,
+      releasedEarly: stats.releasedEarly,
+      missingOnEarlyRelease: { ...stats.missingOnEarlyRelease },
+      releasedEarlyLineMs: stats.releasedEarlyLineMs,
+      retries: stats.retries,
+      retriesRecovered: stats.retriesRecovered,
+      retryLineMs: stats.retryLineMs,
       settledWithoutMarket: stats.settledWithoutMarket,
       holdMsP50: percentileOfSorted(sortedHolds, 50),
       holdMsP90: percentileOfSorted(sortedHolds, 90),
@@ -335,15 +380,24 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     if (arrivedAt.openInterest === null && quote.openInterest !== null) arrivedAt.openInterest = now;
   }
 
-  function recordSettle(entry: WindowPending, timedOut: boolean): void {
+  function recordSettle(entry: WindowPending, outcome: ReleaseOutcome): void {
     const holdMs = Date.now() - entry.subscribedAt;
     const fields = Object.entries(entry.arrivedAt) as [SettleField, number | null][];
     const [lastField] = fields.reduce((latest, current) => ((current[1] ?? 0) > (latest[1] ?? 0) ? current : latest));
     for (const stats of [intervalStats, wholeRunStats]) {
       stats.holdsMs.push(holdMs);
+      if (entry.retryOf) {
+        stats.retries += 1;
+        stats.retryLineMs += holdMs;
+        if (outcome === "settled" && entry.quote.errorCode === null) stats.retriesRecovered += 1;
+      }
       if (entry.firstTickAt !== null) for (const [field, at] of fields) if (at !== null) stats.afterFirstReplyMs[field].push(at - entry.firstTickAt);
       if (entry.quote.errorCode !== null) stats.errored += 1;
-      else if (timedOut) {
+      else if (outcome === "releasedEarly") {
+        stats.releasedEarly += 1;
+        stats.releasedEarlyLineMs += holdMs;
+        for (const [field, at] of fields) if (at === null) stats.missingOnEarlyRelease[field] += 1;
+      } else if (outcome === "timedOut") {
         stats.timedOut += 1;
         stats.timedOutLineMs += holdMs;
         if (entry.firstTickAt === null) stats.timedOutUnanswered += 1;
@@ -370,20 +424,50 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     entry.firstTickAt = Date.now();
     meter.answered(reqId);
     clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => settle(reqId, true), timeoutMs);
+    entry.timer = setTimeout(() => settle(reqId, "timedOut"), timeoutMs);
+    if (options.retryIncompleteAfterMs !== undefined) entry.earlyReleaseTimer = setTimeout(() => releaseIfIncomplete(reqId), options.retryIncompleteAfterMs);
   }
 
-  function markTick(quote: CapturedOptionQuote, tickType: number): void {
-    quote.receivedAnyTick = true;
-    if (realTimeTickTypes.has(tickType)) quote.sawRealTimeTicks = true;
-    if (delayedTickTypes.has(tickType)) quote.sawDelayedTicks = true;
-  }
-
-  function settle(reqId: number, timedOut = false): void {
+  // Price in, open interest and/or delta missing: give the line back. A first attempt goes back in the queue once,
+  // right after its ticker's remaining contracts; a retry ends here with what it has. Without a price, the normal
+  // timeout still applies.
+  function releaseIfIncomplete(reqId: number): void {
     const entry = pending.get(reqId);
     if (!entry) return;
-    recordSettle(entry, timedOut);
+    entry.earlyReleaseTimer = null;
+    const { quote } = entry;
+    const hasPrice = (quote.bid !== null && quote.ask !== null) || quote.last !== null || entry.noMarketOnASide;
+    if (!hasPrice || (quote.delta !== null && quote.openInterest !== null)) return;
+    if (entry.retryOf) {
+      settle(reqId, "releasedEarly");
+      return;
+    }
+    recordSettle(entry, "releasedEarly");
+    releaseLine(reqId, entry);
+    let insertAt = 0;
+    for (let index = queue.length - 1; index >= 0; index--) {
+      if (queue[index]!.group === entry.group) {
+        insertAt = index + 1;
+        break;
+      }
+    }
+    queue.splice(insertAt, 0, { contract: { expiry: quote.expiry, strike: quote.strike, right: quote.right }, group: entry.group, retryOf: quote });
+    sampleInFlight();
+    pump();
+  }
+
+  // The retry's price, sizes and greeks replace the first attempt's together (fresher, and consistent with each other);
+  // open interest is a once-a-day figure, so either attempt's will do. A retry IBKR never answered leaves the first attempt as it was.
+  function mergeRetry(original: CapturedOptionQuote, retry: CapturedOptionQuote): void {
+    if (!retry.receivedAnyTick) return;
+    const openInterest = retry.openInterest ?? original.openInterest;
+    const { sawRealTimeTicks, sawDelayedTicks } = original;
+    Object.assign(original, retry, { openInterest, sawRealTimeTicks: sawRealTimeTicks || retry.sawRealTimeTicks, sawDelayedTicks: sawDelayedTicks || retry.sawDelayedTicks });
+  }
+
+  function releaseLine(reqId: number, entry: WindowPending): void {
     clearTimeout(entry.timer);
+    if (entry.earlyReleaseTimer !== null) clearTimeout(entry.earlyReleaseTimer);
     pending.delete(reqId);
     meter.released(reqId);
     lastReleasedAt = Date.now();
@@ -393,6 +477,20 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     } catch {
       // the connection may already be gone
     }
+  }
+
+  function markTick(quote: CapturedOptionQuote, tickType: number): void {
+    quote.receivedAnyTick = true;
+    if (realTimeTickTypes.has(tickType)) quote.sawRealTimeTicks = true;
+    if (delayedTickTypes.has(tickType)) quote.sawDelayedTicks = true;
+  }
+
+  function settle(reqId: number, outcome: ReleaseOutcome = "settled"): void {
+    const entry = pending.get(reqId);
+    if (!entry) return;
+    recordSettle(entry, outcome);
+    releaseLine(reqId, entry);
+    if (entry.retryOf) mergeRetry(entry.retryOf, entry.quote);
     entry.group.remaining -= 1;
     if (entry.group.remaining === 0) entry.group.resolve(entry.group.quotes);
     sampleInFlight();
@@ -403,7 +501,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
     const entry = pending.get(reqId);
     if (!entry) return;
     noteArrivals(entry);
-    if (isSettled(entry.quote, entry.noMarketOnASide)) settle(reqId);
+    if (isSettled(entry.quote, entry.noMarketOnASide)) settle(reqId, "settled");
   }
 
   function pump(): void {
@@ -415,11 +513,12 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
 
   function pumpContracts(): void {
     while (pending.size < options.concurrency && queue.length > 0) {
-      const { contract, group } = queue.shift()!;
+      const { contract, group, retryOf } = queue.shift()!;
       const reqId = nextReqIdFor(ib, () => nextFallbackReqId++);
       const quote = emptyCapturedQuote(contract);
-      group.quotes.push(quote);
-      pending.set(reqId, { quote, group, timer: setTimeout(() => settle(reqId, true), timeoutMs), subscribedAt: Date.now(), firstTickAt: null, noMarketOnASide: false, arrivedAt: { price: null, delta: null, openInterest: null } });
+      // A retry's quote stays private until it is merged into the first attempt's, which the group already holds.
+      if (!retryOf) group.quotes.push(quote);
+      pending.set(reqId, { quote, group, retryOf, timer: setTimeout(() => settle(reqId, "timedOut"), timeoutMs), earlyReleaseTimer: null, subscribedAt: Date.now(), firstTickAt: null, noMarketOnASide: false, arrivedAt: { price: null, delta: null, openInterest: null } });
       meter.subscribed(reqId);
       firstSubscribedAt ??= Date.now();
       messagesCalled += 1;
@@ -429,7 +528,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       } catch (error) {
         console.warn(`Option capture could not subscribe ${group.symbol} ${contract.expiry} ${contract.strike}${contract.right}: ${error instanceof Error ? error.message : error}`);
         quote.errorCode = -1;
-        settle(reqId);
+        settle(reqId, "settled");
       }
     }
   }
@@ -519,6 +618,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       const openGroups = new Set<WindowGroup>();
       for (const [reqId, entry] of pending) {
         clearTimeout(entry.timer);
+        if (entry.earlyReleaseTimer !== null) clearTimeout(entry.earlyReleaseTimer);
         recordCancelAtClose(entry);
         meter.released(reqId);
         lastReleasedAt = Date.now();
@@ -540,6 +640,7 @@ export function openCaptureQuoteWindow(ib: IBApi, options: CaptureQuoteWindowOpt
       ib.removeListener(EventName.error, onError);
       sentCounter?.stop();
     },
+    concurrency: options.concurrency,
     inFlightCount: () => pending.size,
     queuedCount: () => queue.length,
     subscribedSpan: () => ({ firstSubscribedAt, lastReleasedAt }),

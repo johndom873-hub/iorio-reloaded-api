@@ -170,6 +170,100 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
     }
   });
 
+  describe("early release and one retry (retryIncompleteAfterMs)", () => {
+    const strikesRequested = (ib: FakeIb) => ib.reqMktData.mock.calls.map((call) => (call[1] as { strike: number }).strike);
+    const emitPriceAndDelta = (ib: FakeIb, index: number) => {
+      const reqId = ib.reqIdForContract(index);
+      ib.emit(EventName.tickPrice, reqId, 1, 1.1, {});
+      ib.emit(EventName.tickPrice, reqId, 2, 1.2, {});
+      ib.emit(EventName.tickOptionComputation, reqId, 13, 0, 0.6, -0.31, 1.14, 0, 0.04, 0.09, -0.05, 101);
+    };
+
+    it("releases a contract still missing open interest 3 s after IBKR's first tick and retries it right after its ticker's remaining contracts", async () => {
+      vi.useFakeTimers();
+      try {
+        const ib = new FakeIb();
+        const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 1, timeoutMs: 8_000, retryIncompleteAfterMs: 3_000 });
+        const tickerA = window.capture("AAA", [put100, call105]);
+        const tickerB = window.capture("BBB", [call110]);
+        emitPriceAndDelta(ib, 0); // put100: price and delta, no open interest
+        await vi.advanceTimersByTimeAsync(2_999);
+        expect(ib.cancelMktData).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(ib.cancelMktData).toHaveBeenCalledTimes(1);
+        emitFullRealTimeQuote(ib, 1, 27); // call105
+        emitFullRealTimeQuote(ib, 2); // put100's retry: everything this time
+        const [quotesA] = await Promise.all([tickerA, (emitFullRealTimeQuote(ib, 3, 27), tickerB)]);
+        // The retry went ahead of BBB's contract, right after AAA's own.
+        expect(strikesRequested(ib)).toEqual([100, 105, 100, 110]);
+        expect(quotesA.map((quote) => [quote.strike, quote.openInterest, quote.delta])).toEqual([
+          [100, 1520, -0.31],
+          [105, 1520, -0.31],
+        ]);
+        expect(window.wholeRunSettleStats()).toMatchObject({
+          settled: 3,
+          releasedEarly: 1,
+          missingOnEarlyRelease: { price: 0, delta: 0, openInterest: 1 },
+          releasedEarlyLineMs: 3_000,
+          retries: 1,
+          retriesRecovered: 1,
+          lineUsage: { released: 4 },
+        });
+        window.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("ends a retry that is incomplete again with what it has, keeping the first attempt's open interest", async () => {
+      vi.useFakeTimers();
+      try {
+        const ib = new FakeIb();
+        const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 1, timeoutMs: 8_000, retryIncompleteAfterMs: 3_000 });
+        const pending = window.capture("AAA", [put100]);
+        const first = ib.reqIdForContract(0);
+        ib.emit(EventName.tickPrice, first, 1, 1.1, {});
+        ib.emit(EventName.tickPrice, first, 2, 1.2, {});
+        ib.emit(EventName.tickSize, first, 28, 1520); // open interest, but no delta
+        await vi.advanceTimersByTimeAsync(3_000);
+        const retry = ib.reqIdForContract(1);
+        ib.emit(EventName.tickPrice, retry, 1, 1.3, {});
+        ib.emit(EventName.tickPrice, retry, 2, 1.4, {}); // neither delta nor open interest this time
+        await vi.advanceTimersByTimeAsync(3_000);
+        const [quote] = await pending;
+        expect(quote).toMatchObject({ bid: 1.3, ask: 1.4, openInterest: 1520, delta: null });
+        expect(ib.reqMktData).toHaveBeenCalledTimes(2);
+        expect(window.wholeRunSettleStats()).toMatchObject({ settled: 0, timedOut: 0, releasedEarly: 2, missingOnEarlyRelease: { delta: 2, openInterest: 1 }, retries: 1, retriesRecovered: 0 });
+        window.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a contract without a price on the normal timeout, and never releases early when the option is off", async () => {
+      vi.useFakeTimers();
+      try {
+        for (const retryIncompleteAfterMs of [3_000, undefined]) {
+          const ib = new FakeIb();
+          const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 1, timeoutMs: 8_000, retryIncompleteAfterMs });
+          const pending = window.capture("AAA", [put100]);
+          const reqId = ib.reqIdForContract(0);
+          if (retryIncompleteAfterMs === undefined) emitPriceAndDelta(ib, 0); // price and delta, open interest missing
+          else ib.emit(EventName.tickSize, reqId, 28, 1520); // open interest only, no price
+          await vi.advanceTimersByTimeAsync(7_999);
+          expect(ib.cancelMktData).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(1);
+          await pending;
+          expect(ib.reqMktData).toHaveBeenCalledTimes(1);
+          expect(window.wholeRunSettleStats()).toMatchObject({ timedOut: 1, releasedEarly: 0, retries: 0 });
+          window.close();
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it("resolves an empty contract list without subscribing", async () => {
     const ib = new FakeIb();
     const window = openCaptureQuoteWindow(asIb(ib), { concurrency: 1 });
@@ -208,6 +302,12 @@ describe("openCaptureQuoteWindow (rolling window)", () => {
         timedOutUnanswered: 0,
         errored: 0,
         cancelledAtClose: 0,
+        releasedEarly: 0,
+        missingOnEarlyRelease: { price: 0, delta: 0, openInterest: 0 },
+        releasedEarlyLineMs: 0,
+        retries: 0,
+        retriesRecovered: 0,
+        retryLineMs: 0,
         settledWithoutMarket: 0,
         holdMsP50: 4_000,
         holdMsP90: 8_500,
