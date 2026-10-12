@@ -1,4 +1,4 @@
-// Pure decision logic for the release-phase worker-deploy step (scripts/run-release-phase-worker-deploy.ts)
+// Pure decision logic for the release-phase worker-deploy step (scripts/run-release-phase.ts)
 // — kept separate from that script's DB/SSH/Telegram I/O so the actual decision (skip vs. deploy,
 // and why) is unit-testable without a live database, VPS, or Telegram. The SKIP_WORKER_DEPLOY_REASON
 // override and the market/in-flight-orders deploy guard are both handled earlier in that script, as

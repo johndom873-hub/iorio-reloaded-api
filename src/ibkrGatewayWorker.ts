@@ -77,7 +77,7 @@ installWorkerShutdownHandler();
  *
  * Deployment (Phase B WP4): on staging, the Heroku release phase deploys this file's built commit
  * to the VPS automatically whenever it (or anything it imports) changes — see
- * scripts/run-release-phase-worker-deploy.ts and computeSourceClosureHash.ts for how "changes" is
+ * scripts/run-release-phase.ts and computeSourceClosureHash.ts for how "changes" is
  * decided, and scripts/deploy-worker-to-vps.sh / /opt/ibkr/deploy-worker-staging.sh for the actual
  * atomic build-then-swap. Manual deploys (`npm run deploy:worker:staging`) still work too.
  *

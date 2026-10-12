@@ -43,7 +43,7 @@
     "backfill:signal-engine-history": "tsx scripts/backfillSignalEngineHistory.ts",
     "deploy:worker:staging": "bash scripts/deploy-worker-to-vps.sh staging",
     "worker:staging": "bash scripts/staging-worker-control.sh",
-    "release-phase:worker-deploy": "node dist/scripts/run-release-phase-worker-deploy.js"
+    "release-phase": "node dist/scripts/run-release-phase.js"
   },
   "dependencies": {
     "@simplewebauthn/server": "^14.0.3",
