@@ -386,6 +386,29 @@ function applyCloseCoveredCall(ledger: SimulatedLedger, event: CloseCoveredCallE
   endCycleIfFlat(ledger, position.symbol, event.at);
 }
 
+export interface BuyBackCoveredCallKeepingSharesEvent {
+  positionId: string;
+  /** Purchase fill per share of the call bought back. */
+  callFillPrice: number;
+  at: Date;
+  actionId: string | null;
+}
+
+/**
+ * A covered call's call bought back alone (the baseline wheel's profit-taking; Pluto closes a covered call whole): the
+ * call exits at the fill, the covered call closes (closed via app), and its shares go to the symbol's unstructured
+ * position at their entry, as when the call expires worthless.
+ */
+function applyBuyBackCoveredCallKeepingShares(ledger: SimulatedLedger, event: BuyBackCoveredCallKeepingSharesEvent): void {
+  const position = requirePosition(ledger, event.positionId);
+  const { optionLeg, stockLeg } = openLegsOfPosition(ledger, position);
+  if (position.status !== "open" || position.strategyKey !== "covered_call" || optionLeg === null || stockLeg === null) throw new Error(`Position ${position.id} is not an open covered call with its call and its shares.`);
+  buyOptionToClose(ledger, position, optionLeg, event.callFillPrice, event.at, event.actionId);
+  handOffStockLeg(stockLeg, event.at);
+  closePosition(position, event.at, "closed_via_app");
+  receiveUncoveredShares(ledger, position.symbol, stockLeg.quantity, stockLeg.entryPrice, event.at, "cc_call_bought_back_stock", [position.id]);
+}
+
 /** Shares sold from a stock leg: all of them close the leg at the fill; fewer are carved into their own closed leg, which takes the closing trade. */
 function sellStockLegShares(ledger: SimulatedLedger, position: LedgerPosition, stockLeg: LedgerLeg, shares: number, fillPrice: number, at: Date, actionId: string | null, tradedSharesPerLedgerShare: number): LedgerLeg {
   // The book never sells a share it does not hold.
@@ -545,6 +568,10 @@ export function rollLeg(...args: Parameters<typeof applyRollLeg>): ReturnType<ty
 
 export function buyBackPut(...args: Parameters<typeof applyBuyBackPut>): ReturnType<typeof applyBuyBackPut> {
   return changingLedger(args[0], () => applyBuyBackPut(...args));
+}
+
+export function buyBackCoveredCallKeepingShares(...args: Parameters<typeof applyBuyBackCoveredCallKeepingShares>): ReturnType<typeof applyBuyBackCoveredCallKeepingShares> {
+  return changingLedger(args[0], () => applyBuyBackCoveredCallKeepingShares(...args));
 }
 
 export function closeCoveredCall(...args: Parameters<typeof applyCloseCoveredCall>): ReturnType<typeof applyCloseCoveredCall> {

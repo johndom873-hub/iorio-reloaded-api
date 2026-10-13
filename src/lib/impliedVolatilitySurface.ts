@@ -30,6 +30,17 @@ export const maximumSpreadFractionOfMid = 0.5;
 export const minimumSpreadWeightFloor = 0.02;
 export const minimumPointsPerSlice = 8;
 export const maximumSliceRmseVolatility = 0.03; // 3 volatility points
+
+/** The quote and fit limits a surface fit applies: live always the constants above; a backtest session may change them. */
+export interface SurfaceFitLimits {
+  /** Widest bid/ask spread a quote may have to be a fit point or a parity pair, as a fraction of its mid. */
+  maximumSpreadFractionOfMid: number;
+  minimumPointsPerSlice: number;
+  /** Worst root-mean-square fit error an "ok" slice may have, in volatility (0.03 = 3 points). */
+  maximumSliceRmseVolatility: number;
+}
+
+export const liveSurfaceFitLimits: SurfaceFitLimits = { maximumSpreadFractionOfMid, minimumPointsPerSlice, maximumSliceRmseVolatility };
 /** Strikes within this fraction of the reference forward may take part in the put-call parity forward. */
 export const parityForwardStrikeWindowFraction = 0.05;
 const calendarDaysPerYear = 365;
@@ -162,8 +173,8 @@ function solveImpliedVolatility(price: number, forward: number, strike: number, 
 
 // --- parity-implied forward --------------------------------------------------
 
-function isUsableTwoSidedQuote(quote: SurfaceQuote): quote is SurfaceQuote & { bid: number; ask: number } {
-  return quote.bid !== null && quote.ask !== null && quote.bid > 0 && quote.ask > quote.bid && (quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2) <= maximumSpreadFractionOfMid;
+function isUsableTwoSidedQuote(quote: SurfaceQuote, maxSpreadFractionOfMid: number): quote is SurfaceQuote & { bid: number; ask: number } {
+  return quote.bid !== null && quote.ask !== null && quote.bid > 0 && quote.ask > quote.bid && (quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2) <= maxSpreadFractionOfMid;
 }
 
 /**
@@ -172,10 +183,10 @@ function isUsableTwoSidedQuote(quote: SurfaceQuote): quote is SurfaceQuote & { b
  * `referenceForward`; the median over those strikes. It carries dividends and borrow without modelling them. Null when no strike qualifies
  * (the caller keeps its spot-based forward).
  */
-export function parityImpliedForward(quotes: SurfaceQuote[], referenceForward: number, yearsToExpiry: number, riskFreeRate: number): number | null {
+export function parityImpliedForward(quotes: SurfaceQuote[], referenceForward: number, yearsToExpiry: number, riskFreeRate: number, maxSpreadFractionOfMid: number = maximumSpreadFractionOfMid): number | null {
   const pairsByStrike = new Map<number, { call?: SurfaceQuote & { bid: number; ask: number }; put?: SurfaceQuote & { bid: number; ask: number } }>();
   for (const quote of quotes) {
-    if (!isUsableTwoSidedQuote(quote) || Math.abs(quote.strike / referenceForward - 1) > parityForwardStrikeWindowFraction) continue;
+    if (!isUsableTwoSidedQuote(quote, maxSpreadFractionOfMid) || Math.abs(quote.strike / referenceForward - 1) > parityForwardStrikeWindowFraction) continue;
     const pair = pairsByStrike.get(quote.strike) ?? {};
     if (quote.right === "C") pair.call = quote;
     else pair.put = quote;
@@ -213,7 +224,7 @@ export interface FitPointDropCounts {
 }
 
 /** OTM quotes only (puts below the forward, calls at or above), bid > 0, ask > bid, spread ≤ 50% of the mid, solvable IV. */
-export function buildSviFitPoints(quotes: SurfaceQuote[], forward: number, yearsToExpiry: number, riskFreeRate: number): { points: SviFitPoint[]; dropped: FitPointDropCounts } {
+export function buildSviFitPoints(quotes: SurfaceQuote[], forward: number, yearsToExpiry: number, riskFreeRate: number, maxSpreadFractionOfMid: number = maximumSpreadFractionOfMid): { points: SviFitPoint[]; dropped: FitPointDropCounts } {
   const dropped: FitPointDropCounts = { inTheMoney: 0, noTwoSidedQuote: 0, spreadTooWide: 0, noImpliedVolatility: 0 };
   const points: SviFitPoint[] = [];
   for (const quote of quotes) {
@@ -228,7 +239,7 @@ export function buildSviFitPoints(quotes: SurfaceQuote[], forward: number, years
     }
     const mid = (quote.bid + quote.ask) / 2;
     const relativeSpread = (quote.ask - quote.bid) / mid;
-    if (relativeSpread > maximumSpreadFractionOfMid) {
+    if (relativeSpread > maxSpreadFractionOfMid) {
       dropped.spreadTooWide++;
       continue;
     }
@@ -434,9 +445,9 @@ export interface SviSliceFit {
 }
 
 /** Fits one expiry and applies the approved gates: ≥ 8 points, RMSE ≤ 3 vol points, no butterfly arbitrage (flagged, never silently used). */
-export function fitSviSlice(points: SviFitPoint[], yearsToExpiry: number): SviSliceFit {
+export function fitSviSlice(points: SviFitPoint[], yearsToExpiry: number, limits: Pick<SurfaceFitLimits, "minimumPointsPerSlice" | "maximumSliceRmseVolatility"> = liveSurfaceFitLimits): SviSliceFit {
   const empty = (status: SviSliceStatus, parameters: RawSviParameters | null = null): SviSliceFit => ({ status, parameters, pointCount: points.length, rmseVolatility: null, minimumButterflyDensity: null, kMin: null, kMax: null });
-  if (points.length < minimumPointsPerSlice) return empty("insufficient_points");
+  if (points.length < limits.minimumPointsPerSlice) return empty("insufficient_points");
   const parameters = fitRawSvi(points);
   if (!parameters) return empty("fit_failed");
 
@@ -452,7 +463,7 @@ export function fitSviSlice(points: SviFitPoint[], yearsToExpiry: number): SviSl
   const minimumDensity = minimumButterflyDensity(parameters, kMin, kMax);
 
   let status: SviSliceStatus = "ok";
-  if (rmseVolatility > maximumSliceRmseVolatility) status = "poor_fit";
+  if (rmseVolatility > limits.maximumSliceRmseVolatility) status = "poor_fit";
   else if (minimumDensity < 0) status = "butterfly_arbitrage";
   return { status, parameters, pointCount: points.length, rmseVolatility, minimumButterflyDensity: minimumDensity, kMin, kMax };
 }

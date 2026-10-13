@@ -20,9 +20,10 @@ export interface ClosedTradeFigures {
   settledOn: string | null;
   exposureDollars: number;
   pnlDollars: number | null;
-  expectedPnlDollars: number;
-  calibratedExpectedPnlDollars: number;
-  edgeMargin: number;
+  /** Null for a baseline wheel's sale: no model figures. */
+  expectedPnlDollars: number | null;
+  calibratedExpectedPnlDollars: number | null;
+  edgeMargin: number | null;
   inTheMoneyAtExpiry: boolean | null;
 }
 
@@ -46,7 +47,7 @@ export interface SessionBookFigures {
 }
 
 /** The cycles of a session with the predictions of their options sold: a sale belongs to the cycle its row names. */
-export function cycleFiguresOf(cycles: readonly { symbol: string; cycleNumber: number; status: "open" | "closed"; totalDollars: number }[], optionSales: readonly { symbol: string; cycleNumber: number | null; edgeMargin: number; expectedPnlDollars: number; calibratedExpectedPnlDollars: number }[]): CycleFigures[] {
+export function cycleFiguresOf(cycles: readonly { symbol: string; cycleNumber: number; status: "open" | "closed"; totalDollars: number }[], optionSales: readonly { symbol: string; cycleNumber: number | null; edgeMargin: number | null; expectedPnlDollars: number | null; calibratedExpectedPnlDollars: number | null }[]): CycleFigures[] {
   return cycles.map((cycle) => {
     // In the order sold: the first is the cycle's opening sale.
     const sales = optionSales.filter((sale) => sale.symbol === cycle.symbol && sale.cycleNumber === cycle.cycleNumber);
@@ -54,8 +55,8 @@ export function cycleFiguresOf(cycles: readonly { symbol: string; cycleNumber: n
       status: cycle.status,
       totalDollars: cycle.totalDollars,
       firstSaleEdgeMargin: sales[0]?.edgeMargin ?? null,
-      expectedPnlDollars: sales.reduce((sum, sale) => sum + sale.expectedPnlDollars, 0),
-      calibratedExpectedPnlDollars: sales.reduce((sum, sale) => sum + sale.calibratedExpectedPnlDollars, 0),
+      expectedPnlDollars: sales.reduce((sum, sale) => sum + (sale.expectedPnlDollars ?? 0), 0),
+      calibratedExpectedPnlDollars: sales.reduce((sum, sale) => sum + (sale.calibratedExpectedPnlDollars ?? 0), 0),
       optionSaleCount: sales.length,
     };
   });
@@ -196,13 +197,13 @@ export function computeCycleAccuracyBands(cycles: readonly CycleFigures[]): Back
 /** For a session measured per option: its closed options grouped by their own edge margin, predicted vs what each earned. */
 export function computeTradeAccuracyBands(trades: readonly ClosedTradeFigures[]): BacktestAccuracyBand[] {
   return accuracyBandEdges.map((band) => {
-    const inBand = trades.filter((trade) => trade.pnlDollars !== null && trade.edgeMargin >= band.from && trade.edgeMargin < band.to);
+    const inBand = trades.filter((trade) => trade.pnlDollars !== null && trade.edgeMargin !== null && trade.edgeMargin >= band.from && trade.edgeMargin < band.to);
     return {
       label: band.label,
       tradeCount: inBand.length,
       cycleCount: null,
-      predictedPnlDollars: inBand.reduce((sum, trade) => sum + trade.expectedPnlDollars, 0),
-      calibratedPnlDollars: inBand.reduce((sum, trade) => sum + trade.calibratedExpectedPnlDollars, 0),
+      predictedPnlDollars: inBand.reduce((sum, trade) => sum + (trade.expectedPnlDollars ?? 0), 0),
+      calibratedPnlDollars: inBand.reduce((sum, trade) => sum + (trade.calibratedExpectedPnlDollars ?? 0), 0),
       realizedPnlDollars: inBand.reduce((sum, trade) => sum + (trade.pnlDollars ?? 0), 0),
     };
   });

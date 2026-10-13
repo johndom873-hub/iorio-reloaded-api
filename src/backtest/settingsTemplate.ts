@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { kellyFraction } from "../pluto/postModelGates.js";
 import { mapTradingSettingsRow } from "../lib/tradingSettingsStore.js";
-import { defaultBacktestPolicySettings, type BacktestSettingRow, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
+import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, type BacktestSettingRow, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
 import { earningsDateKnownCalendarDaysAhead } from "./engine/backtestTickerInputs.js";
 import { readBacktestClaudeCliPath } from "./backtestClaudeCli.js";
 
@@ -14,7 +14,8 @@ import { readBacktestClaudeCliPath } from "./backtestClaudeCli.js";
 export async function loadCurrentBacktestSettings(connection: Knex = db): Promise<BacktestSettings> {
   const [pluto, tradingRow] = await Promise.all([loadPlutoSettings(connection), connection("trading_settings").first()]);
   if (!tradingRow) throw new Error("No trading_settings row found.");
-  return { pluto, trading: mapTradingSettingsRow(tradingRow), kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "rules" };
+  const trading = mapTradingSettingsRow(tradingRow);
+  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "rules", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings } };
 }
 
 type RowDefinition = Omit<BacktestSettingRow, "now"> & { fixedValue?: number | string };
@@ -79,6 +80,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     choices: [
       { value: "rules", label: "Rules (below)" },
       { value: "llm", label: "The AI model" },
+      { value: "baseline", label: "Baseline wheel (no Pluto rules, no Signals)" },
     ],
   },
   {
@@ -144,6 +146,104 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "stop", label: "Stop for this look" },
     ],
   },
+
+  {
+    path: "baseline.entry",
+    group: "Baseline wheel",
+    label: "Entry with free cash",
+    unit: "choice",
+    editable: true,
+    note: "only with the baseline wheel as decision maker. At every look free round lots get the call with the highest premium yield, free cash the entry with the highest premium yield; everything is held to expiry",
+    choices: [
+      { value: "put", label: "Cash-secured put" },
+      { value: "buy_write", label: "Buy-write (100 shares and a call)" },
+    ],
+  },
+  { path: "baseline.minAbsDelta", group: "Baseline wheel", label: "|delta| from", unit: "number", editable: true, note: "from each quote's own implied volatility" },
+  { path: "baseline.maxAbsDelta", group: "Baseline wheel", label: "|delta| to", unit: "number", editable: true, note: null },
+  { path: "baseline.minDte", group: "Baseline wheel", label: "Days to expiry from", unit: "days", editable: true, note: null },
+  { path: "baseline.maxDte", group: "Baseline wheel", label: "Days to expiry to", unit: "days", editable: true, note: "data files hold up to 45 days" },
+  {
+    path: "baseline.callStrike",
+    group: "Baseline wheel",
+    label: "Calls on held shares",
+    unit: "choice",
+    editable: true,
+    note: "cost: what the cycle's shares cost per share; break-even: that cost less the cycle's premium (Pluto's measure)",
+    choices: [
+      { value: "delta_range", label: "Any strike in the delta range" },
+      { value: "above_share_cost", label: "Strike at or above the shares' cost" },
+      { value: "above_break_even", label: "Strike at or above the break-even" },
+      { value: "none", label: "No calls (the shares are held uncovered)" },
+    ],
+  },
+  {
+    path: "baseline.callDeltaRange",
+    group: "Baseline wheel",
+    label: "|delta| of calls on held shares",
+    unit: "choice",
+    editable: true,
+    note: null,
+    choices: [
+      { value: "entry_range", label: "The entry's range" },
+      { value: "own_range", label: "Their own range, below" },
+    ],
+  },
+  { path: "baseline.callMinAbsDelta", group: "Baseline wheel", label: "Calls' |delta| from", unit: "number", editable: true, note: "with their own range" },
+  { path: "baseline.callMaxAbsDelta", group: "Baseline wheel", label: "Calls' |delta| to", unit: "number", editable: true, note: "with their own range" },
+  { path: "baseline.takeProfitPct", group: "Baseline wheel", label: "Take profit at", unit: "percent", editable: true, note: "of the premium: an option is bought back at a look once buying it back keeps at least this much; 0 = hold to expiry" },
+  { path: "baseline.shareStopLossPct", group: "Baseline wheel", label: "Sell shares below cost by", unit: "percent", editable: true, note: "every share of the stock is sold (any call on them bought back) once the price is this far below what the cycle's shares cost; 0 = never" },
+  {
+    path: "baseline.earnings",
+    group: "Baseline wheel",
+    label: "Earnings",
+    unit: "choice",
+    editable: true,
+    note: "a report's date is known from 30 calendar days before it",
+    choices: [
+      { value: "ignore", label: "Sell through earnings" },
+      { value: "skip_spanning", label: "No sale whose expiry spans earnings" },
+    ],
+  },
+  { path: "baseline.maxAccountPctPerStock", group: "Baseline wheel", label: "Max per stock", unit: "percent", editable: true, note: "% of the account for new sales: puts at their strike, shares at their cost, net of premium" },
+  {
+    path: "baseline.looks",
+    group: "Baseline wheel",
+    label: "Decides",
+    unit: "choice",
+    editable: true,
+    note: null,
+    choices: [
+      { value: "every_look", label: "At every look (every 30 minutes)" },
+      { value: "first_look", label: "Once a day, at 10:00" },
+    ],
+  },
+  {
+    path: "baseline.volatilityEdgeFilter",
+    group: "Baseline wheel",
+    label: "Sell only above the forecast",
+    unit: "choice",
+    editable: true,
+    note: "a contract's implied volatility against the stock's 21-session forecast, both on the forecast's clock (the Signals model's IV and forecast)",
+    choices: [
+      { value: "off", label: "Off" },
+      { value: "entries", label: "New entries only, by at least the margin below" },
+      { value: "all_sales", label: "Every sale (calls on held shares too), by at least the margin below" },
+    ],
+  },
+  { path: "baseline.minVolatilityEdgePoints", group: "Baseline wheel", label: "IV above the forecast by", unit: "number", editable: true, note: "volatility points (5: 55% against a 50% forecast); may be negative" },
+  {
+    path: "baseline.ranking",
+    group: "Baseline wheel",
+    label: "Pick by",
+    unit: "choice",
+    editable: true,
+    note: "Edge Yield: the Signals model's expected P&L after costs, as a yearly rate on the exposure",
+    choices: [
+      { value: "premium_yield", label: "Premium yield" },
+      { value: "edge_yield", label: "Edge Yield" },
+    ],
+  },
 ];
 
 /** Pluto behaviour a session does not replay, for the note under the table. */
@@ -166,6 +266,11 @@ export function readBacktestSettingValue(settings: BacktestSettings, settingPath
   if (settingPath === "decisionMaker") return settings.decisionMaker ?? "rules";
   const [section, field] = settingPath.split(".") as [string, string];
   if (section === "policy") return ({ ...defaultBacktestPolicySettings, ...settings.policy } as unknown as Record<string, string>)[field]!;
+  if (section === "baseline") return ({ ...defaultBacktestBaselineSettings, ...settings.baseline } as unknown as Record<string, number | string>)[field]!;
+  if (section === "model") {
+    const model = { ...defaultBacktestModelSettings, ...settings.model };
+    return field === "spreadCostChargedPct" ? (model.spreadCostChargedPct ?? settings.trading.spreadCostChargedPct) : (model as unknown as Record<string, number | string>)[field]!;
+  }
   if (section === "pluto") return (settings.pluto as unknown as Record<string, number | string>)[field]!;
   if (section === "trading") return (settings.trading as unknown as Record<string, number | string>)[field]!;
   throw new Error(`Not a settings path: ${settingPath}`);

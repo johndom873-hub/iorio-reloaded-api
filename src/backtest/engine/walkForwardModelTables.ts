@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import { isEtfSector } from "../../lib/tickerCalendarRelevance.js";
-import { buildVolatilityModelTables, type TickerHistoryInput } from "../../lib/volatilityModelTablesBuilder.js";
+import { buildVolatilityModelTables, yangZhangForecastWindow, type TickerHistoryInput } from "../../lib/volatilityModelTablesBuilder.js";
 import { volatilityModelTables as currentVolatilityModelTables } from "../../lib/volatilityModelTables.generated.js";
 import type { VolatilityModelTables } from "../../lib/volatilityModelTables.js";
 import type { BacktestTablesMode } from "../backtestTypes.js";
@@ -46,8 +46,9 @@ export interface ModelTablesForSession {
   report: string[];
 }
 
-export function walkForwardCachePath(dataDirectory: string, year: number): string {
-  return path.join(dataDirectory, "tables", `${year}.json`);
+/** A session on another forecast window than the model's 21 sessions gets tables standardized by that window, cached apart. */
+export function walkForwardCachePath(dataDirectory: string, year: number, forecastWindowDays: number = yangZhangForecastWindow): string {
+  return path.join(dataDirectory, "tables", forecastWindowDays === yangZhangForecastWindow ? `${year}.json` : `${year}-yz${forecastWindowDays}.json`);
 }
 
 /** What the history before `cutoffIso` consists of: any change means the cached tables are stale. */
@@ -103,9 +104,9 @@ function fingerprintsMatch(a: WalkForwardSourceFingerprint, b: WalkForwardSource
 }
 
 /** Builds (or reads from the cache) the tables for year `year`: history strictly before `${year}-01-01`. */
-export async function walkForwardTablesForYear(dataDirectory: string, year: number, connection: Knex = db): Promise<{ tables: VolatilityModelTables; cached: boolean; buildSeconds: number }> {
+export async function walkForwardTablesForYear(dataDirectory: string, year: number, connection: Knex = db, forecastWindowDays: number = yangZhangForecastWindow): Promise<{ tables: VolatilityModelTables; cached: boolean; buildSeconds: number }> {
   const cutoffIso = `${year}-01-01`;
-  const cachePath = walkForwardCachePath(dataDirectory, year);
+  const cachePath = walkForwardCachePath(dataDirectory, year, forecastWindowDays);
   const fingerprint = await loadWalkForwardSourceFingerprint(cutoffIso, connection);
   if (existsSync(cachePath)) {
     const cache = JSON.parse(readFileSync(cachePath, "utf8")) as WalkForwardCacheFile;
@@ -118,8 +119,9 @@ export async function walkForwardTablesForYear(dataDirectory: string, year: numb
     tables = buildVolatilityModelTables(tickers, {
       maxHorizon: walkForwardMaxHorizon,
       bucketCount: walkForwardBucketCount,
+      forecastWindowDays,
       builtAtIso: new Date().toISOString(),
-      source: `daily_price_bars before ${cutoffIso} of ${tickers.length} tickers (${tickers.map((ticker) => ticker.symbol).join(", ")})`,
+      source: `daily_price_bars before ${cutoffIso} of ${tickers.length} tickers (${tickers.map((ticker) => ticker.symbol).join(", ")})${forecastWindowDays === yangZhangForecastWindow ? "" : `, returns standardized by YZ${forecastWindowDays}`}`,
     });
   } catch (error) {
     const groups = (["etf", "stock"] as const).map((group) => `${group === "etf" ? "ETFs" : "stocks"}: ${tickers.filter((ticker) => ticker.group === group).length} tickers`).join(", ");
@@ -132,8 +134,16 @@ export async function walkForwardTablesForYear(dataDirectory: string, year: numb
 }
 
 /** The tables for every session day; walk-forward builds (or reads) one set per calendar year the days touch. */
-export async function prepareModelTablesForSession(mode: BacktestTablesMode, sessionDatesIso: readonly string[], dataDirectory: string, onYearStarted: (year: number) => Promise<void> = async () => {}, connection: Knex = db): Promise<ModelTablesForSession> {
+export async function prepareModelTablesForSession(
+  mode: BacktestTablesMode,
+  sessionDatesIso: readonly string[],
+  dataDirectory: string,
+  onYearStarted: (year: number) => Promise<void> = async () => {},
+  connection: Knex = db,
+  forecastWindowDays: number = yangZhangForecastWindow,
+): Promise<ModelTablesForSession> {
   if (mode === "current") {
+    if (forecastWindowDays !== yangZhangForecastWindow) throw new Error(`The current tables are built on a ${yangZhangForecastWindow}-session forecast: a ${forecastWindowDays}-session forecast needs walk-forward tables.`);
     return { tablesFor: () => currentVolatilityModelTables, report: [`current tables (built ${currentVolatilityModelTables.builtAtIso}, sample ${currentVolatilityModelTables.sampleFromIso} → ${currentVolatilityModelTables.sampleToIso})`] };
   }
   const years = [...new Set(sessionDatesIso.map((dateIso) => Number(dateIso.slice(0, 4))))].sort((a, b) => a - b);
@@ -141,10 +151,10 @@ export async function prepareModelTablesForSession(mode: BacktestTablesMode, ses
   const report: string[] = [];
   for (const year of years) {
     await onYearStarted(year);
-    const { tables, cached, buildSeconds } = await walkForwardTablesForYear(dataDirectory, year, connection);
+    const { tables, cached, buildSeconds } = await walkForwardTablesForYear(dataDirectory, year, connection, forecastWindowDays);
     tablesByYear.set(year, tables);
     const calibrationPoints = tables.calibration.reduce((sum, row) => sum + row.points.length, 0);
-    report.push(`${year}: ${cached ? "cached" : "built"} in ${buildSeconds.toFixed(1)} s, sample ${tables.sampleFromIso} → ${tables.sampleToIso}, ${calibrationPoints} calibration points`);
+    report.push(`${year}: ${cached ? "cached" : "built"} in ${buildSeconds.toFixed(1)} s, sample ${tables.sampleFromIso} → ${tables.sampleToIso}, ${calibrationPoints} calibration points${forecastWindowDays === yangZhangForecastWindow ? "" : `, on a ${forecastWindowDays}-session forecast`}`);
   }
   return {
     tablesFor: (dateIso) => {

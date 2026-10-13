@@ -194,10 +194,11 @@ export interface BacktestOptionSale {
   exposureDollars: number;
   dte: number;
   delta: number | null;
-  grade: string;
-  edgeMargin: number;
-  expectedPnlDollars: number;
-  calibratedExpectedPnlDollars: number;
+  /** The model's figures; null for a baseline wheel's sale (no model). */
+  grade: string | null;
+  edgeMargin: number | null;
+  expectedPnlDollars: number | null;
+  calibratedExpectedPnlDollars: number | null;
   edgeYield: number | null;
   histYield: number | null;
   kellyContracts: number | null;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../../lib/easternIsoDate.js";
 import { checkCalledAway, commissionPerShare } from "../../../pluto/heldShareCalls.js";
-import { openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
+import { buyBackCoveredCallKeepingShares, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
 import { stockPurchaseFillPrice, stockSaleFillPrice } from "./ledgerFills.js";
 import { ledgerBreakEvenForPosition, ledgerCycles, ledgerFreeShares, ledgerOpenCycleSummary, ledgerTotalRealizedPnl } from "./ledgerSelectors.js";
 import { createSimulatedLedger, type SimulatedLedger } from "./simulatedLedger.js";
@@ -225,5 +225,32 @@ describe("a finish two cents in the money", () => {
     expect(cycles[0]!.buckets.csp.total).toBeCloseTo(117.32, 6);
     expect(cycles[0]!.breakEvenPerShare).toBeCloseTo(48.8068, 6);
     expect(cycles[0]!.total).toBeCloseTo(symbolCash(ledger, "PIN") + 100 * 49.98, 6);
+  });
+});
+
+describe("a covered call's call bought back alone (the baseline wheel's profit-taking)", () => {
+  //  2 Mar  sell 1 put $50 6 Mar @ 1.20      cash +120 − 0.68 = +119.32
+  //  6 Mar  close 48.00: assigned            cash −5,000
+  //  9 Mar  sell 1 call $51 20 Mar @ 0.80    cash +80 − 0.68 = +79.32
+  // 11 Mar  buy the call back @ 0.20         cash −20 − 0.68 = −20.68; the 100 shares stay, free for the next call
+  it("keeps the shares in the open cycle, free for a new call, with the cash in step", () => {
+    const ledger = newLedger();
+    const put = openCashSecuredPut(ledger, { symbol: "WHL", expiryDate: "2026-03-06", strike: 50, contracts: 1, fillPrice: 1.2, at: decisionAt("2026-03-02"), actionId: "action-1", splitFactorToday: 1 });
+    settleExpiry(ledger, { legId: put.legId, expiryClose: 48 });
+    const call = openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-20", strike: 51, contracts: 1, callFillPrice: 0.8, stockFillPrice: stockPurchaseFillPrice(49), at: decisionAt("2026-03-09"), actionId: "action-2", splitFactorToday: 1 });
+    expect(ledgerFreeShares(ledger, "WHL")).toBe(0);
+    buyBackCoveredCallKeepingShares(ledger, { positionId: call.positionId, callFillPrice: 0.2, at: decisionAt("2026-03-11"), actionId: "action-3" });
+    expect(ledgerFreeShares(ledger, "WHL")).toBe(100);
+    expect(symbolCash(ledger, "WHL")).toBeCloseTo(119.32 - 5000 + 79.32 - 20.68, 6);
+    const summary = ledgerOpenCycleSummary(ledger, "WHL")!;
+    expect(summary).toMatchObject({ sharesHeld: 100, sharesAcquired: 100, acquisitionCost: 5000 });
+    expect(summary.netPremium).toBeCloseTo(119.32 + 79.32 - 20.68, 6);
+    const cycles = ledgerCycles(ledger, "WHL", { dailyCloses: [{ date: "2026-03-06", close: 48 }, { date: "2026-03-09", close: 49 }, { date: "2026-03-11", close: 49.5 }] });
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]).toMatchObject({ status: "open", sharesHeld: 100, dataFlags: [] });
+    // A second call can be written on the same shares.
+    openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-27", strike: 51, contracts: 1, callFillPrice: 0.7, stockFillPrice: stockPurchaseFillPrice(49.5), at: decisionAt("2026-03-12"), actionId: "action-4", splitFactorToday: 1 });
+    expect(ledgerFreeShares(ledger, "WHL")).toBe(0);
+    expect(() => buyBackCoveredCallKeepingShares(ledger, { positionId: put.positionId, callFillPrice: 0.1, at: decisionAt("2026-03-13"), actionId: "action-5" })).toThrow(/not an open covered call/);
   });
 });

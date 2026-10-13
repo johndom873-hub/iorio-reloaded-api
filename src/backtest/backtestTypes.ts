@@ -1,6 +1,8 @@
 import type { PlutoSettings } from "../pluto/settingsStore.js";
 import type { TradingSettings } from "../lib/tradingSettingsStore.js";
 import type { LlmSessionEstimate } from "./llm/estimateLlmSession.js";
+import type { OpenCandidateRanking } from "../lib/signalCandidates.js";
+import type { KellyEdgeBasis } from "../pluto/postModelGates.js";
 
 // The backtesting API contract (docs/backtesting/). The app mirrors these types in src/api/backtest.ts.
 
@@ -10,8 +12,61 @@ export type BacktestJobStatus = "queued" | "running" | "succeeded" | "failed" | 
 export type BacktestJobDisplayStatus = BacktestJobStatus | "stopped";
 export type BacktestTablesMode = "walk_forward" | "current";
 
-/** Who makes the choices the AI model makes live: the stand-in rules (BacktestPolicySettings), or the model itself (Claude through the subscription, src/backtest/llm/). */
-export type BacktestDecisionMaker = "rules" | "llm";
+/**
+ * Who makes the choices the AI model makes live: the stand-in rules (BacktestPolicySettings), or the model itself (Claude
+ * through the subscription, src/backtest/llm/). "baseline": none of Pluto or Signals, the naive wheel of
+ * BacktestBaselineSettings (Marcelo 2026-10-13), to measure what each rule adds.
+ */
+export type BacktestDecisionMaker = "rules" | "llm" | "baseline";
+
+/**
+ * The naive wheel (approved by Marcelo 2026-10-13; the research log has the full rules). At every look: free round lots of
+ * shares get the call with the highest premium yield in the delta and expiry ranges; free cash goes into the entry (a
+ * cash-secured put, or 100 shares bought with a call sold on them) with the highest premium yield in the same ranges.
+ * Everything is held to expiry: no buybacks, rolls, closes, stops, breakers or Signals.
+ */
+export interface BacktestBaselineSettings {
+  /** How free cash enters a stock: a cash-secured put, or a buy-write. */
+  entry: "put" | "buy_write";
+  /** The |delta| range, from each quote's own implied volatility. */
+  minAbsDelta: number;
+  maxAbsDelta: number;
+  /** Calendar days to expiry. */
+  minDte: number;
+  maxDte: number;
+  /**
+   * Calls on held shares: any strike in the delta range; only at or above what the cycle's shares cost (acquisition cost
+   * per share acquired); only at or above the cycle's break-even after its premium (Pluto's measure); or none (the shares
+   * are held uncovered).
+   */
+  callStrike: "delta_range" | "above_share_cost" | "above_break_even" | "none";
+  /** The |delta| range of calls on held shares: the entry's (minAbsDelta–maxAbsDelta), or their own (callMinAbsDelta–callMaxAbsDelta). */
+  callDeltaRange: "entry_range" | "own_range";
+  callMinAbsDelta: number;
+  callMaxAbsDelta: number;
+  /** Buy an option back at a look once its buyback keeps at least this percentage of the premium; 0 = hold to expiry. */
+  takeProfitPct: number;
+  /** Sell every share of the stock (buying back any call written on them) once its price is this percentage below the cycle's cost per share acquired; 0 = never. */
+  shareStopLossPct: number;
+  /** "skip_spanning": no new sale whose expiry spans a known earnings date (Pluto's rule; dates known 30 days ahead). */
+  earnings: "ignore" | "skip_spanning";
+  /** The most of the account one stock may take for new sales (puts at their strike, shares at their cost, net of premium), percent. */
+  maxAccountPctPerStock: number;
+  /** When the baseline decides: at every look (every 30 minutes) or only at the 10:00 look. */
+  looks: "every_look" | "first_look";
+  /**
+   * Sell only a contract whose implied volatility is at least minVolatilityEdgePoints above the stock's 21-session
+   * forecast (YZ21), both on the forecast's clock (the Signals model's IV and forecast): for new entries only (a put or a
+   * buy-write), or for every sale, the calls on held shares too.
+   */
+  volatilityEdgeFilter: "off" | "entries" | "all_sales";
+  /** Volatility points (5 = 5 points, e.g. 55% against a 50% forecast); may be negative. */
+  minVolatilityEdgePoints: number;
+  /** The order the candidates are picked in: premium yield, or the Signals model's Edge Yield. */
+  ranking: "premium_yield" | "edge_yield";
+}
+
+export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, callStrike: "delta_range", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield" };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
@@ -38,6 +93,45 @@ export interface BacktestPolicySettings {
 
 export const defaultBacktestPolicySettings: BacktestPolicySettings = { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" };
 
+/**
+ * The Signals model's parameters a session may change (Marcelo 2026-10-13); live always runs on the defaults. They change
+ * the model's figures and Pluto's use of them, never the fills (trading.spreadCostChargedPct prices every fill).
+ */
+export interface BacktestModelSettings {
+  /** The Yang-Zhang window of the valuation forecast, in sessions; the walk-forward tables are built on the same window. */
+  forecastWindowDays: number;
+  /** The edge margins the grades start at, percent (strong ≥ good ≥ weak). */
+  gradeStrongMarginPct: number;
+  gradeGoodMarginPct: number;
+  gradeWeakMarginPct: number;
+  /** The order of the eligible opens: Pluto's top pick is the first. */
+  rankOpensBy: OpenCandidateRanking;
+  /** What the Kelly cap's expected P&L per contract is. */
+  kellyBasis: KellyEdgeBasis;
+  /** Surface fit and the 10:00 stock price: the widest quote spread a fit point or a parity pair may have, % of its mid. */
+  surfaceMaxSpreadPctOfMid: number;
+  /** Surface fit: the fewest fit points an expiry needs. */
+  surfaceMinPointsPerSlice: number;
+  /** Surface fit: the worst root-mean-square error of a usable expiry, in volatility points. */
+  surfaceMaxRmseVp: number;
+  /** The share of the half-spread the model charges as friction; null: the fills' share (sessions created before the split). */
+  spreadCostChargedPct: number | null;
+}
+
+/** Live's values (volatilityEdge.ts, contractValuation.ts, signalCandidates.ts, postModelGates.ts, impliedVolatilitySurface.ts). */
+export const defaultBacktestModelSettings: BacktestModelSettings = {
+  forecastWindowDays: 21,
+  gradeStrongMarginPct: 20,
+  gradeGoodMarginPct: 10,
+  gradeWeakMarginPct: 0,
+  rankOpensBy: "edge_yield",
+  kellyBasis: "edge_dollars",
+  surfaceMaxSpreadPctOfMid: 50,
+  surfaceMinPointsPerSlice: 8,
+  surfaceMaxRmseVp: 3,
+  spreadCostChargedPct: null,
+};
+
 /** Settings frozen with a session. `trading` leaves out the commission estimator (the flat commission applies). */
 export interface BacktestSettings {
   pluto: PlutoSettings;
@@ -48,6 +142,10 @@ export interface BacktestSettings {
   policy?: BacktestPolicySettings;
   /** Absent on older sessions: "rules". */
   decisionMaker?: BacktestDecisionMaker;
+  /** Absent on sessions created before the model's parameters could change: the defaults apply. */
+  model?: BacktestModelSettings;
+  /** Absent on sessions created before the baseline wheel existed: the defaults apply. */
+  baseline?: BacktestBaselineSettings;
 }
 
 export interface BacktestSettingsOverrides {
@@ -56,12 +154,16 @@ export interface BacktestSettingsOverrides {
   kellyFraction?: number;
   policy?: Partial<BacktestPolicySettings>;
   decisionMaker?: BacktestDecisionMaker;
+  model?: Partial<BacktestModelSettings>;
+  baseline?: Partial<BacktestBaselineSettings>;
 }
 
 /** A session's settings with its overrides applied and every default filled in: what the engine runs on. */
 export interface EffectiveBacktestSettings extends BacktestSettings {
   policy: BacktestPolicySettings;
   decisionMaker: BacktestDecisionMaker;
+  model: BacktestModelSettings;
+  baseline: BacktestBaselineSettings;
 }
 
 export interface BacktestJobView {
@@ -204,7 +306,8 @@ export interface BacktestSettingChoice {
 /** One row of the New session settings table. `path` addresses the value inside BacktestSettings, e.g. "pluto.minEdgeYieldPct" or "policy.roll". */
 export interface BacktestSettingRow {
   path: string;
-  group: "Capital and sizing" | "Candidate quality" | "Model" | "Trading window and system checks" | "Decisions (stand-in for the AI)";
+  group: "Capital and sizing" | "Candidate quality" | "Model" | "Trading window and system checks" | "Decisions (stand-in for the AI)" | "Baseline wheel";
+  /** `path` addresses e.g. "pluto.minEdgeYieldPct", "policy.roll" or "model.forecastWindowDays". */
   label: string;
   /** "time" is a clock time, "HH:MM" Eastern. */
   unit: "percent" | "number" | "integer" | "dollars" | "grade" | "days" | "time" | "choice";
@@ -313,10 +416,11 @@ export interface BacktestTrade {
   exposureDollars: number;
   dte: number;
   delta: number | null;
-  grade: string;
-  edgeMargin: number;
-  expectedPnlDollars: number;
-  calibratedExpectedPnlDollars: number;
+  /** The model's figures when it was sold; null for a baseline wheel's sale (no model). */
+  grade: string | null;
+  edgeMargin: number | null;
+  expectedPnlDollars: number | null;
+  calibratedExpectedPnlDollars: number | null;
   edgeYield: number | null;
   histYield: number | null;
   kellyContracts: number | null;

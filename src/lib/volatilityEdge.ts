@@ -46,14 +46,15 @@ export interface ModelVolatilityForecast {
   perSessionVariance: number;
   /** √(252 × per-session variance): the same forecast annualized on sessions. */
   annualizedVolatility: number;
-  windowDays: typeof modelForecastWindowDays;
+  /** modelForecastWindowDays live; a backtest session may use another window. */
+  windowDays: number;
 }
 
-/** `bars` in date order, ending before the scoring day (never a partial session). Null without 22 valid bars. */
-export function selectModelVolatilityForecast(bars: DailyOhlcvBar[]): ModelVolatilityForecast | null {
-  const result = computeYangZhangVolatility(bars, modelForecastWindowDays);
+/** `bars` in date order, ending before the scoring day (never a partial session). Null without windowDays + 1 valid bars. */
+export function selectModelVolatilityForecast(bars: DailyOhlcvBar[], windowDays: number = modelForecastWindowDays): ModelVolatilityForecast | null {
+  const result = computeYangZhangVolatility(bars, windowDays);
   if (!result.available || !Number.isFinite(result.annualizedVolatility) || !(result.annualizedVolatility > 0)) return null;
-  return { perSessionVariance: result.annualizedVolatility ** 2 / tradingSessionsPerYear, annualizedVolatility: result.annualizedVolatility, windowDays: modelForecastWindowDays };
+  return { perSessionVariance: result.annualizedVolatility ** 2 / tradingSessionsPerYear, annualizedVolatility: result.annualizedVolatility, windowDays };
 }
 
 export interface EdgeSlice {

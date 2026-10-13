@@ -119,8 +119,8 @@ export interface WindowObservation {
   impliedVolatility: number | null;
 }
 
-/** Pure: every earnings-free window (t, t+h] of every ticker with a YZ21 forecast at t, for h = 1..maxHorizon. */
-export function collectWindows(tickers: TickerHistoryInput[], maxHorizon: number): WindowObservation[] {
+/** Pure: every earnings-free window (t, t+h] of every ticker with a Yang-Zhang forecast at t (21 sessions unless a backtest builds for another window), for h = 1..maxHorizon. */
+export function collectWindows(tickers: TickerHistoryInput[], maxHorizon: number, forecastWindowDays: number = yangZhangForecastWindow): WindowObservation[] {
   const masterSessions = inferMarketSessions(tickers);
   const masterIndexByDate = new Map(masterSessions.map((dateIso, index) => [dateIso, index]));
   const observations: WindowObservation[] = [];
@@ -129,8 +129,8 @@ export function collectWindows(tickers: TickerHistoryInput[], maxHorizon: number
     const impliedUsable = impliedVolatilityIsPlausible(ticker);
     for (const segment of contiguousSegments(ticker, masterIndexByDate)) {
       const segmentBars = segment.map((session) => ticker.bars[session.barIndex]!);
-      for (let t = yangZhangForecastWindow; t < segment.length - 1; t++) {
-        const yz = computeYangZhangVolatility(segmentBars, yangZhangForecastWindow, t + 1);
+      for (let t = forecastWindowDays; t < segment.length - 1; t++) {
+        const yz = computeYangZhangVolatility(segmentBars, forecastWindowDays, t + 1);
         if (!yz.available || !(yz.annualizedVolatility > 0)) continue;
         const forecastVariance = yz.annualizedVolatility ** 2 / 252;
         const implied = impliedUsable ? segmentBars[t]!.impliedVolatility : null;
@@ -256,13 +256,15 @@ export function bootstrapBucketIntervals(sums: Map<string, { premium: number; we
 
 export interface BuildOptions {
   maxHorizon: number;
+  /** The forecast's Yang-Zhang window the returns are standardized by; yangZhangForecastWindow (the model's) when absent. */
+  forecastWindowDays?: number;
   bucketCount: number;
   builtAtIso: string;
   source: string;
 }
 
 export function buildVolatilityModelTables(tickers: TickerHistoryInput[], options: BuildOptions): VolatilityModelTables {
-  const observations = collectWindows(tickers, options.maxHorizon);
+  const observations = collectWindows(tickers, options.maxHorizon, options.forecastWindowDays ?? yangZhangForecastWindow);
   const groups: ValuationGroup[] = ["etf", "stock"];
   const standardizedReturnBuckets = {} as VolatilityModelTables["standardizedReturnBuckets"];
   const sampleCounts = {} as VolatilityModelTables["sampleCounts"];

@@ -89,6 +89,29 @@ describe("inferSplitSchedule", () => {
     expect(requireSplitFactors("XYZ", schedule, [days[0]!.dateIso]).get(days[0]!.dateIso)).toBe(1);
   });
 
+  it("gives a noisy stretch between two runs of the same factor that factor, when its median is nearest it (AAOI 2022-03-21 to 03-25)", () => {
+    // AAOI's real ratios 2022-03-01 to 2022-04-14 (a $3 stock, no split): 2022-03-15 to 03-25 formed no run.
+    const aaoiRatios = [
+      0.984, 0.9999, 1.0069, 1.0043, 1.0111, 0.9986, 0.9744, 0.9999, 1.0072, 1.0099, 0.3582, 1.2194, null, 0.9417, 0.9832, 1.0376, 1.0626, 1.0488, 1.0853, 1.0028, 0.9354, 0.9597, 0.9862, 1.027,
+      0.9749, null, 1.0232, null, 0.814, 1.0498, 0.9074, 1.723, null,
+    ];
+    const days = ratioDays(aaoiRatios, false);
+    const schedule = inferSplitSchedule(days);
+    expect(schedule.unresolved).toEqual([]);
+    expect(schedule.splits).toEqual([]);
+    expect(schedule.segments).toEqual([{ fromDateIso: days[0]!.dateIso, toDateIso: days.at(-1)!.dateIso, factor: 1 }]);
+  });
+
+  it("keeps such a stretch unresolved when it is longer than 30 file days", () => {
+    const alternating = (count: number) => Array.from({ length: count }, (_, index) => (index % 2 === 0 ? 1.06 : 0.94));
+    // The window medians next to the runs take two days at each end of the stretch: the gap is the stretch less 4 days.
+    expect(inferSplitSchedule(ratioDays([...repeat(1, 10), ...alternating(20), ...repeat(1, 10)], false)).unresolved).toEqual([]);
+    const tooLong = inferSplitSchedule(ratioDays([...repeat(1, 10), ...alternating(40), ...repeat(1, 10)], false));
+    expect(tooLong.unresolved.length).toBe(1);
+    expect(tooLong.unresolved[0]!.ratios.length).toBe(36);
+    expect(tooLong.unresolved[0]!.ratios.every((day) => day.ratio === 1.06 || day.ratio === 0.94)).toBe(true);
+  });
+
   it("does not confirm a new factor seen on fewer than 5 days at the end of the file", () => {
     const days = ratioDays([...repeat(1, 10), ...repeat(2, 3)], false);
     const schedule = inferSplitSchedule(days);

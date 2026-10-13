@@ -3,10 +3,12 @@ import {
   checkCalendarArbitrage,
   computeForwardPrice,
   fitSviSlice,
+  liveSurfaceFitLimits,
   parityImpliedForward,
   projectDividendSchedule,
   yearsBetweenIsoDates,
   type FitPointDropCounts,
+  type SurfaceFitLimits,
   type SurfaceQuote,
   type SviSliceFit,
 } from "./impliedVolatilitySurface.js";
@@ -61,7 +63,8 @@ function underlyingPriceOfQuotes(quotes: SurfaceSnapshotQuote[]): number | null 
   return prices.length === 0 ? null : median(prices);
 }
 
-export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOutcome {
+/** `limits`: live always fits with liveSurfaceFitLimits; a backtest session may pass its own. */
+export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput, limits: SurfaceFitLimits = liveSurfaceFitLimits): SurfaceFitOutcome {
   if (input.spotPrice === null || !(input.spotPrice > 0)) return { kind: "skipped", reason: "no_spot_price" };
   if (input.riskFreeRatePercent === null) return { kind: "skipped", reason: "no_risk_free_rate" };
   if (input.quotes.length === 0) return { kind: "skipped", reason: "no_quotes" };
@@ -84,14 +87,9 @@ export function fitSurfaceForSnapshot(input: SurfaceSnapshotInput): SurfaceFitOu
     const expiryQuotes = input.quotes.filter((quote) => quote.expiry === expiry);
     const underlyingPrice = underlyingPriceOfQuotes(expiryQuotes) ?? input.spotPrice;
     const spotBasedForward = computeForwardPrice(underlyingPrice, riskFreeRate, yearsToExpiry, dividends);
-    const forwardPrice = parityImpliedForward(expiryQuotes, spotBasedForward, yearsToExpiry, riskFreeRate) ?? spotBasedForward;
-    const { points, dropped } = buildSviFitPoints(
-      expiryQuotes,
-      forwardPrice,
-      yearsToExpiry,
-      riskFreeRate,
-    );
-    const slice = fitSviSlice(points, yearsToExpiry);
+    const forwardPrice = parityImpliedForward(expiryQuotes, spotBasedForward, yearsToExpiry, riskFreeRate, limits.maximumSpreadFractionOfMid) ?? spotBasedForward;
+    const { points, dropped } = buildSviFitPoints(expiryQuotes, forwardPrice, yearsToExpiry, riskFreeRate, limits.maximumSpreadFractionOfMid);
+    const slice = fitSviSlice(points, yearsToExpiry, limits);
 
     let calendarChecks = 0;
     let calendarViolations = 0;

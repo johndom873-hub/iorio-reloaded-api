@@ -182,7 +182,9 @@ describe("backtest routes", () => {
     expect(template.settings.pluto.minEdgeYieldPct).toBe(Number(plutoRow.min_edge_yield_pct));
     expect(template.settings.trading).not.toHaveProperty("commissionEstimator");
     expect(template.settings).toMatchObject({ decisionMaker: "rules", policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
-    expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(15).fill("Candidate quality"), ...Array(7).fill("Model"), ...Array(6).fill("Trading window and system checks"), ...Array(6).fill("Decisions (stand-in for the AI)")]);
+    expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(15).fill("Candidate quality"), ...Array(7).fill("Model"), ...Array(6).fill("Trading window and system checks"), ...Array(6).fill("Decisions (stand-in for the AI)"), ...Array(17).fill("Baseline wheel")]);
+    expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, callStrike: "delta_range", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield" });
+    expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["rules", "llm", "baseline"]);
     expect(template.rows[0]).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
     // The looks inside Pluto's window and the system checks replayed at each: the window is shown, the checks can be changed.
     expect(template.rows.filter((row) => row.group === "Trading window and system checks").map((row) => [row.path, row.unit, row.now, row.editable])).toEqual([
@@ -208,29 +210,53 @@ describe("backtest routes", () => {
     expect(template.rows[6]).toMatchObject({ now: Number(tradingRow.max_position_pct_of_portfolio), editable: true, note: "% of the account" });
     // A look after 10:00 measures how far each expiry's quotes moved from the 10:00 surface: the limit binds again.
     expect(template.rows.find((row) => row.path === "pluto.maxIvShiftVp")).toMatchObject({ editable: true, now: Number(plutoRow.max_iv_shift_vp) });
-    expect(template.rows.slice(-14, -12).map((row) => [row.path, row.now, row.editable])).toEqual([
+    const forecastRowIndex = template.rows.findIndex((row) => row.path === "fixed.forecastWindowDays");
+    expect(template.rows.slice(forecastRowIndex, forecastRowIndex + 2).map((row) => [row.path, row.now, row.editable])).toEqual([
       ["fixed.forecastWindowDays", 21, false],
       ["fixed.gradeCutPoints", "20 / 10 / 0%", false],
     ]);
     // The decisions the AI model makes live, as choices: who decides, and the rules that stand in for it.
-    expect(template.rows.slice(-6).map((row) => [row.path, row.unit, row.now, row.editable, row.choices?.map((choice) => choice.value)])).toEqual([
-      ["decisionMaker", "choice", "rules", true, ["rules", "llm"]],
+    expect(template.rows.filter((row) => row.group === "Decisions (stand-in for the AI)").map((row) => [row.path, row.unit, row.now, row.editable, row.choices?.map((choice) => choice.value)])).toEqual([
+      ["decisionMaker", "choice", "rules", true, ["rules", "llm", "baseline"]],
       ["policy.roll", "choice", "flagged_legs", true, ["flagged_legs", "any_eligible", "never"]],
       ["policy.buyback", "choice", "when_offered", true, ["when_offered", "never"]],
       ["policy.sharesInProfit", "choice", "call_else_sell", true, ["call_else_sell", "always_sell", "always_keep"]],
       ["policy.eventClose", "choice", "stress_vs_remaining", true, ["stress_vs_remaining", "never", "always"]],
       ["policy.afterBlockedChoice", "choice", "try_next", true, ["try_next", "stop"]],
     ]);
-    expect(template.rows.at(-1)).toMatchObject({ label: "After a choice Pluto's checks refuse", choices: [{ value: "try_next", label: "Choose again, but no more opens where the account has no room" }, { value: "stop", label: "Stop for this look" }] });
+    // The baseline wheel's own rows come last.
+    expect(template.rows.filter((row) => row.group === "Baseline wheel").map((row) => [row.path, row.now, row.editable])).toEqual([
+      ["baseline.entry", "put", true],
+      ["baseline.minAbsDelta", 0.05, true],
+      ["baseline.maxAbsDelta", 0.6, true],
+      ["baseline.minDte", 1, true],
+      ["baseline.maxDte", 45, true],
+      ["baseline.callStrike", "delta_range", true],
+      ["baseline.callDeltaRange", "entry_range", true],
+      ["baseline.callMinAbsDelta", 0.05, true],
+      ["baseline.callMaxAbsDelta", 0.6, true],
+      ["baseline.takeProfitPct", 0, true],
+      ["baseline.shareStopLossPct", 0, true],
+      ["baseline.earnings", "ignore", true],
+      ["baseline.maxAccountPctPerStock", 100, true],
+      ["baseline.looks", "every_look", true],
+      ["baseline.volatilityEdgeFilter", "off", true],
+      ["baseline.minVolatilityEdgePoints", 0, true],
+      ["baseline.ranking", "premium_yield", true],
+    ]);
+    expect(template.rows.find((row) => row.path === "policy.afterBlockedChoice")).toMatchObject({ label: "After a choice Pluto's checks refuse", choices: [{ value: "try_next", label: "Choose again, but no more opens where the account has no room" }, { value: "stop", label: "Stop for this look" }] });
     // The AI model can be picked once the Claude Code CLI is configured.
     const decisionMakerChoices = async () => ((await request("GET", "/backtest/settings-template")).body as BacktestSettingsTemplate).rows.find((row) => row.path === "decisionMaker")?.choices;
+    const baselineChoice = { value: "baseline", label: "Baseline wheel (no Pluto rules, no Signals)" };
     expect(await withClaudeCliPath(undefined, decisionMakerChoices)).toEqual([
       { value: "rules", label: "Rules (below)" },
       { value: "llm", label: "The AI model", unavailableReason: "BACKTEST_CLAUDE_CLI_PATH is not set in the API's .env" },
+      baselineChoice,
     ]);
     expect(await withClaudeCliPath("/usr/local/bin/claude", decisionMakerChoices)).toEqual([
       { value: "rules", label: "Rules (below)" },
       { value: "llm", label: "The AI model" },
+      baselineChoice,
     ]);
     expect(template.notReplayed).toHaveLength(7);
     expect(template.notReplayed.join(" ")).not.toMatch(/macro|daily-loss breaker and market stress|one look a day/i);
@@ -439,7 +465,7 @@ describe("backtest routes", () => {
       expect(spawnBacktestJobProcessMock).toHaveBeenCalledWith(sessionJob.id);
       const row = await testDb("backtest_sessions").where({ id: session.id }).first("settings_snapshot", "overrides");
       expect(row.overrides).toEqual({ pluto: { minEdgeYieldPct: currentMinEdgeYield + 5 } });
-      expect(Object.keys(row.settings_snapshot).sort()).toEqual(["decisionMaker", "kellyFraction", "pluto", "policy", "trading"]);
+      expect(Object.keys(row.settings_snapshot).sort()).toEqual(["baseline", "decisionMaker", "kellyFraction", "model", "pluto", "policy", "trading"]);
       expect(row.settings_snapshot).toMatchObject({ decisionMaker: "rules", policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
       expect(row.settings_snapshot.pluto.minEdgeYieldPct).toBe(currentMinEdgeYield);
     });

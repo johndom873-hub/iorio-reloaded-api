@@ -1,4 +1,4 @@
-import { compareCandidatesByModel, type SignalCandidate, type SignalGrade, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
+import { compareCandidatesByRanking, type OpenCandidateRanking, type SignalCandidate, type SignalGrade, type SignalSurfaceSlice } from "../lib/signalCandidates.js";
 import { expectedDailyMovePct } from "./moveContext.js";
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { TickerSignals } from "../lib/signalsTypes.js";
@@ -388,14 +388,15 @@ export function coveredCallRollBreakEvenFailure(roll: RollSignalCandidate, score
   return null;
 }
 
-/** Eligible opens in the deterministic order (compareCandidatesByModel: Edge Yield, then Edge $). */
-export function rankEligibleOpens(eligible: PlutoOpenCandidate[]): PlutoOpenCandidate[] {
-  return [...eligible].sort((a, b) => compareCandidatesByModel(a.candidate, b.candidate));
+/** Eligible opens in the deterministic order (compareCandidatesByModel: Edge Yield, then Edge $; a backtest session may rank otherwise). */
+export function rankEligibleOpens(eligible: PlutoOpenCandidate[], ranking: OpenCandidateRanking = "edge_yield"): PlutoOpenCandidate[] {
+  const compare = compareCandidatesByRanking(ranking);
+  return [...eligible].sort((a, b) => compare(a.candidate, b.candidate));
 }
 
 /** The best eligible open by compareCandidatesByModel — the deterministic pick the ledger logs next to the model's. */
-export function deterministicTopPick(eligible: PlutoOpenCandidate[]): PlutoOpenCandidate | null {
-  return rankEligibleOpens(eligible)[0] ?? null;
+export function deterministicTopPick(eligible: PlutoOpenCandidate[], ranking: OpenCandidateRanking = "edge_yield"): PlutoOpenCandidate | null {
+  return rankEligibleOpens(eligible, ranking)[0] ?? null;
 }
 
 /**

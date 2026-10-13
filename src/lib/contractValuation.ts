@@ -44,10 +44,18 @@ export function yieldOnExposure(dollars: number, exposureDollars: number, calend
   return dollars / exposureDollars / Math.max(calendarYears, minimumAnnualizationYears);
 }
 
-export function gradeForEdgeMargin(edgeMargin: number): SignalGrade {
-  if (edgeMargin >= gradeMarginCutPoints.strong) return "strong";
-  if (edgeMargin >= gradeMarginCutPoints.good) return "good";
-  if (edgeMargin >= gradeMarginCutPoints.weak) return "weak";
+/** The edge margins the grades start at, as fractions. */
+export interface GradeMarginCutPoints {
+  strong: number;
+  good: number;
+  weak: number;
+}
+
+/** `cutPoints`: live always gradeMarginCutPoints; a backtest session may grade with its own. */
+export function gradeForEdgeMargin(edgeMargin: number, cutPoints: GradeMarginCutPoints = gradeMarginCutPoints): SignalGrade {
+  if (edgeMargin >= cutPoints.strong) return "strong";
+  if (edgeMargin >= cutPoints.good) return "good";
+  if (edgeMargin >= cutPoints.weak) return "weak";
   return "avoid";
 }
 

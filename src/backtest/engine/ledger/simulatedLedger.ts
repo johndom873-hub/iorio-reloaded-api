@@ -9,7 +9,8 @@ import type { PositionLegFigures } from "../../../lib/positionSelectors.js";
 
 export type LedgerStrategyKey = "cash_secured_put" | "covered_call" | "unstructured";
 export type LedgerCloseReason = "assigned" | "expired_worthless" | "closed_via_app" | "stock_rolled_into_covered_call";
-export type LedgerUnstructuredReason = "csp_assigned_stock" | "cc_expired_leftover_stock" | "unknown";
+/** cc_call_bought_back_stock: a covered call's call bought back alone (the baseline wheel's profit-taking); Pluto never does it. */
+export type LedgerUnstructuredReason = "csp_assigned_stock" | "cc_expired_leftover_stock" | "cc_call_bought_back_stock" | "unknown";
 
 /** positions. */
 export interface LedgerPosition {

@@ -37,6 +37,7 @@ import { BacktestScoringPool, scoringWorkerCount } from "./backtestScoringPool.j
 import { BacktestDayDataReader, type PrefetchedSymbolDay } from "./backtestDayDataReader.js";
 import { loadTreasuryBillRates, type TreasuryBillRates } from "./treasuryBillRates.js";
 import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
+import { runBaselineLook } from "./backtestBaselineLook.js";
 
 // The backtest engine's entry point (docs/backtesting/FORMULAS.md, FULL-FIDELITY-DESIGN.md, DATA-FILES.md). Called by the
 // job process (scripts/run-backtest-job.ts) for a backtest job. One session = one or several symbols from its start to
@@ -798,6 +799,19 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           }
         }
         if (lookSymbols.length === 0) continue;
+
+        // The baseline wheel has none of Pluto's checks.
+        if (settings.decisionMaker === "baseline") {
+          if (settings.baseline.looks === "first_look" && !isCaptureLook) continue;
+          const look = await runBaselineLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId });
+          actions.push(...look.actions);
+          optionSales.push(...look.optionSales);
+          const filledAtLook = look.actions.filter((action) => action.outcome === "filled").length;
+          filledActionsToday += filledAtLook;
+          looksOfDay.push({ lookTimeEt, summary: look.summaryOfActions, filledCount: filledAtLook, refusedCount: look.actions.length - filledAtLook, opensStopped: look.opensStopped });
+          if (!isCaptureLook) lookedAfterCapture = true;
+          continue;
+        }
 
         // The system checks, in passRunner's order. The daily-loss breaker stops Pluto for the rest of the day.
         const accountValueAtLook = isCaptureLook ? accountValue : ledgerNetLiquidationValue(ledger, priceByLegId);

@@ -32,7 +32,7 @@ const referenceVolatilityBarCount = 40;
 /** Bars loadBarsForTilt reads. */
 const tiltBarCount = 1500;
 /** Rows loadVolatilityForecasts reads. */
-const forecastBarRowCount = primaryForecastWindowDays + 1 + 20;
+export const forecastBarRowCount = primaryForecastWindowDays + 1 + 20;
 const decisionTimeEt = { hour: 10, minute: 0 };
 
 export interface BacktestTickerProfile {

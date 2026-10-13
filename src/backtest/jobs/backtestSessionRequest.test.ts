@@ -208,7 +208,10 @@ describe("validateBacktestSettingsOverrides", () => {
     });
     // Without the CLI the rules can still be chosen.
     expect(validateBacktestSettingsOverrides({ decisionMaker: "rules" }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({ ok: true, overrides: {} });
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "decisionMaker must be rules or llm." });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "decisionMaker must be rules, llm or baseline." });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "baseline", baseline: { entry: "buy_write", maxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({ ok: true, overrides: { decisionMaker: "baseline", baseline: { entry: "buy_write", maxAbsDelta: 0.4 } } });
+    expect(validateBacktestSettingsOverrides({ baseline: { minAbsDelta: 0.7 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "baseline.minAbsDelta must not be above baseline.maxAbsDelta." });
+    expect(validateBacktestSettingsOverrides({ baseline: { strangle: true } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "baseline.strangle cannot be changed for a session." });
     expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "llm" } }, { ...context, claudeCliAvailable: false })).toMatchObject({ ok: false, error: expect.stringContaining("BACKTEST_CLAUDE_CLI_PATH") });
     expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "llm" } }, context)).toMatchObject({ ok: true, value: { overrides: { decisionMaker: "llm" } } });
   });

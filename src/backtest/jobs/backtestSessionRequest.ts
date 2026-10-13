@@ -1,7 +1,7 @@
 import { validatePlutoSettingsInput, type PlutoSettingsInput } from "../../pluto/settingsStore.js";
 import { validateTradingSettingsInput } from "../../lib/tradingSettingsStore.js";
 import { normalizeBacktestSymbol } from "../backtestDataDirectory.js";
-import { backtestBookPageDefaultLimit, backtestBookPageMaxLimit, backtestMaxSymbolsPerSession, defaultBacktestPolicySettings, type BacktestPolicySettings, type BacktestSettings, type BacktestSettingsOverrides, type BacktestTablesMode } from "../backtestTypes.js";
+import { backtestBookPageDefaultLimit, backtestBookPageMaxLimit, backtestMaxSymbolsPerSession, defaultBacktestBaselineSettings, defaultBacktestPolicySettings, type BacktestBaselineSettings, type BacktestPolicySettings, type BacktestSettings, type BacktestSettingsOverrides, type BacktestTablesMode } from "../backtestTypes.js";
 import { backtestClaudeCliPathMissingMessage } from "../backtestClaudeCli.js";
 import { isIsoCalendarDate } from "./backtestJobRules.js";
 
@@ -81,7 +81,7 @@ export function validateBacktestSettingsOverrides(
 ): { ok: true; overrides: BacktestSettingsOverrides } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, overrides: {} };
   if (!isPlainObject(raw)) return { ok: false, error: "overrides must be an object." };
-  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "kellyFraction" && key !== "policy" && key !== "decisionMaker");
+  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "kellyFraction" && key !== "policy" && key !== "decisionMaker" && key !== "baseline");
   if (unknownSection) return { ok: false, error: `overrides.${unknownSection} is not a setting a session can change.` };
 
   const overrides: BacktestSettingsOverrides = {};
@@ -117,12 +117,52 @@ export function validateBacktestSettingsOverrides(
     if (Object.keys(changedPolicy).length > 0) overrides.policy = changedPolicy as Partial<BacktestPolicySettings>;
   }
 
+  if (raw.baseline !== undefined) {
+    if (!isPlainObject(raw.baseline)) return { ok: false, error: "overrides.baseline must be an object." };
+    const snapshotBaseline = { ...defaultBacktestBaselineSettings, ...snapshot.baseline };
+    const notEditable = Object.keys(raw.baseline).find((field) => !editablePaths.has(`baseline.${field}`));
+    if (notEditable) return { ok: false, error: `baseline.${notEditable} cannot be changed for a session.` };
+    const merged = { ...snapshotBaseline, ...raw.baseline } as Record<string, unknown>;
+    const problem = validateBaselineSettings(merged);
+    if (problem) return { ok: false, error: problem };
+    const changed = changedEntries(snapshotBaseline, raw.baseline);
+    if (Object.keys(changed).length > 0) overrides.baseline = changed as Partial<BacktestBaselineSettings>;
+  }
+
   if (raw.decisionMaker !== undefined) {
-    if (raw.decisionMaker !== "rules" && raw.decisionMaker !== "llm") return { ok: false, error: "decisionMaker must be rules or llm." };
+    if (raw.decisionMaker !== "rules" && raw.decisionMaker !== "llm" && raw.decisionMaker !== "baseline") return { ok: false, error: "decisionMaker must be rules, llm or baseline." };
     if (raw.decisionMaker === "llm" && !decisionMakers.claudeCliAvailable) return { ok: false, error: backtestClaudeCliPathMissingMessage };
     if (raw.decisionMaker !== (snapshot.decisionMaker ?? "rules")) overrides.decisionMaker = raw.decisionMaker;
   }
   return { ok: true, overrides };
+}
+
+/** The baseline wheel's values (BacktestBaselineSettings): null when they are valid. */
+export function validateBaselineSettings(values: Record<string, unknown>): string | null {
+  if (values.entry !== "put" && values.entry !== "buy_write") return "baseline.entry must be put or buy_write.";
+  for (const field of ["minAbsDelta", "maxAbsDelta", "callMinAbsDelta", "callMaxAbsDelta"] as const) {
+    const value = values[field];
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1) return `baseline.${field} must be a number above 0 and at most 1.`;
+  }
+  for (const field of ["minDte", "maxDte"] as const) {
+    const value = values[field];
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 45) return `baseline.${field} must be a whole number of days from 1 to 45 (the data files hold up to 45).`;
+  }
+  if (values.callStrike !== "delta_range" && values.callStrike !== "above_share_cost" && values.callStrike !== "above_break_even" && values.callStrike !== "none") return "baseline.callStrike must be delta_range, above_share_cost, above_break_even or none.";
+  if (values.callStrike === "none" && values.entry === "buy_write") return "baseline.callStrike none cannot go with a buy-write entry, which sells a call on its shares.";
+  if (values.callDeltaRange !== "entry_range" && values.callDeltaRange !== "own_range") return "baseline.callDeltaRange must be entry_range or own_range.";
+  if (typeof values.takeProfitPct !== "number" || !Number.isFinite(values.takeProfitPct) || values.takeProfitPct < 0 || values.takeProfitPct >= 100) return "baseline.takeProfitPct must be a number from 0 (off) to below 100.";
+  if (typeof values.shareStopLossPct !== "number" || !Number.isFinite(values.shareStopLossPct) || values.shareStopLossPct < 0 || values.shareStopLossPct >= 100) return "baseline.shareStopLossPct must be a number from 0 (off) to below 100.";
+  if (values.earnings !== "ignore" && values.earnings !== "skip_spanning") return "baseline.earnings must be ignore or skip_spanning.";
+  if (typeof values.maxAccountPctPerStock !== "number" || !Number.isFinite(values.maxAccountPctPerStock) || values.maxAccountPctPerStock <= 0 || values.maxAccountPctPerStock > 100) return "baseline.maxAccountPctPerStock must be a number above 0 and at most 100.";
+  if (values.looks !== "every_look" && values.looks !== "first_look") return "baseline.looks must be every_look or first_look.";
+  if (values.volatilityEdgeFilter !== "off" && values.volatilityEdgeFilter !== "entries" && values.volatilityEdgeFilter !== "all_sales") return "baseline.volatilityEdgeFilter must be off, entries or all_sales.";
+  if (typeof values.minVolatilityEdgePoints !== "number" || !Number.isFinite(values.minVolatilityEdgePoints) || Math.abs(values.minVolatilityEdgePoints) > 100) return "baseline.minVolatilityEdgePoints must be a number of volatility points from −100 to 100.";
+  if (values.ranking !== "premium_yield" && values.ranking !== "edge_yield") return "baseline.ranking must be premium_yield or edge_yield.";
+  if ((values.minAbsDelta as number) > (values.maxAbsDelta as number)) return "baseline.minAbsDelta must not be above baseline.maxAbsDelta.";
+  if ((values.callMinAbsDelta as number) > (values.callMaxAbsDelta as number)) return "baseline.callMinAbsDelta must not be above baseline.callMaxAbsDelta.";
+  if ((values.minDte as number) > (values.maxDte as number)) return "baseline.minDte must not be above baseline.maxDte.";
+  return null;
 }
 
 const formatWholeNumber = (value: number) => value.toLocaleString("en-US");

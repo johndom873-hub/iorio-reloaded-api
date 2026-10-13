@@ -514,6 +514,22 @@ export function compareCandidatesByModel(a: Pick<SignalCandidate, "model">, b: P
 }
 
 /**
+ * Which model figures order the opens. "edge_yield" is compareCandidatesByModel (live); a backtest session may rank by
+ * "hist_yield" (Hist Yield, then Hist Edge $: history's figures, live 2026-10-10 to 10-12) or "edge_dollars" (Edge $, then
+ * Edge Yield). Unvalued contracts last in every order.
+ */
+export type OpenCandidateRanking = "edge_yield" | "hist_yield" | "edge_dollars";
+
+export function compareCandidatesByRanking(ranking: OpenCandidateRanking): (a: Pick<SignalCandidate, "model">, b: Pick<SignalCandidate, "model">) => number {
+  if (ranking === "edge_yield") return compareCandidatesByModel;
+  return (a, b) => {
+    if (!a.model || !b.model) return (b.model ? 1 : 0) - (a.model ? 1 : 0);
+    if (ranking === "hist_yield") return b.model.calibratedAnnualizedReturn - a.model.calibratedAnnualizedReturn || b.model.calibratedExpectedPnlDollars - a.model.calibratedExpectedPnlDollars;
+    return b.model.expectedPnlDollars - a.model.expectedPnlDollars || b.model.expectedAnnualizedReturn - a.model.expectedAnnualizedReturn;
+  };
+}
+
+/**
  * The candidate the Signals screen shows as a ticker's top signal, in Pluto's order (mockup approved 2026-10-10): highest Edge Yield,
  * then Edge $. Candidates the model could not value come last, by the old Edge $ and net Edge.
  */

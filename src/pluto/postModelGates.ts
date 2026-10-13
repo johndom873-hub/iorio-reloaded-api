@@ -65,6 +65,8 @@ export interface PostModelGateInput {
   stress: StressCapInput;
   /** Share of full Kelly to size with; Pluto's fixed kellyFraction when omitted (a backtest session passes its own). */
   kellyFraction?: number;
+  /** What the Kelly cap's μ is; Edge $ when omitted (a backtest session may pass its own). */
+  kellyBasis?: KellyEdgeBasis;
 }
 
 export interface StressCapInput {
@@ -209,19 +211,29 @@ export interface KellyCap {
   detail: string;
 }
 
-/** `fraction` is Pluto's fixed kellyFraction live; a backtest session sizes with its own. */
-export function computeKellyCap(settings: PlutoSettings, contract: Pick<SignalCandidate, "strategyKey"> & { model: Pick<CandidateModelScore, "expectedPnlDollars" | "pnlVarianceDollars" | "coveredPositionPnlVarianceDollars"> | null }, netLiquidationValue: number, fraction: number = kellyFraction): KellyCap {
+/** What μ is: the model's Edge $ (live), or history's Hist Edge $ (live until 2026-10-12; a backtest session may choose it). */
+export type KellyEdgeBasis = "edge_dollars" | "hist_edge_dollars";
+
+/** `fraction` is Pluto's fixed kellyFraction live and `basis` Edge $; a backtest session sizes with its own. */
+export function computeKellyCap(
+  settings: PlutoSettings,
+  contract: Pick<SignalCandidate, "strategyKey"> & { model: (Pick<CandidateModelScore, "expectedPnlDollars" | "pnlVarianceDollars" | "coveredPositionPnlVarianceDollars"> & Partial<Pick<CandidateModelScore, "calibratedExpectedPnlDollars">>) | null },
+  netLiquidationValue: number,
+  fraction: number = kellyFraction,
+  basis: KellyEdgeBasis = "edge_dollars",
+): KellyCap {
   const model = contract.model;
   if (!model) return { contracts: 0, detail: "Kelly cap: the contract has no model valuation" };
   const bankroll = (netLiquidationValue * settings.capitalBudgetPct) / 100;
-  const mu = model.expectedPnlDollars;
-  if (!(mu > 0)) return { contracts: 0, detail: `Kelly cap: Edge ${formatWholeDollars(mu)}/contract ≤ 0, so no contracts` };
+  const mu = basis === "hist_edge_dollars" ? (model.calibratedExpectedPnlDollars ?? Number.NaN) : model.expectedPnlDollars;
+  const edgeLabel = basis === "hist_edge_dollars" ? "Hist Edge" : "Edge";
+  if (!(mu > 0)) return { contracts: 0, detail: `Kelly cap: ${edgeLabel} ${formatWholeDollars(mu)}/contract ≤ 0, so no contracts` };
   const isCall = contract.strategyKey === "covered_call";
   const variance = isCall ? model.coveredPositionPnlVarianceDollars : model.pnlVarianceDollars;
   const contracts = variance !== null && variance > 0 ? Math.floor((fraction * bankroll * mu) / variance) : 0;
   return {
     contracts,
-    detail: `Kelly cap: ${fraction} × ${formatWholeDollars(bankroll)} budget × Edge ${formatWholeDollars(mu)}/contract ÷ P&L variance${isCall ? " (shares + call)" : ""} → ${contracts} contract(s)`,
+    detail: `Kelly cap: ${fraction} × ${formatWholeDollars(bankroll)} budget × ${edgeLabel} ${formatWholeDollars(mu)}/contract ÷ P&L variance${isCall ? " (shares + call)" : ""} → ${contracts} contract(s)`,
   };
 }
 
@@ -267,13 +279,13 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
     const byRoom = Math.floor(Math.max(0, roomDollars) / unitNotional);
     const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
-    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction);
+    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction, input.kellyBasis);
     fullSizeQuantity = Math.min(byRoom, liquidityCap, stressCap.contracts, kellyCap.contracts);
     gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at ${formatWholeDollars(unitNotional)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → ${formatWholeDollars(fullSizeQuantity * unitNotional)}`);
   } else {
     // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
     // contract is a buy-write that buys 100 shares at the live spot, sized from the same room as a put.
-    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction);
+    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction, input.kellyBasis);
     // One Kelly cap for all the call's contracts, on shares + call: free-share contracts first, buy-writes within what is left.
     const coveredByShares = Math.min(Math.floor(book.freeShares / 100), kellyCap.contracts);
     if (book.spotPrice === null || !(book.spotPrice > 0)) {

@@ -20,10 +20,12 @@ import { loadTreasuryBillRates, type TreasuryBillRates } from "./treasuryBillRat
 //          (their reciprocals). Among factors within ±3% the one made of the fewest splits wins, then the nearest.
 //   F is piecewise constant: each valid day's factor is the snapped median of the 5 valid days centred on it; a run of
 //   one factor counts only when it holds for at least 5 valid days. Days with no valid ratio, and gaps of fewer than 5
-//   valid days between two runs of the same factor, take that factor; between two different factors the change point is
-//   the one the gap's own ratios fit best; an edge stretch takes its neighbour's factor when its ratios agree with it.
-//   Anything else (5 or more valid days no factor holds for, a new factor seen on fewer than 5 days at the file's edge)
-//   stays unresolved: a session touching it fails, naming the dates and the raw ratios (never a guess).
+//   valid days between two runs of the same factor, take that factor; so does a longer gap between two runs of the same
+//   factor (at most 30 file days) whose median ratio is nearer that factor than any other nice factor: a stock does not
+//   split and un-split within weeks, it is a thin chain's noisy closing quotes (AAOI 2022 at $2–3). Between two different
+//   factors the change point is the one the gap's own ratios fit best; an edge stretch takes its neighbour's factor when
+//   its ratios agree with it. Anything else (5 or more valid days no factor holds for, a new factor seen on fewer than 5
+//   days at the file's edge) stays unresolved: a session touching it fails, naming the dates and the raw ratios.
 //
 // A detected split is a change point: { last day on the old scale, first day on the new, ratio = F(before) ÷ F(after) }.
 
@@ -31,8 +33,10 @@ export const standardSplitRatios: readonly number[] = [2, 3, 4, 5, 6, 7, 8, 10, 
 export const splitSnapTolerance = 0.03;
 export const splitPersistenceDays = 5;
 export const maximumSplitsPerFactor = 3;
+/** The longest gap (file days) between two runs of the same factor that takes that factor when its median is nearest it. */
+export const maximumSameFactorGapDays = 30;
 /** Raise when the rule or the cache format changes, so cached schedules are rebuilt. */
-const splitScheduleVersion = 1;
+const splitScheduleVersion = 2;
 
 export interface NiceSplitFactor {
   factor: number;
@@ -70,6 +74,13 @@ export function snapToNiceSplitFactor(ratio: number): number | null {
     if (!best || candidate.splitCount < best.factor.splitCount || (candidate.splitCount === best.factor.splitCount && distance < best.distance)) best = { factor: candidate, distance };
   }
   return best?.factor.factor ?? null;
+}
+
+/** The nice factor nearest a ratio (log distance), however far. */
+export function nearestNiceSplitFactor(ratio: number): number {
+  let nearest = niceSplitFactors[0]!.factor;
+  for (const candidate of niceSplitFactors) if (Math.abs(Math.log(ratio / candidate.factor)) < Math.abs(Math.log(ratio / nearest))) nearest = candidate.factor;
+  return nearest;
 }
 
 export interface DailySplitRatio {
@@ -156,7 +167,13 @@ export function inferSplitSchedule(days: readonly DailySplitRatio[]): SplitSched
       const gapFrom = validDayIndexes[before.lastPosition]! + 1;
       const gapTo = validDayIndexes[after.firstPosition]! - 1;
       const gapValid = validIn(gapFrom, gapTo);
-      // Five or more valid days that formed no persistent run are a stretch no standard factor explains, whatever lies around it.
+      const noisyGapOfOneFactor =
+        before.factor === after.factor && gapTo - gapFrom + 1 <= maximumSameFactorGapDays && nearestNiceSplitFactor(median(gapValid.map((dayIndex) => ratioOf(dayIndex)!))) === before.factor;
+      if (gapValid.length >= splitPersistenceDays && noisyGapOfOneFactor) {
+        assign(gapFrom, gapTo, before.factor);
+        continue;
+      }
+      // Otherwise, five or more valid days that formed no persistent run are a stretch no standard factor explains.
       if (gapValid.length >= splitPersistenceDays) {
         markUnresolved(gapFrom, gapTo);
         continue;
