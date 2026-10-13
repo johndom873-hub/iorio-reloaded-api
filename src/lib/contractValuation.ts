@@ -1,4 +1,5 @@
 import type { SignalGrade } from "./signalCandidates.js";
+import { exactInputCachesAreEnabled } from "./exactInputCaches.js";
 import { RecentEntriesCache } from "./recentEntriesCache.js";
 import { calibratedEdgeMargin, standardizedReturnBucketsFor, type ValuationGroup, type VolatilityModelTables } from "./volatilityModelTables.js";
 
@@ -132,13 +133,15 @@ function pricesAtExpiry(buckets: readonly number[], totalStandardDeviation: numb
 /**
  * Valuations already made, by their exact inputs and tables: a quote that has not moved is valued again with the same
  * figures (the next look scored ahead, then for real). Each answer is handed out as a copy (its fields are all plain
- * values). About the latest day's worth are kept.
+ * values). About the latest day's worth are kept. Only where the exact-input caches are on (exactInputCaches.ts): live
+ * quotes move with every tick.
  */
 const valuationsByKey = new RecentEntriesCache<string, ContractValuation | null>(50_000);
 const tablesIds = new WeakMap<VolatilityModelTables, number>();
 let nextTablesId = 1;
 
 export function valueContract(tables: VolatilityModelTables, input: ContractValuationInput): ContractValuation | null {
+  if (!exactInputCachesAreEnabled()) return computeContractValuation(tables, input);
   let tablesId = tablesIds.get(tables);
   if (tablesId === undefined) tablesIds.set(tables, (tablesId = nextTablesId++));
   const valuations = valuationsByKey;

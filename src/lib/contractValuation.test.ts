@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { gradeForEdgeMargin, valueContract, type ContractValuationInput } from "./contractValuation.js";
+import { gradeForEdgeMargin, valueContract, type ContractValuation, type ContractValuationInput } from "./contractValuation.js";
+import { enableExactInputCaches, exactInputCachesAreEnabled } from "./exactInputCaches.js";
 import { calibratedEdgeMargin, standardizedReturnBucketsFor, type VolatilityModelTables } from "./volatilityModelTables.js";
 import { volatilityModelTables } from "./volatilityModelTables.generated.js";
 import { blackScholesPriceOnForward } from "./impliedVolatilitySurface.js";
@@ -162,15 +163,15 @@ function inverseStandardNormal(p: number): number {
 }
 
 describe("valueContract answers the same in any order", () => {
-  // Valuations are kept by their exact inputs and the strikes of an expiry share their outcome prices: the answer may
-  // not depend on what was valued before, and each caller gets its own copy.
-  it("valued fresh, interleaved and again", () => {
-    const inputs: ContractValuationInput[] = [];
-    for (const varianceSessions of [3.5, 12.25, 30]) {
-      for (const strike of [80, 95, 100, 105, 120]) {
-        for (const isCall of [true, false]) inputs.push({ isCall, strike, forward: 101, mid: 1.5 + strike / 100, frictionDollars: 3, perSessionVariance: 0.0006, varianceSessions, calendarYears: varianceSessions / 252, riskFreeRate: 0.04, group: "stock", spot: 100.5 });
-      }
+  // Valuations are kept by their exact inputs (where the exact-input caches are on) and the strikes of an expiry share
+  // their outcome prices: the answer may not depend on what was valued before, and each caller gets its own copy.
+  const inputs: ContractValuationInput[] = [];
+  for (const varianceSessions of [3.5, 12.25, 30]) {
+    for (const strike of [80, 95, 100, 105, 120]) {
+      for (const isCall of [true, false]) inputs.push({ isCall, strike, forward: 101, mid: 1.5 + strike / 100, frictionDollars: 3, perSessionVariance: 0.0006, varianceSessions, calendarYears: varianceSessions / 252, riskFreeRate: 0.04, group: "stock", spot: 100.5 });
     }
+  }
+  function valuedInAnyOrder(): (ContractValuation | null)[] {
     const inOrder = inputs.map((input) => valueContract(volatilityModelTables, input));
     const reversed = [...inputs].reverse().map((input) => valueContract(volatilityModelTables, input)).reverse();
     const interleaved = inputs.map((_, index) => inputs[(index * 7) % inputs.length]!).map((input) => [input, valueContract(volatilityModelTables, input)] as const);
@@ -179,5 +180,18 @@ describe("valueContract answers the same in any order", () => {
     const first = valueContract(volatilityModelTables, inputs[0]!)!;
     first.fairPrice = -1;
     expect(valueContract(volatilityModelTables, inputs[0]!)).toStrictEqual(inOrder[0]);
+    return inOrder;
+  }
+
+  // Off first: switching the caches on lasts for the rest of this file.
+  it("caches off, as in the API and Pluto's agent: valued fresh, interleaved and again", () => {
+    expect(exactInputCachesAreEnabled()).toBe(false);
+    valuedInAnyOrder();
+  });
+
+  it("caches on, as in a backtest: the same answers as with them off", () => {
+    const uncached = inputs.map((input) => valueContract(volatilityModelTables, input));
+    enableExactInputCaches();
+    expect(valuedInAnyOrder()).toStrictEqual(uncached);
   });
 });

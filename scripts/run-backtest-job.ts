@@ -2,6 +2,7 @@ import "dotenv/config";
 import { db } from "../src/db/connection.js";
 import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
 import { executeBacktestJob } from "../src/backtest/jobs/executeBacktestJob.js";
+import { enableExactInputCaches } from "../src/lib/exactInputCaches.js";
 
 // One backtest job (a ThetaData download or a backtest run) in its own process (docs/backtesting/DATA-FILES.md). The
 // API spawns it detached when the job starts; it also runs from the command line.
@@ -11,6 +12,7 @@ import { executeBacktestJob } from "../src/backtest/jobs/executeBacktestJob.js";
 async function main(): Promise<void> {
   const jobId = process.argv[2]?.trim();
   if (!jobId) throw new Error("Usage: npm run backtest:job -- <jobId>");
+  enableExactInputCaches();
   await executeBacktestJob(jobId);
 }
 

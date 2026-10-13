@@ -1,4 +1,5 @@
 import { parentPort } from "node:worker_threads";
+import { enableExactInputCaches } from "../../lib/exactInputCaches.js";
 import { scoreHeldShareCalls, scoreTicker } from "../../lib/signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "../../lib/signalsTypes.js";
 import type { VolatilityModelTables } from "../../lib/volatilityModelTables.js";
@@ -14,6 +15,7 @@ import { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 
 if (!parentPort) throw new Error("backtestScoringWorker.ts runs as a worker thread of a backtest session.");
 const port = parentPort;
+enableExactInputCaches();
 
 let calendar: BacktestTradingCalendar | null = null;
 const symbolState = new Map<string, { profile: Extract<BacktestScoringWorkerRequest, { type: "init" }>["symbols"][number]["profile"]; bars: BacktestBarHistory; barsByFactor: Map<number, BacktestBarHistory>; inputsByDay: Map<string, TickerSignalsInputs> }>();

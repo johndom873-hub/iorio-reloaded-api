@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { enableExactInputCaches, exactInputCachesAreEnabled } from "./exactInputCaches.js";
 import {
   blackScholesPriceOnForward,
   buildSviFitPoints,
@@ -429,7 +430,7 @@ describe("impliedVolatilityFromPrice gives exactly the plain 80-step bisection",
     return (low + high) / 2;
   }
 
-  it("on thousands of contracts, asked once and again", () => {
+  function expectPlainBisectionOnThousandsOfContracts(): void {
     let seed = 12345;
     const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
     for (let index = 0; index < 4000; index++) {
@@ -443,5 +444,16 @@ describe("impliedVolatilityFromPrice gives exactly the plain 80-step bisection",
       expect(Object.is(impliedVolatilityFromPrice(price, forward, strike, years, rate, isCall), expected)).toBe(true);
       expect(Object.is(impliedVolatilityFromPrice(price, forward, strike, years, rate, isCall), expected)).toBe(true);
     }
+  }
+
+  // Off first: switching the caches on lasts for the rest of this file.
+  it("on thousands of contracts, asked once and again, caches off (the API and Pluto's agent)", () => {
+    expect(exactInputCachesAreEnabled()).toBe(false);
+    expectPlainBisectionOnThousandsOfContracts();
+  });
+
+  it("the same with the exact-input caches on (a backtest)", () => {
+    enableExactInputCaches();
+    expectPlainBisectionOnThousandsOfContracts();
   });
 });

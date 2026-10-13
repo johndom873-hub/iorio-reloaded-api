@@ -1,4 +1,5 @@
 import { standardNormalCdf } from "./blackScholesPop.js";
+import { exactInputCachesAreEnabled } from "./exactInputCaches.js";
 import { RecentEntriesCache } from "./recentEntriesCache.js";
 import { median } from "./statistics.js";
 
@@ -124,12 +125,14 @@ const impliedVolatilityUpperBound = 5;
 /**
  * Answers already solved, by their exact inputs: one scoring solves a contract's volatility for the expiry shift, the
  * filters and the model, and a look scored ahead is scored again for real. About the latest day's worth are kept (the 10:00 quotes come back at every look).
+ * Only where the exact-input caches are on (exactInputCaches.ts): live prices move with every tick.
  */
 const solvedImpliedVolatilities = new RecentEntriesCache<string, number | null>(100_000);
 
 /** Bisection; null when the price lies outside what volatilities in [1%, 500%] can produce (below intrinsic, or absurdly high). */
 export function impliedVolatilityFromPrice(price: number, forward: number, strike: number, yearsToExpiry: number, riskFreeRate: number, isCall: boolean): number | null {
   if (!(price > 0) || !(yearsToExpiry > 0) || !(forward > 0) || !(strike > 0)) return null;
+  if (!exactInputCachesAreEnabled()) return solveImpliedVolatility(price, forward, strike, yearsToExpiry, riskFreeRate, isCall);
   const key = `${price}|${forward}|${strike}|${yearsToExpiry}|${riskFreeRate}|${isCall ? "C" : "P"}`;
   const solved = solvedImpliedVolatilities.get(key);
   if (solved !== undefined) return solved;
