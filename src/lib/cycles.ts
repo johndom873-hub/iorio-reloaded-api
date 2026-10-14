@@ -101,6 +101,8 @@ export interface CycleTimelineRow {
   quantity: number;
   /** Option strike; null for stock rows. */
   strike: number | null;
+  /** Option expiry ("YYYY-MM-DD"); null for stock rows, and for a mark row whose open legs expire on different dates. */
+  expiryDate: string | null;
   /** Underlying price: the real fill for a stock trade, else that date's daily close (the only stock price we store for option fills). */
   stockPrice: number | null;
   /** The purchase of a hedge option that is still held: its cost is not a realized loss, it belongs with the open mark (unrealized). */
@@ -111,6 +113,7 @@ interface RowMeta {
   instrument: "stock" | "option";
   quantity: number;
   strike: number | null;
+  expiryDate: string | null;
   stockPrice: number | null;
   unrealized?: boolean;
 }
@@ -363,8 +366,8 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
             0,
             stockPnl,
             event.kind === "sell"
-              ? { instrument: "stock", quantity: taken, strike: null, stockPrice: event.fillPrice ?? event.price }
-              : { instrument: "option", quantity: taken, strike: event.price, stockPrice: event.expiryClose ?? null },
+              ? { instrument: "stock", quantity: taken, strike: null, expiryDate: null, stockPrice: event.fillPrice ?? event.price }
+              : { instrument: "option", quantity: taken, strike: event.price, expiryDate: event.leg!.expiryDate, stockPrice: event.expiryClose ?? null },
           );
           pools[pool].shares -= taken;
           remaining -= taken;
@@ -382,7 +385,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       for (const event of acquisitions) {
         if (event.kind === "putAssigned") {
           const marketPrice = event.expiryClose!;
-          addRow(event.at, "Put assigned: shares bought at the strike", "csp", 0, event.shares * (marketPrice - event.price), { instrument: "option", quantity: event.shares, strike: event.price, stockPrice: marketPrice });
+          addRow(event.at, "Put assigned: shares bought at the strike", "csp", 0, event.shares * (marketPrice - event.price), { instrument: "option", quantity: event.shares, strike: event.price, expiryDate: event.leg!.expiryDate, stockPrice: marketPrice });
           enterPool("unstructured", event.shares, marketPrice);
         } else {
           enterPool("unstructured", event.shares, event.price);
@@ -411,7 +414,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       const bucket = optionLegBucket(leg);
       const sign = leg.side === "short" ? 1 : -1;
       const contractShares = leg.quantity * leg.multiplier;
-      const optionMeta: RowMeta = { instrument: "option", quantity: contractShares, strike: leg.strike, stockPrice: closeFor(event.at) };
+      const optionMeta: RowMeta = { instrument: "option", quantity: contractShares, strike: leg.strike, expiryDate: leg.expiryDate, stockPrice: closeFor(event.at) };
       if (event.kind === "optionOpen" && leg.side === "long" && leg.exitAt === null) optionMeta.unrealized = true;
       if (event.kind === "optionOpen") {
         const credit = sign * leg.entryPrice * contractShares;
@@ -440,14 +443,14 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       const useCost = delta > 0 && purchaseAverage !== null && pools.unstructured.shares - purchasedShares < moved; // moving newly bought shares
       const handoffPrice = useCost ? purchaseAverage! : closeFor(at) ?? pools[from].ref;
       const realized = moved * (handoffPrice - pools[from].ref);
-      if (realized !== 0) addRow(at, `Shares handed ${from === "unstructured" ? "to CC" : "to Unstructured"}`, from === "cc" ? "cc" : "unstructured", 0, realized, { instrument: "stock", quantity: moved, strike: null, stockPrice: handoffPrice });
+      if (realized !== 0) addRow(at, `Shares handed ${from === "unstructured" ? "to CC" : "to Unstructured"}`, from === "cc" ? "cc" : "unstructured", 0, realized, { instrument: "stock", quantity: moved, strike: null, expiryDate: null, stockPrice: handoffPrice });
       pools[from].shares -= moved;
       enterPool(to, moved, handoffPrice);
     }
 
     // Shares bought: a row so the acquisition shows up (P&L starts at zero); owned by CC when a call covers them right away.
     for (const buy of groupBuys) {
-      addRow(buy.at, "Bought shares", pools.cc.shares > 0 ? "cc" : "unstructured", 0, 0, { instrument: "stock", quantity: buy.shares, strike: null, stockPrice: buy.fillPrice ?? buy.price });
+      addRow(buy.at, "Bought shares", pools.cc.shares > 0 ? "cc" : "unstructured", 0, 0, { instrument: "stock", quantity: buy.shares, strike: null, expiryDate: null, stockPrice: buy.fillPrice ?? buy.price });
     }
 
     // Capital = value of shares when they entered a bucket (net of anything that left in the same step).
@@ -464,7 +467,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     if (lastPrice === null) dataFlags.push("no price to mark the shares still held");
     else {
       for (const pool of ["cc", "unstructured"] as const) {
-        if (pools[pool].shares > 0) addRow(null, `Marked to the ${lastPrice.date} close`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref), { instrument: "stock", quantity: pools[pool].shares, strike: null, stockPrice: lastPrice.price });
+        if (pools[pool].shares > 0) addRow(null, `Marked to the ${lastPrice.date} close`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref), { instrument: "stock", quantity: pools[pool].shares, strike: null, expiryDate: null, stockPrice: lastPrice.price });
       }
     }
   }
@@ -489,6 +492,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
         instrument: "option",
         quantity: legs.reduce((sum, leg) => sum + leg.quantity * leg.multiplier, 0),
         strike: new Set(legs.map((leg) => leg.strike)).size === 1 ? legs[0]!.strike : null,
+        expiryDate: new Set(legs.map((leg) => leg.expiryDate)).size === 1 ? legs[0]!.expiryDate : null,
         stockPrice: lastPrice?.price ?? null,
       });
     }

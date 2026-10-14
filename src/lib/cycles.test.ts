@@ -74,6 +74,27 @@ describe("put assignment fills", () => {
   });
 });
 
+describe("timeline expiry", () => {
+  it("carries the contract's expiry on option rows and none on stock rows", () => {
+    const cycle = openCycle(inputWith([assignmentFill()]));
+    expect(cycle.timeline.map((row) => [row.label, row.expiryDate])).toEqual([
+      ["Sold put @ 2.59", "2026-09-25"],
+      ["Put assigned: shares bought at the strike", "2026-09-25"],
+      ["Marked to the 2026-09-25 close", null],
+    ]);
+  });
+
+  it("gives an open position's mark row the expiry its legs share, and none when they differ", () => {
+    const openPut = (id: string, expiryDate: string) => assignedPutLeg({ id, positionId: "pos-open", exitAt: null, expiryDate });
+    const markRow = (legs: CycleOptionLeg[]) => {
+      const input = { ...inputWith([], legs), stockLegs: [], openPositionPremiumPnl: new Map([["pos-open", 100]]) };
+      return openCycle(input).timeline.find((row) => row.at === null)!;
+    };
+    expect(markRow([openPut("a", "2026-10-16"), openPut("b", "2026-10-16")]).expiryDate).toBe("2026-10-16");
+    expect(markRow([openPut("a", "2026-10-16"), openPut("b", "2026-10-23")]).expiryDate).toBeNull();
+  });
+});
+
 describe("hedge (long option) legs", () => {
   const hedgeLeg = (overrides: Partial<CycleOptionLeg> = {}): CycleOptionLeg => ({
     id: "hedge-leg", positionId: "pos-hedge", side: "long", optionType: "call", strike: 82, quantity: 110, multiplier: 100, entryPrice: 3.918,
