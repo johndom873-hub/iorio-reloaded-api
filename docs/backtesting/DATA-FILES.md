@@ -10,11 +10,11 @@ Local-only (Marcelo's Mac). Decisions: `project_backtesting_design_decisions_202
 - `fred-DTB3.json` — the 3-month T-bill series cache (risk-free rate and interest on cash), written by the engine.
 - `tables/<YEAR>.json` — walk-forward model tables built from history before 1 January of YEAR, written by the engine.
 
-## Symbol file (`<SYMBOL>.sqlite`, schema version 1)
+## Symbol file (`<SYMBOL>.sqlite`, schema version 3)
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- keys: symbol, schema_version ('2'), quote_time_et ('10:00:00'), max_dte ('45'), created_at (ISO UTC),
+-- keys: symbol, schema_version ('3'), quote_time_et ('10:00:00'), max_dte ('all'), created_at (ISO UTC),
 --       intraday_interval ('30m'), intraday_window ('10:00-15:30')
 
 CREATE TABLE days (
@@ -23,10 +23,11 @@ CREATE TABLE days (
   quote_rows INTEGER NOT NULL,
   eod_rows INTEGER NOT NULL,
   open_interest_rows INTEGER NOT NULL,
-  fetched_at TEXT NOT NULL                -- ISO UTC
+  fetched_at TEXT NOT NULL,               -- ISO UTC
+  all_expiries INTEGER NOT NULL DEFAULT 0 -- 1 = its quotes, eod and open_interest rows hold every expiry; 0 = stored with the 45-day cap, to be completed
 );
 
--- Every contract's last NBBO at or before 10:00:00 ET, expiries 0..45 days after trading_date.
+-- Every contract's last NBBO at or before 10:00:00 ET, every expiry from trading_date on (0..45 days in a day stored with the cap).
 CREATE TABLE quotes (
   trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
   option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
@@ -35,7 +36,7 @@ CREATE TABLE quotes (
   PRIMARY KEY (trading_date, expiry, strike, option_right)
 ) WITHOUT ROWID;
 
--- That day's end-of-day per contract (ThetaData builds it ~17:15 ET), expiries 0..46 days.
+-- That day's end-of-day per contract (ThetaData builds it ~17:15 ET), every expiry (0..46 days in a day stored with the cap).
 CREATE TABLE eod (
   trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
   option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
@@ -44,7 +45,7 @@ CREATE TABLE eod (
 ) WITHOUT ROWID;
 
 -- Open interest as ThetaData reports it for trading_date (the previous session's closing OI, published ~06:30 ET),
--- i.e. what Pluto sees at 10:00. Expiries 0..46 days.
+-- i.e. what Pluto sees at 10:00. Every expiry (0..46 days in a day stored with the cap).
 CREATE TABLE open_interest (
   trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
   option_right TEXT NOT NULL CHECK (option_right IN ('C', 'P')),
@@ -59,11 +60,13 @@ CREATE TABLE intraday_days (
   look_count INTEGER NOT NULL,            -- distinct look times stored (12 on a normal day)
   quote_rows INTEGER NOT NULL,
   strike_window_pct REAL,                 -- the --intraday-strike-window-pct applied to this day; NULL = every strike
-  fetched_at TEXT NOT NULL                -- ISO UTC
+  fetched_at TEXT NOT NULL,               -- ISO UTC
+  all_expiries INTEGER NOT NULL DEFAULT 0 -- 1 = its intraday_quotes rows hold every expiry; 0 = stored with the 45-day cap, to be completed
 );
 
 -- Every contract's NBBO at each look: the last quote at or before the look time, the same values
--- option_at_time_quote gives for that time. Looks every 30 minutes from 10:00 to 15:30 ET, expiries 0..45 days.
+-- option_at_time_quote gives for that time. Looks every 30 minutes from 10:00 to 15:30 ET, every expiry (0..45 days in a
+-- day stored with the cap).
 CREATE TABLE intraday_quotes (
   trading_date TEXT NOT NULL, look_time TEXT NOT NULL,   -- 'HH:MM' Eastern
   expiry TEXT NOT NULL, strike REAL NOT NULL,
@@ -93,12 +96,15 @@ CREATE TABLE unavailable_days (
 );
 ```
 
-`schema_version` `'2'` is a file with every table above. `intraday_days`, `intraday_quotes`, `day_issues` and `unavailable_days` were added after the first downloads, and `day_issues.attempts` after those: the downloader creates what a `'1'` file lacks (and the two intraday meta keys) when it opens it, and sets its `schema_version` to `'2'`. Readers accept both versions.
+`schema_version` `'3'` is a file with every table and column above. `intraday_days`, `intraday_quotes`, `day_issues` and `unavailable_days` were added after the first downloads, `day_issues.attempts` after those (version `'2'`), and the `all_expiries` flags when the downloader began keeping every expiry (version `'3'`). Before that it kept expiries 0..45 days after the trading date for the 10:00 and intraday quotes, 0..46 for the end of day and the open interest (`max_dte` `'45'`). When it opens an older file, the downloader creates what the file lacks (and the two intraday meta keys), adds the flags at 0 (1 for `no_data` days, which have nothing to complete), and sets `max_dte` to `'all'` and `schema_version` to `'3'`. Readers accept the three versions.
+
+The engine reads expiries 0..45 days out (0..46 for the end of day and the open interest) whatever the file holds, and of the `day_issues` only those about a whole part or an expiration in that window, so a file completed to every expiry replays every session as before. Longer-dated contracts are read once a strategy uses them.
 
 Rules:
 
 - A day's rows and its `days` row are written in one transaction: a day is fully present or absent. The same holds for its intraday quotes and `intraday_days` row. Both parts of a day fetched in one run share one transaction.
-- A day is done when it has a `days` row and, unless that row says `no_data`, an `intraday_days` row. Resuming works through every weekday from the requested start to the last finished session that is not done, and fetches only what the day lacks: a file downloaded before intraday quotes existed gets only those, without its 10:00 parts being fetched again.
+- A day is done when it has a `days` row and, unless that row says `no_data`, an `intraday_days` row, both with `all_expiries = 1`. Resuming works through every weekday from the requested start to the last finished session that is not done, and fetches only what the day lacks: a file downloaded before intraday quotes existed gets only those, without its 10:00 parts being fetched again.
+- A part stored with the 45-day cap (`all_expiries = 0`) is completed: fetched again for every expiry, and only the rows the day lacks are added (a stored row is left as it is). Its row counts and flag are updated in the same transaction. A completion that cannot retrieve one of the three 10:00 parts at all completes none of them, and one that cannot retrieve the intraday quotes leaves them as they are; either way the day gets no `unavailable_days` row and is completed on a later run. Issues the completion settles are deleted; what it leaves out gets a `day_issues` row.
 - A weekday with no data at all (exchange holiday) is stored as `status = 'no_data'` with zero counts, so it is not fetched again.
 - The last finished session: today counts only after 18:00 ET (EOD is built ~17:15 ET); otherwise the last weekday before today.
 - Prices are dollars; strikes are dollars (ThetaData's tenth-of-a-cent strikes converted).
@@ -110,7 +116,7 @@ Rules:
 A fault in ThetaData's data for one day (for example `INTERNAL: Corrupt FIT data`) never stops a download:
 
 1. Each part of a day (`quotes`, `eod`, `open_interest`, `intraday_quotes`) is one request for all expirations. When it still fails after its retries, or answers with rows that cannot be used (an unreadable expiration or strike), the downloader first asks again for data it has already stored (the latest stored day, one expiration, the same kind of request; while the file holds no such day yet, the symbol's list of expirations). If that fails too, ThetaData is having a problem: the run ends with an error and nothing is recorded for the day.
-2. Otherwise the fault belongs to the day: the part is asked for one expiration at a time (every expiration the symbol lists within 45 days of the trading date, 46 for `eod` and `open_interest`). What comes back is stored; each expiration that still fails gets a `day_issues` row, and the day is stored as `complete` with what was retrieved.
+2. Otherwise the fault belongs to the day: the part is asked for one expiration at a time (every expiration the symbol lists from the trading date to 1,100 days after it; completing a part stored with the cap, only those beyond 45 days, 46 for `eod` and `open_interest`, and none listed there leaves nothing to add). What comes back is stored; each expiration that still fails gets a `day_issues` row, and the day is stored as `complete` with what was retrieved.
 3. If a part cannot be retrieved at all (the request for all expirations failed and so did every expiration asked for on its own), the day is recorded in `unavailable_days` with the part named. For the 10:00 quotes, the end of day or the open interest nothing is stored for the day (no `days` row). For the intraday quotes of a day whose 10:00 parts are stored, the day keeps its `days` row and gets no `intraday_days` row. Either way the run continues with the next day.
 4. Every later run asks once more for each unavailable day in its range (`attempts` counts the runs); when the day is finally stored its `unavailable_days` row is deleted.
 5. A part ThetaData answers with no data, on a day that has data in another part, is stored empty and gets a `day_issues` row (`expiry` NULL, message `no data returned`): for example an end-of-day report that was not built yet. A weekday with no data in any part is a `no_data` day and has no issue.

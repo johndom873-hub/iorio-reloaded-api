@@ -1,6 +1,8 @@
 # Downloads one symbol's option history from ThetaData into <data-dir>/<SYMBOL>.sqlite for the model backtest. For each
-# weekday: every contract's NBBO at 10:00 ET (0..45 days to expiry), that day's end-of-day report, the open interest
-# reported that morning (0..46 days), and the NBBO at every 30-minute look from 10:00 to 15:30 ET (0..45 days).
+# weekday, for every expiry: every contract's NBBO at 10:00 ET, that day's end-of-day report, the open interest reported
+# that morning, and the NBBO at every 30-minute look from 10:00 to 15:30 ET. Files stored with max_dte 45 kept 0..45 days
+# to expiry (0..46 for the end of day and open interest): a run completes each such day by fetching its parts again and
+# adding only the rows it lacks (days.all_expiries, intraday_days.all_expiries).
 # Resumable: what a day already has in the file is not fetched again. A day ThetaData cannot serve never stops the run:
 # what can be retrieved is kept, what cannot is recorded (day_issues, unavailable_days) and asked for again on later
 # runs. At most 2 requests in flight (the plan's limit). Progress goes to stdout as JSON lines, logs to stderr. Spec: docs/backtesting/DATA-FILES.md.
@@ -33,13 +35,20 @@ from dotenv import dotenv_values
 from thetadata import ThetaClient
 from thetadata.errors import AuthenticationError, NoDataFoundError
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 # Versions this downloader brings up to SCHEMA_VERSION when it opens a file: '1' has no day_issues.attempts, and may
-# lack the tables added after the first downloads.
-EARLIER_SCHEMA_VERSIONS = ("1",)
+# lack the tables added after the first downloads; '1' and '2' have no all_expiries flags.
+EARLIER_SCHEMA_VERSIONS = ("1", "2")
 QUOTE_TIME_EASTERN = "10:00:00"
-QUOTE_MAX_DAYS_TO_EXPIRY = 45
-END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY = 46
+# Every expiry is stored. A file whose meta says max_dte '45' was stored with the earlier caps below; its days are
+# completed to every expiry as they are planned.
+MAX_DTE_META = "all"
+EARLIER_MAX_DTE_META = "45"
+EARLIER_QUOTE_MAX_DAYS_TO_EXPIRY = 45
+EARLIER_END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY = 46
+# An expiration asked for on its own (when a request for all of them keeps failing) lies at most this many days out:
+# long-dated options (LEAPS) are listed up to about three years ahead.
+EXPIRATION_BY_EXPIRATION_MAX_DAYS_TO_EXPIRY = 1_100
 INTRADAY_INTERVAL = "30m"
 INTRADAY_FIRST_LOOK_EASTERN = "10:00:00"
 INTRADAY_LAST_LOOK_EASTERN = "15:30:00"
@@ -81,7 +90,8 @@ SCHEMA_STATEMENTS = (
   quote_rows INTEGER NOT NULL,
   eod_rows INTEGER NOT NULL,
   open_interest_rows INTEGER NOT NULL,
-  fetched_at TEXT NOT NULL
+  fetched_at TEXT NOT NULL,
+  all_expiries INTEGER NOT NULL DEFAULT 0
 )""",
     """CREATE TABLE IF NOT EXISTS quotes (
   trading_date TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
@@ -108,7 +118,8 @@ SCHEMA_STATEMENTS = (
   look_count INTEGER NOT NULL,
   quote_rows INTEGER NOT NULL,
   strike_window_pct REAL,
-  fetched_at TEXT NOT NULL
+  fetched_at TEXT NOT NULL,
+  all_expiries INTEGER NOT NULL DEFAULT 0
 )""",
     """CREATE TABLE IF NOT EXISTS intraday_quotes (
   trading_date TEXT NOT NULL, look_time TEXT NOT NULL, expiry TEXT NOT NULL, strike REAL NOT NULL,
@@ -162,15 +173,22 @@ class StoredDay:
     status: str
     quote_rows: int
     has_intraday_quotes: bool
+    # Whether the stored parts hold every expiry (False: stored with the earlier 45-day cap).
+    morning_parts_have_all_expiries: bool = True
+    intraday_quotes_have_all_expiries: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
 class DayPlan:
-    """What one weekday still needs. The morning parts are the 10:00 quotes, the end of day and the open interest."""
+    """What one weekday still needs. The morning parts are the 10:00 quotes, the end of day and the open interest. To
+    fetch a part replaces the day's rows of it; to complete a part fetches it again and adds only the rows the day lacks
+    (a day stored with the earlier 45-day cap)."""
 
     trading_date: datetime.date
     fetch_morning_parts: bool
     fetch_intraday_quotes: bool
+    complete_morning_parts: bool = False
+    complete_intraday_quotes: bool = False
 
 
 def format_utc_timestamp(moment: datetime.datetime) -> str:
@@ -201,7 +219,8 @@ def weekdays_between(first_date: datetime.date, last_date: datetime.date) -> lis
 def plan_days(start_date: datetime.date, end_date: datetime.date, now_eastern: datetime.datetime,
               stored_days: dict[str, StoredDay]) -> tuple[list[datetime.date], list[DayPlan]]:
     """Returns (weekdays in range up to the last finished session, the work left for those not fully stored). A day is
-    fully stored when it has a `days` row and, unless that row says 'no_data', an `intraday_days` row."""
+    fully stored when it has a `days` row and, unless that row says 'no_data', an `intraday_days` row, both holding every
+    expiry. A part stored with the earlier 45-day cap is completed."""
     last_date = min(end_date, last_finished_session_date(now_eastern))
     days_in_range = weekdays_between(start_date, last_date)
     day_plans = []
@@ -209,8 +228,13 @@ def plan_days(start_date: datetime.date, end_date: datetime.date, now_eastern: d
         stored_day = stored_days.get(trading_date.isoformat())
         if stored_day is None:
             day_plans.append(DayPlan(trading_date, fetch_morning_parts=True, fetch_intraday_quotes=True))
-        elif stored_day.status == "complete" and not stored_day.has_intraday_quotes:
-            day_plans.append(DayPlan(trading_date, fetch_morning_parts=False, fetch_intraday_quotes=True))
+        elif stored_day.status == "complete":
+            complete_morning_parts = not stored_day.morning_parts_have_all_expiries
+            fetch_intraday_quotes = not stored_day.has_intraday_quotes
+            complete_intraday_quotes = stored_day.has_intraday_quotes and not stored_day.intraday_quotes_have_all_expiries
+            if complete_morning_parts or fetch_intraday_quotes or complete_intraday_quotes:
+                day_plans.append(DayPlan(trading_date, fetch_morning_parts=False, fetch_intraday_quotes=fetch_intraday_quotes,
+                                         complete_morning_parts=complete_morning_parts, complete_intraday_quotes=complete_intraday_quotes))
     return days_in_range, day_plans
 
 
@@ -269,15 +293,15 @@ def require_columns(frame, column_names: tuple[str, ...], description: str) -> N
         raise RequestFailed(f"ThetaData {description} response is missing columns {missing_columns} (has {list(frame.columns)})")
 
 
-def contract_rows_within_days_to_expiry(frame, trading_date: datetime.date, max_days_to_expiry: int, column_names: tuple[str, ...], description: str):
-    """Yields (expiry text, strike, right, named row) for contracts expiring 0..max_days_to_expiry days after trading_date."""
+def unexpired_contract_rows(frame, trading_date: datetime.date, column_names: tuple[str, ...], description: str):
+    """Yields (expiry text, strike, right, named row) for contracts expiring on trading_date or later (an answer can list
+    contracts that expired before it, such as the open interest reported the morning after an expiry)."""
     if frame is None or frame.height == 0:
         return
     require_columns(frame, ("expiration", "strike", "right") + column_names, description)
     for row in frame.iter_rows(named=True):
         expiry_date = parse_expiry_date(row["expiration"])
-        days_to_expiry = (expiry_date - trading_date).days
-        if days_to_expiry < 0 or days_to_expiry > max_days_to_expiry:
+        if expiry_date < trading_date:
             continue
         strike = price_or_none(row["strike"])
         if strike is None:
@@ -298,24 +322,22 @@ def deduplicate_by_key(rows: list[tuple], key_length: int, description: str, tra
 
 
 def map_quote_rows(frame, trading_date: datetime.date) -> list[tuple]:
-    """(trading_date, expiry, strike, right, bid, ask, bid_size, ask_size, quoted_at) for 0..45 days to expiry."""
+    """(trading_date, expiry, strike, right, bid, ask, bid_size, ask_size, quoted_at) for every unexpired contract."""
     trading_date_text = trading_date.isoformat()
     rows = [
         (trading_date_text, expiry, strike, option_right, price_or_none(row["bid"]), price_or_none(row["ask"]),
          integer_or_none(row["bid_size"]), integer_or_none(row["ask_size"]), format_quote_timestamp(row["timestamp"]))
-        for expiry, strike, option_right, row in contract_rows_within_days_to_expiry(
-            frame, trading_date, QUOTE_MAX_DAYS_TO_EXPIRY, ("timestamp", "bid", "ask", "bid_size", "ask_size"), "quotes")
+        for expiry, strike, option_right, row in unexpired_contract_rows(frame, trading_date, ("timestamp", "bid", "ask", "bid_size", "ask_size"), "quotes")
     ]
     return deduplicate_by_key(rows, 4, "quotes", trading_date)
 
 
 def map_end_of_day_rows(frame, trading_date: datetime.date) -> list[tuple]:
-    """(trading_date, expiry, strike, right, close, volume, bid, ask) for 0..46 days to expiry. ThetaData reports a
+    """(trading_date, expiry, strike, right, close, volume, bid, ask) for every unexpired contract. ThetaData reports a
     close of 0 for a contract that did not trade that day (trade count 0); that is stored as no close (NULL)."""
     trading_date_text = trading_date.isoformat()
     rows = []
-    for expiry, strike, option_right, row in contract_rows_within_days_to_expiry(
-            frame, trading_date, END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY, ("close", "volume", "count", "bid", "ask"), "eod"):
+    for expiry, strike, option_right, row in unexpired_contract_rows(frame, trading_date, ("close", "volume", "count", "bid", "ask"), "eod"):
         traded_that_day = (integer_or_none(row["count"]) or 0) > 0
         rows.append((trading_date_text, expiry, strike, option_right, price_or_none(row["close"]) if traded_that_day else None,
                      integer_or_none(row["volume"]), price_or_none(row["bid"]), price_or_none(row["ask"])))
@@ -323,11 +345,10 @@ def map_end_of_day_rows(frame, trading_date: datetime.date) -> list[tuple]:
 
 
 def map_open_interest_rows(frame, trading_date: datetime.date) -> list[tuple]:
-    """(trading_date, expiry, strike, right, open_interest) for 0..46 days to expiry."""
+    """(trading_date, expiry, strike, right, open_interest) for every unexpired contract."""
     trading_date_text = trading_date.isoformat()
     rows = []
-    for expiry, strike, option_right, row in contract_rows_within_days_to_expiry(
-            frame, trading_date, END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY, ("open_interest",), "open interest"):
+    for expiry, strike, option_right, row in unexpired_contract_rows(frame, trading_date, ("open_interest",), "open interest"):
         open_interest = integer_or_none(row["open_interest"])
         if open_interest is None:
             continue
@@ -336,14 +357,13 @@ def map_open_interest_rows(frame, trading_date: datetime.date) -> list[tuple]:
 
 
 def map_intraday_quote_rows(frame, trading_date: datetime.date) -> list[tuple]:
-    """(trading_date, look_time, expiry, strike, right, bid, ask, bid_size, ask_size, quoted_at) for 0..45 days to
-    expiry, one row per contract and look. ThetaData stamps each row with the look time, not with the time the quote
+    """(trading_date, look_time, expiry, strike, right, bid, ask, bid_size, ask_size, quoted_at) for every unexpired
+    contract, one row per contract and look. ThetaData stamps each row with the look time, not with the time the quote
     was made, so quoted_at is left empty."""
     trading_date_text = trading_date.isoformat()
     rows = []
     rows_off_the_look_grid = 0
-    for expiry, strike, option_right, row in contract_rows_within_days_to_expiry(
-            frame, trading_date, QUOTE_MAX_DAYS_TO_EXPIRY, ("timestamp", "bid", "ask", "bid_size", "ask_size"), "intraday quotes"):
+    for expiry, strike, option_right, row in unexpired_contract_rows(frame, trading_date, ("timestamp", "bid", "ask", "bid_size", "ask_size"), "intraday quotes"):
         look_timestamp = row["timestamp"]
         if look_timestamp is None or look_timestamp.tzinfo is None:
             raise RequestFailed(f"ThetaData returned an intraday quote without a usable look time: {look_timestamp!r}")
@@ -397,11 +417,19 @@ def open_symbol_file(file_path: Path, symbol: str, now_utc: datetime.datetime) -
             connection.execute(statement)
         if "attempts" not in [column[1] for column in connection.execute("PRAGMA table_info(day_issues)")]:
             connection.execute("ALTER TABLE day_issues ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1")
+        # Days stored before the flags existed hold the earlier 45-day cap: 0 marks them to be completed. A 'no_data' day
+        # has nothing to complete (its 10:00 quotes were asked for every expiry).
+        for table_name in ("days", "intraday_days"):
+            if "all_expiries" not in [column[1] for column in connection.execute(f"PRAGMA table_info({table_name})")]:
+                connection.execute(f"ALTER TABLE {table_name} ADD COLUMN all_expiries INTEGER NOT NULL DEFAULT 0")
+                if table_name == "days":
+                    connection.execute("UPDATE days SET all_expiries = 1 WHERE status = 'no_data'")
+        connection.execute("UPDATE meta SET value = ? WHERE key = 'max_dte' AND value = ?", (MAX_DTE_META, EARLIER_MAX_DTE_META))
         expected_meta = {
             "symbol": symbol,
             "schema_version": SCHEMA_VERSION,
             "quote_time_et": QUOTE_TIME_EASTERN,
-            "max_dte": str(QUOTE_MAX_DAYS_TO_EXPIRY),
+            "max_dte": MAX_DTE_META,
             "intraday_interval": INTRADAY_INTERVAL,
             "intraday_window": INTRADAY_WINDOW,
         }
@@ -425,9 +453,10 @@ def open_symbol_file(file_path: Path, symbol: str, now_utc: datetime.datetime) -
 
 def read_stored_days(connection: sqlite3.Connection) -> dict[str, StoredDay]:
     return {
-        trading_date: StoredDay(status, quote_rows, bool(has_intraday_quotes))
-        for trading_date, status, quote_rows, has_intraday_quotes in connection.execute(
-            "SELECT d.trading_date, d.status, d.quote_rows, i.trading_date IS NOT NULL FROM days d LEFT JOIN intraday_days i ON i.trading_date = d.trading_date")
+        trading_date: StoredDay(status, quote_rows, bool(has_intraday_quotes), bool(morning_all_expiries), not has_intraday_quotes or bool(intraday_all_expiries))
+        for trading_date, status, quote_rows, has_intraday_quotes, morning_all_expiries, intraday_all_expiries in connection.execute(
+            """SELECT d.trading_date, d.status, d.quote_rows, i.trading_date IS NOT NULL, d.all_expiries, i.all_expiries
+               FROM days d LEFT JOIN intraday_days i ON i.trading_date = d.trading_date""")
     }
 
 
@@ -466,6 +495,10 @@ class DayOutcome:
     issue_count: int = 0
     # Per part stored with rows: one of its expirations, for the service check of later days.
     reference_expiry_by_part_name: dict[str, str] = dataclasses.field(default_factory=dict)
+    # Per part completed to every expiry: the rows it added.
+    added_rows_by_part_name: dict[str, int] = dataclasses.field(default_factory=dict)
+    # Parts that could not be completed (nothing retrieved): the day keeps what it has and is completed on a later run.
+    completion_failures: list[str] = dataclasses.field(default_factory=list)
 
 
 def describe_unavailable_part(part_label: str, part_result: DayPartResult) -> str:
@@ -512,6 +545,36 @@ def insert_part_rows(connection: sqlite3.Connection, part_name: str, rows: list[
         f"INSERT {'OR REPLACE ' if replace_stored_rows else ''}INTO {part_name} ({', '.join(column_names)}) VALUES ({', '.join('?' * len(column_names))})", rows)
 
 
+def add_missing_part_rows(connection: sqlite3.Connection, part_name: str, rows: list[tuple]) -> int:
+    """Adds the rows the day does not hold yet (by primary key), leaving the stored ones as they are; returns how many."""
+    column_names = PART_COLUMN_NAMES[part_name]
+    before = connection.total_changes
+    connection.executemany(f"INSERT OR IGNORE INTO {part_name} ({', '.join(column_names)}) VALUES ({', '.join('?' * len(column_names))})", rows)
+    return connection.total_changes - before
+
+
+def settle_day_issues_after_completion(connection: sqlite3.Connection, trading_date_text: str, part_results: dict[str, DayPartResult], recorded_at_text: str) -> int:
+    """After parts of a stored day were completed: an issue the day now holds rows for is settled (an expiration with
+    rows, or a whole part with any row); what the completion left out is recorded (or its message brought up to date).
+    Returns the issues recorded."""
+    issue_count = 0
+    for part_name, part_result in part_results.items():
+        for (expiry_text,) in connection.execute("SELECT DISTINCT expiry FROM day_issues WHERE trading_date = ? AND part = ?", (trading_date_text, part_name)).fetchall():
+            held = connection.execute(
+                f"SELECT EXISTS (SELECT 1 FROM {part_name} WHERE trading_date = ?{' AND expiry = ?' if expiry_text is not None else ''})",
+                (trading_date_text,) + ((expiry_text,) if expiry_text is not None else ())).fetchone()[0]
+            if held:
+                connection.execute("DELETE FROM day_issues WHERE trading_date = ? AND part = ? AND expiry IS ?", (trading_date_text, part_name, expiry_text))
+        for expiry_text, message in part_result.issues:
+            updated = connection.execute("UPDATE day_issues SET message = ?, recorded_at = ? WHERE trading_date = ? AND part = ? AND expiry IS ?",
+                                         (message, recorded_at_text, trading_date_text, part_name, expiry_text)).rowcount
+            if not updated:
+                connection.execute("INSERT INTO day_issues (trading_date, part, expiry, message, recorded_at) VALUES (?, ?, ?, ?, ?)",
+                                   (trading_date_text, part_name, expiry_text, message, recorded_at_text))
+            issue_count += 1
+    return issue_count
+
+
 def keep_intraday_quotes_within_strike_window(connection: sqlite3.Connection, trading_date: datetime.date, intraday_quote_rows: list[tuple],
                                               strike_window_pct: float | None, ten_o_clock_quote_rows=None) -> tuple[list[tuple], float | None]:
     """(the rows within strike_window_pct of the day's at-the-money strike, the window applied). Every row and no window
@@ -550,7 +613,7 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
             if part_result.rows:
                 outcome.reference_expiry_by_part_name[part_name] = min(row[1] for row in part_result.rows)
         connection.execute(
-            "INSERT INTO days (trading_date, status, quote_rows, eod_rows, open_interest_rows, fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO days (trading_date, status, quote_rows, eod_rows, open_interest_rows, fetched_at, all_expiries) VALUES (?, ?, ?, ?, ?, ?, 1)",
             (trading_date_text, outcome.status, len(quotes.rows), len(end_of_day.rows), len(open_interest.rows), stored_at_text))
         outcome.issue_count += replace_day_issues(connection, trading_date_text, morning_results, stored_at_text, record_parts_without_data=outcome.status == "complete")
         outcome.quote_rows, outcome.end_of_day_rows, outcome.open_interest_rows = len(quotes.rows), len(end_of_day.rows), len(open_interest.rows)
@@ -560,6 +623,39 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
                 connection.execute(f"DELETE FROM {table_name} WHERE trading_date = ?", (trading_date_text,))
     else:
         outcome.status, outcome.quote_rows = connection.execute("SELECT status, quote_rows FROM days WHERE trading_date = ?", (trading_date_text,)).fetchone()
+        if outcome.status == "complete" and day_plan.complete_morning_parts:
+            morning_results = {day_part.name: part_results[day_part.name] for day_part in MORNING_PARTS}
+            failed_part = next((day_part for day_part in MORNING_PARTS if morning_results[day_part.name].nothing_retrieved), None)
+            if failed_part is not None:
+                outcome.completion_failures.append(describe_unavailable_part(failed_part.label, morning_results[failed_part.name]))
+            else:
+                for part_name, part_result in morning_results.items():
+                    outcome.added_rows_by_part_name[part_name] = add_missing_part_rows(connection, part_name, part_result.rows)
+                    if part_result.rows:
+                        outcome.reference_expiry_by_part_name[part_name] = min(row[1] for row in part_result.rows)
+                connection.execute(
+                    """UPDATE days SET quote_rows = (SELECT count(*) FROM quotes WHERE trading_date = ?), eod_rows = (SELECT count(*) FROM eod WHERE trading_date = ?),
+                       open_interest_rows = (SELECT count(*) FROM open_interest WHERE trading_date = ?), all_expiries = 1 WHERE trading_date = ?""",
+                    (trading_date_text,) * 4)
+                outcome.issue_count += settle_day_issues_after_completion(connection, trading_date_text, morning_results, stored_at_text)
+                outcome.quote_rows = connection.execute("SELECT quote_rows FROM days WHERE trading_date = ?", (trading_date_text,)).fetchone()[0]
+
+    if outcome.status == "complete" and day_plan.complete_intraday_quotes:
+        intraday_quotes = part_results["intraday_quotes"]
+        if intraday_quotes.nothing_retrieved:
+            outcome.completion_failures.append(describe_unavailable_part(INTRADAY_QUOTES_PART.label, intraday_quotes))
+        else:
+            stored_strike_window_pct = connection.execute("SELECT strike_window_pct FROM intraday_days WHERE trading_date = ?", (trading_date_text,)).fetchone()[0]
+            intraday_quote_rows, _ = keep_intraday_quotes_within_strike_window(connection, day_plan.trading_date, intraday_quotes.rows, stored_strike_window_pct)
+            outcome.added_rows_by_part_name["intraday_quotes"] = add_missing_part_rows(connection, "intraday_quotes", intraday_quote_rows)
+            outcome.intraday_quote_rows, outcome.intraday_look_count = connection.execute(
+                "SELECT count(*), count(DISTINCT look_time) FROM intraday_quotes WHERE trading_date = ?", (trading_date_text,)).fetchone()
+            connection.execute(
+                "UPDATE intraday_days SET quote_rows = ?, look_count = ?, status = CASE WHEN ? > 0 THEN 'complete' ELSE status END, all_expiries = 1 WHERE trading_date = ?",
+                (outcome.intraday_quote_rows, outcome.intraday_look_count, outcome.intraday_quote_rows, trading_date_text))
+            outcome.issue_count += settle_day_issues_after_completion(connection, trading_date_text, {"intraday_quotes": intraday_quotes}, stored_at_text)
+            if intraday_quote_rows:
+                outcome.reference_expiry_by_part_name["intraday_quotes"] = min(row[2] for row in intraday_quote_rows)
 
     if outcome.status == "complete" and day_plan.fetch_intraday_quotes:
         intraday_quotes = part_results["intraday_quotes"]
@@ -575,7 +671,7 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
         outcome.intraday_quote_rows = len(intraday_quote_rows)
         outcome.intraday_look_count = len({row[1] for row in intraday_quote_rows})
         connection.execute(
-            "INSERT INTO intraday_days (trading_date, status, look_count, quote_rows, strike_window_pct, fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO intraday_days (trading_date, status, look_count, quote_rows, strike_window_pct, fetched_at, all_expiries) VALUES (?, ?, ?, ?, ?, ?, 1)",
             (trading_date_text, "complete" if intraday_quotes.rows else "no_data", outcome.intraday_look_count, outcome.intraday_quote_rows,
              applied_strike_window_pct, stored_at_text))
         outcome.issue_count += replace_day_issues(connection, trading_date_text, {"intraday_quotes": intraday_quotes}, stored_at_text, record_parts_without_data=True)
@@ -583,7 +679,7 @@ def store_day_in_open_transaction(connection: sqlite3.Connection, day_plan: DayP
             outcome.reference_expiry_by_part_name["intraday_quotes"] = min(row[2] for row in intraday_quote_rows)
 
     connection.execute("DELETE FROM unavailable_days WHERE trading_date = ?", (trading_date_text,))
-    outcome.day_done = True
+    outcome.day_done = not outcome.completion_failures
     return outcome
 
 
@@ -593,7 +689,8 @@ def store_day(connection: sqlite3.Connection, day_plan: DayPlan, part_results: d
     `intraday_days` rows and what was left out (day_issues). A day with a part that could not be retrieved at all (its
     10:00 quotes, end of day or open interest; or its intraday quotes) gets an unavailable_days row instead: nothing of
     its morning parts is stored (the intraday quotes alone leave them as they are), and it is asked for again on the
-    next run."""
+    next run. A part being completed that could not be retrieved at all leaves the day as it was: it is completed on a
+    later run."""
     connection.execute("BEGIN IMMEDIATE")
     try:
         outcome = store_day_in_open_transaction(connection, day_plan, part_results, strike_window_pct, format_utc_timestamp(stored_at_utc))
@@ -691,30 +788,21 @@ def fetch_frame_with_retries(session: ThetaDataSession, perform_request, descrip
         attempt_index += 1
 
 
-def for_all_expirations_only(expiration, max_days_to_expiry: int) -> dict:
-    """max_dte narrows a request for all expirations; a request for one expiration takes none."""
-    return {"max_dte": max_days_to_expiry} if expiration == ALL_EXPIRATIONS else {}
-
-
 def request_quotes(client, symbol: str, trading_date: datetime.date, expiration):
-    return client.option_at_time_quote(symbol, trading_date, trading_date, QUOTE_TIME_EASTERN, expiration,
-                                       **for_all_expirations_only(expiration, QUOTE_MAX_DAYS_TO_EXPIRY))
+    return client.option_at_time_quote(symbol, trading_date, trading_date, QUOTE_TIME_EASTERN, expiration)
 
 
 def request_end_of_day(client, symbol: str, trading_date: datetime.date, expiration):
-    return client.option_history_eod(trading_date, trading_date, symbol, expiration,
-                                     **for_all_expirations_only(expiration, END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY))
+    return client.option_history_eod(trading_date, trading_date, symbol, expiration)
 
 
 def request_open_interest(client, symbol: str, trading_date: datetime.date, expiration):
-    return client.option_history_open_interest(symbol, expiration, date=trading_date,
-                                               **for_all_expirations_only(expiration, END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY))
+    return client.option_history_open_interest(symbol, expiration, date=trading_date)
 
 
 def request_intraday_quotes(client, symbol: str, trading_date: datetime.date, expiration):
     return client.option_history_quote(symbol, expiration, interval=INTRADAY_INTERVAL, date=trading_date,
-                                       start_time=INTRADAY_FIRST_LOOK_EASTERN, end_time=INTRADAY_LAST_LOOK_EASTERN,
-                                       **for_all_expirations_only(expiration, QUOTE_MAX_DAYS_TO_EXPIRY))
+                                       start_time=INTRADAY_FIRST_LOOK_EASTERN, end_time=INTRADAY_LAST_LOOK_EASTERN)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -722,7 +810,9 @@ class DayPart:
     """One request per trading day. `name` is the table its rows go to and the `part` of its day_issues rows."""
 
     name: str
-    max_days_to_expiry: int
+    # The cap a file stored before every expiry was kept held: completing the part asks expiration by expiration only
+    # beyond it.
+    earlier_max_days_to_expiry: int
     perform_request: object
     map_rows: object
     # How many leading values of a mapped row are its primary key in the table; the expiry is the third from its end.
@@ -732,11 +822,11 @@ class DayPart:
 
 
 MORNING_PARTS = (
-    DayPart("quotes", QUOTE_MAX_DAYS_TO_EXPIRY, request_quotes, map_quote_rows, 4, "quotes at 10:00"),
-    DayPart("eod", END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY, request_end_of_day, map_end_of_day_rows, 4, "end of day"),
-    DayPart("open_interest", END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY, request_open_interest, map_open_interest_rows, 4, "open interest"),
+    DayPart("quotes", EARLIER_QUOTE_MAX_DAYS_TO_EXPIRY, request_quotes, map_quote_rows, 4, "quotes at 10:00"),
+    DayPart("eod", EARLIER_END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY, request_end_of_day, map_end_of_day_rows, 4, "end of day"),
+    DayPart("open_interest", EARLIER_END_OF_DAY_AND_OPEN_INTEREST_MAX_DAYS_TO_EXPIRY, request_open_interest, map_open_interest_rows, 4, "open interest"),
 )
-INTRADAY_QUOTES_PART = DayPart("intraday_quotes", QUOTE_MAX_DAYS_TO_EXPIRY, request_intraday_quotes, map_intraday_quote_rows, 5, "intraday quotes")
+INTRADAY_QUOTES_PART = DayPart("intraday_quotes", EARLIER_QUOTE_MAX_DAYS_TO_EXPIRY, request_intraday_quotes, map_intraday_quote_rows, 5, "intraday quotes")
 DAY_PART_BY_NAME = {day_part.name: day_part for day_part in MORNING_PARTS + (INTRADAY_QUOTES_PART,)}
 
 
@@ -801,20 +891,23 @@ def confirm_service_still_answers(session: ThetaDataSession, symbol: str, day_pa
 
 
 def fetch_day_part(session: ThetaDataSession, symbol: str, trading_date: datetime.date, day_part: DayPart, expiration_dates: list[datetime.date],
-                   references: StoredDataReferences, retry_delays_seconds, expiration_by_expiration_retry_delays_seconds) -> DayPartResult:
+                   references: StoredDataReferences, retry_delays_seconds, expiration_by_expiration_retry_delays_seconds, completing: bool = False) -> DayPartResult:
     """One part of one day: one request for all expirations. If that keeps failing while the service still answers for
-    stored data, each expiration in range is asked for on its own; what comes back is kept and the rest listed."""
+    stored data, each expiration in range is asked for on its own (completing a day stored with the earlier cap: only
+    those beyond it); what comes back is kept and the rest listed."""
     try:
         return DayPartResult(fetch_part_rows(session, symbol, trading_date, day_part, ALL_EXPIRATIONS, retry_delays_seconds))
     except RequestFailed as error:
         failed_request = str(error)
     logger.warning("%s; checking the service, then asking for each expiration on its own", failed_request)
     confirm_service_still_answers(session, symbol, day_part, references, failed_request, expiration_by_expiration_retry_delays_seconds)
-    last_expiration_date = trading_date + datetime.timedelta(days=day_part.max_days_to_expiry)
+    first_expiration_date = trading_date + datetime.timedelta(days=day_part.earlier_max_days_to_expiry + 1 if completing else 0)
+    last_expiration_date = trading_date + datetime.timedelta(days=EXPIRATION_BY_EXPIRATION_MAX_DAYS_TO_EXPIRY)
     result = DayPartResult([])
-    expirations_in_range = [expiration_date for expiration_date in expiration_dates if trading_date <= expiration_date <= last_expiration_date]
-    if not expirations_in_range:
-        result.issues.append((None, f"{failed_request}; the symbol lists no expiration within {day_part.max_days_to_expiry} days to ask for on its own"))
+    expirations_in_range = [expiration_date for expiration_date in expiration_dates if first_expiration_date <= expiration_date <= last_expiration_date]
+    # Completing, an empty range leaves nothing to add: the day already holds every expiration listed.
+    if not expirations_in_range and not completing:
+        result.issues.append((None, f"{failed_request}; the symbol lists no expiration within {EXPIRATION_BY_EXPIRATION_MAX_DAYS_TO_EXPIRY} days to ask for on its own"))
     for expiration_date in expirations_in_range:
         try:
             result.rows.extend(fetch_part_rows(session, symbol, trading_date, day_part, expiration_date, expiration_by_expiration_retry_delays_seconds))
@@ -990,6 +1083,10 @@ def describe_day_outcome(outcome: DayOutcome) -> str:
         counts.append(f"{outcome.intraday_quote_rows} intraday quotes in {outcome.intraday_look_count} looks")
     if outcome.unavailable_reason:
         counts.append(f"intraday quotes unavailable ({outcome.unavailable_reason})")
+    if outcome.added_rows_by_part_name:
+        counts.append("completed to every expiry: " + ", ".join(f"+{added} {part_name.replace('_', ' ')}" for part_name, added in outcome.added_rows_by_part_name.items()))
+    for failure in outcome.completion_failures:
+        counts.append(f"not completed, asked for again on the next run ({failure})")
     if outcome.issue_count:
         counts.append(f"{outcome.issue_count} pieces left out")
     if parts_stored_without_rows(outcome):
@@ -1015,10 +1112,13 @@ def download_days(session: ThetaDataSession, connection: sqlite3.Connection, sym
         while days_waiting or days_in_flight:
             while days_waiting and len(days_in_flight) < DAYS_FETCHED_AHEAD:
                 day_plan = days_waiting.popleft()
-                day_parts = (MORNING_PARTS if day_plan.fetch_morning_parts else ()) + ((INTRADAY_QUOTES_PART,) if day_plan.fetch_intraday_quotes else ())
+                morning = day_plan.fetch_morning_parts or day_plan.complete_morning_parts
+                intraday = day_plan.fetch_intraday_quotes or day_plan.complete_intraday_quotes
+                day_parts = (MORNING_PARTS if morning else ()) + ((INTRADAY_QUOTES_PART,) if intraday else ())
                 futures_by_part_name = {
                     day_part.name: executor.submit(fetch_day_part, session, symbol, day_plan.trading_date, day_part, expiration_dates, references,
-                                                   retry_delays_seconds, expiration_by_expiration_retry_delays_seconds)
+                                                   retry_delays_seconds, expiration_by_expiration_retry_delays_seconds,
+                                                   day_plan.complete_intraday_quotes if day_part is INTRADAY_QUOTES_PART else day_plan.complete_morning_parts)
                     for day_part in day_parts
                 }
                 days_in_flight.append((day_plan, futures_by_part_name))
@@ -1037,7 +1137,7 @@ def download_days(session: ThetaDataSession, connection: sqlite3.Connection, sym
             store_time = time.monotonic()
             if first_store_time is None:
                 first_store_time = store_time
-            log_day = logger.warning if (outcome.unavailable_reason or outcome.issue_count or parts_stored_without_rows(outcome)) else logger.info
+            log_day = logger.warning if (outcome.unavailable_reason or outcome.issue_count or outcome.completion_failures or parts_stored_without_rows(outcome)) else logger.info
             log_day("%s %s %s (%.1f s)", symbol, day_plan.trading_date.isoformat(), describe_day_outcome(outcome), store_time - previous_store_time)
             previous_store_time = store_time
             if outcome.day_done:
@@ -1149,9 +1249,11 @@ def run_download(argv: list[str] | None, emit_event, stop_requested: threading.E
             logger.info("%s: asking again for %d pieces earlier runs left out of stored days", symbol, len(day_issues_to_retry))
             retry_day_issues(session, connection, symbol, day_issues_to_retry, stop_requested, expiration_by_expiration_retry_delays_seconds)
         if day_plans:
-            logger.info("%s: %d of %d days to fetch (%s to %s, %d of them only for intraday quotes) into %s", symbol, len(day_plans), days_total,
-                        day_plans[0].trading_date.isoformat(), day_plans[-1].trading_date.isoformat(),
-                        sum(1 for day_plan in day_plans if not day_plan.fetch_morning_parts), symbol_file_path)
+            logger.info("%s: %d of %d days to fetch or complete (%s to %s; %d new, %d completed to every expiry, %d only for intraday quotes) into %s",
+                        symbol, len(day_plans), days_total, day_plans[0].trading_date.isoformat(), day_plans[-1].trading_date.isoformat(),
+                        sum(1 for day_plan in day_plans if day_plan.fetch_morning_parts),
+                        sum(1 for day_plan in day_plans if day_plan.complete_morning_parts or day_plan.complete_intraday_quotes),
+                        sum(1 for day_plan in day_plans if day_plan.fetch_intraday_quotes and not day_plan.fetch_morning_parts), symbol_file_path)
             expiration_dates = load_symbol_expirations(session, symbol, retry_delays_seconds)
             days_done = download_days(session, connection, symbol, day_plans, days_total, days_done, expiration_dates, strike_window_pct, emit_event,
                                       stop_requested, retry_delays_seconds, expiration_by_expiration_retry_delays_seconds)

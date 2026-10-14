@@ -17,7 +17,9 @@ beforeAll(() => {
   dataDirectory = mkdtempSync(path.join(tmpdir(), "backtest-day-data-reader-"));
   previousDataDirectory = process.env.BACKTEST_DATA_DIR;
   process.env.BACKTEST_DATA_DIR = dataDirectory;
-  const quotes = syntheticOptionQuotes("2026-03-02", 100, ["2026-03-13", "2026-03-20"], 0.5, 0.04, 2.5, 8);
+  // Expiries 11, 18, 45, 46 and 300 days out: a file holding every expiry, of which the engine reads 0..45 days (46 for the end of day and the open interest).
+  const expiries = ["2026-03-13", "2026-03-20", "2026-04-16", "2026-04-17", "2026-12-27"];
+  const quotes = syntheticOptionQuotes("2026-03-02", 100, expiries, 0.5, 0.04, 2.5, 8);
   // Some quotes without a bid or an ask, as the files hold them.
   quotes[1] = { ...quotes[1]!, bid: null };
   quotes[4] = { ...quotes[4]!, ask: null, askSize: null };
@@ -28,12 +30,12 @@ beforeAll(() => {
       endOfDayVolume: 100,
       openInterest: 200,
       intradayQuotes: {
-        "10:30": syntheticOptionQuotes("2026-03-02", 101, ["2026-03-13", "2026-03-20"], 0.5, 0.04, 2.5, 8),
-        "11:00": syntheticOptionQuotes("2026-03-02", 99, ["2026-03-13", "2026-03-20"], 0.5, 0.04, 2.5, 8).map((quote, index) => (index === 3 ? { ...quote, bid: null } : quote)),
+        "10:30": syntheticOptionQuotes("2026-03-02", 101, expiries, 0.5, 0.04, 2.5, 8),
+        "11:00": syntheticOptionQuotes("2026-03-02", 99, expiries, 0.5, 0.04, 2.5, 8).map((quote, index) => (index === 3 ? { ...quote, bid: null } : quote)),
         "15:30": syntheticOptionQuotes("2026-03-02", 98, ["2026-03-13"], 0.5, 0.04, 2.5, 8),
       },
     },
-  ]);
+  ], [], { schemaVersion: "3" });
   reader = new BacktestDayDataReader();
 });
 
@@ -56,6 +58,10 @@ describe("BacktestDayDataReader", () => {
       for (const [through, lowest, highest] of [["15:30", 0, 1e9], ["11:00", 90, 105], ["10:30", 100, 100], ["15:30", 97.495, 102.505], ["12:00", 200, 300]] as const) {
         expect([...day!.intradayQuotes("10:00", through, lowest, highest)!]).toStrictEqual([...file.loadIntradayQuotes("2026-03-02", "10:00", through, lowest, highest)]);
       }
+      const lastExpiry = (expiriesRead: string[]) => expiriesRead.sort().at(-1);
+      expect(lastExpiry(day!.quotes().map((quote) => quote.expiry))).toBe("2026-04-16");
+      expect(lastExpiry(day!.endOfDay().map((row) => row.expiry))).toBe("2026-04-17");
+      expect(lastExpiry([...day!.intradayQuotes("10:00", "15:30", 0, 1e9)!.values()].flat().map((quote) => quote.expiry))).toBe("2026-04-16");
     } finally {
       file.close();
     }

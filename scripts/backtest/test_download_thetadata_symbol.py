@@ -216,30 +216,29 @@ class FakeThetaClient:
         self.login_number = login_number
 
     @staticmethod
-    def check_expiration_and_max_dte(expiration, max_dte, max_dte_for_all_expirations):
-        if expiration == "*":
-            assert max_dte == max_dte_for_all_expirations, max_dte
-        else:
-            assert isinstance(expiration, datetime.date) and max_dte is None, (expiration, max_dte)
+    def check_expiration_and_max_dte(expiration, max_dte):
+        """Every expiry is asked for: no request narrows the expiries with max_dte."""
+        assert max_dte is None, max_dte
+        assert expiration == "*" or isinstance(expiration, datetime.date), expiration
 
     def option_at_time_quote(self, symbol, start_date, end_date, time_of_day, expiration, strike="*", right="both", max_dte=None, strike_range=None):
         assert start_date == end_date and time_of_day == "10:00:00"
-        self.check_expiration_and_max_dte(expiration, max_dte, 45)
+        self.check_expiration_and_max_dte(expiration, max_dte)
         return self.service.respond(self.login_number, "quotes", start_date, expiration)
 
     def option_history_eod(self, start_date, end_date, symbol, expiration, strike="*", right="both", max_dte=None, strike_range=None):
         assert start_date == end_date
-        self.check_expiration_and_max_dte(expiration, max_dte, 46)
+        self.check_expiration_and_max_dte(expiration, max_dte)
         return self.service.respond(self.login_number, "eod", start_date, expiration)
 
     def option_history_open_interest(self, symbol, expiration, date=None, strike="*", right="both", max_dte=None, strike_range=None, start_date=None, end_date=None):
-        self.check_expiration_and_max_dte(expiration, max_dte, 46)
+        self.check_expiration_and_max_dte(expiration, max_dte)
         return self.service.respond(self.login_number, "open_interest", date, expiration)
 
     def option_history_quote(self, symbol, expiration, interval="1s", date=None, strike="*", right="both", start_time="09:30:00", end_time="16:00:00",
                              max_dte=None, strike_range=None, start_date=None, end_date=None):
         assert (interval, start_time, end_time) == ("30m", "10:00:00", "15:30:00")
-        self.check_expiration_and_max_dte(expiration, max_dte, 45)
+        self.check_expiration_and_max_dte(expiration, max_dte)
         return self.service.respond(self.login_number, "intraday_quotes", date, expiration)
 
     def option_list_expirations(self, symbol):
@@ -346,26 +345,26 @@ class RealLibraryRequestTests(unittest.TestCase):
         parameters = self.request_parameters(downloader.request_quotes, "*", "GetOptionAtTimeQuote")
         self.assertEqual((parameters.contract_spec.symbol, parameters.contract_spec.expiration, parameters.contract_spec.strike, parameters.contract_spec.right),
                          ("INTC", "*", "*", "both"))
-        self.assertEqual((parameters.start_date, parameters.end_date, parameters.time_of_day, parameters.max_dte), ("2024-03-25", "2024-03-25", "10:00:00", 45))
+        self.assertEqual((parameters.start_date, parameters.end_date, parameters.time_of_day, parameters.HasField("max_dte")), ("2024-03-25", "2024-03-25", "10:00:00", False))
         parameters = self.request_parameters(downloader.request_quotes, self.expiration_date, "GetOptionAtTimeQuote")
         self.assertEqual((parameters.contract_spec.expiration, parameters.HasField("max_dte")), ("2024-04-05", False))
 
     def test_end_of_day(self):
         parameters = self.request_parameters(downloader.request_end_of_day, "*", "GetOptionHistoryEod")
-        self.assertEqual((parameters.contract_spec.expiration, parameters.start_date, parameters.end_date, parameters.max_dte), ("*", "2024-03-25", "2024-03-25", 46))
+        self.assertEqual((parameters.contract_spec.expiration, parameters.start_date, parameters.end_date, parameters.HasField("max_dte")), ("*", "2024-03-25", "2024-03-25", False))
         parameters = self.request_parameters(downloader.request_end_of_day, self.expiration_date, "GetOptionHistoryEod")
         self.assertEqual((parameters.contract_spec.expiration, parameters.HasField("max_dte")), ("2024-04-05", False))
 
     def test_open_interest(self):
         parameters = self.request_parameters(downloader.request_open_interest, "*", "GetOptionHistoryOpenInterest")
-        self.assertEqual((parameters.contract_spec.expiration, parameters.date, parameters.max_dte), ("*", "2024-03-25", 46))
+        self.assertEqual((parameters.contract_spec.expiration, parameters.date, parameters.HasField("max_dte")), ("*", "2024-03-25", False))
         parameters = self.request_parameters(downloader.request_open_interest, self.expiration_date, "GetOptionHistoryOpenInterest")
         self.assertEqual((parameters.contract_spec.expiration, parameters.HasField("max_dte")), ("2024-04-05", False))
 
     def test_intraday_quotes(self):
         parameters = self.request_parameters(downloader.request_intraday_quotes, "*", "GetOptionHistoryQuote")
-        self.assertEqual((parameters.contract_spec.expiration, parameters.date, parameters.interval, parameters.start_time, parameters.end_time, parameters.max_dte),
-                         ("*", "2024-03-25", "30m", "10:00:00", "15:30:00", 45))
+        self.assertEqual((parameters.contract_spec.expiration, parameters.date, parameters.interval, parameters.start_time, parameters.end_time, parameters.HasField("max_dte")),
+                         ("*", "2024-03-25", "30m", "10:00:00", "15:30:00", False))
         parameters = self.request_parameters(downloader.request_intraday_quotes, self.expiration_date, "GetOptionHistoryQuote")
         self.assertEqual((parameters.contract_spec.expiration, parameters.interval, parameters.HasField("max_dte")), ("2024-04-05", "30m", False))
 
@@ -394,6 +393,23 @@ class DayPlanningTests(unittest.TestCase):
             downloader.DayPlan(datetime.date(2024, 3, 26), fetch_morning_parts=True, fetch_intraday_quotes=True),
         ])
 
+    def test_plan_completes_the_parts_stored_with_the_earlier_cap_and_only_those(self):
+        stored_days = {
+            "2024-03-18": downloader.StoredDay("complete", 462, True, morning_parts_have_all_expiries=False, intraday_quotes_have_all_expiries=False),
+            "2024-03-19": downloader.StoredDay("complete", 462, True, morning_parts_have_all_expiries=False),   # intraday quotes already whole
+            "2024-03-20": downloader.StoredDay("complete", 462, True, intraday_quotes_have_all_expiries=False),  # morning parts already whole
+            "2024-03-21": downloader.StoredDay("complete", 462, False, morning_parts_have_all_expiries=False),   # no intraday quotes yet: fetched whole
+            "2024-03-22": downloader.StoredDay("complete", 462, True),                                          # whole
+            "2024-03-25": downloader.StoredDay("no_data", 0, False, morning_parts_have_all_expiries=False),      # a holiday needs nothing
+        }
+        _, day_plans = downloader.plan_days(datetime.date(2024, 3, 18), datetime.date(2024, 3, 25), eastern_time(2024, 3, 26, 12, 0), stored_days)
+        self.assertEqual(day_plans, [
+            downloader.DayPlan(datetime.date(2024, 3, 18), False, False, complete_morning_parts=True, complete_intraday_quotes=True),
+            downloader.DayPlan(datetime.date(2024, 3, 19), False, False, complete_morning_parts=True),
+            downloader.DayPlan(datetime.date(2024, 3, 20), False, False, complete_intraday_quotes=True),
+            downloader.DayPlan(datetime.date(2024, 3, 21), False, True, complete_morning_parts=True),
+        ])
+
     def test_plan_is_empty_when_the_range_starts_after_the_last_session(self):
         self.assertEqual(downloader.plan_days(datetime.date(2024, 3, 26), datetime.date(2024, 3, 29), eastern_time(2024, 3, 26, 9, 0), {}), ([], []))
 
@@ -401,11 +417,11 @@ class DayPlanningTests(unittest.TestCase):
 class RowMappingTests(unittest.TestCase):
     trading_date = datetime.date(2024, 3, 25)
 
-    def test_quotes_map_rights_strikes_timestamps_and_keep_0_to_45_days(self):
+    def test_quotes_map_rights_strikes_timestamps_and_keep_every_unexpired_contract(self):
         frame = quote_frame(self.trading_date, [
             ("2024-03-25", 42.5, "CALL", 0.5, 0.55),          # 0 days: kept
             ("2024-05-09", 40.0, "PUT", 13.950000000000001, 14.1),  # 45 days: kept, float noise rounded
-            ("2024-05-10", 40.0, "PUT", 1.0, 1.1),            # 46 days: dropped
+            ("2026-01-16", 40.0, "PUT", 1.0, 1.1),            # 662 days (a LEAPS): kept
             ("2024-03-22", 40.0, "CALL", 0.0, 0.01),          # expired: dropped
             ("2024-04-05", 41.0, "PUT", float("nan"), 0.2),   # no bid price: NULL
         ])
@@ -413,17 +429,20 @@ class RowMappingTests(unittest.TestCase):
         self.assertEqual(rows, [
             ("2024-03-25", "2024-03-25", 42.5, "C", 0.5, 0.55, 11, 6, "2024-03-25T09:59:58.207-04:00"),
             ("2024-03-25", "2024-05-09", 40.0, "P", 13.95, 14.1, 11, 6, "2024-03-25T09:59:58.207-04:00"),
+            ("2024-03-25", "2026-01-16", 40.0, "P", 1.0, 1.1, 11, 6, "2024-03-25T09:59:58.207-04:00"),
             ("2024-03-25", "2024-04-05", 41.0, "P", None, 0.2, 11, 6, "2024-03-25T09:59:58.207-04:00"),
         ])
 
-    def test_end_of_day_keeps_46_days_and_stores_no_close_when_nothing_traded(self):
+    def test_end_of_day_keeps_every_unexpired_contract_and_stores_no_close_when_nothing_traded(self):
         frame = end_of_day_frame(self.trading_date, [
             ("2024-05-10", 40.0, "CALL", 0.31, 25, 4, 0.3, 0.33),  # 46 days: kept
-            ("2024-05-11", 40.0, "CALL", 0.31, 25, 4, 0.3, 0.33),  # 47 days: dropped
+            ("2025-01-17", 40.0, "CALL", 2.31, 5, 2, 2.3, 2.4),    # 298 days: kept
+            ("2024-03-22", 40.0, "CALL", 0.0, 0, 0, 0.0, 0.01),    # expired: dropped
             ("2024-04-05", 54.0, "PUT", 0.0, 0, 0, 10.65, 12.35),  # no trades: close NULL, volume 0
         ])
         self.assertEqual(downloader.map_end_of_day_rows(frame, self.trading_date), [
             ("2024-03-25", "2024-05-10", 40.0, "C", 0.31, 25, 0.3, 0.33),
+            ("2024-03-25", "2025-01-17", 40.0, "C", 2.31, 5, 2.3, 2.4),
             ("2024-03-25", "2024-04-05", 54.0, "P", None, 0, 10.65, 12.35),
         ])
 
@@ -438,12 +457,16 @@ class RowMappingTests(unittest.TestCase):
     def test_intraday_quotes_take_the_look_time_from_the_row_and_leave_quoted_at_empty(self):
         frame = intraday_quote_frame(self.trading_date, [
             ("2024-04-05", 42.0, "CALL", 0.8300000000000001, 0.84),
-            ("2024-05-10", 42.0, "CALL", 1.0, 1.1),   # 46 days: dropped
+            ("2025-01-17", 42.0, "CALL", 3.0, 3.1),   # 298 days: kept
+            ("2024-03-22", 42.0, "CALL", 0.0, 0.01),  # expired: dropped
         ], look_times=("10:00", "10:30", "15:30", "15:45"))  # 15:45 is not a look
         self.assertEqual(downloader.map_intraday_quote_rows(frame, self.trading_date), [
             ("2024-03-25", "10:00", "2024-04-05", 42.0, "C", 0.83, 0.84, 21, 16, None),
+            ("2024-03-25", "10:00", "2025-01-17", 42.0, "C", 3.0, 3.1, 21, 16, None),
             ("2024-03-25", "10:30", "2024-04-05", 42.0, "C", 0.83, 0.84, 21, 16, None),
+            ("2024-03-25", "10:30", "2025-01-17", 42.0, "C", 3.0, 3.1, 21, 16, None),
             ("2024-03-25", "15:30", "2024-04-05", 42.0, "C", 0.83, 0.84, 21, 16, None),
+            ("2024-03-25", "15:30", "2025-01-17", 42.0, "C", 3.0, 3.1, 21, 16, None),
         ])
 
     def test_the_look_grid_is_every_30_minutes_from_10_00_to_15_30(self):
@@ -526,24 +549,24 @@ class SymbolFileTests(unittest.TestCase):
         connection = self.open_file(created_at=datetime.datetime(2026, 10, 12, 3, 4, 5, 678000, tzinfo=datetime.timezone.utc))
         try:
             self.assertEqual(dict(connection.execute("SELECT key, value FROM meta")), {
-                "symbol": "INTC", "schema_version": "2", "quote_time_et": "10:00:00", "max_dte": "45", "intraday_interval": "30m",
+                "symbol": "INTC", "schema_version": "3", "quote_time_et": "10:00:00", "max_dte": "all", "intraday_interval": "30m",
                 "intraday_window": "10:00-15:30", "created_at": "2026-10-12T03:04:05.678Z"})
             table_names = [name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
             columns_by_table = {table_name: [column[1] for column in connection.execute(f"PRAGMA table_info({table_name})")] for table_name in table_names if table_name != "meta"}
             self.assertEqual(columns_by_table, {
-                "days": ["trading_date", "status", "quote_rows", "eod_rows", "open_interest_rows", "fetched_at"],
+                "days": ["trading_date", "status", "quote_rows", "eod_rows", "open_interest_rows", "fetched_at", "all_expiries"],
                 "quotes": ["trading_date", "expiry", "strike", "option_right", "bid", "ask", "bid_size", "ask_size", "quoted_at"],
                 "eod": ["trading_date", "expiry", "strike", "option_right", "close", "volume", "bid", "ask"],
                 "open_interest": ["trading_date", "expiry", "strike", "option_right", "open_interest"],
-                "intraday_days": ["trading_date", "status", "look_count", "quote_rows", "strike_window_pct", "fetched_at"],
+                "intraday_days": ["trading_date", "status", "look_count", "quote_rows", "strike_window_pct", "fetched_at", "all_expiries"],
                 "intraday_quotes": ["trading_date", "look_time", "expiry", "strike", "option_right", "bid", "ask", "bid_size", "ask_size", "quoted_at"],
                 "day_issues": ["trading_date", "part", "expiry", "message", "recorded_at", "attempts"],
                 "unavailable_days": ["trading_date", "reason", "attempts", "last_attempt_at"],
             })
             without_rowid_tables = {name for name, sql in connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'") if "WITHOUT ROWID" in sql}
             self.assertEqual(without_rowid_tables, {"quotes", "eod", "open_interest", "intraday_quotes"})
-            for rejected_insert in ("INSERT INTO days VALUES ('2024-03-25', 'partial', 0, 0, 0, 'x')",
-                                    "INSERT INTO intraday_days VALUES ('2024-03-25', 'partial', 0, 0, NULL, 'x')",
+            for rejected_insert in ("INSERT INTO days VALUES ('2024-03-25', 'partial', 0, 0, 0, 'x', 1)",
+                                    "INSERT INTO intraday_days VALUES ('2024-03-25', 'partial', 0, 0, NULL, 'x', 1)",
                                     "INSERT INTO day_issues VALUES ('2024-03-25', 'greeks', NULL, 'm', 'x', 1)"):
                 with self.assertRaises(sqlite3.IntegrityError):
                     connection.execute(rejected_insert)
@@ -553,16 +576,16 @@ class SymbolFileTests(unittest.TestCase):
     def test_a_file_of_the_first_version_gets_the_new_tables_and_keeps_its_data(self):
         first_version_file = sqlite3.connect(self.file_path)
         first_version_file.executescript(FIRST_VERSION_SCHEMA)
-        days_table_sql = first_version_file.execute("SELECT sql FROM sqlite_master WHERE name = 'days'").fetchone()[0]
         first_version_file.close()
         connection = self.open_file()
         try:
             tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             self.assertEqual(tables, {"meta", "days", "quotes", "eod", "open_interest", "intraday_days", "intraday_quotes", "day_issues", "unavailable_days"})
-            self.assertEqual(connection.execute("SELECT sql FROM sqlite_master WHERE name = 'days'").fetchone()[0], days_table_sql)
-            self.assertEqual(dict(connection.execute("SELECT key, value FROM meta WHERE key LIKE 'intraday%' OR key IN ('created_at', 'schema_version')")), {
-                "intraday_interval": "30m", "intraday_window": "10:00-15:30", "created_at": "2026-10-12T04:00:00.000Z", "schema_version": "2"})
-            self.assertEqual(downloader.read_stored_days(connection), {"2024-03-25": downloader.StoredDay("complete", 1, has_intraday_quotes=False)})
+            self.assertEqual(connection.execute("SELECT trading_date, status, quote_rows, all_expiries FROM days").fetchall(), [("2024-03-25", "complete", 1, 0)])
+            self.assertEqual(dict(connection.execute("SELECT key, value FROM meta WHERE key LIKE 'intraday%' OR key IN ('created_at', 'schema_version', 'max_dte')")), {
+                "intraday_interval": "30m", "intraday_window": "10:00-15:30", "created_at": "2026-10-12T04:00:00.000Z", "schema_version": "3", "max_dte": "all"})
+            # Stored with the 45-day cap: its morning parts are completed on the next run.
+            self.assertEqual(downloader.read_stored_days(connection), {"2024-03-25": downloader.StoredDay("complete", 1, has_intraday_quotes=False, morning_parts_have_all_expiries=False)})
         finally:
             connection.close()
 
@@ -579,7 +602,7 @@ INSERT INTO day_issues VALUES ('2024-03-25', 'eod', '2024-04-05', 'INTERNAL: Cor
         try:
             self.assertEqual(connection.execute("SELECT trading_date, part, expiry, message, attempts FROM day_issues").fetchall(),
                              [("2024-03-25", "eod", "2024-04-05", "INTERNAL: Corrupt FIT data", 1)])
-            self.assertEqual(connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "2")
+            self.assertEqual(connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "3")
         finally:
             connection.close()
 
@@ -772,6 +795,125 @@ class DownloadRunTests(unittest.TestCase):
         self.run_downloader(FakeThetaData(self.frames_by_date), end="2024-03-25", extra_arguments=("--intraday-strike-window-pct", "20"))
         self.assertEqual(self.read_database("SELECT DISTINCT strike FROM intraday_quotes ORDER BY strike"), [(40.0,), (42.5,), (45.0,)])
 
+    # --- a file stored with the earlier 45-day cap
+
+    def leaps_expiry(self, trading_date):
+        return (trading_date + datetime.timedelta(days=300)).isoformat()
+
+    def frames_with_leaps(self):
+        """Each day's answers with a 300-day expiry added to every part."""
+        frames_by_date = {}
+        for trading_date in self.trading_dates:
+            contracts = contracts_for_trading_day(trading_date) + [(self.leaps_expiry(trading_date), 40.0, right_word, 6.0, 6.2) for right_word in ("CALL", "PUT")]
+            frames_by_date[trading_date] = {
+                "quotes": quote_frame(trading_date, contracts),
+                "eod": end_of_day_frame(trading_date, [(expiry, strike, right_word, 0.52, 120, 14, bid, ask) for expiry, strike, right_word, bid, ask in contracts]),
+                "open_interest": open_interest_frame(trading_date, [(expiry, strike, right_word, 300) for expiry, strike, right_word, _, _ in contracts]),
+                "intraday_quotes": intraday_quote_frame(trading_date, contracts),
+            }
+        return frames_by_date
+
+    def store_with_the_earlier_cap(self, extra_arguments=()):
+        """A complete download of the days without the 300-day expiry, then brought back to a file of schema 2 stored
+        with max_dte 45 (no all_expiries flags)."""
+        self.run_downloader(FakeThetaData(self.frames_by_date), extra_arguments=extra_arguments)
+        connection = sqlite3.connect(self.data_directory / "INTC.sqlite")
+        connection.executescript("""ALTER TABLE days DROP COLUMN all_expiries; ALTER TABLE intraday_days DROP COLUMN all_expiries;
+                                    UPDATE meta SET value = '45' WHERE key = 'max_dte'; UPDATE meta SET value = '2' WHERE key = 'schema_version';
+                                    UPDATE quotes SET bid = 0.77 WHERE trading_date = '2024-03-26' AND strike = 42.5 AND option_right = 'C';""")
+        connection.close()
+
+    def test_a_file_stored_with_the_earlier_cap_is_completed_to_every_expiry_adding_only_what_it_lacks(self):
+        self.store_with_the_earlier_cap()
+        service = FakeThetaData(self.frames_with_leaps())
+        exit_code, events = self.run_downloader(service)
+        self.assertEqual(exit_code, 0)
+        # The holiday was whole already; the four complete days are completed, each counted when done.
+        self.assertEqual(events[0], {"type": "start", "symbol": "INTC", "daysTotal": 5, "daysDone": 1})
+        self.assertEqual([event["lastDate"] for event in events[1:-1]], ["2024-03-25", "2024-03-26", "2024-03-27", "2024-03-28"])
+        self.assertEqual(events[-1], {"type": "done", "daysDone": 5, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 0})
+        whole_day_with_leaps = ("complete", CONTRACTS_PER_DAY + 2, CONTRACTS_PER_DAY + 2, CONTRACTS_PER_DAY + 2, "complete", 12, INTRADAY_ROWS_PER_DAY + 2 * 12)
+        self.assertEqual(self.stored_days()[:4], [(trading_date.isoformat(),) + whole_day_with_leaps for trading_date in self.trading_dates])
+        self.assertEqual(self.read_database("SELECT count(*) FROM quotes WHERE expiry > date(trading_date, '+45 days')"), [(4 * 2,)])
+        self.assertEqual(self.read_database("SELECT count(*) FROM intraday_quotes WHERE expiry > date(trading_date, '+45 days')"), [(4 * 2 * 12,)])
+        # A row the file held is left as it was, though the new answer differs.
+        self.assertEqual(self.read_database("SELECT DISTINCT bid FROM quotes WHERE trading_date = '2024-03-26' AND strike = 42.5 AND option_right = 'C'"), [(0.77,)])
+        self.assertEqual(self.read_database("SELECT DISTINCT all_expiries FROM days UNION SELECT DISTINCT all_expiries FROM intraday_days"), [(1,)])
+        self.assertEqual(dict(self.read_database("SELECT key, value FROM meta WHERE key IN ('max_dte', 'schema_version')")), {"max_dte": "all", "schema_version": "3"})
+        self.assertEqual(sorted({call[0] for call in service.calls if call[1] == self.trading_dates[0]}), ["eod", "intraday_quotes", "open_interest", "quotes"])
+        self.assertEqual({expiration_key for _, _, expiration_key in service.calls}, {"*"})
+        self.assert_every_stored_day_is_whole()
+        # Nothing is left to fetch.
+        resumed_service = FakeThetaData(self.frames_with_leaps())
+        self.assertEqual(self.run_downloader(resumed_service)[1][0], {"type": "start", "symbol": "INTC", "daysTotal": 5, "daysDone": 5})
+        self.assertEqual(resumed_service.calls, [])
+
+    def test_completing_intraday_quotes_keeps_the_strike_window_the_day_was_stored_with(self):
+        self.store_with_the_earlier_cap(extra_arguments=("--intraday-strike-window-pct", "20"))
+        exit_code, _ = self.run_downloader(FakeThetaData(self.frames_with_leaps()))
+        self.assertEqual(exit_code, 0)
+        # The 300-day contracts are at strike 40, inside 20% of the 42.5 at-the-money strike; strike 60 stays out.
+        self.assertEqual(self.read_database("SELECT DISTINCT strike FROM intraday_quotes ORDER BY strike"), [(40.0,), (42.5,), (45.0,)])
+        self.assertEqual(self.read_database("SELECT count(*) FROM intraday_quotes WHERE trading_date = '2024-03-25' AND expiry = ?", (self.leaps_expiry(self.trading_dates[0]),)), [(2 * 12,)])
+        self.assert_every_stored_day_is_whole()
+
+    def test_completing_a_day_whose_request_for_all_expirations_keeps_failing_asks_only_beyond_45_days(self):
+        self.store_with_the_earlier_cap()
+        failing_day = self.trading_dates[1]
+        service = FakeThetaData(self.frames_with_leaps(), failures={("quotes", failing_day, "*"): self.corrupt})
+        exit_code, events = self.run_downloader(service)
+        self.assertEqual((exit_code, events[-1]["daysDone"]), (0, 5))
+        # Every listed expiration beyond 45 days, the 300-day expiries of the other days included (no data that day).
+        self.assertEqual(service.calls_for("quotes", failing_day)[:len(NO_RETRY_DELAYS) + 1], ["*"] * (len(NO_RETRY_DELAYS) + 1))
+        self.assertEqual(sorted(service.calls_for("quotes", failing_day)[len(NO_RETRY_DELAYS) + 1:]),
+                         [expiration for expiration in service.expirations() if expiration > (failing_day + datetime.timedelta(days=45)).isoformat()])
+        self.assertEqual(self.read_database("SELECT count(*) FROM day_issues"), [(0,)])
+        self.assertEqual(self.read_database("SELECT count(*) FROM quotes WHERE trading_date = ?", (failing_day.isoformat(),)), [(CONTRACTS_PER_DAY + 2,)])
+
+    def test_a_completion_whose_request_for_all_expirations_keeps_failing_with_nothing_listed_beyond_45_days_completes_the_day(self):
+        self.store_with_the_earlier_cap()
+        failing_day = self.trading_dates[1]
+        service = FakeThetaData(self.frames_by_date, failures={("quotes", failing_day, "*"): self.corrupt})
+        exit_code, events = self.run_downloader(service)
+        self.assertEqual((exit_code, events[-1]["daysDone"], events[-1]["daysWithIssues"]), (0, 5, 0))
+        self.assertEqual(service.calls_for("quotes", failing_day)[len(NO_RETRY_DELAYS) + 1:], [])
+        self.assertEqual(self.read_database("SELECT all_expiries, quote_rows FROM days WHERE trading_date = ?", (failing_day.isoformat(),)), [(1, CONTRACTS_PER_DAY)])
+        self.assert_every_stored_day_is_whole()
+
+    def test_a_completion_that_cannot_retrieve_a_part_leaves_the_day_as_it_was_and_completes_it_on_the_next_run(self):
+        self.store_with_the_earlier_cap()
+        failing_day = self.trading_dates[2]
+        leaps = self.leaps_expiry(failing_day)
+        failures = {("eod", failing_day, "*"): self.corrupt, ("eod", failing_day, leaps): self.corrupt}
+        exit_code, events = self.run_downloader(FakeThetaData(self.frames_with_leaps(), failures=failures))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(events[-1], {"type": "done", "daysDone": 4, "daysTotal": 5, "unavailableDays": 0, "daysWithIssues": 0})
+        self.assertEqual(self.read_database("SELECT all_expiries, quote_rows, eod_rows FROM days WHERE trading_date = ?", (failing_day.isoformat(),)), [(0, CONTRACTS_PER_DAY, CONTRACTS_PER_DAY)])
+        self.assertEqual(self.read_database("SELECT count(*) FROM quotes WHERE trading_date = ?", (failing_day.isoformat(),)), [(CONTRACTS_PER_DAY,)])
+        # Its intraday quotes were completed all the same.
+        self.assertEqual(self.read_database("SELECT all_expiries FROM intraday_days WHERE trading_date = ?", (failing_day.isoformat(),)), [(1,)])
+        # The next run completes the morning parts only.
+        service = FakeThetaData(self.frames_with_leaps())
+        exit_code, events = self.run_downloader(service)
+        self.assertEqual((exit_code, events[0]["daysDone"], events[-1]["daysDone"]), (0, 4, 5))
+        self.assertEqual(sorted({call[0] for call in service.calls if call[1] == failing_day}), ["eod", "open_interest", "quotes"])
+        self.assert_every_stored_day_is_whole()
+
+    def test_a_piece_left_out_earlier_is_settled_when_the_completion_brings_its_rows(self):
+        self.store_with_the_earlier_cap()
+        day = self.trading_dates[0]
+        connection = sqlite3.connect(self.data_directory / "INTC.sqlite")
+        connection.execute("DELETE FROM eod WHERE trading_date = ? AND expiry = ?", (day.isoformat(), far_expiry(day)))
+        connection.execute("UPDATE days SET eod_rows = eod_rows - ? WHERE trading_date = ?", (CONTRACTS_PER_DAY // 2, day.isoformat()))
+        connection.execute("INSERT INTO day_issues (trading_date, part, expiry, message, recorded_at, attempts) VALUES (?, 'eod', ?, 'INTERNAL: Corrupt FIT data', 'x', 4)",
+                           (day.isoformat(), far_expiry(day)))
+        connection.commit()
+        connection.close()
+        exit_code, events = self.run_downloader(FakeThetaData(self.frames_with_leaps()))
+        self.assertEqual((exit_code, events[-1]["daysWithIssues"]), (0, 0))
+        self.assertEqual(self.read_database("SELECT count(*) FROM eod WHERE trading_date = ?", (day.isoformat(),)), [(CONTRACTS_PER_DAY + 2,)])
+        self.assert_every_stored_day_is_whole()
+
     def test_never_more_than_two_requests_in_flight(self):
         service = FakeThetaData(self.frames_by_date, call_duration_seconds=0.02)
         self.run_downloader(service)
@@ -796,7 +938,7 @@ class DownloadRunTests(unittest.TestCase):
         self.assertEqual(self.read_database("SELECT count(*) FROM day_issues"), [(0,)])
         quote_calls = service.calls_for("quotes", corrupt_day)
         self.assertEqual(quote_calls[:len(NO_RETRY_DELAYS) + 1], ["*"] * (len(NO_RETRY_DELAYS) + 1))
-        self.assertEqual(sorted(quote_calls[len(NO_RETRY_DELAYS) + 1:]), [expiration for expiration in service.expirations() if "2024-03-26" <= expiration <= "2024-05-10"])
+        self.assertEqual(sorted(quote_calls[len(NO_RETRY_DELAYS) + 1:]), [expiration for expiration in service.expirations() if expiration >= "2024-03-26"])
         # The service was checked with data already stored: the day before, one expiration.
         self.assertEqual(service.calls_for("quotes", self.trading_dates[0]), ["*", near_expiry(self.trading_dates[0])])
         self.assert_every_stored_day_is_whole()

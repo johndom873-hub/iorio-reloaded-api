@@ -2,7 +2,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 
-// Read access to one symbol's ThetaData file (docs/backtesting/DATA-FILES.md, schema versions 1 and 2): the days it
+// Read access to one symbol's ThetaData file (docs/backtesting/DATA-FILES.md, schema versions 1 to 3): the days it
 // holds, each day's 10:00 quotes, its end-of-day rows and the open interest published for it, and, where the file has
 // them, the quotes at each look inside the day (intraday_days, intraday_quotes) and what the downloader could not
 // retrieve (day_issues, unavailable_days). Read-only; the downloader writes it.
@@ -41,15 +41,24 @@ export interface SymbolFileDayIssue {
   message: string;
 }
 
-export const supportedSymbolFileSchemaVersions: readonly string[] = ["1", "2"];
+export const supportedSymbolFileSchemaVersions: readonly string[] = ["1", "2", "3"];
 
 export const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
 
+/**
+ * The expiries the engine reads: 0..45 days out for the 10:00 and intraday quotes, 0..46 for the end of day and the open
+ * interest, all that files held before the downloader kept every expiry (schema 3).
+ */
+export const expiresWithin45DaysSql = "expiry <= date(trading_date, '+45 days')";
+const expiresWithin46DaysSql = "expiry <= date(trading_date, '+46 days')";
+/** A day's issues about what the engine reads: a whole part, or an expiration within the part's window above. */
+const issueWithinReadWindowSql = `(expiry IS NULL OR (part IN ('quotes', 'intraday_quotes') AND ${expiresWithin45DaysSql}) OR (part IN ('eod', 'open_interest') AND ${expiresWithin46DaysSql}))`;
+
 /** A day's 10:00 quotes, end-of-day rows and open interest: the statements the engine reads them with (also on the day-data reader thread). */
-export const quotesOfDaySql = "SELECT expiry, strike, option_right AS right, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ?";
-export const endOfDayOfDaySql = "SELECT expiry, strike, option_right AS right, close, volume, bid, ask FROM eod WHERE trading_date = ?";
-export const openInterestOfDaySql = "SELECT expiry, strike, option_right AS right, open_interest AS openInterest FROM open_interest WHERE trading_date = ?";
-/** The columns an intraday look reads, in primary-key order (look time, expiry, strike, right) within the day. */
+export const quotesOfDaySql = `SELECT expiry, strike, option_right AS right, bid, ask, bid_size AS bidSize, ask_size AS askSize FROM quotes WHERE trading_date = ? AND ${expiresWithin45DaysSql}`;
+export const endOfDayOfDaySql = `SELECT expiry, strike, option_right AS right, close, volume, bid, ask FROM eod WHERE trading_date = ? AND ${expiresWithin46DaysSql}`;
+export const openInterestOfDaySql = `SELECT expiry, strike, option_right AS right, open_interest AS openInterest FROM open_interest WHERE trading_date = ? AND ${expiresWithin46DaysSql}`;
+/** The columns an intraday look reads, in primary-key order (look time, expiry, strike, right) within the day; read with expiresWithin45DaysSql. */
 export const intradayQuotesColumnsSql = "SELECT look_time, expiry, strike, option_right, bid, ask FROM intraday_quotes";
 
 export class BacktestSymbolFile {
@@ -67,18 +76,18 @@ export class BacktestSymbolFile {
     // The downloader may be committing a day: wait for its lock instead of failing.
     database.exec("PRAGMA busy_timeout = 3000");
     const version = (database.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined)?.value;
-    if (version === undefined || !supportedSymbolFileSchemaVersions.includes(version)) throw new Error(`The data file has schema version ${version ?? "unknown"}; the engine reads versions ${supportedSymbolFileSchemaVersions.join(" and ")}.`);
+    if (version === undefined || !supportedSymbolFileSchemaVersions.includes(version)) throw new Error(`The data file has schema version ${version ?? "unknown"}; the engine reads versions ${supportedSymbolFileSchemaVersions.join(", ")}.`);
     this.daysStatement = database.prepare("SELECT trading_date AS tradingDate, status FROM days ORDER BY trading_date");
     this.quotesStatement = database.prepare(quotesOfDaySql);
     this.endOfDayStatement = database.prepare(endOfDayOfDaySql);
     this.openInterestStatement = database.prepare(openInterestOfDaySql);
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
-    this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare("SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE trading_date = ? ORDER BY part, expiry") : null;
+    this.dayIssuesStatement = tableNames.has("day_issues") ? database.prepare(`SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues WHERE trading_date = ? AND ${issueWithinReadWindowSql} ORDER BY part, expiry`) : null;
     this.unavailableDaysStatement = tableNames.has("unavailable_days") ? database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date") : null;
     const hasIntradayTables = tableNames.has("intraday_days") && tableNames.has("intraday_quotes");
     this.intradayDaysStatement = hasIntradayTables ? database.prepare("SELECT trading_date AS tradingDate FROM intraday_days WHERE status = 'complete' ORDER BY trading_date") : null;
     // Read by the thousand rows a day and look: only what a look reads (not the sizes), each row as an array.
-    this.intradayQuotesStatement = hasIntradayTables ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time > ? AND look_time <= ? AND strike BETWEEN ? AND ?`) : null;
+    this.intradayQuotesStatement = hasIntradayTables ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time > ? AND look_time <= ? AND strike BETWEEN ? AND ? AND ${expiresWithin45DaysSql}`) : null;
     this.intradayQuotesStatement?.setReturnArrays(true);
   }
 
@@ -128,7 +137,7 @@ export class BacktestSymbolFile {
     return new Map(rows.map((row) => [contractKey({ expiry: String(row.expiry), strike: Number(row.strike), right: row.right }), Number(row.openInterest)]));
   }
 
-  /** What the downloader could not retrieve of a stored day; none on a file without the table. */
+  /** What the downloader could not retrieve of a stored day, among what the engine reads (issueWithinReadWindowSql); none on a file without the table. */
   loadDayIssues(tradingDate: string): SymbolFileDayIssue[] {
     if (!this.dayIssuesStatement) return [];
     return (this.dayIssuesStatement.all(tradingDate) as Record<string, unknown>[]).map((row) => ({ tradingDate: String(row.tradingDate), part: row.part as SymbolFileDayIssue["part"], expiry: row.expiry === null || row.expiry === undefined ? null : String(row.expiry), message: String(row.message) }));

@@ -2,7 +2,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { parentPort } from "node:worker_threads";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { dayDataTransferList, type DayDataColumn, type DayDataPayload, type DayDataReaderReply, type DayDataReaderRequest, type DayDataTable } from "./backtestDayDataReader.js";
-import { endOfDayOfDaySql, intradayQuotesColumnsSql, numberOrNull, openInterestOfDaySql, quotesOfDaySql } from "./backtestSymbolFile.js";
+import { endOfDayOfDaySql, expiresWithin45DaysSql, intradayQuotesColumnsSql, numberOrNull, openInterestOfDaySql, quotesOfDaySql } from "./backtestSymbolFile.js";
 
 // The day-data reader thread of a session (backtestDayDataReader.ts): reads a symbol's day with BacktestSymbolFile's
 // statements, applies the same conversions, and sends the rows back as columns. A value a column cannot carry exactly
@@ -30,7 +30,7 @@ function fileOf(symbol: string): OpenedFile {
     const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
     const statements = [database.prepare(quotesOfDaySql), database.prepare(endOfDayOfDaySql), database.prepare(openInterestOfDaySql)] as const;
     for (const statement of statements) statement.setReturnArrays(true);
-    const intraday = tableNames.has("intraday_days") && tableNames.has("intraday_quotes") ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time > ?`) : null;
+    const intraday = tableNames.has("intraday_days") && tableNames.has("intraday_quotes") ? database.prepare(`${intradayQuotesColumnsSql} WHERE trading_date = ? AND look_time > ? AND ${expiresWithin45DaysSql}`) : null;
     intraday?.setReturnArrays(true);
     opened = { database, quotes: statements[0], endOfDay: statements[1], openInterest: statements[2], intraday };
     openedFiles.set(symbol, opened);

@@ -42,6 +42,22 @@ beforeAll(() => {
     intradayCompleteDays: ["2026-03-02"],
   });
   writeSyntheticSymbolFile(fileOf("VERTHREE"), "VERTHREE", [day("2026-03-02")], [], { schemaVersion: "3" });
+  writeSyntheticSymbolFile(fileOf("VERFOUR"), "VERFOUR", [day("2026-03-02")], [], { schemaVersion: "4" });
+  // A file holding every expiry (schema 3): contracts 10, 45, 46 and 300 days out, at 10:00, at the close and at a later
+  // look, and issues for a whole part and for expirations inside and beyond the engine's window.
+  const everyExpiry = syntheticOptionQuotes("2026-03-02", 100, ["2026-03-12", "2026-04-16", "2026-04-17", "2026-12-27"], 0.5, 0.04, 5, 1);
+  const allExpiriesIssue = (part: "quotes" | "eod" | "open_interest" | "intraday_quotes", expiry: string | null) => ({ tradingDate: "2026-03-02", part, expiry, message: "timeout" });
+  writeSyntheticSymbolFile(fileOf("ALLEXP"), "ALLEXP", [{ ...day("2026-03-02"), quotes: everyExpiry, intradayQuotes: { "10:30": everyExpiry } }], [], {
+    schemaVersion: "3",
+    dayIssues: [
+      allExpiriesIssue("quotes", "2026-04-16"),
+      allExpiriesIssue("quotes", "2026-04-17"),
+      allExpiriesIssue("intraday_quotes", "2026-12-27"),
+      allExpiriesIssue("eod", null),
+      allExpiriesIssue("eod", "2026-04-17"),
+      allExpiriesIssue("open_interest", "2026-12-27"),
+    ],
+  });
   // Intraday quotes on the 2nd (looks at 10:30 and 11:00, the stock a dollar higher at each) and none on the 3rd; the
   // 4th is a holiday, the 5th was never downloaded, the 6th is recorded as unavailable.
   const laterLook = (price: number) => syntheticOptionQuotes("2026-03-02", price, ["2026-03-13"], 0.5, 0.04, 5, 2);
@@ -88,7 +104,7 @@ describe("BacktestSymbolFile", () => {
     }
   });
 
-  it("accepts schema versions 1 and 2 and refuses any other", () => {
+  it("accepts schema versions 1, 2 and 3 and refuses any other", () => {
     const versionTwo = BacktestSymbolFile.open("VERTWO");
     try {
       expect(versionTwo.loadDayIssues("2026-03-03")).toEqual([{ tradingDate: "2026-03-03", part: "eod", expiry: null, message: "no data returned" }]);
@@ -97,7 +113,34 @@ describe("BacktestSymbolFile", () => {
       versionTwo.close();
     }
     expect(readBacktestDataFileContents("VERTWO")).toMatchObject({ completeDays: 2, daysWithIssues: 1, unavailableDays: 1, intradayDays: 1 });
-    expect(() => BacktestSymbolFile.open("VERTHREE")).toThrow("The data file has schema version 3; the engine reads versions 1 and 2.");
+    BacktestSymbolFile.open("VERTHREE").close();
+    expect(() => BacktestSymbolFile.open("VERFOUR")).toThrow("The data file has schema version 4; the engine reads versions 1, 2, 3.");
+  });
+
+  it("reads the expiries up to 45 days out (46 for the end of day and the open interest) of a file holding every expiry", () => {
+    const file = BacktestSymbolFile.open("ALLEXP");
+    try {
+      const expiriesOf = (expiries: string[]) => [...new Set(expiries)].sort();
+      expect(expiriesOf(file.loadQuotes("2026-03-02").map((quote) => quote.expiry))).toEqual(["2026-03-12", "2026-04-16"]);
+      expect(expiriesOf(file.loadEndOfDay("2026-03-02").map((row) => row.expiry))).toEqual(["2026-03-12", "2026-04-16", "2026-04-17"]);
+      expect(expiriesOf([...file.loadOpenInterest("2026-03-02").keys()].map((key) => key.split("|")[0]!))).toEqual(["2026-03-12", "2026-04-16", "2026-04-17"]);
+      const looks = file.loadIntradayQuotes("2026-03-02", "09:30", "15:30", 0, 1_000);
+      expect([...looks.keys()]).toEqual(["10:00", "10:30"]);
+      for (const quotes of looks.values()) expect(expiriesOf(quotes.map((quote) => quote.expiry))).toEqual(["2026-03-12", "2026-04-16"]);
+    } finally {
+      file.close();
+    }
+  });
+
+  it("reads only the issues about what it reads: a whole part, or an expiration within the part's window", () => {
+    const file = BacktestSymbolFile.open("ALLEXP");
+    try {
+      expect(file.loadDayIssues("2026-03-02").map((issue) => `${issue.part} ${issue.expiry ?? "all"}`)).toEqual(["eod all", "eod 2026-04-17", "quotes 2026-04-16"]);
+    } finally {
+      file.close();
+    }
+    // The file's own count still names every day with an issue, whatever its expiry.
+    expect(readBacktestDataFileContents("ALLEXP")).toMatchObject({ daysWithIssues: 1 });
   });
 });
 
