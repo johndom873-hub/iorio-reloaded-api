@@ -105,7 +105,7 @@ const barRows: CycleDailyCloseRow[] = [
   { tickerId: wheelTickerId, date: "2026-03-20", close: 51.2 },
   { tickerId: otherTickerId, date: "2026-03-20", close: 21 },
 ];
-const handWrittenRows = { optionRows: [...wheelOptionRows, ...otherOptionRows], stockLegRows, stockTradeRows, barRows, openPositionPremiumPnl: new Map([[ids.secondCallPosition, 30.25]]) };
+const handWrittenRows = { optionRows: [...wheelOptionRows, ...otherOptionRows], stockLegRows, stockTradeRows, barRows, openPositionPremiumPnl: new Map([[ids.secondCallPosition, 30.25]]), openPositionMarkDate: new Map([[ids.secondCallPosition, "2026-03-20"]]) };
 
 const sortById = <Row extends { id: string }>(rows: Row[]) => [...rows].sort((a, b) => a.id.localeCompare(b.id));
 const sortByEntry = <Row extends { entryAt: Date }>(rows: Row[]) => [...rows].sort((a, b) => a.entryAt.getTime() - b.entryAt.getTime());
@@ -122,6 +122,7 @@ describe("the cycle loaders and the exported row mapping", () => {
       expect(input.dailyCloses).toEqual(built.dailyCloses);
       expect(input.lastPrice).toEqual(built.lastPrice);
       expect(input.openPositionPremiumPnl).toEqual(built.openPositionPremiumPnl);
+      expect(input.openPositionMarkDate).toEqual(built.openPositionMarkDate);
     }
   });
 

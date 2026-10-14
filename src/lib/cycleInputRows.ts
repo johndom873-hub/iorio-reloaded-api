@@ -63,6 +63,8 @@ export interface CycleInputRows {
   barRows: readonly CycleDailyCloseRow[];
   /** Latest snapshot premium P&L of the open positions, by position id. */
   openPositionPremiumPnl: Map<string, number>;
+  /** The snapshot date of each openPositionPremiumPnl mark, by position id. */
+  openPositionMarkDate?: Map<string, string>;
 }
 
 function optionLegsOfTicker<Row extends CycleOptionLegRow>(rows: readonly Row[], tickerId: string) {
@@ -85,7 +87,7 @@ export function buildCycleInputFromRows(tickerId: string, rows: CycleInputRows):
   const stockLegs: CycleStockLeg[] = rows.stockLegRows
     .filter((row) => row.tickerId === tickerId)
     .map((row) => ({ positionId: row.positionId, quantity: row.quantity, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
-  return { optionLegs, stockLegs, stockTrades: stockTradesOfTicker(rows.stockTradeRows, tickerId), dailyCloses, lastPrice, openPositionPremiumPnl: rows.openPositionPremiumPnl };
+  return { optionLegs, stockLegs, stockTrades: stockTradesOfTicker(rows.stockTradeRows, tickerId), dailyCloses, lastPrice, openPositionPremiumPnl: rows.openPositionPremiumPnl, openPositionMarkDate: rows.openPositionMarkDate };
 }
 
 export interface OpenCycleSummaryRows {

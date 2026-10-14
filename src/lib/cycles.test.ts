@@ -95,6 +95,51 @@ describe("timeline expiry", () => {
   });
 });
 
+describe("mark rows", () => {
+  // 2 short $100 puts sold 10-12 at 1.34 (credit 268), snapshot 10-13, while the latest daily bar is 10-14.
+  const openPut = assignedPutLeg({ positionId: "pos-open", strike: 100, quantity: 2, entryPrice: 1.34, entryAt: new Date("2026-10-12T14:00:00Z"), exitAt: null, expiryDate: "2026-10-16", expiryClose: null });
+  const putInput = (overrides: Partial<CycleInput> = {}): CycleInput => ({
+    optionLegs: [openPut],
+    stockLegs: [],
+    stockTrades: [],
+    dailyCloses: new Map([["2026-10-12", 101.35], ["2026-10-13", 102.81], ["2026-10-14", 103.4]]),
+    lastPrice: { date: "2026-10-14", price: 103.4 },
+    openPositionPremiumPnl: new Map([["pos-open", 203.43]]),
+    openPositionMarkDate: new Map([["pos-open", "2026-10-13"]]),
+    ...overrides,
+  });
+
+  it("dates an open option's mark row by its snapshot and prices the stock at that day's close", () => {
+    const markRow = openCycle(putInput()).timeline.find((row) => row.at === null)!;
+    expect(markRow.markDate).toBe("2026-10-13");
+    expect(markRow.stockPrice).toBe(102.81);
+    expect(markRow.premium).toBeCloseTo(203.43 - 268, 6);
+  });
+
+  it("shows no stock price rather than another day's when the snapshot's day has no close", () => {
+    const markRow = openCycle(putInput({ dailyCloses: new Map([["2026-10-12", 101.35], ["2026-10-14", 103.4]]) })).timeline.find((row) => row.at === null)!;
+    expect(markRow.stockPrice).toBeNull();
+  });
+
+  it("lists the mark rows in date order: an older snapshot before a newer close", () => {
+    const sharesAndPut = putInput({ stockLegs: [{ positionId: "pos-open", quantity: 100, entryAt: new Date("2026-10-12T14:00:00Z"), exitAt: null }], stockTrades: [{ at: new Date("2026-10-12T14:00:00Z"), side: "buy", quantity: 100, price: 101.35, commission: 0 }] });
+    const markRows = openCycle(sharesAndPut).timeline.filter((row) => row.at === null);
+    expect(markRows.map((row) => [row.instrument, row.markDate])).toEqual([["option", "2026-10-13"], ["stock", "2026-10-14"]]);
+  });
+
+  it("dates a share mark row by the close it uses", () => {
+    const shareMark = openCycle(inputWith([assignmentFill()])).timeline.find((row) => row.at === null)!;
+    expect(shareMark.markDate).toBe("2026-09-25");
+  });
+
+  it("reports what each open option position is counted at: its snapshot, else its credit, and nothing once closed", () => {
+    expect(openCycle(putInput()).openOptionPositions).toEqual([{ positionId: "pos-open", premiumPnl: 203.43, bucket: "csp", optionType: "put", quantity: 200, strike: 100, expiryDate: "2026-10-16" }]);
+    expect(openCycle(putInput({ openPositionPremiumPnl: new Map() })).openOptionPositions[0]!.premiumPnl).toBeCloseTo(268, 6);
+    const boughtBack = deriveCycles(putInput({ optionLegs: [{ ...openPut, exitAt: new Date("2026-10-13T15:00:00Z"), exitPrice: 0.5, hasClosingTrade: true }] }));
+    expect(boughtBack.map((cycle) => [cycle.status, cycle.openOptionPositions])).toEqual([["closed", []]]);
+  });
+});
+
 describe("hedge (long option) legs", () => {
   const hedgeLeg = (overrides: Partial<CycleOptionLeg> = {}): CycleOptionLeg => ({
     id: "hedge-leg", positionId: "pos-hedge", side: "long", optionType: "call", strike: 82, quantity: 110, multiplier: 100, entryPrice: 3.918,

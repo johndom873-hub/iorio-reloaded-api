@@ -79,6 +79,8 @@ export interface CycleInput {
   lastPrice: { date: string; price: number } | null;
   /** Unrealized premium P&L of currently open option legs keyed by position id (from the latest snapshot); absent = at credit. */
   openPositionPremiumPnl: Map<string, number>;
+  /** The date each openPositionPremiumPnl mark is from (its snapshot date), by position id; absent where not known. */
+  openPositionMarkDate?: Map<string, string>;
   /** Open positions whose option mark could not be established (used by "as of" runs): the cycle is flagged instead of guessed at credit. */
   openPositionPremiumPnlUnavailable?: Set<string>;
 }
@@ -91,7 +93,7 @@ export interface BucketResult {
 }
 
 export interface CycleTimelineRow {
-  at: Date | null; // null = "today" mark row
+  at: Date | null; // null = mark row of what is still open (dated by markDate)
   label: string;
   bucket: CycleBucket;
   premium: number;
@@ -107,6 +109,8 @@ export interface CycleTimelineRow {
   stockPrice: number | null;
   /** The purchase of a hedge option that is still held: its cost is not a realized loss, it belongs with the open mark (unrealized). */
   unrealized?: boolean;
+  /** Mark rows only: the trading date ("YYYY-MM-DD") the mark is priced at (the close for shares, the snapshot for options). */
+  markDate?: string;
 }
 
 interface RowMeta {
@@ -116,6 +120,7 @@ interface RowMeta {
   expiryDate: string | null;
   stockPrice: number | null;
   unrealized?: boolean;
+  markDate?: string;
 }
 
 export interface Cycle {
@@ -129,7 +134,22 @@ export interface Cycle {
   /** Cash-ledger break-even per share held (open cycles only); null when not computable. */
   breakEvenPerShare: number | null;
   timeline: CycleTimelineRow[];
+  /** Open cycle only (empty when closed): the open option positions and what the cycle counts each at, so a live mark can replace it. */
+  openOptionPositions: CycleOpenOptionPosition[];
   dataFlags: string[];
+}
+
+export interface CycleOpenOptionPosition {
+  positionId: string;
+  /** The premium P&L the cycle counts it at: its nightly snapshot, else the credit (a hedge without a snapshot at 0). */
+  premiumPnl: number;
+  bucket: CycleBucket;
+  optionType: CycleOptionLeg["optionType"];
+  /** Shares-equivalent (1 contract = 100). */
+  quantity: number;
+  /** null when its open legs differ. */
+  strike: number | null;
+  expiryDate: string | null;
 }
 
 const groupingWindowMs = 120_000;
@@ -283,7 +303,7 @@ function priceOnOrBefore(dailyCloses: Map<string, number>, isoDate: string): { p
 }
 
 function deriveOneCycle(window: { start: number; end: number | null }, input: CycleInput): Cycle {
-  const { dailyCloses, lastPrice, openPositionPremiumPnl, openPositionPremiumPnlUnavailable } = input;
+  const { dailyCloses, lastPrice, openPositionPremiumPnl, openPositionMarkDate, openPositionPremiumPnlUnavailable } = input;
   const inWindow = (at: number) => at >= window.start && (window.end === null || at <= window.end + groupingWindowMs);
   const optionLegs = input.optionLegs.filter((leg) => inWindow(leg.entryAt.getTime()));
   const stockTrades = dropInferredAssignmentFills(
@@ -461,16 +481,18 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
   }
 
   // 4. Mark what is still held, and the open option legs.
+  const firstMarkRow = timeline.length;
   const sharesHeld = pools.cc.shares + pools.unstructured.shares;
   const isOpen = window.end === null;
   if (isOpen && sharesHeld > 0) {
     if (lastPrice === null) dataFlags.push("no price to mark the shares still held");
     else {
       for (const pool of ["cc", "unstructured"] as const) {
-        if (pools[pool].shares > 0) addRow(null, `Marked to the ${lastPrice.date} close`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref), { instrument: "stock", quantity: pools[pool].shares, strike: null, expiryDate: null, stockPrice: lastPrice.price });
+        if (pools[pool].shares > 0) addRow(null, `Marked to the ${lastPrice.date} close`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref), { instrument: "stock", quantity: pools[pool].shares, strike: null, expiryDate: null, stockPrice: lastPrice.price, markDate: lastPrice.date });
       }
     }
   }
+  const openOptionPositions: CycleOpenOptionPosition[] = [];
   if (isOpen) {
     const openLegsByPosition = new Map<string, CycleOptionLeg[]>();
     for (const leg of optionLegs.filter((l) => l.exitAt === null)) openLegsByPosition.set(leg.positionId, [...(openLegsByPosition.get(leg.positionId) ?? []), leg]);
@@ -483,20 +505,30 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       // (P&L 0), or the day it is bought would book its whole premium as a loss.
       const isHedgePosition = legs.every((leg) => leg.side === "long");
       const snapshotPremiumPnl = openPositionPremiumPnl.get(positionId) ?? (isHedgePosition ? 0 : undefined);
-      if (snapshotPremiumPnl === undefined) continue; // stays at credit
       const credit = legs.reduce((sum, leg) => sum + (leg.side === "short" ? 1 : -1) * leg.entryPrice * leg.quantity * leg.multiplier, 0);
-      const adjustment = snapshotPremiumPnl - credit;
       const bucket = optionLegBucket(legs[0]!);
+      const quantity = legs.reduce((sum, leg) => sum + leg.quantity * leg.multiplier, 0);
+      const strike = new Set(legs.map((leg) => leg.strike)).size === 1 ? legs[0]!.strike : null;
+      const expiryDate = new Set(legs.map((leg) => leg.expiryDate)).size === 1 ? legs[0]!.expiryDate : null;
+      openOptionPositions.push({ positionId, premiumPnl: snapshotPremiumPnl ?? credit, bucket, optionType: legs[0]!.optionType, quantity, strike, expiryDate });
+      if (snapshotPremiumPnl === undefined) continue; // stays at credit
+      const markDate = openPositionMarkDate?.get(positionId);
+      const adjustment = snapshotPremiumPnl - credit;
       netPremium += adjustment;
       addRow(null, `Open ${legs[0]!.optionType} marked to market`, bucket, adjustment, 0, {
         instrument: "option",
-        quantity: legs.reduce((sum, leg) => sum + leg.quantity * leg.multiplier, 0),
-        strike: new Set(legs.map((leg) => leg.strike)).size === 1 ? legs[0]!.strike : null,
-        expiryDate: new Set(legs.map((leg) => leg.expiryDate)).size === 1 ? legs[0]!.expiryDate : null,
-        stockPrice: lastPrice?.price ?? null,
+        quantity,
+        strike,
+        expiryDate,
+        // The close of the snapshot's own day, so the price and the mark always describe the same day.
+        stockPrice: markDate === undefined ? lastPrice?.price ?? null : dailyCloses.get(markDate) ?? null,
+        ...(markDate === undefined ? {} : { markDate }),
       });
     }
   }
+
+  // Mark rows in date order (a snapshot can be older than the latest close); undated ones last.
+  timeline.push(...timeline.splice(firstMarkRow).sort((a, b) => (a.markDate ?? "9999-12-31").localeCompare(b.markDate ?? "9999-12-31")));
 
   // 5. Trust checks.
   const legShares = input.stockLegs.filter((leg) => inWindow(leg.entryAt.getTime()) && leg.exitAt === null).reduce((sum, leg) => sum + leg.quantity, 0);
@@ -535,6 +567,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     sharesHeld,
     breakEvenPerShare,
     timeline,
+    openOptionPositions,
     dataFlags: [...new Set(dataFlags)],
   };
 }

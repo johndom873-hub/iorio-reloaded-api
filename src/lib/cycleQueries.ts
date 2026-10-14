@@ -64,7 +64,7 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
       tickerIds === "all" ? [] : [tickerIds],
     ),
     db.raw(
-      `SELECT DISTINCT ON (s.position_id) s.position_id AS "positionId", s.premium_pnl::float AS "premiumPnl"
+      `SELECT DISTINCT ON (s.position_id) s.position_id AS "positionId", s.premium_pnl::float AS "premiumPnl", s.snapshot_date::text AS "snapshotDate"
        FROM position_pnl_snapshots s JOIN positions p ON p.id = s.position_id
        WHERE p.status = 'open' AND s.premium_pnl IS NOT NULL ${filter}
        ORDER BY s.position_id, s.snapshot_date DESC`,
@@ -79,6 +79,7 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
     stockTradeRows: stockTradeRows.rows,
     barRows: barRows.rows,
     openPositionPremiumPnl: new Map<string, number>(snapshotRows.rows.map((row: any) => [row.positionId, Number(row.premiumPnl)])),
+    openPositionMarkDate: new Map<string, string>(snapshotRows.rows.map((row: any) => [row.positionId, row.snapshotDate])),
   };
   const result: SymbolCycleInput[] = [];
   for (const { tickerId, symbol } of tickerRows.rows as { tickerId: string; symbol: string }[]) {
