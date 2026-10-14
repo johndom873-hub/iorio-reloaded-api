@@ -190,10 +190,16 @@ async function getLatestDailyBarDate(tickerId: string): Promise<Date | null> {
 // IBKR's OPTION_IMPLIED_VOLATILITY series doesn't necessarily have a bar on
 // every date TRADES does (e.g. a brand-new ticker), so a missing entry
 // merges as null rather than dropping the price bar.
+// Only finished sessions are stored: during market hours IBKR's newest daily bar is the day so far, and a stored row
+// reads as that day's close everywhere (wheel-cycle marks, dailyBarsAreCurrent), so it waits for the close.
 export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDate: Map<string, number> = new Map(), executor: Knex = db): Promise<void> {
   if (bars.length === 0) return;
-  const rows = bars.map((bar) => {
-    const tradingDate = new Date(bar.time * 1000).toISOString().slice(0, 10);
+  const lastSessionDate = await lastCompletedSessionDate();
+  const tradingDateOf = (bar: PriceBar) => new Date(bar.time * 1000).toISOString().slice(0, 10);
+  const finishedBars = bars.filter((bar) => tradingDateOf(bar) <= lastSessionDate);
+  if (finishedBars.length === 0) return;
+  const rows = finishedBars.map((bar) => {
+    const tradingDate = tradingDateOf(bar);
     return {
       ticker_id: tickerId,
       trading_date: tradingDate,

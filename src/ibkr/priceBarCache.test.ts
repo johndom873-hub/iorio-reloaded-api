@@ -447,6 +447,16 @@ describe("upsertDailyBars", () => {
     expect(insertedRows("daily_price_bars").map((row) => row.volume)).toEqual([null, 134]);
   });
 
+  it("leaves out a session that has not closed yet (today's bar during market hours)", async () => {
+    await upsertDailyBars(tickerId, [dailyBar("2026-10-05", 102), dailyBar("2026-10-06", 99)]);
+    expect(insertedRows("daily_price_bars").map((row) => row.trading_date)).toEqual(["2026-10-05"]);
+  });
+
+  it("writes nothing when every bar is from an unfinished session", async () => {
+    await upsertDailyBars(tickerId, [dailyBar("2026-10-06", 99)]);
+    expect(queriesOn("daily_price_bars")).toEqual([]);
+  });
+
   it("conflicts on ticker and date and keeps a cached IV when the new row has none", async () => {
     await upsertDailyBars(tickerId, [dailyBar("2026-10-02", 100)]);
     const [query] = queriesOn("daily_price_bars");
@@ -520,7 +530,8 @@ describe("topUpDailyBars", () => {
       whatToShow ? [] : [dailyBar("2026-10-05", 102), dailyBar("2026-10-02", 100), dailyBar("2026-10-06", 103)],
     );
     expect(await topUpDailyBars(connection, tickerId, "SPY")).toEqual({ barCount: 3, firstTradingDate: "2026-10-02", lastTradingDate: "2026-10-06" });
-    expect(insertedRows("daily_price_bars")).toHaveLength(3);
+    // 10-06 is still trading (last completed session 10-05): fetched and reported, not stored.
+    expect(insertedRows("daily_price_bars").map((row) => row.trading_date)).toEqual(["2026-10-05", "2026-10-02"]);
   });
 
   it("reports nulls and writes nothing when IBKR returns no bars", async () => {
