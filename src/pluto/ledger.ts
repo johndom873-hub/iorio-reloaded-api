@@ -1,5 +1,6 @@
 import { db } from "../db/connection.js";
 import { publishNotification } from "../lib/notificationChannel.js";
+import { ensurePlutoSettingsVersion } from "./settingsVersions.js";
 
 // Pluto's decision ledger: the audit trail, the screen's feed and the Phase 2 dataset in one
 // place. One pass row per evaluation, one decision row per model call, one action row per
@@ -36,7 +37,8 @@ export interface PlutoPassRow {
 }
 
 export async function startPlutoPass(trigger: PlutoTrigger, triggerDetail: Record<string, unknown> = {}, settingsSnapshot: unknown = null): Promise<string> {
-  const [row] = await db("pluto_passes").insert({ trigger, trigger_detail: JSON.stringify(triggerDetail), settings_snapshot: settingsSnapshot === null ? null : JSON.stringify(settingsSnapshot) }).returning("id");
+  const settingsVersionId = settingsSnapshot === null ? null : await ensurePlutoSettingsVersion(settingsSnapshot);
+  const [row] = await db("pluto_passes").insert({ trigger, trigger_detail: JSON.stringify(triggerDetail), settings_version_id: settingsVersionId }).returning("id");
   return row.id as string;
 }
 

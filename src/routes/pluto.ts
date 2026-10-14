@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { loadRealizedPnlByActionId, type PlutoActionRealizedPnl } from "../pluto/actionRealizedPnl.js";
 import { loadPlutoBook } from "../pluto/book.js";
@@ -330,10 +331,15 @@ function limitFrom(request: Request, fallback: number): number {
 
 /** ?modelCalled=true keeps only passes that asked the model, so a screen wanting the latest decision is not buried under skipped passes. */
 plutoRouter.get("/passes", async (request: Request, response: Response) => {
-  const passesQuery = db("pluto_passes").orderBy("started_at", "desc").limit(limitFrom(request, 50));
+  const passesQuery = withPassSettings(db("pluto_passes")).orderBy("started_at", "desc").limit(limitFrom(request, 50));
   if (request.query.modelCalled === "true") passesQuery.where({ model_called: true });
   response.json(await serializePassesWithDetails(await passesQuery));
 });
+
+/** Each pass row with the settings version it ran with, as version_settings (serializePass reads it). */
+function withPassSettings(passesQuery: Knex.QueryBuilder): Knex.QueryBuilder {
+  return passesQuery.leftJoin("pluto_settings_versions", "pluto_settings_versions.id", "pluto_passes.settings_version_id").select("pluto_passes.*", "pluto_settings_versions.settings as version_settings");
+}
 
 /** Passes with each one's model calls (a compact summary; the full input payload stays on GET /passes/:id) and actions. */
 async function serializePassesWithDetails(rows: Record<string, unknown>[]) {
@@ -389,12 +395,12 @@ plutoRouter.get("/model-decisions", async (request: Request, response: Response)
   if (verdict === "order") filtered.whereRaw(`${firstParsedVerdictSql} = 'trade'`);
   if (verdict === "no_order") filtered.whereRaw(`${firstParsedVerdictSql} <> 'trade'`);
   if (verdict === "failed") filtered.whereRaw(`${firstParsedVerdictSql} is null`);
-  const [rows, countRows] = await Promise.all([filtered.clone().orderBy("started_at", "desc").orderBy("id", "desc").limit(limitFrom(request, 50)).offset(pageOffsetFrom(request)), filtered.clone().count({ total: "*" })]);
+  const [rows, countRows] = await Promise.all([withPassSettings(filtered.clone()).orderBy("pluto_passes.started_at", "desc").orderBy("pluto_passes.id", "desc").limit(limitFrom(request, 50)).offset(pageOffsetFrom(request)), filtered.clone().count({ total: "*" })]);
   response.json({ passes: await serializePassesWithDetails(rows), total: Number(countRows[0]?.total ?? 0) });
 });
 
 plutoRouter.get("/passes/:id", async (request: Request, response: Response) => {
-  const pass = await db("pluto_passes").where({ id: request.params.id }).first();
+  const pass = await withPassSettings(db("pluto_passes")).where("pluto_passes.id", request.params.id).first();
   if (!pass) {
     response.status(404).json({ error: "Pass not found." });
     return;
@@ -554,6 +560,8 @@ plutoRouter.get("/tickers", async (_request: Request, response: Response) => {
 });
 
 function serializePass(row: Record<string, unknown>) {
+  // A pass the previous agent wrote during a release still carries its own copy.
+  const settings = row.version_settings ?? row.settings_snapshot ?? null;
   return {
     id: row.id,
     startedAt: new Date(row.started_at as string).toISOString(),
@@ -569,8 +577,8 @@ function serializePass(row: Record<string, unknown>) {
     tokensOut: row.tokens_out ?? null,
     costUsd: row.cost_usd === null || row.cost_usd === undefined ? null : Number(row.cost_usd),
     servedModelIds: row.served_model_ids ?? [],
-    settingsSnapshot: row.settings_snapshot ?? null,
-    promptVersion: (row.settings_snapshot as { promptVersion?: string } | null)?.promptVersion ?? null,
+    settingsSnapshot: settings,
+    promptVersion: (settings as { promptVersion?: string } | null)?.promptVersion ?? null,
   };
 }
 
