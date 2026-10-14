@@ -560,8 +560,7 @@ plutoRouter.get("/tickers", async (_request: Request, response: Response) => {
 });
 
 function serializePass(row: Record<string, unknown>) {
-  // A pass the previous agent wrote during a release still carries its own copy.
-  const settings = row.version_settings ?? row.settings_snapshot ?? null;
+  const settings = row.version_settings ?? null;
   return {
     id: row.id,
     startedAt: new Date(row.started_at as string).toISOString(),

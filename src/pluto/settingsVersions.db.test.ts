@@ -6,7 +6,7 @@ import knexLibrary, { type Knex } from "knex";
 
 // Settings versions against the real test database: one row per distinct set, a pass pointing at
 // its version, the backfill's hash agreeing with the app's, and the pass routes reading the
-// settings through the version (or a pass's own copy, written by the previous agent mid-release).
+// settings through the version.
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
   config();
@@ -82,8 +82,8 @@ describe("startPlutoPass", () => {
     const settings = { marker, promptVersion: "v-test-pass" };
     const passId = await startPlutoPass("manual", { test: marker }, settings);
     createdPassIds.push(passId);
-    const row = await testDb("pluto_passes").where({ id: passId }).first("settings_version_id", "settings_snapshot");
-    expect(row.settings_snapshot).toBeNull();
+    const row = await testDb("pluto_passes").where({ id: passId }).first();
+    expect(row).not.toHaveProperty("settings_snapshot");
     expect(row.settings_version_id).toBe(await ensurePlutoSettingsVersion(settings));
   });
 
@@ -97,38 +97,39 @@ describe("startPlutoPass", () => {
 
 describe("pass routes", () => {
   let versionedPassId: string;
-  let ownCopyPassId: string;
+  let olderPassId: string;
 
   beforeAll(async () => {
     const versionId = await ensurePlutoSettingsVersion({ marker, promptVersion: "v-test-route" });
+    const olderVersionId = await ensurePlutoSettingsVersion({ marker, promptVersion: "v-test-route-older" });
     // Year 2100: newer than every other test file's passes, so these lead GET /passes.
     const [versioned] = await testDb("pluto_passes").insert({ started_at: "2100-01-01T00:02:00Z", trigger: "manual", trigger_detail: JSON.stringify({ test: marker }), model_called: true, settings_version_id: versionId }).returning("id");
-    const [ownCopy] = await testDb("pluto_passes").insert({ started_at: "2100-01-01T00:01:00Z", trigger: "manual", trigger_detail: JSON.stringify({ test: marker }), model_called: true, settings_snapshot: JSON.stringify({ marker, promptVersion: "v-test-own-copy" }) }).returning("id");
+    const [older] = await testDb("pluto_passes").insert({ started_at: "2100-01-01T00:01:00Z", trigger: "manual", trigger_detail: JSON.stringify({ test: marker }), model_called: true, settings_version_id: olderVersionId }).returning("id");
     versionedPassId = versioned.id;
-    ownCopyPassId = ownCopy.id;
-    createdPassIds.push(versionedPassId, ownCopyPassId);
+    olderPassId = older.id;
+    createdPassIds.push(versionedPassId, olderPassId);
   });
 
-  it("GET /passes/:id reads the settings through the version, or the pass's own copy", async () => {
+  it("GET /passes/:id reads the settings through the version", async () => {
     const versioned = (await (await fetch(`${baseUrl}/pluto/passes/${versionedPassId}`)).json()) as PassJson;
     expect(versioned.id).toBe(versionedPassId);
     expect(versioned.settingsSnapshot).toEqual({ marker, promptVersion: "v-test-route" });
     expect(versioned.promptVersion).toBe("v-test-route");
-    const ownCopy = (await (await fetch(`${baseUrl}/pluto/passes/${ownCopyPassId}`)).json()) as PassJson;
-    expect(ownCopy.promptVersion).toBe("v-test-own-copy");
+    const older = (await (await fetch(`${baseUrl}/pluto/passes/${olderPassId}`)).json()) as PassJson;
+    expect(older.promptVersion).toBe("v-test-route-older");
   });
 
   it("GET /passes and GET /model-decisions carry each pass's prompt version", async () => {
     const passes = (await (await fetch(`${baseUrl}/pluto/passes?limit=2`)).json()) as PassJson[];
     expect(passes.map((pass) => [pass.id, pass.promptVersion])).toEqual([
       [versionedPassId, "v-test-route"],
-      [ownCopyPassId, "v-test-own-copy"],
+      [olderPassId, "v-test-route-older"],
     ]);
     const decisions = (await (await fetch(`${baseUrl}/pluto/model-decisions?since=2100-01-01T00:00:00Z`)).json()) as { passes: PassJson[]; total: number };
     expect(decisions.total).toBe(2);
     expect(decisions.passes.map((pass) => [pass.id, pass.promptVersion])).toEqual([
       [versionedPassId, "v-test-route"],
-      [ownCopyPassId, "v-test-own-copy"],
+      [olderPassId, "v-test-route-older"],
     ]);
   });
 });
