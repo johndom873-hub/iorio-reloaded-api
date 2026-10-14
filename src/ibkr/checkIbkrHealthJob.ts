@@ -72,6 +72,8 @@ export function isCompetingSessionHistoricalDataError(errorMessage: string): boo
 // (probe.failed) and waits for the next run to confirm.
 const runningJobLookbackMs = 2 * 60 * 60 * 1000;
 
+const historicalDataRecoveredMessage = "ℹ️ IBKR Historical Data initialised (Gateway restarted after the SPY probe failed twice; probe OK now).";
+
 export async function findOtherRunningJobName(): Promise<string | null> {
   const row = await db("job_runs")
     .where({ status: "running" })
@@ -269,7 +271,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       if (connection) gatewayOutput = `healthy (first handshake failed, retry ok: ${handshakeErrors[0]})`;
     }
 
-    async function restartAndReconnect(problemDescription: string): Promise<IbkrConnection> {
+    async function restartAndReconnect(problemDescription: string, recoveredMessage?: string): Promise<IbkrConnection> {
       if (!allowGatewayRestart) {
         throw new Error(`IBKR Gateway ${problemDescription} — not restarted: restarts are not allowed from the manual check while the market is open (the scheduled check will handle it).`);
       }
@@ -320,7 +322,7 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
       }
 
       gatewayOutput = `unhealthy (${problemDescription}), restarted, recovered — restart script output: ${result.output.trim()}`;
-      notifications.push(`⚠️ IBKR Gateway ${problemDescription} — restarted, recovery confirmed via a real handshake and a reqHistoricalData probe.`);
+      notifications.push(recoveredMessage ?? `⚠️ IBKR Gateway ${problemDescription} — restarted, recovery confirmed via a real handshake and a reqHistoricalData probe.`);
       return reconnected;
     }
 
@@ -352,7 +354,11 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
           } else {
             probe = { failed: true, reason, restarted: true };
             closeConnection(connection);
-            connection = await restartAndReconnect(`handshake succeeded but reqHistoricalData failed on two consecutive runs (${reason})`);
+            // Happens daily around 12:20/12:40 UTC and a restart fixes it, so a confirmed recovery is info, not a warning.
+            connection = await restartAndReconnect(
+              `handshake succeeded but reqHistoricalData failed on two consecutive runs (${reason})`,
+              historicalDataRecoveredMessage,
+            );
           }
         }
       }

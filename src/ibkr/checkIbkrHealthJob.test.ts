@@ -595,7 +595,7 @@ describe("runIbkrHealthCheckJob: historical data probe failures with a healthy h
     expect(output.details.output).toBe(
       `unhealthy (handshake succeeded but reqHistoricalData failed on two consecutive runs (${historicalTimeoutError})), restarted, recovered — restart script output: GATEWAY_CONTROL_RESULT=recovered`,
     );
-    expect(output.notify).toContain("restarted, recovery confirmed");
+    expect(output.notify).toBe("ℹ️ IBKR Historical Data initialised (Gateway restarted after the SPY probe failed twice; probe OK now).");
     expect(reconnected.disconnect).toHaveBeenCalledTimes(1);
   });
 
