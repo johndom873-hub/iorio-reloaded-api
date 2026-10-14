@@ -11,6 +11,7 @@ import { clearUndeliveredAlerts, loadUndeliveredAlerts, notifyTelegramTracked } 
 import { opsMonitorProcessName } from "./opsMonitorLiveness.js";
 import { notifyDownThrottled } from "./throttledAlert.js";
 import { pruneOldReadinessState, runPreOpenReadinessIfDue } from "./preOpenReadinessRunner.js";
+import type { JobRunStatus } from "./jobRunStatus.js";
 
 // Runs inside the web dyno on a timer, so it does not depend on Heroku Scheduler (the thing it
 // watches). Every minute it (1) writes a heartbeat that the 10-minute ibkr_health_check verifies
@@ -34,7 +35,7 @@ let digestRetryNotBefore = 0;
 export interface DigestJobLine {
   jobName: string;
   lastStartedAt: Date | null;
-  status: "running" | "success" | "failure" | null;
+  status: JobRunStatus | null;
   errorMessage: string | null;
   /** When this job's slot falls today (Eastern day of the digest), or null when it has none. */
   scheduledTodayAt?: Date | null;
@@ -77,6 +78,10 @@ export function buildMorningDigest(input: {
       jobProblemCount++;
       const reason = job.errorMessage ? ` — ${job.errorMessage.split("\n")[0]!.slice(0, 160)}` : "";
       problemLines.push(`❌ Job ${job.jobName}: failed ${when(job.lastStartedAt)}${reason}${laterSlot ? ` · next run today ${formatEasternTime(laterSlot)}` : ""}`);
+    } else if (job.status === "completed_with_errors") {
+      jobProblemCount++;
+      const errors = job.errorMessage ? ` ${job.errorMessage.split("\n")[0]!.slice(0, 200)}` : " errors";
+      problemLines.push(`⚠️ Job ${job.jobName}: ${when(job.lastStartedAt)} completed with${errors}${laterSlot ? ` · next run today ${formatEasternTime(laterSlot)}` : ""}`);
     } else if (pendingJobs.has(job.jobName) && job.scheduledTodayAt) {
       dueLaterEntries.push({ at: job.scheduledTodayAt, line: `⏳ ${job.jobName} was due ${formatEasternTime(job.scheduledTodayAt)}, not started yet (last run ${lastRunMark(job)})` });
     } else if (ranToday(job)) {

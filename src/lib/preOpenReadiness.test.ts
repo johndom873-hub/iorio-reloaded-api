@@ -202,7 +202,7 @@ describe("evaluateOrderHygiene", () => {
 });
 
 describe("evaluateJobs and evaluateHealthCheck", () => {
-  const run = (jobName: string, status: "success" | "failure" | "running" | null, errorMessage: string | null = null) => ({ jobName, startedAt: status ? minutesAgo(600) : null, status, errorMessage });
+  const run = (jobName: string, status: "success" | "failure" | "completed_with_errors" | "running" | null, errorMessage: string | null = null) => ({ jobName, startedAt: status ? minutesAgo(600) : null, status, errorMessage });
   it("passes when every latest run succeeded", () => {
     expect(evaluateJobs([run("a", "success"), run("b", "success")], [])).toMatchObject({ status: "ok", detail: expect.stringContaining("2 jobs") });
   });
@@ -214,6 +214,12 @@ describe("evaluateJobs and evaluateHealthCheck", () => {
     expect(result.detail).toContain("not started although due: option_chain_structure_refresh");
     expect(result.detail).toContain("none of these blocks trading");
     expect(summarizeReadiness([result]).ready).toBe(true);
+  });
+  it("warns, without the word 'failed', on a latest run that completed with errors", () => {
+    const result = evaluateJobs([run("daily_market_data_capture", "completed_with_errors", "1 error: no implied volatility for TWST - no IV in the snapshot; 25 of 26 tickers complete"), run("b", "success")], []);
+    expect(result.status).toBe("warn");
+    expect(result.detail).toContain("completed with errors: daily_market_data_capture (1 error: no implied volatility for TWST");
+    expect(result.detail).not.toContain("failed");
   });
   it("warns for a job that never ran, and treats a still-running job as not failing", () => {
     expect(evaluateJobs([run("a", null)], []).status).toBe("warn");

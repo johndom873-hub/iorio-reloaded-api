@@ -15,6 +15,7 @@ import { loadUndeliveredAlerts } from "./undeliveredAlerts.js";
 import { loadTradingSettingsForEditing } from "./tradingSettingsStore.js";
 import { fetchTradingHalt, type TradingHalt } from "./platformControls.js";
 import { easternIsoDate } from "./easternIsoDate.js";
+import type { JobRunStatus } from "./jobRunStatus.js";
 import {
   configurationExpectationsFor,
   evaluateAccount,
@@ -75,7 +76,7 @@ export interface ReadinessDependencies {
   loadActiveOrders(): Promise<ActiveOrderRow[]>;
   loadLatestJobRuns(): Promise<LatestJobRun[]>;
   loadJobsDueButNotStarted(now: Date): Promise<string[]>;
-  loadLatestHealthCheck(): Promise<{ startedAt: Date; status: "running" | "success" | "failure" } | null>;
+  loadLatestHealthCheck(): Promise<{ startedAt: Date; status: JobRunStatus } | null>;
   /** The trading date the data checks describe: today once today's chain capture has finished, otherwise the last completed session. */
   dataSessionIso(now: Date): Promise<string>;
   loadDataInvariants(now: Date, dataSessionIso: string): Promise<InvariantResult[]>;

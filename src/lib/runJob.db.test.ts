@@ -38,7 +38,7 @@ vi.mock("./notificationChannel.js", () => ({
 }));
 
 const { db } = await import("../db/connection.js");
-const { runJob, wasErrorAlerted, JobAlreadyRunningError, findPrecedingFailureStreak, telegramFailureSummary } = await import("./runJob.js");
+const { runJob, wasErrorAlerted, JobAlreadyRunningError, findPrecedingProblemStreak, telegramFailureSummary } = await import("./runJob.js");
 const testDb: Knex = db;
 
 const jobNamePrefix = "runjob_test_";
@@ -47,7 +47,7 @@ const newJobName = () => `${jobNamePrefix}${Date.now()}_${jobCounter++}`;
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
 const latestRow = (jobName: string) => testDb("job_runs").where({ job_name: jobName }).orderBy("started_at", "desc").first();
 
-async function insertRun(jobName: string, status: "running" | "success" | "failure", startedAt: Date, errorMessage: string | null = null) {
+async function insertRun(jobName: string, status: "running" | "success" | "failure" | "completed_with_errors", startedAt: Date, errorMessage: string | null = null) {
   const [row] = await testDb("job_runs").insert({ job_name: jobName, started_at: startedAt, finished_at: status === "running" ? null : startedAt, status, error_message: errorMessage }).returning("*");
   return row as { id: string };
 }
@@ -192,6 +192,43 @@ describe("runJob: a run that finishes but reports a failure", () => {
   });
 });
 
+describe("runJob: a run that completes with errors", () => {
+  const completedWithErrors = { errorCount: 1, message: "no implied volatility for TWST - no IV in the snapshot; 25 of 26 tickers complete" };
+
+  it("records completed_with_errors with its details and the error count, alerts, and does not throw", async () => {
+    const jobName = newJobName();
+    await runJob(jobName, async () => ({ details: { succeeded: 26 }, completedWithErrors }));
+    expect(await latestRow(jobName)).toMatchObject({
+      status: "completed_with_errors",
+      details: { succeeded: 26 },
+      error_message: "1 error: no implied volatility for TWST - no IV in the snapshot; 25 of 26 tickers complete",
+    });
+    expect(recorded.trackedMessages).toEqual([`⚠️ ${jobName} completed with 1 error: no implied volatility for TWST - no IV in the snapshot; 25 of 26 tickers complete`]);
+    expect(recorded.publishedNotifications).toContainEqual({ type: "job_completed", jobName, status: "completed_with_errors" });
+  });
+
+  it("says 'errors' for more than one", async () => {
+    const jobName = newJobName();
+    await runJob(jobName, async () => ({ completedWithErrors: { errorCount: 3, message: "x" } }));
+    expect(recorded.trackedMessages).toEqual([`⚠️ ${jobName} completed with 3 errors: x`]);
+  });
+
+  it("uses the throttled alert when the job uses reminders", async () => {
+    const jobName = newJobName();
+    await runJob(jobName, async () => ({ completedWithErrors }), { failureAlertReminderIntervalMs: 600_000 });
+    expect(recorded.throttledAlerts.map((alert) => alert.alertKey)).toEqual([`job_failure:${jobName}`]);
+    expect(recorded.clearedDownStates).toEqual([]);
+  });
+
+  it("does not announce a recovery from earlier failures (its own alert says what happened)", async () => {
+    const jobName = newJobName();
+    await insertRun(jobName, "failure", minutesAgo(1500));
+    await runJob(jobName, async () => ({ completedWithErrors }));
+    expect(recorded.trackedMessages).toHaveLength(1);
+    expect(recorded.trackedMessages[0]).toContain("completed with 1 error");
+  });
+});
+
 describe("runJob: a success whose result cannot be recorded", () => {
   it("alerts that the row stays running, marks the error alerted and throws", async () => {
     const jobName = newJobName();
@@ -277,6 +314,23 @@ describe("runJob: recovery", () => {
     expect(recorded.trackedMessages[0]).toContain("recovered after 3 failed attempts");
   });
 
+  it("says a clean run follows one that completed with errors (staging 2026-10-14)", async () => {
+    const jobName = newJobName();
+    await insertRun(jobName, "success", minutesAgo(5000));
+    await insertRun(jobName, "completed_with_errors", minutesAgo(3000));
+    await insertRun(jobName, "completed_with_errors", minutesAgo(1500));
+    await runJob(jobName, async () => ({}));
+    expect(recorded.trackedMessages).toHaveLength(1);
+    expect(recorded.trackedMessages[0]).toMatch(new RegExp(`^✅ ${jobName} completed with no errors; the previous 2 runs \\(since .* ET\\) completed with errors\\.$`));
+  });
+
+  it("names the single previous run that completed with errors", async () => {
+    const jobName = newJobName();
+    await insertRun(jobName, "completed_with_errors", minutesAgo(1500));
+    await runJob(jobName, async () => ({}));
+    expect(recorded.trackedMessages[0]).toMatch(new RegExp(`^✅ ${jobName} completed with no errors; the previous run \\(.* ET\\) completed with errors\\.$`));
+  });
+
   it("says nothing when the previous run was a success", async () => {
     const jobName = newJobName();
     await insertRun(jobName, "failure", minutesAgo(3000));
@@ -297,13 +351,13 @@ describe("runJob: recovery", () => {
   });
 });
 
-describe("findPrecedingFailureStreak", () => {
+describe("findPrecedingProblemStreak", () => {
   it("returns null when there is no history or the latest prior run succeeded", async () => {
     const jobName = newJobName();
     const current = await insertRun(jobName, "running", new Date());
-    expect(await findPrecedingFailureStreak(jobName, current.id, new Date())).toBeNull();
+    expect(await findPrecedingProblemStreak(jobName, current.id, new Date())).toBeNull();
     await insertRun(jobName, "success", minutesAgo(10));
-    expect(await findPrecedingFailureStreak(jobName, current.id, new Date())).toBeNull();
+    expect(await findPrecedingProblemStreak(jobName, current.id, new Date())).toBeNull();
   });
 
   it("counts only the contiguous failures just before the run and reports when the streak began", async () => {
@@ -315,16 +369,25 @@ describe("findPrecedingFailureStreak", () => {
     await insertRun(jobName, "failure", firstFailureAt);
     await insertRun(jobName, "failure", minutesAgo(200));
     const current = await insertRun(jobName, "success", minutesAgo(1));
-    const streak = await findPrecedingFailureStreak(jobName, current.id, minutesAgo(1));
-    expect(streak?.failureCount).toBe(2);
-    expect(streak?.failingSince.getTime()).toBe(firstFailureAt.getTime());
+    const streak = await findPrecedingProblemStreak(jobName, current.id, minutesAgo(1));
+    expect(streak).toEqual({ status: "failure", runCount: 2, sinceStartedAt: firstFailureAt });
+  });
+
+  it("counts a streak of runs that completed with errors, stopping at a failure before them", async () => {
+    const jobName = newJobName();
+    const firstWithErrorsAt = minutesAgo(300);
+    await insertRun(jobName, "failure", minutesAgo(600));
+    await insertRun(jobName, "completed_with_errors", firstWithErrorsAt);
+    await insertRun(jobName, "completed_with_errors", minutesAgo(200));
+    const current = await insertRun(jobName, "running", new Date());
+    expect(await findPrecedingProblemStreak(jobName, current.id, new Date())).toEqual({ status: "completed_with_errors", runCount: 2, sinceStartedAt: firstWithErrorsAt });
   });
 
   it("ignores other jobs' failures", async () => {
     const jobName = newJobName();
     await insertRun(newJobName(), "failure", minutesAgo(100));
     const current = await insertRun(jobName, "running", new Date());
-    expect(await findPrecedingFailureStreak(jobName, current.id, new Date())).toBeNull();
+    expect(await findPrecedingProblemStreak(jobName, current.id, new Date())).toBeNull();
   });
 });
 

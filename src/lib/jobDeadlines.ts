@@ -1,5 +1,6 @@
 import { formatEasternDateTime, formatEasternTime, easternIsoDate } from "./easternIsoDate.js";
 import { easternInstant } from "./marketSessionStatus.js";
+import type { JobRunStatus } from "./jobRunStatus.js";
 
 // Deadline monitor (opsMonitor.ts): every scheduled job must have STARTED by a fixed time.
 // runJob already alerts when a run fails, but a run that never starts (Heroku Scheduler
@@ -61,7 +62,7 @@ export function runFallsInSlot(job: ExpectedJob, dateIso: string, startedAt: Dat
 export interface JobRunSummary {
   jobName: string;
   startedAt: Date;
-  status: "running" | "success" | "failure";
+  status: JobRunStatus;
 }
 
 export interface DeadlineProblem {

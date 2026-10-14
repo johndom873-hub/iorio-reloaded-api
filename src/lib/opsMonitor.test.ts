@@ -55,6 +55,18 @@ describe("buildMorningDigest", () => {
     expect(text.split("\n")[0]).toBe("✅ Iorio morning check Mon 2026-10-05: all clear (1 jobs, 1 data checks)");
   });
 
+  it("lists a job that completed with errors as a ⚠️ problem, not as failed (staging 2026-10-14 digest)", () => {
+    const text = buildMorningDigest({
+      ...base,
+      jobs: [job("daily_market_data_capture", "2026-10-02T22:00:18Z", "completed_with_errors", "2026-10-05T22:00:00Z", "1 error: no implied volatility for TWST - no IV in the snapshot; 25 of 26 tickers complete")],
+      invariants: [],
+    });
+    expect(text.split("\n")[0]).toBe("⚠️ Iorio morning check Mon 2026-10-05: 1 problem(s)");
+    expect(text).toContain("Problems\n⚠️ Job daily_market_data_capture: Fri 10-02 18:00 ET completed with 1 error: no implied volatility for TWST - no IV in the snapshot; 25 of 26 tickers complete · next run today 18:00 ET");
+    expect(text).not.toContain("failed");
+    expect(text).not.toContain("Jobs due later today");
+  });
+
   it("counts and lists every kind of problem", () => {
     const text = buildMorningDigest({
       ...base,

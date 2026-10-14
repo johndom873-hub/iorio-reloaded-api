@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import type { JobRunStatus } from "./jobRunStatus.js";
 
 // Shared Postgres NOTIFY channel carrying real-time app events (order status
 // changes, position closes) from whichever process caused them — the web
@@ -16,7 +17,7 @@ export type AppNotification =
   // presenceTracker.ts (presence) and the publish call sites in runJob.ts
   // and genosuke/bot.ts.
   | { type: "job_started"; jobName: string }
-  | { type: "job_completed"; jobName: string; status: "success" | "failure" }
+  | { type: "job_completed"; jobName: string; status: Exclude<JobRunStatus, "running"> }
   // Day Signals: a pooled contract's grade went up between two refresh cycles (daySignalsNotifications.ts).
   | { type: "signal_upgraded"; symbol: string; strategyKey: string; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netEdge: number; edgeDollars: number; annualizedYield: number }
   // Roll Signals: a (held leg, replacement) roll's grade went up between two refresh cycles.

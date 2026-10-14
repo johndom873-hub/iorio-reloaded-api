@@ -25,7 +25,7 @@ import { captureMarketDataSnapshot } from "../src/ibkr/captureMarketDataSnapshot
 import { lookupLatestDailyBar, lookupRecentDailyBars } from "../src/ibkr/fetchTickerOverview.js";
 import { storeFreshDailyBars } from "../src/ibkr/priceBarCache.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
-import { assessDailyBar, buildMarketDataFailureMessage, type TickerProblem } from "../src/lib/marketDataJobOutcome.js";
+import { assessDailyBar, buildMarketDataJobOutcome, type TickerProblem } from "../src/lib/marketDataJobOutcome.js";
 import { lastCompletedSessionDate } from "../src/lib/marketSessionStatus.js";
 import { runJob } from "../src/lib/runJob.js";
 
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
 
     if (tickers.length === 0) {
       console.log("No shortlisted tickers or open positions — nothing to capture.");
-      return { details: { tickerCount: 0, succeeded: 0 }, failureMessage: buildMarketDataFailureMessage({ tickerCount: 0, failed: [], missingIv: [], attempts: 0, bailedOnBudget: false }) };
+      return { details: { tickerCount: 0, succeeded: 0 }, ...buildMarketDataJobOutcome({ tickerCount: 0, failed: [], missingIv: [], attempts: 0, bailedOnBudget: false }) };
     }
 
     console.log(`Connecting to IBKR Gateway to capture ${tickers.length} ticker(s)...`);
@@ -207,8 +207,8 @@ async function main(): Promise<void> {
     );
     return {
       details: { tickerCount: tickers.length, succeeded, failed, attempts: attempt, bailedOnBudget, failedSymbols: remaining.map((t) => t.symbol), missingIvSymbols: [...missingIvBySymbol.keys()] },
-      // Recorded as a failure (runJob alerts), not a success with a notify: the bars feed Signals.
-      failureMessage: buildMarketDataFailureMessage({
+      // Recorded as a failure or as completed with errors (runJob alerts either way), not a success with a notify: the bars feed Signals.
+      ...buildMarketDataJobOutcome({
         tickerCount: tickers.length,
         failed: remaining.map((ticker) => failureByTickerId.get(ticker.id) ?? { symbol: ticker.symbol, problem: "unknown" }),
         missingIv: [...missingIvBySymbol.values()],

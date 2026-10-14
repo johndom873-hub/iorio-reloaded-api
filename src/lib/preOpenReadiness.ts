@@ -4,6 +4,7 @@ import type { InvariantResult } from "./dataInvariants.js";
 import { easternInstant } from "./marketSessionStatus.js";
 import { formatEasternTime } from "./easternIsoDate.js";
 import { formatWholeDollars } from "./formatWholeDollars.js";
+import type { JobRunStatus } from "./jobRunStatus.js";
 
 // Pre-open readiness (approved 2026-10-05): "can Iorio trade when the market opens?", answered by one list of checks at
 // 6:00 ET (3.5 hours to fix anything), re-checked while red, summed up at 9:20 ET, and confirmed against live option data at
@@ -240,7 +241,7 @@ export function evaluateOrderHygiene(rows: ActiveOrderRow[]): ReadinessCheck {
 export interface LatestJobRun {
   jobName: string;
   startedAt: Date | null;
-  status: "running" | "success" | "failure" | null;
+  status: JobRunStatus | null;
   errorMessage: string | null;
 }
 
@@ -249,9 +250,11 @@ export interface LatestJobRun {
 // job that must have run today) and the live probes.
 export function evaluateJobs(latestRuns: LatestJobRun[], dueButMissing: string[]): ReadinessCheck {
   const failedRuns = latestRuns.filter((run) => run.status === "failure");
+  const runsWithErrors = latestRuns.filter((run) => run.status === "completed_with_errors");
   const neverRun = latestRuns.filter((run) => run.status === null).map((run) => run.jobName);
   const warnings = [
     ...failedRuns.map((run) => `failed: ${run.jobName}${run.errorMessage ? ` (${run.errorMessage.split("\n")[0]!.slice(0, 120)})` : ""}`),
+    ...runsWithErrors.map((run) => `completed with errors: ${run.jobName}${run.errorMessage ? ` (${run.errorMessage.split("\n")[0]!.slice(0, 120)})` : ""}`),
     ...dueButMissing.map((jobName) => `not started although due: ${jobName}`),
     ...(neverRun.length > 0 ? [`never run: ${neverRun.join(", ")}`] : []),
   ];
@@ -263,7 +266,7 @@ export const healthCheckMaxSilenceMinutesForReadiness = 25;
 
 // Warn-only: the worker, account and order-path checks already prove the Gateway works right now. A silent or failing health
 // check means the automatic Gateway restart is not covering the day.
-export function evaluateHealthCheck(latest: { startedAt: Date; status: "running" | "success" | "failure" } | null, now: Date): ReadinessCheck {
+export function evaluateHealthCheck(latest: { startedAt: Date; status: JobRunStatus } | null, now: Date): ReadinessCheck {
   if (!latest) return check("Gateway health check", "warn", "the 10-minute IBKR health check has never run, so a dropped Gateway is not restarted automatically");
   const ageMinutes = (now.getTime() - latest.startedAt.getTime()) / 60_000;
   if (ageMinutes > healthCheckMaxSilenceMinutesForReadiness) return check("Gateway health check", "warn", `the IBKR health check has not run for over ${healthCheckMaxSilenceMinutesForReadiness} minutes, so a dropped Gateway is not restarted automatically`);
