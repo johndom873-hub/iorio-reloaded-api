@@ -1,5 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
+import { freezeTicker } from "./tickerFreeze.js";
 
 // Stock splits detected in IBKR's daily history (stock_splits; dailyBarSplitCheck.ts records them), and the guard that
 // catches one IBKR's history does not show yet (Marcelo 2026-10-15). A pending split (records not yet rewritten to the
@@ -13,9 +14,28 @@ export interface StockSplit {
   recordsRewrittenAt: Date | null;
 }
 
-/** Records a detected split; the same ticker and effective date again is the same split and is not recorded twice. */
+/**
+ * Records a detected split and freezes its ticker (tickerFreeze.ts: its orders are cancelled, nobody trades it until a person
+ * has rewritten its records and unfrozen it); the same ticker and effective date again is the same split and is not recorded
+ * twice.
+ */
 export async function recordStockSplit(split: { tickerId: string; ratio: number; effectiveDateIso: string }, connection: Knex = db): Promise<void> {
   await connection("stock_splits").insert({ ticker_id: split.tickerId, ratio: split.ratio, effective_date: split.effectiveDateIso }).onConflict(["ticker_id", "effective_date"]).ignore();
+  await freezeTicker(split.tickerId, `${describeSplitRatio(split.ratio)} effective ${split.effectiveDateIso}`, connection);
+}
+
+/**
+ * The split as people say it: "2-for-1 stock split", "3-for-2 stock split", "1-for-10 reverse split". The ratio is new shares per
+ * old share, written as the smallest whole numbers up to 20 that give it.
+ */
+export function describeSplitRatio(ratio: number): string {
+  for (let oldShares = 1; oldShares <= 20; oldShares++) {
+    const newShares = Math.round(ratio * oldShares);
+    if (newShares >= 1 && Math.abs(newShares / oldShares - ratio) < 1e-6) {
+      return newShares >= oldShares ? `${newShares}-for-${oldShares} stock split` : `${newShares}-for-${oldShares} reverse split`;
+    }
+  }
+  return `stock split, ratio ${ratio}`;
 }
 
 /** The ticker's splits whose records are not rewritten yet, oldest first. */

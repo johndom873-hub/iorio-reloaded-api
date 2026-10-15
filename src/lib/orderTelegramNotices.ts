@@ -78,6 +78,7 @@ export function describeOrderTelegramNotice(order: OrderTelegramNotice, fills: O
       if (order.cancellationReason === "expired_at_close") return message(`🚫 ${subject} expired unfilled at the close ${by} — nothing filled:`, ...orderLines);
       if (order.cancellationReason === "not_filled_in_time") return message(`🚫 ${subject} cancelled after resting unfilled past the time limit ${by} — nothing filled:`, ...orderLines);
       if (order.cancellationReason === "not_confirmed_in_time") return message(`🚫 ${subject} never confirmed, cancelled ${by} — nothing sent to IBKR:`, ...orderLines);
+      if (order.cancellationReason === "ticker_frozen") return message(`🚫 ${subject} cancelled: the ticker is frozen after a stock split ${by} — nothing filled:`, ...orderLines);
       const reason = order.errorMessage ? ` (${order.errorMessage})` : "";
       return message(`🚫 ${subject} cancelled at IBKR ${by} — nothing filled${reason}:`, ...orderLines);
     }
@@ -88,6 +89,8 @@ export function describeOrderTelegramNotice(order: OrderTelegramNotice, fills: O
           ? `⚠️ ${subject} expired at the close after partly filling ${by}:`
           : order.cancellationReason === "not_filled_in_time"
             ? `⚠️ ${subject} cancelled past the time limit after partly filling ${by}:`
+            : order.cancellationReason === "ticker_frozen"
+              ? `⚠️ ${subject} cancelled after partly filling: the ticker is frozen after a stock split ${by}:`
             : `⚠️ ${subject} cancelled after partly filling ${by}:`;
       return message(headline, ...orderLines, "Filled:", ...(fills.length > 0 ? fills.map(describeOrderFillLine) : [fillsNotRecordedNote]));
     }

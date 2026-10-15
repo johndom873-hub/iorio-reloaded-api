@@ -1010,3 +1010,59 @@ describe("Pluto's book: every open position on an enabled ticker (Marcelo, 2026-
     expect(await plutoBookPositionIds()).not.toContain(hedgeId);
   });
 });
+
+describe("stock split: detected in the holdings, frozen, rewritten, unfrozen", () => {
+  it("a 2-for-1 freezes the ticker without touching its records, then the rewrite moves them to IBKR's new holdings", async () => {
+    const { loadSplitRecordRewritePlan, applySplitRecordRewrite, undoSplitRecordRewrite } = await import("../lib/stockSplitRewrite.js");
+    const { unfreezeTicker } = await import("../lib/tickerFreeze.js");
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const oldPutConId = (nextConId += 1);
+    const newPutConId = (nextConId += 1);
+    const expiry = isoDateDaysFromToday(30);
+    const stockPositionId = await insertPosition(ticker.id, "unstructured", "assigned_put");
+    const stockLegId = await insertStockLeg(stockPositionId, stockConId, 300, 100);
+    await testDb("trades").insert({ position_leg_id: stockLegId, ibkr_exec_id: `split-test-${stockLegId}`, side: "buy", quantity: 300, price: 100, executed_at: new Date(Date.now() - 86_400_000), is_closing_trade: false });
+    const putPositionId = await insertPosition(ticker.id, "cash_secured_put");
+    const putLegId = await insertShortOptionLeg(putPositionId, oldPutConId, "put", 90, expiry, 2);
+    await testDb("position_legs").where({ id: putLegId }).update({ quantity: 3 });
+    const userId = await plutoTestUser();
+    const [order] = await testDb("order_requests").insert({ requested_by_user_id: userId, request_type: "open_position", payload: JSON.stringify({ symbol: ticker.symbol, legs: [] }), status: "submitted" }).returning(["id"]);
+    // The split's first day is today (the holdings detector records today's Eastern date), so the records above, dated
+    // yesterday, are on the old basis.
+    const afterSplit = [heldStock(ticker.symbol, stockConId, 600, 50), heldShortOption(ticker.symbol, newPutConId, OptionType.Put, 45, expiry, 100, 6)];
+
+    process.env.APP_ENVIRONMENT ??= "development";
+    const messagesBefore = telegramMessages.length;
+    await reconcileHeldPositions(afterSplit, ++passCounter, dependencies);
+    const alert = telegramMessages.slice(messagesBefore).find((message) => message.includes(`${ticker.symbol} FROZEN`));
+    expect(alert).toContain("npm run split:rewrite -- --env");
+
+    const frozen = await testDb("tickers").where({ id: ticker.id }).first("trading_frozen_at", "trading_frozen_reason");
+    expect(frozen.trading_frozen_reason).toMatch(/^2-for-1 stock split effective \d{4}-\d{2}-\d{2}$/);
+    expect(await testDb("order_requests").where({ id: order.id }).first("status", "cancellation_reason")).toEqual({ status: "cancel_requested", cancellation_reason: "ticker_frozen" });
+    const legsWhileFrozen = await testDb("position_legs").whereIn("id", [stockLegId, putLegId]).orderBy("leg_type", "desc");
+    expect(legsWhileFrozen.map((leg) => [leg.quantity, Number(leg.entry_price), leg.exit_at])).toEqual([[300, 100, null], [3, 2, null]]);
+    const split = await testDb("stock_splits").where({ ticker_id: ticker.id }).first("id", "ratio", "ibkr_holdings");
+    expect(Number(split.ratio)).toBe(2);
+    expect(split.ibkr_holdings).toHaveLength(2);
+
+    const plan = await loadSplitRecordRewritePlan(split.id);
+    expect(plan.problems).toEqual([]);
+    await applySplitRecordRewrite(plan, { acceptProblems: false });
+    const rewritten = async () => (await testDb("position_legs").whereIn("id", [stockLegId, putLegId]).orderBy("leg_type", "desc")).map((leg) => [leg.quantity, Number(leg.entry_price), leg.strike_price === null ? null : Number(leg.strike_price), leg.ibkr_contract_id]);
+    expect(await rewritten()).toEqual([[600, 50, null, String(stockConId)], [6, 1, 45, String(newPutConId)]]);
+    expect(await testDb("trades").where({ position_leg_id: stockLegId }).first("quantity", "price")).toEqual({ quantity: 600, price: "50.0000" });
+
+    expect(await undoSplitRecordRewrite(split.id)).toBeGreaterThan(0);
+    expect((await testDb("position_legs").where({ id: putLegId }).first("quantity", "strike_price", "ibkr_contract_id"))).toEqual({ quantity: 3, strike_price: "90.0000", ibkr_contract_id: String(oldPutConId) });
+    await applySplitRecordRewrite(await loadSplitRecordRewritePlan(split.id), { acceptProblems: false });
+    expect((await testDb("tickers").where({ id: ticker.id }).first("trading_frozen_at")).trading_frozen_at).not.toBeNull();
+
+    await unfreezeTicker(ticker.id);
+    await reconcileHeldPositions(afterSplit, ++passCounter, dependencies);
+    expect(await rewritten()).toEqual([[600, 50, null, String(stockConId)], [6, 1, 45, String(newPutConId)]]);
+    expect(await testDb("position_legs").whereIn("position_id", [stockPositionId, putPositionId]).whereNotNull("exit_at")).toHaveLength(0);
+    await testDb("alert_state").where({ alert_key: `ticker_frozen:${ticker.id}` }).del();
+  });
+});

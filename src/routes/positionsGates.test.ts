@@ -402,6 +402,21 @@ describe("POST /positions/orders/:id/confirm", () => {
     expect(publishNotificationMock).toHaveBeenCalledWith({ type: "order_status", orderId });
   });
 
+  it("refuses every order on a frozen ticker (a stock split until its records are rewritten), at build and at confirm", async () => {
+    const ticker = await createTicker();
+    const builtBeforeTheFreeze = await insertOrder(ticker.symbol);
+    await testDb("tickers").where({ id: ticker.id }).update({ trading_frozen_at: testDb.fn.now(), trading_frozen_reason: "2-for-1 stock split effective 2026-12-01" });
+    const refusal = `${ticker.symbol} is frozen (2-for-1 stock split effective 2026-12-01): no orders until its records are rewritten to the new basis and it is unfrozen.`;
+    const confirm = await call("POST", `/positions/orders/${builtBeforeTheFreeze}/confirm`, {});
+    expect([confirm.status, confirm.json.error]).toEqual([409, refusal]);
+    expect((await orderRow(builtBeforeTheFreeze)).status).toBe("pending_confirmation");
+    const build = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "cash_secured_put", option: { quantity: 1, limitPrice: 1.5, strikePrice: 90, expiryDate: "20261120" } });
+    expect([build.status, build.json.error]).toEqual([409, refusal]);
+
+    await testDb("tickers").where({ id: ticker.id }).update({ trading_frozen_at: null, trading_frozen_reason: null });
+    expect((await call("POST", `/positions/orders/${builtBeforeTheFreeze}/confirm`, {})).status).toBe(200);
+  });
+
   it("refuses a Pluto order whose ticker's Pluto switch went off after it was built, and confirms it while the switch is on", async () => {
     const ticker = await createTicker();
     const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");

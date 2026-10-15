@@ -9,6 +9,7 @@ import { classifyOptionLegRetirement, type OptionLegRetirementEvidence } from ".
 import { optionPastExpirySql } from "../lib/optionExpiryClock.js";
 import { carveClosedSliceFromPartialClose, exitFromClosingFills } from "../lib/partialCloseSlice.js";
 import { soldFillsEntryPrice, verifyHeldStockCostBasis } from "../lib/stockCostBasisLedger.js";
+import { setAsideFrozenTickers } from "./ibkrGatewayFrozenTickers.js";
 
 // What this module needs from the worker process itself. Injected so the pass can run against a
 // database without the worker's IBKR connection, execution buffer or Telegram plumbing (the
@@ -347,8 +348,10 @@ async function handOffOpenStockLegs(positionId: string, symbol: string, toDescri
  * being relabelled in place and its history overwritten. The handoff fires
  * only on positive evidence that the change is real (judgeStructureChange).
  */
-export async function reconcileHeldPositions(held: IbkrHeldPosition[], passId: number, deps: ReconciliationDependencies): Promise<void> {
+export async function reconcileHeldPositions(allHeld: IbkrHeldPosition[], passId: number, deps: ReconciliationDependencies): Promise<void> {
   dependencies = deps;
+  // A frozen ticker (a stock split until its records are rewritten, tickerFreeze.ts) is left out of the whole pass.
+  const { held, frozenTickerIds } = await setAsideFrozenTickers(allHeld, passId, deps.notifyTelegram);
   currentPassId = passId;
   legsHandedOffThisPass = 0;
   stockHandoffSourcesThisPass = new Map();
@@ -377,7 +380,7 @@ export async function reconcileHeldPositions(held: IbkrHeldPosition[], passId: n
   // pass sees each position's true remaining legs: a covered call whose short
   // call just expired is, by then, a position holding only stock — exactly
   // the shape that must hand its shares to a leftover-stock position.
-  const closedLegCount = await closeLegsNoLongerHeld(heldConIds, passId);
+  const closedLegCount = await closeLegsNoLongerHeld(heldConIds, passId, frozenTickerIds);
   await syncHeldStructures(bySymbol, heldConIds, passId);
   await closeOrphanedOpenPositions(passId);
 
@@ -416,10 +419,11 @@ export async function reconcileHeldPositions(held: IbkrHeldPosition[], passId: n
 // option instead of the full premium collected. Only a genuinely
 // ambiguous close (no trade, not past expiry — e.g. closed directly in
 // TWS, or before this worker was deployed) still falls back to null.
-async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number): Promise<number> {
+async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number, frozenTickerIds: string[]): Promise<number> {
   const openLegs = await db("position_legs")
     .whereNull("exit_at")
     .whereNotNull("ibkr_contract_id")
+    .whereNotIn("position_id", db("positions").whereIn("ticker_id", frozenTickerIds).select("id"))
     .select("*", db.raw(`(leg_type = 'option' AND expiry_date IS NOT NULL AND ${optionPastExpirySql("expiry_date")}) AS is_expired_option`));
 
   const legsNoLongerHeld = openLegs.filter((leg) => !heldConIds.has(Number(leg.ibkr_contract_id)));
@@ -479,6 +483,11 @@ async function closeLegsNoLongerHeld(heldConIds: Set<number>, passId: number): P
   return closedLegCount;
 }
 
+/** Shares one held option contract delivers: IBKR's multiplier (150 for a contract adjusted by a 3-for-2 split), else 100. */
+function sharesPerHeldContract(position: IbkrHeldPosition): number {
+  return Number(position.contract.multiplier) || 100;
+}
+
 async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, heldConIds: Set<number>, passId: number): Promise<void> {
   for (const [symbol, positionsForSymbol] of bySymbol) {
     const stockLeg = positionsForSymbol.find((p) => p.contract.secType === SecType.STK && p.quantity > 0);
@@ -507,7 +516,7 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
       await upsertSplitCashSecuredPutPosition(symbol, putLeg);
     }
 
-    const totalShortCallShares = shortCallLegs.reduce((sum, leg) => sum + Math.abs(leg.quantity) * 100, 0);
+    const totalShortCallShares = shortCallLegs.reduce((sum, leg) => sum + Math.abs(leg.quantity) * sharesPerHeldContract(leg), 0);
     const isCoveredCall = stockLeg && shortCallLegs.length > 0 && totalShortCallShares <= stockLeg.quantity;
 
     console.log(
@@ -521,7 +530,7 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
       // reshuffle from one pass to the next with no real change underneath.
       const sortedCallLegs = [...shortCallLegs].sort((a, b) => (a.contract.conId ?? 0) - (b.contract.conId ?? 0));
       for (const callLeg of sortedCallLegs) {
-        await upsertSplitCoveredCallPosition(symbol, stockLeg, callLeg, Math.abs(callLeg.quantity) * 100, heldConIds);
+        await upsertSplitCoveredCallPosition(symbol, stockLeg, callLeg, Math.abs(callLeg.quantity) * sharesPerHeldContract(callLeg), heldConIds);
       }
       // Should never happen -- every position this app opens is exactly 1
       // option + 100 shares/contract, so leftover stock beyond what the

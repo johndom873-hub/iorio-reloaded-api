@@ -1,6 +1,7 @@
 import type { IBApi } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import { fetchIbkrHeldPositions } from "./ibkrGatewayFetchHeldPositions.js";
+import { frozenSymbolSet } from "../lib/tickerFreeze.js";
 
 interface OpenLegRow {
   id: string;
@@ -24,7 +25,10 @@ interface OpenLegRow {
  * the alerting layer for exactly that gap.
  */
 export async function checkPositionReconciliation(ib: IBApi): Promise<string[]> {
-  const held = await fetchIbkrHeldPositions(ib);
+  // A frozen ticker (a stock split until its records are rewritten, tickerFreeze.ts) differs from IBKR by design and is
+  // already stopped and alerted on its own: left out, so it does not pause Pluto on every other ticker.
+  const frozenSymbols = await frozenSymbolSet();
+  const held = (await fetchIbkrHeldPositions(ib)).filter((position) => !frozenSymbols.has(position.contract.symbol ?? ""));
   const heldByConId = new Map(held.map((position) => [String(position.contract.conId), position]));
 
   const openLegs: OpenLegRow[] = await db("position_legs as pl")
@@ -32,6 +36,7 @@ export async function checkPositionReconciliation(ib: IBApi): Promise<string[]> 
     .join("tickers as t", "t.id", "p.ticker_id")
     .whereNull("pl.exit_at")
     .whereNotNull("pl.ibkr_contract_id")
+    .whereNotIn("t.symbol", [...frozenSymbols])
     .select("pl.id", "pl.ibkr_contract_id", "pl.quantity", "pl.leg_type", "t.symbol as symbol");
 
   // Grouped by conId, not a 1:1 map — a covered call's stock conId can be

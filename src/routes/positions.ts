@@ -952,6 +952,23 @@ async function plutoMayTradeSymbol(symbol: string): Promise<boolean> {
   return Boolean(entry);
 }
 
+/** A frozen ticker (a stock split until its records are rewritten, tickerFreeze.ts) takes no orders from anyone; the refusal, or null. */
+async function frozenTickerRefusal(symbol: string): Promise<string | null> {
+  const ticker = await db("tickers").where({ symbol }).whereNotNull("trading_frozen_at").first("trading_frozen_reason");
+  return ticker ? `${symbol} is frozen (${ticker.trading_frozen_reason ?? "no reason recorded"}): no orders until its records are rewritten to the new basis and it is unfrozen.` : null;
+}
+
+/**
+ * An option leg whose contract does not deliver 100 shares (adjusted by an uneven or reverse split: 150, 10…) is left to IBKR
+ * (Marcelo 2026-10-15): the platform does not close or roll it. The refusal, or null.
+ */
+async function nonStandardContractRefusal(payload: OrderRequestPayload): Promise<string | null> {
+  const legIds = payload.legs.map((leg) => leg.positionLegId).filter((id): id is string => typeof id === "string");
+  if (legIds.length === 0) return null;
+  const leg = await db("position_legs").whereIn("id", legIds).where("leg_type", "option").whereNot("multiplier", 100).first("multiplier");
+  return leg ? `This order includes an option contract that delivers ${leg.multiplier} shares instead of 100 (adjusted after a stock split). The platform leaves such contracts to IBKR: manage it there.` : null;
+}
+
 /** Manual trades are locked on the tickers the CC + Put Ladder trades (Marcelo 2026-10-15): enabled in Pluto while it is the active strategy. */
 async function manualOrdersLockedOn(symbol: string): Promise<boolean> {
   const settings = await db("pluto_settings").where({ id: 1 }).first("execution_strategy");
@@ -978,6 +995,11 @@ positionsRouter.post("/orders", async (request, response) => {
 
   if (!symbol || !symbol.trim()) {
     response.status(400).json({ error: "Symbol is required." });
+    return;
+  }
+  const frozenRefusal = await frozenTickerRefusal(symbol.trim().toUpperCase());
+  if (frozenRefusal) {
+    response.status(409).json({ error: frozenRefusal });
     return;
   }
   if (!strategyKey || !validStrategyKeys.includes(strategyKey)) {
@@ -1459,6 +1481,11 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     return;
   }
 
+  const frozenRefusal = (await frozenTickerRefusal(orderRequest.payload.symbol)) ?? (await nonStandardContractRefusal(orderRequest.payload));
+  if (frozenRefusal) {
+    response.status(409).json({ error: frozenRefusal });
+    return;
+  }
   if (orderRequest.pluto_action_id && !(await plutoMayTradeSymbol(orderRequest.payload.symbol))) {
     response.status(409).json({ error: `Pluto is no longer allowed to trade ${orderRequest.payload.symbol} (its Pluto switch is off).` });
     return;
