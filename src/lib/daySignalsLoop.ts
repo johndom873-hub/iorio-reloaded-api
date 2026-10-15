@@ -35,7 +35,8 @@ import {
   type DaySignalExpirySeed,
   type DaySignalExpiryRow,
 } from "./daySignalsStore.js";
-import { computeMarketSessionStatus } from "./marketSessionStatus.js";
+import { computeMarketSessionStatus, loadTradingSessionsBetween } from "./marketSessionStatus.js";
+import { deltaFromQuoteMid, yearsToSessionClose } from "./quoteOwnDelta.js";
 import { formatIsoDateAsExpiry } from "./optionChainSnapshotStore.js";
 import { readGitSha } from "./readGitSha.js";
 import { reportBackgroundFailure, reportBackgroundRecovery } from "./backgroundFailureAlert.js";
@@ -152,6 +153,8 @@ export interface DaySignalsLoopDependencies {
   recordAssignmentRiskAlert(legId: string, tradingDateIso: string): Promise<void>;
   rearmAssignmentRiskAlert(legId: string): Promise<void>;
   notifyAssignmentRisk(alert: AssignmentRiskAlert): Promise<void>;
+  /** Today's close, minutes after midnight Eastern (13:00 = 780 on a half day): times a same-day expiry's delta. */
+  sessionCloseMinutesEt(dateIso: string): Promise<number>;
   emitUpdated(tickerId: string): void;
   writeHeartbeat(status: DaySignalsLoopStatus): Promise<void>;
   /** Rate-limited Telegram alert for a failure that is otherwise only logged (backgroundFailureAlert.ts). Optional so tests can omit it. */
@@ -224,6 +227,7 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   recordAssignmentRiskAlert,
   rearmAssignmentRiskAlert,
   notifyAssignmentRisk,
+  sessionCloseMinutesEt: async (dateIso) => (await loadTradingSessionsBetween(dateIso, dateIso))[0]?.closeMinutesEt ?? 16 * 60,
   emitUpdated: emitDayQuotesUpdated,
   writeHeartbeat: async (status) => {
     await db("worker_health")
@@ -748,16 +752,28 @@ export class DaySignalsLoop {
       }
       await this.deps.updateDayQuoteGrades(ticker.tickerId, grades);
       this.deps.emitUpdated(ticker.tickerId);
-      await this.checkAssignmentRisk(ticker.symbol, scored.heldLegs, tradingDateIso, scored.spotPrice ?? spot);
+      await this.checkAssignmentRisk(ticker.symbol, scored.heldLegs, tradingDateIso, scored.spotPrice ?? spot, (inputs.header.riskFreeRatePercent ?? 0) / 100);
     } catch (error) {
       console.error(`day signals loop: re-score of ${ticker.symbol} failed — ${error instanceof Error ? error.message : error}`);
       this.deps.reportFailure?.("day-signals:rescore", `Day Signals re-score of ${ticker.symbol} failed (${error instanceof Error ? error.message : error}), so its grades and upgrade notifications are not updating. Other tickers may be affected too.`);
     }
   }
 
-  /** Alerts held legs whose |delta| reached assignment risk, and re-arms flagged ones that fell back (decideAssignmentRiskAlert). Unscored legs (no delta) are skipped. */
-  private async checkAssignmentRisk(symbol: string, heldLegs: HeldLegScore[], tradingDateIso: string, spotPrice: number | null): Promise<void> {
-    const scoredLegs = heldLegs.filter((leg): leg is HeldLegScore & { delta: number } => leg.delta !== null);
+  /**
+   * Alerts held legs whose |delta| reached assignment risk, and re-arms flagged ones that fell back (decideAssignmentRiskAlert).
+   * A leg expiring today has no surface delta (no slice is fitted for a same-day expiry): its own live quote's delta stands in
+   * (quoteOwnDelta.ts, Marcelo 2026-10-15). Other unscored legs (no delta) are skipped.
+   */
+  private async checkAssignmentRisk(symbol: string, heldLegs: HeldLegScore[], tradingDateIso: string, spotPrice: number | null, riskFreeRate: number): Promise<void> {
+    const expiringToday = heldLegs.filter((leg) => leg.delta === null && leg.expiry === tradingDateIso && leg.bid !== null && leg.ask !== null);
+    let yearsToClose: number | null = null;
+    if (expiringToday.length > 0 && spotPrice !== null) yearsToClose = yearsToSessionClose(this.deps.now(), await this.deps.sessionCloseMinutesEt(tradingDateIso));
+    const withDelta = heldLegs.map((leg) => {
+      if (leg.delta !== null || yearsToClose === null || !expiringToday.includes(leg)) return leg;
+      const delta = deltaFromQuoteMid({ bid: leg.bid, ask: leg.ask, spotPrice: spotPrice!, strike: leg.strike, isCall: leg.right === "C", yearsToExpiry: yearsToClose, riskFreeRate });
+      return delta === null ? leg : { ...leg, delta, dte: 0 };
+    });
+    const scoredLegs = withDelta.filter((leg): leg is HeldLegScore & { delta: number } => leg.delta !== null);
     if (scoredLegs.length === 0) return;
     const states = await this.deps.loadAssignmentRiskAlertStates(scoredLegs.map((leg) => leg.legId));
     for (const leg of scoredLegs) {

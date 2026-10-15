@@ -163,6 +163,7 @@ function createHarness(impliedVolatilityShift = 0): Harness {
     notifyAssignmentRisk: async (alert) => {
       calls.assignmentAlerts.push(`${alert.leg.legId}:${alert.leg.strike}${alert.leg.right}`);
     },
+    sessionCloseMinutesEt: async () => 16 * 60,
     emitUpdated: (tickerId) => {
       calls.emitted.push(tickerId);
     },
@@ -747,6 +748,29 @@ describe("DaySignalsLoop", () => {
       expect(harness.state.assignmentRiskStates.get("leg-1")).toMatchObject({ lastAlertTradingDateIso: "2026-09-24" });
       expect(harness.state.assignmentRiskStates.get("leg-1")!.notifiedAt).not.toBeNull();
       expect(harness.calls.assignmentRearms).toEqual([]);
+    });
+
+    it("on its expiry day a held leg has no surface delta: its own live quote's delta decides the alert", async () => {
+      // The held put expires today (24 Sep): no slice is fitted for a same-day expiry (the ticker's 21 Oct one is), so the leg
+      // is unscored but keeps its quote. With the stock at $100 and five hours to the close, the $105 Put quoted at
+      // 5.00 / 5.10 is in the money (|delta| ~1); the $90 Put at 0.05 / 0.10 is far out (~0).
+      const expiringToday = (strike: number, bid: number, ask: number): TickerSignalsInputs => {
+        const base = inputsFor([]);
+        return { ...base, quotes: [...base.quotes, { expiry: tradingDateIso, strike, right: "P" as const, bid, ask, source: "snapshot" as const }], openShortLegs: [{ ...heldPut(strike), expiry: tradingDateIso }] };
+      };
+      for (const [strike, bid, ask, expected] of [[105, 5, 5.1, ["leg-1:105P"]], [90, 0.05, 0.1, []]] as const) {
+        const harness = createHarness();
+        harness.state.assignmentRiskStates.set("leg-1", { notifiedAt: null, lastAlertTradingDateIso: null });
+        harness.deps.loadTickerSignalsInputs = async () => expiringToday(strike, bid, ask);
+        const originalWindow = harness.deps.runQuoteWindow;
+        harness.deps.runQuoteWindow = async (contracts, options) => {
+          const result = await originalWindow(contracts, options);
+          harness.loop.stop();
+          return result;
+        };
+        await harness.loop.start();
+        expect(harness.calls.assignmentAlerts).toEqual(expected);
+      }
     });
 
     it("re-arms once |delta| falls below 0.45, then alerts on the next crossing (on a later trading day)", async () => {
