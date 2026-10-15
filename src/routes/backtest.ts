@@ -27,7 +27,7 @@ import {
   resumeBacktestJob,
 } from "../backtest/jobs/backtestJobStore.js";
 import { validateBacktestBookPageQuery, validateBacktestSessionsPageQuery } from "../backtest/jobs/backtestSessionRequest.js";
-import { validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
+import { checkSessionRequestAgainstLab, validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
 import { registerTickerAnalysisRoutes } from "./backtestAnalysisRoutes.js";
 import { listAnalysedSymbols, rerunAnalysesAfterSave } from "../backtest/analysis/analysisStore.js";
 import { readBacktestClaudeCliPath } from "../backtest/backtestClaudeCli.js";
@@ -172,8 +172,12 @@ backtestRouter.post("/sessions", async (request, response) => {
 // needed yet), nothing created.
 backtestRouter.post("/sessions/estimate", async (request, response) => {
   const body = (request.body ?? {}) as Record<string, unknown>;
-  const { value, warnings, llmEstimate } = await validateSessionRequestAgainstLab({ ...body, name: typeof body.name === "string" && body.name.trim() !== "" ? body.name : "estimate" });
-  const estimate: BacktestSessionEstimateResponse = { warnings, llmEstimate, capital: value.startingValue, bookMode: value.bookMode, resolvedBySymbol: value.symbolSettings };
+  const checked = await checkSessionRequestAgainstLab({ ...body, name: typeof body.name === "string" && body.name.trim() !== "" ? body.name : "estimate" });
+  // Tickers whose values cannot run still answer, each with its problems, so the screen shows them all at once.
+  const estimate: BacktestSessionEstimateResponse =
+    checked.kind === "ticker_problems"
+      ? { warnings: checked.warnings, llmEstimate: null, capital: checked.tickerProblems.capital, bookMode: "pots", resolvedBySymbol: checked.tickerProblems.bySymbol }
+      : { warnings: checked.warnings, llmEstimate: checked.llmEstimate, capital: checked.value.startingValue, bookMode: checked.value.bookMode, resolvedBySymbol: checked.value.symbolResolution };
   response.json(estimate);
 });
 

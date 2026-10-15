@@ -22,6 +22,7 @@ import type {
   BacktestSessionsPage,
   BacktestSettings,
   BacktestSettingsOverrides,
+  BacktestSettingsSource,
   BacktestSymbolSettings,
   BacktestTablesMode,
   BacktestTrade,
@@ -60,6 +61,8 @@ interface SessionRow {
   overrides: BacktestSettingsOverrides;
   book_mode: BacktestBookMode;
   symbol_settings: Record<string, BacktestSymbolSettings> | null;
+  settings_source: BacktestSettingsSource | null;
+  pots_from_starting_value: boolean | null;
   status: BacktestJobStatus;
   metrics: BacktestMetrics | null;
   baseline_metrics: BacktestMetrics | null;
@@ -89,6 +92,8 @@ function selectSessionRows(connection: Knex = db): Knex.QueryBuilder {
     "overrides",
     "book_mode",
     "symbol_settings",
+    "settings_source",
+    "pots_from_starting_value",
     "status",
     "metrics",
     "baseline_metrics",
@@ -543,6 +548,8 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
       overrides: row.overrides,
       bookMode: row.book_mode,
       symbolSettings: row.symbol_settings,
+      settingsSource: row.settings_source,
+      potsFromStartingValue: row.pots_from_starting_value,
       cashBoundBySymbol,
       pnlBasis: row.pnl_basis,
       baselineMetrics: row.baseline_metrics,
@@ -638,6 +645,8 @@ export async function createBacktestSession(request: ValidatedBacktestSessionReq
         overrides: JSON.stringify(request.overrides),
         book_mode: request.bookMode,
         symbol_settings: request.symbolSettings === null ? null : JSON.stringify(request.symbolSettings),
+        settings_source: request.settingsSource,
+        pots_from_starting_value: request.potsFromStartingValue,
         status: "queued",
       })
       .returning("id");

@@ -18,7 +18,10 @@ import {
   type BacktestSettings,
   type BacktestSettingsOverrides,
   type BacktestSettingsSource,
+  type BacktestSymbolResolution,
+  type BacktestSymbolSettingSource,
   type BacktestSymbolSettings,
+  type BacktestTickerProblem,
   type BacktestTablesMode,
   type BacktestTickerBaselineKey,
   type BacktestTickerBaselineSettings,
@@ -78,10 +81,20 @@ export interface ValidatedBacktestSessionRequest {
   bookMode: BacktestBookMode;
   /** Each ticker's pot, weight and values ("pots"); null otherwise. */
   symbolSettings: Record<string, BacktestSymbolSettings> | null;
+  /** The same with where a reset of each value returns ("pots"); null otherwise. */
+  symbolResolution: Record<string, BacktestSymbolResolution> | null;
+  /** How a "pots" session was asked for (Run again); null otherwise. */
+  settingsSource: BacktestSettingsSource | null;
+  potsFromStartingValue: boolean | null;
 }
 
-/** `warnings` do not stop the session: what it will do differently because of what its data files hold. */
-export type BacktestSessionRequestValidation = { ok: true; value: ValidatedBacktestSessionRequest; warnings: string[] } | { ok: false; error: string };
+/**
+ * `warnings` do not stop the session: what it will do differently because of what its data files hold. A request refused
+ * only for its tickers' values carries their resolution (`symbolResolution`), each ticker with its problems.
+ */
+export type BacktestSessionRequestValidation =
+  | { ok: true; value: ValidatedBacktestSessionRequest; warnings: string[] }
+  | { ok: false; error: string; symbolResolution?: { capital: number | null; bySymbol: Record<string, BacktestSymbolResolution> }; warnings?: string[] };
 
 const maximumNameLength = 120;
 /** starting_value is decimal(16,2). */
@@ -308,7 +321,7 @@ export function validateCreateBacktestSessionRequest(body: unknown, context: Bac
   if (effective.decisionMaker !== "baseline") {
     if (body.symbolSettings !== undefined && body.symbolSettings !== null) return { ok: false, error: "symbolSettings apply to the baseline only." };
     if (typeof startingValue !== "number") return { ok: false, error: "The starting account value must be a number above 0." };
-    return { ok: true, value: { ...base, startingValue, bookMode: "shared_account", symbolSettings: null }, warnings };
+    return { ok: true, value: { ...base, startingValue, bookMode: "shared_account", symbolSettings: null, symbolResolution: null, settingsSource: null, potsFromStartingValue: null }, warnings };
   }
 
   const settingsSource = body.settingsSource ?? "per_ticker";
@@ -327,7 +340,9 @@ export function validateCreateBacktestSessionRequest(body: unknown, context: Bac
     defaultPotDollars: context.defaultPotDollars,
   });
   if (!resolved.ok) return resolved;
-  return { ok: true, value: { ...base, startingValue: resolved.capital, bookMode: "pots", symbolSettings: resolved.bySymbol }, warnings };
+  const tickerProblem = firstTickerProblem(resolved.bySymbol);
+  if (tickerProblem !== null || resolved.capital === null) return { ok: false, error: tickerProblem ?? "A ticker has no pot.", symbolResolution: { capital: resolved.capital, bySymbol: resolved.bySymbol }, warnings };
+  return { ok: true, value: { ...base, startingValue: resolved.capital, bookMode: "pots", symbolSettings: storedSymbolSettings(resolved.bySymbol), symbolResolution: resolved.bySymbol, settingsSource, potsFromStartingValue: typeof startingValue === "number" }, warnings };
 }
 
 const isTickerBaselineKey = (key: string): key is BacktestTickerBaselineKey => (backtestTickerBaselineKeys as readonly string[]).includes(key);
@@ -387,47 +402,67 @@ export function resolveBacktestSymbolSettings(input: {
   requestValues: Record<string, BacktestTickerValues>;
   startingValue: number | null;
   defaultPotDollars: number | null;
-}): { ok: true; bySymbol: Record<string, BacktestSymbolSettings>; capital: number } | { ok: false; error: string } {
+}): { ok: true; bySymbol: Record<string, BacktestSymbolResolution>; capital: number | null } | { ok: false; error: string } {
   const { symbols, globalBaseline, sessionBaseline, sessionOverrides, settingsSource, requestValues, startingValue, defaultPotDollars } = input;
   if (startingValue !== null) {
     const withPot = symbols.find((symbol) => requestValues[symbol]?.potDollars !== undefined);
     if (withPot) return { ok: false, error: `Give either a starting value (split equally) or each ticker's pot, not both (${withPot} has a pot).` };
   }
-  const tickers: Omit<BacktestSymbolSettings, "weight">[] = [];
+  const tickers: Omit<BacktestSymbolResolution, "weight">[] = [];
   for (const symbol of symbols) {
     const fromLab = settingsSource === "per_ticker" ? input.tickerValuesFor(symbol) : null;
     const fromRequest = requestValues[symbol] ?? null;
     const baseline = {} as Record<BacktestTickerBaselineKey, unknown>;
-    const source = {} as BacktestSymbolSettings["source"];
+    const source = {} as BacktestSymbolResolution["source"];
+    const fallback: BacktestSymbolResolution["fallback"] = {};
     for (const key of backtestTickerBaselineKeys) {
-      const layers = [
-        ["ticker", fromLab?.baseline?.[key]],
-        ["session", sessionOverrides[key]],
-        ["request", fromRequest?.baseline?.[key]],
-      ] as const;
-      baseline[key] = globalBaseline[key];
-      source[key] = "global";
-      for (const [layer, value] of layers) {
-        if (value === undefined) continue;
-        baseline[key] = value;
-        source[key] = layer;
-      }
+      // Each layer given, lowest first; the last one wins and the one before it is where a reset returns.
+      const layers: [BacktestSymbolSettingSource, unknown][] = [["global", globalBaseline[key]]];
+      for (const [layer, value] of [["ticker", fromLab?.baseline?.[key]], ["session", sessionOverrides[key]], ["request", fromRequest?.baseline?.[key]]] as const) if (value !== undefined) layers.push([layer, value]);
+      const [winner, below] = [layers.at(-1)!, layers.at(-2)];
+      [source[key], baseline[key]] = winner;
+      if (below) fallback[key] = { value: below[1] as number | string, source: below[0] };
     }
     const tickerBaseline = baseline as BacktestTickerBaselineSettings;
+    const problems: BacktestTickerProblem[] = [];
     const problem = validateBaselineSettings({ ...sessionBaseline, ...tickerBaseline });
-    if (problem) return { ok: false, error: `${symbol}: ${problem}` };
-    let potDollars: number;
+    if (problem) problems.push({ key: /^baseline\.(\w+)/.exec(problem)?.[1] ?? null, message: problem });
+    let potDollars: number | null = null;
     if (startingValue !== null) [potDollars, source.potDollars] = [startingValue / symbols.length, "session"];
-    else if (fromRequest?.potDollars !== undefined) [potDollars, source.potDollars] = [fromRequest.potDollars, "request"];
-    else if (fromLab?.potDollars !== undefined) [potDollars, source.potDollars] = [fromLab.potDollars, "ticker"];
-    else if (defaultPotDollars !== null) [potDollars, source.potDollars] = [defaultPotDollars, "global"];
-    else return { ok: false, error: `${symbol} has no pot: give the session a starting value or the ticker a pot.` };
-    tickers.push({ potDollars, baseline: tickerBaseline, source });
+    else {
+      const potLayers: [BacktestSymbolSettingSource, number][] = [];
+      if (defaultPotDollars !== null) potLayers.push(["global", defaultPotDollars]);
+      if (fromLab?.potDollars !== undefined) potLayers.push(["ticker", fromLab.potDollars]);
+      if (fromRequest?.potDollars !== undefined) potLayers.push(["request", fromRequest.potDollars]);
+      const [winner, below] = [potLayers.at(-1), potLayers.at(-2)];
+      if (winner) [source.potDollars, potDollars] = winner;
+      else {
+        source.potDollars = "global";
+        problems.push({ key: "potDollars", message: `${symbol} has no pot: give the session a starting value or the ticker a pot.` });
+      }
+      if (below) fallback.potDollars = { value: below[1], source: below[0] };
+    }
+    tickers.push({ potDollars, baseline: tickerBaseline, source, fallback, problems });
   }
-  const capital = startingValue ?? tickers.reduce((sum, ticker) => sum + ticker.potDollars, 0);
-  if (capital > maximumStartingValue) return { ok: false, error: "The pots add up to too large a starting account value." };
-  const bySymbol = Object.fromEntries(symbols.map((symbol, index) => [symbol, { ...tickers[index]!, weight: tickers[index]!.potDollars / capital }]));
+  const everyPot = tickers.every((ticker) => ticker.potDollars !== null);
+  const capital = startingValue ?? (everyPot ? tickers.reduce((sum, ticker) => sum + ticker.potDollars!, 0) : null);
+  if (capital !== null && capital > maximumStartingValue) return { ok: false, error: "The pots add up to too large a starting account value." };
+  const bySymbol = Object.fromEntries(symbols.map((symbol, index) => [symbol, { ...tickers[index]!, weight: capital === null ? null : tickers[index]!.potDollars! / capital }]));
   return { ok: true, bySymbol, capital };
+}
+
+/** The first ticker problem as the create route words it ("HOOD: baseline.ladderRungs must be …", "HOOD has no pot: …"); null when every ticker can run. */
+export function firstTickerProblem(bySymbol: Record<string, BacktestSymbolResolution>): string | null {
+  for (const [symbol, resolution] of Object.entries(bySymbol)) {
+    const problem = resolution.problems[0];
+    if (problem) return problem.key === "potDollars" ? problem.message : `${symbol}: ${problem.message}`;
+  }
+  return null;
+}
+
+/** The settings a session stores per ticker: the resolution of a request whose tickers can all run. */
+export function storedSymbolSettings(bySymbol: Record<string, BacktestSymbolResolution>): Record<string, BacktestSymbolSettings> {
+  return Object.fromEntries(Object.entries(bySymbol).map(([symbol, { potDollars, weight, baseline, source }]) => [symbol, { potDollars: potDollars!, weight: weight!, baseline, source }]));
 }
 
 /** The filters of a page of a session's actions or fills, every default filled in. */

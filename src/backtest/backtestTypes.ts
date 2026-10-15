@@ -289,6 +289,24 @@ export interface BacktestOrderShortfall {
   bestCandidate: { expiry: string; strike: number; dte: number; premiumYield: number; volumeCap: number } | null;
 }
 
+/** A problem with a ticker's values in a request: the value it is about (a per-ticker baseline key or "potDollars"; null for the combination), and the sentence. */
+export interface BacktestTickerProblem {
+  key: string | null;
+  message: string;
+}
+
+/** A ticker as a request resolves it (the New session screen's estimate): its values, where each came from, what each would be one layer down, and what is wrong with them. */
+export interface BacktestSymbolResolution extends Omit<BacktestSymbolSettings, "potDollars" | "weight"> {
+  /** Null when the ticker has no pot. */
+  potDollars: number | null;
+  /** Null while any ticker of the request has no pot. */
+  weight: number | null;
+  /** For each value not from the lab's global values: the value and source it returns to when this session's or the ticker's layer is removed. */
+  fallback: Partial<Record<BacktestTickerBaselineKey | "potDollars", { value: number | string | null; source: BacktestSymbolSettingSource }>>;
+  /** Empty when the ticker's values can run. */
+  problems: BacktestTickerProblem[];
+}
+
 /** A session's settings with its overrides applied and every default filled in: what the engine runs on. */
 export interface EffectiveBacktestSettings extends BacktestSettings {
   policy: BacktestPolicySettings;
@@ -481,6 +499,8 @@ export interface BacktestSettingRow {
   note: string | null;
   /** The values a "choice" row can take, the default first. */
   choices?: BacktestSettingChoice[];
+  /** One of the baseline values that can differ by ticker in a session of per-ticker pots (backtestTickerBaselineKeys). */
+  perTicker?: true;
 }
 
 export interface BacktestSettingsTemplate {
@@ -542,14 +562,17 @@ export interface CreateBacktestSessionResponse {
   resolvedBySymbol: Record<string, BacktestSymbolSettings> | null;
 }
 
-/** What POST /backtest/sessions/estimate answers: the create route's checks and resolution, nothing created. */
+/**
+ * What POST /backtest/sessions/estimate answers: the create route's checks and resolution, nothing created. A request
+ * whose only problems are tickers' values still answers here (each ticker with its problems); any other problem is a 400.
+ */
 export interface BacktestSessionEstimateResponse {
   warnings: string[];
   llmEstimate: LlmSessionEstimate | null;
-  /** The session's capital: the starting value given, else Σ the pots. */
-  capital: number;
+  /** The session's capital: the starting value given, else Σ the pots; null while a ticker has no pot. */
+  capital: number | null;
   bookMode: BacktestBookMode;
-  resolvedBySymbol: Record<string, BacktestSymbolSettings> | null;
+  resolvedBySymbol: Record<string, BacktestSymbolResolution> | null;
 }
 
 export interface CreateBacktestSessionRequest {
@@ -911,6 +934,9 @@ export interface BacktestSessionDetail {
     bookMode: BacktestBookMode;
     /** Each ticker's pot, weight and values in a "pots" session; null in a "shared_account" one. */
     symbolSettings: Record<string, BacktestSymbolSettings> | null;
+    /** A "pots" session: how it was asked for (each ticker's lab values or the global ones; pots from a starting value split equally or not), for Run again; null on a "shared_account" one. */
+    settingsSource: BacktestSettingsSource | null;
+    potsFromStartingValue: boolean | null;
     /** A "pots" session: per ticker in its turn order, the looks and days at which the cash cut one of its orders; null in a "shared_account" one. */
     cashBoundBySymbol: { symbol: string; looks: number; days: number }[] | null;
     /** Buy and hold of the session's symbols, each with its pot ("pots") or in equal dollar parts, and of SPY: for comparison only. Neither counts dividends. */

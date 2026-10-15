@@ -13,6 +13,16 @@ import { validateCreateBacktestSessionRequest } from "./backtestSessionRequest.j
 // create sessions. Answers the snapshot the session freezes, the validated request, its warnings and, with the AI model
 // deciding, the estimate of its calls.
 export async function validateSessionRequestAgainstLab(body: unknown) {
+  const checked = await checkSessionRequestAgainstLab(body);
+  if (checked.kind === "ticker_problems") throw new BacktestRequestError(checked.error, 400);
+  return checked;
+}
+
+/**
+ * The same check for the New session screen's estimate: a request refused only for its tickers' values answers their
+ * resolution (each ticker with its problems) instead of an error, so the screen can show every problem at once.
+ */
+export async function checkSessionRequestAgainstLab(body: unknown) {
   const [lab, tickerOverrides] = await Promise.all([loadBacktestLabSettings(), loadBacktestLabTickerOverrides()]);
   const snapshot = lab.settings;
   const tickerValues = new Map(tickerOverrides.map((row) => [row.symbol, tickerOverridesToValues(row)]));
@@ -25,12 +35,15 @@ export async function validateSessionRequestAgainstLab(body: unknown) {
     tickerValuesFor: (symbol) => tickerValues.get(symbol) ?? null,
     defaultPotDollars: lab.defaultPotDollars,
   });
-  if (!validation.ok) throw new BacktestRequestError(validation.error, 400);
+  if (!validation.ok) {
+    if (validation.symbolResolution) return { kind: "ticker_problems" as const, tickerProblems: validation.symbolResolution, error: validation.error, warnings: validation.warnings ?? [] };
+    throw new BacktestRequestError(validation.error, 400);
+  }
   // With the AI model deciding, the calls a full day of looks may take (a day without intraday quotes has one look).
   const effective = applyBacktestOverrides(snapshot, validation.value.overrides);
   const llmEstimate =
     effective.decisionMaker === "llm"
       ? estimateLlmSession(validation.value.startDate, validation.value.endDate, lookTimesInWindow(effective.pluto.windowStartEt, effective.pluto.windowEndEt, regularCloseMinutesEt).length)
       : null;
-  return { snapshot, value: validation.value, warnings: validation.warnings, llmEstimate };
+  return { kind: "valid" as const, snapshot, value: validation.value, warnings: validation.warnings, llmEstimate };
 }

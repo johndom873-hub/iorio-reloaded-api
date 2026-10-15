@@ -199,6 +199,7 @@ describe("backtest routes", () => {
     expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(15).fill("Candidate quality"), ...Array(7).fill("Model"), ...Array(6).fill("Trading window and system checks"), ...Array(6).fill("Decisions (stand-in for the AI)"), ...Array(39).fill("Baseline wheel")]);
     expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" });
     expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["rules", "llm", "baseline"]);
+    expect(template.rows.filter((row) => row.perTicker).map((row) => row.path)).toEqual(["baseline.minAbsDelta", "baseline.maxAbsDelta", "baseline.ladderSharesPct", "baseline.ladderRungs", "baseline.ladderShock", "baseline.ladderShockPct", "baseline.ladderShockMinPct", "baseline.ladderShockMaxPct"]);
     expect(template.rows[0]).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
     // The looks inside Pluto's window and the system checks replayed at each: the window is shown, the checks can be changed.
     expect(template.rows.filter((row) => row.group === "Trading window and system checks").map((row) => [row.path, row.unit, row.now, row.editable])).toEqual([
@@ -636,6 +637,12 @@ describe("backtest routes", () => {
       expect((await request("POST", "/backtest/sessions/estimate", withoutName)).status).toBe(200);
       expect((await withClaudeCliPath(undefined, () => request("POST", "/backtest/sessions/estimate", sessionRequest("estimate", { decisionMaker: "llm" })))).status).toBe(400);
       expect((await request("POST", "/backtest/sessions/estimate", { ...sessionRequest("estimate"), endDate: "2026-09-14" })).status).toBe(400);
+      // With the baseline: a ticker whose values cannot run still answers 200, with its problems; creating it is refused.
+      const badDeltaRange = { ...sessionRequest("estimate", { decisionMaker: "baseline" }), symbolSettings: { [fileSymbol]: { baseline: { minAbsDelta: 0.9 } } } };
+      const withProblems = await request("POST", "/backtest/sessions/estimate", badDeltaRange);
+      expect(withProblems.status).toBe(200);
+      expect(withProblems.body).toMatchObject({ bookMode: "pots", capital: 1_000_000, resolvedBySymbol: { [fileSymbol]: { potDollars: 1_000_000, weight: 1, problems: [{ key: "minAbsDelta" }], fallback: { minAbsDelta: { source: "global" } } } } });
+      expect((await request("POST", "/backtest/sessions", badDeltaRange)).status).toBe(400);
       expect(await testDb("backtest_sessions").count({ total: "*" }).first()).toEqual(sessionsBefore);
     });
 

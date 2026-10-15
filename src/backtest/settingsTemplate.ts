@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { kellyFraction } from "../pluto/postModelGates.js";
 import { mapTradingSettingsRow } from "../lib/tradingSettingsStore.js";
-import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, type BacktestSettingRow, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
+import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, type BacktestSettingRow, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
 import { earningsDateKnownCalendarDaysAhead } from "./engine/backtestTickerInputs.js";
 import { readBacktestClaudeCliPath } from "./backtestClaudeCli.js";
 
@@ -420,9 +420,14 @@ export function readBacktestSettingValue(settings: BacktestSettings, settingPath
 /** The AI model as decision maker cannot be picked while BACKTEST_CLAUDE_CLI_PATH is unset. */
 export const claudeCliUnavailableReason = "BACKTEST_CLAUDE_CLI_PATH is not set in the API's .env";
 
+const tickerBaselinePaths = new Set(backtestTickerBaselineKeys.map((key) => `baseline.${key}`));
+/** A baseline value that can differ by ticker in a session of per-ticker pots. */
+const isTickerBaselinePath = (path: string) => tickerBaselinePaths.has(path);
+
 export function buildBacktestSettingRows(settings: BacktestSettings, decisionMakers: { claudeCliAvailable: boolean }): BacktestSettingRow[] {
   return backtestSettingRowDefinitions.map(({ fixedValue, ...row }) => ({
     ...row,
+    ...(isTickerBaselinePath(row.path) ? { perTicker: true as const } : {}),
     ...(row.path === "decisionMaker" && row.choices && !decisionMakers.claudeCliAvailable
       ? { choices: row.choices.map((choice) => (choice.value === "llm" ? { ...choice, unavailableReason: claudeCliUnavailableReason } : choice)) }
       : {}),
