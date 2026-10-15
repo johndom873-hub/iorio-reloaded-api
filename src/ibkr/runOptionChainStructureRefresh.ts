@@ -3,6 +3,7 @@ import { IbkrLookupTimeoutError, refreshStoredOptionChain, type OptionChainRefre
 import { loadCaptureUniverse, type UniverseTicker } from "./runOptionChainCapture.js";
 import { loadFallbackStockPrices } from "../lib/priceService.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import type { JobResult } from "../lib/runJob.js";
 
 // Split off runOptionChainCapture.ts 2026-09-23: chain STRUCTURE (expiries +
 // each expiry's real strike grid) is plain IBKR contract-definition data,
@@ -35,6 +36,20 @@ export interface OptionChainStructureResult {
   skippedSymbols: string[];
   gridLookups: number;
   gridsReused: number;
+}
+
+/**
+ * How a structure run is recorded: a failure when no ticker got its structure (none to refresh, or every one failed or was
+ * skipped), completed with errors when some tickers have none today, neither when every ticker has. Each failed or skipped
+ * ticker is one error.
+ */
+export function buildStructureJobOutcome(result: OptionChainStructureResult): Pick<JobResult, "failureMessage" | "completedWithErrors"> {
+  if (result.tickersAttempted === 0) return { failureMessage: "no tickers to refresh (shortlist and open positions are both empty)" };
+  const incomplete = [...result.failedSymbols, ...result.skippedSymbols];
+  if (incomplete.length === 0) return {};
+  const message = `${incomplete.length} of ${result.tickersAttempted} tickers have no structure today, so the capture skips them: ${incomplete.join(", ")}`;
+  if (incomplete.length >= result.tickersAttempted) return { failureMessage: message };
+  return { completedWithErrors: { errorCount: incomplete.length, message } };
 }
 
 /** Everything runOptionChainStructureRefresh touches outside itself; injectable so the run logic is testable offline. */

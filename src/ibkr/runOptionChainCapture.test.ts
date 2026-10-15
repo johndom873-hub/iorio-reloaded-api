@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SnapshotCoverage } from "../lib/optionChainCaptureCoverage.js";
 import type { StoredOptionChainRefresh } from "./fetchOptionChain.js";
 import {
-  buildCaptureFailureMessage,
+  buildCaptureJobOutcome,
   prepareTicker,
   runOptionChainCapture,
   type OptionChainCaptureResult,
@@ -337,31 +337,46 @@ describe("runOptionChainCapture", () => {
     expect(withoutRate.riskFreeRateUnavailable).toBe(true);
   });
 
-  describe("buildCaptureFailureMessage", () => {
+  describe("buildCaptureJobOutcome", () => {
     const cleanResult: OptionChainCaptureResult = { tickersAttempted: 9, tickersComplete: 9, tickersPartial: 0, tickersFailed: 0, failedSymbols: [], recapturedSymbols: [], riskFreeRateUnavailable: false, fallbackSpotSymbols: [], qualityProblems: [], lineUsage: null };
 
-    it("is undefined for a clean run", () => {
-      expect(buildCaptureFailureMessage(cleanResult)).toBeUndefined();
+    it("is empty for a clean run", () => {
+      expect(buildCaptureJobOutcome(cleanResult)).toEqual({});
     });
 
-    it("names the missing risk-free rate", () => {
-      expect(buildCaptureFailureMessage({ ...cleanResult, riskFreeRateUnavailable: true })).toContain("risk-free rate unavailable");
+    it("fails a run with no risk-free rate: no surface can be fitted from any snapshot", () => {
+      expect(buildCaptureJobOutcome({ ...cleanResult, riskFreeRateUnavailable: true }).failureMessage).toContain("risk-free rate unavailable");
     });
 
-    it("reports failed tickers and a missing rate together", () => {
-      const message = buildCaptureFailureMessage({ ...cleanResult, tickersComplete: 7, tickersFailed: 2, failedSymbols: ["AAA", "BBB"], riskFreeRateUnavailable: true });
-      expect(message).toBe("2 of 9 tickers not captured: AAA, BBB; risk-free rate unavailable (FRED fetch failed and none is stored), so the snapshots were saved without it and no surface can be fitted");
+    it("reports failed tickers and a missing rate together, as a failure", () => {
+      expect(buildCaptureJobOutcome({ ...cleanResult, tickersComplete: 7, tickersFailed: 2, failedSymbols: ["AAA", "BBB"], riskFreeRateUnavailable: true })).toEqual({
+        failureMessage: "2 of 9 tickers not captured: AAA, BBB; risk-free rate unavailable (FRED fetch failed and none is stored), so the snapshots were saved without it and no surface can be fitted",
+      });
     });
 
-    it("reports an empty universe, fallback spots and weak snapshots", () => {
-      expect(buildCaptureFailureMessage({ ...cleanResult, tickersAttempted: 0 })).toBe("no tickers to capture (shortlist and open positions are both empty)");
-      const message = buildCaptureFailureMessage({ ...cleanResult, fallbackSpotSymbols: ["AAA", "BBB"], qualityProblems: ["CCC: partial (60% of contracts got a tick)", "DDD: market data type delayed"] });
-      expect(message).toBe("spot price came from a stored fallback, not live: AAA, BBB; weak snapshots: CCC: partial (60% of contracts got a tick), DDD: market data type delayed");
+    it("fails an empty universe and a run where every ticker failed", () => {
+      expect(buildCaptureJobOutcome({ ...cleanResult, tickersAttempted: 0 })).toEqual({ failureMessage: "no tickers to capture (shortlist and open positions are both empty)" });
+      expect(buildCaptureJobOutcome({ ...cleanResult, tickersAttempted: 2, tickersComplete: 0, tickersFailed: 2, failedSymbols: ["AAA", "BBB"] })).toEqual({ failureMessage: "2 of 2 tickers not captured: AAA, BBB" });
+    });
+
+    it("completes with errors when two of 21 tickers have thin quotes (staging 2026-10-12..14)", () => {
+      expect(buildCaptureJobOutcome({ ...cleanResult, tickersAttempted: 21, tickersComplete: 21, qualityProblems: ["PEN: two-sided quotes 42% (min 75%)", "TECH: two-sided quotes 33% (min 75%)"] })).toEqual({
+        completedWithErrors: { errorCount: 2, message: "weak snapshots: PEN: two-sided quotes 42% (min 75%), TECH: two-sided quotes 33% (min 75%); 21 of 21 tickers captured" },
+      });
+    });
+
+    it("counts each failed ticker, fallback spot and weak snapshot as an error", () => {
+      expect(buildCaptureJobOutcome({ ...cleanResult, tickersComplete: 8, tickersFailed: 1, failedSymbols: ["EEE"], fallbackSpotSymbols: ["AAA", "BBB"], qualityProblems: ["CCC: partial (60% of contracts got a tick)", "DDD: market data type delayed"] })).toEqual({
+        completedWithErrors: {
+          errorCount: 5,
+          message: "1 of 9 tickers not captured: EEE; spot price came from a stored fallback, not live: AAA, BBB; weak snapshots: CCC: partial (60% of contracts got a tick), DDD: market data type delayed; 8 of 9 tickers captured",
+        },
+      });
     });
 
     it("never contains the '): ' sequence that truncates the Telegram alert", () => {
-      expect(buildCaptureFailureMessage({ ...cleanResult, tickersFailed: 1, failedSymbols: ["AAA"], riskFreeRateUnavailable: true })).not.toContain("): ");
-      expect(buildCaptureFailureMessage({ ...cleanResult, fallbackSpotSymbols: ["AAA"], qualityProblems: ["BBB: two-sided quotes 60% (min 75%)"] })).not.toContain("): ");
+      expect(buildCaptureJobOutcome({ ...cleanResult, tickersFailed: 1, failedSymbols: ["AAA"], riskFreeRateUnavailable: true }).failureMessage).not.toContain("): ");
+      expect(buildCaptureJobOutcome({ ...cleanResult, fallbackSpotSymbols: ["AAA"], qualityProblems: ["BBB: two-sided quotes 60% (min 75%)"] }).completedWithErrors!.message).not.toContain("): ");
     });
   });
 

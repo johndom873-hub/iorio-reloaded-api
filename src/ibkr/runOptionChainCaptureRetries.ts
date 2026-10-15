@@ -1,5 +1,6 @@
 import { captureAttemptsPerTicker, loadCaptureRetryCandidateRows, selectSymbolsToRetry } from "../lib/captureRetryQueue.js";
 import { fitAndStoreSurfacesForDate } from "../lib/optionSurfaceStore.js";
+import type { JobResult } from "../lib/runJob.js";
 import { holdCaptureLineReservation, loadCaptureUniverse, runOptionChainCapture, waitForCaptureLinesToFitBudget, type CaptureRunLineUsage, type OptionChainCaptureEvent } from "./runOptionChainCapture.js";
 
 // Retry rounds of the morning capture (approved 2026-09-30), run after the first capture + fit pass:
@@ -100,10 +101,18 @@ export function buildDefaultCaptureRetryDependencies(onCaptureEvent: (event: Opt
   };
 }
 
-/** One line for the job alert when tickers are still unusable after every attempt, or undefined when none is. Free of "): " (the Telegram summary truncates there). */
-export function buildCaptureRetryFailureMessage(result: CaptureRetryResult): string | undefined {
+/**
+ * How a retry run is recorded: a failure when it fixed nothing (every ticker queued for the first retry is still below the
+ * bar after the last attempt), completed with errors when some tickers are still failing or a round's capture threw,
+ * neither when every ticker ended usable. Free of "): " (the Telegram summary truncates there).
+ */
+export function buildCaptureRetryJobOutcome(result: CaptureRetryResult): Pick<JobResult, "failureMessage" | "completedWithErrors"> {
   const problems: string[] = [];
   if (result.stillFailingSymbols.length > 0) problems.push(`${result.stillFailingSymbols.length} tickers still have fewer than half of their expiries fitted after ${captureAttemptsPerTicker} attempts: ${result.stillFailingSymbols.join(", ")}`);
   if (result.roundErrors.length > 0) problems.push(`retry capture errors: ${result.roundErrors.join(" / ")}`);
-  return problems.length > 0 ? problems.join("; ") : undefined;
+  if (problems.length === 0) return {};
+  const firstQueue = result.roundSymbols[0] ?? [];
+  if (firstQueue.length > 0 && firstQueue.every((symbol) => result.stillFailingSymbols.includes(symbol))) return { failureMessage: problems.join("; ") };
+  const fixedCount = firstQueue.filter((symbol) => !result.stillFailingSymbols.includes(symbol)).length;
+  return { completedWithErrors: { errorCount: result.stillFailingSymbols.length + result.roundErrors.length, message: `${problems.join("; ")}; ${fixedCount} of ${firstQueue.length} retried tickers fixed` } };
 }

@@ -1,7 +1,6 @@
 import { db } from "../db/connection.js";
 import { notifyTelegram } from "./notifyTelegram.js";
 import { notifyTelegramTracked } from "./undeliveredAlerts.js";
-import { formatDurationHuman } from "./formatDurationHuman.js";
 import { formatEasternDateTime } from "./easternIsoDate.js";
 import { publishNotification } from "./notificationChannel.js";
 import { clearDownState, notifyDownThrottled } from "./throttledAlert.js";
@@ -12,15 +11,27 @@ export function buildJobDiedMidRunMessage(jobName: string, previousRunStartedAt:
   return `⚠️ ${jobName} died mid-run: the run started ${formatEasternDateTime(previousRunStartedAt)} never finished (process killed or out of memory). A new run is starting.`;
 }
 
-/** Telegram text when a job succeeds after one or more failed attempts. Times are Eastern. */
-export function buildJobRecoveredMessage(jobName: string, attempts: string, failingSince: Date, downtime: string): string {
-  return `✅ ${jobName} recovered after ${attempts} (was down since ${formatEasternDateTime(failingSince)}, ~${downtime}).`;
+/** "the previous run (Tue 10-13 10:00 ET)" / "the previous 3 runs (since Mon 10-12 10:00 ET)". Times are Eastern. */
+function describePreviousRuns(runCount: number, sinceStartedAt: Date): string {
+  return runCount === 1 ? `the previous run (${formatEasternDateTime(sinceStartedAt)})` : `the previous ${runCount} runs (since ${formatEasternDateTime(sinceStartedAt)})`;
+}
+
+/**
+ * Telegram text when a job succeeds after one or more failed runs. A job is not a service: it names the failed runs, not a
+ * downtime, since the time between scheduled runs is not time spent failing.
+ */
+export function buildJobSucceededAfterFailuresMessage(jobName: string, failedRuns: number, sinceStartedAt: Date): string {
+  return `✅ ${jobName} succeeded; ${describePreviousRuns(failedRuns, sinceStartedAt)} failed.`;
 }
 
 /** Telegram text when a job runs clean after one or more runs that completed with errors. Times are Eastern. */
 export function buildJobCompletedCleanAgainMessage(jobName: string, runsWithErrors: number, sinceStartedAt: Date): string {
-  const previousRuns = runsWithErrors === 1 ? `the previous run (${formatEasternDateTime(sinceStartedAt)})` : `the previous ${runsWithErrors} runs (since ${formatEasternDateTime(sinceStartedAt)})`;
-  return `✅ ${jobName} completed with no errors; ${previousRuns} completed with errors.`;
+  return `✅ ${jobName} completed with no errors; ${describePreviousRuns(runsWithErrors, sinceStartedAt)} completed with errors.`;
+}
+
+/** The reminder while a job keeps failing (see notifyDownThrottled): "failing", since a job is not a service that is down. */
+export function buildJobStillFailingReminder(message: string, failingFor: string, interval: string): string {
+  return `${message}\n\n(Still failing after ~${failingFor}. Reminders are sent at most every ${interval}.)`;
 }
 
 /** The text stored in job_runs.error_message for a completed_with_errors run, and the body of its alert. */
@@ -104,7 +115,7 @@ async function sendFailureAlert(jobName: string, failureAlert: string, options: 
     return;
   }
   try {
-    await notifyDownThrottled(`job_failure:${jobName}`, failureAlert, options.failureAlertReminderIntervalMs);
+    await notifyDownThrottled(`job_failure:${jobName}`, failureAlert, options.failureAlertReminderIntervalMs, { reminderText: buildJobStillFailingReminder });
   } catch (error) {
     console.error(`${jobName}: throttled failure alert failed, sending it directly — ${error instanceof Error ? error.message : error}`);
     await notifyTelegram(failureAlert);
@@ -116,7 +127,7 @@ async function sendFailureAlert(jobName: string, failureAlert: string, options: 
 async function alertScheduledRunSkipped(jobName: string, options: RunJobOptions): Promise<void> {
   if ((options.triggeredBy ?? "scheduler") !== "scheduler") return;
   const message = `⚠️ ${jobName} was skipped: its previous run is still marked "running", so this scheduled run did not start.`;
-  if (options.failureAlertReminderIntervalMs !== undefined) await notifyDownThrottled(`job_skipped:${jobName}`, message, options.failureAlertReminderIntervalMs);
+  if (options.failureAlertReminderIntervalMs !== undefined) await notifyDownThrottled(`job_skipped:${jobName}`, message, options.failureAlertReminderIntervalMs, { reminderText: buildJobStillFailingReminder });
   else await notifyTelegramTracked(message);
 }
 
@@ -312,9 +323,7 @@ export async function runJob(jobName: string, fn: () => Promise<JobResult>, opti
 
   const problemStreak = await findPrecedingProblemStreak(jobName, run.id, startedAt);
   if (problemStreak?.status === "failure") {
-    const attempts = problemStreak.runCount === 1 ? "1 failed attempt" : `${problemStreak.runCount} failed attempts`;
-    const downtime = formatDurationHuman(Date.now() - problemStreak.sinceStartedAt.getTime());
-    await notifyTelegramTracked(buildJobRecoveredMessage(jobName, attempts, problemStreak.sinceStartedAt, downtime));
+    await notifyTelegramTracked(buildJobSucceededAfterFailuresMessage(jobName, problemStreak.runCount, problemStreak.sinceStartedAt));
   } else if (problemStreak?.status === "completed_with_errors") {
     await notifyTelegramTracked(buildJobCompletedCleanAgainMessage(jobName, problemStreak.runCount, problemStreak.sinceStartedAt));
   }

@@ -15,7 +15,7 @@
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
-import { buildCalendarCaptureFailureMessage, selectAlertWorthyUnresolved, type CalendarFetchFailure, type UnresolvedTicker } from "../src/lib/calendarCaptureOutcome.js";
+import { buildCalendarCaptureJobOutcome, earningsFetchSource, selectAlertWorthyUnresolved, type CalendarFetchFailure, type UnresolvedTicker } from "../src/lib/calendarCaptureOutcome.js";
 import { runJob } from "../src/lib/runJob.js";
 import { captureMajorMacroEvents, reportMajorMacroEventHorizon } from "../src/lib/macroEventCalendar.js";
 import {
@@ -78,7 +78,7 @@ async function main(): Promise<void> {
       earningsWritten = await upsertEarningsEvents(earningsRows, tickerIdByTvTicker);
     } catch (error) {
       console.error("daily_calendar_capture: earnings fetch failed", error);
-      fetchFailures.push({ source: "earnings", message: describeError(error) });
+      fetchFailures.push({ source: earningsFetchSource, message: describeError(error) });
     }
 
     try {
@@ -110,8 +110,8 @@ async function main(): Promise<void> {
         macroEventHorizonShortfalls: macroEvents.horizonShortfalls,
         fetchFailures,
       },
-      // Recorded as a failure (runJob alerts) instead of a success with stale rows: the earnings dates gate trades.
-      failureMessage: buildCalendarCaptureFailureMessage({ tickerCount: tickers.length, fetchFailures, unresolvedSymbols: selectAlertWorthyUnresolved(unresolvedTickers) }),
+      // Recorded as a failure or completed with errors (runJob alerts on both) instead of a success with stale rows: the earnings dates gate trades.
+      ...buildCalendarCaptureJobOutcome({ tickerCount: tickers.length, fetchFailures, unresolvedSymbols: selectAlertWorthyUnresolved(unresolvedTickers) }),
     };
   });
 }

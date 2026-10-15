@@ -2,6 +2,8 @@
 // with empty results on an IBKR error or timeout instead of throwing, so without these checks a broken
 // scan (the zero-result marketCapAbove filter, 2026-09-25) or a timed-out enrichment looks like a success.
 
+import type { JobResult } from "./runJob.js";
+
 export interface EnrichmentQuote {
   lastPrice: number | null;
   avgShareVolume: number | null;
@@ -27,13 +29,20 @@ export function describeFailedEnrichment(symbol: string, ibkrError: { code: numb
   return `${symbol} (IBKR ${ibkrError.code} ${ibkrError.message.replaceAll("): ", ") ")}${renameNote})`;
 }
 
-/** One line for the job alert, or undefined when every scan returned rows and every symbol enriched. Free of "): " (Telegram truncation). */
-export function buildScreenerFailureMessage(input: { scanCounts: Record<string, number>; failedSymbols: string[]; universeSize: number }): string | undefined {
+/**
+ * How a screener run is recorded: a failure when nothing was refreshed (every scan empty, an empty universe, or every symbol
+ * failed enrichment), completed with errors when some scans came back empty or some symbols failed enrichment, neither when
+ * clean. Each empty scan and each failed symbol is one error. Free of "): " (Telegram truncation).
+ */
+export function buildScreenerJobOutcome(input: { scanCounts: Record<string, number>; failedSymbols: string[]; universeSize: number }): Pick<JobResult, "failureMessage" | "completedWithErrors"> {
   const problems: string[] = [];
   const emptyScans = Object.entries(input.scanCounts).filter(([, rowCount]) => rowCount === 0).map(([scanName]) => scanName);
-  if (emptyScans.length > 0 && emptyScans.length === Object.keys(input.scanCounts).length) problems.push("every scan returned zero rows, so the screener universe was not refreshed");
+  const everyScanEmpty = emptyScans.length > 0 && emptyScans.length === Object.keys(input.scanCounts).length;
+  if (everyScanEmpty) problems.push("every scan returned zero rows, so the screener universe was not refreshed");
   else if (emptyScans.length > 0) problems.push(`scans returned zero rows: ${emptyScans.join(", ")}`);
   if (input.universeSize === 0) problems.push("the screener universe is empty");
   if (input.failedSymbols.length > 0) problems.push(`${input.failedSymbols.length} of ${input.universeSize} symbols failed enrichment and kept their stored values: ${input.failedSymbols.join(", ")}`);
-  return problems.length > 0 ? problems.join("; ") : undefined;
+  if (problems.length === 0) return {};
+  if (everyScanEmpty || input.universeSize === 0 || input.failedSymbols.length >= input.universeSize) return { failureMessage: problems.join("; ") };
+  return { completedWithErrors: { errorCount: emptyScans.length + input.failedSymbols.length, message: problems.join("; ") } };
 }

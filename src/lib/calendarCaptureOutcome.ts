@@ -1,8 +1,13 @@
 // Outcome rules for scripts/run-daily-calendar-capture-job.ts. Earnings dates feed the Signals earnings
 // exclusion and the order warnings, so a fetch that fails (or a ticker that never resolves) silently lets
-// a trade through a report date: every such case is a failed run, on every run it persists.
+// a trade through a report date: every such case alerts, on every run it persists. A failed earnings fetch
+// leaves every ticker's report dates aging, so it is a failed run; anything narrower completes with errors.
 
 import { isEtfSector } from "./tickerCalendarRelevance.js";
+import type { JobResult } from "./runJob.js";
+
+/** CalendarFetchFailure.source of the earnings fetch, the one whose failure fails the run. */
+export const earningsFetchSource = "earnings";
 
 export interface CalendarFetchFailure {
   /** "earnings", "dividends", or "major macro events, <source>". */
@@ -27,11 +32,17 @@ export function selectAlertWorthyUnresolved(unresolved: UnresolvedTicker[]): str
   return unresolved.filter((ticker) => ticker.reason === "lookup_error" || !isEtfSector(ticker.sector)).map((ticker) => ticker.symbol);
 }
 
-/** One line for the job alert, or undefined when every fetch worked and every ticker that should resolve did. Free of "): " (Telegram truncation). */
-export function buildCalendarCaptureFailureMessage(input: { tickerCount: number; fetchFailures: CalendarFetchFailure[]; unresolvedSymbols: string[] }): string | undefined {
+/**
+ * How a calendar run is recorded: a failure when there are no tickers or the earnings fetch failed (the trade gate),
+ * completed with errors when the dividends or a macro source failed or tickers that should resolve did not, neither when
+ * clean. Each failed fetch and each unresolved ticker is one error. Free of "): " (Telegram truncation).
+ */
+export function buildCalendarCaptureJobOutcome(input: { tickerCount: number; fetchFailures: CalendarFetchFailure[]; unresolvedSymbols: string[] }): Pick<JobResult, "failureMessage" | "completedWithErrors"> {
+  if (input.tickerCount === 0) return { failureMessage: "no tickers to capture (shortlist and open positions are both empty)" };
   const problems: string[] = [];
-  if (input.tickerCount === 0) problems.push("no tickers to capture (shortlist and open positions are both empty)");
   for (const failure of input.fetchFailures) problems.push(`${failure.source} fetch failed, existing rows are aging - ${failure.message.split("\n")[0]!.slice(0, 200)}`);
   if (input.unresolvedSymbols.length > 0) problems.push(`no TradingView match or lookup error, so no earnings or dividend data for ${input.unresolvedSymbols.join(", ")}`);
-  return problems.length > 0 ? problems.join("; ") : undefined;
+  if (problems.length === 0) return {};
+  if (input.fetchFailures.some((failure) => failure.source === earningsFetchSource)) return { failureMessage: problems.join("; ") };
+  return { completedWithErrors: { errorCount: input.fetchFailures.length + input.unresolvedSymbols.length, message: problems.join("; ") } };
 }

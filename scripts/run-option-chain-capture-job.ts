@@ -23,13 +23,13 @@ import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
 import { sharedReadConnection } from "../src/ibkr/sharedReadConnection.js";
-import { buildCaptureFailureMessage, runOptionChainCapture, type OptionChainCaptureEvent } from "../src/ibkr/runOptionChainCapture.js";
-import { buildCaptureRetryFailureMessage, buildDefaultCaptureRetryDependencies, runCaptureRetryRounds } from "../src/ibkr/runOptionChainCaptureRetries.js";
+import { buildCaptureJobOutcome, runOptionChainCapture, type OptionChainCaptureEvent } from "../src/ibkr/runOptionChainCapture.js";
+import { buildCaptureRetryJobOutcome, buildDefaultCaptureRetryDependencies, runCaptureRetryRounds } from "../src/ibkr/runOptionChainCaptureRetries.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { isWithinChainCaptureClockWindow } from "../src/lib/optionChainCaptureClock.js";
 import { runOptionSurfaceFitJob } from "../src/lib/runOptionSurfaceFitJob.js";
 import { runJob } from "../src/lib/runJob.js";
-import { buildSeedEmptyPoolWarning, buildSeedFailureMessage, seedDaySignals } from "../src/lib/daySignalsSeed.js";
+import { buildSeedEmptyPoolWarning, buildSeedJobOutcome, seedDaySignals } from "../src/lib/daySignalsSeed.js";
 import { easternIsoDate } from "../src/lib/easternIsoDate.js";
 
 // This job has no user waiting on latency, so it would rather queue behind
@@ -69,9 +69,9 @@ async function main(): Promise<void> {
       async () => {
         const result = await runOptionChainCapture(logCaptureEvent);
         console.log(`Chain capture: ${result.tickersComplete} complete, ${result.tickersPartial} partial, ${result.tickersFailed} failed of ${result.tickersAttempted}.`);
-        // A run where tickers failed, or that saved every snapshot without a risk-free rate, is recorded
-        // as a failure (runJob alerts), not a "success" that hides it; failed tickers also have failed snapshot rows.
-        return { details: { ...result }, failureMessage: buildCaptureFailureMessage(result) };
+        // A run with failed or weak tickers is recorded as completed with errors, one with nothing usable as a failure (runJob
+        // alerts on both), not a "success" that hides it; failed tickers also have failed snapshot rows.
+        return { details: { ...result }, ...buildCaptureJobOutcome(result) };
       },
       { triggeredBy: "scheduler", staleRunningJobThresholdMs: optionChainCaptureStaleRunningThresholdMs },
     );
@@ -93,7 +93,7 @@ async function main(): Promise<void> {
     async () => {
       const retry = await runCaptureRetryRounds(tradingDateIso, buildDefaultCaptureRetryDependencies(logCaptureEvent));
       console.log(`Capture retry: ${retry.roundSymbols.length === 0 ? "nothing to retry" : retry.roundSymbols.map((symbols, index) => `attempt ${index + 2}: ${symbols.join(", ")}`).join("; ")}; still failing: ${retry.stillFailingSymbols.join(", ") || "-"}.`);
-      return { details: { ...retry }, failureMessage: buildCaptureRetryFailureMessage(retry) };
+      return { details: { ...retry }, ...buildCaptureRetryJobOutcome(retry) };
     },
     { triggeredBy: "scheduler", staleRunningJobThresholdMs: optionChainCaptureStaleRunningThresholdMs },
   ).catch((error) => console.error(`option_chain_capture_retry failed, continuing to the seed: ${error instanceof Error ? error.message : error}`));
@@ -107,7 +107,7 @@ async function main(): Promise<void> {
     async () => {
       const seed = await seedDaySignals(tradingDateIso);
       console.log(`Day Signals seed: ${seed.tickersPooled}/${seed.tickersScored} tickers pooled, ${seed.expiriesPooled} expiries; no pool: ${seed.symbolsWithoutPool.join(", ") || "-"}; no snapshot today: ${seed.symbolsWithoutTodaySnapshot.join(", ") || "-"}.`);
-      return { details: { ...seed }, failureMessage: buildSeedFailureMessage(seed), notify: buildSeedEmptyPoolWarning(seed) };
+      return { details: { ...seed }, ...buildSeedJobOutcome(seed), notify: buildSeedEmptyPoolWarning(seed) };
     },
     { triggeredBy: "scheduler" },
   ).catch((error) => console.error(`day_signals_seed failed: ${error instanceof Error ? error.message : error}`));

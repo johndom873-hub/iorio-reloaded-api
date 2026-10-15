@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScreenerFailureMessage, describeFailedEnrichment, isEmptyEnrichment, type EnrichmentQuote } from "./screenerScanOutcome.js";
+import { buildScreenerJobOutcome, describeFailedEnrichment, isEmptyEnrichment, type EnrichmentQuote } from "./screenerScanOutcome.js";
 
 const quote = (overrides: Partial<EnrichmentQuote> = {}): EnrichmentQuote => ({
   lastPrice: null,
@@ -44,23 +44,26 @@ describe("describeFailedEnrichment", () => {
   });
 });
 
-describe("buildScreenerFailureMessage", () => {
+describe("buildScreenerJobOutcome", () => {
   const healthy = { scanCounts: { TOP_PERC_GAIN: 50, HOT_BY_VOLUME: 50 }, failedSymbols: [], universeSize: 80 };
 
-  it("is undefined when every scan returned rows and every symbol enriched", () => {
-    expect(buildScreenerFailureMessage(healthy)).toBeUndefined();
+  it("is empty when every scan returned rows and every symbol enriched", () => {
+    expect(buildScreenerJobOutcome(healthy)).toEqual({});
   });
 
-  it("says so when every scan came back empty", () => {
-    expect(buildScreenerFailureMessage({ ...healthy, scanCounts: { A: 0, B: 0 } })).toBe("every scan returned zero rows, so the screener universe was not refreshed");
+  it("fails when every scan came back empty", () => {
+    expect(buildScreenerJobOutcome({ ...healthy, scanCounts: { A: 0, B: 0 } })).toEqual({ failureMessage: "every scan returned zero rows, so the screener universe was not refreshed" });
   });
 
-  it("names the individual empty scans and the failed symbols", () => {
-    expect(buildScreenerFailureMessage({ ...healthy, scanCounts: { A: 50, B: 0 }, failedSymbols: ["XYZ", "ABC"] })).toBe("scans returned zero rows: B; 2 of 80 symbols failed enrichment and kept their stored values: XYZ, ABC");
+  it("completes with errors naming the individual empty scans and the failed symbols", () => {
+    expect(buildScreenerJobOutcome({ ...healthy, scanCounts: { A: 50, B: 0 }, failedSymbols: ["XYZ", "ABC"] })).toEqual({
+      completedWithErrors: { errorCount: 3, message: "scans returned zero rows: B; 2 of 80 symbols failed enrichment and kept their stored values: XYZ, ABC" },
+    });
   });
 
-  it("reports an empty universe and never contains '): '", () => {
-    expect(buildScreenerFailureMessage({ scanCounts: { A: 0 }, failedSymbols: [], universeSize: 0 })).toContain("the screener universe is empty");
-    expect(buildScreenerFailureMessage({ ...healthy, failedSymbols: ["A"] })).not.toContain("): ");
+  it("fails on an empty universe or when every symbol failed enrichment, and never contains '): '", () => {
+    expect(buildScreenerJobOutcome({ scanCounts: { A: 0 }, failedSymbols: [], universeSize: 0 }).failureMessage).toContain("the screener universe is empty");
+    expect(buildScreenerJobOutcome({ ...healthy, failedSymbols: ["A", "B"], universeSize: 2 }).failureMessage).toBe("2 of 2 symbols failed enrichment and kept their stored values: A, B");
+    expect(buildScreenerJobOutcome({ ...healthy, failedSymbols: ["A"] }).completedWithErrors!.message).not.toContain("): ");
   });
 });

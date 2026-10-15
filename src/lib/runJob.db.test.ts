@@ -14,6 +14,8 @@ const recorded = vi.hoisted(() => ({
   trackedMessages: [] as string[],
   directMessages: [] as string[],
   throttledAlerts: [] as { alertKey: string; message: string; reminderIntervalMs: number }[],
+  /** Each throttled alert's reminder, rendered for a state that has lasted "2h" with a "1h" interval (null: the default "Still down"). */
+  throttledReminders: [] as (string | null)[],
   clearedDownStates: [] as string[],
   publishedNotifications: [] as unknown[],
   throttledShouldThrow: false,
@@ -23,9 +25,10 @@ const recorded = vi.hoisted(() => ({
 vi.mock("./notifyTelegram.js", () => ({ notifyTelegram: async (message: string) => void recorded.directMessages.push(message) }));
 vi.mock("./undeliveredAlerts.js", () => ({ notifyTelegramTracked: async (message: string) => void recorded.trackedMessages.push(message) }));
 vi.mock("./throttledAlert.js", () => ({
-  notifyDownThrottled: async (alertKey: string, message: string, reminderIntervalMs: number) => {
+  notifyDownThrottled: async (alertKey: string, message: string, reminderIntervalMs: number, options: { reminderText?: (message: string, downFor: string, interval: string) => string } = {}) => {
     if (recorded.throttledShouldThrow) throw new Error("alert_state is unavailable");
     recorded.throttledAlerts.push({ alertKey, message, reminderIntervalMs });
+    recorded.throttledReminders.push(options.reminderText ? options.reminderText(message, "2h", "1h") : null);
     return true;
   },
   clearDownState: async (alertKey: string) => void recorded.clearedDownStates.push(alertKey),
@@ -57,6 +60,7 @@ beforeEach(async () => {
   recorded.trackedMessages.length = 0;
   recorded.directMessages.length = 0;
   recorded.throttledAlerts.length = 0;
+  recorded.throttledReminders.length = 0;
   recorded.clearedDownStates.length = 0;
   recorded.publishedNotifications.length = 0;
   recorded.throttledShouldThrow = false;
@@ -146,6 +150,7 @@ describe("runJob: a thrown error", () => {
     const jobName = newJobName();
     await expect(runJob(jobName, async () => Promise.reject(new Error("down")), { failureAlertReminderIntervalMs: 3_600_000 })).rejects.toThrow("down");
     expect(recorded.throttledAlerts).toEqual([{ alertKey: `job_failure:${jobName}`, message: `⚠️ ${jobName} failed: down`, reminderIntervalMs: 3_600_000 }]);
+    expect(recorded.throttledReminders).toEqual([`⚠️ ${jobName} failed: down\n\n(Still failing after ~2h. Reminders are sent at most every 1h.)`]);
     expect(recorded.trackedMessages).toEqual([]);
   });
 
@@ -296,13 +301,13 @@ describe("runJob: overlapping runs", () => {
 });
 
 describe("runJob: recovery", () => {
-  it("announces a recovery after one failed attempt", async () => {
+  it("announces a success after one failed run, naming the run rather than a downtime", async () => {
     const jobName = newJobName();
     await insertRun(jobName, "success", minutesAgo(3000));
     await insertRun(jobName, "failure", minutesAgo(1500));
     await runJob(jobName, async () => ({}));
     expect(recorded.trackedMessages).toHaveLength(1);
-    expect(recorded.trackedMessages[0]).toMatch(new RegExp(`^✅ ${jobName} recovered after 1 failed attempt \\(was down since .* ET, ~.*\\)\\.$`));
+    expect(recorded.trackedMessages[0]).toMatch(new RegExp(`^✅ ${jobName} succeeded; the previous run \\(.* ET\\) failed\\.$`));
   });
 
   it("counts the whole trailing streak of failures", async () => {
@@ -311,7 +316,7 @@ describe("runJob: recovery", () => {
     await insertRun(jobName, "failure", minutesAgo(2000));
     await insertRun(jobName, "failure", minutesAgo(1000));
     await runJob(jobName, async () => ({}));
-    expect(recorded.trackedMessages[0]).toContain("recovered after 3 failed attempts");
+    expect(recorded.trackedMessages[0]).toMatch(/succeeded; the previous 3 runs \(since .* ET\) failed\.$/);
   });
 
   it("says a clean run follows one that completed with errors (staging 2026-10-14)", async () => {

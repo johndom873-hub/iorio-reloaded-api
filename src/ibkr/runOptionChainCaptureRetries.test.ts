@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { captureAttemptsPerTicker } from "../lib/captureRetryQueue.js";
-import { buildCaptureRetryFailureMessage, runCaptureRetryRounds, type CaptureRetryDependencies } from "./runOptionChainCaptureRetries.js";
+import { buildCaptureRetryJobOutcome, runCaptureRetryRounds, type CaptureRetryDependencies } from "./runOptionChainCaptureRetries.js";
 
 function retryDependencies(queuesByCall: string[][], overrides: Partial<CaptureRetryDependencies> = {}) {
   const order: string[] = [];
@@ -110,15 +110,27 @@ describe("runCaptureRetryRounds", () => {
   });
 });
 
-describe("buildCaptureRetryFailureMessage", () => {
-  it("is undefined when nothing is left failing", () => {
-    expect(buildCaptureRetryFailureMessage({ roundSymbols: [["HOOD"]], roundErrors: [], stillFailingSymbols: [], roundLineUsage: [], lineHold: null })).toBeUndefined();
+describe("buildCaptureRetryJobOutcome", () => {
+  const retryResult = { roundSymbols: [["HOOD", "INTC", "SMCI"]], roundErrors: [], stillFailingSymbols: [], roundLineUsage: [], lineHold: null };
+
+  it("is empty when nothing is left failing", () => {
+    expect(buildCaptureRetryJobOutcome(retryResult)).toEqual({});
+    expect(buildCaptureRetryJobOutcome({ ...retryResult, roundSymbols: [] })).toEqual({});
   });
 
-  it("names the tickers still failing and any round errors, without a colon-parenthesis pair the Telegram summary truncates at", () => {
-    const message = buildCaptureRetryFailureMessage({ roundSymbols: [["HOOD"]], roundErrors: ["attempt 2: gateway down"], stillFailingSymbols: ["HOOD", "INTC"], roundLineUsage: [], lineHold: null })!;
-    expect(message).toContain("2 tickers still have fewer than half of their expiries fitted after 3 attempts: HOOD, INTC");
-    expect(message).toContain("attempt 2: gateway down");
-    expect(message).not.toContain("): ");
+  it("completes with errors when some retried tickers are still failing, naming them and any round errors", () => {
+    const outcome = buildCaptureRetryJobOutcome({ ...retryResult, roundErrors: ["attempt 2: gateway down"], stillFailingSymbols: ["HOOD", "INTC"] });
+    expect(outcome.failureMessage).toBeUndefined();
+    expect(outcome.completedWithErrors!.errorCount).toBe(3);
+    expect(outcome.completedWithErrors!.message).toBe("2 tickers still have fewer than half of their expiries fitted after 3 attempts: HOOD, INTC; retry capture errors: attempt 2: gateway down; 1 of 3 retried tickers fixed");
+    expect(outcome.completedWithErrors!.message).not.toContain("): ");
+  });
+
+  it("completes with errors when a round threw but every ticker ended usable", () => {
+    expect(buildCaptureRetryJobOutcome({ ...retryResult, roundErrors: ["attempt 2: gateway down"] })).toEqual({ completedWithErrors: { errorCount: 1, message: "retry capture errors: attempt 2: gateway down; 3 of 3 retried tickers fixed" } });
+  });
+
+  it("fails when the retries fixed nothing", () => {
+    expect(buildCaptureRetryJobOutcome({ ...retryResult, stillFailingSymbols: ["HOOD", "INTC", "SMCI"] })).toEqual({ failureMessage: "3 tickers still have fewer than half of their expiries fitted after 3 attempts: HOOD, INTC, SMCI" });
   });
 });

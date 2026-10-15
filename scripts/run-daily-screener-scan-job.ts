@@ -30,7 +30,7 @@ import { enrichCandidate, NO_SECURITY_DEFINITION_ERROR_CODE } from "../src/ibkr/
 import { lookupContractDetails } from "../src/ibkr/fetchNewTickerData.js";
 import { lookupListingByContractId } from "../src/ibkr/lookupListingByContractId.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
-import { buildScreenerFailureMessage, describeFailedEnrichment, isEmptyEnrichment } from "../src/lib/screenerScanOutcome.js";
+import { buildScreenerJobOutcome, describeFailedEnrichment, isEmptyEnrichment } from "../src/lib/screenerScanOutcome.js";
 import { classifyRejectedSymbol } from "../src/lib/screenerDelistings.js";
 import { findTickerRenames } from "../src/lib/screenerTickerRenames.js";
 import { runJob } from "../src/lib/runJob.js";
@@ -329,7 +329,7 @@ async function main(): Promise<void> {
       console.log(`Screener scan complete: ${enriched} enriched, ${failed} failed, ${delistedSymbols.length} delisted and removed, ${matchedRows.length} matched, ${carriedOverRows.length} carried over.`);
       return {
         details: { scanCounts, matched: matches.size, universeSize: fullSymbolSet.size, enriched, failed, failedSymbols, delistedSymbols, tickerRenames },
-        failureMessage: buildScreenerFailureMessage({ scanCounts, failedSymbols, universeSize: fullSymbolSet.size }),
+        ...buildScreenerJobOutcome({ scanCounts, failedSymbols, universeSize: fullSymbolSet.size }),
       };
     } finally {
       connection.disconnect();

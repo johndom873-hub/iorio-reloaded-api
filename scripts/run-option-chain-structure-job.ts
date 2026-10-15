@@ -18,7 +18,7 @@
 import "../src/lib/installScriptCrashAlert.js";
 import { runScript } from "../src/lib/runScript.js";
 import { db } from "../src/db/connection.js";
-import { runOptionChainStructureRefresh } from "../src/ibkr/runOptionChainStructureRefresh.js";
+import { buildStructureJobOutcome, runOptionChainStructureRefresh } from "../src/ibkr/runOptionChainStructureRefresh.js";
 import { connectToIbkrGateway } from "../src/ibkr/connectIbkr.js";
 import { fetchSpyLiquidHours } from "../src/ibkr/fetchLiquidHours.js";
 import { recordSessionCloseFromIbkr } from "../src/lib/sessionCloseFromIbkr.js";
@@ -68,16 +68,7 @@ async function main(): Promise<void> {
       console.log(
         `Structure refresh: ${result.tickersComplete} complete, ${result.tickersFailed} failed, ${result.skippedSymbols.length} skipped of ${result.tickersAttempted} (${result.gridLookups} grid lookups, ${result.gridsReused} reused).`,
       );
-      const incomplete = [...result.failedSymbols, ...result.skippedSymbols];
-      return {
-        details: { ...result },
-        failureMessage:
-          result.tickersAttempted === 0
-            ? "no tickers to refresh (shortlist and open positions are both empty)"
-            : incomplete.length > 0
-              ? `${incomplete.length} of ${result.tickersAttempted} tickers have no structure today, so the capture skips them: ${incomplete.join(", ")}`
-              : undefined,
-      };
+      return { details: { ...result }, ...buildStructureJobOutcome(result) };
     },
     { triggeredBy: "scheduler" },
   );

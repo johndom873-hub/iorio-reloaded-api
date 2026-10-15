@@ -36,6 +36,7 @@ import { excludeTickersBeingPrepared } from "../lib/tickersBeingPrepared.js";
 import { signalsEnabledShortlistTickerIdsQuery } from "../lib/shortlistQueries.js";
 import { describeMarketDataLineShortage, loadActiveMarketDataLineReservations, releaseMarketDataLines, renewMarketDataLineReservation, reserveMarketDataLines, totalMarketDataLineBudget, type LineReservationResult } from "./marketDataLineBudget.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import type { JobResult } from "../lib/runJob.js";
 
 // The job holds ONE priority reservation for its whole run (approved
 // 2026-09-24): live screens see the budget minus these lines and the live
@@ -202,15 +203,22 @@ export interface OptionChainCaptureResult {
   lineUsage: CaptureRunLineUsage | null;
 }
 
-/** One line for the job alert when the capture ran but part of its work is unusable, or undefined when it is clean. */
-export function buildCaptureFailureMessage(result: OptionChainCaptureResult): string | undefined {
+/**
+ * How a capture run is recorded: a failure when nothing usable came out (no tickers, every ticker failed, or no risk-free
+ * rate, so no surface can be fitted from any snapshot), completed with errors when some tickers failed or came out weak or
+ * on a stored spot price, neither when the run is clean. Each failed ticker, fallback spot and weak snapshot is one error.
+ */
+export function buildCaptureJobOutcome(result: OptionChainCaptureResult): Pick<JobResult, "failureMessage" | "completedWithErrors"> {
+  if (result.tickersAttempted === 0) return { failureMessage: "no tickers to capture (shortlist and open positions are both empty)" };
   const problems: string[] = [];
-  if (result.tickersAttempted === 0) problems.push("no tickers to capture (shortlist and open positions are both empty)");
   if (result.tickersFailed > 0) problems.push(`${result.tickersFailed} of ${result.tickersAttempted} tickers not captured: ${result.failedSymbols.join(", ")}`);
   if (result.riskFreeRateUnavailable) problems.push("risk-free rate unavailable (FRED fetch failed and none is stored), so the snapshots were saved without it and no surface can be fitted");
   if (result.fallbackSpotSymbols.length > 0) problems.push(`spot price came from a stored fallback, not live: ${result.fallbackSpotSymbols.join(", ")}`);
   if (result.qualityProblems.length > 0) problems.push(`weak snapshots: ${result.qualityProblems.join(", ")}`);
-  return problems.length > 0 ? problems.join("; ") : undefined;
+  if (problems.length === 0) return {};
+  if (result.riskFreeRateUnavailable || result.tickersFailed === result.tickersAttempted) return { failureMessage: problems.join("; ") };
+  const errorCount = result.tickersFailed + result.fallbackSpotSymbols.length + result.qualityProblems.length;
+  return { completedWithErrors: { errorCount, message: `${problems.join("; ")}; ${result.tickersAttempted - result.tickersFailed} of ${result.tickersAttempted} tickers captured` } };
 }
 
 export interface UniverseTicker {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSeedEmptyPoolWarning, buildSeedFailureMessage, seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
+import { buildSeedEmptyPoolWarning, buildSeedJobOutcome, seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
 import type { SignalCandidate, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
@@ -206,19 +206,27 @@ describe("seed model prediction log", () => {
 });
 
 describe("seed failure reporting", () => {
-  it("flags an unavailable account summary", async () => {
+  it("fails on an unavailable account summary: every candidate is non-executable", async () => {
     const { deps } = seedDependencies({ loadAccountContext: async () => { throw new Error("no IBKR"); } });
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const result = await seedDaySignals("2026-09-24", deps);
     expect(result.accountContextUnavailable).toBe(true);
-    expect(buildSeedFailureMessage(result)).toContain("account summary unavailable");
+    expect(buildSeedJobOutcome(result).failureMessage).toContain("account summary unavailable");
   });
 
-  it("names tickers without today's snapshot and is silent when everything is present", async () => {
+  it("completes with errors for tickers without today's snapshot and is silent when everything is present", async () => {
     const { deps } = seedDependencies();
     const result = await seedDaySignals("2026-09-24", deps);
-    expect(buildSeedFailureMessage(result)).toBe("no snapshot for today, so no Day Signals pool: OLD");
-    expect(buildSeedFailureMessage({ ...result, symbolsWithoutTodaySnapshot: [], accountContextUnavailable: false })).toBeUndefined();
+    expect(buildSeedJobOutcome(result)).toEqual({
+      completedWithErrors: { errorCount: 1, message: `no snapshot for today, so no Day Signals pool: OLD; ${result.tickersScored} of ${result.tickersScored + 1} tickers scored` },
+    });
+    expect(buildSeedJobOutcome({ ...result, symbolsWithoutTodaySnapshot: [], accountContextUnavailable: false })).toEqual({});
+  });
+
+  it("fails when no ticker has today's snapshot", async () => {
+    const { deps } = seedDependencies();
+    const result = await seedDaySignals("2026-09-24", deps);
+    expect(buildSeedJobOutcome({ ...result, tickersScored: 0, symbolsWithoutTodaySnapshot: ["OLD", "OLDER"] })).toEqual({ failureMessage: "no snapshot for today, so no Day Signals pool: OLD, OLDER" });
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../db/connection.js", () => ({ db: {} }));
-const { buildJobDiedMidRunMessage, buildJobRecoveredMessage, buildJobCompletedCleanAgainMessage, buildCompletedWithErrorsText } = await import("./runJob.js");
+const { buildJobDiedMidRunMessage, buildJobSucceededAfterFailuresMessage, buildJobStillFailingReminder, buildJobCompletedCleanAgainMessage, buildCompletedWithErrorsText } = await import("./runJob.js");
 
 describe("runJob alert texts", () => {
   it("gives the abandoned run's start in Eastern time", () => {
@@ -11,11 +11,19 @@ describe("runJob alert texts", () => {
     );
   });
 
-  it("gives when the job went down in Eastern time, on the Eastern day (not the UTC one)", () => {
+  it("names the failed runs in Eastern time, on the Eastern day (not the UTC one), with no downtime", () => {
     // 2026-10-03 02:30 UTC is still Friday 22:30 ET.
-    expect(buildJobRecoveredMessage("daily_pnl_snapshot", "2 failed attempts", new Date("2026-10-03T02:30:00Z"), "1 day")).toBe(
-      "✅ daily_pnl_snapshot recovered after 2 failed attempts (was down since Fri 10-02 22:30 ET, ~1 day).",
+    expect(buildJobSucceededAfterFailuresMessage("daily_pnl_snapshot", 2, new Date("2026-10-03T02:30:00Z"))).toBe(
+      "✅ daily_pnl_snapshot succeeded; the previous 2 runs (since Fri 10-02 22:30 ET) failed.",
     );
+    // 2026-10-12 14:00 UTC is Monday 10:00 ET.
+    expect(buildJobSucceededAfterFailuresMessage("option_chain_capture", 1, new Date("2026-10-12T14:00:16Z"))).toBe(
+      "✅ option_chain_capture succeeded; the previous run (Mon 10-12 10:00 ET) failed.",
+    );
+  });
+
+  it("reminds that a job is still failing, not down", () => {
+    expect(buildJobStillFailingReminder("⚠️ ibkr_health_check failed: x", "2h", "6h")).toBe("⚠️ ibkr_health_check failed: x\n\n(Still failing after ~2h. Reminders are sent at most every 6h.)");
   });
 
   it("names the runs that completed with errors in Eastern time", () => {

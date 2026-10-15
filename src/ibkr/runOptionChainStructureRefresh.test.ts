@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { IbkrLookupTimeoutError, type StoredOptionChainRefresh } from "./fetchOptionChain.js";
-import { runOptionChainStructureRefresh, structureGridMaxAgeDays, type OptionChainStructureDependencies, type OptionChainStructureEvent } from "./runOptionChainStructureRefresh.js";
+import { buildStructureJobOutcome, runOptionChainStructureRefresh, structureGridMaxAgeDays, type OptionChainStructureDependencies, type OptionChainStructureEvent } from "./runOptionChainStructureRefresh.js";
 import type { UniverseTicker } from "./runOptionChainCapture.js";
 
 const fakeIb = {} as never;
@@ -151,5 +151,26 @@ describe("canReuseStoredGrid", async () => {
     expect(canReuseStoredGrid(grid(1), { maxAgeDays: 7, spotPrice: null }, now)).toBe(true);
     expect(canReuseStoredGrid(undefined, { maxAgeDays: 7, spotPrice: 100 }, now)).toBe(false);
     expect(canReuseStoredGrid({ strikes: [], fetchedAt: daysAgo(1) }, { maxAgeDays: 7, spotPrice: 100 }, now)).toBe(false);
+  });
+});
+
+describe("buildStructureJobOutcome", () => {
+  const cleanResult = { tickersAttempted: 4, tickersComplete: 4, tickersFailed: 0, failedSymbols: [], skippedSymbols: [], gridLookups: 0, gridsReused: 0 };
+
+  it("is empty when every ticker has its structure", () => {
+    expect(buildStructureJobOutcome(cleanResult)).toEqual({});
+  });
+
+  it("completes with errors when some tickers failed or were skipped, one error each", () => {
+    expect(buildStructureJobOutcome({ ...cleanResult, tickersComplete: 2, tickersFailed: 1, failedSymbols: ["AAA"], skippedSymbols: ["BBB"] })).toEqual({
+      completedWithErrors: { errorCount: 2, message: "2 of 4 tickers have no structure today, so the capture skips them: AAA, BBB" },
+    });
+  });
+
+  it("fails when no ticker got its structure, or there was none to refresh", () => {
+    expect(buildStructureJobOutcome({ ...cleanResult, tickersComplete: 0, tickersFailed: 1, failedSymbols: ["AAA"], skippedSymbols: ["BBB", "CCC", "DDD"] })).toEqual({
+      failureMessage: "4 of 4 tickers have no structure today, so the capture skips them: AAA, BBB, CCC, DDD",
+    });
+    expect(buildStructureJobOutcome({ ...cleanResult, tickersAttempted: 0, tickersComplete: 0 })).toEqual({ failureMessage: "no tickers to refresh (shortlist and open positions are both empty)" });
   });
 });

@@ -63,6 +63,7 @@ import type { PriceContract } from "../src/ibkr/fetchLivePrices.js";
 import { previousOpenSessionDate, lastCompletedSessionDate } from "../src/lib/marketSessionStatus.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
+import { buildPnlSnapshotJobOutcome, type PnlSnapshotProblem } from "../src/lib/pnlSnapshotJobOutcome.js";
 import { assignFlowsToSnapshots } from "../src/lib/flexCashFlowAssignment.js";
 import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthlessPrice.js";
 
@@ -147,8 +148,8 @@ async function main(): Promise<void> {
     // The session this snapshot belongs to (newest one whose 16:00 ET close has passed), not the UTC calendar date: a late or
     // manual rerun after 00:00 UTC is still the previous evening in New York and must be filed under that session.
     const snapshotDate = await lastCompletedSessionDate();
-    // Everything that went wrong tonight, returned as the run's failureMessage so runJob alerts once with all of it.
-    const problems: string[] = [];
+    // Everything that went wrong tonight, returned as the run's outcome so runJob alerts once with all of it.
+    const problems: PnlSnapshotProblem[] = [];
     const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
     const legRows: OpenPositionLegRow[] = await db.raw(
@@ -244,7 +245,7 @@ async function main(): Promise<void> {
           ledgerPnl.realizedPnl == null ? "realized P&L" : null,
           ledgerPnl.unrealizedPnl == null ? "unrealized P&L" : null,
         ].filter((name): name is string => name !== null);
-        if (missingAccountValues.length > 0) problems.push(`account snapshot for ${snapshotDate} was saved without ${missingAccountValues.join(", ")}`);
+        if (missingAccountValues.length > 0) problems.push({ message: `account snapshot for ${snapshotDate} was saved without ${missingAccountValues.join(", ")}`, errorCount: 1, nothingUsable: false });
         console.log(
           `Account PnL: realized=${ledgerPnl.realizedPnl} unrealized=${ledgerPnl.unrealizedPnl} netLiq=${accountSummary.netLiquidationValue}`,
         );
@@ -264,12 +265,12 @@ async function main(): Promise<void> {
         await reconcileCashFlows(snapshotDate);
       } catch (error) {
         console.error(`Cash-flow reconciliation failed: ${describeError(error)}`);
-        problems.push(`Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error).split("\n")[0]}`);
+        problems.push({ message: `Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error).split("\n")[0]}`, errorCount: 1, nothingUsable: false });
       }
-      if (!accountSnapshotWritten) problems.push(`account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`);
+      if (!accountSnapshotWritten) problems.push({ message: `account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`, errorCount: 1, nothingUsable: true });
       return {
         details: { accountSnapshot: accountSnapshotWritten, accountSnapshotError, openPositionCount: 0 },
-        failureMessage: problems.length > 0 ? problems.join("; ") : undefined,
+        ...buildPnlSnapshotJobOutcome(problems),
       };
     }
 
@@ -289,7 +290,7 @@ async function main(): Promise<void> {
         `Live price fetch failed, skipping all position-level snapshots for ${snapshotDate}: ${reason instanceof Error ? reason.message : reason}`,
       );
       skipped = legsByPositionId.size;
-      problems.push(`position price fetch failed, no position snapshots for ${snapshotDate} - ${describeError(reason).split("\n")[0]}`);
+      problems.push({ message: `position price fetch failed, no position snapshots for ${snapshotDate} - ${describeError(reason).split("\n")[0]}`, errorCount: 1, nothingUsable: true });
     } else {
       const expiredOptionCandidateLegs = legRows.flatMap((leg) =>
         leg.legType === "option" && leg.optionType !== null && leg.strikePrice !== null && leg.expiryDate !== null
@@ -347,7 +348,7 @@ async function main(): Promise<void> {
     }
 
     console.log(`Snapshotted ${snapshotted}/${legsByPositionId.size} open position(s) for ${snapshotDate} (${skipped} skipped).`);
-    if (skippedSymbols.length > 0) problems.push(`${skippedSymbols.length} of ${legsByPositionId.size} positions skipped for a missing price: ${skippedSymbols.join(", ")}`);
+    if (skippedSymbols.length > 0) problems.push({ message: `${skippedSymbols.length} of ${legsByPositionId.size} positions skipped for a missing price: ${skippedSymbols.join(", ")}`, errorCount: skippedSymbols.length, nothingUsable: false });
 
     // Runs after both captures above are already written — its own
     // runtime (Flex API, up to 120s) must no longer sit between the
@@ -360,7 +361,7 @@ async function main(): Promise<void> {
       await reconcileCashFlows(snapshotDate);
     } catch (error) {
       console.error(`Cash-flow reconciliation failed: ${describeError(error)}`);
-      problems.push(`Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error).split("\n")[0]}`);
+      problems.push({ message: `Flex cash-flow reconcile failed, so deposits and withdrawals may still count as trading P&L - ${describeError(error).split("\n")[0]}`, errorCount: 1, nothingUsable: false });
     }
 
     // Greeks, same nightly cadence as the P&L snapshot above — piggybacks on
@@ -404,14 +405,14 @@ async function main(): Promise<void> {
         console.error(`Greeks snapshot failed for ${snapshotDate}: ${greeksError}`);
       }
     }
-    // A night with no greeks saved leaves the position cards' Delta/Gamma blank after hours: the run is recorded as a failure (P&L rows stay written).
+    // A night with no greeks saved leaves the position cards' Delta/Gamma blank after hours: the run completes with errors (P&L rows stay written).
     const legsWithoutGreeks = optionLegRows.filter((leg) => !legsWithGreeks.has(leg.legId));
     const greeksFailure =
       legsWithoutGreeks.length === 0
         ? null
         : `greeks saved for ${greeksSnapshotted}/${optionLegRows.length} open option leg(s) for ${snapshotDate} (missing: ${legsWithoutGreeks.map((leg) => `${leg.symbol} ${leg.optionType} ${Number(leg.strikePrice)} ${leg.expiryDate}`).join(", ")})${greeksError ? `. Error: ${greeksError}` : ""}`;
-    if (!accountSnapshotWritten) problems.push(`account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`);
-    if (greeksFailure) problems.push(greeksFailure);
+    if (!accountSnapshotWritten) problems.push({ message: `account-level P&L failed for ${snapshotDate} - ${accountSnapshotError}`, errorCount: 1, nothingUsable: true });
+    if (greeksFailure) problems.push({ message: greeksFailure, errorCount: legsWithoutGreeks.length, nothingUsable: false });
     return {
       details: {
         accountSnapshot: accountSnapshotWritten,
@@ -423,7 +424,7 @@ async function main(): Promise<void> {
         greeksExpected: optionLegRows.length,
         greeksError,
       },
-      failureMessage: problems.length > 0 ? problems.join("; ") : undefined,
+      ...buildPnlSnapshotJobOutcome(problems),
     };
   });
 }

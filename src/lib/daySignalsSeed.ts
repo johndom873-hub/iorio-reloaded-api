@@ -1,3 +1,4 @@
+import type { JobResult } from "./runJob.js";
 import { compareCandidatesByModel, type SignalCandidate } from "./signalCandidates.js";
 import { scoreTicker } from "./signalsLiveScoring.js";
 import { loadAccountContext, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "./signalsStore.js";
@@ -76,12 +77,19 @@ export interface DaySignalsSeedResult {
   modelPredictionsRecorded: number | null;
 }
 
-/** One line for the job alert when the seed ran but its pool is missing tickers or is scored without the account, or undefined when clean. */
-export function buildSeedFailureMessage(result: DaySignalsSeedResult): string | undefined {
+/**
+ * How a seed run is recorded: a failure when nothing usable came out (no ticker has today's snapshot, or the account summary
+ * was unavailable, so every candidate is marked non-executable and Pluto can open nothing), completed with errors when some
+ * tickers have no snapshot for today, neither when clean. Each ticker without today's snapshot is one error.
+ */
+export function buildSeedJobOutcome(result: DaySignalsSeedResult): Pick<JobResult, "failureMessage" | "completedWithErrors"> {
   const problems: string[] = [];
   if (result.symbolsWithoutTodaySnapshot.length > 0) problems.push(`no snapshot for today, so no Day Signals pool: ${result.symbolsWithoutTodaySnapshot.join(", ")}`);
   if (result.accountContextUnavailable) problems.push("account summary unavailable, so free cash was taken as 0 and every candidate is marked non-executable");
-  return problems.length > 0 ? problems.join("; ") : undefined;
+  if (problems.length === 0) return {};
+  if (result.accountContextUnavailable || result.tickersScored === 0) return { failureMessage: problems.join("; ") };
+  const tickerCount = result.tickersScored + result.symbolsWithoutTodaySnapshot.length;
+  return { completedWithErrors: { errorCount: result.symbolsWithoutTodaySnapshot.length, message: `${problems.join("; ")}; ${result.tickersScored} of ${tickerCount} tickers scored` } };
 }
 
 /**
