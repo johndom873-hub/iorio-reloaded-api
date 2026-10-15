@@ -271,7 +271,7 @@ describe("loadFills", () => {
     expect(await dependencies().loadFills(orderId)).toEqual([{ side: "buy", quantity: 100, price: 48.2, optionType: null, strikePrice: null, expiryDate: null }]);
   });
 
-  it("returns the option and stock fills of one buy-write together, oldest execution first", async () => {
+  it("returns the option and stock fills of one Covered Call entry together, oldest execution first", async () => {
     const { legId } = await createOptionLeg();
     const stockLegId = await createStockLeg();
     const orderId = await insertOrder({ status: "filled" });

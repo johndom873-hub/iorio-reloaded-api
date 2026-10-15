@@ -156,7 +156,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     note: "only with the baseline wheel as decision maker. At every look free round lots get the call with the highest premium yield, free cash the entry with the highest premium yield; everything is held to expiry",
     choices: [
       { value: "put", label: "Cash-Secured Put" },
-      { value: "buy_write", label: "Covered Call (100 shares bought and one call sold on them)" },
+      { value: "covered_call", label: "Covered Call (100 shares bought and one call sold on them)" },
     ],
   },
   { path: "baseline.minAbsDelta", group: "Baseline wheel", label: "|delta| from", unit: "number", editable: true, note: "from each quote's own implied volatility" },

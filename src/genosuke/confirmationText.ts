@@ -116,7 +116,7 @@ function describeBuiltLeg(leg: BuiltOrderLeg): string {
 
 /**
  * The card for an order, written from the order the server actually built (the legs and limit prices that will be sent), never from what
- * the model asked for: whatever the server filled in (a covered call's buy-write stock leg, a rounded price) is on the card.
+ * the model asked for: whatever the server filled in (a Covered Call entry's stock leg, a rounded price) is on the card.
  */
 export function buildOrderCard(order: BuiltOrderForCard): string {
   const { requestType, payload } = order;

@@ -46,19 +46,19 @@ function forwardAnchorsOfDay(ledger: SimulatedLedger, symbol: string, todayIso: 
 //      the average price paid for the shares held (ledgerHeldSharesAverageCost); on as many lots as the volume limit
 //      allows. With callStrike "none", no call: the shares are held uncovered;
 //   2. free cash goes into the entry with the highest premium yield in the same ranges: a cash-secured put, or 100
-//      shares bought with a call sold on them (a buy-write; with entryCallStrike "above_purchase_price", the call at or
+//      shares bought with a call sold on them (a Covered Call entry; with entryCallStrike "above_purchase_price", the call at or
 //      above the price paid for the shares; with "above_average_after_purchase", at or above the average price of the
 //      shares held once these are bought), as many contracts as the cash, the stock's share of the account
 //      (maxAccountPctPerStock: its open positions' capital at risk, net of premium), the shares' cap
 //      (maxSharesPctOfAccount: the shares held at the 10:00 price, against the day's account value) and the volume limit
-//      allow. A buy-write waits while held round lots have no call, unless entryWhenSharesUncovered is "buy": it then buys
+//      allow. A Covered Call entry waits while held round lots have no call, unless entryWhenSharesUncovered is "buy": it then buys
 //      every share its call covers and the uncovered lots keep waiting for their own;
-//   3. with putsWhenNoCall "dte_budget" (a buy-write entry), when step 1 left held lots without a call or step 2 had room
-//      for a lot and sold no buy-write, and no put of the stock is open: one put, the highest premium yield, strike at
+//   3. with putsWhenNoCall "dte_budget" (a Covered Call entry), when step 1 left held lots without a call or step 2 had room
+//      for a lot and sold no Covered Call entry, and no put of the stock is open: one put, the highest premium yield, strike at
 //      most the average price of the shares held (any with none held), as many contracts as putBudgetPctPerDte% of the
 //      day's account value × days to expiry (its exposure, (strike − fill) × 100 a contract), the free cash and the volume
 //      limit allow (approved by Marcelo 2026-10-13). An assignment may take the shares past their cap.
-// With minCallYieldPct > 0, a call (step 1 or a buy-write's) is sold only when its premium yield is above that.
+// With minCallYieldPct > 0, a call (step 1 or a Covered Call entry's) is sold only when its premium yield is above that.
 // The day's account value for sizing is the session's: open options at zero when dayValueOptions is "excluded".
 // With earnings "skip_spanning", no sale whose expiry spans a known earnings date (today ≤ report ≤ expiry); with looks
 // "first_look", the session asks only at 10:00. With volatilityEdgeFilter "entries" (or "all_sales"), a new entry (or any
@@ -169,7 +169,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
         .filter((leg) => leg.legType === "stock" && leg.side === "long" && leg.exitAt === null)
         .reduce((sum, leg) => sum + leg.quantity * priceToCycleScale, 0);
     // The put ladder (backtestBaselineLadder.ts): the cycle's state, noted before anything is sold at this look.
-    const ladderOn = baseline.entry === "buy_write" && baseline.putsWhenNoCall === "reserve_ladder";
+    const ladderOn = baseline.entry === "covered_call" && baseline.putsWhenNoCall === "reserve_ladder";
     const ladderState = ladderOn
       ? noteLadderLook(ledger, symbol, { cycleOpen: ledgerOpenCycleSummary(ledger, symbol) !== null, todayIso, accountValue: accountValueToday(), adjustedClosesBefore: lookSymbol.adjustedDailyClosesBeforeToday }, baseline)
       : null;

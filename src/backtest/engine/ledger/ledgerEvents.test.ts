@@ -107,7 +107,7 @@ describe("open cash-secured put", () => {
   });
 });
 
-describe("open covered call as a buy-write", () => {
+describe("open covered call as a Covered Call entry", () => {
   it("creates a covered call holding the call and the shares bought for it, at their cost with the commission", () => {
     // 200 sh at 30.01 (stock 30.00 + 0.01) = 6,002 + 1.00 commission: entry 6,003 ÷ 200 = 30.015.
     // 2 calls $31 at 0.50: premium 100, commission 1.36, entry 0.4932.
@@ -443,15 +443,15 @@ describe("whole covered-call close", () => {
   });
 });
 
-describe("a buy-write opened and closed at the same look", () => {
+describe("a Covered Call entry opened and closed at the same look", () => {
   it("leaves the cycle's shares as the book holds them: the cycle derivation takes the shares in before it sells them", () => {
-    // 500 shares under a call since 16 March; on the 18th one look opens a 24-contract buy-write and, in its next pass,
+    // 500 shares under a call since 16 March; on the 18th one look opens a 24-contract Covered Call entry and, in its next pass,
     // closes it whole: the purchase and the sale carry the same instant (HOOD 2024-09-30 11:00 in the step-5 session).
     const ledger = createSimulatedLedger(1_000_000, easternInstant("2026-03-02", 9, 30));
     openCoveredCall(ledger, { symbol: "SMI", expiryDate: "2026-03-27", strike: 24, contracts: 5, callFillPrice: 0.4, stockFillPrice: 23.01, at: decisionAt("2026-03-16"), actionId: "action-held", splitFactorToday: 1 });
     const at = easternInstant("2026-03-18", 11, 0);
-    const buyWrite = openCoveredCall(ledger, { symbol: "SMI", expiryDate: "2026-03-20", strike: 24, contracts: 24, callFillPrice: 0.34, stockFillPrice: 23.32, at, actionId: "action-open", splitFactorToday: 1 });
-    closeCoveredCall(ledger, { positionId: buyWrite.positionId, callFillPrice: 0.35, stockFillPrice: 23.3, at, actionId: "action-close" });
+    const coveredCallEntry = openCoveredCall(ledger, { symbol: "SMI", expiryDate: "2026-03-20", strike: 24, contracts: 24, callFillPrice: 0.34, stockFillPrice: 23.32, at, actionId: "action-open", splitFactorToday: 1 });
+    closeCoveredCall(ledger, { positionId: coveredCallEntry.positionId, callFillPrice: 0.35, stockFillPrice: 23.3, at, actionId: "action-close" });
 
     expect(ledgerFreeShares(ledger, "SMI")).toBe(0);
     const [cycle] = ledgerCycles(ledger, "SMI", { dailyCloses: [{ date: "2026-03-17", close: 23.2 }, { date: "2026-03-18", close: 23.4 }] });

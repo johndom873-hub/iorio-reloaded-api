@@ -30,13 +30,13 @@ describe("computeInFlightOrderNotional", () => {
     expect(computeInFlightOrderNotional("open_cash_secured_put", putOpen)).toBe(17_700);
   });
 
-  it("counts a covered call's buy-write stock leg at shares x (limit price − call premium), and nothing when it is written against held shares", () => {
-    const buyWrite = { symbol: "AAA", strategyKey: "covered_call", legs: [
+  it("counts a Covered Call entry's stock leg at shares x (limit price − call premium), and nothing when it is written against held shares", () => {
+    const coveredCallEntry = { symbol: "AAA", strategyKey: "covered_call", legs: [
       { role: "stock", action: "BUY", symbol: "AAA", quantity: 200, unitPrice: 50 },
       { role: "option", action: "SELL", symbol: "AAA", quantity: 2, unitPrice: 1, strike: 55, expiry: "20261016", right: "C" },
     ] } as OrderRequestPayload;
-    expect(computeInFlightOrderNotional("open_covered_call", buyWrite)).toBe(9_800);
-    const heldShares = { ...buyWrite, legs: [buyWrite.legs[1]!] } as OrderRequestPayload;
+    expect(computeInFlightOrderNotional("open_covered_call", coveredCallEntry)).toBe(9_800);
+    const heldShares = { ...coveredCallEntry, legs: [coveredCallEntry.legs[1]!] } as OrderRequestPayload;
     expect(computeInFlightOrderNotional("open_covered_call", heldShares)).toBe(0);
   });
 

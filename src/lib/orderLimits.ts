@@ -103,8 +103,8 @@ export function computeOrderNotional(input: Pick<OrderLimitsInput, "strategyKey"
 
 /**
  * Pure: the notional an order already on its way to IBKR still ties up, read from its stored payload (no market data needed), net of
- * the premium at its limit prices: a put open reserves (strike − premium) × 100 × contracts, a covered-call open costs its buy-write
- * stock leg less the call's premium on those shares (nothing when it is written against shares already held), a put roll adds the
+ * the premium at its limit prices: a put open reserves (strike − premium) × 100 × contracts, a covered-call open costs the stock leg
+ * of its Covered Call entry less the call's premium on those shares (nothing when it is written against shares already held), a put roll adds the
  * strike difference less its net credit when that is positive, a call roll and every close add nothing.
  */
 export function computeInFlightOrderNotional(requestType: string, payload: OrderRequestPayload): number {

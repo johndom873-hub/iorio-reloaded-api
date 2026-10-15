@@ -59,7 +59,7 @@ function putOpenPayload(symbol: string, strike: number, contracts: number, premi
   return { symbol, strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", symbol, quantity: contracts, unitPrice: premium, strike, expiry: "20261120", right: "P" }] };
 }
 
-function buyWritePayload(symbol: string, shares: number, stockPrice: number, contracts: number, premium = 0) {
+function coveredCallEntryPayload(symbol: string, shares: number, stockPrice: number, contracts: number, premium = 0) {
   return {
     symbol,
     strategyKey: "covered_call",
@@ -141,7 +141,7 @@ describe("max position size: exactly at the boundary", () => {
     expect(result.reasons).toEqual(["This order is 10.0% of portfolio value, above the 7.5% max position size."]);
   });
 
-  it("a covered-call buy-write is measured as the share shortfall times the spot price", async () => {
+  it("a Covered Call entry is measured as the share shortfall times the spot price", async () => {
     await setLimits({ maxPosition: 10 });
     const ticker = await createTicker();
     const callOrder = (spotPrice: number) => ({ strategyKey: "covered_call" as const, premium: 0, symbol: ticker.symbol, tickerId: ticker.id, quantity: 10, strike: 120, spotPrice });
@@ -224,7 +224,7 @@ describe("net of the premium (Marcelo 2026-10-12: the exposure Positions shows)"
     expect((await evaluateOrderLimits(cashSecuredPut("AAA", 102.01, 10, { premium: 2 }))).blocked).toBe(true);
   });
 
-  it("a buy-write counts the shares it buys less the call's premium on them", async () => {
+  it("a Covered Call entry counts the shares it buys less the call's premium on them", async () => {
     const ticker = await createTicker();
     const result = await evaluateOrderLimits({ strategyKey: "covered_call", premium: 1.5, symbol: ticker.symbol, tickerId: ticker.id, quantity: 10, strike: 120, spotPrice: 100 });
     expect(result.details?.orderNotional).toBe(98_500); // 1,000 shares × (100 − 1.50)
@@ -237,7 +237,7 @@ describe("net of the premium (Marcelo 2026-10-12: the exposure Positions shows)"
 
   it("orders in flight count at their limit prices, net of the premium", async () => {
     await insertOrder("open_cash_secured_put", "submitted", putOpenPayload("OTH", 100, 5, 2)); // (100 − 2) × 500 = 49,000
-    await insertOrder("open_covered_call", "submitted", buyWritePayload("OTH", 200, 50, 2, 1)); // 200 × (50 − 1) = 9,800
+    await insertOrder("open_covered_call", "submitted", coveredCallEntryPayload("OTH", 200, 50, 2, 1)); // 200 × (50 − 1) = 9,800
     expect((await evaluateOrderLimits(cashSecuredPut("AAA", 10, 1))).details?.inFlightNotional).toBe(58_800);
   });
 });
@@ -414,10 +414,10 @@ describe("orders still in flight", () => {
     }
   });
 
-  it("sums every in-flight order across tickers and kinds: puts, buy-writes, put rolls, closes and held-share calls", async () => {
+  it("sums every in-flight order across tickers and kinds: puts, Covered Call entries, put rolls, closes and held-share calls", async () => {
     await insertOrder("open_cash_secured_put", "confirmed", putOpenPayload("INF", 100, 5)); // 50,000
-    await insertOrder("open_covered_call", "submitted", buyWritePayload("OTH", 200, 50, 2)); // 10,000
-    await insertOrder("open_covered_call", "submitted", { ...buyWritePayload("OTH", 200, 50, 2), legs: [buyWritePayload("OTH", 200, 50, 2).legs[1]] }); // held shares: 0
+    await insertOrder("open_covered_call", "submitted", coveredCallEntryPayload("OTH", 200, 50, 2)); // 10,000
+    await insertOrder("open_covered_call", "submitted", { ...coveredCallEntryPayload("OTH", 200, 50, 2), legs: [coveredCallEntryPayload("OTH", 200, 50, 2).legs[1]] }); // held shares: 0
     await insertOrder("close_position", "confirmed", putOpenPayload("INF", 100, 5)); // a close: 0
     await insertOrder("roll_leg", "partially_filled", {
       symbol: "INF",

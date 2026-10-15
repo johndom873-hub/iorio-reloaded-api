@@ -14,7 +14,7 @@ describe("compareFillsWithReference", () => {
     expect(sold.chosenLegFillPrice).toBeCloseTo(2.0333, 4);
   });
 
-  it("buy-write: the net is what counts, not IBKR's split between shares and call (COHR, 2026-09-21)", () => {
+  it("Covered Call entry: the net is what counts, not IBKR's split between shares and call (COHR, 2026-09-21)", () => {
     // Reference call bid 7.90, shares at 328.52; IBKR filled the call at 6.86 and the shares at 327.48 — same net.
     const comparison = compareFillsWithReference({ price: 7.9, side: "sell", multiplier: 100, otherLegs: [{ side: "buy", price: 328.52, multiplier: 1 }] }, [option("sell", 1, 6.86), shares(100, 327.48)])!;
     expect(comparison.chosenLegFillPrice).toBeCloseTo(6.86);
@@ -61,7 +61,7 @@ describe("impliedChosenLegPrice", () => {
   const option = (side: "sell" | "buy", quantity: number, price: number) => ({ side, quantity, price, multiplier: 100 });
   const call = { side: "sell" as const, multiplier: 100 };
 
-  it("buy-write: the call's share of the net with the shares at our price (COHR, 2026-09-21)", () => {
+  it("Covered Call entry: the call's share of the net with the shares at our price (COHR, 2026-09-21)", () => {
     const others = otherLegOrderPrices(call, [{ role: "stock", action: "BUY", unitPrice: 328.52 }, { role: "option", action: "SELL", unitPrice: 7.9 }]);
     expect(others).toEqual([{ side: "buy", price: 328.52, multiplier: 1 }]);
     expect(impliedChosenLegPrice(call, others, [option("sell", 1, 6.86), { side: "buy", quantity: 100, price: 327.48, multiplier: 1 }])).toBeCloseTo(7.9, 6);

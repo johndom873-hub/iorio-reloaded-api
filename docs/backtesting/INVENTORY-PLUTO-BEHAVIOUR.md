@@ -19,7 +19,7 @@ The schema has three verdicts, `trade | no_trade | abstain_system_concern` (`src
 | Kind | What it does | Id format | Who triggers it |
 |---|---|---|---|
 | `open_cash_secured_put` | Sell an OTM put | `SYM:cash_secured_put:expiry:strike` (`candidateFilters.ts:127-129`) | Model |
-| `open_covered_call` (buy-write) | Sell an OTM call and buy 100 shares per contract in one combo | `SYM:covered_call:expiry:strike` | Model |
+| `open_covered_call` (Covered Call entry) | Sell an OTM call and buy 100 shares per contract in one combo | `SYM:covered_call:expiry:strike` | Model |
 | `open_covered_call` on held shares | Sell a call against free shares, buying none; carries `heldShares` | same id | Model |
 | `roll` | Buy back a held short leg and sell a lower-or-equal-delta replacement for a net credit, one combo | `SYM:roll:legId:expiry:strike` (`:131-133`) | Model |
 | `close_leg` | Buy back a short put | `SYM:close_leg:legId` | Model (P2, F3); code alone (P3 before earnings) |
@@ -28,7 +28,7 @@ The schema has three verdicts, `trade | no_trade | abstain_system_concern` (`src
 | Hold / no-op | `no_trade`, `abstain_system_concern`, a failed or invalid model call (`passRunner.ts:479-481`), or a pass skipped before the model | n/a | Default |
 
 **Stock trades Pluto makes** are only these three:
-- The share purchase inside a buy-write: shares = 100 × contracts minus uncovered shares already held, priced at the stock's bid/ask mid, else last (`src/routes/positions.ts:1020-1044`, `src/lib/stockLegLimit.ts:6-11`).
+- The share purchase inside a Covered Call entry: shares = 100 × contracts minus uncovered shares already held, priced at the stock's bid/ask mid, else last (`src/routes/positions.ts:1020-1044`, `src/lib/stockLegLimit.ts:6-11`).
 - The `close_shares` sale.
 - The share sale inside `close_position`.
 
@@ -130,7 +130,7 @@ Then, in `filterTickerForPluto`:
 **Held-share variant** (`:247-259`, `:267-273`). When the ticker has at least 100 free shares (unstructured stock, `src/lib/positionQueries.ts:231-239`):
 - Every call candidate is treated as a held-share call. The grade, Edge Yield and Pluto premium-yield rules are replaced by Edge $ > 0 (`:178-179`).
 - It must pass the break-even rule (`src/pluto/heldShareCalls.ts:6-18`, `:35-50`): `(strike − breakEvenAfter) × 100 × contracts ≥ max(unstructuredCloseMinPct% × average acquisition cost × 100 × contracts, unstructuredCloseMinDollars)`.
-- Only the best by Edge Yield is kept (`:268-273`). So no buy-write is offered on a ticker holding round lots.
+- Only the best by Edge Yield is kept (`:268-273`). So no Covered Call entry is offered on a ticker holding round lots.
 - The Signals-level delta band, yield minimum and earnings exclusion from 3.1 still apply.
 
 **What the model sees for opens.** The top 3 per ticker per strategy by `compareCandidatesByModel` (Edge Yield, then Edge $) (`prompt.ts:18`, `:240-245`). Only those ids are offered.
@@ -165,7 +165,7 @@ In order:
 - **Stress cap** (`:157-195`): a k-sigma move to expiry may lose at most `stressRiskBudgetPct` (1%) of NLV. k = `stressSigmas` (2) + 0.5 if elevated volatility + 0.5 if the stock is down more than one normal day today.
 - **Kelly cap** (`:197-227`): floor(0.5 × budget × Edge $ ÷ P&L variance). The backtest already passes its own fraction.
 - **Held-share call** (`:274-292`): min(floor(freeShares ÷ 100), volume cap). No budget, stress or Kelly cap; notional 0.
-- **Buy-write** (`:293-314`): unit notional = (spot − limit) × 100. Contracts = min(floor(room ÷ unit), stress cap, Kelly cap), then the volume cap.
+- **Covered Call entry** (`:293-314`): unit notional = (spot − limit) × 100. Contracts = min(floor(room ÷ unit), stress cap, Kelly cap), then the volume cap.
 - **Roll** (`:260-265`): keeps the held quantity.
 
 **Platform order gate**, at build and confirm and again in the worker (`src/lib/orderGates.ts:11-22`, `:100-111`):

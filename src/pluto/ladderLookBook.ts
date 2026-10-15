@@ -20,7 +20,7 @@ export interface LadderSale {
   contracts: number;
   /** The option's limit per share. */
   optionPrice: number;
-  /** Shares a covered call buys (a buy-write); the rest of its shares are already held. 0 for a Put. */
+  /** Shares a covered call buys (a Covered Call entry); the rest of its shares are already held. 0 for a Put. */
   sharesBought: number;
   /** The stock's limit per share when shares are bought. */
   stockPrice: number;

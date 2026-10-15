@@ -14,7 +14,7 @@
 //                         (expiry-date close − strike) x shares  [charged, usually negative]
 //   Unstructured bucket = stock P&L on shares with no call written (handed in at market)
 //   CC bucket           = call premium (net) + stock P&L on covered shares
-//                         (a buy-write's covered shares start at their purchase price)
+//                         (a Covered Call entry's covered shares start at their purchase price)
 //   Capital             = CSP: strike x shares of each put; the others: value of the shares
 //                         when they entered the bucket. Return = bucket total / capital.
 //
@@ -417,7 +417,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     };
 
     // Disposals go first, unless they take more shares than the pools hold while the group also acquires some: those
-    // shares were bought and sold within the same moment (a simulated look that opens a buy-write and closes it in its
+    // shares were bought and sold within the same moment (a simulated look that opens a Covered Call entry and closes it in its
     // next pass stamps both fills with the look's instant), so the acquisitions come first.
     const sharesDisposed = disposals.reduce((sum, e) => sum + e.shares, 0);
     if (acquisitions.length > 0 && sharesDisposed > pools.cc.shares + pools.unstructured.shares) {
@@ -451,7 +451,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       }
     }
 
-    // 3d. Rebalance: covered shares belong to CC. New purchases move at their cost (buy-write), others at the day's close.
+    // 3d. Rebalance: covered shares belong to CC. New purchases move at their cost (Covered Call entry), others at the day's close.
     const totalShares = pools.cc.shares + pools.unstructured.shares;
     const wantedCovered = Math.min(totalShares, Math.max(openCallShares, 0));
     const delta = wantedCovered - pools.cc.shares;

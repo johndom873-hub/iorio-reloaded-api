@@ -295,7 +295,7 @@ describe("covered calls on held shares (Marcelo, 2026-10-12): code sells them, r
     // another failure as well: not worth a burst
     expect(held([call({ quoteSource: "snapshot", quotedAt: null, spreadPercent: 16 })]).heldShareCall!.rankedIgnoringQuoteAge).toEqual([]);
   });
-  it("covers every free round lot; an odd lot is no held shares, and its calls go to the model as buy-writes", () => {
+  it("covers every free round lot; an odd lot is no held shares, and its calls go to the model as Covered Call entries", () => {
     // 300 shares: 3 contracts, floor max(1% × $108 × 300, $50) = $324; break-even after 105 − 1.0432 × 300 / 300 = 103.9568 → $2,412.96
     const three = held([call()], { freeShares: 350 }, { cycleBreakEven: { ...cycle, sharesAcquired: 300, acquisitionCost: 32_400 } }).heldShareCall!;
     expect(three.chosen!.contracts).toBe(3);

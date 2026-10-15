@@ -267,7 +267,7 @@ export interface OpenCoveredCallResult {
 }
 
 /**
- * A call sold against shares: the symbol's uncovered shares first, the rest bought (a buy-write when it holds none; with
+ * A call sold against shares: the symbol's uncovered shares first, the rest bought (a Covered Call entry when it holds none; with
  * buyEveryShare, all of them bought). The new covered-call position holds the call and exactly the shares it covers. An unstructured position that supplied
  * shares closes (stock rolled into covered call), its leg handed off at entry; what the call did not need goes to a new
  * unstructured position.

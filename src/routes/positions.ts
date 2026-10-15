@@ -1013,7 +1013,7 @@ positionsRouter.post("/orders", async (request, response) => {
   }
 
   // A covered call's stock leg is a standard 100-shares-per-contract
-  // buy-write unless the caller explicitly overrides it (e.g. deliberate
+  // Covered Call entry unless the caller explicitly overrides it (e.g. deliberate
   // over-coverage or a specific stock limit) — approved 2026-08-24 so
   // Genosuke stops asking "how many shares?" for the common case. Only
   // covered_call needs a stock leg at all; cash_secured_put never does.

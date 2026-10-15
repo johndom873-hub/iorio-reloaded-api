@@ -26,7 +26,7 @@ vi.mock("./tradingSettingsStore.js", () => ({ loadPriceCheckTolerance: (...args:
 const { evaluateLimitPriceCheckForOrderRequest } = await import("./limitPriceCheckGate.js");
 
 const putOpen = { symbol: "AAOI", strategyKey: "cash_secured_put", legs: [{ role: "option", action: "SELL", symbol: "AAOI", quantity: 2, unitPrice: 1.35, strike: 50, expiry: "20261016", right: "P" }] } as OrderRequestPayload;
-const buyWrite = {
+const coveredCallEntry = {
   symbol: "AAOI",
   strategyKey: "covered_call",
   legs: [
@@ -74,7 +74,7 @@ describe("evaluateLimitPriceCheckForOrderRequest", () => {
 
   it("subscribes one pooled contract per leg: stock as stock, option with its strike, expiry and right", async () => {
     feedQuotes(() => ({ bid: 1, ask: 1.1 }));
-    await evaluateLimitPriceCheckForOrderRequest({ payload: buyWrite });
+    await evaluateLimitPriceCheckForOrderRequest({ payload: coveredCallEntry });
     const contracts = subscribeToPooledQuoteMock.mock.calls.map((call) => call[0]);
     expect(contracts).toHaveLength(2);
     expect(contracts[0]).toMatchObject({ legType: "stock", symbol: "AAOI" });
@@ -82,9 +82,9 @@ describe("evaluateLimitPriceCheckForOrderRequest", () => {
     expect(contracts[0].key).not.toBe(contracts[1].key);
   });
 
-  it("judges each leg of a buy-write on its own quote", async () => {
+  it("judges each leg of a Covered Call entry on its own quote", async () => {
     feedQuotes((contract) => (contract.legType === "stock" ? { bid: 48.15, ask: 48.25 } : { bid: 4.9, ask: 5.1 }));
-    const result = await evaluateLimitPriceCheckForOrderRequest({ payload: buyWrite });
+    const result = await evaluateLimitPriceCheckForOrderRequest({ payload: coveredCallEntry });
     expect(result!.legs.map((leg) => leg.ok)).toEqual([true, false]);
     expect(result!.blocked).toBe(true);
   });
@@ -117,11 +117,11 @@ describe("evaluateLimitPriceCheckForOrderRequest", () => {
   it("lets go of every line it took, also when a later subscription fails", async () => {
     const unsubscribe = vi.fn();
     subscribeToPooledQuoteMock.mockResolvedValueOnce(unsubscribe).mockRejectedValueOnce(new Error("no more lines"));
-    const result = await evaluateLimitPriceCheckForOrderRequest({ payload: buyWrite });
+    const result = await evaluateLimitPriceCheckForOrderRequest({ payload: coveredCallEntry });
     expect(result!.blocked).toBe(true);
     expect(unsubscribe).toHaveBeenCalledTimes(1);
     const released = feedQuotes(() => ({ bid: 1.3, ask: 1.4 }));
-    await evaluateLimitPriceCheckForOrderRequest({ payload: buyWrite });
+    await evaluateLimitPriceCheckForOrderRequest({ payload: coveredCallEntry });
     expect(released).toHaveBeenCalledTimes(2);
   });
 

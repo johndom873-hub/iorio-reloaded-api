@@ -129,7 +129,7 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
     return await errored(input, `build failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // A buy-write's shares are priced by the route at the live price; a roll's buyback at the held leg's ask.
+  // A Covered Call entry's shares are priced by the route at the live price; a roll's buyback at the held leg's ask.
   const otherReferenceLegs: PlutoReferenceLeg[] =
     input.kind === "open"
       ? (built.payload?.legs ?? []).filter((leg) => leg.role === "stock").map((leg) => ({ side: leg.action === "SELL" ? ("sell" as const) : ("buy" as const), price: Number(leg.unitPrice), multiplier: 1 }))
@@ -236,7 +236,7 @@ export interface FillComparison {
  * Pure: compares an order's fills with its reference on the net (Marcelo, 2026-09-29). A guaranteed
  * combo fills at its net limit but IBKR splits that net between the legs its own way, so only the net
  * is meaningful. Each reference leg takes the fills with its side and multiplier (unique per leg in
- * every order Pluto sends: one option, a buy-write's shares + call, a roll's buyback + new option).
+ * every order Pluto sends: one option, a Covered Call entry's shares + call, a roll's buyback + new option).
  * For a single leg this reduces to (reference − fill) / reference for a sell and the mirror for a buy.
  * Null until the chosen leg has a fill.
  */
@@ -321,7 +321,7 @@ export async function loadWorkingPlutoOrders(): Promise<AdoptableOrder[]> {
 
 /**
  * Pure: for a two-part order, the chosen leg's price implied by the net fill, counting the other legs
- * at the prices we set on them in the order (Marcelo, 2026-09-29) — e.g. a buy-write IBKR reported as
+ * at the prices we set on them in the order (Marcelo, 2026-09-29) — e.g. a Covered Call entry IBKR reported as
  * call 6.86 / shares 327.48 against our 7.90 / 328.52 at the same net gives 7.90. Other legs take the
  * fills with their side and multiplier, as in compareFillsWithReference. Null for a single-leg order
  * or before the chosen leg has a fill.

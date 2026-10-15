@@ -202,7 +202,7 @@ describe("hedge (long option) legs", () => {
 });
 
 describe("shares bought and sold within the same moment", () => {
-  // 500 shares held since 10 September at 20.00; on the 15th a buy-write's 2,400 shares are bought at 23.32 and, in
+  // 500 shares held since 10 September at 20.00; on the 15th a Covered Call entry's 2,400 shares are bought at 23.32 and, in
   // the same look of a simulated book, sold at 23.30: both fills carry the same instant.
   const heldSince = new Date("2026-09-10T15:00:00Z");
   const sameMoment = new Date("2026-09-15T15:00:00Z");
@@ -210,7 +210,7 @@ describe("shares bought and sold within the same moment", () => {
     optionLegs: [],
     stockLegs: [
       { positionId: "pos-held", quantity: 500, entryAt: heldSince, exitAt: null },
-      { positionId: "pos-buy-write", quantity: 2400, entryAt: sameMoment, exitAt: sameMoment },
+      { positionId: "pos-covered-call-entry", quantity: 2400, entryAt: sameMoment, exitAt: sameMoment },
     ],
     stockTrades: [
       { at: heldSince, side: "buy", quantity: 500, price: 20, commission: 0 },

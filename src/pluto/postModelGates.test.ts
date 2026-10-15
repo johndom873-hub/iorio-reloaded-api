@@ -34,12 +34,12 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
 /**
  * The default model block: margin 35%, 14 sessions of variance, Edge $80/contract (Hist Edge $30) over a $150 P&L
  * standard deviation, so the half-Kelly cap on Edge $ is floor(0.5 × $500,000 budget × 80 ÷ 22,500) = 888 contracts and never binds unless a test
- * says so. A call's buy-write variance is set by the call fixtures.
+ * says so. A Covered Call entry's variance is set by the call fixtures.
  */
 function model(overrides: Partial<CandidateModelScore> = {}): CandidateModelScore {
   return fixtureCandidateModel({ edgeMargin: 0.35, expectedPnlDollars: 80, calibratedExpectedPnlDollars: 30, pnlVarianceDollars: 150 ** 2, varianceSessions: 14, ...overrides });
 }
-const buyWriteVariance = 500 ** 2;
+const coveredCallEntryVariance = 500 ** 2;
 
 const book: PostModelBookInput = {
   netLiquidationValue: 1_000_000, freeCash: 600_000, committedDollars: 50_000, inFlight: { totalNotional: 0, tickerNotional: 0, managedNotional: 0 }, openPositionCount: 2, existingTickerExposure: 20_000, existingSectorExposure: 100_000, freeShares: 0,
@@ -142,8 +142,8 @@ describe("runPostModelGates — the gates", () => {
 });
 
 describe("runPostModelGates — covered calls and rolls", () => {
-  it("a covered call the model chose is a buy-write sized like a put; an odd lot of free shares covers nothing", () => {
-    const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ coveredPositionPnlVarianceDollars: buyWriteVariance }) });
+  it("a covered call the model chose is a Covered Call entry sized like a put; an odd lot of free shares covers nothing", () => {
+    const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ coveredPositionPnlVarianceDollars: coveredCallEntryVariance }) });
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
     // order size 50k / ((110 − 2.05) × 100) = 4
     expect(runPostModelGates(input({ decision, candidate: call })).plan).toEqual({ quantity: 4, limitPrice: 2.05, notional: 43_180, fullSizeQuantity: 4 });
@@ -151,8 +151,8 @@ describe("runPostModelGates — covered calls and rolls", () => {
     const none = runPostModelGates(input({ decision, candidate: call, book: { ...book, freeShares: 80, freeCash: 40_000 } }));
     expect(failed(none)).toEqual(["sizing"]);
   });
-  it("the open-positions cap refuses a buy-write or a put at the cap", () => {
-    const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ coveredPositionPnlVarianceDollars: buyWriteVariance }) });
+  it("the open-positions cap refuses a Covered Call entry or a put at the cap", () => {
+    const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ coveredPositionPnlVarianceDollars: coveredCallEntryVariance }) });
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
     const atCap = { ...book, openPositionCount: 8 };
     expect(failed(runPostModelGates(input({ decision, candidate: call, book: atCap })))).toContain("open_positions_cap");
@@ -197,7 +197,7 @@ describe("stress cap (Marcelo, 2026-10-08; on the model's τ since 2026-10-10)",
   // SMCI on 2026-10-07: spot 44.02, forecast 76.1%, $46 call 2026-10-09 at 0.37/0.40, two sessions of variance to the close.
   const smciCall = { strategyKey: "covered_call" as const, strike: 46, expiry: "2026-10-09", bid: 0.37, ask: 0.4, model: model({ varianceSessions: 2 }) };
   const smciDay = { forecastVolatility: 0.761, elevatedVolatility: false, dayMoveSigmas: 0.31 };
-  it("sizes a buy-write from a 2σ move to expiry: σ_T 6.78%, stressed spot 38.05, loss $558/contract, 18 contracts within $10,383", () => {
+  it("sizes a Covered Call entry from a 2σ move to expiry: σ_T 6.78%, stressed spot 38.05, loss $558/contract, 18 contracts within $10,383", () => {
     const cap = computeStressCap(on, smciDay, smciCall, 44.02, 1_038_326);
     expect(cap.contracts).toBe(18);
     expect(cap.detail).toBe("stress cap: a 2σ move to expiry (−13.6% over 2.00 sessions of variance) loses $558/contract → 18 within $10,383 (1% of account)");
@@ -237,10 +237,10 @@ describe("stress cap (Marcelo, 2026-10-08; on the model's τ since 2026-10-10)",
     expect(runPostModelGates(input({ settings: { ...on, stressRiskBudgetPct: 0.5 } })).gates.find((gate) => gate.gate === "sizing")?.detail).toContain("stress cap: a 2σ move to expiry");
     expect(runPostModelGates(input({ settings: on })).plan?.quantity).toBe(5); // the 5-contract order size binds first
   });
-  it("caps a buy-write's contracts: they buy shares", () => {
+  it("caps a Covered Call entry's contracts: they buy shares", () => {
     const callTrade = { ...trade, actionKind: "open_covered_call" as const, candidateId: "HOOD:covered_call:2026-10-16:120" };
-    const call = candidate({ strategyKey: "covered_call", strike: 120, delta: 0.25, bid: 1.5, ask: 1.6, volume: 1000, model: model({ coveredPositionPnlVarianceDollars: buyWriteVariance }) });
-    const capped = { ...on, stressRiskBudgetPct: 0.2 }; // $2,000: a buy-write's 2σ loss (~$2,440 here) allows none
+    const call = candidate({ strategyKey: "covered_call", strike: 120, delta: 0.25, bid: 1.5, ask: 1.6, volume: 1000, model: model({ coveredPositionPnlVarianceDollars: coveredCallEntryVariance }) });
+    const capped = { ...on, stressRiskBudgetPct: 0.2 }; // $2,000: a Covered Call entry's 2σ loss (~$2,440 here) allows none
     expect(runPostModelGates(input({ decision: callTrade, candidate: call, settings: capped, book: { ...book, freeShares: 0 } })).plan).toBeNull();
   });
 });
@@ -271,11 +271,11 @@ describe("half-Kelly cap on Edge $ (model review P5, 2026-10-10; half-Kelly on E
     expect(tight.gates.find((gate) => gate.gate === "sizing")?.detail).toContain("→ 2 contract(s)");
     expect(failed(runPostModelGates(input({ candidate: candidate({ model: model({ expectedPnlDollars: 0 }) }) })))).toEqual(["sizing"]);
   });
-  it("caps a buy-write's contracts on shares + call", () => {
+  it("caps a Covered Call entry's contracts on shares + call", () => {
     const decision: PlutoDecision = { ...trade, actionKind: "open_covered_call", candidateId: "HOOD:covered_call:2026-10-16:130" };
     // shares + call Kelly: 0.5 × 500,000 × 2.5 ÷ 250,000 = 2.5 → 2
-    const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ expectedPnlDollars: 2.5, coveredPositionPnlVarianceDollars: buyWriteVariance }) });
-    // a buy-write: the order size allows 4, the cap 2
+    const call = candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ expectedPnlDollars: 2.5, coveredPositionPnlVarianceDollars: coveredCallEntryVariance }) });
+    // a Covered Call entry: the order size allows 4, the cap 2
     expect(runPostModelGates(input({ decision, candidate: call })).plan).toEqual({ quantity: 2, limitPrice: 2.05, notional: 21_590, fullSizeQuantity: 2 });
   });
 });

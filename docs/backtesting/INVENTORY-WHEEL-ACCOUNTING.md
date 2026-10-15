@@ -69,7 +69,7 @@ A position closes in exactly one place, `finalizeClosedPosition` (`:210-226`), w
 | Event | Resulting rows |
 |---|---|
 | **Open cash-secured put** | New `cash_secured_put` position, one short put leg with `entry_price` = fill net of commission, one opening trade (`:986-1043`). Cycle opens if the symbol was flat. |
-| **Open covered call as a buy-write** | Order has a stock BUY leg for the shortfall and a call SELL leg (`src/routes/positions.ts:1020-1075`). New `covered_call` position with call leg and stock leg (`:841-976`). |
+| **Open covered call as a Covered Call entry** | Order has a stock BUY leg for the shortfall and a call SELL leg (`src/routes/positions.ts:1020-1075`). New `covered_call` position with call leg and stock leg (`:841-976`). |
 | **Open covered call on held shares** | Order has no stock leg (`routes/positions.ts:1027-1043`). New `covered_call` position; the unstructured position's stock leg is handed off at entry and that position closes with `stock_rolled_into_covered_call`; a share-source link is recorded (`:934-975`). Shares beyond the calls stay in an unstructured position (`:1084-1143`). |
 | **Put expires out of the money** | Put leg `exit_price = 0`, position closes `expired_worthless`. Cycle closes if nothing else is open. |
 | **Put assigned** | Put leg `exit_price = 0`; position `close_reason = assigned` (`:158-178`, or by the audit `src/lib/expirySettlementAudit.ts:141-150`). IBKR reports a stock buy at the strike, recorded as an opening trade on a new `unstructured` position with `unstructured_reason = csp_assigned_stock` (`:92-126`, `:759-833`); share source linked to the put (`:275-287`). Stock entry ends at the strike once verified or corrected (`expirySettlementAudit.ts:256-351`). Cycle stays open. |
@@ -131,7 +131,7 @@ Timing detail that matters for a replay: both cycle modules group events within 
 - `computeSizingRoom` (`:126-135`): budget, order cap, ticker, sector and cash room.
 - Put: `unitNotional = (strike − limit) × 100`; contracts = min(room, volume share, stress cap, Kelly cap) (`:266-273`).
 - Call on held shares: `min(floor(freeShares / 100), volume cap)`, zero notional, no Kelly cap, then the break-even gate (`:274-292`).
-- Buy-write: free-share contracts first, then `(spot − limit) × 100` per extra contract (`:293-314`).
+- Covered Call entry: free-share contracts first, then `(spot − limit) × 100` per extra contract (`:293-314`).
 - Roll: keeps the held quantity; a put roll's notional is `max(0, dollarRiskChange)` (`:260-265`).
 - Stress cap `:178-195`; Kelly cap `:214-227`; limit price is the mid clamped inside the market (`:113-115`).
 
@@ -289,7 +289,7 @@ An in-memory ledger whose rows have the same shape as the live tables, a determi
 - `splitFactorAtCycleStart` per open cycle.
 
 **Event applier**, one function per event, producing exactly the end states of table 1.5:
-- `openCashSecuredPut`, `openCoveredCall` (buy-write, held shares, or mixed), `rollLeg`, `buyBackPut`, `closeCoveredCall`, `sellShares`.
+- `openCashSecuredPut`, `openCoveredCall` (Covered Call entry, held shares, or mixed), `rollLeg`, `buyBackPut`, `closeCoveredCall`, `sellShares`.
 - `settleExpiry` with four outcomes: put worthless, put assigned, call worthless, call-away.
 - Timestamps: fills at the decision instant (10:00 Eastern); settlements at 16:00 Eastern on the expiry date. Everything belonging to one event shares one timestamp, so the 120-second grouping holds.
 - Put assignment: put leg exit 0, `close_reason = assigned`, new unstructured position with a stock leg at the strike, cash − strike × shares, share source linked.
@@ -344,7 +344,7 @@ Likely difficulties:
 
 1. **Assignment rule at expiry**: in the money by ≥ $0.05 as live infers, or any amount in the money; and what a finish inside $0.05 does.
 2. **Buyback fill price**: suggested mirror of the sale rule, mid + spread cost share × half-spread, plus the buy commission.
-3. **Stock fills and quotes**: buy-write and share-sale price, the stock commission ($0.005 per share flat), and what stands in for stock bid/ask.
+3. **Stock fills and quotes**: Covered Call entry and share-sale price, the stock commission ($0.005 per share flat), and what stands in for stock bid/ask.
 4. **Early assignment**: propose not modelled in version 1.
 5. **Splits while a cycle holds shares**: propose keeping the whole cycle on its starting scale.
 6. **Dividends**: currently excluded; held shares make this matter more than before.

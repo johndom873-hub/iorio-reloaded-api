@@ -232,7 +232,7 @@ describe("runBaselineLook with the average-cost floor", () => {
       splitFactorToday: 1,
       optionContractsRepresentable: true,
     } as unknown as BacktestLookSymbol;
-    const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "buy_write", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", coverage: "fill_down_ranking", callStrike: "above_average_cost", entryCallStrike: "above_average_after_purchase", ...baseline } } as unknown as EffectiveBacktestSettings;
+    const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", coverage: "fill_down_ranking", callStrike: "above_average_cost", entryCallStrike: "above_average_after_purchase", ...baseline } } as unknown as EffectiveBacktestSettings;
     const heldShareLegs = positionsOfSymbol(ledger, "WHL").flatMap((position) => legsOfPosition(ledger, position.id)).filter((leg) => leg.legType === "stock" && leg.exitAt === null);
     const context = { todayIso, calendar: oneDayCalendar, symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(heldShareLegs.map((leg) => [leg.id, stockPrice])), nextActionId: () => `action-${++actionNumber}` } as unknown as BacktestLookContext;
     return runBaselineLook(context);
@@ -301,9 +301,9 @@ describe("runBaselineLook with the average-cost floor", () => {
       splitFactorToday: 1,
       optionContractsRepresentable: true,
     } as unknown as BacktestLookSymbol;
-    const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "buy_write", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", coverage: "fill_down_ranking", callStrike: "above_average_cost_else_break_even", entryCallStrike: "above_average_after_purchase", entryWhenSharesUncovered: "wait", ranking: "premium_per_day" } } as unknown as EffectiveBacktestSettings;
+    const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", coverage: "fill_down_ranking", callStrike: "above_average_cost_else_break_even", entryCallStrike: "above_average_after_purchase", entryWhenSharesUncovered: "wait", ranking: "premium_per_day" } } as unknown as EffectiveBacktestSettings;
     const result = await runBaselineLook({ todayIso, calendar: oneDayCalendar, symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(), nextActionId: () => `action-${++actionNumber}` } as unknown as BacktestLookContext);
-    // The free cash then goes into a buy-write; the call on the held shares is the one before it.
+    // The free cash then goes into a Covered Call entry; the call on the held shares is the one before it.
     const heldShareCalls = result.actions.filter((action) => action.chosenBecause.includes("free shares"));
     expect(heldShareCalls).toHaveLength(1);
     expect(heldShareCalls[0]!.contract!.strike).toBe(110);
@@ -329,12 +329,12 @@ describe("runBaselineLook with the average-cost floor", () => {
       splitFactorToday: 1,
       optionContractsRepresentable: true,
     } as unknown as BacktestLookSymbol;
-    const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "buy_write", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", callStrike: "above_average_cost", entryCallStrike: "above_average_after_purchase" } } as unknown as EffectiveBacktestSettings;
+    const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", callStrike: "above_average_cost", entryCallStrike: "above_average_after_purchase" } } as unknown as EffectiveBacktestSettings;
     await runBaselineLook({ todayIso, calendar: oneDayCalendar, symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(), nextActionId: () => `action-${++actionNumber}` } as unknown as BacktestLookContext);
     expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBe(100);
   });
 
-  it("holds buy-writes to the shares' cap at market value, sells no put while calls are sold, and a put when none clears the yield", async () => {
+  it("holds Covered Call entries to the shares' cap at market value, sells no put while calls are sold, and a put when none clears the yield", async () => {
     const capQuotes = [100, 105, 110].map((strike) => quote(expiry, strike, "C")).concat([90, 95, 100].map((strike) => quote(expiry, strike, "P")));
     const run = async (ledger: SimulatedLedger, baseline: Partial<BacktestBaselineSettings>) => {
       let actionNumber = 0;
@@ -344,7 +344,7 @@ describe("runBaselineLook with the average-cost floor", () => {
         splitFactorToday: 1,
         optionContractsRepresentable: true,
       } as unknown as BacktestLookSymbol;
-      const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "buy_write", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", coverage: "fill_down_ranking", callStrike: "above_average_cost_else_break_even", entryCallStrike: "above_average_after_purchase", entryWhenSharesUncovered: "buy", dayValueOptions: "excluded", maxSharesPctOfAccount: 70, putsWhenNoCall: "dte_budget", ...baseline } } as unknown as EffectiveBacktestSettings;
+      const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", coverage: "fill_down_ranking", callStrike: "above_average_cost_else_break_even", entryCallStrike: "above_average_after_purchase", entryWhenSharesUncovered: "buy", dayValueOptions: "excluded", maxSharesPctOfAccount: 70, putsWhenNoCall: "dte_budget", ...baseline } } as unknown as EffectiveBacktestSettings;
       return runBaselineLook({ todayIso, calendar: oneDayCalendar, symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(), nextActionId: () => `action-${++actionNumber}` } as unknown as BacktestLookContext);
     };
     // $100,000 and no shares: 70% buys 700 shares at $100; the cap leaves no room for an eighth lot, so no put.
@@ -379,7 +379,7 @@ describe("runBaselineLook in a session of per-ticker pots", () => {
       splitFactorToday: 1,
       optionContractsRepresentable: true,
     }) as unknown as BacktestLookSymbol;
-  const baseline = { ...defaultBacktestBaselineSettings, entry: "buy_write", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", coverage: "fill_down_ranking", callStrike: "above_break_even", entryWhenSharesUncovered: "buy", dayValueOptions: "excluded", putsWhenNoCall: "reserve_ladder", ladderSharesPct: 50 } as BacktestBaselineSettings;
+  const baseline = { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", coverage: "fill_down_ranking", callStrike: "above_break_even", entryWhenSharesUncovered: "buy", dayValueOptions: "excluded", putsWhenNoCall: "reserve_ladder", ladderSharesPct: 50 } as BacktestBaselineSettings;
   const lookOfTwo = (tickerSetupBySymbol?: BacktestLookContext["tickerSetupBySymbol"]) => {
     let actionNumber = 0;
     const settings = { trading: { spreadCostChargedPct: 50 }, baseline } as unknown as EffectiveBacktestSettings;
@@ -477,13 +477,13 @@ describe("selectBaselineCandidates with the Signals model", () => {
 });
 
 describe("baselineContractsForCash", () => {
-  it("reserves a put's strike less its fill, and pays a buy-write's shares less its fill, with commissions", () => {
+  it("reserves a put's strike less its fill, and pays a Covered Call entry's shares less its fill, with commissions", () => {
     // Put: (95 − 2) × 100 + 0.68 = 9,300.68 per contract.
     expect(baselineContractsForCash(93_006.8, { strike: 95, fillPrice: 2 }, "put", 100.01, flatCommissions)).toBe(10);
     expect(baselineContractsForCash(93_006.7, { strike: 95, fillPrice: 2 }, "put", 100.01, flatCommissions)).toBe(9);
-    // Buy-write: (100.01 − 3) × 100 + 0.68 + 100 × $0.005 = 9,702.18 per contract.
-    expect(baselineContractsForCash(97_021.8, { strike: 105, fillPrice: 3 }, "buy_write", 100.01, flatCommissions)).toBe(10);
-    expect(baselineContractsForCash(97_021.7, { strike: 105, fillPrice: 3 }, "buy_write", 100.01, flatCommissions)).toBe(9);
+    // Covered Call entry: (100.01 − 3) × 100 + 0.68 + 100 × $0.005 = 9,702.18 per contract.
+    expect(baselineContractsForCash(97_021.8, { strike: 105, fillPrice: 3 }, "covered_call", 100.01, flatCommissions)).toBe(10);
+    expect(baselineContractsForCash(97_021.7, { strike: 105, fillPrice: 3 }, "covered_call", 100.01, flatCommissions)).toBe(9);
   });
 });
 
@@ -503,10 +503,10 @@ describe("validateBaselineSettings", () => {
     expect(validateBaselineSettings({ ...valid, callStrike: "above_break_even", takeProfitPct: 75 })).toBeNull();
     expect(validateBaselineSettings({ ...valid, callStrike: "anywhere" })).toMatch(/callStrike/);
     expect(validateBaselineSettings({ ...valid, callStrike: "none" })).toBeNull();
-    expect(validateBaselineSettings({ ...valid, callStrike: "none", entry: "buy_write" })).toMatch(/Covered Call/);
+    expect(validateBaselineSettings({ ...valid, callStrike: "none", entry: "covered_call" })).toMatch(/Covered Call/);
     expect(validateBaselineSettings({ ...valid, callDeltaRange: "own_range", callMinAbsDelta: 0.1, callMaxAbsDelta: 0.2 })).toBeNull();
     expect(validateBaselineSettings({ ...valid, callDeltaRange: "wide" })).toMatch(/callDeltaRange/);
-    expect(validateBaselineSettings({ ...valid, entry: "buy_write", entryCallStrike: "above_purchase_price" })).toBeNull();
+    expect(validateBaselineSettings({ ...valid, entry: "covered_call", entryCallStrike: "above_purchase_price" })).toBeNull();
     expect(validateBaselineSettings({ ...valid, entryCallStrike: "otm" })).toMatch(/entryCallStrike/);
     expect(validateBaselineSettings({ ...valid, callMinAbsDelta: 0 })).toMatch(/callMinAbsDelta/);
     expect(validateBaselineSettings({ ...valid, callMinAbsDelta: 0.3, callMaxAbsDelta: 0.2 })).toMatch(/callMinAbsDelta must not be above/);
@@ -524,18 +524,18 @@ describe("validateBaselineSettings", () => {
     expect(validateBaselineSettings({ ...valid, ranking: "premium_dollars", callStrike: "above_latest_entry", expiryChoice: "nearest_qualifying", coverage: "fill_down_ranking" })).toBeNull();
     expect(validateBaselineSettings({ ...valid, expiryChoice: "farthest" })).toMatch(/expiryChoice/);
     expect(validateBaselineSettings({ ...valid, coverage: "all" })).toMatch(/coverage/);
-    expect(validateBaselineSettings({ ...valid, entry: "buy_write", callStrike: "above_average_cost", entryCallStrike: "above_average_after_purchase", entryWhenSharesUncovered: "buy" })).toBeNull();
+    expect(validateBaselineSettings({ ...valid, entry: "covered_call", callStrike: "above_average_cost", entryCallStrike: "above_average_after_purchase", entryWhenSharesUncovered: "buy" })).toBeNull();
     expect(validateBaselineSettings({ ...valid, entryWhenSharesUncovered: "sometimes" })).toMatch(/entryWhenSharesUncovered/);
-    expect(validateBaselineSettings({ ...valid, entry: "buy_write", maxSharesPctOfAccount: 70, minCallYieldPct: 30, putsWhenNoCall: "dte_budget", putBudgetPctPerDte: 0.5 })).toBeNull();
+    expect(validateBaselineSettings({ ...valid, entry: "covered_call", maxSharesPctOfAccount: 70, minCallYieldPct: 30, putsWhenNoCall: "dte_budget", putBudgetPctPerDte: 0.5 })).toBeNull();
     expect(validateBaselineSettings({ ...valid, maxSharesPctOfAccount: 70 })).toMatch(/needs a Covered Call/);
-    expect(validateBaselineSettings({ ...valid, entry: "buy_write", maxSharesPctOfAccount: 0 })).toMatch(/maxSharesPctOfAccount/);
+    expect(validateBaselineSettings({ ...valid, entry: "covered_call", maxSharesPctOfAccount: 0 })).toMatch(/maxSharesPctOfAccount/);
     expect(validateBaselineSettings({ ...valid, minCallYieldPct: -1 })).toMatch(/minCallYieldPct/);
     expect(validateBaselineSettings({ ...valid, putsWhenNoCall: "dte_budget" })).toMatch(/needs a Covered Call/);
     expect(validateBaselineSettings({ ...valid, putsWhenNoCall: "always" })).toMatch(/putsWhenNoCall/);
     expect(validateBaselineSettings({ ...valid, putBudgetPctPerDte: 0 })).toMatch(/putBudgetPctPerDte/);
     expect(validateBaselineSettings({ ...valid, callStrike: "above_average_cost_else_break_even", ranking: "premium_per_day", dayValueOptions: "excluded" })).toBeNull();
     expect(validateBaselineSettings({ ...valid, dayValueOptions: "never" })).toMatch(/dayValueOptions/);
-    const ladder = { ...defaultBacktestBaselineSettings, entry: "buy_write", putsWhenNoCall: "reserve_ladder" };
+    const ladder = { ...defaultBacktestBaselineSettings, entry: "covered_call", putsWhenNoCall: "reserve_ladder" };
     expect(validateBaselineSettings(ladder)).toBeNull();
   });
 });

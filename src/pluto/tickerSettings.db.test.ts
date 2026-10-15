@@ -152,7 +152,7 @@ describe("ladder settings reader", () => {
     expect(read.status).toBe(200);
     const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first();
     expect(read.json).toMatchObject({ symbol: enabledSymbol, source: "live", enabled: false, allocationPct: 12.5, overrideShockPct: null });
-    expect(read.json.baseline).toMatchObject({ entry: "buy_write", putsWhenNoCall: "reserve_ladder", ladderSharesPct: 30, maxAbsDelta: Number(settingsRow.ladder_max_abs_delta), ladderRungs: settingsRow.ladder_rungs });
+    expect(read.json.baseline).toMatchObject({ entry: "covered_call", putsWhenNoCall: "reserve_ladder", ladderSharesPct: 30, maxAbsDelta: Number(settingsRow.ladder_max_abs_delta), ladderRungs: settingsRow.ladder_rungs });
     const version = await testDb("pluto_settings_versions").where({ id: read.json.settingsVersionId as string }).first("settings");
     expect(version.settings.executionStrategy).toBe(settingsRow.execution_strategy);
 

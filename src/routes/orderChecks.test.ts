@@ -314,7 +314,7 @@ describe("POST /order-checks/commission-preview: the preview", () => {
     expect(response.json).toMatchObject({ source: "estimate", estimateReason: "gateway offline" });
   });
 
-  it("an estimate for a buy-write says it leaves out the stock leg's commission", async () => {
+  it("an estimate for a Covered Call entry says it leaves out the stock leg's commission", async () => {
     fetchWhatIfCommissionRangeMock.mockRejectedValue(new Error("offline"));
     const callLeg = { ...optionLeg, right: "C", strike: 100, quantity: 1 };
     const response = await call("POST", "/order-checks/commission-preview", { legs: [stockLeg, callLeg] });

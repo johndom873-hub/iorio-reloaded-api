@@ -250,7 +250,7 @@ describe("a session with looks inside the window", () => {
     expect(dayOf(session, firstDay).decisionSummary).toMatch(/^10:00 Opened LKC .* · 11:00 Opened LKC .* · no action at the other 2 looks/);
 
     // The next day's row is its 10:00 mark with both of the first day's fills in it: the cash they brought, less the
-    // two options at their 10:00 mids (and plus the shares a buy-write bought, at the 10:00 stock price).
+    // two options at their 10:00 mids (and plus the shares a Covered Call entry bought, at the 10:00 stock price).
     const next = dayOf(session, secondDay);
     const stockPrice = computeParityStockPrice(session.quotesAt("LKC", secondDay, "10:00"), secondDay, ratePercent / 100, maximumSpreadFractionOfMid)!.price;
     let cash = startingValue + session.detail.days.reduce((sum, day) => sum + day.interestDollars, 0);
@@ -382,7 +382,7 @@ describe("a session with looks inside the window", () => {
   }, 60_000);
 
   it("closes a position before a macro event when the rule says so, and holds it when the rule is never", async () => {
-    // A buy-write opened on Monday 8 June; on Tuesday the stock is at 104 and the position is in profit, one session
+    // A Covered Call entry opened on Monday 8 June; on Tuesday the stock is at 104 and the position is in profit, one session
     // before CPI (Wednesday 08:30).
     const [firstDay, secondDay] = ["2026-06-08", "2026-06-09"];
     const days = { "2026-06-05": firstFileDay(), [firstDay]: { looks: looksAt(100, ["10:00"]), close: 100 }, [secondDay]: { looks: looksAt(104, ["10:00", "10:30"]), close: 104 } };

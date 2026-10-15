@@ -211,7 +211,7 @@ describe("validateBacktestSettingsOverrides", () => {
     // Without the CLI the rules can still be chosen.
     expect(validateBacktestSettingsOverrides({ decisionMaker: "rules" }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({ ok: true, overrides: {} });
     expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "decisionMaker must be rules, llm or baseline." });
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "baseline", baseline: { entry: "buy_write", maxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({ ok: true, overrides: { decisionMaker: "baseline", baseline: { entry: "buy_write", maxAbsDelta: 0.4 } } });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({ ok: true, overrides: { decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } } });
     expect(validateBacktestSettingsOverrides({ baseline: { minAbsDelta: 0.7 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "baseline.minAbsDelta must not be above baseline.maxAbsDelta." });
     expect(validateBacktestSettingsOverrides({ baseline: { strangle: true } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "baseline.strangle cannot be changed for a session." });
     expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "llm" } }, { ...context, claudeCliAvailable: false })).toMatchObject({ ok: false, error: expect.stringContaining("BACKTEST_CLAUDE_CLI_PATH") });
@@ -225,7 +225,7 @@ describe("validateBacktestSettingsOverrides", () => {
 });
 
 describe("per-ticker pots (the baseline)", () => {
-  const ladderOverrides = { decisionMaker: "baseline", baseline: { entry: "buy_write", putsWhenNoCall: "reserve_ladder" } };
+  const ladderOverrides = { decisionMaker: "baseline", baseline: { entry: "covered_call", putsWhenNoCall: "reserve_ladder" } };
   const potsRequest = { name: "Pots", symbols: ["hood", "aaoi"], startDate: "2021-08-02", endDate: "2026-09-30", tablesMode: "walk_forward", overrides: ladderOverrides };
   const lab: BacktestSessionRequestContext = { ...context, tickerValuesFor: (symbol) => (symbol === "HOOD" ? { potDollars: 300_000, baseline: { ladderSharesPct: 30 } } : null), defaultPotDollars: 100_000 };
   const resolved = (body: Record<string, unknown>, requestContext: BacktestSessionRequestContext = lab) => {

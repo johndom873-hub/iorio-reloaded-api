@@ -32,9 +32,9 @@ export interface PostModelBookInput {
   /** Every open position's exposure on this symbol and sector, humans' included (computePositionExposures). */
   existingTickerExposure: number;
   existingSectorExposure: number;
-  /** Uncovered shares of the symbol: a buy-write buys only what they do not cover; a round lot of them is code's (runHeldShareCallGates). */
+  /** Uncovered shares of the symbol: a Covered Call entry buys only what they do not cover; a round lot of them is code's (runHeldShareCallGates). */
   freeShares: number;
-  /** Live underlying price: a covered call buys 100 shares per contract beyond the free ones (buy-write). */
+  /** Live underlying price: a covered call buys 100 shares per contract beyond the free ones (Covered Call entry). */
   spotPrice: number | null;
   workingOrderOnSymbol: boolean;
   /** When Pluto last acted on this symbol with an order that filled (fully or partly); null if never. */
@@ -284,9 +284,9 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
     gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at ${formatWholeDollars(unitNotional)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → ${formatWholeDollars(fullSizeQuantity * unitNotional)}`);
   } else {
     // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
-    // contract is a buy-write that buys 100 shares at the live spot, sized from the same room as a put.
+    // contract is a Covered Call entry that buys 100 shares at the live spot, sized from the same room as a put.
     const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction, input.kellyBasis);
-    // One Kelly cap for all the call's contracts, on shares + call: free-share contracts first, buy-writes within what is left.
+    // One Kelly cap for all the call's contracts, on shares + call: free-share contracts first, Covered Call entries within what is left.
     const coveredByShares = Math.min(Math.floor(book.freeShares / 100), kellyCap.contracts);
     if (book.spotPrice === null || !(book.spotPrice > 0)) {
       unitNotional = 0;
@@ -297,9 +297,9 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
       const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
       // Only the contracts that buy shares add risk, so only they are stress-capped.
       const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
-      const buyWriteContracts = Math.min(Math.floor(Math.max(0, roomDollars) / unitNotional), stressCap.contracts, Math.max(0, kellyCap.contracts - coveredByShares));
-      fullSizeQuantity = Math.min(coveredByShares + buyWriteContracts, liquidityCap);
-      gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${coveredByShares} contract(s) within the Kelly cap, room allows ${buyWriteContracts} more contract(s) buying 100 shares each at ${book.spotPrice.toFixed(2)} less the ${limitPrice.toFixed(2)} premium (${describeRoom(room)}; ${stressCap.detail}; ${kellyCap.detail}), volume share allows ${liquidityCap}`);
+      const coveredCallEntryContracts = Math.min(Math.floor(Math.max(0, roomDollars) / unitNotional), stressCap.contracts, Math.max(0, kellyCap.contracts - coveredByShares));
+      fullSizeQuantity = Math.min(coveredByShares + coveredCallEntryContracts, liquidityCap);
+      gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${coveredByShares} contract(s) within the Kelly cap, room allows ${coveredCallEntryContracts} more contract(s) buying 100 shares each at ${book.spotPrice.toFixed(2)} less the ${limitPrice.toFixed(2)} premium (${describeRoom(room)}; ${stressCap.detail}; ${kellyCap.detail}), volume share allows ${liquidityCap}`);
     }
     // Only the shares actually bought count as notional: the free-share contracts commit no new cash.
     unitNotional = fullSizeQuantity > 0 ? (Math.max(0, fullSizeQuantity - coveredByShares) * unitNotional) / fullSizeQuantity : 0;

@@ -25,7 +25,7 @@ import { createSimulatedLedger, type SimulatedLedger } from "../simulatedLedger.
 // ROL  a put rolled down and out                                               open cycle    +215.92
 //   2 Mar  sell 2 puts $40 6 Mar @ 0.60                +120 − 1.36
 //   5 Mar  buy them back @ 0.90, sell 2 puts $39 27 Mar @ 1.40   −180 − 1.36 + 280 − 1.36
-// BWR  a buy-write called away; a put bought back; a covered call closed whole three closed cycles +295.64, +23.64, +70.64
+// BWR  a Covered Call entry called away; a put bought back; a covered call closed whole three closed cycles +295.64, +23.64, +70.64
 //   2 Mar  buy 200 sh @ 30.01 (stock 30.00), sell 2 calls $31 6 Mar @ 0.50   −6,002 − 1.00 + 100 − 1.36
 //   6 Mar  close 31.50: called away at 31              +6,200
 //   9 Mar  sell 1 put $30 13 Mar @ 0.35                +35 − 0.68

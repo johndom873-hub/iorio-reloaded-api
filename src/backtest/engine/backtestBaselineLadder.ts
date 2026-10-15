@@ -1,7 +1,7 @@
 import type { BacktestBaselineSettings } from "../backtestTypes.js";
 import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
 
-// The put ladder on a cash reserve (baseline putsWhenNoCall "reserve_ladder", Marcelo 2026-10-14). The buy-writes' shares
+// The put ladder on a cash reserve (baseline putsWhenNoCall "reserve_ladder", Marcelo 2026-10-14). The Covered Call entries' shares
 // get ladderSharesPct% of the base (at cost) and the rest is the reserve R0; the base is the larger of the account value
 // the cycle started with and today's, so a fall keeps the cycle's plan and a rally grows both with the account. In a
 // session of per-ticker pots each ticker's base is its share of that (w = its pot ÷ every pot, fixed for the session;

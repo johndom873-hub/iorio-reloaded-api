@@ -47,7 +47,7 @@ describe("ledgerHeldSharesAverageCost", () => {
     expect(settleExpiry(ledger, { legId: firstCallLegId, expiryClose: 55 })).toBe("call_worthless");
     expect(ledgerFreeShares(ledger, "WHL")).toBe(300);
     expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBeCloseTo(47.5, 10);
-    // A buy-write buying every share leaves the 300 uncovered ones where they are.
+    // A Covered Call entry buying every share leaves the 300 uncovered ones where they are.
     const third = openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-13", strike: 62, contracts: 1, callFillPrice: 1, stockFillPrice: 60, at: decisionAt("2026-03-09"), actionId: "action-3", splitFactorToday: 1, buyEveryShare: true });
     expect(third).toMatchObject({ sharesBought: 100, sharesFromHeld: 0, leftoverPositionId: null });
     expect(ledgerFreeShares(ledger, "WHL")).toBe(300);
@@ -191,7 +191,7 @@ describe("put rolled, then expiring", () => {
   });
 });
 
-describe("buy-write called away", () => {
+describe("Covered Call entry called away", () => {
   //  2 Mar  buy 200 sh @ 30.01 (stock 30.00), sell 2 calls $31 6 Mar @ 0.50    cash −6,002 − 1.00 + 100 − 1.36 = −5,904.36
   //         shares cost 6,003 (30.015 each); break-even (6,003 − 98.64) ÷ 200 = 29.5218
   //  6 Mar  close 31.01, a cent in the money: called away at 31                cash +6,200

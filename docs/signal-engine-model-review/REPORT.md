@@ -348,7 +348,7 @@ the Signals screen; the new figures get a UI mockup before any screen work. Thet
 
 Choices made while implementing (flag any you disagree with):
 - **Ranking:** Pluto and the seed rank by calibrated annualized return, then the model's Edge $. Kelly's bankroll is
-  Pluto's budget (NLV × capital budget %). Calls on shares already held are Kelly-capped on the option alone; buy-writes on
+  Pluto's budget (NLV × capital budget %). Calls on shares already held are Kelly-capped on the option alone; Covered Call entries on
   shares + call.
 - **Yield rule:** Pluto's minimum yield now reads the model's max annualized yield (premium after friction ÷ capital,
   annualized on sessions), not the old calendar-day yield. The Signals trading settings' own minimum yield (calendar
@@ -421,7 +421,7 @@ ThetaData tests (strike-level backtest and calibration, tenors, weekend and rest
   premium yield the same. The variance clock values the contract; the capital is tied up on weekends too, and every
   other yield on the platform uses 365. INTC $24.5 put, 2 days: 5.79 ÷ 2,450 × 365 ÷ 2 = 43% (27% on trading days). A
   Friday-to-Monday contract is now annualized over 3 days, not 1.3, so it ranks below a weekday one with the same premium.
-- **Kelly for every covered call on shares + call**, one cap across contracts on shares already held and buy-writes.
+- **Kelly for every covered call on shares + call**, one cap across contracts on shares already held and Covered Call entries.
   SMCI $46 call: 26 contracts (92 on the call alone).
 - **Pluto's minimum is on Edge Yield, not Edge $** (Marcelo: a per-contract dollar floor ignores days to expiry, so it
   penalizes the short-dated contracts; `min_edge_yield_pct`; a roll's net Edge $ per contract is turned into a yield on

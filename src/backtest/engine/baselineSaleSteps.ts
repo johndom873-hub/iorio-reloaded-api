@@ -293,8 +293,8 @@ export function describeRejections(rejections: BaselineRejections): string {
     .join(", ");
 }
 
-/** Contracts the free cash pays for: a put reserves its strike and brings its fill in; a buy-write pays the shares less the fill. */
-export function baselineContractsForCash(freeCash: number, candidate: Pick<BaselineCandidate, "strike" | "fillPrice">, entry: "put" | "buy_write", stockFillPrice: number, commissions: BaselineCommissions): number {
+/** Contracts the free cash pays for: a put reserves its strike and brings its fill in; a Covered Call entry pays the shares less the fill. */
+export function baselineContractsForCash(freeCash: number, candidate: Pick<BaselineCandidate, "strike" | "fillPrice">, entry: "put" | "covered_call", stockFillPrice: number, commissions: BaselineCommissions): number {
   const optionCommission = optionCommissionPerContract(commissions);
   const perContract = entry === "put" ? (candidate.strike - candidate.fillPrice) * sharesPerContract + optionCommission : (stockFillPrice - candidate.fillPrice) * sharesPerContract + optionCommission + stockCommissionPerLot(commissions);
   return perContract > 0 ? Math.max(0, Math.floor(freeCash / perContract)) : 0;
@@ -529,22 +529,22 @@ export function planBaselineSales(input: BaselineSalesInput): void {
   // When the ladder put was chosen over the calls, they were quoted and lost: the put's own line says why.
   if (callFloors.length > 0 && !anyCallCandidate && !ladderPutChosen) notes.push(`${symbol}: no call for ${freeLots * sharesPerContract} free shares (${(lastCallRejections && describeRejections(lastCallRejections)) || "no quotes"})`);
 
-  // 2. The entry with the free cash. A buy-write waits while free round lots are still uncovered, unless it buys every share.
-  const buyWrite = baseline.entry === "buy_write";
-  // Room for the buy-writes' shares under maxSharesPctOfAccount, in round lots at today's fill (unbounded at 100).
+  // 2. The entry with the free cash. A Covered Call entry waits while free round lots are still uncovered, unless it buys every share.
+  const coveredCallEntry = baseline.entry === "covered_call";
+  // Room for the Covered Call entries' shares under maxSharesPctOfAccount, in round lots at today's fill (unbounded at 100).
   const shareCapLots = () => {
-    if (buyWrite && ladderState !== null) return ladderShareLots(ladderBudget(ladderBase(ladderState, book.accountValueToday(), book.tickerWeight()), baseline.ladderSharesPct).sharesBudget - heldSharesCostToday() - book.openPutCollateral(), stockFillToday);
-    if (!buyWrite || baseline.maxSharesPctOfAccount >= 100) return Number.POSITIVE_INFINITY;
+    if (coveredCallEntry && ladderState !== null) return ladderShareLots(ladderBudget(ladderBase(ladderState, book.accountValueToday(), book.tickerWeight()), baseline.ladderSharesPct).sharesBudget - heldSharesCostToday() - book.openPutCollateral(), stockFillToday);
+    if (!coveredCallEntry || baseline.maxSharesPctOfAccount >= 100) return Number.POSITIVE_INFINITY;
     const room = (book.accountValueToday() * baseline.maxSharesPctOfAccount) / 100 - book.heldSharesToday() * stockPrice;
     return room > 0 ? Math.floor(room / (stockFillToday * sharesPerContract)) : 0;
   };
-  /** True when a buy-write had cash and room for a round lot and sold none (no call passed, the yield threshold included). */
+  /** True when a Covered Call entry had cash and room for a round lot and sold none (no call passed, the yield threshold included). */
   const enterWithFreeCash = (): boolean => {
-    const buyEveryShare = buyWrite && baseline.entryWhenSharesUncovered === "buy";
-    if (buyWrite && uncoveredLots >= 1 && !buyEveryShare) return false;
-    const roomForALot = buyWrite && Math.min(Math.floor(book.freeCash() / (stockFillToday * sharesPerContract)), shareCapLots()) >= 1;
+    const buyEveryShare = coveredCallEntry && baseline.entryWhenSharesUncovered === "buy";
+    if (coveredCallEntry && uncoveredLots >= 1 && !buyEveryShare) return false;
+    const roomForALot = coveredCallEntry && Math.min(Math.floor(book.freeCash() / (stockFillToday * sharesPerContract)), shareCapLots()) >= 1;
     const entryRight = baseline.entry === "put" ? "P" : "C";
-    const floorAfterPurchase = buyWrite && baseline.entryCallStrike === "above_average_after_purchase";
+    const floorAfterPurchase = coveredCallEntry && baseline.entryCallStrike === "above_average_after_purchase";
     // The average once `contracts` more lots are bought at today's fill (the fill itself when none are held).
     const averageCostAfterBuying = (contracts: number) => {
       const averageCost = book.heldSharesAverageCostToday();
@@ -553,12 +553,12 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     };
     // Selection takes the lowest the average after the purchase can be (today's fill or the average now); each candidate is then held to its own.
     const heldAverageNow = floorAfterPurchase ? book.heldSharesAverageCostToday() : null;
-    const entryMinimumStrike = !buyWrite ? null : baseline.entryCallStrike === "above_purchase_price" ? stockFillToday : floorAfterPurchase ? Math.min(stockFillToday, heldAverageNow ?? stockFillToday) : null;
+    const entryMinimumStrike = !coveredCallEntry ? null : baseline.entryCallStrike === "above_purchase_price" ? stockFillToday : floorAfterPurchase ? Math.min(stockFillToday, heldAverageNow ?? stockFillToday) : null;
     const { candidates, rejections } = select(entryRight, entryMinimumStrike);
     if (candidates.length === 0) {
       notes.push(`${symbol}: no ${baseline.entry === "put" ? "put" : "new Covered Call"} (${describeRejections(rejections) || "no quotes"})`);
-      // Lots the buy-writes had cash and room for (a put entry's depend on a strike: unknown).
-      const wanted = buyWrite ? Math.min(Math.floor(book.freeCash() / (stockFillToday * sharesPerContract)), shareCapLots()) : null;
+      // Lots the Covered Call entries had cash and room for (a put entry's depend on a strike: unknown).
+      const wanted = coveredCallEntry ? Math.min(Math.floor(book.freeCash() / (stockFillToday * sharesPerContract)), shareCapLots()) : null;
       if (wanted === null || wanted >= 1) noteOrderShortfall({ step: "entry", right: entryRight, wanted, filled: 0, unsold: wanted, cashCut: false, anyCandidate: false, best: null });
       return roomForALot;
     }
@@ -577,7 +577,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     const best = bestOf(candidates);
     const bestLimits = best === null ? null : entryLimitsFor(best);
     const wanted = bestLimits === null ? null : Number.isFinite(bestLimits.byRoom) ? bestLimits.byRoom : bestLimits.byCash;
-    const entrySharesAverageCost: Record<string, number | null> = buyWrite ? { sharesAverageCostBefore: book.heldSharesAverageCostToday(), stockPriceAtLook: stockPrice } : {};
+    const entrySharesAverageCost: Record<string, number | null> = coveredCallEntry ? { sharesAverageCostBefore: book.heldSharesAverageCostToday(), stockPriceAtLook: stockPrice } : {};
     let entriesMade = 0;
     let contractsSold = 0;
     let cashCut = false;
@@ -602,10 +602,10 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     if (entriesMade === 0 && belowAverageAfterPurchase > 0) notes.push(`${symbol}: no new Covered Call at or above the average after the purchase (${belowAverageAfterPurchase} below it)`);
     return entriesMade === 0 && roomForALot;
   };
-  const buyWriteFoundNoCall = enterWithFreeCash();
+  const coveredCallEntryFoundNoCall = enterWithFreeCash();
 
-  // 3. One put when no call was sold (held lots left without one, or a buy-write with room found none), while none is open.
-  if (buyWrite && baseline.putsWhenNoCall === "dte_budget" && (uncoveredLots >= 1 || buyWriteFoundNoCall)) {
+  // 3. One put when no call was sold (held lots left without one, or a Covered Call entry with room found none), while none is open.
+  if (coveredCallEntry && baseline.putsWhenNoCall === "dte_budget" && (uncoveredLots >= 1 || coveredCallEntryFoundNoCall)) {
     const putOpen = book.hasOpenCashSecuredPut();
     if (putOpen) notes.push(`${symbol}: no new put while one is open`);
     else {

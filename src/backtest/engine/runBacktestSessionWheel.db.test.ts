@@ -635,7 +635,7 @@ describe("a session of several symbols on one book", () => {
   }, 60_000);
 
   it("gives each ticker of a pots session its pot: turns in alphabetical order, its share level and weight, buy and hold per pot", async () => {
-    const ladder = { ...defaultBacktestBaselineSettings, entry: "buy_write", putsWhenNoCall: "reserve_ladder", entryWhenSharesUncovered: "buy", callStrike: "above_break_even", minAbsDelta: 0.01, maxAbsDelta: 1, maxSpreadPctOfMid: 50 } as BacktestBaselineSettings;
+    const ladder = { ...defaultBacktestBaselineSettings, entry: "covered_call", putsWhenNoCall: "reserve_ladder", entryWhenSharesUncovered: "buy", callStrike: "above_break_even", minAbsDelta: 0.01, maxAbsDelta: 1, maxSpreadPctOfMid: 50 } as BacktestBaselineSettings;
     const tickerValues = (ladderSharesPct: number) => ({ ...Object.fromEntries(backtestTickerBaselineKeys.map((key) => [key, ladder[key]])), ladderSharesPct }) as BacktestSymbolSettings["baseline"];
     const source = Object.fromEntries([...backtestTickerBaselineKeys, "potDollars"].map((key) => [key, "request"])) as BacktestSymbolSettings["source"];
     // Given WTB first: the pots session still lets WTA take its turn first at every look.

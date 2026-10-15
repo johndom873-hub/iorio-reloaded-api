@@ -20,7 +20,7 @@ export interface AnalysisSessionRow {
   /** The ticker's share level (%) in the session; null when the session is not the CC + Put Ladder. */
   sharesPct: number | null;
   rungs: number | null;
-  /** Entry buy-write with the reserve ladder: the CC + Put Ladder. */
+  /** A Covered Call entry with the reserve ladder: the CC + Put Ladder. */
   ladder: boolean;
   cagr: number;
   maxDrawdown: number;
@@ -86,7 +86,7 @@ export async function listAnalysisSessions(symbol: string, connection: Knex = db
       const period = `${row.start_date}|${row.end_date}`;
       const cashCagr = cashCagrByPeriod.get(period) ?? cashCagrByPeriod.set(period, treasuryBillCagr(rates, row.start_date, row.end_date)).get(period)!;
       const maxDrawdown = Number(row.metrics.maxDrawdown);
-      const ladder = baseline !== null && baseline.entry === "buy_write" && baseline.putsWhenNoCall === "reserve_ladder";
+      const ladder = baseline !== null && baseline.entry === "covered_call" && baseline.putsWhenNoCall === "reserve_ladder";
       return {
         id: row.id,
         name: row.name,

@@ -20,7 +20,7 @@ describe("fillsAreComplete", () => {
     expect(fillsAreComplete("filled", rollLegs, [buyBack, sellNew])).toBe(true);
   });
 
-  it("a covered-call buy-write counts shares and contracts in their own units (100 shares + 1 call)", () => {
+  it("a Covered Call entry counts shares and contracts in their own units (100 shares + 1 call)", () => {
     const legs = [{ quantity: 100 }, { quantity: 1 }];
     const stockFill: OrderFill = { side: "buy", quantity: 100, price: 50, optionType: null, strikePrice: null, expiryDate: null };
     const callFill: OrderFill = { side: "sell", quantity: 1, price: 1.25, optionType: "call", strikePrice: 55, expiryDate: "2026-10-16" };

@@ -18,7 +18,7 @@ describe("computePlutoActionExposure", () => {
     }
   });
 
-  it("opens add what the order gate counts, net of the premium: (strike − limit) × 100 per put, the shares less the call's premium for a buy-write; a working order counts its ordered quantity", () => {
+  it("opens add what the order gate counts, net of the premium: (strike − limit) × 100 per put, the shares less the call's premium for a Covered Call entry; a working order counts its ordered quantity", () => {
     expect(computePlutoActionExposure(action({ outcome: "confirmed" }), order("open_cash_secured_put", cspPayload))).toBeCloseTo(4676, 9); // (24 − 0.62) × 100 × 2
     expect(computePlutoActionExposure(action({ kind: "open_covered_call", quantity: 5, limitPrice: 2.45 }), order("open_covered_call", ccPayload, 5))).toBeCloseTo(45_275, 9); // 500 × (93 − 2.45)
   });

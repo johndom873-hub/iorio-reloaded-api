@@ -403,7 +403,7 @@ describe("POST /positions/orders: Signals snapshot", () => {
 describe("POST /positions/orders: covered call", () => {
   const callOption = (quantity: number) => ({ quantity, limitPrice: 1.5, strikePrice: 105, expiryDate: "20261120" });
 
-  it("auto-fills a standard buy-write at the last price: 2 contracts need 200 shares, bought at the cent-rounded last price", async () => {
+  it("auto-fills a standard Covered Call entry at the last price: 2 contracts need 200 shares, bought at the cent-rounded last price", async () => {
     const ticker = await createTicker();
     fetchPricesPoolFirstMock.mockResolvedValue({ stock: 100.456 });
     const response = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "covered_call", option: callOption(2) });

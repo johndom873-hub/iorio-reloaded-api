@@ -26,8 +26,8 @@ export type BacktestDecisionMaker = "rules" | "llm" | "baseline";
  * Everything is held to expiry: no buybacks, rolls, closes, stops, breakers or Signals.
  */
 export interface BacktestBaselineSettings {
-  /** How free cash enters a stock: a cash-secured put, or a buy-write. */
-  entry: "put" | "buy_write";
+  /** How free cash enters a stock: a cash-secured put, or a Covered Call entry. */
+  entry: "put" | "covered_call";
   /** The |delta| range, from each quote's own implied volatility. */
   minAbsDelta: number;
   maxAbsDelta: number;
@@ -45,24 +45,24 @@ export interface BacktestBaselineSettings {
    */
   callStrike: "delta_range" | "above_share_cost" | "above_break_even" | "above_latest_entry" | "above_average_cost" | "above_average_cost_else_break_even" | "none";
   /**
-   * A buy-write's call: any strike; only at or above the price paid for its shares; or only at or above the average price
+   * A Covered Call entry's call: any strike; only at or above the price paid for its shares; or only at or above the average price
    * of the shares held once these are bought (the price paid when none are held).
    */
   entryCallStrike: "any" | "above_purchase_price" | "above_average_after_purchase";
   /**
-   * A buy-write while some held round lots have no call: "wait" until they all have one, or "buy" (the buy-write buys
+   * A Covered Call entry while some held round lots have no call: "wait" until they all have one, or "buy" (the Covered Call entry buys
    * every share its call covers and leaves the uncovered lots to their own calls).
    */
   entryWhenSharesUncovered: "wait" | "buy";
   /**
-   * With a buy-write entry: buy-writes buy shares while the shares held, at the 10:00 price, stay within this % of the
+   * With a Covered Call entry: Covered Call entries buy shares while the shares held, at the 10:00 price, stay within this % of the
    * day's account value; 100 = no cap. An assigned put may take them past it.
    */
   maxSharesPctOfAccount: number;
-  /** A call, on held shares or a buy-write's, is sold only when its premium yield (annualized) is above this %; 0 = any. */
+  /** A call, on held shares or a Covered Call entry's, is sold only when its premium yield (annualized) is above this %; 0 = any. */
   minCallYieldPct: number;
   /**
-   * With a buy-write entry, "dte_budget": on a look where held shares are left without a call, or a buy-write with room
+   * With a Covered Call entry, "dte_budget": on a look where held shares are left without a call, or a Covered Call entry with room
    * finds none (minCallYieldPct included), and no put of the stock is open, one put is sold: the highest premium yield,
    * strike at most the average price of the shares held (any strike with none held), as many contracts as
    * putBudgetPctPerDte% of the account value per day to expiry, the free cash and the volume limit allow.
@@ -71,7 +71,7 @@ export interface BacktestBaselineSettings {
   /** That put's exposure, (strike − fill) × 100 a contract, per day to expiry: % of the day's account value. */
   putBudgetPctPerDte: number;
   /**
-   * With putsWhenNoCall "reserve_ladder" (backtestBaselineLadder.ts): the buy-writes' shares, at cost, at most this % of
+   * With putsWhenNoCall "reserve_ladder" (backtestBaselineLadder.ts): the Covered Call entries' shares, at cost, at most this % of
    * the account value the cycle started with; the rest is the puts' reserve. maxSharesPctOfAccount does not apply.
    */
   ladderSharesPct: number;
@@ -115,7 +115,7 @@ export interface BacktestBaselineSettings {
   /**
    * Sell only a contract whose implied volatility is at least minVolatilityEdgePoints above the stock's 21-session
    * forecast (YZ21), both on the forecast's clock (the Signals model's IV and forecast): for new entries only (a put or a
-   * buy-write), or for every sale, the calls on held shares too.
+   * Covered Call entry), or for every sale, the calls on held shares too.
    */
   volatilityEdgeFilter: "off" | "entries" | "all_sales";
   /** Volatility points (5 = 5 points, e.g. 55% against a 50% forecast); may be negative. */

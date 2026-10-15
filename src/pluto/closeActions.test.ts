@@ -105,7 +105,7 @@ describe("orderedEntryPremium", () => {
   it("moves the recorded entry by IBKR's combo split, keeping its commission treatment", () => {
     // AMAT roll: we set the new call at 4.60, IBKR reported it at 5.04; recorded entry 5.0284 (commission in).
     expect(orderedEntryPremium(5.0284, [{ quantity: 1, price: 5.04, orderedLegPrice: 4.6 }])).toBeCloseTo(4.5884, 6);
-    // SPCX buy-write: two fills at 1.61 and 1.59 against our 1.72.
+    // SPCX Covered Call entry: two fills at 1.61 and 1.59 against our 1.72.
     expect(orderedEntryPremium(1.5926, [{ quantity: 1, price: 1.61, orderedLegPrice: 1.72 }, { quantity: 1, price: 1.59, orderedLegPrice: 1.72 }])).toBeCloseTo(1.7126, 6);
   });
   it("is null for legs opened by single-leg orders and weights mixed openings by quantity", () => {

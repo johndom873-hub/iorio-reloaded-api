@@ -54,7 +54,7 @@ describe("the ladder's budget", () => {
     expect(ladderRungCollateral(100_000, 120_000, 5)).toBe(0);
   });
 
-  it("gives the buy-writes the round lots the budget has room for", () => {
+  it("gives the Covered Call entries the round lots the budget has room for", () => {
     expect(ladderShareLots(10_000, 33)).toBe(3);
     expect(ladderShareLots(-5, 33)).toBe(0);
   });

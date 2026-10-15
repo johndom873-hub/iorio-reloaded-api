@@ -49,7 +49,7 @@ describe("createLadderLookBook", () => {
     expect(book.hasOpenCashSecuredPut()).toBe(false);
   });
 
-  it("a buy-write: 200 shares bought at $50 under 2 Calls at $1.05, applied at once and collected for the order step", () => {
+  it("a Covered Call entry: 200 shares bought at $50 under 2 Calls at $1.05, applied at once and collected for the order step", () => {
     const { book, planned } = createLadderLookBook(snapshot());
     book.sell("covered_call", candidate({}), 2, 7, "baseline: entry", null, false, { rank: 1 });
     // Cash: + 2 × 105 premium − 2 × 0.68 − 200 × 50 − 200 × 0.005 = −9,792.36.

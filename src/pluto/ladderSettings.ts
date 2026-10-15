@@ -17,7 +17,7 @@ import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlu
  * variant from a screen. The tunable values come from pluto_settings and pluto_ticker_settings.
  */
 export const ladderFixedBaselineChoices = {
-  entry: "buy_write",
+  entry: "covered_call",
   callStrike: "above_break_even",
   entryCallStrike: "any",
   entryWhenSharesUncovered: "buy",
