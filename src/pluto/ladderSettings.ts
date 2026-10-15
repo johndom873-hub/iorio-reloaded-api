@@ -66,8 +66,8 @@ export interface LadderTickerSettings {
   allocationPct: number | null;
   /**
    * The ticker's pot in dollars, while it is enabled in Pluto: allocation (effective) × Pluto's capital budget at last
-   * night's account value. Null when the ticker is not enabled or no account value is recorded. Becomes the pot's own
-   * ledger value once the pot ledger exists.
+   * night's account value. Null when the ticker is not enabled or no account value is recorded. Pots are percentages,
+   * recomputed from the account value, with no ledger of their own (Marcelo 2026-10-15).
    */
   potDollars: number | null;
   /** The user's shock; null = the recommended one (computed from the stock's Max drawdown by the backtest's rule). */
