@@ -29,6 +29,7 @@
     "sync-dev-db": "bash scripts/sync-dev-db.sh",
     "deploy:worker": "bash scripts/deploy-worker-to-vps.sh",
     "job:daily-market-data": "tsx scripts/run-daily-market-data-job.ts",
+    "job:option-session-volume": "tsx scripts/run-option-session-volume-capture-job.ts",
     "job:daily-screener-scan": "tsx scripts/run-daily-screener-scan-job.ts",
     "job:daily-calendar-capture": "tsx scripts/run-daily-calendar-capture-job.ts",
     "job:daily-pnl-snapshot": "tsx scripts/run-daily-pnl-snapshot-job.ts",

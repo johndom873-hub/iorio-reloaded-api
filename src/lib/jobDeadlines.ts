@@ -40,6 +40,8 @@ export const expectedScheduledJobs: ExpectedJob[] = [
   { jobName: "market_calendar_sync", zone: "utc", hour: 19, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: false },
   { jobName: "daily_screener_scan", zone: "utc", hour: 18, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 30, marketDaysOnly: true },
   { jobName: "daily_calendar_capture", zone: "utc", hour: 20, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: false },
+  // The first night quotes the whole universe (no IV known yet): up to ~35 minutes for 20 tickers.
+  { jobName: "option_session_volume_capture", zone: "utc", hour: 21, minute: 30, startByGraceMinutes: 10, maxRunMinutes: 60, marketDaysOnly: true },
   { jobName: "daily_market_data_capture", zone: "utc", hour: 22, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 60, marketDaysOnly: true },
   { jobName: "daily_pnl_snapshot", zone: "utc", hour: 22, minute: 30, startByGraceMinutes: 10, maxRunMinutes: 30, marketDaysOnly: true },
   { jobName: "expiry_settlement_audit", zone: "utc", hour: 23, minute: 0, startByGraceMinutes: 10, maxRunMinutes: 15, marketDaysOnly: false },
