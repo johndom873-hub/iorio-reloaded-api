@@ -14,7 +14,7 @@ import type { ClaudeSubscriptionCallInput, ClaudeSubscriptionCallResult } from "
 import { maskPlutoText, unmaskPlutoText, type PlutoPromptMasking } from "../llm/plutoPromptMasking.js";
 import { computeParityStockPrice, computeSaleFillPrice } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
-import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticMacroEventHistory, writeSyntheticSymbolFile } from "./testSupport/syntheticBacktestData.js";
+import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticMacroEventHistory, writeSyntheticSymbolFile } from "./testSupport/syntheticBacktestData.js";
 
 // Whole sessions with looks inside Pluto's window, in a private copy of the test tables: each on its own synthetic
 // symbols, whose files hold the quotes of every look named for a day (priced at a chosen stock price and implied
@@ -124,6 +124,7 @@ async function createLookSymbol(spec: LookSymbolSpec): Promise<Map<string, Symbo
     return { tradingDate, open, high: Math.max(open, close) * 1.004, low: Math.min(open, close) * 0.996, close, volume: 1_000_000, impliedVolatility: 0.5 };
   });
   await testDb("daily_price_bars").insert([...history, ...sessionBars].map((bar) => ({ ticker_id: ticker.id, trading_date: bar.tradingDate, open_price: bar.open, high_price: bar.high, low_price: bar.low, close_price: bar.close, volume: bar.volume, implied_volatility: bar.impliedVolatility })));
+  writeSyntheticIbkrBarsFromQuotes(path.join(dataDirectory, `${spec.symbol}.sqlite`), [...history, ...sessionBars], ratePercent);
   return quotesByDateAndLook;
 }
 

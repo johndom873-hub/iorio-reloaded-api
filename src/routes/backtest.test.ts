@@ -8,7 +8,19 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { kellyFraction } from "../pluto/postModelGates.js";
 import knexLibrary, { type Knex } from "knex";
-import type { BacktestActionsPage, BacktestCompareResponse, BacktestFillsPage, BacktestJobView, BacktestOverview, BacktestSessionDetail, BacktestSessionListItem, BacktestSettingsTemplate, CreateBacktestSessionResponse } from "../backtest/backtestTypes.js";
+import type {
+  BacktestActionsPage,
+  BacktestCompareResponse,
+  BacktestFillsPage,
+  BacktestJobDisplayStatus,
+  BacktestJobView,
+  BacktestOverview,
+  BacktestSessionDetail,
+  BacktestSessionListItem,
+  BacktestSessionsPage,
+  BacktestSettingsTemplate,
+  CreateBacktestSessionResponse,
+} from "../backtest/backtestTypes.js";
 
 // The real backtest router on a small express app against the test database, with a temporary data folder holding a
 // real symbol file. Only starting and stopping job processes is mocked.
@@ -33,6 +45,7 @@ const { db } = await import("../db/connection.js");
 const { backtestRouter } = await import("./backtest.js");
 const { errorHandler } = await import("../middleware/errorHandler.js");
 const { lastFinishedBacktestSessionDate } = await import("../backtest/jobs/backtestJobRules.js");
+const { requeuePausedDownload } = await import("../backtest/jobs/backtestJobStore.js");
 const { splitScheduleFingerprint, writeSplitScheduleCache } = await import("../backtest/engine/splitFactors.js");
 const { lookTimesInWindow } = await import("../backtest/engine/runBacktestSession.js");
 const testDb: Knex = db;
@@ -44,6 +57,7 @@ const partFileSymbol = `BT${runTag}P`;
 const downloadSymbolA = `BT${runTag}A`;
 const downloadSymbolB = `BT${runTag}B`;
 const downloadSymbolC = `BT${runTag}C`;
+const jobListingSymbol = `BT${runTag}L`;
 const sessionNamePrefix = `backtest-route-${runTag}`;
 let tickerId: string;
 
@@ -161,7 +175,7 @@ beforeEach(() => {
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await testDb("backtest_sessions").where("name", "like", `${sessionNamePrefix}%`).del();
-  await testDb("backtest_jobs").whereIn("symbol", [fileSymbol, downloadSymbolA, downloadSymbolB, downloadSymbolC]).del();
+  await testDb("backtest_jobs").whereIn("symbol", [fileSymbol, downloadSymbolA, downloadSymbolB, downloadSymbolC, jobListingSymbol]).del();
   await testDb("daily_price_bars").where({ ticker_id: tickerId }).del();
   await testDb("tickers").where({ id: tickerId }).del();
   await testDb.destroy();
@@ -182,8 +196,8 @@ describe("backtest routes", () => {
     expect(template.settings.pluto.minEdgeYieldPct).toBe(Number(plutoRow.min_edge_yield_pct));
     expect(template.settings.trading).not.toHaveProperty("commissionEstimator");
     expect(template.settings).toMatchObject({ decisionMaker: "rules", policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
-    expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(15).fill("Candidate quality"), ...Array(7).fill("Model"), ...Array(6).fill("Trading window and system checks"), ...Array(6).fill("Decisions (stand-in for the AI)"), ...Array(17).fill("Baseline wheel")]);
-    expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, callStrike: "delta_range", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield" });
+    expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(15).fill("Candidate quality"), ...Array(7).fill("Model"), ...Array(6).fill("Trading window and system checks"), ...Array(6).fill("Decisions (stand-in for the AI)"), ...Array(42).fill("Baseline wheel")]);
+    expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderMinutesBetweenRungs: 0, ladderMaxRungsPerSession: 0, ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, shareFill: "plus_one_cent", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" });
     expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["rules", "llm", "baseline"]);
     expect(template.rows[0]).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
     // The looks inside Pluto's window and the system checks replayed at each: the window is shown, the checks can be changed.
@@ -231,7 +245,30 @@ describe("backtest routes", () => {
       ["baseline.maxAbsDelta", 0.6, true],
       ["baseline.minDte", 1, true],
       ["baseline.maxDte", 45, true],
+      ["baseline.maxSpreadPctOfMid", 15, true],
       ["baseline.callStrike", "delta_range", true],
+      ["baseline.entryCallStrike", "any", true],
+      ["baseline.entryWhenSharesUncovered", "wait", true],
+      ["baseline.maxSharesPctOfAccount", 100, true],
+      ["baseline.minCallYieldPct", 0, true],
+      ["baseline.putsWhenNoCall", "off", true],
+      ["baseline.putBudgetPctPerDte", 1, true],
+      ["baseline.ladderSharesPct", 50, true],
+      ["baseline.ladderRungs", 5, true],
+      ["baseline.ladderShock", "history", true],
+      ["baseline.ladderShockPct", 70, true],
+      ["baseline.ladderShockMinPct", 60, true],
+      ["baseline.ladderShockMaxPct", 80, true],
+      ["baseline.ladderShockNoHistoryPct", 90, true],
+      ["baseline.ladderShockLookbackYears", 10, true],
+      ["baseline.ladderTop", "break_even", true],
+      ["baseline.ladderPace", "any_look", true],
+      ["baseline.ladderPutVersusCall", "call_first", true],
+      ["baseline.ladderPutYieldMarginPct", 0, true],
+      ["baseline.ladderMinutesBetweenRungs", 0, true],
+      ["baseline.ladderMaxRungsPerSession", 0, true],
+      ["baseline.shareFill", "plus_one_cent", true],
+      ["baseline.dayValueOptions", "marked", true],
       ["baseline.callDeltaRange", "entry_range", true],
       ["baseline.callMinAbsDelta", 0.05, true],
       ["baseline.callMaxAbsDelta", 0.6, true],
@@ -243,6 +280,8 @@ describe("backtest routes", () => {
       ["baseline.volatilityEdgeFilter", "off", true],
       ["baseline.minVolatilityEdgePoints", 0, true],
       ["baseline.ranking", "premium_yield", true],
+      ["baseline.expiryChoice", "any_in_range", true],
+      ["baseline.coverage", "best_contract", true],
     ]);
     expect(template.rows.find((row) => row.path === "policy.afterBlockedChoice")).toMatchObject({ label: "After a choice Pluto's checks refuse", choices: [{ value: "try_next", label: "Choose again, but no more opens where the account has no room" }, { value: "stop", label: "Stop for this look" }] });
     // The AI model can be picked once the Claude Code CLI is configured.
@@ -265,6 +304,15 @@ describe("backtest routes", () => {
   describe("downloads and jobs", () => {
     let firstJob: BacktestJobView;
     let secondJob: BacktestJobView;
+
+    /** Where each status sits in the Downloads list: the running download, the stopped ones, the queue, the finished ones. */
+    const downloadListGroupByDisplayStatus: Record<BacktestJobDisplayStatus, number> = { running: 0, stopped: 1, queued: 2, succeeded: 3, failed: 3, cancelled: 3 };
+    const isUnfinishedJob = (job: BacktestJobView) => job.status === "queued" || job.status === "running";
+    const countUnfinishedDownloads = async () => Number((await testDb("backtest_jobs").where({ kind: "download" }).whereIn("status", ["queued", "running"]).count("* as count").first())?.count);
+    async function insertListingDownload(fields: Record<string, unknown>): Promise<string> {
+      const [row] = await testDb("backtest_jobs").insert({ kind: "download", symbol: jobListingSymbol, ...fields }).returning("id");
+      return row.id as string;
+    }
 
     it("refuse an invalid symbol or start date", async () => {
       expect(await request("POST", "/backtest/downloads", { symbol: "1abc" })).toEqual({ status: 400, body: { error: 'Not a valid symbol: "1abc"' } });
@@ -345,6 +393,61 @@ describe("backtest routes", () => {
       await testDb("backtest_jobs").whereIn("id", [firstJob.id, secondJob.id]).update({ status: "cancelled", finished_at: testDb.fn.now() });
     });
 
+    it("put a new download first and pause the running one, which then waits right after it", async () => {
+      const [running] = await testDb("backtest_jobs")
+        .insert({ kind: "download", symbol: downloadSymbolA, start_date: "2024-01-02", end_date: "2024-01-05", status: "running", pid: 777, heartbeat_at: testDb.fn.now(), started_at: testDb.raw("now() - interval '10 minutes'"), progress_done: 3, progress_total: 9, earlier_run_seconds: 60 })
+        .returning("id");
+      const [queuedEarlier] = await testDb("backtest_jobs").insert({ kind: "download", symbol: downloadSymbolB, start_date: "2024-01-02", end_date: "2024-01-05", status: "queued", queued_at: testDb.raw("now() - interval '1 hour'") }).returning("id");
+
+      expect(await request("POST", "/backtest/downloads", { symbol: downloadSymbolC, pauseRunning: true })).toEqual({ status: 400, body: { error: "pauseRunning goes with putFirst: only a download put first can pause the running one." } });
+      expect((await request("POST", "/backtest/downloads", { symbol: downloadSymbolC, putFirst: "yes" })).status).toBe(400);
+
+      const created = await request("POST", "/backtest/downloads", { symbol: downloadSymbolC, putFirst: true, pauseRunning: true });
+      expect(created.status).toBe(201);
+      const putFirst = created.body as BacktestJobView;
+      // It waits for the running one to stop: the two never share ThetaData's single login.
+      expect(putFirst).toMatchObject({ displayStatus: "queued", putFirst: true });
+      expect(spawnBacktestJobProcessMock).not.toHaveBeenCalled();
+      expect(await testDb("backtest_jobs").where({ id: running.id }).first("cancel_requested", "pause_requested")).toEqual({ cancel_requested: true, pause_requested: true });
+      expect((await request("GET", "/backtest/overview")).body).toMatchObject({ jobs: expect.arrayContaining([expect.objectContaining({ id: running.id, pauseRequested: true })]) });
+
+      // Its process ends: back in the queue with what it saved, its run time added; not cancelled.
+      expect(await requeuePausedDownload(running.id as string, 777, { done: 4, total: 9, label: "saved up to 2024-01-03" })).toBe(true);
+      const paused = await testDb("backtest_jobs").where({ id: running.id }).first("status", "pid", "cancel_requested", "pause_requested", "progress_done", "earlier_run_seconds", "finished_at");
+      expect(paused).toMatchObject({ status: "queued", pid: null, cancel_requested: false, pause_requested: false, progress_done: 4, finished_at: null });
+      expect(paused.earlier_run_seconds).toBeGreaterThanOrEqual(660);
+
+      // The queue: the job put first, then the paused one, then the one queued before both.
+      await request("GET", "/backtest/overview");
+      expect(spawnBacktestJobProcessMock).toHaveBeenCalledWith(putFirst.id);
+      spawnBacktestJobProcessMock.mockClear();
+      await testDb("backtest_jobs").where({ id: putFirst.id }).update({ status: "succeeded", finished_at: testDb.fn.now() });
+      await request("GET", "/backtest/overview");
+      expect(spawnBacktestJobProcessMock).toHaveBeenCalledWith(running.id);
+      expect(spawnBacktestJobProcessMock).not.toHaveBeenCalledWith(queuedEarlier.id);
+      await testDb("backtest_jobs").whereIn("id", [running.id, queuedEarlier.id, putFirst.id]).delete();
+    });
+
+    it("move a queued download to the top without pausing, refuse one that is not queued, and leave a plain cancel cancelled", async () => {
+      const [running] = await testDb("backtest_jobs").insert({ kind: "download", symbol: downloadSymbolA, start_date: "2024-01-02", end_date: "2024-01-05", status: "running", pid: 778, heartbeat_at: testDb.fn.now(), started_at: testDb.fn.now() }).returning("id");
+      const [first] = await testDb("backtest_jobs").insert({ kind: "download", symbol: downloadSymbolB, start_date: "2024-01-02", end_date: "2024-01-05", status: "queued", queued_at: testDb.raw("now() - interval '2 hours'") }).returning("id");
+      const [second] = await testDb("backtest_jobs").insert({ kind: "download", symbol: downloadSymbolC, start_date: "2024-01-02", end_date: "2024-01-05", status: "queued", queued_at: testDb.raw("now() - interval '1 hour'") }).returning("id");
+
+      const moved = await request("POST", `/backtest/jobs/${second.id}/put-first`, {});
+      expect(moved.body).toMatchObject({ id: second.id, displayStatus: "queued", putFirst: true });
+      expect(await testDb("backtest_jobs").where({ id: running.id }).first("cancel_requested", "pause_requested")).toEqual({ cancel_requested: false, pause_requested: false });
+      const queueOrder = ((await request("GET", "/backtest/overview")).body as BacktestOverview).jobs.filter((job) => job.displayStatus === "queued" && [first.id, second.id].includes(job.id)).map((job) => job.id);
+      expect(queueOrder).toEqual([second.id, first.id]);
+      expect((await request("POST", `/backtest/jobs/${running.id}/put-first`, {})).status).toBe(409);
+      expect((await request("POST", `/backtest/jobs/${second.id}/put-first`, { pauseRunning: 1 })).status).toBe(400);
+
+      // A cancel while pausing ends the job cancelled.
+      await request("POST", `/backtest/jobs/${second.id}/put-first`, { pauseRunning: true });
+      await request("POST", `/backtest/jobs/${running.id}/cancel`);
+      expect(await requeuePausedDownload(running.id as string, 778, { done: 0, total: 0, label: null })).toBe(false);
+      await testDb("backtest_jobs").whereIn("id", [running.id, first.id, second.id]).delete();
+    });
+
     it("mark a job failed when its process cannot be started", async () => {
       spawnBacktestJobProcessMock.mockImplementation(() => {
         throw new Error("spawn node ENOENT");
@@ -354,6 +457,105 @@ describe("backtest routes", () => {
       expect(body).toMatchObject({ status: "failed", error: "The job process could not be started: spawn node ENOENT" });
       await testDb("backtest_jobs").where({ id: secondJob.id }).update({ status: "cancelled" });
     });
+
+    it("list the downloads as the queue runs them (running, stopped, the queue in the order it starts them, then the last to end of the finished ones up to 50) and the 50 latest backtests", async () => {
+      const secondsAgo = (seconds: number) => testDb.raw("now() - (?::int * interval '1 second')", [seconds]);
+      const instantSecondsAgo = (seconds: number) => new Date(Date.now() - seconds * 1000);
+      const daySeconds = 86_400;
+      // The running download (its heartbeat fresh, so the overview starts nothing) and two that stopped.
+      const running = await insertListingDownload({ status: "running", queued_at: secondsAgo(900), started_at: secondsAgo(900), heartbeat_at: secondsAgo(2) });
+      const stoppedLongAgo = await insertListingDownload({ status: "running", queued_at: secondsAgo(30 * daySeconds), started_at: secondsAgo(30 * daySeconds), heartbeat_at: secondsAgo(30 * daySeconds) });
+      const stoppedRecently = await insertListingDownload({ status: "running", queued_at: secondsAgo(3_600), started_at: secondsAgo(3_600), heartbeat_at: secondsAgo(300) });
+      // The queue goes by when each entered it (a resume enters it again), then by creation, then by id.
+      const sharedEntry = instantSecondsAgo(20);
+      const sharedEntryAndCreation = instantSecondsAgo(10);
+      const resumedLast = await insertListingDownload({ status: "queued", created_at: instantSecondsAgo(3 * daySeconds), queued_at: instantSecondsAgo(5) });
+      const twins = [
+        await insertListingDownload({ status: "queued", created_at: sharedEntryAndCreation, queued_at: sharedEntryAndCreation }),
+        await insertListingDownload({ status: "queued", created_at: sharedEntryAndCreation, queued_at: sharedEntryAndCreation }),
+      ];
+      const sameEntryCreatedLater = await insertListingDownload({ status: "queued", created_at: instantSecondsAgo(3_600), queued_at: sharedEntry });
+      const queuedSecond = await insertListingDownload({ status: "queued", created_at: instantSecondsAgo(30), queued_at: instantSecondsAgo(30) });
+      const sameEntryCreatedEarlier = await insertListingDownload({ status: "queued", created_at: instantSecondsAgo(7_200), queued_at: sharedEntry });
+      const queuedFirst = await insertListingDownload({ status: "queued", created_at: instantSecondsAgo(40), queued_at: instantSecondsAgo(40) });
+      // 53 finished downloads that ended 10–530 s ago, and a failed one without finished_at whose last heartbeat was 25 s ago.
+      const finishedStatuses = ["succeeded", "failed", "cancelled"];
+      await testDb("backtest_jobs").insert(
+        Array.from({ length: 53 }, (_, index) => ({ kind: "download", symbol: jobListingSymbol, status: finishedStatuses[index % 3], queued_at: secondsAgo(900), started_at: secondsAgo(900), finished_at: secondsAgo((index + 1) * 10) })),
+      );
+      const finishedByEnd = (await testDb("backtest_jobs").where({ symbol: jobListingSymbol }).whereNotNull("finished_at").orderBy("finished_at", "desc").select("id")).map((row) => row.id as string);
+      const failedWithoutFinish = await insertListingDownload({ status: "failed", queued_at: secondsAgo(900), started_at: secondsAgo(900), heartbeat_at: secondsAgo(25) });
+      const finishedInEndOrder = [...finishedByEnd.slice(0, 2), failedWithoutFinish, ...finishedByEnd.slice(2)];
+      // A backtest that finished 8 days ago.
+      const [oldBacktest] = await testDb("backtest_jobs").insert({ kind: "backtest", symbol: jobListingSymbol, status: "failed", queued_at: secondsAgo(8 * daySeconds + 600), finished_at: secondsAgo(8 * daySeconds) }).returning("id");
+
+      const overview = (await request("GET", "/backtest/overview")).body as BacktestOverview;
+      expect(spawnBacktestJobProcessMock).not.toHaveBeenCalled();
+      const listedDownloads = overview.jobs.filter((job) => job.kind === "download");
+      const listedIds = listedDownloads.map((job) => job.id);
+
+      const unfinishedInListOrder = [running, stoppedRecently, stoppedLongAgo, queuedFirst, queuedSecond, sameEntryCreatedEarlier, sameEntryCreatedLater, ...[...twins].sort(), resumedLast];
+      expect(listedIds.filter((id) => unfinishedInListOrder.includes(id))).toEqual(unfinishedInListOrder);
+      expect(unfinishedInListOrder.map((id) => listedDownloads.find((job) => job.id === id)?.displayStatus)).toEqual(["running", "stopped", "stopped", ...Array<string>(7).fill("queued")]);
+      // Whatever else the shared database holds: the groups in that order, and every unfinished download listed.
+      const listGroups = listedDownloads.map((job) => downloadListGroupByDisplayStatus[job.displayStatus]);
+      expect(listGroups).toEqual([...listGroups].sort((a, b) => a - b));
+      const unfinishedDownloadCount = await countUnfinishedDownloads();
+      expect(listedDownloads.filter(isUnfinishedJob)).toHaveLength(unfinishedDownloadCount);
+      // The finished ones fill the list up to 50, the last to end first: whichever of these made it are the last of them to
+      // end (the one without finished_at among them), and none listed ended before the latest one left out.
+      expect(listedDownloads).toHaveLength(Math.max(50, unfinishedDownloadCount));
+      const listedFinishedOfThese = listedIds.filter((id) => finishedInEndOrder.includes(id));
+      expect(listedFinishedOfThese.length).toBeGreaterThan(3);
+      expect(listedFinishedOfThese.length).toBeLessThan(finishedInEndOrder.length);
+      expect(listedFinishedOfThese).toEqual(finishedInEndOrder.slice(0, listedFinishedOfThese.length));
+      const endedAt = (job: BacktestJobView) => new Date(job.finishedAt ?? job.heartbeatAt ?? job.createdAt).getTime();
+      const listedEndTimes = listedDownloads.filter((job) => !isUnfinishedJob(job)).map(endedAt);
+      expect(listedEndTimes).toEqual([...listedEndTimes].sort((a, b) => b - a));
+      const latestLeftOut = await testDb("backtest_jobs").where({ id: finishedInEndOrder[listedFinishedOfThese.length] }).first("finished_at");
+      expect(listedEndTimes.every((time) => time >= new Date(latestLeftOut.finished_at).getTime())).toBe(true);
+      // The backtests are listed as before: each kind has its own 50, however old; the backtest stays while there are no more than 50.
+      const backtestJobCount = Number((await testDb("backtest_jobs").where({ kind: "backtest" }).count("* as count").first())?.count);
+      expect(overview.jobs.filter((job) => job.kind === "backtest")).toHaveLength(Math.min(50, backtestJobCount));
+      if (backtestJobCount <= 50) expect(overview.jobs.map((job) => job.id)).toContain(oldBacktest.id);
+
+      // Each time the running download ends, the queue starts the next one listed.
+      const queuedInListOrder = listedDownloads.filter((job) => job.displayStatus === "queued").map((job) => job.id);
+      let runningId = running;
+      for (const expectedNext of queuedInListOrder) {
+        await testDb("backtest_jobs").where({ id: runningId }).update({ status: "succeeded", finished_at: testDb.fn.now() });
+        const downloadsAfter = ((await request("GET", "/backtest/overview")).body as BacktestOverview).jobs.filter((job) => job.kind === "download");
+        expect(downloadsAfter[0]).toMatchObject({ id: expectedNext, displayStatus: "running" });
+        runningId = expectedNext;
+      }
+      expect(spawnBacktestJobProcessMock.mock.calls.map(([jobId]) => jobId)).toEqual(queuedInListOrder);
+
+      await testDb("backtest_jobs").where({ symbol: jobListingSymbol }).del();
+    });
+
+    it("list every unfinished download however many, and no finished one once they reach 50", async () => {
+      const secondsAgo = (seconds: number) => testDb.raw("now() - (?::int * interval '1 second')", [seconds]);
+      const running = await insertListingDownload({ status: "running", queued_at: secondsAgo(900), started_at: secondsAgo(900), heartbeat_at: secondsAgo(2) });
+      const stopped = await insertListingDownload({ status: "running", queued_at: secondsAgo(3_600), started_at: secondsAgo(3_600), heartbeat_at: secondsAgo(300) });
+      // 52 queued: with the running and the stopped one, 54 unfinished downloads.
+      const queuedRows: { id: string; queued_at: Date }[] = await testDb("backtest_jobs")
+        .insert(Array.from({ length: 52 }, (_, index) => ({ kind: "download", symbol: jobListingSymbol, status: "queued", queued_at: secondsAgo(600 - index) })))
+        .returning(["id", "queued_at"]);
+      const queuedInQueueOrder = [...queuedRows].sort((a, b) => new Date(a.queued_at).getTime() - new Date(b.queued_at).getTime()).map((row) => row.id);
+      const finished = await insertListingDownload({ status: "succeeded", queued_at: secondsAgo(60), started_at: secondsAgo(60), finished_at: secondsAgo(1) });
+
+      const listedDownloads = ((await request("GET", "/backtest/overview")).body as BacktestOverview).jobs.filter((job) => job.kind === "download");
+      expect(spawnBacktestJobProcessMock).not.toHaveBeenCalled();
+      const unfinishedDownloadCount = await countUnfinishedDownloads();
+      expect(unfinishedDownloadCount).toBeGreaterThanOrEqual(54);
+      expect(listedDownloads).toHaveLength(unfinishedDownloadCount);
+      expect(listedDownloads.every(isUnfinishedJob)).toBe(true);
+      const theseInListOrder = [running, stopped, ...queuedInQueueOrder];
+      expect(listedDownloads.map((job) => job.id).filter((id) => theseInListOrder.includes(id))).toEqual(theseInListOrder);
+      expect(listedDownloads.map((job) => job.id)).not.toContain(finished);
+
+      await testDb("backtest_jobs").where({ symbol: jobListingSymbol }).del();
+    });
   });
 
   describe("sessions", () => {
@@ -362,6 +564,8 @@ describe("backtest routes", () => {
     let secondSession: BacktestSessionListItem;
 
     const sessionRequest = (name: string, overrides: unknown = {}) => ({ name: `${sessionNamePrefix} ${name}`, symbol: fileSymbol, startDate: "2026-09-01", endDate: "2026-09-11", startingValue: 1_000_000, tablesMode: "walk_forward", overrides });
+    /** This run's sessions in the Sessions list (the shared test database holds others), with more of the query after it. */
+    const listSessions = async (query = "") => (await request("GET", `/backtest/sessions?search=${encodeURIComponent(sessionNamePrefix)}${query}`)).body as BacktestSessionsPage;
 
     it("summarize the symbol file in the overview", async () => {
       const { body } = await request("GET", "/backtest/overview");
@@ -646,7 +850,7 @@ describe("backtest routes", () => {
           ["wheel_cycle", { cycleCount: 1, closedCycleCount: 0, openCycleCount: 1, totalPnlDollars: -100.68, openCyclePnlDollars: -100.68 }],
           [secondSession.pnlBasis, null],
         ]);
-        const listed = ((await request("GET", "/backtest/overview")).body as BacktestOverview).sessions.find((entry) => entry.id === session.id)!;
+        const listed = (await listSessions()).sessions.find((entry) => entry.id === session.id)!;
         expect(listed).toMatchObject({ pnlBasis: "wheel_cycle", wheelCycles: { openCycleCount: 1, totalPnlDollars: -100.68 } });
       } finally {
         await testDb("backtest_sessions").where({ id: session.id }).update({ pnl_basis: pnlBasisBefore, status: statusBefore });
@@ -655,9 +859,39 @@ describe("backtest routes", () => {
       expect((await request("GET", "/backtest/compare?ids=00000000-0000-4000-8000-000000000000")).status).toBe(404);
     });
 
-    it("list sessions newest first", async () => {
-      const sessions = ((await request("GET", "/backtest/overview")).body as BacktestOverview).sessions.filter((entry) => entry.name.startsWith(sessionNamePrefix));
-      expect(sessions.map((entry) => entry.id)).toEqual([secondSession.id, session.id]);
+    it("list sessions page by page, newest first, filtered by name, symbol and status, each with its latest job's run", async () => {
+      const everything = await listSessions();
+      expect(everything).toMatchObject({ total: 2, limit: 50, offset: 0 });
+      expect(everything.sessions.map((entry) => entry.id)).toEqual([secondSession.id, session.id]);
+      expect(everything.symbols).toContain(fileSymbol);
+      expect(await listSessions("&limit=1&offset=1")).toMatchObject({ sessions: [expect.objectContaining({ id: session.id })], total: 2, limit: 1, offset: 1 });
+
+      // The name: any part, ignoring case; % and _ are not wildcards.
+      const idsFor = async (query: string) => ((await request("GET", `/backtest/sessions?${query}`)).body as BacktestSessionsPage).sessions.map((entry) => entry.id);
+      expect(await idsFor(`search=${encodeURIComponent(`${sessionNamePrefix} PLAIN`.toUpperCase())}`)).toEqual([secondSession.id]);
+      expect(await idsFor(`search=${encodeURIComponent(`${sessionNamePrefix}%`)}`)).toEqual([]);
+      expect(await idsFor(`search=${encodeURIComponent(sessionNamePrefix.replace("-", "_"))}`)).toEqual([]);
+      // The symbol (any case) and the status: both sessions are still queued, which "running" matches.
+      expect((await listSessions(`&symbol=${fileSymbol.toLowerCase()}`)).total).toBe(2);
+      expect((await listSessions(`&symbol=${secondFileSymbol}`)).total).toBe(0);
+      expect((await listSessions("&status=running")).total).toBe(2);
+      expect((await listSessions("&status=succeeded")).total).toBe(0);
+
+      // Each session carries its latest job's run, a stale heartbeat showing as stopped: the overview lists only the latest jobs.
+      await testDb("backtest_jobs").where({ id: sessionJob.id }).update({ heartbeat_at: testDb.raw("now() - interval '2 minutes'") });
+      try {
+        const listed = (await listSessions()).sessions.find((entry) => entry.id === session.id)!;
+        expect(listed.latestRun).toMatchObject({ status: "running", displayStatus: "stopped" });
+      } finally {
+        await testDb("backtest_jobs").where({ id: sessionJob.id }).update({ heartbeat_at: testDb.fn.now() });
+      }
+
+      expect(await request("GET", "/backtest/sessions?status=maybe")).toEqual({ status: 400, body: { error: "status must be succeeded, running, failed or cancelled." } });
+      expect(await request("GET", "/backtest/sessions?symbol=1abc")).toEqual({ status: 400, body: { error: 'Not a valid symbol: "1abc"' } });
+      expect(await request("GET", "/backtest/sessions?limit=201")).toEqual({ status: 400, body: { error: "limit must be a whole number from 1 to 200." } });
+      expect(await request("GET", "/backtest/sessions?offset=-1")).toEqual({ status: 400, body: { error: "offset must be a whole number from 0." } });
+      // The overview no longer carries the sessions.
+      expect((await request("GET", "/backtest/overview")).body).not.toHaveProperty("sessions");
     });
 
     it("take a list of symbols for one book, inside the period all their files cover", async () => {
@@ -677,8 +911,11 @@ describe("backtest routes", () => {
       const row = await testDb("backtest_sessions").where({ id: created.session.id }).first("symbol", "symbols");
       expect(row).toEqual({ symbol: symbolsLabel, symbols: [fileSymbol, secondFileSymbol] });
       // The list, the detail and the comparison show the symbols; buy and hold is one curve for the list.
-      const listed = ((await request("GET", "/backtest/overview")).body as BacktestOverview).sessions.find((entry) => entry.id === created.session.id)!;
+      const listed = (await listSessions()).sessions.find((entry) => entry.id === created.session.id)!;
       expect(listed.symbols).toEqual([fileSymbol, secondFileSymbol]);
+      // The Symbol filter matches any of a session's symbols.
+      expect((await listSessions(`&symbol=${secondFileSymbol}`)).sessions.map((entry) => entry.id)).toEqual([created.session.id]);
+      expect((await listSessions()).symbols).toEqual(expect.arrayContaining([fileSymbol, secondFileSymbol]));
       const detail = (await request("GET", `/backtest/sessions/${created.session.id}`)).body as BacktestSessionDetail;
       expect(detail.session).toMatchObject({ symbol: symbolsLabel, symbols: [fileSymbol, secondFileSymbol] });
       // Splits are listed per symbol (the cached schedule written above is the first symbol's).

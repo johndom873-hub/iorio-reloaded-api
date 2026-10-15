@@ -6,7 +6,7 @@ import knexLibrary, { type Knex } from "knex";
 import { environment } from "../../config/env.js";
 import { runBacktestSession, type BacktestRunHooks } from "./runBacktestSession.js";
 import { readSplitScheduleCache } from "./splitFactors.js";
-import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticSymbolFile, writeSyntheticMacroEventHistory } from "./testSupport/syntheticBacktestData.js";
+import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile, writeSyntheticMacroEventHistory } from "./testSupport/syntheticBacktestData.js";
 
 if (!environment.testDatabaseUrl) {
   throw new Error("TEST_DATABASE_URL must be set to run the backtest engine tests.");
@@ -54,6 +54,7 @@ beforeAll(async () => {
     return { tradingDate, open, high: Math.max(open, close) * 1.004, low: Math.min(open, close) * 0.996, close, volume: 1_000_000, impliedVolatility: 0.5 };
   });
   await db("daily_price_bars").insert([...history, ...sessionBars].map((bar) => ({ ticker_id: tickerId, trading_date: bar.tradingDate, open_price: bar.open, high_price: bar.high, low_price: bar.low, close_price: bar.close, volume: bar.volume, implied_volatility: bar.impliedVolatility })));
+  writeSyntheticIbkrBarsFromQuotes(path.join(dataDirectory, `${symbol}.sqlite`), [...history, ...sessionBars], 4, splitFactorOf);
   const [session] = await db("backtest_sessions")
     .insert({ name: "engine split test", symbol, start_date: sessionDates[0], end_date: sessionDates.at(-1), starting_value: 1_000_000, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings({ maxTickerExposurePct: 30 })), overrides: JSON.stringify({ policy: { roll: "never" } }) })
     .returning("id");

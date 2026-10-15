@@ -6,7 +6,7 @@ Local-only (Marcelo's Mac). Decisions: `project_backtesting_design_decisions_202
 
 `BACKTEST_DATA_DIR` in `.env` (relative paths resolve from the API repo root; the default checkout uses `backtest-data`, gitignored). Unset = the backtest routes are not mounted (staging, prod). Contents:
 
-- `<SYMBOL>.sqlite` — one file per symbol, written only by the downloader.
+- `<SYMBOL>.sqlite` — one file per symbol: the option data, written only by the downloader, and IBKR's stock bars ("IBKR stock bars" below), written only by Node.
 - `fred-DTB3.json` — the 3-month T-bill series cache (risk-free rate and interest on cash), written by the engine.
 - `tables/<YEAR>.json` — walk-forward model tables built from history before 1 January of YEAR, written by the engine.
 
@@ -125,6 +125,32 @@ A fault in ThetaData's data for one day (for example `INTERNAL: Corrupt FIT data
 
 A permission or authentication refusal is not a day's fault: it ends the run at once.
 
+### IBKR stock bars
+
+Every stock price the engine uses comes from IBKR's bars kept in the file, never from the option quotes (the quotes only tell where splits fall, `engine/splitFactors.ts`). Node writes them (`src/backtest/refreshFileStockBars.ts`); the downloader never touches these tables.
+
+```sql
+-- IBKR daily TRADES bars for the last 20 years, with the daily OPTION_IMPLIED_VOLATILITY (NULL where IBKR has none).
+CREATE TABLE ibkr_daily_bars (
+  trading_date TEXT PRIMARY KEY, open REAL, high REAL, low REAL, close REAL, volume REAL, implied_volatility REAL
+) WITHOUT ROWID;
+
+-- IBKR 30-minute TRADES bars (regular hours) from 1 January of the year of the file's first option day.
+CREATE TABLE ibkr_intraday_bars (
+  trading_date TEXT NOT NULL,             -- YYYY-MM-DD (Eastern)
+  start_minutes_et INTEGER NOT NULL,      -- the bar's start, minutes after midnight ET (570 = 09:30)
+  bar_start TEXT NOT NULL,                -- ISO UTC
+  open REAL, high REAL, low REAL, close REAL, volume REAL,
+  PRIMARY KEY (trading_date, start_minutes_et)
+) WITHOUT ROWID;
+-- meta keys: ibkr_bars_version ('1'), ibkr_bars_fetched_at (ISO UTC)
+```
+
+- Requests, one at a time through the Gateway the local API uses, 10 s apart: daily bars `20 Y`, implied volatility `20 Y`, then 30-minute bars `1 Y` per calendar year, each ending 06:00 UTC on 1 January of the next year (the running year: now). Bars after the last finished session are not stored. IBKR returns what it holds for the stock's current listing, up to the 20 years asked for: INTC from 2006-10, MU from 2009-12, TLT only from 2016-02 (checked 2026-10-14).
+- Each refresh replaces every bar in one transaction: IBKR adjusts its whole history for splits as of the fetch, so a file never holds two adjustments. With no daily or no 30-minute bars returned nothing is written; a failed implied-volatility request is logged and the bars are written without it.
+- Written when a download job's downloader worked through its range (so **Update** on a row of Data files refreshes them), and by `npm run backtest:backfill-file-stock-bars [-- SYMBOL ...]` for files downloaded before they existed (it skips a symbol whose download is running; a queued download refreshes them again when it ends).
+- The stock's price at a look is the close of the last 30-minute bar ending by then (10:00 reads the 09:30 bar), × the day's split factor to put it on the traded scale. A day's close is its daily bar's, else its last 30-minute bar's. A session stops when either set ends before its last day.
+
 ## Downloader process protocol
 
 `scripts/backtest/download_thetadata_symbol.py --symbol AAOI --start 2020-01-01 --end 2026-10-09 --data-dir /abs/path [--intraday-strike-window-pct 40]`, run with `.venv-backtest/bin/python`. Reads `THETADATA_API_KEY` from the API repo's `.env`. At most 2 requests in flight (the plan's limit). Prints one JSON object per line on stdout, nothing else on stdout (logs go to stderr):
@@ -148,7 +174,7 @@ The API creates the row and spawns `scripts/run-backtest-job.ts <jobId>` detache
 
 A `running` job whose heartbeat is older than 60 s is shown as **stopped** (derived, not stored); Resume re-spawns the same job id. Downloads run one at a time (ThetaData allows 2 requests in flight and one download uses both): a new download is `queued` while another runs, and the next queued one starts when a download finishes, is cancelled, or is found stopped when the screen loads. Backtest runs can run alongside each other.
 
-A download job runs, in order: the IBKR daily-bar top-up for the symbol (back to 2016-01-01, local DB), then the ThetaData downloader. A download whose range was worked through ends `succeeded` even when some days could not be stored in full; its final label says so, e.g. `saved up to 2026-10-09 · 2 days unavailable · 1 day with gaps` (`nothing new to save` when the run stored no new day).
+A download job runs, in order: the IBKR daily-bar top-up for the symbol (back to 2016-01-01, local DB), the ThetaData downloader, then, when the downloader worked through its range, the file's IBKR stock bars and its split schedule. A failed IBKR step fails the job (`Option data downloaded. The IBKR stock bars for the file failed (…). Resume retries.`). A download whose range was worked through ends `succeeded` even when some days could not be stored in full; its final label says so, e.g. `saved up to 2026-10-09 · 2 days unavailable · 1 day with gaps` (`nothing new to save` when the run stored no new day).
 
 ## History in the local DB
 

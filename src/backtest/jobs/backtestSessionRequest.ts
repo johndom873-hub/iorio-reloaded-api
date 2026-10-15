@@ -1,7 +1,21 @@
 import { validatePlutoSettingsInput, type PlutoSettingsInput } from "../../pluto/settingsStore.js";
 import { validateTradingSettingsInput } from "../../lib/tradingSettingsStore.js";
 import { normalizeBacktestSymbol } from "../backtestDataDirectory.js";
-import { backtestBookPageDefaultLimit, backtestBookPageMaxLimit, backtestMaxSymbolsPerSession, defaultBacktestBaselineSettings, defaultBacktestPolicySettings, type BacktestBaselineSettings, type BacktestPolicySettings, type BacktestSettings, type BacktestSettingsOverrides, type BacktestTablesMode } from "../backtestTypes.js";
+import {
+  backtestBookPageDefaultLimit,
+  backtestBookPageMaxLimit,
+  backtestMaxSymbolsPerSession,
+  backtestSessionsPageDefaultLimit,
+  backtestSessionsPageMaxLimit,
+  defaultBacktestBaselineSettings,
+  defaultBacktestPolicySettings,
+  type BacktestBaselineSettings,
+  type BacktestPolicySettings,
+  type BacktestSessionStatusFilter,
+  type BacktestSettings,
+  type BacktestSettingsOverrides,
+  type BacktestTablesMode,
+} from "../backtestTypes.js";
 import { backtestClaudeCliPathMissingMessage } from "../backtestClaudeCli.js";
 import { isIsoCalendarDate } from "./backtestJobRules.js";
 
@@ -146,10 +160,23 @@ export function validateBaselineSettings(values: Record<string, unknown>): strin
   }
   for (const field of ["minDte", "maxDte"] as const) {
     const value = values[field];
-    if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 45) return `baseline.${field} must be a whole number of days from 1 to 45 (the data files hold up to 45).`;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 45) return `baseline.${field} must be a whole number of days from 0 to 45 (the data files hold up to 45; 0 = expiring on the look's day).`;
   }
-  if (values.callStrike !== "delta_range" && values.callStrike !== "above_share_cost" && values.callStrike !== "above_break_even" && values.callStrike !== "none") return "baseline.callStrike must be delta_range, above_share_cost, above_break_even or none.";
-  if (values.callStrike === "none" && values.entry === "buy_write") return "baseline.callStrike none cannot go with a buy-write entry, which sells a call on its shares.";
+  if (typeof values.maxSpreadPctOfMid !== "number" || !Number.isFinite(values.maxSpreadPctOfMid) || values.maxSpreadPctOfMid <= 0 || values.maxSpreadPctOfMid > 200) return "baseline.maxSpreadPctOfMid must be a number above 0 and at most 200.";
+  if (values.callStrike !== "delta_range" && values.callStrike !== "above_share_cost" && values.callStrike !== "above_break_even" && values.callStrike !== "above_latest_entry" && values.callStrike !== "above_average_cost" && values.callStrike !== "above_average_cost_else_break_even" && values.callStrike !== "none") return "baseline.callStrike must be delta_range, above_share_cost, above_break_even, above_latest_entry, above_average_cost, above_average_cost_else_break_even or none.";
+  if (values.callStrike === "none" && values.entry === "buy_write") return "baseline.callStrike none cannot go with a Covered Call entry, which sells a call on its shares.";
+  if (values.entryCallStrike !== "any" && values.entryCallStrike !== "above_purchase_price" && values.entryCallStrike !== "above_average_after_purchase") return "baseline.entryCallStrike must be any, above_purchase_price or above_average_after_purchase.";
+  if (values.entryWhenSharesUncovered !== "wait" && values.entryWhenSharesUncovered !== "buy") return "baseline.entryWhenSharesUncovered must be wait or buy.";
+  if (typeof values.maxSharesPctOfAccount !== "number" || !Number.isFinite(values.maxSharesPctOfAccount) || values.maxSharesPctOfAccount <= 0 || values.maxSharesPctOfAccount > 100) return "baseline.maxSharesPctOfAccount must be a number above 0 and at most 100.";
+  if (values.maxSharesPctOfAccount < 100 && values.entry !== "buy_write") return "baseline.maxSharesPctOfAccount needs a Covered Call entry: it caps the new Covered Calls' shares.";
+  if (typeof values.minCallYieldPct !== "number" || !Number.isFinite(values.minCallYieldPct) || values.minCallYieldPct < 0 || values.minCallYieldPct > 1000) return "baseline.minCallYieldPct must be a number from 0 (any) to 1000.";
+  if (values.putsWhenNoCall !== "off" && values.putsWhenNoCall !== "dte_budget" && values.putsWhenNoCall !== "reserve_ladder") return "baseline.putsWhenNoCall must be off, dte_budget or reserve_ladder.";
+  if (values.putsWhenNoCall !== "off" && values.entry !== "buy_write") return "baseline.putsWhenNoCall needs a Covered Call entry: its puts stand in for the calls.";
+  const ladderError = values.putsWhenNoCall === "reserve_ladder" ? validateLadderSettings(values) : null;
+  if (ladderError) return ladderError;
+  if (typeof values.putBudgetPctPerDte !== "number" || !Number.isFinite(values.putBudgetPctPerDte) || values.putBudgetPctPerDte <= 0 || values.putBudgetPctPerDte > 100) return "baseline.putBudgetPctPerDte must be a number above 0 and at most 100.";
+  if (values.shareFill !== "plus_one_cent" && values.shareFill !== "ten_oclock_price") return "baseline.shareFill must be plus_one_cent or ten_oclock_price.";
+  if (values.dayValueOptions !== "marked" && values.dayValueOptions !== "excluded") return "baseline.dayValueOptions must be marked or excluded.";
   if (values.callDeltaRange !== "entry_range" && values.callDeltaRange !== "own_range") return "baseline.callDeltaRange must be entry_range or own_range.";
   if (typeof values.takeProfitPct !== "number" || !Number.isFinite(values.takeProfitPct) || values.takeProfitPct < 0 || values.takeProfitPct >= 100) return "baseline.takeProfitPct must be a number from 0 (off) to below 100.";
   if (typeof values.shareStopLossPct !== "number" || !Number.isFinite(values.shareStopLossPct) || values.shareStopLossPct < 0 || values.shareStopLossPct >= 100) return "baseline.shareStopLossPct must be a number from 0 (off) to below 100.";
@@ -158,10 +185,31 @@ export function validateBaselineSettings(values: Record<string, unknown>): strin
   if (values.looks !== "every_look" && values.looks !== "first_look") return "baseline.looks must be every_look or first_look.";
   if (values.volatilityEdgeFilter !== "off" && values.volatilityEdgeFilter !== "entries" && values.volatilityEdgeFilter !== "all_sales") return "baseline.volatilityEdgeFilter must be off, entries or all_sales.";
   if (typeof values.minVolatilityEdgePoints !== "number" || !Number.isFinite(values.minVolatilityEdgePoints) || Math.abs(values.minVolatilityEdgePoints) > 100) return "baseline.minVolatilityEdgePoints must be a number of volatility points from −100 to 100.";
-  if (values.ranking !== "premium_yield" && values.ranking !== "edge_yield") return "baseline.ranking must be premium_yield or edge_yield.";
+  if (values.ranking !== "premium_yield" && values.ranking !== "edge_yield" && values.ranking !== "time_value" && values.ranking !== "premium_dollars" && values.ranking !== "premium_per_day") return "baseline.ranking must be premium_yield, edge_yield, time_value, premium_dollars or premium_per_day.";
+  if (values.expiryChoice !== "any_in_range" && values.expiryChoice !== "nearest_qualifying") return "baseline.expiryChoice must be any_in_range or nearest_qualifying.";
+  if (values.coverage !== "best_contract" && values.coverage !== "fill_down_ranking") return "baseline.coverage must be best_contract or fill_down_ranking.";
   if ((values.minAbsDelta as number) > (values.maxAbsDelta as number)) return "baseline.minAbsDelta must not be above baseline.maxAbsDelta.";
   if ((values.callMinAbsDelta as number) > (values.callMaxAbsDelta as number)) return "baseline.callMinAbsDelta must not be above baseline.callMaxAbsDelta.";
   if ((values.minDte as number) > (values.maxDte as number)) return "baseline.minDte must not be above baseline.maxDte.";
+  return null;
+}
+
+/** The put ladder's values (putsWhenNoCall "reserve_ladder"): null when they are valid. */
+function validateLadderSettings(values: Record<string, unknown>): string | null {
+  const isNumberIn = (value: unknown, min: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+  const isWholeNumberIn = (value: unknown, min: number, max: number) => isNumberIn(value, min, max) && Number.isInteger(value);
+  if (!isNumberIn(values.ladderSharesPct, 1, 99)) return "baseline.ladderSharesPct must be a number from 1 to 99.";
+  if (!isWholeNumberIn(values.ladderRungs, 1, 20)) return "baseline.ladderRungs must be a whole number from 1 to 20.";
+  if (values.ladderShock !== "history" && values.ladderShock !== "fixed") return "baseline.ladderShock must be history or fixed.";
+  for (const field of ["ladderShockPct", "ladderShockMinPct", "ladderShockMaxPct", "ladderShockNoHistoryPct"] as const) if (!isNumberIn(values[field], 1, 99)) return `baseline.${field} must be a number from 1 to 99.`;
+  if ((values.ladderShockMinPct as number) > (values.ladderShockMaxPct as number)) return "baseline.ladderShockMinPct must not be above baseline.ladderShockMaxPct.";
+  if (!isWholeNumberIn(values.ladderShockLookbackYears, 1, 30)) return "baseline.ladderShockLookbackYears must be a whole number of years from 1 to 30.";
+  if (values.ladderTop !== "break_even" && values.ladderTop !== "price") return "baseline.ladderTop must be break_even or price.";
+  if (values.ladderPace !== "any_look" && values.ladderPace !== "one_open" && values.ladderPace !== "no_puts") return "baseline.ladderPace must be any_look, one_open or no_puts.";
+  if (!isWholeNumberIn(values.ladderMinutesBetweenRungs, 0, 10_080)) return "baseline.ladderMinutesBetweenRungs must be a whole number of minutes from 0 to 10,080 (a week).";
+  if (!isWholeNumberIn(values.ladderMaxRungsPerSession, 0, 100)) return "baseline.ladderMaxRungsPerSession must be a whole number from 0 to 100.";
+  if (values.ladderPutVersusCall !== "call_first" && values.ladderPutVersusCall !== "higher_yield") return "baseline.ladderPutVersusCall must be call_first or higher_yield.";
+  if (!isNumberIn(values.ladderPutYieldMarginPct, 0, 1000)) return "baseline.ladderPutYieldMarginPct must be a number from 0 to 1000.";
   return null;
 }
 
@@ -251,41 +299,81 @@ export interface BacktestBookPageFilters {
   offset: number;
 }
 
+/** A query parameter's text, trimmed; null when it is absent or blank. */
+function queryText(raw: Record<string, unknown>, key: string): string | null {
+  const value = raw[key];
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/** The query's symbol filter, normalized; null when absent. */
+function validateSymbolQuery(raw: Record<string, unknown>): { ok: true; symbol: string | null } | { ok: false; error: string } {
+  const symbol = queryText(raw, "symbol");
+  if (symbol === null) return { ok: true, symbol: null };
+  try {
+    return { ok: true, symbol: normalizeBacktestSymbol(symbol) };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** The query's page: `limit` (1 to `maxLimit`, `defaultLimit` unless given) and `offset` (0 unless given). */
+function validatePageQuery(raw: Record<string, unknown>, defaultLimit: number, maxLimit: number): { ok: true; limit: number; offset: number } | { ok: false; error: string } {
+  const wholeNumber = (key: "limit" | "offset", fallback: number, minimum: number, maximum: number): number | null => {
+    const text = queryText(raw, key);
+    if (text === null) return fallback;
+    const value = Number(text);
+    return Number.isInteger(value) && value >= minimum && value <= maximum ? value : null;
+  };
+  const limit = wholeNumber("limit", defaultLimit, 1, maxLimit);
+  if (limit === null) return { ok: false, error: `limit must be a whole number from 1 to ${maxLimit}.` };
+  const offset = wholeNumber("offset", 0, 0, Number.MAX_SAFE_INTEGER);
+  if (offset === null) return { ok: false, error: "offset must be a whole number from 0." };
+  return { ok: true, limit, offset };
+}
+
 /**
  * Validation of the query of GET /backtest/sessions/:id/actions and /fills (BacktestBookPageQuery): trading dates from
  * and to (inclusive), a symbol, the actions' outcome, and the page (limit 200 unless given, at most 1,000; offset 0).
  */
 export function validateBacktestBookPageQuery(raw: Record<string, unknown>, options: { outcomeAllowed: boolean }): { ok: true; filters: BacktestBookPageFilters } | { ok: false; error: string } {
-  const given = (key: string): string | null => {
-    const value = raw[key];
-    return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-  };
-  const filters: BacktestBookPageFilters = { from: given("from"), to: given("to"), symbol: null, outcome: null, limit: backtestBookPageDefaultLimit, offset: 0 };
-  for (const key of ["from", "to"] as const) if (filters[key] !== null && !isIsoCalendarDate(filters[key])) return { ok: false, error: `${key} must be a date (YYYY-MM-DD).` };
-  if (filters.from !== null && filters.to !== null && filters.from > filters.to) return { ok: false, error: "from must be on or before to." };
-  const symbol = given("symbol");
-  if (symbol !== null) {
-    try {
-      filters.symbol = normalizeBacktestSymbol(symbol);
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-  const outcome = given("outcome");
+  const from = queryText(raw, "from");
+  const to = queryText(raw, "to");
+  for (const [key, value] of [["from", from], ["to", to]] as const) if (value !== null && !isIsoCalendarDate(value)) return { ok: false, error: `${key} must be a date (YYYY-MM-DD).` };
+  if (from !== null && to !== null && from > to) return { ok: false, error: "from must be on or before to." };
+  const symbol = validateSymbolQuery(raw);
+  if (!symbol.ok) return symbol;
+  const outcome = queryText(raw, "outcome");
   if (outcome !== null) {
     if (!options.outcomeAllowed) return { ok: false, error: "outcome filters actions only." };
     if (outcome !== "filled" && outcome !== "blocked") return { ok: false, error: "outcome must be filled or blocked." };
-    filters.outcome = outcome;
   }
-  const wholeNumber = (key: "limit" | "offset", minimum: number, maximum: number): number | string => {
-    const text = given(key);
-    if (text === null) return filters[key];
-    const value = Number(text);
-    return Number.isInteger(value) && value >= minimum && value <= maximum ? value : `${key} must be a whole number from ${minimum} to ${maximum}.`;
-  };
-  const limit = wholeNumber("limit", 1, backtestBookPageMaxLimit);
-  if (typeof limit === "string") return { ok: false, error: limit };
-  const offset = wholeNumber("offset", 0, Number.MAX_SAFE_INTEGER);
-  if (typeof offset === "string") return { ok: false, error: "offset must be a whole number from 0." };
-  return { ok: true, filters: { ...filters, limit, offset } };
+  const page = validatePageQuery(raw, backtestBookPageDefaultLimit, backtestBookPageMaxLimit);
+  if (!page.ok) return page;
+  return { ok: true, filters: { from, to, symbol: symbol.symbol, outcome: outcome as BacktestBookPageFilters["outcome"], limit: page.limit, offset: page.offset } };
+}
+
+/** The filters of a page of the Sessions list, every default filled in. */
+export interface BacktestSessionsPageFilters {
+  /** Matches any part of the name, ignoring case. */
+  search: string | null;
+  symbol: string | null;
+  status: BacktestSessionStatusFilter | null;
+  limit: number;
+  offset: number;
+}
+
+const sessionStatusFilters: readonly BacktestSessionStatusFilter[] = ["succeeded", "running", "failed", "cancelled"];
+
+/**
+ * Validation of the query of GET /backtest/sessions (BacktestSessionsPageQuery): a name search, a symbol, a status
+ * ("running" also matches a queued session), and the page (limit 50 unless given, at most 200; offset 0).
+ */
+export function validateBacktestSessionsPageQuery(raw: Record<string, unknown>): { ok: true; filters: BacktestSessionsPageFilters } | { ok: false; error: string } {
+  const symbol = validateSymbolQuery(raw);
+  if (!symbol.ok) return symbol;
+  const status = queryText(raw, "status");
+  if (status !== null && !sessionStatusFilters.includes(status as BacktestSessionStatusFilter)) return { ok: false, error: "status must be succeeded, running, failed or cancelled." };
+  const page = validatePageQuery(raw, backtestSessionsPageDefaultLimit, backtestSessionsPageMaxLimit);
+  if (!page.ok) return page;
+  return { ok: true, filters: { search: queryText(raw, "search"), symbol: symbol.symbol, status: status as BacktestSessionStatusFilter | null, limit: page.limit, offset: page.offset } };
 }

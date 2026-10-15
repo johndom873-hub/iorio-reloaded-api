@@ -34,12 +34,76 @@ export interface BacktestBaselineSettings {
   /** Calendar days to expiry. */
   minDte: number;
   maxDte: number;
+  /** Widest spread sold into, as a percent of the mid: (ask − bid) ÷ mid. */
+  maxSpreadPctOfMid: number;
   /**
    * Calls on held shares: any strike in the delta range; only at or above what the cycle's shares cost (acquisition cost
-   * per share acquired); only at or above the cycle's break-even after its premium (Pluto's measure); or none (the shares
-   * are held uncovered).
+   * per share acquired); only at or above the cycle's break-even after its premium (Pluto's measure); only at or above
+   * the price of the latest share acquisition (a purchase, or a put assigned at its strike); only at or above the average
+   * price paid for the shares held (ledgerHeldSharesAverageCost); at or above that average first and, for the lots still
+   * uncovered, at or above the cycle's break-even; or none (the shares are held uncovered).
    */
-  callStrike: "delta_range" | "above_share_cost" | "above_break_even" | "none";
+  callStrike: "delta_range" | "above_share_cost" | "above_break_even" | "above_latest_entry" | "above_average_cost" | "above_average_cost_else_break_even" | "none";
+  /**
+   * A buy-write's call: any strike; only at or above the price paid for its shares; or only at or above the average price
+   * of the shares held once these are bought (the price paid when none are held).
+   */
+  entryCallStrike: "any" | "above_purchase_price" | "above_average_after_purchase";
+  /**
+   * A buy-write while some held round lots have no call: "wait" until they all have one, or "buy" (the buy-write buys
+   * every share its call covers and leaves the uncovered lots to their own calls).
+   */
+  entryWhenSharesUncovered: "wait" | "buy";
+  /**
+   * With a buy-write entry: buy-writes buy shares while the shares held, at the 10:00 price, stay within this % of the
+   * day's account value; 100 = no cap. An assigned put may take them past it.
+   */
+  maxSharesPctOfAccount: number;
+  /** A call, on held shares or a buy-write's, is sold only when its premium yield (annualized) is above this %; 0 = any. */
+  minCallYieldPct: number;
+  /**
+   * With a buy-write entry, "dte_budget": on a look where held shares are left without a call, or a buy-write with room
+   * finds none (minCallYieldPct included), and no put of the stock is open, one put is sold: the highest premium yield,
+   * strike at most the average price of the shares held (any strike with none held), as many contracts as
+   * putBudgetPctPerDte% of the account value per day to expiry, the free cash and the volume limit allow.
+   */
+  putsWhenNoCall: "off" | "dte_budget" | "reserve_ladder";
+  /** That put's exposure, (strike − fill) × 100 a contract, per day to expiry: % of the day's account value. */
+  putBudgetPctPerDte: number;
+  /**
+   * With putsWhenNoCall "reserve_ladder" (backtestBaselineLadder.ts): the buy-writes' shares, at cost, at most this % of
+   * the account value the cycle started with; the rest is the puts' reserve. maxSharesPctOfAccount does not apply.
+   */
+  ladderSharesPct: number;
+  /** The rungs the reserve is spent in: each put's collateral at most reserve ÷ rungs. */
+  ladderRungs: number;
+  /** The stock shock S: "history" (the deepest fall in the lookback before the cycle, within min–max) or "fixed" (ladderShockPct). */
+  ladderShock: "history" | "fixed";
+  ladderShockPct: number;
+  ladderShockMinPct: number;
+  ladderShockMaxPct: number;
+  /** S when the lookback holds under a year of closes (fewer than 250: a new listing), outside the min–max range. */
+  ladderShockNoHistoryPct: number;
+  ladderShockLookbackYears: number;
+  /** The ladder's top A: the cycle's break-even, or the lower of it and today's price (the rungs then spread from the price down to the floor). */
+  ladderTop: "break_even" | "price";
+  /** When a new rung may be sold: at any look with room, only while no ladder put is open, or never (the shares' budget alone). */
+  ladderPace: "any_look" | "one_open" | "no_puts";
+  /** A new rung (a look that sells ladder puts) only this many minutes or more after the ticker's last one; 0 = any look. */
+  ladderMinutesBetweenRungs: number;
+  /** At most this many new rungs on a ticker in one session; 0 = no limit. */
+  ladderMaxRungsPerSession: number;
+  /**
+   * When the ladder sells a put while held shares are free: only when no call on them qualifies, or when its premium yield
+   * beats the best call's by more than ladderPutYieldMarginPct% (relative: 25 = a quarter above the call's), the shares then
+   * waiting for a later look.
+   */
+  ladderPutVersusCall: "call_first" | "higher_yield";
+  ladderPutYieldMarginPct: number;
+  /** A buy-write's shares: at the 10:00 price + $0.01 (the session's stock fill), or at the 10:00 price itself. */
+  shareFill: "plus_one_cent" | "ten_oclock_price";
+  /** The day's recorded account value: open options at their marks, or left out (cash and shares only) until the end. */
+  dayValueOptions: "marked" | "excluded";
   /** The |delta| range of calls on held shares: the entry's (minAbsDelta–maxAbsDelta), or their own (callMinAbsDelta–callMaxAbsDelta). */
   callDeltaRange: "entry_range" | "own_range";
   callMinAbsDelta: number;
@@ -62,11 +126,22 @@ export interface BacktestBaselineSettings {
   volatilityEdgeFilter: "off" | "entries" | "all_sales";
   /** Volatility points (5 = 5 points, e.g. 55% against a 50% forecast); may be negative. */
   minVolatilityEdgePoints: number;
-  /** The order the candidates are picked in: premium yield, or the Signals model's Edge Yield. */
-  ranking: "premium_yield" | "edge_yield";
+  /**
+   * The order the candidates are picked in: premium yield; the Signals model's Edge Yield; time value (the fill less its
+   * intrinsic value, per contract after commission); the premium in dollars (the fill, intrinsic value included); or the
+   * premium in dollars per calendar day to expiry (the fill ÷ days, at least 1).
+   */
+  ranking: "premium_yield" | "edge_yield" | "time_value" | "premium_dollars" | "premium_per_day";
+  /** "nearest_qualifying": candidates from the nearest expiry that has any come first, then the next expiry's, each ranked. */
+  expiryChoice: "any_in_range" | "nearest_qualifying";
+  /**
+   * "fill_down_ranking": when the best contract's volume limit cannot take every free lot (or the whole entry), the rest
+   * goes to the next candidates in order until every lot is covered (the entry: until the cash or the stock's share runs out).
+   */
+  coverage: "best_contract" | "fill_down_ranking";
 }
 
-export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, callStrike: "delta_range", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield" };
+export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderMinutesBetweenRungs: 0, ladderMaxRungsPerSession: 0, ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, shareFill: "plus_one_cent", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
@@ -186,6 +261,10 @@ export interface BacktestJobView {
   startedAt: string | null;
   finishedAt: string | null;
   error: string | null;
+  /** A queued download put at the top of the queue (the latest put first starts first). */
+  putFirst: boolean;
+  /** A running download asked to pause: it goes back into the queue once it stops. */
+  pauseRequested: boolean;
 }
 
 /** A split the engine found by comparing the options' closing parity price with IBKR's split-adjusted close. */
@@ -286,13 +365,43 @@ export interface BacktestSessionListItem {
   /** The wheel cycles of a finished session measured per cycle; null otherwise. */
   wheelCycles: BacktestWheelCycleSummary | null;
   createdAt: string;
+  /** Its latest job's run; null on the session list items that do not carry it (a comparison) or when the job is gone. */
+  latestRun: BacktestSessionRunState | null;
+}
+
+/** A session's latest job as the Sessions list shows it: a running job whose heartbeat stopped shows as stopped. */
+export interface BacktestSessionRunState {
+  status: BacktestJobStatus;
+  displayStatus: BacktestJobDisplayStatus;
+  progressDone: number;
+  progressTotal: number;
+}
+
+/** The Sessions list's filters; "running" also matches a session still queued. */
+export type BacktestSessionStatusFilter = "succeeded" | "running" | "failed" | "cancelled";
+
+export const backtestSessionsPageDefaultLimit = 50;
+export const backtestSessionsPageMaxLimit = 200;
+
+/** One page of the Sessions list, newest first. `total` counts every session the filters match; `symbols` lists every
+ *  symbol any session has, for the Symbol filter. */
+export interface BacktestSessionsPage {
+  sessions: BacktestSessionListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  symbols: string[];
 }
 
 export interface BacktestOverview {
   dataDirectory: string;
   files: BacktestDataFileSummary[];
+  /**
+   * The backtests, then the downloads. Backtests: the 50 latest, finished or not, latest activity first. Downloads: the
+   * running one, the stopped ones, the queue in the order it starts them, then the finished ones, the last to end first;
+   * every unfinished one is listed, the finished ones fill up to 50. The sessions are read page by page.
+   */
   jobs: BacktestJobView[];
-  sessions: BacktestSessionListItem[];
 }
 
 /** One value a "choice" row can take. */

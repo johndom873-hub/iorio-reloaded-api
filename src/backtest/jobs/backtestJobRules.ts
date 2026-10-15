@@ -7,8 +7,8 @@ import type { BacktestJobDisplayStatus, BacktestJobStatus } from "../backtestTyp
 export const staleHeartbeatMilliseconds = 60_000;
 /** How often a job process writes its heartbeat and reads cancel_requested (the docs ask for at least every 10 s). */
 export const jobHeartbeatIntervalMilliseconds = 5_000;
-/** Finished jobs stay on the overview this many days. */
-export const finishedJobListingDays = 7;
+/** Of each kind, the overview lists this many jobs: the latest backtests by their latest activity; every unfinished download, then the finished ones up to this many in all. */
+export const overviewJobsPerKind = 50;
 export const defaultDownloadStartDate = "2020-01-01";
 /** Today's session counts as finished from 18:00 ET: ThetaData builds the end-of-day data around 17:15 ET. */
 const sessionFinishedEasternMinutes = 18 * 60;

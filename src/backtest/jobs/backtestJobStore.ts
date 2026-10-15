@@ -1,12 +1,12 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
-import type { BacktestJobKind, BacktestJobStatus, BacktestJobView } from "../backtestTypes.js";
+import type { BacktestJobKind, BacktestJobStatus, BacktestJobView, BacktestSessionRunState } from "../backtestTypes.js";
 import {
   appendProgressSample,
   computeJobRunSeconds,
   deriveJobDisplayStatus,
   estimateSecondsLeft,
-  finishedJobListingDays,
+  overviewJobsPerKind,
   staleHeartbeatMilliseconds,
   type ProgressSample,
 } from "./backtestJobRules.js";
@@ -46,6 +46,8 @@ export interface BacktestJobRow {
   started_at: Date | null;
   finished_at: Date | null;
   earlier_run_seconds: number;
+  put_first_at: Date | null;
+  pause_requested: boolean;
 }
 
 function selectJobRows(connection: Knex = db): Knex.QueryBuilder {
@@ -71,6 +73,8 @@ function selectJobRows(connection: Knex = db): Knex.QueryBuilder {
       "j.started_at",
       "j.finished_at",
       "j.earlier_run_seconds",
+      "j.put_first_at",
+      "j.pause_requested",
     );
 }
 
@@ -114,6 +118,9 @@ export function toBacktestJobView(row: BacktestJobRow, now: Date = new Date()): 
     startedAt: isoTimestamp(row.started_at),
     finishedAt: isoTimestamp(row.finished_at),
     error: row.error,
+    putFirst: row.status === "queued" && row.put_first_at !== null,
+    // Only a running job pauses; a job that ended before its pause took effect is not pausing.
+    pauseRequested: row.status === "running" && Boolean(row.pause_requested),
   };
 }
 
@@ -128,23 +135,79 @@ export async function loadBacktestJobView(jobId: string): Promise<BacktestJobVie
   return toBacktestJobView(row);
 }
 
-/** The overview's jobs, latest activity first (queued or resumed, started, last progress, finished): everything not finished, plus what finished in the last week. */
+/** A job's latest activity: queued or resumed, started, last progress, finished. */
+const latestActivitySql = "GREATEST(j.queued_at, COALESCE(j.started_at, j.queued_at), COALESCE(j.heartbeat_at, j.queued_at), COALESCE(j.finished_at, j.queued_at))";
+
+/**
+ * The order the download queue starts its jobs (kickDownloadQueue): the jobs put first, the latest put first at the top,
+ * then the rest, the first to enter the queue (or re-enter it on a resume) first.
+ */
+const downloadQueueOrderSql = "put_first_at DESC NULLS LAST, queued_at, created_at, id";
+const downloadQueueOrderColumns = ["queued_at", "created_at", "id"];
+
+/** The overview's jobs: the Backtests list, then the Downloads list, each in its own order. */
 export async function listOverviewJobViews(): Promise<BacktestJobView[]> {
-  const rows: BacktestJobRow[] = await selectJobRows()
-    .where((query) =>
-      query
-        .whereIn("j.status", ["queued", "running"])
-        .orWhereNull("j.finished_at")
-        .orWhere("j.finished_at", ">", db.raw("now() - (?::int * interval '1 day')", [finishedJobListingDays])),
-    )
-    .orderByRaw("GREATEST(j.queued_at, COALESCE(j.started_at, j.queued_at), COALESCE(j.heartbeat_at, j.queued_at), COALESCE(j.finished_at, j.queued_at)) DESC, j.created_at DESC");
   const now = new Date();
-  return rows.map((row) => toBacktestJobView(row, now));
+  const [backtestRows, downloadRows] = await Promise.all([listOverviewBacktestJobRows(), listOverviewDownloadJobRows(now)]);
+  return [...backtestRows, ...downloadRows].map((row) => toBacktestJobView(row, now));
+}
+
+/** The Backtests list: the latest overviewJobsPerKind, finished or not, latest activity first. */
+async function listOverviewBacktestJobRows(): Promise<BacktestJobRow[]> {
+  const rows: BacktestJobRow[] = await selectJobRows().where("j.kind", "backtest").orderByRaw(`${latestActivitySql} DESC, j.created_at DESC`).limit(overviewJobsPerKind);
+  return rows;
+}
+
+/**
+ * The Downloads list: the running download, the stopped ones (latest activity first), the queue in the order it starts
+ * them, then the finished ones, the last to end first. Every unfinished download is listed, however many; the finished
+ * ones fill the list up to overviewJobsPerKind.
+ */
+async function listOverviewDownloadJobRows(now: Date): Promise<BacktestJobRow[]> {
+  // Running or stopped as of `now`, the instant the views derive their displayStatus at, so each row's place matches its badge.
+  const freshHeartbeatSince = new Date(now.getTime() - staleHeartbeatMilliseconds);
+  const listOrderSql = [
+    "CASE WHEN j.status = 'running' AND j.heartbeat_at >= ? THEN 0 WHEN j.status = 'running' THEN 1 WHEN j.status = 'queued' THEN 2 ELSE 3 END",
+    "CASE WHEN j.status = 'queued' THEN j.put_first_at END DESC NULLS LAST",
+    ...downloadQueueOrderColumns.map((column) => `CASE WHEN j.status = 'queued' THEN j.${column} END`),
+    // When it ended; the running and stopped ones, and a finished one without finished_at, by their latest activity.
+    `COALESCE(j.finished_at, ${latestActivitySql}) DESC`,
+    "j.created_at DESC",
+    "j.id DESC",
+  ].join(", ");
+  const listPlaces = db("backtest_jobs as j").where("j.kind", "download").select("j.id", db.raw(`row_number() OVER (ORDER BY ${listOrderSql}) AS place`, [freshHeartbeatSince]));
+  const rows: BacktestJobRow[] = await selectJobRows()
+    .join(listPlaces.as("listed"), "listed.id", "j.id")
+    .where((listed) => listed.whereIn("j.status", ["queued", "running"]).orWhere("listed.place", "<=", overviewJobsPerKind))
+    .orderBy("listed.place");
+  return rows;
 }
 
 export async function loadLatestJobViewForSession(sessionId: string): Promise<BacktestJobView | null> {
   const row = await selectJobRows().where("j.session_id", sessionId).orderBy("j.created_at", "desc").first();
   return row ? toBacktestJobView(row as BacktestJobRow) : null;
+}
+
+/** Each session's latest job as the Sessions list shows it, by session id: the overview lists only the latest jobs. */
+export async function loadLatestSessionRunStates(sessionIds: readonly string[]): Promise<Map<string, BacktestSessionRunState>> {
+  if (sessionIds.length === 0) return new Map();
+  const rows: Pick<BacktestJobRow, "session_id" | "status" | "heartbeat_at" | "progress_done" | "progress_total">[] = await db("backtest_jobs")
+    .distinctOn("session_id")
+    .whereIn("session_id", sessionIds)
+    .orderBy([{ column: "session_id" }, { column: "created_at", order: "desc" }])
+    .select("session_id", "status", "heartbeat_at", "progress_done", "progress_total");
+  const now = new Date();
+  return new Map(
+    rows.map((row) => [
+      row.session_id as string,
+      {
+        status: row.status,
+        displayStatus: deriveJobDisplayStatus(row.status, row.heartbeat_at ? new Date(row.heartbeat_at) : null, now),
+        progressDone: Number(row.progress_done),
+        progressTotal: Number(row.progress_total),
+      },
+    ]),
+  );
 }
 
 /** Marks a job as started by the API before its process exists, so it is never started twice. */
@@ -181,7 +244,7 @@ async function spawnClaimedJob(jobId: string): Promise<void> {
 }
 
 /**
- * Starts the oldest queued download when no download is running (a stopped one does not count): one at a time, since
+ * Starts the download first in the queue when no download is running (a stopped one does not count): one at a time, since
  * ThetaData allows 2 requests in flight and one download uses both. The advisory lock makes concurrent kicks (the
  * overview, a finishing job) take turns. Returns the started job's id.
  */
@@ -193,7 +256,7 @@ export async function kickDownloadQueue(): Promise<string | null> {
       .where("heartbeat_at", ">", transaction.raw("now() - (?::int * interval '1 millisecond')", [staleHeartbeatMilliseconds]))
       .first("id");
     if (running) return null;
-    const next = await transaction("backtest_jobs").where({ kind: "download", status: "queued" }).orderBy("queued_at", "asc").first("id");
+    const next = await transaction("backtest_jobs").where({ kind: "download", status: "queued" }).orderByRaw(downloadQueueOrderSql).first("id");
     if (!next) return null;
     await claimJob(transaction, next.id as string, { resetProgress: false });
     return next.id as string;
@@ -208,11 +271,68 @@ export async function findUnfinishedDownloadJob(symbol: string): Promise<Backtes
   return (row as BacktestJobRow | undefined) ?? null;
 }
 
-/** Queues a download and kicks the queue: it starts now when no other download runs. */
-export async function createDownloadJob(input: { symbol: string; startDate: string; endDate: string }): Promise<BacktestJobView> {
-  const [row] = await db("backtest_jobs").insert({ kind: "download", symbol: input.symbol, start_date: input.startDate, end_date: input.endDate, status: "queued" }).returning("id");
+/**
+ * Queues a download and kicks the queue: it starts now when no other download runs. putFirst puts it at the top of the
+ * queue; pauseRunning also pauses the running download, which goes back into the queue right after it (putDownloadFirst).
+ */
+export async function createDownloadJob(input: { symbol: string; startDate: string; endDate: string; putFirst?: boolean; pauseRunning?: boolean }): Promise<BacktestJobView> {
+  const jobId = await db.transaction(async (transaction) => {
+    const [row] = await transaction("backtest_jobs").insert({ kind: "download", symbol: input.symbol, start_date: input.startDate, end_date: input.endDate, status: "queued" }).returning("id");
+    if (input.putFirst) await putFirstInTransaction(transaction, row.id as string, input.pauseRunning === true);
+    return row.id as string;
+  });
   await kickDownloadQueue();
-  return loadBacktestJobView(row.id as string);
+  return loadBacktestJobView(jobId);
+}
+
+/**
+ * Puts a queued download at the top of the queue: it starts next, ahead of every other queued job. With pauseRunning, the
+ * running download (if another one runs) is asked to stop and goes back into the queue right after this one, keeping
+ * what it saved; this one starts once that has stopped, so the two never share ThetaData's single login.
+ */
+export async function putDownloadFirst(jobId: string, options: { pauseRunning: boolean }): Promise<BacktestJobView> {
+  const job = await loadBacktestJobRow(jobId);
+  if (!job) throw new BacktestRequestError("No such job.", 404);
+  if (job.kind !== "download") throw new BacktestRequestError("Only downloads wait in a queue.", 409);
+  if (deriveJobDisplayStatus(job.status, job.heartbeat_at ? new Date(job.heartbeat_at) : null, new Date()) !== "queued") throw new BacktestRequestError("Only a queued download can be put first.", 409);
+  await db.transaction((transaction) => putFirstInTransaction(transaction, jobId, options.pauseRunning));
+  await kickDownloadQueue();
+  return loadBacktestJobView(jobId);
+}
+
+/**
+ * A download paused for one put first, whose process is ending: back into the queue (its put_first_at keeps it right after
+ * that one) with what it saved; the run that just ended counts toward its total run time, as on a resume. False when the
+ * job was not paused (a plain cancel), so the caller ends it cancelled.
+ */
+export async function requeuePausedDownload(jobId: string, pid: number, progress: { done: number; total: number; label: string | null }): Promise<boolean> {
+  const requeued = await db("backtest_jobs")
+    .where({ id: jobId, pid, pause_requested: true })
+    .update({
+      status: "queued",
+      pid: null,
+      cancel_requested: false,
+      pause_requested: false,
+      error: null,
+      finished_at: null,
+      heartbeat_at: null,
+      earlier_run_seconds: db.raw("earlier_run_seconds + CASE WHEN started_at IS NULL THEN 0 ELSE GREATEST(0, ROUND(EXTRACT(EPOCH FROM (now() - started_at))))::integer END"),
+      progress_done: progress.done,
+      progress_total: progress.total,
+      progress_label: progress.label,
+    });
+  return requeued > 0;
+}
+
+/** now() is the transaction's start: the paused download sits a millisecond behind the job put first. */
+async function putFirstInTransaction(transaction: Knex.Transaction, jobId: string, pauseRunning: boolean): Promise<void> {
+  await transaction("backtest_jobs").where({ id: jobId }).update({ put_first_at: transaction.fn.now() });
+  if (!pauseRunning) return;
+  await transaction("backtest_jobs")
+    .where({ kind: "download", status: "running" })
+    .whereNot({ id: jobId })
+    .where("heartbeat_at", ">", transaction.raw("now() - (?::int * interval '1 millisecond')", [staleHeartbeatMilliseconds]))
+    .update({ cancel_requested: true, pause_requested: true, put_first_at: transaction.raw("now() - interval '1 millisecond'") });
 }
 
 /** Inserts a session's backtest job already claimed (backtests do not queue); startClaimedBacktestJob then starts its process. */
@@ -236,7 +356,8 @@ export async function cancelBacktestJob(jobId: string): Promise<BacktestJobView>
   if (!job) throw new BacktestRequestError("No such job.", 404);
   const displayStatus = deriveJobDisplayStatus(job.status, job.heartbeat_at ? new Date(job.heartbeat_at) : null, new Date());
   if (displayStatus === "running") {
-    await db("backtest_jobs").where({ id: jobId, status: "running" }).update({ cancel_requested: true });
+    // A cancel while pausing ends the job cancelled, not back in the queue.
+    await db("backtest_jobs").where({ id: jobId, status: "running" }).update({ cancel_requested: true, pause_requested: false });
   } else if (displayStatus === "queued" && job.kind === "download" && job.started_at === null) {
     // Removed from the queue before it ever ran: there is nothing to keep a record of.
     const deleted = await db("backtest_jobs").where({ id: jobId, status: "queued" }).whereNull("started_at").delete();
@@ -275,6 +396,9 @@ export async function resumeBacktestJob(jobId: string): Promise<BacktestJobView>
         earlier_run_seconds: db.raw("earlier_run_seconds + CASE WHEN started_at IS NULL THEN 0 ELSE GREATEST(0, ROUND(EXTRACT(EPOCH FROM (COALESCE(finished_at, heartbeat_at, started_at) - started_at))))::integer END"),
         status: "queued",
         queued_at: db.fn.now(),
+        // A resume joins the end of the queue, even if the job was once put first.
+        put_first_at: null,
+        pause_requested: false,
         pid: null,
         cancel_requested: false,
         error: null,

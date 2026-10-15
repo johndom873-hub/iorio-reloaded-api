@@ -18,6 +18,8 @@ import type {
   BacktestSessionDay,
   BacktestSessionDetail,
   BacktestSessionListItem,
+  BacktestSessionRunState,
+  BacktestSessionsPage,
   BacktestSettings,
   BacktestSettingsOverrides,
   BacktestTablesMode,
@@ -26,8 +28,9 @@ import type {
 import { backtestCaptureLookTimeEt } from "../backtestTypes.js";
 import { computeCycleAccuracyBands, computeDrawdowns, computeMonthlyReturns, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
 import { computeAllSymbolsStatistics, computeTickerStatistics } from "../tickerStatistics.js";
-import { BacktestRequestError, insertClaimedBacktestJob, loadBacktestJobView, loadLatestJobViewForSession, startClaimedBacktestJob, stopJobsOfSession } from "./backtestJobStore.js";
-import type { BacktestBookPageFilters, ValidatedBacktestSessionRequest } from "./backtestSessionRequest.js";
+import { BacktestRequestError, insertClaimedBacktestJob, loadBacktestJobView, loadLatestJobViewForSession, loadLatestSessionRunStates, startClaimedBacktestJob, stopJobsOfSession } from "./backtestJobStore.js";
+import type { BacktestBookPageFilters, BacktestSessionsPageFilters, ValidatedBacktestSessionRequest } from "./backtestSessionRequest.js";
+import { sqlContainsPattern } from "../../lib/sqlContainsPattern.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { readSplitScheduleCache } from "../engine/splitFactors.js";
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
@@ -114,7 +117,7 @@ export function describeSessionSymbols(symbols: readonly string[]): string {
   return symbols.join(", ");
 }
 
-function toSessionListItem(row: SessionRow): BacktestSessionListItem {
+function toSessionListItem(row: SessionRow, latestRun: BacktestSessionRunState | null = null): BacktestSessionListItem {
   return {
     id: row.id,
     name: row.name,
@@ -140,14 +143,47 @@ function toSessionListItem(row: SessionRow): BacktestSessionListItem {
           }
         : null,
     createdAt: new Date(row.created_at).toISOString(),
+    latestRun,
   };
 }
 
 const nullableNumber = (value: string | number | null): number | null => (value === null ? null : Number(value));
 
-export async function listBacktestSessionItems(): Promise<BacktestSessionListItem[]> {
-  const rows: SessionRow[] = await selectSessionRows().orderBy("created_at", "desc");
-  return rows.map(toSessionListItem);
+/** The Sessions list's filters: a name search (any part, ignoring case), a symbol on the session's book, a status. */
+function whereSessionsMatch(query: Knex.QueryBuilder, filters: BacktestSessionsPageFilters): Knex.QueryBuilder {
+  if (filters.search !== null) query.whereILike("backtest_sessions.name", sqlContainsPattern(filters.search));
+  const symbol = filters.symbol;
+  if (symbol !== null) query.where((inner) => inner.whereRaw("backtest_sessions.symbols @> ?::jsonb", [JSON.stringify([symbol])]).orWhere("backtest_sessions.symbol", symbol));
+  if (filters.status !== null) query.whereIn("backtest_sessions.status", filters.status === "running" ? ["queued", "running"] : [filters.status]);
+  return query;
+}
+
+/** Every symbol any session has, A to Z: the Sessions list's Symbol filter. */
+async function listSessionSymbols(): Promise<string[]> {
+  const result: { rows: { symbol: string }[] } = await db.raw(`
+    SELECT DISTINCT listed.symbol
+    FROM backtest_sessions s
+    CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_array_length(s.symbols) > 0 THEN s.symbols ELSE jsonb_build_array(s.symbol) END) AS listed(symbol)
+    ORDER BY listed.symbol
+  `);
+  return result.rows.map((row) => row.symbol);
+}
+
+/** One page of the Sessions list, newest first, each session with its latest job's run: the overview lists only the latest jobs. */
+export async function loadBacktestSessionsPage(filters: BacktestSessionsPageFilters): Promise<BacktestSessionsPage> {
+  const [rows, total, symbols]: [SessionRow[], number, string[]] = await Promise.all([
+    whereSessionsMatch(selectSessionRows(), filters)
+      .orderBy([
+        { column: "created_at", order: "desc" },
+        { column: "id", order: "desc" },
+      ])
+      .limit(filters.limit)
+      .offset(filters.offset),
+    countRows(whereSessionsMatch(db("backtest_sessions"), filters)),
+    listSessionSymbols(),
+  ]);
+  const latestRuns = await loadLatestSessionRunStates(rows.map((row) => row.id));
+  return { sessions: rows.map((row) => toSessionListItem(row, latestRuns.get(row.id) ?? null)), total, limit: filters.limit, offset: filters.offset, symbols };
 }
 
 async function loadSessionRow(sessionId: string): Promise<SessionRow> {

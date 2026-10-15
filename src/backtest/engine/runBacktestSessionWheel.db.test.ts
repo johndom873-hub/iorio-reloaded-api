@@ -9,7 +9,7 @@ import type { PlutoSettings } from "../../pluto/settingsStore.js";
 import type { BacktestAction, BacktestFill, BacktestSessionDetail, BacktestSettingsOverrides } from "../backtestTypes.js";
 import { computeParityStockPrice } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
-import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticSymbolFile, writeSyntheticMacroEventHistory } from "./testSupport/syntheticBacktestData.js";
+import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile, writeSyntheticMacroEventHistory } from "./testSupport/syntheticBacktestData.js";
 import { dollarsAfter } from "./testSupport/gateTextDollars.js";
 
 // Whole sessions through the wheel, in a private copy of the test tables: each on its own synthetic symbol (a file of
@@ -113,7 +113,9 @@ async function createWheelSymbol(spec: WheelSymbolSpec): Promise<Map<string, Sym
     const close = spec.closes[index]!;
     return { tradingDate, open, high: Math.max(open, close) * 1.004, low: Math.min(open, close) * 0.996, close, volume: 1_000_000, impliedVolatility: 0.5 };
   });
-  await testDb("daily_price_bars").insert([...history, ...sessionBars.filter((bar) => !datesWithoutBar.has(bar.tradingDate))].map((bar) => ({ ticker_id: ticker.id, trading_date: bar.tradingDate, open_price: bar.open, high_price: bar.high, low_price: bar.low, close_price: bar.close, volume: bar.volume, implied_volatility: bar.impliedVolatility })));
+  const dailyBars = [...history, ...sessionBars.filter((bar) => !datesWithoutBar.has(bar.tradingDate))];
+  await testDb("daily_price_bars").insert(dailyBars.map((bar) => ({ ticker_id: ticker.id, trading_date: bar.tradingDate, open_price: bar.open, high_price: bar.high, low_price: bar.low, close_price: bar.close, volume: bar.volume, implied_volatility: bar.impliedVolatility })));
+  writeSyntheticIbkrBarsFromQuotes(path.join(dataDirectory, `${spec.symbol}.sqlite`), dailyBars, ratePercent);
   if (spec.earnings) await testDb("ticker_calendar_events").insert(spec.earnings.map((event) => ({ ticker_id: ticker.id, event_type: "earnings", event_date: event.dateIso, event_time: event.eventTime, raw: JSON.stringify({}) })));
   return quotesByDate;
 }
@@ -194,7 +196,8 @@ function recomputeAccountDays(session: WheelSession): { tradingDate: string; cas
         const quoteAmong = (dayQuotes: SymbolFileQuote[]) => dayQuotes.find((entry) => entry.expiry === leg.expiry && entry.strike === leg.strike && entry.right === (leg.optionType === "call" ? "C" : "P"));
         // Without a quote today the option keeps its last mark: an earlier day's, or the mid it was sold at 10:00 against.
         const quote = quoteAmong(quotes) ?? (lastMidByLegId.has(leg.legId) ? undefined : quoteAmong(session.quotesOn(leg.entryAt.slice(0, 10), symbol)));
-        if (quote && quote.ask !== null) lastMidByLegId.set(leg.legId, ((quote.bid ?? 0) + quote.ask) / 2);
+        // A quote with no bid gives no mark (backtestOptionMarks.ts).
+        if (quote && quote.bid !== null && quote.bid > 0 && quote.ask !== null && quote.ask >= quote.bid) lastMidByLegId.set(leg.legId, (quote.bid + quote.ask) / 2);
         marks -= leg.quantity * leg.multiplier * lastMidByLegId.get(leg.legId)!;
       }
     }
@@ -518,23 +521,23 @@ describe("a session through the wheel", () => {
     expect(dayOf(session, "2026-04-13").decisionSummary).not.toContain("volume unknown");
   }, 60_000);
 
-  it("settles on the price the closing quotes imply when IBKR has no bar for the expiry, and fails when there is neither", async () => {
+  it("settles on IBKR's last 30-minute bar when there is no daily bar for the expiry, and fails when there is neither", async () => {
     const fileDates = weekdaysBetween("2026-04-06", "2026-04-21");
     //                        6     7      8      9     10    13    14    15    16    17    20    21
     const tenOClockPrices = [100, 100.2, 100.6, 100.4, 99.6, 98.8, 98.2, 97.8, 97.4, 97.2, 97.6, 99.0];
     const closes = /*     */ [100.1, 100.4, 100.5, 100, 99.2, 98.5, 98.0, 97.6, 97.3, 97.0, 98.4, 99.1];
     const spec = { fileDates, lastSessionDate: "2026-04-21", tenOClockPrices, closes, expiriesOn: (dateIso: string) => (dateIso < "2026-04-17" ? ["2026-04-17"] : ["2026-04-17", "2026-04-24"]), plutoOverrides: { maxTickerExposurePct: 5 } };
 
-    // No bar for Friday 17 April, but the file has the day: the stock is priced from its quotes (≈ 97.2), under the $98 strike.
+    // No daily bar for Friday 17 April, but 30-minute bars: the stock settles at the last one's close (≈ 97.2), under the $98 strike.
     const settled = await runWheelSession({ ...spec, symbol: "WHLE", datesWithoutBar: ["2026-04-17"] });
     const monday = dayOf(settled, "2026-04-20").decisionSummary!;
     expect(monday).toContain("$98 Put · 17 Apr assigned at the 97.20 close: 500 shares bought at the strike");
-    expect(monday).toContain("settled 2026-04-17 at the closing quotes' price (no IBKR bar)");
+    expect(monday).toContain("settled 2026-04-17 at the close of IBKR's last 30-minute bar (no daily bar)");
     expectAccountToReconcile(settled);
 
-    // Neither a bar nor the day in the file: the session stops rather than guess a price or leave the put open.
+    // Neither a daily nor a 30-minute bar: the session stops rather than guess a price or leave the put open.
     await expect(runWheelSession({ ...spec, symbol: "WHLF", datesWithoutBar: ["2026-04-17"], unavailableDates: ["2026-04-17"] })).rejects.toThrow(
-      "Cannot settle WHLF $98 Put · 17 Apr: there is no IBKR daily bar for 2026-04-17 and the data file has no closing quotes for that day to price the stock with. Refresh WHLF's daily bars (or download that day) and run the session again.",
+      "Cannot settle WHLF $98 Put · 17 Apr: the WHLF data file has no IBKR daily or 30-minute bar for 2026-04-17. Press Update on its row in Data files and run the session again.",
     );
   }, 60_000);
 });

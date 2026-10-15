@@ -44,6 +44,7 @@
     "backtest:job": "tsx scripts/run-backtest-job.ts",
     "backtest:backfill-history": "tsx scripts/backfill-backtest-history.ts",
     "backtest:backfill-market-stress-bars": "tsx scripts/backfill-backtest-market-stress-bars.ts",
+    "backtest:backfill-file-stock-bars": "tsx scripts/backfill-backtest-file-stock-bars.ts",
     "backfill:ticker-history": "tsx scripts/backfillTickerHistory.ts",
     "backfill:signal-engine-history": "tsx scripts/backfillSignalEngineHistory.ts",
     "deploy:worker:staging": "bash scripts/deploy-worker-to-vps.sh staging",

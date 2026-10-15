@@ -10,17 +10,18 @@ import {
   BacktestRequestError,
   cancelBacktestJob,
   createDownloadJob,
+  putDownloadFirst,
   findUnfinishedDownloadJob,
   kickDownloadQueue,
   listOverviewJobViews,
   resumeBacktestJob,
 } from "../backtest/jobs/backtestJobStore.js";
-import { validateBacktestBookPageQuery, validateCreateBacktestSessionRequest } from "../backtest/jobs/backtestSessionRequest.js";
+import { validateBacktestBookPageQuery, validateBacktestSessionsPageQuery, validateCreateBacktestSessionRequest } from "../backtest/jobs/backtestSessionRequest.js";
 import { readBacktestClaudeCliPath } from "../backtest/backtestClaudeCli.js";
 import { applyBacktestOverrides } from "../backtest/backtestSettingsOverrides.js";
 import { lookTimesInWindow, regularCloseMinutesEt } from "../backtest/engine/runBacktestSession.js";
 import { estimateLlmSession } from "../backtest/llm/estimateLlmSession.js";
-import { createBacktestSession, deleteBacktestSession, listBacktestSessionItems, loadBacktestComparison, loadBacktestSessionActions, loadBacktestSessionDetail, loadBacktestSessionFills } from "../backtest/jobs/backtestSessionStore.js";
+import { createBacktestSession, deleteBacktestSession, loadBacktestComparison, loadBacktestSessionActions, loadBacktestSessionDetail, loadBacktestSessionFills, loadBacktestSessionsPage } from "../backtest/jobs/backtestSessionStore.js";
 
 // Model backtesting (docs/backtesting/), local only: app.ts mounts this router only when BACKTEST_DATA_DIR is set.
 // Shapes are backtestTypes.ts, which the app mirrors.
@@ -30,6 +31,13 @@ backtestRouter.use(requireAuth);
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** An optional true/false body field: absent (or null) is false. */
+function optionalBoolean(value: unknown, field: string): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== "boolean") throw new BacktestRequestError(`${field} must be true or false.`, 400);
+  return value;
+}
+
 function requireUuidParameter(value: string | undefined, what: string): string {
   if (!value || !uuidPattern.test(value)) throw new BacktestRequestError(`No such ${what}.`, 404);
   return value;
@@ -38,13 +46,13 @@ function requireUuidParameter(value: string | undefined, what: string): string {
 backtestRouter.get("/overview", async (_request, response) => {
   // Reading the overview is one of the moments the download queue moves on (a stopped download no longer blocks it).
   await kickDownloadQueue();
-  const [files, jobs, sessions] = await Promise.all([summarizeBacktestDataFiles(), listOverviewJobViews(), listBacktestSessionItems()]);
-  const overview: BacktestOverview = { dataDirectory: requireBacktestDataDirectory(), files, jobs, sessions };
+  const [files, jobs] = await Promise.all([summarizeBacktestDataFiles(), listOverviewJobViews()]);
+  const overview: BacktestOverview = { dataDirectory: requireBacktestDataDirectory(), files, jobs };
   response.json(overview);
 });
 
 backtestRouter.post("/downloads", async (request, response) => {
-  const body = (request.body ?? {}) as { symbol?: unknown; startDate?: unknown };
+  const body = (request.body ?? {}) as { symbol?: unknown; startDate?: unknown; putFirst?: unknown; pauseRunning?: unknown };
   let symbol: string;
   try {
     symbol = normalizeBacktestSymbol(typeof body.symbol === "string" ? body.symbol : "");
@@ -58,11 +66,19 @@ backtestRouter.post("/downloads", async (request, response) => {
   const endDate = lastFinishedBacktestSessionDate(new Date());
   if (startDate > endDate) throw new BacktestRequestError(`The start date must be on or before the last finished session (${endDate}).`, 400);
   if (await findUnfinishedDownloadJob(symbol)) throw new BacktestRequestError(`${symbol} already has a download queued or running: resume or cancel that one.`, 409);
-  response.status(201).json(await createDownloadJob({ symbol, startDate, endDate }));
+  const putFirst = optionalBoolean(body.putFirst, "putFirst");
+  const pauseRunning = optionalBoolean(body.pauseRunning, "pauseRunning");
+  if (pauseRunning && !putFirst) throw new BacktestRequestError("pauseRunning goes with putFirst: only a download put first can pause the running one.", 400);
+  response.status(201).json(await createDownloadJob({ symbol, startDate, endDate, putFirst, pauseRunning }));
 });
 
 backtestRouter.post("/jobs/:id/cancel", async (request, response) => {
   response.json(await cancelBacktestJob(requireUuidParameter(request.params.id, "job")));
+});
+
+backtestRouter.post("/jobs/:id/put-first", async (request, response) => {
+  const body = (request.body ?? {}) as { pauseRunning?: unknown };
+  response.json(await putDownloadFirst(requireUuidParameter(request.params.id, "job"), { pauseRunning: optionalBoolean(body.pauseRunning, "pauseRunning") }));
 });
 
 backtestRouter.post("/jobs/:id/resume", async (request, response) => {
@@ -107,6 +123,14 @@ backtestRouter.post("/sessions/estimate", async (request, response) => {
 });
 
 // ?symbol=XYZ narrows the option sales, positions, cycles and statistics to one symbol of the session's book.
+// The sessions grow with every run, so they are listed page by page, newest first, filtered by name, symbol and status
+// (BacktestSessionsPageQuery); each carries its latest job's run, since the overview lists only the latest jobs.
+backtestRouter.get("/sessions", async (request, response) => {
+  const validation = validateBacktestSessionsPageQuery(request.query as Record<string, unknown>);
+  if (!validation.ok) throw new BacktestRequestError(validation.error, 400);
+  response.json(await loadBacktestSessionsPage(validation.filters));
+});
+
 backtestRouter.get("/sessions/:id", async (request, response) => {
   let onlySymbol: string | null = null;
   if (typeof request.query.symbol === "string" && request.query.symbol.trim() !== "") {

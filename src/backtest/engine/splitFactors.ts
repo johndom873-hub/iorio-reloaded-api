@@ -4,7 +4,7 @@ import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import type { BacktestDetectedSplit } from "../backtestTypes.js";
 import { requireBacktestDataDirectory } from "../backtestDataDirectory.js";
-import { loadBacktestBarHistory, type BacktestBarHistory } from "./backtestBarHistory.js";
+import { BacktestBarHistory, loadBacktestBarHistory } from "./backtestBarHistory.js";
 import { computeParityStockPrice } from "./backtestBook.js";
 import { BacktestSymbolFile } from "./backtestSymbolFile.js";
 import { loadTreasuryBillRates, type TreasuryBillRates } from "./treasuryBillRates.js";
@@ -326,7 +326,10 @@ export function loadOrInferSplitSchedule(dataDirectory: string, symbol: string, 
   return { schedule, cached: false };
 }
 
-/** After a download: infer (or confirm) the symbol's schedule from its whole file and cache it. */
+/**
+ * After a download: infer (or confirm) the symbol's schedule from its whole file and cache it, against the IBKR daily
+ * bars the file keeps (what a session reads); a file without them yet is read against the local DB's.
+ */
 export async function refreshSplitScheduleForSymbol(symbol: string, connection: Knex = db): Promise<SplitSchedule | null> {
   const ticker: { id: string } | undefined = await connection("tickers").where({ symbol }).first("id");
   if (!ticker) return null;
@@ -335,7 +338,8 @@ export async function refreshSplitScheduleForSymbol(symbol: string, connection: 
   try {
     const completeDaysIso = file.loadDays().filter((day) => day.status === "complete").map((day) => day.tradingDate);
     if (completeDaysIso.length === 0) return null;
-    const bars = await loadBacktestBarHistory(ticker.id, connection);
+    const fileBars = file.loadIbkrDailyBars();
+    const bars = fileBars ? new BacktestBarHistory(fileBars) : await loadBacktestBarHistory(ticker.id, connection);
     const rates = await loadTreasuryBillRates(dataDirectory, completeDaysIso[0]!, completeDaysIso.at(-1)!);
     return loadOrInferSplitSchedule(dataDirectory, symbol, file, completeDaysIso, bars, rates).schedule;
   } finally {

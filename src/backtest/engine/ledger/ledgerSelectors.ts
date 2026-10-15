@@ -213,6 +213,59 @@ export function ledgerCycles(ledger: SimulatedLedger, symbol: string, market: Le
   return deriveCycles(ledgerCycleInput(ledger, symbol, market));
 }
 
+/**
+ * The price per share of the symbol's latest share acquisition (a purchase, or a put assigned at its strike), on the
+ * ledger's (cycle) scale; null when it never acquired any.
+ */
+export function ledgerLatestShareAcquisitionPrice(ledger: SimulatedLedger, symbol: string): number | null {
+  for (let index = ledger.trades.length - 1; index >= 0; index--) {
+    const trade = ledger.trades[index]!;
+    if (trade.side !== "buy" || trade.isClosingTrade) continue;
+    const leg = findLeg(ledger, trade.legId);
+    if (leg?.legType !== "stock" || findPosition(ledger, leg.positionId)?.symbol !== symbol) continue;
+    return trade.price;
+  }
+  return null;
+}
+
+/**
+ * The average price paid for the symbol's shares held now, on the ledger's (cycle) scale; null when it holds none.
+ * Average cost (approved by Marcelo 2026-10-13): an acquisition (a purchase at its fill, a put assigned at its strike;
+ * commissions left out) moves it to (shares held × average + shares acquired × price) ÷ (shares held + shares acquired);
+ * shares leaving (sold, or called away at expiry, which leaves no trade) do not change it; once none are held, the next
+ * acquisition sets it afresh.
+ */
+export function ledgerHeldSharesAverageCost(ledger: SimulatedLedger, symbol: string): number | null {
+  return rememberedForRevision(ledger, `heldSharesAverageCost:${symbol}`, () => {
+    const shareMoves: { at: number; order: number; shares: number; price: number }[] = [];
+    ledger.trades.forEach((trade, index) => {
+      const leg = findLeg(ledger, trade.legId);
+      if (leg?.legType !== "stock" || findPosition(ledger, leg.positionId)?.symbol !== symbol) return;
+      shareMoves.push({ at: trade.executedAt.getTime(), order: index, shares: trade.side === "buy" ? trade.quantity : -trade.quantity, price: trade.price });
+    });
+    for (const position of positionsOfSymbol(ledger, symbol)) {
+      if (position.strategyKey !== "covered_call" || position.closeReason !== "assigned" || position.closedAt === null) continue;
+      const calledAwayAt = position.closedAt.getTime();
+      for (const leg of legsOfPosition(ledger, position.id)) {
+        if (leg.legType === "stock" && leg.exitAt !== null && leg.exitAt.getTime() === calledAwayAt) shareMoves.push({ at: calledAwayAt, order: -1, shares: -leg.quantity, price: leg.exitPrice ?? 0 });
+      }
+    }
+    shareMoves.sort((a, b) => a.at - b.at || a.order - b.order);
+    let sharesHeld = 0;
+    let averageCost = 0;
+    for (const move of shareMoves) {
+      if (move.shares > 0) {
+        averageCost = (sharesHeld * averageCost + move.shares * move.price) / (sharesHeld + move.shares);
+        sharesHeld += move.shares;
+      } else if ((sharesHeld += move.shares) < 1e-9) {
+        sharesHeld = 0;
+        averageCost = 0;
+      }
+    }
+    return sharesHeld > 0 ? averageCost : null;
+  });
+}
+
 /** ledgerOpenCycleSummary per ledger and symbol, kept for one ledger revision (it reads the book alone). */
 const openCycleSummaryByLedger = new WeakMap<SimulatedLedger, Map<string, { revision: number; summary: OpenCycleSummary | null }>>();
 

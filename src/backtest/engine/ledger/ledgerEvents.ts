@@ -252,6 +252,8 @@ export interface OpenCoveredCallEvent {
   sharesPerContract?: number;
   /** Shares as traded today per share on the cycle's scale (the stock commission is charged on shares as traded); 1 when omitted. */
   tradedSharesPerLedgerShare?: number;
+  /** Buy every share the call covers, leaving the symbol's uncovered shares where they are; false when omitted. */
+  buyEveryShare?: boolean;
 }
 
 export interface OpenCoveredCallResult {
@@ -265,8 +267,8 @@ export interface OpenCoveredCallResult {
 }
 
 /**
- * A call sold against shares: the symbol's uncovered shares first, the rest bought (a buy-write when it holds none). The
- * new covered-call position holds the call and exactly the shares it covers. An unstructured position that supplied
+ * A call sold against shares: the symbol's uncovered shares first, the rest bought (a buy-write when it holds none; with
+ * buyEveryShare, all of them bought). The new covered-call position holds the call and exactly the shares it covers. An unstructured position that supplied
  * shares closes (stock rolled into covered call), its leg handed off at entry; what the call did not need goes to a new
  * unstructured position.
  */
@@ -275,7 +277,7 @@ function applyOpenCoveredCall(ledger: SimulatedLedger, event: OpenCoveredCallEve
   requireContractNotHeld(ledger, event.symbol, event.expiryDate, event.strike);
   const sharesPerContract = event.sharesPerContract ?? standardSharesPerContract;
   const sharesNeeded = event.contracts * sharesPerContract;
-  const uncovered = openUncoveredStockLegs(ledger, event.symbol);
+  const uncovered = event.buyEveryShare ? [] : openUncoveredStockLegs(ledger, event.symbol);
   const uncoveredShares = uncovered.reduce((sum, held) => sum + held.leg.quantity, 0);
   const sharesFromHeld = Math.min(uncoveredShares, sharesNeeded);
   const sharesBought = sharesNeeded - sharesFromHeld;

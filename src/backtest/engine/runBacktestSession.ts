@@ -2,7 +2,6 @@ import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import { describeOptionContract } from "../../lib/optionContractLabel.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
-import { maximumSpreadFractionOfMid } from "../../lib/impliedVolatilitySurface.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { isEtfSector, tickerCalendarProfile } from "../../lib/tickerCalendarRelevance.js";
 import { dailyLossPercent } from "../../pluto/systemChecks.js";
@@ -11,12 +10,14 @@ import type { BacktestAction, BacktestCycle, BacktestFill, BacktestPosition, Bac
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { calendarDaysBetween, computeBacktestMetrics, computeDailyReturns, cycleFiguresOf, type AccountDay } from "../sessionAnalytics.js";
-import { loadBacktestBarHistory, type BacktestBarHistory } from "./backtestBarHistory.js";
-import { computeInterestDollars, computeParityStockPrice } from "./backtestBook.js";
+import type { FileIntradayPrices } from "../backtestFileStockBars.js";
+import { BacktestBarHistory, loadBacktestBarHistory } from "./backtestBarHistory.js";
+import { computeInterestDollars } from "./backtestBook.js";
 import { runBacktestLook, type BacktestLookSymbol, type BacktestOptionSale, type BacktestPreparedSymbolDay } from "./backtestLook.js";
 import { buildCycleRecords, buildFillRecords, buildOptionTrades, buildPositionRecords, withPositionCycle, type SimulatedTrade } from "./backtestSessionRecords.js";
 import { captureLookTimeEt, decisionInstantMs, lookInstantMs, selectLookDayQuotes, type BacktestTickerProfile } from "./backtestTickerInputs.js";
 import type { LiveOptionQuote } from "../../lib/signalsLiveScoring.js";
+import { firstTwoSidedMids, markKey, markMidByContract, roundedStrike } from "./backtestOptionMarks.js";
 import { BacktestSymbolFile, type SymbolFileDayIssue, type SymbolFileEndOfDayRow, type SymbolFileQuote } from "./backtestSymbolFile.js";
 import { describeDaysWithoutIntradayQuotes } from "../jobs/backtestSessionRequest.js";
 import { loadMacroEventHistory } from "../macroEventHistory.js";
@@ -35,7 +36,7 @@ import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorOn, type Spli
 import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestTradingCalendar.js";
 import { BacktestScoringPool, scoringWorkerCount } from "./backtestScoringPool.js";
 import { BacktestDayDataReader, type PrefetchedSymbolDay } from "./backtestDayDataReader.js";
-import { loadTreasuryBillRates, type TreasuryBillRates } from "./treasuryBillRates.js";
+import { loadTreasuryBillRates } from "./treasuryBillRates.js";
 import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
 import { runBaselineLook } from "./backtestBaselineLook.js";
 
@@ -44,9 +45,11 @@ import { runBaselineLook } from "./backtestBaselineLook.js";
 // its end date on ONE book: a simulated ledger shaped like the platform's own tables (ledger/), with one cash balance.
 // Session days are the dates on which at least one symbol's file has a complete day; each is replayed as:
 //   a. settle every option whose expiry is before today, at 16:00 of its expiry day and that day's close (IBKR daily
-//      bar, else the price the file's closing quotes of that day imply): in the money by a cent or more it is assigned
-//      (a put's shares come in at the strike, a call's go at the strike), otherwise it expires worthless and a call's
-//      shares stay. With neither close the session fails: an option is never settled on a guessed price or left open.
+//      bar, else the close of IBKR's last 30-minute bar that day): in the money by a cent or more it is assigned (a put's
+//      shares come in at the strike, a call's go at the strike), otherwise it expires worthless and a call's shares
+//      stay. With neither close the session fails: an option is never settled on a guessed price or left open.
+//      Every stock price comes from IBKR's bars kept in the symbol's file (backtestFileStockBars.ts), never from the
+//      option quotes (Marcelo 2026-10-14); the quotes only tell where a split falls (splitFactors.ts).
 //   b. credit interest on cash since the previous session day (DTB3 on or before that day)
 //   c. mark the account at 10:00 and record the day:
 //        account value = cash + shares × the 10:00 stock price − short options × their 10:00 mids
@@ -55,9 +58,9 @@ import { runBaselineLook } from "./backtestBaselineLook.js";
 //   d. the looks inside Pluto's trading window, every half hour the files hold quotes for (10:00 … 15:30) from the
 //      window's start to its end, the end never later than 30 minutes before the day's close (sessionSchedule.ts: 12:30
 //      on a 13:00 day). At each look, in passRunner's order:
-//        - each symbol's quotes of that look give its stock price (put-call parity, as at 10:00) and re-mark its legs;
-//          a symbol whose file has no intraday quotes that day is looked at only at 10:00, and one without a price at a
-//          look is left out of that look
+//        - each symbol's stock price at the look is the close of IBKR's 30-minute bar ending then (10:00 reads the 09:30
+//          bar), and the look's quotes re-mark its legs; a symbol whose file has no intraday quotes that day is looked at
+//          only at 10:00, and one without quotes or a bar at a look is left out of that look
 //        - the daily-loss breaker: the account at the look against its value at the previous session's close; at the
 //          breaker's percentage or worse nothing more is done that day (live needs a human to reset it: assumed done
 //          before the next open)
@@ -167,8 +170,6 @@ async function loadTickerProfile(symbol: string, connection: Knex): Promise<Back
 }
 
 /** A strike as the marks are keyed: rounded, so a strike carried across a split (÷ r) finds the listed one. */
-const roundedStrike = (strike: number) => Math.round(strike * 10_000) / 10_000;
-const markKey = (expiry: string, strike: number, right: "C" | "P") => contractKey({ expiry, strike: roundedStrike(strike), right });
 
 /** The half hours the data files hold quotes for (their intraday_window, every intraday_interval). */
 export const lookGridTimesEt: readonly string[] = ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30"];
@@ -232,30 +233,18 @@ function summarizeDayLooks(looks: readonly DayLookSummary[]): string[] {
  * contracts at the given strikes (as markKey rounds them): the held legs a caller marks. The last quote of a contract
  * counts, as when every quote is read.
  */
-function markMidByContract(quotes: readonly Pick<SymbolFileQuote, "expiry" | "strike" | "right" | "bid" | "ask">[], roundedStrikesWanted: ReadonlySet<number>): Map<string, number> {
-  const marks = new Map<string, number>();
-  for (const quote of quotes) {
-    if (!roundedStrikesWanted.has(roundedStrike(quote.strike))) continue;
-    if (quote.ask === null || !(quote.ask > 0)) continue;
-    const bid = quote.bid !== null && quote.bid > 0 ? quote.bid : 0;
-    if (quote.ask < bid) continue;
-    marks.set(markKey(quote.expiry, quote.strike, quote.right), (bid + quote.ask) / 2);
-  }
-  return marks;
+/** A day's close on IBKR's split-adjusted scale: its daily bar's, else its last 30-minute bar's; null with neither. */
+function adjustedCloseOn(dateIso: string, bars: BacktestBarHistory, intradayPrices: FileIntradayPrices): { close: number; source: "bar" | "intraday_bar" } | null {
+  const dailyClose = bars.closeOn(dateIso);
+  if (dailyClose !== null && dailyClose > 0) return { close: dailyClose, source: "bar" };
+  const lastIntradayClose = intradayPrices.priceAt(dateIso, "16:00");
+  return lastIntradayClose === null ? null : { close: lastIntradayClose, source: "intraday_bar" };
 }
 
-/**
- * The expiry day's close on a cycle's scale: IBKR's split-adjusted close × F(cycle), else the stock price the closing
- * option quotes imply (traded on the expiry day) × F(cycle) ÷ F(expiry). Null when neither exists.
- */
-function settlementCloseOnCycleScale(expiryDate: string, cycleSplitFactor: number, bars: BacktestBarHistory, endOfDayRows: (tradingDate: string) => readonly SymbolFileEndOfDayRow[], rates: TreasuryBillRates, schedule: SplitSchedule): { close: number; source: "bar" | "closing_quotes" } | null {
-  const adjustedClose = bars.closeOn(expiryDate);
-  if (adjustedClose !== null && adjustedClose > 0) return { close: adjustedClose * cycleSplitFactor, source: "bar" };
-  const splitFactorAtExpiry = splitFactorOn(schedule, expiryDate);
-  if (splitFactorAtExpiry === null) return null;
-  const ratePercent = rates.ratePercentOnOrBefore(expiryDate) ?? 0;
-  const parity = computeParityStockPrice(endOfDayRows(expiryDate), expiryDate, ratePercent / 100, null);
-  return parity ? { close: (parity.price * cycleSplitFactor) / splitFactorAtExpiry, source: "closing_quotes" } : null;
+/** The expiry day's close on a cycle's scale: IBKR's split-adjusted close (adjustedCloseOn) × F(cycle). Null without one. */
+function settlementCloseOnCycleScale(expiryDate: string, cycleSplitFactor: number, bars: BacktestBarHistory, intradayPrices: FileIntradayPrices): { close: number; source: "bar" | "intraday_bar" } | null {
+  const close = adjustedCloseOn(expiryDate, bars, intradayPrices);
+  return close === null ? null : { close: close.close * cycleSplitFactor, source: close.source };
 }
 
 function volumeByContract(endOfDayRows: readonly SymbolFileEndOfDayRow[] | null): Map<string, number> | null {
@@ -311,12 +300,13 @@ export interface SimulatedSessionResult {
   runStatistics: BacktestRunStatistics;
 }
 
-/** A symbol's file day at 10:00, from the files alone: its quotes, the stock price they imply, and what Signals reads with them. */
+/** A symbol's file day at 10:00: its quotes, the stock price then (IBKR), and what Signals reads with them. */
 interface DayCapture {
   quotes: SymbolFileQuote[];
-  parity: ReturnType<typeof computeParityStockPrice>;
+  /** The close of IBKR's 09:30 bar on the day's traded scale; null without that bar. */
+  stockPrice: number | null;
   previousSessionVolumeByContract: Map<string, number> | null;
-  /** What the day's inputs are built from; null without a price from the quotes. */
+  /** What the day's inputs are built from; null without a 10:00 price. */
   market: BacktestLookSymbol["market"] | null;
 }
 
@@ -325,7 +315,10 @@ interface SessionSymbol {
   symbol: string;
   file: BacktestSymbolFile;
   profile: BacktestTickerProfile;
+  /** IBKR's daily bars kept in the symbol's file. */
   bars: BacktestBarHistory;
+  /** IBKR's 30-minute bars kept in the file: the stock's price at each look. */
+  intradayPrices: FileIntradayPrices;
   barsOnTradedScale(splitFactor: number): BacktestBarHistory;
   /** IBKR's split-adjusted daily closes, ascending. */
   adjustedDailyCloses: { date: string; close: number }[];
@@ -418,8 +411,17 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const completeDays = completeDaysBySymbol.get(symbol)!;
       const completeDaySet = new Set(completeDays);
       const profile = await loadTickerProfile(symbol, connection);
-      const bars = await loadBacktestBarHistory(profile.tickerId, connection);
-      if (bars.rows.length === 0) throw new Error(`No IBKR daily bars for ${symbol} in the local DB: the forecast and the settlement prices come from them.`);
+      // Every stock price comes from IBKR's bars kept in the file: the forecast, the 10:00 and look prices, the closes.
+      const refreshHint = `press Update on its row in Data files (or run npm run backtest:backfill-file-stock-bars -- ${symbol})`;
+      const dailyBarRows = file.loadIbkrDailyBars();
+      if (!dailyBarRows) throw new Error(`The ${symbol} data file has no IBKR daily bars: ${refreshHint}.`);
+      const bars = new BacktestBarHistory(dailyBarRows);
+      const intradayPrices = file.loadIbkrIntradayPrices(addCalendarDays(session.startDate, -10), session.endDate);
+      if (!intradayPrices) throw new Error(`The ${symbol} data file has no IBKR 30-minute bars: ${refreshHint}.`);
+      const lastOwnDay = [...completeDays].reverse().find((dateIso) => dateIso >= session.startDate && dateIso <= session.endDate)!;
+      for (const [what, lastDate] of [["daily", bars.lastDateIso()], ["30-minute", intradayPrices.lastDate]] as const) {
+        if (lastDate === null || lastDate < lastOwnDay) throw new Error(`The ${symbol} IBKR ${what} bars end ${lastDate ?? "nowhere"}, before the session's last day ${lastOwnDay}: ${refreshHint}.`);
+      }
       // IBKR's bars are split-adjusted, the option file is as traded: F(D) puts every bar price on day D's traded scale.
       const { schedule, cached: scheduleCached } = loadOrInferSplitSchedule(dataDirectory, symbol, file, completeDays, bars, rates);
       const ownSessionDays = sessionDays.filter((dateIso) => completeDaySet.has(dateIso));
@@ -447,6 +449,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         file,
         profile,
         bars,
+        intradayPrices,
         barsOnTradedScale: (factor) => barsOnScale.get(factor) ?? barsOnScale.set(factor, bars.scaled(factor)).get(factor)!,
         adjustedDailyCloses: bars.rows.flatMap((row) => (row.close !== null && row.close > 0 ? [{ date: row.tradingDate, close: row.close }] : [])),
         schedule,
@@ -537,11 +540,13 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       if (capture) return capture;
       const riskFreeRatePercent = riskFreeRatePercentOn(dateIso);
       const quotes = entry.prefetchedDays.get(dateIso)?.quotes() ?? entry.file.loadQuotes(dateIso);
-      const parity = computeParityStockPrice(quotes, dateIso, (riskFreeRatePercent ?? 0) / 100, maximumSpreadFractionOfMid);
+      const adjustedPrice = entry.intradayPrices.priceAt(dateIso, captureLookTimeEt);
+      const splitFactor = splitFactorOnDay(entry, dateIso);
+      const stockPrice = adjustedPrice === null || splitFactor === null ? null : adjustedPrice * splitFactor;
       const previousFileDay = entry.previousFileDayOf.get(dateIso) ?? null;
       const previousSessionVolumeByContract = volumeByContract(previousFileDay === null ? null : entry.endOfDayRows(previousFileDay));
-      const market = parity ? { todayIso: dateIso, quotes, openInterestByContract: entry.prefetchedDays.get(dateIso)?.openInterest() ?? entry.file.loadOpenInterest(dateIso), previousSessionVolumeByContract, stockPrice: parity.price, riskFreeRatePercent } : null;
-      capture = { quotes, parity, previousSessionVolumeByContract, market };
+      const market = stockPrice !== null ? { todayIso: dateIso, quotes, openInterestByContract: entry.prefetchedDays.get(dateIso)?.openInterest() ?? entry.file.loadOpenInterest(dateIso), previousSessionVolumeByContract, stockPrice, riskFreeRatePercent } : null;
+      capture = { quotes, stockPrice, previousSessionVolumeByContract, market };
       entry.captureByDay.set(dateIso, capture);
       if (entry.captureByDay.size > 3) entry.captureByDay.delete(entry.captureByDay.keys().next().value!);
       return capture;
@@ -604,8 +609,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const cycleSplitFactor = cycleSplitFactorFor(ledger, owner.symbol, splitFactorToday(owner));
         const splitFactorAtExpiry = splitFactorOn(owner.schedule, expiryDate);
         const contractLabel = describeOptionContract({ symbol: owner.symbol, strike: roundedStrike((leg.strikePrice! * (splitFactorAtExpiry ?? cycleSplitFactor)) / cycleSplitFactor), right: leg.optionType === "call" ? "C" : "P", expiry: expiryDate, dte: null });
-        const settlementClose = settlementCloseOnCycleScale(expiryDate, cycleSplitFactor, owner.bars, owner.endOfDayRows, rates, owner.schedule);
-        if (!settlementClose) throw new Error(`Cannot settle ${contractLabel}: there is no IBKR daily bar for ${expiryDate} and the data file has no closing quotes for that day to price the stock with. Refresh ${owner.symbol}'s daily bars (or download that day) and run the session again.`);
+        const settlementClose = settlementCloseOnCycleScale(expiryDate, cycleSplitFactor, owner.bars, owner.intradayPrices);
+        if (!settlementClose) throw new Error(`Cannot settle ${contractLabel}: the ${owner.symbol} data file has no IBKR daily or 30-minute bar for ${expiryDate}. Press Update on its row in Data files and run the session again.`);
         const sharesOnCycleScale = leg.quantity * leg.multiplier;
         const tradedScale = cycleSplitFactor / (splitFactorAtExpiry ?? cycleSplitFactor);
         const outcome = settleExpiry(ledger, { legId: leg.id, expiryClose: settlementClose.close });
@@ -618,7 +623,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
               ? `${contractLabel} assigned at the ${closeAsTraded} close: ${sharesAsTraded} shares called away at the strike`
               : `${contractLabel} expired worthless at the ${closeAsTraded} close${outcome === "call_worthless" ? `, ${sharesAsTraded} shares kept` : ""}`,
         );
-        if (settlementClose.source === "closing_quotes") notes.push(noteFor(owner, `settled ${expiryDate} at the closing quotes' price (no IBKR bar)`));
+        if (settlementClose.source === "intraday_bar") notes.push(noteFor(owner, `settled ${expiryDate} at the close of IBKR's last 30-minute bar (no daily bar)`));
         if (tradedScale !== 1) notes.push(`${contractLabel} was held across a split (×${Number(tradedScale.toFixed(4))}): settled on its cycle's scale at ${settlementClose.close.toFixed(2)}`);
       }
 
@@ -635,22 +640,54 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       const spyBaselineDay = spyBuyAndHold?.markDay(todayIso, spyPriceAtTen(todayIso), interestPeriod) ?? null;
 
       // c. The 10:00 marks, symbol by symbol, and what the day's looks score.
-      const riskFreeRatePercent = riskFreeRatePercentOn(todayIso);
       const macroEvents = macroEventsOn(todayIso);
       const openLegs = openLegsOf(ledger);
-      /** Marks a symbol's open legs at a stock price and the quotes of the same instant; an option those quotes lack keeps its last mark. */
-      const markLegs = (entry: SessionSymbol, legsOfSymbol: readonly LedgerLeg[], stockPrice: number, quotes: readonly SymbolFileQuote[], splitFactor: number) => {
-        if (legsOfSymbol.length === 0) return;
+      /**
+       * Marks a symbol's open legs at a stock price and the quotes of the same instant; an option those quotes lack (or
+       * quote with no bid) keeps its last mark. Returns those options.
+       */
+      const markLegs = (entry: SessionSymbol, legsOfSymbol: readonly LedgerLeg[], stockPrice: number, quotes: readonly SymbolFileQuote[], splitFactor: number): LedgerLeg[] => {
+        if (legsOfSymbol.length === 0) return [];
         const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
         const midByContract = markMidByContract(quotes, new Set(legsOfSymbol.flatMap((leg) => (leg.legType === "stock" ? [] : [roundedStrike(leg.strikePrice! / priceToCycleScale)]))));
+        const unmarked: LedgerLeg[] = [];
         for (const leg of legsOfSymbol) {
           if (leg.legType === "stock") priceByLegId.set(leg.id, stockPrice * priceToCycleScale);
           else {
             const mid = midByContract.get(markKey(leg.expiryDate!, leg.strikePrice! / priceToCycleScale, leg.optionType === "call" ? "C" : "P"));
             if (mid !== undefined) priceByLegId.set(leg.id, mid * priceToCycleScale);
+            else unmarked.push(leg);
           }
         }
+        return unmarked;
       };
+      /**
+       * The day's mark of options the 10:00 quotes left unmarked (approved by Marcelo 2026-10-13): the first two-sided quote
+       * later that day, the snapshots after 10:00 in time order, then the close; none when none turns up (the option then
+       * keeps its last mark). It goes into the day's value only: the 10:00 decisions keep the last mark, so nothing from
+       * later in the day steers them; once the day's looks are done it becomes the option's mark.
+       */
+      const laterMarksOfDay = (entry: SessionSymbol, legs: readonly LedgerLeg[], splitFactor: number): Map<string, number> => {
+        const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
+        const strikes = legs.map((leg) => leg.strikePrice! / priceToCycleScale);
+        const lowestStrike = Math.min(...strikes) - 0.005;
+        const highestStrike = Math.max(...strikes) + 0.005;
+        const closeEt = clockTime(closeMinutesByDay.get(todayIso) ?? regularCloseMinutesEt);
+        const snapshots = entry.intradayDays.has(todayIso) ? (entry.prefetchedDays.get(todayIso)?.intradayQuotes(captureLookTimeEt, closeEt, lowestStrike, highestStrike) ?? entry.file.loadIntradayQuotes(todayIso, captureLookTimeEt, closeEt, lowestStrike, highestStrike)) : new Map<string, SymbolFileQuote[]>();
+        const quoteSets = [...[...snapshots.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, quotes]) => quotes), entry.endOfDayRows(todayIso)];
+        const contractOf = (leg: LedgerLeg) => ({ expiry: leg.expiryDate!, strike: leg.strikePrice! / priceToCycleScale, right: leg.optionType === "call" ? ("C" as const) : ("P" as const) });
+        const midByContract = firstTwoSidedMids(quoteSets, legs.map(contractOf));
+        const marks = new Map<string, number>();
+        for (const leg of legs) {
+          const contract = contractOf(leg);
+          const mid = midByContract.get(markKey(contract.expiry, contract.strike, contract.right));
+          if (mid !== undefined) marks.set(leg.id, mid * priceToCycleScale);
+        }
+        return marks;
+      };
+      /** Options the 10:00 quotes left unmarked: their later mark of the day, and the mark they kept for the decisions. */
+      const laterMarkByLegId = new Map<string, number>();
+      const decisionMarkByLegId = new Map<string, number | undefined>();
       /** The symbols scored today, each with its 10:00 capture. */
       const daySymbols: { entry: SessionSymbol; lookSymbol: BacktestLookSymbol; splitFactor: number }[] = [];
       let nothingScoredReason = "no symbol could be scored";
@@ -665,16 +702,22 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const previousFileDay = hasFileDay ? (entry.previousFileDayOf.get(todayIso) ?? null) : null;
         const capture = hasFileDay ? captureOf(entry, todayIso) : null;
         const quotes = capture?.quotes ?? [];
-        const parity = capture?.parity ?? null;
-        const adjustedFallbackPrice: number | null = parity ? null : (entry.bars.previousClose(todayIso)?.close ?? entry.lastAdjustedStockPrice);
-        const stockPrice: number | null = parity?.price ?? (adjustedFallbackPrice === null ? null : adjustedFallbackPrice * splitFactor);
+        const tenOclockPrice = capture?.stockPrice ?? null;
+        const adjustedFallbackPrice: number | null = tenOclockPrice !== null ? null : (entry.bars.previousClose(todayIso)?.close ?? entry.lastAdjustedStockPrice);
+        const stockPrice: number | null = tenOclockPrice ?? (adjustedFallbackPrice === null ? null : adjustedFallbackPrice * splitFactor);
         const legsOfSymbol = openLegs.filter((leg) => symbolOfLeg(leg) === entry);
         if (stockPrice === null) {
-          if (legsOfSymbol.length > 0 || !severalSymbols) throw new Error(`${entry.symbol} ${todayIso}: no 10:00 stock price from the quotes and no earlier close to mark the account with.`);
+          if (legsOfSymbol.length > 0 || !severalSymbols) throw new Error(`${entry.symbol} ${todayIso}: no IBKR 10:00 price and no earlier close to mark the account with.`);
           notes.push(noteFor(entry, "not scored: no data for the day and no earlier close"));
           continue;
         }
-        markLegs(entry, legsOfSymbol, stockPrice, quotes, splitFactor);
+        const unmarkedAtCapture = markLegs(entry, legsOfSymbol, stockPrice, quotes, splitFactor);
+        if (unmarkedAtCapture.length > 0 && hasFileDay) {
+          for (const [legId, mark] of laterMarksOfDay(entry, unmarkedAtCapture, splitFactor)) {
+            laterMarkByLegId.set(legId, mark);
+            decisionMarkByLegId.set(legId, priceByLegId.get(legId));
+          }
+        }
         entry.lastAdjustedStockPrice = stockPrice / splitFactor;
 
         // f. Buy and hold: the symbol's part in whole shares on its first day with a price (as traded that day).
@@ -688,8 +731,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           notes.push(noteFor(entry, `not scored: ${entry.unavailableDaysInPeriod.includes(todayIso) ? "the day could not be downloaded" : todayIso > entry.lastCompleteDay ? `its data file ends ${entry.lastCompleteDay}` : "no data for the day"}; marked at the previous close ${stockPrice.toFixed(2)}`));
           continue;
         }
-        if (!parity) {
-          const reason = `no two-sided call and put pair to price the stock at 10:00; marked at the previous close ${stockPrice.toFixed(2)}`;
+        if (tenOclockPrice === null) {
+          const reason = `no IBKR 30-minute bar ending by 10:00; marked at the previous close ${stockPrice.toFixed(2)}`;
           if (severalSymbols) notes.push(noteFor(entry, `not scored: ${reason}`));
           else nothingScoredReason = reason;
           continue;
@@ -712,7 +755,15 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           },
         });
       }
-      const accountValue = ledgerNetLiquidationValue(ledger, priceByLegId);
+      const accountValueForDecisions = ledgerNetLiquidationValue(ledger, priceByLegId);
+      // A baseline session may leave open options out of the day's value (dayValueOptions "excluded"): cash, premiums
+      // included, and shares at the 10:00 price; the options held at the end are valued apart from the account.
+      const optionsLeftOut = settings.decisionMaker === "baseline" && settings.baseline.dayValueOptions === "excluded";
+      const accountValue = optionsLeftOut
+        ? ledgerNetLiquidationValue(ledger, new Map([...priceByLegId, ...openLegsOf(ledger).filter((leg) => leg.legType === "option").map((leg) => [leg.id, 0] as const)]))
+        : laterMarkByLegId.size === 0
+          ? accountValueForDecisions
+          : ledgerNetLiquidationValue(ledger, new Map([...priceByLegId, ...laterMarkByLegId]));
       const cashAtMark = ledger.cash;
       const exposureDollars = ledgerCommittedDollars(ledger);
       const baselineValue = baselineSharesValue + baselineCash;
@@ -741,16 +792,17 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
        * from the files alone. Only once the day's intraday quotes are read (their strike range takes in the legs held at
        * the first later look), so nothing is read earlier than it would be.
        */
-      const lookAheadBySymbolAndTime = new Map<string, { parity: ReturnType<typeof computeParityStockPrice>; dayQuotes: LiveOptionQuote[] | null }>();
-      const lookAheadOf = (entry: SessionSymbol, lookTimeEt: string): { quotes: SymbolFileQuote[] | undefined; parity: ReturnType<typeof computeParityStockPrice>; dayQuotes: LiveOptionQuote[] | null } | null => {
+      const lookAheadBySymbolAndTime = new Map<string, { stockPrice: number | null; dayQuotes: LiveOptionQuote[] | null }>();
+      const lookAheadOf = (entry: SessionSymbol, lookTimeEt: string): { quotes: SymbolFileQuote[] | undefined; stockPrice: number | null; dayQuotes: LiveOptionQuote[] | null } | null => {
         const quotes = intradayQuotesBySymbol.get(entry.symbol)?.get(lookTimeEt);
         const key = `${entry.symbol}|${lookTimeEt}`;
         let ahead = lookAheadBySymbolAndTime.get(key);
         if (!ahead) {
-          const parity = quotes ? computeParityStockPrice(quotes, todayIso, (riskFreeRatePercent ?? 0) / 100, maximumSpreadFractionOfMid) : null;
+          const adjustedPrice = entry.intradayPrices.priceAt(todayIso, lookTimeEt);
+          const stockPrice = adjustedPrice === null ? null : adjustedPrice * splitFactorToday(entry);
           const prepared = preparedDayBySymbol.get(entry.symbol);
-          const dayQuotes = quotes && parity && prepared ? selectLookDayQuotes(quotes, prepared.capturedContracts, todayIso, parity.price, prepared.referenceVolatility, new Date(lookInstantMs(todayIso, lookTimeEt)).toISOString()) : null;
-          lookAheadBySymbolAndTime.set(key, (ahead = { parity, dayQuotes }));
+          const dayQuotes = quotes && stockPrice !== null && prepared ? selectLookDayQuotes(quotes, prepared.capturedContracts, todayIso, stockPrice, prepared.referenceVolatility, new Date(lookInstantMs(todayIso, lookTimeEt)).toISOString()) : null;
+          lookAheadBySymbolAndTime.set(key, (ahead = { stockPrice, dayQuotes }));
         }
         return { quotes, ...ahead };
       };
@@ -768,7 +820,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           const lookTimesAhead = lookTimes.slice(lookTimes.indexOf(lookTimeEt) + 1, lookTimes.indexOf(lookTimeEt) + 1 + scoringPool.laneCountOf(entry.symbol));
           for (const lookTimeAhead of lookTimesAhead) {
             const ahead = lookAheadOf(entry, lookTimeAhead)!;
-            if (ahead.parity && ahead.dayQuotes) scoringPool.warm(entry.symbol, { todayIso, dayQuotes: ahead.dayQuotes, spotPrice: ahead.parity.price, scoredAtMs: lookInstantMs(todayIso, lookTimeAhead) });
+            if (ahead.stockPrice !== null && ahead.dayQuotes) scoringPool.warm(entry.symbol, { todayIso, dayQuotes: ahead.dayQuotes, spotPrice: ahead.stockPrice, scoredAtMs: lookInstantMs(todayIso, lookTimeAhead) });
           }
         }
       };
@@ -790,12 +842,12 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           for (const { entry, lookSymbol, splitFactor } of daySymbols) {
             if (!entry.intradayDays.has(todayIso)) continue;
             intradayQuotesOf(entry, lookSymbol.market.stockPrice, splitFactor);
-            const { quotes, parity, dayQuotes } = lookAheadOf(entry, lookTimeEt)!;
-            // Without a price from this look's quotes the symbol keeps its last marks and is left out of the look.
-            if (!quotes || !parity) continue;
-            markLegs(entry, openLegsAtLook.filter((leg) => symbolOfLeg(leg) === entry), parity.price, quotes, splitFactor);
-            entry.lastAdjustedStockPrice = parity.price / splitFactor;
-            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: parity.price, ...(dayQuotes ? { dayQuotes } : {}) } });
+            const { quotes, stockPrice: lookPrice, dayQuotes } = lookAheadOf(entry, lookTimeEt)!;
+            // Without this look's quotes or an IBKR price then, the symbol keeps its last marks and is left out of the look.
+            if (!quotes || lookPrice === null) continue;
+            markLegs(entry, openLegsAtLook.filter((leg) => symbolOfLeg(leg) === entry), lookPrice, quotes, splitFactor);
+            entry.lastAdjustedStockPrice = lookPrice / splitFactor;
+            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice, ...(dayQuotes ? { dayQuotes } : {}) } });
           }
         }
         if (lookSymbols.length === 0) continue;
@@ -814,7 +866,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
 
         // The system checks, in passRunner's order. The daily-loss breaker stops Pluto for the rest of the day.
-        const accountValueAtLook = isCaptureLook ? accountValue : ledgerNetLiquidationValue(ledger, priceByLegId);
+        const accountValueAtLook = isCaptureLook ? accountValueForDecisions : ledgerNetLiquidationValue(ledger, priceByLegId);
         const dayLossPercent = dailyLossPercent(accountValueAtLook, previousEndOfDayAccountValue);
         if (dayLossPercent !== null && dayLossPercent <= -pluto.dailyLossBreakerPct) {
           runStatistics.dailyLossBreakerTripDates.push(todayIso);
@@ -892,6 +944,11 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       days.push({ tradingDate: todayIso, accountValue, cash: cashAtMark, exposureDollars, interestDollars, baselineValue, baselineExposureDollars: baselineSharesValue, baselineInterestDollars, spyBaselineValue: spyBaselineDay?.value ?? null, spyBaselineExposureDollars: spyBaselineDay?.exposureDollars ?? null, spyBaselineInterestDollars: spyBaselineDay?.interestDollars ?? null, decisionSummary: [...summaryParts, ...checkNotes, ...notes].join(" · "), looksRun: looksOfDay.length, actionsTaken: filledActionsToday });
 
       // e. The account at the close: what tomorrow's daily-loss breaker measures against.
+      // The later marks of the day replace the ones the 10:00 decisions kept, unless a later look marked the option since.
+      const openLegIdsAfterLooks = new Set(openLegsOf(ledger).map((leg) => leg.id));
+      for (const [legId, mark] of laterMarkByLegId) {
+        if (openLegIdsAfterLooks.has(legId) && priceByLegId.get(legId) === decisionMarkByLegId.get(legId)) priceByLegId.set(legId, mark);
+      }
       const openLegsAtClose = openLegsOf(ledger);
       const closingPriceByLegId = new Map(priceByLegId);
       for (const entry of symbols) {
@@ -900,8 +957,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         const splitFactor = splitFactorToday(entry);
         const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
         const endOfDayRows = entry.completeDays.has(todayIso) ? entry.endOfDayRows(todayIso) : [];
-        const adjustedClose = entry.bars.closeOn(todayIso);
-        const closeAsTraded = adjustedClose !== null && adjustedClose > 0 ? adjustedClose * splitFactor : (computeParityStockPrice(endOfDayRows, todayIso, (riskFreeRatePercent ?? 0) / 100, null)?.price ?? null);
+        const adjustedClose = adjustedCloseOn(todayIso, entry.bars, entry.intradayPrices);
+        const closeAsTraded = adjustedClose === null ? null : adjustedClose.close * splitFactor;
         const closingMidByContract = markMidByContract(endOfDayRows, new Set(legsOfSymbol.flatMap((leg) => (leg.legType === "stock" ? [] : [roundedStrike(leg.strikePrice! / priceToCycleScale)]))));
         for (const leg of legsOfSymbol) {
           if (leg.legType === "stock") {

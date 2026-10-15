@@ -55,7 +55,7 @@ Example: $600,000 cash, rate 4.2%, Friday → Monday (3 days): 600,000 × 0.042 
 
 ## Simulation rules
 
-- **Stock price at 10:00**: from the option quotes, because ThetaData's free stock tier has no intraday history before 2023-06: the median of C − P + K × e^(−r × T) over the three strikes nearest the money of the nearest expiry with at least one day left.
+- **Stock price at 10:00**: the close of IBKR's 30-minute bar ending at 10:00 (the 09:30 bar), kept in the data file (DATA-FILES.md, "IBKR stock bars"), × the day's split factor to put it on the traded scale. Never from the option quotes (Marcelo 2026-10-14). Without that bar the day is marked at the previous close and nothing is traded; the day's summary says so.
 - **Forecast**: the valuation model's forecast (Yang-Zhang over the last 21 sessions) on IBKR daily bars up to the previous close, as Pluto does live.
 - **Filters and sizing**: Pluto's filters, ranking and sizing with the session's settings. Open interest is the previous day's (what Pluto sees at 10:00). Volume is the previous day's full-day volume, because the history has no volume as of 10:00. Expiries spanning a known earnings date are skipped.
 - **Trade**: Pluto's deterministic top pick (the first of Pluto's own ranking of the eligible candidates). The AI model's own choice is not replayed.
@@ -69,7 +69,7 @@ Replaces the **Trade** and **Settlement** rules above: the session keeps a simul
 
 **The day, in order**
 
-1. Options whose expiry is before today are settled at 16:00 ET of their expiry day, on that day's close (IBKR daily bar; when IBKR has no bar for the day, the stock price the file's closing quotes imply). With neither, the session fails and names the contract: nothing is settled on a guessed price.
+1. Options whose expiry is before today are settled at 16:00 ET of their expiry day, on that day's close (IBKR daily bar; without one, the close of IBKR's last 30-minute bar that day). With neither, the session fails and names the contract: nothing is settled on a guessed price.
 2. Interest on cash since the previous session day (formula above).
 3. The account is marked at 10:00. **The day's row is this mark, taken before the day's looks**: what the looks do shows in the account from the next session day. The last session day's actions are therefore in the book (positions, fills, cycles) but outside the account series and the metrics.
 4. The looks inside Pluto's trading window (below): at each, Pluto's passes on that look's quotes and the book, until a pass takes no action.
@@ -153,8 +153,8 @@ Buy and hold with several symbols: see Baselines below.
 **Looks inside Pluto's window** (step 5)
 
 - **When**: the half hours the data files hold quotes for (10:00, 10:30 … 15:30 ET) from the session's window start through its window end, the end never later than 30 minutes before the day's close (12:30 on a 13:00 day). With the window 10:00–15:30: 12 looks on a full day, 6 on a 13:00 day. The quotes stored after an early close repeat the close and are never read.
-- **Which symbols**: a symbol is looked at after 10:00 only on the days its file has intraday quotes; otherwise it gets the 10:00 look only (the session's notes count those days). A symbol whose quotes at a look give no stock price is left out of that look.
-- **Stock price at a look**: put-call parity on that look's quotes, as at 10:00 (quotes with a spread of at most 50% of the mid).
+- **Which symbols**: a symbol is looked at after 10:00 only on the days its file has intraday quotes; otherwise it gets the 10:00 look only (the session's notes count those days). A symbol without quotes or an IBKR price at a look is left out of that look.
+- **Stock price at a look**: the close of IBKR's last 30-minute bar ending by the look (10:30 reads the 10:00 bar), × the day's split factor, as at 10:00.
 - **Scoring at a look after 10:00**, as live scores between two captures:
   - the surface stays the 10:00 fit and follows the stock by sticky moneyness: each expiry's forward × (look price ÷ 10:00 price);
   - the look's quotes replace the 10:00 quotes of every captured contract, and add the contracts the capture's strike window takes at the look's price; a contract the look does not quote on both sides keeps its 10:00 quote, which Pluto's quote-age rule (10 minutes) then refuses;

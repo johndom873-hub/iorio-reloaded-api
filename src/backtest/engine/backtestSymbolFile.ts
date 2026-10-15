@@ -1,11 +1,14 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
+import { readFileDailyBars, readFileIntradayPrices, type FileIntradayPrices } from "../backtestFileStockBars.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
+import type { StoredDailyBar } from "./backtestBarHistory.js";
 
 // Read access to one symbol's ThetaData file (docs/backtesting/DATA-FILES.md, schema versions 1 to 3): the days it
 // holds, each day's 10:00 quotes, its end-of-day rows and the open interest published for it, and, where the file has
 // them, the quotes at each look inside the day (intraday_days, intraday_quotes) and what the downloader could not
-// retrieve (day_issues, unavailable_days). Read-only; the downloader writes it.
+// retrieve (day_issues, unavailable_days); and IBKR's stock bars Node keeps in it (the stock prices). Read-only; the
+// downloader and the IBKR bars step write it.
 
 export interface SymbolFileDay {
   tradingDate: string;
@@ -105,6 +108,16 @@ export class BacktestSymbolFile {
 
   loadDays(): SymbolFileDay[] {
     return this.daysStatement.all() as unknown as SymbolFileDay[];
+  }
+
+  /** IBKR's daily bars kept in the file (backtestFileStockBars.ts), ascending; null when it has none. */
+  loadIbkrDailyBars(): StoredDailyBar[] | null {
+    return readFileDailyBars(this.database);
+  }
+
+  /** IBKR's 30-minute bars kept in the file, as the stock's price at a look; null when it has none. */
+  loadIbkrIntradayPrices(fromDateIso: string, toDateIso: string): FileIntradayPrices | null {
+    return readFileIntradayPrices(this.database, fromDateIso, toDateIso);
   }
 
   loadQuotes(tradingDate: string): SymbolFileQuote[] {

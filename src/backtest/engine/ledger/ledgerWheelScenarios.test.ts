@@ -3,7 +3,7 @@ import { easternInstant } from "../../../lib/easternIsoDate.js";
 import { checkCalledAway, commissionPerShare } from "../../../pluto/heldShareCalls.js";
 import { buyBackCoveredCallKeepingShares, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
 import { stockPurchaseFillPrice, stockSaleFillPrice } from "./ledgerFills.js";
-import { ledgerBreakEvenForPosition, ledgerCycles, ledgerFreeShares, ledgerOpenCycleSummary, ledgerTotalRealizedPnl } from "./ledgerSelectors.js";
+import { ledgerBreakEvenForPosition, ledgerCycles, ledgerFreeShares, ledgerHeldSharesAverageCost, ledgerLatestShareAcquisitionPrice, ledgerOpenCycleSummary, ledgerTotalRealizedPnl } from "./ledgerSelectors.js";
 import { createSimulatedLedger, type SimulatedLedger } from "./simulatedLedger.js";
 
 // Whole wheels through the simulated ledger, worked by hand, read back through the live cycle engine (deriveCycles),
@@ -16,6 +16,58 @@ const newLedger = () => createSimulatedLedger(startingCash, easternInstant("2026
 const symbolCash = (ledger: SimulatedLedger, symbol: string) => ledger.cashJournal.filter((entry) => entry.symbol === symbol).reduce((sum, entry) => sum + entry.amount, 0);
 // Pluto's minimum profit on shares: 1% of their cost, at least $50.
 const profitFloorSettings = { unstructuredCloseMinPct: 1, unstructuredCloseMinDollars: 50 };
+
+describe("ledgerLatestShareAcquisitionPrice", () => {
+  it("reads the latest purchase or assignment of the symbol's shares, not their average cost", () => {
+    const ledger = newLedger();
+    expect(ledgerLatestShareAcquisitionPrice(ledger, "WHL")).toBeNull();
+    openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-06", strike: 52, contracts: 1, callFillPrice: 0.9, stockFillPrice: 50.01, at: decisionAt("2026-03-02"), actionId: "action-1", splitFactorToday: 1 });
+    openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-06", strike: 50, contracts: 1, callFillPrice: 1.1, stockFillPrice: 47.01, at: decisionAt("2026-03-03"), actionId: "action-2", splitFactorToday: 1 });
+    expect(ledgerLatestShareAcquisitionPrice(ledger, "WHL")).toBe(47.01);
+    // Another symbol's purchase and an assignment of this one.
+    openCoveredCall(ledger, { symbol: "OTH", expiryDate: "2026-03-06", strike: 20, contracts: 1, callFillPrice: 0.5, stockFillPrice: 19.01, at: decisionAt("2026-03-04"), actionId: "action-3", splitFactorToday: 1 });
+    expect(ledgerLatestShareAcquisitionPrice(ledger, "WHL")).toBe(47.01);
+    const put = openCashSecuredPut(ledger, { symbol: "WHL", expiryDate: "2026-03-06", strike: 45, contracts: 1, fillPrice: 1, at: decisionAt("2026-03-04"), actionId: "action-4", splitFactorToday: 1 });
+    settleExpiry(ledger, { legId: put.legId, expiryClose: 44 });
+    expect(ledgerLatestShareAcquisitionPrice(ledger, "WHL")).toBe(45);
+  });
+});
+
+describe("ledgerHeldSharesAverageCost", () => {
+  // Marcelo's worked example: hold 300 @ $50, buy 100 @ $40 → $47.50; 100 called away → 300 left, still $47.50; buy 100 @ $60
+  // → (300 × 47.50 + 100 × 60) ÷ 400 = $50.625 (the cycle's cost per share acquired counts the 100 called away: $50.00).
+  it("averages the shares held over their fills, unchanged by shares leaving, afresh once none are held", () => {
+    const ledger = newLedger();
+    expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBeNull();
+    openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-06", strike: 56, contracts: 3, callFillPrice: 0.9, stockFillPrice: 50, at: decisionAt("2026-03-02"), actionId: "action-1", splitFactorToday: 1 });
+    const second = openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-06", strike: 48, contracts: 1, callFillPrice: 1.1, stockFillPrice: 40, at: decisionAt("2026-03-03"), actionId: "action-2", splitFactorToday: 1 });
+    expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBeCloseTo(47.5, 10);
+    // 6 Mar close 55: the $48 call takes its 100 shares away; the $56 call expires and its 300 shares wait uncovered.
+    const firstCallLegId = ledger.legs.find((leg) => leg.legType === "option" && leg.strikePrice === 56)!.id;
+    expect(settleExpiry(ledger, { legId: second.callLegId, expiryClose: 55 })).toBe("call_away");
+    expect(settleExpiry(ledger, { legId: firstCallLegId, expiryClose: 55 })).toBe("call_worthless");
+    expect(ledgerFreeShares(ledger, "WHL")).toBe(300);
+    expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBeCloseTo(47.5, 10);
+    // A buy-write buying every share leaves the 300 uncovered ones where they are.
+    const third = openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-13", strike: 62, contracts: 1, callFillPrice: 1, stockFillPrice: 60, at: decisionAt("2026-03-09"), actionId: "action-3", splitFactorToday: 1, buyEveryShare: true });
+    expect(third).toMatchObject({ sharesBought: 100, sharesFromHeld: 0, leftoverPositionId: null });
+    expect(ledgerFreeShares(ledger, "WHL")).toBe(300);
+    expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBeCloseTo(50.625, 10);
+    const cycle = ledgerOpenCycleSummary(ledger, "WHL")!;
+    expect(cycle.acquisitionCost / cycle.sharesAcquired).toBeCloseTo(50, 1);
+    // Selling the 300 uncovered shares leaves the average; the last 100 called away clear it; the next purchase sets it.
+    const pool = ledger.positions.find((position) => position.status === "open" && position.strategyKey === "unstructured")!;
+    sellShares(ledger, { positionId: pool.id, shares: 300, fillPrice: 58, at: decisionAt("2026-03-10"), actionId: "action-4" });
+    expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBeCloseTo(50.625, 10);
+    expect(settleExpiry(ledger, { legId: third.callLegId, expiryClose: 63 })).toBe("call_away");
+    expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBeNull();
+    openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-20", strike: 66, contracts: 2, callFillPrice: 1, stockFillPrice: 64, at: decisionAt("2026-03-16"), actionId: "action-5", splitFactorToday: 1 });
+    expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBe(64);
+    // Another symbol's shares never enter it.
+    openCoveredCall(ledger, { symbol: "OTH", expiryDate: "2026-03-20", strike: 21, contracts: 1, callFillPrice: 0.5, stockFillPrice: 19, at: decisionAt("2026-03-16"), actionId: "action-6", splitFactorToday: 1 });
+    expect(ledgerHeldSharesAverageCost(ledger, "WHL")).toBe(64);
+  });
+});
 
 describe("put assigned, a call expires, the next call takes the shares", () => {
   //  2 Mar  sell 1 put $50 6 Mar @ 1.20      cash +120 − 0.68 = +119.32      put-only break-even 50 − 1.1932 = 48.8068

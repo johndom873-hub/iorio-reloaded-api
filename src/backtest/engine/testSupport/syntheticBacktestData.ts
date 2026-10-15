@@ -1,15 +1,18 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { blackScholesPriceOnForward, yearsBetweenIsoDates } from "../../../lib/impliedVolatilitySurface.js";
+import { easternInstant } from "../../../lib/easternIsoDate.js";
+import { blackScholesPriceOnForward, maximumSpreadFractionOfMid, yearsBetweenIsoDates } from "../../../lib/impliedVolatilitySurface.js";
 import type { PlutoSettings } from "../../../pluto/settingsStore.js";
 import type { BacktestSettings } from "../../backtestTypes.js";
+import { fileIntradayBarMinutes, writeFileStockBars, type FileIntradayBar } from "../../backtestFileStockBars.js";
 import type { StoredDailyBar } from "../backtestBarHistory.js";
-import type { SymbolFileQuote } from "../backtestSymbolFile.js";
+import { computeParityStockPrice } from "../backtestBook.js";
+import { BacktestSymbolFile, type SymbolFileQuote } from "../backtestSymbolFile.js";
 import type { HistoricalMacroEvent, MacroEventHistoryCache } from "../../macroEventHistory.js";
 
 // Synthetic market data for the engine's tests: a seeded random-walk bar history, Black-Scholes option quotes at a flat
-// implied volatility, settings shaped like the dev database's, and a schema-version-1 symbol file.
+// implied volatility, settings shaped like the dev database's, a schema-version-1 symbol file and its IBKR bars.
 
 /** Deterministic standard normal draws (LCG + Box-Muller), so a test's data is the same on every run. */
 export function seededNormalGenerator(seed: number): () => number {
@@ -240,5 +243,43 @@ export function writeSyntheticSymbolFile(filePath: string, symbol: string, days:
     }
   } finally {
     database.close();
+  }
+}
+
+/**
+ * Writes IBKR's bars into a synthetic symbol file (backtestFileStockBars.ts): `dailyBars`, and 30-minute bars at the
+ * prices the engine read from the file's own quotes before it took every stock price from IBKR (put-call parity,
+ * backtestBook.ts), so a test keeps the numbers it was written with. The 09:30 bar closes at the 10:00 quotes' price, a
+ * bar ends at each later look at that look's, and the 15:30 bar at the closing quotes' (the old settlement and closing
+ * fallback). A day whose quotes give no price gets no bar. `splitFactorOn` puts the quotes' as-traded prices on the
+ * bars' split-adjusted scale.
+ */
+export function writeSyntheticIbkrBarsFromQuotes(filePath: string, dailyBars: readonly StoredDailyBar[], riskFreeRatePercent: number, splitFactorOn: (dateIso: string) => number = () => 1): void {
+  const reader = new BacktestSymbolFile(new DatabaseSync(filePath, { readOnly: true }));
+  const intraday: FileIntradayBar[] = [];
+  const rate = riskFreeRatePercent / 100;
+  try {
+    const intradayDays = reader.loadIntradayDays();
+    for (const { tradingDate } of reader.loadDays().filter((day) => day.status === "complete")) {
+      const barEndingAt = (lookTimeEt: string, price: number | undefined) => {
+        if (price === undefined) return;
+        const end = easternInstant(tradingDate, Number(lookTimeEt.slice(0, 2)), Number(lookTimeEt.slice(3, 5)));
+        const close = price / splitFactorOn(tradingDate);
+        intraday.push({ barStart: new Date(end.getTime() - fileIntradayBarMinutes * 60_000), open: close, high: close, low: close, close, volume: 1_000 });
+      };
+      barEndingAt("10:00", computeParityStockPrice(reader.loadQuotes(tradingDate), tradingDate, rate, maximumSpreadFractionOfMid)?.price);
+      if (intradayDays.has(tradingDate)) {
+        for (const [lookTimeEt, quotes] of reader.loadIntradayQuotes(tradingDate, "10:00", "15:30", 0, Number.MAX_SAFE_INTEGER)) barEndingAt(lookTimeEt, computeParityStockPrice(quotes, tradingDate, rate, maximumSpreadFractionOfMid)?.price);
+      }
+      barEndingAt("16:00", computeParityStockPrice(reader.loadEndOfDay(tradingDate), tradingDate, rate, null)?.price);
+    }
+  } finally {
+    reader.close();
+  }
+  const writer = new DatabaseSync(filePath);
+  try {
+    writeFileStockBars(writer, { daily: dailyBars, intraday, fetchedAt: new Date("2026-10-14T00:00:00Z") });
+  } finally {
+    writer.close();
   }
 }
