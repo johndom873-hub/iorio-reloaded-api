@@ -18,6 +18,7 @@ Multi-strategy options trading platform used by two people: Marce (Marcelo), the
 - **Data tables**: every data table gets a gear icon above it opening a popover with per-column show/hide checkboxes. All columns visible by default. Selections auto-save to localStorage (no explicit save button).
 - **Personalization** (column visibility, UI prefs) is localStorage-only — no per-user server-side settings. All users share the same access level.
 - **Mobile + desktop**: every screen and function must work on both. Test both explicitly (Playwright viewport testing).
+- **Pluto's How it works tab**: the Pluto screen explains each execution strategy in plain language (app `src/components/pluto/PlutoHowItWorksTab.tsx`), with every number from `GET /pluto/how-it-works` (`src/pluto/howItWorks.ts`). A change to a rule, setting or constant the tab describes updates the tab's wording, and the endpoint if a new number is quoted, in the same change. `src/pluto/howItWorks.test.ts` pins every quoted number: when it fails, check the tab's wording against the new value before updating the expectation.
 
 ## Progress tracking
 See `PROGRESS.md` in this repo for: what's planned, what's built, current state of each component, and a running list of optional/future features awaiting a decision. Update it as work happens — this is the persistent memory of the project across sessions.

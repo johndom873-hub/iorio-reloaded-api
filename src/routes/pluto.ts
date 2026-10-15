@@ -9,6 +9,7 @@ import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
 import { loadLadderSettingsForTicker } from "../pluto/ladderSettings.js";
+import { loadPlutoHowItWorks } from "../pluto/howItWorks.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
 import { plutoEventCategories, plutoEventCategoryByType, plutoEventTypesInCategories, recordPlutoEvent, type PlutoEventCategory } from "../pluto/ledger.js";
 import { cancelPlutoOrders, countPlutoWorkingOrders, loadPlutoWorkingOrders } from "../pluto/orders.js";
@@ -384,6 +385,11 @@ plutoRouter.put("/ticker-settings/:symbol", async (request: Request, response: R
     }
     throw error;
   }
+});
+
+/** Every number the "How it works" tab quotes for both strategies (src/pluto/howItWorks.ts). */
+plutoRouter.get("/how-it-works", async (_request: Request, response: Response) => {
+  response.json(await loadPlutoHowItWorks());
 });
 
 /** The CC + Put Ladder's settings for one ticker, as loadLadderSettingsForTicker gives them (backtest names and units). */
