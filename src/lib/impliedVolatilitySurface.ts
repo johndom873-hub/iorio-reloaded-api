@@ -61,6 +61,14 @@ export function computeForwardPrice(spotPrice: number, riskFreeRate: number, yea
   return (spotPrice - presentValueOfDividends) * Math.exp(riskFreeRate * yearsToExpiry);
 }
 
+/**
+ * Sticky moneyness: a forward found at one stock price (the 10:00 fit's parity forward), read at another by moving it in
+ * proportion. Pluto's live scoring, the CC + Put Ladder live and its backtest all use it (Marcelo 2026-10-15).
+ */
+export function forwardAtSpot(anchorForward: number, anchorSpotPrice: number, spotPrice: number): number {
+  return anchorForward * (spotPrice / anchorSpotPrice);
+}
+
 export function yearsBetweenIsoDates(fromIso: string, toIso: string): number {
   return (Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / 86_400_000 / calendarDaysPerYear;
 }

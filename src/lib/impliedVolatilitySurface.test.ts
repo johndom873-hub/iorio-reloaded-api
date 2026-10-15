@@ -6,6 +6,7 @@ import {
   checkCalendarArbitrage,
   computeForwardPrice,
   fitRawSvi,
+  forwardAtSpot,
   fitSviSlice,
   impliedVolatilityFromPrice,
   isRegularDividendCadence,
@@ -40,6 +41,14 @@ describe("computeForwardPrice", () => {
     expect(computeForwardPrice(100, 0.04, 0.5, [{ amount: 1, yearsToExDividend: 0.5 }])).toBeCloseTo(plain, 12);
     expect(computeForwardPrice(100, 0.04, 0.5, [{ amount: 1, yearsToExDividend: 0.9 }])).toBeCloseTo(plain, 12);
     expect(computeForwardPrice(100, 0.04, 0.5, [{ amount: 1, yearsToExDividend: -0.1 }])).toBeCloseTo(plain, 12);
+  });
+});
+
+describe("forwardAtSpot", () => {
+  it("moves the anchored forward in proportion to the stock price", () => {
+    // Fitted at 10:00: forward 99.83 with the stock at 100; the stock at 102 later reads the forward 2% higher.
+    expect(forwardAtSpot(99.83, 100, 102)).toBeCloseTo(101.8266, 9);
+    expect(forwardAtSpot(99.83, 100, 100)).toBe(99.83);
   });
 });
 

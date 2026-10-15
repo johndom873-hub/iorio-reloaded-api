@@ -1,4 +1,4 @@
-import { sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
+import { forwardAtSpot, sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
 import { easternInstant, easternIsoDate, easternMinutesOfDay } from "./easternIsoDate.js";
 import type { TradingSession } from "./marketSessionStatus.js";
 import { varianceSessionsToExpiry } from "./varianceClock.js";
@@ -66,7 +66,7 @@ export function computeDayChangePercent(spotPrice: number | null, previousClose:
  */
 export function scaleSlicesToLiveSpot(slices: SignalSurfaceSlice[], snapshotSpot: number, liveSpot: number): SignalSurfaceSlice[] {
   if (!(snapshotSpot > 0) || !(liveSpot > 0) || liveSpot === snapshotSpot) return slices;
-  return slices.map((slice) => ({ ...slice, forwardPrice: slice.forwardPrice * (liveSpot / (slice.fitUnderlyingPrice ?? snapshotSpot)) }));
+  return slices.map((slice) => ({ ...slice, forwardPrice: forwardAtSpot(slice.forwardPrice, slice.fitUnderlyingPrice ?? snapshotSpot, liveSpot) }));
 }
 
 /**
