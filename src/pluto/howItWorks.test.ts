@@ -13,7 +13,7 @@ const settings: PlutoSettings = {
   capitalBudgetPct: 50, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 15, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeYieldPct: 15, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 1, stressSigmas: 2,
-  windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 5, spyStressBreakerPct: 3,
+  windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
   maxEdgeMarginDriftPts: 10, tickerCooldownMinutes: 60, maxFillSlippagePct: 5,
   modelId: "openai/gpt-6-luna", reasoningEffort: "medium", callTimeoutSeconds: 90, dailyCostCeilingUsd: 1, confidenceFloor: 0.6, consecutiveModelFailuresBreaker: 3, promptVersion: "v4.4",
   daySignalsPollSeconds: 1, burstLines: 10, burstSettleSeconds: 4, perTickerModelCooldownMinutes: 5, maxEnabledTickers: 15, messageRateLimitPerSecond: 8,
@@ -26,7 +26,7 @@ const figures = { unfilledOrderCancelMinutes: 15, todayIso: "2026-10-15" };
 describe("buildPlutoHowItWorks", () => {
   it("quotes every number the tab shows, at today's defaults and constants", () => {
     const { ladder, edgeMargin, ...rest } = buildPlutoHowItWorks(settings, figures);
-    expect(rest).toEqual({ activeStrategy: "edge_margin", shared: { capitalBudgetPct: 50, dailyLossBreakerPct: 5, unfilledOrderCancelMinutes: 15 } });
+    expect(rest).toEqual({ activeStrategy: "edge_margin", shared: { capitalBudgetPct: 50, dailyLossBreakerPct: 2, unfilledOrderCancelMinutes: 15 } });
     const { example: ladderExample, ...ladderValues } = ladder;
     expect(ladderValues).toEqual({
       minAbsDelta: 0.05, maxAbsDelta: 0.3, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 50, minimumBid: 0.05, maxVolumeSharePct: 20,
