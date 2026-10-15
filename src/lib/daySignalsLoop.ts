@@ -761,17 +761,20 @@ export class DaySignalsLoop {
 
   /**
    * Alerts held legs whose |delta| reached assignment risk, and re-arms flagged ones that fell back (decideAssignmentRiskAlert).
-   * A leg expiring today has no surface delta (no slice is fitted for a same-day expiry): its own live quote's delta stands in
-   * (quoteOwnDelta.ts, Marcelo 2026-10-15). Other unscored legs (no delta) are skipped.
+   * A leg with no surface delta (expiring today, when no slice is fitted for a same-day expiry, or on a poorly fitted
+   * slice) takes its own live quote's delta (quoteOwnDelta.ts, Marcelo 2026-10-15): time to expiry is the hours to today's
+   * close on its expiry day, else the calendar days to expiry ÷ 365 as the surface counts them. Legs with no two-sided
+   * quote either are skipped.
    */
   private async checkAssignmentRisk(symbol: string, heldLegs: HeldLegScore[], tradingDateIso: string, spotPrice: number | null, riskFreeRate: number): Promise<void> {
-    const expiringToday = heldLegs.filter((leg) => leg.delta === null && leg.expiry === tradingDateIso && leg.bid !== null && leg.ask !== null);
-    let yearsToClose: number | null = null;
-    if (expiringToday.length > 0 && spotPrice !== null) yearsToClose = yearsToSessionClose(this.deps.now(), await this.deps.sessionCloseMinutesEt(tradingDateIso));
+    const withoutDelta = spotPrice === null ? [] : heldLegs.filter((leg) => leg.delta === null && leg.bid !== null && leg.ask !== null);
+    const yearsToTodaysClose = withoutDelta.some((leg) => leg.expiry === tradingDateIso) ? yearsToSessionClose(this.deps.now(), await this.deps.sessionCloseMinutesEt(tradingDateIso)) : 0;
     const withDelta = heldLegs.map((leg) => {
-      if (leg.delta !== null || yearsToClose === null || !expiringToday.includes(leg)) return leg;
-      const delta = deltaFromQuoteMid({ bid: leg.bid, ask: leg.ask, spotPrice: spotPrice!, strike: leg.strike, isCall: leg.right === "C", yearsToExpiry: yearsToClose, riskFreeRate });
-      return delta === null ? leg : { ...leg, delta, dte: 0 };
+      if (!withoutDelta.includes(leg)) return leg;
+      const daysToExpiry = calendarDaysUntilExpiry(tradingDateIso, leg.expiry.replaceAll("-", ""));
+      const yearsToExpiry = daysToExpiry <= 0 ? yearsToTodaysClose : daysToExpiry / 365;
+      const delta = deltaFromQuoteMid({ bid: leg.bid, ask: leg.ask, spotPrice: spotPrice!, strike: leg.strike, isCall: leg.right === "C", yearsToExpiry, riskFreeRate });
+      return delta === null ? leg : { ...leg, delta, dte: Math.max(0, daysToExpiry) };
     });
     const scoredLegs = withDelta.filter((leg): leg is HeldLegScore & { delta: number } => leg.delta !== null);
     if (scoredLegs.length === 0) return;

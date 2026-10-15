@@ -69,7 +69,7 @@ describe("Formula P3 — pure edge cases", () => {
 
   it("uses the same offer id as P2 for the same leg (runChosenClose matches fresh offers by id)", () => {
     const p3 = evaluateEarningsBuyback(base).offer!;
-    const p2 = evaluateShortLegBuyback({ symbol: "AUD", leg: heldLeg({ model: fixtureHeldLegModel(-25, 5) }), rolls: [], settings, singleLegPosition: true }).offer!;
+    const p2 = evaluateShortLegBuyback({ symbol: "AUD", leg: heldLeg({ model: fixtureHeldLegModel(-25, 5) }), rolls: [], settings, singleLegPosition: true, todayIso: "2031-03-10" }).offer!;
     expect(p3.id).toBe(p2.id);
   });
 
@@ -146,7 +146,7 @@ describe("automaticReason on P1 and P2", () => {
     expect(odd.automaticReason).toMatch(/Formula P1/);
   });
   it("P2 is never automatic", () => {
-    expect(evaluateShortLegBuyback({ symbol: "AUD", leg: heldLeg({ model: fixtureHeldLegModel(-25, 5) }), rolls: [], settings, singleLegPosition: true }).offer).toMatchObject({ automatic: false, automaticReason: null });
+    expect(evaluateShortLegBuyback({ symbol: "AUD", leg: heldLeg({ model: fixtureHeldLegModel(-25, 5) }), rolls: [], settings, singleLegPosition: true, todayIso: "2031-03-10" }).offer).toMatchObject({ automatic: false, automaticReason: null });
   });
 });
 

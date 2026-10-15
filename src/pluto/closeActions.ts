@@ -10,7 +10,7 @@ import type { CommissionEstimator } from "../lib/commissionEstimate.js";
 import { heaviestMacroEventBeforeExpiry } from "../lib/macroEventTiming.js";
 import type { MacroEvent } from "../lib/macroEventCalendar.js";
 import { eventReviewKey, heldCoveredCallEntry, heldPutEntry, type HeldPositionEntry, type HeldPositionEvent } from "./heldPositionMetrics.js";
-import { describeOptionContract, describeOrderSize, formatDayMonth } from "../lib/optionContractLabel.js";
+import { daysToExpiry, describeOptionContract, describeOrderSize, formatDayMonth } from "../lib/optionContractLabel.js";
 import { resolveIsOpenDay } from "../lib/marketSessionStatus.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 
@@ -30,6 +30,9 @@ import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 //   The leg's premium for the loss check is the price we set on it when it was opened by a two-part
 //   order (Marcelo 2026-09-29): IBKR fills a combo at exactly its net but splits it between the legs
 //   its own way, so its recorded fill for one leg is arbitrary (orderedEntryPremium).
+//   A leg the surface cannot score (no usable slice for its expiry or strike: a poorly fitted surface, so no model
+//   valuation) is offered instead when buying back at the ask keeps at least buybackUnscoredMinKeptPremiumShare of the
+//   premium: (premium − ask) ≥ 0.75 × premium (approved 2026-10-14); the roll, DTE and single-leg conditions still apply.
 // P3 — earnings buyback (approved 2026-10-07): a single-leg short whose expiry is on or after the ticker's next earnings
 //   announcement is bought back by code, without a model call, within the last earningsBuybackWindowSessions sessions before
 //   the announcement, and only when its P&L at the ask is positive (never at a loss). The last session before the
@@ -200,36 +203,46 @@ export interface P2Input {
   singleLegPosition: boolean;
   /** The leg's premium corrected for a combo split (orderedEntryPremium); null = use the recorded entry. */
   orderedEntryPremium?: number | null;
+  /** Today, Eastern: the DTE of a leg the surface could not score (it carries none). */
+  todayIso: string;
 }
 
 /** P2: a credit roll with at least this edge margin withholds the buyback. A margin of its own, not a grade's cut point. */
 export const buybackWithheldAtRollEdgeMargin = 0.1;
 
+/** P2 for a leg the surface cannot score: buying back at the ask must keep at least this share of the premium. */
+export const buybackUnscoredMinKeptPremiumShare = 0.75;
+
 /** Pure P2: the buyback offer, or the reason there is none. */
 export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | null; reason: string | null } {
   const { leg, settings } = input;
   const entryPremium = input.orderedEntryPremium ?? leg.entryPrice;
-  if (leg.unscoredReason) return { offer: null, reason: `held leg not scored: ${leg.unscoredReason}` };
+  const surfaceUnusable = leg.unscoredReason === "no_slice";
+  if (leg.unscoredReason && !surfaceUnusable) return { offer: null, reason: `held leg not scored: ${leg.unscoredReason}` };
   if (!input.singleLegPosition) return { offer: null, reason: "buybacks are limited to single-leg positions for now" };
   // The valuation model's hold value (model review, 2026-10-10): (mid − fair) × 100 against the cost of closing.
-  if (!leg.model) return { offer: null, reason: "the held leg has no model valuation" };
-  const holdValueDollars = leg.model.holdValueDollars;
-  const closeCostDollars = leg.model.closeCostDollars;
-  if (holdValueDollars - closeCostDollars >= 0) return { offer: null, reason: `holding is still worth ${formatSignedDollars(holdValueDollars - closeCostDollars, 0)} per contract more than buying back, after closing costs` };
+  if (!surfaceUnusable && !leg.model) return { offer: null, reason: "the held leg has no model valuation" };
+  const holdValueDollars = leg.model?.holdValueDollars ?? null;
+  const closeCostDollars = leg.model?.closeCostDollars ?? null;
+  if (holdValueDollars !== null && closeCostDollars !== null && holdValueDollars - closeCostDollars >= 0) return { offer: null, reason: `holding is still worth ${formatSignedDollars(holdValueDollars - closeCostDollars, 0)} per contract more than buying back, after closing costs` };
   if (input.rolls.some((roll) => roll.legId === leg.legId && roll.model !== null && roll.model.edgeMargin >= buybackWithheldAtRollEdgeMargin)) return { offer: null, reason: `a credit roll has an edge margin of ${(buybackWithheldAtRollEdgeMargin * 100).toFixed(0)}% or more` };
-  if (leg.dte === null || leg.dte < settings.buybackMinDte) return { offer: null, reason: `DTE ${leg.dte ?? "unknown"} below ${settings.buybackMinDte}` };
+  const dte = leg.dte ?? (surfaceUnusable ? daysToExpiry(leg.expiry, input.todayIso) : null);
+  if (dte === null || dte < settings.buybackMinDte) return { offer: null, reason: `DTE ${dte ?? "unknown"} below ${settings.buybackMinDte}` };
   if (leg.ask === null || leg.bid === null || !(leg.ask > 0) || leg.ask < leg.bid) return { offer: null, reason: "no live two-sided quote on the held leg" };
   const pnlAtAsk = (entryPremium - leg.ask) * leg.quantity * 100;
   if (pnlAtAsk <= 0) return { offer: null, reason: pnlAtAsk < 0 ? `buying back at the ask would lose ${formatSignedDollars(-pnlAtAsk, 0)}` : "buying back at the ask would only break even" };
+  const keptPremiumShare = (entryPremium - leg.ask) / entryPremium;
+  if (surfaceUnusable && keptPremiumShare < buybackUnscoredMinKeptPremiumShare)
+    return { offer: null, reason: `the surface cannot value the leg (no usable slice), and buying back at the ask would keep ${(keptPremiumShare * 100).toFixed(1)}% of the premium, below ${(buybackUnscoredMinKeptPremiumShare * 100).toFixed(0)}%` };
   const limitPrice = Math.round(((leg.bid + leg.ask) / 2) * 100) / 100;
   return {
     offer: {
       id: `${input.symbol}:close_leg:${leg.legId}`,
       kind: "close_leg",
       symbol: input.symbol,
-      description: `${input.symbol} Buy back ${describeOptionContract({ strike: leg.strike, right: leg.right, expiry: leg.expiry, dte: leg.dte })}${describeOrderSize(leg.quantity, limitPrice)} (sold at ${entryPremium.toFixed(2)}); locks ${pnlAtAsk.toFixed(0)} at the ask`,
+      description: `${input.symbol} Buy back ${describeOptionContract({ strike: leg.strike, right: leg.right, expiry: leg.expiry, dte })}${describeOrderSize(leg.quantity, limitPrice)} (sold at ${entryPremium.toFixed(2)}); locks ${pnlAtAsk.toFixed(0)} at the ask${surfaceUnusable ? `, ${(keptPremiumShare * 100).toFixed(0)}% of the premium (the surface cannot value this leg)` : ""}`,
       cycle_pnl: pnlAtAsk,
-      detail: { dte: leg.dte, entry_credit: entryPremium, recorded_entry_credit: leg.entryPrice, ask: leg.ask, hold_value_dollars: Math.round(holdValueDollars), close_cost_dollars: Math.round(closeCostDollars), pnl_at_ask: Math.round(pnlAtAsk) },
+      detail: { dte, entry_credit: entryPremium, recorded_entry_credit: leg.entryPrice, ask: leg.ask, ...(holdValueDollars !== null && closeCostDollars !== null ? { hold_value_dollars: Math.round(holdValueDollars), close_cost_dollars: Math.round(closeCostDollars) } : {}), pnl_at_ask: Math.round(pnlAtAsk), ...(surfaceUnusable ? { kept_premium_pct: Math.round(keptPremiumShare * 100) } : {}) },
       positionId: leg.positionId,
       legIds: [leg.legId],
       automatic: false,
@@ -732,6 +745,7 @@ export async function buildCloseOffersFromBook(input: CloseOffersForTickerInput,
         settings: input.settings,
         singleLegPosition,
         orderedEntryPremium: orderedPremium,
+        todayIso: input.todayIso,
       });
       // F3 before a macro event: the close gate is only read inside the window, for a buyback the ask would not lose on.
       const eventGate = entry && eventCloseDue(entry.event) && leg.ask !== null && leg.ask < entry.entryCredit ? await gates.fromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote) : null;

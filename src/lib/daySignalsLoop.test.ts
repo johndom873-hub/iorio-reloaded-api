@@ -773,6 +773,32 @@ describe("DaySignalsLoop", () => {
       }
     });
 
+    it("a held leg on an expiry with no usable slice (a poorly fitted surface) takes its own live quote's delta, on calendar days to expiry", async () => {
+      // 2 Oct has no fitted slice (the ticker's 21 Oct one is fitted): the leg is unscored but keeps its quote. With the
+      // stock at $100 and 8 days to go, the $105 Put at 5.20 / 5.40 is deep in the money; the $90 Put at 0.05 / 0.10 is far out.
+      const noSliceExpiry = "2026-10-02";
+      const onUnfittedExpiry = (strike: number, bid: number, ask: number): TickerSignalsInputs => {
+        const base = inputsFor([]);
+        return { ...base, quotes: [...base.quotes, { expiry: noSliceExpiry, strike, right: "P" as const, bid, ask, source: "snapshot" as const }], openShortLegs: [{ ...heldPut(strike), expiry: noSliceExpiry }] };
+      };
+      for (const [strike, bid, ask, expected] of [[105, 5.2, 5.4, ["leg-1:105P"]], [90, 0.05, 0.1, []]] as const) {
+        const harness = createHarness();
+        harness.state.assignmentRiskStates.set("leg-1", { notifiedAt: null, lastAlertTradingDateIso: null });
+        harness.deps.loadTickerSignalsInputs = async () => onUnfittedExpiry(strike, bid, ask);
+        harness.deps.sessionCloseMinutesEt = async () => {
+          throw new Error("only a same-day expiry needs today's close");
+        };
+        const originalWindow = harness.deps.runQuoteWindow;
+        harness.deps.runQuoteWindow = async (contracts, options) => {
+          const result = await originalWindow(contracts, options);
+          harness.loop.stop();
+          return result;
+        };
+        await harness.loop.start();
+        expect(harness.calls.assignmentAlerts).toEqual(expected);
+      }
+    });
+
     it("re-arms once |delta| falls below 0.45, then alerts on the next crossing (on a later trading day)", async () => {
       const harness = createHarness();
       harness.state.assignmentRiskStates.set("leg-1", { notifiedAt: null, lastAlertTradingDateIso: null });

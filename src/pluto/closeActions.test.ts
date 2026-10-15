@@ -47,7 +47,7 @@ describe("Formula P2 — short-leg buyback", () => {
     model: fixtureHeldLegModel(-25, 5),
   };
   const roll = (grade: RollSignalCandidate["grade"]): RollSignalCandidate => ({ legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", quantity: 2, replacement: {} as never, netRollEdge: 0.01, netRollEdgeDollarsPerContract: 5, netRollEdgeDollars: 10, netCreditPerShare: 0.1, deltaChange: -0.01, dollarRiskChange: 0, flags: [], warnings: [], grade, model: fixtureRollModel({ grade }) });
-  const base = { symbol: "HOOD", leg, rolls: [], settings, singleLegPosition: true };
+  const base = { symbol: "HOOD", leg, rolls: [], settings, singleLegPosition: true, todayIso: "2026-09-28" };
 
   it("offers the buyback at the mid when holding has negative net value and the ask locks a profit", () => {
     const { offer, reason } = evaluateShortLegBuyback(base);
@@ -79,6 +79,25 @@ describe("Formula P2 — short-leg buyback", () => {
     expect(evaluateShortLegBuyback({ ...base, singleLegPosition: false }).reason).toMatch(/single-leg/);
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, unscoredReason: "no_quote" } }).reason).toMatch(/not scored/);
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: null } }).reason).toMatch(/two-sided quote/);
+  });
+  it("on a leg the surface cannot score, offers the buyback only when the ask keeps at least 75% of the premium", () => {
+    // No usable slice: no delta, DTE or model valuation; the quote stays. Sold at 2.40, 18 days to 16 Oct.
+    const unscoredLeg: HeldLegScore = { ...leg, unscoredReason: "no_slice", dte: null, delta: null, model: null, surfaceImpliedVolatility: null, edge: null, vega: null };
+    // Ask 0.60 keeps (2.40 − 0.60) ÷ 2.40 = 75%: offered, the DTE from the calendar.
+    const kept75 = evaluateShortLegBuyback({ ...base, leg: { ...unscoredLeg, bid: 0.56, ask: 0.6 } });
+    expect(kept75.reason).toBeNull();
+    expect(kept75.offer).toMatchObject({ kind: "close_leg", limitPrice: 0.58, automatic: false });
+    expect(kept75.offer!.detail).toMatchObject({ dte: 18, kept_premium_pct: 75 });
+    expect(kept75.offer!.detail).not.toHaveProperty("hold_value_dollars");
+    expect(kept75.offer!.description).toMatch(/75% of the premium \(the surface cannot value this leg\)$/);
+    // Ask 0.61 keeps 74.6%: not offered.
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...unscoredLeg, bid: 0.56, ask: 0.61 } }).reason).toBe("the surface cannot value the leg (no usable slice), and buying back at the ask would keep 74.6% of the premium, below 75%");
+    // The other P2 conditions still apply.
+    expect(evaluateShortLegBuyback({ ...base, leg: unscoredLeg, todayIso: "2026-10-15" }).reason).toMatch(/DTE 1 below 2/);
+    expect(evaluateShortLegBuyback({ ...base, leg: unscoredLeg, singleLegPosition: false }).reason).toMatch(/single-leg/);
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...unscoredLeg, ask: null } }).reason).toMatch(/two-sided quote/);
+    // Unscored for another reason (no quote, no forecast): still refused.
+    expect(evaluateShortLegBuyback({ ...base, leg: { ...unscoredLeg, unscoredReason: "no_forecast" } }).reason).toBe("held leg not scored: no_forecast");
   });
 });
 
@@ -159,7 +178,7 @@ describe("Formula F3 — event closes", () => {
     expect(offer).toMatchObject({ id: "HOOD:close_leg:leg7", kind: "close_leg", automatic: false, side: "buy", multiplier: 100, quantity: 1, limitPrice: 0.14, reviewKey: "c80s3" });
     expect(offer!.description).toMatch(/before the 27 Oct Fed rate decision \(heavy, 3 sessions away\); locks 84 at the ask$/);
     expect(offer!.detail).toMatchObject({ event: "Fed rate decision", sessions_until: 3, stress_normal_days: 2, captured_pct: 84, max_remaining_gain_dollars: 14, event_stress_loss_dollars: 43, close_cost_dollars: 3 });
-    expect(evaluateShortLegBuyback({ symbol: "HOOD", leg: put, rolls: [], settings, singleLegPosition: true }).offer).toBeNull();
+    expect(evaluateShortLegBuyback({ symbol: "HOOD", leg: put, rolls: [], settings, singleLegPosition: true, todayIso: "2026-09-28" }).offer).toBeNull();
   });
 
   it("the window: exactly eventCloseWindowSessions sessions away is in, one more is out (null/null)", () => {
@@ -179,7 +198,7 @@ describe("Formula F3 — event closes", () => {
 
   it("one offer per leg when P2 also applies: the event close, saying holding no longer pays", () => {
     const eventOffer = evaluateEventPutClose(putInput(3)).offer!;
-    const p2 = evaluateShortLegBuyback({ symbol: "HOOD", leg: { ...put, model: fixtureHeldLegModel(-10, 3) }, rolls: [], settings, singleLegPosition: true }).offer!;
+    const p2 = evaluateShortLegBuyback({ symbol: "HOOD", leg: { ...put, model: fixtureHeldLegModel(-10, 3) }, rolls: [], settings, singleLegPosition: true, todayIso: "2026-09-28" }).offer!;
     const merged = mergeEventAndHoldValueBuybacks(eventOffer, p2);
     expect(merged.id).toBe(p2.id);
     expect(merged.reviewKey).toBe("c80s3");
