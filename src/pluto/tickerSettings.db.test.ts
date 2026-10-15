@@ -139,7 +139,9 @@ describe("ladder settings reader", () => {
   it("gives a ticker not enabled in Pluto no pot, and an unknown symbol the strategy values only", async () => {
     expect((await call("GET", `/ladder-settings/${otherSymbol}`)).json).toMatchObject({ enabled: false, potDollars: null, allocationPct: null });
     const unknown = await call("GET", "/ladder-settings/nosuchtickery");
-    expect(unknown.json).toMatchObject({ symbol: "NOSUCHTICKERY", enabled: false, potDollars: null, allocationPct: null, overrideShockPct: null });
+    expect(unknown.json).toMatchObject({ symbol: "NOSUCHTICKERY", enabled: false, potDollars: null, allocationPct: null, overrideShockPct: null, recommendedShockPct: null });
+    // The test tickers have no daily bars: under 250 closes, the new-listing shock.
+    expect((await call("GET", `/ladder-settings/${otherSymbol}`)).json.recommendedShockPct).toBe(90);
     expect((unknown.json.baseline as { ladderSharesPct: number }).ladderSharesPct).toBeGreaterThan(0);
   });
 });

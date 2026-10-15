@@ -3,6 +3,8 @@ import { db } from "../db/connection.js";
 import type { BacktestBaselineSettings } from "../backtest/backtestTypes.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { ensurePlutoSettingsVersion } from "./settingsVersions.js";
+import { loadLadderRecommendedShock } from "./ladderRecommendedShock.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The CC + Put Ladder's settings for one ticker, in the backtest's names and units, so the live ladder, the ticker
@@ -66,6 +68,8 @@ export interface LadderTickerSettings {
   potDollars: number | null;
   /** The user's shock; null = the recommended one (computed from the stock's Max drawdown by the backtest's rule). */
   overrideShockPct: number | null;
+  /** The shock the system recommends today from the stored daily closes (ladderRecommendedShock.ts); null for an unknown ticker. */
+  recommendedShockPct: number | null;
 }
 
 /** The strategy-wide ladder values in backtest form, with the given share level. Pure. */
@@ -95,7 +99,10 @@ export async function loadLadderSettingsForTicker(symbol: string, connection: Kn
     loadEnabledPlutoTickerSettings(connection),
     connection("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value"),
   ]);
-  const settingsVersionId = await ensurePlutoSettingsVersion(settings, connection);
+  const [settingsVersionId, recommendedShock] = await Promise.all([
+    ensurePlutoSettingsVersion(settings, connection),
+    loadLadderRecommendedShock(normalizedSymbol, settings, easternIsoDate(new Date()), connection),
+  ]);
   const enabledInPluto = enabledTickers.some((ticker) => ticker.symbol === normalizedSymbol);
   const allocationEffectivePct = effectiveAllocationPctBySymbol(enabledTickers).get(normalizedSymbol);
   const potDollars =
@@ -111,5 +118,6 @@ export async function loadLadderSettingsForTicker(symbol: string, connection: Kn
     allocationPct: tickerSettings?.allocationPct ?? null,
     potDollars,
     overrideShockPct: tickerSettings?.ladderShockOverridePct ?? null,
+    recommendedShockPct: recommendedShock?.recommendedShockPct ?? null,
   };
 }
