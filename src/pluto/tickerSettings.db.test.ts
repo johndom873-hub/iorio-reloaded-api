@@ -120,6 +120,31 @@ describe("ticker settings routes", () => {
   });
 });
 
+describe("rungs and delta range per ticker", () => {
+  it("stores them, refuses a fractional rung count and a range whose lower limit passes the upper one (the strategy's side counts)", async () => {
+    expect((await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderRungs: 2.5 })).status).toBe(400);
+    expect((await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderRungs: 21 })).status).toBe(400);
+    const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first("ladder_max_abs_delta");
+    const aboveStrategyTop = Number(settingsRow.ladder_max_abs_delta) + 0.05;
+    const refused = await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderMinAbsDelta: aboveStrategyTop });
+    expect(refused.status).toBe(400);
+    expect(refused.json.error).toMatch(/lower limit cannot exceed the upper one/);
+    expect((await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderMinAbsDelta: aboveStrategyTop, ladderMaxAbsDelta: aboveStrategyTop + 0.1 })).status).toBe(200);
+    const saved = await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderRungs: 4, ladderMinAbsDelta: 0.08, ladderMaxAbsDelta: 0.25 });
+    expect(saved.json).toMatchObject({ ladderRungs: 4, ladderMinAbsDelta: 0.08, ladderMaxAbsDelta: 0.25 });
+  });
+
+  it("the reader gives the effective values, the strategy's values and the overrides apart", async () => {
+    const read = await call("GET", `/ladder-settings/${otherSymbol}`);
+    const settingsRow = await testDb("pluto_settings").where({ id: 1 }).first("ladder_rungs", "ladder_min_abs_delta", "ladder_max_abs_delta");
+    expect(read.json.baseline).toMatchObject({ ladderRungs: 4, minAbsDelta: 0.08, maxAbsDelta: 0.25 });
+    expect(read.json.strategyBaseline).toMatchObject({ ladderRungs: settingsRow.ladder_rungs, minAbsDelta: Number(settingsRow.ladder_min_abs_delta), maxAbsDelta: Number(settingsRow.ladder_max_abs_delta) });
+    expect(read.json.tickerOverrides).toEqual({ ladderSharesPct: null, ladderRungs: 4, minAbsDelta: 0.08, maxAbsDelta: 0.25 });
+    await call("PUT", `/ticker-settings/${otherSymbol}`, { ladderRungs: null, ladderMinAbsDelta: null, ladderMaxAbsDelta: null });
+    expect((await call("GET", `/ladder-settings/${otherSymbol}`)).json.tickerOverrides).toEqual({ ladderSharesPct: null, ladderRungs: null, minAbsDelta: null, maxAbsDelta: null });
+  });
+});
+
 describe("ladder settings reader", () => {
   it("gives the ladder's values in backtest form with the ticker's overrides, and the pot from last night's account value", async () => {
     const read = await call("GET", `/ladder-settings/${enabledSymbol}`);

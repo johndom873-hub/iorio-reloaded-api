@@ -14,18 +14,25 @@ export interface PlutoTickerSettings {
   ladderSharesPct: number | null;
   /** Overrides the recommended shock (the Max drawdown rule). */
   ladderShockOverridePct: number | null;
+  /** Override the strategy's rungs and |delta| range (pluto_settings.ladder_rungs, ladder_min_abs_delta, ladder_max_abs_delta). */
+  ladderRungs: number | null;
+  ladderMinAbsDelta: number | null;
+  ladderMaxAbsDelta: number | null;
   updatedAt: string | null;
   updatedByUserId: string | null;
 }
 
-export type PlutoTickerSettingsField = "allocationPct" | "ladderSharesPct" | "ladderShockOverridePct";
+export type PlutoTickerSettingsField = "allocationPct" | "ladderSharesPct" | "ladderShockOverridePct" | "ladderRungs" | "ladderMinAbsDelta" | "ladderMaxAbsDelta";
 export type PlutoTickerSettingsInput = Partial<Record<PlutoTickerSettingsField, number | null>>;
 
-/** Above `above` (exclusive) and at most `max`; bounds of the share level and shock are the backtest's. */
-export const plutoTickerSettingsColumns: Record<PlutoTickerSettingsField, { column: string; above: number; max: number }> = {
+/** Above `above` (exclusive) and at most `max`, whole when `integer`; the ladder's bounds are the backtest's. */
+export const plutoTickerSettingsColumns: Record<PlutoTickerSettingsField, { column: string; above: number; max: number; integer?: true }> = {
   allocationPct: { column: "allocation_pct", above: 0, max: 100 },
   ladderSharesPct: { column: "ladder_shares_pct", above: 0, max: 99 },
   ladderShockOverridePct: { column: "ladder_shock_override_pct", above: 0, max: 99 },
+  ladderRungs: { column: "ladder_rungs", above: 0, max: 20, integer: true },
+  ladderMinAbsDelta: { column: "ladder_min_abs_delta", above: 0, max: 1 },
+  ladderMaxAbsDelta: { column: "ladder_max_abs_delta", above: 0, max: 1 },
 };
 
 const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
@@ -37,6 +44,9 @@ function rowToTickerSettings(row: Record<string, unknown>): PlutoTickerSettings 
     allocationPct: numberOrNull(row.allocation_pct),
     ladderSharesPct: numberOrNull(row.ladder_shares_pct),
     ladderShockOverridePct: numberOrNull(row.ladder_shock_override_pct),
+    ladderRungs: numberOrNull(row.ladder_rungs),
+    ladderMinAbsDelta: numberOrNull(row.ladder_min_abs_delta),
+    ladderMaxAbsDelta: numberOrNull(row.ladder_max_abs_delta),
     updatedAt: row.updated_at ? new Date(row.updated_at as string).toISOString() : null,
     updatedByUserId: (row.updated_by_user_id as string | null) ?? null,
   };
@@ -45,7 +55,7 @@ function rowToTickerSettings(row: Record<string, unknown>): PlutoTickerSettings 
 function tickerSettingsQuery(connection: Knex) {
   return connection("tickers as t")
     .leftJoin("pluto_ticker_settings as s", "s.ticker_id", "t.id")
-    .select("t.symbol", "t.id as ticker_id", "s.allocation_pct", "s.ladder_shares_pct", "s.ladder_shock_override_pct", "s.updated_at", "s.updated_by_user_id");
+    .select("t.symbol", "t.id as ticker_id", "s.allocation_pct", "s.ladder_shares_pct", "s.ladder_shock_override_pct", "s.ladder_rungs", "s.ladder_min_abs_delta", "s.ladder_max_abs_delta", "s.updated_at", "s.updated_by_user_id");
 }
 
 /** The ticker's settings (every field null when none were set), or null when the symbol is not a known ticker. */
@@ -86,6 +96,7 @@ export function validatePlutoTickerSettingsInput(input: Record<string, unknown>)
     if (value === null) continue;
     if (typeof value !== "number" || !Number.isFinite(value)) return `${field} must be a number, or null for the default.`;
     if (value <= spec.above || value > spec.max) return `${field} must be above ${spec.above} and at most ${spec.max}.`;
+    if (spec.integer && !Number.isInteger(value)) return `${field} must be a whole number.`;
   }
   return null;
 }
@@ -106,6 +117,13 @@ export async function updatePlutoTickerSettings(symbol: string, input: PlutoTick
       const others = await trx("pluto_ticker_settings").whereNot("ticker_id", current.tickerId).whereNotNull("allocation_pct").sum({ total: "allocation_pct" }).first();
       const othersTotal = Number(others?.total ?? 0);
       if (othersTotal + input.allocationPct > 100) throw new PlutoTickerSettingsValidationError(`The set allocations would add up to ${othersTotal + input.allocationPct}%: at most 100% (other tickers hold ${othersTotal}%).`);
+    }
+    if (input.ladderMinAbsDelta !== undefined || input.ladderMaxAbsDelta !== undefined) {
+      // The ticker's range, each side its override or else the strategy's, must stay a range.
+      const strategy = await trx("pluto_settings").where({ id: 1 }).first("ladder_min_abs_delta", "ladder_max_abs_delta");
+      const minimum = (input.ladderMinAbsDelta !== undefined ? input.ladderMinAbsDelta : current.ladderMinAbsDelta) ?? Number(strategy.ladder_min_abs_delta);
+      const maximum = (input.ladderMaxAbsDelta !== undefined ? input.ladderMaxAbsDelta : current.ladderMaxAbsDelta) ?? Number(strategy.ladder_max_abs_delta);
+      if (minimum > maximum) throw new PlutoTickerSettingsValidationError(`The ticker's |delta| range would be ${minimum}–${maximum}: the lower limit cannot exceed the upper one.`);
     }
     const update: Record<string, number | null> = {};
     const audit: { ticker_id: string; user_id: string; field: string; old_value: string | null; new_value: string | null }[] = [];

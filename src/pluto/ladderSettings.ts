@@ -56,8 +56,12 @@ export interface LadderTickerSettings {
   enabled: boolean;
   /** The Pluto settings version these values come from (the one a pass would record). */
   settingsVersionId: string | null;
-  /** Backtest names and units; the share level is the ticker's override, else the strategy default. */
+  /** The ticker's effective values, backtest names and units: each its override where the ticker has one, else the strategy's. */
   baseline: LadderBaselineSettings;
+  /** The strategy-wide values alone (no ticker override), for "reset to the strategy value". */
+  strategyBaseline: LadderBaselineSettings;
+  /** What the ticker overrides, backtest names and units; null = the strategy's value. The shock and allocation are below. */
+  tickerOverrides: LadderTickerOverrides;
   /** The ticker's set allocation, % of Pluto's capital budget; null = an equal share (effectiveAllocationPctBySymbol). */
   allocationPct: number | null;
   /**
@@ -72,17 +76,27 @@ export interface LadderTickerSettings {
   recommendedShockPct: number | null;
 }
 
-/** The strategy-wide ladder values in backtest form, with the given share level. Pure. */
-export function ladderBaselineFromPlutoSettings(settings: PlutoSettings, sharesPct: number): LadderBaselineSettings {
+/** A ticker's overrides of the strategy's values (pluto_ticker_settings), in backtest names; null = the strategy's value. */
+export interface LadderTickerOverrides {
+  ladderSharesPct: number | null;
+  ladderRungs: number | null;
+  minAbsDelta: number | null;
+  maxAbsDelta: number | null;
+}
+
+export const noLadderTickerOverrides: LadderTickerOverrides = { ladderSharesPct: null, ladderRungs: null, minAbsDelta: null, maxAbsDelta: null };
+
+/** The ladder's values in backtest form: the strategy's, each replaced by the ticker's override where it has one. Pure. */
+export function ladderBaselineFromPlutoSettings(settings: PlutoSettings, overrides: LadderTickerOverrides = noLadderTickerOverrides): LadderBaselineSettings {
   return {
     ...ladderFixedBaselineChoices,
-    minAbsDelta: settings.ladderMinAbsDelta,
-    maxAbsDelta: settings.ladderMaxAbsDelta,
+    minAbsDelta: overrides.minAbsDelta ?? settings.ladderMinAbsDelta,
+    maxAbsDelta: overrides.maxAbsDelta ?? settings.ladderMaxAbsDelta,
     minDte: settings.ladderMinDte,
     maxDte: settings.ladderMaxDte,
     maxSpreadPctOfMid: settings.ladderMaxSpreadPctOfMid,
-    ladderRungs: settings.ladderRungs,
-    ladderSharesPct: sharesPct,
+    ladderRungs: overrides.ladderRungs ?? settings.ladderRungs,
+    ladderSharesPct: overrides.ladderSharesPct ?? settings.ladderSharesPct,
     ladderShockMinPct: settings.ladderShockMinPct,
     ladderShockMaxPct: settings.ladderShockMaxPct,
     ladderShockNoHistoryPct: settings.ladderShockNoHistoryPct,
@@ -103,6 +117,12 @@ export async function loadLadderSettingsForTicker(symbol: string, connection: Kn
     ensurePlutoSettingsVersion(settings, connection),
     loadLadderRecommendedShock(normalizedSymbol, settings, easternIsoDate(new Date()), connection),
   ]);
+  const tickerOverrides: LadderTickerOverrides = {
+    ladderSharesPct: tickerSettings?.ladderSharesPct ?? null,
+    ladderRungs: tickerSettings?.ladderRungs ?? null,
+    minAbsDelta: tickerSettings?.ladderMinAbsDelta ?? null,
+    maxAbsDelta: tickerSettings?.ladderMaxAbsDelta ?? null,
+  };
   const enabledInPluto = enabledTickers.some((ticker) => ticker.symbol === normalizedSymbol);
   const allocationEffectivePct = effectiveAllocationPctBySymbol(enabledTickers).get(normalizedSymbol);
   const potDollars =
@@ -114,7 +134,9 @@ export async function loadLadderSettingsForTicker(symbol: string, connection: Kn
     source: "live",
     enabled: enabledInPluto && settings.executionStrategy === "cc_put_ladder",
     settingsVersionId,
-    baseline: ladderBaselineFromPlutoSettings(settings, tickerSettings?.ladderSharesPct ?? settings.ladderSharesPct),
+    baseline: ladderBaselineFromPlutoSettings(settings, tickerOverrides),
+    strategyBaseline: ladderBaselineFromPlutoSettings(settings),
+    tickerOverrides,
     allocationPct: tickerSettings?.allocationPct ?? null,
     potDollars,
     overrideShockPct: tickerSettings?.ladderShockOverridePct ?? null,

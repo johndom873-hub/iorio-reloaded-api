@@ -19,17 +19,17 @@ const settingsAtDefaults = plutoLadderSettingsFixture as unknown as PlutoSetting
 
 describe("ladderBaselineFromPlutoSettings", () => {
   it("at the approved defaults, is exactly the adopted backtest configuration", () => {
-    const live = { ...defaultBacktestBaselineSettings, ...ladderBaselineFromPlutoSettings(settingsAtDefaults, 50) };
+    const live = { ...defaultBacktestBaselineSettings, ...ladderBaselineFromPlutoSettings(settingsAtDefaults) };
     const adopted = { ...defaultBacktestBaselineSettings, ...adoptedBaselineOverrides };
     expect(live).toEqual(adopted);
   });
 
   it("is a valid backtest baseline, so a session can replay it", () => {
-    expect(validateBaselineSettings({ ...defaultBacktestBaselineSettings, ...ladderBaselineFromPlutoSettings(settingsAtDefaults, 30) })).toBeNull();
+    expect(validateBaselineSettings({ ...defaultBacktestBaselineSettings, ...ladderBaselineFromPlutoSettings(settingsAtDefaults, { ladderSharesPct: 30, ladderRungs: 4, minAbsDelta: 0.08, maxAbsDelta: 0.25 }) })).toBeNull();
   });
 
-  it("takes the share level it is given (a ticker's override) and the strategy values from the settings", () => {
-    const baseline = ladderBaselineFromPlutoSettings({ ...settingsAtDefaults, ladderMaxAbsDelta: 0.25, ladderRungs: 4 }, 70);
-    expect(baseline).toMatchObject({ ladderSharesPct: 70, maxAbsDelta: 0.25, ladderRungs: 4 });
+  it("takes each ticker override it is given and the strategy's value for the rest", () => {
+    const baseline = ladderBaselineFromPlutoSettings({ ...settingsAtDefaults, ladderMaxAbsDelta: 0.25, ladderRungs: 4 }, { ladderSharesPct: 70, ladderRungs: null, minAbsDelta: 0.1, maxAbsDelta: null });
+    expect(baseline).toMatchObject({ ladderSharesPct: 70, minAbsDelta: 0.1, maxAbsDelta: 0.25, ladderRungs: 4 });
   });
 });
