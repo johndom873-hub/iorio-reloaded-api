@@ -3,7 +3,7 @@ import type { SignalCandidate, SignalSurfaceSlice } from "../lib/signalCandidate
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { TickerSignals } from "../lib/signalsTypes.js";
 import { candidateSetFingerprint } from "./inputHash.js";
-import { describeCandidateId, deterministicTopPick, filterTickerForPluto, openCandidateId, summarizeTopPick, type PlutoTickerFilterInput } from "./candidateFilters.js";
+import { describeCandidateId, deterministicTopPick, filterTickerForPluto, openCandidateId, rollCandidateFailures, summarizeTopPick, type PlutoTickerFilterInput } from "./candidateFilters.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
 import { fixtureCandidateModel, fixtureModelForecast, fixtureRollModel } from "../lib/testSupport/valuationModelFixtures.js";
@@ -170,6 +170,20 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
     expect(result.eligibleRolls.map((entry) => entry.id)).toEqual(["HOOD:roll:leg1:2026-10-16:95"]);
     const bad = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, replacement: candidate({ strike: 95, spreadPercent: 30 }) }] }) }));
     expect(bad.rejectedRolls[0]!.reasons).toEqual(["replacement: spread 30.0% above 15%"]);
+  });
+  it("offers no roll while rolls are blocked (the ticker cooldown, live), and opens-blocked alone leaves rolls alone", () => {
+    const blocked = filterTickerForPluto(input({ scored: scored({ rolls: [roll] }), rollsBlockedReason: "ticker cooldown: 20 min ago (cooldown 60 min)" }));
+    expect(blocked.eligibleRolls).toEqual([]);
+    expect(blocked.rejectedRolls[0]!.reasons).toEqual(["ticker cooldown: 20 min ago (cooldown 60 min)"]);
+    expect(filterTickerForPluto(input({ scored: scored({ rolls: [roll] }), opensBlockedReason: "ticker cooldown" })).eligibleRolls).toHaveLength(1);
+  });
+  it("rollCandidateFailures repeats the filter's roll rules (used again on the fresh quotes after the model chose a roll)", () => {
+    const context = { scored: scored({ rolls: [roll] }), slicesByExpiry: new Map(input({}).slices.map((slice) => [slice.expiry, slice])), settings: input({}).settings, nowMs: input({}).nowMs };
+    expect(rollCandidateFailures(roll, context, null)).toEqual([]);
+    const lowGrade = { ...roll, model: fixtureRollModel({ grade: "weak", edgeMargin: 0.02 }) };
+    expect(rollCandidateFailures(lowGrade, context, null).map((failure) => failure.code)).toContain("grade");
+    const wideReplacement = { ...roll, replacement: candidate({ strike: 95, spreadPercent: 30 }) };
+    expect(rollCandidateFailures(wideReplacement, context, null).map((failure) => failure.reason)).toEqual(["replacement: spread 30.0% above 15%"]);
   });
   it("judges a roll's Edge Yield per contract on the new leg's exposure and days, not its total across the held quantity", () => {
     const result = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, model: fixtureRollModel({ netExpectedPnlPerContract: 20, netExpectedPnl: 40, edgeMargin: 0.25 }) }] }) }));

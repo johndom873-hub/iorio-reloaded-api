@@ -12,7 +12,7 @@ import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js"
 import { compareCandidatesByModel, type SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
 import { anyOpenPositionOn, loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol, loadOccupiedContracts, loadPlutoBook, type PlutoBook } from "./book.js";
-import { coveredCallRollBreakEvenFailure, describeCandidateId, filterTickerForPluto, findSameContractConflict, summarizeTopPick, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
+import { describeCandidateId, filterTickerForPluto, findSameContractConflict, summarizeTopPick, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateFailures, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
 import { summarizeTickerRejections } from "./rejectionSummary.js";
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { updatePlutoConcernAlerts } from "./concernAlerts.js";
@@ -177,7 +177,8 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   const needsCycle = scored.freeShares >= 100 || scored.rolls.some((roll) => roll.strategyKey === "covered_call");
   const [occupiedContracts, cycleSummaries] = await Promise.all([loadOccupiedContracts(row.symbol), needsCycle ? fetchOpenCycleSummaryByTickerId([row.tickerId]) : null]);
   const cycleBreakEven = cycleSummaries?.get(row.tickerId) ?? null;
-  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason, cycleBreakEven, heldShareCallCandidates });
+  // The ticker cooldown keeps rolls from the model too: the post-model gate would refuse one it chose.
+  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason, rollsBlockedReason: opensBlockedReason, cycleBreakEven, heldShareCallCandidates });
   return { row, inputs, scored, filtered, occupiedContracts, cycleBreakEven, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [], heldPositions: [] };
 }
 
@@ -659,7 +660,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     ...(freshCandidate ? rejectOpenCandidate(freshCandidate, { scored: fresh.scored, slicesByExpiry, settings, nowMs: Date.now() }) : chosenOpen ? ["the chosen contract is no longer a candidate"] : []),
     ...(freshCandidate?.strategyKey === "covered_call" && fresh.scored.freeShares >= 100 ? [`${fresh.scored.freeShares} free shares now: code sells the call on them`] : []),
     ...(chosenRoll && !freshRoll ? ["the chosen roll is no longer a candidate"] : []),
-    ...(freshRoll ? [coveredCallRollBreakEvenFailure(freshRoll, fresh.scored, fresh.cycleBreakEven, settings)?.reason].filter((reason): reason is string => reason !== undefined) : []),
+    // A roll is re-checked as fully as an open: its grade and net Edge Yield, the new leg's open filters, the break-even.
+    ...(freshRoll ? rollCandidateFailures(freshRoll, { scored: fresh.scored, slicesByExpiry, settings, nowMs: Date.now() }, fresh.cycleBreakEven).map((failure) => failure.reason) : []),
   ];
   const [exposures, inFlight] = await Promise.all([computePositionExposures(), loadInFlightNotionals(owner.row.symbol)]);
   const freshContractForGate = freshCandidate ?? freshRoll?.replacement ?? null;

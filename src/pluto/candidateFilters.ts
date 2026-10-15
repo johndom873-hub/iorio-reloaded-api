@@ -125,6 +125,11 @@ export interface PlutoTickerFilterInput {
   /** Why no open on this ticker may be offered this round (the ticker cooldown); rolls and closes are unaffected. */
   opensBlockedReason?: string | null;
   /**
+   * Why no roll on this ticker may be offered this round: live passes the ticker cooldown, whose post-model gate would refuse a
+   * roll the model chose (Marcelo 2026-10-15: not offered at all). Closes are unaffected.
+   */
+  rollsBlockedReason?: string | null;
+  /**
    * The ticker's open cycle, for the break-even rule on covered calls written on held shares and on covered-call rolls that
    * lower the strike (heldShareCalls.ts). Absent or null blocks exactly those, as an unknown break-even does.
    */
@@ -238,6 +243,28 @@ export function openCandidateFailures(candidate: SignalCandidate, context: OpenC
   return failures;
 }
 
+/**
+ * Every reason one roll is out, the same-contract rule aside (the post-model gates check it): its grade and net Edge Yield,
+ * the replacement leg's own open filters, and a covered call's break-even. Used when rolls are offered and again on the
+ * fresh quotes after the model chose one (Marcelo 2026-10-15: a roll is re-checked as fully as an open).
+ */
+export function rollCandidateFailures(roll: RollSignalCandidate, context: OpenCandidateFilterContext, cycle: CycleBreakEven | null): PlutoRejectionReason[] {
+  const { settings, scored } = context;
+  const failures: PlutoRejectionReason[] = [];
+  if (!roll.model) failures.push({ code: "no_model", reason: "roll not valued by the model (a leg has no model score)" });
+  else {
+    if (gradeRank[roll.model.grade] < gradeRank[settings.minGrade]) failures.push({ code: "grade", reason: `roll grade ${roll.model.grade} (edge margin ${(roll.model.edgeMargin * 100).toFixed(0)}%) below ${settings.minGrade}` });
+    const rollEdgeYield = roll.replacement.model ? yieldOnExposure(roll.model.netExpectedPnlPerContract, roll.replacement.model.capitalAtRiskDollars, roll.replacement.model.calendarYears) : Number.NEGATIVE_INFINITY;
+    if (rollEdgeYield * 100 < settings.minEdgeYieldPct) failures.push({ code: "edge_yield", reason: `net roll Edge Yield ${(rollEdgeYield * 100).toFixed(0)}% below ${settings.minEdgeYieldPct}%` });
+  }
+  // The replacement leg must be tradeable on its own terms, minus the grade/Edge Yield rules already judged on the roll.
+  const replacementFailures = openCandidateFailures(roll.replacement, context, { skipValueRules: true });
+  failures.push(...replacementFailures.map((failure) => ({ code: failure.code, reason: `replacement: ${failure.reason}` })));
+  const breakEvenFailure = coveredCallRollBreakEvenFailure(roll, scored, cycle, settings);
+  if (breakEvenFailure) failures.push(breakEvenFailure);
+  return failures;
+}
+
 /** Reasons the whole ticker is out this pass. */
 export function rejectTicker(input: PlutoTickerFilterInput): string[] {
   const { scored, settings, todayEasternIso } = input;
@@ -288,20 +315,10 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
 
   for (const roll of scored.rolls) {
     const id = rollCandidateId(scored.symbol, roll);
-    const failures: PlutoRejectionReason[] = [];
-    if (!roll.model) failures.push({ code: "no_model", reason: "roll not valued by the model (a leg has no model score)" });
-    else {
-      if (gradeRank[roll.model.grade] < gradeRank[input.settings.minGrade]) failures.push({ code: "grade", reason: `roll grade ${roll.model.grade} (edge margin ${(roll.model.edgeMargin * 100).toFixed(0)}%) below ${input.settings.minGrade}` });
-      const rollEdgeYield = roll.replacement.model ? yieldOnExposure(roll.model.netExpectedPnlPerContract, roll.replacement.model.capitalAtRiskDollars, roll.replacement.model.calendarYears) : Number.NEGATIVE_INFINITY;
-      if (rollEdgeYield * 100 < input.settings.minEdgeYieldPct) failures.push({ code: "edge_yield", reason: `net roll Edge Yield ${(rollEdgeYield * 100).toFixed(0)}% below ${input.settings.minEdgeYieldPct}%` });
-    }
-    // The replacement leg must be tradeable on its own terms, minus the grade/Edge Yield rules already judged on the roll.
-    const replacementFailures = openCandidateFailures(roll.replacement, context, { skipValueRules: true });
-    failures.push(...replacementFailures.map((failure) => ({ code: failure.code, reason: `replacement: ${failure.reason}` })));
-    const breakEvenFailure = coveredCallRollBreakEvenFailure(roll, scored, cycle, input.settings);
-    if (breakEvenFailure) failures.push(breakEvenFailure);
+    const failures = rollCandidateFailures(roll, context, cycle);
     const conflict = findSameContractConflict(occupied, roll.replacement.expiry, roll.replacement.strike);
     if (conflict) failures.push({ code: "same_contract", reason: `replacement: same contract: ${conflict}` });
+    if (input.rollsBlockedReason) failures.push({ code: "opens_blocked", reason: input.rollsBlockedReason });
     if (failures.length === 0) result.eligibleRolls.push({ id, kind: "roll", symbol: scored.symbol, roll });
     else result.rejectedRolls.push(plutoRejection(id, failures));
   }
