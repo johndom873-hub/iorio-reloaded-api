@@ -16,6 +16,7 @@ vi.mock("../db/connection.js", async () => {
 const { db } = await import("../db/connection.js");
 const { plutoRouter } = await import("../routes/pluto.js");
 const { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings } = await import("./tickerSettingsStore.js");
+const { loadLadderCycleMemory, saveLadderCycleMemory } = await import("./ladderCycleMemory.js");
 
 const testDb: Knex = db;
 const suffix = `${Date.now() % 100000}`;
@@ -179,8 +180,14 @@ describe("strategy switch", () => {
     expect(refused.json.error).toMatch(/Pause Pluto/);
 
     await testDb("pluto_state").where({ id: 1 }).update({ paused: true });
+    // A memory from an earlier ladder period is stored and read back, then forgotten by the switch: a cycle open at the switch starts there.
+    const earlier = { startedOn: "2026-09-01", accountValueAtStart: 180_000, peakPrice: 61.25, shock: 0.7 };
+    await saveLadderCycleMemory(tickerIds[0]!, earlier);
+    await saveLadderCycleMemory(tickerIds[0]!, { ...earlier, peakPrice: 63.5 });
+    expect(await loadLadderCycleMemory(tickerIds[0]!)).toEqual({ ...earlier, peakPrice: 63.5 });
     const switched = await call("PUT", "/settings", { executionStrategy: "cc_put_ladder" });
     expect(switched.status).toBe(200);
+    expect(await loadLadderCycleMemory(tickerIds[0]!)).toBeNull();
     expect(switched.json.executionStrategy).toBe("cc_put_ladder");
     expect((await call("GET", `/ladder-settings/${enabledSymbol}`)).json.enabled).toBe(true);
 

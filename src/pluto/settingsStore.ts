@@ -1,5 +1,6 @@
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
+import { clearLadderCycleMemories } from "./ladderCycleMemory.js";
 
 // Pluto's parameters: one typed row (pluto_settings) plus an audit trail of every
 // change (pluto_settings_audit). Every reader goes through loadPlutoSettings; every
@@ -259,6 +260,8 @@ export async function updatePlutoSettings(input: PlutoSettingsInput, userId: str
     if (audit.length === 0) return current;
     await trx("pluto_settings").where({ id: 1 }).update({ ...update, updated_at: trx.fn.now(), updated_by_user_id: userId });
     await trx("pluto_settings_audit").insert(audit);
+    // A cycle open when the ladder takes over starts its memory at the switch (ladderCycleMemory.ts).
+    if (update.execution_strategy === "cc_put_ladder") await clearLadderCycleMemories(trx);
     return loadPlutoSettings(trx);
   });
 }
