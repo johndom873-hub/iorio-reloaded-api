@@ -6,7 +6,7 @@ import type { KellyEdgeBasis } from "../pluto/postModelGates.js";
 
 // The backtesting API contract (docs/backtesting/). The app mirrors these types in src/api/backtest.ts.
 
-export type BacktestJobKind = "download" | "backtest";
+export type BacktestJobKind = "download" | "backtest" | "analysis";
 export type BacktestJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 /** What the screen shows: a running job with a heartbeat older than 60 s is "stopped". */
 export type BacktestJobDisplayStatus = BacktestJobStatus | "stopped";
@@ -492,6 +492,44 @@ export interface BacktestSettingsTemplate {
   rows: BacktestSettingRow[];
   /** Pluto behaviour a session does not replay, for the note under the table. */
   notReplayed: string[];
+}
+
+/** The lab's global settings (separate from Pluto's live settings): the New session table's rows plus the default pot. */
+export interface BacktestLabSettingsView extends BacktestSettingsTemplate {
+  /** The dollars each ticker starts with when it has no pot of its own. */
+  defaultPotDollars: number;
+  updatedAt: string;
+}
+
+/** A ticker's lab values as stored; null = the lab's global value. */
+export interface BacktestLabTickerOverrides {
+  symbol: string;
+  potDollars: number | null;
+  ladderSharesPct: number | null;
+  ladderRungs: number | null;
+  /** A fixed shock instead of the global shock rule. */
+  ladderShockPct: number | null;
+  minAbsDelta: number | null;
+  maxAbsDelta: number | null;
+  updatedAt: string;
+}
+
+/** One changed lab value: a global settings path ("baseline.ladderRungs", "lab.defaultPotDollars") or a ticker field ("ladderRungs"). */
+export interface BacktestLabChange {
+  field: string;
+  oldValue: string;
+  newValue: string;
+}
+
+export interface BacktestLabAuditRow {
+  id: number;
+  changedAt: string;
+  userDisplayName: string | null;
+  /** Null for a global value. */
+  symbol: string | null;
+  field: string;
+  oldValue: string | null;
+  newValue: string | null;
 }
 
 /** The most symbols one session runs on its book. */

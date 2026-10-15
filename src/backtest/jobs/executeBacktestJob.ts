@@ -11,6 +11,7 @@ import { readFirstOptionDay } from "../backtestDataFile.js";
 import { describeFileStockBarsRefresh, FileStockBarsCancelledError, refreshFileStockBars } from "../refreshFileStockBars.js";
 import { BacktestCancelledError, runBacktestSession } from "../engine/runBacktestSession.js";
 import { refreshSplitScheduleForSymbol } from "../engine/splitFactors.js";
+import { runAnalysisJob } from "../analysis/runAnalysisJob.js";
 import { backfillDailyHistoryForBacktest, backtestHistoryStartDate, describeBacktestHistoryBackfill } from "../backfillDailyHistory.js";
 import { formatDownloadProgressLabel, jobHeartbeatIntervalMilliseconds, lastFinishedBacktestSessionDate } from "./backtestJobRules.js";
 import { finishSessionOfJob, kickDownloadQueue, loadBacktestJobRow, requeuePausedDownload, type BacktestJobRow } from "./backtestJobStore.js";
@@ -321,7 +322,7 @@ export async function executeBacktestJob(jobId: string): Promise<void> {
 
   let outcome: JobOutcome = { status: "failed", error: "The job ended without an outcome." };
   try {
-    outcome = job.kind === "download" ? await runDownloadJob(job, control) : await runBacktestJob(job, control);
+    outcome = job.kind === "download" ? await runDownloadJob(job, control) : job.kind === "analysis" ? await runAnalysisJob(job.id, control) : await runBacktestJob(job, control);
   } catch (error) {
     console.error(`Backtest job ${jobId} failed:`, error);
     outcome = control.cancelRequested ? { status: "cancelled", error: null } : { status: "failed", error: errorMessage(error) };

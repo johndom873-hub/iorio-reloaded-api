@@ -19,6 +19,8 @@ export interface ClaudeSubscriptionCallInput {
   timeoutSeconds: number;
   systemPrompt: string;
   userPayload: string;
+  /** The answer's JSON schema; Pluto's decision when absent. */
+  jsonSchema?: object;
 }
 
 /**
@@ -74,7 +76,7 @@ function failed(kind: ClaudeCallFailureKind) {
   return { usageLimitReached: kind === "usage_limit", failureKind: kind };
 }
 
-export function claudeCliArguments(systemPrompt: string): string[] {
+export function claudeCliArguments(systemPrompt: string, jsonSchema: object = plutoDecisionJsonSchema): string[] {
   return [
     "-p",
     "--output-format", "json",
@@ -82,7 +84,7 @@ export function claudeCliArguments(systemPrompt: string): string[] {
     "--effort", backtestClaudeReasoningEffort,
     "--system-prompt", systemPrompt,
     "--tools", "",
-    "--json-schema", JSON.stringify(plutoDecisionJsonSchema),
+    "--json-schema", JSON.stringify(jsonSchema),
     "--no-session-persistence",
     "--strict-mcp-config",
     "--disable-slash-commands",
@@ -139,7 +141,7 @@ export function callClaudeSubscriptionModel(input: ClaudeSubscriptionCallInput, 
       clearTimeout(timer);
       resolve(result);
     };
-    const child = spawn(input.cliPath, claudeCliArguments(input.systemPrompt), input.workingDirectory);
+    const child = spawn(input.cliPath, claudeCliArguments(input.systemPrompt, input.jsonSchema), input.workingDirectory);
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {

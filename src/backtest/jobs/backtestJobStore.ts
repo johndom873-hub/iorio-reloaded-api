@@ -152,9 +152,9 @@ export async function listOverviewJobViews(): Promise<BacktestJobView[]> {
   return [...backtestRows, ...downloadRows].map((row) => toBacktestJobView(row, now));
 }
 
-/** The Backtests list: the latest overviewJobsPerKind, finished or not, latest activity first. */
+/** The Backtests list (the ticker analyses included, Marcelo 2026-10-15): the latest overviewJobsPerKind, finished or not, latest activity first. */
 async function listOverviewBacktestJobRows(): Promise<BacktestJobRow[]> {
-  const rows: BacktestJobRow[] = await selectJobRows().where("j.kind", "backtest").orderByRaw(`${latestActivitySql} DESC, j.created_at DESC`).limit(overviewJobsPerKind);
+  const rows: BacktestJobRow[] = await selectJobRows().whereIn("j.kind", ["backtest", "analysis"]).orderByRaw(`${latestActivitySql} DESC, j.created_at DESC`).limit(overviewJobsPerKind);
   return rows;
 }
 
@@ -343,6 +343,12 @@ export async function insertClaimedBacktestJob(sessionId: string, symbol: string
   return row.id as string;
 }
 
+/** Inserts a ticker analysis's job already claimed (analyses do not queue); startClaimedBacktestJob then starts its process. */
+export async function insertClaimedAnalysisJob(symbol: string, connection: Knex = db): Promise<string> {
+  const [row] = await connection("backtest_jobs").insert({ kind: "analysis", symbol, status: "running", heartbeat_at: connection.fn.now(), started_at: connection.fn.now() }).returning("id");
+  return row.id as string;
+}
+
 export async function startClaimedBacktestJob(jobId: string): Promise<void> {
   await spawnClaimedJob(jobId);
 }
@@ -386,6 +392,7 @@ export async function resumeBacktestJob(jobId: string): Promise<BacktestJobView>
   if (displayStatus === "succeeded") throw new BacktestRequestError("This job finished: there is nothing to resume.", 409);
   if (displayStatus === "queued" || displayStatus === "running") throw new BacktestRequestError("This job is already running or waiting to start.", 409);
   if (job.kind === "backtest" && !job.session_id) throw new BacktestRequestError("This backtest job has no session.", 409);
+  if (job.kind === "analysis") throw new BacktestRequestError("An analysis is not resumed: run Update Analysis again.", 409);
 
   terminateLeftoverJobProcesses(job.pid, jobId);
   if (job.kind === "download") {

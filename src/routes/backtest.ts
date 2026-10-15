@@ -1,10 +1,20 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtest/backtestDataDirectory.js";
-import type { BacktestOverview, BacktestSessionEstimateResponse } from "../backtest/backtestTypes.js";
+import type { BacktestLabSettingsView, BacktestOverview, BacktestSessionEstimateResponse, BacktestSettingsTemplate } from "../backtest/backtestTypes.js";
 import { readBacktestDataFileContents, readBacktestDataFilePeriodContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
 import { backtestHistoryStartDate } from "../backtest/backfillDailyHistory.js";
-import { editableBacktestSettingPaths, loadBacktestSettingsTemplate, loadCurrentBacktestSettings } from "../backtest/settingsTemplate.js";
+import { backtestNotReplayed, buildBacktestSettingRows, editableBacktestSettingPaths } from "../backtest/settingsTemplate.js";
+import {
+  BacktestLabSettingsValidationError,
+  globalChangeReachesTicker,
+  loadBacktestLabAudit,
+  loadBacktestLabSettings,
+  loadBacktestLabTickerOverrides,
+  saveBacktestLabTickerOverrides,
+  updateBacktestLabSettings,
+  type BacktestLabSettings,
+} from "../backtest/labSettingsStore.js";
 import { defaultDownloadStartDate, isIsoCalendarDate, lastFinishedBacktestSessionDate } from "../backtest/jobs/backtestJobRules.js";
 import {
   BacktestRequestError,
@@ -16,7 +26,10 @@ import {
   listOverviewJobViews,
   resumeBacktestJob,
 } from "../backtest/jobs/backtestJobStore.js";
-import { validateBacktestBookPageQuery, validateBacktestSessionsPageQuery, validateCreateBacktestSessionRequest } from "../backtest/jobs/backtestSessionRequest.js";
+import { validateBacktestBookPageQuery, validateBacktestSessionsPageQuery } from "../backtest/jobs/backtestSessionRequest.js";
+import { validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
+import { registerTickerAnalysisRoutes } from "./backtestAnalysisRoutes.js";
+import { listAnalysedSymbols, rerunAnalysesAfterSave } from "../backtest/analysis/analysisStore.js";
 import { readBacktestClaudeCliPath } from "../backtest/backtestClaudeCli.js";
 import { applyBacktestOverrides } from "../backtest/backtestSettingsOverrides.js";
 import { lookTimesInWindow, regularCloseMinutesEt } from "../backtest/engine/runBacktestSession.js";
@@ -85,35 +98,73 @@ backtestRouter.post("/jobs/:id/resume", async (request, response) => {
   response.json(await resumeBacktestJob(requireUuidParameter(request.params.id, "job")));
 });
 
-backtestRouter.get("/settings-template", async (_request, response) => {
-  response.json(await loadBacktestSettingsTemplate());
-});
-
-/** A New session request checked as the create route checks it, with the AI model's estimate when it decides (null on the rules). */
-async function validateSessionRequestWithEstimate(body: unknown) {
-  const snapshot = await loadCurrentBacktestSettings();
-  const validation = validateCreateBacktestSessionRequest(body, {
-    snapshot,
-    editablePaths: editableBacktestSettingPaths,
-    coverageFor: (symbol) => readBacktestDataFileContents(symbol),
-    periodContentsFor: (symbol, startDate, endDate) => readBacktestDataFilePeriodContents(symbol, startDate, endDate),
-    claudeCliAvailable: readBacktestClaudeCliPath() !== null,
-    // Until the lab's settings store exists, no ticker has saved values and there is no default pot.
-    tickerValuesFor: () => null,
-    defaultPotDollars: null,
-  });
-  if (!validation.ok) throw new BacktestRequestError(validation.error, 400);
-  // With the AI model deciding, the calls a full day of looks may take (a day without intraday quotes has one look).
-  const effective = applyBacktestOverrides(snapshot, validation.value.overrides);
-  const llmEstimate =
-    effective.decisionMaker === "llm"
-      ? estimateLlmSession(validation.value.startDate, validation.value.endDate, lookTimesInWindow(effective.pluto.windowStartEt, effective.pluto.windowEndEt, regularCloseMinutesEt).length)
-      : null;
-  return { snapshot, value: validation.value, warnings: validation.warnings, llmEstimate };
+function labSettingsView(lab: BacktestLabSettings): BacktestLabSettingsView {
+  const template: BacktestSettingsTemplate = { settings: lab.settings, rows: buildBacktestSettingRows(lab.settings, { claudeCliAvailable: readBacktestClaudeCliPath() !== null }), notReplayed: [...backtestNotReplayed] };
+  return { ...template, defaultPotDollars: lab.defaultPotDollars, updatedAt: lab.updatedAt };
 }
 
+/** Runs a lab store call, its validation errors answered as 400s. */
+async function withLabValidation<T>(work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof BacktestLabSettingsValidationError) throw new BacktestRequestError(error.message, 400);
+    throw error;
+  }
+}
+
+// The New session table starts from the lab's global settings (Marcelo 2026-10-15: the lab is separate from Pluto's
+// live settings and never syncs with them).
+backtestRouter.get("/settings-template", async (_request, response) => {
+  const template: BacktestSettingsTemplate = labSettingsView(await loadBacktestLabSettings());
+  response.json({ settings: template.settings, rows: template.rows, notReplayed: template.notReplayed });
+});
+
+backtestRouter.get("/lab-settings", async (_request, response) => {
+  response.json(labSettingsView(await loadBacktestLabSettings()));
+});
+
+// Body: { overrides?: <the New session's overrides shape>, defaultPotDollars?: number }. Answers the saved settings and
+// the values that changed.
+backtestRouter.put("/lab-settings", async (request, response) => {
+  const body = (request.body ?? {}) as { overrides?: unknown; defaultPotDollars?: unknown };
+  const { lab, changes } = await withLabValidation(() => updateBacktestLabSettings(body, request.session.userId ?? null));
+  // Saving the global lab values re-runs every stored analysis they reach: a ticker's own value for a field shields it.
+  const changedFields = changes.map((change) => change.field);
+  const overridesBySymbol = new Map((await loadBacktestLabTickerOverrides()).map((row) => [row.symbol, row]));
+  const reached = changedFields.length === 0 ? [] : (await listAnalysedSymbols()).filter((symbol) => globalChangeReachesTicker(changedFields, overridesBySymbol.get(symbol) ?? null));
+  response.json({ settings: labSettingsView(lab), changes, analyses: await rerunAnalysesAfterSave(reached, "global_settings") });
+});
+
+// ?symbol=XYZ: one ticker's own values; ?symbol= (empty): the global values only; absent: everything.
+backtestRouter.get("/lab-settings/audit", async (request, response) => {
+  const raw = request.query.symbol;
+  const symbol = raw === undefined ? undefined : typeof raw === "string" && raw.trim() !== "" ? normalizeBacktestSymbol(raw) : null;
+  response.json(await loadBacktestLabAudit({ symbol }));
+});
+
+backtestRouter.get("/lab-ticker-overrides", async (_request, response) => {
+  response.json(await loadBacktestLabTickerOverrides());
+});
+
+backtestRouter.get("/lab-ticker-overrides/:symbol", async (request, response) => {
+  const symbol = await withLabValidation(async () => normalizeBacktestSymbol(request.params.symbol ?? ""));
+  const overrides = (await loadBacktestLabTickerOverrides()).find((row) => row.symbol === symbol) ?? null;
+  response.json({ symbol, overrides });
+});
+
+// Body: any of potDollars, ladderSharesPct, ladderRungs, ladderShockPct, minAbsDelta, maxAbsDelta: a number, or null for
+// the global value again.
+backtestRouter.put("/lab-ticker-overrides/:symbol", async (request, response) => {
+  const body = (request.body ?? {}) as Record<string, unknown>;
+  const { overrides, changes } = await withLabValidation(() => saveBacktestLabTickerOverrides(request.params.symbol ?? "", body, request.session.userId ?? null));
+  // Save for the ticker updates its analysis at once, so the stored analysis always matches its saved values.
+  const symbol = normalizeBacktestSymbol(request.params.symbol ?? "");
+  response.json({ overrides, changes, analyses: changes.length === 0 ? { started: [], skipped: [] } : await rerunAnalysesAfterSave([symbol], "ticker_settings") });
+});
+
 backtestRouter.post("/sessions", async (request, response) => {
-  const { snapshot, value, warnings, llmEstimate } = await validateSessionRequestWithEstimate(request.body);
+  const { snapshot, value, warnings, llmEstimate } = await validateSessionRequestAgainstLab(request.body);
   response.status(201).json({ ...(await createBacktestSession(value, snapshot)), warnings, llmEstimate, resolvedBySymbol: value.symbolSettings });
 });
 
@@ -121,7 +172,7 @@ backtestRouter.post("/sessions", async (request, response) => {
 // needed yet), nothing created.
 backtestRouter.post("/sessions/estimate", async (request, response) => {
   const body = (request.body ?? {}) as Record<string, unknown>;
-  const { value, warnings, llmEstimate } = await validateSessionRequestWithEstimate({ ...body, name: typeof body.name === "string" && body.name.trim() !== "" ? body.name : "estimate" });
+  const { value, warnings, llmEstimate } = await validateSessionRequestAgainstLab({ ...body, name: typeof body.name === "string" && body.name.trim() !== "" ? body.name : "estimate" });
   const estimate: BacktestSessionEstimateResponse = { warnings, llmEstimate, capital: value.startingValue, bookMode: value.bookMode, resolvedBySymbol: value.symbolSettings };
   response.json(estimate);
 });
@@ -173,6 +224,8 @@ backtestRouter.delete("/sessions/:id", async (request, response) => {
   await deleteBacktestSession(requireUuidParameter(request.params.id, "session"));
   response.status(204).end();
 });
+
+registerTickerAnalysisRoutes(backtestRouter);
 
 // A request the job or session state does not allow is answered with its own status and message; anything else goes on
 // to the app's error handler.
