@@ -37,15 +37,17 @@ export function rememberAnalysed(stamps: DaySignalQuoteStamp[], lastAnalysedQuot
   for (const stamp of stamps) lastAnalysedQuotedAtMs.set(contractKey(stamp), stamp.quotedAtMs);
 }
 
-/** Today's (US/Eastern) error-free Day Signals quotes on the tickers Pluto may trade. */
+/** Today's (US/Eastern) error-free quotes the Day Signals loop wrote for the tickers Pluto may trade: Signals' own and the CC + Put Ladder's band. */
 export async function loadTodaysDaySignalQuoteStamps(now: Date = new Date()): Promise<DaySignalQuoteStamp[]> {
-  const rows: { symbol: string; expiry: string; strike: string; right: string; quotedAt: Date | string }[] = await db("day_signal_quotes as q")
-    .join("shortlist_entries as se", "se.ticker_id", "q.ticker_id")
-    .join("tickers as t", "t.id", "q.ticker_id")
-    .whereNull("se.removed_at")
-    .where("se.bot_enabled", true)
-    .whereNull("q.error_code")
-    .select("t.symbol", db.raw("q.expiry::text as expiry"), "q.strike", "q.option_right as right", "q.quoted_at as quotedAt");
+  const stampsOf = (table: "day_signal_quotes" | "ladder_band_quotes"): Promise<{ symbol: string; expiry: string; strike: string; right: string; quotedAt: Date | string }[]> =>
+    db(`${table} as q`)
+      .join("shortlist_entries as se", "se.ticker_id", "q.ticker_id")
+      .join("tickers as t", "t.id", "q.ticker_id")
+      .whereNull("se.removed_at")
+      .where("se.bot_enabled", true)
+      .whereNull("q.error_code")
+      .select("t.symbol", db.raw("q.expiry::text as expiry"), "q.strike", "q.option_right as right", "q.quoted_at as quotedAt");
+  const rows = (await Promise.all([stampsOf("day_signal_quotes"), stampsOf("ladder_band_quotes")])).flat();
   const todayIso = easternIsoDate(now);
   return rows
     .map((row) => ({ symbol: row.symbol, expiry: row.expiry, strike: Number(row.strike), right: row.right, quotedAtMs: new Date(row.quotedAt).getTime() }))
