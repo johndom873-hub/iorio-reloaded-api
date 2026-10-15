@@ -141,8 +141,12 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
     record("daily_loss", false, `could not read the P&L snapshot: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // The CC + Put Ladder calls no model (Marcelo 2026-10-15): the AI cost and AI failure checks pass under it, so an Edge
+  // Margin day that hit either limit does not stop the ladder's rounds after a switch.
+  const ladderActive = settings.executionStrategy === "cc_put_ladder";
   const counters = await loadPlutoTodayCounters(now);
-  record("cost_ceiling", counters.costTodayUsd < settings.dailyCostCeilingUsd, `$${counters.costTodayUsd.toFixed(3)} of $${settings.dailyCostCeilingUsd} today`);
+  if (ladderActive) record("cost_ceiling", true, `not checked: the CC + Put Ladder calls no model ($${counters.costTodayUsd.toFixed(3)} spent today)`);
+  else record("cost_ceiling", counters.costTodayUsd < settings.dailyCostCeilingUsd, `$${counters.costTodayUsd.toFixed(3)} of $${settings.dailyCostCeilingUsd} today`);
   record("actions_cap", counters.actionsToday < settings.maxActionsPerSession, `${counters.actionsToday} of ${settings.maxActionsPerSession} actions today`);
   // Position reconciliation: the health-check job compares IBKR's holdings with the book and
   // stores what it found in job_runs.details.reconciliationProblems.
@@ -155,7 +159,8 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   }
 
   const trailingFailures = await countTrailingModelFailures(now);
-  record("model_failures", trailingFailures < settings.consecutiveModelFailuresBreaker, `${trailingFailures} consecutive model failure(s), breaker at ${settings.consecutiveModelFailuresBreaker}`);
+  if (ladderActive) record("model_failures", true, `not checked: the CC + Put Ladder calls no model (${trailingFailures} consecutive model failure(s))`);
+  else record("model_failures", trailingFailures < settings.consecutiveModelFailuresBreaker, `${trailingFailures} consecutive model failure(s), breaker at ${settings.consecutiveModelFailuresBreaker}`);
 
   const failures = Object.entries(checks).filter(([, check]) => !check.ok).map(([name, check]) => `${name}: ${check.detail}`);
   return { ok: failures.length === 0, checks, failures, context: { state, marketState, netLiquidationValue, totalCashValue, counters, todayEasternIso, session } };
