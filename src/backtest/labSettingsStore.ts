@@ -94,7 +94,8 @@ export async function loadBacktestLabSettings(connection: Knex = db): Promise<Ba
  * policy, decisionMaker, baseline), checked as a session's overrides are, and `defaultPotDollars`. One audit row per
  * value that changed; an empty list when nothing did.
  */
-export async function updateBacktestLabSettings(input: { overrides?: unknown; defaultPotDollars?: unknown }, userId: string | null, connection: Knex = db): Promise<{ lab: BacktestLabSettings; changes: BacktestLabChange[] }> {
+/** Saves the global lab values; `dryRun` validates and answers the changes without writing (the save's confirmation). */
+export async function updateBacktestLabSettings(input: { overrides?: unknown; defaultPotDollars?: unknown }, userId: string | null, connection: Knex = db, options: { dryRun?: boolean } = {}): Promise<{ lab: BacktestLabSettings; changes: BacktestLabChange[]; auditIds: number[] }> {
   return connection.transaction(async (trx) => {
     const current = await loadBacktestLabSettings(trx);
     const validation = validateBacktestSettingsOverrides(input.overrides, current.settings, editableBacktestSettingPaths, { claudeCliAvailable: readBacktestClaudeCliPath() !== null });
@@ -113,10 +114,12 @@ export async function updateBacktestLabSettings(input: { overrides?: unknown; de
       if (String(before) !== String(after)) changes.push({ field: path, oldValue: String(before), newValue: String(after) });
     }
     if (defaultPotDollars !== current.defaultPotDollars) changes.push({ field: "lab.defaultPotDollars", oldValue: String(current.defaultPotDollars), newValue: String(defaultPotDollars) });
-    if (changes.length === 0) return { lab: current, changes };
+    if (changes.length === 0 || options.dryRun) return { lab: current, changes, auditIds: [] };
     await trx("backtest_lab_settings").where({ id: 1 }).update({ settings: JSON.stringify(next), default_pot_dollars: defaultPotDollars, updated_at: trx.fn.now(), updated_by_user_id: userId });
-    await trx("backtest_lab_settings_audit").insert(changes.map((change) => ({ user_id: userId, symbol: null, field: change.field, old_value: change.oldValue, new_value: change.newValue })));
-    return { lab: await loadBacktestLabSettings(trx), changes };
+    const inserted: { id: number | string }[] = await trx("backtest_lab_settings_audit")
+      .insert(changes.map((change) => ({ user_id: userId, symbol: null, field: change.field, old_value: change.oldValue, new_value: change.newValue })))
+      .returning("id");
+    return { lab: await loadBacktestLabSettings(trx), changes, auditIds: inserted.map((row) => Number(row.id)) };
   });
 }
 
@@ -229,7 +232,13 @@ export async function loadBacktestLabAudit(options: { symbol?: string | null; li
     field: row.field,
     oldValue: row.old_value ?? null,
     newValue: row.new_value ?? null,
+    analysesRerun: row.analyses_rerun ?? null,
   }));
+}
+
+/** Records how many stored analyses a global save re-ran, on the audit rows it wrote. */
+export async function noteLabAuditAnalysesRerun(auditIds: readonly number[], count: number, connection: Knex = db): Promise<void> {
+  if (auditIds.length > 0) await connection("backtest_lab_settings_audit").whereIn("id", auditIds).update({ analyses_rerun: count });
 }
 
 /**
@@ -244,6 +253,11 @@ const globalPathsByTickerField: Record<BacktestLabTickerField, readonly string[]
   minAbsDelta: ["baseline.minAbsDelta"],
   maxAbsDelta: ["baseline.maxAbsDelta"],
 };
+
+/** Whether a ticker's own values replace this global value (it keeps its override when the value changes). */
+export function tickerOverridesGlobalPath(path: string, overrides: Pick<BacktestLabTickerOverrides, BacktestLabTickerField> | null): boolean {
+  return overrides !== null && tickerFields.some((field) => overrides[field] !== null && globalPathsByTickerField[field].includes(path));
+}
 
 /** Whether a change to these global values reaches a ticker: some changed value is one its own values don't replace. */
 export function globalChangeReachesTicker(changedFields: readonly string[], overrides: Pick<BacktestLabTickerOverrides, BacktestLabTickerField> | null): boolean {

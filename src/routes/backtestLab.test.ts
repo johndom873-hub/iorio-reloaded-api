@@ -107,4 +107,30 @@ describe("lab settings routes", () => {
     expect(cleared.body.overrides).toBeNull();
     expect((await call<{ overrides: unknown }>("GET", `/lab-ticker-overrides/${symbol}`)).body.overrides).toBeNull();
   });
+
+  it("previews a global save without writing it: each change, the tickers it re-runs and the ones keeping their own value", async () => {
+    await call("PUT", `/lab-ticker-overrides/${symbol}`, { ladderRungs: 6 });
+    const before = await call<BacktestLabSettingsView>("GET", "/lab-settings");
+    const rungs = before.body.settings.baseline!.ladderRungs === 4 ? 3 : 4;
+    const auditBefore = await call<BacktestLabAuditRow[]>("GET", "/lab-settings/audit?symbol=");
+
+    type Preview = { changes: (BacktestLabChange & { reruns: string[]; keptOverrides: string[] })[]; reruns: string[] };
+    const preview = await call<Preview>("POST", "/lab-settings/preview", { overrides: { baseline: { ladderRungs: rungs } } });
+    expect(preview.status).toBe(200);
+    expect(preview.body.changes).toHaveLength(1);
+    expect(preview.body.changes[0]).toMatchObject({ field: "baseline.ladderRungs", oldValue: String(before.body.settings.baseline!.ladderRungs), newValue: String(rungs) });
+    expect(preview.body.changes[0]!.keptOverrides).toContain(symbol);
+    expect(preview.body.changes[0]!.reruns).not.toContain(symbol);
+    expect(preview.body.reruns).not.toContain(symbol);
+    // Nothing written: the value and the history are as they were.
+    expect((await call<BacktestLabSettingsView>("GET", "/lab-settings")).body.settings.baseline!.ladderRungs).toBe(before.body.settings.baseline!.ladderRungs);
+    expect((await call<BacktestLabAuditRow[]>("GET", "/lab-settings/audit?symbol=")).body[0]?.id).toBe(auditBefore.body[0]?.id);
+    expect((await call("POST", "/lab-settings/preview", { overrides: { baseline: { minDte: 90 } } })).status).toBe(400);
+
+    // The save itself records how many analyses it re-ran on its history rows.
+    const saved = await call<{ analyses: { started: string[] } }>("PUT", "/lab-settings", { overrides: { baseline: { ladderRungs: rungs } } });
+    const audit = await call<BacktestLabAuditRow[]>("GET", "/lab-settings/audit?symbol=");
+    expect(audit.body[0]).toMatchObject({ field: "baseline.ladderRungs", analysesRerun: saved.body.analyses.started.length });
+    await call("PUT", `/lab-ticker-overrides/${symbol}`, { ladderRungs: null });
+  });
 });

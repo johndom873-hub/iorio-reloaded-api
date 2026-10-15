@@ -11,7 +11,9 @@ import {
   loadBacktestLabAudit,
   loadBacktestLabSettings,
   loadBacktestLabTickerOverrides,
+  noteLabAuditAnalysesRerun,
   saveBacktestLabTickerOverrides,
+  tickerOverridesGlobalPath,
   updateBacktestLabSettings,
   type BacktestLabSettings,
 } from "../backtest/labSettingsStore.js";
@@ -128,12 +130,32 @@ backtestRouter.get("/lab-settings", async (_request, response) => {
 // the values that changed.
 backtestRouter.put("/lab-settings", async (request, response) => {
   const body = (request.body ?? {}) as { overrides?: unknown; defaultPotDollars?: unknown };
-  const { lab, changes } = await withLabValidation(() => updateBacktestLabSettings(body, request.session.userId ?? null));
+  const { lab, changes, auditIds } = await withLabValidation(() => updateBacktestLabSettings(body, request.session.userId ?? null));
   // Saving the global lab values re-runs every stored analysis they reach: a ticker's own value for a field shields it.
   const changedFields = changes.map((change) => change.field);
   const overridesBySymbol = new Map((await loadBacktestLabTickerOverrides()).map((row) => [row.symbol, row]));
   const reached = changedFields.length === 0 ? [] : (await listAnalysedSymbols()).filter((symbol) => globalChangeReachesTicker(changedFields, overridesBySymbol.get(symbol) ?? null));
-  response.json({ settings: labSettingsView(lab), changes, analyses: await rerunAnalysesAfterSave(reached, "global_settings") });
+  const analyses = await rerunAnalysesAfterSave(reached, "global_settings");
+  await noteLabAuditAnalysesRerun(auditIds, analyses.started.length);
+  response.json({ settings: labSettingsView(lab), changes, analyses });
+});
+
+// The save's confirmation: the same body as PUT, nothing written. Each change with the analysed tickers it re-runs and
+// the tickers whose own value keeps it from reaching them; `reruns` is every ticker the save re-runs.
+backtestRouter.post("/lab-settings/preview", async (request, response) => {
+  const body = (request.body ?? {}) as { overrides?: unknown; defaultPotDollars?: unknown };
+  const { changes } = await withLabValidation(() => updateBacktestLabSettings(body, request.session.userId ?? null, undefined, { dryRun: true }));
+  const overrides = await loadBacktestLabTickerOverrides();
+  const overridesBySymbol = new Map(overrides.map((row) => [row.symbol, row]));
+  const analysed = await listAnalysedSymbols();
+  response.json({
+    changes: changes.map((change) => ({
+      ...change,
+      reruns: analysed.filter((symbol) => !tickerOverridesGlobalPath(change.field, overridesBySymbol.get(symbol) ?? null)),
+      keptOverrides: overrides.filter((row) => tickerOverridesGlobalPath(change.field, row)).map((row) => row.symbol),
+    })),
+    reruns: changes.length === 0 ? [] : analysed.filter((symbol) => globalChangeReachesTicker(changes.map((change) => change.field), overridesBySymbol.get(symbol) ?? null)),
+  });
 });
 
 // ?symbol=XYZ: one ticker's own values; ?symbol= (empty): the global values only; absent: everything.

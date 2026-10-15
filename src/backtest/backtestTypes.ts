@@ -546,6 +546,8 @@ export interface BacktestLabAuditRow {
   field: string;
   oldValue: string | null;
   newValue: string | null;
+  /** How many stored analyses the save re-ran; null for ticker saves and rows from before it was recorded. */
+  analysesRerun: number | null;
 }
 
 /** The most symbols one session runs on its book. */
