@@ -7,6 +7,8 @@ import { resolvePlutoSession } from "../pluto/sessionSchedule.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
+import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
+import { loadLadderSettingsForTicker } from "../pluto/ladderSettings.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
 import { plutoEventCategories, plutoEventCategoryByType, plutoEventTypesInCategories, recordPlutoEvent, type PlutoEventCategory } from "../pluto/ledger.js";
 import { cancelPlutoOrders, countPlutoWorkingOrders, loadPlutoWorkingOrders } from "../pluto/orders.js";
@@ -322,6 +324,62 @@ plutoRouter.put("/settings", async (request: Request, response: Response) => {
 
 plutoRouter.get("/settings/audit", async (request: Request, response: Response) => {
   response.json(await loadPlutoSettingsAudit(Math.min(500, Number(request.query.limit) || 100)));
+});
+
+/** Every enabled ticker's settings, with the allocation each one gets after the equal split. */
+plutoRouter.get("/ticker-settings", async (_request: Request, response: Response) => {
+  const enabledTickers = await loadEnabledPlutoTickerSettings();
+  const effective = effectiveAllocationPctBySymbol(enabledTickers);
+  response.json(enabledTickers.map((ticker) => ({ ...ticker, effectiveAllocationPct: effective.get(ticker.symbol) ?? null })));
+});
+
+plutoRouter.get("/ticker-settings/audit", async (request: Request, response: Response) => {
+  const symbol = typeof request.query.symbol === "string" && request.query.symbol !== "" ? request.query.symbol : undefined;
+  response.json(await loadPlutoTickerSettingsAudit(limitFrom(request, 100), symbol));
+});
+
+plutoRouter.get("/ticker-settings/:symbol", async (request: Request, response: Response) => {
+  const settings = await loadPlutoTickerSettings(String(request.params.symbol));
+  if (!settings) {
+    response.status(404).json({ error: `${String(request.params.symbol).toUpperCase()} is not a known ticker.` });
+    return;
+  }
+  response.json(settings);
+});
+
+/** Body: any of allocationPct, ladderSharesPct, ladderShockOverridePct; null puts a field back to the default. */
+plutoRouter.put("/ticker-settings/:symbol", async (request: Request, response: Response) => {
+  const input = request.body;
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    response.status(400).json({ error: "Body must be an object of ticker settings fields." });
+    return;
+  }
+  const symbol = String(request.params.symbol);
+  const before = await loadPlutoTickerSettings(symbol);
+  try {
+    const settings = await updatePlutoTickerSettings(symbol, input as PlutoTickerSettingsInput, currentUserId(request));
+    const changed = (Object.keys(input) as PlutoTickerSettingsField[]).filter((field) => before?.[field] !== settings[field]);
+    if (changed.length > 0) {
+      const who = await currentUserDisplayName(request);
+      await recordPlutoEvent("settings_changed", { by: who, symbol: settings.symbol, fields: changed.map((field) => ({ field, from: before?.[field] ?? null, to: settings[field] })) });
+    }
+    response.json(settings);
+  } catch (error) {
+    if (error instanceof PlutoTickerSettingsValidationError) {
+      response.status(400).json({ error: error.message });
+      return;
+    }
+    if (error instanceof PlutoTickerNotFoundError) {
+      response.status(404).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
+});
+
+/** The CC + Put Ladder's settings for one ticker, as loadLadderSettingsForTicker gives them (backtest names and units). */
+plutoRouter.get("/ladder-settings/:symbol", async (request: Request, response: Response) => {
+  response.json(await loadLadderSettingsForTicker(String(request.params.symbol)));
 });
 
 function limitFrom(request: Request, fallback: number): number {

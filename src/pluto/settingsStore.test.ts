@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { plutoSettingsColumns, validatePlutoSettingsInput, type PlutoSettings } from "./settingsStore.js";
+import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
 
 // The approved defaults (2026-09-28), as the store would read them back.
 const current: PlutoSettings = {
+  ...plutoLadderSettingsFixture,
   capitalBudgetPct: 30, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeYieldPct: 15, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 0, stressSigmas: 2,
@@ -37,6 +39,21 @@ describe("validatePlutoSettingsInput", () => {
     expect(validatePlutoSettingsInput({ windowStartEt: "15:30" }, current)).toMatch(/before windowEndEt/);
     expect(validatePlutoSettingsInput({ minDte: 50, maxDte: 60 }, current)).toBeNull();
   });
+  it("checks the strategy switch and the ladder's values with the backtest's bounds", () => {
+    expect(validatePlutoSettingsInput({ executionStrategy: "cc_put_ladder" }, current)).toBeNull();
+    expect(validatePlutoSettingsInput({ executionStrategy: "wheel" as never }, current)).toMatch(/must be one of/);
+    expect(validatePlutoSettingsInput({ ladderMinAbsDelta: 0 }, current)).toMatch(/above 0/);
+    expect(validatePlutoSettingsInput({ ladderMinAbsDelta: 0.35 }, current)).toMatch(/cannot exceed ladderMaxAbsDelta/);
+    expect(validatePlutoSettingsInput({ ladderMinDte: 0 }, current)).toBeNull();
+    expect(validatePlutoSettingsInput({ ladderMaxDte: 46 }, current)).toMatch(/cannot be above 45/);
+    expect(validatePlutoSettingsInput({ ladderMinDte: 10, ladderMaxDte: 5 }, current)).toMatch(/ladderMinDte cannot exceed/);
+    expect(validatePlutoSettingsInput({ ladderMaxSpreadPctOfMid: 0 }, current)).toMatch(/above 0/);
+    expect(validatePlutoSettingsInput({ ladderRungs: 2.5 }, current)).toMatch(/whole number/);
+    expect(validatePlutoSettingsInput({ ladderSharesPct: 100 }, current)).toMatch(/cannot be above 99/);
+    expect(validatePlutoSettingsInput({ ladderShockMinPct: 85 }, current)).toMatch(/ladderShockMinPct cannot exceed/);
+    expect(validatePlutoSettingsInput({ ladderMaxWorkingOrdersPerTicker: 0 }, current)).toMatch(/cannot be below 1/);
+  });
+
   it("every settings field has a column mapping", () => {
     const fields = Object.keys(current).filter((key) => key !== "updatedAt" && key !== "updatedByUserId");
     expect(Object.keys(plutoSettingsColumns).sort()).toEqual(fields.sort());

@@ -6,12 +6,14 @@ import type { TickerSignals } from "../lib/signalsTypes.js";
 import { filterTickerForPluto, rejectTicker, type PlutoTickerFilterInput } from "./candidateFilters.js";
 import { expectedDailyMovePct } from "./moveContext.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
 import { fixtureCandidateModel, fixtureModelForecast } from "../lib/testSupport/valuationModelFixtures.js";
 
 const now = Date.parse("2026-09-28T15:00:00Z"); // 11:00 ET
 const today = "2026-09-28";
 
 const settings: PlutoSettings = {
+  ...plutoLadderSettingsFixture,
   capitalBudgetPct: 30, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeYieldPct: 15, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 0, stressSigmas: 2,

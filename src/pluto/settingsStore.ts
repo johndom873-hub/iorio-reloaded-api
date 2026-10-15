@@ -9,8 +9,12 @@ import { db } from "../db/connection.js";
 export type PlutoGrade = "strong" | "good" | "weak";
 export type PlutoReasoningEffort = "low" | "medium" | "high";
 export type PlutoTelegramVerbosity = "actions" | "off";
+/** One strategy runs at a time (Marcelo 2026-10-15): the model-driven Edge Margin or the rules-only CC + Put Ladder. */
+export type PlutoExecutionStrategy = "edge_margin" | "cc_put_ladder";
 
 export interface PlutoSettings {
+  /** Changed only while Pluto is off or paused; the active strategy takes over every open position. */
+  executionStrategy: PlutoExecutionStrategy;
   // Capital
   capitalBudgetPct: number;
   maxTickerExposurePct: number;
@@ -79,6 +83,21 @@ export interface PlutoSettings {
   unstructuredCloseMinPct: number;
   unstructuredCloseMinDollars: number;
   buybackMinDte: number;
+  // CC + Put Ladder (the backtest's baseline keys with a "ladder" prefix; loadLadderSettingsForTicker maps them back)
+  ladderMinAbsDelta: number;
+  ladderMaxAbsDelta: number;
+  ladderMinDte: number;
+  ladderMaxDte: number;
+  ladderMaxSpreadPctOfMid: number;
+  ladderRungs: number;
+  /** The default share level; a ticker may override it (pluto_ticker_settings). */
+  ladderSharesPct: number;
+  ladderShockMinPct: number;
+  ladderShockMaxPct: number;
+  ladderShockNoHistoryPct: number;
+  ladderShockLookbackYears: number;
+  /** At most this many of a ticker's ladder orders work at once; the rest go at the next looks. */
+  ladderMaxWorkingOrdersPerTicker: number;
   updatedAt: string;
   updatedByUserId: string | null;
 }
@@ -138,7 +157,24 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   unstructuredCloseMinPct: { column: "unstructured_close_min_pct", kind: "number", min: 0 },
   unstructuredCloseMinDollars: { column: "unstructured_close_min_dollars", kind: "number", min: 0 },
   buybackMinDte: { column: "buyback_min_dte", kind: "integer", min: 0 },
+  executionStrategy: { column: "execution_strategy", kind: "text", oneOf: ["edge_margin", "cc_put_ladder"] },
+  // The ladder's bounds are the backtest's (validateBaselineSettings), so every live value can be backtested.
+  ladderMinAbsDelta: { column: "ladder_min_abs_delta", kind: "number", min: 0, max: 1 },
+  ladderMaxAbsDelta: { column: "ladder_max_abs_delta", kind: "number", min: 0, max: 1 },
+  ladderMinDte: { column: "ladder_min_dte", kind: "integer", min: 0, max: 45 },
+  ladderMaxDte: { column: "ladder_max_dte", kind: "integer", min: 0, max: 45 },
+  ladderMaxSpreadPctOfMid: { column: "ladder_max_spread_pct_of_mid", kind: "number", min: 0, max: 200 },
+  ladderRungs: { column: "ladder_rungs", kind: "integer", min: 1, max: 20 },
+  ladderSharesPct: { column: "ladder_shares_pct", kind: "number", min: 1, max: 99 },
+  ladderShockMinPct: { column: "ladder_shock_min_pct", kind: "number", min: 1, max: 99 },
+  ladderShockMaxPct: { column: "ladder_shock_max_pct", kind: "number", min: 1, max: 99 },
+  ladderShockNoHistoryPct: { column: "ladder_shock_no_history_pct", kind: "number", min: 1, max: 99 },
+  ladderShockLookbackYears: { column: "ladder_shock_lookback_years", kind: "integer", min: 1, max: 30 },
+  ladderMaxWorkingOrdersPerTicker: { column: "ladder_max_working_orders_per_ticker", kind: "integer", min: 1, max: 100 },
 };
+
+/** Settings only the CC + Put Ladder reads: changing them changes no Edge Margin decision, and the reverse. */
+export const ladderOnlySettingsFields: ReadonlySet<string> = new Set(Object.keys(plutoSettingsColumns).filter((field) => field.startsWith("ladder")));
 
 export type PlutoSettingsField = keyof typeof plutoSettingsColumns;
 export type PlutoSettingsInput = Partial<Pick<PlutoSettings, PlutoSettingsField>>;
@@ -181,6 +217,11 @@ export function validatePlutoSettingsInput(input: PlutoSettingsInput, current: P
   const merged = { ...current, ...input };
   if (merged.minDte > merged.maxDte) return "minDte cannot exceed maxDte.";
   if (merged.windowStartEt >= merged.windowEndEt) return "windowStartEt must be before windowEndEt.";
+  if (merged.ladderMinAbsDelta <= 0) return "ladderMinAbsDelta must be above 0.";
+  if (merged.ladderMinAbsDelta > merged.ladderMaxAbsDelta) return "ladderMinAbsDelta cannot exceed ladderMaxAbsDelta.";
+  if (merged.ladderMinDte > merged.ladderMaxDte) return "ladderMinDte cannot exceed ladderMaxDte.";
+  if (merged.ladderMaxSpreadPctOfMid <= 0) return "ladderMaxSpreadPctOfMid must be above 0.";
+  if (merged.ladderShockMinPct > merged.ladderShockMaxPct) return "ladderShockMinPct cannot exceed ladderShockMaxPct.";
   return null;
 }
 
@@ -190,6 +231,11 @@ export async function updatePlutoSettings(input: PlutoSettingsInput, userId: str
     const current = await loadPlutoSettings(trx);
     const problem = validatePlutoSettingsInput(input, current);
     if (problem) throw new PlutoSettingsValidationError(problem);
+    if (input.executionStrategy !== undefined && input.executionStrategy !== current.executionStrategy) {
+      // Locked so a Resume cannot land between this check and the commit.
+      const state = await trx("pluto_state").where({ id: 1 }).forUpdate().first("mode", "paused");
+      if (state && state.mode === "on" && !state.paused) throw new PlutoSettingsValidationError("Pause Pluto (or turn it off) before switching its strategy.");
+    }
     const update: Record<string, unknown> = {};
     const audit: { user_id: string; field: string; old_value: string; new_value: string }[] = [];
     for (const [field, value] of Object.entries(input)) {

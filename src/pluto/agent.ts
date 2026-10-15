@@ -17,7 +17,8 @@ import { PlutoRoundFailedAfterModelCallError, runPlutoPass, type PassRequest, ty
 import { advanceOpeningLook, decideOpeningLook, type OpeningLookDecision, type OpeningLookProgress } from "./openingLook.js";
 import { forcedRoundRetryDelayMs, recordRoundOutcome, roundFailureAlertText, roundFailureRecoveryText, shouldRetryForcedRound, type RoundFailureState } from "./roundFailures.js";
 import { resolvePlutoSession } from "./sessionSchedule.js";
-import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
+import { ladderOnlySettingsFields, loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
+import { plutoTickerSettingsColumns } from "./tickerSettingsStore.js";
 import { assemblePlutoReadinessResults, decidePlutoReadinessRun, describePlutoReadinessOutcome, reusableProbeResults, runPlutoReadinessTests } from "./readiness.js";
 import { createPlutoReadinessProbes } from "./readinessProbes.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, recordPlutoRelease, savePlutoReadiness } from "./stateStore.js";
@@ -140,7 +141,8 @@ export class PlutoAgent {
       }
       if (notification.type !== "pluto_event" || notification.eventType !== "settings_changed") return;
       const fields = ((notification.payload.fields as { field: string }[] | undefined) ?? []).map((change) => change.field);
-      if (fields.length > 0 && fields.every((field) => settingsFieldsThatNeverChangeADecision.has(field))) return;
+      const ladderFieldsChangeNothing = (this.settings?.executionStrategy ?? "edge_margin") === "edge_margin";
+      if (fields.length > 0 && fields.every((field) => settingsFieldsThatNeverChangeADecision.has(field) || (ladderFieldsChangeNothing && (ladderOnlySettingsFields.has(field) || field in plutoTickerSettingsColumns)))) return;
       this.queueForcedRound("settings_changed", { fields, by: notification.payload.by ?? null }, null);
     });
     await this.housekeeping();
