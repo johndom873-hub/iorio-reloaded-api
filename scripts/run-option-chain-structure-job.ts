@@ -24,6 +24,7 @@ import { fetchSpyLiquidHours } from "../src/ibkr/fetchLiquidHours.js";
 import { recordSessionCloseFromIbkr } from "../src/lib/sessionCloseFromIbkr.js";
 import { isMarketClosedToday } from "../src/lib/isWeekend.js";
 import { runJob } from "../src/lib/runJob.js";
+import { describeLadderSplitCheckOutcome, ladderSplitCheckJobName, runLadderSplitCheck } from "../src/pluto/ladderSplitCheck.js";
 
 async function main(): Promise<void> {
   if (await isMarketClosedToday()) {
@@ -80,6 +81,19 @@ async function main(): Promise<void> {
     },
     { triggeredBy: "scheduler" },
   );
+
+  // The CC + Put Ladder's tickers checked for a split before the open (src/pluto/ladderSplitCheck.ts). Its own job run:
+  // a failure alerts on its own; nothing to check while another strategy is active.
+  await runJob(
+    ladderSplitCheckJobName,
+    async () => {
+      const result = await runLadderSplitCheck();
+      const pending = result.pendingSplits.map((split) => `${split.symbol} ${split.ratio} from ${split.effectiveDateIso}`);
+      console.log(`Ladder split check: ${result.checkedSymbols.length} checked, ${result.failed.length} failed${pending.length > 0 ? `; pending splits (the ladder stops on these): ${pending.join(", ")}` : ""}.`);
+      return { details: { ...result }, ...describeLadderSplitCheckOutcome(result) };
+    },
+    { triggeredBy: "scheduler" },
+  ).catch((error: unknown) => console.error(`${ladderSplitCheckJobName} failed: ${error instanceof Error ? error.message : error}`));
 }
 
 runScript("run-option-chain-structure-job", main, () => db.destroy());

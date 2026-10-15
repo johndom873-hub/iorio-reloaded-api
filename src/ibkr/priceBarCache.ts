@@ -10,6 +10,8 @@ import { lastCompletedSessionDate } from "../lib/marketSessionStatus.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
 import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { storeDailyBarsCheckingForSplit, type DailyBarStoreResult, type DailyHistory, type StoredBarPrices } from "./dailyBarSplitCheck.js";
+import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { recordStockSplit } from "../lib/stockSplits.js";
 import type { Knex } from "knex";
 
 // MA99 (technicalIndicators.ts) is the deeper of the two indicator
@@ -235,7 +237,7 @@ export async function upsertDailyBars(tickerId: string, bars: PriceBar[], ivByDa
  */
 export async function storeFreshDailyBars(connection: IbkrConnection, tickerId: string, symbol: string, history: DailyHistory, reqId: number): Promise<DailyBarStoreResult> {
   return storeDailyBarsCheckingForSplit(
-    { tickerId, symbol, environment: readAppEnvironment(), ...history },
+    { tickerId, symbol, environment: readAppEnvironment(), todayIso: easternIsoDate(new Date()), ...history },
     {
       loadStoredPrices: async (id, tradingDates): Promise<StoredBarPrices[]> => {
         const rows: { tradingDate: string; open: string; high: string; low: string; close: string }[] = await db("daily_price_bars")
@@ -260,6 +262,7 @@ export async function storeFreshDailyBars(connection: IbkrConnection, tickerId: 
           return { removedEarlierDays };
         }),
       notify: notifyTelegram,
+      recordSplit: (split) => recordStockSplit({ tickerId, ...split }),
     },
   );
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PriceBar } from "./fetchTickerOverview.js";
-import { describePriceAdjustment, detectPriceAdjustment, storeDailyBarsCheckingForSplit, type DailyBarStoreDependencies, type StoredBarPrices } from "./dailyBarSplitCheck.js";
+import { describePriceAdjustment, detectPriceAdjustment, splitEffectiveDate, storeDailyBarsCheckingForSplit, type DailyBarStoreDependencies, type StoredBarPrices } from "./dailyBarSplitCheck.js";
 
 const timeOf = (isoDate: string) => Date.parse(`${isoDate}T00:00:00Z`) / 1000;
 const freshBar = (isoDate: string, close: number): PriceBar => ({ time: timeOf(isoDate), open: close * 0.99, high: close * 1.02, low: close * 0.97, close, volume: 1_000_000 });
@@ -33,6 +33,15 @@ describe("detectPriceAdjustment", () => {
   });
 });
 
+describe("splitEffectiveDate", () => {
+  it("is the first fetched day after the newest adjusted one, else today (a morning check before today's bar)", () => {
+    const thursday = freshBar("2026-10-01", 50);
+    const friday = freshBar("2026-10-02", 51);
+    expect(splitEffectiveDate({ ratio: 2, adjustedDates: ["2026-09-30", "2026-10-01"] }, [thursday, friday], "2026-10-05")).toBe("2026-10-02");
+    expect(splitEffectiveDate({ ratio: 2, adjustedDates: ["2026-10-01", "2026-10-02"] }, [thursday, friday], "2026-10-05")).toBe("2026-10-05");
+  });
+});
+
 describe("describePriceAdjustment", () => {
   it("names whole-number splits and falls back to the factor", () => {
     expect(describePriceAdjustment(2)).toBe("2-for-1 split");
@@ -57,46 +66,49 @@ describe("storeDailyBarsCheckingForSplit", () => {
       fetchFullHistory: vi.fn(async () => (calls.push("fetchFull"), history)),
       replaceHistory: vi.fn(async () => (calls.push("replace"), { removedEarlierDays: 0 })),
       notify: vi.fn(async (message: string) => void calls.push(`notify:${message}`)),
+      recordSplit: vi.fn(async (split: { ratio: number; effectiveDateIso: string }) => void calls.push(`split:${split.ratio}@${split.effectiveDateIso}`)),
     };
   }
 
   it("writes the fresh bars as they are when nothing moved", async () => {
     const deps = dependencies([storedFrom(bars[0]!)]);
-    const result = await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", bars, ivByDate: new Map() }, deps);
+    const result = await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", todayIso: "2026-10-07", bars, ivByDate: new Map() }, deps);
     expect(result).toEqual({ adjustment: null, replacedDays: 0 });
     expect(deps.calls).toEqual(["upsert"]);
   });
 
   it("on a split, replaces the whole history from a fresh fetch instead of writing the short window, and says so", async () => {
     const deps = dependencies([storedFrom(bars[0]!, 2)]);
-    const result = await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", bars, ivByDate: new Map() }, deps);
+    const result = await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", todayIso: "2026-10-07", bars, ivByDate: new Map() }, deps);
     expect(result.replacedDays).toBe(3);
-    expect(deps.calls.slice(0, 2)).toEqual(["fetchFull", "replace"]);
+    // Recorded first (stock_splits): the ticker's trading stops even if the re-fetch fails. Effective from the first new day.
+    expect(deps.calls.slice(0, 3)).toEqual(["split:2@2026-10-06", "fetchFull", "replace"]);
     expect(deps.upsertBars).not.toHaveBeenCalled();
-    expect(deps.calls[2]).toBe("notify:ℹ️ SMCI (staging): 2-for-1 split detected (stored prices 2.000× IBKR's on 2026-10-05). The price history was fetched again from IBKR and replaced: 3 days.");
+    expect(deps.calls[3]).toBe("notify:ℹ️ SMCI (staging): 2-for-1 split detected (stored prices 2.000× IBKR's on 2026-10-05). The price history was fetched again from IBKR and replaced: 3 days.");
   });
 
   it("writes nothing and fails when the re-fetch returns no bars, so the two price bases never mix", async () => {
     const deps = dependencies([storedFrom(bars[0]!, 2)], { bars: [], ivByDate: new Map() });
-    await expect(storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", bars, ivByDate: new Map() }, deps)).rejects.toThrow("2-for-1 split detected");
+    await expect(storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", todayIso: "2026-10-07", bars, ivByDate: new Map() }, deps)).rejects.toThrow("2-for-1 split detected");
     expect(deps.upsertBars).not.toHaveBeenCalled();
     expect(deps.replaceHistory).not.toHaveBeenCalled();
+    expect(deps.calls[0]).toBe("split:2@2026-10-06");
     expect(deps.calls.at(-1)).toMatch(/^notify:⚠️ SMCI \(staging\)/);
   });
 
   it("with no shared day (a missed night), fetches back to the newest stored day, compares there and fills the gap", async () => {
     const friday = freshBar("2026-10-02", 49);
     const deps = dependencies([storedFrom(friday, 2)], fullHistory, { newestStoredDate: "2026-10-02", window: [friday, freshBar("2026-10-03", 49.5)] });
-    const result = await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", bars, ivByDate: new Map() }, deps);
+    const result = await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", todayIso: "2026-10-07", bars, ivByDate: new Map() }, deps);
     expect(deps.fetchSince).toHaveBeenCalledWith("2026-10-02");
     expect(result.adjustment).toEqual({ ratio: 2, adjustedDates: ["2026-10-02"] });
-    expect(deps.calls.slice(0, 3)).toEqual(["fetchSince", "fetchFull", "replace"]);
+    expect(deps.calls.slice(0, 4)).toEqual(["fetchSince", "split:2@2026-10-03", "fetchFull", "replace"]);
   });
 
   it("the gap-filling window is written with the fresh bars when nothing moved", async () => {
     const friday = freshBar("2026-10-02", 49);
     const deps = dependencies([storedFrom(friday)], fullHistory, { newestStoredDate: "2026-10-02", window: [friday, freshBar("2026-10-03", 49.5)] });
-    await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", bars, ivByDate: new Map([["2026-10-06", 0.6]]) }, deps);
+    await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", todayIso: "2026-10-07", bars, ivByDate: new Map([["2026-10-06", 0.6]]) }, deps);
     const written = vi.mocked(deps.upsertBars).mock.calls[0]![1];
     expect(written.bars.map((bar) => new Date(bar.time * 1000).toISOString().slice(0, 10))).toEqual(["2026-10-02", "2026-10-03", "2026-10-05", "2026-10-06"]);
     expect(written.ivByDate.get("2026-10-06")).toBe(0.6);
@@ -104,14 +116,14 @@ describe("storeDailyBarsCheckingForSplit", () => {
 
   it("a ticker with no stored bars is written without a window fetch", async () => {
     const deps = dependencies([], fullHistory, { newestStoredDate: null });
-    await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", bars, ivByDate: new Map() }, deps);
+    await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", todayIso: "2026-10-07", bars, ivByDate: new Map() }, deps);
     expect(deps.fetchSince).not.toHaveBeenCalled();
     expect(deps.calls).toEqual(["upsert"]);
   });
 
   it("does nothing for an empty fetch", async () => {
     const deps = dependencies([]);
-    expect(await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", bars: [], ivByDate: new Map() }, deps)).toEqual({ adjustment: null, replacedDays: 0 });
+    expect(await storeDailyBarsCheckingForSplit({ tickerId: "t", symbol: "SMCI", environment: "staging", todayIso: "2026-10-07", bars: [], ivByDate: new Map() }, deps)).toEqual({ adjustment: null, replacedDays: 0 });
     expect(deps.loadStoredPrices).not.toHaveBeenCalled();
   });
 });

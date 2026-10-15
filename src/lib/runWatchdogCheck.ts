@@ -15,6 +15,8 @@ const DAILY_JOB_NAMES = [
   // Runs 11:00 PM UTC every day (weekends too), so it has always run by this check.
   "expiry_settlement_audit",
   "option_chain_structure_refresh",
+  // 9:00 AM UTC on market days, after the structure refresh: the ladder's tickers checked for a split.
+  "ladder_split_check",
   "option_chain_capture",
   "option_surface_fit",
   "day_signals_seed",

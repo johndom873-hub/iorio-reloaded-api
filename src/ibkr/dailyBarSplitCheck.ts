@@ -66,6 +66,16 @@ export function detectPriceAdjustment(stored: StoredBarPrices[], fresh: PriceBar
   return { ratio: median(adjusted.map((entry) => entry.ratio)), adjustedDates: adjusted.map((entry) => entry.date).sort() };
 }
 
+/**
+ * The split's first trading day on the new basis: the first fetched day after the newest day whose stored prices were
+ * adjusted, else today (a morning check, before today has a bar). Example: stored days up to Thursday adjusted, Friday
+ * fetched and new → Friday.
+ */
+export function splitEffectiveDate(adjustment: PriceAdjustment, freshBars: PriceBar[], todayIso: string): string {
+  const newestAdjusted = adjustment.adjustedDates[adjustment.adjustedDates.length - 1]!;
+  return freshBars.map(tradingDateOf).filter((date) => date > newestAdjusted).sort()[0] ?? todayIso;
+}
+
 /** "2-for-1 split" / "1-for-10 reverse split" when the ratio is close to a whole number, otherwise the factor. */
 export function describePriceAdjustment(ratio: number): string {
   const nearestWhole = (value: number) => (Math.abs(value - Math.round(value)) / value <= 0.02 ? Math.round(value) : null);
@@ -96,6 +106,8 @@ export interface DailyBarStoreDependencies {
   /** Writes the full history and removes what it does not cover: stored days before its first bar, and the chart's intraday cache. */
   replaceHistory(tickerId: string, history: DailyHistory): Promise<{ removedEarlierDays: number }>;
   notify(message: string): Promise<unknown>;
+  /** Records the split (stock_splits) as soon as it is seen, so trading on the ticker stops even if the re-fetch fails. */
+  recordSplit(split: { ratio: number; effectiveDateIso: string }): Promise<void>;
 }
 
 export interface DailyBarStoreResult {
@@ -112,7 +124,7 @@ function mergeHistories(earlier: DailyHistory, later: DailyHistory): DailyHistor
 }
 
 /** Writes freshly fetched daily bars, replacing the whole stored history first when IBKR's prices show a split since it was stored. */
-export async function storeDailyBarsCheckingForSplit(input: { tickerId: string; symbol: string; environment: string } & DailyHistory, dependencies: DailyBarStoreDependencies): Promise<DailyBarStoreResult> {
+export async function storeDailyBarsCheckingForSplit(input: { tickerId: string; symbol: string; environment: string; todayIso: string } & DailyHistory, dependencies: DailyBarStoreDependencies): Promise<DailyBarStoreResult> {
   if (input.bars.length === 0) return { adjustment: null, replacedDays: 0 };
   let fresh: DailyHistory = { bars: input.bars, ivByDate: input.ivByDate };
   let stored = await dependencies.loadStoredPrices(input.tickerId, fresh.bars.map(tradingDateOf));
@@ -132,6 +144,7 @@ export async function storeDailyBarsCheckingForSplit(input: { tickerId: string; 
     return { adjustment: null, replacedDays: 0 };
   }
   const what = describePriceAdjustment(adjustment.ratio);
+  await dependencies.recordSplit({ ratio: adjustment.ratio, effectiveDateIso: splitEffectiveDate(adjustment, fresh.bars, input.todayIso) });
   const history = await dependencies.fetchFullHistory();
   if (history.bars.length === 0) {
     // Writing the fresh bars now would mix the two price bases; leave everything as it was and let the next run retry.
