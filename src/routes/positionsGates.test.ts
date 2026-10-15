@@ -396,6 +396,30 @@ describe("POST /positions/orders/:id/confirm", () => {
     }
   });
 
+  it("locks a person's orders on a ticker Pluto trades while the CC + Put Ladder is the active strategy", async () => {
+    const ticker = await createTicker();
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const before = await testDb("pluto_settings").where({ id: 1 }).first("execution_strategy");
+    try {
+      await testDb("pluto_settings").where({ id: 1 }).update({ execution_strategy: "cc_put_ladder" });
+      const locked = await insertOrder(ticker.symbol);
+      const refused = await call("POST", `/positions/orders/${locked}/confirm`, {});
+      expect(refused.status).toBe(409);
+      expect(refused.json.error).toBe(`${ticker.symbol} is traded by Pluto's CC + Put Ladder strategy, so orders by hand are locked. Switch the ticker off in Pluto to trade it by hand.`);
+      expect((await orderRow(locked)).status).toBe("pending_confirmation");
+      // Switched off in Pluto, the ticker is a person's to trade again.
+      await testDb("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: false });
+      expect((await call("POST", `/positions/orders/${locked}/confirm`, {})).status).toBe(200);
+      // Under Edge Margin nothing is locked.
+      await testDb("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: true });
+      await testDb("pluto_settings").where({ id: 1 }).update({ execution_strategy: "edge_margin" });
+      expect((await call("POST", `/positions/orders/${await insertOrder(ticker.symbol)}/confirm`, {})).status).toBe(200);
+    } finally {
+      await testDb("pluto_settings").where({ id: 1 }).update({ execution_strategy: before?.execution_strategy ?? "edge_margin" });
+      await testDb("shortlist_entries").where({ id: entry.id }).del();
+    }
+  });
+
   it("answers 409 with every block reason joined, and leaves the order pending with no notification", async () => {
     const ticker = await createTicker();
     const orderId = await insertOrder(ticker.symbol);

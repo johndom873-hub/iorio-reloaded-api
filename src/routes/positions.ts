@@ -34,6 +34,7 @@ import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { fetchTodaysOrders } from "../lib/todaysOrders.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
+import { executionStrategyLabels } from "../pluto/executionStrategies.js";
 import { computeUnderlyingStockPriceByPosition, computeUnrealizedPnlByPosition, normalizeExpiryDate, roundToCents, sumSharesCommittedByCoveredCallPayloads, underlyingStockPriceKey, validateCoveredCallCoverage } from "../lib/positionOrderRules.js";
 
 export const positionsRouter = Router();
@@ -944,6 +945,12 @@ async function plutoMayTradeSymbol(symbol: string): Promise<boolean> {
   return Boolean(entry);
 }
 
+/** Manual trades are locked on the tickers the CC + Put Ladder trades (Marcelo 2026-10-15): enabled in Pluto while it is the active strategy. */
+async function manualOrdersLockedOn(symbol: string): Promise<boolean> {
+  const settings = await db("pluto_settings").where({ id: 1 }).first("execution_strategy");
+  return settings?.execution_strategy === "cc_put_ladder" && (await plutoMayTradeSymbol(symbol));
+}
+
 function readSignalSnapshot(raw: unknown): { ok: true; value: Record<string, unknown> | null } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, value: null };
   if (typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "signalSnapshot must be an object." };
@@ -1425,6 +1432,10 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
 
   if (orderRequest.pluto_action_id && !(await plutoMayTradeSymbol(orderRequest.payload.symbol))) {
     response.status(409).json({ error: `Pluto is no longer allowed to trade ${orderRequest.payload.symbol} (its Pluto switch is off).` });
+    return;
+  }
+  if (!orderRequest.pluto_action_id && (await manualOrdersLockedOn(orderRequest.payload.symbol))) {
+    response.status(409).json({ error: `${orderRequest.payload.symbol} is traded by Pluto's ${executionStrategyLabels.cc_put_ladder} strategy, so orders by hand are locked. Switch the ticker off in Pluto to trade it by hand.` });
     return;
   }
 
