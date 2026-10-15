@@ -9,7 +9,7 @@ import { volatilityModelTables } from "../../lib/volatilityModelTables.generated
 import { defaultBacktestBaselineSettings, type BacktestBaselineSettings, type EffectiveBacktestSettings } from "../backtestTypes.js";
 import { validateBaselineSettings } from "../jobs/backtestSessionRequest.js";
 import { baselineContractsForCash, runBaselineLook, selectBaselineCandidates, type BaselineCandidateInput, type BaselineModelInput } from "./backtestBaselineLook.js";
-import { noteBaselineForwardAnchors, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
+import { makeBaselineSelector, noteBaselineForwardAnchors, type BaselineCommissions, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
 
 const flatCommissions: BaselineCommissions = { option: flatCommissionEstimator, stock: flatStockCommissionEstimator };
@@ -122,6 +122,20 @@ describe("selectBaselineCandidates", () => {
       const years = yearsBetweenIsoDates(todayIso, candidate.expiry);
       expect(candidate.delta).toBeCloseTo(blackScholesDelta(forward, candidate.strike, years, riskFreeRate, candidate.impliedVolatility, false), 12);
     }
+  });
+
+  it("holds every Call, the Covered Call entry's included, to the Calls' own range, and the Puts to the main one", () => {
+    const quotes = Array.from({ length: 41 }, (_, index) => 80 + index).flatMap((strike) => [quote("2026-03-20", strike, "C"), quote("2026-03-20", strike, "P")]);
+    const { forwardAnchors } = input(quotes);
+    const baseline = { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.05, maxAbsDelta: 0.4, callDeltaRange: "own_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.3, maxSpreadPctOfMid: 50 } as BacktestBaselineSettings;
+    const select = makeBaselineSelector({ quotes, forwardAnchors, commissions: flatCommissions, todayIso, yearsToTodaysClose: 6 / 8760, stockPrice, riskFreeRate, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), baseline, spreadShareCharged: 0, isHeld: () => false, earningsDatesIso: undefined, model: null });
+    const maxAbsDelta = (candidates: { delta: number }[]) => Math.max(...candidates.map((candidate) => Math.abs(candidate.delta)));
+    // The entry (forEntry) and the held shares' Calls both stop at 0.30; the Puts reach 0.40.
+    expect(maxAbsDelta(select("C", null, true).candidates)).toBeLessThanOrEqual(0.3);
+    expect(maxAbsDelta(select("C", null, false).candidates)).toBeLessThanOrEqual(0.3);
+    const puts = select("P", null, true).candidates;
+    expect(maxAbsDelta(puts)).toBeGreaterThan(0.3);
+    expect(maxAbsDelta(puts)).toBeLessThanOrEqual(0.4);
   });
 
   it("counts only the time value of an in-the-money contract", () => {

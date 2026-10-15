@@ -302,7 +302,7 @@ export function baselineContractsForCash(freeCash: number, candidate: Pick<Basel
 
 export type BaselineSelect = (right: "C" | "P", minimumStrike?: number | null, forEntry?: boolean, maximumStrike?: number | null, byPremiumYield?: boolean) => { candidates: BaselineCandidate[]; rejections: BaselineRejections };
 
-/** A symbol's candidate selection at a look: entries on the baseline's ranges, calls on held shares on theirs (callDeltaRange). */
+/** A symbol's candidate selection at a look: Puts on the baseline's |delta| range, every Call (on held shares and a new Covered Call) on the Calls' (callDeltaRange). */
 export function makeBaselineSelector(input: {
   quotes: readonly SymbolFileQuote[];
   forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
@@ -321,11 +321,12 @@ export function makeBaselineSelector(input: {
   const { quotes, forwardAnchors, commissions, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model } = input;
   // The calls on held shares are held to the margin only when every sale is.
   const callsModel = model && baseline.volatilityEdgeFilter === "entries" ? { ...model, minVolatilityEdge: null } : model;
+  // With their own range every Call uses it, the Covered Call entry's included (Marcelo 2026-10-15).
   const callsSettings = baseline.callDeltaRange === "own_range" ? { ...baseline, minAbsDelta: baseline.callMinAbsDelta, maxAbsDelta: baseline.callMaxAbsDelta } : baseline;
   // Calls (on held shares and new Covered Calls) only above minCallYieldPct; a put ranked by premium yield alone when asked.
   const minimumCallYield = baseline.minCallYieldPct > 0 ? baseline.minCallYieldPct / 100 : null;
   return (right: "C" | "P", minimumStrike: number | null = null, forEntry = true, maximumStrike: number | null = null, byPremiumYield = false) =>
-    selectBaselineCandidates({ quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: forEntry ? baseline : callsSettings, spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: right === "C" ? minimumCallYield : null, ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" });
+    selectBaselineCandidates({ quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: right === "C" ? callsSettings : baseline, spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: right === "C" ? minimumCallYield : null, ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" });
 }
 
 /** What the sale steps read from the symbol's book and how they sell; prices on the cycle's scale unless the name says "Today". */

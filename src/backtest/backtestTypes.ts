@@ -98,7 +98,7 @@ export interface BacktestBaselineSettings {
   ladderPutYieldMarginPct: number;
   /** The day's recorded account value: open options at their marks, or left out (cash and shares only) until the end. */
   dayValueOptions: "marked" | "excluded";
-  /** The |delta| range of calls on held shares: the entry's (minAbsDelta–maxAbsDelta), or their own (callMinAbsDelta–callMaxAbsDelta). */
+  /** The |delta| range of every Call (on held shares and a new Covered Call): the Puts' (minAbsDelta–maxAbsDelta), or their own (callMinAbsDelta–callMaxAbsDelta). */
   callDeltaRange: "entry_range" | "own_range";
   callMinAbsDelta: number;
   callMaxAbsDelta: number;

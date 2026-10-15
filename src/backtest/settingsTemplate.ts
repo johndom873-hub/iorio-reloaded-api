@@ -294,12 +294,12 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   {
     path: "baseline.callDeltaRange",
     group: "Baseline wheel",
-    label: "|delta| of calls on held shares",
+    label: "|delta| of Calls (held shares and new Covered Calls)",
     unit: "choice",
     editable: true,
     note: null,
     choices: [
-      { value: "entry_range", label: "The entry's range" },
+      { value: "entry_range", label: "The same range as the Puts" },
       { value: "own_range", label: "Their own range, below" },
     ],
   },
