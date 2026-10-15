@@ -25,6 +25,16 @@ const harness = vi.hoisted(() => ({
   executedCloses: [] as string[],
   throwOnBook: null as unknown,
   lastFilledActionAtBySymbol: new Map<string, Date>(),
+  executionStrategy: "edge_margin" as "edge_margin" | "cc_put_ladder",
+  ladderRounds: [] as Record<string, unknown>[],
+  ladderOutcome: { looked: [] as string[], planned: 0, outcomes: [] as { outcome: string }[], notes: [] as string[] },
+}));
+
+vi.mock("./ladderRound.js", () => ({
+  runLadderRound: async (input: Record<string, unknown>) => {
+    harness.ladderRounds.push(input);
+    return harness.ladderOutcome;
+  },
 }));
 
 vi.mock("../db/connection.js", () => {
@@ -38,7 +48,7 @@ vi.mock("../db/connection.js", () => {
   return { db: Object.assign((table: string) => chain(table), { raw: () => "" }) };
 });
 vi.mock("./settingsStore.js", () => ({
-  loadPlutoSettings: async () => ({ perTickerModelCooldownMinutes: 5, tickerCooldownMinutes: 60, burstLines: 10, spyStressBreakerPct: 3, modelId: "test/model", reasoningEffort: "low", callTimeoutSeconds: 10, promptVersion: "test", confidenceFloor: 0.6, telegramVerbosity: "off", maxOpenPositions: 15, maxActionsPerSession: 10, capitalBudgetPct: 50 }),
+  loadPlutoSettings: async () => ({ executionStrategy: harness.executionStrategy, ladderSpyStressBreakerPct: 5, perTickerModelCooldownMinutes: 5, tickerCooldownMinutes: 60, burstLines: 10, spyStressBreakerPct: 3, modelId: "test/model", reasoningEffort: "low", callTimeoutSeconds: 10, promptVersion: "test", confidenceFloor: 0.6, telegramVerbosity: "off", maxOpenPositions: 15, maxActionsPerSession: 10, capitalBudgetPct: 50 }),
 }));
 vi.mock("./ledger.js", () => ({
   startPlutoPass: vi.fn(async () => "pass-1"),
@@ -182,6 +192,9 @@ function makeContext() {
 const dayRound = (symbols: string[]) => ({ trigger: "day_signals_update" as const, triggerDetail: {}, symbols, force: false });
 
 beforeEach(() => {
+  harness.executionStrategy = "edge_margin";
+  harness.ladderRounds.length = 0;
+  harness.ladderOutcome = { looked: [], planned: 0, outcomes: [], notes: [] };
   harness.tickers = [ticker("AAA")];
   harness.bursts.length = 0;
   harness.modelCalls = 0;
@@ -416,5 +429,32 @@ describe("runPlutoPass: fingerprints across rounds (audit A)", () => {
     await runPlutoPass(dayRound(["AAA", "BBB"]), context);
     expect([...context.lastFingerprintBySymbol.keys()].sort()).toEqual(["AAA", "BBB"]);
     expect(context.lastModelEvaluationAtBySymbol.get("BBB")).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe("runPlutoPass under the CC + Put Ladder", () => {
+  it("runs the ladder's round instead of the model, with the account's figures and the round's symbols", async () => {
+    harness.executionStrategy = "cc_put_ladder";
+    harness.ladderOutcome = { looked: ["AAA"], planned: 2, outcomes: [{ outcome: "confirmed" }, { outcome: "blocked" }], notes: [] };
+    const summary = await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(harness.modelCalls).toBe(0);
+    expect(harness.ladderRounds).toEqual([expect.objectContaining({ todayIso: "2026-10-07", totalCashValue: 400_000, netLiquidationValue: 1_000_000, symbols: ["AAA"] })]);
+    expect(summary).toMatchObject({ modelCalled: false, skippedReason: null, outcome: "trade" });
+  });
+
+  it("says why nothing was sent", async () => {
+    harness.executionStrategy = "cc_put_ladder";
+    harness.ladderOutcome = { looked: ["AAA"], planned: 0, outcomes: [], notes: ["AAA: no previous-session option volume was captured, so nothing can be sold (the 20% rule)"] };
+    expect((await runPlutoPass(dayRound(["AAA"]), makeContext())).skippedReason).toBe("the ladder planned no sale (1 ticker(s) looked at; AAA: no previous-session option volume was captured, so nothing can be sold (the 20% rule))");
+  });
+
+  it("stops at the ladder's own SPY stress level (5%), not Edge Margin's (3%)", async () => {
+    harness.executionStrategy = "cc_put_ladder";
+    harness.spyDayChangePct = -4;
+    await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(harness.ladderRounds).toHaveLength(1);
+    harness.spyDayChangePct = -5.2;
+    expect((await runPlutoPass(dayRound(["AAA"]), makeContext())).skippedReason).toBe("market stress: the ladder sells nothing while SPY is down");
+    expect(harness.ladderRounds).toHaveLength(1);
   });
 });

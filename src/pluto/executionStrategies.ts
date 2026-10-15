@@ -8,7 +8,7 @@ export const executionStrategyLabels: Record<PlutoExecutionStrategy, string> = {
 };
 
 /** The strategies whose decision code exists. Pluto never acts under any other, so a selected strategy can't trade half-built. */
-const executionStrategiesBuilt: ReadonlySet<PlutoExecutionStrategy> = new Set(["edge_margin"]);
+const executionStrategiesBuilt: ReadonlySet<PlutoExecutionStrategy> = new Set(["edge_margin", "cc_put_ladder"]);
 
 /** Why Pluto cannot act under this strategy, or null when it can. */
 export function describeExecutionStrategyBlock(strategy: PlutoExecutionStrategy): string | null {

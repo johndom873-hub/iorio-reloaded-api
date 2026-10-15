@@ -36,6 +36,7 @@ import { buildPlutoSystemPrompt, buildPlutoUserPayload, plutoPromptVersion, rece
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { loadPlutoState, recordPlutoPass, tripPlutoBreaker } from "./stateStore.js";
 import { runPlutoSystemChecks } from "./systemChecks.js";
+import { runLadderRound } from "./ladderRound.js";
 
 // One evaluation pass (design rounds 3–4, 2026-09-28): system checks → fresh scoring of the enabled
 // tickers with a focused quote burst → deterministic filters → fingerprint → (only if something
@@ -422,6 +423,23 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     ok: !marketStress,
     detail: `${spyDayChangePct === null ? "SPY day change unknown" : `SPY ${spyDayChangePct.toFixed(2)}% (opens blocked at -${settings.spyStressBreakerPct}%)`}${stressOverridden ? ` — override on for today${checks.context.state.stressOverrideByDisplayName ? ` by ${checks.context.state.stressOverrideByDisplayName}` : ""}` : ""}`,
   };
+
+  // The CC + Put Ladder (Marcelo 2026-10-14/15): rules only, no model, after the same system checks. Its opens wait for
+  // today's opening look like Edge Margin's, and stop under its own SPY stress level.
+  if (settings.executionStrategy === "cc_put_ladder") {
+    const ladderStress = spyDayChangePct !== null && spyDayChangePct <= -settings.ladderSpyStressBreakerPct && !stressOverridden;
+    checks.checks.market_stress = { ok: !ladderStress, detail: `${spyDayChangePct === null ? "SPY day change unknown" : `SPY ${spyDayChangePct.toFixed(2)}% (the ladder stops at -${settings.ladderSpyStressBreakerPct}%)`}${stressOverridden ? " — override on for today" : ""}` };
+    if (request.heldPositionsOnly) return skip("the ladder's sales wait for today's opening look", checks.checks);
+    if (ladderStress) return skip("market stress: the ladder sells nothing while SPY is down", checks.checks);
+    if (checks.context.netLiquidationValue === null) return skip("no net liquidation value for the ladder's pots", checks.checks);
+    const ladder = await runLadderRound({ passId, settings, api: context.api, marketWatch: context.marketWatch, trackWatch: context.trackWatch, now, todayIso: checks.context.todayEasternIso, totalCashValue: checks.context.totalCashValue, netLiquidationValue: checks.context.netLiquidationValue, cancelByMs: checks.context.session.cancelByMs, symbols: request.symbols });
+    const sent = ladder.outcomes.filter((outcome) => outcome.outcome === "confirmed").length;
+    const skippedReason = sent > 0 ? null : ladder.planned === 0 ? `the ladder planned no sale (${ladder.looked.length} ticker(s) looked at${ladder.notes.length > 0 ? `; ${ladder.notes.join("; ")}` : ""})` : `none of the ladder's ${ladder.planned} planned sale(s) was sent`;
+    await finishPass({ candidateCount: ladder.planned, systemChecks: checks.checks, modelCalled: false, skippedReason });
+    if (skippedReason) await recordPlutoEvent("pass_skipped", { passId, trigger: request.trigger, reason: skippedReason });
+    await recordPlutoPass();
+    return { passId, modelCalled: false, skippedReason, outcome: sent > 0 ? "trade" : null };
+  }
 
   // 2. Universe (loaded above).
   if (rows.length === 0) return skip("no enabled tickers to evaluate", checks.checks);
