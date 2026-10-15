@@ -150,6 +150,21 @@ Example: put sold 7 April, rolled the 8th (−19.30), assigned 24 April (premium
 
 Buy and hold with several symbols: see Baselines below.
 
+**Per-ticker pots** (the baseline deciding; approved by Marcelo 2026-10-15). A session's `book_mode` is "pots" for every new session the baseline decides, "shared_account" for the rules, the AI model and every earlier session (which re-run unchanged).
+
+- **Pots and weights**: each ticker has a pot in dollars. A starting value given splits equally (pot = starting value ÷ tickers); without one, a ticker's pot is the request's, else its saved lab pot (settings source "per ticker"), else the lab's default pot. Session capital = Σ pots; weight w_i = pot_i ÷ Σ pots, fixed for the session.
+- **One account**: the tickers share one cash balance, one account value and its interest; the pots exist only through the weights.
+- **The ladder's base**: base_i = w_i × max(the whole account at the start of ticker i's cycle, the whole account today); its shares' budget = p_i × base_i and its reserve = (1 − p_i) × base_i, with p_i the ticker's share level. U and Q are the ticker's own. With one ticker w = 1: the same as a shared account.
+- **The ticker's values**: the share level, rungs, shock (history or fixed, its %, min and max) and |delta| range can differ by ticker; every other value is the session's. A value is, last one given winning: the lab's global value < the ticker's lab value ("per ticker") < the request's session-wide override < the request's value for the ticker. The session stores each ticker's pot, weight, values and where each came from.
+- **Turn order**: at every look the tickers take their turn alphabetically (the order given in a shared account), so when the cash runs short the later tickers are the ones cut, the same way every time. The session reports, per ticker, the looks and days at which the cash cut one of its orders.
+- Example: pots HOOD $150,000 and SMCI $50,000 → capital $200,000, w = 0.75 and 0.25. With the account at $240,000 today (above its $200,000 at the cycles' start) and both at 50% shares: HOOD's base $180,000 → shares' budget $90,000 and reserve $90,000; SMCI's base $60,000 → $30,000 and $30,000.
+
+**Order records** (Marcelo 2026-10-15; recorded only, no decision reads them). Each baseline order (the calls on the free lots, the entry with the free cash, a ladder put, a put on the DTE budget) records:
+
+- on each of its sales: **wantedContracts**: calls on free lots = the free lots; the entry = the lots the room holds (the shares' budget, the per-stock cap), or what the cash pays for when neither caps it; a ladder put = the rung's collateral ÷ (the best put's strike × 100), rounded down; a DTE-budget put = its budget's contracts at the best put. **rank** = the sale's place in the order's ranking, from 1; **bestCandidate…** = the first contract in the ranking not already held when the order starts (strike, DTE, premium yield, volume limit = floor(20% × the previous session's volume));
+- when it leaves contracts unsold, a shortfall row: wanted, filled, unsold (a ladder put: the collateral left ÷ (the best put's strike × 100)) and the reason: **cash** (the cash allowed fewer contracts than the room and the volume limit, at any contract it tried), else **volume** (the contracts within the rules ran out, each to its volume limit or already held), else **no_candidate** (none within the rules). Looks that found no candidate are kept one row per day, ticker and order, with their count.
+- Example: a rung of $20,000 with the best put at $40 wants 5 contracts; its volume limit is 3, the next put ($39) fills 2 → 5 filled, no row. With a volume limit of 3 and no other put: 3 filled, a row with 2 unsold (volume).
+
 **Looks inside Pluto's window** (step 5)
 
 - **When**: the half hours the data files hold quotes for (10:00, 10:30 … 15:30 ET) from the session's window start through its window end, the end never later than 30 minutes before the day's close (12:30 on a 13:00 day). With the window 10:00–15:30: 12 looks on a full day, 6 on a 13:00 day. The quotes stored after an early close repeat the close and are never read.
@@ -187,7 +202,7 @@ Buy and hold with several symbols: see Baselines below.
 
 Two buy-and-hold series run beside every session, marked at 10:00 each session day and measured with the same formulas as the session (return, CAGR, Sortino, drawdown, worst month). They are for comparison only: nothing in the session depends on them. Neither counts dividends.
 
-**Buy and hold of the session's symbols (equal dollars)**: the starting value in equal parts, one per symbol; each part buys whole shares at its symbol's first 10:00 price in the session and is never rebalanced; what is left stays in cash at the same interest as the session. Value on a day = cash + Σ shares × the day's 10:00 price × F(purchase day) ÷ F(day) (split scale). With one symbol: as many whole shares as the starting value allows.
+**Buy and hold of the session's symbols**: each symbol's pot in a pots session, else the starting value in equal parts, one per symbol; each part buys whole shares at its symbol's first 10:00 price in the session and is never rebalanced; what is left stays in cash at the same interest as the session. Value on a day = cash + Σ shares × the day's 10:00 price × F(purchase day) ÷ F(day) (split scale). With one symbol: as many whole shares as the starting value allows.
 
 Example: $1,000,000 over SMCI at 40.00 and HOOD at 25.00 → 12,500 SMCI and 20,000 HOOD shares, nothing left in cash.
 

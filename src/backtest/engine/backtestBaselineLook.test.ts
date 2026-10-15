@@ -341,6 +341,58 @@ describe("runBaselineLook with the average-cost floor", () => {
   });
 });
 
+describe("runBaselineLook in a session of per-ticker pots", () => {
+  const expiry = "2026-03-27";
+  const quotes = [100, 105, 110, 115].map((strike) => quote(expiry, strike, "C")).concat([90, 95].map((strike) => quote(expiry, strike, "P")));
+  const lookSymbolOf = (symbol: string) =>
+    ({
+      profile: { symbol, calendarChecksApply: false, earnings: [] },
+      market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      adjustedDailyClosesBeforeToday: [],
+      splitFactorToday: 1,
+      optionContractsRepresentable: true,
+    }) as unknown as BacktestLookSymbol;
+  const baseline = { ...defaultBacktestBaselineSettings, entry: "buy_write", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", coverage: "fill_down_ranking", callStrike: "above_break_even", entryWhenSharesUncovered: "buy", shareFill: "ten_oclock_price", dayValueOptions: "excluded", putsWhenNoCall: "reserve_ladder", ladderSharesPct: 50 } as BacktestBaselineSettings;
+  const lookOfTwo = (tickerSetupBySymbol?: BacktestLookContext["tickerSetupBySymbol"]) => {
+    let actionNumber = 0;
+    const settings = { trading: { spreadCostChargedPct: 50 }, baseline } as unknown as EffectiveBacktestSettings;
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-02-27", 9, 30));
+    return runBaselineLook({ todayIso, calendar: oneDayCalendar, symbols: [lookSymbolOf("AAA"), lookSymbolOf("BBB")], settings, ledger, priceByLegId: new Map(), nextActionId: () => `action-${++actionNumber}`, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) } as unknown as BacktestLookContext);
+  };
+  const contractsBySymbol = async (tickerSetupBySymbol?: BacktestLookContext["tickerSetupBySymbol"]) => {
+    const result = await lookOfTwo(tickerSetupBySymbol);
+    const contracts: Record<string, number> = {};
+    for (const action of result.actions) if (action.kind === "open_covered_call") contracts[action.symbol] = (contracts[action.symbol] ?? 0) + action.quantity!;
+    return contracts;
+  };
+
+  it("gives each ticker its own share level and its weight of the account as the ladder's base", async () => {
+    // One account of $100,000, shares at $100. Shared: each ticker's budget is 50% of the whole account, $50,000 = 5 lots
+    // each (the calls' premiums cover the rest). Pots: AAA 0.3 × 100,000 × 40% = $12,000 = 1 lot; BBB 0.7 × 100,000 ×
+    // 60% = $42,000 = 4 lots.
+    expect(await contractsBySymbol()).toEqual({ AAA: 5, BBB: 5 });
+    const pots = new Map([
+      ["AAA", { baseline: { ...baseline, ladderSharesPct: 40 }, weight: 0.3 }],
+      ["BBB", { baseline: { ...baseline, ladderSharesPct: 60 }, weight: 0.7 }],
+    ]);
+    expect(await contractsBySymbol(pots)).toEqual({ AAA: 1, BBB: 4 });
+  });
+
+  it("records what each order wanted, and an order the cash cut, without changing what is sold", async () => {
+    // Budgets of 0.7 × $100,000 × 90% = $63,000 each, 6 lots: AAA takes its 6 first; BBB's cash then pays for fewer.
+    const tight = new Map(["AAA", "BBB"].map((symbol) => [symbol, { baseline: { ...baseline, ladderSharesPct: 90 }, weight: 0.7 }]));
+    const result = await lookOfTwo(tight);
+    const sold = (symbol: string) => result.actions.filter((action) => action.symbol === symbol).reduce((sum, action) => sum + action.quantity!, 0);
+    expect(sold("AAA")).toBe(6);
+    expect(sold("BBB")).toBeLessThan(6);
+    const firstSale = result.actions[0]!;
+    expect(firstSale.candidateScores).toMatchObject({ wantedContracts: 6, rank: 1, bestCandidateStrike: firstSale.contract!.strike, bestCandidateVolumeCap: 200 });
+    expect(result.shortfalls).toEqual([
+      expect.objectContaining({ symbol: "BBB", step: "entry", right: "C", reason: "cash", wantedContracts: 6, filledContracts: sold("BBB"), unsoldContracts: 6 - sold("BBB"), lookCount: 1, tradingDate: todayIso }),
+    ]);
+  });
+});
+
 describe("selectBaselineCandidates with the Signals model", () => {
   /** τ: 0.8 variance sessions per calendar day, so the forecast's clock runs slower than the calendar's 1 ÷ 365. */
   const varianceSessionsPerDay = 0.8;

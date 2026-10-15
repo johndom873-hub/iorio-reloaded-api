@@ -233,6 +233,68 @@ export interface BacktestSettingsOverrides {
   baseline?: Partial<BacktestBaselineSettings>;
 }
 
+/**
+ * How a session's tickers share the account. "shared_account": the session's settings for every ticker and the whole
+ * account as each ladder's base (every session created before per-ticker pots). "pots": each ticker has its own pot and
+ * baseline values, its ladder's base is its weight (its pot ÷ every pot) of the account, and the tickers still share the
+ * one account, its cash and its interest.
+ */
+export type BacktestBookMode = "shared_account" | "pots";
+
+/** The baseline values that can differ between the tickers of one session; every other value is the session's. */
+export const backtestTickerBaselineKeys = ["minAbsDelta", "maxAbsDelta", "ladderSharesPct", "ladderRungs", "ladderShock", "ladderShockPct", "ladderShockMinPct", "ladderShockMaxPct"] as const;
+export type BacktestTickerBaselineKey = (typeof backtestTickerBaselineKeys)[number];
+export type BacktestTickerBaselineSettings = Pick<BacktestBaselineSettings, BacktestTickerBaselineKey>;
+
+/** "per_ticker": each ticker's saved lab values apply; "global": the lab's global values for every ticker. */
+export type BacktestSettingsSource = "per_ticker" | "global";
+
+/** Where a ticker's value came from: the lab's global values, the ticker's lab values, the session-wide overrides, or the request's values for the ticker. */
+export type BacktestSymbolSettingSource = "global" | "ticker" | "session" | "request";
+
+/** A ticker's own values, as asked in a request or saved in the lab. */
+export interface BacktestTickerValues {
+  potDollars?: number;
+  baseline?: Partial<BacktestTickerBaselineSettings>;
+}
+
+/** A ticker of a "pots" session as it was created. */
+export interface BacktestSymbolSettings {
+  potDollars: number;
+  /** Its pot ÷ every pot: its share of the account for the ladder's base, fixed for the session. */
+  weight: number;
+  baseline: BacktestTickerBaselineSettings;
+  source: Record<BacktestTickerBaselineKey | "potDollars", BacktestSymbolSettingSource>;
+}
+
+/** The baseline's orders: calls on the free lots, the entry with the free cash, a ladder put, a put on the DTE budget. */
+export type BacktestOrderStep = "held_calls" | "entry" | "ladder_put" | "budget_put";
+
+/** Why an order left contracts unsold: the cash cut it; the contracts within the rules ran out (each to its volume limit, or already held); or none was within the rules. */
+export type BacktestShortfallReason = "cash" | "volume" | "no_candidate";
+
+/**
+ * An order of the baseline that left contracts unsold, as its look saw it (recorded only: no decision reads it). Looks
+ * that found nothing within the rules are one row per day, symbol and order: the day's first such look, with their count.
+ */
+export interface BacktestOrderShortfall {
+  tradingDate: string;
+  at: string;
+  lookTimeEt: string;
+  symbol: string;
+  step: BacktestOrderStep;
+  right: "C" | "P";
+  /** In contracts of the order's best candidate (a put's: the rung's collateral ÷ (its strike × 100)); null when there was none to measure it by. */
+  wantedContracts: number | null;
+  filledContracts: number;
+  unsoldContracts: number | null;
+  reason: BacktestShortfallReason;
+  /** 1, or the day's looks a no_candidate row stands for. */
+  lookCount: number;
+  /** The best contract the order was allowed to sell (the first in its ranking not already held); null when none. */
+  bestCandidate: { expiry: string; strike: number; dte: number; premiumYield: number; volumeCap: number } | null;
+}
+
 /** A session's settings with its overrides applied and every default filled in: what the engine runs on. */
 export interface EffectiveBacktestSettings extends BacktestSettings {
   policy: BacktestPolicySettings;
@@ -444,6 +506,18 @@ export interface CreateBacktestSessionResponse {
   warnings: string[];
   /** With the AI model as decision maker: how many calls and how many hours of model time the session may take (an upper bound); null with the rules. */
   llmEstimate: LlmSessionEstimate | null;
+  /** Each ticker's pot, weight and values with where each came from ("pots"); null when the tickers share the session's settings. */
+  resolvedBySymbol: Record<string, BacktestSymbolSettings> | null;
+}
+
+/** What POST /backtest/sessions/estimate answers: the create route's checks and resolution, nothing created. */
+export interface BacktestSessionEstimateResponse {
+  warnings: string[];
+  llmEstimate: LlmSessionEstimate | null;
+  /** The session's capital: the starting value given, else Σ the pots. */
+  capital: number;
+  bookMode: BacktestBookMode;
+  resolvedBySymbol: Record<string, BacktestSymbolSettings> | null;
 }
 
 export interface CreateBacktestSessionRequest {
@@ -454,9 +528,18 @@ export interface CreateBacktestSessionRequest {
   symbol?: string;
   startDate: string;
   endDate: string;
-  startingValue: number;
+  /**
+   * The session's capital. With the baseline deciding, it is split equally into the tickers' pots and can be left out:
+   * each ticker's pot is then its symbolSettings pot, else its lab pot (settingsSource "per_ticker"), else the lab's
+   * default pot. Required with the rules or the AI model.
+   */
+  startingValue?: number;
   tablesMode: BacktestTablesMode;
   overrides: BacktestSettingsOverrides;
+  /** The baseline only; "per_ticker" unless given. */
+  settingsSource?: BacktestSettingsSource;
+  /** The baseline only: values for some of the session's tickers, over every other source. */
+  symbolSettings?: Record<string, BacktestTickerValues>;
 }
 
 export interface BacktestSessionDay {
@@ -793,7 +876,12 @@ export interface BacktestSessionDetail {
     overrides: BacktestSettingsOverrides;
     /** What the win rate, the averages, edge capture and the accuracy table are measured on. */
     pnlBasis: BacktestPnlBasis;
-    /** Buy and hold of the session's symbols in equal dollar parts, and of SPY: for comparison only. Neither counts dividends. */
+    bookMode: BacktestBookMode;
+    /** Each ticker's pot, weight and values in a "pots" session; null in a "shared_account" one. */
+    symbolSettings: Record<string, BacktestSymbolSettings> | null;
+    /** A "pots" session: per ticker in its turn order, the looks and days at which the cash cut one of its orders; null in a "shared_account" one. */
+    cashBoundBySymbol: { symbol: string; looks: number; days: number }[] | null;
+    /** Buy and hold of the session's symbols, each with its pot ("pots") or in equal dollar parts, and of SPY: for comparison only. Neither counts dividends. */
     baselineMetrics: BacktestMetrics | null;
     baselineLabel: string;
     spyBaselineMetrics: BacktestMetrics | null;

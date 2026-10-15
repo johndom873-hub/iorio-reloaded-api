@@ -6,7 +6,7 @@ import type { Knex } from "knex";
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { maximumSpreadFractionOfMid } from "../../lib/impliedVolatilitySurface.js";
 import type { PlutoSettings } from "../../pluto/settingsStore.js";
-import type { BacktestAction, BacktestFill, BacktestSessionDetail, BacktestSettingsOverrides } from "../backtestTypes.js";
+import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, type BacktestAction, type BacktestBaselineSettings, type BacktestFill, type BacktestSessionDetail, type BacktestSettingsOverrides, type BacktestSymbolSettings } from "../backtestTypes.js";
 import { computeParityStockPrice } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile, writeSyntheticMacroEventHistory } from "./testSupport/syntheticBacktestData.js";
@@ -62,6 +62,8 @@ interface WheelSessionSpec extends WheelSymbolSpec {
   moreSymbols?: WheelSymbolSpec[];
   plutoOverrides?: Partial<PlutoSettings>;
   overrides?: BacktestSettingsOverrides;
+  /** A session of per-ticker pots: each symbol's pot, weight and values. */
+  pots?: Record<string, BacktestSymbolSettings>;
 }
 
 interface WheelSession {
@@ -127,7 +129,7 @@ async function runWheelSession(spec: WheelSessionSpec): Promise<WheelSession> {
   const symbols = symbolSpecs.map((symbolSpec) => symbolSpec.symbol);
 
   const [session] = await testDb("backtest_sessions")
-    .insert({ name: `wheel ${symbols.join(" ")}`, symbol: symbols.join(", "), symbols: JSON.stringify(symbols), start_date: spec.fileDates[0], end_date: spec.lastSessionDate, starting_value: startingValue, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings(spec.plutoOverrides)), overrides: JSON.stringify(spec.overrides ?? {}) })
+    .insert({ name: `wheel ${symbols.join(" ")}`, symbol: symbols.join(", "), symbols: JSON.stringify(symbols), start_date: spec.fileDates[0], end_date: spec.lastSessionDate, starting_value: startingValue, tables_mode: "current", settings_snapshot: JSON.stringify(fixtureBacktestSettings(spec.plutoOverrides)), overrides: JSON.stringify(spec.overrides ?? {}), ...(spec.pots ? { book_mode: "pots", symbol_settings: JSON.stringify(spec.pots) } : {}) })
     .returning("id");
   await runBacktestSession(session.id, hooks);
   const detail = await loadBacktestSessionDetail(session.id);
@@ -630,6 +632,49 @@ describe("a session of several symbols on one book", () => {
     expect(onlyB.allSymbolsStatistics).toEqual({ ...statisticsB, symbol: "All symbols" });
     // The account's days are the whole book's either way.
     expect(onlyB.days).toEqual(detail.days);
+  }, 60_000);
+
+  it("gives each ticker of a pots session its pot: turns in alphabetical order, its share level and weight, buy and hold per pot", async () => {
+    const ladder = { ...defaultBacktestBaselineSettings, entry: "buy_write", putsWhenNoCall: "reserve_ladder", entryWhenSharesUncovered: "buy", callStrike: "above_break_even", minAbsDelta: 0.01, maxAbsDelta: 1, maxSpreadPctOfMid: 50 } as BacktestBaselineSettings;
+    const tickerValues = (ladderSharesPct: number) => ({ ...Object.fromEntries(backtestTickerBaselineKeys.map((key) => [key, ladder[key]])), ladderSharesPct }) as BacktestSymbolSettings["baseline"];
+    const source = Object.fromEntries([...backtestTickerBaselineKeys, "potDollars"].map((key) => [key, "request"])) as BacktestSymbolSettings["source"];
+    // Given WTB first: the pots session still lets WTA take its turn first at every look.
+    const pots: Record<string, BacktestSymbolSettings> = {
+      WTB: { potDollars: 750_000, weight: 0.75, baseline: tickerValues(40), source },
+      WTA: { potDollars: 250_000, weight: 0.25, baseline: tickerValues(60), source },
+    };
+    const session = await runWheelSession({ ...symbolSpec("WTB", pricesB), lastSessionDate: "2026-04-10", moreSymbols: [symbolSpec("WTA", pricesA)], overrides: { decisionMaker: "baseline", baseline: ladder }, pots });
+    const { detail } = session;
+    expect(detail.session).toMatchObject({ status: "succeeded", symbols: ["WTB", "WTA"], bookMode: "pots", symbolSettings: pots });
+    // The cash-bound report lists every ticker in its turn order; the orders' shortfalls are stored with the session.
+    expect(detail.session.cashBoundBySymbol!.map((entry) => entry.symbol)).toEqual(["WTA", "WTB"]);
+    const storedShortfalls: { symbol: string; look_count: number }[] = await testDb("backtest_look_shortfalls").where({ session_id: session.sessionId }).select("symbol", "look_count");
+    expect(storedShortfalls.length).toBeGreaterThan(0);
+    expect(storedShortfalls.every((row) => row.look_count >= 1)).toBe(true);
+
+    // Each look's actions: every WTA one before any WTB one.
+    const filled = filledActionsOf(session);
+    expect(filled.length).toBeGreaterThan(0);
+    for (const at of new Set(filled.map((action) => action.at))) {
+      const symbolsAtLook = filled.filter((action) => action.at === at).map((action) => action.symbol);
+      expect(symbolsAtLook).toEqual([...symbolsAtLook].sort());
+    }
+
+    // Shares bought on the first day with sales: within each ticker's budget, its weight × the $1,000,000 account × its
+    // share level (WTA 0.25 × 60% = $150,000; WTB 0.75 × 40% = $300,000), and short of it by less than one lot.
+    const firstSaleDay = filled[0]!.tradingDate;
+    for (const [symbol, budget] of [["WTA", 150_000], ["WTB", 300_000]] as const) {
+      const shareFills = session.fills.filter((fill) => fill.symbol === symbol && fill.instrument === "stock" && fill.side === "buy" && fill.tradingDate === firstSaleDay);
+      const cost = shareFills.reduce((sum, fill) => sum + fill.quantity * fill.price, 0);
+      expect(cost).toBeLessThanOrEqual(budget);
+      expect(cost).toBeGreaterThan(budget - 100 * shareFills[0]!.price);
+    }
+
+    // Buy and hold: each symbol's pot in whole shares at the first 10:00 price, the rest in cash.
+    const priceOn = (symbol: string, dateIso: string) => computeParityStockPrice(session.quotesOn(dateIso, symbol), dateIso, ratePercent / 100, maximumSpreadFractionOfMid)?.price ?? session.previousCloseOf(symbol, dateIso);
+    const sharesOf = (symbol: string) => Math.floor(pots[symbol]!.potDollars / priceOn(symbol, "2026-04-06"));
+    const baselineCash = startingValue - sharesOf("WTA") * priceOn("WTA", "2026-04-06") - sharesOf("WTB") * priceOn("WTB", "2026-04-06");
+    expect(dayOf(session, "2026-04-10").baselineValue).toBeCloseTo(baselineCash + sharesOf("WTA") * priceOn("WTA", "2026-04-10") + sharesOf("WTB") * priceOn("WTB", "2026-04-10"), 0);
   }, 60_000);
 
   it("applies the book's limits across the symbols: the budget, the open positions and the sector", async () => {

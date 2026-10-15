@@ -22,8 +22,10 @@ import type {
   BacktestSessionsPage,
   BacktestSettings,
   BacktestSettingsOverrides,
+  BacktestSymbolSettings,
   BacktestTablesMode,
   BacktestTrade,
+  BacktestBookMode,
 } from "../backtestTypes.js";
 import { backtestCaptureLookTimeEt } from "../backtestTypes.js";
 import { computeCycleAccuracyBands, computeDrawdowns, computeMonthlyReturns, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
@@ -56,6 +58,8 @@ interface SessionRow {
   tables_mode: BacktestTablesMode;
   settings_snapshot: BacktestSettings;
   overrides: BacktestSettingsOverrides;
+  book_mode: BacktestBookMode;
+  symbol_settings: Record<string, BacktestSymbolSettings> | null;
   status: BacktestJobStatus;
   metrics: BacktestMetrics | null;
   baseline_metrics: BacktestMetrics | null;
@@ -83,6 +87,8 @@ function selectSessionRows(connection: Knex = db): Knex.QueryBuilder {
     "tables_mode",
     "settings_snapshot",
     "overrides",
+    "book_mode",
+    "symbol_settings",
     "status",
     "metrics",
     "baseline_metrics",
@@ -493,6 +499,18 @@ async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
   }));
 }
 
+/** Per ticker in its turn order (alphabetical), the looks and days at which the cash cut one of its orders (backtest_look_shortfalls). */
+async function loadCashBoundBySymbol(sessionId: string, symbols: readonly string[]): Promise<{ symbol: string; looks: number; days: number }[]> {
+  const rows: { symbol: string; looks: string; days: string }[] = await db("backtest_look_shortfalls")
+    .where({ session_id: sessionId, reason: "cash" })
+    .groupBy("symbol")
+    .select("symbol", db.raw("sum(look_count) as looks"), db.raw("count(distinct trading_date) as days"));
+  return [...symbols].sort().map((symbol) => {
+    const found = rows.find((entry) => entry.symbol === symbol);
+    return { symbol, looks: Number(found?.looks ?? 0), days: Number(found?.days ?? 0) };
+  });
+}
+
 /**
  * A session as its screen reads it. With `onlySymbol` the option sales, positions, cycles and statistics are that
  * symbol's alone (the account's days and metrics are always the whole book's).
@@ -500,7 +518,7 @@ async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
 export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: string | null = null): Promise<BacktestSessionDetail> {
   const row = await loadSessionRow(sessionId);
   const ofSymbol = <Row extends { symbol: string }>(rows: Row[]): Row[] => (onlySymbol === null ? rows : rows.filter((entry) => entry.symbol === onlySymbol));
-  const [dayRows, tradeRows, job, everyPositionRecord, everyCycle, bookCounts] = await Promise.all([
+  const [dayRows, tradeRows, job, everyPositionRecord, everyCycle, bookCounts, cashBoundBySymbol] = await Promise.all([
     loadSessionDayRows([sessionId]),
     db("backtest_trades")
       .where({ session_id: sessionId })
@@ -511,6 +529,7 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
     loadSessionPositions(sessionId),
     loadSessionCycles(sessionId),
     loadSessionBookCounts(sessionId),
+    row.book_mode === "pots" ? loadCashBoundBySymbol(sessionId, symbolsOf(row)) : null,
   ]);
   const days = toSessionDays(dayRows);
   // A row stored before trades named their symbol belongs to the session's one symbol.
@@ -522,6 +541,9 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
       ...toSessionListItem(row),
       settingsSnapshot: row.settings_snapshot,
       overrides: row.overrides,
+      bookMode: row.book_mode,
+      symbolSettings: row.symbol_settings,
+      cashBoundBySymbol,
       pnlBasis: row.pnl_basis,
       baselineMetrics: row.baseline_metrics,
       baselineLabel: `Buy and hold · ${row.symbol}`,
@@ -549,8 +571,9 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
 }
 
 /**
- * Account value curves for the sessions, in the order asked, plus one buy-and-hold curve per distinct list of symbols,
- * period and starting value (buy and hold depends on nothing else), keyed by the first such session.
+ * Account value curves for the sessions, in the order asked, plus one buy-and-hold curve per distinct set of symbols
+ * with their dollars (pots, or equal parts of the starting value) and period (buy and hold depends on nothing else),
+ * keyed by the first such session.
  */
 export async function loadBacktestComparison(sessionIds: readonly string[]): Promise<BacktestCompareResponse> {
   const rows: SessionRow[] = await selectSessionRows().whereIn("id", sessionIds);
@@ -571,7 +594,9 @@ export async function loadBacktestComparison(sessionIds: readonly string[]): Pro
   }));
   const baselineKeys = new Set<string>();
   for (const row of rowsInAskedOrder) {
-    const baselineIdentity = `${symbolsOf(row).join(",")}|${row.start_date}|${row.end_date}|${Number(row.starting_value)}`;
+    // Each symbol's dollars: its pot, or an equal part of the starting value.
+    const dollarsBySymbol = symbolsOf(row).map((symbol) => `${symbol}:${row.symbol_settings?.[symbol]?.potDollars ?? Number(row.starting_value) / symbolsOf(row).length}`);
+    const baselineIdentity = `${dollarsBySymbol.sort().join(",")}|${row.start_date}|${row.end_date}`;
     if (baselineKeys.has(baselineIdentity)) continue;
     baselineKeys.add(baselineIdentity);
     curves.push({
@@ -611,6 +636,8 @@ export async function createBacktestSession(request: ValidatedBacktestSessionReq
         tables_mode: request.tablesMode,
         settings_snapshot: JSON.stringify(snapshot),
         overrides: JSON.stringify(request.overrides),
+        book_mode: request.bookMode,
+        symbol_settings: request.symbolSettings === null ? null : JSON.stringify(request.symbolSettings),
         status: "queued",
       })
       .returning("id");

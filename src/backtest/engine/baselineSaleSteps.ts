@@ -6,7 +6,7 @@ import { frictionDollarsPerContract } from "../../lib/signalCandidates.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 import type { ModelVolatilityForecast } from "../../lib/volatilityEdge.js";
 import type { ValuationGroup, VolatilityModelTables } from "../../lib/volatilityModelTables.js";
-import type { BacktestBaselineSettings } from "../backtestTypes.js";
+import type { BacktestBaselineSettings, BacktestOrderShortfall } from "../backtestTypes.js";
 import { ladderBase, ladderBudget, ladderRungPaceBlock, ladderRungToday, ladderShareLots, noteLadderRungSold, type LadderCycleState } from "./backtestBaselineLadder.js";
 import { computeSaleFillPrice, sharesPerContract } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
@@ -310,8 +310,10 @@ export interface BaselineLookBook {
   openCycleSummary(): OpenCycleSummary | null;
   /** Open cash-secured puts' strike × shares. */
   openPutCollateral(): number;
-  /** The day's account value for sizing (dayValueOptions). */
+  /** The day's account value for sizing (dayValueOptions): the whole account's. */
   accountValueToday(): number;
+  /** The ticker's share of the account for the ladder's base: its pot ÷ every pot, fixed for the session; 1 when the session's tickers share one account. */
+  tickerWeight(): number;
   /** Net liquidation value at the look's marks (maxAccountPctPerStock). */
   netLiquidationValue(): number;
   /** The symbol's open positions' capital at risk (maxAccountPctPerStock). */
@@ -337,7 +339,12 @@ export interface BaselineSalesInput {
   ladderState: LadderCycleState | null;
   /** The look's lines ("no call for …"), in order with the sales' own. */
   notes: string[];
+  /** Told of each order that left contracts unsold (recorded only: no decision reads it). */
+  noteShortfall?: (shortfall: BaselineOrderShortfall) => void;
 }
+
+/** An order that left contracts unsold, without the look's own facts (its time and symbol). */
+export type BaselineOrderShortfall = Omit<BacktestOrderShortfall, "tradingDate" | "at" | "lookTimeEt" | "symbol" | "lookCount">;
 
 /** The pre-step and steps 1–4 of the baseline's look, in order: each step sees the book after the earlier steps' sales. */
 export function planBaselineSales(input: BaselineSalesInput): void {
@@ -347,6 +354,33 @@ export function planBaselineSales(input: BaselineSalesInput): void {
   const heldSharesCostToday = () => (book.heldSharesAverageCostToday() ?? 0) * book.heldSharesToday();
 
   const stockFillToday = baselineShareFillPrice(baseline, stockPrice);
+
+  // What each order wanted and why any of it went unsold, recorded only: each sale's scores, and input.noteShortfall.
+  // An order's best candidate is the first in its ranking not already held when it starts; its rank counts from 1.
+  const bestOf = (candidates: readonly BaselineCandidate[]) => candidates.find((candidate) => !book.isHeld(candidate)) ?? null;
+  const orderScores = (wantedContracts: number | null, candidates: readonly BaselineCandidate[], candidate: BaselineCandidate, best: BaselineCandidate | null): Record<string, number | null> => ({
+    wantedContracts,
+    rank: candidates.indexOf(candidate) + 1,
+    bestCandidateStrike: best?.strike ?? null,
+    bestCandidateDte: best?.dte ?? null,
+    bestCandidatePremiumYield: best?.premiumYield ?? null,
+    bestCandidateVolumeCap: best?.volumeCap ?? null,
+  });
+  /** An order that wanted contracts and left some unsold (unsold null: none to measure it by, so nothing was within the rules). */
+  const noteOrderShortfall = (order: { step: BaselineOrderShortfall["step"]; right: "C" | "P"; wanted: number | null; filled: number; unsold: number | null; cashCut: boolean; anyCandidate: boolean; best: BaselineCandidate | null }) => {
+    if (!input.noteShortfall || (order.unsold !== null && order.unsold < 1)) return;
+    const { best } = order;
+    input.noteShortfall({
+      step: order.step,
+      right: order.right,
+      wantedContracts: order.wanted,
+      filledContracts: order.filled,
+      unsoldContracts: order.unsold,
+      reason: order.cashCut ? "cash" : order.anyCandidate ? "volume" : "no_candidate",
+      bestCandidate: best === null ? null : { expiry: best.expiry, strike: best.strike, dte: best.dte, premiumYield: best.premiumYield, volumeCap: best.volumeCap },
+    });
+  };
+
   // 1. Calls on the free round lots.
   const freeLots = Math.floor((book.freeShares() * priceToCycleScale) / sharesPerContract + 1e-9);
   let uncoveredLots = freeLots;
@@ -372,7 +406,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     if (!ladderState) return null;
     const cycle = book.openCycleSummary();
     const breakEven = cycle?.breakEvenPerShare == null ? null : cycle.breakEvenPerShare / priceToCycleScale;
-    const rung = ladderRungToday({ settings: baseline, state: ladderState, accountValueToday: book.accountValueToday(), breakEven, stockPrice, heldSharesCost: heldSharesCostToday(), openPutCollateral: book.openPutCollateral(), priceToCycleScale });
+    const rung = ladderRungToday({ settings: baseline, state: ladderState, accountValueToday: book.accountValueToday(), tickerWeight: book.tickerWeight(), breakEven, stockPrice, heldSharesCost: heldSharesCostToday(), openPutCollateral: book.openPutCollateral(), priceToCycleScale });
     if (baseline.ladderPace === "one_open" && book.openPutCollateral() > 0) return { rung, blocked: `${symbol}: no new ladder put while one is open`, candidates: [] as BaselineCandidate[], rejections: null };
     const paceBlock = ladderRungPaceBlock(baseline, ladderState, atMs, todayIso);
     if (paceBlock !== null) return { rung, blocked: `${symbol}: ${paceBlock}`, candidates: [] as BaselineCandidate[], rejections: null };
@@ -380,24 +414,41 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     const { candidates, rejections } = select("P", null, true, rung.cap, true);
     return { rung, blocked: null, candidates, rejections };
   };
-  const ladderPutContracts = (candidate: BaselineCandidate, collateralLeft: number) =>
-    Math.min(Math.floor(collateralLeft / (candidate.strike * sharesPerContract)), baselineContractsForCash(book.freeCash(), candidate, "put", stockFillToday), candidate.volumeCap);
+  const ladderPutLimits = (candidate: BaselineCandidate, collateralLeft: number) => ({
+    byCollateral: Math.floor(collateralLeft / (candidate.strike * sharesPerContract)),
+    byCash: baselineContractsForCash(book.freeCash(), candidate, "put", stockFillToday),
+    byVolume: candidate.volumeCap,
+  });
+  const ladderPutContracts = (candidate: BaselineCandidate, collateralLeft: number) => {
+    const limits = ladderPutLimits(candidate, collateralLeft);
+    return Math.min(limits.byCollateral, limits.byCash, limits.byVolume);
+  };
   const sellLadderPuts = (plan: NonNullable<ReturnType<typeof planLadderPuts>>, why: string) => {
     if (plan.blocked !== null) {
       notes.push(plan.blocked);
       return;
     }
     const cap = plan.rung.cap!;
+    // The rung wants its collateral's worth of the best put: collateral ÷ (strike × 100).
+    const best = bestOf(plan.candidates);
+    const contractsOfBest = (collateral: number) => (best === null ? null : Math.floor(collateral / (best.strike * sharesPerContract)));
+    const wanted = contractsOfBest(plan.rung.collateral);
     let collateralLeft = plan.rung.collateral;
     let putsSold = 0;
+    let contractsSold = 0;
+    let cashCut = false;
     for (const candidate of fillDown ? plan.candidates : plan.candidates.slice(0, 1)) {
       if (book.isHeld(candidate)) continue;
-      const contracts = ladderPutContracts(candidate, collateralLeft);
+      const limits = ladderPutLimits(candidate, collateralLeft);
+      const contracts = Math.min(limits.byCollateral, limits.byCash, limits.byVolume);
+      cashCut ||= limits.byCash < Math.min(limits.byCollateral, limits.byVolume);
       if (contracts < 1) continue;
-      book.sell("cash_secured_put", candidate, contracts, plan.candidates.length, `baseline: the ladder put with the highest premium yield (${why}), strike at most ${cap.toFixed(2)}${putsSold > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, { name: "costCeiling", value: cap }, false, plan.rung.scores);
+      book.sell("cash_secured_put", candidate, contracts, plan.candidates.length, `baseline: the ladder put with the highest premium yield (${why}), strike at most ${cap.toFixed(2)}${putsSold > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, { name: "costCeiling", value: cap }, false, { ...plan.rung.scores, ...orderScores(wanted, plan.candidates, candidate, best) });
       collateralLeft -= contracts * candidate.strike * sharesPerContract;
       putsSold++;
+      contractsSold += contracts;
     }
+    noteOrderShortfall({ step: "ladder_put", right: "P", wanted, filled: contractsSold, unsold: contractsOfBest(collateralLeft), cashCut, anyCandidate: plan.candidates.length > 0, best });
     if (putsSold > 0 && ladderState) noteLadderRungSold(ladderState, atMs, todayIso);
     if (putsSold === 0) notes.push(`${symbol}: no ladder put at or below ${cap.toFixed(2)} (${plan.candidates.length > 0 ? `${plan.candidates.length} within the rules, none fits the rung or the cash` : (plan.rejections && describeRejections(plan.rejections)) || "no quotes"}; ${plan.rung.note})`);
   };
@@ -423,21 +474,25 @@ export function planBaselineSales(input: BaselineSalesInput): void {
 
   let lastCallRejections: BaselineRejections | null = null;
   let anyCallCandidate = false;
+  // The order wants a call on every free lot; its best candidate is the first floor's.
+  let heldCallsBest: BaselineCandidate | null = null;
   for (const { floor, label } of ladderPutChosen ? [] : callFloors) {
     if (uncoveredLots < 1) break;
     const { candidates, rejections } = select("C", floor, false);
     lastCallRejections = rejections;
     anyCallCandidate ||= candidates.length > 0;
+    heldCallsBest ??= bestOf(candidates);
     let soldAtThisFloor = 0;
     for (const candidate of fillDown ? candidates : candidates.slice(0, 1)) {
       if (uncoveredLots < 1) break;
       if (book.isHeld(candidate)) continue;
       const contracts = Math.min(uncoveredLots, candidate.volumeCap);
-      book.sell("covered_call", candidate, contracts, candidates.length, `baseline: the call with the highest ${rankingLabel}${label} on the free shares${fillDown && soldAtThisFloor > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, floor === null ? null : { name: "costFloor", value: floor });
+      book.sell("covered_call", candidate, contracts, candidates.length, `baseline: the call with the highest ${rankingLabel}${label} on the free shares${fillDown && soldAtThisFloor > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, floor === null ? null : { name: "costFloor", value: floor }, false, orderScores(freeLots, candidates, candidate, heldCallsBest));
       uncoveredLots -= contracts;
       soldAtThisFloor += 1;
     }
   }
+  if (!ladderPutChosen && callFloors.length > 0) noteOrderShortfall({ step: "held_calls", right: "C", wanted: freeLots, filled: freeLots - uncoveredLots, unsold: uncoveredLots, cashCut: false, anyCandidate: anyCallCandidate, best: heldCallsBest });
   // When the ladder put was chosen over the calls, they were quoted and lost: the put's own line says why.
   if (callFloors.length > 0 && !anyCallCandidate && !ladderPutChosen) notes.push(`${symbol}: no call for ${freeLots * sharesPerContract} free shares (${(lastCallRejections && describeRejections(lastCallRejections)) || "no quotes"})`);
 
@@ -445,7 +500,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
   const buyWrite = baseline.entry === "buy_write";
   // Room for the buy-writes' shares under maxSharesPctOfAccount, in round lots at today's fill (unbounded at 100).
   const shareCapLots = () => {
-    if (buyWrite && ladderState !== null) return ladderShareLots(ladderBudget(ladderBase(ladderState, book.accountValueToday()), baseline.ladderSharesPct).sharesBudget - heldSharesCostToday() - book.openPutCollateral(), stockFillToday);
+    if (buyWrite && ladderState !== null) return ladderShareLots(ladderBudget(ladderBase(ladderState, book.accountValueToday(), book.tickerWeight()), baseline.ladderSharesPct).sharesBudget - heldSharesCostToday() - book.openPutCollateral(), stockFillToday);
     if (!buyWrite || baseline.maxSharesPctOfAccount >= 100) return Number.POSITIVE_INFINITY;
     const room = (book.accountValueToday() * baseline.maxSharesPctOfAccount) / 100 - book.heldSharesToday() * stockPrice;
     return room > 0 ? Math.floor(room / (stockFillToday * sharesPerContract)) : 0;
@@ -469,9 +524,12 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     const { candidates, rejections } = select(entryRight, entryMinimumStrike);
     if (candidates.length === 0) {
       notes.push(`${symbol}: no ${baseline.entry === "put" ? "put" : "new Covered Call"} (${describeRejections(rejections) || "no quotes"})`);
+      // Lots the buy-writes had cash and room for (a put entry's depend on a strike: unknown).
+      const wanted = buyWrite ? Math.min(Math.floor(book.freeCash() / (stockFillToday * sharesPerContract)), shareCapLots()) : null;
+      if (wanted === null || wanted >= 1) noteOrderShortfall({ step: "entry", right: entryRight, wanted, filled: 0, unsold: wanted, cashCut: false, anyCandidate: false, best: null });
       return roomForALot;
     }
-    const entryContractsFor = (candidate: BaselineCandidate) => {
+    const entryLimitsFor = (candidate: BaselineCandidate) => {
       const byCash = baselineContractsForCash(book.freeCash(), candidate, baseline.entry, stockFillToday);
       let byRoom = Number.POSITIVE_INFINITY;
       if (baseline.maxAccountPctPerStock < 100) {
@@ -480,23 +538,33 @@ export function planBaselineSales(input: BaselineSalesInput): void {
         const perContract = ((baseline.entry === "put" ? candidate.strike : stockFillToday) - candidate.fillPrice) * sharesPerContract;
         byRoom = room > 0 && perContract > 0 ? Math.floor(room / perContract) : 0;
       }
-      return Math.min(byCash, byRoom, shareCapLots(), candidate.volumeCap);
+      return { byCash, byRoom: Math.min(byRoom, shareCapLots()), byVolume: candidate.volumeCap };
     };
+    // The order wants what the room holds (the shares' cap, maxAccountPctPerStock); with neither, what the cash pays for.
+    const best = bestOf(candidates);
+    const bestLimits = best === null ? null : entryLimitsFor(best);
+    const wanted = bestLimits === null ? null : Number.isFinite(bestLimits.byRoom) ? bestLimits.byRoom : bestLimits.byCash;
     let entriesMade = 0;
+    let contractsSold = 0;
+    let cashCut = false;
     let belowAverageAfterPurchase = 0;
     for (const candidate of fillDown ? candidates : candidates.slice(0, 1)) {
       if (book.isHeld(candidate)) continue;
       // A later candidate can still fit when this one does not: its fill may leave less to pay per contract.
-      const contracts = entryContractsFor(candidate);
+      const limits = entryLimitsFor(candidate);
+      const contracts = Math.min(limits.byCash, limits.byRoom, limits.byVolume);
+      cashCut ||= Number.isFinite(limits.byRoom) && limits.byCash < Math.min(limits.byRoom, limits.byVolume);
       if (contracts < 1) continue;
       const costFloor = floorAfterPurchase ? averageCostAfterBuying(contracts) : entryMinimumStrike;
       if (floorAfterPurchase && candidate.strike < costFloor! - 1e-9) {
         belowAverageAfterPurchase++;
         continue;
       }
-      book.sell(baseline.entry === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${baseline.entry === "put" ? "put" : "Covered Call"} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, buyEveryShare);
+      book.sell(baseline.entry === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${baseline.entry === "put" ? "put" : "Covered Call"} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, buyEveryShare, orderScores(wanted, candidates, candidate, best));
       entriesMade++;
+      contractsSold += contracts;
     }
+    if (wanted !== null && wanted >= 1) noteOrderShortfall({ step: "entry", right: entryRight, wanted, filled: contractsSold, unsold: Math.max(0, wanted - contractsSold), cashCut, anyCandidate: true, best });
     if (entriesMade === 0 && belowAverageAfterPurchase > 0) notes.push(`${symbol}: no new Covered Call at or above the average after the purchase (${belowAverageAfterPurchase} below it)`);
     return entriesMade === 0 && roomForALot;
   };
@@ -510,18 +578,29 @@ export function planBaselineSales(input: BaselineSalesInput): void {
       const averageNow = book.heldSharesAverageCostToday();
       const { candidates, rejections } = select("P", null, true, averageNow, true);
       const accountValue = book.accountValueToday();
-      let putSold = false;
-      for (const candidate of candidates) {
-        if (book.isHeld(candidate)) continue;
+      const budgetOf = (candidate: BaselineCandidate) => {
         const budget = ((accountValue * baseline.putBudgetPctPerDte) / 100) * candidate.dte;
         const exposurePerContract = (candidate.strike - candidate.fillPrice) * sharesPerContract;
-        const byBudget = exposurePerContract > 0 ? Math.floor(budget / exposurePerContract) : 0;
-        const contracts = Math.min(byBudget, baselineContractsForCash(book.freeCash(), candidate, "put", stockFillToday), candidate.volumeCap);
+        return { budget, byBudget: exposurePerContract > 0 ? Math.floor(budget / exposurePerContract) : 0 };
+      };
+      const best = bestOf(candidates);
+      const wanted = best === null ? null : budgetOf(best).byBudget;
+      let putSold = false;
+      let contractsSold = 0;
+      let cashCut = false;
+      for (const candidate of candidates) {
+        if (book.isHeld(candidate)) continue;
+        const { budget, byBudget } = budgetOf(candidate);
+        const byCash = baselineContractsForCash(book.freeCash(), candidate, "put", stockFillToday);
+        const contracts = Math.min(byBudget, byCash, candidate.volumeCap);
+        cashCut ||= byCash < Math.min(byBudget, candidate.volumeCap);
         if (contracts < 1) continue;
-        book.sell("cash_secured_put", candidate, contracts, candidates.length, `baseline: the put with the highest premium yield (no call sold), ${baseline.putBudgetPctPerDte}% of the account per day to expiry`, { name: "costCeiling", value: averageNow }, false, { putBudgetDollars: budget, accountValue });
+        book.sell("cash_secured_put", candidate, contracts, candidates.length, `baseline: the put with the highest premium yield (no call sold), ${baseline.putBudgetPctPerDte}% of the account per day to expiry`, { name: "costCeiling", value: averageNow }, false, { putBudgetDollars: budget, accountValue, ...orderScores(wanted, candidates, candidate, best) });
         putSold = true;
+        contractsSold = contracts;
         break;
       }
+      noteOrderShortfall({ step: "budget_put", right: "P", wanted, filled: contractsSold, unsold: wanted === null ? null : Math.max(0, wanted - contractsSold), cashCut, anyCandidate: candidates.length > 0, best });
       if (!putSold) notes.push(`${symbol}: no put (${candidates.length > 0 ? `${candidates.length} within the rules, none fits the budget or the cash` : describeRejections(rejections) || "no quotes"})`);
     }
   }

@@ -3,7 +3,9 @@ import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
 
 // The put ladder on a cash reserve (baseline putsWhenNoCall "reserve_ladder", Marcelo 2026-10-14). The buy-writes' shares
 // get ladderSharesPct% of the base (at cost) and the rest is the reserve R0; the base is the larger of the account value
-// the cycle started with and today's, so a fall keeps the cycle's plan and a rally grows both with the account. When
+// the cycle started with and today's, so a fall keeps the cycle's plan and a rally grows both with the account. In a
+// session of per-ticker pots each ticker's base is its share of that (w = its pot ÷ every pot, fixed for the session;
+// approved by Marcelo 2026-10-15), and every ticker shares the one account, its cash and its interest. When
 // held shares get no call (none qualifies), puts are sold on the reserve, the strike capped by how much of it is
 // committed:
 //
@@ -105,9 +107,9 @@ export function noteLadderRungSold(state: LadderCycleState, atMs: number, todayI
   state.rungsInSession = { dateIso: todayIso, count: (state.rungsInSession?.dateIso === todayIso ? state.rungsInSession.count : 0) + 1 };
 }
 
-/** The base the budget and the reserve are taken from: the larger of the cycle's starting value and today's account value. */
-export function ladderBase(state: Pick<LadderCycleState, "accountValueAtStart">, accountValueToday: number): number {
-  return Math.max(state.accountValueAtStart, accountValueToday);
+/** The base the budget and the reserve are taken from: the ticker's weight × the larger of the account value at the cycle's start and today's (weight 1 when the session's tickers share one account). */
+export function ladderBase(state: Pick<LadderCycleState, "accountValueAtStart">, accountValueToday: number, tickerWeight: number): number {
+  return Math.max(state.accountValueAtStart, accountValueToday) * tickerWeight;
 }
 
 export function ladderBudget(base: number, sharesPct: number): LadderBudget {
@@ -138,10 +140,10 @@ export interface LadderRung {
 }
 
 /** Today's rung: the cap, its collateral and what the action records about it. */
-export function ladderRungToday(input: { settings: Pick<BacktestBaselineSettings, "ladderSharesPct" | "ladderRungs" | "ladderTop">; state: LadderCycleState; accountValueToday: number; breakEven: number | null; stockPrice: number; heldSharesCost: number; openPutCollateral: number; priceToCycleScale: number }): LadderRung {
-  const { settings, state, accountValueToday, breakEven, stockPrice, heldSharesCost, openPutCollateral, priceToCycleScale } = input;
+export function ladderRungToday(input: { settings: Pick<BacktestBaselineSettings, "ladderSharesPct" | "ladderRungs" | "ladderTop">; state: LadderCycleState; accountValueToday: number; tickerWeight: number; breakEven: number | null; stockPrice: number; heldSharesCost: number; openPutCollateral: number; priceToCycleScale: number }): LadderRung {
+  const { settings, state, accountValueToday, tickerWeight, breakEven, stockPrice, heldSharesCost, openPutCollateral, priceToCycleScale } = input;
   const top = breakEven === null ? null : settings.ladderTop === "price" ? Math.min(breakEven, stockPrice) : breakEven;
-  const base = ladderBase(state, accountValueToday);
+  const base = ladderBase(state, accountValueToday, tickerWeight);
   const { sharesBudget, reserve } = ladderBudget(base, settings.ladderSharesPct);
   const committed = ladderCommitted(heldSharesCost, openPutCollateral, sharesBudget);
   const collateral = ladderRungCollateral(reserve, committed, settings.ladderRungs);

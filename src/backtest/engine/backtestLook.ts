@@ -25,7 +25,7 @@ import { heldShareCallGate, type CycleBreakEven } from "../../pluto/heldShareCal
 import type { PlutoGateResult } from "../../pluto/ledger.js";
 import { computeKellyCap, computeSizingRoom, computeStressCap, midLimitPrice, runHeldShareCallGates, runPostModelGates, stressCapInputFor, tickerCooldownStatus } from "../../pluto/postModelGates.js";
 import { countPlutoRejections } from "../../pluto/rejectionSummary.js";
-import type { BacktestAction, BacktestActionKind, EffectiveBacktestSettings } from "../backtestTypes.js";
+import type { BacktestAction, BacktestActionKind, BacktestBaselineSettings, BacktestOrderShortfall, EffectiveBacktestSettings } from "../backtestTypes.js";
 import { toOhlcvBars, type BacktestBarHistory } from "./backtestBarHistory.js";
 import { computeSaleFillPrice, sharesPerContract } from "./backtestBook.js";
 import { classifyOpenRefusal, orderLimitBreachesOf, type OpenRefusalInput } from "./backtestOpenRefusal.js";
@@ -137,6 +137,12 @@ export interface BacktestPreparedSymbolDay {
   dailyClosesOnCycleScale(cycleSplitFactor: number): { date: string; close: number }[];
 }
 
+/** One ticker of a session of per-ticker pots: its baseline settings (the session's with its own values) and its weight, its pot ÷ every pot. */
+export interface BacktestTickerSetup {
+  baseline: BacktestBaselineSettings;
+  weight: number;
+}
+
 export interface BacktestLookContext {
   todayIso: string;
   /** The look's time, "HH:MM" Eastern; 10:00 when absent. */
@@ -157,6 +163,8 @@ export interface BacktestLookContext {
   sectorBySymbol: ReadonlyMap<string, string | null>;
   calendar: BacktestTradingCalendar;
   settings: EffectiveBacktestSettings;
+  /** A session of per-ticker pots: each ticker's own baseline settings and its weight. Absent when the tickers share one account and the session's settings. */
+  tickerSetupBySymbol?: ReadonlyMap<string, BacktestTickerSetup>;
   modelTables: VolatilityModelTables;
   ledger: SimulatedLedger;
   /** The session day before today; null on the first. */
@@ -222,6 +230,8 @@ export interface BacktestLookResult {
   scoredBySymbol: Map<string, TickerSignals>;
   /** LLM mode: the model calls the look made, and how many the cache answered. */
   llmCalls: { asked: number; fromCache: number };
+  /** The baseline: its orders that left contracts unsold. */
+  shortfalls?: BacktestOrderShortfall[];
 }
 
 const roundedStrike = (strike: number) => Math.round(strike * 10_000) / 10_000;

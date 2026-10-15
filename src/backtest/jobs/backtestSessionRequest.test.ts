@@ -64,6 +64,8 @@ const context: BacktestSessionRequestContext = {
     symbol === "AAOI" ? { firstDate: "2020-01-02", lastDate: "2026-10-09" } : symbol === "HOOD" ? { firstDate: "2021-07-29", lastDate: "2026-10-09" } : symbol === "INTC" ? { firstDate: "2020-01-02", lastDate: "2026-06-30" } : symbol === "OLDF" ? { firstDate: "2016-01-04", lastDate: "2019-12-31" } : symbol === "EMPTY" ? { firstDate: null, lastDate: null } : null,
   periodContentsFor: () => wholePeriod,
   claudeCliAvailable: true,
+  tickerValuesFor: () => null,
+  defaultPotDollars: null,
 };
 /** BACKTEST_CLAUDE_CLI_PATH is set. */
 const withClaudeCli = { claudeCliAvailable: true };
@@ -75,7 +77,7 @@ const validRequest = { name: " Edge Yield 20% ", symbol: "aaoi", startDate: "202
 describe("validateCreateBacktestSessionRequest", () => {
   it("accepts a valid request, trimming the name and normalizing the symbol", () => {
     const result = validateCreateBacktestSessionRequest(validRequest, context);
-    expect(result).toEqual({ ok: true, value: { name: "Edge Yield 20%", symbols: ["AAOI"], startDate: "2021-01-04", endDate: "2026-09-30", startingValue: 1_000_000, tablesMode: "walk_forward", overrides: {} }, warnings: [] });
+    expect(result).toEqual({ ok: true, value: { name: "Edge Yield 20%", symbols: ["AAOI"], startDate: "2021-01-04", endDate: "2026-09-30", startingValue: 1_000_000, tablesMode: "walk_forward", overrides: {}, bookMode: "shared_account", symbolSettings: null }, warnings: [] });
   });
 
   it("refuses a period in which a symbol's file has weekdays with nothing stored, naming the symbol and how many", () => {
@@ -219,6 +221,71 @@ describe("validateBacktestSettingsOverrides", () => {
   it("keeps the Kelly fraction above 0 and at most 1", () => {
     expect(validateBacktestSettingsOverrides({ kellyFraction: 0 }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "kellyFraction must be a number above 0 and at most 1." });
     expect(validateBacktestSettingsOverrides({ kellyFraction: 1.2 }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "kellyFraction must be a number above 0 and at most 1." });
+  });
+});
+
+describe("per-ticker pots (the baseline)", () => {
+  const ladderOverrides = { decisionMaker: "baseline", baseline: { entry: "buy_write", putsWhenNoCall: "reserve_ladder" } };
+  const potsRequest = { name: "Pots", symbols: ["hood", "aaoi"], startDate: "2021-08-02", endDate: "2026-09-30", tablesMode: "walk_forward", overrides: ladderOverrides };
+  const lab: BacktestSessionRequestContext = { ...context, tickerValuesFor: (symbol) => (symbol === "HOOD" ? { potDollars: 300_000, baseline: { ladderSharesPct: 30 } } : null), defaultPotDollars: 100_000 };
+  const resolved = (body: Record<string, unknown>, requestContext: BacktestSessionRequestContext = lab) => {
+    const result = validateCreateBacktestSessionRequest(body, requestContext);
+    if (!result.ok) throw new Error(result.error);
+    return result.value;
+  };
+
+  it("splits a starting value equally: w = 1 ÷ tickers, every value the lab's global one", () => {
+    const value = resolved({ ...potsRequest, startingValue: 200_000 }, { ...lab, tickerValuesFor: () => null });
+    expect(value).toMatchObject({ startingValue: 200_000, bookMode: "pots" });
+    expect(value.symbolSettings!.HOOD).toMatchObject({ potDollars: 100_000, weight: 0.5, baseline: { ladderSharesPct: 50, ladderRungs: 5, minAbsDelta: 0.05 } });
+    expect(value.symbolSettings!.HOOD!.source).toMatchObject({ potDollars: "session", ladderSharesPct: "global", minAbsDelta: "global" });
+    expect(Object.keys(value.symbolSettings!)).toEqual(["HOOD", "AAOI"]);
+  });
+
+  it("takes a ticker's lab pot and values, else the lab's default pot; capital = Σ pots, w = pot ÷ Σ pots", () => {
+    const value = resolved(potsRequest);
+    expect(value.startingValue).toBe(400_000);
+    expect(value.symbolSettings!.HOOD).toMatchObject({ potDollars: 300_000, weight: 0.75, baseline: { ladderSharesPct: 30 }, source: { potDollars: "ticker", ladderSharesPct: "ticker" } });
+    expect(value.symbolSettings!.AAOI).toMatchObject({ potDollars: 100_000, weight: 0.25, baseline: { ladderSharesPct: 50 }, source: { potDollars: "global", ladderSharesPct: "global" } });
+  });
+
+  it("lets the session-wide overrides beat the ticker's lab values, and the request's ticker values beat both", () => {
+    const sessionWide = { ...ladderOverrides, baseline: { ...ladderOverrides.baseline, ladderSharesPct: 70 } };
+    const value = resolved({ ...potsRequest, overrides: sessionWide, symbolSettings: { aaoi: { potDollars: 50_000, baseline: { ladderSharesPct: 40, ladderRungs: 8 } } } });
+    expect(value.symbolSettings!.HOOD).toMatchObject({ baseline: { ladderSharesPct: 70 }, source: { ladderSharesPct: "session", potDollars: "ticker" } });
+    expect(value.symbolSettings!.AAOI).toMatchObject({ potDollars: 50_000, baseline: { ladderSharesPct: 40, ladderRungs: 8 }, source: { potDollars: "request", ladderSharesPct: "request", ladderRungs: "request" } });
+    expect(value.startingValue).toBe(350_000);
+  });
+
+  it("ignores the tickers' lab values with settingsSource global", () => {
+    const value = resolved({ ...potsRequest, settingsSource: "global" });
+    expect(value.symbolSettings!.HOOD).toMatchObject({ potDollars: 100_000, weight: 0.5, baseline: { ladderSharesPct: 50 }, source: { potDollars: "global", ladderSharesPct: "global" } });
+  });
+
+  it("gives one ticker its whole starting value: weight 1, as when the tickers share one account", () => {
+    const value = resolved({ ...potsRequest, symbols: ["HOOD"], startingValue: 250_000 });
+    expect(value.symbolSettings!.HOOD).toMatchObject({ potDollars: 250_000, weight: 1 });
+  });
+
+  it.each([
+    [{ startingValue: 200_000, symbolSettings: { HOOD: { potDollars: 10_000 } } }, lab, "Give either a starting value (split equally) or each ticker's pot, not both (HOOD has a pot)."],
+    [{}, { ...lab, defaultPotDollars: null }, "AAOI has no pot: give the session a starting value or the ticker a pot."],
+    [{ symbolSettings: { HOOD: { baseline: { maxDte: 10 } } } }, lab, "baseline.maxDte cannot differ between tickers: change it for the whole session."],
+    [{ symbolSettings: { INTC: { potDollars: 10_000 } } }, lab, "symbolSettings.INTC: INTC is not one of the session's symbols."],
+    [{ symbolSettings: { HOOD: { potDollars: -5 } } }, lab, "symbolSettings.HOOD.potDollars must be a number above 0."],
+    [{ symbolSettings: { HOOD: { pot: 5 } } }, lab, "symbolSettings.HOOD.pot is not a ticker value (potDollars or baseline)."],
+    [{ symbolSettings: { AAOI: { baseline: { ladderRungs: 0 } } } }, lab, "AAOI: baseline.ladderRungs must be a whole number from 1 to 20."],
+    [{ symbolSettings: { AAOI: { baseline: { minAbsDelta: 0.4, maxAbsDelta: 0.3 } } } }, lab, "AAOI: baseline.minAbsDelta must not be above baseline.maxAbsDelta."],
+    [{ settingsSource: "mine" }, lab, "settingsSource must be per_ticker or global."],
+  ])("refuses %j", (change, requestContext, error) => {
+    expect(validateCreateBacktestSessionRequest({ ...potsRequest, ...change }, requestContext)).toEqual({ ok: false, error });
+  });
+
+  it("keeps the rules and the AI model on one shared account with a starting value", () => {
+    const rules = { ...validRequest, symbols: ["HOOD", "AAOI"], symbol: undefined, startDate: "2021-08-02" };
+    expect(validateCreateBacktestSessionRequest(rules, lab)).toMatchObject({ ok: true, value: { startingValue: 1_000_000, bookMode: "shared_account", symbolSettings: null } });
+    expect(validateCreateBacktestSessionRequest({ ...rules, startingValue: undefined }, lab)).toEqual({ ok: false, error: "The starting account value must be a number above 0." });
+    expect(validateCreateBacktestSessionRequest({ ...rules, symbolSettings: { HOOD: { potDollars: 1 } } }, lab)).toEqual({ ok: false, error: "symbolSettings apply to the baseline only." });
   });
 });
 

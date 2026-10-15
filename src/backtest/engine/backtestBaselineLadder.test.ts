@@ -30,9 +30,17 @@ describe("the ladder's budget", () => {
   });
 
   it("takes the budget from the larger of the cycle's starting value and today's: a rally grows it, a fall keeps it", () => {
-    expect(ladderBase({ accountValueAtStart: 200_000 }, 400_000)).toBe(400_000);
-    expect(ladderBase({ accountValueAtStart: 200_000 }, 120_000)).toBe(200_000);
-    expect(ladderBudget(ladderBase({ accountValueAtStart: 200_000 }, 400_000), 50)).toEqual({ sharesBudget: 200_000, reserve: 200_000 });
+    expect(ladderBase({ accountValueAtStart: 200_000 }, 400_000, 1)).toBe(400_000);
+    expect(ladderBase({ accountValueAtStart: 200_000 }, 120_000, 1)).toBe(200_000);
+    expect(ladderBudget(ladderBase({ accountValueAtStart: 200_000 }, 400_000, 1), 50)).toEqual({ sharesBudget: 200_000, reserve: 200_000 });
+  });
+
+  it("gives a ticker of a pots session its weight of that base: pots $80,000 and $120,000 are 40% and 60% of the account", () => {
+    // The account started at $200,000 and is $250,000 today: the 40% ticker's base is 0.4 × 250,000 = $100,000.
+    expect(ladderBase({ accountValueAtStart: 200_000 }, 250_000, 0.4)).toBeCloseTo(100_000, 6);
+    // After a fall to $150,000 it keeps 0.4 × 200,000 = $80,000, its pot at the cycle's start.
+    expect(ladderBase({ accountValueAtStart: 200_000 }, 150_000, 0.4)).toBeCloseTo(80_000, 6);
+    expect(ladderBudget(ladderBase({ accountValueAtStart: 200_000 }, 250_000, 0.6), 50)).toEqual({ sharesBudget: 75_000, reserve: 75_000 });
   });
 
   it("counts as committed only what the stock holds beyond the shares' budget", () => {
@@ -95,11 +103,11 @@ describe("the ladder's cycle state", () => {
 
   it("reports today's rung from the state", () => {
     const state = { startedOn: "2024-01-02", accountValueAtStart: 200_000, peakOnCycleScale: 110, shock: 0.7, lastRungAtMs: null, rungsInSession: null };
-    const rung = ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even" }, state, accountValueToday: 180_000, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, priceToCycleScale: 1 });
+    const rung = ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, priceToCycleScale: 1 });
     expect(rung.cap).toBeCloseTo(86.6, 6);
     expect(rung.collateral).toBe(20_000);
     // From today's price: 80 − (80 − 33) × 0.2 = 70.60.
-    expect(ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "price" }, state, accountValueToday: 180_000, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, priceToCycleScale: 1 }).cap).toBeCloseTo(70.6, 6);
+    expect(ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "price" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, priceToCycleScale: 1 }).cap).toBeCloseTo(70.6, 6);
   });
 });
 

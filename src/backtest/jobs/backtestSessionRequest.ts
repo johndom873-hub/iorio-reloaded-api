@@ -1,20 +1,28 @@
 import { validatePlutoSettingsInput, type PlutoSettingsInput } from "../../pluto/settingsStore.js";
 import { validateTradingSettingsInput } from "../../lib/tradingSettingsStore.js";
 import { normalizeBacktestSymbol } from "../backtestDataDirectory.js";
+import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import {
   backtestBookPageDefaultLimit,
   backtestBookPageMaxLimit,
   backtestMaxSymbolsPerSession,
   backtestSessionsPageDefaultLimit,
   backtestSessionsPageMaxLimit,
+  backtestTickerBaselineKeys,
   defaultBacktestBaselineSettings,
   defaultBacktestPolicySettings,
   type BacktestBaselineSettings,
+  type BacktestBookMode,
   type BacktestPolicySettings,
   type BacktestSessionStatusFilter,
   type BacktestSettings,
   type BacktestSettingsOverrides,
+  type BacktestSettingsSource,
+  type BacktestSymbolSettings,
   type BacktestTablesMode,
+  type BacktestTickerBaselineKey,
+  type BacktestTickerBaselineSettings,
+  type BacktestTickerValues,
 } from "../backtestTypes.js";
 import { backtestClaudeCliPathMissingMessage } from "../backtestClaudeCli.js";
 import { isIsoCalendarDate } from "./backtestJobRules.js";
@@ -49,6 +57,10 @@ export interface BacktestSessionRequestContext {
   periodContentsFor: (symbol: string, startDate: string, endDate: string) => DataFilePeriodContents | null;
   /** BACKTEST_CLAUDE_CLI_PATH is set: the AI model can be the decision maker. */
   claudeCliAvailable: boolean;
+  /** The ticker's saved lab values (its pot and baseline values); null when it has none. */
+  tickerValuesFor: (symbol: string) => BacktestTickerValues | null;
+  /** The lab's pot for a ticker without its own; null when none is set. */
+  defaultPotDollars: number | null;
 }
 
 export interface ValidatedBacktestSessionRequest {
@@ -57,10 +69,15 @@ export interface ValidatedBacktestSessionRequest {
   symbols: string[];
   startDate: string;
   endDate: string;
+  /** The session's capital: the starting value given, else Σ the pots. */
   startingValue: number;
   tablesMode: BacktestTablesMode;
   /** Only the values that differ from the snapshot. */
   overrides: BacktestSettingsOverrides;
+  /** "pots" when the baseline decides; "shared_account" with the rules or the AI model. */
+  bookMode: BacktestBookMode;
+  /** Each ticker's pot, weight and values ("pots"); null otherwise. */
+  symbolSettings: Record<string, BacktestSymbolSettings> | null;
 }
 
 /** `warnings` do not stop the session: what it will do differently because of what its data files hold. */
@@ -277,16 +294,143 @@ export function validateCreateBacktestSessionRequest(body: unknown, context: Bac
   }
 
   const startingValue = body.startingValue;
-  if (typeof startingValue !== "number" || !Number.isFinite(startingValue) || startingValue <= 0) return { ok: false, error: "The starting account value must be a number above 0." };
-  if (startingValue > maximumStartingValue) return { ok: false, error: "The starting account value is too large." };
+  if (startingValue !== undefined && startingValue !== null) {
+    if (typeof startingValue !== "number" || !Number.isFinite(startingValue) || startingValue <= 0) return { ok: false, error: "The starting account value must be a number above 0." };
+    if (startingValue > maximumStartingValue) return { ok: false, error: "The starting account value is too large." };
+  }
 
   const tablesMode = body.tablesMode;
   if (typeof tablesMode !== "string" || !tablesModes.includes(tablesMode as BacktestTablesMode)) return { ok: false, error: `tablesMode must be one of ${tablesModes.join(", ")}.` };
 
   const overrides = validateBacktestSettingsOverrides(body.overrides, context.snapshot, context.editablePaths, { claudeCliAvailable: context.claudeCliAvailable });
   if (!overrides.ok) return overrides;
+  const base = { name, symbols, startDate, endDate, tablesMode: tablesMode as BacktestTablesMode, overrides: overrides.overrides };
 
-  return { ok: true, value: { name, symbols, startDate, endDate, startingValue, tablesMode: tablesMode as BacktestTablesMode, overrides: overrides.overrides }, warnings };
+  // Per-ticker pots and values are the baseline's; the rules and the AI model run on the session's settings and its starting value.
+  const effective = applyBacktestOverrides(context.snapshot, overrides.overrides);
+  if (effective.decisionMaker !== "baseline") {
+    if (body.symbolSettings !== undefined && body.symbolSettings !== null) return { ok: false, error: "symbolSettings apply to the baseline only." };
+    if (typeof startingValue !== "number") return { ok: false, error: "The starting account value must be a number above 0." };
+    return { ok: true, value: { ...base, startingValue, bookMode: "shared_account", symbolSettings: null }, warnings };
+  }
+
+  const settingsSource = body.settingsSource ?? "per_ticker";
+  if (settingsSource !== "per_ticker" && settingsSource !== "global") return { ok: false, error: "settingsSource must be per_ticker or global." };
+  const requestValues = validateRequestTickerValues(body.symbolSettings, symbols, context.editablePaths);
+  if (!requestValues.ok) return requestValues;
+  const resolved = resolveBacktestSymbolSettings({
+    symbols,
+    globalBaseline: { ...defaultBacktestBaselineSettings, ...context.snapshot.baseline },
+    sessionBaseline: effective.baseline,
+    sessionOverrides: overrides.overrides.baseline ?? {},
+    settingsSource,
+    tickerValuesFor: context.tickerValuesFor,
+    requestValues: requestValues.values,
+    startingValue: typeof startingValue === "number" ? startingValue : null,
+    defaultPotDollars: context.defaultPotDollars,
+  });
+  if (!resolved.ok) return resolved;
+  return { ok: true, value: { ...base, startingValue: resolved.capital, bookMode: "pots", symbolSettings: resolved.bySymbol }, warnings };
+}
+
+const isTickerBaselineKey = (key: string): key is BacktestTickerBaselineKey => (backtestTickerBaselineKeys as readonly string[]).includes(key);
+
+/** The request's symbolSettings: keyed by the session's symbols (normalized), each a pot above 0 and per-ticker baseline values only. Their values are checked once merged. */
+function validateRequestTickerValues(raw: unknown, symbols: readonly string[], editablePaths: ReadonlySet<string>): { ok: true; values: Record<string, BacktestTickerValues> } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, values: {} };
+  if (!isPlainObject(raw)) return { ok: false, error: "symbolSettings must be an object of symbols." };
+  const values: Record<string, BacktestTickerValues> = {};
+  for (const [givenSymbol, given] of Object.entries(raw)) {
+    let symbol: string;
+    try {
+      symbol = normalizeBacktestSymbol(givenSymbol);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (!symbols.includes(symbol)) return { ok: false, error: `symbolSettings.${givenSymbol}: ${symbol} is not one of the session's symbols.` };
+    if (!isPlainObject(given)) return { ok: false, error: `symbolSettings.${symbol} must be an object.` };
+    const unknownKey = Object.keys(given).find((key) => key !== "potDollars" && key !== "baseline");
+    if (unknownKey) return { ok: false, error: `symbolSettings.${symbol}.${unknownKey} is not a ticker value (potDollars or baseline).` };
+    const tickerValues: BacktestTickerValues = {};
+    if (given.potDollars !== undefined) {
+      const pot = given.potDollars;
+      if (typeof pot !== "number" || !Number.isFinite(pot) || pot <= 0 || pot > maximumStartingValue) return { ok: false, error: `symbolSettings.${symbol}.potDollars must be a number above 0.` };
+      tickerValues.potDollars = pot;
+    }
+    if (given.baseline !== undefined) {
+      if (!isPlainObject(given.baseline)) return { ok: false, error: `symbolSettings.${symbol}.baseline must be an object.` };
+      const sessionWide = Object.keys(given.baseline).find((key) => !isTickerBaselineKey(key));
+      if (sessionWide) return { ok: false, error: `baseline.${sessionWide} cannot differ between tickers: change it for the whole session.` };
+      const notEditable = Object.keys(given.baseline).find((key) => !editablePaths.has(`baseline.${key}`));
+      if (notEditable) return { ok: false, error: `baseline.${notEditable} cannot be changed for a session.` };
+      tickerValues.baseline = given.baseline as Partial<BacktestTickerBaselineSettings>;
+    }
+    values[symbol] = tickerValues;
+  }
+  return { ok: true, values };
+}
+
+/**
+ * Each ticker's pot, weight and baseline values in a session of per-ticker pots (approved by Marcelo 2026-10-15). A
+ * value comes from, last one given winning: the lab's global values < the ticker's lab values (settingsSource
+ * "per_ticker") < the request's session-wide overrides < the request's values for the ticker. Pots: a starting value
+ * splits equally (pot = starting value ÷ tickers); without one, the request's pot, else the ticker's lab pot
+ * ("per_ticker"), else the lab's default pot. w = pot ÷ Σ pots; the session's capital is Σ pots.
+ */
+export function resolveBacktestSymbolSettings(input: {
+  symbols: readonly string[];
+  /** The lab's global values, every default filled in. */
+  globalBaseline: BacktestBaselineSettings;
+  /** The global values with the session-wide overrides: every value the tickers share. */
+  sessionBaseline: BacktestBaselineSettings;
+  /** Only the values the request changes for the whole session. */
+  sessionOverrides: Partial<BacktestBaselineSettings>;
+  settingsSource: BacktestSettingsSource;
+  tickerValuesFor: (symbol: string) => BacktestTickerValues | null;
+  requestValues: Record<string, BacktestTickerValues>;
+  startingValue: number | null;
+  defaultPotDollars: number | null;
+}): { ok: true; bySymbol: Record<string, BacktestSymbolSettings>; capital: number } | { ok: false; error: string } {
+  const { symbols, globalBaseline, sessionBaseline, sessionOverrides, settingsSource, requestValues, startingValue, defaultPotDollars } = input;
+  if (startingValue !== null) {
+    const withPot = symbols.find((symbol) => requestValues[symbol]?.potDollars !== undefined);
+    if (withPot) return { ok: false, error: `Give either a starting value (split equally) or each ticker's pot, not both (${withPot} has a pot).` };
+  }
+  const tickers: Omit<BacktestSymbolSettings, "weight">[] = [];
+  for (const symbol of symbols) {
+    const fromLab = settingsSource === "per_ticker" ? input.tickerValuesFor(symbol) : null;
+    const fromRequest = requestValues[symbol] ?? null;
+    const baseline = {} as Record<BacktestTickerBaselineKey, unknown>;
+    const source = {} as BacktestSymbolSettings["source"];
+    for (const key of backtestTickerBaselineKeys) {
+      const layers = [
+        ["ticker", fromLab?.baseline?.[key]],
+        ["session", sessionOverrides[key]],
+        ["request", fromRequest?.baseline?.[key]],
+      ] as const;
+      baseline[key] = globalBaseline[key];
+      source[key] = "global";
+      for (const [layer, value] of layers) {
+        if (value === undefined) continue;
+        baseline[key] = value;
+        source[key] = layer;
+      }
+    }
+    const tickerBaseline = baseline as BacktestTickerBaselineSettings;
+    const problem = validateBaselineSettings({ ...sessionBaseline, ...tickerBaseline });
+    if (problem) return { ok: false, error: `${symbol}: ${problem}` };
+    let potDollars: number;
+    if (startingValue !== null) [potDollars, source.potDollars] = [startingValue / symbols.length, "session"];
+    else if (fromRequest?.potDollars !== undefined) [potDollars, source.potDollars] = [fromRequest.potDollars, "request"];
+    else if (fromLab?.potDollars !== undefined) [potDollars, source.potDollars] = [fromLab.potDollars, "ticker"];
+    else if (defaultPotDollars !== null) [potDollars, source.potDollars] = [defaultPotDollars, "global"];
+    else return { ok: false, error: `${symbol} has no pot: give the session a starting value or the ticker a pot.` };
+    tickers.push({ potDollars, baseline: tickerBaseline, source });
+  }
+  const capital = startingValue ?? tickers.reduce((sum, ticker) => sum + ticker.potDollars, 0);
+  if (capital > maximumStartingValue) return { ok: false, error: "The pots add up to too large a starting account value." };
+  const bySymbol = Object.fromEntries(symbols.map((symbol, index) => [symbol, { ...tickers[index]!, weight: tickers[index]!.potDollars / capital }]));
+  return { ok: true, bySymbol, capital };
 }
 
 /** The filters of a page of a session's actions or fills, every default filled in. */

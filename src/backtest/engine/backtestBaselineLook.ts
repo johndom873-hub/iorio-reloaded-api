@@ -3,9 +3,9 @@ import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { regularCloseMinutesEt, varianceSessionsToExpiry } from "../../lib/varianceClock.js";
 import { selectModelVolatilityForecast } from "../../lib/volatilityEdge.js";
 import { openCandidateId } from "../../pluto/candidateFilters.js";
-import type { BacktestAction } from "../backtestTypes.js";
+import type { BacktestAction, BacktestOrderShortfall } from "../backtestTypes.js";
 import { toOhlcvBars } from "./backtestBarHistory.js";
-import { baselineShareFillPrice, makeBaselineSelector, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineLookBook, type BaselineModelInput } from "./baselineSaleSteps.js";
+import { baselineShareFillPrice, makeBaselineSelector, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineLookBook, type BaselineModelInput, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
 import { noteLadderLook } from "./backtestBaselineLadder.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { BacktestLookContext, BacktestLookResult, BacktestOptionSale } from "./backtestLook.js";
@@ -74,7 +74,6 @@ export { baselineContractsForCash, baselineMaxVolumeShare, baselineMinimumBid, s
 
 export async function runBaselineLook(context: BacktestLookContext): Promise<BacktestLookResult> {
   const { settings, ledger, todayIso } = context;
-  const baseline = settings.baseline;
   const lookTimeEt = context.lookTimeEt ?? captureLookTimeEt;
   const at = new Date(lookInstantMs(todayIso, lookTimeEt));
   // An option expiring today is priced on the hours left to today's close (13:00 on a half day).
@@ -85,9 +84,14 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
   const actions: BacktestAction[] = [];
   const optionSales: BacktestOptionSale[] = [];
   const summaries: string[] = [];
+  const shortfalls: BacktestOrderShortfall[] = [];
 
   for (const lookSymbol of context.symbols) {
     const symbol = lookSymbol.profile.symbol;
+    // A session of per-ticker pots gives each ticker its own settings and its share of the account (backtestLook.ts).
+    const tickerSetup = context.tickerSetupBySymbol?.get(symbol);
+    const baseline = tickerSetup?.baseline ?? settings.baseline;
+    const tickerWeight = tickerSetup?.weight ?? 1;
     if (!lookSymbol.optionContractsRepresentable) {
       summaries.push(`${symbol}: no option orders while the open cycle spans a split`);
       continue;
@@ -334,15 +338,17 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
       openCycleSummary: () => ledgerOpenCycleSummary(ledger, symbol),
       openPutCollateral,
       accountValueToday,
+      tickerWeight: () => tickerWeight,
       netLiquidationValue: () => ledgerNetLiquidationValue(ledger, context.priceByLegId),
       openPositionsCapitalAtRisk: () => positionsOfSymbol(ledger, symbol).filter((position) => position.status === "open").reduce((sum, position) => sum + (ledgerCapitalAtRisk(ledger, position.id) ?? 0), 0),
       hasOpenCashSecuredPut: () => positionsOfSymbol(ledger, symbol).some((position) => position.status === "open" && position.strategyKey === "cash_secured_put"),
       isHeld,
       sell: record,
     };
-    planBaselineSales({ symbol, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries });
+    const noteShortfall = (shortfall: BaselineOrderShortfall) => shortfalls.push({ tradingDate: todayIso, at: at.toISOString(), lookTimeEt, symbol, ...shortfall, lookCount: 1 });
+    planBaselineSales({ symbol, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall });
   }
 
   const summary = summaries.length === 0 ? "No action: fully invested" : actions.length === 0 ? `No action: ${summaries.join(" | ")}` : summaries.join(" · ");
-  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], fitIssueBySymbol: new Map(), scoredBySymbol: new Map(), llmCalls: { asked: 0, fromCache: 0 } };
+  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], fitIssueBySymbol: new Map(), scoredBySymbol: new Map(), llmCalls: { asked: 0, fromCache: 0 }, shortfalls };
 }

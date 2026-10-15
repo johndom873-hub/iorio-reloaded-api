@@ -1,7 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtest/backtestDataDirectory.js";
-import type { BacktestOverview } from "../backtest/backtestTypes.js";
+import type { BacktestOverview, BacktestSessionEstimateResponse } from "../backtest/backtestTypes.js";
 import { readBacktestDataFileContents, readBacktestDataFilePeriodContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
 import { backtestHistoryStartDate } from "../backtest/backfillDailyHistory.js";
 import { editableBacktestSettingPaths, loadBacktestSettingsTemplate, loadCurrentBacktestSettings } from "../backtest/settingsTemplate.js";
@@ -98,6 +98,9 @@ async function validateSessionRequestWithEstimate(body: unknown) {
     coverageFor: (symbol) => readBacktestDataFileContents(symbol),
     periodContentsFor: (symbol, startDate, endDate) => readBacktestDataFilePeriodContents(symbol, startDate, endDate),
     claudeCliAvailable: readBacktestClaudeCliPath() !== null,
+    // Until the lab's settings store exists, no ticker has saved values and there is no default pot.
+    tickerValuesFor: () => null,
+    defaultPotDollars: null,
   });
   if (!validation.ok) throw new BacktestRequestError(validation.error, 400);
   // With the AI model deciding, the calls a full day of looks may take (a day without intraday quotes has one look).
@@ -111,15 +114,16 @@ async function validateSessionRequestWithEstimate(body: unknown) {
 
 backtestRouter.post("/sessions", async (request, response) => {
   const { snapshot, value, warnings, llmEstimate } = await validateSessionRequestWithEstimate(request.body);
-  response.status(201).json({ ...(await createBacktestSession(value, snapshot)), warnings, llmEstimate });
+  response.status(201).json({ ...(await createBacktestSession(value, snapshot)), warnings, llmEstimate, resolvedBySymbol: value.symbolSettings });
 });
 
 // The New session screen's estimate before anything starts: the same request body, checked the same way (a name is not
 // needed yet), nothing created.
 backtestRouter.post("/sessions/estimate", async (request, response) => {
   const body = (request.body ?? {}) as Record<string, unknown>;
-  const { warnings, llmEstimate } = await validateSessionRequestWithEstimate({ ...body, name: typeof body.name === "string" && body.name.trim() !== "" ? body.name : "estimate" });
-  response.json({ warnings, llmEstimate });
+  const { value, warnings, llmEstimate } = await validateSessionRequestWithEstimate({ ...body, name: typeof body.name === "string" && body.name.trim() !== "" ? body.name : "estimate" });
+  const estimate: BacktestSessionEstimateResponse = { warnings, llmEstimate, capital: value.startingValue, bookMode: value.bookMode, resolvedBySymbol: value.symbolSettings };
+  response.json(estimate);
 });
 
 // ?symbol=XYZ narrows the option sales, positions, cycles and statistics to one symbol of the session's book.
