@@ -133,8 +133,9 @@ describe("the close offers' loader and builder", () => {
     expect(sortedBook(await loadCloseOffersBook(input))).toEqual(sortedBook(handWrittenBook));
   });
 
-  it("reads only the share positions when no short leg is held", async () => {
-    expect(await loadCloseOffersBook({ ...input, heldLegs: [] })).toEqual({ ...handWrittenBook, openLegsByPositionId: new Map(), recentUnfilledAutomaticAttemptPositionIds: new Set(), activeOrderPositionIds: new Set(), openingTradesByLegId: new Map(), earnings: null, sessionsLeftBeforeEarnings: null });
+  it("reads only the share positions and the automatic-close rules' records when no short leg is held", async () => {
+    // The ticker's recent unfilled automatic attempts are read for the share positions' odd-lot sales; working orders on them only.
+    expect(await loadCloseOffersBook({ ...input, heldLegs: [] })).toEqual({ ...handWrittenBook, openLegsByPositionId: new Map(), activeOrderPositionIds: new Set(), openingTradesByLegId: new Map(), earnings: null, sessionsLeftBeforeEarnings: null });
   });
 
   it("builds from the hand-written book what buildCloseOffersForTicker builds from the database", async () => {
@@ -172,5 +173,36 @@ describe("the close offers' loader and builder", () => {
     } finally {
       await testDb("position_share_sources").where({ position_id: positionIds.coveredCall }).delete();
     }
+  });
+});
+
+// The automatic-close rules cover the odd-lot share sale (P1) too (Marcelo 2026-10-15): an unfilled sale cancelled by the sweep
+// waited for nothing before, and was sent again every round, each attempt counting toward the order cap.
+describe("the odd-lot share sale (P1) under the automatic-close rules", () => {
+  const oddLotBook = (overrides: Partial<CloseOffersBook>): CloseOffersBook => ({ ...handWrittenBook, sharePositions: [{ ...handWrittenBook.sharePositions[0]!, shares: 50 }], recentUnfilledAutomaticAttemptPositionIds: new Set(), activeOrderPositionIds: new Set(), ...overrides });
+  const build = (book: CloseOffersBook) => buildCloseOffersFromBook({ ...input, heldLegs: [] }, book, { forPosition: () => gateVerdict, fromQuotes: () => gateVerdict });
+  const shareId = () => `PAR:close_shares:${positionIds.shares}`;
+
+  it("is sent automatically when neither rule applies", async () => {
+    const { offers } = await build(oddLotBook({}));
+    expect(offers.map((offer) => [offer.kind, offer.automatic])).toEqual([["close_shares", true]]);
+  });
+
+  it("is not sent while an order on the position is working", async () => {
+    const { offers, skipped } = await build(oddLotBook({ activeOrderPositionIds: new Set([positionIds.shares]) }));
+    expect(offers).toEqual([]);
+    expect(skipped).toContainEqual({ id: shareId(), reason: "an order on this position is still working" });
+  });
+
+  it("is not sent again within the hour after an automatic attempt that did not fill", async () => {
+    const { offers, skipped } = await build(oddLotBook({ recentUnfilledAutomaticAttemptPositionIds: new Set([positionIds.shares]) }));
+    expect(offers).toEqual([]);
+    expect(skipped).toContainEqual({ id: shareId(), reason: "an automatic sale of these shares did not fill within the last hour" });
+  });
+
+  it("a round lot, offered to the model, is not held by the hour rule (it is not automatic)", async () => {
+    const book: CloseOffersBook = { ...handWrittenBook, recentUnfilledAutomaticAttemptPositionIds: new Set([positionIds.shares]), activeOrderPositionIds: new Set() };
+    const { offers } = await build(book);
+    expect(offers.map((offer) => [offer.kind, offer.automatic])).toEqual([["close_shares", false]]);
   });
 });

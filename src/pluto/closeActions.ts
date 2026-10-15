@@ -620,12 +620,15 @@ const liveCloseGates: CloseGateReader = { forPosition: evaluateCloseGateForPosit
 export async function loadCloseOffersBook(input: Pick<CloseOffersForTickerInput, "symbol" | "heldLegs" | "todayIso">): Promise<CloseOffersBook> {
   const hasHeldLegs = input.heldLegs.length > 0;
   const heldPositionIds = [...new Set(input.heldLegs.map((leg) => leg.positionId))];
+  const sharePositions = await loadUnstructuredSharePositions([input.symbol]);
+  // The automatic-close rules (an order working, an unfilled attempt within the hour) cover the share positions' odd-lot sales (P1) too.
+  const guardedPositionIds = [...heldPositionIds, ...sharePositions.map((position) => position.positionId)];
+  const hasGuardedPositions = guardedPositionIds.length > 0;
   // None of these reads depends on another; those about held legs are skipped when there is none.
-  const [sharePositions, openLegs, recentUnfilledAutomaticAttemptPositionIds, activeOrderPositionIds, openingTradesByLegId, earnings, heldShareCallPositionIds] = await Promise.all([
-    loadUnstructuredSharePositions([input.symbol]),
+  const [openLegs, recentUnfilledAutomaticAttemptPositionIds, activeOrderPositionIds, openingTradesByLegId, earnings, heldShareCallPositionIds] = await Promise.all([
     hasHeldLegs ? (db("position_legs").whereIn("position_id", heldPositionIds).whereNull("exit_at").select("position_id", "id", "leg_type", "side", "quantity") as Promise<{ position_id: string; id: string; leg_type: string; side: string; quantity: string }[]>) : [],
-    hasHeldLegs ? loadRecentUnfilledAutomaticAttempts(input.symbol) : new Set<string>(),
-    hasHeldLegs ? loadPositionsWithActiveOrder(heldPositionIds) : new Set<string>(),
+    hasGuardedPositions ? loadRecentUnfilledAutomaticAttempts(input.symbol) : new Set<string>(),
+    hasGuardedPositions ? loadPositionsWithActiveOrder(guardedPositionIds) : new Set<string>(),
     hasHeldLegs ? loadOpeningTradesForPremium(input.heldLegs.map((leg) => leg.legId)) : new Map<string, OpeningTradeForPremium[]>(),
     hasHeldLegs ? loadUpcomingEarnings(input.symbol, input.todayIso) : null,
     hasHeldLegs ? loadPositionsWithShareSources(heldPositionIds) : new Set<string>(),
@@ -653,10 +656,16 @@ export async function buildCloseOffersFromBook(input: CloseOffersForTickerInput,
   const skipped: { id: string; reason: string }[] = [];
   const heldPositions: HeldPositionEntry[] = [];
   for (const position of book.sharePositions) {
+    const closeId = `${input.symbol}:close_shares:${position.positionId}`;
+    if (book.activeOrderPositionIds.has(position.positionId)) {
+      skipped.push({ id: closeId, reason: "an order on this position is still working" });
+      continue;
+    }
     const gate = await gates.forPosition(position.positionId);
     const result = evaluateUnstructuredClose({ position, cycleTotal: gate.cycleTotal, cycleBlockReason: gate.blocked ? gate.reason : null, stockBid: input.stockBid, stockAsk: input.stockAsk, settings: input.settings, previousSessionDateIso: input.previousSessionDateIso });
-    if (result.offer) offers.push(result.offer);
-    else skipped.push({ id: `${input.symbol}:close_shares:${position.positionId}`, reason: result.reason ?? "not offered" });
+    if (result.offer?.automatic && book.recentUnfilledAutomaticAttemptPositionIds.has(position.positionId)) skipped.push({ id: closeId, reason: "an automatic sale of these shares did not fill within the last hour" });
+    else if (result.offer) offers.push(result.offer);
+    else skipped.push({ id: closeId, reason: result.reason ?? "not offered" });
   }
   if (input.heldLegs.length > 0) {
     const { earnings, sessionsLeftBeforeEarnings: sessionsLeft } = book;
