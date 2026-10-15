@@ -243,6 +243,10 @@ export async function updatePlutoSettings(input: PlutoSettingsInput, userId: str
     const current = await loadPlutoSettings(trx);
     const problem = validatePlutoSettingsInput(input, current);
     if (problem) throw new PlutoSettingsValidationError(problem);
+    if (input.ladderMinAbsDelta !== undefined || input.ladderMaxAbsDelta !== undefined) {
+      const broken = await tickersWithBrokenDeltaRange({ ...current, ...input } as PlutoSettings, trx);
+      if (broken.length > 0) throw new PlutoSettingsValidationError(`${broken.map((entry) => `${entry.symbol}'s |delta| range would be ${entry.from.toFixed(2)}–${entry.to.toFixed(2)} (it sets its own ${entry.ownLimits}).`).join(" ")} Change ${broken.length === 1 ? "that ticker's override" : "those tickers' overrides"} in the ticker window first.`);
+    }
     if (input.executionStrategy !== undefined && input.executionStrategy !== current.executionStrategy) {
       // Locked so a Resume cannot land between this check and the commit.
       const state = await trx("pluto_state").where({ id: 1 }).forUpdate().first("mode", "paused");
@@ -267,6 +271,26 @@ export async function updatePlutoSettings(input: PlutoSettingsInput, userId: str
 }
 
 export class PlutoSettingsValidationError extends Error {}
+
+/**
+ * Tickers whose effective |delta| range the strategy's would leave empty (lower limit above upper): each limit is the
+ * ticker's override where it has one, else the strategy's. A strategy save that does this is refused (Marcelo 2026-10-15).
+ */
+export async function tickersWithBrokenDeltaRange(settings: Pick<PlutoSettings, "ladderMinAbsDelta" | "ladderMaxAbsDelta">, connection: Knex = db): Promise<{ symbol: string; from: number; to: number; ownLimits: string }[]> {
+  const rows: { symbol: string; ladder_min_abs_delta: string | null; ladder_max_abs_delta: string | null }[] = await connection("pluto_ticker_settings as s")
+    .join("tickers as t", "t.id", "s.ticker_id")
+    .where((inner) => inner.whereNotNull("s.ladder_min_abs_delta").orWhereNotNull("s.ladder_max_abs_delta"))
+    .orderBy("t.symbol")
+    .select("t.symbol", "s.ladder_min_abs_delta", "s.ladder_max_abs_delta");
+  return rows.flatMap((row) => {
+    const ownMin = row.ladder_min_abs_delta === null ? null : Number(row.ladder_min_abs_delta);
+    const ownMax = row.ladder_max_abs_delta === null ? null : Number(row.ladder_max_abs_delta);
+    const from = ownMin ?? settings.ladderMinAbsDelta;
+    const to = ownMax ?? settings.ladderMaxAbsDelta;
+    if (from <= to) return [];
+    return [{ symbol: row.symbol, from, to, ownLimits: ownMin !== null && ownMax !== null ? "lower and upper limits" : ownMin !== null ? "lower limit" : "upper limit" }];
+  });
+}
 
 export interface PlutoSettingsAuditRow {
   id: number;

@@ -202,3 +202,36 @@ describe("strategy switch", () => {
     if (savedState) await testDb("pluto_state").where({ id: 1 }).update(savedState);
   });
 });
+
+describe("ladder settings screen reads", () => {
+  it("lists the shortlisted tickers' ladder settings with the fit checks' price, the budget and the shock's source", async () => {
+    await testDb("daily_price_bars").insert({ ticker_id: tickerIds[0], trading_date: "2026-10-14", close_price: 106.01 });
+    const list = await call("GET", "/ladder-settings");
+    expect(list.status).toBe(200);
+    const rows = list.json as unknown as { symbol: string; lastClose: { price: number; date: string } | null; recommendedShockSource: { closesUsed: number } | null; capitalBudgetDollars: number | null }[];
+    const enabled = rows.find((row) => row.symbol === enabledSymbol)!;
+    expect(enabled.lastClose).toEqual({ price: 106.01, date: "2026-10-14" });
+    expect(enabled.recommendedShockSource).toMatchObject({ closesUsed: 1 });
+    expect(rows.find((row) => row.symbol === otherSymbol)?.lastClose).toBeNull();
+    const one = await call("GET", `/ladder-settings/${enabledSymbol.toLowerCase()}`);
+    expect(one.json).toMatchObject({ symbol: enabledSymbol, lastClose: { price: 106.01 } });
+    await testDb("daily_price_bars").where({ ticker_id: tickerIds[0] }).del();
+  });
+
+  it("numbers the current settings version and says since when", async () => {
+    const version = await call("GET", "/settings/version");
+    expect(version.status).toBe(200);
+    expect(version.json.number).toBeGreaterThanOrEqual(1);
+    expect(typeof version.json.versionId).toBe("string");
+  });
+
+  it("refuses a strategy |delta| change that would leave a ticker's own range empty, naming it", async () => {
+    const before = (await call("GET", "/settings")).json as { ladderMinAbsDelta: number; ladderMaxAbsDelta: number };
+    await call("PUT", `/ticker-settings/${enabledSymbol}`, { ladderMaxAbsDelta: 0.25 });
+    const refused = await call("PUT", "/settings", { ladderMinAbsDelta: 0.3 });
+    expect(refused.status).toBe(400);
+    expect(refused.json.error).toContain(`${enabledSymbol}'s |delta| range would be 0.30–0.25 (it sets its own upper limit)`);
+    expect((await call("GET", "/settings")).json.ladderMinAbsDelta).toBe(before.ladderMinAbsDelta);
+    await call("PUT", `/ticker-settings/${enabledSymbol}`, { ladderMaxAbsDelta: null });
+  });
+});

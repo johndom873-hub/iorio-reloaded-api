@@ -8,7 +8,8 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
-import { loadLadderSettingsForTicker } from "../pluto/ladderSettings.js";
+import { loadLadderScreenSettings } from "../pluto/ladderSettings.js";
+import { loadCurrentPlutoSettingsVersion } from "../pluto/settingsVersions.js";
 import { loadPlutoHowItWorks } from "../pluto/howItWorks.js";
 import { describePlutoBlock, loadPlutoState, pausePluto, PlutoStateError, resetPlutoBreaker, resumePluto, setPlutoMode, setPlutoStressOverride, type PlutoMode } from "../pluto/stateStore.js";
 import { plutoEventCategories, plutoEventCategoryByType, plutoEventTypesInCategories, recordPlutoEvent, type PlutoEventCategory } from "../pluto/ledger.js";
@@ -392,9 +393,21 @@ plutoRouter.get("/how-it-works", async (_request: Request, response: Response) =
   response.json(await loadPlutoHowItWorks());
 });
 
-/** The CC + Put Ladder's settings for one ticker, as loadLadderSettingsForTicker gives them (backtest names and units). */
+/** Every shortlisted ticker's CC + Put Ladder settings, as the ticker window shows them (the Tickers tab's columns). */
+plutoRouter.get("/ladder-settings", async (_request: Request, response: Response) => {
+  const rows: { symbol: string }[] = await db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").orderBy("t.symbol").select("t.symbol");
+  response.json(await loadLadderScreenSettings(rows.map((row) => row.symbol)));
+});
+
+/** The CC + Put Ladder's settings for one ticker (backtest names and units), with the fit checks' price, the budget in dollars and the recommended shock's source. */
 plutoRouter.get("/ladder-settings/:symbol", async (request: Request, response: Response) => {
-  response.json(await loadLadderSettingsForTicker(String(request.params.symbol)));
+  const [settings] = await loadLadderScreenSettings([String(request.params.symbol).toUpperCase()]);
+  response.json(settings);
+});
+
+/** The settings version a pass would record now: its number (in the order versions were first stored) and when the settings last changed. */
+plutoRouter.get("/settings/version", async (_request: Request, response: Response) => {
+  response.json(await loadCurrentPlutoSettingsVersion());
 });
 
 function limitFrom(request: Request, fallback: number): number {

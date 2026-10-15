@@ -3,9 +3,9 @@ import { db } from "../db/connection.js";
 import type { BacktestBaselineSettings } from "../backtest/backtestTypes.js";
 import { loadPlutoSettings, type PlutoSettings } from "./settingsStore.js";
 import { ensurePlutoSettingsVersion } from "./settingsVersions.js";
-import { loadLadderRecommendedShock } from "./ladderRecommendedShock.js";
+import { loadLadderRecommendedShock, type LadderRecommendedShock } from "./ladderRecommendedShock.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
-import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings } from "./tickerSettingsStore.js";
+import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, type PlutoTickerSettings } from "./tickerSettingsStore.js";
 
 // The CC + Put Ladder's settings for one ticker, in the backtest's names and units, so the live ladder, the ticker
 // configuration screen and the Backtesting screen's Analyse modal read the same values and can hand them straight to
@@ -101,36 +101,40 @@ export function ladderBaselineFromPlutoSettings(settings: PlutoSettings, overrid
   };
 }
 
-/** The ladder's settings for `symbol`; a symbol that is not a known ticker gets the strategy values only. */
-export async function loadLadderSettingsForTicker(symbol: string, connection: Knex = db): Promise<LadderTickerSettings> {
-  const normalizedSymbol = symbol.toUpperCase();
-  const [settings, tickerSettings, enabledTickers, lastSnapshot] = await Promise.all([
+/** What every ticker's settings read in common: Pluto's settings, its version, the enabled tickers and last night's account value. */
+interface LadderSettingsContext {
+  settings: PlutoSettings;
+  settingsVersionId: string;
+  enabledTickers: PlutoTickerSettings[];
+  /** Last night's account value; null when none is recorded. */
+  accountValue: number | null;
+}
+
+async function loadLadderSettingsContext(connection: Knex): Promise<LadderSettingsContext> {
+  const [settings, enabledTickers, lastSnapshot] = await Promise.all([
     loadPlutoSettings(connection),
-    loadPlutoTickerSettings(normalizedSymbol, connection),
     loadEnabledPlutoTickerSettings(connection),
     connection("account_pnl_snapshots").whereNotNull("net_liquidation_value").orderBy("snapshot_date", "desc").first("net_liquidation_value"),
   ]);
-  const [settingsVersionId, recommendedShock] = await Promise.all([
-    ensurePlutoSettingsVersion(settings, connection),
-    loadLadderRecommendedShock(normalizedSymbol, settings, easternIsoDate(new Date()), connection),
-  ]);
+  return { settings, settingsVersionId: await ensurePlutoSettingsVersion(settings, connection), enabledTickers, accountValue: lastSnapshot ? Number(lastSnapshot.net_liquidation_value) : null };
+}
+
+function ladderTickerSettingsFrom(symbol: string, context: LadderSettingsContext, tickerSettings: PlutoTickerSettings | null, recommendedShock: LadderRecommendedShock | null): LadderTickerSettings {
+  const { settings, enabledTickers, accountValue } = context;
   const tickerOverrides: LadderTickerOverrides = {
     ladderSharesPct: tickerSettings?.ladderSharesPct ?? null,
     ladderRungs: tickerSettings?.ladderRungs ?? null,
     minAbsDelta: tickerSettings?.ladderMinAbsDelta ?? null,
     maxAbsDelta: tickerSettings?.ladderMaxAbsDelta ?? null,
   };
-  const enabledInPluto = enabledTickers.some((ticker) => ticker.symbol === normalizedSymbol);
-  const allocationEffectivePct = effectiveAllocationPctBySymbol(enabledTickers).get(normalizedSymbol);
-  const potDollars =
-    enabledInPluto && allocationEffectivePct !== undefined && lastSnapshot
-      ? (Number(lastSnapshot.net_liquidation_value) * (settings.capitalBudgetPct / 100) * allocationEffectivePct) / 100
-      : null;
+  const enabledInPluto = enabledTickers.some((ticker) => ticker.symbol === symbol);
+  const allocationEffectivePct = effectiveAllocationPctBySymbol(enabledTickers).get(symbol);
+  const potDollars = enabledInPluto && allocationEffectivePct !== undefined && accountValue !== null ? (accountValue * (settings.capitalBudgetPct / 100) * allocationEffectivePct) / 100 : null;
   return {
-    symbol: normalizedSymbol,
+    symbol,
     source: "live",
     enabled: enabledInPluto && settings.executionStrategy === "cc_put_ladder",
-    settingsVersionId,
+    settingsVersionId: context.settingsVersionId,
     baseline: ladderBaselineFromPlutoSettings(settings, tickerOverrides),
     strategyBaseline: ladderBaselineFromPlutoSettings(settings),
     tickerOverrides,
@@ -139,4 +143,46 @@ export async function loadLadderSettingsForTicker(symbol: string, connection: Kn
     overrideShockPct: tickerSettings?.ladderShockOverridePct ?? null,
     recommendedShockPct: recommendedShock?.recommendedShockPct ?? null,
   };
+}
+
+/** The ladder's settings for `symbol`; a symbol that is not a known ticker gets the strategy values only. */
+export async function loadLadderSettingsForTicker(symbol: string, connection: Knex = db): Promise<LadderTickerSettings> {
+  const normalizedSymbol = symbol.toUpperCase();
+  const [context, tickerSettings] = await Promise.all([loadLadderSettingsContext(connection), loadPlutoTickerSettings(normalizedSymbol, connection)]);
+  const recommendedShock = await loadLadderRecommendedShock(normalizedSymbol, context.settings, easternIsoDate(new Date()), connection);
+  return ladderTickerSettingsFrom(normalizedSymbol, context, tickerSettings, recommendedShock);
+}
+
+/** A ticker's ladder settings as the Pluto screen shows them: plus the fit checks' price, the budget in dollars and where the recommended shock comes from. */
+export interface LadderTickerScreenSettings extends LadderTickerSettings {
+  /** The last daily close and its date: the price the fit checks use (Marcelo 2026-10-15). Null without daily bars. */
+  lastClose: { price: number; date: string } | null;
+  /** Pluto's capital budget in dollars at last night's account value; null when none is recorded. */
+  capitalBudgetDollars: number | null;
+  /** What the recommended shock was computed from; null for an unknown ticker. */
+  recommendedShockSource: Omit<LadderRecommendedShock, "recommendedShockPct"> | null;
+}
+
+async function loadLastClose(symbol: string, connection: Knex): Promise<{ price: number; date: string } | null> {
+  const row: { date: string; close: string } | undefined = await connection("daily_price_bars as b")
+    .join("tickers as t", "t.id", "b.ticker_id")
+    .where("t.symbol", symbol)
+    .whereNotNull("b.close_price")
+    .orderBy("b.trading_date", "desc")
+    .first(connection.raw("b.trading_date::text as date"), "b.close_price as close");
+  return row ? { price: Number(row.close), date: row.date } : null;
+}
+
+/** The screen's settings for each of `symbols` (upper case); the shared reads are made once. */
+export async function loadLadderScreenSettings(symbols: readonly string[], connection: Knex = db): Promise<LadderTickerScreenSettings[]> {
+  const context = await loadLadderSettingsContext(connection);
+  const todayIso = easternIsoDate(new Date());
+  const capitalBudgetDollars = context.accountValue === null ? null : (context.accountValue * context.settings.capitalBudgetPct) / 100;
+  return Promise.all(
+    symbols.map(async (symbol) => {
+      const [tickerSettings, recommendedShock, lastClose] = await Promise.all([loadPlutoTickerSettings(symbol, connection), loadLadderRecommendedShock(symbol, context.settings, todayIso, connection), loadLastClose(symbol, connection)]);
+      const recommendedShockSource = recommendedShock && { maxDrawdownPct: recommendedShock.maxDrawdownPct, closesUsed: recommendedShock.closesUsed, fromIso: recommendedShock.fromIso, toIso: recommendedShock.toIso };
+      return { ...ladderTickerSettingsFrom(symbol, context, tickerSettings, recommendedShock), lastClose, capitalBudgetDollars, recommendedShockSource };
+    }),
+  );
 }
