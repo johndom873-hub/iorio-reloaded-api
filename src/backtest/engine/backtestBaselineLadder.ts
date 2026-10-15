@@ -13,7 +13,9 @@ import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
 //     A  = the cycle's break-even per share (the platform's: shares' cost less the cycle's net premium, ÷ shares), or
 //          with ladderTop "price" the lower of it and today's price; with ladderPace "one_open", no rung while a ladder
 //          put is open
-//     F  = the floor: the highest price seen at a look since the cycle started × (1 − S)
+//     F  = the floor: the average cost of the shares held (weighted by the shares of each purchase or assignment, on
+//          today's price scale) × (1 − S). It follows the holdings, falling as lower rungs are assigned, and never rises
+//          with the market (Marcelo 2026-10-15: the Puts are there to lower the break-even); no shares held, no rung
 //     S  = the stock shock: fixed, or the deepest fall from a running peak in the adjusted closes of the
 //          ladderShockLookbackYears before the cycle started, kept within ladderShockMinPct–ladderShockMaxPct; with
 //          under a year of closes there (a new listing), ladderShockNoHistoryPct
@@ -21,16 +23,15 @@ import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
 //          at least 0 (shares called away free it again)
 //     Q  = this rung's collateral: min(R0 ÷ ladderRungs, R0 − U)
 //
-// Example: break-even $100, peak $110, S 70% (F $33), R0 $100,000 in 5 rungs, nothing committed: K_max =
-// 100 − 67 × 0.2 = $86.60; with $15,000 committed after an assignment and the break-even down to $95.50:
-// 95.50 − 62.50 × 0.35 = $73.63. The last rung's cap is the floor itself.
+// Example: break-even $100, shares' average cost $104, S 70% (F $31.20), R0 $100,000 in 5 rungs, nothing committed:
+// K_max = 100 − 68.80 × 0.2 = $86.24; with $15,000 committed after an assignment, the average cost down to $98.20
+// (F $29.46) and the break-even to $95.50: 95.50 − 66.04 × 0.35 = $72.39. The last rung's cap is the floor itself.
 
 export interface LadderCycleState {
   /** Null while the symbol is flat. */
   startedOn: string | null;
   /** The account value at the last look the symbol was flat: the cycle's starting value. */
   accountValueAtStart: number;
-  peakOnCycleScale: number;
   shock: number;
 }
 
@@ -66,22 +67,21 @@ export function ladderShock(settings: Pick<BacktestBaselineSettings, "ladderShoc
 
 /**
  * The symbol's ladder state at a look, updated: flat, it records the account value (the next cycle's start); in a cycle,
- * it starts one at the first look that finds shares (S fixed then) and raises the peak.
+ * it starts one at the first look that finds shares (S fixed then).
  */
 export function noteLadderLook(
   ledger: SimulatedLedger,
   symbol: string,
-  look: { cycleOpen: boolean; todayIso: string; accountValue: number; stockPriceOnCycleScale: number; adjustedClosesBefore: readonly { date: string; close: number }[] },
+  look: { cycleOpen: boolean; todayIso: string; accountValue: number; adjustedClosesBefore: readonly { date: string; close: number }[] },
   settings: Pick<BacktestBaselineSettings, "ladderShock" | "ladderShockPct" | "ladderShockMinPct" | "ladderShockMaxPct" | "ladderShockNoHistoryPct" | "ladderShockLookbackYears">,
 ): LadderCycleState {
   let bySymbol = stateByLedger.get(ledger);
   if (!bySymbol) stateByLedger.set(ledger, (bySymbol = new Map()));
   const kept = bySymbol.get(symbol);
   let state: LadderCycleState;
-  if (!look.cycleOpen) state = { startedOn: null, accountValueAtStart: look.accountValue, peakOnCycleScale: look.stockPriceOnCycleScale, shock: 0 };
-  else if (!kept || kept.startedOn === null)
-    state = { startedOn: look.todayIso, accountValueAtStart: kept?.accountValueAtStart ?? look.accountValue, peakOnCycleScale: look.stockPriceOnCycleScale, shock: ladderShock(settings, look.adjustedClosesBefore, look.todayIso) };
-  else state = { ...kept, peakOnCycleScale: Math.max(kept.peakOnCycleScale, look.stockPriceOnCycleScale) };
+  if (!look.cycleOpen) state = { startedOn: null, accountValueAtStart: look.accountValue, shock: 0 };
+  else if (!kept || kept.startedOn === null) state = { startedOn: look.todayIso, accountValueAtStart: kept?.accountValueAtStart ?? look.accountValue, shock: ladderShock(settings, look.adjustedClosesBefore, look.todayIso) };
+  else state = kept;
   bySymbol.set(symbol, state);
   return state;
 }
@@ -119,19 +119,18 @@ export interface LadderRung {
 }
 
 /** Today's rung: the cap, its collateral and what the action records about it. */
-export function ladderRungToday(input: { settings: Pick<BacktestBaselineSettings, "ladderSharesPct" | "ladderRungs" | "ladderTop">; state: LadderCycleState; accountValueToday: number; tickerWeight: number; breakEven: number | null; stockPrice: number; heldSharesCost: number; openPutCollateral: number; priceToCycleScale: number }): LadderRung {
-  const { settings, state, accountValueToday, tickerWeight, breakEven, stockPrice, heldSharesCost, openPutCollateral, priceToCycleScale } = input;
+export function ladderRungToday(input: { settings: Pick<BacktestBaselineSettings, "ladderSharesPct" | "ladderRungs" | "ladderTop">; state: LadderCycleState; accountValueToday: number; tickerWeight: number; breakEven: number | null; stockPrice: number; heldSharesCost: number; openPutCollateral: number; sharesAverageCost: number | null }): LadderRung {
+  const { settings, state, accountValueToday, tickerWeight, breakEven, stockPrice, heldSharesCost, openPutCollateral, sharesAverageCost } = input;
   const top = breakEven === null ? null : settings.ladderTop === "price" ? Math.min(breakEven, stockPrice) : breakEven;
   const base = ladderBase(state, accountValueToday, tickerWeight);
   const { sharesBudget, reserve } = ladderBudget(base, settings.ladderSharesPct);
   const committed = ladderCommitted(heldSharesCost, openPutCollateral, sharesBudget);
   const collateral = ladderRungCollateral(reserve, committed, settings.ladderRungs);
-  const peak = state.peakOnCycleScale / priceToCycleScale;
-  const floor = peak * (1 - state.shock);
-  const cap = ladderStrikeCap({ breakEven: top, floor, committed, rungCollateral: collateral, reserve });
+  const floor = sharesAverageCost === null ? null : sharesAverageCost * (1 - state.shock);
+  const cap = floor === null ? null : ladderStrikeCap({ breakEven: top, floor, committed, rungCollateral: collateral, reserve });
   const money = (value: number) => `$${Math.round(value).toLocaleString("en-US")}`;
-  const note = `break-even ${breakEven === null ? "unknown" : breakEven.toFixed(2)}${settings.ladderTop === "price" && top !== null ? `, top ${top.toFixed(2)}` : ""}, floor ${floor.toFixed(2)} (peak ${peak.toFixed(2)}, shock ${(state.shock * 100).toFixed(0)}%), ${money(committed)} of the ${money(reserve)} reserve committed`;
-  return { cap, collateral, note, scores: { ladderCap: cap, ladderTop: top, ladderBase: base, ladderFloor: floor, ladderPeak: peak, ladderShock: state.shock, ladderBreakEven: breakEven, ladderCommitted: committed, ladderReserve: reserve, ladderRungCollateral: collateral } };
+  const note = `break-even ${breakEven === null ? "unknown" : breakEven.toFixed(2)}${settings.ladderTop === "price" && top !== null ? `, top ${top.toFixed(2)}` : ""}, ${floor === null ? "no shares held, no floor" : `floor ${floor.toFixed(2)} (average cost ${sharesAverageCost!.toFixed(2)}, shock ${(state.shock * 100).toFixed(0)}%)`}, ${money(committed)} of the ${money(reserve)} reserve committed`;
+  return { cap, collateral, note, scores: { ladderCap: cap, ladderTop: top, ladderBase: base, ladderFloor: floor, ladderAverageCost: sharesAverageCost, ladderShock: state.shock, ladderBreakEven: breakEven, ladderCommitted: committed, ladderReserve: reserve, ladderRungCollateral: collateral } };
 }
 
 /** K_max = A − (A − F) × (U + Q) ÷ R0; null when no put fits (no break-even, nothing left, or the break-even at or below the floor). */

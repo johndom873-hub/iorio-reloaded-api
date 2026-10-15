@@ -171,7 +171,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
     // The put ladder (backtestBaselineLadder.ts): the cycle's state, noted before anything is sold at this look.
     const ladderOn = baseline.entry === "buy_write" && baseline.putsWhenNoCall === "reserve_ladder";
     const ladderState = ladderOn
-      ? noteLadderLook(ledger, symbol, { cycleOpen: ledgerOpenCycleSummary(ledger, symbol) !== null, todayIso, accountValue: accountValueToday(), stockPriceOnCycleScale: toCyclePrice(stockPrice), adjustedClosesBefore: lookSymbol.adjustedDailyClosesBeforeToday }, baseline)
+      ? noteLadderLook(ledger, symbol, { cycleOpen: ledgerOpenCycleSummary(ledger, symbol) !== null, todayIso, accountValue: accountValueToday(), adjustedClosesBefore: lookSymbol.adjustedDailyClosesBeforeToday }, baseline)
       : null;
     const openPutCollateral = () =>
       positionsOfSymbol(ledger, symbol)

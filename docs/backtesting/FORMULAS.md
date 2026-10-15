@@ -150,6 +150,18 @@ Example: put sold 7 April, rolled the 8th (−19.30), assigned 24 April (premium
 
 Buy and hold with several symbols: see Baselines below.
 
+**The put ladder** (baseline putsWhenNoCall "reserve_ladder", Marcelo 2026-10-14; floor from the average cost 2026-10-15). The shares' budget is the share level × the base and the reserve R0 the rest, with the base = the larger of the account value when the ticker's cycle started and today's (× the ticker's weight in a pots session). When held shares get no Call, Puts are sold on the reserve with the strike at most
+
+  K_max = A − (A − F) × (U + Q) ÷ R0
+
+- A = the cycle's break-even per share, or with ladderTop "price" the lower of it and today's price;
+- F = the floor: the average cost of the shares held (weighted by the shares of each purchase or assignment, on today's price scale) × (1 − S). It follows the holdings, falling as lower rungs are assigned, and never rises with the market; with no shares held there is no floor and no rung;
+- S = the stock shock, fixed for the cycle at its start: the deepest fall from a running high in the adjusted closes of the 10 years before, kept within 60–80% (90% with under a year of closes), or a fixed value;
+- U = the reserve committed: shares held at cost + open Puts' collateral − the shares' budget, at least 0;
+- Q = this rung's collateral: min(R0 ÷ rungs, R0 − U).
+
+Example: break-even $100, shares' average cost $104, S 70% (F = $31.20), R0 $100,000 in 5 rungs, nothing committed: K_max = 100 − 68.80 × 0.2 = $86.24. A rally to $150 leaves F at $31.20. After an assignment, with $15,000 committed, the average cost down to $98.20 (F = $29.46) and the break-even to $95.50: 95.50 − 66.04 × 0.35 = $72.39.
+
 **Per-ticker pots** (the baseline deciding; approved by Marcelo 2026-10-15). A session's `book_mode` is "pots" for every new session the baseline decides, "shared_account" for the rules, the AI model and every earlier session (which re-run unchanged).
 
 - **Pots and weights**: each ticker has a pot in dollars. A starting value given splits equally (pot = starting value ÷ tickers); without one, a ticker's pot is the request's, else its saved lab pot (settings source "per ticker"), else the lab's default pot. Session capital = Σ pots; weight w_i = pot_i ÷ Σ pots, fixed for the session.

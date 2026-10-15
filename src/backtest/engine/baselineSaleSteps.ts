@@ -440,7 +440,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     if (!ladderState) return null;
     const cycle = book.openCycleSummary();
     const breakEven = cycle?.breakEvenPerShare == null ? null : cycle.breakEvenPerShare / priceToCycleScale;
-    const rung = ladderRungToday({ settings: baseline, state: ladderState, accountValueToday: book.accountValueToday(), tickerWeight: book.tickerWeight(), breakEven, stockPrice, heldSharesCost: heldSharesCostToday(), openPutCollateral: book.openPutCollateral(), priceToCycleScale });
+    const rung = ladderRungToday({ settings: baseline, state: ladderState, accountValueToday: book.accountValueToday(), tickerWeight: book.tickerWeight(), breakEven, stockPrice, heldSharesCost: heldSharesCostToday(), openPutCollateral: book.openPutCollateral(), sharesAverageCost: book.heldSharesAverageCostToday() });
     if (baseline.ladderPace === "one_open" && book.openPutCollateral() > 0) return { rung, blocked: `${symbol}: no new ladder put while one is open`, candidates: [] as BaselineCandidate[], rejections: null };
     if (rung.cap === null) return { rung, blocked: `${symbol}: no ladder put (${rung.note})`, candidates: [] as BaselineCandidate[], rejections: null };
     const { candidates, rejections } = select("P", null, true, rung.cap, true);

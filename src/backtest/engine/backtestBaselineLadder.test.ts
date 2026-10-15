@@ -89,24 +89,31 @@ describe("the stock shock", () => {
 });
 
 describe("the ladder's cycle state", () => {
-  const look = (overrides: Partial<Parameters<typeof noteLadderLook>[2]>) => ({ cycleOpen: false, todayIso: "2024-03-12", accountValue: 200_000, stockPriceOnCycleScale: 110, adjustedClosesBefore: [], ...overrides });
+  const look = (overrides: Partial<Parameters<typeof noteLadderLook>[2]>) => ({ cycleOpen: false, todayIso: "2024-03-12", accountValue: 200_000, adjustedClosesBefore: [], ...overrides });
 
-  it("starts a cycle with the value of the last flat look, fixes S, then raises the peak only", () => {
+  it("starts a cycle with the value of the last flat look and fixes S for the cycle", () => {
     const ledger = {} as SimulatedLedger;
     expect(noteLadderLook(ledger, "SMCI", look({}), settings).startedOn).toBeNull();
-    const started = noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-13", accountValue: 199_000, stockPriceOnCycleScale: 118 }), settings);
-    expect(started).toEqual({ startedOn: "2024-03-13", accountValueAtStart: 200_000, peakOnCycleScale: 118, shock: 0.9 });
-    expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-14", stockPriceOnCycleScale: 100 }), settings).peakOnCycleScale).toBe(118);
-    expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-15", stockPriceOnCycleScale: 125 }), settings).peakOnCycleScale).toBe(125);
+    const started = noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-13", accountValue: 199_000 }), settings);
+    expect(started).toEqual({ startedOn: "2024-03-13", accountValueAtStart: 200_000, shock: 0.9 });
+    expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-14", accountValue: 150_000 }), settings)).toEqual(started);
     expect(noteLadderLook(ledger, "SMCI", look({ todayIso: "2024-09-01", accountValue: 150_000 }), settings)).toMatchObject({ startedOn: null, accountValueAtStart: 150_000 });
   });
 
-  it("reports today's rung from the state", () => {
-    const state = { startedOn: "2024-01-02", accountValueAtStart: 200_000, peakOnCycleScale: 110, shock: 0.7 };
-    const rung = ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, priceToCycleScale: 1 });
-    expect(rung.cap).toBeCloseTo(86.6, 6);
+  it("reports today's rung from the state, its floor from the shares' average cost", () => {
+    const state = { startedOn: "2024-01-02", accountValueAtStart: 200_000, shock: 0.7 };
+    // Average cost $104, S 70%: F = $31.20; nothing committed, Q = 20,000 of R0 100,000: 100 − 68.80 × 0.2 = 86.24.
+    const rung = ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, sharesAverageCost: 104 });
+    expect(rung.cap).toBeCloseTo(86.24, 6);
     expect(rung.collateral).toBe(20_000);
-    // From today's price: 80 − (80 − 33) × 0.2 = 70.60.
-    expect(ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "price" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, priceToCycleScale: 1 }).cap).toBeCloseTo(70.6, 6);
+    expect(rung.scores.ladderFloor).toBeCloseTo(31.2, 9);
+    expect(rung.scores.ladderAverageCost).toBe(104);
+    // From today's price: 80 − (80 − 31.20) × 0.2 = 70.24.
+    expect(ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "price" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, sharesAverageCost: 104 }).cap).toBeCloseTo(70.24, 6);
+    // A rally does not move it: the floor follows the holdings, not the market. No shares held: no floor, no rung.
+    expect(ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 150, heldSharesCost: 100_000, openPutCollateral: 0, sharesAverageCost: 104 }).cap).toBeCloseTo(86.24, 6);
+    const noShares = ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: null, stockPrice: 80, heldSharesCost: 0, openPutCollateral: 0, sharesAverageCost: null });
+    expect(noShares.cap).toBeNull();
+    expect(noShares.note).toMatch(/no shares held, no floor/);
   });
 });
