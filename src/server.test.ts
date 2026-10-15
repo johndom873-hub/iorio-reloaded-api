@@ -28,6 +28,7 @@ vi.mock("./lib/stalePendingOrders.js", () => ({ startStalePendingOrderSweep: cal
 vi.mock("./genosuke/bot.js", () => ({ startGenosuke: calls.startGenosuke }));
 vi.mock("./lib/notificationBroadcaster.js", () => ({ startNotificationBroadcaster: calls.startNotificationBroadcaster }));
 vi.mock("./lib/daySignalsLoop.js", () => ({ startDaySignalsLoop: calls.startDaySignalsLoop }));
+vi.mock("./pluto/ladderBandPlanLoader.js", () => ({ createDayLoopLadderBand: () => ({ ladderBand: "fake" }) }));
 vi.mock("./lib/opsMonitor.js", () => ({ startOpsMonitor: calls.startOpsMonitor }));
 vi.mock("./lib/orderTelegramNotices.js", () => ({ startOrderTelegramNotices: calls.startOrderTelegramNotices }));
 vi.mock("./lib/processMemoryMonitor.js", () => ({ startProcessMemoryMonitor: calls.startProcessMemoryMonitor }));
@@ -156,6 +157,8 @@ describe("server.ts once the port is bound", () => {
     for (const started of [calls.startNotificationBroadcaster, calls.startStalePendingOrderSweep, calls.startGenosuke, calls.startOpsMonitor, calls.startOrderTelegramNotices, calls.startProcessMemoryMonitor, calls.startDaySignalsLoop, calls.resumeInterruptedBackfillRuns, calls.borrowRead, calls.borrowLive]) {
       expect(started).toHaveBeenCalledTimes(1);
     }
+    // The loop quotes the CC + Put Ladder's band beside Signals' contracts.
+    expect(calls.startDaySignalsLoop).toHaveBeenCalledWith({ ladderBand: { ladderBand: "fake" } });
   });
 
   it("leaves the Day Signals loop off when DAY_SIGNALS_LOOP_ENABLED is false, starting everything else", async () => {

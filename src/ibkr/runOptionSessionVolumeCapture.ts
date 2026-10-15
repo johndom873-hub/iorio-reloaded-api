@@ -14,7 +14,7 @@ import { loadLastSeenImpliedVolatilityByContract, saveOptionSessionVolumes, type
 import { loadPlutoSettings, type PlutoSettings } from "../pluto/settingsStore.js";
 import { loadEnabledPlutoTickerSettings } from "../pluto/tickerSettingsStore.js";
 import { ladderRequoteBand, selectLadderRequoteContracts, type LadderRequoteBand } from "../pluto/ladderRequoteBand.js";
-import { daysToExpiry } from "../lib/optionContractLabel.js";
+import { ladderDteRangeContracts } from "../pluto/ladderBandPlan.js";
 
 // The after-close option volume capture (Marcelo 2026-10-15): for every ticker Pluto is enabled on, whichever strategy is
 // active, each contract's full-session volume (IBKR tick 8, read under FROZEN after the close: it holds the whole day
@@ -62,18 +62,8 @@ export function planSessionVolumeContracts(input: {
   riskFreeRate: number;
   lastSeenImpliedVolatilityByContract: ReadonlyMap<string, number>;
 }): SessionVolumePlan {
-  const universe: { expiry: string; strike: number; right: "C" | "P"; lastSeenImpliedVolatility: number | null }[] = [];
-  for (const expiryYyyymmdd of input.expirations) {
-    const expiry = `${expiryYyyymmdd.slice(0, 4)}-${expiryYyyymmdd.slice(4, 6)}-${expiryYyyymmdd.slice(6, 8)}`;
-    // The universe here is the days-to-expiry range only: the volume floor is what this capture measures.
-    const dte = daysToExpiry(expiry, input.nextSessionIso);
-    if (dte < input.settings.ladderMinDte || dte > input.settings.ladderMaxDte) continue;
-    for (const strike of input.strikesByExpiry.get(expiryYyyymmdd) ?? []) {
-      for (const right of ["C", "P"] as const) {
-        universe.push({ expiry, strike, right, lastSeenImpliedVolatility: input.lastSeenImpliedVolatilityByContract.get(contractKey({ expiry, strike, right })) ?? null });
-      }
-    }
-  }
+  // The universe here is the days-to-expiry range only: the volume floor is what this capture measures.
+  const universe = ladderDteRangeContracts({ expirations: input.expirations, strikesByExpiry: input.strikesByExpiry, todayIso: input.nextSessionIso, settings: input.settings }).map((contract) => ({ ...contract, lastSeenImpliedVolatility: input.lastSeenImpliedVolatilityByContract.get(contractKey(contract)) ?? null }));
   const unknownIvCount = universe.filter((contract) => contract.lastSeenImpliedVolatility === null).length;
   const stockPrice = input.stockPrice;
   const selected =

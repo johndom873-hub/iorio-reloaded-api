@@ -7,6 +7,7 @@ import { sharedLiveConnection, sharedReadConnection } from "./ibkr/sharedReadCon
 import { installShutdownHandler } from "./lib/installShutdownHandler.js";
 import { startNotificationBroadcaster } from "./lib/notificationBroadcaster.js";
 import { startDaySignalsLoop } from "./lib/daySignalsLoop.js";
+import { createDayLoopLadderBand } from "./pluto/ladderBandPlanLoader.js";
 import { startOpsMonitor } from "./lib/opsMonitor.js";
 import { startOrderTelegramNotices } from "./lib/orderTelegramNotices.js";
 import { announceWebDynoStart } from "./lib/webDynoStartNotice.js";
@@ -77,6 +78,6 @@ app.listen(port, () => {
   startOpsMonitor();
   startOrderTelegramNotices();
   startProcessMemoryMonitor({ processName: "web", label: "The API web dyno", counts: () => ({ poolContracts: marketDataPoolSnapshot().contractCount, liveListeners: sharedLiveConnection.listenerCount(), readListeners: sharedReadConnection.listenerCount() }) });
-  if (daySignalsLoopFlag === "true") startDaySignalsLoop();
+  if (daySignalsLoopFlag === "true") startDaySignalsLoop({ ladderBand: createDayLoopLadderBand() });
   else console.log("Day Signals loop disabled (DAY_SIGNALS_LOOP_ENABLED=false).");
 });

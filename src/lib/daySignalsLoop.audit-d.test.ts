@@ -150,7 +150,7 @@ function createAuditHarness(cycles: number): AuditHarness {
     recordAssignmentRiskAlert: async () => {},
     rearmAssignmentRiskAlert: async () => {},
     notifyAssignmentRisk: async () => {},
-    sessionCloseMinutesEt: async () => 16 * 60,
+    sessionCloseMinutesEt: async () => 16 * 60, hasSeedFinished: async () => true,
     emitUpdated: () => {},
     writeHeartbeat: async () => {},
     reportFailure: (source) => {

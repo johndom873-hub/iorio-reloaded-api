@@ -1,7 +1,7 @@
 import type { IBApi } from "@stoqey/ib";
 import { describe, expect, it, vi } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { DaySignalsLoop, daySignalsLoopLineHolder, shouldLogCycle, slowCycleLogThresholdMs, type DaySignalsLoopDependencies } from "./daySignalsLoop.js";
+import { DaySignalsLoop, daySignalsLoopLineHolder, shouldLogCycle, slowCycleLogThresholdMs, type DaySignalsLoopDependencies, type DayLoopLadderBandQuote } from "./daySignalsLoop.js";
 import type { WindowContract, WindowQuote } from "../ibkr/daySignalsQuoteWindow.js";
 import type { SignalGrade, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
@@ -164,6 +164,7 @@ function createHarness(impliedVolatilityShift = 0): Harness {
       calls.assignmentAlerts.push(`${alert.leg.legId}:${alert.leg.strike}${alert.leg.right}`);
     },
     sessionCloseMinutesEt: async () => 16 * 60,
+    hasSeedFinished: async () => true,
     emitUpdated: (tickerId) => {
       calls.emitted.push(tickerId);
     },
@@ -179,6 +180,72 @@ function createHarness(impliedVolatilityShift = 0): Harness {
   const loop = new DaySignalsLoop(deps);
   return { deps, loop, calls, state };
 }
+
+describe("DaySignalsLoop: the CC + Put Ladder's band", () => {
+  /** A harness whose ladder band asks for `bandByTicker`; it records what the ladder stores and stops after the first quote window. */
+  function withLadderBand(bandByTicker: Record<string, { symbol: string; contracts: DayContractRef[] }>) {
+    const harness = createHarness();
+    const stored: DayLoopLadderBandQuote[] = [];
+    const tickers = Object.entries(bandByTicker).map(([tickerId, band]) => ({ tickerId, symbol: band.symbol }));
+    let bandSpots: ReadonlyMap<string, number | null> | null = null;
+    harness.deps.ladderBand = {
+      tickers: async () => tickers,
+      contractsFor: async (_tradingDateIso, spotByTicker) => {
+        bandSpots = new Map(spotByTicker);
+        return new Map(Object.entries(bandByTicker));
+      },
+      store: async (writes) => {
+        stored.push(...writes);
+      },
+    };
+    const originalWindow = harness.deps.runQuoteWindow;
+    harness.deps.runQuoteWindow = async (contracts, options) => {
+      const result = await originalWindow(contracts, options);
+      harness.loop.stop();
+      return result;
+    };
+    return { harness, stored, bandSpots: () => bandSpots };
+  }
+
+  it("quotes the band beside Signals' contracts, a contract both want once, and stores each in its own table", async () => {
+    // AAA is a Signals and a ladder ticker: its $90 Put is in both sets, its $70 Put only in the ladder's band.
+    const { harness, stored } = withLadderBand({ t1: { symbol: "AAA", contracts: [{ expiry, strike: 90, right: "P" }, { expiry, strike: 70, right: "P" }] } });
+    await harness.loop.start();
+    const optionKeys = harness.calls.windows[0]!.filter((contract) => contract.legType === "option").map((contract) => contract.key);
+    expect(optionKeys.filter((key) => key === `t1|${expiry}|90|P`)).toHaveLength(1);
+    expect(optionKeys).toContain(`t1|${expiry}|70|P`);
+    // Signals' table gets its 6 contracts only; the ladder's gets the band's 2, with the cycle's stock price.
+    expect(harness.calls.writes).toBe(strikes.length);
+    expect(stored.map((write) => `${write.strike}${write.right}`).sort()).toEqual(["70P", "90P"]);
+    expect(stored.every((write) => write.stockPrice === 100 && write.tickerId === "t1" && write.tradingDateIso === tradingDateIso)).toBe(true);
+  });
+
+  it("a ladder ticker outside Signals gets its price in the spot pass and its band quoted, without being scored for Signals", async () => {
+    const { harness, stored, bandSpots } = withLadderBand({ t2: { symbol: "BBB", contracts: [{ expiry, strike: 40, right: "P" }] } });
+    harness.state.spot = 45;
+    await harness.loop.start();
+    expect(harness.calls.spotPasses[0]).toContain("t2|stock");
+    expect(bandSpots()?.get("t2")).toBe(45);
+    expect(harness.calls.windows[0]!.map((contract) => contract.key)).toEqual(expect.arrayContaining([`t2|${expiry}|40|P`, "t2|stock"]));
+    expect(stored).toEqual([expect.objectContaining({ tickerId: "t2", strike: 40, right: "P", stockPrice: 45 })]);
+    expect(harness.calls.emitted).not.toContain("t2");
+  });
+
+  it("with no Signals pool, quotes the ladder once today's seed has finished, and waits before that", async () => {
+    const { harness, stored } = withLadderBand({ t2: { symbol: "BBB", contracts: [{ expiry, strike: 40, right: "P" }] } });
+    harness.state.pool = false;
+    await harness.loop.start();
+    expect(stored).toHaveLength(1);
+    expect(harness.calls.writes).toBe(0);
+
+    const waiting = withLadderBand({ t2: { symbol: "BBB", contracts: [{ expiry, strike: 40, right: "P" }] } });
+    waiting.harness.state.pool = false;
+    waiting.harness.deps.hasSeedFinished = async () => false;
+    await waiting.harness.loop.start();
+    expect(waiting.harness.calls.windows).toHaveLength(0);
+    expect(waiting.harness.calls.heartbeats).toContain("idle");
+  });
+});
 
 describe("DaySignalsLoop", () => {
   it("stays idle while the market is closed and releases nothing it never reserved", async () => {

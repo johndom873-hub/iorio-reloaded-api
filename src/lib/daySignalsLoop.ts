@@ -15,6 +15,7 @@ import { selectDaySignalExpiries } from "./daySignalsSeed.js";
 import { clearsNotificationHysteresis, decideAssignmentRiskAlert, isGradeUpgrade, notifyAssignmentRisk, notifyRollSignalUpgrade, notifySignalUpgrade, type AssignmentRiskAlert, type RollSignalUpgrade, type SignalUpgrade } from "./daySignalsNotifications.js";
 import {
   loadAssignmentRiskAlertStates,
+  hasDaySignalsSeedFinished,
   loadDayRollGrades,
   loadDaySignalExpiries,
   loadDaySignalUniverse,
@@ -116,6 +117,33 @@ export interface DaySignalsLoopStatus {
   lastError: string | null;
 }
 
+/** One band quote for the CC + Put Ladder (stored apart from Signals' own quotes). */
+export interface DayLoopLadderBandQuote {
+  tickerId: string;
+  tradingDateIso: string;
+  expiry: string;
+  strike: number;
+  right: "C" | "P";
+  bid: number | null;
+  ask: number | null;
+  stockPrice: number | null;
+  errorCode: number | null;
+  quotedAt: Date;
+  cycleNumber: number;
+}
+
+/**
+ * The CC + Put Ladder's band (Marcelo 2026-10-15): its tickers' contracts that can qualify are quoted by this loop in
+ * addition to Signals' own, and stored by the ladder (src/pluto/ladderBandPlanLoader.ts supplies it; server.ts wires it).
+ */
+export interface DayLoopLadderBand {
+  /** The ladder's tickers today (none while another strategy is active). */
+  tickers(tradingDateIso: string): Promise<{ tickerId: string; symbol: string }[]>;
+  /** Each ladder ticker's contracts for this cycle at its live price; a ticker absent from the map quotes none. */
+  contractsFor(tradingDateIso: string, spotByTicker: ReadonlyMap<string, number | null>, now: Date): Promise<Map<string, { symbol: string; contracts: DayContractRef[] }>>;
+  store(writes: DayLoopLadderBandQuote[]): Promise<void>;
+}
+
 export interface DaySignalsLoopDependencies {
   now(): Date;
   isMarketOpen(now: Date): Promise<boolean>;
@@ -163,6 +191,10 @@ export interface DaySignalsLoopDependencies {
   sleep(ms: number, signal: AbortSignal): Promise<void>;
   /** Measurement only: what the live screens' pool holds for a contract (marketDataPool.ts). Optional so tests can omit it. */
   pooledLineState?(contract: PriceContract): "streaming" | "paused" | "waiting" | null;
+  /** The CC + Put Ladder's band, quoted beside Signals' contracts; absent: Signals' contracts only. */
+  ladderBand?: DayLoopLadderBand;
+  /** Today's Day Signals seed has finished (a ladder ticker is quoted from then on even when the seed pooled nothing). */
+  hasSeedFinished(tradingDateIso: string): Promise<boolean>;
 }
 
 function spotFromQuote(quote: WindowQuote): number | null {
@@ -228,6 +260,7 @@ export const defaultDaySignalsLoopDependencies: DaySignalsLoopDependencies = {
   rearmAssignmentRiskAlert,
   notifyAssignmentRisk,
   sessionCloseMinutesEt: async (dateIso) => (await loadTradingSessionsBetween(dateIso, dateIso))[0]?.closeMinutesEt ?? 16 * 60,
+  hasSeedFinished: hasDaySignalsSeedFinished,
   emitUpdated: emitDayQuotesUpdated,
   writeHeartbeat: async (status) => {
     await db("worker_health")
@@ -340,14 +373,18 @@ export class DaySignalsLoop {
       return false;
     }
     const pool = await this.deps.loadPool(tradingDateIso);
-    if (pool.length === 0) {
+    const ladderTickers = await this.ladderTickersSafely(tradingDateIso);
+    // The ladder's first look waits for the 10:00 capture like Signals (Marcelo 2026-10-15): its tickers are quoted once the
+    // seed has finished, also on a day when the seed pooled nothing.
+    const ladderOnly = pool.length === 0 && ladderTickers.length > 0 && (await this.deps.hasSeedFinished(tradingDateIso));
+    if (pool.length === 0 && !ladderOnly) {
       await this.releaseLines();
       this.setState("idle", `waiting for today's pool (${tradingDateIso}: capture, fit and seed not done yet)`);
       return false;
     }
     if (!(await this.ensureLines())) return false;
-    const universe = await this.deps.loadUniverse(tradingDateIso);
-    if (universe.length === 0) {
+    const universe = pool.length === 0 ? [] : await this.deps.loadUniverse(tradingDateIso);
+    if (universe.length === 0 && ladderTickers.length === 0) {
       this.setState("idle", "today's pool has no captured contracts");
       return false;
     }
@@ -360,8 +397,8 @@ export class DaySignalsLoop {
     }
     this.status.tradingDateIso = tradingDateIso;
     this.status.contractsInPool = universe.length;
-    this.setState("running", `${pool.length} expiries, ${universe.length} contracts`);
-    const result = await this.runCycle(borrowed.ib, pool, universe, tradingDateIso, signal);
+    this.setState("running", `${pool.length} expiries, ${universe.length} contracts${ladderTickers.length > 0 ? `, ladder band on ${ladderTickers.length} ticker(s)` : ""}`);
+    const result = await this.runCycle(borrowed.ib, pool, universe, tradingDateIso, signal, ladderTickers);
     if (result.disconnected) {
       this.status.lastError = "IBKR live connection dropped mid-cycle";
       this.deps.reportFailure?.("day-signals:cycle", "Day Signals loop: the IBKR live connection dropped mid-cycle. It retries after a short pause.");
@@ -407,7 +444,7 @@ export class DaySignalsLoop {
     await this.deps.releaseLines(daySignalsLoopLineHolder).catch((error) => console.warn(`day signals loop: could not release lines — ${error instanceof Error ? error.message : error}`));
   }
 
-  private async runCycle(ib: IBApi, pool: DaySignalExpiryRow[], snapshotUniverse: (DayQuoteContract & { symbol: string })[], tradingDateIso: string, signal: AbortSignal): Promise<RollingQuoteWindowResult> {
+  private async runCycle(ib: IBApi, pool: DaySignalExpiryRow[], snapshotUniverse: (DayQuoteContract & { symbol: string })[], tradingDateIso: string, signal: AbortSignal, ladderTickers: { tickerId: string; symbol: string }[] = []): Promise<RollingQuoteWindowResult> {
     const cycleNumber = ++this.status.cycleNumber;
     const startedAt = this.deps.now();
     this.status.cycleStartedAt = startedAt.toISOString();
@@ -417,7 +454,8 @@ export class DaySignalsLoop {
     const spotByTicker = new Map<string, number | null>();
     // Tracked = pooled tickers plus tickers scored at 10:00 with no pool: a stock that jumped after the open may only now have puts worth selling.
     let trackedTickers = await this.trackedTickersFor(pool, tradingDateIso);
-    const spotWindowContracts: WindowContract[] = trackedTickers.map((ticker) => ({ key: `${ticker.tickerId}|stock`, legType: "stock", symbol: ticker.symbol }));
+    const spotTickers = [...trackedTickers, ...ladderTickers.filter((ladderTicker) => !trackedTickers.some((ticker) => ticker.tickerId === ladderTicker.tickerId))];
+    const spotWindowContracts: WindowContract[] = spotTickers.map((ticker) => ({ key: `${ticker.tickerId}|stock`, legType: "stock", symbol: ticker.symbol }));
     const meterClock = () => this.deps.now().getTime();
     const spotPoolCoverage = describePoolCoverage(spotWindowContracts, this.deps.pooledLineState);
     const spotMeter = createLineUsageMeter(meterClock);
@@ -489,7 +527,7 @@ export class DaySignalsLoop {
       trackedTickers = await this.trackedTickersFor(activePool, tradingDateIso);
       contexts = await this.loadContractContextsSafely(trackedTickers, tradingDateIso);
     }
-    const built = await this.buildCycleUniverse(activePool, universe, contexts, spotByTicker, rerankedTickerIds);
+    const built = activePool.length === 0 ? { universe: [], newContractKeysByTicker: new Map<string, Set<string>>() } : await this.buildCycleUniverse(activePool, universe, contexts, spotByTicker, rerankedTickerIds);
     universe = built.universe;
     const newContractKeysByTicker = built.newContractKeysByTicker;
     this.status.contractsInPool = universe.length;
@@ -500,6 +538,21 @@ export class DaySignalsLoop {
       const entry = tickers.get(contract.tickerId) ?? { symbol: contract.symbol, contracts: [] };
       entry.contracts.push(contract);
       tickers.set(contract.tickerId, entry);
+    }
+    // Signals' contracts are stored and scored as before; the ladder's band is added to its tickers' blocks (a contract both
+    // want is quoted once) and stored apart, so the Signals screens score exactly what they did.
+    const signalsKeys = new Set(universe.map((contract) => `${contract.tickerId}|${contract.expiry}|${contract.strike}|${contract.right}`));
+    const signalsTickerIds = new Set(tickers.keys());
+    const ladderKeys = new Set<string>();
+    const ladderBand = await this.ladderBandSafely(tradingDateIso, spotByTicker);
+    for (const [tickerId, band] of ladderBand) {
+      const entry = tickers.get(tickerId) ?? { symbol: band.symbol, contracts: [] };
+      for (const contract of band.contracts) {
+        const key = `${tickerId}|${contract.expiry}|${contract.strike}|${contract.right}`;
+        ladderKeys.add(key);
+        if (!signalsKeys.has(key)) entry.contracts.push({ tickerId, symbol: band.symbol, expiry: contract.expiry, strike: contract.strike, right: contract.right });
+      }
+      if (entry.contracts.length > 0) tickers.set(tickerId, entry);
     }
     const windowContracts: WindowContract[] = [];
     const remainingByTicker = new Map<string, number>();
@@ -512,15 +565,25 @@ export class DaySignalsLoop {
     }
 
     let writeBuffer: DayQuoteWrite[] = [];
+    let ladderWriteBuffer: DayLoopLadderBandQuote[] = [];
     let flushChain: Promise<void> = Promise.resolve();
     const flush = (): Promise<void> => {
-      if (writeBuffer.length === 0) return flushChain;
+      if (writeBuffer.length === 0 && ladderWriteBuffer.length === 0) return flushChain;
       const batch = writeBuffer;
+      const ladderBatch = ladderWriteBuffer;
       writeBuffer = [];
-      flushChain = flushChain.then(() => this.deps.upsertDayQuotes(batch)).catch((error) => {
-        console.error(`day signals loop: quote write failed — ${error instanceof Error ? error.message : error}`);
-        this.deps.reportFailure?.("day-signals:quote-write", `Day Signals loop could not save its quotes (${error instanceof Error ? error.message : error}). Live Signals quotes are stale.`);
-      });
+      ladderWriteBuffer = [];
+      flushChain = flushChain
+        .then(() => (batch.length > 0 ? this.deps.upsertDayQuotes(batch) : undefined))
+        .catch((error) => {
+          console.error(`day signals loop: quote write failed — ${error instanceof Error ? error.message : error}`);
+          this.deps.reportFailure?.("day-signals:quote-write", `Day Signals loop could not save its quotes (${error instanceof Error ? error.message : error}). Live Signals quotes are stale.`);
+        })
+        .then(() => (ladderBatch.length > 0 ? this.deps.ladderBand?.store(ladderBatch) : undefined))
+        .catch((error) => {
+          console.error(`day signals loop: ladder band quote write failed — ${error instanceof Error ? error.message : error}`);
+          this.deps.reportFailure?.("day-signals:ladder-quote-write", `Day Signals loop could not save the CC + Put Ladder's quotes (${error instanceof Error ? error.message : error}). The ladder's quotes are stale.`);
+        });
       return flushChain;
     };
     const flushTimer = setInterval(() => void flush(), writeFlushIntervalMs);
@@ -530,8 +593,9 @@ export class DaySignalsLoop {
       const tickerId = contract.key.split("|")[0]!;
       if (contract.legType === "option") {
         const [, expiry, strike, right] = contract.key.split("|") as [string, string, string, "C" | "P"];
-        writeBuffer.push({ tickerId, expiry, strike: Number(strike), right, tradingDateIso, bid: quote.bid, ask: quote.ask, last: quote.last, errorCode: quote.errorCode, quotedAt: quote.settledAt, cycleNumber });
-        if (writeBuffer.length >= writeFlushRowCount) void flush();
+        if (signalsKeys.has(contract.key)) writeBuffer.push({ tickerId, expiry, strike: Number(strike), right, tradingDateIso, bid: quote.bid, ask: quote.ask, last: quote.last, errorCode: quote.errorCode, quotedAt: quote.settledAt, cycleNumber });
+        if (ladderKeys.has(contract.key)) ladderWriteBuffer.push({ tickerId, tradingDateIso, expiry, strike: Number(strike), right, bid: quote.bid, ask: quote.ask, stockPrice: spotByTicker.get(tickerId) ?? null, errorCode: quote.errorCode, quotedAt: quote.settledAt, cycleNumber });
+        if (writeBuffer.length + ladderWriteBuffer.length >= writeFlushRowCount) void flush();
       } else {
         spotByTicker.set(tickerId, spotFromQuote(quote));
       }
@@ -541,6 +605,7 @@ export class DaySignalsLoop {
         const symbol = tickers.get(tickerId)!.symbol;
         tickerWorkChain = tickerWorkChain.then(async () => {
           await flush();
+          if (!signalsTickerIds.has(tickerId)) return;
           await this.rescoreTicker({ tickerId, symbol, companyName: null, sector: null }, tradingDateIso, spotByTicker.get(tickerId) ?? null, settings, account, newContractKeysByTicker.get(tickerId) ?? new Set());
         });
       }
@@ -557,7 +622,7 @@ export class DaySignalsLoop {
       await tickerWorkChain;
       this.status.lastCycleDurationMs = this.deps.now().getTime() - startedAt.getTime();
       if (shouldLogCycle({ cycleNumber, settled: result.settled, total: windowContracts.length, durationMs: this.status.lastCycleDurationMs, disconnected: result.disconnected, aborted: result.aborted })) {
-        console.log(`day signals loop: cycle ${cycleNumber} — ${result.settled}/${windowContracts.length} settled in ${Math.round(this.status.lastCycleDurationMs / 1000)}s${result.disconnected ? " (disconnected)" : ""}${result.aborted ? " (aborted)" : ""}`);
+        console.log(`day signals loop: cycle ${cycleNumber} — ${result.settled}/${windowContracts.length} settled in ${Math.round(this.status.lastCycleDurationMs / 1000)}s${result.disconnected ? " (disconnected)" : ""}${result.aborted ? " (aborted)" : ""}${ladderKeys.size > 0 ? `; ladder band ${ladderKeys.size} contracts on ${ladderBand.size} ticker(s), ${[...ladderKeys].filter((key) => !signalsKeys.has(key)).length} beside Signals'` : ""}`);
         // Measurement for line sizing: where the cycle's time went, how each window used its lines, and what the screens' pool already streamed.
         const tailMs = this.status.lastCycleDurationMs - (spotPassStartedAt - startedAt.getTime()) - spotPassMs - prepareMs - quoteWindowMs;
         console.log(
@@ -571,6 +636,30 @@ export class DaySignalsLoop {
       return result;
     } finally {
       clearInterval(flushTimer);
+    }
+  }
+
+  /** The ladder's tickers today; a failed read quotes Signals' contracts only this cycle. */
+  private async ladderTickersSafely(tradingDateIso: string): Promise<{ tickerId: string; symbol: string }[]> {
+    if (!this.deps.ladderBand) return [];
+    try {
+      return await this.deps.ladderBand.tickers(tradingDateIso);
+    } catch (error) {
+      console.warn(`day signals loop: the ladder's tickers are unavailable — ${error instanceof Error ? error.message : error}`);
+      this.deps.reportFailure?.("day-signals:ladder-tickers", `Day Signals loop could not read the CC + Put Ladder's tickers (${error instanceof Error ? error.message : error}), so the ladder gets no live quotes until it can.`);
+      return [];
+    }
+  }
+
+  /** The ladder band's contracts per ticker this cycle; a failed read quotes Signals' contracts only. */
+  private async ladderBandSafely(tradingDateIso: string, spotByTicker: Map<string, number | null>): Promise<Map<string, { symbol: string; contracts: DayContractRef[] }>> {
+    if (!this.deps.ladderBand) return new Map();
+    try {
+      return await this.deps.ladderBand.contractsFor(tradingDateIso, spotByTicker, this.deps.now());
+    } catch (error) {
+      console.warn(`day signals loop: the ladder's band is unavailable — ${error instanceof Error ? error.message : error}`);
+      this.deps.reportFailure?.("day-signals:ladder-band", `Day Signals loop could not plan the CC + Put Ladder's band (${error instanceof Error ? error.message : error}), so the ladder gets no live quotes until it can.`);
+      return new Map();
     }
   }
 
@@ -795,10 +884,10 @@ export class DaySignalsLoop {
 
 let runningLoop: DaySignalsLoop | null = null;
 
-/** Started once by server.ts when DAY_SIGNALS_LOOP_ENABLED=true; the health route reads its status. */
-export function startDaySignalsLoop(): DaySignalsLoop {
+/** Started once by server.ts when DAY_SIGNALS_LOOP_ENABLED=true, with the CC + Put Ladder's band; the health route reads its status. */
+export function startDaySignalsLoop(options: { ladderBand?: DayLoopLadderBand } = {}): DaySignalsLoop {
   if (runningLoop) return runningLoop;
-  runningLoop = new DaySignalsLoop();
+  runningLoop = new DaySignalsLoop({ ...defaultDaySignalsLoopDependencies, ...options });
   runningLoop.start().catch((error) => {
     console.error(`day signals loop exited: ${error instanceof Error ? error.message : error}`);
     reportBackgroundFailure("day-signals:loop-exited", `🔥 Day Signals loop exited and will not restart until the web dyno does: ${error instanceof Error ? error.message : error}`);
