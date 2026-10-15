@@ -22,7 +22,11 @@ function describeQuoteProblem(label: string, quote: unknown, now: Date): string 
   return null;
 }
 
-/** The first reason a Signals snapshot's pricing quotes are not live and fresh, or null when every quote is (or the snapshot is not a Signals one). */
+/**
+ * The first reason a Signals snapshot's pricing quotes are not live and fresh, or null when every quote is (or the snapshot
+ * is not a Signals one). A CC + Put Ladder order's snapshot (kind "ladder") records its contract with the same quote fields
+ * and is held to the same rule (Marcelo 2026-10-15).
+ */
 export function findNonLiveSnapshotQuoteReason(snapshot: Record<string, unknown> | null, now: Date = new Date()): string | null {
   if (snapshot === null) return null;
   const quotesToCheck: { label: string; quote: unknown }[] =
@@ -31,9 +35,11 @@ export function findNonLiveSnapshotQuoteReason(snapshot: Record<string, unknown>
           { label: "The leg being closed", quote: snapshot.closeLeg },
           { label: "The new leg", quote: snapshot.replacement },
         ]
-      : snapshot.candidate !== undefined
-        ? [{ label: "The contract", quote: snapshot.candidate }]
-        : [];
+      : snapshot.kind === "ladder"
+        ? [{ label: "The contract", quote: snapshot.contract }]
+        : snapshot.candidate !== undefined
+          ? [{ label: "The contract", quote: snapshot.candidate }]
+          : [];
   for (const { label, quote } of quotesToCheck) {
     const problem = describeQuoteProblem(label, quote, now);
     if (problem) return `${problem}. Wait for live prices and build the order again.`;

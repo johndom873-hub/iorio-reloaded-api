@@ -177,6 +177,11 @@ export async function recordPlutoAction(input: RecordPlutoActionInput): Promise<
       block_reason: input.blockReason,
       reference_bid: input.referenceBid,
       reference_mid: input.referenceMid,
+      // The strategy the action's pass ran under (its settings version), else today's: the order gates judge by it.
+      execution_strategy: db.raw(
+        "coalesce((select v.settings->>'executionStrategy' from pluto_passes p join pluto_settings_versions v on v.id = p.settings_version_id where p.id = ?), (select execution_strategy from pluto_settings where id = 1))",
+        [input.passId],
+      ),
     })
     .returning("id");
   return row.id as string;

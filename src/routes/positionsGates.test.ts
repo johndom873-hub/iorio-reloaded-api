@@ -24,6 +24,13 @@ vi.mock("../lib/orderLimits.js", () => ({ evaluateOrderLimits: (...args: unknown
 const evaluateDeltaBandMock = vi.fn();
 vi.mock("../lib/deltaBandGate.js", () => ({ evaluateDeltaBandForOrderRequest: (...args: unknown[]) => evaluateDeltaBandMock(...args) }));
 
+const evaluateLadderDeltaMock = vi.fn();
+vi.mock("../lib/ladderOrderGates.js", () => ({ evaluateLadderDeltaForOrderRequest: (...args: unknown[]) => evaluateLadderDeltaMock(...args) }));
+// The ladder's gate context reads today's close and 10:00 forwards through the band planner's readers.
+vi.mock("../pluto/ladderBandPlanLoader.js", () => ({
+  defaultLadderBandPlannerDependencies: { loadClock: async (todayIso: string) => ({ todayIso, closeMinutesEt: 16 * 60, riskFreeRate: 0.04 }), loadForwardAnchors: async () => new Map() },
+}));
+
 const evaluateCloseGateForPositionMock = vi.fn();
 vi.mock("../lib/closeGate.js", () => ({ evaluateCloseGateForPosition: (...args: unknown[]) => evaluateCloseGateForPositionMock(...args) }));
 
@@ -120,6 +127,7 @@ beforeEach(() => {
   evaluateOrderLimitsMock.mockReset().mockResolvedValue(clearLimits);
   evaluateDeltaBandMock.mockReset().mockImplementation(async (order: { request_type: string }) => (order.request_type.startsWith("open_") ? { compliant: true, reason: null } : null));
   evaluateCloseGateForPositionMock.mockReset().mockResolvedValue({ blocked: false, reason: null, cycleTotal: 7 });
+  evaluateLadderDeltaMock.mockReset().mockResolvedValue({ compliant: true, reason: null });
   evaluateLimitPriceCheckMock.mockReset().mockResolvedValue({ blocked: false, reasons: [], legs: [] });
   publishNotificationMock.mockReset().mockResolvedValue(undefined);
   fetchMacroEventWarningEventsMock.mockReset().mockResolvedValue([]);
@@ -235,6 +243,31 @@ describe("POST /positions/orders", () => {
     expect(publishNotificationMock).toHaveBeenCalledWith({ type: "order_status", orderId: response.json.id });
     await settle();
     expect(notifiedOrderIds).toEqual([]);
+  });
+
+  it("a Pluto Covered Call entry with buyEveryShare buys all its shares even with uncovered ones held; only Pluto may ask", async () => {
+    const ticker = await createTicker();
+    // 150 uncovered shares held: the auto-fill would buy only 50 for 2 Calls.
+    const [held] = await testDb("positions").insert({ strategy_key: "unstructured", ticker_id: ticker.id, status: "open" }).returning("id");
+    createdPositionIds.push(held.id);
+    await testDb("position_legs").insert({ position_id: held.id, leg_type: "stock", side: "long", quantity: 150, multiplier: 1, entry_price: 95, entry_at: new Date(Date.now() - 86_400_000) });
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-buy-every-share" }), model_called: false }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_covered_call", symbol: ticker.symbol, outcome: "order_built", execution_strategy: "cc_put_ladder" }).returning("id");
+    const callOption = { ...optionBody, strikePrice: 110 };
+    try {
+      const netted = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "covered_call", option: callOption });
+      expect(netted.json.payload.legs[0]).toMatchObject({ role: "stock", quantity: 50 });
+      const everyShare = await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "covered_call", option: callOption, buyEveryShare: true, plutoActionId: action.id });
+      expect(everyShare.status).toBe(201);
+      expect(everyShare.json.payload.legs[0]).toMatchObject({ role: "stock", action: "BUY", quantity: 200, unitPrice: 100 });
+      for (const body of [{ buyEveryShare: true }, { buyEveryShare: true, plutoActionId: action.id, stock: { quantity: 200, limitPrice: 100 } }, { buyEveryShare: "yes", plutoActionId: action.id }]) {
+        expect((await call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "covered_call", option: callOption, ...body })).status).toBe(400);
+      }
+    } finally {
+      await testDb("order_requests").where({ requested_by_user_id: userId }).del();
+      await testDb("pluto_actions").where({ id: action.id }).del();
+      await testDb("pluto_passes").where({ id: pass.id }).del();
+    }
   });
 
   it("stores the economic-calendar events and one-line warning on the built order", async () => {
@@ -391,6 +424,44 @@ describe("POST /positions/orders/:id/confirm", () => {
     } finally {
       await testDb("order_requests").where({ pluto_action_id: action.id }).del();
       await testDb("pluto_actions").where({ id: action.id }).del();
+      await testDb("pluto_passes").where({ id: pass.id }).del();
+      await testDb("shortlist_entries").where({ id: entry.id }).del();
+    }
+  });
+
+  it("judges a CC + Put Ladder order by the ladder's delta range and its pot; an Edge Margin order by the platform's rules", async () => {
+    const ticker = await createTicker();
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-ladder" }), model_called: false }).returning("id");
+    const [ladderAction] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built", execution_strategy: "cc_put_ladder" }).returning("id");
+    const [edgeAction] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
+    const settings = await testDb("pluto_settings").where({ id: 1 }).first("capital_budget_pct", "ladder_min_abs_delta", "ladder_max_abs_delta");
+    const enabledCount = Number((await testDb("shortlist_entries").whereNull("removed_at").where({ bot_enabled: true }).count({ count: "*" }))[0]!.count);
+    try {
+      const ladderOrder = await insertOrder(ticker.symbol, { pluto_action_id: ladderAction.id });
+      expect((await call("POST", `/positions/orders/${ladderOrder}/confirm`, {})).status).toBe(200);
+      expect(evaluateDeltaBandMock).not.toHaveBeenCalled();
+      expect(evaluateLadderDeltaMock).toHaveBeenCalledTimes(1);
+      // The ticker's pot: its equal share of Pluto's capital budget (no allocation set), with the ladder's delta range.
+      const context = evaluateLadderDeltaMock.mock.calls[0]![1];
+      expect(context).toMatchObject({ minAbsDelta: Number(settings.ladder_min_abs_delta), maxAbsDelta: Number(settings.ladder_max_abs_delta), forwardAnchor: null, riskFreeRate: 0.04 });
+      expect(context.potFraction).toBeCloseTo(((100 / enabledCount / 100) * Number(settings.capital_budget_pct)) / 100, 9);
+      expect(evaluateOrderLimitsMock.mock.calls[0]![0]).toMatchObject({ ladder: { potFraction: context.potFraction, stockSharesBought: 0 } });
+
+      evaluateLadderDeltaMock.mockResolvedValueOnce({ compliant: false, reason: "The contract's own delta is 0.305, above the ladder's 0.05–0.3 delta range." });
+      const refusedOrder = await insertOrder(ticker.symbol, { pluto_action_id: ladderAction.id });
+      const refused = await call("POST", `/positions/orders/${refusedOrder}/confirm`, {});
+      expect(refused.status).toBe(409);
+      expect(refused.json.error).toBe("The contract's own delta is 0.305, above the ladder's 0.05–0.3 delta range.");
+
+      evaluateOrderLimitsMock.mockClear();
+      const edgeOrder = await insertOrder(ticker.symbol, { pluto_action_id: edgeAction.id });
+      expect((await call("POST", `/positions/orders/${edgeOrder}/confirm`, {})).status).toBe(200);
+      expect(evaluateDeltaBandMock).toHaveBeenCalledTimes(1);
+      expect(evaluateOrderLimitsMock.mock.calls[0]![0]).not.toHaveProperty("ladder");
+    } finally {
+      await testDb("order_requests").whereIn("pluto_action_id", [ladderAction.id, edgeAction.id]).del();
+      await testDb("pluto_actions").whereIn("id", [ladderAction.id, edgeAction.id]).del();
       await testDb("pluto_passes").where({ id: pass.id }).del();
       await testDb("shortlist_entries").where({ id: entry.id }).del();
     }

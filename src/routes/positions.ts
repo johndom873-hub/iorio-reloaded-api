@@ -35,6 +35,8 @@ import { fetchTodaysOrders } from "../lib/todaysOrders.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
 import { executionStrategyLabels } from "../pluto/executionStrategies.js";
+import { loadLadderOrderGateContext } from "../pluto/ladderOrderGateContext.js";
+import type { LadderOrderGateContext } from "../lib/ladderOrderGates.js";
 import { computeUnderlyingStockPriceByPosition, computeUnrealizedPnlByPosition, normalizeExpiryDate, roundToCents, sumSharesCommittedByCoveredCallPayloads, underlyingStockPriceKey, validateCoveredCallCoverage } from "../lib/positionOrderRules.js";
 
 export const positionsRouter = Router();
@@ -923,6 +925,11 @@ interface OpenOrderRequestBody {
   option?: { quantity: number; limitPrice: number; strikePrice: number; expiryDate: string };
   /** Signals modal only: the scores at the moment the order was built (stored as-is in order_requests.signal_snapshot). */
   signalSnapshot?: unknown;
+  /**
+   * Pluto's CC + Put Ladder only (Marcelo 2026-10-15): a Covered Call entry buys every share its calls cover, even with
+   * uncovered shares held (the ladder keeps those for its Puts and calls on held shares), priced as the auto-fill does.
+   */
+  buyEveryShare?: unknown;
 }
 
 // A snapshot is a plain object of modest size; the shape itself is the app's (SignalOrderSnapshot) and is not re-validated here.
@@ -959,7 +966,15 @@ function readSignalSnapshot(raw: unknown): { ok: true; value: Record<string, unk
 }
 
 positionsRouter.post("/orders", async (request, response) => {
-  const { symbol, strategyKey, stock, option } = request.body as OpenOrderRequestBody;
+  const { symbol, strategyKey, stock, option, buyEveryShare } = request.body as OpenOrderRequestBody;
+  if (buyEveryShare !== undefined && typeof buyEveryShare !== "boolean") {
+    response.status(400).json({ error: "buyEveryShare must be true or false." });
+    return;
+  }
+  if (buyEveryShare && (strategyKey !== "covered_call" || stock !== undefined || !(request.body as { plutoActionId?: unknown }).plutoActionId)) {
+    response.status(400).json({ error: "buyEveryShare is for a Pluto Covered Call entry with an auto-filled stock leg only." });
+    return;
+  }
 
   if (!symbol || !symbol.trim()) {
     response.status(400).json({ error: "Symbol is required." });
@@ -1033,7 +1048,7 @@ positionsRouter.post("/orders", async (request, response) => {
     // Shares already committed by in-flight covered-call orders on this
     // symbol (2026-09-24) — two builds could otherwise both skip the stock
     // leg against the same uncovered shares and leave the second call naked.
-    const availableUncovered = Math.max(0, (await fetchAvailableUncoveredShares(ticker.id)) - (await sharesCommittedByInFlightCoveredCalls(ticker.symbol)));
+    const availableUncovered = buyEveryShare ? 0 : Math.max(0, (await fetchAvailableUncoveredShares(ticker.id)) - (await sharesCommittedByInFlightCoveredCalls(ticker.symbol)));
     const shortfall = Math.max(0, requiredShares - availableUncovered);
     excessUncoveredShares = Math.max(0, availableUncovered - requiredShares);
 
@@ -1375,6 +1390,15 @@ export async function sharesCommittedByInFlightCoveredCalls(symbol: string): Pro
   return sumSharesCommittedByCoveredCallPayloads(rows.map((row) => row.payload));
 }
 
+/** The CC + Put Ladder's gate context for an order its Pluto action took under the ladder; a failed read refuses the order. */
+async function readLadderGateContext(orderRequest: { pluto_action_id?: string | null; payload: OrderRequestPayload }): Promise<{ ladder: LadderOrderGateContext | null; error: string | null }> {
+  try {
+    return { ladder: await loadLadderOrderGateContext(orderRequest), error: null };
+  } catch (error) {
+    return { ladder: null, error: `The ${executionStrategyLabels.cc_put_ladder} order rules could not be read (${error instanceof Error ? error.message : String(error)}).` };
+  }
+}
+
 // What the order gate says about a built order right now, without confirming it: the same evaluation the confirm
 // step runs (orderGates.ts), so a client -- Genosuke's card above all -- can show the blocks and warnings first.
 positionsRouter.get("/orders/:id/gates", async (request, response) => {
@@ -1383,7 +1407,12 @@ positionsRouter.get("/orders/:id/gates", async (request, response) => {
     response.status(404).json({ error: "Order not found." });
     return;
   }
-  const { blocks, warnings, evaluatedAt } = await evaluateOrderGates(orderRequest);
+  const { ladder, error } = await readLadderGateContext(orderRequest);
+  if (error) {
+    response.json({ blocks: [error], warnings: [], evaluatedAt: new Date().toISOString() });
+    return;
+  }
+  const { blocks, warnings, evaluatedAt } = await evaluateOrderGates(orderRequest, ladder);
   response.json({ blocks, warnings, evaluatedAt });
 });
 
@@ -1444,11 +1473,17 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   // gate for closes. The order stays pending_confirmation when any of them blocks.
   // Judged and committed under one lock (orderConfirmationLock.ts): two orders confirmed at the same instant take turns, so the second
   // sees the first as in flight and cannot slip under a limit only one of them fits under.
+  // A CC + Put Ladder order is judged by the ladder's delta range and pot instead of the delta band and two of the limits.
+  const { ladder, error: ladderError } = await readLadderGateContext(orderRequest);
+  if (ladderError) {
+    response.status(409).json({ error: ladderError });
+    return;
+  }
   let blockedReasons: string[] = [];
   let wonRace = false;
   try {
     await withOrderConfirmationLock(async (transaction) => {
-      const gateEvaluation = await evaluateOrderGates(orderRequest);
+      const gateEvaluation = await evaluateOrderGates(orderRequest, ladder);
       if (gateEvaluation.blocks.length > 0) {
         blockedReasons = gateEvaluation.blocks;
         return;

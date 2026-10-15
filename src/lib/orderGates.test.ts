@@ -37,6 +37,15 @@ describe("limitsInputFromOrderRequest", () => {
   });
 });
 
+describe("limitsInputFromOrderRequest for a CC + Put Ladder order", () => {
+  it("carries the pot and the shares the Covered Call entry buys (every share, uncovered ones held or not)", () => {
+    const coveredCallEntry = { symbol: "AAA", strategyKey: "covered_call", legs: [{ role: "stock", action: "BUY", symbol: "AAA", quantity: 200, unitPrice: 50 }, { role: "option", action: "SELL", symbol: "AAA", quantity: 2, unitPrice: 1.1, strike: 55, expiry: "20261120", right: "C" }] } as OrderRequestPayload;
+    expect(limitsInputFromOrderRequest({ id: "o6", request_type: "open_covered_call", payload: coveredCallEntry }, { potFraction: 0.25 })).toMatchObject({ strategyKey: "covered_call", quantity: 2, strike: 55, ladder: { potFraction: 0.25, stockSharesBought: 200 } });
+    expect(limitsInputFromOrderRequest({ id: "o7", request_type: "open_cash_secured_put", payload: putOpen }, { potFraction: 0.1 })).toMatchObject({ ladder: { potFraction: 0.1, stockSharesBought: 0 } });
+    expect(limitsInputFromOrderRequest({ id: "o8", request_type: "open_cash_secured_put", payload: putOpen })).not.toHaveProperty("ladder");
+  });
+});
+
 describe("describeCalendarWarnings", () => {
   it("lists the events before expiry in one line", () => {
     expect(describeCalendarWarnings({ calendar_warning_events: [{ title: "FOMC Rate Decision", eventDate: "2026-10-07" }, { title: "CPI", eventDate: "2026-10-14" }] })).toEqual([

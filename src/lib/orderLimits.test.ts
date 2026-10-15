@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeInFlightOrderNotional, computeOrderNotional } from "./orderLimits.js";
+import { computeInFlightOrderNotional, computeOrderNotional, evaluateOrderLimitFigures } from "./orderLimits.js";
 import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 
 // Formula 3g's OrderNotional, plus the Roll Signals rule (2026-09-24): a roll re-uses the
@@ -52,5 +52,28 @@ describe("computeInFlightOrderNotional", () => {
   it("ignores closes and orders with no strategy", () => {
     expect(computeInFlightOrderNotional("close_position", putOpen)).toBe(0);
     expect(computeInFlightOrderNotional("open_covered_call", { ...putOpen, strategyKey: undefined } as unknown as OrderRequestPayload)).toBe(0);
+  });
+});
+
+describe("evaluateOrderLimitFigures for a CC + Put Ladder order", () => {
+  // A $200,000 account, $60,000 cash, nothing locked; the platform's limits at 20% per position, 10% per ticker, 5% cash reserve.
+  const figures = { symbol: "LADR", totalPortfolioValue: 200_000, totalCashValue: 60_000, cashLockedInCsps: 0, inFlight: { totalNotional: 0, tickerNotional: 0 }, settings: { maxPositionPctOfPortfolio: 20, maxConcentrationPerTickerPct: 10, minCashReservePct: 5 } };
+
+  it("an order the platform's 10% per ticker would refuse passes inside a 25% pot", () => {
+    // LADR already $30,000; the order adds $15,000 → $45,000: 22.5% of the account, under the $50,000 pot.
+    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 30_000, orderNotional: 15_000 }).reasons).toEqual([expect.stringMatching(/22.5% of portfolio value, above the 10% max concentration/)]);
+    const ladder = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 30_000, orderNotional: 15_000, ladderPotFraction: 0.25 });
+    expect(ladder).toMatchObject({ blocked: false, reasons: [], details: { ladderPotDollars: 50_000 } });
+  });
+
+  it("refuses an order that takes the ticker past its pot, counting orders still working", () => {
+    const over = evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 30_000, inFlight: { totalNotional: 8_000, tickerNotional: 8_000 }, orderNotional: 15_000, ladderPotFraction: 0.25 });
+    expect(over.blocked).toBe(true);
+    expect(over.reasons).toEqual(["LADR would be $53,000, above its CC + Put Ladder pot of $50,000 (25.0% of portfolio value) (counting $8,000 of orders still working)."]);
+  });
+
+  it("keeps the cash reserve", () => {
+    // $60,000 cash − $52,000 order = $8,000 = 4% of the account, under the 5% reserve.
+    expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 52_000, ladderPotFraction: 0.3 }).reasons).toEqual([expect.stringMatching(/4.0% of portfolio value as cash, below the 5% min cash reserve/)]);
   });
 });

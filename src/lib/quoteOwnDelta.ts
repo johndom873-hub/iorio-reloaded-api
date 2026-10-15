@@ -1,4 +1,4 @@
-import { blackScholesDelta, impliedVolatilityFromPrice } from "./impliedVolatilitySurface.js";
+import { blackScholesDelta, forwardAtSpot, impliedVolatilityFromPrice } from "./impliedVolatilitySurface.js";
 import { easternMinutesOfDay } from "./easternIsoDate.js";
 
 // A contract's delta from its own live quote (Marcelo 2026-10-15: one source for IV and delta, the quote's own, as the
@@ -16,13 +16,25 @@ export function yearsToSessionClose(now: Date, closeMinutesEt: number): number {
   return Math.max(0, closeMinutesEt - easternMinutesOfDay(now)) / 60 / 8760;
 }
 
-export function deltaFromQuoteMid(input: { bid: number | null; ask: number | null; spotPrice: number; strike: number; isCall: boolean; yearsToExpiry: number; riskFreeRate: number }): number | null {
-  const { bid, ask, spotPrice, strike, isCall, yearsToExpiry, riskFreeRate } = input;
+/**
+ * The expiry's forward at a stock price: Pluto's 10:00 parity forward moved with the stock (forwardAtSpot) when there is
+ * one, else the price grown at the risk-free rate. The CC + Put Ladder's forward (Marcelo 2026-10-15).
+ */
+export function forwardFromAnchor(anchor: { forward: number; spotPrice: number } | undefined, stockPrice: number, yearsToExpiry: number, riskFreeRate: number): number {
+  return anchor ? forwardAtSpot(anchor.forward, anchor.spotPrice, stockPrice) : stockPrice * Math.exp(riskFreeRate * yearsToExpiry);
+}
+
+/** As deltaFromQuoteMid, on a given forward (the stock price only says whether the option is in the money). */
+export function deltaFromQuoteMidOnForward(input: { bid: number | null; ask: number | null; spotPrice: number; forward: number; strike: number; isCall: boolean; yearsToExpiry: number; riskFreeRate: number }): number | null {
+  const { bid, ask, spotPrice, forward, strike, isCall, yearsToExpiry, riskFreeRate } = input;
   if (bid === null || ask === null || !(bid > 0) || !(ask > bid) || !(spotPrice > 0)) return null;
   const intrinsic = isCall ? Math.max(spotPrice - strike, 0) : Math.max(strike - spotPrice, 0);
   if (!(yearsToExpiry > 0)) return intrinsic > 0 ? (isCall ? 1 : -1) : null;
-  const forward = spotPrice * Math.exp(riskFreeRate * yearsToExpiry);
   const impliedVolatility = impliedVolatilityFromPrice((bid + ask) / 2, forward, strike, yearsToExpiry, riskFreeRate, isCall);
   if (impliedVolatility === null) return intrinsic > 0 ? (isCall ? 1 : -1) : null;
   return blackScholesDelta(forward, strike, yearsToExpiry, riskFreeRate, impliedVolatility, isCall);
+}
+
+export function deltaFromQuoteMid(input: { bid: number | null; ask: number | null; spotPrice: number; strike: number; isCall: boolean; yearsToExpiry: number; riskFreeRate: number }): number | null {
+  return deltaFromQuoteMidOnForward({ ...input, forward: forwardFromAnchor(undefined, input.spotPrice, input.yearsToExpiry, input.riskFreeRate) });
 }

@@ -3,6 +3,7 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import type { DeltaComplianceResult } from "../ibkr/streamOrderLegQuote.js";
 import { evaluateCloseGateForPosition, type CloseGateVerdict } from "./closeGate.js";
 import { evaluateDeltaBandForOrderRequest } from "./deltaBandGate.js";
+import { evaluateLadderDeltaForOrderRequest, type LadderOrderGateContext } from "./ladderOrderGates.js";
 import { evaluateLimitPriceCheckForOrderRequest } from "./limitPriceCheckGate.js";
 import type { PriceCheckResult } from "./limitPriceCheck.js";
 import { evaluateOrderLimits, type OrderLimitsResult, type OrderLimitsStrategyKey } from "./orderLimits.js";
@@ -19,7 +20,9 @@ import { fetchTradingBlockedReason } from "./tradingGate.js";
 //   open_* only        the delta band, from a live delta (fails closed when no live delta can be read)
 //   close_position     the close gate (session open, live two-sided quotes on every leg, consistent wheel cycle)
 //   every order        the limit-price check: each leg's limit against its own live mid (limitPriceCheck.ts)
-// A close is not limit-checked: it only reduces exposure.
+// A close is not limit-checked: it only reduces exposure. A CC + Put Ladder order (its Pluto action taken under the ladder)
+// gets the ladder's delta range on its own delta and its pot cap instead of the delta band and the first two limits
+// (ladderOrderGates.ts; Marcelo 2026-10-15).
 
 export interface OrderRequestForGates {
   id: string;
@@ -43,7 +46,7 @@ export interface OrderGateResult {
 }
 
 /** The limit-check input of an opening or rolling order, or null when the order is not limit-checked (closes, no option leg, no strategy). */
-export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGates, "id" | "request_type" | "payload">) {
+export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGates, "id" | "request_type" | "payload">, ladder: Pick<LadderOrderGateContext, "potFraction"> | null = null) {
   const requestType = orderRequest.request_type;
   const isRoll = requestType === "roll_leg";
   if (!requestType.startsWith("open_") && !isRoll) return null;
@@ -54,15 +57,17 @@ export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGa
   const optionLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && !leg.positionLegId) : payload.legs.find((leg) => leg.role === "option");
   const closeLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && leg.positionLegId) : undefined;
   if (!optionLeg || !optionLeg.strike || (isRoll && !closeLeg?.strike)) return null;
-  return { strategyKey: strategyKey as OrderLimitsStrategyKey, symbol: payload.symbol, quantity: optionLeg.quantity, strike: optionLeg.strike, premium: optionLeg.unitPrice, rollFromStrike: closeLeg?.strike, rollFromPremium: closeLeg?.unitPrice, excludeOrderRequestId: orderRequest.id };
+  const stockSharesBought = payload.legs.find((leg) => leg.role === "stock")?.quantity ?? 0;
+  return { strategyKey: strategyKey as OrderLimitsStrategyKey, symbol: payload.symbol, quantity: optionLeg.quantity, strike: optionLeg.strike, premium: optionLeg.unitPrice, rollFromStrike: closeLeg?.strike, rollFromPremium: closeLeg?.unitPrice, excludeOrderRequestId: orderRequest.id, ...(ladder ? { ladder: { potFraction: ladder.potFraction, stockSharesBought } } : {}) };
 }
 
 /** Null when the order is not limit-checked; otherwise the shared limits verdict. A ticker unknown to the platform fails closed. */
 export async function evaluateOrderLimitsForOrderRequest(
   orderRequest: Pick<OrderRequestForGates, "id" | "request_type" | "payload">,
   live: { spotPrice?: number } = {},
+  ladder: LadderOrderGateContext | null = null,
 ): Promise<OrderLimitsResult | null> {
-  const input = limitsInputFromOrderRequest(orderRequest);
+  const input = limitsInputFromOrderRequest(orderRequest, ladder);
   if (!input) return null;
   const ticker = await db("tickers").where({ symbol: input.symbol.trim().toUpperCase() }).first("id", "symbol");
   if (!ticker) return { blocked: true, reasons: [`Could not verify position limits: ${input.symbol} is not a known ticker.`] };
@@ -97,12 +102,13 @@ export function combineOrderGateVerdicts(parts: {
   return { blocks, warnings: parts.warnings };
 }
 
-export async function evaluateOrderGates(orderRequest: OrderRequestForGates): Promise<OrderGateResult> {
+/** `ladder`: the CC + Put Ladder's context for an order its Pluto action took under the ladder (null for every other order). */
+export async function evaluateOrderGates(orderRequest: OrderRequestForGates, ladder: LadderOrderGateContext | null = null): Promise<OrderGateResult> {
   const closeGateWanted = orderRequest.request_type === "close_position" && Boolean(orderRequest.related_position_id);
   const [tradingBlockedReason, limits, deltaBand, closeGate, priceCheck] = await Promise.all([
     fetchTradingBlockedReason(),
-    evaluateOrderLimitsForOrderRequest(orderRequest),
-    evaluateDeltaBandForOrderRequest(orderRequest),
+    evaluateOrderLimitsForOrderRequest(orderRequest, {}, ladder),
+    ladder ? evaluateLadderDeltaForOrderRequest(orderRequest, ladder) : evaluateDeltaBandForOrderRequest(orderRequest),
     closeGateWanted ? evaluateCloseGateForPosition(orderRequest.related_position_id!) : Promise.resolve(null),
     evaluateLimitPriceCheckForOrderRequest(orderRequest),
   ]);

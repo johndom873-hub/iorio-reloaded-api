@@ -40,6 +40,13 @@ describe("findNonLiveSnapshotQuoteReason", () => {
     expect(findNonLiveSnapshotQuoteReason({ version: 1, candidate: { quoteSource: "day", quotedAt: "2026-10-01T14:09:40.000Z" } }, now)).toMatch(/contract is priced from a day quote/);
   });
 
+  it("holds a CC + Put Ladder order's contract to the same rule", () => {
+    expect(findNonLiveSnapshotQuoteReason({ kind: "ladder", contract: { quoteSource: "live", quotedAt: "2026-10-01T14:09:30.000Z" } }, now)).toBeNull();
+    expect(findNonLiveSnapshotQuoteReason({ kind: "ladder", contract: { quoteSource: "live", quotedAt: "2026-10-01T14:09:20.000Z" } }, now)).toMatch(/contract's live quote is older than 15 seconds/);
+    expect(findNonLiveSnapshotQuoteReason({ kind: "ladder", contract: { quoteSource: "band", quotedAt: "2026-10-01T14:09:40.000Z" } }, now)).toMatch(/priced from a band quote/);
+    expect(findNonLiveSnapshotQuoteReason({ kind: "ladder" }, now)).toMatch(/no quote recorded/);
+  });
+
   it("rejects a snapshot with the quote missing and ignores a null or non-Signals one", () => {
     expect(findNonLiveSnapshotQuoteReason({ kind: "roll", replacement: { quoteSource: "live" } }, now)).toMatch(/no quote recorded/);
     expect(findNonLiveSnapshotQuoteReason(null, now)).toBeNull();

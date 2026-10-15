@@ -1,7 +1,7 @@
 import type { BaselineForwardAnchor } from "../backtest/engine/baselineSaleSteps.js";
-import { forwardAtSpot, impliedVolatilityFromPrice, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
+import { impliedVolatilityFromPrice, yearsBetweenIsoDates } from "../lib/impliedVolatilitySurface.js";
 import { daysToExpiry } from "../lib/optionContractLabel.js";
-import { yearsToSessionClose } from "../lib/quoteOwnDelta.js";
+import { forwardFromAnchor, yearsToSessionClose } from "../lib/quoteOwnDelta.js";
 import { contractKey } from "../lib/signalsLiveScoring.js";
 import type { LadderBandQuote } from "./ladderBandQuotes.js";
 import { isInLadderUniverse, ladderRequoteBand, selectLadderRequoteContracts, type LadderRequoteContract } from "./ladderRequoteBand.js";
@@ -51,17 +51,12 @@ function yearsToExpiryAt(expiry: string, at: Date, clock: LadderClock): number {
   return daysToExpiry(expiry, clock.todayIso) <= 0 ? yearsToSessionClose(at, clock.closeMinutesEt) : yearsBetweenIsoDates(clock.todayIso, expiry);
 }
 
-/** The expiry's forward at a stock price: Pluto's 10:00 anchor moved with the stock, else the price grown at the risk-free rate. */
-export function ladderForward(anchor: BaselineForwardAnchor | undefined, stockPrice: number, yearsToExpiry: number, riskFreeRate: number): number {
-  return anchor ? forwardAtSpot(anchor.forward, anchor.spotPrice, stockPrice) : stockPrice * Math.exp(riskFreeRate * yearsToExpiry);
-}
-
 /** A stored quote's own IV (its mid on the forward at the quote's stock price); null without a two-sided quote or a price. */
 export function bandQuoteOwnImpliedVolatility(quote: LadderBandQuote, anchors: ReadonlyMap<string, BaselineForwardAnchor>, clock: LadderClock): number | null {
   if (quote.bid === null || quote.ask === null || !(quote.bid > 0) || !(quote.ask > quote.bid) || quote.stockPrice === null || !(quote.stockPrice > 0)) return null;
   const years = yearsToExpiryAt(quote.expiry, quote.quotedAt, clock);
   if (!(years > 0)) return null;
-  const forward = ladderForward(anchors.get(quote.expiry), quote.stockPrice, years, clock.riskFreeRate);
+  const forward = forwardFromAnchor(anchors.get(quote.expiry), quote.stockPrice, years, clock.riskFreeRate);
   return impliedVolatilityFromPrice((quote.bid + quote.ask) / 2, forward, quote.strike, years, clock.riskFreeRate, quote.right === "C");
 }
 
@@ -128,7 +123,7 @@ export function planLadderBand(input: {
     todayIso: input.clock.todayIso,
     yearsToTodaysClose: yearsToSessionClose(input.now, input.clock.closeMinutesEt),
     riskFreeRate: input.clock.riskFreeRate,
-    forwardFor: (expiry, years) => ladderForward(input.anchors.get(expiry), input.stockPrice, years, input.clock.riskFreeRate),
+    forwardFor: (expiry, years) => forwardFromAnchor(input.anchors.get(expiry), input.stockPrice, years, input.clock.riskFreeRate),
   });
   return {
     contracts: toQuote.map(({ expiry, strike, right }) => ({ expiry, strike, right })),
