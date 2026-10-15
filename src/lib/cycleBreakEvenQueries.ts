@@ -1,6 +1,6 @@
 import { db } from "../db/connection.js";
 import { breakEvenForPosition, type OpenCycleSummary } from "./cycleBreakEven.js";
-import { assignmentDayCloseJoinSql, settlementCloseSelectSql, summarizeOpenCycleFromRows } from "./cycleInputRows.js";
+import { assignmentDayCloseJoinSql, settlementCloseSelectSql, summarizeOpenCycleFromRows, type OpenCycleSummaryRows } from "./cycleInputRows.js";
 
 export interface PositionBreakEven {
   breakEven: number | null;
@@ -32,6 +32,16 @@ export async function fetchBreakEvenByPositionId(tickerIds: string[]): Promise<M
 /** The open cycle of each ticker (absent when the ticker is flat), from every short option leg and stock fill of the ticker. */
 export async function fetchOpenCycleSummaryByTickerId(tickerIds: string[]): Promise<Map<string, OpenCycleSummary>> {
   const result = new Map<string, OpenCycleSummary>();
+  for (const [tickerId, rows] of await fetchOpenCycleSummaryRowsByTickerId(tickerIds)) {
+    const summary = summarizeOpenCycleFromRows(tickerId, rows);
+    if (summary) result.set(tickerId, summary);
+  }
+  return result;
+}
+
+/** The rows fetchOpenCycleSummaryByTickerId summarizes, per ticker: for a caller that adds rows of its own first (the live ladder's look book). */
+export async function fetchOpenCycleSummaryRowsByTickerId(tickerIds: string[]): Promise<Map<string, OpenCycleSummaryRows>> {
+  const result = new Map<string, OpenCycleSummaryRows>();
   const uniqueTickerIds = [...new Set(tickerIds)];
   if (uniqueTickerIds.length === 0) return result;
 
@@ -69,8 +79,11 @@ export async function fetchOpenCycleSummaryByTickerId(tickerIds: string[]): Prom
 
   const openStockSharesByTicker = new Map<string, number>(openStockRows.rows.map((row: any) => [row.tickerId, Number(row.shares)]));
   for (const tickerId of uniqueTickerIds) {
-    const summary = summarizeOpenCycleFromRows(tickerId, { optionRows: optionRows.rows, stockTradeRows: stockTradeRows.rows, openStockShares: openStockSharesByTicker.get(tickerId) ?? 0 });
-    if (summary) result.set(tickerId, summary);
+    result.set(tickerId, {
+      optionRows: optionRows.rows.filter((row: { tickerId: string }) => row.tickerId === tickerId),
+      stockTradeRows: stockTradeRows.rows.filter((row: { tickerId: string }) => row.tickerId === tickerId),
+      openStockShares: openStockSharesByTicker.get(tickerId) ?? 0,
+    });
   }
   return result;
 }

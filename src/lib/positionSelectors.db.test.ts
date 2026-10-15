@@ -17,6 +17,7 @@ const { dropIsolatedTestDatabase } = await import("./testSupport/isolatedTestSch
 const { fetchAvailableUncoveredShares, positionSelect } = await import("./positionQueries.js");
 const { computeCashLockedInCsps } = await import("./positionExposure.js");
 const { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalAtRisk, positionCapitalDeployed, positionRealizedPnl } = await import("./positionSelectors.js");
+const { loadOpenPositionFigures } = await import("../pluto/ladderLookSnapshot.js");
 const testDb: Knex = db;
 
 const firstTickerId: string = randomUUID();
@@ -310,5 +311,16 @@ describe("position figures: the SQL and its pure mirror", () => {
     const expectedLocked = 13_500 + 12_000 + 2_500 + 2_000;
     expect(await computeCashLockedInCsps()).toBeCloseTo(expectedLocked, 6);
     expect(cashLockedInCashSecuredPuts([...(await loadPositionFigures()).values()])).toBeCloseTo(expectedLocked, 6);
+  });
+
+  it("the live ladder's loader reads a ticker's open positions as the SQL figures them", async () => {
+    const loaded = await loadOpenPositionFigures(firstTickerId);
+    const sqlRows = (await testDb.raw(`${positionSelect} WHERE p.ticker_id = ? AND p.status = 'open'`, [firstTickerId])).rows;
+    expect(loaded).toHaveLength(sqlRows.length);
+    expect(availableUncoveredShares(loaded)).toBe(360);
+    // 45 × 300 + 40 × 300 + 25 × 100: the first ticker's open put positions.
+    expect(cashLockedInCashSecuredPuts(loaded)).toBeCloseTo(28_000, 6);
+    const sqlCapitalAtRisk = sqlRows.reduce((sum: number, row: { capitalAtRisk: string | null }) => sum + (numberOrNull(row.capitalAtRisk) ?? 0), 0);
+    expect(loaded.reduce((sum, position) => sum + (positionCapitalAtRisk(position) ?? 0), 0)).toBeCloseTo(sqlCapitalAtRisk, 6);
   });
 });
