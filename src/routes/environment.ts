@@ -10,6 +10,7 @@ import { daySignalsLoopLineHolder } from "../lib/daySignalsLoop.js";
 import { plutoLineHolder } from "../pluto/marketWatch.js";
 import { marketDataFeedRefusal } from "../ibkr/marketDataPool.js";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { loadFrozenTickers } from "../lib/tickerFreeze.js";
 
 // Feeds the top-bar environment badges (PAPER / LIVE / STAGING / DEV / TRADING BLOCKED).
 // GET /environment is public on purpose (the login page shows it too, so nobody signs into the
@@ -25,10 +26,11 @@ environmentRouter.get("/details", requireAuth, async (_request, response) => {
   const apiEnvironment = readAppEnvironment();
   // The Day Signals loop and Pluto hold their priority lines for the whole session (Marcelo 2026-09-24): that is
   // normal operation, not a restriction, so only the chain capture drives the banner.
-  const [workerRow, marketDataRestriction, tradingHalt] = await Promise.all([
+  const [workerRow, marketDataRestriction, tradingHalt, frozenTickers] = await Promise.all([
     db("worker_health").where({ process_name: "ibkr_gateway_worker" }).first(),
     loadMarketDataLineRestriction({ excludeHolders: [daySignalsLoopLineHolder, plutoLineHolder] }),
     fetchTradingHalt(),
+    loadFrozenTickers(),
   ]);
   const trading = classifyTradingStatus(workerRow, apiEnvironment, Date.now(), tradingHalt);
   response.json({
@@ -48,6 +50,9 @@ environmentRouter.get("/details", requireAuth, async (_request, response) => {
     marketDataLinesEnabled: ibkrMarketDataLinesEnabled(),
     // Non-null while IBKR refuses the live pool's data (10197; see marketDataPool.ts) — the top bar's "Live prices stopped" state.
     marketDataFeedRefusal: marketDataFeedRefusal(),
+    // Tickers nobody trades until a stock split's records are rewritten and they are unfrozen (tickerFreeze.ts) — the top
+    // bar's "frozen" pill and every screen's Frozen badge.
+    frozenTickers: frozenTickers.map((ticker) => ({ symbol: ticker.symbol, reason: ticker.reason, frozenAt: ticker.frozenAt.toISOString() })),
     worker: workerRow
       ? {
           gitSha: workerRow.git_sha ? String(workerRow.git_sha).slice(0, 7) : null,

@@ -17,6 +17,8 @@ const loadMarketDataLineRestrictionMock = vi.fn();
 vi.mock("../ibkr/marketDataLineBudget.js", () => ({ loadMarketDataLineRestriction: (...args: unknown[]) => loadMarketDataLineRestrictionMock(...args) }));
 const marketDataFeedRefusalMock = vi.fn();
 vi.mock("../ibkr/marketDataPool.js", () => ({ marketDataFeedRefusal: () => marketDataFeedRefusalMock() }));
+const loadFrozenTickersMock = vi.fn();
+vi.mock("../lib/tickerFreeze.js", () => ({ loadFrozenTickers: () => loadFrozenTickersMock() }));
 vi.mock("../lib/daySignalsLoop.js", () => ({ daySignalsLoopLineHolder: "daySignalsLoop" }));
 
 const { db } = await import("../db/connection.js");
@@ -60,6 +62,7 @@ beforeEach(async () => {
   process.env.IBKR_MARKET_DATA_LINES_ENABLED = "true";
   loadMarketDataLineRestrictionMock.mockReset().mockResolvedValue(null);
   marketDataFeedRefusalMock.mockReset().mockReturnValue(null);
+  loadFrozenTickersMock.mockReset().mockResolvedValue([]);
   await testDb("platform_controls").insert({ key: "trading_halt", enabled: false, reason: null, set_by_user_id: null }).onConflict("key").merge({ enabled: false, reason: null, set_by_user_id: null });
   await testDb("worker_health").where({ process_name: gatewayProcessName }).del();
 });
@@ -153,6 +156,7 @@ describe("GET /environment/details", () => {
       marketDataRestriction: null,
       marketDataLinesEnabled: true,
       marketDataFeedRefusal: null,
+      frozenTickers: [],
       worker: { gitSha: "0123456", accountId: "DU1111111", detectedTradingMode: "paper", bindingStatus: "ok", heartbeatAgeSeconds: expect.any(Number) },
     });
     expect(json.worker.heartbeatAgeSeconds).toBeLessThanOrEqual(5);
@@ -240,6 +244,11 @@ describe("GET /environment/details", () => {
     const refusal = { code: 10197, message: "No market data during competing live session", since: "2030-01-02T15:00:00.000Z" };
     marketDataFeedRefusalMock.mockReturnValue(refusal);
     expect((await call("/details")).json.marketDataFeedRefusal).toEqual(refusal);
+  });
+
+  it("lists the frozen tickers with why and since when", async () => {
+    loadFrozenTickersMock.mockResolvedValue([{ tickerId: "t1", symbol: "SMCI", reason: "2-for-1 stock split effective 2026-12-01", frozenAt: new Date("2026-12-01T09:00:00Z") }]);
+    expect((await call("/details")).json.frozenTickers).toEqual([{ symbol: "SMCI", reason: "2-for-1 stock split effective 2026-12-01", frozenAt: "2026-12-01T09:00:00.000Z" }]);
   });
 
   it.each([["true", true], ["false", false]])("reports market-data lines enabled=%s", async (value, expected) => {
