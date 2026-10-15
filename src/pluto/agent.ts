@@ -217,7 +217,7 @@ export class PlutoAgent {
 
   private async isAllowedToAct(): Promise<{ allowed: boolean; reason: string | null; window: TradingWindowClock }> {
     const window = await this.readTradingWindow();
-    const block = describePlutoBlock(await loadPlutoState());
+    const block = describePlutoBlock(await loadPlutoState(), this.settings?.executionStrategy);
     if (block) return { allowed: false, reason: block, window };
     return { allowed: true, reason: null, window };
   }

@@ -98,6 +98,13 @@ export interface PlutoSettings {
   ladderShockLookbackYears: number;
   /** At most this many of a ticker's ladder orders work at once; the rest go at the next looks. */
   ladderMaxWorkingOrdersPerTicker: number;
+  /** The ladder's SPY stress breaker (Edge Margin: spyStressBreakerPct); the daily-loss breaker is one value for both. */
+  ladderSpyStressBreakerPct: number;
+  /** Minutes after a filled ladder order on a ticker before the ladder may act on it again; 0 = no cooldown. */
+  ladderTickerCooldownMinutes: number;
+  ladderMaxOpenPositionsPerTicker: number;
+  /** Every ladder order sent on a ticker in a day counts, re-prices included. */
+  ladderMaxOrdersPerTickerPerDay: number;
   updatedAt: string;
   updatedByUserId: string | null;
 }
@@ -171,6 +178,10 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   ladderShockNoHistoryPct: { column: "ladder_shock_no_history_pct", kind: "number", min: 1, max: 99 },
   ladderShockLookbackYears: { column: "ladder_shock_lookback_years", kind: "integer", min: 1, max: 30 },
   ladderMaxWorkingOrdersPerTicker: { column: "ladder_max_working_orders_per_ticker", kind: "integer", min: 1, max: 100 },
+  ladderSpyStressBreakerPct: { column: "ladder_spy_stress_breaker_pct", kind: "number", min: 0, max: 100 },
+  ladderTickerCooldownMinutes: { column: "ladder_ticker_cooldown_minutes", kind: "integer", min: 0 },
+  ladderMaxOpenPositionsPerTicker: { column: "ladder_max_open_positions_per_ticker", kind: "integer", min: 1, max: 1000 },
+  ladderMaxOrdersPerTickerPerDay: { column: "ladder_max_orders_per_ticker_per_day", kind: "integer", min: 1, max: 1000 },
 };
 
 /** Settings only the CC + Put Ladder reads: changing them changes no Edge Margin decision, and the reverse. */

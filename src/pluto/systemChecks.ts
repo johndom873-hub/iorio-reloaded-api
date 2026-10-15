@@ -88,7 +88,7 @@ export async function runPlutoSystemChecks(settings: PlutoSettings, now: Date = 
   };
 
   const state = await loadPlutoState();
-  const stateBlock = describePlutoBlock(state);
+  const stateBlock = describePlutoBlock(state, settings.executionStrategy);
   record("pluto_state", stateBlock === null, stateBlock ?? "on, not paused, no breaker tripped");
 
   try {

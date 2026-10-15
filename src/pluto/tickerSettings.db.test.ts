@@ -145,7 +145,7 @@ describe("ladder settings reader", () => {
 });
 
 describe("strategy switch", () => {
-  it("is refused while Pluto runs, allowed while paused, and the reader then reports an enabled ladder ticker", async () => {
+  it("is refused while Pluto runs, allowed while paused; under the unbuilt ladder Pluto cannot resume or switch on", async () => {
     await testDb("pluto_state").where({ id: 1 }).update({ mode: "on", paused: false });
     const refused = await call("PUT", "/settings", { executionStrategy: "cc_put_ladder" });
     expect(refused.status).toBe(400);
@@ -157,7 +157,22 @@ describe("strategy switch", () => {
     expect(switched.json.executionStrategy).toBe("cc_put_ladder");
     expect((await call("GET", `/ladder-settings/${enabledSymbol}`)).json.enabled).toBe(true);
 
+    // The ladder is not built yet: Pluto may not resume or switch on under it, and its state says why.
+    const notBuilt = /CC \+ Put Ladder strategy is selected but not built yet/;
+    const resume = await call("POST", "/resume");
+    expect(resume.status).toBe(409);
+    expect(resume.json.error).toMatch(notBuilt);
+    expect((await testDb("pluto_state").where({ id: 1 }).first("paused")).paused).toBe(true);
+    await testDb("pluto_state").where({ id: 1 }).update({ mode: "off" });
+    const switchOn = await call("PUT", "/mode", { mode: "on" });
+    expect(switchOn.status).toBe(409);
+    expect(switchOn.json.error).toMatch(notBuilt);
+    expect((await testDb("pluto_state").where({ id: 1 }).first("mode")).mode).toBe("off");
+    expect((await call("GET", "/state")).json.blockReason).toMatch(notBuilt);
+
     expect((await call("PUT", "/settings", { executionStrategy: "edge_margin" })).status).toBe(200);
+    expect((await call("PUT", "/mode", { mode: "on" })).status).toBe(200);
+    expect((await call("GET", "/state")).json.blockReason).toMatch(/paused/);
     if (savedState) await testDb("pluto_state").where({ id: 1 }).update(savedState);
   });
 });

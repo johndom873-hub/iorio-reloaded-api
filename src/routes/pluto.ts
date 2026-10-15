@@ -60,7 +60,7 @@ plutoRouter.get("/state", async (_request: Request, response: Response) => {
   for (const order of workingOrders) workingOrdersBySymbol[order.symbol] = (workingOrdersBySymbol[order.symbol] ?? 0) + 1;
   response.json({
     ...state,
-    blockReason: describePlutoBlock(state),
+    blockReason: describePlutoBlock(state, settings.executionStrategy),
     modeChangedAt: lastModeChange ? new Date(lastModeChange.occurred_at).toISOString() : null,
     modeChangedBy: (lastModeChange?.payload as { by?: string } | undefined)?.by ?? null,
     orders: working,
@@ -112,7 +112,16 @@ plutoRouter.put("/mode", async (request: Request, response: Response) => {
     response.json(before);
     return;
   }
-  const state = await setPlutoMode(mode);
+  let state;
+  try {
+    state = await setPlutoMode(mode);
+  } catch (error) {
+    if (error instanceof PlutoStateError) {
+      response.status(409).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
   const who = await currentUserDisplayName(request);
   await recordPlutoEvent("mode_changed", { mode, by: who });
   await notifyPlutoTelegram(mode === "on" ? `🪐 Pluto switched ON by ${who}${state.paused ? " (still paused — press Resume to let it act)" : ""}.` : `🪐 Pluto switched OFF by ${who}.`);

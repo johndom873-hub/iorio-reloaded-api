@@ -18,4 +18,11 @@ describe("describePlutoBlock", () => {
     expect(describePlutoBlock({ ...base, paused: true, pauseReason: "manual", pausedByDisplayName: "Juan" })).toBe("Pluto is paused (manual by Juan).");
     expect(describePlutoBlock({ ...base, paused: true, pauseReason: "deploy" })).toBe("Pluto is paused (deploy).");
   });
+  it("a selected strategy that is not built outranks everything; Edge Margin adds no block", () => {
+    const notBuilt = "The CC + Put Ladder strategy is selected but not built yet: switch back to Edge Margin to let Pluto act.";
+    expect(describePlutoBlock(base, "cc_put_ladder")).toBe(notBuilt);
+    expect(describePlutoBlock({ ...base, mode: "off", paused: true }, "cc_put_ladder")).toBe(notBuilt);
+    expect(describePlutoBlock(base, "edge_margin")).toBeNull();
+    expect(describePlutoBlock({ ...base, paused: true, pauseReason: "deploy" }, "edge_margin")).toBe("Pluto is paused (deploy).");
+  });
 });
