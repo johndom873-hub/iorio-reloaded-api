@@ -30,8 +30,6 @@ export const ladderFixedBaselineChoices = {
   ladderShock: "history",
   ladderTop: "price",
   ladderPace: "any_look",
-  ladderMinutesBetweenRungs: 0,
-  ladderMaxRungsPerSession: 0,
   ladderPutVersusCall: "higher_yield",
   ladderPutYieldMarginPct: 0,
   dayValueOptions: "marked",

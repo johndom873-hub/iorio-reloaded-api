@@ -32,9 +32,6 @@ export interface LadderCycleState {
   accountValueAtStart: number;
   peakOnCycleScale: number;
   shock: number;
-  /** The ticker's last new rung and the rungs of its session, kept from one cycle to the next (ladderMinutesBetweenRungs, ladderMaxRungsPerSession). */
-  lastRungAtMs: number | null;
-  rungsInSession: { dateIso: string; count: number } | null;
 }
 
 export interface LadderBudget {
@@ -80,31 +77,13 @@ export function noteLadderLook(
   let bySymbol = stateByLedger.get(ledger);
   if (!bySymbol) stateByLedger.set(ledger, (bySymbol = new Map()));
   const kept = bySymbol.get(symbol);
-  const pace = { lastRungAtMs: kept?.lastRungAtMs ?? null, rungsInSession: kept?.rungsInSession ?? null };
   let state: LadderCycleState;
-  if (!look.cycleOpen) state = { startedOn: null, accountValueAtStart: look.accountValue, peakOnCycleScale: look.stockPriceOnCycleScale, shock: 0, ...pace };
+  if (!look.cycleOpen) state = { startedOn: null, accountValueAtStart: look.accountValue, peakOnCycleScale: look.stockPriceOnCycleScale, shock: 0 };
   else if (!kept || kept.startedOn === null)
-    state = { startedOn: look.todayIso, accountValueAtStart: kept?.accountValueAtStart ?? look.accountValue, peakOnCycleScale: look.stockPriceOnCycleScale, shock: ladderShock(settings, look.adjustedClosesBefore, look.todayIso), ...pace };
+    state = { startedOn: look.todayIso, accountValueAtStart: kept?.accountValueAtStart ?? look.accountValue, peakOnCycleScale: look.stockPriceOnCycleScale, shock: ladderShock(settings, look.adjustedClosesBefore, look.todayIso) };
   else state = { ...kept, peakOnCycleScale: Math.max(kept.peakOnCycleScale, look.stockPriceOnCycleScale) };
   bySymbol.set(symbol, state);
   return state;
-}
-
-/** Why the ladder may not start a new rung at this look (ladderMinutesBetweenRungs, ladderMaxRungsPerSession), or null when it may. */
-export function ladderRungPaceBlock(settings: Pick<BacktestBaselineSettings, "ladderMinutesBetweenRungs" | "ladderMaxRungsPerSession">, state: Pick<LadderCycleState, "lastRungAtMs" | "rungsInSession">, atMs: number, todayIso: string): string | null {
-  if (settings.ladderMinutesBetweenRungs > 0 && state.lastRungAtMs !== null) {
-    const minutesSince = (atMs - state.lastRungAtMs) / 60_000;
-    if (minutesSince < settings.ladderMinutesBetweenRungs) return `no new ladder rung: the last one was ${Math.round(minutesSince)} minutes ago, at most one every ${settings.ladderMinutesBetweenRungs} minutes`;
-  }
-  const rungsToday = state.rungsInSession?.dateIso === todayIso ? state.rungsInSession.count : 0;
-  if (settings.ladderMaxRungsPerSession > 0 && rungsToday >= settings.ladderMaxRungsPerSession) return `no new ladder rung: ${rungsToday} sold this session, at most ${settings.ladderMaxRungsPerSession}`;
-  return null;
-}
-
-/** Records a new rung (a look that sold at least one ladder put) for the pace rules. */
-export function noteLadderRungSold(state: LadderCycleState, atMs: number, todayIso: string): void {
-  state.lastRungAtMs = atMs;
-  state.rungsInSession = { dateIso: todayIso, count: (state.rungsInSession?.dateIso === todayIso ? state.rungsInSession.count : 0) + 1 };
 }
 
 /** The base the budget and the reserve are taken from: the ticker's weight × the larger of the account value at the cycle's start and today's (weight 1 when the session's tickers share one account). */

@@ -89,10 +89,6 @@ export interface BacktestBaselineSettings {
   ladderTop: "break_even" | "price";
   /** When a new rung may be sold: at any look with room, only while no ladder put is open, or never (the shares' budget alone). */
   ladderPace: "any_look" | "one_open" | "no_puts";
-  /** A new rung (a look that sells ladder puts) only this many minutes or more after the ticker's last one; 0 = any look. */
-  ladderMinutesBetweenRungs: number;
-  /** At most this many new rungs on a ticker in one session; 0 = no limit. */
-  ladderMaxRungsPerSession: number;
   /**
    * When the ladder sells a put while held shares are free: only when no call on them qualifies, or when its premium yield
    * beats the best call's by more than ladderPutYieldMarginPct% (relative: 25 = a quarter above the call's), the shares then
@@ -139,7 +135,7 @@ export interface BacktestBaselineSettings {
   coverage: "best_contract" | "fill_down_ranking";
 }
 
-export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderMinutesBetweenRungs: 0, ladderMaxRungsPerSession: 0, ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
+export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is

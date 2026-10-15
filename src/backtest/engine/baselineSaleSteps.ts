@@ -7,7 +7,7 @@ import { contractKey } from "../../lib/signalsLiveScoring.js";
 import type { ModelVolatilityForecast } from "../../lib/volatilityEdge.js";
 import type { ValuationGroup, VolatilityModelTables } from "../../lib/volatilityModelTables.js";
 import type { BacktestBaselineSettings, BacktestOrderShortfall } from "../backtestTypes.js";
-import { ladderBase, ladderBudget, ladderRungPaceBlock, ladderRungToday, ladderShareLots, noteLadderRungSold, type LadderCycleState } from "./backtestBaselineLadder.js";
+import { ladderBase, ladderBudget, ladderRungToday, ladderShareLots, type LadderCycleState } from "./backtestBaselineLadder.js";
 import { computeSaleFillPrice, sharesPerContract } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import type { CommissionEstimator, StockCommissionEstimator } from "../../lib/commissionEstimate.js";
@@ -442,8 +442,6 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     const breakEven = cycle?.breakEvenPerShare == null ? null : cycle.breakEvenPerShare / priceToCycleScale;
     const rung = ladderRungToday({ settings: baseline, state: ladderState, accountValueToday: book.accountValueToday(), tickerWeight: book.tickerWeight(), breakEven, stockPrice, heldSharesCost: heldSharesCostToday(), openPutCollateral: book.openPutCollateral(), priceToCycleScale });
     if (baseline.ladderPace === "one_open" && book.openPutCollateral() > 0) return { rung, blocked: `${symbol}: no new ladder put while one is open`, candidates: [] as BaselineCandidate[], rejections: null };
-    const paceBlock = ladderRungPaceBlock(baseline, ladderState, atMs, todayIso);
-    if (paceBlock !== null) return { rung, blocked: `${symbol}: ${paceBlock}`, candidates: [] as BaselineCandidate[], rejections: null };
     if (rung.cap === null) return { rung, blocked: `${symbol}: no ladder put (${rung.note})`, candidates: [] as BaselineCandidate[], rejections: null };
     const { candidates, rejections } = select("P", null, true, rung.cap, true);
     return { rung, blocked: null, candidates, rejections };
@@ -483,7 +481,6 @@ export function planBaselineSales(input: BaselineSalesInput): void {
       contractsSold += contracts;
     }
     noteOrderShortfall({ step: "ladder_put", right: "P", wanted, filled: contractsSold, unsold: contractsOfBest(collateralLeft), cashCut, anyCandidate: plan.candidates.length > 0, best });
-    if (putsSold > 0 && ladderState) noteLadderRungSold(ladderState, atMs, todayIso);
     if (putsSold === 0) notes.push(`${symbol}: no ladder put at or below ${cap.toFixed(2)} (${plan.candidates.length > 0 ? `${plan.candidates.length} within the rules, none fits the rung or the cash` : (plan.rejections && describeRejections(plan.rejections)) || "no quotes"}; ${plan.rung.note})`);
   };
   // With ladderPutVersusCall "higher_yield": the best ladder put that can be sold now against the best call on the free

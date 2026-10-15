@@ -279,8 +279,6 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     ],
   },
   { path: "baseline.ladderPutYieldMarginPct", group: "Baseline wheel", label: "Ladder: put yield above the call's by more than", unit: "percent", editable: true, note: "relative: 25 = a quarter above the call's yield; 0 = any higher" },
-  { path: "baseline.ladderMinutesBetweenRungs", group: "Baseline wheel", label: "Ladder: minutes between new rungs, at least", unit: "integer", editable: true, note: "from the ticker's last rung; 0 = any look (looks are 30 minutes apart)" },
-  { path: "baseline.ladderMaxRungsPerSession", group: "Baseline wheel", label: "Ladder: new rungs per session, at most", unit: "integer", editable: true, note: "per ticker; 0 = no limit" },
   {
     path: "baseline.dayValueOptions",
     group: "Baseline wheel",

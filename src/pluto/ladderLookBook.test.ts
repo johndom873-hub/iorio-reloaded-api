@@ -116,7 +116,7 @@ describe("the shared sale steps on the live book", () => {
     noteBaselineForwardAnchors(forwardAnchors, { quotes, todayIso, yearsToTodaysClose: 1 / 8760, stockPrice: 50, riskFreeRate });
     const select = makeBaselineSelector({ quotes, forwardAnchors, commissions, todayIso, yearsToTodaysClose: 1 / 8760, stockPrice: 50, riskFreeRate, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), baseline, spreadShareCharged: 0.5, isHeld: book.isHeld, earningsDatesIso: undefined, model: null });
     const notes: string[] = [];
-    const ladderState = { startedOn: memory.startedOn, accountValueAtStart: memory.accountValueAtStart, peakOnCycleScale: memory.peakPrice ?? 50, shock: memory.shock ?? 0, lastRungAtMs: null, rungsInSession: null };
+    const ladderState = { startedOn: memory.startedOn, accountValueAtStart: memory.accountValueAtStart, peakOnCycleScale: memory.peakPrice ?? 50, shock: memory.shock ?? 0 };
     planBaselineSales({ symbol: "LADR", commissions, todayIso, atMs: at.getTime(), stockPrice: 50, priceToCycleScale: 1, baseline, select, book, ladderState, notes });
     // The pot: 25% of the $200,000 account = $50,000; half of it for shares = $25,000 = 5 lots at $50.
     expect(planned.length).toBeGreaterThan(0);

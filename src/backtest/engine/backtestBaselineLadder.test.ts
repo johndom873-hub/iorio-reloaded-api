@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultBacktestBaselineSettings } from "../backtestTypes.js";
-import { deepestFallFromPeak, ladderBase, ladderBudget, ladderCommitted, ladderRungCollateral, ladderRungPaceBlock, ladderRungToday, ladderShareLots, ladderShock, ladderStrikeCap, noteLadderLook, noteLadderRungSold } from "./backtestBaselineLadder.js";
+import { deepestFallFromPeak, ladderBase, ladderBudget, ladderCommitted, ladderRungCollateral, ladderRungToday, ladderShareLots, ladderShock, ladderStrikeCap, noteLadderLook } from "./backtestBaselineLadder.js";
 import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
 
 const settings = { ...defaultBacktestBaselineSettings, putsWhenNoCall: "reserve_ladder" as const };
@@ -95,53 +95,18 @@ describe("the ladder's cycle state", () => {
     const ledger = {} as SimulatedLedger;
     expect(noteLadderLook(ledger, "SMCI", look({}), settings).startedOn).toBeNull();
     const started = noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-13", accountValue: 199_000, stockPriceOnCycleScale: 118 }), settings);
-    expect(started).toEqual({ startedOn: "2024-03-13", accountValueAtStart: 200_000, peakOnCycleScale: 118, shock: 0.9, lastRungAtMs: null, rungsInSession: null });
+    expect(started).toEqual({ startedOn: "2024-03-13", accountValueAtStart: 200_000, peakOnCycleScale: 118, shock: 0.9 });
     expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-14", stockPriceOnCycleScale: 100 }), settings).peakOnCycleScale).toBe(118);
     expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-15", stockPriceOnCycleScale: 125 }), settings).peakOnCycleScale).toBe(125);
     expect(noteLadderLook(ledger, "SMCI", look({ todayIso: "2024-09-01", accountValue: 150_000 }), settings)).toMatchObject({ startedOn: null, accountValueAtStart: 150_000 });
   });
 
   it("reports today's rung from the state", () => {
-    const state = { startedOn: "2024-01-02", accountValueAtStart: 200_000, peakOnCycleScale: 110, shock: 0.7, lastRungAtMs: null, rungsInSession: null };
+    const state = { startedOn: "2024-01-02", accountValueAtStart: 200_000, peakOnCycleScale: 110, shock: 0.7 };
     const rung = ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, priceToCycleScale: 1 });
     expect(rung.cap).toBeCloseTo(86.6, 6);
     expect(rung.collateral).toBe(20_000);
     // From today's price: 80 − (80 − 33) × 0.2 = 70.60.
     expect(ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "price" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, priceToCycleScale: 1 }).cap).toBeCloseTo(70.6, 6);
-  });
-});
-
-describe("the ladder's rung pace", () => {
-  const at = (dateIso: string, timeUtc: string) => Date.parse(`${dateIso}T${timeUtc}:00Z`);
-  const fresh = () => ({ startedOn: "2024-03-13", accountValueAtStart: 200_000, peakOnCycleScale: 110, shock: 0.7, lastRungAtMs: null, rungsInSession: null });
-
-  it("at most one new rung every 60 minutes: a rung at 10:00 ET blocks 10:30 and allows 11:00", () => {
-    const pace = { ladderMinutesBetweenRungs: 60, ladderMaxRungsPerSession: 0 };
-    const state = fresh();
-    expect(ladderRungPaceBlock(pace, state, at("2024-03-13", "14:00"), "2024-03-13")).toBeNull();
-    noteLadderRungSold(state, at("2024-03-13", "14:00"), "2024-03-13");
-    expect(ladderRungPaceBlock(pace, state, at("2024-03-13", "14:30"), "2024-03-13")).toBe("no new ladder rung: the last one was 30 minutes ago, at most one every 60 minutes");
-    expect(ladderRungPaceBlock(pace, state, at("2024-03-13", "15:00"), "2024-03-13")).toBeNull();
-  });
-
-  it("at most 2 new rungs a session, counted again the next session; 0 for both rules is any look", () => {
-    const pace = { ladderMinutesBetweenRungs: 0, ladderMaxRungsPerSession: 2 };
-    const state = fresh();
-    noteLadderRungSold(state, at("2024-03-13", "14:00"), "2024-03-13");
-    expect(ladderRungPaceBlock(pace, state, at("2024-03-13", "14:30"), "2024-03-13")).toBeNull();
-    noteLadderRungSold(state, at("2024-03-13", "14:30"), "2024-03-13");
-    expect(ladderRungPaceBlock(pace, state, at("2024-03-13", "15:00"), "2024-03-13")).toBe("no new ladder rung: 2 sold this session, at most 2");
-    expect(ladderRungPaceBlock(pace, state, at("2024-03-14", "14:00"), "2024-03-14")).toBeNull();
-    noteLadderRungSold(state, at("2024-03-14", "14:00"), "2024-03-14");
-    expect(state.rungsInSession).toEqual({ dateIso: "2024-03-14", count: 1 });
-    expect(ladderRungPaceBlock({ ladderMinutesBetweenRungs: 0, ladderMaxRungsPerSession: 0 }, state, at("2024-03-14", "14:00"), "2024-03-14")).toBeNull();
-  });
-
-  it("keeps the ticker's last rung when its cycle ends and a new one starts", () => {
-    const ledger = {} as SimulatedLedger;
-    const look = { cycleOpen: true, todayIso: "2024-03-13", accountValue: 200_000, stockPriceOnCycleScale: 110, adjustedClosesBefore: [] };
-    noteLadderRungSold(noteLadderLook(ledger, "SMCI", look, settings), at("2024-03-13", "14:00"), "2024-03-13");
-    expect(noteLadderLook(ledger, "SMCI", { ...look, cycleOpen: false }, settings)).toMatchObject({ startedOn: null, lastRungAtMs: at("2024-03-13", "14:00"), rungsInSession: { dateIso: "2024-03-13", count: 1 } });
-    expect(noteLadderLook(ledger, "SMCI", look, settings)).toMatchObject({ startedOn: "2024-03-13", lastRungAtMs: at("2024-03-13", "14:00") });
   });
 });

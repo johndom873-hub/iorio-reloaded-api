@@ -222,8 +222,6 @@ function validateLadderSettings(values: Record<string, unknown>): string | null 
   if (!isWholeNumberIn(values.ladderShockLookbackYears, 1, 30)) return "baseline.ladderShockLookbackYears must be a whole number of years from 1 to 30.";
   if (values.ladderTop !== "break_even" && values.ladderTop !== "price") return "baseline.ladderTop must be break_even or price.";
   if (values.ladderPace !== "any_look" && values.ladderPace !== "one_open" && values.ladderPace !== "no_puts") return "baseline.ladderPace must be any_look, one_open or no_puts.";
-  if (!isWholeNumberIn(values.ladderMinutesBetweenRungs, 0, 10_080)) return "baseline.ladderMinutesBetweenRungs must be a whole number of minutes from 0 to 10,080 (a week).";
-  if (!isWholeNumberIn(values.ladderMaxRungsPerSession, 0, 100)) return "baseline.ladderMaxRungsPerSession must be a whole number from 0 to 100.";
   if (values.ladderPutVersusCall !== "call_first" && values.ladderPutVersusCall !== "higher_yield") return "baseline.ladderPutVersusCall must be call_first or higher_yield.";
   if (!isNumberIn(values.ladderPutYieldMarginPct, 0, 1000)) return "baseline.ladderPutYieldMarginPct must be a number from 0 to 1000.";
   return null;

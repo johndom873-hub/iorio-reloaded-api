@@ -537,8 +537,5 @@ describe("validateBaselineSettings", () => {
     expect(validateBaselineSettings({ ...valid, dayValueOptions: "never" })).toMatch(/dayValueOptions/);
     const ladder = { ...defaultBacktestBaselineSettings, entry: "buy_write", putsWhenNoCall: "reserve_ladder" };
     expect(validateBaselineSettings(ladder)).toBeNull();
-    expect(validateBaselineSettings({ ...ladder, ladderMinutesBetweenRungs: 60, ladderMaxRungsPerSession: 2 })).toBeNull();
-    expect(validateBaselineSettings({ ...ladder, ladderMinutesBetweenRungs: 45.5 })).toMatch(/ladderMinutesBetweenRungs/);
-    expect(validateBaselineSettings({ ...ladder, ladderMaxRungsPerSession: -1 })).toMatch(/ladderMaxRungsPerSession/);
   });
 });
