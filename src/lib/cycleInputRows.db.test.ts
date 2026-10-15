@@ -148,3 +148,65 @@ describe("the cycle loaders and the exported row mapping", () => {
     expect(summaries.get(otherTickerId)).toEqual(summarizeOpenCycleFromRows(otherTickerId, { optionRows: shortRows, stockTradeRows, openStockShares: 0 }));
   });
 });
+
+// An early assignment (Marcelo 2026-10-15): a $40 put expiring 17 April assigned on the night of 23 March (reconciliation
+// closes the leg at 22:00 ET with no closing trade and marks the position assigned; IBKR's stock buy at the strike lands
+// 40 s earlier). It settles on 23 March's close, $37: the 24 March bar is after the leg closed, and 17 April has no bar.
+describe("an option assigned before its expiry date", () => {
+  const earlyTickerId: string = randomUUID();
+  const putPositionId: string = randomUUID();
+  const sharesPositionId: string = randomUUID();
+  const putLegId: string = randomUUID();
+  const sharesLegId: string = randomUUID();
+  const assignedNight = at("2026-03-24T02:00:00Z");
+
+  beforeAll(async () => {
+    await testDb("tickers").insert({ id: earlyTickerId, symbol: "EAR", company_name: "Early Assignment Co", sector: "Technology" });
+    await testDb("positions").insert([
+      { id: putPositionId, strategy_key: "cash_secured_put", ticker_id: earlyTickerId, status: "closed", opened_at: putOpenedAt, closed_at: assignedNight, close_reason: "assigned" },
+      { id: sharesPositionId, strategy_key: "unstructured", ticker_id: earlyTickerId, status: "open", opened_at: assignedNight, unstructured_reason: "csp_assigned_stock" },
+    ]);
+    await testDb("position_legs").insert([
+      { id: putLegId, position_id: putPositionId, leg_type: "option", side: "short", quantity: 1, option_type: "put", strike_price: 40, expiry_date: "2026-04-17", multiplier: 100, entry_price: 1.2, entry_at: putOpenedAt, exit_price: null, exit_at: assignedNight },
+      { id: sharesLegId, position_id: sharesPositionId, leg_type: "stock", side: "long", quantity: 100, multiplier: 1, entry_price: 38.8, entry_at: assignedNight, exit_price: null, exit_at: null },
+    ]);
+    await testDb("trades").insert([
+      { position_leg_id: putLegId, side: "sell", quantity: 1, price: 1.2, commission: 0.68, executed_at: putOpenedAt, is_closing_trade: false },
+      { position_leg_id: sharesLegId, side: "buy", quantity: 100, price: 40, commission: 0, executed_at: at("2026-03-24T01:59:20Z"), is_closing_trade: false },
+    ]);
+    await testDb("daily_price_bars").insert([
+      { ticker_id: earlyTickerId, trading_date: "2026-03-23", close_price: 37 },
+      { ticker_id: earlyTickerId, trading_date: "2026-03-24", close_price: 38 },
+    ]);
+  });
+
+  it("settles as assigned on the assignment day's close, not waiting for an expiry-date bar", async () => {
+    const [loaded] = await loadCycleInputsForTickers([earlyTickerId]);
+    const putLeg = loaded!.input.optionLegs.find((leg) => leg.id === putLegId)!;
+    expect(putLeg).toMatchObject({ settledAs: "assigned", expiryClose: 37 });
+    expect(putLeg).not.toHaveProperty("assignedBeforeExpiry");
+
+    const [cycles] = (await fetchCyclesForTickers([earlyTickerId])).map((entry) => entry.cycles);
+    expect(cycles![0]!.dataFlags).toEqual([]);
+    expect(cycles![0]!.sharesHeld).toBe(100);
+    expect(cycles![0]!.timeline.find((row) => row.label.startsWith("Put assigned"))).toMatchObject({ strike: 40, stockPrice: 37, quantity: 100 });
+  });
+
+  it("gives the cycle a break-even, from IBKR's stock buy at the strike counted once", async () => {
+    const summary = (await fetchOpenCycleSummaryByTickerId([earlyTickerId])).get(earlyTickerId)!;
+    // 100 shares at $40 less the $120 premium: (4,000 − 120) ÷ 100.
+    expect(summary).toMatchObject({ sharesHeld: 100, sharesAcquired: 100, unavailableReason: null });
+    expect(summary.breakEvenPerShare).toBeCloseTo(38.8, 8);
+  });
+
+  it("still refuses a leg that vanished before its expiry without being marked assigned", async () => {
+    await testDb("positions").where({ id: putPositionId }).update({ close_reason: "expired" });
+    try {
+      const summary = (await fetchOpenCycleSummaryByTickerId([earlyTickerId])).get(earlyTickerId)!;
+      expect(summary.breakEvenPerShare).toBeNull();
+      expect(summary.unavailableReason).toMatch(/no expiry-date price bar/);
+    } finally {
+      await testDb("positions").where({ id: putPositionId }).update({ close_reason: "assigned" });
+    }
+  });
+});

@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { buildCycleInputFromRows, type CycleInputRows } from "./cycleInputRows.js";
+import { assignmentDayCloseJoinSql, buildCycleInputFromRows, settlementCloseSelectSql, type CycleInputRows } from "./cycleInputRows.js";
 import { deriveCycles, type Cycle, type CycleInput } from "./cycles.js";
 
 export interface SymbolCycles {
@@ -40,9 +40,10 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
               pl.exit_price::float AS "exitPrice", pl.exit_at AS "exitAt", pl.expiry_date::text AS "expiryDate",
               COALESCE((SELECT SUM(tr.commission) FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade), 0)::float AS "closingCommission",
               EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade) AS "hasClosingTrade",
-              b.close_price::float AS "expiryClose"
+              ${settlementCloseSelectSql}
        FROM position_legs pl JOIN positions p ON p.id = pl.position_id
        LEFT JOIN daily_price_bars b ON b.ticker_id = p.ticker_id AND b.trading_date = pl.expiry_date
+       ${assignmentDayCloseJoinSql}
        WHERE pl.leg_type = 'option' ${filter}`,
       params,
     ),

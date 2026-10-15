@@ -29,7 +29,26 @@ export interface CycleOptionLegRow {
   positionCloseReason?: string | null;
   /** Never selected from the database; a simulated ledger states how each leg settled. */
   settledAs?: OptionSettlementOutcome;
+  /** IBKR assigned the leg before its expiry date (assignedBeforeExpirySql): it settles as assigned, on that day's close. */
+  assignedBeforeExpiry?: boolean;
 }
+
+// An early assignment settles the cycle on the assignment date (Marcelo 2026-10-15): a short leg that left before its
+// expiry date with no closing trade, on a position reconciliation marked assigned, is assigned then, priced at the close
+// of the last session that ended before the leg closed, not at its expiry date's close (no bar exists until then, which
+// left the break-even blank for up to 45 days). The loaders' SQL, with pl = position_legs and p = positions:
+export const assignedBeforeExpirySql = `(p.close_reason = 'assigned' AND pl.side = 'short' AND pl.exit_at IS NOT NULL
+  AND (pl.exit_at AT TIME ZONE 'America/New_York')::date < pl.expiry_date
+  AND NOT EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade))`;
+/** Joins `settlement_bar`: the close of the last session that ended before an early-assigned leg closed (none otherwise). */
+export const assignmentDayCloseJoinSql = `LEFT JOIN LATERAL (
+  SELECT ab.close_price FROM daily_price_bars ab
+  WHERE ${assignedBeforeExpirySql} AND ab.ticker_id = p.ticker_id
+    AND ab.trading_date <= (pl.exit_at AT TIME ZONE 'America/New_York')::date
+    AND ((ab.trading_date + time '16:00') AT TIME ZONE 'America/New_York') <= pl.exit_at
+  ORDER BY ab.trading_date DESC LIMIT 1) settlement_bar ON true`;
+/** The settlement close the cycle engines read as expiryClose, and the early-assignment flag. */
+export const settlementCloseSelectSql = `(CASE WHEN ${assignedBeforeExpirySql} THEN settlement_bar.close_price ELSE b.close_price END)::float AS "expiryClose", ${assignedBeforeExpirySql} AS "assignedBeforeExpiry"`;
 
 export interface CycleStockLegRow {
   tickerId: string;
@@ -68,7 +87,9 @@ export interface CycleInputRows {
 }
 
 function optionLegsOfTicker<Row extends CycleOptionLegRow>(rows: readonly Row[], tickerId: string) {
-  return rows.filter((row) => row.tickerId === tickerId).map((row) => ({ ...row, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
+  return rows
+    .filter((row) => row.tickerId === tickerId)
+    .map(({ assignedBeforeExpiry, ...row }) => ({ ...row, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt), ...(assignedBeforeExpiry && row.settledAs === undefined ? { settledAs: "assigned" as const } : {}) }));
 }
 
 function stockTradesOfTicker(rows: readonly CycleStockTradeRow[], tickerId: string): CycleStockTrade[] {
