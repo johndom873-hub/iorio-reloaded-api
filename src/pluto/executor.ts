@@ -53,7 +53,21 @@ export interface ExecuteRollInput {
   scoresSnapshot: unknown;
 }
 
-export type ExecuteInput = ExecuteOpenInput | ExecuteRollInput;
+/** A CC + Put Ladder sale (ladderOrders.ts): no Signals candidate, its own contract record and the shares it buys. */
+export interface ExecuteLadderOpenInput {
+  kind: "ladder_open";
+  actionId: string;
+  symbol: string;
+  strategyKey: "cash_secured_put" | "covered_call";
+  contract: { expiry: string; strike: number; right: "C" | "P"; dte: number };
+  plan: PlutoOrderPlan;
+  /** A Covered Call entry buying every share its calls cover, uncovered shares held or not (the route's buyEveryShare). */
+  buyEveryShare: boolean;
+  reasons: string[];
+  scoresSnapshot: unknown;
+}
+
+export type ExecuteInput = ExecuteOpenInput | ExecuteRollInput | ExecuteLadderOpenInput;
 
 export interface ExecuteResult {
   outcome: PlutoActionOutcome;
@@ -89,6 +103,7 @@ function isoToIbkrExpiry(expiryIso: string): string {
 /** "SMCI Sell $46 Call · 9 Oct (2DTE) · 11× @ 0.39"; "MU Roll $105 Put · 10 Oct → $100 Put · 17 Oct (9DTE) · 2× @ 0.40". */
 export function describeOrder(input: ExecuteInput): string {
   const size = describeOrderSize(input.plan.quantity, input.plan.limitPrice);
+  if (input.kind === "ladder_open") return `${input.symbol} Sell ${describeOptionContract(input.contract)}${size}`;
   if (input.kind === "open") {
     const { candidate } = input;
     return `${input.symbol} Sell ${describeOptionContract({ strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", expiry: candidate.expiry, dte: candidate.dte })}${size}`;
@@ -104,7 +119,16 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
   const description = describeOrder(input);
   let built: OrderRequestResponse;
   try {
-    if (input.kind === "open") {
+    if (input.kind === "ladder_open") {
+      built = await api.post<OrderRequestResponse>("/positions/orders", {
+        symbol: input.symbol,
+        strategyKey: input.strategyKey,
+        option: { quantity: input.plan.quantity, limitPrice: input.plan.limitPrice, strikePrice: input.contract.strike, expiryDate: isoToIbkrExpiry(input.contract.expiry) },
+        ...(input.buyEveryShare ? { buyEveryShare: true } : {}),
+        signalSnapshot: input.scoresSnapshot,
+        plutoActionId: input.actionId,
+      });
+    } else if (input.kind === "open") {
       built = await api.post<OrderRequestResponse>("/positions/orders", {
         symbol: input.symbol,
         strategyKey: input.candidate.strategyKey,
@@ -131,7 +155,7 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
 
   // A Covered Call entry's shares are priced by the route at the live price; a roll's buyback at the held leg's ask.
   const otherReferenceLegs: PlutoReferenceLeg[] =
-    input.kind === "open"
+    input.kind === "open" || input.kind === "ladder_open"
       ? (built.payload?.legs ?? []).filter((leg) => leg.role === "stock").map((leg) => ({ side: leg.action === "SELL" ? ("sell" as const) : ("buy" as const), price: Number(leg.unitPrice), multiplier: 1 }))
       : [{ side: "buy", price: input.heldLeg.ask!, multiplier: 100 }]; // a roll without a two-sided held quote was blocked above
   await updatePlutoAction(input.actionId, { outcome: "order_built", orderRequestId: built.id, referenceOtherLegs: otherReferenceLegs.length > 0 ? otherReferenceLegs : null });
