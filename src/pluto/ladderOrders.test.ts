@@ -56,6 +56,7 @@ describe("sendLadderSales", () => {
       watched,
       burst: async (_symbol, contracts) => contracts.map((contract) => ({ ...contract, ...quotes[contract.strike]! })),
       recordAction: async (input) => (recorded.push(input), `action-${recorded.length}`),
+      recordEvent: async () => {},
       execute: vi.fn(async (input) => (executed.push(input), { outcome: "confirmed" as const, orderId: `order-${executed.length}`, detail: "LADR Sell" })),
       watch: (input) => void watched.push(input),
       now: () => now,
@@ -65,7 +66,7 @@ describe("sendLadderSales", () => {
   it("sends a sale whose live quote is inside the ladder's range at the live mid, with the ladder snapshot, and watches it", async () => {
     const quote = liveQuote(45, "P");
     const deps = dependencies({ 45: quote });
-    const [outcome] = await sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales: [sale(45)], gateContext: context, stockPrice: 50, todayIso }, deps);
+    const [outcome] = await sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales: [sale(45)], gateContext: context, forwardAnchors: new Map(), stockPrice: 50, todayIso }, deps);
     expect(outcome).toMatchObject({ actionId: "action-1", outcome: "confirmed" });
     expect(deps.recorded[0]).toMatchObject({ kind: "open_cash_secured_put", outcome: "validated", quantity: 2, limitPrice: Math.round(((quote.bid + quote.ask) / 2) * 100) / 100 });
     expect(deps.executed[0]).toMatchObject({ kind: "ladder_open", strategyKey: "cash_secured_put", buyEveryShare: false, contract: { expiry, strike: 45, right: "P", dte: 31 }, scoresSnapshot: { kind: "ladder", contract: { bid: quote.bid, ask: quote.ask, quoteSource: "live", quotedAt: quote.quotedAt } } });
@@ -74,13 +75,13 @@ describe("sendLadderSales", () => {
 
   it("a Covered Call entry buying every share asks the route to buy them all", async () => {
     const deps = dependencies({ 55: liveQuote(55, "C") });
-    await sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales: [sale(55, { strategyKey: "covered_call", right: "C", sharesBought: 200 })], gateContext: context, stockPrice: 50, todayIso }, deps);
+    await sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales: [sale(55, { strategyKey: "covered_call", right: "C", sharesBought: 200 })], gateContext: context, forwardAnchors: new Map(), stockPrice: 50, todayIso }, deps);
     expect(deps.executed[0]).toMatchObject({ kind: "ladder_open", strategyKey: "covered_call", buyEveryShare: true });
   });
 
   it("records a blocked action and sends nothing when the live quote left the range or is missing", async () => {
     const deps = dependencies({ 50: liveQuote(50, "P"), 44: { bid: null, ask: null } });
-    const outcomes = await sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales: [sale(50), sale(44)], gateContext: context, stockPrice: 50, todayIso }, deps);
+    const outcomes = await sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales: [sale(50), sale(44)], gateContext: context, forwardAnchors: new Map(), stockPrice: 50, todayIso }, deps);
     expect(outcomes.map((entry) => entry.outcome)).toEqual(["blocked", "blocked"]);
     expect(outcomes[0]!.detail).toMatch(/above the ladder's 0.05–0.3 delta range/);
     expect(outcomes[1]!.detail).toBe("no live two-sided quote");

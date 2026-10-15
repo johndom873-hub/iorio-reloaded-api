@@ -55,6 +55,8 @@ export function admitLadderSales(planned: readonly PlannedLadderSale[], counts: 
 export interface LadderOrderDependencies {
   burst(symbol: string, contracts: { expiry: string; strike: number; right: "C" | "P" }[]): Promise<LiveOptionQuote[]>;
   recordAction(input: RecordPlutoActionInput): Promise<string>;
+  /** Pluto's event log: a sale validated before it is sent, or blocked by the ladder's own check (the executor logs the rest). */
+  recordEvent(type: "action_validated" | "action_blocked", detail: Record<string, unknown>): Promise<void>;
   execute(input: ExecuteLadderOpenInput): Promise<ExecuteResult>;
   /** Watches a confirmed order to its end (the agent keeps the watch alive after the pass). */
   watch(input: { actionId: string; orderId: string; symbol: string; limitPrice: number; quantity: number; description: string; otherReferenceLegs: ExecuteResult["otherReferenceLegs"] }): void;
@@ -69,18 +71,22 @@ export interface LadderSaleOutcome {
 }
 
 /** Sends the admitted sales one by one: live quote, the ladder's delta range on it, the mid as the limit, then the order. */
-export async function sendLadderSales(input: { passId: string; symbol: string; tickerId: string; sales: readonly PlannedLadderSale[]; gateContext: LadderOrderGateContext; stockPrice: number; todayIso: string }, dependencies: LadderOrderDependencies): Promise<LadderSaleOutcome[]> {
+export async function sendLadderSales(
+  input: { passId: string; symbol: string; tickerId: string; sales: readonly PlannedLadderSale[]; gateContext: Omit<LadderOrderGateContext, "forwardAnchor">; forwardAnchors: ReadonlyMap<string, { forward: number; spotPrice: number }>; stockPrice: number; todayIso: string },
+  dependencies: LadderOrderDependencies,
+): Promise<LadderSaleOutcome[]> {
   const outcomes: LadderSaleOutcome[] = [];
   for (const sale of input.sales) {
+    const gateContext: LadderOrderGateContext = { ...input.gateContext, forwardAnchor: input.forwardAnchors.get(sale.expiry) ?? null };
     const contract = { expiry: sale.expiry, strike: sale.strike, right: sale.right };
     const [live] = await dependencies.burst(input.symbol, [contract]);
     const twoSided = live && live.bid !== null && live.ask !== null && live.bid > 0 && live.ask > live.bid ? { bid: live.bid, ask: live.ask } : null;
-    const verdict = twoSided ? ladderDeltaVerdict({ ...twoSided, stockPrice: input.stockPrice, strike: sale.strike, expiryIso: sale.expiry, isCall: sale.right === "C", now: dependencies.now(), context: input.gateContext }) : null;
+    const verdict = twoSided ? ladderDeltaVerdict({ ...twoSided, stockPrice: input.stockPrice, strike: sale.strike, expiryIso: sale.expiry, isCall: sale.right === "C", now: dependencies.now(), context: gateContext }) : null;
     const limitPrice = twoSided ? midLimitPrice(twoSided.bid, twoSided.ask) : null;
     const gateResults: PlutoGateResult[] = [
       { gate: "ladder", ok: true, detail: sale.chosenBecause },
       { gate: "live_quote", ok: twoSided !== null, detail: twoSided ? `bid ${twoSided.bid.toFixed(2)}, ask ${twoSided.ask.toFixed(2)}` : "no live two-sided quote" },
-      ...(verdict ? [{ gate: "ladder_delta", ok: verdict.compliant, detail: verdict.reason ?? `own |delta| ${Math.abs(verdict.delta!).toFixed(3)} inside ${input.gateContext.minAbsDelta}–${input.gateContext.maxAbsDelta}` }] : []),
+      ...(verdict ? [{ gate: "ladder_delta", ok: verdict.compliant, detail: verdict.reason ?? `own |delta| ${Math.abs(verdict.delta!).toFixed(3)} inside ${gateContext.minAbsDelta}–${gateContext.maxAbsDelta}` }] : []),
     ];
     const ok = twoSided !== null && verdict?.compliant === true && limitPrice !== null;
     const dte = daysToExpiry(sale.expiry, input.todayIso);
@@ -102,9 +108,12 @@ export async function sendLadderSales(input: { passId: string; symbol: string; t
       referenceMid: twoSided ? (twoSided.bid + twoSided.ask) / 2 : null,
     });
     if (!ok) {
-      outcomes.push({ sale, actionId, outcome: "blocked", detail: gateResults.filter((gate) => !gate.ok).map((gate) => gate.detail).join("; ") });
+      const detail = gateResults.filter((gate) => !gate.ok).map((gate) => gate.detail).join("; ");
+      await dependencies.recordEvent("action_blocked", { passId: input.passId, actionId, symbol: input.symbol, stage: "ladder", reason: detail });
+      outcomes.push({ sale, actionId, outcome: "blocked", detail });
       continue;
     }
+    await dependencies.recordEvent("action_validated", { passId: input.passId, actionId, symbol: input.symbol, quantity: sale.contracts, limitPrice, reasons: [sale.chosenBecause] });
     const plan = { quantity: sale.contracts, limitPrice: limitPrice!, notional: sale.strategyKey === "cash_secured_put" ? (sale.strike - limitPrice!) * 100 * sale.contracts : sale.sharesBought * Math.max(0, input.stockPrice - limitPrice!), fullSizeQuantity: sale.contracts };
     const quotedAt = live!.quotedAt ?? dependencies.now().toISOString();
     const result = await dependencies.execute({
