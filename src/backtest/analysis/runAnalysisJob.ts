@@ -75,7 +75,7 @@ async function runAnalysisBacktest(symbol: string, labValues: AnalysisLabValues,
     await control.reportProgress(Number(row.progress_done), Number(row.progress_total), "backtest" satisfies AnalysisStep);
     await waitOrCancel(backtestPollMilliseconds, control);
   }
-  return computeAnalysisBacktestFigures(session.id, symbol, baseline);
+  return computeAnalysisBacktestFigures(session.id, symbol);
 }
 
 /**
@@ -128,7 +128,7 @@ export async function runAnalysisJob(jobId: string, control: AnalysisJobControl)
       const reusedSessionId = await reusableAnalysisSession(analysis.id, analysis.symbol, analysis.lab_values_hash, figures.optionLastDate, figures.barsLastDate);
       if (reusedSessionId) await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ session_id: reusedSessionId });
       stored.analysisBacktest = reusedSessionId
-        ? await computeAnalysisBacktestFigures(reusedSessionId, analysis.symbol, analysis.lab_values.effective.baseline)
+        ? await computeAnalysisBacktestFigures(reusedSessionId, analysis.symbol)
         : await runAnalysisBacktest(analysis.symbol, analysis.lab_values, analysis.id, control);
       await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ figures: JSON.stringify(stored) });
     }

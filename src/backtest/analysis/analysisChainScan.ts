@@ -1,5 +1,5 @@
 import type { BacktestSymbolFile, SymbolFileEndOfDayRow, SymbolFileQuote } from "../engine/backtestSymbolFile.js";
-import { noteBaselineForwardAnchors, selectBaselineCandidates, type BaselineForwardAnchor } from "../engine/baselineSaleSteps.js";
+import { noteBaselineForwardAnchors, selectBaselineCandidates, type BaselineCandidateInput, type BaselineForwardAnchor } from "../engine/baselineSaleSteps.js";
 import type { BacktestBaselineSettings } from "../backtestTypes.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { commissionPerContractDollars } from "../../lib/optionFriction.js";
@@ -9,7 +9,9 @@ import { blackScholesDelta, impliedVolatilityFromPrice, parityImpliedForward, ye
 // The Analyse window's 10:00 chain scan (Marcelo 2026-10-15): every complete day of a symbol file filtered with the
 // engine's own selectBaselineCandidates at the ticker's lab values, counted by right and expiry range (F8), the Puts also
 // under each day's first-rung cap (F19: cap = 10:00 price × (1 − S ÷ rungs), S that day's shock), and the last day's
-// whole chain priced for the chain yield map (F10).
+// whole chain priced for the chain yield map (F10). Each day also records the contracts its largest pot is taken from
+// (approved 2026-10-15): the best Put under the cap, ranked by premium yield as the ladder's Puts are, and the best Call
+// a new Covered Call entry would sell, chosen as the engine's entry chooses it.
 
 /** Days to expiry ranges of the year × expiry table (D3). */
 export const analysisDteRanges = [
@@ -24,7 +26,7 @@ export type AnalysisChainView = "C" | "P" | "Pcap";
 
 export const dteRangeOf = (dte: number): AnalysisDteRange | null => analysisDteRanges.find((range) => dte >= range.low && dte <= range.high)?.key ?? null;
 
-export type ChainScanSettings = Pick<BacktestBaselineSettings, "minAbsDelta" | "maxAbsDelta" | "minDte" | "maxDte" | "maxSpreadPctOfMid" | "ladderRungs"> & {
+export type ChainScanSettings = Pick<BacktestBaselineSettings, "minAbsDelta" | "maxAbsDelta" | "minDte" | "maxDte" | "maxSpreadPctOfMid" | "ladderRungs" | "ranking" | "expiryChoice" | "minCallYieldPct" | "entryCallStrike"> & {
   /** λ: the share of the half-spread a fill gives up (0 = the mid). */
   spreadShareCharged: number;
 };
@@ -39,6 +41,8 @@ export interface ChainScanDayInput {
   riskFreeRate: number;
   /** The shock the rule gives for a cycle starting that day, a fraction. */
   shock: number;
+  /** Earnings dates known that day and not yet reported, when the lab skips expiries spanning one; null when it ignores earnings. */
+  earningsDatesIso: string[] | null;
 }
 
 export interface ChainScanCell {
@@ -55,6 +59,9 @@ export interface ChainScanDayRow {
   cells: Record<AnalysisChainView, Partial<Record<AnalysisDteRange, ChainScanCell>>>;
   /** The best passing Put under the cap: the first rung's actual best. */
   bestCappedPut: { strike: number; expiry: string; dte: number; premiumYield: number; delta: number } | null;
+  /** The contracts the day's largest pot is taken from, with their volume limits; null when none passes. */
+  largestPotPut: { strike: number; volumeCap: number } | null;
+  largestPotCall: { strike: number; volumeCap: number } | null;
   passingTotal: number;
   /** Passing contracts quoted at or under 25% of the mid. */
   spreadsUnder25: number;
@@ -83,7 +90,7 @@ export function volumeByContract(rows: readonly SymbolFileEndOfDayRow[] | null):
 /** One day's counts. Pure apart from reading the file. */
 export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, settings: ChainScanSettings): ChainScanDayRow {
   const cap = day.spot === null ? null : day.spot * (1 - day.shock / settings.ladderRungs);
-  const row: ChainScanDayRow = { date: day.date, spot: day.spot, shock: day.shock, cap, cells: { C: {}, P: {}, Pcap: {} }, bestCappedPut: null, passingTotal: 0, spreadsUnder25: 0 };
+  const row: ChainScanDayRow = { date: day.date, spot: day.spot, shock: day.shock, cap, cells: { C: {}, P: {}, Pcap: {} }, bestCappedPut: null, largestPotPut: null, largestPotCall: null, passingTotal: 0, spreadsUnder25: 0 };
   if (day.spot === null || cap === null) return row;
   const quotes = file.loadQuotes(day.date);
   const previousSessionVolumeByContract = volumeByContract(day.previousDate === null ? null : file.loadEndOfDay(day.previousDate));
@@ -96,8 +103,8 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
   // The day's forwards as the engine's first look notes them (parity, else spot × e^(rT)).
   const forwardAnchors = new Map<string, BaselineForwardAnchor>();
   noteBaselineForwardAnchors(forwardAnchors, { quotes, todayIso: day.date, yearsToTodaysClose: 6 / 8760, stockPrice: day.spot, riskFreeRate: day.riskFreeRate });
-  for (const right of ["C", "P"] as const) {
-    const { candidates } = selectBaselineCandidates({
+  const select = (right: "C" | "P", rules: Pick<BaselineCandidateInput, "minimumStrike" | "maximumStrike" | "minimumPremiumYield" | "earningsDatesIso" | "ranking" | "nearestExpiryFirst"> = {}) =>
+    selectBaselineCandidates({
       quotes,
       forwardAnchors,
       // The backtest's flat commissions ($0.68 a contract, $0.005 a share), as its sessions charge.
@@ -105,14 +112,16 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
       right,
       todayIso: day.date,
       yearsToTodaysClose: 6 / 8760,
-      stockPrice: day.spot,
+      stockPrice: day.spot!,
       riskFreeRate: day.riskFreeRate,
       previousSessionVolumeByContract,
       settings,
       spreadShareCharged: settings.spreadShareCharged,
       isHeld: () => false,
-    });
-    for (const candidate of candidates) {
+      ...rules,
+    }).candidates;
+  for (const right of ["C", "P"] as const) {
+    for (const candidate of select(right)) {
       const range = dteRangeOf(candidate.dte);
       if (range === null) continue;
       row.passingTotal++;
@@ -126,6 +135,19 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
       }
     }
   }
+  const earnings = day.earningsDatesIso === null ? {} : { earningsDatesIso: day.earningsDatesIso };
+  // The ladder's Put: under the cap, by premium yield (the engine's select("P", null, true, cap, true)).
+  const put = select("P", { maximumStrike: cap, ranking: "premium_yield", ...earnings })[0];
+  // A new Covered Call entry's Call (the engine's enterWithFreeCash): with no shares held, a cost rule's floor is the price paid.
+  const call = select("C", {
+    minimumStrike: settings.entryCallStrike === "any" ? null : day.spot,
+    minimumPremiumYield: settings.minCallYieldPct > 0 ? settings.minCallYieldPct / 100 : null,
+    ...(settings.ranking !== "edge_yield" ? { ranking: settings.ranking } : {}),
+    nearestExpiryFirst: settings.expiryChoice === "nearest_qualifying",
+    ...earnings,
+  })[0];
+  row.largestPotPut = put ? { strike: put.strike, volumeCap: put.volumeCap } : null;
+  row.largestPotCall = call ? { strike: call.strike, volumeCap: call.volumeCap } : null;
   return row;
 }
 

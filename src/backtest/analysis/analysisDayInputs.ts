@@ -4,11 +4,13 @@ import type { FileIntradayPrices } from "../backtestFileStockBars.js";
 import type { TreasuryBillRates } from "../engine/treasuryBillRates.js";
 import type { StoredDailyBar } from "../engine/backtestBarHistory.js";
 import type { BacktestBaselineSettings } from "../backtestTypes.js";
+import { earningsNotYetReported, type BacktestTickerProfile } from "../engine/backtestTickerInputs.js";
 import type { ChainScanDayInput } from "./analysisChainScan.js";
 
 // What each scanned day reads besides its quotes, as the engine reads it (runBacktestSession.ts): the 10:00 price as
 // traded (the close of IBKR's 09:30 bar, split-adjusted, × the day's split factor), the T-bill rate of the day before, the
-// previous complete file day (its volume sets the limit), and the shock the rule gives for a cycle starting that day.
+// previous complete file day (its volume sets the limit), the shock the rule gives for a cycle starting that day, and the
+// earnings dates known that day and not yet reported (the engine's earnings filter).
 
 export type AnalysisShockSettings = Pick<BacktestBaselineSettings, "ladderShock" | "ladderShockPct" | "ladderShockMinPct" | "ladderShockMaxPct" | "ladderShockNoHistoryPct" | "ladderShockLookbackYears">;
 
@@ -31,6 +33,8 @@ export function buildChainScanDayInputs(input: {
   /** IBKR's daily bars (split-adjusted), ascending: the shock rule's closes. */
   dailyBars: readonly StoredDailyBar[];
   shockSettings: AnalysisShockSettings;
+  /** The ticker's earnings when the lab skips expiries spanning one (and the ticker is not an ETF); null when earnings are ignored. */
+  earnings: BacktestTickerProfile["earnings"] | null;
 }): ChainScanDayInput[] {
   const closes = input.dailyBars.filter((bar) => bar.close !== null && bar.close > 0).map((bar) => ({ date: bar.tradingDate, close: bar.close! }));
   return input.completeDays.map((date, index) => ({
@@ -39,5 +43,6 @@ export function buildChainScanDayInputs(input: {
     spot: tenOclockPriceAsTraded(date, input.intradayPrices, input.schedule),
     riskFreeRate: (input.rates.ratePercentOnOrBefore(addCalendarDays(date, -1)) ?? 0) / 100,
     shock: ladderShock(input.shockSettings, closes, date),
+    earningsDatesIso: input.earnings === null ? null : earningsNotYetReported(input.earnings, date),
   }));
 }

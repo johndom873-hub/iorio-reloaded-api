@@ -3,7 +3,7 @@ import { TreasuryBillRates } from "../engine/treasuryBillRates.js";
 import { analysisSessionName } from "./analysisBacktest.js";
 import { treasuryBillCagr } from "./analysisSessions.js";
 import { hashAnalysisLabValues, validateAnalysisTrialValues } from "./analysisStore.js";
-import { fitByDay, largestPotOfOrder, tooLargeByYear, yieldGivenUp, type AnalysisOrder } from "./analysisPotSizing.js";
+import { fitByDay, ladderBasePath, largestPotOfDay, potOnDayFrom, tooLargeByYear, yieldGivenUp, type AnalysisOrder } from "./analysisPotSizing.js";
 import type { BacktestSettings } from "../backtestTypes.js";
 
 describe("analysisSessionName", () => {
@@ -50,32 +50,75 @@ describe("hashAnalysisLabValues", () => {
   });
 });
 
-const order = (overrides: Partial<AnalysisOrder>): AnalysisOrder => ({ date: "2025-03-03", at: "2025-03-03T15:00:00.000Z", right: "P", wanted: 4, best: { strike: 80, dte: 30, premiumYield: 0.2, volumeCap: 3 }, fills: [{ contracts: 3, premiumYield: 0.2 }], unsold: 0, unsoldReason: null, sharesAverageCost: null, ...overrides });
+const order = (overrides: Partial<AnalysisOrder>): AnalysisOrder => ({ date: "2025-03-03", at: "2025-03-03T15:00:00.000Z", right: "P", wanted: 4, best: { strike: 80, dte: 30, premiumYield: 0.2, volumeCap: 3 }, fills: [{ contracts: 3, premiumYield: 0.2 }], unsold: 0, unsoldReason: null, ...overrides });
 
 describe("pot sizing", () => {
   it("fitByDay: smallest pot = max(100 × P ÷ p, 100 × P × (n − S) ÷ (1 − p))", () => {
     // P 100, p 0.5, n 5, S 0.8: lot 10,000 ÷ 0.5 = 20,000; rung side 100 × 100 × 4.2 ÷ 0.5 = 84,000.
-    const [row] = fitByDay([{ date: "2025-01-02", price: 100, shock: 0.8 }], { potDollars: 200_000, shares: 0.5, rungs: 5, fixedShock: null });
+    const [row] = fitByDay([{ date: "2025-01-02", price: 100, shock: 0.8 }], { shares: 0.5, rungs: 5, fixedShock: null }, () => 200_000);
     expect(row!.smallestPot).toBeCloseTo(84_000, 6);
     expect(row!.lotFits).toBe(true);
     // A rung of 200,000 × 0.5 ÷ 5 = 20,000 holds a Put at the first cap 100 × (1 − 0.16) = 84 (8,400).
     expect(row!.rungFits).toBe(true);
     // A share level of 0.05 makes the lot side bind: 10,000 ÷ 0.05 = 200,000, and a $10,000 lot budget exactly buys a lot.
-    const [lotSide] = fitByDay([{ date: "2025-01-02", price: 100, shock: 0.8 }], { potDollars: 200_000, shares: 0.05, rungs: 5, fixedShock: null });
+    const [lotSide] = fitByDay([{ date: "2025-01-02", price: 100, shock: 0.8 }], { shares: 0.05, rungs: 5, fixedShock: null }, () => 200_000);
     expect(lotSide!.smallestPot).toBeCloseTo(200_000, 6);
     expect(lotSide!.lotFits).toBe(true);
-    const [small] = fitByDay([{ date: "2025-01-02", price: 100, shock: 0.8 }], { potDollars: 15_000, shares: 0.5, rungs: 5, fixedShock: null });
+    const [small] = fitByDay([{ date: "2025-01-02", price: 100, shock: 0.8 }], { shares: 0.5, rungs: 5, fixedShock: null }, () => 15_000);
     expect(small!.lotFits).toBe(false);
     expect(small!.rungFits).toBe(false);
+    // Each day against its own pot; no pot path: no fits.
+    const [early, late] = fitByDay(
+      [
+        { date: "2025-01-02", price: 100, shock: 0.8 },
+        { date: "2025-06-02", price: 100, shock: 0.8 },
+      ],
+      { shares: 0.5, rungs: 5, fixedShock: null },
+      (date) => (date < "2025-03-01" ? 15_000 : 200_000),
+    );
+    expect([early!.lotFits, late!.lotFits]).toEqual([false, true]);
+    expect(fitByDay([{ date: "2025-01-02", price: 100, shock: 0.8 }], { shares: 0.5, rungs: 5, fixedShock: null }, null)[0]).toMatchObject({ lotFits: null, rungFits: null });
   });
 
-  it("largestPotOfOrder: Put limit × strike × 100 × n ÷ (1 − p); Call limit × 100 × the shares' cost ÷ p", () => {
-    expect(largestPotOfOrder(order({}), { shares: 0.5, rungs: 5 })).toBeCloseTo((3 * 80 * 100 * 5) / 0.5, 6);
-    expect(largestPotOfOrder(order({ right: "C", sharesAverageCost: 90 }), { shares: 0.5, rungs: 5 })).toBeCloseTo((3 * 100 * 90) / 0.5, 6);
-    expect(largestPotOfOrder(order({ right: "C", sharesAverageCost: null }), { shares: 0.5, rungs: 5 })).toBeNull();
-    // An entry's shares cost the look's price (the loader takes stockPriceAtLook when no shares are held).
-    expect(largestPotOfOrder(order({ right: "C", sharesAverageCost: 45 }), { shares: 0.5, rungs: 5 })).toBeCloseTo((3 * 100 * 45) / 0.5, 6);
-    expect(largestPotOfOrder(order({ best: null }), { shares: 0.5, rungs: 5 })).toBeNull();
+  it("largestPotOfDay: the smaller of Put limit × strike × 100 × n ÷ (1 − p) and Call limit × 100 × P ÷ p", () => {
+    // 14 Oct 2026, HOOD at $106.01: the $85 Put with limit 96 → 96 × 85 × 100 × 5 ÷ 0.5 = $8,160,000; the Call with limit
+    // 1,746 → 1,746 × 100 × 106.01 ÷ 0.5 = $37,016,700. The Put side sets it.
+    const values = { shares: 0.5, rungs: 5 };
+    const day = { date: "2026-10-14", price: 106.01, putVolumeCap: 96, putStrike: 85, callVolumeCap: 1746 };
+    expect(largestPotOfDay(day, values)!.pot).toBeCloseTo(8_160_000, 6);
+    expect(largestPotOfDay(day, values)!.right).toBe("P");
+    expect(largestPotOfDay({ ...day, callVolumeCap: 10 }, values)).toEqual({ pot: (10 * 100 * 106.01) / 0.5, right: "C" });
+    // A side with no qualifying contract: the day is left out.
+    expect(largestPotOfDay({ ...day, putVolumeCap: null, putStrike: null }, values)).toBeNull();
+    expect(largestPotOfDay({ ...day, callVolumeCap: null }, values)).toBeNull();
+  });
+
+  it("ladderBasePath: max(account at the open cycle's start, last night's account), last night's while flat", () => {
+    const days = [
+      { date: "2022-01-03", accountValue: 200_000 },
+      { date: "2022-01-04", accountValue: 150_000 },
+      { date: "2022-01-05", accountValue: 120_000 },
+      { date: "2022-01-06", accountValue: 130_000 },
+      { date: "2022-01-07", accountValue: 260_000 },
+      { date: "2022-01-10", accountValue: 270_000 },
+    ];
+    // Cycle 1 from the 4th (started at the 3rd's close, $200,000) to the 6th; flat on the 7th; cycle 2 from the 10th.
+    const path = ladderBasePath(days, [{ openedOn: "2022-01-04", closedOn: "2022-01-06" }, { openedOn: "2022-01-10", closedOn: null }], 200_000);
+    expect(path).toEqual([
+      ["2022-01-03", 200_000],
+      ["2022-01-04", 200_000],
+      ["2022-01-05", 200_000],
+      ["2022-01-06", 200_000],
+      ["2022-01-07", 130_000],
+      ["2022-01-10", 260_000],
+    ]);
+    const potOnDay = potOnDayFrom(path)!;
+    expect(potOnDay("2022-01-05")).toBe(200_000);
+    // A weekend carries the Friday; past the last day the last value carries forward; before the first, the first.
+    expect(potOnDay("2022-01-08")).toBe(130_000);
+    expect(potOnDay("2022-02-01")).toBe(260_000);
+    expect(potOnDay("2021-12-31")).toBe(200_000);
+    expect(potOnDayFrom([])).toBeNull();
   });
 
   it("yieldGivenUp and tooLargeByYear count orders over one strike and partly unsold", () => {

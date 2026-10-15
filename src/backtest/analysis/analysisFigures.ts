@@ -2,6 +2,7 @@ import { statSync, existsSync } from "node:fs";
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import { computeYangZhangVolatility } from "../../lib/realizedVolatility.js";
+import { tickerCalendarProfile } from "../../lib/tickerCalendarRelevance.js";
 import { backtestDataFilePath, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
 import { readFileDailyBars, readFileIntradayPrices } from "../backtestFileStockBars.js";
@@ -35,7 +36,7 @@ import {
 // files (for correlation), at the values given. Everything but the analysis backtest's figures (analysisBacktestFigures.ts).
 
 /** Bumped when a formula or the figures' shape changes: a stored analysis with an older version shows as such. */
-export const analysisFormulasVersion = 4;
+export const analysisFormulasVersion = 5;
 
 export type AnalysisStep = "bars" | "chains" | "earnings_correlation" | "saving" | "backtest" | "summary";
 export const analysisSteps: readonly AnalysisStep[] = ["bars", "chains", "earnings_correlation", "saving", "backtest", "summary"];
@@ -73,13 +74,21 @@ export interface AnalysisFigures {
     chainMap: ChainMapContract[];
     scanSeconds: number;
   };
-  /** Each scanned day's 10:00 price as traded and shock: [date, price, shock]. The window computes the fits from them. */
-  fitDays: [string, number, number][];
+  /**
+   * Each scanned day with a 10:00 price: [date, price as traded, shock, the best capped Put's volume limit, its strike, the
+   * best entry Call's volume limit] (the contract fields null when none passed). The window computes the fits and the
+   * largest pots from them.
+   */
+  fitDays: AnalysisFitDayRow[];
+  /** True when the lab's volatility-edge filter or Edge Yield ranking applies: the largest pot's contracts were chosen without them. */
+  largestPotWithoutModel: boolean;
   earnings: AnalysisEarningsSummary & { exDividendDates: string[]; hasTickerRow: boolean };
   correlation: { rows: AnalysisCorrelationRow[]; skipped: Record<string, string>; spySource: "file" | "database" | null };
   profile: { all: AnalysisProfile | null; twoYear: AnalysisProfile | null };
   dataQuality: AnalysisDataQuality;
 }
+
+export type AnalysisFitDayRow = [string, number, number, number | null, number | null, number | null];
 
 export interface AnalysisDataQuality {
   completeDays: number;
@@ -168,9 +177,9 @@ const weekdaysBetween = (fromIso: string, toIso: string) => {
 };
 
 /** The ticker's earnings reports and ex-dividend dates (ticker_calendar_events); hasTickerRow false when the symbol has no ticker row. */
-async function loadCalendarEvents(symbol: string, connection: Knex): Promise<{ hasTickerRow: boolean; earnings: { date: string; afterClose: boolean | null }[]; exDividendDates: string[] }> {
-  const ticker: { id: string } | undefined = await connection("tickers").where({ symbol }).first("id");
-  if (!ticker) return { hasTickerRow: false, earnings: [], exDividendDates: [] };
+async function loadCalendarEvents(symbol: string, connection: Knex): Promise<{ hasTickerRow: boolean; calendarChecksApply: boolean; earnings: { date: string; afterClose: boolean | null; eventTime: string | null }[]; exDividendDates: string[] }> {
+  const ticker: { id: string; sector: string | null; tradingview_ticker: string | null } | undefined = await connection("tickers").where({ symbol }).first("id", connection.raw("NULLIF(sector, '') as sector"), "tradingview_ticker");
+  if (!ticker) return { hasTickerRow: false, calendarChecksApply: false, earnings: [], exDividendDates: [] };
   const rows: { event_type: string; event_date: string; event_time: string | null }[] = await connection("ticker_calendar_events")
     .where({ ticker_id: ticker.id })
     .whereIn("event_type", ["earnings", "ex_dividend"])
@@ -178,8 +187,9 @@ async function loadCalendarEvents(symbol: string, connection: Knex): Promise<{ h
     .select("event_type", connection.raw("event_date::text as event_date"), "event_time");
   return {
     hasTickerRow: true,
+    calendarChecksApply: tickerCalendarProfile(ticker).calendarChecksApply,
     // event_time "1": after the close; "-1": before the open; "0" or none: not said.
-    earnings: rows.filter((row) => row.event_type === "earnings").map((row) => ({ date: row.event_date, afterClose: row.event_time === "1" ? true : row.event_time === "-1" ? false : null })),
+    earnings: rows.filter((row) => row.event_type === "earnings").map((row) => ({ date: row.event_date, afterClose: row.event_time === "1" ? true : row.event_time === "-1" ? false : null, eventTime: row.event_time })),
     exDividendDates: rows.filter((row) => row.event_type === "ex_dividend").map((row) => row.event_date),
   };
 }
@@ -216,8 +226,11 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
   })();
   if (!intradayPrices) throw new Error(`The ${symbol} data file has no IBKR 30-minute bars: the 10:00 prices cannot be read. Its download writes them.`);
 
+  const calendar = await loadCalendarEvents(symbol, connection);
+  const skipsEarnings = values.baseline.earnings === "skip_spanning" && calendar.calendarChecksApply;
+
   report("chains", 0, completeDays.length);
-  const days = buildChainScanDayInputs({ completeDays, intradayPrices, schedule, rates, dailyBars, shockSettings: values.baseline });
+  const days = buildChainScanDayInputs({ completeDays, intradayPrices, schedule, rates, dailyBars, shockSettings: values.baseline, earnings: skipsEarnings ? calendar.earnings.map((event) => ({ dateIso: event.date, eventTime: event.eventTime })) : null });
   const scanStarted = Date.now();
   const { rows, chainMap } = await scanChainDaysInParallel({
     filePath: backtestDataFilePath(symbol),
@@ -232,7 +245,6 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
   const passing = (row: ChainScanDayRow, view: "C" | "P" | "Pcap") => Object.values(row.cells[view]).reduce((sum, cell) => sum + (cell?.count ?? 0), 0);
 
   report("earnings_correlation");
-  const calendar = await loadCalendarEvents(symbol, connection);
   const firstOptionDay = completeDays[0]!;
   const lastBarDate = closes.at(-1)?.tradingDate ?? null;
   const pastReports = calendar.earnings.filter((event) => event.date >= firstOptionDay && lastBarDate !== null && event.date <= lastBarDate);
@@ -307,7 +319,8 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
       chainMap,
       scanSeconds,
     },
-    fitDays: days.filter((day) => day.spot !== null).map((day) => [day.date, day.spot!, day.shock]),
+    fitDays: rows.filter((row) => row.spot !== null).map((row): AnalysisFitDayRow => [row.date, row.spot!, row.shock, row.largestPotPut?.volumeCap ?? null, row.largestPotPut?.strike ?? null, row.largestPotCall?.volumeCap ?? null]),
+    largestPotWithoutModel: values.baseline.volatilityEdgeFilter !== "off" || values.baseline.ranking === "edge_yield",
     earnings: { ...earnings, exDividendDates: calendar.exDividendDates, hasTickerRow: calendar.hasTickerRow },
     correlation: { rows: correlationRows(closes, others), skipped, spySource },
     profile: { all: stockProfile(ohlcv, null, reportSessions), twoYear: lastClose ? stockProfile(ohlcv, yearsBefore(lastClose, 2), reportSessions) : null },
