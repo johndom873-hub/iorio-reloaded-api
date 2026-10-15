@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../../lib/easternIsoDate.js";
 import { buyBackPut, closeCoveredCall, creditInterest, expirySettlementInstant, isAssignedAtExpiry, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
-import { optionPurchaseFillPrice, optionSaleFillPrice, stockPurchaseFillPrice, stockSaleFillPrice } from "./ledgerFills.js";
+import { optionPurchaseFillPrice, optionSaleFillPrice } from "./ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerCapitalDeployed, ledgerCashLockedInCashSecuredPuts, ledgerCycles, ledgerFreeCash, ledgerFreeShares, ledgerRealizedPnl } from "./ledgerSelectors.js";
 import { createSimulatedLedger, cycleGroupingWindowMs, cycleSplitFactorFor, isSymbolFlat, legsOfPosition, requireLeg, requirePosition, type SimulatedLedger } from "./simulatedLedger.js";
 
@@ -33,11 +33,6 @@ describe("fill prices", () => {
     // Bid 1.00, ask 1.20, half the half-spread charged: mid 1.10 ∓ 0.5 × 0.10.
     expect(optionSaleFillPrice(1, 1.2, 0.5)).toBeCloseTo(1.05, 10);
     expect(optionPurchaseFillPrice(1, 1.2, 0.5)).toBeCloseTo(1.15, 10);
-  });
-
-  it("buys shares a cent over the stock price and sells them a cent under", () => {
-    expect(stockPurchaseFillPrice(30)).toBeCloseTo(30.01, 10);
-    expect(stockSaleFillPrice(30)).toBeCloseTo(29.99, 10);
   });
 });
 
@@ -118,7 +113,7 @@ describe("open covered call as a buy-write", () => {
     // 2 calls $31 at 0.50: premium 100, commission 1.36, entry 0.4932.
     const ledger = newLedger();
     const at = decisionAt("2026-03-02");
-    const result = openCoveredCall(ledger, { symbol: "BBB", expiryDate: "2026-03-06", strike: 31, contracts: 2, callFillPrice: 0.5, stockFillPrice: stockPurchaseFillPrice(30), at, actionId: "action-1", splitFactorToday: 1 });
+    const result = openCoveredCall(ledger, { symbol: "BBB", expiryDate: "2026-03-06", strike: 31, contracts: 2, callFillPrice: 0.5, stockFillPrice: 30.01, at, actionId: "action-1", splitFactorToday: 1 });
 
     expect(result).toMatchObject({ sharesBought: 200, sharesFromHeld: 0, leftoverPositionId: null });
     expect(requirePosition(ledger, result.positionId)).toMatchObject({ strategyKey: "covered_call", status: "open", openedAt: at });
@@ -192,7 +187,7 @@ describe("open covered call on held shares", () => {
     const at = decisionAt("2026-03-09");
     expect(() => openCoveredCall(ledger, { symbol: "CCC", expiryDate: "2026-03-13", strike: 53, contracts: 2, callFillPrice: 0.8, stockFillPrice: null, at, actionId: null, splitFactorToday: 1 })).toThrow(/100 more shares/);
 
-    const result = openCoveredCall(ledger, { symbol: "CCC", expiryDate: "2026-03-13", strike: 53, contracts: 2, callFillPrice: 0.8, stockFillPrice: stockPurchaseFillPrice(52), at, actionId: "action-call", splitFactorToday: 1 });
+    const result = openCoveredCall(ledger, { symbol: "CCC", expiryDate: "2026-03-13", strike: 53, contracts: 2, callFillPrice: 0.8, stockFillPrice: 52.01, at, actionId: "action-call", splitFactorToday: 1 });
 
     expect(result).toMatchObject({ sharesBought: 100, sharesFromHeld: 100, leftoverPositionId: null });
     expect(requireLeg(ledger, result.stockLegId).quantity).toBe(200);
@@ -266,7 +261,7 @@ describe("put assigned", () => {
 describe("call expires out of the money", () => {
   it("closes the call at 0, hands the shares at their entry to a new unstructured position and closes the covered call as expired worthless", () => {
     const ledger = newLedger();
-    const call = openCoveredCall(ledger, { symbol: "FFF", expiryDate: "2026-03-06", strike: 31, contracts: 2, callFillPrice: 0.5, stockFillPrice: stockPurchaseFillPrice(30), at: decisionAt("2026-03-02"), actionId: null, splitFactorToday: 1 });
+    const call = openCoveredCall(ledger, { symbol: "FFF", expiryDate: "2026-03-06", strike: 31, contracts: 2, callFillPrice: 0.5, stockFillPrice: 30.01, at: decisionAt("2026-03-02"), actionId: null, splitFactorToday: 1 });
     const cashBefore = ledger.cash;
     const tradeCountBefore = ledger.trades.length;
     const settledAt = new Date("2026-03-06T21:00:00.000Z");
@@ -323,7 +318,7 @@ describe("call-away", () => {
   it("closes the call at 0 and the shares at the strike with no stock trade, and the covered call as assigned", () => {
     // 200 sh bought at 30.015 called away at 31: +6,200 cash; stock P&L (31 − 30.015) × 200 = 197, premium 98.64.
     const ledger = newLedger();
-    const call = openCoveredCall(ledger, { symbol: "GGG", expiryDate: "2026-03-06", strike: 31, contracts: 2, callFillPrice: 0.5, stockFillPrice: stockPurchaseFillPrice(30), at: decisionAt("2026-03-02"), actionId: null, splitFactorToday: 1 });
+    const call = openCoveredCall(ledger, { symbol: "GGG", expiryDate: "2026-03-06", strike: 31, contracts: 2, callFillPrice: 0.5, stockFillPrice: 30.01, at: decisionAt("2026-03-02"), actionId: null, splitFactorToday: 1 });
     const cashBefore = ledger.cash;
     const tradeCountBefore = ledger.trades.length;
     const settledAt = new Date("2026-03-06T21:00:00.000Z");
@@ -375,7 +370,7 @@ describe("roll", () => {
   it("hands a covered call's shares at their entry to the new position", () => {
     // 100 sh at 30.015 under a $31 call sold at 0.50; rolled to $32: buyback 0.20 (−20 − 0.68), new call 0.70 (+70 − 0.68).
     const ledger = newLedger();
-    const call = openCoveredCall(ledger, { symbol: "HHH", expiryDate: "2026-03-06", strike: 31, contracts: 1, callFillPrice: 0.5, stockFillPrice: stockPurchaseFillPrice(30), at: decisionAt("2026-03-02"), actionId: null, splitFactorToday: 1 });
+    const call = openCoveredCall(ledger, { symbol: "HHH", expiryDate: "2026-03-06", strike: 31, contracts: 1, callFillPrice: 0.5, stockFillPrice: 30.01, at: decisionAt("2026-03-02"), actionId: null, splitFactorToday: 1 });
     const cashBefore = ledger.cash;
     const stockTradeCountBefore = tradesOfLeg(ledger, call.stockLegId).length;
     const at = decisionAt("2026-03-05");
@@ -419,7 +414,7 @@ describe("buyback of a put", () => {
 
   it("refuses to buy back only the call of a covered call", () => {
     const ledger = newLedger();
-    const call = openCoveredCall(ledger, { symbol: "III", expiryDate: "2026-03-06", strike: 31, contracts: 1, callFillPrice: 0.5, stockFillPrice: stockPurchaseFillPrice(30), at: decisionAt("2026-03-02"), actionId: null, splitFactorToday: 1 });
+    const call = openCoveredCall(ledger, { symbol: "III", expiryDate: "2026-03-06", strike: 31, contracts: 1, callFillPrice: 0.5, stockFillPrice: 30.01, at: decisionAt("2026-03-02"), actionId: null, splitFactorToday: 1 });
     expect(() => buyBackPut(ledger, { legId: call.callLegId, fillPrice: 0.1, at: decisionAt("2026-03-04"), actionId: null })).toThrow(/only a put/);
   });
 });
@@ -429,10 +424,10 @@ describe("whole covered-call close", () => {
     // 100 sh at 31.01 + 0.50 (entry 31.015), a $32 call at 0.55 (entry 0.5432). Closed: call bought at 0.30, shares sold at 31.49.
     // Call (0.5432 − 0.30) × 100 − 0.68 = 23.64; shares (31.49 − 31.015) × 100 − 0.50 = 47.00; cash +70.64 over the whole trade.
     const ledger = newLedger();
-    const call = openCoveredCall(ledger, { symbol: "JJJ", expiryDate: "2026-03-27", strike: 32, contracts: 1, callFillPrice: 0.55, stockFillPrice: stockPurchaseFillPrice(31), at: decisionAt("2026-03-16"), actionId: "action-open", splitFactorToday: 1 });
+    const call = openCoveredCall(ledger, { symbol: "JJJ", expiryDate: "2026-03-27", strike: 32, contracts: 1, callFillPrice: 0.55, stockFillPrice: 31.01, at: decisionAt("2026-03-16"), actionId: "action-open", splitFactorToday: 1 });
     const at = decisionAt("2026-03-18");
 
-    closeCoveredCall(ledger, { positionId: call.positionId, callFillPrice: 0.3, stockFillPrice: stockSaleFillPrice(31.5), at, actionId: "action-close" });
+    closeCoveredCall(ledger, { positionId: call.positionId, callFillPrice: 0.3, stockFillPrice: 31.49, at, actionId: "action-close" });
 
     expect(requireLeg(ledger, call.callLegId)).toMatchObject({ exitPrice: 0.3, exitAt: at, settledAs: null });
     expect(requireLeg(ledger, call.stockLegId).exitPrice).toBeCloseTo(31.49, 10);
@@ -453,10 +448,10 @@ describe("a buy-write opened and closed at the same look", () => {
     // 500 shares under a call since 16 March; on the 18th one look opens a 24-contract buy-write and, in its next pass,
     // closes it whole: the purchase and the sale carry the same instant (HOOD 2024-09-30 11:00 in the step-5 session).
     const ledger = createSimulatedLedger(1_000_000, easternInstant("2026-03-02", 9, 30));
-    openCoveredCall(ledger, { symbol: "SMI", expiryDate: "2026-03-27", strike: 24, contracts: 5, callFillPrice: 0.4, stockFillPrice: stockPurchaseFillPrice(23), at: decisionAt("2026-03-16"), actionId: "action-held", splitFactorToday: 1 });
+    openCoveredCall(ledger, { symbol: "SMI", expiryDate: "2026-03-27", strike: 24, contracts: 5, callFillPrice: 0.4, stockFillPrice: 23.01, at: decisionAt("2026-03-16"), actionId: "action-held", splitFactorToday: 1 });
     const at = easternInstant("2026-03-18", 11, 0);
-    const buyWrite = openCoveredCall(ledger, { symbol: "SMI", expiryDate: "2026-03-20", strike: 24, contracts: 24, callFillPrice: 0.34, stockFillPrice: stockPurchaseFillPrice(23.31), at, actionId: "action-open", splitFactorToday: 1 });
-    closeCoveredCall(ledger, { positionId: buyWrite.positionId, callFillPrice: 0.35, stockFillPrice: stockSaleFillPrice(23.31), at, actionId: "action-close" });
+    const buyWrite = openCoveredCall(ledger, { symbol: "SMI", expiryDate: "2026-03-20", strike: 24, contracts: 24, callFillPrice: 0.34, stockFillPrice: 23.32, at, actionId: "action-open", splitFactorToday: 1 });
+    closeCoveredCall(ledger, { positionId: buyWrite.positionId, callFillPrice: 0.35, stockFillPrice: 23.3, at, actionId: "action-close" });
 
     expect(ledgerFreeShares(ledger, "SMI")).toBe(0);
     const [cycle] = ledgerCycles(ledger, "SMI", { dailyCloses: [{ date: "2026-03-17", close: 23.2 }, { date: "2026-03-18", close: 23.4 }] });
@@ -485,7 +480,7 @@ describe("stock sale", () => {
     const cashBefore = ledger.cash;
     const at = decisionAt("2026-03-10");
 
-    const sale = sellShares(ledger, { positionId: sharesPosition.id, shares: 100, fillPrice: stockSaleFillPrice(21), at, actionId: "action-sell" });
+    const sale = sellShares(ledger, { positionId: sharesPosition.id, shares: 100, fillPrice: 20.99, at, actionId: "action-sell" });
 
     expect(sale).toEqual({ soldLegId: sharesLeg.id, positionClosed: true });
     expect(sharesLeg.exitPrice).toBeCloseTo(20.99, 10);
@@ -507,7 +502,7 @@ describe("stock sale", () => {
     const at = decisionAt("2026-03-10");
     expect(() => sellShares(ledger, { positionId: sharesPosition.id, shares: 201, fillPrice: 30, at, actionId: null })).toThrow(/holds 200 shares/);
 
-    const sale = sellShares(ledger, { positionId: sharesPosition.id, shares: 40, fillPrice: stockSaleFillPrice(30.5), at, actionId: "action-sell" });
+    const sale = sellShares(ledger, { positionId: sharesPosition.id, shares: 40, fillPrice: 30.49, at, actionId: "action-sell" });
 
     expect(sale.positionClosed).toBe(false);
     expect(sale.soldLegId).not.toBe(sharesLeg.id);

@@ -36,7 +36,7 @@ import { buildHistoricalTickerInputs, captureLookTimeEt, ContractSet, earningsKn
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import type { BacktestScoringPool } from "./backtestScoringPool.js";
 import { buyBackPut, closeCoveredCall, openCashSecuredPut, openCoveredCall, rollLeg, sellShares } from "./ledger/ledgerEvents.js";
-import { optionPurchaseFillPrice, stockFillSlippageDollars, stockPurchaseFillPrice, stockSaleFillPrice } from "./ledger/ledgerFills.js";
+import { optionPurchaseFillPrice } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerCashLockedInCashSecuredPuts, ledgerCommittedDollars, ledgerCycleInput, ledgerFreeCash, ledgerFreeShares, ledgerLastFilledActionAt, ledgerNetLiquidationValue, ledgerOpenCycleSummary, ledgerPostModelBook } from "./ledger/ledgerSelectors.js";
 import { cycleSplitFactorFor, legsOfPosition, positionsOfSymbol, requireLeg, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 
@@ -368,7 +368,8 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
     // The look's own quotes and the stock price they imply: the capture's at 10:00.
     const lookQuotes = lookSymbol.intraday?.quotes ?? market.quotes;
     const stockPrice = lookSymbol.intraday?.stockPrice ?? market.stockPrice;
-    const stockQuoteToday = { bid: stockPrice - stockFillSlippageDollars, ask: stockPrice + stockFillSlippageDollars, last: stockPrice };
+    // Shares trade at the look's price itself: its bid and ask are that price.
+    const stockQuoteToday = { bid: stockPrice, ask: stockPrice, last: stockPrice };
     // The look's quote of a contract. Read for the held legs only, so the quotes are indexed when first asked for.
     let lookQuoteIndex: Map<string, SymbolFileQuote> | null = null;
     const lookQuoteOfContract = (key: string): SymbolFileQuote | undefined => (lookQuoteIndex ??= new Map(lookQuotes.map((quote) => [contractKey({ expiry: quote.expiry, strike: roundedStrike(quote.strike), right: quote.right }), quote]))).get(key);
@@ -556,7 +557,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
       strike: toCyclePrice(candidate.strike),
       contracts: quantity,
       callFillPrice: toCyclePrice(computeSaleFillPrice(candidate.bid, candidate.ask, spreadShareCharged)),
-      stockFillPrice: toCyclePrice(stockPurchaseFillPrice(owner.stockPrice)),
+      stockFillPrice: toCyclePrice(owner.stockPrice),
       at,
       actionId: null,
       splitFactorToday: owner.lookSymbol.splitFactorToday,
@@ -597,8 +598,8 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
       unscoredReason: null,
       model: null,
     };
-    const stockBid = owner.stockPrice - stockFillSlippageDollars;
-    const stockAsk = owner.stockPrice + stockFillSlippageDollars;
+    const stockBid = owner.stockPrice;
+    const stockAsk = owner.stockPrice;
     const entry = heldCoveredCallEntry({ callLeg, shares, entryCredit: callLeg.entryPrice, spot: scored.spotPrice, stockBid, stockAsk, forecastVolatility: scored.modelForecast?.annualizedVolatility ?? null, event, commissionPerContract: flatCommissionEstimator.perContractDollars("buy", quantity), cycleTotal: gate.cycleTotal });
     const offered = evaluateEventCoveredCallClose({ symbol: owner.symbol, positionId: opened.positionId, callLeg, stockLeg: { legId: opened.stockLegId, shares }, entry, stockBid, stockAsk, gateBlockReason: gate.blocked ? gate.reason : null }).offer !== null;
     return openClosedAtOnceByEventRule(rule, entry, offered);
@@ -680,7 +681,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
         return "blocked";
       }
       const actionId = context.nextActionId();
-      const stockFillToday = stockSaleFillPrice(owner.stockPrice);
+      const stockFillToday = owner.stockPrice;
       let fillPrice: number;
       if (offer.kind === "close_shares") {
         const stockLeg = requireLeg(ledger, offer.legIds[0]!);
@@ -995,7 +996,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
       newLegId = opened.legId;
       positionIds = [opened.positionId];
     } else {
-      const stockFillToday = stockPurchaseFillPrice(stockPrice);
+      const stockFillToday = stockPrice;
       const opened = openCoveredCall(ledger, { symbol, expiryDate: candidate.expiry, strike: toCyclePrice(candidate.strike), contracts: plan.quantity, callFillPrice: toCyclePrice(fillPrice), stockFillPrice: toCyclePrice(stockFillToday), at, actionId, splitFactorToday, sharesPerContract: sharesPerContractOnCycleScale, tradedSharesPerLedgerShare: priceToCycleScale });
       const leftoverLegIds = opened.leftoverPositionId === null ? [] : legsOfPosition(ledger, opened.leftoverPositionId).filter((leg) => leg.exitAt === null).map((leg) => leg.id);
       markNewLegs([opened.callLegId, opened.stockLegId, ...leftoverLegIds], candidateMid);

@@ -1,6 +1,5 @@
 import { easternInstant } from "../../../../lib/easternIsoDate.js";
 import { buyBackPut, closeCoveredCall, creditInterest, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "../ledgerEvents.js";
-import { stockPurchaseFillPrice, stockSaleFillPrice } from "../ledgerFills.js";
 import { createSimulatedLedger, type SimulatedLedger } from "../simulatedLedger.js";
 
 // A book three weeks into March 2026, six symbols, every event of the applier at least once. Shared by the selector
@@ -85,7 +84,7 @@ export function buildFinishedLedgerFixture(): FinishedLedgerFixture {
   const nextActionId = () => `action-${(actionNumber += 1)}`;
   const openPut = (symbol: string, dateIso: string, expiryDate: string, strike: number, contracts: number, fillPrice: number) => openCashSecuredPut(ledger, { symbol, expiryDate, strike, contracts, fillPrice, at: decisionAt(dateIso), actionId: nextActionId(), splitFactorToday: 1 });
   const openCall = (symbol: string, dateIso: string, expiryDate: string, strike: number, contracts: number, callFillPrice: number, stockPrice: number | null) =>
-    openCoveredCall(ledger, { symbol, expiryDate, strike, contracts, callFillPrice, stockFillPrice: stockPrice === null ? null : stockPurchaseFillPrice(stockPrice), at: decisionAt(dateIso), actionId: nextActionId(), splitFactorToday: 1 });
+    openCoveredCall(ledger, { symbol, expiryDate, strike, contracts, callFillPrice, stockFillPrice: stockPrice === null ? null : stockPrice + 0.01, at: decisionAt(dateIso), actionId: nextActionId(), splitFactorToday: 1 });
 
   const whlPut = openPut("WHL", "2026-03-02", "2026-03-06", 50, 1, 1.2);
   const mixPut = openPut("MIX", "2026-03-02", "2026-03-06", 30, 2, 0.5);
@@ -106,9 +105,9 @@ export function buildFinishedLedgerFixture(): FinishedLedgerFixture {
   const mixFirstCall = openCall("MIX", "2026-03-09", "2026-03-13", 31, 1, 0.45, null);
   const bwrPut = openPut("BWR", "2026-03-09", "2026-03-13", 30, 1, 0.35);
 
-  sellShares(ledger, { positionId: mixFirstCall.leftoverPositionId!, shares: 40, fillPrice: stockSaleFillPrice(30.5), at: decisionAt("2026-03-10"), actionId: nextActionId() });
+  sellShares(ledger, { positionId: mixFirstCall.leftoverPositionId!, shares: 40, fillPrice: 30.49, at: decisionAt("2026-03-10"), actionId: nextActionId() });
   const sldSharesPositionId = ledger.positions.find((position) => position.symbol === "SLD" && position.status === "open")!.id;
-  sellShares(ledger, { positionId: sldSharesPositionId, shares: 100, fillPrice: stockSaleFillPrice(21), at: decisionAt("2026-03-10"), actionId: nextActionId() });
+  sellShares(ledger, { positionId: sldSharesPositionId, shares: 100, fillPrice: 20.99, at: decisionAt("2026-03-10"), actionId: nextActionId() });
 
   buyBackPut(ledger, { legId: bwrPut.legId, fillPrice: 0.1, at: decisionAt("2026-03-11"), actionId: nextActionId() });
 
@@ -120,7 +119,7 @@ export function buildFinishedLedgerFixture(): FinishedLedgerFixture {
   const mixSecondCall = openCall("MIX", "2026-03-16", "2026-03-27", 31, 2, 0.4, 30.3);
   const bwrSecondCall = openCall("BWR", "2026-03-16", "2026-03-27", 32, 1, 0.55, 31);
 
-  closeCoveredCall(ledger, { positionId: bwrSecondCall.positionId, callFillPrice: 0.3, stockFillPrice: stockSaleFillPrice(31.5), at: decisionAt("2026-03-18"), actionId: nextActionId() });
+  closeCoveredCall(ledger, { positionId: bwrSecondCall.positionId, callFillPrice: 0.3, stockFillPrice: 31.49, at: decisionAt("2026-03-18"), actionId: nextActionId() });
 
   settleExpiry(ledger, { legId: whlSecondCall.callLegId, expiryClose: 52 });
 

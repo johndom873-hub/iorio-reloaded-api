@@ -1,3 +1,4 @@
+import { flatCommissionEstimator, flatStockCommissionEstimator } from "../../lib/commissionEstimate.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize } from "../../lib/optionContractLabel.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { regularCloseMinutesEt, varianceSessionsToExpiry } from "../../lib/varianceClock.js";
@@ -5,7 +6,7 @@ import { selectModelVolatilityForecast } from "../../lib/volatilityEdge.js";
 import { openCandidateId } from "../../pluto/candidateFilters.js";
 import type { BacktestAction, BacktestOrderShortfall } from "../backtestTypes.js";
 import { toOhlcvBars } from "./backtestBarHistory.js";
-import { baselineShareFillPrice, makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
+import { makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineCommissions, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
 
 import { noteLadderLook } from "./backtestBaselineLadder.js";
 import { sharesPerContract } from "./backtestBook.js";
@@ -13,9 +14,12 @@ import type { BacktestLookContext, BacktestLookResult, BacktestOptionSale } from
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { captureLookTimeEt, earningsNotYetReported, forecastBarRowCount, lookInstantMs } from "./backtestTickerInputs.js";
 import { buyBackCoveredCallKeepingShares, buyBackPut, closeCoveredCall, openCashSecuredPut, openCoveredCall, sellShares } from "./ledger/ledgerEvents.js";
-import { optionCommissionDollars, optionPurchaseFillPrice, stockSaleFillPrice } from "./ledger/ledgerFills.js";
+import { optionCommissionDollars, optionPurchaseFillPrice } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerFreeShares, ledgerHeldSharesAverageCost, ledgerLatestShareAcquisitionPrice, ledgerNetLiquidationValue, ledgerOpenCycleSummary } from "./ledger/ledgerSelectors.js";
 import { cycleSplitFactorFor, legsOfPosition, positionsOfSymbol, requireLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
+
+/** The flat rates the ledger charges (ledgerFills.ts), for the sale steps' ranking and sizing. */
+const backtestCommissions: BaselineCommissions = { option: flatCommissionEstimator, stock: flatStockCommissionEstimator };
 
 /** Each ticker's forward anchors of the day, by ledger (one per session run); a new day starts afresh. */
 const forwardAnchorsByLedger = new WeakMap<SimulatedLedger, Map<string, { dateIso: string; anchors: Map<string, BaselineForwardAnchor> }>>();
@@ -147,7 +151,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
     // The ticker's forwards anchored at the day's first look that quoted each expiry, then moved with the stock (Pluto's rule).
     const forwardAnchors = forwardAnchorsOfDay(ledger, symbol, todayIso);
     noteBaselineForwardAnchors(forwardAnchors, { quotes, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate });
-    const select = makeBaselineSelector({ quotes, forwardAnchors, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: lookSymbol.market.previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model });
+    const select = makeBaselineSelector({ quotes, forwardAnchors, commissions: backtestCommissions, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: lookSymbol.market.previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model });
     // The day's account value for sizing: the session's own, open options at zero when it leaves them out.
     const accountValueToday = () =>
       ledgerNetLiquidationValue(ledger, baseline.dayValueOptions === "excluded" ? new Map([...context.priceByLegId].map(([legId, price]) => [legId, requireLeg(ledger, legId).legType === "option" ? 0 : price])) : context.priceByLegId);
@@ -182,7 +186,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
       const actionId = context.nextActionId();
       const averageCostBefore = strikeLimit === null ? null : heldSharesAverageCostToday();
       const sharesHeldBefore = strikeLimit === null ? null : Math.round(heldSharesToday());
-      const stockFillToday = baselineShareFillPrice(baseline, stockPrice);
+      const stockFillToday = stockPrice;
       const candidateMid = (candidate.bid + candidate.ask) / 2;
       let legIds: string[];
       let positionIds: string[];
@@ -289,7 +293,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
       const cycle = ledgerOpenCycleSummary(ledger, symbol);
       const costToday = cycle && cycle.sharesHeld > 0 && cycle.sharesAcquired > 0 ? cycle.acquisitionCost / cycle.sharesAcquired / priceToCycleScale : null;
       if (costToday !== null && stockPrice <= costToday * (1 - baseline.shareStopLossPct / 100)) {
-        const stockFill = stockSaleFillPrice(stockPrice);
+        const stockFill = stockPrice;
         for (const position of positionsOfSymbol(ledger, symbol)) {
           if (position.status !== "open" || (position.strategyKey !== "unstructured" && position.strategyKey !== "covered_call")) continue;
           const openLegs = legsOfPosition(ledger, position.id).filter((leg) => leg.exitAt === null);
@@ -362,7 +366,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
       sell: record,
     };
     const noteShortfall = (shortfall: BaselineOrderShortfall) => shortfalls.push({ tradingDate: todayIso, at: at.toISOString(), lookTimeEt, symbol, ...shortfall, lookCount: 1 });
-    planBaselineSales({ symbol, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall });
+    planBaselineSales({ symbol, commissions: backtestCommissions, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall });
   }
 
   const summary = summaries.length === 0 ? "No action: fully invested" : actions.length === 0 ? `No action: ${summaries.join(" | ")}` : summaries.join(" · ");

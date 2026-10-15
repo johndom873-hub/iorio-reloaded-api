@@ -400,7 +400,7 @@ describe("a session with looks inside the window", () => {
     const closingFills = closing.fills.filter((fill) => fill.actionId === closes[0]!.actionId);
     expect(closingFills.map((fill) => `${fill.instrument} ${fill.side}`).sort()).toEqual(["option buy", "stock sell"]);
     expect(closingFills.find((fill) => fill.instrument === "option")!.price).toBeCloseTo((buyback.bid! + buyback.ask!) / 2 + (0.5 * (buyback.ask! - buyback.bid!)) / 2, 6);
-    expect(closingFills.find((fill) => fill.instrument === "stock")!.price).toBeCloseTo(stockPrice - 0.01, 3);
+    expect(closingFills.find((fill) => fill.instrument === "stock")!.price).toBeCloseTo(stockPrice, 3);
     expect(closing.detail.trades[0]).toMatchObject({ endedBy: "bought_back", settledOn: secondDay });
 
     const holding = await runLookSession({ symbols: [{ symbol: "LKM", days, expiriesOn }], plutoOverrides: { maxOpenPositions: 1 }, overrides: { policy: { roll: "never", buyback: "never", eventClose: "never" } } });

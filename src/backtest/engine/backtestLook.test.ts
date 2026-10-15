@@ -121,7 +121,7 @@ describe("an open", () => {
     if (sale.strategyKey === "cash_secured_put") expect(context.ledger.cash).toBeCloseTo(startingCash + sale.fillPrice * 100 * sale.contracts - sale.commissionDollars, 6);
     // The new leg is marked at its 10:00 mid, so the account value only moved by the spread share and the commission.
     expect(context.priceByLegId.get(sale.legId)).toBeCloseTo((sale.bid + sale.ask) / 2, 12);
-    expect(ledgerNetLiquidationValue(context.ledger, context.priceByLegId)).toBeCloseTo(startingCash - ((sale.bid + sale.ask) / 2 - sale.fillPrice) * 100 * sale.contracts - sale.commissionDollars - (sale.strategyKey === "covered_call" ? sale.contracts * 100 * 0.015 : 0), 4);
+    expect(ledgerNetLiquidationValue(context.ledger, context.priceByLegId)).toBeCloseTo(startingCash - ((sale.bid + sale.ask) / 2 - sale.fillPrice) * 100 * sale.contracts - sale.commissionDollars - (sale.strategyKey === "covered_call" ? sale.contracts * 100 * 0.005 : 0), 4);
   });
 
   it("takes one open a look: the fill starts the ticker cooldown", async () => {
@@ -219,16 +219,16 @@ describe("shares put to the book", () => {
 
     expect(look.actions).toHaveLength(1);
     expect(look.actions[0]).toMatchObject({ kind: "close_shares", outcome: "filled", automatic: false, quantity: 100, chosenBecause: "shares in profit above the floor: no call on them clears Pluto's rules", positionIds: [sharesPosition.id] });
-    expect(look.actions[0]!.fillPrice).toBeCloseTo(stockPrice - 0.01, 10);
+    expect(look.actions[0]!.fillPrice).toBeCloseTo(stockPrice, 10);
     expect(look.actions[0]!.gateResults.find((gate) => gate.gate === "close_gate")).toMatchObject({ ok: true });
     expect(look.summary).toMatch(/^Closed SYN Sell 100 shares @ /);
     expect(sharesPosition).toMatchObject({ status: "closed", closeReason: "closed_via_app" });
-    expect(context.ledger.cash).toBeCloseTo(cashBefore + (stockPrice - 0.01) * 100 - 0.5, 6);
+    expect(context.ledger.cash).toBeCloseTo(cashBefore + stockPrice * 100 - 0.5, 6);
     expect(isSymbolFlat(context.ledger, "SYN")).toBe(true);
     // The cycle closed with the put's premium and the shares' gain: 149.32 + (price − 0.01 − 95) × 100 − 0.50.
     const cycle = ledgerCycles(context.ledger, "SYN", { dailyCloses: adjustedDailyCloses.map((bar) => ({ ...bar })) })[0]!;
     expect(cycle).toMatchObject({ status: "closed", dataFlags: [] });
-    expect(cycle.total).toBeCloseTo(149.32 + (stockPrice - 0.01 - 95) * 100 - 0.5, 6);
+    expect(cycle.total).toBeCloseTo(149.32 + (stockPrice - 95) * 100 - 0.5, 6);
   });
 
   it("sells them at once when the rule is to always sell, and keeps them when the shares are younger than one session", async () => {
@@ -577,7 +577,7 @@ describe("several symbols on one book", () => {
     expect(look.optionSales.map((sale) => sale.symbol)).toEqual(["ALT", "SYN"]);
     expect(context.ledger.positions.map((position) => position.symbol)).toEqual(["ALT", "SYN"]);
     // One cash balance: both premiums land in it.
-    expect(context.ledger.cash).toBeCloseTo(startingCash + look.optionSales.reduce((sum, sale) => sum + (sale.strategyKey === "cash_secured_put" ? sale.fillPrice * 100 * sale.contracts - sale.commissionDollars : 0), 0) - look.optionSales.reduce((sum, sale) => sum + (sale.strategyKey === "covered_call" ? sale.contracts * 100 * (sale.spotAtOpen + 0.015) - (sale.fillPrice * 100 * sale.contracts - sale.commissionDollars) : 0), 0), 4);
+    expect(context.ledger.cash).toBeCloseTo(startingCash + look.optionSales.reduce((sum, sale) => sum + (sale.strategyKey === "cash_secured_put" ? sale.fillPrice * 100 * sale.contracts - sale.commissionDollars : 0), 0) - look.optionSales.reduce((sum, sale) => sum + (sale.strategyKey === "covered_call" ? sale.contracts * 100 * (sale.spotAtOpen + 0.005) - (sale.fillPrice * 100 * sale.contracts - sale.commissionDollars) : 0), 0), 4);
     expect(look.summary).toMatch(/^Opened ALT Sell .* · Opened SYN Sell /);
     // A third pass found both cooling down and nothing else to do.
     expect(look.scoredBySymbol.get("ALT")!.symbol).toBe("ALT");

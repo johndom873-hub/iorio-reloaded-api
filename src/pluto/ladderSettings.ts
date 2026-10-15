@@ -34,7 +34,6 @@ export const ladderFixedBaselineChoices = {
   ladderMaxRungsPerSession: 0,
   ladderPutVersusCall: "higher_yield",
   ladderPutYieldMarginPct: 0,
-  shareFill: "plus_one_cent",
   dayValueOptions: "marked",
   takeProfitPct: 0,
   shareStopLossPct: 0,

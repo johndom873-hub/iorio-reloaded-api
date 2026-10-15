@@ -86,7 +86,7 @@ Example: 5 puts $97 sold at 3.545, close 95.40 → assigned, 500 shares in at 97
 **Fills and commissions**
 
 - option sold: mid − spread cost share × (ask − bid) ÷ 2. Option bought back: mid + spread cost share × (ask − bid) ÷ 2. $0.68 per contract each way.
-- shares bought: the look's stock price + $0.01; sold: − $0.01; $0.005 per share. Wherever a rule reads the stock's bid and ask, they are the price ∓ $0.01.
+- shares bought and sold at the look's stock price itself (IBKR's price at the look; the $0.01 either way removed by Marcelo 2026-10-15), plus $0.005 per share. Wherever a rule reads the stock's bid and ask, both are that price.
 - every fill is at the quotes of the look it happens at; an option the look has no two-sided quote for is not bought back at that look.
 
 Example: bid 2.80, ask 2.90, spread cost share 50%: sale at 2.85 − 0.025 = 2.825, buyback at 2.875.
@@ -163,7 +163,7 @@ Buy and hold with several symbols: see Baselines below.
 
 **Order records** (Marcelo 2026-10-15; recorded only, no decision reads them). Each baseline order (the calls on the free lots, the entry with the free cash, a ladder put, a put on the DTE budget) records:
 
-- on each of its sales: **wantedContracts**: calls on free lots = the free lots; the entry = the lots the room holds (the shares' budget, the per-stock cap), or what the cash pays for when neither caps it; a ladder put = the rung's collateral ÷ (the best put's strike × 100), rounded down; a DTE-budget put = its budget's contracts at the best put. **rank** = the sale's place in the order's ranking, from 1; **bestCandidate…** = the first contract in the ranking not already held when the order starts (strike, DTE, premium yield, volume limit = floor(20% × the previous session's volume)); on a Call order, **sharesAverageCostBefore** = the average cost of the shares held when the order starts, on today's price scale (null when none are held);
+- on each of its sales: **wantedContracts**: calls on free lots = the free lots; the entry = the lots the room holds (the shares' budget, the per-stock cap), or what the cash pays for when neither caps it; a ladder put = the rung's collateral ÷ (the best put's strike × 100), rounded down; a DTE-budget put = its budget's contracts at the best put. **rank** = the sale's place in the order's ranking, from 1; **bestCandidate…** = the first contract in the ranking not already held when the order starts (strike, DTE, premium yield, volume limit = floor(20% × the previous session's volume)); on a Call order, **sharesAverageCostBefore** = the average cost of the shares held when the order starts, on today's price scale (null when none are held), and **stockPriceAtLook** = the look's stock price, the price new shares are bought at;
 - when it leaves contracts unsold, a shortfall row: wanted, filled, unsold (a ladder put: the collateral left ÷ (the best put's strike × 100)) and the reason: **cash** (the cash allowed fewer contracts than the room and the volume limit, at any contract it tried), else **volume** (the contracts within the rules ran out, each to its volume limit or already held), else **no_candidate** (none within the rules). Looks that found no candidate are kept one row per day, ticker and order, with their count.
 - Example: a rung of $20,000 with the best put at $40 wants 5 contracts; its volume limit is 3, the next put ($39) fills 2 → 5 filled, no row. With a volume limit of 3 and no other put: 3 filled, a row with 2 unsold (volume).
 

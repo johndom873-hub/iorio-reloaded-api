@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../../lib/easternIsoDate.js";
 import { checkCalledAway, commissionPerShare } from "../../../pluto/heldShareCalls.js";
 import { buyBackCoveredCallKeepingShares, openCashSecuredPut, openCoveredCall, rollLeg, sellShares, settleExpiry } from "./ledgerEvents.js";
-import { stockPurchaseFillPrice, stockSaleFillPrice } from "./ledgerFills.js";
 import { ledgerBreakEvenForPosition, ledgerCycles, ledgerFreeShares, ledgerHeldSharesAverageCost, ledgerLatestShareAcquisitionPrice, ledgerOpenCycleSummary, ledgerTotalRealizedPnl } from "./ledgerSelectors.js";
 import { createSimulatedLedger, type SimulatedLedger } from "./simulatedLedger.js";
 
@@ -199,7 +198,7 @@ describe("buy-write called away", () => {
   //         cycle total 98.64 + (31 − 30.015) × 200 = 295.64, all in the covered-call bucket, on 6,003 of capital
   it("books the premium and the shares' gain to the covered-call bucket", () => {
     const ledger = newLedger();
-    const call = openCoveredCall(ledger, { symbol: "BWR", expiryDate: "2026-03-06", strike: 31, contracts: 2, callFillPrice: 0.5, stockFillPrice: stockPurchaseFillPrice(30), at: decisionAt("2026-03-02"), actionId: "action-1", splitFactorToday: 1 });
+    const call = openCoveredCall(ledger, { symbol: "BWR", expiryDate: "2026-03-06", strike: 31, contracts: 2, callFillPrice: 0.5, stockFillPrice: 30.01, at: decisionAt("2026-03-02"), actionId: "action-1", splitFactorToday: 1 });
     const summary = ledgerOpenCycleSummary(ledger, "BWR")!;
     expect(summary).toMatchObject({ sharesHeld: 200, sharesAcquired: 200, unavailableReason: null });
     expect(summary.acquisitionCost).toBeCloseTo(6003, 6);
@@ -243,7 +242,7 @@ describe("put assigned, shares sold at a profit", () => {
     const sharesPosition = ledger.positions.find((position) => position.symbol === "SLD" && position.status === "open")!;
     expect(ledgerBreakEvenForPosition(ledger, sharesPosition.id).breakEven).toBeCloseTo(19.6068, 6);
 
-    sellShares(ledger, { positionId: sharesPosition.id, shares: 100, fillPrice: stockSaleFillPrice(21), at: decisionAt("2026-03-10"), actionId: "action-2" });
+    sellShares(ledger, { positionId: sharesPosition.id, shares: 100, fillPrice: 20.99, at: decisionAt("2026-03-10"), actionId: "action-2" });
     expect(ledgerOpenCycleSummary(ledger, "SLD")).toBeNull();
     const cycles = ledgerCycles(ledger, "SLD", { dailyCloses: [{ date: "2026-03-06", close: 19.5 }, { date: "2026-03-10", close: 21 }] });
     expect(cycles).toHaveLength(1);
@@ -289,7 +288,7 @@ describe("a covered call's call bought back alone (the baseline wheel's profit-t
     const ledger = newLedger();
     const put = openCashSecuredPut(ledger, { symbol: "WHL", expiryDate: "2026-03-06", strike: 50, contracts: 1, fillPrice: 1.2, at: decisionAt("2026-03-02"), actionId: "action-1", splitFactorToday: 1 });
     settleExpiry(ledger, { legId: put.legId, expiryClose: 48 });
-    const call = openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-20", strike: 51, contracts: 1, callFillPrice: 0.8, stockFillPrice: stockPurchaseFillPrice(49), at: decisionAt("2026-03-09"), actionId: "action-2", splitFactorToday: 1 });
+    const call = openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-20", strike: 51, contracts: 1, callFillPrice: 0.8, stockFillPrice: 49.01, at: decisionAt("2026-03-09"), actionId: "action-2", splitFactorToday: 1 });
     expect(ledgerFreeShares(ledger, "WHL")).toBe(0);
     buyBackCoveredCallKeepingShares(ledger, { positionId: call.positionId, callFillPrice: 0.2, at: decisionAt("2026-03-11"), actionId: "action-3" });
     expect(ledgerFreeShares(ledger, "WHL")).toBe(100);
@@ -301,7 +300,7 @@ describe("a covered call's call bought back alone (the baseline wheel's profit-t
     expect(cycles).toHaveLength(1);
     expect(cycles[0]).toMatchObject({ status: "open", sharesHeld: 100, dataFlags: [] });
     // A second call can be written on the same shares.
-    openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-27", strike: 51, contracts: 1, callFillPrice: 0.7, stockFillPrice: stockPurchaseFillPrice(49.5), at: decisionAt("2026-03-12"), actionId: "action-4", splitFactorToday: 1 });
+    openCoveredCall(ledger, { symbol: "WHL", expiryDate: "2026-03-27", strike: 51, contracts: 1, callFillPrice: 0.7, stockFillPrice: 49.51, at: decisionAt("2026-03-12"), actionId: "action-4", splitFactorToday: 1 });
     expect(ledgerFreeShares(ledger, "WHL")).toBe(0);
     expect(() => buyBackCoveredCallKeepingShares(ledger, { positionId: put.positionId, callFillPrice: 0.1, at: decisionAt("2026-03-13"), actionId: "action-5" })).toThrow(/not an open covered call/);
   });

@@ -282,18 +282,6 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   { path: "baseline.ladderMinutesBetweenRungs", group: "Baseline wheel", label: "Ladder: minutes between new rungs, at least", unit: "integer", editable: true, note: "from the ticker's last rung; 0 = any look (looks are 30 minutes apart)" },
   { path: "baseline.ladderMaxRungsPerSession", group: "Baseline wheel", label: "Ladder: new rungs per session, at most", unit: "integer", editable: true, note: "per ticker; 0 = no limit" },
   {
-    path: "baseline.shareFill",
-    group: "Baseline wheel",
-    label: "A new Covered Call's shares bought at",
-    unit: "choice",
-    editable: true,
-    note: null,
-    choices: [
-      { value: "plus_one_cent", label: "The 10:00 price + $0.01" },
-      { value: "ten_oclock_price", label: "The 10:00 price" },
-    ],
-  },
-  {
     path: "baseline.dayValueOptions",
     group: "Baseline wheel",
     label: "Open options in the day's account value",

@@ -192,7 +192,6 @@ export function validateBaselineSettings(values: Record<string, unknown>): strin
   const ladderError = values.putsWhenNoCall === "reserve_ladder" ? validateLadderSettings(values) : null;
   if (ladderError) return ladderError;
   if (typeof values.putBudgetPctPerDte !== "number" || !Number.isFinite(values.putBudgetPctPerDte) || values.putBudgetPctPerDte <= 0 || values.putBudgetPctPerDte > 100) return "baseline.putBudgetPctPerDte must be a number above 0 and at most 100.";
-  if (values.shareFill !== "plus_one_cent" && values.shareFill !== "ten_oclock_price") return "baseline.shareFill must be plus_one_cent or ten_oclock_price.";
   if (values.dayValueOptions !== "marked" && values.dayValueOptions !== "excluded") return "baseline.dayValueOptions must be marked or excluded.";
   if (values.callDeltaRange !== "entry_range" && values.callDeltaRange !== "own_range") return "baseline.callDeltaRange must be entry_range or own_range.";
   if (typeof values.takeProfitPct !== "number" || !Number.isFinite(values.takeProfitPct) || values.takeProfitPct < 0 || values.takeProfitPct >= 100) return "baseline.takeProfitPct must be a number from 0 (off) to below 100.";
