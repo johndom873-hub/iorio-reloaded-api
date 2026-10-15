@@ -17,6 +17,8 @@ const harness = vi.hoisted(() => ({
   modelCalls: 0,
   spyDayChangePct: 0.5 as number | null,
   systemChecksOk: true,
+  /** The day's order cap reached (the actions_cap check failing), alone or with systemChecksOk false. */
+  actionsCapReached: false,
   finishFailuresLeft: 0,
   failNoTradeAction: false,
   accountContextCalls: [] as (number | null)[],
@@ -57,9 +59,9 @@ vi.mock("./ledger.js", () => ({
 vi.mock("./stateStore.js", () => ({ loadPlutoState: async () => ({ breakers: {} }), recordPlutoPass: vi.fn(), tripPlutoBreaker: vi.fn() }));
 vi.mock("./systemChecks.js", () => ({
   runPlutoSystemChecks: async () => ({
-    ok: harness.systemChecksOk,
-    failures: harness.systemChecksOk ? [] : ["account_data: account summary failed: timeout"],
-    checks: harness.systemChecksOk ? {} : { account_data: { ok: false, detail: "account summary failed: timeout" } },
+    ok: harness.systemChecksOk && !harness.actionsCapReached,
+    failures: [...(harness.systemChecksOk ? [] : ["account_data: account summary failed: timeout"]), ...(harness.actionsCapReached ? ["actions_cap: 10 of 10 actions today"] : [])],
+    checks: { ...(harness.systemChecksOk ? {} : { account_data: { ok: false, detail: "account summary failed: timeout" } }), ...(harness.actionsCapReached ? { actions_cap: { ok: false, detail: "10 of 10 actions today" } } : {}) },
     context: { state: { stressOverrideDate: null }, todayEasternIso: "2026-10-07", session: { cancelByMs: 0, windowEndEt: "15:30" }, netLiquidationValue: 1_000_000, totalCashValue: 400_000, counters: { actionsToday: 0 } },
   }),
 }));
@@ -185,6 +187,7 @@ beforeEach(() => {
   harness.modelCalls = 0;
   harness.spyDayChangePct = 0.5;
   harness.systemChecksOk = true;
+  harness.actionsCapReached = false;
   harness.finishFailuresLeft = 0;
   harness.failNoTradeAction = false;
   harness.accountContextCalls.length = 0;
@@ -353,6 +356,41 @@ describe("runPlutoPass: opens blocked (heldPositionsOnly / market stress) (audit
     expect(summary.skippedReason).toBe("nothing eligible");
     expect(harness.bursts).toEqual([]);
     expect(harness.modelCalls).toBe(0);
+  });
+});
+
+describe("runPlutoPass: the day's order cap never stops a close (2026-10-15)", () => {
+  it("with only the cap reached, an automatic close is still sent", async () => {
+    harness.actionsCapReached = true;
+    harness.tickers = [ticker("AAA", { eligibleIds: [], closeOffers: [closeOffer("AAA", true)] })];
+    const summary = await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(summary.skippedOnSystemChecks).toBeUndefined();
+    expect(harness.executedCloses).toEqual(["AAA"]);
+  });
+
+  it("with only the cap reached, a close for the model is still offered, and opens are not", async () => {
+    harness.actionsCapReached = true;
+    harness.tickers = [ticker("AAA", { closeOffers: [closeOffer("AAA", false)] })];
+    const summary = await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(summary.modelCalled).toBe(true);
+    // The open the ticker had eligible is not among the offers: the close alone is.
+    expect(vi.mocked(ledger.finishPlutoPass).mock.calls.at(-1)![1]).toMatchObject({ candidateCount: 1 });
+  });
+
+  it("with only the cap reached and nothing to close, the round finds nothing eligible and calls no model", async () => {
+    harness.actionsCapReached = true;
+    const summary = await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(summary.skippedReason).toBe("nothing eligible");
+    expect(harness.modelCalls).toBe(0);
+  });
+
+  it("the cap with another failing check still skips the round on its checks", async () => {
+    harness.actionsCapReached = true;
+    harness.systemChecksOk = false;
+    harness.tickers = [ticker("AAA", { closeOffers: [closeOffer("AAA", true)] })];
+    const summary = await runPlutoPass(dayRound(["AAA"]), makeContext());
+    expect(summary.skippedOnSystemChecks).toBe(true);
+    expect(harness.executedCloses).toEqual([]);
   });
 });
 

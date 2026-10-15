@@ -204,11 +204,7 @@ async function attachCloseOffers(ticker: EvaluatedTicker, settings: PlutoSetting
   let automaticCloseWorking = false;
   for (const offer of offers) {
     if (!offer.automatic || !executeAutomatic) continue;
-    // Automatic closes count against the session's order cap like any other order (counters.ts).
-    if (automaticBudget.remaining <= 0) {
-      await recordPlutoEvent("warning", { message: `automatic close not sent, the session's order cap is reached: ${offer.description}`, symbol: offer.symbol });
-      continue;
-    }
+    // Automatic closes count toward the session's order cap (counters.ts), but the cap never stops one: a close reduces risk.
     automaticBudget.remaining -= 1;
     const actionId = await recordPlutoAction({ passId, kind: offer.kind, symbol: offer.symbol, tickerId: ticker.row.tickerId, contract: { positionId: offer.positionId, legIds: offer.legIds, ...(offer.contract ?? {}) }, candidateScores: offer.detail, deterministicTopPick: null, gateResults: [{ gate: "automatic_close", ok: true, detail: offer.automaticReason ?? "automatic close" }], sizeTier: null, quantity: offer.quantity, limitPrice: offer.limitPrice, outcome: "validated", blockReason: null, referenceBid: offer.limitPrice, referenceMid: offer.limitPrice });
     if (offer.otherReferenceLegs) await updatePlutoAction(actionId, { referenceOtherLegs: offer.otherReferenceLegs });
@@ -410,7 +406,11 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       await notifyPlutoTelegram(`🛑 Pluto breaker tripped (reconciliation): ${checks.checks.reconciliation.detail}. Pluto is paused until a human resets it.`);
     }
   }
-  if (!checks.ok) return { ...(await skip(checks.failures.join(" | "), checks.checks)), skippedOnSystemChecks: true };
+  // The day's order cap never stops a close that reduces risk (Marcelo 2026-10-15): with only the cap reached, the round runs
+  // with closes alone (opens, rolls and calls on held shares wait for tomorrow).
+  const actionsCapReached = checks.checks.actions_cap?.ok === false;
+  const blockingFailures = checks.failures.filter((failure) => !failure.startsWith("actions_cap:"));
+  if (blockingFailures.length > 0) return { ...(await skip(checks.failures.join(" | "), checks.checks)), skippedOnSystemChecks: true };
 
   // Market stress (design round 4, item 72): a broad intraday drop blocks new opens for as long as it
   // lasts; rolls and profit-taking closes stay allowed. Recorded as a check, not a breaker, so it lifts
@@ -434,11 +434,16 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const coolingDown = (symbol: string) => nowMs - (context.lastModelEvaluationAtBySymbol.get(symbol) ?? 0) < cooldownMs;
   // A held position can have an automatic close due (odd lots, a buyback before earnings), so its ticker is never skipped here.
   if (!request.force && rows.every((row) => coolingDown(row.symbol)) && !(await anyOpenPositionOn(rows.map((row) => row.symbol)))) return skip("every ticker in this round is cooling down", checks.checks);
-  const opensBlockedBecause = marketStress ? "market stress: new opens blocked while SPY is down" : request.heldPositionsOnly ? "opens wait for today's opening look" : null;
+  const opensBlockedBecause = actionsCapReached ? "the day's order cap is reached: closes only" : marketStress ? "market stress: new opens blocked while SPY is down" : request.heldPositionsOnly ? "opens wait for today's opening look" : null;
   const blockOpensWhenBarred = (ticker: EvaluatedTicker) => {
     if (!opensBlockedBecause) return;
     ticker.filtered.rejected.push(...ticker.filtered.eligible.map((entry) => ({ id: entry.id, reasons: [opensBlockedBecause], codes: ["opens_blocked" as const] })));
     ticker.filtered.eligible = [];
+    // A roll opens a new leg: past the order cap it waits too (under market stress rolls stay allowed).
+    if (actionsCapReached) {
+      ticker.filtered.rejectedRolls.push(...ticker.filtered.eligibleRolls.map((entry) => ({ id: entry.id, reasons: [opensBlockedBecause], codes: ["opens_blocked" as const] })));
+      ticker.filtered.eligibleRolls = [];
+    }
   };
   // The ticker cooldown after a filled Pluto action keeps the ticker's opens from the model too: the post-model gate would refuse them.
   const lastFilledActionAtBySymbol = await loadLastFilledPlutoActionAtBySymbol();
