@@ -181,10 +181,10 @@ describe("strategy switch", () => {
 
     await testDb("pluto_state").where({ id: 1 }).update({ paused: true });
     // A memory from an earlier ladder period is stored and read back, then forgotten by the switch: a cycle open at the switch starts there.
-    const earlier = { startedOn: "2026-09-01", accountValueAtStart: 180_000, peakPrice: 61.25, shock: 0.7 };
+    const earlier = { startedOn: "2026-09-01", accountValueAtStart: 180_000, shock: 0.7 };
+    await saveLadderCycleMemory(tickerIds[0]!, { ...earlier, shock: 0.65 });
     await saveLadderCycleMemory(tickerIds[0]!, earlier);
-    await saveLadderCycleMemory(tickerIds[0]!, { ...earlier, peakPrice: 63.5 });
-    expect(await loadLadderCycleMemory(tickerIds[0]!)).toEqual({ ...earlier, peakPrice: 63.5 });
+    expect(await loadLadderCycleMemory(tickerIds[0]!)).toEqual(earlier);
     const switched = await call("PUT", "/settings", { executionStrategy: "cc_put_ladder" });
     expect(switched.status).toBe(200);
     expect(await loadLadderCycleMemory(tickerIds[0]!)).toBeNull();
