@@ -1,6 +1,6 @@
 import { valueContract, yieldOnExposure } from "../../lib/contractValuation.js";
 import type { OpenCycleSummary } from "../../lib/cycleBreakEven.js";
-import { blackScholesDelta, impliedVolatilityFromPrice, parityImpliedForward, yearsBetweenIsoDates } from "../../lib/impliedVolatilitySurface.js";
+import { blackScholesDelta, forwardAtSpot, impliedVolatilityFromPrice, parityImpliedForward, yearsBetweenIsoDates } from "../../lib/impliedVolatilitySurface.js";
 import { daysToExpiry } from "../../lib/optionContractLabel.js";
 import { frictionDollarsPerContract } from "../../lib/signalCandidates.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
@@ -74,9 +74,36 @@ export interface BaselineModelInput {
   rankByEdgeYield: boolean;
 }
 
+/** An expiry's forward as the day's first look that quoted it found it (parity), with the stock price then. */
+export interface BaselineForwardAnchor {
+  forward: number;
+  spotPrice: number;
+}
+
+/**
+ * Notes the forward of every expiry the look quotes that the day has no anchor for yet (Pluto's rule, approved by
+ * Marcelo 2026-10-15): put-call parity on the look's quotes of that expiry, else spot × e^(rT). The caller keeps the
+ * anchors for the ticker's day and starts afresh each day; later looks move them with the stock (forwardAtSpot).
+ */
+export function noteBaselineForwardAnchors(anchors: Map<string, BaselineForwardAnchor>, look: { quotes: readonly SymbolFileQuote[]; todayIso: string; yearsToTodaysClose: number; stockPrice: number; riskFreeRate: number }): void {
+  const quotesByExpiry = new Map<string, { strike: number; right: "C" | "P"; bid: number | null; ask: number | null }[]>();
+  for (const quote of look.quotes) {
+    if (anchors.has(quote.expiry) || quote.expiry < look.todayIso) continue;
+    const expiryQuotes = quotesByExpiry.get(quote.expiry) ?? quotesByExpiry.set(quote.expiry, []).get(quote.expiry)!;
+    expiryQuotes.push({ strike: quote.strike, right: quote.right, bid: quote.bid, ask: quote.ask });
+  }
+  for (const [expiry, expiryQuotes] of quotesByExpiry) {
+    const yearsToExpiry = expiry === look.todayIso ? look.yearsToTodaysClose : yearsBetweenIsoDates(look.todayIso, expiry);
+    const spotForward = look.stockPrice * Math.exp(look.riskFreeRate * yearsToExpiry);
+    anchors.set(expiry, { forward: parityImpliedForward(expiryQuotes, spotForward, yearsToExpiry, look.riskFreeRate) ?? spotForward, spotPrice: look.stockPrice });
+  }
+}
+
 export interface BaselineCandidateInput {
-  /** Every quote of the look (both rights; the parity forward reads both). */
+  /** Every quote of the look. */
   quotes: readonly SymbolFileQuote[];
+  /** The day's forward anchors by expiry (noteBaselineForwardAnchors, run on this look first). */
+  forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
   right: "C" | "P";
   todayIso: string;
   /** T for an option expiring on the look's day: the hours from the look to that day's close ÷ 8,760 (later expiries use whole calendar days). */
@@ -110,16 +137,10 @@ export interface BaselineCandidateInput {
 export function selectBaselineCandidates(input: BaselineCandidateInput): { candidates: BaselineCandidate[]; rejections: BaselineRejections } {
   const rejections: BaselineRejections = { outsideExpiryRange: 0, noUsableQuote: 0, spreadTooWide: 0, tooLittleVolume: 0, noImpliedVolatility: 0, outsideDeltaRange: 0, noTimeValue: 0, alreadyHeld: 0, belowCost: 0, aboveCeiling: 0, belowMinimumYield: 0, spansEarnings: 0, noForecast: 0, belowVolatilityEdge: 0 };
   const isCall = input.right === "C";
-  const forwardByExpiry = new Map<string, number>();
+  // The day's anchor moved with the stock (sticky moneyness), as Pluto's surface; an expiry without one (not noted) on spot × e^(rT).
   const forwardOf = (expiry: string, yearsToExpiry: number) => {
-    let forward = forwardByExpiry.get(expiry);
-    if (forward === undefined) {
-      const spotForward = input.stockPrice * Math.exp(input.riskFreeRate * yearsToExpiry);
-      const expiryQuotes = input.quotes.filter((quote) => quote.expiry === expiry).map((quote) => ({ strike: quote.strike, right: quote.right, bid: quote.bid, ask: quote.ask }));
-      forward = parityImpliedForward(expiryQuotes, spotForward, yearsToExpiry, input.riskFreeRate) ?? spotForward;
-      forwardByExpiry.set(expiry, forward);
-    }
-    return forward;
+    const anchor = input.forwardAnchors.get(expiry);
+    return anchor ? forwardAtSpot(anchor.forward, anchor.spotPrice, input.stockPrice) : input.stockPrice * Math.exp(input.riskFreeRate * yearsToExpiry);
   };
   const candidates: BaselineCandidate[] = [];
   for (const quote of input.quotes) {
@@ -275,6 +296,7 @@ export type BaselineSelect = (right: "C" | "P", minimumStrike?: number | null, f
 /** A symbol's candidate selection at a look: entries on the baseline's ranges, calls on held shares on theirs (callDeltaRange). */
 export function makeBaselineSelector(input: {
   quotes: readonly SymbolFileQuote[];
+  forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
   todayIso: string;
   yearsToTodaysClose: number;
   stockPrice: number;
@@ -286,14 +308,14 @@ export function makeBaselineSelector(input: {
   earningsDatesIso: readonly string[] | undefined;
   model: BaselineModelInput | null;
 }): BaselineSelect {
-  const { quotes, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model } = input;
+  const { quotes, forwardAnchors, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model } = input;
   // The calls on held shares are held to the margin only when every sale is.
   const callsModel = model && baseline.volatilityEdgeFilter === "entries" ? { ...model, minVolatilityEdge: null } : model;
   const callsSettings = baseline.callDeltaRange === "own_range" ? { ...baseline, minAbsDelta: baseline.callMinAbsDelta, maxAbsDelta: baseline.callMaxAbsDelta } : baseline;
   // Calls (on held shares and new Covered Calls) only above minCallYieldPct; a put ranked by premium yield alone when asked.
   const minimumCallYield = baseline.minCallYieldPct > 0 ? baseline.minCallYieldPct / 100 : null;
   return (right: "C" | "P", minimumStrike: number | null = null, forEntry = true, maximumStrike: number | null = null, byPremiumYield = false) =>
-    selectBaselineCandidates({ quotes, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: forEntry ? baseline : callsSettings, spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: right === "C" ? minimumCallYield : null, ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" });
+    selectBaselineCandidates({ quotes, forwardAnchors, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: forEntry ? baseline : callsSettings, spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: right === "C" ? minimumCallYield : null, ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" });
 }
 
 /** What the sale steps read from the symbol's book and how they sell; prices on the cycle's scale unless the name says "Today". */
@@ -474,8 +496,10 @@ export function planBaselineSales(input: BaselineSalesInput): void {
 
   let lastCallRejections: BaselineRejections | null = null;
   let anyCallCandidate = false;
-  // The order wants a call on every free lot; its best candidate is the first floor's.
+  // The order wants a call on every free lot; its best candidate is the first floor's. A Call order also records the
+  // shares' average cost before it (the Analyse window's largest pot).
   let heldCallsBest: BaselineCandidate | null = null;
+  const heldCallsSharesAverageCost = book.heldSharesAverageCostToday();
   for (const { floor, label } of ladderPutChosen ? [] : callFloors) {
     if (uncoveredLots < 1) break;
     const { candidates, rejections } = select("C", floor, false);
@@ -487,7 +511,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
       if (uncoveredLots < 1) break;
       if (book.isHeld(candidate)) continue;
       const contracts = Math.min(uncoveredLots, candidate.volumeCap);
-      book.sell("covered_call", candidate, contracts, candidates.length, `baseline: the call with the highest ${rankingLabel}${label} on the free shares${fillDown && soldAtThisFloor > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, floor === null ? null : { name: "costFloor", value: floor }, false, orderScores(freeLots, candidates, candidate, heldCallsBest));
+      book.sell("covered_call", candidate, contracts, candidates.length, `baseline: the call with the highest ${rankingLabel}${label} on the free shares${fillDown && soldAtThisFloor > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, floor === null ? null : { name: "costFloor", value: floor }, false, { ...orderScores(freeLots, candidates, candidate, heldCallsBest), sharesAverageCostBefore: heldCallsSharesAverageCost });
       uncoveredLots -= contracts;
       soldAtThisFloor += 1;
     }
@@ -544,6 +568,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     const best = bestOf(candidates);
     const bestLimits = best === null ? null : entryLimitsFor(best);
     const wanted = bestLimits === null ? null : Number.isFinite(bestLimits.byRoom) ? bestLimits.byRoom : bestLimits.byCash;
+    const entrySharesAverageCost: Record<string, number | null> = buyWrite ? { sharesAverageCostBefore: book.heldSharesAverageCostToday() } : {};
     let entriesMade = 0;
     let contractsSold = 0;
     let cashCut = false;
@@ -560,7 +585,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
         belowAverageAfterPurchase++;
         continue;
       }
-      book.sell(baseline.entry === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${baseline.entry === "put" ? "put" : "Covered Call"} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, buyEveryShare, orderScores(wanted, candidates, candidate, best));
+      book.sell(baseline.entry === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${baseline.entry === "put" ? "put" : "Covered Call"} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, buyEveryShare, { ...orderScores(wanted, candidates, candidate, best), ...entrySharesAverageCost });
       entriesMade++;
       contractsSold += contracts;
     }

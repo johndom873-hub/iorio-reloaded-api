@@ -5,7 +5,8 @@ import { selectModelVolatilityForecast } from "../../lib/volatilityEdge.js";
 import { openCandidateId } from "../../pluto/candidateFilters.js";
 import type { BacktestAction, BacktestOrderShortfall } from "../backtestTypes.js";
 import { toOhlcvBars } from "./backtestBarHistory.js";
-import { baselineShareFillPrice, makeBaselineSelector, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineLookBook, type BaselineModelInput, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
+import { baselineShareFillPrice, makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
+
 import { noteLadderLook } from "./backtestBaselineLadder.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { BacktestLookContext, BacktestLookResult, BacktestOptionSale } from "./backtestLook.js";
@@ -14,7 +15,19 @@ import { captureLookTimeEt, earningsNotYetReported, forecastBarRowCount, lookIns
 import { buyBackCoveredCallKeepingShares, buyBackPut, closeCoveredCall, openCashSecuredPut, openCoveredCall, sellShares } from "./ledger/ledgerEvents.js";
 import { optionCommissionDollars, optionPurchaseFillPrice, stockSaleFillPrice } from "./ledger/ledgerFills.js";
 import { ledgerCapitalAtRisk, ledgerFreeCash, ledgerFreeShares, ledgerHeldSharesAverageCost, ledgerLatestShareAcquisitionPrice, ledgerNetLiquidationValue, ledgerOpenCycleSummary } from "./ledger/ledgerSelectors.js";
-import { cycleSplitFactorFor, legsOfPosition, positionsOfSymbol, requireLeg } from "./ledger/simulatedLedger.js";
+import { cycleSplitFactorFor, legsOfPosition, positionsOfSymbol, requireLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
+
+/** Each ticker's forward anchors of the day, by ledger (one per session run); a new day starts afresh. */
+const forwardAnchorsByLedger = new WeakMap<SimulatedLedger, Map<string, { dateIso: string; anchors: Map<string, BaselineForwardAnchor> }>>();
+function forwardAnchorsOfDay(ledger: SimulatedLedger, symbol: string, todayIso: string): Map<string, BaselineForwardAnchor> {
+  let bySymbol = forwardAnchorsByLedger.get(ledger);
+  if (!bySymbol) forwardAnchorsByLedger.set(ledger, (bySymbol = new Map()));
+  const kept = bySymbol.get(symbol);
+  if (kept?.dateIso === todayIso) return kept.anchors;
+  const anchors = new Map<string, BaselineForwardAnchor>();
+  bySymbol.set(symbol, { dateIso: todayIso, anchors });
+  return anchors;
+}
 
 // The baseline wheel's look (decision maker "baseline", approved by Marcelo 2026-10-13): none of Pluto's rules and none
 // of the Signals model, so each can later be added back and measured. At every look, for every symbol:
@@ -131,7 +144,10 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
       };
     }
     // The calls on held shares are held to the margin only when every sale is (makeBaselineSelector).
-    const select = makeBaselineSelector({ quotes, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: lookSymbol.market.previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model });
+    // The ticker's forwards anchored at the day's first look that quoted each expiry, then moved with the stock (Pluto's rule).
+    const forwardAnchors = forwardAnchorsOfDay(ledger, symbol, todayIso);
+    noteBaselineForwardAnchors(forwardAnchors, { quotes, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate });
+    const select = makeBaselineSelector({ quotes, forwardAnchors, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: lookSymbol.market.previousSessionVolumeByContract, baseline, spreadShareCharged, isHeld, earningsDatesIso, model });
     // The day's account value for sizing: the session's own, open options at zero when it leaves them out.
     const accountValueToday = () =>
       ledgerNetLiquidationValue(ledger, baseline.dayValueOptions === "excluded" ? new Map([...context.priceByLegId].map(([legId, price]) => [legId, requireLeg(ledger, legId).legType === "option" ? 0 : price])) : context.priceByLegId);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { valueContract } from "../../lib/contractValuation.js";
 import { easternInstant } from "../../lib/easternIsoDate.js";
-import { blackScholesDelta, blackScholesPriceOnForward, yearsBetweenIsoDates } from "../../lib/impliedVolatilitySurface.js";
+import { blackScholesDelta, blackScholesPriceOnForward, forwardAtSpot, yearsBetweenIsoDates } from "../../lib/impliedVolatilitySurface.js";
 import { frictionDollarsPerContract } from "../../lib/signalCandidates.js";
 import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { fixtureModelForecast } from "../../lib/testSupport/valuationModelFixtures.js";
@@ -9,6 +9,7 @@ import { volatilityModelTables } from "../../lib/volatilityModelTables.generated
 import { defaultBacktestBaselineSettings, type BacktestBaselineSettings, type EffectiveBacktestSettings } from "../backtestTypes.js";
 import { validateBaselineSettings } from "../jobs/backtestSessionRequest.js";
 import { baselineContractsForCash, runBaselineLook, selectBaselineCandidates, type BaselineCandidateInput, type BaselineModelInput } from "./backtestBaselineLook.js";
+import { noteBaselineForwardAnchors, type BaselineForwardAnchor } from "./baselineSaleSteps.js";
 import type { BacktestLookContext, BacktestLookSymbol } from "./backtestLook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { openCashSecuredPut, settleExpiry } from "./ledger/ledgerEvents.js";
@@ -32,8 +33,12 @@ function quote(expiry: string, strike: number, right: "C" | "P", spreadFraction 
 }
 
 function input(quotes: SymbolFileQuote[], overrides: Partial<BaselineCandidateInput> = {}): BaselineCandidateInput {
+  // The look is the day's first: each expiry's forward is anchored on its own quotes.
+  const forwardAnchors = new Map<string, BaselineForwardAnchor>();
+  noteBaselineForwardAnchors(forwardAnchors, { quotes, todayIso, yearsToTodaysClose: overrides.yearsToTodaysClose ?? 6 / 8760, stockPrice: overrides.stockPrice ?? stockPrice, riskFreeRate: overrides.riskFreeRate ?? riskFreeRate });
   return {
     quotes,
+    forwardAnchors,
     right: "P",
     todayIso,
     yearsToTodaysClose: 6 / 8760,
@@ -95,6 +100,24 @@ describe("selectBaselineCandidates", () => {
     expect(candidate.premiumYield).toBeCloseTo(((candidate.fillPrice * 100 - 0.68) / ((99 - candidate.fillPrice) * 100)) * 365, 10);
     // At the close nothing is left to price: no implied volatility, so it is refused.
     expect(selectBaselineCandidates(input([sameDay], { settings: fromZeroDays, yearsToTodaysClose: 0 })).rejections.noImpliedVolatility).toBe(1);
+  });
+
+  it("anchors each expiry's forward at the day's first look and moves it with the stock at later looks (Pluto's rule)", () => {
+    const quotes = [90, 95, 100, 105, 110].flatMap((strike) => [quote("2026-03-20", strike, "C"), quote("2026-03-20", strike, "P")]);
+    const anchors = new Map<string, BaselineForwardAnchor>();
+    noteBaselineForwardAnchors(anchors, { quotes, todayIso, yearsToTodaysClose: 6 / 8760, stockPrice, riskFreeRate });
+    const atTen = anchors.get("2026-03-20")!;
+    expect(atTen.spotPrice).toBe(stockPrice);
+    // A later look with the stock at 103 keeps the 10:00 anchor; its forward is the anchor × 103 ÷ 100.
+    noteBaselineForwardAnchors(anchors, { quotes, todayIso, yearsToTodaysClose: 3 / 8760, stockPrice: 103, riskFreeRate });
+    expect(anchors.get("2026-03-20")).toEqual(atTen);
+    const { candidates } = selectBaselineCandidates({ ...input(quotes, { stockPrice: 103 }), forwardAnchors: anchors });
+    const forward = forwardAtSpot(atTen.forward, atTen.spotPrice, 103);
+    expect(forward).toBeCloseTo(atTen.forward * 1.03, 12);
+    for (const candidate of candidates) {
+      const years = yearsBetweenIsoDates(todayIso, candidate.expiry);
+      expect(candidate.delta).toBeCloseTo(blackScholesDelta(forward, candidate.strike, years, riskFreeRate, candidate.impliedVolatility, false), 12);
+    }
   });
 
   it("counts only the time value of an in-the-money contract", () => {
