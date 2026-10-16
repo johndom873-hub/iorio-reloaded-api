@@ -11,7 +11,8 @@ import type { OrderRequestForGates } from "./orderGates.js";
 // band and its max-position and max-concentration limits (the cash reserve still applies):
 //   delta  the contract's own delta from its live bid/ask (the mid's IV on the expiry's forward: Pluto's 10:00 parity
 //          forward moved with the live price, as the ladder chose it), inside the ticker's ladder range, no tolerance
-//          (|delta| 0.305 is refused against 0.30); every opening order, a call on held shares included
+//          (|delta| 0.305 is refused against 0.30); every opening Call, a call on held shares included. The ladder's Puts
+//          have no |delta| range (Marcelo 2026-10-16): the rung's cap bounds them, so their delta is recorded, never checked
 //   pot    the ticker's exposure after the order (open positions, orders still working, this order) at most its pot:
 //          allocation × Pluto's capital budget × the account's net liquidation value
 // The route reads this context for an order whose Pluto action was taken under the ladder (ladderOrderGateContext.ts).
@@ -19,7 +20,7 @@ import type { OrderRequestForGates } from "./orderGates.js";
 export interface LadderOrderGateContext {
   /** The ticker's pot as a share of the account: its effective allocation × Pluto's capital budget (0.25 = 25%). */
   potFraction: number;
-  /** The ticker's ladder |delta| range (its override, else the strategy's). */
+  /** The ticker's ladder |delta| range for Calls (its override, else the strategy's). */
   minAbsDelta: number;
   maxAbsDelta: number;
   /** Today's 10:00 forward for the order's expiry and the stock price it was fitted at; null without one. */
@@ -37,10 +38,14 @@ const formatRange = (context: Pick<LadderOrderGateContext, "minAbsDelta" | "maxA
 /** Pure: the verdict on one live quote. */
 export function ladderDeltaVerdict(input: { bid: number | null; ask: number | null; stockPrice: number | null; strike: number; expiryIso: string; isCall: boolean; now: Date; context: LadderOrderGateContext }): DeltaComplianceResult & { delta: number | null } {
   const { context } = input;
-  if (input.stockPrice === null || !(input.stockPrice > 0)) return { compliant: false, delta: null, reason: "No live stock price to work out the contract's own delta, so the ladder's delta range can't be verified." };
+  if (input.stockPrice === null || !(input.stockPrice > 0)) {
+    if (!input.isCall) return { compliant: true, delta: null, reason: null };
+    return { compliant: false, delta: null, reason: "No live stock price to work out the contract's own delta, so the ladder's delta range can't be verified." };
+  }
   const years = daysToExpiry(input.expiryIso, context.todayIso) <= 0 ? yearsToSessionClose(input.now, context.closeMinutesEt) : yearsBetweenIsoDates(context.todayIso, input.expiryIso);
   const forward = forwardFromAnchor(context.forwardAnchor ?? undefined, input.stockPrice, years, context.riskFreeRate);
   const delta = deltaFromQuoteMidOnForward({ bid: input.bid, ask: input.ask, spotPrice: input.stockPrice, forward, strike: input.strike, isCall: input.isCall, yearsToExpiry: years, riskFreeRate: context.riskFreeRate });
+  if (!input.isCall) return { compliant: true, delta, reason: null };
   if (delta === null) return { compliant: false, delta: null, reason: `The contract's own delta can't be worked out from its live quote (bid ${input.bid ?? "none"}, ask ${input.ask ?? "none"}), so the ladder's ${formatRange(context)} delta range can't be verified.` };
   const magnitude = Math.abs(delta);
   if (magnitude < context.minAbsDelta) return { compliant: false, delta, reason: `The contract's own delta is ${magnitude.toFixed(3)}, below the ladder's ${formatRange(context)} delta range.` };
@@ -80,6 +85,8 @@ export async function evaluateLadderDeltaForOrderRequest(orderRequest: Pick<Orde
   if (!orderRequest.request_type.startsWith("open_")) return null;
   const optionLeg = orderRequest.payload.legs.find((leg) => leg.role === "option");
   if (!optionLeg?.strike || !optionLeg.expiry || !optionLeg.right) return null;
+  // The ladder's Puts have no |delta| range: nothing to read the live quote for.
+  if (optionLeg.right === "P") return { compliant: true, reason: null };
   try {
     const [quote, stockPrice] = await Promise.all([reader.optionQuote({ symbol: orderRequest.payload.symbol, expiry: optionLeg.expiry, strike: optionLeg.strike, right: optionLeg.right }), reader.stockPrice(orderRequest.payload.symbol)]);
     const { compliant, reason } = ladderDeltaVerdict({ ...quote, stockPrice, strike: optionLeg.strike, expiryIso: ibkrExpiryToIso(optionLeg.expiry), isCall: optionLeg.right === "C", now: reader.now(), context });

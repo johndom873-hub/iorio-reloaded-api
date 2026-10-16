@@ -79,9 +79,17 @@ describe("sendLadderSales", () => {
     expect(deps.executed[0]).toMatchObject({ kind: "ladder_open", strategyKey: "covered_call", buyEveryShare: true });
   });
 
-  it("records a blocked action and sends nothing when the live quote left the range or is missing", async () => {
-    const deps = dependencies({ 50: liveQuote(50, "P"), 44: { bid: null, ask: null } });
-    const outcomes = await sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales: [sale(50), sale(44)], gateContext: context, forwardAnchors: new Map(), stockPrice: 50, todayIso }, deps);
+  it("sends a ladder Put whatever its |delta|: the range is the Calls'", async () => {
+    // The $50 Put at the money has a |delta| near 0.5, far above the 0.30 top.
+    const deps = dependencies({ 50: liveQuote(50, "P") });
+    const [outcome] = await sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales: [sale(50)], gateContext: context, forwardAnchors: new Map(), stockPrice: 50, todayIso }, deps);
+    expect(outcome).toMatchObject({ outcome: "confirmed" });
+    expect((deps.recorded[0] as { gateResults: { gate: string; ok: boolean; detail: string }[] }).gateResults.find((gate) => gate.gate === "ladder_delta")).toMatchObject({ ok: true, detail: expect.stringMatching(/the ladder's Puts have no \|delta\| range/) });
+  });
+
+  it("records a blocked action and sends nothing when a Call's live quote left the range or a quote is missing", async () => {
+    const deps = dependencies({ 50: liveQuote(50, "C"), 44: { bid: null, ask: null } });
+    const outcomes = await sendLadderSales({ passId: "p1", symbol: "LADR", tickerId: "t1", sales: [sale(50, { strategyKey: "covered_call", right: "C", sharesBought: 0 }), sale(44)], gateContext: context, forwardAnchors: new Map(), stockPrice: 50, todayIso }, deps);
     expect(outcomes.map((entry) => entry.outcome)).toEqual(["blocked", "blocked"]);
     expect(outcomes[0]!.detail).toMatch(/above the ladder's 0.05–0.3 delta range/);
     expect(outcomes[1]!.detail).toBe("no live two-sided quote");

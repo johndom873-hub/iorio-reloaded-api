@@ -17,26 +17,29 @@ const strikesByExpiry = new Map<string, number[]>([
 ]);
 
 describe("planSessionVolumeContracts", () => {
-  it("with no IV known (the first night), quotes every strike of both rights in the ladder's days to expiry, counted from the next session", () => {
+  it("with no IV known (the first night), quotes every Call and every Put below the price in the ladder's days to expiry, counted from the next session", () => {
     const plan = planSessionVolumeContracts({ expirations, strikesByExpiry, nextSessionIso, settings, band, stockPrice: 100, riskFreeRate: 0.04, lastSeenImpliedVolatilityByContract: new Map() });
     // 15 Oct is 0 DTE and 18 Dec is 64 DTE on 15 Oct: out. 16 Oct (1), 20 Nov (36), 30 Nov (46): 30 Nov is out too.
     expect(plan.contracts.map((contract) => contract.expiry)).toEqual(expect.arrayContaining(["20261016", "20261120"]));
     expect(new Set(plan.contracts.map((contract) => contract.expiry))).toEqual(new Set(["20261016", "20261120"]));
     expect(plan.universeCount).toBe(12);
     expect(plan.unknownIvCount).toBe(12);
-    expect(plan.contracts).toHaveLength(12);
+    // The ladder's Puts are below the price (under the rung's cap): the $100, $105 and $130 Puts of 16 Oct and the $100 Put of 20 Nov are not quoted.
+    expect(plan.contracts).toHaveLength(8);
+    expect(plan.contracts.filter((contract) => contract.right === "P").map((contract) => contract.strike)).toEqual([80, 95]);
   });
 
-  it("with IVs known, quotes the first-look band only (0.02–0.45 for 0.05–0.30), plus any contract still without an IV", () => {
+  it("with IVs known, quotes the Calls in the first-look band (0.02–0.45 for 0.05–0.30) and every Put below the price, plus any Call still without an IV", () => {
     const iv = 0.5;
     const lastSeen = new Map<string, number>();
     for (const strike of [80, 95, 100, 105, 130]) for (const right of ["C", "P"]) lastSeen.set(`2026-10-16|${strike}|${right}`, iv);
     const plan = planSessionVolumeContracts({ expirations, strikesByExpiry, nextSessionIso, settings, band, stockPrice: 100, riskFreeRate: 0.04, lastSeenImpliedVolatilityByContract: lastSeen });
     const tomorrow = plan.contracts.filter((contract) => contract.expiry === "20261016").map((contract) => `${contract.strike}${contract.right}`).sort();
-    // 1 DTE at 50% IV: the $95 Put and $105 Call sit near |delta| 0.2, at the money (~0.5) is out, $80 and $130 are far out (~0).
-    expect(tomorrow).toEqual(["105C", "95P"]);
-    // 20 Nov has no IV yet: both rights quoted whatever the band.
-    expect(plan.contracts.filter((contract) => contract.expiry === "20261120")).toHaveLength(2);
+    // 1 DTE at 50% IV: the $105 Call sits near |delta| 0.2, the $100 and $130 Calls are out of the band; the Puts have no
+    // |delta| range, so the $80 (far out, ~0) and $95 Puts are quoted, not the $100 and $105 at or above the price.
+    expect(tomorrow).toEqual(["105C", "80P", "95P"]);
+    // 20 Nov has no IV yet: its Call is quoted whatever the band, its $100 Put (at the price) is not.
+    expect(plan.contracts.filter((contract) => contract.expiry === "20261120").map((contract) => contract.right)).toEqual(["C"]);
     expect(plan.unknownIvCount).toBe(2);
   });
 

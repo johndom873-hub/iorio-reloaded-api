@@ -196,8 +196,8 @@ describe("backtest routes", () => {
     expect(template.settings.pluto.minEdgeYieldPct).toBe(Number(plutoRow.min_edge_yield_pct));
     expect(template.settings.trading).not.toHaveProperty("commissionEstimator");
     expect(template.settings).toMatchObject({ decisionMaker: "rules", policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
-    expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(15).fill("Candidate quality"), ...Array(7).fill("Model"), ...Array(6).fill("Trading window and system checks"), ...Array(6).fill("Decisions (stand-in for the AI)"), ...Array(39).fill("Baseline wheel")]);
-    expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" });
+    expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(15).fill("Candidate quality"), ...Array(7).fill("Model"), ...Array(6).fill("Trading window and system checks"), ...Array(6).fill("Decisions (stand-in for the AI)"), ...Array(41).fill("Baseline wheel")]);
+    expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" });
     expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["rules", "llm", "baseline"]);
     expect(template.rows.filter((row) => row.perTicker).map((row) => row.path)).toEqual(["baseline.minAbsDelta", "baseline.maxAbsDelta", "baseline.ladderSharesPct", "baseline.ladderRungs", "baseline.ladderShock", "baseline.ladderShockPct", "baseline.ladderShockMinPct", "baseline.ladderShockMaxPct"]);
     expect(template.rows[0]).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
@@ -252,6 +252,7 @@ describe("backtest routes", () => {
       ["baseline.entryWhenSharesUncovered", "wait", true],
       ["baseline.maxSharesPctOfAccount", 100, true],
       ["baseline.minCallYieldPct", 0, true],
+      ["baseline.minCallYieldAppliesTo", "every_call", true],
       ["baseline.putsWhenNoCall", "off", true],
       ["baseline.putBudgetPctPerDte", 1, true],
       ["baseline.ladderSharesPct", 50, true],
@@ -266,6 +267,7 @@ describe("backtest routes", () => {
       ["baseline.ladderPace", "any_look", true],
       ["baseline.ladderPutVersusCall", "call_first", true],
       ["baseline.ladderPutYieldMarginPct", 0, true],
+      ["baseline.ladderPutDeltaRange", "delta_range", true],
       ["baseline.dayValueOptions", "marked", true],
       ["baseline.callDeltaRange", "entry_range", true],
       ["baseline.callMinAbsDelta", 0.05, true],
@@ -486,8 +488,18 @@ describe("backtest routes", () => {
       const finishedInEndOrder = [...finishedByEnd.slice(0, 2), failedWithoutFinish, ...finishedByEnd.slice(2)];
       // A backtest that finished 8 days ago.
       const [oldBacktest] = await testDb("backtest_jobs").insert({ kind: "backtest", symbol: jobListingSymbol, status: "failed", queued_at: secondsAgo(8 * daySeconds + 600), finished_at: secondsAgo(8 * daySeconds) }).returning("id");
+      // A ticker analysis running its own backtest: the analysis is listed, its backtest is not.
+      const [analysisSession] = await testDb("backtest_sessions")
+        .insert({ name: `${jobListingSymbol} · Analysis`, symbol: jobListingSymbol, start_date: "2026-09-01", end_date: "2026-09-11", starting_value: 200_000, tables_mode: "walk_forward", settings_snapshot: JSON.stringify({}) })
+        .returning("id");
+      const [analysisJob] = await testDb("backtest_jobs").insert({ kind: "analysis", symbol: jobListingSymbol, status: "running", started_at: secondsAgo(5), heartbeat_at: secondsAgo(1) }).returning("id");
+      const [analysisBacktest] = await testDb("backtest_jobs").insert({ kind: "backtest", symbol: jobListingSymbol, session_id: analysisSession.id, status: "running", started_at: secondsAgo(4), heartbeat_at: secondsAgo(1) }).returning("id");
+      await testDb("backtest_ticker_analyses").insert({ symbol: jobListingSymbol, job_id: analysisJob.id, session_id: analysisSession.id, formulas_version: 1, lab_values: JSON.stringify({}), lab_values_hash: "listing" });
 
       const overview = (await request("GET", "/backtest/overview")).body as BacktestOverview;
+      expect(overview.jobs.map((job) => job.id)).toContain(analysisJob.id);
+      expect(overview.jobs.map((job) => job.id)).not.toContain(analysisBacktest.id);
+      await testDb("backtest_jobs").whereIn("id", [analysisJob.id, analysisBacktest.id]).update({ status: "succeeded", finished_at: testDb.fn.now() });
       expect(spawnBacktestJobProcessMock).not.toHaveBeenCalled();
       const listedDownloads = overview.jobs.filter((job) => job.kind === "download");
       const listedIds = listedDownloads.map((job) => job.id);
@@ -513,7 +525,9 @@ describe("backtest routes", () => {
       const latestLeftOut = await testDb("backtest_jobs").where({ id: finishedInEndOrder[listedFinishedOfThese.length] }).first("finished_at");
       expect(listedEndTimes.every((time) => time >= new Date(latestLeftOut.finished_at).getTime())).toBe(true);
       // The backtests are listed as before: each kind has its own 50, however old; the backtest stays while there are no more than 50.
-      const backtestJobCount = Number((await testDb("backtest_jobs").where({ kind: "backtest" }).count("* as count").first())?.count);
+      const backtestJobCount = Number(
+        (await testDb("backtest_jobs as j").where({ "j.kind": "backtest" }).whereNotExists((analyses) => analyses.select(testDb.raw("1")).from("backtest_ticker_analyses as a").whereRaw("a.session_id = j.session_id")).count("* as count").first())?.count,
+      );
       expect(overview.jobs.filter((job) => job.kind === "backtest")).toHaveLength(Math.min(50, backtestJobCount));
       if (backtestJobCount <= 50) expect(overview.jobs.map((job) => job.id)).toContain(oldBacktest.id);
 

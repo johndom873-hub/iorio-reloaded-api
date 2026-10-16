@@ -70,7 +70,7 @@ export interface LadderSaleOutcome {
   detail: string;
 }
 
-/** Sends the admitted sales one by one: live quote, the ladder's delta range on it, the mid as the limit, then the order. */
+/** Sends the admitted sales one by one: live quote, the ladder's delta range on it (Calls), the mid as the limit, then the order. */
 export async function sendLadderSales(
   input: { passId: string; symbol: string; tickerId: string; sales: readonly PlannedLadderSale[]; gateContext: Omit<LadderOrderGateContext, "forwardAnchor">; forwardAnchors: ReadonlyMap<string, { forward: number; spotPrice: number }>; stockPrice: number; todayIso: string },
   dependencies: LadderOrderDependencies,
@@ -86,7 +86,7 @@ export async function sendLadderSales(
     const gateResults: PlutoGateResult[] = [
       { gate: "ladder", ok: true, detail: sale.chosenBecause },
       { gate: "live_quote", ok: twoSided !== null, detail: twoSided ? `bid ${twoSided.bid.toFixed(2)}, ask ${twoSided.ask.toFixed(2)}` : "no live two-sided quote" },
-      ...(verdict ? [{ gate: "ladder_delta", ok: verdict.compliant, detail: verdict.reason ?? `own |delta| ${Math.abs(verdict.delta!).toFixed(3)} inside ${gateContext.minAbsDelta}–${gateContext.maxAbsDelta}` }] : []),
+      ...(verdict ? [{ gate: "ladder_delta", ok: verdict.compliant, detail: verdict.reason ?? (sale.right === "P" ? `own |delta| ${verdict.delta === null ? "unknown" : Math.abs(verdict.delta).toFixed(3)} (the ladder's Puts have no |delta| range)` : `own |delta| ${Math.abs(verdict.delta!).toFixed(3)} inside ${gateContext.minAbsDelta}–${gateContext.maxAbsDelta}`) }] : []),
     ];
     const ok = twoSided !== null && verdict?.compliant === true && limitPrice !== null;
     const dte = daysToExpiry(sale.expiry, input.todayIso);

@@ -300,9 +300,12 @@ export function baselineContractsForCash(freeCash: number, candidate: Pick<Basel
   return perContract > 0 ? Math.max(0, Math.floor(freeCash / perContract)) : 0;
 }
 
-export type BaselineSelect = (right: "C" | "P", minimumStrike?: number | null, forEntry?: boolean, maximumStrike?: number | null, byPremiumYield?: boolean) => { candidates: BaselineCandidate[]; rejections: BaselineRejections };
+export type BaselineSelect = (right: "C" | "P", minimumStrike?: number | null, forEntry?: boolean, maximumStrike?: number | null, byPremiumYield?: boolean, options?: { ladderPut?: boolean }) => { candidates: BaselineCandidate[]; rejections: BaselineRejections };
 
-/** A symbol's candidate selection at a look: Puts on the baseline's |delta| range, every Call (on held shares and a new Covered Call) on the Calls' (callDeltaRange). */
+/**
+ * A symbol's candidate selection at a look: Puts on the baseline's |delta| range (the ladder's at any |delta| with
+ * ladderPutDeltaRange "none"), every Call (on held shares and a new Covered Call) on the Calls' (callDeltaRange).
+ */
 export function makeBaselineSelector(input: {
   quotes: readonly SymbolFileQuote[];
   forwardAnchors: ReadonlyMap<string, BaselineForwardAnchor>;
@@ -323,10 +326,14 @@ export function makeBaselineSelector(input: {
   const callsModel = model && baseline.volatilityEdgeFilter === "entries" ? { ...model, minVolatilityEdge: null } : model;
   // With their own range every Call uses it, the Covered Call entry's included (Marcelo 2026-10-15).
   const callsSettings = baseline.callDeltaRange === "own_range" ? { ...baseline, minAbsDelta: baseline.callMinAbsDelta, maxAbsDelta: baseline.callMaxAbsDelta } : baseline;
-  // Calls (on held shares and new Covered Calls) only above minCallYieldPct; a put ranked by premium yield alone when asked.
+  // Calls only above minCallYieldPct: every call, or the Covered Call entries' alone (forEntry); a put ranked by premium yield alone when asked.
   const minimumCallYield = baseline.minCallYieldPct > 0 ? baseline.minCallYieldPct / 100 : null;
-  return (right: "C" | "P", minimumStrike: number | null = null, forEntry = true, maximumStrike: number | null = null, byPremiumYield = false) =>
-    selectBaselineCandidates({ quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: right === "C" ? callsSettings : baseline, spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: right === "C" ? minimumCallYield : null, ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" });
+  const minimumYieldFor = (forEntry: boolean) => (forEntry || baseline.minCallYieldAppliesTo === "every_call" ? minimumCallYield : null);
+  // Any |delta| passes 0–1: the ladder's Puts without a range still need a usable implied volatility, as every contract does.
+  const ladderPutsSettings = baseline.ladderPutDeltaRange === "none" ? { ...baseline, minAbsDelta: 0, maxAbsDelta: 1 } : baseline;
+  const settingsFor = (right: "C" | "P", ladderPut: boolean) => (right === "C" ? callsSettings : ladderPut ? ladderPutsSettings : baseline);
+  return (right: "C" | "P", minimumStrike: number | null = null, forEntry = true, maximumStrike: number | null = null, byPremiumYield = false, options = {}) =>
+    selectBaselineCandidates({ quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: settingsFor(right, options.ladderPut === true), spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: right === "C" ? minimumYieldFor(forEntry) : null, ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" });
 }
 
 /** What the sale steps read from the symbol's book and how they sell; prices on the cycle's scale unless the name says "Today". */
@@ -444,7 +451,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     const rung = ladderRungToday({ settings: baseline, state: ladderState, accountValueToday: book.accountValueToday(), tickerWeight: book.tickerWeight(), breakEven, stockPrice, heldSharesCost: heldSharesCostToday(), openPutCollateral: book.openPutCollateral(), sharesAverageCost: book.heldSharesAverageCostToday() });
     if (baseline.ladderPace === "one_open" && book.openPutCollateral() > 0) return { rung, blocked: `${symbol}: no new ladder put while one is open`, candidates: [] as BaselineCandidate[], rejections: null };
     if (rung.cap === null) return { rung, blocked: `${symbol}: no ladder put (${rung.note})`, candidates: [] as BaselineCandidate[], rejections: null };
-    const { candidates, rejections } = select("P", null, true, rung.cap, true);
+    const { candidates, rejections } = select("P", null, true, rung.cap, true, { ladderPut: true });
     return { rung, blocked: null, candidates, rejections };
   };
   const ladderPutLimits = (candidate: BaselineCandidate, collateralLeft: number) => ({

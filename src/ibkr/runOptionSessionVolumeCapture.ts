@@ -23,7 +23,8 @@ import { ladderDteRangeContracts } from "../pluto/ladderBandPlan.js";
 //
 // Which contracts: the ladder's universe for the next session (every listed strike, both rights, of the expiries in its
 // days-to-expiry range counted from that session) narrowed to the first-look re-quoting band (ladderRequoteBand.ts) at
-// today's last price, from each contract's last-seen IV; a contract whose IV is unknown is always quoted. The first night
+// today's last price, from each contract's last-seen IV: the Calls inside it, every Put below the price; a Call whose IV
+// is unknown is always quoted. The first night
 // knows no IV, so it quotes the whole universe (about 21,000 contracts, ~35 min for 20 tickers); later nights quote the
 // band (~3,200, ~5 min), and learn the IVs of what they quote.
 
@@ -69,7 +70,7 @@ export function planSessionVolumeContracts(input: {
   const selected =
     stockPrice === null || !(stockPrice > 0)
       ? universe
-      : selectLadderRequoteContracts({ universe, band: input.band, todayIso: input.nextSessionIso, yearsToTodaysClose: firstLookYearsToClose, riskFreeRate: input.riskFreeRate, forwardFor: (_expiry, years) => stockPrice * Math.exp(input.riskFreeRate * years) }).toQuote;
+      : selectLadderRequoteContracts({ universe, band: input.band, stockPrice, todayIso: input.nextSessionIso, yearsToTodaysClose: firstLookYearsToClose, riskFreeRate: input.riskFreeRate, forwardFor: (_expiry, years) => stockPrice * Math.exp(input.riskFreeRate * years) }).toQuote;
   return { universeCount: universe.length, unknownIvCount, contracts: selected.map((contract) => ({ expiry: contract.expiry.replaceAll("-", ""), strike: contract.strike, right: contract.right })) };
 }
 

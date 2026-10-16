@@ -207,7 +207,19 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     ],
   },
   { path: "baseline.maxSharesPctOfAccount", group: "Baseline wheel", label: "Shares at most", unit: "percent", editable: true, note: "of the account value, the shares held at the 10:00 price: new Covered Calls stop there; 100 = no cap" },
-  { path: "baseline.minCallYieldPct", group: "Baseline wheel", label: "Calls only above a premium yield of", unit: "percent", editable: true, note: "annualized, on held shares and new Covered Calls alike; 0 = any" },
+  { path: "baseline.minCallYieldPct", group: "Baseline wheel", label: "Calls only above a premium yield of", unit: "percent", editable: true, note: "annualized; 0 = any" },
+  {
+    path: "baseline.minCallYieldAppliesTo",
+    group: "Baseline wheel",
+    label: "That premium yield applies to",
+    unit: "choice",
+    editable: true,
+    note: "a new Covered Call below it is not opened: no shares bought, the cash waits",
+    choices: [
+      { value: "every_call", label: "Every Call (held shares and new Covered Calls)" },
+      { value: "new_covered_calls", label: "New Covered Calls only (Calls on held shares at any premium)" },
+    ],
+  },
   {
     path: "baseline.putsWhenNoCall",
     group: "Baseline wheel",
@@ -279,6 +291,18 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     ],
   },
   { path: "baseline.ladderPutYieldMarginPct", group: "Baseline wheel", label: "Ladder: put yield above the call's by more than", unit: "percent", editable: true, note: "relative: 25 = a quarter above the call's yield; 0 = any higher" },
+  {
+    path: "baseline.ladderPutDeltaRange",
+    group: "Baseline wheel",
+    label: "Ladder: |delta| of the Puts",
+    unit: "choice",
+    editable: true,
+    note: "with none, the rung's cap, days to expiry, spread, minimum bid and volume limit bound them",
+    choices: [
+      { value: "delta_range", label: "The |delta| range above" },
+      { value: "none", label: "None: any |delta|" },
+    ],
+  },
   {
     path: "baseline.dayValueOptions",
     group: "Baseline wheel",

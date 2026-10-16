@@ -29,13 +29,18 @@ describe("createLadderBandPlanner", () => {
     expect((await planner.plan(todayIso, new Map([["t1", 100]]), now)).size).toBe(0);
   });
 
-  it("plans the band of each ladder ticker with a price: the universe is the volume-qualified 1–45 DTE contracts, unknown IVs all quoted", async () => {
+  it("plans the band of each ladder ticker with a price: the universe is the volume-qualified 1–45 DTE contracts, unknown IVs quoted (Puts below the price)", async () => {
     const planner = createLadderBandPlanner(dependencies());
     expect(await planner.tickers(todayIso)).toEqual([{ tickerId: "t1", symbol: "LADR" }]);
     const plans = await planner.plan(todayIso, new Map([["t1", 100]]), now);
-    // 4 contracts with volume (the $80 and $90 Calls had none); no IV known yet, so all 4 are quoted, at the first look's band.
+    // 4 contracts with volume (the $80 and $90 Calls had none); no IV known yet: the $100 Call and the Puts below $100 are
+    // quoted, not the $100 Put at the price (a ladder Put is under the rung's cap, below the price).
     expect(plans.get("t1")).toMatchObject({ symbol: "LADR", plan: { universeCount: 4, unknownImpliedVolatilityCount: 4, firstLookOfDay: true } });
-    expect(plans.get("t1")!.plan.contracts).toHaveLength(4);
+    expect(plans.get("t1")!.plan.contracts).toEqual([
+      { expiry: "2026-11-20", strike: 80, right: "P" },
+      { expiry: "2026-11-20", strike: 90, right: "P" },
+      { expiry: "2026-11-20", strike: 100, right: "C" },
+    ]);
     expect((await planner.plan(todayIso, new Map([["t1", null]]), now)).size).toBe(0);
   });
 

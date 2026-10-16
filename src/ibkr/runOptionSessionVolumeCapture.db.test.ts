@@ -71,8 +71,9 @@ describe("the after-close option volume capture", () => {
     const { dependencies, released } = fakeDependencies("2026-10-14T21:30:00Z", quoted);
     const result = await runOptionSessionVolumeCapture(dependencies);
     expect(result).toMatchObject({ sessionDateIso: "2026-10-14", nextSessionIso: "2026-10-15", concurrency: 40 });
-    // 16 Oct is 1 DTE and 20 Nov 36 DTE on 15 Oct: 5 strikes × 2 rights each; the fake gives no volume to the $130 Call and Put.
-    expect(result.tickers).toEqual([expect.objectContaining({ symbol: "VOL", universe: 20, requested: 20, unknownIv: 20, withVolume: 18, withImpliedVolatility: 20, stockPrice: 100, error: null })]);
+    // 16 Oct is 1 DTE and 20 Nov 36 DTE on 15 Oct: 5 strikes × 2 rights each. Requested: the 10 Calls and the 4 Puts below
+    // the $100 price (the ladder's Puts are under the rung's cap); the fake gives no volume to the $130 Call.
+    expect(result.tickers).toEqual([expect.objectContaining({ symbol: "VOL", universe: 20, requested: 14, unknownIv: 20, withVolume: 13, withImpliedVolatility: 14, stockPrice: 100, error: null })]);
     expect(released).toHaveBeenCalled();
 
     const volumes = (await loadSessionVolumeByContract(tickerId, "2026-10-14"))!;
@@ -86,9 +87,10 @@ describe("the after-close option volume capture", () => {
     const quoted: OptionContractRequest[][] = [];
     const { dependencies } = fakeDependencies("2026-10-15T21:30:00Z", quoted);
     const result = await runOptionSessionVolumeCapture(dependencies);
-    // For 16 Oct, 16 Oct itself is 0 DTE: only 20 Nov (35 DTE) is left, 10 contracts, all with an IV now.
+    // For 16 Oct, 16 Oct itself is 0 DTE: only 20 Nov (35 DTE) is left, 10 contracts, all with an IV now but the $100, $115
+    // and $140 Puts, never quoted (not below the price).
     const [ticker] = result.tickers;
-    expect(ticker).toMatchObject({ universe: 10, unknownIv: 0, error: null });
+    expect(ticker).toMatchObject({ universe: 10, unknownIv: 3, error: null });
     expect(ticker!.requested).toBeGreaterThan(0);
     expect(ticker!.requested).toBeLessThan(10);
     // At 35 DTE and 50% IV, at the money (|delta| ~0.5) is outside 0.02–0.45: never quoted.

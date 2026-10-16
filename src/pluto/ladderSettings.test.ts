@@ -13,6 +13,8 @@ const adoptedBaselineOverrides = {
   takeProfitPct: 0, shareStopLossPct: 0, looks: "every_look", putsWhenNoCall: "reserve_ladder", ladderSharesPct: 50, ladderTop: "price", ladderPace: "any_look",
   ladderShock: "history", ladderRungs: 5, entryWhenSharesUncovered: "buy", ladderShockMinPct: 60, ladderShockMaxPct: 80, maxSpreadPctOfMid: 50,
   ladderPutVersusCall: "higher_yield", ladderPutYieldMarginPct: 0,
+  // Marcelo 2026-10-16: the |delta| range is the Calls'; the ladder's Puts go by the rung's cap.
+  ladderPutDeltaRange: "none",
 } as const;
 
 const settingsAtDefaults = plutoLadderSettingsFixture as unknown as PlutoSettings;

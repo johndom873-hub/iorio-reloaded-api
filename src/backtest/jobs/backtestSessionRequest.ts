@@ -200,6 +200,7 @@ export function validateBaselineSettings(values: Record<string, unknown>): strin
   if (typeof values.maxSharesPctOfAccount !== "number" || !Number.isFinite(values.maxSharesPctOfAccount) || values.maxSharesPctOfAccount <= 0 || values.maxSharesPctOfAccount > 100) return "baseline.maxSharesPctOfAccount must be a number above 0 and at most 100.";
   if (values.maxSharesPctOfAccount < 100 && values.entry !== "covered_call") return "baseline.maxSharesPctOfAccount needs a Covered Call entry: it caps the new Covered Calls' shares.";
   if (typeof values.minCallYieldPct !== "number" || !Number.isFinite(values.minCallYieldPct) || values.minCallYieldPct < 0 || values.minCallYieldPct > 1000) return "baseline.minCallYieldPct must be a number from 0 (any) to 1000.";
+  if (values.minCallYieldAppliesTo !== "every_call" && values.minCallYieldAppliesTo !== "new_covered_calls") return "baseline.minCallYieldAppliesTo must be every_call or new_covered_calls.";
   if (values.putsWhenNoCall !== "off" && values.putsWhenNoCall !== "dte_budget" && values.putsWhenNoCall !== "reserve_ladder") return "baseline.putsWhenNoCall must be off, dte_budget or reserve_ladder.";
   if (values.putsWhenNoCall !== "off" && values.entry !== "covered_call") return "baseline.putsWhenNoCall needs a Covered Call entry: its puts stand in for the calls.";
   const ladderError = values.putsWhenNoCall === "reserve_ladder" ? validateLadderSettings(values) : null;
@@ -235,6 +236,7 @@ function validateLadderSettings(values: Record<string, unknown>): string | null 
   if (!isWholeNumberIn(values.ladderShockLookbackYears, 1, 30)) return "baseline.ladderShockLookbackYears must be a whole number of years from 1 to 30.";
   if (values.ladderTop !== "break_even" && values.ladderTop !== "price") return "baseline.ladderTop must be break_even or price.";
   if (values.ladderPace !== "any_look" && values.ladderPace !== "one_open" && values.ladderPace !== "no_puts") return "baseline.ladderPace must be any_look, one_open or no_puts.";
+  if (values.ladderPutDeltaRange !== "delta_range" && values.ladderPutDeltaRange !== "none") return "baseline.ladderPutDeltaRange must be delta_range or none.";
   if (values.ladderPutVersusCall !== "call_first" && values.ladderPutVersusCall !== "higher_yield") return "baseline.ladderPutVersusCall must be call_first or higher_yield.";
   if (!isNumberIn(values.ladderPutYieldMarginPct, 0, 1000)) return "baseline.ladderPutYieldMarginPct must be a number from 0 to 1000.";
   return null;

@@ -5,9 +5,11 @@ import { baselineMaxVolumeShare } from "../backtest/engine/baselineSaleSteps.js"
 import type { PlutoSettings } from "./settingsStore.js";
 
 // Which of a ladder ticker's contracts to quote at a look (Marcelo 2026-10-15, design: the "follow the delta band" rule):
-// the contracts whose delta at the look's price, from each contract's last-seen implied volatility, is inside the
-// ladder's delta range widened by a margin, plus every contract whose IV is still unknown. The universe is fixed each
-// morning: 1–45 DTE (the ladder's range) and a previous-session volume the 20% rule can sell at least one contract of.
+// the Calls whose delta at the look's price, from each contract's last-seen implied volatility, is inside the ladder's
+// delta range widened by a margin, plus every Call whose IV is still unknown; and every Put below the look's price, at
+// any delta (Marcelo 2026-10-16: the |delta| range is the Calls'; a ladder Put's strike is at most the rung's cap, below
+// the price, so the look sees every Put the backtest would). The universe is fixed each morning: 1–45 DTE (the ladder's
+// range) and a previous-session volume the 20% rule can sell at least one contract of.
 //
 //   band, later looks: max(0, bottom − 0.02) … top + 0.10      (0.05–0.30 → 0.03–0.40)
 //   band, first look:  max(0, bottom − 0.03) … top + 0.15      (0.05–0.30 → 0.02–0.45)
@@ -50,10 +52,12 @@ export interface LadderRequoteSelection<Contract extends LadderRequoteContract> 
   predictedAbsDeltaByKey: Map<string, number>;
 }
 
-/** The universe contracts to quote at this look: predicted |delta| inside the band, or IV unknown. Pure. */
+/** The universe contracts to quote at this look: Calls with predicted |delta| inside the band or IV unknown, every Put below the price. Pure. */
 export function selectLadderRequoteContracts<Contract extends LadderRequoteContract>(input: {
   universe: readonly Contract[];
   band: LadderRequoteBand;
+  /** The look's stock price: every Put below it is quoted. */
+  stockPrice: number;
   todayIso: string;
   /** For a contract expiring today: hours from the look to today's close ÷ 8,760. */
   yearsToTodaysClose: number;
@@ -65,17 +69,20 @@ export function selectLadderRequoteContracts<Contract extends LadderRequoteContr
   const toQuote: Contract[] = [];
   const predictedAbsDeltaByKey = new Map<string, number>();
   for (const contract of input.universe) {
-    if (contract.lastSeenImpliedVolatility === null || !(contract.lastSeenImpliedVolatility > 0)) {
+    const isPut = contract.right === "P";
+    if (isPut && !(contract.strike < input.stockPrice)) continue;
+    const ivKnown = contract.lastSeenImpliedVolatility !== null && contract.lastSeenImpliedVolatility > 0;
+    if (!ivKnown) {
       toQuote.push(contract);
       continue;
     }
     const dte = daysToExpiry(contract.expiry, input.todayIso);
     const years = dte === 0 ? input.yearsToTodaysClose : yearsBetweenIsoDates(input.todayIso, contract.expiry);
     if (!(years > 0)) continue;
-    const delta = blackScholesDelta(input.forwardFor(contract.expiry, years), contract.strike, years, input.riskFreeRate, contract.lastSeenImpliedVolatility, contract.right === "C");
+    const delta = blackScholesDelta(input.forwardFor(contract.expiry, years), contract.strike, years, input.riskFreeRate, contract.lastSeenImpliedVolatility!, contract.right === "C");
     const absDelta = Math.abs(delta);
     predictedAbsDeltaByKey.set(contractKey(contract), absDelta);
-    if (absDelta >= input.band.minAbsDelta - 1e-12 && absDelta <= input.band.maxAbsDelta + 1e-12) toQuote.push(contract);
+    if (isPut || (absDelta >= input.band.minAbsDelta - 1e-12 && absDelta <= input.band.maxAbsDelta + 1e-12)) toQuote.push(contract);
   }
   return { toQuote, predictedAbsDeltaByKey };
 }

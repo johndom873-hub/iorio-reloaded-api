@@ -16,8 +16,8 @@ import type { PlutoSettings } from "./settingsStore.js";
 //                     10:00 parity forward moved with the stock: forwardAtSpot); else last night's IBKR IV plus the
 //                     expiry's median shift today (own IV today − IBKR IV last night, over the expiry's contracts that
 //                     have both); else unknown, and quoted
-//   band              predicted |delta| at the live price inside the ladder's range widened (first look of the day:
-//                     no band quote yet today)
+//   band              Calls: predicted |delta| at the live price inside the ladder's range widened (first look of the day:
+//                     no band quote yet today); Puts: every strike below the live price, any |delta| (ladderRequoteBand.ts)
 
 export type LadderUniverseContract = Pick<LadderRequoteContract, "expiry" | "strike" | "right">;
 
@@ -120,6 +120,7 @@ export function planLadderBand(input: {
   const { toQuote } = selectLadderRequoteContracts({
     universe,
     band: ladderRequoteBand(input.deltaRange, firstLookOfDay),
+    stockPrice: input.stockPrice,
     todayIso: input.clock.todayIso,
     yearsToTodaysClose: yearsToSessionClose(input.now, input.clock.closeMinutesEt),
     riskFreeRate: input.clock.riskFreeRate,

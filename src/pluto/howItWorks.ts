@@ -46,6 +46,7 @@ export interface PlutoHowItWorks {
     unfilledOrderCancelMinutes: number;
   };
   ladder: {
+    /** The Calls' |delta| range; the ladder's Puts have none (the rung's cap bounds them). */
     minAbsDelta: number;
     maxAbsDelta: number;
     minDte: number;

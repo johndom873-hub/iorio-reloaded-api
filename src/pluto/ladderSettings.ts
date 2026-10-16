@@ -32,6 +32,8 @@ export const ladderFixedBaselineChoices = {
   ladderPace: "any_look",
   ladderPutVersusCall: "higher_yield",
   ladderPutYieldMarginPct: 0,
+  // The |delta| range is the Calls' (Marcelo 2026-10-16): the ladder's Puts go by the rung's cap.
+  ladderPutDeltaRange: "none",
   dayValueOptions: "marked",
   takeProfitPct: 0,
   shareStopLossPct: 0,

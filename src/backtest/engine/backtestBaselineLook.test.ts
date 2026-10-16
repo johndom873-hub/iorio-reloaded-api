@@ -138,6 +138,28 @@ describe("selectBaselineCandidates", () => {
     expect(maxAbsDelta(puts)).toBeLessThanOrEqual(0.4);
   });
 
+  it("sells the ladder's Puts at any |delta| with ladderPutDeltaRange none, every other Put and Call staying on its range", () => {
+    const quotes = Array.from({ length: 41 }, (_, index) => 80 + index).flatMap((strike) => [quote("2026-03-20", strike, "C"), quote("2026-03-20", strike, "P")]);
+    const { forwardAnchors } = input(quotes);
+    const selectorFor = (ladderPutDeltaRange: BacktestBaselineSettings["ladderPutDeltaRange"]) =>
+      makeBaselineSelector({ quotes, forwardAnchors, commissions: flatCommissions, todayIso, yearsToTodaysClose: 6 / 8760, stockPrice, riskFreeRate, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), baseline: { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.2, maxAbsDelta: 0.3, maxSpreadPctOfMid: 50, ladderPutDeltaRange } as BacktestBaselineSettings, spreadShareCharged: 0, isHeld: () => false, earningsDatesIso: undefined, model: null });
+    const absDeltas = (candidates: { delta: number }[]) => candidates.map((candidate) => Math.abs(candidate.delta));
+    const insideRange = (values: number[]) => values.every((value) => value >= 0.2 - 1e-12 && value <= 0.3 + 1e-12);
+    // On the range: the ladder's Puts (under a $99 cap) stay within 0.20–0.30.
+    const onRange = absDeltas(selectorFor("delta_range")("P", null, true, 99, true, { ladderPut: true }).candidates);
+    expect(onRange.length).toBeGreaterThan(0);
+    expect(insideRange(onRange)).toBe(true);
+    // None: the same cap reaches Puts below 0.20 and above 0.30, and more of them.
+    const none = selectorFor("none");
+    const anyDelta = absDeltas(none("P", null, true, 99, true, { ladderPut: true }).candidates);
+    expect(anyDelta.length).toBeGreaterThan(onRange.length);
+    expect(Math.min(...anyDelta)).toBeLessThan(0.2);
+    expect(Math.max(...anyDelta)).toBeGreaterThan(0.3);
+    // Not the ladder's: the other Puts (the DTE-budget put, a put entry) and every Call keep the range.
+    expect(insideRange(absDeltas(none("P", null, true, 99, true).candidates))).toBe(true);
+    expect(insideRange(absDeltas(none("C", null, true).candidates))).toBe(true);
+  });
+
   it("counts only the time value of an in-the-money contract", () => {
     // $1 in the money, |delta| 0.56: inside the range.
     const inTheMoney = quote("2026-03-06", 101, "P");
@@ -380,6 +402,38 @@ describe("runBaselineLook with the average-cost floor", () => {
     expect(atAverage.actions[0]!.contract!.strike).toBeLessThanOrEqual(95);
     expect(atAverage.actions[0]!.candidateScores).toMatchObject({ costCeiling: 95, averageCostBefore: 95, sharesHeldBefore: 100 });
   });
+
+  it("holds only new Covered Calls to the yield threshold when it applies to them alone", async () => {
+    const callQuotes = [100, 105, 110].map((strike) => quote(expiry, strike, "C"));
+    const run = async (ledger: SimulatedLedger, minCallYieldAppliesTo: BacktestBaselineSettings["minCallYieldAppliesTo"]) => {
+      let actionNumber = 0;
+      const lookSymbol = {
+        profile: { symbol: "WHL", calendarChecksApply: false, earnings: [] },
+        market: { todayIso, quotes: callQuotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(callQuotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+        splitFactorToday: 1,
+        optionContractsRepresentable: true,
+      } as unknown as BacktestLookSymbol;
+      const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "covered_call", minAbsDelta: 0.01, maxAbsDelta: 1, looks: "first_look", callStrike: "delta_range", entryWhenSharesUncovered: "buy", dayValueOptions: "excluded", maxSharesPctOfAccount: 10, minCallYieldPct: 1000, minCallYieldAppliesTo } } as unknown as EffectiveBacktestSettings;
+      return runBaselineLook({ todayIso, calendar: oneDayCalendar, symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(), nextActionId: () => `action-${++actionNumber}` } as unknown as BacktestLookContext);
+    };
+    // 100 shares from an assigned put, the 10% cap full: only the held shares' call is on offer.
+    const assignedShares = () => {
+      const ledger = createSimulatedLedger(100_000, easternInstant("2026-02-23", 9, 30));
+      const put = openCashSecuredPut(ledger, { symbol: "WHL", expiryDate: "2026-02-27", strike: 95, contracts: 1, fillPrice: 1, at: easternInstant("2026-02-23", 10, 0), actionId: "put", splitFactorToday: 1 });
+      settleExpiry(ledger, { legId: put.legId, expiryClose: 90 });
+      return ledger;
+    };
+    const heldAtAnyYield = await run(assignedShares(), "new_covered_calls");
+    expect(heldAtAnyYield.actions.map((action) => [action.kind, action.quantity])).toEqual([["open_covered_call", 1]]);
+    expect(heldAtAnyYield.actions[0]!.chosenBecause).toMatch(/free shares/);
+    const heldToTheYield = await run(assignedShares(), "every_call");
+    expect(heldToTheYield.actions).toEqual([]);
+    expect(heldToTheYield.summary).toMatch(/no call for 100 free shares \(.*yield/);
+    // No shares: the new Covered Call is held to the threshold either way, so nothing is bought and the cash waits.
+    const flat = await run(createSimulatedLedger(100_000, easternInstant("2026-02-27", 9, 30)), "new_covered_calls");
+    expect(flat.actions).toEqual([]);
+    expect(flat.summary).toMatch(/no new Covered Call \(.*yield/);
+  });
 });
 
 describe("runBaselineLook in a session of per-ticker pots", () => {
@@ -503,7 +557,7 @@ describe("baselineContractsForCash", () => {
 
 describe("validateBaselineSettings", () => {
   it("accepts the defaults and refuses ranges that are out of order or out of bounds", () => {
-    const valid = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, putsWhenNoCall: "off", putBudgetPctPerDte: 1, dayValueOptions: "marked" };
+    const valid = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", putBudgetPctPerDte: 1, dayValueOptions: "marked" };
     expect(validateBaselineSettings(valid)).toBeNull();
     expect(validateBaselineSettings({ ...valid, entry: "strangle" })).toMatch(/entry/);
     expect(validateBaselineSettings({ ...valid, minAbsDelta: 0.7 })).toMatch(/minAbsDelta must not be above/);
@@ -544,6 +598,8 @@ describe("validateBaselineSettings", () => {
     expect(validateBaselineSettings({ ...valid, maxSharesPctOfAccount: 70 })).toMatch(/needs a Covered Call/);
     expect(validateBaselineSettings({ ...valid, entry: "covered_call", maxSharesPctOfAccount: 0 })).toMatch(/maxSharesPctOfAccount/);
     expect(validateBaselineSettings({ ...valid, minCallYieldPct: -1 })).toMatch(/minCallYieldPct/);
+    expect(validateBaselineSettings({ ...valid, minCallYieldAppliesTo: "held_calls" })).toMatch(/minCallYieldAppliesTo/);
+    expect(validateBaselineSettings({ ...valid, minCallYieldAppliesTo: "new_covered_calls" })).toBeNull();
     expect(validateBaselineSettings({ ...valid, putsWhenNoCall: "dte_budget" })).toMatch(/needs a Covered Call/);
     expect(validateBaselineSettings({ ...valid, putsWhenNoCall: "always" })).toMatch(/putsWhenNoCall/);
     expect(validateBaselineSettings({ ...valid, putBudgetPctPerDte: 0 })).toMatch(/putBudgetPctPerDte/);

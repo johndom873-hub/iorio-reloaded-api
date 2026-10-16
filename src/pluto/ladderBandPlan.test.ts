@@ -51,32 +51,33 @@ describe("the last-seen implied volatility", () => {
 });
 
 describe("planLadderBand", () => {
-  const strikes = [60, 70, 80, 85, 90, 95, 100];
-  const universe = strikes.map((strike) => ({ expiry, strike, right: "P" as const }));
-  const absDeltaAt = (strike: number) => Math.abs(blackScholesDelta(100.1, strike, years, clock.riskFreeRate, 0.5, false));
-  const overnight = new Map(strikes.map((strike) => [`${expiry}|${strike}|P`, 0.5]));
+  const putStrikes = [60, 70, 80, 85, 90, 95, 100];
+  const callStrikes = [100, 105, 110, 120, 130, 140, 160];
+  const universe = [...putStrikes.map((strike) => ({ expiry, strike, right: "P" as const })), ...callStrikes.map((strike) => ({ expiry, strike, right: "C" as const }))];
+  const callAbsDeltaAt = (strike: number, forward = 100.1) => Math.abs(blackScholesDelta(forward, strike, years, clock.riskFreeRate, 0.5, true));
+  const overnight = new Map(universe.map((contract) => [`${expiry}|${contract.strike}|${contract.right}`, 0.5]));
   const now = new Date("2026-10-20T16:00:00Z");
+  const strikesOf = (contracts: { strike: number; right: "C" | "P" }[], right: "C" | "P") => contracts.filter((contract) => contract.right === right).map((contract) => contract.strike);
 
-  it("the first look of the day (no band quote yet) widens to 0.02–0.45; later looks 0.03–0.40", () => {
+  it("the Calls' band: the first look of the day (no band quote yet) widens to 0.02–0.45, later looks 0.03–0.40; every Put below the price, any |delta|", () => {
     const first = planLadderBand({ universe, todaysQuotes: [], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, deltaRange: settings });
     expect(first.firstLookOfDay).toBe(true);
-    expect(first.contracts.map((contract) => contract.strike)).toEqual(strikes.filter((strike) => absDeltaAt(strike) >= 0.02 && absDeltaAt(strike) <= 0.45));
+    expect(strikesOf(first.contracts, "C")).toEqual(callStrikes.filter((strike) => callAbsDeltaAt(strike) >= 0.02 && callAbsDeltaAt(strike) <= 0.45));
     const later = planLadderBand({ universe, todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 100, deltaRange: settings });
     expect(later.firstLookOfDay).toBe(false);
-    expect(later.contracts.map((contract) => contract.strike)).toEqual(strikes.filter((strike) => absDeltaAt(strike) >= 0.03 && absDeltaAt(strike) <= 0.4));
-    // The at-the-money $100 Put (|delta| about 0.46) is never quoted; the $60 Put (about 0.01) neither.
-    expect(later.contracts.some((contract) => contract.strike === 100 || contract.strike === 60)).toBe(false);
+    expect(strikesOf(later.contracts, "C")).toEqual(callStrikes.filter((strike) => callAbsDeltaAt(strike) >= 0.03 && callAbsDeltaAt(strike) <= 0.4));
+    // The ladder's Puts have no |delta| range: the $60 Put (|delta| about 0.01) is quoted; the $100 Put, at the price, is not.
+    expect(strikesOf(later.contracts, "P")).toEqual([60, 70, 80, 85, 90, 95]);
   });
 
-  it("quotes every contract whose IV is unknown, and follows the live price", () => {
+  it("quotes every Call whose IV is unknown and every Put below the price, and follows the live price", () => {
     const unknown = planLadderBand({ universe, todaysQuotes: [], overnightImpliedVolatilityByContract: new Map(), anchors, clock, now, stockPrice: 100, deltaRange: settings });
-    expect(unknown.contracts).toHaveLength(strikes.length);
-    expect(unknown.unknownImpliedVolatilityCount).toBe(strikes.length);
-    // The stock falls 10% to $90: the $100 Put is now deep in the money (out of the band) and the $70 Put comes into it.
+    expect(strikesOf(unknown.contracts, "C")).toEqual(callStrikes);
+    expect(strikesOf(unknown.contracts, "P")).toEqual([60, 70, 80, 85, 90, 95]);
+    expect(unknown.unknownImpliedVolatilityCount).toBe(universe.length);
+    // The stock falls 10% to $90: the Puts at $90 and above leave, the Calls' band moves down with the forward.
     const fallen = planLadderBand({ universe, todaysQuotes: [quoteAt(60, "P", 100)], overnightImpliedVolatilityByContract: overnight, anchors, clock, now, stockPrice: 90, deltaRange: settings });
-    const fallenDelta = (strike: number) => Math.abs(blackScholesDelta(100.1 * 0.9, strike, years, clock.riskFreeRate, 0.5, false));
-    expect(fallen.contracts.map((contract) => contract.strike)).toEqual(strikes.filter((strike) => fallenDelta(strike) >= 0.03 && fallenDelta(strike) <= 0.4));
-    expect(fallen.contracts.map((contract) => contract.strike)).toContain(70);
-    expect(fallen.contracts.map((contract) => contract.strike)).not.toContain(100);
+    expect(strikesOf(fallen.contracts, "P")).toEqual([60, 70, 80, 85]);
+    expect(strikesOf(fallen.contracts, "C")).toEqual(callStrikes.filter((strike) => callAbsDeltaAt(strike, 100.1 * 0.9) >= 0.03 && callAbsDeltaAt(strike, 100.1 * 0.9) <= 0.4));
   });
 });

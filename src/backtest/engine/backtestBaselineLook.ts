@@ -58,7 +58,8 @@ function forwardAnchorsOfDay(ledger: SimulatedLedger, symbol: string, todayIso: 
 //      most the average price of the shares held (any with none held), as many contracts as putBudgetPctPerDte% of the
 //      day's account value × days to expiry (its exposure, (strike − fill) × 100 a contract), the free cash and the volume
 //      limit allow (approved by Marcelo 2026-10-13). An assignment may take the shares past their cap.
-// With minCallYieldPct > 0, a call (step 1 or a Covered Call entry's) is sold only when its premium yield is above that.
+// With minCallYieldPct > 0, a call is sold only when its premium yield is above that: a Covered Call entry's always, step 1's
+// only with minCallYieldAppliesTo "every_call".
 // The day's account value for sizing is the session's: open options at zero when dayValueOptions is "excluded".
 // With earnings "skip_spanning", no sale whose expiry spans a known earnings date (today ≤ report ≤ expiry); with looks
 // "first_look", the session asks only at 10:00. With volatilityEdgeFilter "entries" (or "all_sales"), a new entry (or any

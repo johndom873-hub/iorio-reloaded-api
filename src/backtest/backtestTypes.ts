@@ -59,8 +59,13 @@ export interface BacktestBaselineSettings {
    * day's account value; 100 = no cap. An assigned put may take them past it.
    */
   maxSharesPctOfAccount: number;
-  /** A call, on held shares or a Covered Call entry's, is sold only when its premium yield (annualized) is above this %; 0 = any. */
+  /** A call is sold only when its premium yield (annualized) is above this %; 0 = any. Which calls: minCallYieldAppliesTo. */
   minCallYieldPct: number;
+  /**
+   * "every_call": the Covered Call entries' calls and the calls on held shares (assigned ones included); "new_covered_calls":
+   * the Covered Call entries' calls only, held shares' calls at any yield (Marcelo 2026-10-16).
+   */
+  minCallYieldAppliesTo: "every_call" | "new_covered_calls";
   /**
    * With a Covered Call entry, "dte_budget": on a look where held shares are left without a call, or a Covered Call entry with room
    * finds none (minCallYieldPct included), and no put of the stock is open, one put is sold: the highest premium yield,
@@ -96,6 +101,11 @@ export interface BacktestBaselineSettings {
    */
   ladderPutVersusCall: "call_first" | "higher_yield";
   ladderPutYieldMarginPct: number;
+  /**
+   * The ladder's Puts: on the |delta| range (minAbsDelta–maxAbsDelta), or "none": any |delta|, the rung's cap, days to expiry,
+   * spread, minimum bid and volume limit bounding them (Marcelo 2026-10-16: the |delta| range is for the Calls only).
+   */
+  ladderPutDeltaRange: "delta_range" | "none";
   /** The day's recorded account value: open options at their marks, or left out (cash and shares only) until the end. */
   dayValueOptions: "marked" | "excluded";
   /** The |delta| range of every Call (on held shares and a new Covered Call): the Puts' (minAbsDelta–maxAbsDelta), or their own (callMinAbsDelta–callMaxAbsDelta). */
@@ -135,7 +145,14 @@ export interface BacktestBaselineSettings {
   coverage: "best_contract" | "fill_down_ranking";
 }
 
-export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
+/**
+ * The engine's version, stored on each session it runs (backtest_sessions.engine_version): raised whenever a stored
+ * session's settings would give different results, so the ticker analysis compares only same-engine runs. A new setting
+ * whose default keeps the results does not raise it. 1: the engine as of 3020323 (2026-10-15).
+ */
+export const backtestEngineVersion = 1;
+
+export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
