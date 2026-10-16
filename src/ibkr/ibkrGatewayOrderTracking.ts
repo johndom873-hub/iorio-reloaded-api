@@ -5,6 +5,12 @@ import { finalOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { ibkrInactiveOrderMessage, ibkrOrderCanceledErrorCode, ibkrOrderRejectionErrorCodes, requestStatusForIbkrRejection, requestStatusForOrderStatusEvent } from "./ibkrGatewayOrderStatus.js";
 import { recordIbkrCancellationReason, recordIbkrOrderCanceled, workingOrderRequestStatuses, type ExecutedOutcome } from "./ibkrGatewayCancellationRecording.js";
 import type { OrderRequestPayload } from "./ibkrGatewayOrderPayload.js";
+
+interface SourceOrderRequest {
+  id: string;
+  requestType: string;
+  payload: Partial<OrderRequestPayload>;
+}
 import { parseIbkrExecutionTime } from "./ibkrGatewayParseExecutionTime.js";
 import type { fetchIbkrCompletedOrders } from "./ibkrGatewayFetchCompletedOrders.js";
 import type { fetchIbkrOpenOrders } from "./ibkrGatewayFetchOpenOrders.js";
@@ -287,10 +293,58 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
   // Looked up by permId, not ibkr_order_id: ibkr_order_id resets and gets reused after every Gateway/worker restart, so
   // matching a trade to its requester by order id could attribute an old trade to whichever unrelated request later reused
   // that id. Null if the order was placed outside the app (no order_requests row), which is expected, not an error.
-  async function lookupSourceOrderRequestId(execution: Execution): Promise<string | null> {
+  async function loadSourceOrderRequest(execution: Execution): Promise<SourceOrderRequest | null> {
     if (!execution.permId) return null;
-    const orderRequest = await db("order_requests").where({ ibkr_perm_id: execution.permId }).first("id");
-    return orderRequest?.id ?? null;
+    const orderRequest = await db("order_requests").where({ ibkr_perm_id: execution.permId }).first("id", "request_type", "payload");
+    if (!orderRequest) return null;
+    const payload: Partial<OrderRequestPayload> = typeof orderRequest.payload === "string" ? JSON.parse(orderRequest.payload) : (orderRequest.payload ?? {});
+    return { id: orderRequest.id, requestType: orderRequest.request_type, payload };
+  }
+
+  async function lookupSourceOrderRequestId(execution: Execution): Promise<string | null> {
+    return (await loadSourceOrderRequest(execution))?.id ?? null;
+  }
+
+  // Shares bought by a covered-call order are that new position's own, even when another position already holds the same
+  // stock: they belong with the call the same order sold, never with whichever open leg of the contract comes first.
+  function isCoveredCallShareBuy(contract: Contract, execution: Execution, sourceOrder: SourceOrderRequest | null): boolean {
+    return contract.secType === "STK" && execution.side === "BOT" && sourceOrder?.requestType === "open_covered_call";
+  }
+
+  /** Order request ids whose option fills sit on the position that owns this leg. */
+  async function orderRequestIdsOfPositionOptionFills(legId: string): Promise<Set<string>> {
+    const rows: { id: string }[] = await db("trades as tr")
+      .join("position_legs as option_leg", "option_leg.id", "tr.position_leg_id")
+      .join("position_legs as leg", "leg.position_id", "option_leg.position_id")
+      .where({ "leg.id": legId, "option_leg.leg_type": "option" })
+      .whereNotNull("tr.source_order_request_id")
+      .distinct("tr.source_order_request_id as id");
+    return new Set(rows.map((row) => row.id));
+  }
+
+  /**
+   * The open leg an execution belongs to, or null to buffer it until the reconciliation creates that leg. One stock
+   * contract can be open on several positions (covered calls on the same ticker), so the conId alone is not enough:
+   *   - a leg the order itself names (a close or a roll of a tracked leg) wins;
+   *   - shares bought by a covered-call order go to the position holding that order's call, or wait for it;
+   *   - anything else (an order placed outside the app, an assignment) keeps the oldest open leg of the contract.
+   */
+  async function legForExecution(conId: string, contract: Contract, execution: Execution, sourceOrder: SourceOrderRequest | null) {
+    const openLegs = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").orderBy("entry_at", "asc").orderBy("id", "asc");
+    if (openLegs.length === 0) return null;
+
+    const namedLegIds = new Set((sourceOrder?.payload.legs ?? []).map((leg) => leg.positionLegId).filter((id): id is string => typeof id === "string"));
+    const namedLeg = openLegs.find((leg) => namedLegIds.has(leg.id));
+    if (namedLeg) return namedLeg;
+
+    if (isCoveredCallShareBuy(contract, execution, sourceOrder)) {
+      const callOwner = await db("trades as tr")
+        .join("position_legs as option_leg", "option_leg.id", "tr.position_leg_id")
+        .where({ "tr.source_order_request_id": sourceOrder!.id, "option_leg.leg_type": "option" })
+        .first("option_leg.position_id as positionId");
+      return openLegs.find((leg) => leg.position_id === callOwner?.positionId) ?? null;
+    }
+    return openLegs[0];
   }
 
   async function recordCommission(report: CommissionReport): Promise<void> {
@@ -351,12 +405,12 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     if (existing) return;
 
     const conId = String(contract.conId);
-    const leg = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").first();
+    const leg = await legForExecution(conId, contract, execution, await loadSourceOrderRequest(execution));
 
     if (!leg) {
       // A brand-new position-opening fill (or one placed outside the app entirely): the leg does not exist yet because the
       // position reconciliation has not run since this fill. Buffer it; the reconciliation drains the buffer once it
-      // creates the leg.
+      // creates the leg. Shares a covered-call order bought wait here too while another position already holds the stock.
       const buffered = pendingOpeningExecutions.get(conId) ?? [];
       buffered.push({ contract, execution, receivedAt });
       pendingOpeningExecutions.set(conId, buffered);
@@ -395,14 +449,28 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     dependencies.requestReconciliation();
   }
 
-  /** Called by the position reconciliation when it creates a leg: writes the opening fills that were waiting for it. */
+  /**
+   * Called by the position reconciliation when it creates a leg: writes the opening fills that were waiting for it. Shares
+   * a covered-call order bought stay buffered unless the new leg's position holds that order's call.
+   */
   async function drainPendingOpeningExecutions(conId: string, newLegId: string): Promise<void> {
     const buffered = pendingOpeningExecutions.get(conId);
     if (!buffered) return;
     pendingOpeningExecutions.delete(conId);
-    for (const { contract, execution, receivedAt } of buffered) {
-      await insertOpeningTradeRow(newLegId, contract, execution, receivedAt);
+    let ownOrderRequestIds: Set<string> | null = null;
+    const stillWaiting: typeof buffered = [];
+    for (const entry of buffered) {
+      const sourceOrder = await loadSourceOrderRequest(entry.execution);
+      if (isCoveredCallShareBuy(entry.contract, entry.execution, sourceOrder)) {
+        ownOrderRequestIds ??= await orderRequestIdsOfPositionOptionFills(newLegId);
+        if (!ownOrderRequestIds.has(sourceOrder!.id)) {
+          stillWaiting.push(entry);
+          continue;
+        }
+      }
+      await insertOpeningTradeRow(newLegId, entry.contract, entry.execution, entry.receivedAt);
     }
+    if (stillWaiting.length > 0) pendingOpeningExecutions.set(conId, stillWaiting);
   }
 
   return {

@@ -8,7 +8,8 @@ import { readExpirySettlementMode, runExpirySettlementAudit, summarizeExpirySett
 import { classifyOptionLegRetirement, type OptionLegRetirementEvidence } from "../lib/optionLegRetirement.js";
 import { optionPastExpirySql } from "../lib/optionExpiryClock.js";
 import { carveClosedSliceFromPartialClose, exitFromClosingFills } from "../lib/partialCloseSlice.js";
-import { soldFillsEntryPrice, verifyHeldStockCostBasis } from "../lib/stockCostBasisLedger.js";
+import { costBasisMatchTolerancePerShare, soldFillsEntryPrice, verifyHeldStockCostBasis } from "../lib/stockCostBasisLedger.js";
+import { allocateStockEntryPerPosition, type PositionStockLeg } from "../lib/stockEntryPerPosition.js";
 import { setAsideFrozenTickers } from "./ibkrGatewayFrozenTickers.js";
 
 // What this module needs from the worker process itself. Injected so the pass can run against a
@@ -293,12 +294,32 @@ async function recordAssignedPutShareSource(symbol: string, positionId: string):
   console.log(`Reconciliation #${currentPassId}: ${symbol} — stock position ${positionId} records its shares as delivered by assigned put position ${assignedPut.id}.`);
 }
 
-async function handOffOpenStockLegs(positionId: string, symbol: string, toDescription: string): Promise<Map<string, number>> {
+/** The cost a handed-off stock leg carries to its successor, and whether it is its own position's cost (stockEntryPerPosition.ts). */
+interface CarriedStockCost {
+  entryPrice: number;
+  fromPositionSplit: boolean;
+}
+
+async function closingFillQuantity(legId: string): Promise<number> {
+  const row = await db("trades").where({ position_leg_id: legId, is_closing_trade: true }).sum({ total: "quantity" }).first();
+  return Number(row?.total ?? 0);
+}
+
+async function handOffOpenStockLegs(positionId: string, symbol: string, toDescription: string): Promise<Map<string, CarriedStockCost>> {
   const openStockLegs = await db("position_legs").where({ position_id: positionId, leg_type: "stock" }).whereNull("exit_at");
-  const entryPriceByConId = new Map<string, number>();
+  const carriedCostByConId = new Map<string, CarriedStockCost>();
   for (const leg of openStockLegs) {
+    // Shares whose own sale fills cover them were sold, not moved: a sibling covered call closed while another one on the
+    // same ticker keeps IBKR's contract held, so the leg never reaches closeLegsNoLongerHeld.
+    const closingFillExit = (await closingFillQuantity(leg.id)) >= Number(leg.quantity) ? await exitFromClosingFills(leg.id) : null;
+    if (closingFillExit) {
+      await db("position_legs").where({ id: leg.id }).update({ exit_at: closingFillExit.exitAt, exit_price: closingFillExit.exitPrice });
+      legsHandedOffThisPass += 1;
+      console.log(`Reconciliation #${currentPassId}: ${symbol} — stock leg ${leg.id} (${leg.quantity} sh) of position ${positionId} closed by its own sale fills @ ${closingFillExit.exitPrice}.`);
+      continue;
+    }
     await db("position_legs").where({ id: leg.id }).update({ exit_at: db.fn.now(), exit_price: leg.entry_price });
-    entryPriceByConId.set(String(leg.ibkr_contract_id), Number(leg.entry_price));
+    carriedCostByConId.set(String(leg.ibkr_contract_id), { entryPrice: Number(leg.entry_price), fromPositionSplit: Boolean(leg.entry_price_from_position_split) });
     legsHandedOffThisPass += 1;
     const sources = stockHandoffSourcesThisPass.get(symbol) ?? new Set<string>();
     sources.add(positionId);
@@ -307,7 +328,7 @@ async function handOffOpenStockLegs(positionId: string, symbol: string, toDescri
       `Reconciliation #${currentPassId}: ${symbol} — handed off stock leg ${leg.id} (${leg.quantity} sh @ ${leg.entry_price}) from position ${positionId} ${toDescription}.`,
     );
   }
-  return entryPriceByConId;
+  return carriedCostByConId;
 }
 
 /**
@@ -530,7 +551,7 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
       // reshuffle from one pass to the next with no real change underneath.
       const sortedCallLegs = [...shortCallLegs].sort((a, b) => (a.contract.conId ?? 0) - (b.contract.conId ?? 0));
       for (const callLeg of sortedCallLegs) {
-        await upsertSplitCoveredCallPosition(symbol, stockLeg, callLeg, Math.abs(callLeg.quantity) * sharesPerHeldContract(callLeg), heldConIds);
+        await upsertSplitCoveredCallPosition(symbol, stockLeg, callLeg, Math.abs(callLeg.quantity) * sharesPerHeldContract(callLeg), heldConIds, shortCallLegs);
       }
       // Should never happen -- every position this app opens is exactly 1
       // option + 100 shares/contract, so leftover stock beyond what the
@@ -561,6 +582,7 @@ async function syncHeldStructures(bySymbol: Map<string, IbkrHeldPosition[]>, hel
         }
       }
     }
+    if (stockLeg) await syncStockEntriesPerPosition(symbol, stockLeg);
   }
 }
 
@@ -647,6 +669,86 @@ async function verifiedStockEntryPrice(tickerId: string, held: IbkrHeldPosition)
   return null;
 }
 
+// Last allocation outcome logged per stock conId (a skip reason, or drift), so a state that persists does not log every pass.
+const loggedPositionCostOutcomeByConId = new Map<string, string>();
+
+// Each position's own cost for shares several positions hold (stockEntryPerPosition.ts): runs once per ticker after every
+// leg is synced, and only where that applies (two or more open legs, or a lone leg that already carries its own cost).
+async function syncStockEntriesPerPosition(symbol: string, held: IbkrHeldPosition): Promise<void> {
+  const conId = String(held.contract.conId);
+  const legRows = await db("position_legs as pl")
+    .join("positions as p", "p.id", "pl.position_id")
+    .where({ "pl.ibkr_contract_id": conId, "pl.leg_type": "stock", "pl.side": "long" })
+    .whereNull("pl.exit_at")
+    .select("pl.id", "pl.quantity", "pl.entry_price", "pl.entry_price_from_position_split", "p.ticker_id");
+  if (legRows.length === 0) return;
+  if (legRows.length === 1 && !legRows[0].entry_price_from_position_split) return;
+
+  const fillRows: { position_leg_id: string; quantity: string; price: string; commission: string | null }[] = await db("trades")
+    .whereIn(
+      "position_leg_id",
+      legRows.map((row) => row.id),
+    )
+    .where({ is_closing_trade: false, side: "buy" })
+    .select("position_leg_id", "quantity", "price", "commission");
+  const legs: PositionStockLeg[] = legRows.map((row) => ({
+    id: row.id,
+    quantity: Number(row.quantity),
+    storedEntryPrice: Number(row.entry_price),
+    fromPositionSplit: Boolean(row.entry_price_from_position_split),
+    openingFills: fillRows
+      .filter((fill) => fill.position_leg_id === row.id)
+      .map((fill) => ({ quantity: Number(fill.quantity), price: Number(fill.price), commission: fill.commission === null ? null : Number(fill.commission) })),
+  }));
+
+  const heldShares = Math.abs(held.quantity);
+  const heldAverageCost = (await verifiedStockEntryPrice(legRows[0].ticker_id, held)) ?? held.avgCost;
+  const allocation = allocateStockEntryPerPosition(legs, heldShares, heldShares * heldAverageCost);
+
+  const logOnce = (outcome: string, message: string) => {
+    if (loggedPositionCostOutcomeByConId.get(conId) === outcome) return;
+    loggedPositionCostOutcomeByConId.set(conId, outcome);
+    console.warn(`Reconciliation #${currentPassId}: ${symbol} — ${message}`);
+  };
+
+  if (allocation.kind === "skipped" && allocation.reason === "no_known_cost") {
+    // Nothing to split on yet: every leg takes IBKR's average, as a lone leg would.
+    for (const leg of legs) {
+      if (roundToEntryPrice(leg.storedEntryPrice) !== roundToEntryPrice(heldAverageCost)) await db("position_legs").where({ id: leg.id }).update({ entry_price: heldAverageCost });
+    }
+    return;
+  }
+  if (allocation.kind === "skipped") {
+    logOnce(allocation.reason, `per-position stock cost not set (${allocation.reason}); legs keep their entries this pass.`);
+    return;
+  }
+  if (allocation.kind === "ibkr_average") {
+    const [leg] = legs as [PositionStockLeg];
+    await db("position_legs").where({ id: leg.id }).update({ entry_price: heldAverageCost, entry_price_from_position_split: false });
+    console.warn(`Reconciliation #${currentPassId}: ${symbol} — stock leg ${leg.id} gained shares beyond its own fills; its own cost is no longer known, back to IBKR's average ${heldAverageCost}.`);
+    loggedPositionCostOutcomeByConId.delete(conId);
+    return;
+  }
+
+  for (const leg of legs) {
+    const entryPrice = allocation.entryPriceByLegId.get(leg.id)!;
+    if (leg.fromPositionSplit && roundToEntryPrice(leg.storedEntryPrice) === entryPrice) continue;
+    await db("position_legs").where({ id: leg.id }).update({ entry_price: entryPrice, entry_price_from_position_split: true });
+    console.log(`Reconciliation #${currentPassId}: ${symbol} — stock leg ${leg.id} (${leg.quantity} sh) at its own position's cost ${entryPrice} (was ${leg.storedEntryPrice}).`);
+  }
+  if (Math.abs(allocation.driftPerShare) > costBasisMatchTolerancePerShare) {
+    logOnce("drift", `per-position stock costs sum ${allocation.driftPerShare.toFixed(4)}/share away from IBKR's average ${heldAverageCost} (expected after a sibling's sale: IBKR sells the oldest lot first).`);
+  } else {
+    loggedPositionCostOutcomeByConId.delete(conId);
+  }
+}
+
+/** Whether another position holds an open long stock leg of the same contract. */
+async function hasOpenSiblingStockLeg(conId: string, legId: string): Promise<boolean> {
+  const sibling = await db("position_legs").where({ ibkr_contract_id: conId, leg_type: "stock", side: "long" }).whereNull("exit_at").whereNot({ id: legId }).first("id");
+  return sibling !== undefined;
+}
+
 // Insert-or-update for a single position_legs row against one IBKR-held
 // contract. Shared by upsertUnstructuredPosition (looks up an existing leg
 // by conId alone, which stays safe there since that path never splits one
@@ -654,7 +756,7 @@ async function verifiedStockEntryPrice(tickerId: string, held: IbkrHeldPosition)
 // upsertLeftoverStockPosition below (which pass scopeLookupToPosition=true,
 // since a covered call's *stock* conId can be shared across several sibling
 // positions and needs position_id in the lookup to disambiguate which slice
-// belongs to which). entryPriceOverride is for a leg re-created after a
+// belongs to which). carriedCost is for a leg re-created after a
 // handoff (see handOffOpenStockLegs): the shares' cost basis carries over
 // from the closed predecessor leg instead of being read fresh from IBKR.
 async function upsertPositionLeg(
@@ -663,7 +765,7 @@ async function upsertPositionLeg(
   side: "long" | "short",
   quantityOverride?: number,
   scopeLookupToPosition = false,
-  entryPriceOverride?: number,
+  carriedCost?: CarriedStockCost,
 ): Promise<void> {
   const conId = String(held.contract.conId);
   const contract = held.contract;
@@ -680,7 +782,7 @@ async function upsertPositionLeg(
   // ruled out — `?? 100` wouldn't catch it (`"" ?? 100` is `""`, not 100),
   // silently producing `avgCost / 0` = Infinity.
   const ibkrEntryPrice = contract.secType === SecType.STK ? held.avgCost : held.avgCost / (contract.multiplier || 100);
-  const entryPrice = entryPriceOverride ?? ibkrEntryPrice;
+  const entryPrice = carriedCost?.entryPrice ?? ibkrEntryPrice;
   const trueQuantity = quantityOverride ?? Math.abs(held.quantity);
   const stockTickerId: string | undefined =
     contract.secType === SecType.STK && side === "long" ? (await db("positions").where({ id: positionId }).first("ticker_id"))?.ticker_id : undefined;
@@ -704,13 +806,21 @@ async function upsertPositionLeg(
     //
     // A stock entry is IBKR's average cost corrected for assigned-put premium when the trades ledger verifies it
     // (verifiedStockEntryPrice); the sold shares' own lot cost goes onto the carved slice the same way.
+    //
+    // A leg holding its own position's cost (shares shared with sibling positions) keeps it: the slice takes that cost too,
+    // and syncStockEntriesPerPosition sets the entry once every leg of the ticker is synced.
+    const keepsPositionCost = stockTickerId !== undefined && (Boolean(existing.entry_price_from_position_split) || (await hasOpenSiblingStockLeg(conId, existing.id)));
     const carvedSliceId = await carveClosedSliceFromPartialClose(
       existing,
       trueQuantity,
       db,
-      stockTickerId === undefined ? undefined : (soldFills, database) => soldFillsEntryPrice(stockTickerId, soldFills, Math.abs(held.quantity), held.avgCost, database),
+      stockTickerId === undefined || keepsPositionCost ? undefined : (soldFills, database) => soldFillsEntryPrice(stockTickerId, soldFills, Math.abs(held.quantity), held.avgCost, database),
     );
     if (carvedSliceId) console.log(`Reconciliation #${currentPassId}: leg ${existing.id} partially closed — closed shares carved into leg ${carvedSliceId}.`);
+    if (keepsPositionCost) {
+      if (Number(existing.quantity) !== trueQuantity) await db("position_legs").where({ id: existing.id }).update({ quantity: trueQuantity });
+      return;
+    }
     const syncedEntryPrice = (stockTickerId === undefined ? null : await verifiedStockEntryPrice(stockTickerId, held)) ?? ibkrEntryPrice;
     if (Number(existing.quantity) !== trueQuantity || Number(existing.entry_price) !== roundToEntryPrice(syncedEntryPrice)) {
       await db("position_legs").where({ id: existing.id }).update({ quantity: trueQuantity, entry_price: syncedEntryPrice });
@@ -746,6 +856,7 @@ async function upsertPositionLeg(
       multiplier: contract.secType === SecType.STK ? 1 : (contract.multiplier ?? 1),
       ibkr_contract_id: conId,
       entry_price: entryPrice,
+      entry_price_from_position_split: carriedCost?.fromPositionSplit ?? false,
       entry_at: db.fn.now(),
     })
     .returning(["id"]);
@@ -753,15 +864,16 @@ async function upsertPositionLeg(
   // Drain any opening execution(s) recordExecution buffered before this
   // leg existed — one trades row per real fill, not a single synthesized
   // one, so partial fills still show individually in the Trade Blotter.
-  // Note: if two sibling covered-call positions both create their stock leg
-  // from the same never-before-seen conId in the same pass, whichever runs
-  // first drains the whole buffer — an extremely unlikely race (this app
-  // only ever opens 1 option + 100 shares at a time; splitting only matters
-  // for pre-existing multi-strike data), not fully solved here.
+  // A stock buy placed by a covered-call order is drained only onto the
+  // stock leg of the position holding that order's call (see
+  // drainPendingOpeningExecutions), so two covered calls opened on one
+  // ticker in the same pass each get their own shares' fills.
   await dependencies.drainPendingOpeningExecutions(conId, newLeg!.id);
 
   // The assignment fill is in `trades` only after the drain above, so a new stock leg's verified entry is computed here.
-  const verifiedEntryPrice = stockTickerId === undefined ? null : await verifiedStockEntryPrice(stockTickerId, held);
+  // A leg sharing the contract with another position, or carrying its own position's cost, is priced by syncStockEntriesPerPosition.
+  const keepsPositionCost = stockTickerId !== undefined && (Boolean(carriedCost?.fromPositionSplit) || (await hasOpenSiblingStockLeg(conId, newLeg!.id)));
+  const verifiedEntryPrice = stockTickerId === undefined || keepsPositionCost ? null : await verifiedStockEntryPrice(stockTickerId, held);
   if (verifiedEntryPrice !== null && verifiedEntryPrice !== roundToEntryPrice(entryPrice)) {
     await db("position_legs").where({ id: newLeg!.id }).update({ entry_price: verifiedEntryPrice });
   }
@@ -802,12 +914,12 @@ async function upsertUnstructuredPosition(
     verdicts.set(foreign.id, { verdict, optionLegs });
   }
 
-  const handoffEntryPriceByConId = new Map<string, number>();
+  const handoffCostByConId = new Map<string, CarriedStockCost>();
   const shareSourcePositionIds: string[] = [];
   for (const foreign of foreignPositions) {
     const { optionLegs } = verdicts.get(foreign.id)!;
     const handedOff = await handOffOpenStockLegs(foreign.id, symbol, "to a leftover-stock position");
-    for (const [conId, entryPrice] of handedOff) handoffEntryPriceByConId.set(conId, entryPrice);
+    for (const [conId, carriedCost] of handedOff) handoffCostByConId.set(conId, carriedCost);
     if (handedOff.size > 0) shareSourcePositionIds.push(foreign.id);
     const remainingOpenLegs = await db("position_legs").where({ position_id: foreign.id }).whereNull("exit_at");
     if (remainingOpenLegs.length === 0) {
@@ -842,7 +954,7 @@ async function upsertUnstructuredPosition(
 
   for (const leg of legs) {
     const conId = String(leg.held.contract.conId);
-    await upsertPositionLeg(positionId!, leg.held, leg.side, undefined, false, handoffEntryPriceByConId.get(conId));
+    await upsertPositionLeg(positionId!, leg.held, leg.side, undefined, false, handoffCostByConId.get(conId));
   }
   return true;
 }
@@ -859,6 +971,7 @@ async function upsertSplitCoveredCallPosition(
   callLeg: IbkrHeldPosition,
   sharesForThisLeg: number,
   heldConIds: Set<number>,
+  symbolShortCallLegs: IbkrHeldPosition[],
 ): Promise<void> {
   const callConId = String(callLeg.contract.conId);
   const existingCallLeg = await db("position_legs").where({ ibkr_contract_id: callConId }).whereNull("exit_at").first();
@@ -955,8 +1068,14 @@ async function upsertSplitCoveredCallPosition(
     .where({ ibkr_contract_id: stockConId, leg_type: "stock" })
     .whereNull("exit_at")
     .whereNot({ position_id: positionId });
-  let handoffEntryPrice: number | undefined;
+  // A position that already owns its shares never takes another position's while a call sold this pass still has no
+  // position: those shares are that new call's (a sibling covered call rolled, and its new call sorts after this one).
+  const newCallAwaitingShares =
+    ownStockLeg !== undefined &&
+    (await Promise.all(symbolShortCallLegs.map(async (leg) => (await db("position_legs").where({ ibkr_contract_id: String(leg.contract.conId) }).whereNull("exit_at").first("id")) === undefined))).some(Boolean);
+  let handoffCost: CarriedStockCost | undefined;
   for (const candidate of staleCandidates) {
+    if (newCallAwaitingShares) break;
     const siblingOptionLegs = await db("position_legs")
       .where({ position_id: candidate.position_id, leg_type: "option" })
       .whereNull("exit_at");
@@ -975,7 +1094,7 @@ async function upsertSplitCoveredCallPosition(
     // (once), and the leftover is resized by upsertLeftoverStockPosition, not recycled.
     if (ownStockLeg && sourcePosition?.strategy_key === "unstructured") continue;
     const handedOff = await handOffOpenStockLegs(candidate.position_id, symbol, `to covered call position ${positionId}`);
-    if (!ownStockLeg && handoffEntryPrice === undefined) handoffEntryPrice = handedOff.get(stockConId);
+    if (!ownStockLeg && handoffCost === undefined) handoffCost = handedOff.get(stockConId);
     if (handedOff.size > 0) await recordShareSource(positionId!, candidate.position_id);
 
     const remainingOpenLegs = await db("position_legs").where({ position_id: candidate.position_id }).whereNull("exit_at");
@@ -987,7 +1106,7 @@ async function upsertSplitCoveredCallPosition(
     }
   }
 
-  await upsertPositionLeg(positionId!, stockLeg, "long", sharesForThisLeg, true, handoffEntryPrice);
+  await upsertPositionLeg(positionId!, stockLeg, "long", sharesForThisLeg, true, handoffCost);
 }
 
 // One cash-secured-put position per distinct short put contract — the same

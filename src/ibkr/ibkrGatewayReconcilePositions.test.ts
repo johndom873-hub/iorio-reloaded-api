@@ -15,6 +15,7 @@ vi.mock("../db/connection.js", async () => {
 
 const { db } = await import("../db/connection.js");
 const { reconcileHeldPositions, closeReasonStockRolledIntoCoveredCall } = await import("./ibkrGatewayReconcilePositions.js");
+const { createExecutionRecorder } = await import("./ibkrGatewayOrderTracking.js");
 const { isOptionPastExpiry, optionPastExpirySql } = await import("../lib/optionExpiryClock.js");
 // Pluto's book is tested here too: a reconciliation pass closes every open leg it is not given, so the
 // Pluto-book scenarios live beside the other tests that run passes.
@@ -883,6 +884,153 @@ describe("reconcileHeldPositions — a partial sale of mixed lots is priced at t
 
     const legs = await legsFor(positionId);
     expect(legs.map((leg) => Number(leg.entry_price))).toEqual([106.1571, 106.1571]);
+  });
+});
+
+describe("reconcileHeldPositions — covered calls sharing one stock contract each keep their own cost", () => {
+  // INTC 2026-10-15: 200 shares assigned at $100.00 under the $98 calls, then 100 bought at $92.43 + $1.0903 with the $94
+  // call. IBKR holds 300 at one average, (20,000 + 9,243 + 1.0903) / 300 = 97.4803, which both stock legs used to show.
+  async function seedIntcSiblings(fillOnThe94Leg: boolean) {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const the98CallConId = (nextConId += 1);
+    const the94CallConId = (nextConId += 1);
+    const the98Id = await insertPosition(ticker.id, "covered_call");
+    const the98StockLegId = await insertStockLeg(the98Id, stockConId, 200, 97.4803);
+    const the98CallLegId = await insertShortOptionLeg(the98Id, the98CallConId, "call", 98, isoDateDaysFromToday(1), 0.3553);
+    await testDb("position_legs").where({ id: the98CallLegId }).update({ quantity: 2 });
+    const the94Id = await insertPosition(ticker.id, "covered_call");
+    const the94StockLegId = await insertStockLeg(the94Id, stockConId, 100, 97.4803);
+    const the94CallLegId = await insertShortOptionLeg(the94Id, the94CallConId, "call", 94, isoDateDaysFromToday(1), 1.143);
+    await insertStockTrade(fillOnThe94Leg ? the94StockLegId : the98StockLegId, "buy", 100, 92.43, 1.0903, new Date(Date.now() - 3_600_000));
+    const held = [
+      heldStock(ticker.symbol, stockConId, 300, 97.4803),
+      heldShortOption(ticker.symbol, the98CallConId, OptionType.Call, 98, isoDateDaysFromToday(1), 35.53, 2),
+      heldShortOption(ticker.symbol, the94CallConId, OptionType.Call, 94, isoDateDaysFromToday(1), 114.3),
+    ];
+    return { ticker, stockConId, the98CallConId, the94CallConId, the98Id, the98StockLegId, the98CallLegId, the94Id, the94StockLegId, the94CallLegId, held };
+  }
+
+  const stockLegOf = async (legId: string) => testDb("position_legs").where({ id: legId }).first();
+
+  it("INTC: the $94 position's shares at their own fill, the $98 position's at what is left of IBKR's total, and a second pass rewrites nothing", async () => {
+    const intc = await seedIntcSiblings(true);
+
+    await runPass(intc.held);
+
+    const the98Stock = await stockLegOf(intc.the98StockLegId);
+    const the94Stock = await stockLegOf(intc.the94StockLegId);
+    expect(Number(the98Stock.entry_price)).toBe(100);
+    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect([the98Stock.entry_price_from_position_split, the94Stock.entry_price_from_position_split]).toEqual([true, true]);
+    expect([the98Stock.quantity, the94Stock.quantity]).toEqual([200, 100]);
+
+    const versions = [await rowVersion(intc.the98StockLegId), await rowVersion(intc.the94StockLegId)];
+    await runPass(intc.held);
+    expect([await rowVersion(intc.the98StockLegId), await rowVersion(intc.the94StockLegId)]).toEqual(versions);
+  });
+
+  it("the buy still on the wrong position's leg: no leg has a cost of its own, both keep IBKR's average as before", async () => {
+    const intc = await seedIntcSiblings(false);
+
+    await runPass(intc.held);
+
+    for (const legId of [intc.the98StockLegId, intc.the94StockLegId]) {
+      const stockLeg = await stockLegOf(legId);
+      expect(Number(stockLeg.entry_price)).toBe(97.4803);
+      expect(stockLeg.entry_price_from_position_split).toBe(false);
+    }
+  });
+
+  it("the $94 position closes (call bought back, shares sold): its shares exit at their sale fill, the $98 shares keep $100.00 though IBKR's average moved", async () => {
+    const intc = await seedIntcSiblings(true);
+    await runPass(intc.held);
+
+    await insertClosingTrade(intc.the94CallLegId, 1.5, new Date(Date.now() - 60_000));
+    await insertStockTrade(intc.the94StockLegId, "sell", 100, 93, 1, new Date(Date.now() - 60_000));
+    // IBKR sold its oldest lot (the $100.00 shares): the 200 left average (100 x 100 + 100 x 92.4409) / 200.
+    await runPass([heldStock(intc.ticker.symbol, intc.stockConId, 200, 96.2205), intc.held[1]!]);
+
+    const the94Stock = await stockLegOf(intc.the94StockLegId);
+    expect(the94Stock.exit_at).not.toBeNull();
+    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect(Number(the94Stock.exit_price)).toBe(93);
+    expect((await positionsFor(intc.ticker.id)).find((position) => position.id === intc.the94Id)!.status).toBe("closed");
+
+    const the98Stock = await stockLegOf(intc.the98StockLegId);
+    expect(the98Stock.exit_at).toBeNull();
+    expect(the98Stock.quantity).toBe(200);
+    expect(Number(the98Stock.entry_price)).toBe(100);
+    expect(await shareSourcesOf(intc.the98Id)).toEqual([]);
+  });
+
+  it("the $98 position rolls while the $94 one stays open: its 200 shares move to the new call at $100.00, even when the $94 call is synced first", async () => {
+    const intc = await seedIntcSiblings(true);
+    await runPass(intc.held);
+
+    await insertClosingTrade(intc.the98CallLegId, 0.2, new Date(Date.now() - 20 * 60_000));
+    const newCallConId = (nextConId += 1);
+    await runPass([intc.held[0]!, intc.held[2]!, heldShortOption(intc.ticker.symbol, newCallConId, OptionType.Call, 99, isoDateDaysFromToday(8), 80, 2)]);
+
+    const positions = await positionsFor(intc.ticker.id);
+    expect(positions.find((position) => position.id === intc.the98Id)!.status).toBe("closed");
+    const rolled = positions.find((position) => position.id !== intc.the98Id && position.id !== intc.the94Id)!;
+    const rolledStock = (await legsFor(rolled.id)).find((leg) => leg.leg_type === "stock")!;
+    expect(rolledStock.quantity).toBe(200);
+    expect(Number(rolledStock.entry_price)).toBe(100);
+    expect(rolledStock.entry_price_from_position_split).toBe(true);
+    expect(await shareSourcesOf(rolled.id)).toEqual([intc.the98Id]);
+
+    const the94Stock = await stockLegOf(intc.the94StockLegId);
+    expect(the94Stock.exit_at).toBeNull();
+    expect(the94Stock.quantity).toBe(100);
+    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect(await shareSourcesOf(intc.the94Id)).toEqual([]);
+  });
+
+  it("end to end with the worker's recorder: the buy-write's shares wait for their own call's position instead of joining the $98 position's leg", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const the98CallConId = (nextConId += 1);
+    const the94CallConId = (nextConId += 1);
+    const the98Id = await insertPosition(ticker.id, "covered_call");
+    const the98StockLegId = await insertStockLeg(the98Id, stockConId, 200, 100);
+    const the98CallLegId = await insertShortOptionLeg(the98Id, the98CallConId, "call", 98, isoDateDaysFromToday(1), 0.3553);
+    await testDb("position_legs").where({ id: the98CallLegId }).update({ quantity: 2 });
+
+    const permId = 1_000_000 + (nextConId % 1_000_000_000);
+    await testDb("order_requests").insert({
+      requested_by_user_id: await plutoTestUser(),
+      request_type: "open_covered_call",
+      payload: JSON.stringify({ symbol: ticker.symbol, strategyKey: "covered_call", legs: [] }),
+      status: "filled",
+      ibkr_perm_id: permId,
+    });
+    const recorder = createExecutionRecorder({ db: testDb, isAccountBindingMismatch: () => false, requestReconciliation: () => {} });
+    const stockExecId = `reconcile-test-buy-write-stock-${permId}`;
+    await recorder.recordExecution({ conId: stockConId, symbol: ticker.symbol, secType: SecType.STK } as never, { execId: stockExecId, orderId: 1, permId, side: "BOT", shares: 100, price: 92.43, time: "20261015 10:25:50 America/New_York" } as never);
+    await recorder.recordCommission({ execId: stockExecId, commission: 1.0903 } as never);
+    await recorder.recordExecution({ conId: the94CallConId, symbol: ticker.symbol, secType: SecType.OPT } as never, { execId: `reconcile-test-buy-write-call-${permId}`, orderId: 1, permId, side: "SLD", shares: 1, price: 1.15, time: "20261015 10:25:50 America/New_York" } as never);
+    expect(await testDb("trades").where({ position_leg_id: the98StockLegId })).toHaveLength(0);
+
+    drainPendingOpeningExecutionsHook = (conId, newLegId) => recorder.drainPendingOpeningExecutions(conId, newLegId);
+    try {
+      await runPass([
+        heldStock(ticker.symbol, stockConId, 300, 97.4803),
+        heldShortOption(ticker.symbol, the98CallConId, OptionType.Call, 98, isoDateDaysFromToday(1), 35.53, 2),
+        heldShortOption(ticker.symbol, the94CallConId, OptionType.Call, 94, isoDateDaysFromToday(1), 114.3),
+      ]);
+    } finally {
+      drainPendingOpeningExecutionsHook = undefined;
+    }
+
+    const the94 = (await positionsFor(ticker.id)).find((position) => position.id !== the98Id)!;
+    const the94Legs = await legsFor(the94.id);
+    const the94Stock = the94Legs.find((leg) => leg.leg_type === "stock")!;
+    expect((await testDb("trades").where({ ibkr_exec_id: stockExecId }).first()).position_leg_id).toBe(the94Stock.id);
+    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect(Number((await testDb("position_legs").where({ id: the98StockLegId }).first()).entry_price)).toBe(100);
+    expect(await testDb("trades").where({ position_leg_id: the98StockLegId })).toHaveLength(0);
   });
 });
 

@@ -674,6 +674,87 @@ describe("execution recorder", () => {
     expect((await tradeOf(execution.execId!)).source_order_request_id).toBeNull();
   });
 
+  describe("which position's leg a fill belongs to when one stock contract is open on several positions", () => {
+    // Covered calls on the same ticker share IBKR's one stock contract. INTC 2026-10-15: the $94 buy-write's 100 shares
+    // were recorded on the $98 position's stock leg, the oldest open leg of the contract.
+    async function siblingStockLegs(stockConId: string) {
+      const older = await createLeg("long", stockConId);
+      const newer = await createLeg("long", stockConId);
+      await testDb("position_legs").where({ id: newer.legId }).update({ entry_at: daysAgo(1) });
+      return { older, newer };
+    }
+    const stockContractOf = (conId: string): Contract => ({ conId: Number(conId), secType: "STK" }) as Contract;
+
+    async function coveredCallOrderWithCallFillOn(callLegId: string | null) {
+      const permId = nextPermId();
+      const order = await insertOrder({ ibkr_perm_id: permId, status: "filled" });
+      if (callLegId) await insertTrade(callLegId, order.id, 1);
+      return { order, permId };
+    }
+
+    it("shares a covered-call order bought go to the position holding that order's call", async () => {
+      const stockConId = nextConId();
+      const { newer } = await siblingStockLegs(stockConId);
+      const [callLeg] = await testDb("position_legs")
+        .insert({ position_id: newer.positionId, leg_type: "option", side: "short", quantity: 1, multiplier: 100, option_type: "call", strike_price: 94, expiry_date: "2031-03-21", entry_price: 1.14, entry_at: daysAgo(1), ibkr_contract_id: nextConId() })
+        .returning(["id"]);
+      const { order, permId } = await coveredCallOrderWithCallFillOn(callLeg.id);
+
+      const execution = executionOf({ permId, side: "BOT", shares: 100, price: 92.43 });
+      await recorder.recordExecution(stockContractOf(stockConId), execution);
+
+      expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: newer.legId, is_closing_trade: false, source_order_request_id: order.id });
+    });
+
+    it("while that position has no stock leg yet, the shares wait instead of joining another position's leg, and drain only onto their own position's", async () => {
+      const stockConId = nextConId();
+      const { older } = await siblingStockLegs(stockConId);
+      const { legId: callLegId, positionId: ownPositionId } = await createLeg("short", nextConId(), "option");
+      const { permId } = await coveredCallOrderWithCallFillOn(callLegId);
+
+      const execution = executionOf({ permId, side: "BOT", shares: 100, price: 92.43 });
+      await recorder.recordExecution(stockContractOf(stockConId), execution);
+      expect(await tradeCount(execution.execId!)).toBe(0);
+      expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(1);
+
+      // A stock leg created for any other position does not take them.
+      await recorder.drainPendingOpeningExecutions(stockConId, older.legId);
+      expect(await tradeCount(execution.execId!)).toBe(0);
+      expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(1);
+
+      const [ownStockLeg] = await testDb("position_legs")
+        .insert({ position_id: ownPositionId, leg_type: "stock", side: "long", quantity: 100, multiplier: 1, entry_price: 97.48, entry_at: new Date(), ibkr_contract_id: stockConId })
+        .returning(["id"]);
+      await recorder.drainPendingOpeningExecutions(stockConId, ownStockLeg.id);
+      expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: ownStockLeg.id, is_closing_trade: false });
+      expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(0);
+    });
+
+    it("a sale by a close order goes to the leg the order names, not the contract's oldest open leg", async () => {
+      const stockConId = nextConId();
+      const { newer } = await siblingStockLegs(stockConId);
+      const permId = nextPermId();
+      await insertOrder({
+        ibkr_perm_id: permId,
+        request_type: "close_position",
+        payload: { symbol: "TRK", strategyKey: "covered_call", legs: [{ role: "stock", action: "SELL", symbol: "TRK", quantity: 100, unitPrice: 93, positionLegId: newer.legId }] },
+      });
+
+      const execution = executionOf({ permId, side: "SLD", shares: 100, price: 93 });
+      await recorder.recordExecution(stockContractOf(stockConId), execution);
+
+      expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: newer.legId, is_closing_trade: true });
+    });
+
+    it("a fill no app order explains (an assignment, a trade placed at IBKR) keeps the contract's oldest open leg", async () => {
+      const stockConId = nextConId();
+      const { older } = await siblingStockLegs(stockConId);
+      const execution = executionOf({ permId: nextPermId(), side: "SLD", shares: 100, price: 94 });
+      await recorder.recordExecution(stockContractOf(stockConId), execution);
+      expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: older.legId, is_closing_trade: true });
+    });
+  });
+
   describe("commissions", () => {
     const report = (execId: string | undefined, commission: number | undefined): CommissionReport => ({ execId, commission }) as CommissionReport;
 

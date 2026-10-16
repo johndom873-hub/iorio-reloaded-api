@@ -481,6 +481,14 @@ Plain language: the screen-review checklist Claude runs after UI work was out of
 - Gear tap target 44 px on phones (`fc6655e`, `b1b55c1`).
 - Verified in Playwright at 1706/1440/390 px, light + dark; typecheck + lint.
 
+## Covered calls sharing one stock: each position's own share cost (approved by Marcelo 2026-10-15; committed, not pushed; ibkrGateway* files changed, so a push redeploys the worker)
+Plain language: IBKR keeps one average price for all the shares of a stock. When two covered calls on the same stock each own part of those shares, both showed that average, so one looked worse and the other better than it really was (INTC on prod: $100.00 and $92.44 shares both shown at $97.48; the INTC total was right). Each position now shows what its own shares cost, and keeps that cost after the other position sells or when it rolls.
+- Fills go to the right position: shares bought with a covered call go to that call's position (they wait if the position does not exist yet); a sale from a Close goes to the leg the order names. Fills no app order explains (a call assignment, a trade placed directly at IBKR) still go to the stock's oldest open leg.
+- Share cost per position (`src/lib/stockEntryPerPosition.ts`, new column `position_legs.entry_price_from_position_split`): own buy fills incl. commission; else the cost already carried; else what is left of IBKR's total. When no position has a cost of its own, IBKR's average stays, as before. A lone position is unchanged unless its cost came from a split.
+- Also fixed: closing one of two sibling covered calls recorded its share P&L as $0 (shares treated as moved, not sold); a sibling's roll could hand its shares to the wrong position depending on contract order.
+- Prod data repair for INTC done 2026-10-16 (run by Marcelo): the $92.43 buy (trade `79d74d3a`) moved from leg `436a3f3c` to `ab4a719c`. INTC shows the per-position costs once the code reaches prod.
+- Not per position (by design, separate decision): Break-even, Cycle P&L and the position card's payoff numbers are the whole ticker's wheel cycle. The Wheel cycle table's Stock price for an option sold today shows the latest daily close, not the price at the sale.
+
 ## Open decisions — Juan's Iorio Upgrades feedback (2026-08-24)
 Full IBKR trading-book/depth visibility, full option chain w/ all bid-ask, richer trade tab, and a new upcoming-events tab. Broken into independently-decidable pieces:
 - [x] **Order confirmation needs real-time prices and the live option chain (Juan) — built, corrected 2026-09-25.** This was stale: `OrderReviewPanel.tsx` has had a live-streaming "Live Quote" card (bid/ask/greeks/IV via genuine SSE) since app commit `e9e8d07` (2026-08-25) — a month before this checkbox's own "unblocked 2026-09-14" note was even added.
