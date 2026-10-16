@@ -28,7 +28,7 @@ import type {
   BacktestTrade,
   BacktestBookMode,
 } from "../backtestTypes.js";
-import { backtestCaptureLookTimeEt } from "../backtestTypes.js";
+import { backtestCaptureLookTimeEt, backtestEngineVersion } from "../backtestTypes.js";
 import { computeCycleAccuracyBands, computeDrawdowns, computeMonthlyReturns, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
 import { computeAllSymbolsStatistics, computeTickerStatistics } from "../tickerStatistics.js";
 import { BacktestRequestError, insertClaimedBacktestJob, loadBacktestJobView, loadLatestJobViewForSession, loadLatestSessionRunStates, startClaimedBacktestJob, stopJobsOfSession } from "./backtestJobStore.js";
@@ -647,6 +647,7 @@ export async function createBacktestSession(request: ValidatedBacktestSessionReq
         symbol_settings: request.symbolSettings === null ? null : JSON.stringify(request.symbolSettings),
         settings_source: request.settingsSource,
         pots_from_starting_value: request.potsFromStartingValue,
+        engine_version: backtestEngineVersion,
         status: "queued",
       })
       .returning("id");

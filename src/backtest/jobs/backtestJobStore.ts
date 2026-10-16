@@ -152,9 +152,16 @@ export async function listOverviewJobViews(): Promise<BacktestJobView[]> {
   return [...backtestRows, ...downloadRows].map((row) => toBacktestJobView(row, now));
 }
 
-/** The Backtests list (the ticker analyses included, Marcelo 2026-10-15): the latest overviewJobsPerKind, finished or not, latest activity first. */
+/**
+ * The Backtests list (the ticker analyses included, Marcelo 2026-10-15): the latest overviewJobsPerKind, finished or not, latest
+ * activity first. An analysis's own backtest is left out: the analysis's row shows its progress and cancelling it cancels the backtest.
+ */
 async function listOverviewBacktestJobRows(): Promise<BacktestJobRow[]> {
-  const rows: BacktestJobRow[] = await selectJobRows().whereIn("j.kind", ["backtest", "analysis"]).orderByRaw(`${latestActivitySql} DESC, j.created_at DESC`).limit(overviewJobsPerKind);
+  const rows: BacktestJobRow[] = await selectJobRows()
+    .whereIn("j.kind", ["backtest", "analysis"])
+    .where((query) => query.whereNull("j.session_id").orWhereNotExists((analyses) => analyses.select(db.raw("1")).from("backtest_ticker_analyses as a").whereRaw("a.session_id = j.session_id")))
+    .orderByRaw(`${latestActivitySql} DESC, j.created_at DESC`)
+    .limit(overviewJobsPerKind);
   return rows;
 }
 

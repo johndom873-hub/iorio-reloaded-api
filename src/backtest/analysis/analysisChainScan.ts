@@ -26,7 +26,7 @@ export type AnalysisChainView = "C" | "P" | "Pcap";
 
 export const dteRangeOf = (dte: number): AnalysisDteRange | null => analysisDteRanges.find((range) => dte >= range.low && dte <= range.high)?.key ?? null;
 
-export type ChainScanSettings = Pick<BacktestBaselineSettings, "minAbsDelta" | "maxAbsDelta" | "minDte" | "maxDte" | "maxSpreadPctOfMid" | "ladderRungs" | "ranking" | "expiryChoice" | "minCallYieldPct" | "entryCallStrike"> & {
+export type ChainScanSettings = Pick<BacktestBaselineSettings, "minAbsDelta" | "maxAbsDelta" | "minDte" | "maxDte" | "maxSpreadPctOfMid" | "ladderRungs" | "ranking" | "expiryChoice" | "minCallYieldPct" | "entryCallStrike" | "ladderPutDeltaRange" | "callDeltaRange" | "callMinAbsDelta" | "callMaxAbsDelta"> & {
   /** λ: the share of the half-spread a fill gives up (0 = the mid). */
   spreadShareCharged: number;
 };
@@ -103,6 +103,9 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
   // The day's forwards as the engine's first look notes them (parity, else spot × e^(rT)).
   const forwardAnchors = new Map<string, BaselineForwardAnchor>();
   noteBaselineForwardAnchors(forwardAnchors, { quotes, todayIso: day.date, yearsToTodaysClose: 6 / 8760, stockPrice: day.spot, riskFreeRate: day.riskFreeRate });
+  // As the engine's selector: Calls on their range (callDeltaRange), the ladder's Puts at any |delta| with ladderPutDeltaRange "none".
+  const callSettings = settings.callDeltaRange === "own_range" ? { ...settings, minAbsDelta: settings.callMinAbsDelta, maxAbsDelta: settings.callMaxAbsDelta } : settings;
+  const putSettings = settings.ladderPutDeltaRange === "none" ? { ...settings, minAbsDelta: 0, maxAbsDelta: 1 } : settings;
   const select = (right: "C" | "P", rules: Pick<BaselineCandidateInput, "minimumStrike" | "maximumStrike" | "minimumPremiumYield" | "earningsDatesIso" | "ranking" | "nearestExpiryFirst"> = {}) =>
     selectBaselineCandidates({
       quotes,
@@ -115,7 +118,7 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
       stockPrice: day.spot!,
       riskFreeRate: day.riskFreeRate,
       previousSessionVolumeByContract,
-      settings,
+      settings: right === "C" ? callSettings : putSettings,
       spreadShareCharged: settings.spreadShareCharged,
       isHeld: () => false,
       ...rules,

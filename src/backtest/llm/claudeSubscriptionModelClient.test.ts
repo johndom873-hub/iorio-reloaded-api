@@ -69,6 +69,12 @@ describe("Pluto's decision through the Claude subscription CLI", () => {
     expect(args).not.toContain("--bare");
   });
 
+  it("asks another model at another effort when the call names them (the analysis summary's Opus at extra-high effort)", () => {
+    const args = claudeCliArguments("You summarise.", { type: "object" }, "claude-opus-5-5", "xhigh");
+    expect(args[args.indexOf("--model") + 1]).toBe("claude-opus-5-5");
+    expect(args[args.indexOf("--effort") + 1]).toBe("xhigh");
+  });
+
   it("returns the structured answer as the raw text, the answering model, all input tokens and the API-equivalent cost", async () => {
     const seen: { stdin?: string; cwd?: string } = {};
     const result = await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(successEnvelope) }, seen));

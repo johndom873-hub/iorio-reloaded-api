@@ -70,7 +70,8 @@ export async function resolveAnalysisLabValues(symbol: string, trial: AnalysisTr
   const [lab, overrides] = await Promise.all([loadBacktestLabSettings(connection), loadBacktestLabTickerOverrides(connection)]);
   const override = overrides.find((row) => row.symbol === symbol) ?? null;
   const tickerValues = override ? tickerOverridesToValues(override) : null;
-  const baseline: BacktestBaselineSettings = { ...defaultBacktestBaselineSettings, ...lab.settings.baseline, ...(tickerValues?.baseline ?? {}) };
+  // The window's |delta| range is the Calls' (Marcelo 2026-10-16): every Call on minAbsDelta–maxAbsDelta, whatever the lab's callDeltaRange.
+  const baseline: BacktestBaselineSettings = { ...defaultBacktestBaselineSettings, ...lab.settings.baseline, ...(tickerValues?.baseline ?? {}), callDeltaRange: "entry_range" };
   let potDollars = tickerValues?.potDollars ?? lab.defaultPotDollars;
   if (trial) {
     const { potDollars: trialPot, ladderShockPct, ...rest } = trial;

@@ -12,6 +12,8 @@ import type { PlutoModelCallResult } from "../../pluto/modelClient.js";
 export const backtestClaudeModel = "sonnet";
 export const backtestClaudeReasoningEffort = "medium";
 
+export type ClaudeReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface ClaudeSubscriptionCallInput {
   cliPath: string;
   /** Working directory for the CLI: an empty folder, so no project instructions are picked up. */
@@ -21,6 +23,9 @@ export interface ClaudeSubscriptionCallInput {
   userPayload: string;
   /** The answer's JSON schema; Pluto's decision when absent. */
   jsonSchema?: object;
+  /** The model and its effort; the backtest's (backtestClaudeModel, backtestClaudeReasoningEffort) when absent. */
+  model?: string;
+  effort?: ClaudeReasoningEffort;
 }
 
 /**
@@ -76,12 +81,12 @@ function failed(kind: ClaudeCallFailureKind) {
   return { usageLimitReached: kind === "usage_limit", failureKind: kind };
 }
 
-export function claudeCliArguments(systemPrompt: string, jsonSchema: object = plutoDecisionJsonSchema): string[] {
+export function claudeCliArguments(systemPrompt: string, jsonSchema: object = plutoDecisionJsonSchema, model: string = backtestClaudeModel, effort: ClaudeReasoningEffort = backtestClaudeReasoningEffort): string[] {
   return [
     "-p",
     "--output-format", "json",
-    "--model", backtestClaudeModel,
-    "--effort", backtestClaudeReasoningEffort,
+    "--model", model,
+    "--effort", effort,
     "--system-prompt", systemPrompt,
     "--tools", "",
     "--json-schema", JSON.stringify(jsonSchema),
@@ -141,7 +146,7 @@ export function callClaudeSubscriptionModel(input: ClaudeSubscriptionCallInput, 
       clearTimeout(timer);
       resolve(result);
     };
-    const child = spawn(input.cliPath, claudeCliArguments(input.systemPrompt, input.jsonSchema), input.workingDirectory);
+    const child = spawn(input.cliPath, claudeCliArguments(input.systemPrompt, input.jsonSchema, input.model, input.effort), input.workingDirectory);
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {

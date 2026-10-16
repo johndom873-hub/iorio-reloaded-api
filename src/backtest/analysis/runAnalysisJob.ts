@@ -1,5 +1,5 @@
 import { db } from "../../db/connection.js";
-import { readBacktestDataFileContents } from "../dataFileSummary.js";
+import { readBacktestDataFileContents, readBacktestDataFilePeriodContents } from "../dataFileSummary.js";
 import { createBacktestSession } from "../jobs/backtestSessionStore.js";
 import { cancelBacktestJob } from "../jobs/backtestJobStore.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
@@ -136,7 +136,11 @@ export async function runAnalysisJob(jobId: string, control: AnalysisJobControl)
 
     await control.reportProgress(0, 0, "summary" satisfies AnalysisStep);
     const backtest = stored.analysisBacktest && "sessionId" in stored.analysisBacktest ? stored.analysisBacktest : null;
-    const digest = buildAnalysisSummaryDigest({ figures, values: analysis.lab_values.effective, backtest, sessions: await listAnalysisSessions(analysis.symbol) });
+    // The data file's missing weekdays over the last 12 months (the window after the same date a year before), for the verdict's first test.
+    const yearBefore = `${Number(figures.optionLastDate.slice(0, 4)) - 1}${figures.optionLastDate.slice(4)}`;
+    const lastTwelveMonthsFrom = new Date(Date.parse(`${yearBefore}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+    const lastTwelveMonths = readBacktestDataFilePeriodContents(analysis.symbol, lastTwelveMonthsFrom, figures.optionLastDate);
+    const digest = buildAnalysisSummaryDigest({ figures, values: analysis.lab_values.effective, backtest, sessions: await listAnalysisSessions(analysis.symbol), missingWeekdaysLastTwelveMonths: lastTwelveMonths?.missingWeekdays ?? null });
     const outcome = await writeAnalysisSummary(digest);
     const call = "call" in outcome ? outcome.call : null;
     await finish({
