@@ -30,6 +30,7 @@
     "split:undo": "tsx scripts/stock-split.ts undo",
     "ticker:unfreeze": "tsx scripts/stock-split.ts unfreeze",
     "sync-dev-db": "bash scripts/sync-dev-db.sh",
+    "sync-screener": "bash scripts/sync-screener-from-staging.sh",
     "deploy:worker": "bash scripts/deploy-worker-to-vps.sh",
     "job:daily-market-data": "tsx scripts/run-daily-market-data-job.ts",
     "job:option-session-volume": "tsx scripts/run-option-session-volume-capture-job.ts",
