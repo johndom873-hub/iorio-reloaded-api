@@ -22,9 +22,9 @@ export function toIsoExpiry(expiry: string): string {
   return expiry;
 }
 
-/** A per-share or per-contract price as brokers quote it: always two decimals. */
+/** A per-share or per-contract transaction price: two decimals, up to four when the price has them ("1.20", "92.4325"). */
 export function formatTradePrice(price: number): string {
-  return price.toFixed(2);
+  return price.toFixed(4).replace(/(\.\d{2}\d*?)0+$/, "$1");
 }
 
 export interface TradeLineContract {

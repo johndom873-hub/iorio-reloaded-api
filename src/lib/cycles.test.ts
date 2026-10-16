@@ -72,6 +72,111 @@ describe("put assignment fills", () => {
     expect(cycle.sharesHeld).toBe(300);
     expect(cycle.dataFlags).toEqual([]);
   });
+
+  it("charges the assignment fill's commission once: to the put's assignment and to the break-even", () => {
+    const cycle = openCycle(inputWith([assignmentFill({ commission: 1.05 })]));
+    expect(cycle.dataFlags).toEqual([]);
+    expect(cycle.sharesHeld).toBe(300);
+    // 777 premium + (101.40 − 104) x 300 − 1.05 commission; the shares enter at the 101.40 close and are marked at it.
+    expect(cycle.buckets.csp.total).toBeCloseTo(-4.05, 8);
+    expect(cycle.total).toBeCloseTo(-4.05, 8);
+    expect(cycle.breakEvenPerShare).toBeCloseTo((300 * 104 + 1.05 - 777) / 300, 8);
+    const assignmentRow = cycle.timeline.find((row) => row.label.startsWith("Put assigned"))!;
+    expect(assignmentRow.strike).toBe(104);
+  });
+
+  it("matches a fill executed 10 minutes after the leg's exit", () => {
+    const cycle = openCycle(inputWith([assignmentFill({ at: new Date(assignedAt.getTime() + 600_000) })]));
+    expect(cycle.dataFlags).toEqual([]);
+    expect(cycle.sharesHeld).toBe(300);
+  });
+
+  it("matches the fill of an early assignment (a leg that states it was assigned before its expiry date)", () => {
+    // Assigned overnight after the 13 October session, three days before the 16 October expiry, priced at the 13 October close.
+    const earlyAssignedAt = new Date("2026-10-14T01:40:00Z");
+    const earlyAssigned = assignedPutLeg({ entryAt: new Date("2026-10-12T14:00:00Z"), exitAt: earlyAssignedAt, expiryDate: "2026-10-16", expiryClose: 101.9, settledAs: "assigned" });
+    const input: CycleInput = {
+      ...inputWith([assignmentFill({ at: new Date("2026-10-14T01:39:30Z"), commission: 0.9 })], [earlyAssigned]),
+      stockLegs: [{ positionId: "pos-stock", quantity: 300, entryAt: earlyAssignedAt, exitAt: null }],
+      dailyCloses: new Map([["2026-10-12", 103.1], ["2026-10-13", 101.9]]),
+      lastPrice: { date: "2026-10-13", price: 101.9 },
+    };
+    const cycle = openCycle(input);
+    expect(cycle.dataFlags).toEqual([]);
+    expect(cycle.sharesHeld).toBe(300);
+    expect(cycle.buckets.csp.total).toBeCloseTo(777 + (101.9 - 104) * 300 - 0.9, 8);
+  });
+});
+
+describe("call assignment fills", () => {
+  // A Covered Call entry on 5 October: 100 shares bought at 50.00 (+1.00 commission) and the $52 call sold at 1.20; the
+  // call expired in the money on 9 October (close 53.40) and the shares were called away. IBKR reported the call-away as
+  // a sale of the 100 shares at the strike (0.60 commission), which the worker recorded.
+  const coveredCallOpenedAt = new Date("2026-10-05T14:00:00Z");
+  const calledAwayAt = new Date("2026-10-10T01:45:00Z");
+  const calledAwayCall = (overrides: Partial<CycleOptionLeg> = {}): CycleOptionLeg => ({
+    id: "call-a", positionId: "pos-cc-a", side: "short", optionType: "call", strike: 52, quantity: 1, multiplier: 100, entryPrice: 1.2,
+    entryAt: coveredCallOpenedAt, exitPrice: null, exitAt: calledAwayAt, closingCommission: 0, hasClosingTrade: false,
+    expiryDate: "2026-10-09", expiryClose: 53.4, ...overrides,
+  });
+  const callAwaySale = (overrides: Partial<CycleStockTrade> = {}): CycleStockTrade => ({ at: new Date("2026-10-10T01:44:46Z"), side: "sell", quantity: 100, price: 52, commission: 0.6, ...overrides });
+  const singleCoveredCall = (sale: CycleStockTrade): CycleInput => ({
+    optionLegs: [calledAwayCall()],
+    stockLegs: [{ positionId: "pos-cc-a", quantity: 100, entryAt: coveredCallOpenedAt, exitAt: calledAwayAt }],
+    stockTrades: [{ at: coveredCallOpenedAt, side: "buy", quantity: 100, price: 50, commission: 1 }, sale],
+    dailyCloses: new Map([["2026-10-05", 50.1], ["2026-10-09", 53.4]]),
+    lastPrice: { date: "2026-10-09", price: 53.4 },
+    openPositionPremiumPnl: new Map(),
+  });
+
+  it("takes the called-away shares out once when the worker also recorded IBKR's sale, net of its commission", () => {
+    const cycles = deriveCycles(singleCoveredCall(callAwaySale()));
+    expect(cycles).toHaveLength(1);
+    const cycle = cycles[0]!;
+    expect(cycle.status).toBe("closed");
+    expect(cycle.dataFlags).toEqual([]);
+    // 120 premium + 100 x 52 − 0.60 proceeds − (5,000 + 1.00) cost.
+    expect(cycle.total).toBeCloseTo(318.4, 8);
+    expect(cycle.timeline.filter((row) => row.label === "Sold shares")).toEqual([]);
+    const callAwayRows = cycle.timeline.filter((row) => row.label.startsWith("Call assigned"));
+    expect(callAwayRows.map((row) => [row.quantity, row.strike])).toEqual([[100, 52]]);
+  });
+
+  it("matches a sale executed 10 minutes after the leg's exit, after the cycle has closed", () => {
+    const cycles = deriveCycles(singleCoveredCall(callAwaySale({ at: new Date(calledAwayAt.getTime() + 600_000) })));
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]!.dataFlags).toEqual([]);
+    expect(cycles[0]!.total).toBeCloseTo(318.4, 8);
+  });
+
+  it("two Covered Calls on one ticker, one called away: the other keeps its shares and the break-even is computed", () => {
+    // The second Covered Call: 100 shares at 51.00 (+1.00) on 6 October, the $55 call sold at 0.80, still open.
+    const secondOpenedAt = new Date("2026-10-06T14:00:00Z");
+    const input: CycleInput = {
+      ...singleCoveredCall(callAwaySale()),
+      optionLegs: [
+        calledAwayCall(),
+        calledAwayCall({ id: "call-b", positionId: "pos-cc-b", strike: 55, entryPrice: 0.8, entryAt: secondOpenedAt, exitAt: null, expiryDate: "2026-10-16", expiryClose: null }),
+      ],
+      stockLegs: [
+        { positionId: "pos-cc-a", quantity: 100, entryAt: coveredCallOpenedAt, exitAt: calledAwayAt },
+        { positionId: "pos-cc-b", quantity: 100, entryAt: secondOpenedAt, exitAt: null },
+      ],
+      stockTrades: [
+        { at: coveredCallOpenedAt, side: "buy", quantity: 100, price: 50, commission: 1 },
+        { at: secondOpenedAt, side: "buy", quantity: 100, price: 51, commission: 1 },
+        callAwaySale(),
+      ],
+      dailyCloses: new Map([["2026-10-05", 50.1], ["2026-10-06", 51], ["2026-10-09", 53.4]]),
+    };
+    const cycle = openCycle(input);
+    expect(cycle.dataFlags).toEqual([]);
+    expect(cycle.sharesHeld).toBe(100);
+    // (5,001 + 5,101 − 120 − 80) / 200 shares acquired.
+    expect(cycle.breakEvenPerShare).toBeCloseTo(49.51, 8);
+    // Cash: −10,102 + 200 premium + 5,199.40 proceeds, plus the 100 shares held marked at 53.40.
+    expect(cycle.total).toBeCloseTo(-10_102 + 200 + 5_199.4 + 5_340, 8);
+  });
 });
 
 describe("timeline expiry", () => {

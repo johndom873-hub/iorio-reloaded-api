@@ -167,6 +167,7 @@ describe("trade rows and realized P&L (exit - entry) x quantity x multiplier, si
     const { json } = await get("/trade-blotter");
 
     expect(json.trades).toHaveLength(1);
+    expect(Number(json.trades[0].pnl)).toBe(150);
     expect(json.trades[0]).toMatchObject({
       side: "buy",
       quantity: 1,
@@ -174,7 +175,6 @@ describe("trade rows and realized P&L (exit - entry) x quantity x multiplier, si
       value: "50.0000",
       commission: "1.2500",
       isClosingTrade: true,
-      pnl: "150.0000",
       positionId,
       strategyKey: "cash_secured_put",
       legId,

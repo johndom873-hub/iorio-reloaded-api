@@ -10,8 +10,11 @@
 // cost basis. The real cash flows are, and they are all recoverable:
 //   stock buys / sells   -> the fills in `trades` (price x qty, plus commission)
 //   put assigned         -> shares in at the strike (a short put that expired
-//                           in the money per the expiry-date daily close; no fill exists)
+//                           in the money per the expiry-date daily close)
 //   call assigned        -> shares out at the strike (same test)
+//                           IBKR's recorded stock fill of an assignment, when there is one, is
+//                           absorbed by it (assignmentFillMatching.ts): not counted again, its
+//                           commission added to a put's cost
 //   option premium       -> legs: credit received (entry_price is already net of the opening
 //                           commission) minus buy-back paid minus closing-trade commissions;
 //                           an open short counts at its credit ("if it expires worthless")
@@ -26,6 +29,8 @@
 // Refuses to answer (null + reason) instead of guessing when the ledger cannot be trusted:
 // an expired leg with no expiry-date bar, an expiry within $0.05 of the strike, or a
 // ledger share count that disagrees with the open stock legs.
+
+import { matchAssignmentFills } from "./assignmentFillMatching.js";
 
 export interface CycleOptionLeg {
   id: string;
@@ -47,9 +52,8 @@ export interface CycleOptionLeg {
   expiryClose: number | null;
   /** How the leg settled at expiry, when known rather than inferred (a simulated book); live leaves it unset (see cycles.ts). */
   settledAs?: OptionSettlementOutcome;
-  /** positions.close_reason for this leg's own position — "assigned" means ibkrGatewayWorker already
-   * confirmed a real fill produced/removed the shares (see cycleBreakEven.ts's assignment-matching note
-   * below), so the ledger must not also infer shares from the strike price and double them up. */
+  /** positions.close_reason for this leg's own position. Not read by the ledger: an assignment's recorded fill is
+   * recognised by what it is (assignmentFillMatching.ts), whatever reason reconciliation stamped. */
   positionCloseReason: string | null;
 }
 
@@ -61,6 +65,15 @@ export interface CycleStockTrade {
   quantity: number;
   price: number;
   commission: number;
+  /** The position whose stock leg holds the fill, for each position's own break-even (breakEvenByPositionFromHistory). */
+  positionId?: string;
+}
+
+/** What one position added to the open cycle: the amounts its own legs and fills put into the cycle's break-even. */
+export interface PositionCycleContribution {
+  sharesAcquired: number;
+  acquisitionCost: number;
+  netPremium: number;
 }
 
 export interface OpenCycleSummary {
@@ -74,6 +87,8 @@ export interface OpenCycleSummary {
   unavailableReason: string | null;
   /** Open short puts in the cycle, for the put-only (no shares yet) break-even of each position. */
   openShortPuts: { positionId: string; strike: number; shares: number }[];
+  /** The cycle's amounts by the position they came from; a fill with no position is under "". They add up to the totals above. */
+  contributionsByPositionId: Map<string, PositionCycleContribution>;
 }
 
 const groupingWindowMs = 120_000;
@@ -85,10 +100,22 @@ interface LedgerEvent {
   openOptionsDelta: number;
   acquiredShares: number;
   acquiredCost: number;
+  positionId: string;
 }
 
 function isSettledWithoutTrade(leg: CycleOptionLeg): boolean {
   return leg.side === "short" && leg.exitAt !== null && !leg.hasClosingTrade && (leg.exitPrice === 0 || leg.exitPrice === null);
+}
+
+function inTheMoneyBy(leg: CycleOptionLeg, settlementClose: number): number {
+  return leg.optionType === "call" ? settlementClose - leg.strike : leg.strike - settlementClose;
+}
+
+/** Whether the ledger books the leg as assigned: settled without a trade, assigned by its explicit settlement, else in the money by the threshold at the settlement close. */
+function settlesAssigned(leg: CycleOptionLeg): boolean {
+  if (!isSettledWithoutTrade(leg)) return false;
+  if (leg.settledAs !== undefined) return leg.settledAs === "assigned";
+  return leg.expiryClose !== null && inTheMoneyBy(leg, leg.expiryClose) >= marginalThreshold;
 }
 
 /** Summary of the symbol's currently open cycle, or null when the symbol is flat. */
@@ -100,68 +127,51 @@ export function summarizeOpenCycle(
   let unavailableReason: string | null = null;
   const events: LedgerEvent[] = [];
 
-  for (const trade of stockTrades) {
+  // IBKR reports an assignment as an ordinary stock execution at the strike, which the worker records like any other
+  // fill, while the ledger also infers the assignment from the leg. A fill that matches an inferred assignment
+  // (assignmentFillMatching.ts, the rule deriveCycles uses too) is absorbed by it: it leaves the fills, and the assignment
+  // takes its price and commission. An assignment with no recorded fill brings its shares in or out at the strike.
+  const fillIndexByAssignedLegId = matchAssignmentFills(optionLegs.filter(settlesAssigned), stockTrades);
+  const absorbedFillIndices = new Set(fillIndexByAssignedLegId.values());
+
+  stockTrades.forEach((trade, tradeIndex) => {
+    if (absorbedFillIndices.has(tradeIndex)) return;
     const signedShares = trade.side === "buy" ? trade.quantity : -trade.quantity;
     const isBuy = trade.side === "buy";
-    events.push({ at: trade.at.getTime(), sharesDelta: signedShares, openOptionsDelta: 0, acquiredShares: isBuy ? trade.quantity : 0, acquiredCost: isBuy ? trade.quantity * trade.price + trade.commission : 0 });
-  }
-
-  // A confirmed assignment (positions.close_reason === "assigned", stamped by ibkrGatewayWorker's
-  // reconciliation the moment the assignment is detected) normally already has its own real stock
-  // trade in `stockTrades` above -- IBKR reports the assignment as an ordinary execution, and
-  // upsertLeftoverStockPosition/upsertSyncedPosition record it like any other fill. Below, an assigned
-  // leg that finds its matching real trade skips the strike-price-based synthesis entirely, so the
-  // shares aren't counted twice (real bug found 2026-09-24: a same-day TLT/QQQ CSP assignment showed
-  // 200 sh in the ledger against 100 sh actually held, nulling out break-even). If no matching trade is
-  // found -- the execution report never arrived, a known gap this file's worker comments call out
-  // elsewhere -- fall back to today's strike-price inference so a genuinely untracked assignment still
-  // gets a break-even instead of silently losing its shares.
-  const matchedAssignmentTradeIndices = new Set<number>();
-  function findMatchingAssignmentTrade(exitAtMs: number, expectedSide: "buy" | "sell", shares: number): boolean {
-    for (let i = 0; i < stockTrades.length; i += 1) {
-      if (matchedAssignmentTradeIndices.has(i)) continue;
-      const trade = stockTrades[i]!;
-      if (trade.side !== expectedSide || trade.quantity !== shares) continue;
-      if (Math.abs(trade.at.getTime() - exitAtMs) > groupingWindowMs) continue;
-      matchedAssignmentTradeIndices.add(i);
-      return true;
-    }
-    return false;
-  }
+    events.push({ at: trade.at.getTime(), sharesDelta: signedShares, openOptionsDelta: 0, acquiredShares: isBuy ? trade.quantity : 0, acquiredCost: isBuy ? trade.quantity * trade.price + trade.commission : 0, positionId: trade.positionId ?? "" });
+  });
 
   for (const leg of optionLegs) {
-    events.push({ at: leg.entryAt.getTime(), sharesDelta: 0, openOptionsDelta: 1, acquiredShares: 0, acquiredCost: 0 });
+    events.push({ at: leg.entryAt.getTime(), sharesDelta: 0, openOptionsDelta: 1, acquiredShares: 0, acquiredCost: 0, positionId: leg.positionId });
     if (leg.exitAt === null) continue;
     let sharesDelta = 0;
     let acquiredShares = 0;
     let acquiredCost = 0;
-    if (isSettledWithoutTrade(leg)) {
-      const exitAtMs = leg.exitAt.getTime();
-      const recordAssignment = () => {
-        const shares = leg.quantity * leg.multiplier;
-        const expectedSide = leg.optionType === "put" ? "buy" : "sell";
-        const alreadyRecordedByRealTrade = leg.positionCloseReason === "assigned" && findMatchingAssignmentTrade(exitAtMs, expectedSide, shares);
-        if (!alreadyRecordedByRealTrade) {
-          sharesDelta = leg.optionType === "put" ? shares : -shares;
-          if (leg.optionType === "put") {
-            acquiredShares = shares;
-            acquiredCost = shares * leg.strike;
-          }
-        }
-      };
-      if (leg.settledAs !== undefined) {
-        // The book's own settlement: no bar and no threshold to infer from.
-        if (leg.settledAs === "assigned") recordAssignment();
-      } else if (leg.expiryClose === null) {
-        unavailableReason ??= `no expiry-date price bar for ${leg.optionType} $${leg.strike} (${leg.expiryDate})`;
-      } else {
-        const inTheMoneyBy = leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose;
-        if (inTheMoneyBy > 0 && inTheMoneyBy < marginalThreshold) {
-          unavailableReason ??= `${leg.optionType} $${leg.strike} (${leg.expiryDate}) expired within $${marginalThreshold} of the strike — assignment unclear`;
-        } else if (inTheMoneyBy >= marginalThreshold) recordAssignment();
+    let acquiredByPositionId = leg.positionId;
+    // An explicit settlement (a simulated book) needs no bar and no threshold; an inferred one refuses what it cannot tell.
+    if (isSettledWithoutTrade(leg) && leg.settledAs === undefined) {
+      if (leg.expiryClose === null) unavailableReason ??= `no expiry-date price bar for ${leg.optionType} $${leg.strike} (${leg.expiryDate})`;
+      else {
+        const inTheMoneyAtSettlement = inTheMoneyBy(leg, leg.expiryClose);
+        if (inTheMoneyAtSettlement > 0 && inTheMoneyAtSettlement < marginalThreshold) unavailableReason ??= `${leg.optionType} $${leg.strike} (${leg.expiryDate}) expired within $${marginalThreshold} of the strike — assignment unclear`;
       }
     }
-    events.push({ at: leg.exitAt.getTime(), sharesDelta, openOptionsDelta: -1, acquiredShares, acquiredCost });
+    if (settlesAssigned(leg)) {
+      const shares = leg.quantity * leg.multiplier;
+      sharesDelta = leg.optionType === "put" ? shares : -shares;
+      if (leg.optionType === "put") {
+        const fillIndex = fillIndexByAssignedLegId.get(leg.id);
+        const fill = fillIndex === undefined ? undefined : stockTrades[fillIndex]!;
+        acquiredShares = shares;
+        acquiredCost = fill === undefined ? shares * leg.strike : fill.quantity * fill.price + fill.commission;
+        // The cost goes to the position whose stock leg holds the fill, where the shares landed: each position's own
+        // break-even (breakEvenByPositionFromHistory) then finds it in the receiving position's history even when the
+        // put's hand-over link (position_share_sources) is missing. With no fill, or a fill with no position, it stays
+        // with the put.
+        if (fill?.positionId !== undefined) acquiredByPositionId = fill.positionId;
+      }
+    }
+    events.push({ at: leg.exitAt.getTime(), sharesDelta, openOptionsDelta: -1, acquiredShares, acquiredCost, positionId: acquiredByPositionId });
   }
 
   events.sort((a, b) => a.at - b.at);
@@ -190,14 +200,32 @@ export function summarizeOpenCycle(
   const sharesAcquired = cycleEvents.reduce((sum, event) => sum + event.acquiredShares, 0);
   const acquisitionCost = cycleEvents.reduce((sum, event) => sum + event.acquiredCost, 0);
 
+  const contributionsByPositionId = new Map<string, PositionCycleContribution>();
+  const contributionOf = (positionId: string) => {
+    let contribution = contributionsByPositionId.get(positionId);
+    if (!contribution) contributionsByPositionId.set(positionId, (contribution = { sharesAcquired: 0, acquisitionCost: 0, netPremium: 0 }));
+    return contribution;
+  };
+  for (const event of cycleEvents) {
+    if (event.acquiredShares === 0 && event.acquiredCost === 0) continue;
+    const contribution = contributionOf(event.positionId);
+    contribution.sharesAcquired += event.acquiredShares;
+    contribution.acquisitionCost += event.acquiredCost;
+  }
+
   const cycleOptionLegs = optionLegs.filter((leg) => leg.entryAt.getTime() >= cycleStartAt);
   let netPremium = 0;
   for (const leg of cycleOptionLegs) {
+    // A long option (a hedge) keeps the cycle open while held, the way the Wheel card's cycle windows count it, but its
+    // cost stays out of the wheel's premium and break-even.
+    if (leg.side === "long") continue;
     const sign = leg.side === "short" ? 1 : -1;
     const contractShares = leg.quantity * leg.multiplier;
-    netPremium += sign * leg.entryPrice * contractShares;
-    if (leg.exitAt !== null && leg.exitPrice !== null) netPremium -= sign * leg.exitPrice * contractShares;
-    netPremium -= leg.closingCommission;
+    let legPremium = sign * leg.entryPrice * contractShares;
+    if (leg.exitAt !== null && leg.exitPrice !== null) legPremium -= sign * leg.exitPrice * contractShares;
+    legPremium -= leg.closingCommission;
+    netPremium += legPremium;
+    contributionOf(leg.positionId).netPremium += legPremium;
   }
 
   const openShortPuts = cycleOptionLegs
@@ -215,7 +243,7 @@ export function summarizeOpenCycle(
     else if (openShortPutShares === 0) unavailableReason = "no shares or open short put in the cycle";
   }
 
-  return { sharesHeld, sharesAcquired, acquisitionCost, netPremium, breakEvenPerShare, unavailableReason, openShortPuts };
+  return { sharesHeld, sharesAcquired, acquisitionCost, netPremium, breakEvenPerShare, unavailableReason, openShortPuts, contributionsByPositionId };
 }
 
 /** Break-even for one open position: the cycle's per-share figure, or (put-only cycle) that position's own put strike - premium per put share. */
@@ -226,4 +254,113 @@ export function breakEvenForPosition(summary: OpenCycleSummary, positionId: stri
   const ownPut = summary.openShortPuts.find((put) => put.positionId === positionId);
   if (!ownPut || putShares === 0) return { breakEven: null, reason: "no open short put on this position" };
   return { breakEven: ownPut.strike - summary.netPremium / putShares, reason: null };
+}
+
+/** An open position, as breakEvenByPositionFromHistory needs it. */
+export interface OpenPositionHoldings {
+  positionId: string;
+  sharesHeld: number;
+}
+
+/** A position that received shares from another (position_share_sources), with how many it received. */
+export interface PositionShareSourceLink {
+  positionId: string;
+  sourcePositionId: string;
+  sharesReceived: number;
+}
+
+/**
+ * Each open position's own break-even (approved by Marcelo 2026-10-16), the Wheel cycle keeping the consolidated one:
+ *   break-even = (cost - net premium) / shares acquired, over this position's history: itself and every position whose
+ *   shares reached it (a roll, a leftover-stock position, the put that delivered them), each counted by the share of its
+ *   shares that came here (split by shares received when a position handed shares to several);
+ *   plus the cycle's amounts no open position's history reaches (a put that expired without delivering shares, shares
+ *   bought and sold again), shared by shares held (by put shares while no position holds shares).
+ * A ticker's only open position gets exactly the cycle's break-even. Several positions' break-evens, weighted by shares
+ * held, average to the cycle's only when every open position holds shares and each one's shares acquired are the same
+ * multiple of its shares held: not after a partial sale out of one position's shares, nor with an open cash-secured put
+ * beside the shares (its premium stays with the put, outside the shares' average).
+ * A position with only a put: its strike - net premium per put share.
+ */
+export function breakEvenByPositionFromHistory(
+  summary: OpenCycleSummary,
+  openPositions: OpenPositionHoldings[],
+  shareSources: PositionShareSourceLink[],
+): Map<string, { breakEven: number | null; reason: string | null }> {
+  const result = new Map<string, { breakEven: number | null; reason: string | null }>();
+  if (summary.unavailableReason !== null) {
+    for (const position of openPositions) result.set(position.positionId, { breakEven: null, reason: summary.unavailableReason });
+    return result;
+  }
+
+  const sourcesByPositionId = new Map<string, PositionShareSourceLink[]>();
+  const sharesHandedOutBySourceId = new Map<string, number>();
+  const receiversBySourceId = new Map<string, number>();
+  for (const link of shareSources) {
+    sourcesByPositionId.set(link.positionId, [...(sourcesByPositionId.get(link.positionId) ?? []), link]);
+    sharesHandedOutBySourceId.set(link.sourcePositionId, (sharesHandedOutBySourceId.get(link.sourcePositionId) ?? 0) + Math.max(link.sharesReceived, 0));
+    receiversBySourceId.set(link.sourcePositionId, (receiversBySourceId.get(link.sourcePositionId) ?? 0) + 1);
+  }
+  const shareOfSource = (link: PositionShareSourceLink) => {
+    const handedOut = sharesHandedOutBySourceId.get(link.sourcePositionId) ?? 0;
+    return handedOut > 0 ? Math.max(link.sharesReceived, 0) / handedOut : 1 / (receiversBySourceId.get(link.sourcePositionId) ?? 1);
+  };
+
+  // Every position in an open position's history, with the share of its amounts that belongs here.
+  const historyWeights = (positionId: string): Map<string, number> => {
+    const weights = new Map<string, number>([[positionId, 1]]);
+    const visit = (currentId: string, weight: number, path: Set<string>) => {
+      for (const link of sourcesByPositionId.get(currentId) ?? []) {
+        if (path.has(link.sourcePositionId)) continue;
+        const sourceWeight = weight * shareOfSource(link);
+        weights.set(link.sourcePositionId, (weights.get(link.sourcePositionId) ?? 0) + sourceWeight);
+        visit(link.sourcePositionId, sourceWeight, new Set([...path, link.sourcePositionId]));
+      }
+    };
+    visit(positionId, 1, new Set([positionId]));
+    return weights;
+  };
+
+  const zero = (): PositionCycleContribution => ({ sharesAcquired: 0, acquisitionCost: 0, netPremium: 0 });
+  const addScaled = (target: PositionCycleContribution, source: PositionCycleContribution, scale: number) => {
+    target.sharesAcquired += source.sharesAcquired * scale;
+    target.acquisitionCost += source.acquisitionCost * scale;
+    target.netPremium += source.netPremium * scale;
+  };
+
+  const amountsByPositionId = new Map<string, PositionCycleContribution>();
+  const unattributed: PositionCycleContribution = { sharesAcquired: summary.sharesAcquired, acquisitionCost: summary.acquisitionCost, netPremium: summary.netPremium };
+  for (const position of openPositions) {
+    const amounts = zero();
+    for (const [historyPositionId, weight] of historyWeights(position.positionId)) {
+      const contribution = summary.contributionsByPositionId.get(historyPositionId);
+      if (contribution) addScaled(amounts, contribution, weight);
+    }
+    amountsByPositionId.set(position.positionId, amounts);
+    addScaled(unattributed, amounts, -1);
+  }
+
+  const putSharesByPositionId = new Map<string, number>();
+  for (const put of summary.openShortPuts) putSharesByPositionId.set(put.positionId, (putSharesByPositionId.get(put.positionId) ?? 0) + put.shares);
+  const totalSharesHeld = openPositions.reduce((sum, position) => sum + Math.max(position.sharesHeld, 0), 0);
+  const totalPutShares = openPositions.reduce((sum, position) => sum + (putSharesByPositionId.get(position.positionId) ?? 0), 0);
+  for (const position of openPositions) {
+    const share = totalSharesHeld > 0 ? Math.max(position.sharesHeld, 0) / totalSharesHeld : totalPutShares > 0 ? (putSharesByPositionId.get(position.positionId) ?? 0) / totalPutShares : 0;
+    addScaled(amountsByPositionId.get(position.positionId)!, unattributed, share);
+  }
+
+  for (const position of openPositions) {
+    const amounts = amountsByPositionId.get(position.positionId)!;
+    if (position.sharesHeld > 0) {
+      result.set(
+        position.positionId,
+        amounts.sharesAcquired > 0 ? { breakEven: (amounts.acquisitionCost - amounts.netPremium) / amounts.sharesAcquired, reason: null } : { breakEven: null, reason: "no shares acquired in this position's history" },
+      );
+      continue;
+    }
+    const ownPut = summary.openShortPuts.find((put) => put.positionId === position.positionId);
+    const putShares = putSharesByPositionId.get(position.positionId) ?? 0;
+    result.set(position.positionId, ownPut && putShares > 0 ? { breakEven: ownPut.strike - amounts.netPremium / putShares, reason: null } : { breakEven: null, reason: "no shares or open short put on this position" });
+  }
+  return result;
 }

@@ -1,4 +1,5 @@
 import { db } from "../db/connection.js";
+import type { OrderLegPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { describeTradeLine } from "./tradeMessageFormatting.js";
 
 export interface OrderFill {
@@ -69,4 +70,80 @@ export function orderFillsPendingSql(alias: string): string {
  */
 export function orderCancelledBeforeSentSql(alias: string): string {
   return `(${alias}.status = 'cancelled' and ${alias}.ibkr_order_id is null and ${alias}.cancellation_reason is distinct from 'not_confirmed_in_time')`;
+}
+
+/** One order's fills of one contract: trades grouped by leg type, side, strike and expiry. */
+export interface OrderLegFillRow {
+  orderRequestId: string;
+  legType: "stock" | "option";
+  side: "buy" | "sell";
+  strike: string | number | null;
+  /** YYYYMMDD. */
+  expiry: string | null;
+  quantity: string | number;
+  notional: string | number;
+  commission: string | number | null;
+}
+
+/** What has filled of one order leg: the quantity and its quantity-weighted average fill price (null with nothing filled). */
+export interface OrderLegFill {
+  filledQuantity: number;
+  averageFillPrice: number | null;
+}
+
+/** A payload leg's expiry as YYYYMMDD: opening legs store IBKR's YYYYMMDD, close and roll legs copied from a position store its ISO date or timestamp ("2026-10-02T00:00:00.000Z"). */
+export function normalizeOrderLegExpiryToYyyymmdd(expiry: string | undefined): string | null {
+  if (!expiry) return null;
+  const isoDatePrefix = /^(\d{4})-(\d{2})-(\d{2})/.exec(expiry);
+  if (isoDatePrefix) return `${isoDatePrefix[1]}${isoDatePrefix[2]}${isoDatePrefix[3]}`;
+  return /^\d{8}$/.test(expiry) ? expiry : null;
+}
+
+function orderLegFillKey(role: string, side: string, strike: string | number | null | undefined, expiry: string | null | undefined): string {
+  return [role, side.toLowerCase(), strike === null || strike === undefined || strike === "" ? "" : Number(strike), expiry ?? ""].join("|");
+}
+
+/**
+ * Each payload leg's fills, in the payload's order: matched on leg type, side, strike and expiry, so a roll's close and
+ * open legs stay apart. averageFillPrice = Σ(price × quantity) ÷ Σ quantity over the leg's trades.
+ */
+export function matchOrderLegFills(legs: OrderLegPayload[], fills: OrderLegFillRow[]): OrderLegFill[] {
+  const fillByLegKey = new Map(fills.map((fill) => [orderLegFillKey(fill.legType, fill.side, fill.strike, fill.expiry), fill]));
+  return legs.map((leg) => {
+    const fill = fillByLegKey.get(orderLegFillKey(leg.role, leg.action, leg.strike, normalizeOrderLegExpiryToYyyymmdd(leg.expiry)));
+    const filledQuantity = fill ? Number(fill.quantity) : 0;
+    return { filledQuantity, averageFillPrice: fill && filledQuantity > 0 ? Number(fill.notional) / filledQuantity : null };
+  });
+}
+
+/** The orders' fills (trades.source_order_request_id), summed per order and contract. */
+export async function fetchOrderLegFillRows(orderRequestIds: string[]): Promise<OrderLegFillRow[]> {
+  if (orderRequestIds.length === 0) return [];
+  return db("trades as tr")
+    .join("position_legs as pl", "pl.id", "tr.position_leg_id")
+    .whereIn("tr.source_order_request_id", orderRequestIds)
+    .groupBy("tr.source_order_request_id", "pl.leg_type", "tr.side", "pl.strike_price", "pl.expiry_date")
+    .select(
+      "tr.source_order_request_id as orderRequestId",
+      "pl.leg_type as legType",
+      "tr.side as side",
+      "pl.strike_price as strike",
+      db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as expiry"),
+      db.raw("SUM(tr.quantity) as quantity"),
+      db.raw("SUM(tr.price * tr.quantity) as notional"),
+      db.raw("SUM(tr.commission) as commission"),
+    );
+}
+
+/** Each order's payload legs' fills (matchOrderLegFills), keyed by order id; an order whose payload has no legs gets none. */
+export async function fetchOrderLegFillsByOrderId(orders: { id: string; payload: unknown }[]): Promise<Map<string, OrderLegFill[]>> {
+  const fillRows = await fetchOrderLegFillRows(orders.map((order) => order.id));
+  const fillRowsByOrderId = new Map<string, OrderLegFillRow[]>();
+  for (const fillRow of fillRows) fillRowsByOrderId.set(fillRow.orderRequestId, [...(fillRowsByOrderId.get(fillRow.orderRequestId) ?? []), fillRow]);
+  return new Map(
+    orders.map((order) => {
+      const legs = (order.payload as { legs?: unknown } | null)?.legs;
+      return [order.id, Array.isArray(legs) ? matchOrderLegFills(legs as OrderLegPayload[], fillRowsByOrderId.get(order.id) ?? []) : []];
+    }),
+  );
 }

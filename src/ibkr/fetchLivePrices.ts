@@ -5,6 +5,7 @@ import { sharedReadConnection } from "./sharedReadConnection.js";
 import { isDelayedDataFallbackNotice } from "./requestMarketData.js";
 import { loadFallbackStockPrices, recordStockPrices } from "../lib/priceService.js";
 import { describeOptionContract } from "../lib/optionContractLabel.js";
+import { optionMarkPrice } from "../lib/optionMarkPrice.js";
 import { randomUUID } from "node:crypto";
 import { describeMarketDataLineShortage, releaseMarketDataLines, reserveMarketDataLines } from "./marketDataLineBudget.js";
 
@@ -20,8 +21,8 @@ export interface FetchLivePricesOptions {
   /** Overrides the 6 s snapshot ceiling: legs still without a price when it elapses come back null. */
   snapshotTimeoutMs?: number;
   /**
-   * Stop waiting this long after the most recent price arrived, whatever is still unpriced: a leg that never ticks
-   * (no last trade at all) otherwise holds the batch to the full ceiling. Omit to wait for every leg or the ceiling.
+   * Stop waiting this long after the most recent price arrived, whatever is still unpriced: a leg that never gets a price
+   * (no last trade, nor an option's two-sided quote) otherwise holds the batch to the full ceiling. Omit to wait for every leg or the ceiling.
    */
   settleGraceMs?: number;
 }
@@ -42,16 +43,16 @@ export interface PriceContract {
 // happened to arrive.
 const snapshotTimeoutMs = 6_000;
 
-// Only `last` is ever used as a price (decided 2026-09-19). IBKR also sends
-// the PREVIOUS session's close (tick 9/75) with every FROZEN reading; it was
-// once accepted as a fallback for contracts with no last, but it is
-// yesterday's number — worse than showing nothing — and, because it arrives
-// right after the last, a last-tick-wins handler priced stocks at
-// yesterday's close (AAOI 98.06 shown while last was 104.90, found
-// 2026-09-18). A contract with no last is simply null.
-// Real-time last=4, delayed last=68 — see fetchOptionChain.ts's comment on
-// why both are accepted.
+// A stock is priced at its `last` only (decided 2026-09-19); an option at its
+// mark, the bid/ask mid when both sides are positive, else its last
+// (optionMarkPrice). IBKR also sends the PREVIOUS session's close (tick 9/75)
+// with every FROZEN reading; it is never a price: it is yesterday's number,
+// worse than showing nothing. A contract with neither is simply null.
+// Real-time last=4 / bid=1 / ask=2, delayed 68 / 66 / 67 — see
+// fetchOptionChain.ts's comment on why both are accepted.
 const lastTickTypes = [4, 68];
+const bidTickTypes = [1, 66];
+const askTickTypes = [2, 67];
 
 export function requestLivePrices(ib: IBApi, allocateReqId: () => number, contracts: PriceContract[], timeoutMs: number, settleGraceMs: number | null = null): Promise<Record<string, number | null>> {
   // FROZEN, not REALTIME — same reasoning as streamLivePrices' phase 1 below:
@@ -64,6 +65,8 @@ export function requestLivePrices(ib: IBApi, allocateReqId: () => number, contra
 
   const priceByKey = new Map<string, number | null>();
   const reqIdToContract = new Map<number, PriceContract>();
+  // An option's sides and last as they arrive; its price is optionMarkPrice of them.
+  const optionQuoteByReqId = new Map<number, { bid: number | null; ask: number | null; last: number | null }>();
   // Tracks contracts still waiting — lets the wait below resolve as soon as
   // every requested contract is done, rather than a fixed timer. A contract
   // counts as done the moment EITHER its real price arrives OR IBKR signals
@@ -87,11 +90,26 @@ export function requestLivePrices(ib: IBApi, allocateReqId: () => number, contra
     if (pendingReqIds.delete(reqId) && pendingReqIds.size === 0) onAllReceived?.();
   }
 
+  // An option counts as done once it has a mark (a two-sided quote, or a last). IBKR sends a snapshot's bid, ask and last
+  // together, and the decoder emits every tick of one read before the wait below can resolve, so a last arriving first
+  // does not cut off the sides that came with it.
   function onTickPrice(reqId: number, tickType: number, price: number) {
     const contract = reqIdToContract.get(reqId);
     if (!contract || price <= 0) return;
-    if (!lastTickTypes.includes(tickType)) return;
-    priceByKey.set(contract.key, price);
+    if (contract.legType === "option") {
+      const quote = optionQuoteByReqId.get(reqId);
+      if (!quote) return;
+      if (lastTickTypes.includes(tickType)) quote.last = price;
+      else if (bidTickTypes.includes(tickType)) quote.bid = price;
+      else if (askTickTypes.includes(tickType)) quote.ask = price;
+      else return;
+      const markPrice = optionMarkPrice(quote);
+      priceByKey.set(contract.key, markPrice);
+      if (markPrice === null) return;
+    } else {
+      if (!lastTickTypes.includes(tickType)) return;
+      priceByKey.set(contract.key, price);
+    }
     markDone(reqId);
     if (settleGraceMs !== null) {
       if (settleTimer !== null) clearTimeout(settleTimer);
@@ -122,6 +140,7 @@ export function requestLivePrices(ib: IBApi, allocateReqId: () => number, contra
         reqIdToContract.set(reqId, contract);
         pendingReqIds.add(reqId);
         priceByKey.set(contract.key, null);
+        if (contract.legType === "option") optionQuoteByReqId.set(reqId, { bid: null, ask: null, last: null });
         const ibContract: Contract =
           contract.legType === "stock"
             ? new Stock(contract.symbol, "SMART", "USD")
@@ -168,8 +187,8 @@ function describePriceContract(contract: PriceContract): string {
 }
 
 /**
- * Sibling of fetchLiveGreeks.ts — same shape, but captures last price
- * instead of Greeks. Used by the Positions table's plain (non-streaming)
+ * Sibling of fetchLiveGreeks.ts — same shape, but captures prices (a stock's
+ * last, an option's mark) instead of Greeks. Used by the Positions table's plain (non-streaming)
  * P&L endpoint and by the daily P&L snapshot job to mark open positions to
  * market (see the unrealized-P&L formula sign-off, 2026-08-20). Requests
  * FROZEN data (see requestLivePrices above) rather than REALTIME.

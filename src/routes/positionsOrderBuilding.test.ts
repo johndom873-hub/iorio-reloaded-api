@@ -660,9 +660,28 @@ describe("GET /positions/orders, /orders/today and /orders/:id", () => {
     expect(Object.keys(response.json).sort()).toEqual(
       [
         "calendarWarning", "calendarWarningEvents", "cancellationReason", "cancelledByDisplayName", "cancelledByUserId", "createdAt", "errorMessage", "ibkrOrderId", "id",
-        "payload", "plutoActionId", "relatedPositionId", "requestType", "requestedByDisplayName", "requestedByUserId", "riskFreeRate", "status", "updatedAt",
+        "legFills", "payload", "plutoActionId", "relatedPositionId", "requestType", "requestedByDisplayName", "requestedByUserId", "riskFreeRate", "status", "updatedAt",
       ].sort(),
     );
+    expect(response.json.legFills).toEqual([{ filledQuantity: 0, averageFillPrice: null }]);
+  });
+
+  it("gives each payload leg what has filled of it, at its quantity-weighted average fill price", async () => {
+    const { symbol, legIds } = await createPosition("cash_secured_put", [shortPut(2, { expiryDate: "2026-11-20" })]);
+    const orderId = await insertOrder(symbol, { status: "filled" });
+    await testDb("trades").insert([
+      { position_leg_id: legIds[0], ibkr_exec_id: `pxo-fill-${orderId}-a`, side: "sell", quantity: 1, price: 1.5, executed_at: new Date(), is_closing_trade: false, source_order_request_id: orderId },
+      { position_leg_id: legIds[0], ibkr_exec_id: `pxo-fill-${orderId}-b`, side: "sell", quantity: 1, price: 1.5125, executed_at: new Date(), is_closing_trade: false, source_order_request_id: orderId },
+    ]);
+    try {
+      const response = await call("GET", `/positions/orders/${orderId}`);
+      expect(response.status).toBe(200);
+      expect(response.json.legFills).toHaveLength(1);
+      expect(response.json.legFills[0].filledQuantity).toBe(2);
+      expect(response.json.legFills[0].averageFillPrice).toBeCloseTo(1.50625, 10);
+    } finally {
+      await testDb("trades").where({ source_order_request_id: orderId }).del();
+    }
   });
 
   it("answers 404 for an unknown order id", async () => {

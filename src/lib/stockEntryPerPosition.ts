@@ -9,12 +9,15 @@
 // A leg split this way keeps its own cost afterwards, even alone: after one sibling sells, IBKR's average reflects the lot
 // it sold first (oldest first), not the lots each position bought, and taking it would lose the difference from the total.
 
-const entryPriceDecimals = 4;
+const entryPriceDecimals = 8;
 
 export interface OpeningFill {
   quantity: number;
   price: number;
+  /** null: IBKR reported none (an assignment fill carries no commission). */
   commission: number | null;
+  /** An app order's fill whose commission report never arrived: its cost is not known. */
+  commissionMissing?: boolean;
 }
 
 export interface PositionStockLeg {
@@ -36,10 +39,11 @@ function roundEntryPrice(value: number): number {
   return Number(value.toFixed(entryPriceDecimals));
 }
 
-/** Cost per share of the leg's own opening fills, commissions included, when they cover its shares; else null. */
+/** Cost per share of the leg's own opening fills, commissions included, when they cover its shares and every commission is known; else null. */
 export function ownOpeningFillsCost(fills: OpeningFill[], legQuantity: number): number | null {
   const filledQuantity = fills.reduce((sum, fill) => sum + fill.quantity, 0);
   if (filledQuantity === 0 || filledQuantity < legQuantity) return null;
+  if (fills.some((fill) => fill.commissionMissing)) return null;
   const filledCost = fills.reduce((sum, fill) => sum + fill.quantity * fill.price + (fill.commission ?? 0), 0);
   return roundEntryPrice(filledCost / filledQuantity);
 }

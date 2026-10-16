@@ -14,8 +14,8 @@ describe("weightedAverageFillPrice", () => {
     expect(weightedAverageFillPrice([fill("a", 100, 118.75, 0)])).toBe(118.75);
   });
 
-  it("rounds to the 4 decimals trades.price carries", () => {
-    expect(weightedAverageFillPrice([fill("a", 1, 1.06, 0), fill("b", 2, 1.07, 1)])).toBe(1.0667);
+  it("rounds to the 8 decimals position_legs.exit_price carries", () => {
+    expect(weightedAverageFillPrice([fill("a", 1, 1.06, 0), fill("b", 2, 1.07, 1)])).toBe(1.06666667);
   });
 });
 

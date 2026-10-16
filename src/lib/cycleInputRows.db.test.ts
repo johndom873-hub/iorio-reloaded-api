@@ -116,7 +116,10 @@ describe("the cycle loaders and the exported row mapping", () => {
     expect(loaded.map((entry) => entry.symbol)).toEqual(["OTH", "WHL"]);
     for (const { tickerId, input } of loaded) {
       const built = buildCycleInputFromRows(tickerId, handWrittenRows);
-      expect(sortById(input.optionLegs)).toEqual(sortById(built.optionLegs));
+      // The loader also reads each leg's fills for the timeline; the hand-written rows have none, so those figures are compared apart.
+      const withoutFillFigures = (legs: typeof input.optionLegs) => legs.map(({ openingFillPrice: _price, openingFillCount: _count, openingCommission: _commission, closingFillPrice: _closing, ...leg }) => leg);
+      expect(sortById(withoutFillFigures(input.optionLegs))).toEqual(sortById(built.optionLegs));
+      expect(input.optionLegs.every((leg) => typeof leg.openingFillCount === "number")).toBe(true);
       expect(sortByEntry(input.stockLegs)).toEqual(sortByEntry(built.stockLegs));
       expect(input.stockTrades).toEqual(built.stockTrades);
       expect(input.dailyCloses).toEqual(built.dailyCloses);
@@ -136,16 +139,18 @@ describe("the cycle loaders and the exported row mapping", () => {
     expect(wheel![0]!.sharesHeld).toBe(100);
   });
 
-  it("summarize the open cycle the mapping summarizes from the short legs, the stock fills and the open shares", async () => {
+  it("summarize the open cycle the mapping summarizes from the option legs, the stock fills and the open shares", async () => {
     const summaries = await fetchOpenCycleSummaryByTickerId([wheelTickerId, otherTickerId]);
     const closeReasonByPosition = new Map<string, string | null>([[ids.putPosition, "assigned"], [ids.firstCallPosition, "closed_via_app"], [ids.secondCallPosition, null], [ids.otherPutPosition, null]]);
-    const shortRows = handWrittenRows.optionRows.filter((row) => row.side === "short").map((row) => ({ ...row, positionCloseReason: closeReasonByPosition.get(row.positionId) ?? null }));
-    const wheelFromRows = summarizeOpenCycleFromRows(wheelTickerId, { optionRows: shortRows, stockTradeRows, openStockShares: 100 })!;
+    const optionRows = handWrittenRows.optionRows.map((row) => ({ ...row, positionCloseReason: closeReasonByPosition.get(row.positionId) ?? null }));
+    // The loader also carries the position each stock fill belongs to (each open position's own break-even).
+    const stockTradeRowsWithPosition = stockTradeRows.map((row) => ({ ...row, positionId: ids.sharesPosition }));
+    const wheelFromRows = summarizeOpenCycleFromRows(wheelTickerId, { optionRows, stockTradeRows: stockTradeRowsWithPosition, openStockShares: 100 })!;
     expect(summaries.get(wheelTickerId)).toEqual(wheelFromRows);
     // By hand: 100 shares at the $50 strike; premium 99.32 + (79.32 − 35 − 0.68) + 84.32 = 227.28; break-even (5,000 − 227.28) ÷ 100.
     expect(wheelFromRows.netPremium).toBeCloseTo(227.28, 8);
     expect(wheelFromRows.breakEvenPerShare).toBeCloseTo(47.7272, 8);
-    expect(summaries.get(otherTickerId)).toEqual(summarizeOpenCycleFromRows(otherTickerId, { optionRows: shortRows, stockTradeRows, openStockShares: 0 }));
+    expect(summaries.get(otherTickerId)).toEqual(summarizeOpenCycleFromRows(otherTickerId, { optionRows, stockTradeRows: stockTradeRowsWithPosition, openStockShares: 0 }));
   });
 });
 
@@ -189,7 +194,8 @@ describe("an option assigned before its expiry date", () => {
     const [cycles] = (await fetchCyclesForTickers([earlyTickerId])).map((entry) => entry.cycles);
     expect(cycles![0]!.dataFlags).toEqual([]);
     expect(cycles![0]!.sharesHeld).toBe(100);
-    expect(cycles![0]!.timeline.find((row) => row.label.startsWith("Put assigned"))).toMatchObject({ strike: 40, stockPrice: 37, quantity: 100 });
+    // The row shows the price the shares were bought at (the strike); the CSP's Stock line still uses the 37 close.
+    expect(cycles![0]!.timeline.find((row) => row.label.startsWith("Put assigned"))).toMatchObject({ strike: 40, stockPrice: 40, stockPriceSource: "execution", quantity: 100 });
   });
 
   it("gives the cycle a break-even, from IBKR's stock buy at the strike counted once", async () => {

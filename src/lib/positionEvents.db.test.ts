@@ -166,6 +166,48 @@ describe("fetchPositionEvents: an opened position", () => {
   });
 });
 
+describe("fetchPositionEvents: shares handed from one position to another", () => {
+  it("names the receiving position on the source's close and the source on the receiver's opening, and gives each leg its opening fills", async () => {
+    const source = await createPosition({ strategyKey: "covered_call", openedAt: daysAgo(3), closedAt: new Date(), closeReason: "closed_via_app" });
+    await insertLeg(source.positionId, { legType: "stock", side: "long", quantity: 100, entryPrice: 50, exitPrice: 50 });
+    const receiver = await createPosition({ strategyKey: "covered_call" });
+    await insertLeg(receiver.positionId, { legType: "stock", side: "long", quantity: 100, entryPrice: 50 });
+    const callLegId = await insertLeg(receiver.positionId, { legType: "option", side: "short", quantity: 2, entryPrice: 1.1485, optionType: "call", strikePrice: 55 });
+    await testDb("trades").insert([
+      { position_leg_id: callLegId, side: "sell", quantity: 1, price: 1.15, executed_at: new Date(), is_closing_trade: false, commission: 0.65 },
+      { position_leg_id: callLegId, side: "sell", quantity: 1, price: 1.16, executed_at: new Date(), is_closing_trade: false, commission: 0.65 },
+    ]);
+    await testDb("position_share_sources").insert({ position_id: receiver.positionId, source_position_id: source.positionId });
+
+    const [receiverOpened] = await eventsFor(receiver.symbol);
+    expect(receiverOpened!.sharesCarriedFromPositions).toEqual([{ positionId: source.positionId, strategyKey: "covered_call" }]);
+    expect(receiverOpened!.sharesMovedToPositions).toEqual([]);
+    expect(receiverOpened!.legs.find((leg) => leg.legType === "stock")!.openingFill).toBeNull();
+    const callOpeningFill = receiverOpened!.legs.find((leg) => leg.legType === "option")!.openingFill!;
+    expect(callOpeningFill.quantity).toBe(2);
+    expect(callOpeningFill.averagePrice).toBeCloseTo(1.155, 10);
+    expect(callOpeningFill.commission).toBeCloseTo(1.3, 10);
+
+    const sourceClosed = (await eventsFor(source.symbol)).find((event) => event.eventType === "closed")!;
+    expect(sourceClosed.sharesMovedToPositions).toEqual([{ positionId: receiver.positionId, strategyKey: "covered_call" }]);
+    expect(sourceClosed.legs[0]).toMatchObject({ sharesHandedOn: true, openingFill: null });
+    // The moved shares were not sold: the close carries no value for them.
+    expect(sourceClosed.fullMarketValue).toBe(0);
+  });
+
+  it("leaves an opening fill's commission unknown while any of its trades has none", async () => {
+    const { positionId, symbol } = await createPosition({ strategyKey: "cash_secured_put" });
+    const putLegId = await insertLeg(positionId, { legType: "option", side: "short", quantity: 2, entryPrice: 1.2, optionType: "put", strikePrice: 50 });
+    await testDb("trades").insert([
+      { position_leg_id: putLegId, side: "sell", quantity: 1, price: 1.2, executed_at: new Date(), is_closing_trade: false, commission: 0.65 },
+      { position_leg_id: putLegId, side: "sell", quantity: 1, price: 1.2, executed_at: new Date(), is_closing_trade: false, commission: null },
+    ]);
+    const [opened] = await eventsFor(symbol);
+    expect(opened!.legs[0]!.openingFill).toEqual({ quantity: 2, averagePrice: 1.2, commission: null });
+    expect(opened!.sharesCarriedFromPositions).toEqual([]);
+  });
+});
+
 describe("fetchPositionEvents: a closed position", () => {
   it("realized P&L sums each leg's exit-minus-entry with the short side reversed, net of closing commissions", async () => {
     const { positionId, symbol } = await createPosition({ strategyKey: "covered_call", closedAt: new Date(), closeReason: "expired" });

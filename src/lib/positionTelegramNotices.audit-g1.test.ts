@@ -28,7 +28,7 @@ vi.mock("../db/connection.js", async () => {
 });
 
 const connection = (await import("../db/connection.js")) as unknown as { db: Knex & { __state: { current: Knex | Knex.Transaction }; __base: Knex } };
-const { sendDuePositionTelegramNotices, describePositionClosedNotice } = await import("./positionTelegramNotices.js");
+const { sendDuePositionTelegramNotices, describePositionClosedNotice, describePositionOpenedNotice } = await import("./positionTelegramNotices.js");
 const base = connection.db.__base;
 let trx: Knex.Transaction;
 let counter = Date.now() % 100_000;
@@ -192,6 +192,23 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
     expect(pass.sent[0]).toContain(`• Buy $55 Call · ${jan17()} · 1× @ 0.40`);
   });
 
+  it("a covered call opened on shares handed over says they were carried at their cost, its call at the real fill with the commission apart; the source names it", async () => {
+    const source = await createPosition({ strategyKey: "covered_call", openedAt: new Date(Date.now() - 60_000), closedAt: new Date(), closeReason: "closed_via_app" });
+    await trx("positions").where({ id: source.positionId }).update({ telegram_opened_notified_at: new Date() });
+    await insertLeg(source.positionId, { leg_type: "stock", side: "long", quantity: 100, multiplier: 1, option_type: null, strike_price: null, expiry_date: null, entry_price: 100, exit_price: 100, exit_at: new Date() });
+    const receiver = await createPosition({ strategyKey: "covered_call" });
+    await insertLeg(receiver.positionId, { leg_type: "stock", side: "long", quantity: 100, multiplier: 1, option_type: null, strike_price: null, expiry_date: null, entry_price: 100 });
+    const callLegId = await insertLeg(receiver.positionId, { option_type: "call", strike_price: 105, entry_price: 1.1435 });
+    await trx("trades").insert({ position_leg_id: callLegId, side: "sell", quantity: 1, price: 1.15, executed_at: new Date(), is_closing_trade: false, commission: 0.65 });
+    await trx("position_share_sources").insert({ position_id: receiver.positionId, source_position_id: source.positionId });
+
+    const pass = sender();
+    await sendDuePositionTelegramNotices(pass.send);
+    expect(pass.sent).toHaveLength(2);
+    expect(pass.sent[0]).toContain("• 100 shares moved to a covered call");
+    expect(pass.sent[1]).toBe(`📥 New position: ${receiver.symbol} covered call\n• 100 shares carried from a covered call at $100.00 cost\n• Sell $105 Call · ${jan17()} · 1× @ 1.15 (commission $0.65)`);
+  });
+
   it("leftover shares absorbed into a covered call are told as such (reason label)", async () => {
     const { positionId, symbol } = await createPosition({ strategyKey: "unstructured", unstructuredReason: "csp_assigned_stock", closedAt: new Date(), closeReason: "stock_rolled_into_covered_call" });
     await trx("positions").where({ id: positionId }).update({ telegram_opened_notified_at: new Date() });
@@ -211,7 +228,7 @@ describe("sendDuePositionTelegramNotices (audit)", () => {
   });
 });
 
-describe("describePositionClosedNotice (pure)", () => {
+describe("describePositionClosedNotice and describePositionOpenedNotice (pure)", () => {
   const event = {
     positionId: "p",
     eventType: "closed" as const,
@@ -225,11 +242,31 @@ describe("describePositionClosedNotice (pure)", () => {
     netCashEffect: null,
     fullMarketValue: null,
     attributedTo: null,
+    sharesCarriedFromPositions: [],
+    sharesMovedToPositions: [],
     legs: [{ legType: "option" as const, side: "short" as const, quantity: 1, optionType: "put" as const, strikePrice: 50, expiryDate: "2031-01-17", entryPrice: 1.25, exitPrice: 1.37 }],
   };
 
   it("a loss shows the minus before the dollar sign and a negative percent", () => {
     expect(describePositionClosedNotice(event, 5_000).split("\n").at(-1)).toBe("P&L: −$12.35 (−0.25%)");
+  });
+
+  it("an opening that bought some shares and took the rest over lists both, the carried ones without a cost of their own", () => {
+    const opened = {
+      ...event,
+      eventType: "opened" as const,
+      strategyKey: "covered_call",
+      closeReason: null,
+      realizedPnl: null,
+      sharesCarriedFromPositions: [{ positionId: "a", strategyKey: "cash_secured_put" }, { positionId: "b", strategyKey: "unstructured" }],
+      legs: [{ legType: "stock" as const, side: "long" as const, quantity: 200, optionType: null, strikePrice: null, expiryDate: null, entryPrice: 96.2, exitPrice: null, openingFill: { quantity: 100, averagePrice: 92.4325, commission: null } }],
+    };
+    expect(describePositionOpenedNotice(opened).split("\n").slice(1)).toEqual(["• Buy 100 shares @ 92.4325", "• 100 shares carried from a cash-secured put and a position with no strategy"]);
+  });
+
+  it("an option leg with no opening trade recorded keeps its entry price and shows no commission", () => {
+    const opened = { ...event, eventType: "opened" as const, closeReason: null, realizedPnl: null, legs: [{ ...event.legs[0]!, exitPrice: null, openingFill: null }] };
+    expect(describePositionOpenedNotice(opened).split("\n")[1]).toBe(`• Sell $50 Put · ${jan17()} · 1× @ 1.25`);
   });
 
   it("capitalDeployed of zero or null drops the percent instead of dividing by zero", () => {

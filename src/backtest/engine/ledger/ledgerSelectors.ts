@@ -1,6 +1,7 @@
 import { breakEvenForPosition, type OpenCycleSummary } from "../../../lib/cycleBreakEven.js";
 import { runningAverageShareCost } from "../../../lib/shareAverageCost.js";
 import { buildCycleInputFromRows, summarizeOpenCycleFromRows, type CycleInputRows, type CycleOptionLegRow, type CycleStockTradeRow } from "../../../lib/cycleInputRows.js";
+import { stockAcquisitionByPositionIdFromRecords } from "../../../lib/stockAcquisitionTracing.js";
 import { deriveCycles, type Cycle, type CycleInput } from "../../../lib/cycles.js";
 import { daysToExpiry, describeOptionContract } from "../../../lib/optionContractLabel.js";
 import { computeExposureRows, type PositionExposureRow } from "../../../lib/positionExposure.js";
@@ -122,6 +123,18 @@ export function ledgerNetLiquidationValue(ledger: SimulatedLedger, priceByLegId:
 function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDate: ReadonlyMap<string, number>): (CycleOptionLegRow & { positionCloseReason: string | null })[] {
   const closingCommissionByLegId = closingCommissionDollarsByLegId(ledger);
   const legIdsWithClosingTrade = new Set(ledger.trades.filter((trade) => trade.isClosingTrade).map((trade) => trade.legId));
+  // The timeline's figures from the fills, as the cycle loader reads them (a carved slice reads the leg it was carved from).
+  const tradesByLegId = new Map<string, typeof ledger.trades>();
+  for (const trade of ledger.trades) {
+    const legTrades = tradesByLegId.get(trade.legId);
+    if (legTrades) legTrades.push(trade);
+    else tradesByLegId.set(trade.legId, [trade]);
+  }
+  const fillFiguresOf = (legId: string, closing: boolean) => {
+    const fills = (tradesByLegId.get(legId) ?? []).filter((trade) => trade.isClosingTrade === closing);
+    const quantity = fills.reduce((sum, trade) => sum + trade.quantity, 0);
+    return { count: fills.length, quantity, price: quantity > 0 ? fills.reduce((sum, trade) => sum + trade.price * trade.quantity, 0) / quantity : null, commission: fills.reduce((sum, trade) => sum + trade.commission, 0) };
+  };
   const rows: (CycleOptionLegRow & { positionCloseReason: string | null })[] = [];
   for (const position of positionsOfSymbol(ledger, symbol)) {
     for (const leg of legsOfPosition(ledger, position.id)) {
@@ -145,6 +158,15 @@ function optionLegRows(ledger: SimulatedLedger, symbol: string, expiryCloseByDat
         expiryClose: leg.expiryClose ?? expiryCloseByDate.get(leg.expiryDate) ?? null,
         positionCloseReason: position.closeReason,
         settledAs: leg.settledAs ?? undefined,
+        ...(() => {
+          const opening = fillFiguresOf(leg.parentLegId ?? leg.id, false);
+          return {
+            openingFillPrice: opening.price,
+            openingFillCount: opening.count,
+            openingCommission: opening.quantity > 0 ? (opening.commission / opening.quantity) * leg.quantity : null,
+            closingFillPrice: fillFiguresOf(leg.id, true).price,
+          };
+        })(),
       });
     }
   }
@@ -188,7 +210,27 @@ export function ledgerCycleInputRows(ledger: SimulatedLedger, symbol: string, ma
     stockTradeRows: stockTradeRows(ledger, symbol),
     barRows: market.dailyCloses.map((bar) => ({ tickerId: symbol, date: bar.date, close: bar.close })),
     openPositionPremiumPnl,
+    stockCostPriceByPositionId: ledgerStockCostPriceByPositionId(ledger, symbolPositions),
   };
+}
+
+/** What the shares behind each Covered Call were bought at, traced the way the live loader does (stockAcquisitionTracing.ts). */
+function ledgerStockCostPriceByPositionId(ledger: SimulatedLedger, symbolPositions: readonly LedgerPosition[]): Map<string, number> {
+  const positionIds = new Set(symbolPositions.map((position) => position.id));
+  const symbolLegs = symbolPositions.flatMap((position) => legsOfPosition(ledger, position.id));
+  const stockLegPositionByLegId = new Map(symbolLegs.filter((leg) => leg.legType === "stock").map((leg) => [leg.id, leg.positionId]));
+  const coveredCallPositionIds = [...new Set(symbolLegs.filter((leg) => leg.legType === "option" && leg.optionType === "call" && leg.side === "short").map((leg) => leg.positionId))];
+  const acquisitions = stockAcquisitionByPositionIdFromRecords(coveredCallPositionIds, {
+    buyFills: ledger.trades
+      .filter((trade) => !trade.isClosingTrade && trade.side === "buy" && stockLegPositionByLegId.has(trade.legId))
+      .map((trade) => ({ positionId: stockLegPositionByLegId.get(trade.legId)!, quantity: trade.quantity, price: trade.price, commission: trade.commission })),
+    shareSources: ledger.shareSources.filter((link) => positionIds.has(link.positionId)).map((link) => ({ positionId: link.positionId, sourcePositionId: link.sourcePositionId, sharesReceived: null })),
+    assignedPuts: symbolPositions
+      .filter((position) => position.strategyKey === "cash_secured_put" && position.closeReason === "assigned")
+      .flatMap((position) => legsOfPosition(ledger, position.id).filter((leg) => leg.legType === "option" && leg.optionType === "put" && leg.side === "short" && leg.strikePrice !== null))
+      .map((leg) => ({ positionId: leg.positionId, strike: leg.strikePrice!, quantity: leg.quantity, multiplier: leg.multiplier })),
+  });
+  return new Map([...acquisitions].map(([positionId, acquisition]) => [positionId, acquisition.fillPrice]));
 }
 
 /**
@@ -271,7 +313,7 @@ export function ledgerOpenCycleSummary(ledger: SimulatedLedger, symbol: string):
 
 function summarizeLedgerOpenCycle(ledger: SimulatedLedger, symbol: string): OpenCycleSummary | null {
   const openStockShares = positionsOfSymbol(ledger, symbol).flatMap((position) => legsOfPosition(ledger, position.id)).filter((leg) => leg.legType === "stock" && leg.side === "long" && isOpen(leg)).reduce((sum, leg) => sum + leg.quantity, 0);
-  return summarizeOpenCycleFromRows(symbol, { optionRows: optionLegRows(ledger, symbol, new Map()).filter((row) => row.side === "short"), stockTradeRows: stockTradeRows(ledger, symbol), openStockShares });
+  return summarizeOpenCycleFromRows(symbol, { optionRows: optionLegRows(ledger, symbol, new Map()), stockTradeRows: stockTradeRows(ledger, symbol), openStockShares });
 }
 
 /** An open position's break-even (the Positions column): its cycle's per share, or a put-only cycle's own strike less the premium. */

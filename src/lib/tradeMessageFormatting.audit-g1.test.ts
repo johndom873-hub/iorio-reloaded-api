@@ -20,10 +20,15 @@ describe("tradeMessageFormatting (audit)", () => {
     expect(toIsoExpiry("garbage")).toBe("garbage");
   });
 
-  it("a fractional strike keeps its decimals; prices always have two", () => {
+  it("a fractional strike keeps its decimals; prices have two, up to four when they have them", () => {
     expect(describeTradeContract({ legType: "option", quantity: 2, optionType: "call", strikePrice: 182.5, expiryDate: "20311017" }, "2031-10-07")).toBe("$182.5 Call · 17 Oct (10DTE) · 2×");
     expect(formatTradePrice(1)).toBe("1.00");
-    expect(formatTradePrice(0.125)).toBe("0.13");
+    expect(formatTradePrice(1.2)).toBe("1.20");
+    expect(formatTradePrice(0.125)).toBe("0.125");
+    expect(formatTradePrice(92.4325)).toBe("92.4325");
+    expect(formatTradePrice(1.143)).toBe("1.143");
+    expect(formatTradePrice(1.20333333)).toBe("1.2033");
+    expect(formatTradePrice(0.1 + 0.2)).toBe("0.30");
   });
 
   it("a stock line ignores option fields, and a null price reads 'price unknown'", () => {

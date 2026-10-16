@@ -93,13 +93,51 @@ describe("requestLivePrices", () => {
     expect(ib.reqMktData.mock.calls[1]![1]).toMatchObject({ symbol: "AAPL", secType: "OPT", lastTradeDateOrContractMonth: "20261016", strike: 200, right: OptionType.Call, exchange: "SMART" });
   });
 
-  it("takes only last ticks (4 real-time, 68 delayed) as the price, and keeps the latest of them", async () => {
+  it("takes only a stock's last ticks (4 real-time, 68 delayed) as its price, and keeps the latest of them", async () => {
     const result = start([stock("s", "AAPL")]);
     ib.emit(EventName.tickPrice, 100, 1, 10); // bid
     ib.emit(EventName.tickPrice, 100, 9, 20); // previous close
     ib.emit(EventName.tickPrice, 100, 75, 30); // delayed close
     ib.emit(EventName.tickPrice, 100, 68, 41);
     expect(await result).toEqual({ s: 41 });
+  });
+
+  it("prices an option at its bid/ask mid (real-time or delayed sides) and counts it done without a last", async () => {
+    const result = start([callOption("o"), callOption("d")]);
+    ib.emit(EventName.tickPrice, 100, 1, 1.1);
+    ib.emit(EventName.tickPrice, 100, 2, 1.3);
+    ib.emit(EventName.tickPrice, 101, 66, 2.0);
+    ib.emit(EventName.tickPrice, 101, 67, 2.2);
+    const prices = await result;
+    expect(prices.o).toBeCloseTo(1.2, 10);
+    expect(prices.d).toBeCloseTo(2.1, 10);
+  });
+
+  it("prefers an option's mid over a last that arrived first, when the sides come in the same read", async () => {
+    const result = start([callOption("o")]);
+    ib.emit(EventName.tickPrice, 100, 4, 0.9);
+    ib.emit(EventName.tickPrice, 100, 1, 1.1);
+    ib.emit(EventName.tickPrice, 100, 2, 1.3);
+    expect((await result).o).toBeCloseTo(1.2, 10);
+  });
+
+  it("falls back to an option's last when a side is missing or not positive", async () => {
+    const result = start([callOption("o")]);
+    ib.emit(EventName.tickPrice, 100, 1, -1);
+    ib.emit(EventName.tickPrice, 100, 2, 0.05);
+    ib.emit(EventName.tickPrice, 100, 4, 0.03);
+    expect(await result).toEqual({ o: 0.03 });
+  });
+
+  it("keeps an option with only one side unpriced and waiting", async () => {
+    const result = start([callOption("o")], 1_000);
+    ib.emit(EventName.tickPrice, 100, 2, 0.05);
+    let settled = false;
+    void result.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toEqual({ o: null });
   });
 
   it("ignores zero and negative last prices, leaving the contract null until the snapshot ends", async () => {

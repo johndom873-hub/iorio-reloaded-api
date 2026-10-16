@@ -16,7 +16,7 @@ export interface ClosingFill {
   executedAt: Date;
 }
 
-const exitPriceDecimals = 4;
+const exitPriceDecimals = 8;
 
 /** Quantity-weighted average of the fills' prices, rounded to the precision of trades.price. */
 export function weightedAverageFillPrice(fills: ClosingFill[]): number {

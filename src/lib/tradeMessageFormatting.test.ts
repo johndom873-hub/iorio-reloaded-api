@@ -11,6 +11,10 @@ describe("toIsoExpiry", () => {
 });
 
 describe("describeTradeLine", () => {
+  it("describes a stock fill priced to four decimals with all four", () => {
+    expect(describeTradeLine("BUY", { legType: "stock", quantity: 100, optionType: null, strikePrice: null, expiryDate: null }, 92.4325, "2026-10-07")).toBe("• Buy 100 shares @ 92.4325");
+  });
+
   it("describes an option or stock trade with a two-decimal price, or says the price is unknown", () => {
     expect(describeTradeLine("sell", { legType: "option", quantity: 1, optionType: "put", strikePrice: 42.5, expiryDate: "20261009" }, 0.6, "2026-10-07")).toBe("• Sell $42.5 Put · 9 Oct (2DTE) · 1× @ 0.60");
     expect(describeTradeLine("BUY", { legType: "stock", quantity: 100, optionType: null, strikePrice: null, expiryDate: null }, null, "2026-10-07")).toBe("• Buy 100 shares (price unknown)");

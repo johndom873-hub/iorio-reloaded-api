@@ -22,11 +22,13 @@
 // same sign convention as the Trade Blotter's realized-P&L formula:
 //   unrealizedPnl = (currentPrice - entryPrice) * qty * multiplier * (short ? -1 : 1)
 //   marketValue = sum of (currentPrice * qty * multiplier), signed the same way
-// realized_pnl is always 0 here — position_legs only supports closing every
-// leg of a position at once (no partial closes), so nothing is "realized"
-// while a position is still open; once fully closed it drops out of this
-// job's scope (no longer open) and its realized figure lives in the Trade
-// Blotter instead.
+// Only legs still open are valued (fetchOpenLegsOfOpenPositions): a partial
+// close carves the closed quantity into its own closed leg that stays on the
+// open position (partialCloseSlice.ts), and that slice's P&L is realized,
+// counted from the closed leg by the positions' realized P&L. realized_pnl is
+// therefore always 0 here; once a position is fully closed it drops out of
+// this job's scope (no longer open) and its realized figure lives in the
+// Trade Blotter instead.
 //
 // The account-level net-liq fetch and the per-position price fetch are
 // launched together (Promise.allSettled), not sequentially with Flex
@@ -66,20 +68,7 @@ import { runJob } from "../src/lib/runJob.js";
 import { buildPnlSnapshotJobOutcome, type PnlSnapshotProblem } from "../src/lib/pnlSnapshotJobOutcome.js";
 import { assignFlowsToSnapshots } from "../src/lib/flexCashFlowAssignment.js";
 import { fillWorthlessExpiredOptionPrices } from "../src/lib/expiredOptionWorthlessPrice.js";
-
-interface OpenPositionLegRow {
-  positionId: string;
-  legId: string;
-  legType: "stock" | "option";
-  side: "long" | "short";
-  quantity: number;
-  optionType: "call" | "put" | null;
-  strikePrice: string | null;
-  expiryDate: string | null;
-  multiplier: number;
-  entryPrice: string;
-  symbol: string;
-}
+import { fetchOpenLegsOfOpenPositions, type OpenPositionLegRow } from "../src/lib/openPositionLegsForPnlSnapshot.js";
 
 interface RecentAccountSnapshotRow {
   snapshotDate: string;
@@ -152,26 +141,7 @@ async function main(): Promise<void> {
     const problems: PnlSnapshotProblem[] = [];
     const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-    const legRows: OpenPositionLegRow[] = await db.raw(
-      `
-      SELECT
-        p.id AS "positionId",
-        pl.id AS "legId",
-        pl.leg_type AS "legType",
-        pl.side,
-        pl.quantity,
-        pl.option_type AS "optionType",
-        pl.strike_price AS "strikePrice",
-        to_char(pl.expiry_date, 'YYYYMMDD') AS "expiryDate",
-        pl.multiplier,
-        pl.entry_price AS "entryPrice",
-        t.symbol
-      FROM positions p
-      JOIN position_legs pl ON pl.position_id = p.id
-      JOIN tickers t ON t.id = p.ticker_id
-      WHERE p.status = 'open'
-      `,
-    ).then((result) => result.rows);
+    const legRows: OpenPositionLegRow[] = await fetchOpenLegsOfOpenPositions();
 
     const priceContracts: PriceContract[] = legRows.map((leg) => ({
       key: leg.legId,

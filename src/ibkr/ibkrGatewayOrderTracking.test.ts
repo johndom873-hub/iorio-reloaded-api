@@ -746,6 +746,24 @@ describe("execution recorder", () => {
       expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: newer.legId, is_closing_trade: true });
     });
 
+    it("shares of a covered-call order adding to an existing Covered Call wait until the call's fill is recorded, then join that position's stock leg", async () => {
+      const stockConId = nextConId();
+      const { newer } = await siblingStockLegs(stockConId);
+      const [callLeg] = await testDb("position_legs")
+        .insert({ position_id: newer.positionId, leg_type: "option", side: "short", quantity: 1, multiplier: 100, option_type: "call", strike_price: 94, expiry_date: "2031-03-21", entry_price: 1.14, entry_at: daysAgo(1), ibkr_contract_id: nextConId() })
+        .returning(["id"]);
+      const { order, permId } = await coveredCallOrderWithCallFillOn(null);
+
+      const shares = executionOf({ permId, side: "BOT", shares: 100, price: 92.43 });
+      await recorder.recordExecution(stockContractOf(stockConId), shares);
+      expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(1);
+
+      await insertTrade(callLeg.id, order.id, 1);
+      await recorder.attributeWaitingCoveredCallShareBuys();
+      expect(await tradeOf(shares.execId!)).toMatchObject({ position_leg_id: newer.legId, is_closing_trade: false });
+      expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(0);
+    });
+
     it("a fill no app order explains (an assignment, a trade placed at IBKR) keeps the contract's oldest open leg", async () => {
       const stockConId = nextConId();
       const { older } = await siblingStockLegs(stockConId);
@@ -797,11 +815,38 @@ describe("execution recorder", () => {
       expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: the94StockLegId, is_closing_trade: true });
     });
 
-    it("a sale at a call's strike before that call's expiry is not an assignment: the oldest open leg, as before", async () => {
-      const { stockConId, the98StockLegId } = await siblingCoveredCalls(inAWeekIso());
+    it("an early assignment (the call's expiry still ahead) goes to that call's position too", async () => {
+      const { stockConId, the94StockLegId } = await siblingCoveredCalls(inAWeekIso());
       const execution = executionOf({ side: "SLD", shares: 100, price: 94, time: nowAsIbkrTime() });
       await recorder.recordExecution(stockContractOf(stockConId), execution);
+      expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: the94StockLegId, is_closing_trade: true });
+    });
+
+    it("a sale at no option's strike keeps the contract's oldest open leg", async () => {
+      const { stockConId, the98StockLegId } = await siblingCoveredCalls(inAWeekIso());
+      const execution = executionOf({ side: "SLD", shares: 100, price: 95.5, time: nowAsIbkrTime() });
+      await recorder.recordExecution(stockContractOf(stockConId), execution);
       expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: the98StockLegId });
+    });
+
+    it("the assigned call's shares already closed by the reconciliation: the sale closes that leg at the strike, not the open sibling's", async () => {
+      const { stockConId, the94StockLegId, the98StockLegId } = await siblingCoveredCalls(yesterdayIso());
+      await testDb("position_legs").where({ id: the94StockLegId }).update({ exit_at: new Date(Date.now() - 3_600_000), exit_price: 97.48 });
+      const execution = executionOf({ side: "SLD", shares: 100, price: 94, time: nowAsIbkrTime() });
+      await recorder.recordExecution(stockContractOf(stockConId), execution);
+      expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: the94StockLegId, is_closing_trade: true });
+      expect(Number((await testDb("position_legs").where({ id: the94StockLegId }).first()).exit_price)).toBe(94);
+      expect(await testDb("trades").where({ position_leg_id: the98StockLegId })).toHaveLength(0);
+    });
+
+    it("an early-assigned call the reconciliation closed with no exit ends at 0 once its stock fill arrives", async () => {
+      const { tickerId, stockConId, the94StockLegId } = await siblingCoveredCalls(inAWeekIso());
+      const the94CallLeg = await testDb("position_legs").join("positions", "positions.id", "position_legs.position_id").where({ "positions.ticker_id": tickerId, "position_legs.strike_price": 94 }).first("position_legs.id");
+      await testDb("position_legs").where({ id: the94CallLeg.id }).update({ exit_at: new Date(Date.now() - 600_000), exit_price: null });
+      await recorder.recordExecution(stockContractOf(stockConId), executionOf({ side: "SLD", shares: 100, price: 94, time: nowAsIbkrTime() }));
+      const settledCallLeg = await testDb("position_legs").where({ id: the94CallLeg.id }).first();
+      expect(settledCallLeg.exit_price === null ? null : Number(settledCallLeg.exit_price)).toBe(0);
+      expect(await testDb("trades").where({ position_leg_id: the94StockLegId })).toHaveLength(1);
     });
 
     it("a put assigned while covered calls hold the stock: the shares wait for the leftover-stock position, or join it when it exists", async () => {

@@ -45,6 +45,16 @@ describe("mergeSlicedLegsForOpenedEvent", () => {
     expect(mergeSlicedLegsForOpenedEvent(legs)).toEqual(legs);
   });
 
+  it("adds the slices' opening fills together, averaging the price by quantity, and keeps the one slice that has them", () => {
+    const withFill = (quantity: number, fillQuantity: number, averagePrice: number, commission: number | null): PositionEventLeg => ({ ...putLeg(quantity, 300, 2), openingFill: { quantity: fillQuantity, averagePrice, commission } });
+    const [merged] = mergeSlicedLegsForOpenedEvent([withFill(2, 2, 2.1, 1.3), withFill(3, 3, 2.0, 1.95)]);
+    expect(merged!.openingFill!.quantity).toBe(5);
+    expect(merged!.openingFill!.averagePrice).toBeCloseTo(2.04, 10);
+    expect(merged!.openingFill!.commission).toBeCloseTo(3.25, 10);
+    expect(mergeSlicedLegsForOpenedEvent([withFill(2, 2, 2.1, null), withFill(3, 3, 2.0, 1.95)])[0]!.openingFill!.commission).toBeNull();
+    expect(mergeSlicedLegsForOpenedEvent([withFill(2, 5, 2.04, 3.25), { ...putLeg(3, 300, 2), openingFill: null }])[0]!.openingFill).toEqual({ quantity: 5, averagePrice: 2.04, commission: 3.25 });
+  });
+
   it("does not modify the legs it is given", () => {
     const legs = [stockLeg(80, 40, 42), stockLeg(40, 40, null)];
     mergeSlicedLegsForOpenedEvent(legs);

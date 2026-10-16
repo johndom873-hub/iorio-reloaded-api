@@ -92,7 +92,15 @@ export const positionSelect = `
             'entryPrice', pl.entry_price,
             'entryAt', pl.entry_at,
             'exitPrice', pl.exit_price,
-            'exitAt', pl.exit_at
+            'exitAt', pl.exit_at,
+            -- What really traded (IBKR's fills), beside the commission-inclusive cost above. A carved slice reads the
+            -- opening fills of the leg it was carved from; its commission is its share of theirs.
+            'openingFillPrice', (SELECT SUM(tr.price * tr.quantity) / NULLIF(SUM(tr.quantity), 0) FROM trades tr WHERE tr.position_leg_id = COALESCE(pl.parent_leg_id, pl.id) AND NOT tr.is_closing_trade),
+            'openingFillQuantity', (SELECT SUM(tr.quantity) FROM trades tr WHERE tr.position_leg_id = COALESCE(pl.parent_leg_id, pl.id) AND NOT tr.is_closing_trade),
+            'openingCommission', (SELECT SUM(COALESCE(tr.commission, 0)) / NULLIF(SUM(tr.quantity), 0) * pl.quantity FROM trades tr WHERE tr.position_leg_id = COALESCE(pl.parent_leg_id, pl.id) AND NOT tr.is_closing_trade),
+            'openingCommissionMissing', EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = COALESCE(pl.parent_leg_id, pl.id) AND NOT tr.is_closing_trade AND tr.commission IS NULL AND tr.source_order_request_id IS NOT NULL),
+            'closingFillPrice', (SELECT SUM(tr.price * tr.quantity) / NULLIF(SUM(tr.quantity), 0) FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade),
+            'closingCommission', (SELECT SUM(COALESCE(tr.commission, 0)) FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade)
           ) ORDER BY pl.leg_type, pl.strike_price
         )
         FROM position_legs pl
@@ -198,6 +206,16 @@ export interface PositionLegRow {
   entryAt: string;
   exitPrice: string | null;
   exitAt: string | null;
+  /** IBKR's execution price of the leg's opening fills (average), and how many they cover; null without fills of its own. */
+  openingFillPrice: number | null;
+  openingFillQuantity: number | null;
+  /** Commission IBKR charged on those fills, for this leg's quantity. */
+  openingCommission: number | null;
+  /** An app order's opening fill whose commission report never arrived. */
+  openingCommissionMissing: boolean;
+  /** Average price of the leg's closing fills, and their commission; null without closing fills. */
+  closingFillPrice: number | null;
+  closingCommission: number | null;
 }
 
 export interface PositionRow {

@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PriceContract } from "./fetchLivePrices.js";
 
+type PushedQuote = { last: number | null; bid?: number | null; ask?: number | null };
+
 const pool = vi.hoisted(() => ({
   pooledQuotes: new Map<string, Record<string, unknown>>(),
   peeked: [] as PriceContract[],
-  subscriptions: [] as { contract: PriceContract; push: (quote: { last: number | null }) => void; unsubscribe: ReturnType<typeof vi.fn> }[],
+  subscriptions: [] as { contract: PriceContract; push: (quote: PushedQuote) => void; unsubscribe: ReturnType<typeof vi.fn> }[],
   graceMs: 1_000,
   fetchLivePricesCalls: [] as { contracts: PriceContract[]; options: unknown }[],
   fetchLivePricesResult: {} as Record<string, number | null>,
@@ -14,7 +16,7 @@ vi.mock("./marketDataPool.js", () => ({
     pool.peeked.push(contract);
     return pool.pooledQuotes.get(contract.key) ?? null;
   },
-  subscribeToPooledQuote: async (contract: PriceContract, push: (quote: { last: number | null }) => void) => {
+  subscribeToPooledQuote: async (contract: PriceContract, push: (quote: PushedQuote) => void) => {
     const unsubscribe = vi.fn();
     pool.subscriptions.push({ contract, push, unsubscribe });
     return unsubscribe;
@@ -78,6 +80,23 @@ describe("fetchPricesPoolFirst", () => {
     expect(pool.fetchLivePricesCalls[0]!.contracts).toEqual([stock("AAPL")]);
   });
 
+  it("prices a pooled option at its bid/ask mid, else its last, and snapshots one with neither", async () => {
+    pool.pooledQuotes.set("two-sided", { last: 1.0, bid: 1.1, ask: 1.3 });
+    pool.pooledQuotes.set("one-sided", { last: 0.03, bid: null, ask: 0.05 });
+    pool.pooledQuotes.set("unquoted", { last: null, bid: null, ask: 0.05 });
+    pool.fetchLivePricesResult = { unquoted: 0.04 };
+    const prices = await fetchPricesPoolFirst([option("two-sided"), option("one-sided"), option("unquoted")]);
+    expect(prices["two-sided"]).toBeCloseTo(1.2, 10);
+    expect(prices["one-sided"]).toBe(0.03);
+    expect(prices["unquoted"]).toBe(0.04);
+    expect(pool.fetchLivePricesCalls.map((call) => call.contracts)).toEqual([[option("unquoted")]]);
+  });
+
+  it("keeps pricing a pooled stock at its last, never its bid/ask mid", async () => {
+    pool.pooledQuotes.set("AAPL", { last: 190, bid: 191, ask: 193 });
+    expect(await fetchPricesPoolFirst([stock("AAPL")])).toEqual({ AAPL: 190 });
+  });
+
   it("accepts a pooled last of zero as a pooled price", async () => {
     pool.pooledQuotes.set("AAPL", { last: 0 });
     expect(await fetchPricesPoolFirst([stock("AAPL")])).toEqual({ AAPL: 0 });
@@ -104,6 +123,15 @@ describe("subscribeToPooledPrice", () => {
     pool.subscriptions[0]!.push({ last: null });
     expect(onUpdate.mock.calls).toEqual([[190], [null]]);
     expect(unsubscribe).toBe(pool.subscriptions[0]!.unsubscribe);
+  });
+
+  it("forwards an option's mark: the bid/ask mid while two-sided, else its last", async () => {
+    const onUpdate = vi.fn();
+    await subscribeToPooledPrice(option("o"), onUpdate);
+    pool.subscriptions[0]!.push({ last: 1.0, bid: 1.1, ask: 1.3 });
+    pool.subscriptions[0]!.push({ last: 1.0, bid: null, ask: 1.3 });
+    expect(onUpdate.mock.calls[0]![0]).toBeCloseTo(1.2, 10);
+    expect(onUpdate.mock.calls[1]![0]).toBe(1.0);
   });
 });
 
@@ -151,6 +179,15 @@ describe("streamPooledPrices", () => {
     pool.subscriptions[0]!.push({ last: 191 });
     pool.subscriptions[1]!.push({ last: 411 });
     expect(onUpdate.mock.calls.map((call) => call[0])).toEqual([{ AAPL: 190, MSFT: 410 }, { AAPL: 191, MSFT: 410 }, { AAPL: 191, MSFT: 411 }]);
+  });
+
+  it("emits an option leg at its mark, so a bid/ask move with no new trade is a change", async () => {
+    const { onUpdate } = stream([option("o")]);
+    await vi.advanceTimersByTimeAsync(0);
+    pool.subscriptions[0]!.push({ last: 1.0, bid: 1.1, ask: 1.3 });
+    await vi.advanceTimersByTimeAsync(0);
+    pool.subscriptions[0]!.push({ last: 1.0, bid: 1.3, ask: 1.5 });
+    expect(onUpdate.mock.calls.map((call) => call[0].o)).toEqual([expect.closeTo(1.2, 10), expect.closeTo(1.4, 10)]);
   });
 
   it("hands out a copy: a later change does not mutate an earlier emitted snapshot", async () => {

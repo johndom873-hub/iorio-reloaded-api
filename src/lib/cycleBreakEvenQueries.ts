@@ -1,5 +1,5 @@
 import { db } from "../db/connection.js";
-import { breakEvenForPosition, type OpenCycleSummary } from "./cycleBreakEven.js";
+import { breakEvenByPositionFromHistory, type OpenCycleSummary, type PositionShareSourceLink } from "./cycleBreakEven.js";
 import { assignmentDayCloseJoinSql, settlementCloseSelectSql, summarizeOpenCycleFromRows, type OpenCycleSummaryRows } from "./cycleInputRows.js";
 
 export interface PositionBreakEven {
@@ -8,22 +8,57 @@ export interface PositionBreakEven {
   breakEvenUnavailableReason: string | null;
   cycleNetPremium: number | null;
   cycleSharesHeld: number | null;
+  /** The symbol's consolidated cycle break-even (the Wheel cycle card's), and how many open positions share the cycle. */
+  cycleBreakEven: number | null;
+  cycleOpenPositionCount: number;
 }
 
-/** Break-even per open position id, derived from every option leg and stock fill of the positions' symbols. */
+/** Each open position's own break-even (breakEvenByPositionFromHistory), from every option leg, stock fill and share hand-over of the positions' symbols. */
 export async function fetchBreakEvenByPositionId(tickerIds: string[]): Promise<Map<string, PositionBreakEven>> {
   const result = new Map<string, PositionBreakEven>();
   const uniqueTickerIds = [...new Set(tickerIds)];
   if (uniqueTickerIds.length === 0) return result;
-  const [summaries, openPositionRows] = await Promise.all([
+  const [summaries, openPositionRows, shareSourceRows] = await Promise.all([
     fetchOpenCycleSummaryByTickerId(uniqueTickerIds),
     // A hedge has no break-even, and its long leg stays out of the wheel's ledger.
-    db.raw(`SELECT p.id, p.ticker_id AS "tickerId" FROM positions p WHERE p.status = 'open' AND p.strategy_key <> 'hedge' AND p.ticker_id = ANY(?)`, [uniqueTickerIds]),
+    db.raw(
+      `SELECT p.id, p.ticker_id AS "tickerId",
+              COALESCE((SELECT SUM(pl.quantity) FROM position_legs pl WHERE pl.position_id = p.id AND pl.leg_type = 'stock' AND pl.side = 'long' AND pl.exit_at IS NULL), 0)::int AS "sharesHeld"
+       FROM positions p WHERE p.status = 'open' AND p.strategy_key <> 'hedge' AND p.ticker_id = ANY(?)`,
+      [uniqueTickerIds],
+    ),
+    // Shares received: recorded with the link; a link from before that column, the receiving position's first stock leg as
+    // created (with the shares later carved off it).
+    db.raw(
+      `SELECT pss.position_id AS "positionId", pss.source_position_id AS "sourcePositionId", p.ticker_id AS "tickerId",
+              COALESCE(pss.shares_received,
+                       (SELECT first_leg.quantity + COALESCE((SELECT SUM(slice.quantity) FROM position_legs slice WHERE slice.parent_leg_id = first_leg.id), 0)
+                        FROM position_legs first_leg
+                        WHERE first_leg.position_id = pss.position_id AND first_leg.leg_type = 'stock' AND first_leg.parent_leg_id IS NULL
+                        ORDER BY first_leg.entry_at, first_leg.id LIMIT 1), 0)::int AS "sharesReceived"
+       FROM position_share_sources pss JOIN positions p ON p.id = pss.position_id
+       WHERE p.ticker_id = ANY(?)`,
+      [uniqueTickerIds],
+    ),
   ]);
   for (const [tickerId, summary] of summaries) {
-    for (const position of openPositionRows.rows.filter((row: any) => row.tickerId === tickerId)) {
-      const { breakEven, reason } = breakEvenForPosition(summary, position.id);
-      result.set(position.id, { breakEven, breakEvenUnavailableReason: reason, cycleNetPremium: summary.netPremium, cycleSharesHeld: summary.sharesHeld });
+    const openPositions = openPositionRows.rows
+      .filter((row: { tickerId: string }) => row.tickerId === tickerId)
+      .map((row: { id: string; sharesHeld: number }) => ({ positionId: row.id, sharesHeld: Number(row.sharesHeld) }));
+    const shareSources: PositionShareSourceLink[] = shareSourceRows.rows
+      .filter((row: { tickerId: string }) => row.tickerId === tickerId)
+      .map((row: { positionId: string; sourcePositionId: string; sharesReceived: number }) => ({ positionId: row.positionId, sourcePositionId: row.sourcePositionId, sharesReceived: Number(row.sharesReceived) }));
+    const breakEvenByPosition = breakEvenByPositionFromHistory(summary, openPositions, shareSources);
+    for (const position of openPositions) {
+      const { breakEven, reason } = breakEvenByPosition.get(position.positionId)!;
+      result.set(position.positionId, {
+        breakEven,
+        breakEvenUnavailableReason: reason,
+        cycleNetPremium: summary.netPremium,
+        cycleSharesHeld: summary.sharesHeld,
+        cycleBreakEven: summary.unavailableReason === null ? summary.breakEvenPerShare : null,
+        cycleOpenPositionCount: openPositions.length,
+      });
     }
   }
   return result;
@@ -57,11 +92,11 @@ export async function fetchOpenCycleSummaryRowsByTickerId(tickerIds: string[]): 
        JOIN positions p ON p.id = pl.position_id
        LEFT JOIN daily_price_bars b ON b.ticker_id = p.ticker_id AND b.trading_date = pl.expiry_date
        ${assignmentDayCloseJoinSql}
-       WHERE pl.leg_type = 'option' AND pl.side = 'short' AND p.ticker_id = ANY(?)`,
+       WHERE pl.leg_type = 'option' AND p.ticker_id = ANY(?)`,
       [uniqueTickerIds],
     ),
     db.raw(
-      `SELECT p.ticker_id AS "tickerId", tr.executed_at AS at, tr.side, tr.quantity, tr.price::float AS price, COALESCE(tr.commission, 0)::float AS commission
+      `SELECT p.ticker_id AS "tickerId", pl.position_id AS "positionId", tr.executed_at AS at, tr.side, tr.quantity, tr.price::float AS price, COALESCE(tr.commission, 0)::float AS commission
        FROM trades tr
        JOIN position_legs pl ON pl.id = tr.position_leg_id
        JOIN positions p ON p.id = pl.position_id

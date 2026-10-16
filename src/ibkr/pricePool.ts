@@ -1,5 +1,12 @@
-import { peekPooledQuote, subscribeToPooledQuote, waitForFirstReading } from "./marketDataPool.js";
+import { peekPooledQuote, subscribeToPooledQuote, waitForFirstReading, type PooledQuote } from "./marketDataPool.js";
 import { fetchLivePrices, type FetchLivePricesOptions, type PriceContract } from "./fetchLivePrices.js";
+import { optionMarkPrice } from "../lib/optionMarkPrice.js";
+
+// The price every function here hands out for a contract: a stock's last trade, an option's mark (bid/ask mid, else
+// last; optionMarkPrice). Every option priced through this file is an open position's leg being valued.
+function pooledMarkPrice(contract: PriceContract, quote: PooledQuote): number | null {
+  return contract.legType === "option" ? optionMarkPrice(quote) : quote.last;
+}
 
 /**
  * One-shot prices, pool first (2026-09-24): a contract some open screen is
@@ -10,7 +17,8 @@ export async function fetchPricesPoolFirst(contracts: PriceContract[], options: 
   const pricesByKey: Record<string, number | null> = {};
   const notPooled: PriceContract[] = [];
   for (const contract of contracts) {
-    const pooled = peekPooledQuote(contract)?.last ?? null;
+    const pooledQuote = peekPooledQuote(contract);
+    const pooled = pooledQuote ? pooledMarkPrice(contract, pooledQuote) : null;
     if (pooled !== null) pricesByKey[contract.key] = pooled;
     else notPooled.push(contract);
   }
@@ -25,7 +33,7 @@ export async function fetchPricesPoolFirst(contracts: PriceContract[], options: 
 // changes when price and greeks pooling were unified into one subscription
 // per contract.
 export async function subscribeToPooledPrice(contract: PriceContract, onUpdate: (price: number | null) => void): Promise<() => void> {
-  return subscribeToPooledQuote(contract, (quote) => onUpdate(quote.last));
+  return subscribeToPooledQuote(contract, (quote) => onUpdate(pooledMarkPrice(contract, quote)));
 }
 
 /**

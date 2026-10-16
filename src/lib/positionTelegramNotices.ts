@@ -1,9 +1,9 @@
 import { db } from "../db/connection.js";
-import { fetchPositionEventsForPositions, type PositionEvent, type PositionEventLeg } from "./positionEvents.js";
+import { fetchPositionEventsForPositions, type PositionEvent, type PositionEventLeg, type ShareHandOverPosition } from "./positionEvents.js";
 import { fetchPositionById } from "./positionQueries.js";
 import { formatSignedDollars } from "./formatSignedDollars.js";
 import { formatSignedPercent } from "./formatSignedPercent.js";
-import { describeTradeContract, describeTradeLine, labelStrategy } from "./tradeMessageFormatting.js";
+import { describeTradeContract, describeTradeLine, formatTradePrice, labelStrategy } from "./tradeMessageFormatting.js";
 
 // Trading-events catch-all, position side (approved 2026-10-07): every position opening and closing is told once to the
 // alerts chat, including the leftover-stock positions the dashboard feed hides. A close the expiry message already told
@@ -34,9 +34,46 @@ function describePositionSubject(event: PositionEvent, unstructuredReason: strin
   return `${event.symbol} stock, no strategy${reason ? ` (${reason})` : ""}`;
 }
 
-/** Pure: "📥 New position: …" with each leg as it was opened (a short leg was sold, a long leg bought). */
+const shareHandOverPositionLabels: Record<string, string> = {
+  covered_call: "a covered call",
+  cash_secured_put: "a cash-secured put",
+  hedge: "a hedge",
+  unstructured: "a position with no strategy",
+};
+
+/** "a covered call", "a cash-secured put and a position with no strategy"; null when there is none. */
+function describeShareHandOverPositions(positions: ShareHandOverPosition[]): string | null {
+  if (positions.length === 0) return null;
+  return positions.map((position) => shareHandOverPositionLabels[position.strategyKey] ?? `a ${labelStrategy(position.strategyKey)} position`).join(" and ");
+}
+
+/**
+ * A leg as it was opened, at its real fill price (the average of its opening trades; entry_price is net of the opening
+ * commission) with that commission on its own. Shares the position took over from another one (position_share_sources)
+ * with no opening trade of their own were carried over, never bought: "• 100 shares carried from a cash-secured put at
+ * $100.00 cost". A leg with no opening trade recorded and no hand-over keeps its entry price.
+ */
+function describeOpenedLegLines(leg: PositionEventLeg, sharesCarriedFrom: string | null): string[] {
+  const fill = leg.openingFill ?? null;
+  const commissionText = fill?.commission != null ? ` (commission ${formatSignedDollars(fill.commission, 2)})` : "";
+  if (leg.legType === "stock" && sharesCarriedFrom !== null) {
+    const boughtQuantity = fill?.quantity ?? 0;
+    const carriedQuantity = leg.quantity - boughtQuantity;
+    const lines = boughtQuantity > 0 ? [`${describeTradeLine("BUY", { ...leg, quantity: boughtQuantity }, fill!.averagePrice)}${commissionText}`] : [];
+    if (carriedQuantity > 0) {
+      // A leg that also bought shares has one blended cost: the carried shares' own cost is not known apart.
+      const costText = boughtQuantity === 0 ? ` at $${formatTradePrice(leg.entryPrice)} cost` : "";
+      lines.push(`• ${describeTradeContract({ ...leg, quantity: carriedQuantity })} carried from ${sharesCarriedFrom}${costText}`);
+    }
+    return lines;
+  }
+  return [`${describeTradeLine(leg.side === "short" ? "SELL" : "BUY", leg, fill ? fill.averagePrice : leg.entryPrice)}${commissionText}`];
+}
+
+/** Pure: "📥 New position: …" with each leg as it was opened (a short leg was sold, a long leg bought, shares carried over). */
 export function describePositionOpenedNotice(event: PositionEvent): string {
-  const lines = event.legs.map((leg: PositionEventLeg) => describeTradeLine(leg.side === "short" ? "SELL" : "BUY", leg, leg.entryPrice));
+  const sharesCarriedFrom = describeShareHandOverPositions(event.sharesCarriedFromPositions ?? []);
+  const lines = event.legs.flatMap((leg: PositionEventLeg) => describeOpenedLegLines(leg, sharesCarriedFrom));
   return [`📥 New position: ${describePositionSubject(event, event.unstructuredReason)}`, ...lines].join("\n");
 }
 
@@ -44,8 +81,9 @@ export function describePositionOpenedNotice(event: PositionEvent): string {
 export function describePositionClosedNotice(event: PositionEvent, capitalDeployed: number | null): string {
   const reasonLabel = event.closeReason ? closeReasonLabels[event.closeReason] : undefined;
   const headline = `📤 Position closed: ${describePositionSubject(event, null)}${reasonLabel ? ` — ${reasonLabel}` : ""}`;
+  const sharesMovedTo = describeShareHandOverPositions(event.sharesMovedToPositions ?? []) ?? "the next position";
   const lines = event.legs.map((leg: PositionEventLeg) =>
-    leg.sharesHandedOn ? `• ${describeTradeContract(leg)} moved to the next position` : describeTradeLine(leg.side === "short" ? "BUY" : "SELL", leg, leg.exitPrice),
+    leg.sharesHandedOn ? `• ${describeTradeContract(leg)} moved to ${sharesMovedTo}` : describeTradeLine(leg.side === "short" ? "BUY" : "SELL", leg, leg.exitPrice),
   );
   // Same P&L % base as the expiry message: realized P&L over capitalDeployed (approved 2026-10-01). A zero P&L has no sign,
   // like its 0.00%.

@@ -1,5 +1,6 @@
 import { db } from "../db/connection.js";
 import type { JobRunStatus } from "./jobRunStatus.js";
+import { fetchOrderLegFillsByOrderId, type OrderLegFill } from "./orderFills.js";
 
 // Shared Postgres NOTIFY channel carrying real-time app events (order status
 // changes, position closes) from whichever process caused them — the web
@@ -111,8 +112,11 @@ export async function publishPulse(edgeId: PulseEdgeId): Promise<void> {
 export interface RecentNotificationEventWithOrder {
   notification: AppNotification;
   occurredAt: string;
-  /** Only on order_status events: the order's current status and payload (null if the order no longer exists). */
-  order?: { status: string; payload: unknown; cancellationReason: string | null } | null;
+  /**
+   * Only on order_status events: the order's current status and payload, and what has filled of each payload leg with
+   * its average fill price (null if the order no longer exists).
+   */
+  order?: { status: string; payload: unknown; cancellationReason: string | null; legFills: OrderLegFill[] } | null;
 }
 
 /**
@@ -143,7 +147,8 @@ export async function fetchRecentNotificationEventsWithOrders(limit: number): Pr
   if (orderIds.length === 0) return events;
 
   const orderRows: { id: string; status: string; payload: unknown; cancellation_reason: string | null }[] = await db("order_requests").whereIn("id", orderIds).select("id", "status", "payload", "cancellation_reason");
-  const orderById = new Map(orderRows.map((row) => [row.id, { status: row.status, payload: row.payload, cancellationReason: row.cancellation_reason }]));
+  const legFillsByOrderId = await fetchOrderLegFillsByOrderId(orderRows);
+  const orderById = new Map(orderRows.map((row) => [row.id, { status: row.status, payload: row.payload, cancellationReason: row.cancellation_reason, legFills: legFillsByOrderId.get(row.id) ?? [] }]));
   return events.map((event) =>
     event.notification.type === "order_status" ? { ...event, order: orderById.get(event.notification.orderId) ?? null } : event,
   );

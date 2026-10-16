@@ -784,7 +784,7 @@ describe("reconcileHeldPositions — stock entry is the true cost when the trade
     await insertShortOptionLeg(cspId, putConId, "put", 120, isoDateDaysFromToday(-1), 1.4026);
     drainPendingOpeningExecutionsHook = async (_conId, newLegId) => insertStockTrade(newLegId, "buy", 100, 120, null, new Date(Date.now() - 45_000));
 
-    const held = [heldStock(ticker.symbol, stockConId, 100, 118.59739)];
+    const held = [heldStock(ticker.symbol, stockConId, 100, 118.5974)];
     await runPass(held);
     drainPendingOpeningExecutionsHook = undefined;
 
@@ -798,18 +798,18 @@ describe("reconcileHeldPositions — stock entry is the true cost when the trade
     expect(await rowVersion(stockLeg!.id)).toBe(versionBefore);
   });
 
-  it("no assignment fill recorded: IBKR's average cost is kept, rounded to four decimals, and not rewritten every pass", async () => {
+  it("no assignment fill recorded: IBKR's average cost is kept, rounded to eight decimals, and not rewritten every pass", async () => {
     const ticker = await createTicker();
     const putConId = (nextConId += 1);
     const stockConId = (nextConId += 1);
     const cspId = await insertPosition(ticker.id, "cash_secured_put");
     await insertShortOptionLeg(cspId, putConId, "put", 120, isoDateDaysFromToday(-1), 1.4026);
 
-    const held = [heldStock(ticker.symbol, stockConId, 100, 118.59739)];
+    const held = [heldStock(ticker.symbol, stockConId, 100, 118.597391234)];
     await runPass(held);
     const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
     const [stockLeg] = await legsFor(leftover.id);
-    expect(Number(stockLeg!.entry_price)).toBe(118.5974);
+    expect(Number(stockLeg!.entry_price)).toBe(118.59739123);
 
     const versionBefore = await rowVersion(stockLeg!.id);
     await runPass(held);
@@ -889,22 +889,22 @@ describe("reconcileHeldPositions — a partial sale of mixed lots is priced at t
 
 describe("reconcileHeldPositions — covered calls sharing one stock contract each keep their own cost", () => {
   // INTC 2026-10-15: 200 shares assigned at $100.00 under the $98 calls, then 100 bought at $92.43 + $1.0903 with the $94
-  // call. IBKR holds 300 at one average, (20,000 + 9,243 + 1.0903) / 300 = 97.4803, which both stock legs used to show.
+  // call. IBKR holds 300 at one average, (20,000 + 9,243 + 1.0903) / 300 = 97.480301, which both stock legs used to show.
   async function seedIntcSiblings(fillOnThe94Leg: boolean) {
     const ticker = await createTicker();
     const stockConId = (nextConId += 1);
     const the98CallConId = (nextConId += 1);
     const the94CallConId = (nextConId += 1);
     const the98Id = await insertPosition(ticker.id, "covered_call");
-    const the98StockLegId = await insertStockLeg(the98Id, stockConId, 200, 97.4803);
+    const the98StockLegId = await insertStockLeg(the98Id, stockConId, 200, 97.480301);
     const the98CallLegId = await insertShortOptionLeg(the98Id, the98CallConId, "call", 98, isoDateDaysFromToday(1), 0.3553);
     await testDb("position_legs").where({ id: the98CallLegId }).update({ quantity: 2 });
     const the94Id = await insertPosition(ticker.id, "covered_call");
-    const the94StockLegId = await insertStockLeg(the94Id, stockConId, 100, 97.4803);
+    const the94StockLegId = await insertStockLeg(the94Id, stockConId, 100, 97.480301);
     const the94CallLegId = await insertShortOptionLeg(the94Id, the94CallConId, "call", 94, isoDateDaysFromToday(1), 1.143);
     await insertStockTrade(fillOnThe94Leg ? the94StockLegId : the98StockLegId, "buy", 100, 92.43, 1.0903, new Date(Date.now() - 3_600_000));
     const held = [
-      heldStock(ticker.symbol, stockConId, 300, 97.4803),
+      heldStock(ticker.symbol, stockConId, 300, 97.480301),
       heldShortOption(ticker.symbol, the98CallConId, OptionType.Call, 98, isoDateDaysFromToday(1), 35.53, 2),
       heldShortOption(ticker.symbol, the94CallConId, OptionType.Call, 94, isoDateDaysFromToday(1), 114.3),
     ];
@@ -921,7 +921,7 @@ describe("reconcileHeldPositions — covered calls sharing one stock contract ea
     const the98Stock = await stockLegOf(intc.the98StockLegId);
     const the94Stock = await stockLegOf(intc.the94StockLegId);
     expect(Number(the98Stock.entry_price)).toBe(100);
-    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect(Number(the94Stock.entry_price)).toBe(92.440903);
     expect([the98Stock.entry_price_from_position_split, the94Stock.entry_price_from_position_split]).toEqual([true, true]);
     expect([the98Stock.quantity, the94Stock.quantity]).toEqual([200, 100]);
 
@@ -937,7 +937,7 @@ describe("reconcileHeldPositions — covered calls sharing one stock contract ea
 
     for (const legId of [intc.the98StockLegId, intc.the94StockLegId]) {
       const stockLeg = await stockLegOf(legId);
-      expect(Number(stockLeg.entry_price)).toBe(97.4803);
+      expect(Number(stockLeg.entry_price)).toBe(97.480301);
       expect(stockLeg.entry_price_from_position_split).toBe(false);
     }
   });
@@ -948,12 +948,12 @@ describe("reconcileHeldPositions — covered calls sharing one stock contract ea
 
     await insertClosingTrade(intc.the94CallLegId, 1.5, new Date(Date.now() - 60_000));
     await insertStockTrade(intc.the94StockLegId, "sell", 100, 93, 1, new Date(Date.now() - 60_000));
-    // IBKR sold its oldest lot (the $100.00 shares): the 200 left average (100 x 100 + 100 x 92.4409) / 200.
-    await runPass([heldStock(intc.ticker.symbol, intc.stockConId, 200, 96.2205), intc.held[1]!]);
+    // IBKR sold its oldest lot (the $100.00 shares): the 200 left average (100 x 100 + 100 x 92.440903) / 200.
+    await runPass([heldStock(intc.ticker.symbol, intc.stockConId, 200, 96.2204515), intc.held[1]!]);
 
     const the94Stock = await stockLegOf(intc.the94StockLegId);
     expect(the94Stock.exit_at).not.toBeNull();
-    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect(Number(the94Stock.entry_price)).toBe(92.440903);
     expect(Number(the94Stock.exit_price)).toBe(93);
     expect((await positionsFor(intc.ticker.id)).find((position) => position.id === intc.the94Id)!.status).toBe("closed");
 
@@ -975,14 +975,14 @@ describe("reconcileHeldPositions — covered calls sharing one stock contract ea
     await recorder.recordExecution({ conId: intc.stockConId, symbol: intc.ticker.symbol, secType: SecType.STK } as never, { execId: assignmentExecId, orderId: 0, side: "SLD", shares: 100, price: 94, time: ibkrNow } as never);
     expect((await testDb("trades").where({ ibkr_exec_id: assignmentExecId }).first()).position_leg_id).toBe(intc.the94StockLegId);
 
-    // IBKR sold its oldest lot (the $100.00 shares): the 200 left average (100 x 100 + 100 x 92.4409) / 200.
-    await runPass([heldStock(intc.ticker.symbol, intc.stockConId, 200, 96.2205), intc.held[1]!]);
+    // IBKR sold its oldest lot (the $100.00 shares): the 200 left average (100 x 100 + 100 x 92.440903) / 200.
+    await runPass([heldStock(intc.ticker.symbol, intc.stockConId, 200, 96.2204515), intc.held[1]!]);
 
     const the94 = (await positionsFor(intc.ticker.id)).find((position) => position.id === intc.the94Id)!;
     expect(the94.status).toBe("closed");
     expect(the94.close_reason).toBe("assigned");
     const the94Stock = await stockLegOf(intc.the94StockLegId);
-    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect(Number(the94Stock.entry_price)).toBe(92.440903);
     expect(Number(the94Stock.exit_price)).toBe(94);
     const the98Stock = await stockLegOf(intc.the98StockLegId);
     expect([the98Stock.exit_at, the98Stock.quantity, Number(the98Stock.entry_price)]).toEqual([null, 200, 100]);
@@ -1004,11 +1004,12 @@ describe("reconcileHeldPositions — covered calls sharing one stock contract ea
     expect(Number(rolledStock.entry_price)).toBe(100);
     expect(rolledStock.entry_price_from_position_split).toBe(true);
     expect(await shareSourcesOf(rolled.id)).toEqual([intc.the98Id]);
+    expect((await testDb("position_share_sources").where({ position_id: rolled.id }).first()).shares_received).toBe(200);
 
     const the94Stock = await stockLegOf(intc.the94StockLegId);
     expect(the94Stock.exit_at).toBeNull();
     expect(the94Stock.quantity).toBe(100);
-    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect(Number(the94Stock.entry_price)).toBe(92.440903);
     expect(await shareSourcesOf(intc.the94Id)).toEqual([]);
   });
 
@@ -1040,7 +1041,7 @@ describe("reconcileHeldPositions — covered calls sharing one stock contract ea
     drainPendingOpeningExecutionsHook = (conId, newLegId) => recorder.drainPendingOpeningExecutions(conId, newLegId);
     try {
       await runPass([
-        heldStock(ticker.symbol, stockConId, 300, 97.4803),
+        heldStock(ticker.symbol, stockConId, 300, 97.480301),
         heldShortOption(ticker.symbol, the98CallConId, OptionType.Call, 98, isoDateDaysFromToday(1), 35.53, 2),
         heldShortOption(ticker.symbol, the94CallConId, OptionType.Call, 94, isoDateDaysFromToday(1), 114.3),
       ]);
@@ -1052,9 +1053,84 @@ describe("reconcileHeldPositions — covered calls sharing one stock contract ea
     const the94Legs = await legsFor(the94.id);
     const the94Stock = the94Legs.find((leg) => leg.leg_type === "stock")!;
     expect((await testDb("trades").where({ ibkr_exec_id: stockExecId }).first()).position_leg_id).toBe(the94Stock.id);
-    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect(Number(the94Stock.entry_price)).toBe(92.440903);
     expect(Number((await testDb("position_legs").where({ id: the98StockLegId }).first()).entry_price)).toBe(100);
     expect(await testDb("trades").where({ position_leg_id: the98StockLegId })).toHaveLength(0);
+  });
+});
+
+describe("reconcileHeldPositions — fixes from the 2026-10-16 P&L review", () => {
+  it("a leftover-stock leg taking over a Covered Call's shares blends both costs (100 at $50.00 + 100 at $40.01 = $45.005)", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const leftoverId = await insertPosition(ticker.id, "unstructured", "csp_assigned_stock");
+    const leftoverLegId = await insertStockLeg(leftoverId, stockConId, 100, 50);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    const coveredCallStockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 40.01);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 45, isoDateDaysFromToday(-1), 0.5);
+    await testDb("position_legs").whereIn("id", [leftoverLegId, coveredCallStockLegId]).update({ entry_price_from_position_split: true });
+
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 45.005)]);
+
+    const leftoverLeg = await testDb("position_legs").where({ id: leftoverLegId }).first();
+    expect([leftoverLeg.exit_at, leftoverLeg.quantity, Number(leftoverLeg.entry_price)]).toEqual([null, 200, 45.005]);
+    expect((await testDb("position_share_sources").where({ position_id: leftoverId, source_position_id: coveredCallId }).first()).shares_received).toBe(100);
+  });
+
+  it("one of two puts bought back: the closed contract costs what IBKR's remaining average leaves (oldest first), the remainder IBKR's average", async () => {
+    const ticker = await createTicker();
+    const putConId = (nextConId += 1);
+    const positionId = await insertPosition(ticker.id, "cash_secured_put");
+    const legId = await insertShortOptionLeg(positionId, putConId, "put", 50, isoDateDaysFromToday(7), 1.4935);
+    await testDb("position_legs").where({ id: legId }).update({ quantity: 2 });
+    await insertClosingFill(legId, 1, 0.5, 0, "buy");
+
+    // Sold at 1.00 then 2.00 (0.9935 and 1.9935 net); IBKR keeps the 1.9935 contract after selling the oldest.
+    await runPass([heldShortOption(ticker.symbol, putConId, OptionType.Put, 50, isoDateDaysFromToday(7), 199.35, 1)]);
+
+    const legs = await testDb("position_legs").where({ position_id: positionId }).orderBy("exit_at", "asc");
+    expect(legs.map((leg) => [leg.quantity, Number(leg.entry_price), leg.exit_price === null ? null : Number(leg.exit_price)])).toEqual([
+      [1, 0.9935, 0.5],
+      [1, 1.9935, null],
+    ]);
+  });
+
+  it("a call assigned early (expiry a week away) with its stock sale recorded: the call ends at 0 and the position closes as assigned", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    const stockLegId = await insertStockLeg(coveredCallId, stockConId, 100, 48.01);
+    const callLegId = await insertShortOptionLeg(coveredCallId, callConId, "call", 50, isoDateDaysFromToday(7), 1.1935);
+    await testDb("trades").insert({ position_leg_id: stockLegId, ibkr_exec_id: `reconcile-test-early-assignment-${stockLegId}`, side: "sell", quantity: 100, price: 50, executed_at: new Date(Date.now() - 600_000), is_closing_trade: true });
+
+    await runPass([]);
+
+    const callLeg = await testDb("position_legs").where({ id: callLegId }).first();
+    expect(callLeg.exit_price === null ? null : Number(callLeg.exit_price)).toBe(0);
+    expect(Number((await testDb("position_legs").where({ id: stockLegId }).first()).exit_price)).toBe(50);
+    const coveredCall = (await positionsFor(ticker.id)).find((position) => position.id === coveredCallId)!;
+    expect([coveredCall.status, coveredCall.close_reason]).toEqual(["closed", "assigned"]);
+  });
+
+  it("a put assigned while a Covered Call holds the stock: the new leftover-stock position records the put as its shares' source", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const putConId = (nextConId += 1);
+    const coveredCallId = await insertPosition(ticker.id, "covered_call");
+    await insertStockLeg(coveredCallId, stockConId, 100, 92.4409);
+    await insertShortOptionLeg(coveredCallId, callConId, "call", 94, isoDateDaysFromToday(7), 1.143);
+    const cspId = await insertPosition(ticker.id, "cash_secured_put");
+    await insertShortOptionLeg(cspId, putConId, "put", 100, isoDateDaysFromToday(-1), 1.3358);
+
+    await runPass([heldStock(ticker.symbol, stockConId, 200, 96.2205), heldShortOption(ticker.symbol, callConId, OptionType.Call, 94, isoDateDaysFromToday(7), 114.3)]);
+
+    const csp = (await positionsFor(ticker.id)).find((position) => position.id === cspId)!;
+    expect(csp.close_reason).toBe("assigned");
+    const leftover = (await positionsFor(ticker.id)).find((position) => position.strategy_key === "unstructured")!;
+    expect(await testDb("position_share_sources").where({ position_id: leftover.id }).select("source_position_id", "shares_received")).toEqual([{ source_position_id: cspId, shares_received: 100 }]);
   });
 });
 

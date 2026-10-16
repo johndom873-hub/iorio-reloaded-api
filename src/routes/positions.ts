@@ -3,13 +3,14 @@ import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import type { Knex } from "knex";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { positionSelect, fetchAvailableUncoveredShares } from "../lib/positionQueries.js";
+import { positionSelect, fetchAvailableUncoveredShares, type PositionLegRow } from "../lib/positionQueries.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 import type { Greeks, GreeksContract } from "../ibkr/fetchLiveGreeks.js";
 import { fetchGreeksPoolFirst } from "../ibkr/greeksPool.js";
 import { streamPooledGreeks } from "../ibkr/greeksPool.js";
 import { fetchCyclesForTickers } from "../lib/cycleQueries.js";
 import { fetchBreakEvenByPositionId, type PositionBreakEven } from "../lib/cycleBreakEvenQueries.js";
+import { fetchStockAcquisitionByPositionId, type StockAcquisition } from "../lib/stockLegAcquisitionFills.js";
 import { getRiskFreeRate } from "../lib/riskFreeRate.js";
 import { computeLegSuccessProbabilities, type SuccessProbabilityLeg } from "../lib/positionSuccessProbability.js";
 import type { PriceContract } from "../ibkr/fetchLivePrices.js";
@@ -32,6 +33,7 @@ import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
 import { findNonLiveSnapshotQuoteReason } from "../lib/signalSnapshotLiveQuotes.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
 import { fetchTodaysOrders } from "../lib/todaysOrders.js";
+import { fetchOrderLegFillsByOrderId } from "../lib/orderFills.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
 import { executionStrategyLabels } from "../pluto/executionStrategies.js";
@@ -154,8 +156,8 @@ positionsRouter.get("/", async (request, response) => {
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const result = await db.raw(`${positionSelect} ${whereClause} ORDER BY p.opened_at DESC`, params);
 
-  // Cycle break-even (approved 2026-09-19, see cycleBreakEven.ts) — open positions only. A failure here must
-  // never take the whole list down: rows just come back without a break-even.
+  // Each open position's own break-even (see breakEvenByPositionFromHistory), and its symbol's consolidated cycle break-even.
+  // A failure here must never take the whole list down: rows just come back without a break-even.
   const openRows = result.rows.filter((row: { status: string }) => row.status === "open");
   let breakEvenByPositionId = new Map<string, PositionBreakEven>();
   if (openRows.length > 0) {
@@ -165,10 +167,37 @@ positionsRouter.get("/", async (request, response) => {
       console.error("positions: break-even computation failed, returning positions without it", error);
     }
   }
+  // A stock leg holding shares it did not buy itself shows what they were really bought at (stockLegAcquisitionFills.ts).
+  const positionIdsWithCarriedShares = result.rows
+    .filter((row: { legs: PositionLegRow[] }) => row.legs.some((leg) => leg.legType === "stock" && Number(leg.openingFillQuantity ?? 0) < leg.quantity))
+    .map((row: { id: string }) => row.id);
+  let acquisitionByPositionId = new Map<string, StockAcquisition>();
+  try {
+    acquisitionByPositionId = await fetchStockAcquisitionByPositionId(positionIdsWithCarriedShares);
+  } catch (error) {
+    console.error("positions: carried-share fill prices failed, returning legs without them", error);
+  }
+  for (const row of result.rows as { id: string; legs: (PositionLegRow & { openingFillCarried?: boolean })[] }[]) {
+    const acquisition = acquisitionByPositionId.get(row.id);
+    if (!acquisition) continue;
+    for (const leg of row.legs) {
+      if (leg.legType !== "stock" || Number(leg.openingFillQuantity ?? 0) >= leg.quantity) continue;
+      leg.openingFillPrice = acquisition.fillPrice;
+      leg.openingCommission = acquisition.commissionPerShare * leg.quantity;
+      leg.openingFillCarried = true;
+    }
+  }
+
   response.json(
     result.rows.map((row: { id: string }) => {
       const breakEven = breakEvenByPositionId.get(row.id);
-      return { ...row, breakEven: breakEven?.breakEven ?? null, breakEvenUnavailableReason: breakEven?.breakEvenUnavailableReason ?? null };
+      return {
+        ...row,
+        breakEven: breakEven?.breakEven ?? null,
+        breakEvenUnavailableReason: breakEven?.breakEvenUnavailableReason ?? null,
+        cycleBreakEven: breakEven?.cycleBreakEven ?? null,
+        cycleOpenPositionCount: breakEven?.cycleOpenPositionCount ?? null,
+      };
     }),
   );
 });
@@ -554,7 +583,8 @@ function buildUnderlyingStockPriceRequests(legRows: Array<{ positionId: string; 
 // stored data with no live call needed. unrealizedPnl only marks
 // currently-open legs (exit_at IS NULL) to market — an already-rolled-away
 // leg's gain is locked in and already counted in realizedPnl, so it isn't
-// re-priced live here.
+// re-priced live here. Stock legs are marked at the last trade, option legs
+// at the bid/ask mid, else the last trade (optionMarkPrice, via pricePool.ts).
 //
 // Fallback (approved 2026-08-24): when live IBKR pricing is unavailable
 // for a position (e.g. outside market hours), fall back to that
@@ -1181,13 +1211,15 @@ positionsRouter.get("/orders/today", async (_request, response) => {
   response.json(await fetchTodaysOrders());
 });
 
+// legFills: what has filled of each payload leg, in the payload's order, with its average fill price (Pulse's Latest Events).
 positionsRouter.get("/orders/:id", async (request, response) => {
   const orderRequest = await orderRequestsWithNames().where("orq.id", request.params.id).first();
   if (!orderRequest) {
     response.status(404).json({ error: "Order not found." });
     return;
   }
-  response.json(serializeOrderRequest(orderRequest));
+  const legFillsByOrderId = await fetchOrderLegFillsByOrderId([orderRequest]);
+  response.json({ ...serializeOrderRequest(orderRequest), legFills: legFillsByOrderId.get(orderRequest.id) ?? [] });
 });
 
 // Order Review panel's live bid/ask/IV/Greeks (streaming since 2026-08-27,

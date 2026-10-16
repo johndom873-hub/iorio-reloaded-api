@@ -1,6 +1,7 @@
 import { db } from "../db/connection.js";
 import { assignmentDayCloseJoinSql, buildCycleInputFromRows, settlementCloseSelectSql, type CycleInputRows } from "./cycleInputRows.js";
 import { deriveCycles, type Cycle, type CycleInput } from "./cycles.js";
+import { fetchStockAcquisitionByPositionId } from "./stockLegAcquisitionFills.js";
 
 export interface SymbolCycles {
   symbol: string;
@@ -40,6 +41,10 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
               pl.exit_price::float AS "exitPrice", pl.exit_at AS "exitAt", pl.expiry_date::text AS "expiryDate",
               COALESCE((SELECT SUM(tr.commission) FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade), 0)::float AS "closingCommission",
               EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade) AS "hasClosingTrade",
+              (SELECT (SUM(tr.price * tr.quantity) / NULLIF(SUM(tr.quantity), 0))::float FROM trades tr WHERE tr.position_leg_id = COALESCE(pl.parent_leg_id, pl.id) AND NOT tr.is_closing_trade) AS "openingFillPrice",
+              (SELECT COUNT(*)::int FROM trades tr WHERE tr.position_leg_id = COALESCE(pl.parent_leg_id, pl.id) AND NOT tr.is_closing_trade) AS "openingFillCount",
+              (SELECT (SUM(COALESCE(tr.commission, 0)) / NULLIF(SUM(tr.quantity), 0) * pl.quantity)::float FROM trades tr WHERE tr.position_leg_id = COALESCE(pl.parent_leg_id, pl.id) AND NOT tr.is_closing_trade) AS "openingCommission",
+              (SELECT (SUM(tr.price * tr.quantity) / NULLIF(SUM(tr.quantity), 0))::float FROM trades tr WHERE tr.position_leg_id = pl.id AND tr.is_closing_trade) AS "closingFillPrice",
               ${settlementCloseSelectSql}
        FROM position_legs pl JOIN positions p ON p.id = pl.position_id
        LEFT JOIN daily_price_bars b ON b.ticker_id = p.ticker_id AND b.trading_date = pl.expiry_date
@@ -74,7 +79,12 @@ export async function loadCycleInputsForTickers(tickerIds: string[] | "all"): Pr
     db.raw(`SELECT DISTINCT p.ticker_id AS "tickerId", t.symbol FROM positions p JOIN tickers t ON t.id = p.ticker_id ${tickerIds === "all" ? "" : "WHERE p.ticker_id = ANY(?)"}`, tickerIds === "all" ? [] : [tickerIds]),
   ]);
 
+  // What the shares behind each Covered Call were bought at, for its timeline rows' stock price.
+  const coveredCallPositionIds: string[] = [...new Set<string>(optionRows.rows.filter((row: any) => row.side === "short" && row.optionType === "call").map((row: any) => row.positionId as string))];
+  const stockCostPriceByPositionId = new Map([...(await fetchStockAcquisitionByPositionId(coveredCallPositionIds))].map(([positionId, acquisition]) => [positionId, acquisition.fillPrice]));
+
   const rows: CycleInputRows = {
+    stockCostPriceByPositionId,
     optionRows: optionRows.rows,
     stockLegRows: stockLegRows.rows,
     stockTradeRows: stockTradeRows.rows,

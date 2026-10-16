@@ -7,11 +7,14 @@
 // open on it, else by the Unstructured bucket. Handoffs are valued at the daily
 // close of the transition date; shares enter at their real cost (fill + commission,
 // or the strike for an assigned put) and leave at their real proceeds (fill − commission,
-// or the strike for a called-away call). Because every mark cancels between its two
-// ends, the buckets always add up to the cycle's real total (checked in tests).
+// or the strike for a called-away call); an assignment whose stock fill was recorded
+// adds that fill's commission to the cost, or takes it from the proceeds. Because every
+// mark cancels between its two ends, the buckets always add up to the cycle's real
+// total (checked in tests).
 //
 //   CSP bucket          = put premium (net of commissions) + on assignment
-//                         (expiry-date close − strike) x shares  [charged, usually negative]
+//                         (expiry-date close − strike) x shares − the assignment fill's
+//                         commission  [charged, usually negative]
 //   Unstructured bucket = stock P&L on shares with no call written (handed in at market)
 //   CC bucket           = call premium (net) + stock P&L on covered shares
 //                         (a Covered Call entry's covered shares start at their purchase price)
@@ -19,11 +22,15 @@
 //                         when they entered the bucket. Return = bucket total / capital.
 //
 // Ledger inputs are the same cash flows as cycleBreakEven.ts (trades fills, ITM-at-expiry
-// assignments from daily bars, option legs). A cycle whose ledger cannot be trusted is
-// returned with `dataFlags` set instead of guessed: a missing expiry bar, an expiry
-// within $0.05 of the strike, or ledger shares that disagree with the stock legs.
+// assignments from daily bars, option legs), with IBKR's recorded fill of an assignment
+// absorbed by the inferred assignment under the rule both share (assignmentFillMatching.ts).
+// A cycle whose ledger cannot be trusted is returned with `dataFlags` set instead of
+// guessed: a missing expiry bar, an expiry within $0.05 of the strike, or ledger shares
+// that disagree with the stock legs.
 
+import { matchAssignmentFills } from "./assignmentFillMatching.js";
 import { easternIsoDate } from "./easternIsoDate.js";
+import { formatTradePrice } from "./tradeMessageFormatting.js";
 
 export type CycleBucket = "csp" | "unstructured" | "cc" | "hedge";
 
@@ -50,6 +57,12 @@ export interface CycleOptionLeg {
    * so. Live leaves it unset, and the outcome is inferred from expiryClose (in the money by $0.05 or more = assigned).
    */
   settledAs?: OptionSettlementOutcome;
+  /** IBKR's opening fills of the leg, for the timeline: their average price, how many, and their commission. Absent: entryPrice. */
+  openingFillPrice?: number | null;
+  openingFillCount?: number;
+  openingCommission?: number | null;
+  /** Average price of the leg's closing fills. Absent: exitPrice. */
+  closingFillPrice?: number | null;
 }
 
 export type OptionSettlementOutcome = "assigned" | "worthless";
@@ -83,6 +96,8 @@ export interface CycleInput {
   openPositionMarkDate?: Map<string, string>;
   /** Open positions whose option mark could not be established (used by "as of" runs): the cycle is flagged instead of guessed at credit. */
   openPositionPremiumPnlUnavailable?: Set<string>;
+  /** What the shares behind each Covered Call position were bought at (stockLegAcquisitionFills.ts), for its rows' stock price. */
+  stockCostPriceByPositionId?: Map<string, number>;
 }
 
 export interface BucketResult {
@@ -91,6 +106,9 @@ export interface BucketResult {
   total: number;
   capital: number;
 }
+
+/** Where a timeline row's stock price comes from: an IBKR execution (a fill, an assignment at the strike), or a market close. */
+export type CycleStockPriceSource = "execution" | "close";
 
 export interface CycleTimelineRow {
   at: Date | null; // null = mark row of what is still open (dated by markDate)
@@ -105,8 +123,15 @@ export interface CycleTimelineRow {
   strike: number | null;
   /** Option expiry ("YYYY-MM-DD"); null for stock rows, and for a mark row whose open legs expire on different dates. */
   expiryDate: string | null;
-  /** Underlying price: the real fill for a stock trade, else that date's daily close (the only stock price we store for option fills). */
+  /**
+   * The stock price that really traded behind the row (approved 2026-10-16): a stock fill; for a Covered Call's option rows,
+   * what the shares it covers were bought at; an assignment at its strike. A mark row (and a hand-over valued at the day's
+   * close) is the market close. Null where no shares are involved (a put sale).
+   */
   stockPrice: number | null;
+  stockPriceSource: CycleStockPriceSource | null;
+  /** Commission IBKR charged on the row's executions; null when none applies or none is recorded. */
+  commission: number | null;
   /** The purchase of a hedge option that is still held: its cost is not a realized loss, it belongs with the open mark (unrealized). */
   unrealized?: boolean;
   /** Mark rows only: the trading date ("YYYY-MM-DD") the mark is priced at (the close for shares, the snapshot for options). */
@@ -119,6 +144,8 @@ interface RowMeta {
   strike: number | null;
   expiryDate: string | null;
   stockPrice: number | null;
+  stockPriceSource: CycleStockPriceSource | null;
+  commission: number | null;
   unrealized?: boolean;
   markDate?: string;
 }
@@ -171,8 +198,9 @@ interface RawEvent {
   at: number;
   kind: "buy" | "sell" | "putAssigned" | "callAssigned" | "optionOpen" | "optionClose";
   shares: number;
-  price: number; // per share actual cost/proceeds incl. commission for buys/sells; strike for assignments
+  price: number; // per share actual cost/proceeds incl. commission for buys/sells; for assignments the strike, or the recorded assignment fill with its commission
   fillPrice?: number; // the raw stock fill, without commission
+  commission?: number | null; // the stock fill's commission, or the recorded assignment fill's
   leg?: CycleOptionLeg;
   expiryClose?: number | null;
 }
@@ -188,30 +216,28 @@ function settledAssigned(leg: CycleOptionLeg): boolean {
   return (leg.optionType === "call" ? leg.expiryClose - leg.strike : leg.strike - leg.expiryClose) >= marginalThreshold;
 }
 
-// IBKR reports a put assignment as a real stock buy at the strike, which the worker records as a trade, while the
-// ledger already infers the same assignment from the expired-ITM option leg (putAssigned). Counting both doubles
-// the shares, so the trade is dropped when it matches an inferred assignment: same share count, price equal to the
-// strike, and executed within assignmentFillWindowMs of the leg's exit. Each put leg absorbs at most one fill.
-const assignmentFillWindowMs = 36 * 3_600_000;
+// IBKR reports an assignment as a real stock execution at the strike (a put's shares bought, a call's shares sold), which
+// the worker records as a trade, while the ledger already infers the same assignment from the option leg that settled in
+// the money (putAssigned, callAssigned). Counting both doubles the shares moved, so a fill that matches an inferred
+// assignment (assignmentFillMatching.ts) is absorbed by it: the fill leaves the trades, and the assignment keeps its own
+// rows and bucket but takes the fill's price and commission. Matched over the whole input, not per cycle: a call-away's
+// sale can be executed after the cycle it closes has ended. Kept per trade list, as the windows are per leg list.
+interface AssignmentFills {
+  fillByLegId: Map<string, CycleStockTrade>;
+  absorbedFills: Set<CycleStockTrade>;
+}
 
-function dropInferredAssignmentFills(stockTrades: CycleStockTrade[], optionLegs: CycleOptionLeg[]): CycleStockTrade[] {
-  const absorbingLegIds = new Set<string>();
-  return stockTrades.filter((trade) => {
-    if (trade.side !== "buy") return true;
-    const assignedLeg = optionLegs.find(
-      (leg) =>
-        !absorbingLegIds.has(leg.id) &&
-        leg.optionType === "put" &&
-        isSettledWithoutTrade(leg) &&
-        settledAssigned(leg) &&
-        trade.quantity === leg.quantity * leg.multiplier &&
-        Math.abs(trade.price - leg.strike) < 0.00005 &&
-        Math.abs(trade.at.getTime() - leg.exitAt!.getTime()) <= assignmentFillWindowMs,
-    );
-    if (!assignedLeg) return true;
-    absorbingLegIds.add(assignedLeg.id);
-    return false;
-  });
+const assignmentFillsByStockTrades = new WeakMap<readonly CycleStockTrade[], { optionLegs: readonly CycleOptionLeg[]; optionLegCount: number; stockTradeCount: number; fills: AssignmentFills }>();
+
+function assignmentFillsOf(input: CycleInput): AssignmentFills {
+  const kept = assignmentFillsByStockTrades.get(input.stockTrades);
+  if (kept && kept.optionLegs === input.optionLegs && kept.optionLegCount === input.optionLegs.length && kept.stockTradeCount === input.stockTrades.length) return kept.fills;
+  const assignedLegs = input.optionLegs.filter((leg) => isSettledWithoutTrade(leg) && settledAssigned(leg));
+  const fillByLegId = new Map<string, CycleStockTrade>();
+  for (const [legId, fillIndex] of matchAssignmentFills(assignedLegs, input.stockTrades)) fillByLegId.set(legId, input.stockTrades[fillIndex]!);
+  const fills: AssignmentFills = { fillByLegId, absorbedFills: new Set(fillByLegId.values()) };
+  assignmentFillsByStockTrades.set(input.stockTrades, { optionLegs: input.optionLegs, optionLegCount: input.optionLegs.length, stockTradeCount: input.stockTrades.length, fills });
+  return fills;
 }
 
 export function deriveCycles(input: CycleInput): Cycle[] {
@@ -306,9 +332,9 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
   const { dailyCloses, lastPrice, openPositionPremiumPnl, openPositionMarkDate, openPositionPremiumPnlUnavailable } = input;
   const inWindow = (at: number) => at >= window.start && (window.end === null || at <= window.end + groupingWindowMs);
   const optionLegs = input.optionLegs.filter((leg) => inWindow(leg.entryAt.getTime()));
-  const stockTrades = dropInferredAssignmentFills(
-    input.stockTrades.filter((trade) => trade.at.getTime() >= window.start - fillLookbackMs && (window.end === null || trade.at.getTime() <= window.end + groupingWindowMs)),
-    optionLegs,
+  const { fillByLegId, absorbedFills } = assignmentFillsOf(input);
+  const stockTrades = input.stockTrades.filter(
+    (trade) => !absorbedFills.has(trade) && trade.at.getTime() >= window.start - fillLookbackMs && (window.end === null || trade.at.getTime() <= window.end + groupingWindowMs),
   );
   const dataFlags: string[] = [];
 
@@ -316,13 +342,19 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
   const events: RawEvent[] = [];
   for (const trade of stockTrades) {
     const perShare = trade.side === "buy" ? (trade.quantity * trade.price + trade.commission) / trade.quantity : (trade.quantity * trade.price - trade.commission) / trade.quantity;
-    events.push({ at: trade.at.getTime(), kind: trade.side === "buy" ? "buy" : "sell", shares: trade.quantity, price: perShare, fillPrice: trade.price });
+    events.push({ at: trade.at.getTime(), kind: trade.side === "buy" ? "buy" : "sell", shares: trade.quantity, price: perShare, fillPrice: trade.price, commission: trade.commission });
   }
   for (const leg of optionLegs) {
     events.push({ at: leg.entryAt.getTime(), kind: "optionOpen", shares: leg.quantity * leg.multiplier, price: 0, leg });
     if (leg.exitAt === null) continue;
     if (isSettledWithoutTrade(leg)) {
-      const assignedEvent = (): RawEvent => ({ at: leg.exitAt!.getTime(), kind: leg.optionType === "put" ? "putAssigned" : "callAssigned", shares: leg.quantity * leg.multiplier, price: leg.strike, leg, expiryClose: leg.expiryClose });
+      const assignedEvent = (): RawEvent => {
+        const shares = leg.quantity * leg.multiplier;
+        const fill = fillByLegId.get(leg.id);
+        // With its recorded fill: a put's shares cost the fill plus its commission, a call-away's proceeds are the fill less it.
+        const pricePerShare = fill === undefined ? leg.strike : fill.price + (leg.optionType === "put" ? fill.commission : -fill.commission) / shares;
+        return { at: leg.exitAt!.getTime(), kind: leg.optionType === "put" ? "putAssigned" : "callAssigned", shares, price: pricePerShare, leg, expiryClose: leg.expiryClose, commission: fill?.commission ?? null };
+      };
       if (leg.settledAs === "worthless") {
         // Settled worthless by the book's own rule: no shares moved, whatever the bar says.
       } else if (leg.expiryClose === null) {
@@ -386,8 +418,8 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
             0,
             stockPnl,
             event.kind === "sell"
-              ? { instrument: "stock", quantity: taken, strike: null, expiryDate: null, stockPrice: event.fillPrice ?? event.price }
-              : { instrument: "option", quantity: taken, strike: event.price, expiryDate: event.leg!.expiryDate, stockPrice: event.expiryClose ?? null },
+              ? { instrument: "stock", quantity: taken, strike: null, expiryDate: null, stockPrice: event.fillPrice ?? event.price, stockPriceSource: "execution", commission: event.commission ?? null }
+              : { instrument: "option", quantity: taken, strike: event.leg!.strike, expiryDate: event.leg!.expiryDate, stockPrice: event.leg!.strike, stockPriceSource: "execution", commission: event.commission ?? null },
           );
           pools[pool].shares -= taken;
           remaining -= taken;
@@ -405,7 +437,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       for (const event of acquisitions) {
         if (event.kind === "putAssigned") {
           const marketPrice = event.expiryClose!;
-          addRow(event.at, "Put assigned: shares bought at the strike", "csp", 0, event.shares * (marketPrice - event.price), { instrument: "option", quantity: event.shares, strike: event.price, expiryDate: event.leg!.expiryDate, stockPrice: marketPrice });
+          addRow(event.at, "Put assigned: shares bought at the strike", "csp", 0, event.shares * (marketPrice - event.price), { instrument: "option", quantity: event.shares, strike: event.leg!.strike, expiryDate: event.leg!.expiryDate, stockPrice: event.leg!.strike, stockPriceSource: "execution", commission: event.commission ?? null });
           enterPool("unstructured", event.shares, marketPrice);
         } else {
           enterPool("unstructured", event.shares, event.price);
@@ -434,19 +466,24 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       const bucket = optionLegBucket(leg);
       const sign = leg.side === "short" ? 1 : -1;
       const contractShares = leg.quantity * leg.multiplier;
-      const optionMeta: RowMeta = { instrument: "option", quantity: contractShares, strike: leg.strike, expiryDate: leg.expiryDate, stockPrice: closeFor(event.at) };
+      // A Covered Call's rows show what the shares it covers were bought at; a put or a hedge has no shares behind it.
+      const coveredSharesPrice = leg.optionType === "call" && leg.side === "short" ? (input.stockCostPriceByPositionId?.get(leg.positionId) ?? null) : null;
+      const optionMeta: RowMeta = { instrument: "option", quantity: contractShares, strike: leg.strike, expiryDate: leg.expiryDate, stockPrice: coveredSharesPrice, stockPriceSource: coveredSharesPrice === null ? null : "execution", commission: null };
       if (event.kind === "optionOpen" && leg.side === "long" && leg.exitAt === null) optionMeta.unrealized = true;
       if (event.kind === "optionOpen") {
         const credit = sign * leg.entryPrice * contractShares;
         netPremium += credit;
-        addRow(event.at, `${sign === 1 ? "Sold" : "Bought"} ${leg.optionType} @ ${leg.entryPrice.toFixed(2)}`, bucket, credit, 0, optionMeta);
+        const fillCountNote = (leg.openingFillCount ?? 0) > 1 ? ` · ${leg.openingFillCount} fills` : "";
+        addRow(event.at, `${sign === 1 ? "Sold" : "Bought"} ${leg.optionType} @ ${leg.openingFillPrice != null ? formatTradePrice(leg.openingFillPrice) : leg.entryPrice.toFixed(2)}${fillCountNote}`, bucket, credit, 0, { ...optionMeta, commission: leg.openingCommission ?? null });
         if (leg.side === "long") buckets.hedge.capital += leg.entryPrice * contractShares; // a hedge risks the premium it cost
         else if (leg.optionType === "put") buckets.csp.capital += leg.strike * contractShares;
         if (leg.optionType === "call" && leg.side === "short") openCallShares += contractShares;
       } else {
         const debit = leg.exitPrice === null ? 0 : -sign * leg.exitPrice * contractShares - leg.closingCommission;
         netPremium += debit;
-        if (leg.exitPrice !== null && (debit !== 0 || leg.closingCommission !== 0)) addRow(event.at, `Bought back ${leg.optionType} @ ${leg.exitPrice.toFixed(2)}`, bucket, debit, 0, optionMeta);
+        if (leg.exitPrice !== null && (debit !== 0 || leg.closingCommission !== 0)) {
+          addRow(event.at, `${sign === 1 ? "Bought back" : "Sold"} ${leg.optionType} @ ${leg.closingFillPrice != null ? formatTradePrice(leg.closingFillPrice) : leg.exitPrice.toFixed(2)}`, bucket, debit, 0, { ...optionMeta, commission: leg.closingCommission });
+        }
         if (leg.optionType === "call" && leg.side === "short") openCallShares -= contractShares;
       }
     }
@@ -463,14 +500,14 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
       const useCost = delta > 0 && purchaseAverage !== null && pools.unstructured.shares - purchasedShares < moved; // moving newly bought shares
       const handoffPrice = useCost ? purchaseAverage! : closeFor(at) ?? pools[from].ref;
       const realized = moved * (handoffPrice - pools[from].ref);
-      if (realized !== 0) addRow(at, `Shares handed ${from === "unstructured" ? "to CC" : "to Unstructured"}`, from === "cc" ? "cc" : "unstructured", 0, realized, { instrument: "stock", quantity: moved, strike: null, expiryDate: null, stockPrice: handoffPrice });
+      if (realized !== 0) addRow(at, `Shares handed ${from === "unstructured" ? "to CC" : "to Unstructured"}`, from === "cc" ? "cc" : "unstructured", 0, realized, { instrument: "stock", quantity: moved, strike: null, expiryDate: null, stockPrice: handoffPrice, stockPriceSource: useCost ? "execution" : "close", commission: null });
       pools[from].shares -= moved;
       enterPool(to, moved, handoffPrice);
     }
 
     // Shares bought: a row so the acquisition shows up (P&L starts at zero); owned by CC when a call covers them right away.
     for (const buy of groupBuys) {
-      addRow(buy.at, "Bought shares", pools.cc.shares > 0 ? "cc" : "unstructured", 0, 0, { instrument: "stock", quantity: buy.shares, strike: null, expiryDate: null, stockPrice: buy.fillPrice ?? buy.price });
+      addRow(buy.at, "Bought shares", pools.cc.shares > 0 ? "cc" : "unstructured", 0, 0, { instrument: "stock", quantity: buy.shares, strike: null, expiryDate: null, stockPrice: buy.fillPrice ?? buy.price, stockPriceSource: "execution", commission: buy.commission ?? null });
     }
 
     // Capital = value of shares when they entered a bucket (net of anything that left in the same step).
@@ -488,7 +525,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
     if (lastPrice === null) dataFlags.push("no price to mark the shares still held");
     else {
       for (const pool of ["cc", "unstructured"] as const) {
-        if (pools[pool].shares > 0) addRow(null, `Marked to the ${lastPrice.date} close`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref), { instrument: "stock", quantity: pools[pool].shares, strike: null, expiryDate: null, stockPrice: lastPrice.price, markDate: lastPrice.date });
+        if (pools[pool].shares > 0) addRow(null, `Marked to the ${lastPrice.date} close`, pool === "cc" ? "cc" : "unstructured", 0, pools[pool].shares * (lastPrice.price - pools[pool].ref), { instrument: "stock", quantity: pools[pool].shares, strike: null, expiryDate: null, stockPrice: lastPrice.price, stockPriceSource: "close", commission: null, markDate: lastPrice.date });
       }
     }
   }
@@ -522,6 +559,8 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
         expiryDate,
         // The close of the snapshot's own day, so the price and the mark always describe the same day.
         stockPrice: markDate === undefined ? lastPrice?.price ?? null : dailyCloses.get(markDate) ?? null,
+        stockPriceSource: "close",
+        commission: null,
         ...(markDate === undefined ? {} : { markDate }),
       });
     }

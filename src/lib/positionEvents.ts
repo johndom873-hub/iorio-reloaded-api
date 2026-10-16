@@ -17,8 +17,34 @@ export function mergeSlicedLegsForOpenedEvent(legs: PositionEventLeg[]): Positio
     }
     merged.quantity += leg.quantity;
     if (merged.exitPrice !== leg.exitPrice) merged.exitPrice = null;
+    merged.openingFill = mergeOpeningFills(merged.openingFill ?? null, leg.openingFill ?? null);
   }
   return [...mergedByContract.values()];
+}
+
+/** Two slices' opening fills as one: quantities added, prices averaged by quantity, commissions added (unknown if either is). */
+function mergeOpeningFills(first: PositionEventOpeningFill | null, second: PositionEventOpeningFill | null): PositionEventOpeningFill | null {
+  if (first === null || second === null) return first ?? second;
+  const quantity = first.quantity + second.quantity;
+  return {
+    quantity,
+    averagePrice: (first.averagePrice * first.quantity + second.averagePrice * second.quantity) / quantity,
+    commission: first.commission === null || second.commission === null ? null : first.commission + second.commission,
+  };
+}
+
+/** A leg's own opening fills (its non-closing trades): their quantity, quantity-weighted average price and total commission. */
+export interface PositionEventOpeningFill {
+  quantity: number;
+  averagePrice: number;
+  /** Null when IBKR has not reported the commission of every one of them. */
+  commission: number | null;
+}
+
+/** A position on the other end of a share hand-over (position_share_sources). */
+export interface ShareHandOverPosition {
+  positionId: string;
+  strategyKey: string;
 }
 
 // Reconstructs a human-readable position lifecycle feed from data that's
@@ -68,6 +94,10 @@ export interface PositionEvent {
   // placed outside the app) is null — an honest gap, not a guess. Genosuke acts as a real
   // users row, so bot-initiated trades attribute through the same joins.
   attributedTo: string | null;
+  /** The positions whose shares this one took over (an assigned put, an expired covered call's leftover stock…). */
+  sharesCarriedFromPositions: ShareHandOverPosition[];
+  /** The positions this one's shares moved to when it closed (see sharesHandedOn). */
+  sharesMovedToPositions: ShareHandOverPosition[];
   legs: {
     legType: "stock" | "option";
     side: "long" | "short";
@@ -79,6 +109,8 @@ export interface PositionEvent {
     exitPrice: number | null;
     /** Long stock closed at its entry price with no closing trade: the shares went to the next position, never sold. */
     sharesHandedOn?: boolean;
+    /** Null when the leg has no opening trade recorded: shares carried over from another position, or a leg recorded without one. */
+    openingFill?: PositionEventOpeningFill | null;
   }[];
 }
 
@@ -106,6 +138,10 @@ interface LegRow {
   exitAt: string | null;
   closingCommission: string | number;
   hasClosingTrade: boolean;
+  openingFillQuantity: string | number;
+  openingFillNotional: string | number | null;
+  openingFillCommission: string | number | null;
+  openingFillCommissionKnown: boolean | null;
 }
 
 // sinceDays scopes the feed to recent activity (approved 2026-08-28,
@@ -201,7 +237,24 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
       // Approved 2026-09-19: realized P&L is net of closing-trade commissions (see legRealizedPnlSql.ts).
       db.raw('COALESCE((SELECT SUM(tr.commission) FROM trades tr WHERE tr.position_leg_id = position_legs.id AND tr.is_closing_trade), 0) AS "closingCommission"'),
       db.raw('EXISTS (SELECT 1 FROM trades tr WHERE tr.position_leg_id = position_legs.id AND tr.is_closing_trade) AS "hasClosingTrade"'),
+      db.raw('COALESCE((SELECT SUM(tr.quantity) FROM trades tr WHERE tr.position_leg_id = position_legs.id AND NOT tr.is_closing_trade), 0) AS "openingFillQuantity"'),
+      db.raw('(SELECT SUM(tr.price * tr.quantity) FROM trades tr WHERE tr.position_leg_id = position_legs.id AND NOT tr.is_closing_trade) AS "openingFillNotional"'),
+      db.raw('(SELECT SUM(tr.commission) FROM trades tr WHERE tr.position_leg_id = position_legs.id AND NOT tr.is_closing_trade) AS "openingFillCommission"'),
+      db.raw('(SELECT BOOL_AND(tr.commission IS NOT NULL) FROM trades tr WHERE tr.position_leg_id = position_legs.id AND NOT tr.is_closing_trade) AS "openingFillCommissionKnown"'),
     );
+
+  const shareHandOvers: { positionId: string; sourcePositionId: string; positionStrategyKey: string; sourceStrategyKey: string }[] = await db("position_share_sources as pss")
+    .join("positions as receiver", "receiver.id", "pss.position_id")
+    .join("positions as source", "source.id", "pss.source_position_id")
+    .where((builder) => builder.whereIn("pss.position_id", positionIds).orWhereIn("pss.source_position_id", positionIds))
+    .orderBy("pss.created_at", "asc")
+    .select("pss.position_id as positionId", "pss.source_position_id as sourcePositionId", "receiver.strategy_key as positionStrategyKey", "source.strategy_key as sourceStrategyKey");
+  const sharesCarriedFromByPositionId = new Map<string, ShareHandOverPosition[]>();
+  const sharesMovedToByPositionId = new Map<string, ShareHandOverPosition[]>();
+  for (const handOver of shareHandOvers) {
+    sharesCarriedFromByPositionId.set(handOver.positionId, [...(sharesCarriedFromByPositionId.get(handOver.positionId) ?? []), { positionId: handOver.sourcePositionId, strategyKey: handOver.sourceStrategyKey }]);
+    sharesMovedToByPositionId.set(handOver.sourcePositionId, [...(sharesMovedToByPositionId.get(handOver.sourcePositionId) ?? []), { positionId: handOver.positionId, strategyKey: handOver.positionStrategyKey }]);
+  }
 
   const legsByPositionId = new Map<string, LegRow[]>();
   for (const leg of legs) {
@@ -220,9 +273,19 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
       expiryDate: leg.expiryDate,
       entryPrice: Number(leg.entryPrice),
       exitPrice: leg.exitPrice === null ? null : Number(leg.exitPrice),
-      sharesHandedOn:
-        leg.legType === "stock" && leg.side === "long" && leg.exitAt !== null && !leg.hasClosingTrade && leg.exitPrice !== null && Number(leg.exitPrice) === Number(leg.entryPrice),
+      sharesHandedOn: isHandedOnLeg(leg),
+      openingFill: openingFillOf(leg),
     }));
+  }
+
+  function openingFillOf(leg: LegRow): PositionEventOpeningFill | null {
+    const quantity = Number(leg.openingFillQuantity);
+    if (!(quantity > 0) || leg.openingFillNotional === null) return null;
+    return {
+      quantity,
+      averagePrice: Number(leg.openingFillNotional) / quantity,
+      commission: leg.openingFillCommissionKnown && leg.openingFillCommission !== null ? Number(leg.openingFillCommission) : null,
+    };
   }
 
   // null (not a possibly-wrong partial sum) when any leg exited without a
@@ -256,11 +319,18 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
   // sum-across-legs formula already handles a stock-only leftover position
   // (quantity × price) and the rare naked-call anomaly without any extra
   // cases; it was excluded before only because no one had asked for it yet.
+  // Long stock closed at its entry price with no closing trade: moved to another position, never sold.
+  function isHandedOnLeg(leg: LegRow): boolean {
+    return leg.legType === "stock" && leg.side === "long" && leg.exitAt !== null && !leg.hasClosingTrade && leg.exitPrice !== null && Number(leg.exitPrice) === Number(leg.entryPrice);
+  }
+
+  // At a close, shares that moved to another position were not part of the transaction, so they add no value.
   function fullMarketValueFor(positionLegs: LegRow[], strategyKey: string, atClose: boolean): number | null {
     if (strategyKey !== "covered_call" && strategyKey !== "cash_secured_put" && strategyKey !== "unstructured" && strategyKey !== "hedge") return null;
     if (atClose && positionLegs.some((leg) => leg.exitPrice === null)) return null;
 
     return positionLegs.reduce((sum, leg) => {
+      if (atClose && isHandedOnLeg(leg)) return sum;
       const price = atClose ? Number(leg.exitPrice) : Number(leg.entryPrice);
       const sign = leg.side === "short" ? -1 : 1;
       let value = price * leg.quantity * leg.multiplier * sign;
@@ -304,6 +374,8 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
         netCashEffect: isUnstructured ? null : netCashEffectFor(positionLegs),
         fullMarketValue: fullMarketValueFor(positionLegs, position.strategyKey, false),
         attributedTo: openAttributionByPositionId.get(position.id) ?? null,
+        sharesCarriedFromPositions: sharesCarriedFromByPositionId.get(position.id) ?? [],
+        sharesMovedToPositions: sharesMovedToByPositionId.get(position.id) ?? [],
         legs: mergeSlicedLegsForOpenedEvent(legSummaries(positionLegs)),
       });
     }
@@ -322,6 +394,8 @@ async function buildPositionEvents(positions: PositionRow[], options: { includeC
         netCashEffect: null,
         fullMarketValue: fullMarketValueFor(positionLegs, position.strategyKey, true),
         attributedTo: closeAttributionByPositionId.get(position.id) ?? null,
+        sharesCarriedFromPositions: sharesCarriedFromByPositionId.get(position.id) ?? [],
+        sharesMovedToPositions: sharesMovedToByPositionId.get(position.id) ?? [],
         legs: legSummaries(positionLegs),
       });
     }

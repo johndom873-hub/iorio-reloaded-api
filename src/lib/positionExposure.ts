@@ -6,7 +6,8 @@ import { dedupeInFlight } from "./dedupeInFlight.js";
 import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 
 // Position "exposure"/"value" = full market value across every open leg
-// (stock + option together), option legs priced as a liability — the
+// (stock + option together), option legs priced as a liability at their
+// mark (bid/ask mid, else last: optionMarkPrice via pricePool.ts) — the
 // platform-wide valuation standard (decided 2026-08-28, see
 // project_position_valuation_full_market_value memory). Single source of
 // truth shared by riskLimits.ts (concentration/allocation limits) and
@@ -150,7 +151,7 @@ export function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegR
 }
 
 // The one-shot exposures (Dashboard, Risk & Limits) stop waiting this long after the last leg price arrived: a leg that
-// never ticks (no last trade at all) is valued at its entry price either way, and used to hold them to the 6 s ceiling.
+// never gets a price (no last trade, nor an option's two-sided quote) is valued at its entry price either way, and used to hold them to the 6 s ceiling.
 // A grace after the latest arrival, not a flat cap, so a slow leg that is still pricing is not cut off.
 const exposurePriceSettleGraceMs = 1_000;
 

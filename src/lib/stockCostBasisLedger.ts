@@ -17,7 +17,7 @@ import { db } from "../db/connection.js";
 export const costBasisMatchTolerancePerShare = 0.015;
 const assignmentFillWindowMs = 36 * 3_600_000;
 const strikeMatchTolerance = 0.00005;
-const entryPriceDecimals = 4;
+const entryPriceDecimals = 8;
 const recentPutSettlementDays = 7;
 
 export interface LedgerStockTrade {

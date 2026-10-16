@@ -31,6 +31,11 @@ export interface CycleOptionLegRow {
   settledAs?: OptionSettlementOutcome;
   /** IBKR assigned the leg before its expiry date (assignedBeforeExpirySql): it settles as assigned, on that day's close. */
   assignedBeforeExpiry?: boolean;
+  /** The timeline's figures from the leg's fills: selected by the cycle loader only (see CycleOptionLeg). */
+  openingFillPrice?: number | null;
+  openingFillCount?: number;
+  openingCommission?: number | null;
+  closingFillPrice?: number | null;
 }
 
 // An early assignment settles the cycle on the assignment date (Marcelo 2026-10-15): a short leg that left before its
@@ -65,6 +70,8 @@ export interface CycleStockTradeRow {
   quantity: number;
   price: number;
   commission: number;
+  /** The position whose stock leg holds the fill: selected by the break-even loader only. */
+  positionId?: string;
 }
 
 export interface CycleDailyCloseRow {
@@ -84,6 +91,8 @@ export interface CycleInputRows {
   openPositionPremiumPnl: Map<string, number>;
   /** The snapshot date of each openPositionPremiumPnl mark, by position id. */
   openPositionMarkDate?: Map<string, string>;
+  /** What the shares behind each Covered Call position were bought at (stockLegAcquisitionFills.ts). */
+  stockCostPriceByPositionId?: Map<string, number>;
 }
 
 function optionLegsOfTicker<Row extends CycleOptionLegRow>(rows: readonly Row[], tickerId: string) {
@@ -93,7 +102,9 @@ function optionLegsOfTicker<Row extends CycleOptionLegRow>(rows: readonly Row[],
 }
 
 function stockTradesOfTicker(rows: readonly CycleStockTradeRow[], tickerId: string): CycleStockTrade[] {
-  return rows.filter((row) => row.tickerId === tickerId).map((row) => ({ at: new Date(row.at), side: row.side, quantity: row.quantity, price: row.price, commission: row.commission }));
+  return rows
+    .filter((row) => row.tickerId === tickerId)
+    .map((row) => ({ at: new Date(row.at), side: row.side, quantity: row.quantity, price: row.price, commission: row.commission, ...(row.positionId === undefined ? {} : { positionId: row.positionId }) }));
 }
 
 /** One ticker's CycleInput (deriveCycles) from the loader's rows of any number of tickers. */
@@ -108,11 +119,20 @@ export function buildCycleInputFromRows(tickerId: string, rows: CycleInputRows):
   const stockLegs: CycleStockLeg[] = rows.stockLegRows
     .filter((row) => row.tickerId === tickerId)
     .map((row) => ({ positionId: row.positionId, quantity: row.quantity, entryAt: new Date(row.entryAt), exitAt: row.exitAt === null ? null : new Date(row.exitAt) }));
-  return { optionLegs, stockLegs, stockTrades: stockTradesOfTicker(rows.stockTradeRows, tickerId), dailyCloses, lastPrice, openPositionPremiumPnl: rows.openPositionPremiumPnl, openPositionMarkDate: rows.openPositionMarkDate };
+  return {
+    optionLegs,
+    stockLegs,
+    stockTrades: stockTradesOfTicker(rows.stockTradeRows, tickerId),
+    dailyCloses,
+    lastPrice,
+    openPositionPremiumPnl: rows.openPositionPremiumPnl,
+    openPositionMarkDate: rows.openPositionMarkDate,
+    ...(rows.stockCostPriceByPositionId === undefined ? {} : { stockCostPriceByPositionId: rows.stockCostPriceByPositionId }),
+  };
 }
 
 export interface OpenCycleSummaryRows {
-  /** The ticker's SHORT option legs, with positionCloseReason. */
+  /** The ticker's option legs (long ones only bound the cycle; see summarizeOpenCycle), with positionCloseReason. */
   optionRows: readonly (CycleOptionLegRow & { positionCloseReason: string | null })[];
   stockTradeRows: readonly CycleStockTradeRow[];
   /** Shares in the ticker's open long stock legs. */

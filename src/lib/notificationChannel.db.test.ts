@@ -15,6 +15,7 @@ const testDb: Knex = db;
 
 let userId: string;
 const createdOrderIds: string[] = [];
+const createdTickerIds: string[] = [];
 
 async function persistedPayloads(): Promise<unknown[]> {
   return (await testDb("notification_events").orderBy("occurred_at", "asc").select("payload")).map((row) => row.payload);
@@ -46,7 +47,11 @@ afterEach(() => {
 
 afterAll(async () => {
   await testDb("notification_events").del();
+  await testDb("trades").whereIn("source_order_request_id", createdOrderIds).del();
   await testDb("order_requests").whereIn("id", createdOrderIds).del();
+  await testDb("position_legs").whereIn("position_id", testDb("positions").select("id").whereIn("ticker_id", createdTickerIds)).del();
+  await testDb("positions").whereIn("ticker_id", createdTickerIds).del();
+  await testDb("tickers").whereIn("id", createdTickerIds).del();
   await testDb("users").where({ id: userId }).del();
   await testDb.destroy();
 });
@@ -118,6 +123,38 @@ describe("fetchRecentNotificationEventsWithOrders", () => {
     expect(events[1]!.notification).toMatchObject({ type: "job_completed" });
     expect("order" in events[1]!).toBe(false);
     expect(events[2]).toMatchObject({ notification: { orderId: filledOrderId }, order: { status: "filled", cancellationReason: null } });
+  });
+
+  it("attaches what has filled of each payload leg with its average fill price, and an empty list for a payload with no legs", async () => {
+    const symbol = `NCF${Date.now() % 100_000}`;
+    const [ticker] = await testDb("tickers").insert({ symbol, company_name: "Notification Fill Co", sector: "Technology" }).returning(["id"]);
+    createdTickerIds.push(ticker.id);
+    const [position] = await testDb("positions").insert({ strategy_key: "covered_call", ticker_id: ticker.id, status: "open", opened_at: new Date() }).returning(["id"]);
+    const [callLeg] = await testDb("position_legs")
+      .insert({ position_id: position.id, leg_type: "option", side: "short", quantity: 2, multiplier: 100, option_type: "call", strike_price: 95, expiry_date: "2031-01-17", entry_price: 1.2, entry_at: new Date() })
+      .returning(["id"]);
+    const [order] = await testDb("order_requests")
+      .insert({
+        requested_by_user_id: userId,
+        request_type: "open_covered_call",
+        status: "filled",
+        payload: JSON.stringify({ symbol, strategyKey: "covered_call", legs: [{ role: "option", action: "SELL", symbol, quantity: 2, unitPrice: 1.2, strike: 95, expiry: "20310117", right: "C" }] }),
+      })
+      .returning(["id"]);
+    createdOrderIds.push(order.id);
+    await testDb("trades").insert([
+      { position_leg_id: callLeg.id, ibkr_order_id: "1", ibkr_exec_id: `nc-fill-${order.id}-a`, side: "sell", quantity: 1, price: 1.25, executed_at: new Date(), is_closing_trade: false, source_order_request_id: order.id },
+      { position_leg_id: callLeg.id, ibkr_order_id: "1", ibkr_exec_id: `nc-fill-${order.id}-b`, side: "sell", quantity: 1, price: 1.2, executed_at: new Date(), is_closing_trade: false, source_order_request_id: order.id },
+    ]);
+    const legLessOrderId = await createOrder("cancelled");
+    await insertEvent({ type: "order_status", orderId: order.id }, minutesAgo(2));
+    await insertEvent({ type: "order_status", orderId: legLessOrderId }, minutesAgo(1));
+
+    const [legLess, filled] = await channel.fetchRecentNotificationEventsWithOrders(10);
+    expect(legLess!.order!.legFills).toEqual([]);
+    expect(filled!.order!.legFills).toHaveLength(1);
+    expect(filled!.order!.legFills[0]!.filledQuantity).toBe(2);
+    expect(filled!.order!.legFills[0]!.averageFillPrice).toBeCloseTo(1.225, 10);
   });
 
   it("collapses several status changes of one order into its newest event, still returning up to the limit", async () => {

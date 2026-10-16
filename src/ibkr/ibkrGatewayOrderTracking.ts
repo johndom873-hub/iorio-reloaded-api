@@ -11,10 +11,22 @@ interface SourceOrderRequest {
   requestType: string;
   payload: Partial<OrderRequestPayload>;
 }
+
+/** The position_legs columns fill attribution reads. */
+interface FillLegRow {
+  id: string;
+  position_id: string;
+  side: "long" | "short";
+  quantity: number;
+}
+
+/** Where an execution is written: an open leg, a leg the reconciliation already closed, or the buffer until its leg exists. */
+type FillDestination = ({ kind: "open"; leg: FillLegRow } | { kind: "closed"; leg: FillLegRow } | { kind: "wait" }) & { assignedOptionLegIds?: string[] };
 import { parseIbkrExecutionTime } from "./ibkrGatewayParseExecutionTime.js";
 import type { fetchIbkrCompletedOrders } from "./ibkrGatewayFetchCompletedOrders.js";
 import type { fetchIbkrOpenOrders } from "./ibkrGatewayFetchOpenOrders.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { exitFromClosingFills } from "../lib/partialCloseSlice.js";
 
 // How the worker follows an order after it is placed: IBKR's order-status and error events, the executions and commissions
 // that become the trades ledger, and the sweep that settles orders IBKR no longer lists. Kept apart from
@@ -247,8 +259,8 @@ export interface ExecutionRecordingDependencies {
  */
 export const openingFillReconciliationDelayMs = 3_000;
 
-/** How long after an option leg closed as expired an assignment fill at its strike is still matched to it. */
-export const assignmentMatchWindowMs = 36 * 3_600_000;
+/** How long after the reconciliation closed a leg a fill still counts as that leg's (an assignment's, or any late closing fill). */
+export const lateClosingFillWindowMs = 36 * 3_600_000;
 
 /** Most commission reports held while waiting for their trade row; the oldest is dropped beyond this. */
 export const maxPendingCommissions = 500;
@@ -326,61 +338,125 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
   }
 
   /**
-   * The open leg an execution belongs to, or null to buffer it until the reconciliation creates that leg. One stock
-   * contract can be open on several positions (covered calls on the same ticker), so the conId alone is not enough:
-   *   - a leg the order itself names (a close or a roll of a tracked leg) wins;
+   * Where an execution goes. One stock contract can be open on several positions (Covered Calls on the same ticker), so the
+   * conId alone is not enough:
+   *   - a leg the order itself names (a close or a roll of a tracked leg) wins, even one the reconciliation just closed;
    *   - shares bought by a covered-call order go to the position holding that order's call, or wait for it;
-   *   - an assignment (no app order, at a strike that has reached expiry) goes where assignmentStockLeg says;
-   *   - anything else (an order placed outside the app) keeps the oldest open leg of the contract.
+   *   - an assignment (no app order, at a short option's strike) goes where assignmentDestination says;
+   *   - anything else keeps the oldest open leg of the contract; with none open, a closing fill goes to the leg the
+   *     reconciliation closed when IBKR's holding went (lateClosingFillWindowMs), and an opening fill waits for its leg.
    */
-  async function legForExecution(conId: string, contract: Contract, execution: Execution, sourceOrder: SourceOrderRequest | null, receivedAt: Date) {
-    const openLegs = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").orderBy("entry_at", "asc").orderBy("id", "asc");
-    if (openLegs.length === 0) return null;
+  async function destinationForExecution(conId: string, contract: Contract, execution: Execution, sourceOrder: SourceOrderRequest | null, receivedAt: Date): Promise<FillDestination> {
+    const executedAt = executedAtOf(execution, receivedAt);
+    const openLegs: FillLegRow[] = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").orderBy("entry_at", "asc").orderBy("id", "asc");
+    const recentlyClosedLegs = (): Promise<FillLegRow[]> =>
+      db("position_legs")
+        .where({ ibkr_contract_id: conId, side: execution.side === "SLD" ? "long" : "short" })
+        .whereNotNull("exit_at")
+        .where("exit_at", ">=", new Date(executedAt.getTime() - lateClosingFillWindowMs))
+        .whereNotExists(db("trades as closing").whereRaw("closing.position_leg_id = position_legs.id").where("closing.is_closing_trade", true))
+        .orderBy("exit_at", "desc")
+        .orderBy("id", "asc");
 
     const namedLegIds = new Set((sourceOrder?.payload.legs ?? []).map((leg) => leg.positionLegId).filter((id): id is string => typeof id === "string"));
-    const namedLeg = openLegs.find((leg) => namedLegIds.has(leg.id));
-    if (namedLeg) return namedLeg;
+    const namedOpenLeg = openLegs.find((leg) => namedLegIds.has(leg.id));
+    if (namedOpenLeg) return { kind: "open", leg: namedOpenLeg };
+    if (namedLegIds.size > 0) {
+      const namedClosedLeg = (await recentlyClosedLegs()).find((leg) => namedLegIds.has(leg.id));
+      if (namedClosedLeg) return { kind: "closed", leg: namedClosedLeg };
+    }
 
     if (isCoveredCallShareBuy(contract, execution, sourceOrder)) {
-      const callOwner = await db("trades as tr")
-        .join("position_legs as option_leg", "option_leg.id", "tr.position_leg_id")
-        .where({ "tr.source_order_request_id": sourceOrder!.id, "option_leg.leg_type": "option" })
-        .first("option_leg.position_id as positionId");
-      return openLegs.find((leg) => leg.position_id === callOwner?.positionId) ?? null;
+      const callOwnerPositionId = await positionHoldingOrdersCall(sourceOrder!.id);
+      const ownStockLeg = openLegs.find((leg) => leg.position_id === callOwnerPositionId);
+      return ownStockLeg ? { kind: "open", leg: ownStockLeg } : { kind: "wait" };
     }
     if (!sourceOrder && contract.secType === "STK") {
-      const assignmentLeg = await assignmentStockLeg(openLegs, execution, receivedAt);
-      if (assignmentLeg !== undefined) return assignmentLeg;
+      const assignment = await assignmentDestination(conId, openLegs, recentlyClosedLegs, execution, executedAt);
+      if (assignment) return assignment;
     }
-    return openLegs[0];
+    if (openLegs.length > 0) return { kind: "open", leg: openLegs[0]! };
+    const lateClosedLeg = (await recentlyClosedLegs())[0];
+    return lateClosedLeg ? { kind: "closed", leg: lateClosedLeg } : { kind: "wait" };
+  }
+
+  /** The position holding the option leg an order's option fill went to, once that fill is recorded. */
+  async function positionHoldingOrdersCall(orderRequestId: string): Promise<string | undefined> {
+    const callOwner = await db("trades as tr")
+      .join("position_legs as option_leg", "option_leg.id", "tr.position_leg_id")
+      .where({ "tr.source_order_request_id": orderRequestId, "option_leg.leg_type": "option" })
+      .first("option_leg.position_id as positionId");
+    return callOwner?.positionId;
   }
 
   /**
-   * An assignment's stock fill, told by its price: exactly the strike of a short option on the ticker that has reached
-   * expiry and has no closing trade (still open, or closed within assignmentMatchWindowMs as expired).
-   *   - a call assigned (shares sold): the stock leg of the position holding that call;
-   *   - a put assigned (shares bought): the ticker's leftover-stock position, or null to wait for the reconciliation to
-   *     create it. Never a covered call's leg: those shares are the put's, and would blend into that position's own cost.
-   * undefined when the fill is not an assignment, or no open leg is that call's.
+   * An assignment's stock fill, told by its price: exactly the strike of a short option on the ticker with no closing
+   * trade, still open or closed within lateClosingFillWindowMs (early assignments included: no expiry condition).
+   *   - a call assigned (shares sold): the stock leg of the position holding that call, open or just closed;
+   *   - a put assigned (shares bought): the ticker's leftover-stock position, or wait for the reconciliation to create it.
+   *     Never a covered call's leg: those shares are the put's, and would blend into that position's own cost.
+   * null when the fill is not an assignment, or no leg of the assigned call's position fits.
    */
-  async function assignmentStockLeg(openLegs: { id: string; position_id: string }[], execution: Execution, receivedAt: Date) {
-    if (execution.price === undefined || (execution.side !== "SLD" && execution.side !== "BOT")) return undefined;
-    const executedAt = executedAtOf(execution, receivedAt);
-    const positionIds = openLegs.map((leg) => leg.position_id);
-    const assignedOptionPositionIds: string[] = await db("position_legs as pl")
+  async function assignmentDestination(conId: string, openLegs: FillLegRow[], recentlyClosedLegs: () => Promise<FillLegRow[]>, execution: Execution, executedAt: Date): Promise<FillDestination | null> {
+    if (execution.price === undefined || (execution.side !== "SLD" && execution.side !== "BOT")) return null;
+    const tickerIds = db("positions").whereIn("id", db("position_legs").where({ ibkr_contract_id: conId }).select("position_id")).select("ticker_id");
+    const assignedOptionLegs: { id: string; positionId: string }[] = await db("position_legs as pl")
       .join("positions as p", "p.id", "pl.position_id")
-      .whereIn("p.ticker_id", db("positions").whereIn("id", positionIds).select("ticker_id"))
+      .whereIn("p.ticker_id", tickerIds)
       .where({ "pl.leg_type": "option", "pl.side": "short", "pl.option_type": execution.side === "SLD" ? "call" : "put" })
       .whereRaw("abs(pl.strike_price - ?) < 0.00005", [execution.price])
-      .whereRaw("pl.expiry_date <= ?::date", [easternIsoDate(executedAt)])
-      .andWhere((builder) => builder.whereNull("pl.exit_at").orWhere("pl.exit_at", ">=", new Date(executedAt.getTime() - assignmentMatchWindowMs)))
+      .andWhere((builder) => builder.whereNull("pl.exit_at").orWhere("pl.exit_at", ">=", new Date(executedAt.getTime() - lateClosingFillWindowMs)))
       .whereNotExists(db("trades as closing").whereRaw("closing.position_leg_id = pl.id").where("closing.is_closing_trade", true))
-      .pluck("pl.position_id");
-    if (assignedOptionPositionIds.length === 0) return undefined;
+      .select("pl.id", "pl.position_id as positionId");
+    if (assignedOptionLegs.length === 0) return null;
+    const assignedPositionIds = new Set(assignedOptionLegs.map((leg) => leg.positionId));
+    const assignedOptionLegIds = assignedOptionLegs.map((leg) => leg.id);
 
-    if (execution.side === "SLD") return openLegs.find((leg) => assignedOptionPositionIds.includes(leg.position_id));
-    const leftoverPosition = await db("positions").whereIn("id", positionIds).where({ strategy_key: "unstructured" }).first("id");
-    return openLegs.find((leg) => leg.position_id === leftoverPosition?.id) ?? null;
+    if (execution.side === "SLD") {
+      const openLeg = openLegs.find((leg) => assignedPositionIds.has(leg.position_id));
+      if (openLeg) return { kind: "open", leg: openLeg, assignedOptionLegIds };
+      const closedLeg = (await recentlyClosedLegs()).find((leg) => assignedPositionIds.has(leg.position_id));
+      return closedLeg ? { kind: "closed", leg: closedLeg, assignedOptionLegIds } : null;
+    }
+    const leftoverPosition = openLegs.length === 0 ? undefined : await db("positions").whereIn("id", openLegs.map((leg) => leg.position_id)).where({ strategy_key: "unstructured" }).first("id");
+    const leftoverLeg = openLegs.find((leg) => leg.position_id === leftoverPosition?.id);
+    return leftoverLeg ? { kind: "open", leg: leftoverLeg, assignedOptionLegIds } : { kind: "wait", assignedOptionLegIds };
+  }
+
+  /**
+   * An assigned option leg the reconciliation closed before the assignment's fill arrived (it vanished before its expiry
+   * with no trade, so its exit was left unknown): the fill shows it was assigned, which ends a short option at 0.
+   */
+  async function settleAssignedOptionLegs(assignedOptionLegIds: string[] | undefined): Promise<void> {
+    if (!assignedOptionLegIds || assignedOptionLegIds.length === 0) return;
+    const settled = await db("position_legs").whereIn("id", assignedOptionLegIds).whereNotNull("exit_at").whereNull("exit_price").update({ exit_price: 0 });
+    if (settled > 0) console.log(`Assignment fill: ${settled} assigned option leg(s) closed earlier without an exit now exit at 0.`);
+  }
+
+  /**
+   * A closing fill for a leg the reconciliation already closed (IBKR's holding went before the execution arrived): recorded
+   * as that leg's closing trade, and the leg's exit becomes its closing fills' average once they cover its quantity.
+   */
+  async function recordLateClosingFill(leg: FillLegRow, execution: Execution, receivedAt: Date): Promise<void> {
+    await db("trades")
+      .insert({
+        position_leg_id: leg.id,
+        ibkr_order_id: String(execution.orderId ?? ""),
+        ibkr_exec_id: execution.execId,
+        side: execution.side === "BOT" ? "buy" : "sell",
+        quantity: execution.shares ?? 0,
+        price: execution.price ?? 0,
+        executed_at: executedAtOf(execution, receivedAt),
+        is_closing_trade: true,
+        source_order_request_id: await lookupSourceOrderRequestId(execution),
+      })
+      .onConflict("ibkr_exec_id")
+      .ignore();
+    await applyPendingCommission(execution.execId!);
+    const closingQuantity = Number((await db("trades").where({ position_leg_id: leg.id, is_closing_trade: true }).sum({ total: "quantity" }).first())?.total ?? 0);
+    const exit = closingQuantity >= Number(leg.quantity) ? await exitFromClosingFills(leg.id, db) : null;
+    if (exit) await db("position_legs").where({ id: leg.id }).update({ exit_price: exit.exitPrice, exit_at: exit.exitAt });
+    console.log(`Execution ${execution.execId}: closing fill for leg ${leg.id}, closed before it arrived${exit ? `; exit now ${exit.exitPrice}` : ""}.`);
   }
 
   async function recordCommission(report: CommissionReport): Promise<void> {
@@ -441,9 +517,15 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     if (existing) return;
 
     const conId = String(contract.conId);
-    const leg = await legForExecution(conId, contract, execution, await loadSourceOrderRequest(execution), receivedAt);
+    const destination = await destinationForExecution(conId, contract, execution, await loadSourceOrderRequest(execution), receivedAt);
+    await settleAssignedOptionLegs(destination.assignedOptionLegIds);
 
-    if (!leg) {
+    if (destination.kind === "closed") {
+      await recordLateClosingFill(destination.leg, execution, receivedAt);
+      dependencies.requestReconciliation();
+      return;
+    }
+    if (destination.kind === "wait") {
       // A brand-new position-opening fill (or one placed outside the app entirely): the leg does not exist yet because the
       // position reconciliation has not run since this fill. Buffer it; the reconciliation drains the buffer once it
       // creates the leg. Shares a covered-call order bought wait here too while another position already holds the stock.
@@ -455,6 +537,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
       return;
     }
 
+    const leg = destination.leg;
     const isClosing = execution.side === "BOT" ? leg.side === "short" : leg.side === "long";
     if (!isClosing) {
       // An add-on fill to an already-tracked leg: not a close, but still a real execution the Trade Blotter should show.
@@ -509,10 +592,35 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     if (stillWaiting.length > 0) pendingOpeningExecutions.set(conId, stillWaiting);
   }
 
+  /**
+   * Shares a covered-call order bought that are still waiting while the position holding the order's call already has its
+   * stock leg: an add-on to an existing Covered Call creates no new leg to drain onto, and its call fill may have been
+   * recorded after the shares'. Called by the position reconciliation at the start of each pass.
+   */
+  async function attributeWaitingCoveredCallShareBuys(): Promise<void> {
+    for (const [conId, buffered] of [...pendingOpeningExecutions]) {
+      const stillWaiting: typeof buffered = [];
+      for (const entry of buffered) {
+        const sourceOrder = await loadSourceOrderRequest(entry.execution);
+        const callOwnerPositionId = isCoveredCallShareBuy(entry.contract, entry.execution, sourceOrder) ? await positionHoldingOrdersCall(sourceOrder!.id) : undefined;
+        const ownStockLeg = callOwnerPositionId === undefined ? undefined : await db("position_legs").where({ ibkr_contract_id: conId, position_id: callOwnerPositionId }).whereNull("exit_at").first("id");
+        if (!ownStockLeg) {
+          stillWaiting.push(entry);
+          continue;
+        }
+        await insertOpeningTradeRow(ownStockLeg.id, entry.contract, entry.execution, entry.receivedAt);
+        console.log(`Execution ${entry.execution.execId}: shares of a covered-call order written to stock leg ${ownStockLeg.id} of the position holding its call.`);
+      }
+      if (stillWaiting.length > 0) pendingOpeningExecutions.set(conId, stillWaiting);
+      else pendingOpeningExecutions.delete(conId);
+    }
+  }
+
   return {
     recordExecution,
     recordCommission,
     drainPendingOpeningExecutions,
+    attributeWaitingCoveredCallShareBuys,
     bufferedOpeningExecutionCount: (conId: string) => pendingOpeningExecutions.get(conId)?.length ?? 0,
     pendingCommissionCount: () => pendingCommissionsByExecId.size,
   };

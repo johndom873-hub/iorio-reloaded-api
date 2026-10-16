@@ -2,6 +2,7 @@ import { db } from "../db/connection.js";
 import { easternIsoDate } from "./easternIsoDate.js";
 import { activeOrderRequestStatuses } from "./orderRequestStatuses.js";
 import { computeNetLimitPrice, type OrderLegPayload, type OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
+import { fetchOrderLegFillRows, matchOrderLegFills, normalizeOrderLegExpiryToYyyymmdd, type OrderLegFillRow } from "./orderFills.js";
 
 export interface TodaysOrderLeg {
   role: "stock" | "option";
@@ -54,34 +55,9 @@ export interface TodaysOrderRow {
   ibkr_perm_id: number | null;
 }
 
-/** One order's fills of one contract: trades grouped by leg type, side, strike and expiry. */
-export interface TodaysOrderFillRow {
-  orderRequestId: string;
-  legType: "stock" | "option";
-  side: "buy" | "sell";
-  strike: string | number | null;
-  /** YYYYMMDD. */
-  expiry: string | null;
-  quantity: string | number;
-  notional: string | number;
-  commission: string | number | null;
-}
-
-/** A payload leg's expiry as YYYYMMDD: opening legs store IBKR's YYYYMMDD, close and roll legs copied from a position store its ISO date or timestamp ("2026-10-02T00:00:00.000Z"). */
-function normalizeExpiryToYyyymmdd(expiry: string | undefined): string | null {
-  if (!expiry) return null;
-  const isoDatePrefix = /^(\d{4})-(\d{2})-(\d{2})/.exec(expiry);
-  if (isoDatePrefix) return `${isoDatePrefix[1]}${isoDatePrefix[2]}${isoDatePrefix[3]}`;
-  return /^\d{8}$/.test(expiry) ? expiry : null;
-}
-
-function legFillKey(role: string, side: string, strike: string | number | null | undefined, expiry: string | null | undefined): string {
-  return [role, side.toLowerCase(), strike === null || strike === undefined || strike === "" ? "" : Number(strike), expiry ?? ""].join("|");
-}
-
 /** Pairs each order with its legs' fills (matched on leg type, side, strike and expiry, so a roll's close and open legs stay apart). */
-export function buildTodaysOrders(orderRows: TodaysOrderRow[], fillRows: TodaysOrderFillRow[]): TodaysOrder[] {
-  const fillsByOrderId = new Map<string, TodaysOrderFillRow[]>();
+export function buildTodaysOrders(orderRows: TodaysOrderRow[], fillRows: OrderLegFillRow[]): TodaysOrder[] {
+  const fillsByOrderId = new Map<string, OrderLegFillRow[]>();
   for (const fill of fillRows) {
     const fills = fillsByOrderId.get(fill.orderRequestId) ?? [];
     fills.push(fill);
@@ -90,23 +66,18 @@ export function buildTodaysOrders(orderRows: TodaysOrderRow[], fillRows: TodaysO
 
   return orderRows.map((row) => {
     const fills = fillsByOrderId.get(row.id) ?? [];
-    const fillByLegKey = new Map(fills.map((fill) => [legFillKey(fill.legType, fill.side, fill.strike, fill.expiry), fill]));
-    const legs = row.payload.legs.map((leg: OrderLegPayload): TodaysOrderLeg => {
-      const expiry = normalizeExpiryToYyyymmdd(leg.expiry);
-      const fill = fillByLegKey.get(legFillKey(leg.role, leg.action, leg.strike, expiry));
-      const filledQuantity = fill ? Number(fill.quantity) : 0;
-      return {
-        role: leg.role,
-        action: leg.action,
-        quantity: leg.quantity,
-        unitPrice: leg.unitPrice,
-        strike: leg.strike ?? null,
-        expiry,
-        right: leg.right ?? null,
-        filledQuantity,
-        averageFillPrice: fill && filledQuantity > 0 ? Number(fill.notional) / filledQuantity : null,
-      };
-    });
+    const legFills = matchOrderLegFills(row.payload.legs, fills);
+    const legs = row.payload.legs.map((leg: OrderLegPayload, index): TodaysOrderLeg => ({
+      role: leg.role,
+      action: leg.action,
+      quantity: leg.quantity,
+      unitPrice: leg.unitPrice,
+      strike: leg.strike ?? null,
+      expiry: normalizeOrderLegExpiryToYyyymmdd(leg.expiry),
+      right: leg.right ?? null,
+      filledQuantity: legFills[index]!.filledQuantity,
+      averageFillPrice: legFills[index]!.averageFillPrice,
+    }));
     const commissions = fills.filter((fill) => fill.commission !== null).map((fill) => Number(fill.commission));
     return {
       id: row.id,
@@ -159,23 +130,6 @@ export async function fetchTodaysOrders(now: Date = new Date()): Promise<TodaysO
     );
   if (orderRows.length === 0) return [];
 
-  const fillRows: TodaysOrderFillRow[] = await db("trades as tr")
-    .join("position_legs as pl", "pl.id", "tr.position_leg_id")
-    .whereIn(
-      "tr.source_order_request_id",
-      orderRows.map((row) => row.id),
-    )
-    .groupBy("tr.source_order_request_id", "pl.leg_type", "tr.side", "pl.strike_price", "pl.expiry_date")
-    .select(
-      "tr.source_order_request_id as orderRequestId",
-      "pl.leg_type as legType",
-      "tr.side as side",
-      "pl.strike_price as strike",
-      db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as expiry"),
-      db.raw("SUM(tr.quantity) as quantity"),
-      db.raw("SUM(tr.price * tr.quantity) as notional"),
-      db.raw("SUM(tr.commission) as commission"),
-    );
-
+  const fillRows = await fetchOrderLegFillRows(orderRows.map((row) => row.id));
   return buildTodaysOrders(orderRows, fillRows);
 }
