@@ -102,7 +102,7 @@ export interface PlutoHowItWorks {
     confidenceFloor: number;
     maxEdgeMarginDriftPts: number;
     orderSizePctOfBudget: number;
-    maxTickerExposurePct: number;
+    maxTickerPctOfBudget: number;
     minCashReservePct: number;
     maxContractsVolumeSharePct: number;
     stressRiskBudgetPct: number;
@@ -204,7 +204,7 @@ export function buildPlutoHowItWorks(settings: PlutoSettings, figures: { unfille
       confidenceFloor: settings.confidenceFloor,
       maxEdgeMarginDriftPts: settings.maxEdgeMarginDriftPts,
       orderSizePctOfBudget: settings.orderSizePctOfBudget,
-      maxTickerExposurePct: settings.maxTickerExposurePct,
+      maxTickerPctOfBudget: settings.maxTickerPctOfBudget,
       minCashReservePct: settings.minCashReservePct,
       maxContractsVolumeSharePct: settings.maxContractsVolumeSharePct,
       stressRiskBudgetPct: settings.stressRiskBudgetPct,

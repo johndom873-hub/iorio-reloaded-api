@@ -328,7 +328,7 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
       min_grade: input.settings.minGrade,
       max_abs_delta: input.settings.maxAbsDelta,
       dte_range: [input.settings.minDte, input.settings.maxDte],
-      max_ticker_exposure_pct: input.settings.maxTickerExposurePct,
+      max_ticker_pct_of_budget: input.settings.maxTickerPctOfBudget,
       order_size_pct_of_budget: input.settings.orderSizePctOfBudget,
       confidence_floor: input.settings.confidenceFloor,
       spread_cost_share_pct: input.spreadCostSharePct,

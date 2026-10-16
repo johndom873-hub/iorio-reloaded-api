@@ -28,7 +28,7 @@ function input(overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput {
     minutesToWindowEnd: 200,
     spyDayChangePct: 0.2,
     account: { netLiquidationValue: 1_000_000, freeCash: 700_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 10, managedPositions: 4, maxOpenPositions: 15, actionsToday: 1, maxActionsPerSession: 10, openPositionsBySymbol: {} },
-    settings: { minGrade: "good", maxAbsDelta: 0.4, minDte: 1, maxDte: 45, maxTickerExposurePct: 10, orderSizePctOfBudget: 10, confidenceFloor: 0.6 } as PlutoPromptInput["settings"],
+    settings: { minGrade: "good", maxAbsDelta: 0.4, minDte: 1, maxDte: 45, maxTickerPctOfBudget: 10, orderSizePctOfBudget: 10, confidenceFloor: 0.6 } as PlutoPromptInput["settings"],
     tickers: [{ scored, eligible: [{ id: "SMCI:cash_secured_put:2026-10-16:40", kind: "open_cash_secured_put", symbol: "SMCI", candidate: candidate() }], eligibleRolls: [], closeActions: [], heldPositions: [] }],
     spreadCostSharePct: 50,
     recentDecisions: [],

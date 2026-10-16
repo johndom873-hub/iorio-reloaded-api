@@ -264,7 +264,7 @@ describe("a session through the wheel", () => {
       tenOClockPrices,
       closes,
       expiriesOn: (dateIso) => (dateIso < "2026-04-24" ? ["2026-04-17", "2026-04-24"] : dateIso < "2026-05-01" ? ["2026-04-24", "2026-05-01"] : ["2026-05-01", "2026-05-08"]),
-      plutoOverrides: { maxTickerExposurePct: 5 },
+      plutoOverrides: { maxTickerPctOfBudget: 10 },
     });
     const { detail } = session;
     expect(detail.session.status).toBe("succeeded");
@@ -397,7 +397,7 @@ describe("a session through the wheel", () => {
       closes,
       expiriesOn: (dateIso) => (dateIso < "2026-04-17" ? ["2026-04-17"] : ["2026-04-17", "2026-04-24", "2026-05-01"]),
       impliedVolatilityOn: { "2026-04-08": 0.15, "2026-04-21": 0.15 },
-      plutoOverrides: { maxTickerExposurePct: 5 },
+      plutoOverrides: { maxTickerPctOfBudget: 10 },
     });
     const { detail } = session;
     expectAccountToReconcile(session);
@@ -462,7 +462,7 @@ describe("a session through the wheel", () => {
       expiriesOn: () => ["2026-04-24"],
       sector: "ETF",
       earnings: [{ dateIso: "2026-04-16", eventTime: "1" }],
-      plutoOverrides: { maxTickerExposurePct: 5 },
+      plutoOverrides: { maxTickerPctOfBudget: 10 },
     });
     const { detail } = session;
     expect(detail.session.dataLastDate).toBe("2026-04-24");
@@ -502,7 +502,7 @@ describe("a session through the wheel", () => {
       expiriesOn: () => ["2026-04-24"],
       unavailableDates: ["2026-04-08"],
       datesWithoutEndOfDay: ["2026-04-09"],
-      plutoOverrides: { maxTickerExposurePct: 30 },
+      plutoOverrides: { maxTickerPctOfBudget: 60 },
     });
     const { detail } = session;
     expect(detail.session.status).toBe("succeeded");
@@ -528,7 +528,7 @@ describe("a session through the wheel", () => {
     //                        6     7      8      9     10    13    14    15    16    17    20    21
     const tenOClockPrices = [100, 100.2, 100.6, 100.4, 99.6, 98.8, 98.2, 97.8, 97.4, 97.2, 97.6, 99.0];
     const closes = /*     */ [100.1, 100.4, 100.5, 100, 99.2, 98.5, 98.0, 97.6, 97.3, 97.0, 98.4, 99.1];
-    const spec = { fileDates, lastSessionDate: "2026-04-21", tenOClockPrices, closes, expiriesOn: (dateIso: string) => (dateIso < "2026-04-17" ? ["2026-04-17"] : ["2026-04-17", "2026-04-24"]), plutoOverrides: { maxTickerExposurePct: 5 } };
+    const spec = { fileDates, lastSessionDate: "2026-04-21", tenOClockPrices, closes, expiriesOn: (dateIso: string) => (dateIso < "2026-04-17" ? ["2026-04-17"] : ["2026-04-17", "2026-04-24"]), plutoOverrides: { maxTickerPctOfBudget: 10 } };
 
     // No daily bar for Friday 17 April, but 30-minute bars: the stock settles at the last one's close (≈ 97.2), under the $98 strike.
     const settled = await runWheelSession({ ...spec, symbol: "WHLE", datesWithoutBar: ["2026-04-17"] });
@@ -686,7 +686,7 @@ describe("a session of several symbols on one book", () => {
     const secondDay = (session: WheelSession) => session.actions.filter((action) => action.tradingDate === "2026-04-07").map((action) => [action.symbol, action.outcome]);
 
     // The capital budget: 5% of $1,000,000 = $50,000, and one order may take all of it.
-    const budget = await twoSymbols("WBA", "WBB", { capitalBudgetPct: 5, orderSizePctOfBudget: 100 });
+    const budget = await twoSymbols("WBA", "WBB", { capitalBudgetPct: 5, orderSizePctOfBudget: 100, maxTickerPctOfBudget: 100 });
     expect(secondDay(budget)).toEqual([
       ["WBB", "filled"],
       ["WBA", "blocked"],
@@ -706,8 +706,8 @@ describe("a session of several symbols on one book", () => {
     ]);
     expect(positions.actions.find((action) => action.symbol === "WPA" && action.outcome === "blocked")!.blockReason).toBe("open_positions_cap: 1 of 1 managed positions");
 
-    // The sector: both tickers are Technology, capped at 5% of the account together.
-    const sector = await twoSymbols("WSA", "WSB", { maxSectorExposurePct: 5 });
+    // The sector: both tickers are Technology, capped together at 10% of the $500,000 budget ($50,000).
+    const sector = await twoSymbols("WSA", "WSB", { maxSectorPctOfBudget: 10 });
     expect(secondDay(sector)).toEqual([
       ["WSB", "filled"],
       ["WSA", "blocked"],
@@ -717,7 +717,7 @@ describe("a session of several symbols on one book", () => {
     expect(dollarsAfter("ticker room", refusedForSector.blockReason!)).toBeGreaterThan(40_000);
     expect(dayOf(sector, "2026-04-07").decisionSummary).toMatch(/^Opened WSB Sell .* · Blocked WSA Sell .*: sizing: .*sector room /);
     // With the second ticker in another sector the same cap refuses nothing.
-    const otherSector = await twoSymbols("WOA", "WOB", { maxSectorExposurePct: 5 }, "Healthcare");
+    const otherSector = await twoSymbols("WOA", "WOB", { maxSectorPctOfBudget: 10 }, "Healthcare");
     expect(secondDay(otherSector)).toEqual([
       ["WOB", "filled"],
       ["WOA", "filled"],

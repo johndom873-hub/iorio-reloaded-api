@@ -212,7 +212,7 @@ describe("backtest routes", () => {
     ]);
     expect(template.rows.find((row) => row.path === "pluto.maxActionsPerSession")).toMatchObject({ label: "Max orders per day", note: "across every symbol and every look of the day, automatic closes included" });
     // The sector cap binds once a session runs several symbols on one book.
-    expect(template.rows.find((row) => row.path === "pluto.maxSectorExposurePct")).toMatchObject({ group: "Capital and sizing", label: "Max per sector", unit: "percent", editable: true, now: Number(plutoRow.max_sector_exposure_pct) });
+    expect(template.rows.find((row) => row.path === "pluto.maxSectorPctOfBudget")).toMatchObject({ group: "Capital and sizing", label: "Max per sector", unit: "percent", editable: true, now: Number(plutoRow.max_sector_pct_of_budget) });
     expect(template.rows.find((row) => row.path === "pluto.minGrade")?.now).toBe(plutoRow.min_grade);
     expect(template.rows.find((row) => row.path === "fixed.earningsDateKnownCalendarDaysAhead")).toMatchObject({ group: "Candidate quality", label: "Earnings dates known 30 days ahead", unit: "days", now: 30, editable: false });
     const tradingRow = await testDb("trading_settings").first("max_position_pct_of_portfolio");

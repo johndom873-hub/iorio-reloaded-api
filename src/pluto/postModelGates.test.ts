@@ -10,7 +10,7 @@ import { fixtureCandidateModel, fixtureRollModel } from "../lib/testSupport/valu
 
 const settings: PlutoSettings = {
   ...plutoLadderSettingsFixture,
-  capitalBudgetPct: 50, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
+  capitalBudgetPct: 50, maxTickerPctOfBudget: 20, maxSectorPctOfBudget: 100, maxOpenPositions: 8, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeYieldPct: 15, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 0, stressSigmas: 2,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
@@ -73,6 +73,16 @@ describe("runPostModelGates — a clean cash-secured put", () => {
     expect(computeSizingRoom({ ...settings, capitalBudgetPct: 30, orderSizePctOfBudget: 20 }, book, false).orderCap).toBe(60_000);
     expect(computeSizingRoom(settings, { ...book, netLiquidationValue: 1_100_000 }, false).orderCap).toBe(55_000);
   });
+  it("the ticker and sector caps are shares of the capital budget, not of the account", () => {
+    // 1M × 50% budget = 500k; ticker 20% of it = 100k − 20k on the ticker = 80k; sector 30% of it = 150k − 100k in the sector = 50k
+    const room = computeSizingRoom({ ...settings, maxSectorPctOfBudget: 30 }, book, true);
+    expect(room.tickerRoom).toBe(80_000);
+    expect(room.sectorRoom).toBe(50_000);
+    // A smaller budget shrinks both: 1M × 40% = 400k → ticker 80k − 20k = 60k, sector 120k − 100k = 20k
+    const smaller = computeSizingRoom({ ...settings, capitalBudgetPct: 40, maxSectorPctOfBudget: 30 }, book, true);
+    expect(smaller.tickerRoom).toBe(60_000);
+    expect(smaller.sectorRoom).toBe(20_000);
+  });
   it("a tighter limit than the order size wins, and contracts round down", () => {
     // cash room 64k − 50k reserve = 14k → 1 contract
     expect(runPostModelGates(input({ book: { ...book, freeCash: 64_000 } })).plan?.quantity).toBe(1);
@@ -126,8 +136,8 @@ describe("runPostModelGates — the gates", () => {
   });
   it("sector room only bites when a sector cap is set", () => {
     expect(computeSizingRoom(settings, book, true).sectorRoom).toBe(Number.POSITIVE_INFINITY);
-    const capped = runPostModelGates(input({ settings: { ...settings, maxSectorExposurePct: 11 } }));
-    // sector room 110k − 100k = 10k → 1 contract
+    const capped = runPostModelGates(input({ settings: { ...settings, maxSectorPctOfBudget: 22 } }));
+    // sector room 1M × 50% budget × 22% = 110k − 100k = 10k → 1 contract
     expect(capped.plan?.quantity).toBe(1);
   });
   it("refuses a contract that is already held or has a working order, puts and calls alike", () => {

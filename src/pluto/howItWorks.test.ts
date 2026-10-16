@@ -10,7 +10,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 /** Pluto's settings at their migration defaults. */
 const settings: PlutoSettings = {
   ...plutoLadderSettingsFixture,
-  capitalBudgetPct: 50, maxTickerExposurePct: 10, maxSectorExposurePct: 100, maxOpenPositions: 15, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
+  capitalBudgetPct: 50, maxTickerPctOfBudget: 10, maxSectorPctOfBudget: 100, maxOpenPositions: 15, maxActionsPerSession: 10, orderSizePctOfBudget: 10, minCashReservePct: 5,
   minGrade: "good", minEdgeYieldPct: 15, maxAbsDelta: 0.3, minDte: 2, maxDte: 45, minAnnualizedYieldPct: 50, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxContractsVolumeSharePct: 20,
   maxSliceRmseVp: 2, minSlicePointCount: 10, maxMidVsSurfaceIvVp: 5, maxIvShiftVp: 8, maxDayMoveMultiple: 3, stressRiskBudgetPct: 1, stressSigmas: 2,
   windowStartEt: "10:45", windowEndEt: "15:30", dailyLossBreakerPct: 2, spyStressBreakerPct: 3,
@@ -39,7 +39,7 @@ describe("buildPlutoHowItWorks", () => {
       minGrade: "good", gradeCutsPct: { strong: 20, good: 10, weak: 0 }, minEdgeYieldPct: 15, minAnnualizedYieldPct: 50,
       maxAbsDelta: 0.3, minDte: 2, maxDte: 45, maxSpreadPct: 15, minOpenInterest: 500, minSessionVolume: 50, maxQuoteAgeMinutes: 10, maxDayMoveMultiple: 3,
       burstLines: 10, candidatesPerTickerPerStrategy: 3, confidenceFloor: 0.6, maxEdgeMarginDriftPts: 10,
-      orderSizePctOfBudget: 10, maxTickerExposurePct: 10, minCashReservePct: 5, maxContractsVolumeSharePct: 20, stressRiskBudgetPct: 1, stressSigmas: 2, kellyFraction: 0.5, maxOpenPositions: 15,
+      orderSizePctOfBudget: 10, maxTickerPctOfBudget: 10, minCashReservePct: 5, maxContractsVolumeSharePct: 20, stressRiskBudgetPct: 1, stressSigmas: 2, kellyFraction: 0.5, maxOpenPositions: 15,
       spyStressBreakerPct: 3, maxActionsPerSession: 10, tickerCooldownMinutes: 60, consecutiveModelFailuresBreaker: 3, dailyCostCeilingUsd: 1,
       heldShareCallMinProfitPct: 1, heldShareCallMinProfitDollars: 50, buybackMinDte: 2, buybackUnscoredMinKeptPremiumPct: 75, earningsCloseWindowSessions: 5, eventCloseWindowSessions: 5,
     });

@@ -597,7 +597,7 @@ describe("several symbols on one book", () => {
 
   it("shares the capital budget: the first order uses it up and the other symbol's is refused for lack of budget", async () => {
     // Budget 5% of $1,000,000 = $50,000, order size all of it: ALT's order takes about $47,000 of EXP $.
-    const context = twoSymbolLook({ plutoOverrides: { capitalBudgetPct: 5, orderSizePctOfBudget: 100 } });
+    const context = twoSymbolLook({ plutoOverrides: { capitalBudgetPct: 5, orderSizePctOfBudget: 100, maxTickerPctOfBudget: 100 } });
     const look = await runBacktestLook(context);
 
     expect(look.actions.map((action) => [action.symbol, action.outcome])).toEqual([
@@ -625,9 +625,9 @@ describe("several symbols on one book", () => {
   });
 
   it("ends the opens on a ticker with no room and goes on to the other ticker", async () => {
-    // ALT already carries a $95,000 put position, above its 5% ticker limit ($50,000): its best contract is refused for
+    // ALT already carries a $95,000 put position, above its ticker limit (10% of the $500,000 budget = $50,000): its best contract is refused for
     // lack of ticker room, no other ALT contract is tried, and SYN's is sold.
-    const context = twoSymbolLook({ plutoOverrides: { maxTickerExposurePct: 5 } });
+    const context = twoSymbolLook({ plutoOverrides: { maxTickerPctOfBudget: 10 } });
     openCashSecuredPut(context.ledger, { symbol: "ALT", expiryDate: "2026-03-20", strike: 95, contracts: 10, fillPrice: 2, at: tenAm("2026-02-23"), actionId: null, splitFactorToday: 1 });
     const look = await runBacktestLook(context);
     expect(look.actions.map((action) => [action.symbol, action.outcome])).toEqual([
@@ -640,8 +640,8 @@ describe("several symbols on one book", () => {
   });
 
   it("caps a sector across its symbols: the second order in the same sector is refused, one in another sector is not", async () => {
-    // Sector cap 5% of the account = $50,000; ALT's order takes about $47,000 of it.
-    const sameSector = await runBacktestLook(twoSymbolLook({ plutoOverrides: { maxSectorExposurePct: 5 } }));
+    // Sector cap 10% of the $500,000 budget = $50,000; ALT's order takes about $47,000 of it.
+    const sameSector = await runBacktestLook(twoSymbolLook({ plutoOverrides: { maxSectorPctOfBudget: 10 } }));
     expect(sameSector.actions.map((action) => [action.symbol, action.outcome])).toEqual([
       ["ALT", "filled"],
       ["SYN", "blocked"],
@@ -655,7 +655,7 @@ describe("several symbols on one book", () => {
     expect(dollarsAfter("ticker room", refused.blockReason!)).toBeGreaterThan(40_000);
     expect(dollarsAfter("budget left", refused.blockReason!)).toBeGreaterThan(400_000);
 
-    const otherSector = await runBacktestLook(twoSymbolLook({ plutoOverrides: { maxSectorExposurePct: 5 }, altSector: "Healthcare" }));
+    const otherSector = await runBacktestLook(twoSymbolLook({ plutoOverrides: { maxSectorPctOfBudget: 10 }, altSector: "Healthcare" }));
     expect(otherSector.actions.map((action) => [action.symbol, action.outcome])).toEqual([
       ["ALT", "filled"],
       ["SYN", "filled"],
@@ -671,7 +671,7 @@ describe("several symbols on one book", () => {
     // $30,000 of cash, no per-order or per-ticker limit below it: the fills use it up. A symbol's scoring is kept across
     // a fill on the other one unless the smaller free cash changes a put's flag, so at the end every put of both symbols
     // must be flagged exactly when the free cash is below its risk.
-    const context = twoSymbolLook({ plutoOverrides: { capitalBudgetPct: 100, orderSizePctOfBudget: 100, maxTickerExposurePct: 100, minCashReservePct: 0 }, tradingOverrides: { maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 } });
+    const context = twoSymbolLook({ plutoOverrides: { capitalBudgetPct: 100, orderSizePctOfBudget: 100, maxTickerPctOfBudget: 100, minCashReservePct: 0 }, tradingOverrides: { maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 } });
     context.ledger = createSimulatedLedger(30_000, tenAm("2026-02-02"));
     const look = await runBacktestLook(context);
 

@@ -238,7 +238,7 @@ describe("a session with looks inside the window", () => {
     const [firstDay, secondDay] = ["2026-03-02", "2026-03-03"];
     const session = await runLookSession({
       symbols: [{ symbol: "LKC", days: { [fridayBefore]: firstFileDay(), [firstDay]: { looks: looksAt(100, ["10:00", "10:30", "11:00", "11:30"]), close: 100 }, [secondDay]: { looks: looksAt(100, ["10:00"]), close: 100 } }, expiriesOn: marchExpiries }],
-      plutoOverrides: { maxTickerExposurePct: 20 },
+      plutoOverrides: { maxTickerPctOfBudget: 40 },
     });
     const filled = filledOn(session, firstDay);
     expect(filled.map((action) => action.lookTimeEt)).toEqual(["10:00", "11:00"]);
@@ -348,7 +348,7 @@ describe("a session with looks inside the window", () => {
     const [dayBefore, fullDay, holiday, earlyCloseDay] = ["2026-11-24", "2026-11-25", "2026-11-26", "2026-11-27"];
     const session = await runLookSession({
       symbols: [{ symbol: "LKI", days: { [dayBefore]: firstFileDay(), [fullDay]: { looks: looksAt(100, everyLookTime), close: 100 }, [earlyCloseDay]: { looks: looksAt(100, everyLookTime), close: 100 } }, holidays: [holiday], expiriesOn: () => ["2026-12-04", "2026-12-11"] }],
-      plutoOverrides: { maxTickerExposurePct: 50 },
+      plutoOverrides: { maxTickerPctOfBudget: 100 },
     });
     expect(session.detail.days.map((day) => `${day.tradingDate} ${day.looksRun}`)).toEqual([`${dayBefore} 1`, `${fullDay} 12`, `${earlyCloseDay} 6`]);
     // The full day: an order every second look until the order gate's ticker limit (20% of the account) is reached at
@@ -369,7 +369,7 @@ describe("a session with looks inside the window", () => {
         { symbol: "LKJ", days: { [fridayBefore]: firstFileDay(), [dateIso]: { looks, close: 100 } }, expiriesOn: marchExpiries },
         { symbol: "LKK", days: { [fridayBefore]: firstFileDay(), [dateIso]: { looks, close: 100 } }, expiriesOn: marchExpiries, intradayQuotes: false },
       ],
-      plutoOverrides: { maxTickerExposurePct: 20 },
+      plutoOverrides: { maxTickerPctOfBudget: 40 },
     });
     expect(dayOf(session, dateIso).looksRun).toBe(5);
     const lookTimesOf = (symbol: string) => filledOn(session, dateIso).filter((action) => action.symbol === symbol).map((action) => action.lookTimeEt);
@@ -426,7 +426,7 @@ describe("a session scored on worker threads", () => {
         expiriesOn: () => ["2026-04-10", "2026-04-17", "2026-04-24"],
       }));
     const runWith = async (prefix: string, scoringWorkers: number) => {
-      const session = await runLookSession({ symbols: symbolsOf(prefix), overrides: {}, plutoOverrides: { maxTickerExposurePct: 15 }, scoringWorkers });
+      const session = await runLookSession({ symbols: symbolsOf(prefix), overrides: {}, plutoOverrides: { maxTickerPctOfBudget: 30 }, scoringWorkers });
       // The same session under other symbol names, with the stored rows' serial ids: compare without them.
       const strip = (value: unknown) => JSON.parse(JSON.stringify(value, (key, entry) => (key === "id" && typeof entry === "number" ? undefined : entry)).replaceAll(new RegExp(`${prefix}([ABC])`, "g"), "SYM$1"));
       const { session: sessionRow, ...detail } = session.detail;

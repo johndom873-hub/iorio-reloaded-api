@@ -157,8 +157,8 @@ In order:
 - **Room** (`:126-135`):
   - `orderCap` = NLV × `capitalBudgetPct` × `orderSizePctOfBudget`;
   - `budgetRoom` = budget − committed − in-flight managed notional;
-  - `tickerRoom` = NLV × `maxTickerExposurePct` − existing ticker exposure − in-flight on the ticker;
-  - `sectorRoom`;
+  - `tickerRoom` = budget × `maxTickerPctOfBudget` − existing ticker exposure − in-flight on the ticker;
+  - `sectorRoom` = budget × `maxSectorPctOfBudget` − existing sector exposure (no cap at 100 or with no sector);
   - `cashRoom` = free cash − in-flight − NLV × `minCashReservePct`.
 - **Cash-secured put** (`:266-273`): unit notional = (strike − limit) × 100. Contracts = min(floor(min(rooms) ÷ unit), volume cap, stress cap, Kelly cap).
 - **Volume cap** (`:143-145`): floor(volume × `maxContractsVolumeSharePct` %); default 20%.

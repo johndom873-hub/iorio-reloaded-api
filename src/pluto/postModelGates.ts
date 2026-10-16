@@ -126,11 +126,13 @@ export interface SizingRoom {
 
 export function computeSizingRoom(settings: PlutoSettings, book: PostModelBookInput, sectorKnown: boolean): SizingRoom {
   const nlv = book.netLiquidationValue;
+  const budget = (nlv * settings.capitalBudgetPct) / 100;
   return {
-    budgetRoom: (nlv * settings.capitalBudgetPct) / 100 - book.committedDollars - book.inFlight.managedNotional,
-    orderCap: (((nlv * settings.capitalBudgetPct) / 100) * settings.orderSizePctOfBudget) / 100,
-    tickerRoom: (nlv * settings.maxTickerExposurePct) / 100 - book.existingTickerExposure - book.inFlight.tickerNotional,
-    sectorRoom: sectorKnown && settings.maxSectorExposurePct < 100 ? (nlv * settings.maxSectorExposurePct) / 100 - book.existingSectorExposure : Number.POSITIVE_INFINITY,
+    budgetRoom: budget - book.committedDollars - book.inFlight.managedNotional,
+    orderCap: (budget * settings.orderSizePctOfBudget) / 100,
+    // The ticker and sector caps are shares of the budget (Marcelo, 2026-10-16); the exposure they hold still counts everyone's positions.
+    tickerRoom: (budget * settings.maxTickerPctOfBudget) / 100 - book.existingTickerExposure - book.inFlight.tickerNotional,
+    sectorRoom: sectorKnown && settings.maxSectorPctOfBudget < 100 ? (budget * settings.maxSectorPctOfBudget) / 100 - book.existingSectorExposure : Number.POSITIVE_INFINITY,
     cashRoom: book.freeCash - book.inFlight.totalNotional - (nlv * settings.minCashReservePct) / 100,
   };
 }

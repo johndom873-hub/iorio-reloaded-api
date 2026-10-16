@@ -18,8 +18,8 @@ export interface PlutoSettings {
   executionStrategy: PlutoExecutionStrategy;
   // Capital
   capitalBudgetPct: number;
-  maxTickerExposurePct: number;
-  maxSectorExposurePct: number;
+  maxTickerPctOfBudget: number;
+  maxSectorPctOfBudget: number;
   maxOpenPositions: number;
   maxActionsPerSession: number;
   /** The standard order: this share of Pluto's capital budget (budget = capitalBudgetPct of NLV). */
@@ -115,8 +115,8 @@ type ColumnKind = "number" | "integer" | "text";
 /** camelCase field → snake_case column, with the kind that decides parsing and validation. */
 export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedAt" | "updatedByUserId">, { column: string; kind: ColumnKind; min?: number; max?: number; oneOf?: readonly string[] }> = {
   capitalBudgetPct: { column: "capital_budget_pct", kind: "number", min: 0, max: 100 },
-  maxTickerExposurePct: { column: "max_ticker_exposure_pct", kind: "number", min: 0, max: 100 },
-  maxSectorExposurePct: { column: "max_sector_exposure_pct", kind: "number", min: 0, max: 100 },
+  maxTickerPctOfBudget: { column: "max_ticker_pct_of_budget", kind: "number", min: 0, max: 100 },
+  maxSectorPctOfBudget: { column: "max_sector_pct_of_budget", kind: "number", min: 0, max: 100 },
   maxOpenPositions: { column: "max_open_positions", kind: "integer", min: 0 },
   maxActionsPerSession: { column: "max_actions_per_session", kind: "integer", min: 0 },
   orderSizePctOfBudget: { column: "order_size_pct_of_budget", kind: "number", min: 0, max: 100 },

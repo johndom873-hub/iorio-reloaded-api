@@ -76,8 +76,8 @@ export function fixturePlutoSettings(overrides: Partial<PlutoSettings> = {}): Pl
   return {
     ...plutoLadderSettingsFixture,
     capitalBudgetPct: 50,
-    maxTickerExposurePct: 10,
-    maxSectorExposurePct: 100,
+    maxTickerPctOfBudget: 20,
+    maxSectorPctOfBudget: 100,
     maxOpenPositions: 15,
     maxActionsPerSession: 10,
     orderSizePctOfBudget: 10,

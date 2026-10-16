@@ -7,8 +7,8 @@ import { validateBacktestBookPageQuery, validateBacktestSettingsOverrides, valid
 const snapshot: BacktestSettings = {
   pluto: {
     capitalBudgetPct: 50,
-    maxTickerExposurePct: 8,
-    maxSectorExposurePct: 20,
+    maxTickerPctOfBudget: 8,
+    maxSectorPctOfBudget: 20,
     maxOpenPositions: 10,
     maxActionsPerSession: 10,
     orderSizePctOfBudget: 10,
@@ -155,8 +155,8 @@ describe("validateBacktestSettingsOverrides", () => {
   });
 
   it("lets a session change the sector cap, which binds once several symbols share the book", () => {
-    expect(validateBacktestSettingsOverrides({ pluto: { maxSectorExposurePct: 25 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { pluto: { maxSectorExposurePct: 25 } } });
-    expect(validateBacktestSettingsOverrides({ pluto: { maxSectorExposurePct: 101 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toMatchObject({ ok: false });
+    expect(validateBacktestSettingsOverrides({ pluto: { maxSectorPctOfBudget: 25 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { pluto: { maxSectorPctOfBudget: 25 } } });
+    expect(validateBacktestSettingsOverrides({ pluto: { maxSectorPctOfBudget: 101 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toMatchObject({ ok: false });
   });
 
   it("refuses settings a session cannot change", () => {

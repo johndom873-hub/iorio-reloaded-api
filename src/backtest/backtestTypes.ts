@@ -148,9 +148,10 @@ export interface BacktestBaselineSettings {
 /**
  * The engine's version, stored on each session it runs (backtest_sessions.engine_version): raised whenever a stored
  * session's settings would give different results, so the ticker analysis compares only same-engine runs. A new setting
- * whose default keeps the results does not raise it. 1: the engine as of 3020323 (2026-10-15).
+ * whose default keeps the results does not raise it. 1: the engine as of 3020323 (2026-10-15). 2: max per ticker and max
+ * per sector are shares of the capital budget, not of the account (2026-10-16).
  */
-export const backtestEngineVersion = 1;
+export const backtestEngineVersion = 2;
 
 export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
 
