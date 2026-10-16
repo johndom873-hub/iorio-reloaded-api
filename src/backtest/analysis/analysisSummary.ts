@@ -11,7 +11,7 @@ import { ladderSettingsOf, type AnalysisSessionLadderSettings, type AnalysisSess
 // figures, the analysis backtest and the ticker's other backtests as they stand, through the subscription CLI, and
 // answers a summary plus settings values with reasons and a verdict on the ticker for the CC + Put Ladder.
 
-export const analysisSummaryPromptVersion = 5;
+export const analysisSummaryPromptVersion = 6;
 const summaryTimeoutSeconds = 600;
 // Opus 5.5 at extra-high effort (Marcelo 2026-10-16); the backtests' decisions keep backtestClaudeModel.
 const analysisSummaryClaudeModel = "claude-opus-5-5";
@@ -63,6 +63,7 @@ export const analysisSummaryJsonSchema = {
 
 // Prompt version 5 (approved by Marcelo 2026-10-16): who reads it and what they decide, the verdict and the evidence a
 // changed value needs both computed in code (verdictTests, settingEvidence), the data's units and fields explained.
+// Version 6 (Marcelo 2026-10-16): a pot outside the range is rounded toward the inside, so it still fits.
 const systemPrompt = `You write the Summary and the Recommendation in the Analyse window: one stock, judged for the CC + Put Ladder. Two people read it: Marcelo, the developer, and Juan, a trader who is not a developer. They use it to decide whether to run the ladder on this stock, and with which values for it. "Try these values" copies your values into the window and "Backtest these values" tests them, so every value you change sends them to a backtest.
 
 <strategy>
@@ -81,7 +82,7 @@ Recommend one value for each setting key. A single stock's backtests run on one 
 - Change a value only to one whose test clears the margin. Call it "worth testing", not "better": they will backtest it before using it.
 - When tested values did not clear the margin, keep the current value and say the difference was too small.
 - When no backtest varied the setting, keep the current value and say it is untested.
-- potDollars comes from the pot-size figures: keep the configured pot when it lies inside the last 12 months' range; otherwise recommend the nearer end of that range, rounded to $10,000.
+- potDollars comes from the pot-size figures: keep the configured pot when it lies inside the last 12 months' range; otherwise recommend the nearer end of that range, rounded to $10,000 toward the inside: the smallest pot rounded up, the largest rounded down.
 - ladderShockPct: null keeps the rule.
 </changing_values>
 
