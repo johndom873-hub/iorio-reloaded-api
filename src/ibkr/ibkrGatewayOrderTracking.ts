@@ -247,6 +247,9 @@ export interface ExecutionRecordingDependencies {
  */
 export const openingFillReconciliationDelayMs = 3_000;
 
+/** How long after an option leg closed as expired an assignment fill at its strike is still matched to it. */
+export const assignmentMatchWindowMs = 36 * 3_600_000;
+
 /** Most commission reports held while waiting for their trade row; the oldest is dropped beyond this. */
 export const maxPendingCommissions = 500;
 
@@ -327,9 +330,10 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
    * contract can be open on several positions (covered calls on the same ticker), so the conId alone is not enough:
    *   - a leg the order itself names (a close or a roll of a tracked leg) wins;
    *   - shares bought by a covered-call order go to the position holding that order's call, or wait for it;
-   *   - anything else (an order placed outside the app, an assignment) keeps the oldest open leg of the contract.
+   *   - an assignment (no app order, at a strike that has reached expiry) goes where assignmentStockLeg says;
+   *   - anything else (an order placed outside the app) keeps the oldest open leg of the contract.
    */
-  async function legForExecution(conId: string, contract: Contract, execution: Execution, sourceOrder: SourceOrderRequest | null) {
+  async function legForExecution(conId: string, contract: Contract, execution: Execution, sourceOrder: SourceOrderRequest | null, receivedAt: Date) {
     const openLegs = await db("position_legs").where({ ibkr_contract_id: conId }).whereNull("exit_at").orderBy("entry_at", "asc").orderBy("id", "asc");
     if (openLegs.length === 0) return null;
 
@@ -344,7 +348,39 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
         .first("option_leg.position_id as positionId");
       return openLegs.find((leg) => leg.position_id === callOwner?.positionId) ?? null;
     }
+    if (!sourceOrder && contract.secType === "STK") {
+      const assignmentLeg = await assignmentStockLeg(openLegs, execution, receivedAt);
+      if (assignmentLeg !== undefined) return assignmentLeg;
+    }
     return openLegs[0];
+  }
+
+  /**
+   * An assignment's stock fill, told by its price: exactly the strike of a short option on the ticker that has reached
+   * expiry and has no closing trade (still open, or closed within assignmentMatchWindowMs as expired).
+   *   - a call assigned (shares sold): the stock leg of the position holding that call;
+   *   - a put assigned (shares bought): the ticker's leftover-stock position, or null to wait for the reconciliation to
+   *     create it. Never a covered call's leg: those shares are the put's, and would blend into that position's own cost.
+   * undefined when the fill is not an assignment, or no open leg is that call's.
+   */
+  async function assignmentStockLeg(openLegs: { id: string; position_id: string }[], execution: Execution, receivedAt: Date) {
+    if (execution.price === undefined || (execution.side !== "SLD" && execution.side !== "BOT")) return undefined;
+    const executedAt = executedAtOf(execution, receivedAt);
+    const positionIds = openLegs.map((leg) => leg.position_id);
+    const assignedOptionPositionIds: string[] = await db("position_legs as pl")
+      .join("positions as p", "p.id", "pl.position_id")
+      .whereIn("p.ticker_id", db("positions").whereIn("id", positionIds).select("ticker_id"))
+      .where({ "pl.leg_type": "option", "pl.side": "short", "pl.option_type": execution.side === "SLD" ? "call" : "put" })
+      .whereRaw("abs(pl.strike_price - ?) < 0.00005", [execution.price])
+      .whereRaw("pl.expiry_date <= ?::date", [easternIsoDate(executedAt)])
+      .andWhere((builder) => builder.whereNull("pl.exit_at").orWhere("pl.exit_at", ">=", new Date(executedAt.getTime() - assignmentMatchWindowMs)))
+      .whereNotExists(db("trades as closing").whereRaw("closing.position_leg_id = pl.id").where("closing.is_closing_trade", true))
+      .pluck("pl.position_id");
+    if (assignedOptionPositionIds.length === 0) return undefined;
+
+    if (execution.side === "SLD") return openLegs.find((leg) => assignedOptionPositionIds.includes(leg.position_id));
+    const leftoverPosition = await db("positions").whereIn("id", positionIds).where({ strategy_key: "unstructured" }).first("id");
+    return openLegs.find((leg) => leg.position_id === leftoverPosition?.id) ?? null;
   }
 
   async function recordCommission(report: CommissionReport): Promise<void> {
@@ -405,7 +441,7 @@ export function createExecutionRecorder(dependencies: ExecutionRecordingDependen
     if (existing) return;
 
     const conId = String(contract.conId);
-    const leg = await legForExecution(conId, contract, execution, await loadSourceOrderRequest(execution));
+    const leg = await legForExecution(conId, contract, execution, await loadSourceOrderRequest(execution), receivedAt);
 
     if (!leg) {
       // A brand-new position-opening fill (or one placed outside the app entirely): the leg does not exist yet because the

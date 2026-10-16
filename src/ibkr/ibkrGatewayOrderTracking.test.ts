@@ -755,6 +755,74 @@ describe("execution recorder", () => {
     });
   });
 
+  describe("an assignment's stock fill (no app order) goes to the position whose option was assigned", () => {
+    const stockContractOf = (conId: string): Contract => ({ conId: Number(conId), secType: "STK" }) as Contract;
+    const yesterdayIso = () => new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    const inAWeekIso = () => new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+    const nowAsIbkrTime = () => new Date().toISOString().replace(/\.\d{3}Z$/, "").replace(/-/g, "").replace("T", "-");
+
+    async function positionOn(tickerId: string, strategyKey: string): Promise<string> {
+      const [position] = await testDb("positions").insert({ strategy_key: strategyKey, ticker_id: tickerId, status: "open" }).returning(["id"]);
+      createdPositionIds.push(position.id);
+      return position.id;
+    }
+    async function stockLegOn(positionId: string, conId: string, entryAt: Date): Promise<string> {
+      const [leg] = await testDb("position_legs").insert({ position_id: positionId, leg_type: "stock", side: "long", quantity: 100, multiplier: 1, entry_price: 97.48, entry_at: entryAt, ibkr_contract_id: conId }).returning(["id"]);
+      return leg.id;
+    }
+    async function shortOptionOn(positionId: string, optionType: "call" | "put", strike: number, expiryIso: string): Promise<string> {
+      const [leg] = await testDb("position_legs")
+        .insert({ position_id: positionId, leg_type: "option", side: "short", quantity: 1, multiplier: 100, option_type: optionType, strike_price: strike, expiry_date: expiryIso, entry_price: 1, entry_at: daysAgo(3), ibkr_contract_id: nextConId() })
+        .returning(["id"]);
+      return leg.id;
+    }
+    // INTC-shaped: the $98 covered call's shares were opened first, the $94 covered call's after.
+    async function siblingCoveredCalls(the94Expiry: string) {
+      const [ticker] = await testDb("tickers").insert({ symbol: `AS${(counter += 1)}${Date.now() % 10_000}`, company_name: "Assignment Test Co", sector: "Technology" }).returning(["id"]);
+      createdTickerIds.push(ticker.id);
+      const stockConId = nextConId();
+      const the98Id = await positionOn(ticker.id, "covered_call");
+      const the98StockLegId = await stockLegOn(the98Id, stockConId, daysAgo(2));
+      await shortOptionOn(the98Id, "call", 98, inAWeekIso());
+      const the94Id = await positionOn(ticker.id, "covered_call");
+      const the94StockLegId = await stockLegOn(the94Id, stockConId, daysAgo(1));
+      await shortOptionOn(the94Id, "call", 94, the94Expiry);
+      return { tickerId: ticker.id, stockConId, the98StockLegId, the94StockLegId };
+    }
+
+    it("the $94 call assigned: the 100 shares sold at $94 close the $94 position's stock, not the older $98 position's", async () => {
+      const { stockConId, the94StockLegId } = await siblingCoveredCalls(yesterdayIso());
+      const execution = executionOf({ side: "SLD", shares: 100, price: 94, time: nowAsIbkrTime() });
+      await recorder.recordExecution(stockContractOf(stockConId), execution);
+      expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: the94StockLegId, is_closing_trade: true });
+    });
+
+    it("a sale at a call's strike before that call's expiry is not an assignment: the oldest open leg, as before", async () => {
+      const { stockConId, the98StockLegId } = await siblingCoveredCalls(inAWeekIso());
+      const execution = executionOf({ side: "SLD", shares: 100, price: 94, time: nowAsIbkrTime() });
+      await recorder.recordExecution(stockContractOf(stockConId), execution);
+      expect(await tradeOf(execution.execId!)).toMatchObject({ position_leg_id: the98StockLegId });
+    });
+
+    it("a put assigned while covered calls hold the stock: the shares wait for the leftover-stock position, or join it when it exists", async () => {
+      const { tickerId, stockConId, the98StockLegId, the94StockLegId } = await siblingCoveredCalls(inAWeekIso());
+      const cspId = await positionOn(tickerId, "cash_secured_put");
+      await shortOptionOn(cspId, "put", 100, yesterdayIso());
+
+      const waiting = executionOf({ side: "BOT", shares: 100, price: 100, time: nowAsIbkrTime() });
+      await recorder.recordExecution(stockContractOf(stockConId), waiting);
+      expect(await tradeCount(waiting.execId!)).toBe(0);
+      expect(recorder.bufferedOpeningExecutionCount(stockConId)).toBe(1);
+
+      const leftoverId = await positionOn(tickerId, "unstructured");
+      const leftoverStockLegId = await stockLegOn(leftoverId, stockConId, new Date());
+      const joining = executionOf({ side: "BOT", shares: 100, price: 100, time: nowAsIbkrTime() });
+      await recorder.recordExecution(stockContractOf(stockConId), joining);
+      expect(await tradeOf(joining.execId!)).toMatchObject({ position_leg_id: leftoverStockLegId, is_closing_trade: false });
+      expect(await testDb("trades").whereIn("position_leg_id", [the98StockLegId, the94StockLegId])).toHaveLength(0);
+    });
+  });
+
   describe("commissions", () => {
     const report = (execId: string | undefined, commission: number | undefined): CommissionReport => ({ execId, commission }) as CommissionReport;
 

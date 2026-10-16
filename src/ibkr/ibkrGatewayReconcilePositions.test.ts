@@ -964,6 +964,30 @@ describe("reconcileHeldPositions — covered calls sharing one stock contract ea
     expect(await shareSourcesOf(intc.the98Id)).toEqual([]);
   });
 
+  it("the $94 call assigned at expiry: the recorder puts the $94 sale on the $94 position, which closes as assigned at $94; the $98 shares keep $100.00", async () => {
+    const intc = await seedIntcSiblings(true);
+    await runPass(intc.held);
+    await testDb("position_legs").where({ id: intc.the94CallLegId }).update({ expiry_date: isoDateDaysFromToday(-1) });
+
+    const recorder = createExecutionRecorder({ db: testDb, isAccountBindingMismatch: () => false, requestReconciliation: () => {} });
+    const assignmentExecId = `reconcile-test-assignment-${intc.the94StockLegId}`;
+    const ibkrNow = new Date().toISOString().replace(/\.\d{3}Z$/, "").replace(/-/g, "").replace("T", "-");
+    await recorder.recordExecution({ conId: intc.stockConId, symbol: intc.ticker.symbol, secType: SecType.STK } as never, { execId: assignmentExecId, orderId: 0, side: "SLD", shares: 100, price: 94, time: ibkrNow } as never);
+    expect((await testDb("trades").where({ ibkr_exec_id: assignmentExecId }).first()).position_leg_id).toBe(intc.the94StockLegId);
+
+    // IBKR sold its oldest lot (the $100.00 shares): the 200 left average (100 x 100 + 100 x 92.4409) / 200.
+    await runPass([heldStock(intc.ticker.symbol, intc.stockConId, 200, 96.2205), intc.held[1]!]);
+
+    const the94 = (await positionsFor(intc.ticker.id)).find((position) => position.id === intc.the94Id)!;
+    expect(the94.status).toBe("closed");
+    expect(the94.close_reason).toBe("assigned");
+    const the94Stock = await stockLegOf(intc.the94StockLegId);
+    expect(Number(the94Stock.entry_price)).toBe(92.4409);
+    expect(Number(the94Stock.exit_price)).toBe(94);
+    const the98Stock = await stockLegOf(intc.the98StockLegId);
+    expect([the98Stock.exit_at, the98Stock.quantity, Number(the98Stock.entry_price)]).toEqual([null, 200, 100]);
+  });
+
   it("the $98 position rolls while the $94 one stays open: its 200 shares move to the new call at $100.00, even when the $94 call is synced first", async () => {
     const intc = await seedIntcSiblings(true);
     await runPass(intc.held);
