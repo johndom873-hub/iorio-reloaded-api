@@ -500,7 +500,7 @@ Plain language: IBKR keeps one average price for all the shares of a stock. When
 - Review fixes (2026-10-16): leg prices stored to 8 decimals (migration); share hand-overs record the shares received (migration); a partial sale of shared shares takes IBKR's oldest lots first; shares joining an existing leg blend its cost with theirs; a closing fill that lands after the close sets the exit; a missing commission report leaves the cost unknown rather than understated; the daily P&L snapshot counts open legs only; options are marked at the bid/ask mid everywhere (was the last trade).
 - After the prod promotion (Marcelo runs the scripts): repair old buy-write share fills booked to the wrong position (a stock fill belongs to the position holding the same order's option fill; COIN 29–30 Sep on staging), old blended sibling costs, and P&L snapshot rows that included closed legs.
 
-## Access levels: admin and trader (approved by Marcelo 2026-10-17; built, not pushed; mockup https://claude.ai/artifact/QN7mJ8kd8r9sgGwpphuShP)
+## Access levels: admin and trader (approved by Marcelo 2026-10-17; on staging 2026-10-17, API `cd15680` + app `ec4c9d4`, prod at promotion; mockup https://claude.ai/artifact/QN7mJ8kd8r9sgGwpphuShP)
 
 In plain words: Marce is the admin and can do everything. Everyone else is a trader: they can trade, halt trading and stop Pluto, but cannot change a limit or a Pluto setting, restart Pluto or lift a halt, and their new positions must fit in the part of the account not reserved for Pluto.
 
