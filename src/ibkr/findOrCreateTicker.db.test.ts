@@ -78,7 +78,16 @@ describe("findOrCreateTicker", () => {
   it("refuses a symbol IBKR has no contract for and stores nothing", async () => {
     const symbol = nextSymbol();
     fetchNewTickerDataMock.mockResolvedValue({ companyName: null, sector: null, conId: null, primaryExchange: null, impliedVolatility: null, avgOptionVolume: null });
-    await expect(findOrCreateTicker(symbol, { captureTodaysMarketData: false })).rejects.toBeInstanceOf(UnknownSymbolError);
+    await expect(findOrCreateTicker(symbol, { captureTodaysMarketData: false })).rejects.toMatchObject({ name: "UnknownSymbolError", ibkrHasNoSuchContract: false });
+    expect(await testDb("tickers").where({ symbol }).first()).toBeUndefined();
+  });
+
+  it("says when IBKR answered that it has no such stock (a delisted or misspelt symbol), not merely no answer", async () => {
+    const symbol = nextSymbol();
+    fetchNewTickerDataMock.mockResolvedValue({ companyName: null, sector: null, conId: null, primaryExchange: null, impliedVolatility: null, avgOptionVolume: null, ibkrHasNoSuchContract: true });
+    const refusal = await findOrCreateTicker(symbol, { captureTodaysMarketData: false }).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(UnknownSymbolError);
+    expect((refusal as InstanceType<typeof UnknownSymbolError>).ibkrHasNoSuchContract).toBe(true);
     expect(await testDb("tickers").where({ symbol }).first()).toBeUndefined();
   });
 });

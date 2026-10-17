@@ -12,7 +12,7 @@ import { describeFileStockBarsRefresh, FileStockBarsCancelledError, refreshFileS
 import { BacktestCancelledError, runBacktestSession } from "../engine/runBacktestSession.js";
 import { refreshSplitScheduleForSymbol } from "../engine/splitFactors.js";
 import { runAnalysisJob } from "../analysis/runAnalysisJob.js";
-import { backfillDailyHistoryForBacktest, backtestHistoryStartDate, describeBacktestHistoryBackfill } from "../backfillDailyHistory.js";
+import { backfillDailyHistoryForBacktest, backtestHistoryStartDate, describeBacktestHistoryBackfill, isIbkrNoSuchContractError } from "../backfillDailyHistory.js";
 import { formatDownloadProgressLabel, jobHeartbeatIntervalMilliseconds, lastFinishedBacktestSessionDate } from "./backtestJobRules.js";
 import { finishSessionOfJob, kickDownloadQueue, loadBacktestJobRow, requeuePausedDownload, type BacktestJobRow } from "./backtestJobStore.js";
 import { thetaDataDownloaderScriptName } from "./spawnBacktestJobProcess.js";
@@ -242,13 +242,17 @@ async function runDownloadJob(job: BacktestJobRow, control: JobProcessControl): 
   if (control.cancelRequested) return { status: "cancelled", error: null };
   await control.reportProgress(job.progress_done, job.progress_total, `IBKR daily bars and implied volatility back to ${backtestHistoryStartDate}`);
   // The option data does not depend on the bars, so an IBKR failure (Gateway down, pacing) does not stop the download;
-  // the job then ends failed with the reason, and Resume retries the top-up.
+  // the job then ends failed with the reason, and Resume retries the top-up. A stock IBKR has no contract for stops it:
+  // the backtests take their stock prices from IBKR only, so its option data could never be used.
   let ibkrError: string | null = null;
   try {
     await topUpIbkrHistory(job.symbol);
   } catch (error) {
     ibkrError = errorMessage(error);
     console.error(`${job.symbol}: IBKR history top-up failed: ${ibkrError}`);
+    if (isIbkrNoSuchContractError(error)) {
+      return { status: "failed", error: `IBKR has no stock contract for ${job.symbol}: it is delisted, or the symbol is misspelt. No option data was downloaded: the backtests need IBKR's stock prices.` };
+    }
   }
   if (control.cancelRequested) return { status: "cancelled", error: null };
 

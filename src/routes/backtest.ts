@@ -3,6 +3,7 @@ import { requireAuth } from "../middleware/requireAuth.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtest/backtestDataDirectory.js";
 import type { BacktestLabSettingsView, BacktestOverview, BacktestSessionEstimateResponse, BacktestSettingsTemplate } from "../backtest/backtestTypes.js";
 import { readBacktestDataFileContents, readBacktestDataFilePeriodContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
+import { deleteBacktestDataFile } from "../backtest/deleteBacktestDataFile.js";
 import { backtestHistoryStartDate } from "../backtest/backfillDailyHistory.js";
 import { backtestNotReplayed, buildBacktestSettingRows, editableBacktestSettingPaths } from "../backtest/settingsTemplate.js";
 import {
@@ -85,6 +86,17 @@ backtestRouter.post("/downloads", async (request, response) => {
   const pauseRunning = optionalBoolean(body.pauseRunning, "pauseRunning");
   if (pauseRunning && !putFirst) throw new BacktestRequestError("pauseRunning goes with putFirst: only a download put first can pause the running one.", 400);
   response.status(201).json(await createDownloadJob({ symbol, startDate, endDate, putFirst, pauseRunning }));
+});
+
+backtestRouter.delete("/data-files/:symbol", async (request, response) => {
+  let symbol: string;
+  try {
+    symbol = normalizeBacktestSymbol(request.params.symbol ?? "");
+  } catch (error) {
+    throw new BacktestRequestError(error instanceof Error ? error.message : String(error), 400);
+  }
+  await deleteBacktestDataFile(symbol);
+  response.status(204).end();
 });
 
 backtestRouter.post("/jobs/:id/cancel", async (request, response) => {

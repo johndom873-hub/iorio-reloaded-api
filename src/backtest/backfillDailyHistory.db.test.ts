@@ -14,7 +14,8 @@ vi.mock("../db/connection.js", async () => {
 });
 
 const { db } = await import("../db/connection.js");
-const { backfillDailyHistoryForBacktest, historyDurationReaching, isIbkrPacingOrOutageError } = await import("./backfillDailyHistory.js");
+const { backfillDailyHistoryForBacktest, historyDurationReaching, isIbkrNoSuchContractError, isIbkrPacingOrOutageError } = await import("./backfillDailyHistory.js");
+const { UnknownSymbolError } = await import("../ibkr/findOrCreateTicker.js");
 const testDb: Knex = db;
 
 const symbol = `BF${String(Date.now() % 1_000_000).padStart(6, "0")}`;
@@ -120,5 +121,14 @@ describe("backfill helpers", () => {
     expect(isIbkrPacingOrOutageError(new Error("Historical data error for INTC (code 162): Historical Market Data Service error message:API historical data query cancelled: pacing violation"))).toBe(true);
     expect(isIbkrPacingOrOutageError(new Error("Historical data error for XYZ (code 162): Historical Market Data Service error message:HMDS query returned no data"))).toBe(false);
     expect(isIbkrPacingOrOutageError(new Error("Historical data error for XYZ (code 200): No security definition has been found"))).toBe(false);
+  });
+
+  it("tells a stock IBKR has no contract for from one it could not reach", () => {
+    expect(isIbkrNoSuchContractError(new UnknownSymbolError("WBA", { ibkrHasNoSuchContract: true }))).toBe(true);
+    expect(isIbkrNoSuchContractError(new UnknownSymbolError("WBA"))).toBe(false);
+    expect(isIbkrNoSuchContractError(new Error("Historical data error for WBA (code 200): No security definition has been found for the request"))).toBe(true);
+    expect(isIbkrNoSuchContractError(new Error("Historical data error for INTC (code 162): pacing violation"))).toBe(false);
+    expect(isIbkrNoSuchContractError(new Error("Historical data error for INTC (code 2000): something"))).toBe(false);
+    expect(isIbkrNoSuchContractError(new Error("Historical data timeout for INTC"))).toBe(false);
   });
 });

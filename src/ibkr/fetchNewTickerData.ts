@@ -12,6 +12,8 @@ export interface NewTickerData {
   primaryExchange: string | null;
   impliedVolatility: number | null;
   avgOptionVolume: number | null;
+  /** Set when IBKR answered that it has no such stock (see ContractDetails); absent when it was found or did not answer. */
+  ibkrHasNoSuchContract?: true;
 }
 
 const contractDetailsTimeoutMs = 10_000;
@@ -22,6 +24,8 @@ const contractDetailsTimeoutMs = 10_000;
 // (which usually does arrive within a couple seconds) for no benefit.
 const interactiveMarketDataTimeoutMs = 5_000;
 const contractDetailsReqId = 1;
+/** IBKR's "No security definition has been found for the request": it has no contract matching the symbol. */
+export const ibkrNoSecurityDefinitionErrorCode = 200;
 const marketDataReqId = 2;
 
 export interface ContractDetails {
@@ -40,6 +44,11 @@ export interface ContractDetails {
   // only valid for a day or two and are fetched live (see
   // fetchExchangeHours.ts) rather than cached on the ticker row.
   primaryExchange: string | null;
+  // Set when IBKR answered that it has no such stock (error 200 "No security
+  // definition", or a details list with nothing in it): a delisted or
+  // misspelt symbol. Absent when the stock was found and when IBKR did not
+  // answer in time, so a caller can tell "unknown" from "try again".
+  ibkrHasNoSuchContract?: true;
 }
 
 // IBKR's `industry` field (GICS-style classification) is populated for
@@ -61,6 +70,7 @@ export function lookupContractDetails(
     let settled = false;
 
     const emptyResult: ContractDetails = { companyName: null, sector: null, conId: null, primaryExchange: null };
+    const noSuchContractResult: ContractDetails = { ...emptyResult, ibkrHasNoSuchContract: true };
 
     const onContractDetails = (
       id: number,
@@ -82,13 +92,13 @@ export function lookupContractDetails(
     };
 
     const onEnd = (id: number) => {
-      if (id === reqId) finish(emptyResult);
+      if (id === reqId) finish(noSuchContractResult);
     };
 
-    // e.g. an invalid/unrecognized symbol — fail fast instead of waiting out
-    // the full timeout for something that will never arrive.
-    const onError = (_error: Error, _code: number, id: number) => {
-      if (id === reqId) finish(emptyResult);
+    // e.g. an invalid/unrecognized symbol (code 200) — fail fast instead of
+    // waiting out the full timeout for something that will never arrive.
+    const onError = (_error: Error, code: number, id: number) => {
+      if (id === reqId) finish(code === ibkrNoSecurityDefinitionErrorCode ? noSuchContractResult : emptyResult);
     };
 
     const timer = setTimeout(() => finish(emptyResult), contractDetailsTimeoutMs);

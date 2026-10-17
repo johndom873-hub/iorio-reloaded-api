@@ -65,6 +65,13 @@ export function readFileDailyBars(database: DatabaseSync): StoredDailyBar[] | nu
   return rows.length > 0 ? rows : null;
 }
 
+/** How many IBKR daily bars the file keeps and the last one's date (what the split schedule is checked against); null when it has none. */
+export function countFileDailyBars(database: DatabaseSync): { count: number; lastDate: string } | null {
+  if (!hasTable(database, "ibkr_daily_bars")) return null;
+  const row = database.prepare("SELECT count(*) AS count, max(trading_date) AS lastDate FROM ibkr_daily_bars").get() as { count: number; lastDate: string | null };
+  return row.lastDate ? { count: Number(row.count), lastDate: row.lastDate } : null;
+}
+
 /** The first and last dates of the file's IBKR bars, and when they were fetched; nulls when it has none. */
 export function describeFileStockBars(database: DatabaseSync): { dailyFirstDate: string | null; dailyLastDate: string | null; intradayFirstDate: string | null; intradayLastDate: string | null; fetchedAt: string | null } {
   if (!hasTable(database, "ibkr_daily_bars") || !hasTable(database, "ibkr_intraday_bars")) return { dailyFirstDate: null, dailyLastDate: null, intradayFirstDate: null, intradayLastDate: null, fetchedAt: null };

@@ -20,9 +20,13 @@ export interface FindOrCreateTickerResult {
  */
 /** Thrown when IBKR has no contract for the symbol — routes answer 422, nothing is stored. */
 export class UnknownSymbolError extends Error {
-  constructor(symbol: string) {
+  /** True when IBKR answered that it has no such stock; false when it did not answer in time. */
+  readonly ibkrHasNoSuchContract: boolean;
+
+  constructor(symbol: string, options: { ibkrHasNoSuchContract?: boolean } = {}) {
     super(`${symbol} is not a symbol IBKR recognises — check the spelling (or IBKR did not answer in time; try again).`);
     this.name = "UnknownSymbolError";
+    this.ibkrHasNoSuchContract = options.ibkrHasNoSuchContract ?? false;
   }
 }
 
@@ -44,7 +48,7 @@ export async function findOrCreateTicker(symbol: string, options: { captureToday
   // used to be saved with a null contract id for good and then fail every
   // later step (2026-09-24). Refuse instead; nothing is written.
   if (tickerData.conId === null || tickerData.conId === undefined) {
-    throw new UnknownSymbolError(normalizedSymbol);
+    throw new UnknownSymbolError(normalizedSymbol, { ibkrHasNoSuchContract: tickerData.ibkrHasNoSuchContract === true });
   }
   // Two concurrent adds of the same new symbol: the loser re-reads the row
   // the winner inserted instead of surfacing the unique violation as a 500.

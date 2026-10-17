@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -58,6 +58,7 @@ const downloadSymbolA = `BT${runTag}A`;
 const downloadSymbolB = `BT${runTag}B`;
 const downloadSymbolC = `BT${runTag}C`;
 const jobListingSymbol = `BT${runTag}L`;
+const deletedFileSymbol = `BT${runTag}D`;
 const sessionNamePrefix = `backtest-route-${runTag}`;
 let tickerId: string;
 
@@ -175,7 +176,7 @@ beforeEach(() => {
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await testDb("backtest_sessions").where("name", "like", `${sessionNamePrefix}%`).del();
-  await testDb("backtest_jobs").whereIn("symbol", [fileSymbol, downloadSymbolA, downloadSymbolB, downloadSymbolC, jobListingSymbol]).del();
+  await testDb("backtest_jobs").whereIn("symbol", [fileSymbol, downloadSymbolA, downloadSymbolB, downloadSymbolC, jobListingSymbol, deletedFileSymbol]).del();
   await testDb("daily_price_bars").where({ ticker_id: tickerId }).del();
   await testDb("tickers").where({ id: tickerId }).del();
   await testDb.destroy();
@@ -570,6 +571,73 @@ describe("backtest routes", () => {
     });
   });
 
+  describe("deleting a data file", () => {
+    const filePath = () => path.join(dataDirectory, `${deletedFileSymbol}.sqlite`);
+    const splitCachePath = () => path.join(dataDirectory, "splits", `${deletedFileSymbol}.json`);
+
+    beforeEach(() => {
+      rmSync(filePath(), { force: true });
+      writeSymbolFile(deletedFileSymbol, [{ tradingDate: "2026-09-01", status: "complete" }]);
+    });
+
+    it("deletes the file, its side files and split cache, and its finished downloads; other files and jobs stay", async () => {
+      writeFileSync(`${filePath()}-wal`, "");
+      mkdirSync(path.dirname(splitCachePath()), { recursive: true });
+      writeFileSync(splitCachePath(), "{}");
+      await testDb("backtest_jobs").insert([
+        { kind: "download", symbol: deletedFileSymbol, status: "failed", error: "IBKR has no stock contract" },
+        { kind: "download", symbol: deletedFileSymbol, status: "succeeded" },
+        { kind: "analysis", symbol: deletedFileSymbol, status: "succeeded" },
+      ]);
+
+      expect((await request("DELETE", `/backtest/data-files/${deletedFileSymbol.toLowerCase()}`)).status).toBe(204);
+      for (const gone of [filePath(), `${filePath()}-wal`, splitCachePath()]) expect(existsSync(gone)).toBe(false);
+      expect(await testDb("backtest_jobs").where({ symbol: deletedFileSymbol }).pluck("kind")).toEqual(["analysis"]);
+      expect(existsSync(path.join(dataDirectory, `${fileSymbol}.sqlite`))).toBe(true);
+      const overview = (await request("GET", "/backtest/overview")).body as BacktestOverview;
+      expect(overview.files.map((file) => file.symbol)).not.toContain(deletedFileSymbol);
+      expect(overview.files.map((file) => file.symbol)).toContain(fileSymbol);
+      await testDb("backtest_jobs").where({ symbol: deletedFileSymbol }).del();
+    });
+
+    it("refuses while a download, an analysis or a backtest that uses the symbol is queued or running, and keeps the file", async () => {
+      const [download] = await testDb("backtest_jobs").insert({ kind: "download", symbol: deletedFileSymbol, status: "queued", start_date: "2026-09-01", end_date: "2026-09-02" }).returning("id");
+      let refusal = await request("DELETE", `/backtest/data-files/${deletedFileSymbol}`);
+      expect(refusal).toEqual({ status: 409, body: { error: `${deletedFileSymbol} has a download queued or running: cancel it first.` } });
+      await testDb("backtest_jobs").where({ id: download.id }).del();
+
+      const [analysis] = await testDb("backtest_jobs").insert({ kind: "analysis", symbol: deletedFileSymbol, status: "running" }).returning("id");
+      refusal = await request("DELETE", `/backtest/data-files/${deletedFileSymbol}`);
+      expect(refusal).toEqual({ status: 409, body: { error: `${deletedFileSymbol} is being analysed: wait for the analysis to finish.` } });
+      await testDb("backtest_jobs").where({ id: analysis.id }).del();
+
+      const sessionName = `${sessionNamePrefix}-uses-deleted-file`;
+      await testDb("backtest_sessions").insert({
+        name: sessionName,
+        symbol: `${fileSymbol}, ${deletedFileSymbol}`,
+        symbols: JSON.stringify([fileSymbol, deletedFileSymbol]),
+        start_date: "2026-09-01",
+        end_date: "2026-09-02",
+        starting_value: 100_000,
+        tables_mode: "current",
+        settings_snapshot: JSON.stringify({}),
+        status: "queued",
+      });
+      refusal = await request("DELETE", `/backtest/data-files/${deletedFileSymbol}`);
+      expect(refusal).toEqual({ status: 409, body: { error: `The backtest "${sessionName}" uses ${deletedFileSymbol} and has not finished: wait for it or cancel it first.` } });
+      await testDb("backtest_sessions").where({ name: sessionName }).del();
+
+      expect(existsSync(filePath())).toBe(true);
+      expect((await request("DELETE", `/backtest/data-files/${deletedFileSymbol}`)).status).toBe(204);
+    });
+
+    it("answers 404 for a symbol without a file and 400 for something that is not a symbol", async () => {
+      rmSync(filePath(), { force: true });
+      expect(await request("DELETE", `/backtest/data-files/${deletedFileSymbol}`)).toEqual({ status: 404, body: { error: `${deletedFileSymbol} has no data file.` } });
+      expect((await request("DELETE", "/backtest/data-files/not-a-symbol!")).status).toBe(400);
+    });
+  });
+
   describe("sessions", () => {
     let session: BacktestSessionListItem;
     let sessionJob: BacktestJobView;
@@ -594,8 +662,49 @@ describe("backtest routes", () => {
         intradayDays: null,
         barsFirstDate: "2016-01-04",
         barsLastDate: "2026-09-11",
+        barsCount: 2,
         detectedSplits: null,
+        issueDays: 1,
+        issues: { notStored: [], partial: [], unavailable: [{ tradingDate: "2026-09-09", part: "quotes", reason: "HTTP 500" }] },
       });
+    });
+
+    it("list a file's issues for the Issues tooltip: nothing stored (runs across a weekend), stored with parts missing, not retrievable", async () => {
+      // The part file: nothing for the 3rd, 4th and 7th (one run over the weekend), the 9th not retrievable.
+      const partFile = ((await request("GET", "/backtest/overview")).body as BacktestOverview).files.find((file) => file.symbol === partFileSymbol)!;
+      expect(partFile.issueDays).toBe(4);
+      expect(partFile.issues.notStored).toEqual([{ firstDate: "2026-09-03", lastDate: "2026-09-07", weekdays: 3 }]);
+
+      const issuesFileSymbol = `BT${runTag}I`;
+      writeSymbolFile(issuesFileSymbol, [
+        { tradingDate: "2026-09-01", status: "complete" },
+        { tradingDate: "2026-09-02", status: "complete" },
+      ]);
+      const database = new DatabaseSync(path.join(dataDirectory, `${issuesFileSymbol}.sqlite`));
+      database.exec("CREATE TABLE day_issues (trading_date TEXT NOT NULL, part TEXT NOT NULL, expiry TEXT, message TEXT NOT NULL, recorded_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1);");
+      const insertIssue = database.prepare("INSERT INTO day_issues (trading_date, part, expiry, message, recorded_at) VALUES (?, ?, ?, ?, 'x')");
+      const failed = (part: string, detail: string) => `ThetaData request ${part} ${issuesFileSymbol} 2026-09-01 expiration 2026-10-16 failed (${detail})`;
+      insertIssue.run("2026-09-01", "intraday_quotes", "2026-10-16", failed("intraday_quotes", "INVALID_ARGUMENT: Wrong number of data fields, expecting 11, got 6"));
+      insertIssue.run("2026-09-01", "quotes", "2026-10-16", failed("quotes", "INVALID_ARGUMENT: Wrong number of data fields, expecting 11, got 6"));
+      insertIssue.run("2026-09-01", "quotes", "2026-11-20", failed("quotes", "UNAVAILABLE: failed to connect to all addresses"));
+      insertIssue.run("2026-09-02", "open_interest", null, "no data returned");
+      insertIssue.run("2026-09-02", "eod", null, "no data returned");
+      database.close();
+      try {
+        const issuesFile = ((await request("GET", "/backtest/overview")).body as BacktestOverview).files.find((file) => file.symbol === issuesFileSymbol)!;
+        expect(issuesFile.issueDays).toBe(2);
+        expect(issuesFile.issues).toEqual({
+          notStored: [],
+          partial: [
+            { tradingDate: "2026-09-01", expiry: "2026-10-16", parts: ["quotes", "intraday_quotes"], reason: "ThetaData sent malformed data" },
+            { tradingDate: "2026-09-01", expiry: "2026-11-20", parts: ["quotes"], reason: "ThetaData could not be reached" },
+            { tradingDate: "2026-09-02", expiry: null, parts: ["eod", "open_interest"], reason: "no data returned" },
+          ],
+          unavailable: [],
+        });
+      } finally {
+        rmSync(path.join(dataDirectory, `${issuesFileSymbol}.sqlite`), { force: true });
+      }
     });
 
     it("show the splits the engine cached for the file, only while the file and the bars are what they were inferred from", async () => {
@@ -610,6 +719,31 @@ describe("backtest routes", () => {
       expect((await fileOf()).detectedSplits).toBeNull();
       writeSplitScheduleCache(dataDirectory, { symbol: fileSymbol, fingerprint: splitScheduleFingerprint(7, "2026-09-11", 2, "2026-09-11"), builtAtIso: "2026-10-12T00:00:00Z", schedule });
       expect((await fileOf()).detectedSplits).toEqual(splits);
+    });
+
+    it("check the cached splits against the IBKR daily bars the file keeps, the ones the split check used, not the local DB's", async () => {
+      const keptBarsSymbol = `BT${runTag}K`;
+      writeSymbolFile(keptBarsSymbol, [
+        { tradingDate: "2026-09-01", status: "complete" },
+        { tradingDate: "2026-09-02", status: "complete" },
+      ]);
+      const database = new DatabaseSync(path.join(dataDirectory, `${keptBarsSymbol}.sqlite`));
+      database.exec("CREATE TABLE ibkr_daily_bars (trading_date TEXT PRIMARY KEY, open REAL, high REAL, low REAL, close REAL, volume REAL, implied_volatility REAL) WITHOUT ROWID;");
+      for (const tradingDate of ["2026-08-31", "2026-09-01", "2026-09-02"]) database.prepare("INSERT INTO ibkr_daily_bars VALUES (?, 10, 11, 9, 10, 100, NULL)").run(tradingDate);
+      database.close();
+      const splits = [{ lastDayBefore: "2026-09-01", firstDayAfter: "2026-09-02", ratio: 4 }];
+      const schedule = { segments: [], splits, unresolved: [] };
+      const fileOf = async () => ((await request("GET", "/backtest/overview")).body as BacktestOverview).files.find((file) => file.symbol === keptBarsSymbol)!;
+      try {
+        // Inferred against the file's 3 bars (the symbol has none in the local DB): shown. Against other bars: not.
+        writeSplitScheduleCache(dataDirectory, { symbol: keptBarsSymbol, fingerprint: splitScheduleFingerprint(2, "2026-09-02", 3, "2026-09-02"), builtAtIso: "2026-10-17T00:00:00Z", schedule });
+        expect((await fileOf()).detectedSplits).toEqual(splits);
+        writeSplitScheduleCache(dataDirectory, { symbol: keptBarsSymbol, fingerprint: splitScheduleFingerprint(2, "2026-09-02", 0, null), builtAtIso: "2026-10-17T00:00:00Z", schedule });
+        expect((await fileOf()).detectedSplits).toBeNull();
+      } finally {
+        rmSync(path.join(dataDirectory, `${keptBarsSymbol}.sqlite`), { force: true });
+        rmSync(path.join(dataDirectory, "splits", `${keptBarsSymbol}.json`), { force: true });
+      }
     });
 
     it("refuse a session outside the data file or without a file", async () => {

@@ -369,6 +369,19 @@ export interface BacktestDetectedSplit {
   ratio: number;
 }
 
+/** A part of an option day the downloader fetches (the file's day_issues.part). */
+export type BacktestDataFilePart = "quotes" | "eod" | "open_interest" | "intraday_quotes";
+
+/** Everything wrong with a file's option days, for the Data files table's Issues tooltip. Reasons are plain text. */
+export interface BacktestDataFileIssues {
+  /** Weekdays between firstDate and lastDate with nothing stored and no failed attempt recorded, as runs of consecutive weekdays. */
+  notStored: { firstDate: string; lastDate: string; weekdays: number }[];
+  /** Days stored with a part or an expiration missing: one entry per day, expiration and reason. */
+  partial: { tradingDate: string; expiry: string | null; parts: BacktestDataFilePart[]; reason: string }[];
+  /** Days, or a day's intraday quotes, the downloader could not retrieve; every later download asks for them again. */
+  unavailable: { tradingDate: string; part: BacktestDataFilePart | null; reason: string }[];
+}
+
 export interface BacktestDataFileSummary {
   symbol: string;
   /** Splits found in the file's period; null until the file has been analysed (after a download or a session run). */
@@ -389,6 +402,11 @@ export interface BacktestDataFileSummary {
   /** IBKR daily bars in the local DB for the symbol (the forecast and settlement prices). */
   barsFirstDate: string | null;
   barsLastDate: string | null;
+  /** How many of those bars are stored; 0 when none. */
+  barsCount: number;
+  /** Distinct days in `issues`: nothing stored, stored with a part missing, or not retrievable. */
+  issueDays: number;
+  issues: BacktestDataFileIssues;
 }
 
 /**

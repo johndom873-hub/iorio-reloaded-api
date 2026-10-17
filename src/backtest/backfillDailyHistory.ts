@@ -2,6 +2,8 @@ import { BarSizeSetting, WhatToShow } from "@stoqey/ib";
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import type { IbkrConnection } from "../ibkr/connectIbkr.js";
+import { ibkrNoSecurityDefinitionErrorCode } from "../ibkr/fetchNewTickerData.js";
+import { UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
 import { detectPriceAdjustment, tradingDateOf, type StoredBarPrices } from "../ibkr/dailyBarSplitCheck.js";
 import { fetchHistoricalBarsRaw, type PriceBar } from "../ibkr/fetchTickerOverview.js";
 import { ivBarsToDateMap, storeFreshDailyBars } from "../ibkr/priceBarCache.js";
@@ -181,4 +183,14 @@ export function describeBacktestHistoryBackfill(result: BacktestHistoryBackfillR
 export function isIbkrPacingOrOutageError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /timeout|timed out|pacing|not connected|code 1100\b|code 502\b|code 504\b/i.test(message) && !/returned no data/i.test(message);
+}
+
+/**
+ * A failure that means IBKR has no such stock (delisted or misspelt), not that it is busy or down: the contract lookup's
+ * answer (UnknownSymbolError) or a historical request's error 200 ("No security definition"). Retrying never helps.
+ */
+export function isIbkrNoSuchContractError(error: unknown): boolean {
+  if (error instanceof UnknownSymbolError) return error.ibkrHasNoSuchContract;
+  const message = error instanceof Error ? error.message : String(error);
+  return new RegExp(`\\(code ${ibkrNoSecurityDefinitionErrorCode}\\)`).test(message);
 }

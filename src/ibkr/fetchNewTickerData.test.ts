@@ -117,17 +117,24 @@ describe("lookupContractDetails", () => {
     expect((await result).companyName).toBe("MINE");
   });
 
-  it("resolves empty on the end of the list with no details, and on an error for the request", async () => {
-    const empty = { companyName: null, sector: null, conId: null, primaryExchange: null };
+  it("resolves empty and flagged as no such contract on the end of the list with no details, and on error 200 for the request", async () => {
+    const noSuchContract = { companyName: null, sector: null, conId: null, primaryExchange: null, ibkrHasNoSuchContract: true };
     let ib = new FakeIbApi();
     let result = lookupContractDetails(asConnection(ib), 5);
     ib.emit(EventName.contractDetailsEnd, 5);
-    expect(await result).toEqual(empty);
+    expect(await result).toStrictEqual(noSuchContract);
 
     ib = new FakeIbApi();
     result = lookupContractDetails(asConnection(ib), 5);
     ib.emit(EventName.error, new Error("No security definition has been found"), 200, 5);
-    expect(await result).toEqual(empty);
+    expect(await result).toStrictEqual(noSuchContract);
+  });
+
+  it("resolves empty without the flag on any other error for the request: IBKR did not say the stock does not exist", async () => {
+    const ib = new FakeIbApi();
+    const result = lookupContractDetails(asConnection(ib), 5);
+    ib.emit(EventName.error, new Error("Not connected"), 504, 5);
+    expect(await result).toStrictEqual({ companyName: null, sector: null, conId: null, primaryExchange: null });
   });
 
   it("resolves empty after 10 s of silence and removes its listeners", async () => {
@@ -136,7 +143,7 @@ describe("lookupContractDetails", () => {
     await vi.advanceTimersByTimeAsync(9_999);
     expect(ib.listenerCount(EventName.contractDetails)).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(await result).toEqual({ companyName: null, sector: null, conId: null, primaryExchange: null });
+    expect(await result).toStrictEqual({ companyName: null, sector: null, conId: null, primaryExchange: null });
     for (const eventName of [EventName.contractDetails, EventName.contractDetailsEnd, EventName.error]) expect(ib.listenerCount(eventName)).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -189,7 +196,7 @@ describe("getCachedContractDetails", () => {
     const result = getCachedContractDetails(asConnection(ib), "AAPL", 9);
     await vi.advanceTimersByTimeAsync(0);
     ib.emit(EventName.error, new Error("No security definition"), 200, 9);
-    expect(await result).toEqual({ companyName: null, sector: null, conId: null, primaryExchange: null });
+    expect(await result).toStrictEqual({ companyName: null, sector: null, conId: null, primaryExchange: null, ibkrHasNoSuchContract: true });
     expect(mocks.tickerUpdates).toEqual([]);
   });
 });

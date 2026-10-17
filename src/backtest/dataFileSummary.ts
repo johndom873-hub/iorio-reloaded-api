@@ -3,8 +3,9 @@ import path from "node:path";
 import type { Knex } from "knex";
 import { db } from "../db/connection.js";
 import { openBacktestDataFileReadOnly } from "./backtestDataFile.js";
+import { countFileDailyBars } from "./backtestFileStockBars.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "./backtestDataDirectory.js";
-import type { BacktestDataFileSummary } from "./backtestTypes.js";
+import type { BacktestDataFileIssues, BacktestDataFilePart, BacktestDataFileSummary } from "./backtestTypes.js";
 import { addCalendarDays, isWeekendDate, weekdaysBetweenInclusive } from "./jobs/backtestJobRules.js";
 import type { DataFileCoverage, DataFilePeriodContents } from "./jobs/backtestSessionRequest.js";
 import { readSplitScheduleCache, splitScheduleFingerprint, splitScheduleFingerprintsMatch } from "./engine/splitFactors.js";
@@ -110,6 +111,81 @@ export function readBacktestDataFilePeriodContents(symbol: string, startDate: st
   }
 }
 
+const noIssues: BacktestDataFileIssues = { notStored: [], partial: [], unavailable: [] };
+const partOrder: BacktestDataFilePart[] = ["quotes", "intraday_quotes", "eod", "open_interest"];
+/** unavailable_days.reason starts with the part it is about (docs/backtesting/DATA-FILES.md). */
+const unavailableReasonPrefixes: { prefix: string; part: BacktestDataFilePart }[] = [
+  { prefix: "quotes at 10:00: ", part: "quotes" },
+  { prefix: "end of day: ", part: "eod" },
+  { prefix: "open interest: ", part: "open_interest" },
+  { prefix: "intraday quotes: ", part: "intraday_quotes" },
+];
+
+/** The downloader's error, in a few plain words: ThetaData's malformed and corrupt answers named as such, otherwise its own text. */
+export function plainDownloaderReason(message: string): string {
+  if (/no data returned/i.test(message)) return "no data returned";
+  if (/Wrong number of data fields/i.test(message)) return "ThetaData sent malformed data";
+  if (/Corrupt FIT data/i.test(message)) return "ThetaData sent corrupt data";
+  if (/failed to connect|Network is unreachable/i.test(message)) return "ThetaData could not be reached";
+  const failedWith = /failed \((.*)\)\s*$/s.exec(message)?.[1] ?? message;
+  return failedWith.length > 120 ? `${failedWith.slice(0, 117)}…` : failedWith;
+}
+
+/** Consecutive weekdays (a weekend between two of them does not break a run), from dates sorted ascending. */
+function weekdayRuns(dates: readonly string[]): BacktestDataFileIssues["notStored"] {
+  const runs: BacktestDataFileIssues["notStored"] = [];
+  for (const date of dates) {
+    const last = runs.at(-1);
+    let nextWeekday = last ? addCalendarDays(last.lastDate, 1) : null;
+    while (nextWeekday && isWeekendDate(nextWeekday)) nextWeekday = addCalendarDays(nextWeekday, 1);
+    if (last && nextWeekday === date) {
+      last.lastDate = date;
+      last.weekdays += 1;
+    } else runs.push({ firstDate: date, lastDate: date, weekdays: 1 });
+  }
+  return runs;
+}
+
+/** The file's issues (BacktestDataFileIssues) and how many distinct days they cover; none when the symbol has no file. */
+export function readBacktestDataFileIssues(symbol: string): { issueDays: number; issues: BacktestDataFileIssues } {
+  const database = openBacktestDataFileReadOnly(symbol);
+  if (!database) return { issueDays: 0, issues: noIssues };
+  try {
+    database.exec("PRAGMA busy_timeout = 3000");
+    const tableNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
+    if (!tableNames.has("days")) return { issueDays: 0, issues: noIssues };
+    const unavailableRows = tableNames.has("unavailable_days") ? (database.prepare("SELECT trading_date AS tradingDate, reason FROM unavailable_days ORDER BY trading_date").all() as { tradingDate: string; reason: string }[]) : [];
+    const unavailable = unavailableRows.map((row) => {
+      const matched = unavailableReasonPrefixes.find((candidate) => row.reason.startsWith(candidate.prefix));
+      return { tradingDate: row.tradingDate, part: matched?.part ?? null, reason: plainDownloaderReason(matched ? row.reason.slice(matched.prefix.length) : row.reason) };
+    });
+
+    const issueRows = tableNames.has("day_issues") ? (database.prepare("SELECT trading_date AS tradingDate, part, expiry, message FROM day_issues ORDER BY trading_date, expiry").all() as { tradingDate: string; part: BacktestDataFilePart; expiry: string | null; message: string }[]) : [];
+    const partialByKey = new Map<string, BacktestDataFileIssues["partial"][number]>();
+    for (const row of issueRows) {
+      const reason = plainDownloaderReason(row.message);
+      const key = `${row.tradingDate}|${row.expiry ?? ""}|${reason}`;
+      const entry = partialByKey.get(key) ?? { tradingDate: row.tradingDate, expiry: row.expiry, parts: [], reason };
+      if (!entry.parts.includes(row.part)) entry.parts.push(row.part);
+      partialByKey.set(key, entry);
+    }
+    const partial = [...partialByKey.values()].map((entry) => ({ ...entry, parts: partOrder.filter((part) => entry.parts.includes(part)) }));
+
+    const range = database.prepare("SELECT min(trading_date) AS firstDate, max(trading_date) AS lastDate FROM days WHERE status = 'complete'").get() as { firstDate: string | null; lastDate: string | null };
+    const notStoredDates: string[] = [];
+    if (range.firstDate && range.lastDate) {
+      const storedDays = new Set((database.prepare("SELECT trading_date AS tradingDate FROM days WHERE trading_date BETWEEN ? AND ?").all(range.firstDate, range.lastDate) as { tradingDate: string }[]).map((row) => row.tradingDate));
+      const unavailableDays = new Set(unavailable.map((row) => row.tradingDate));
+      for (let day = range.firstDate; day <= range.lastDate; day = addCalendarDays(day, 1)) if (!isWeekendDate(day) && !storedDays.has(day) && !unavailableDays.has(day)) notStoredDates.push(day);
+    }
+
+    const issueDays = new Set([...notStoredDates, ...partial.map((entry) => entry.tradingDate), ...unavailable.map((entry) => entry.tradingDate)]).size;
+    return { issueDays, issues: { notStored: weekdayRuns(notStoredDates), partial, unavailable } };
+  } finally {
+    database.close();
+  }
+}
+
 /** The file's size on disk, including a write-ahead log not yet merged into it. */
 function dataFileSizeBytes(symbol: string): number {
   const filePath = path.join(requireBacktestDataDirectory(), `${symbol}.sqlite`);
@@ -128,10 +204,23 @@ export async function loadDailyBarRanges(symbols: readonly string[], connection:
   return new Map(rows.map((row) => [row.symbol, { firstDate: row.first_date, lastDate: row.last_date, count: Number(row.bar_count) }]));
 }
 
+/** The IBKR daily bars the split schedule is checked against, as refreshSplitScheduleForSymbol picks them: the file's own, else the local DB's. */
+function splitCheckBars(symbol: string, localDatabaseBars: { lastDate: string; count: number } | undefined): { lastDate: string; count: number } | undefined {
+  const database = openBacktestDataFileReadOnly(symbol);
+  if (!database) return localDatabaseBars;
+  try {
+    database.exec("PRAGMA busy_timeout = 3000");
+    return countFileDailyBars(database) ?? localDatabaseBars;
+  } finally {
+    database.close();
+  }
+}
+
 /** The splits the engine cached for the file (splitFactors.ts), only while the file and the bars are what they were inferred from; never inferred here. */
-function cachedDetectedSplits(dataDirectory: string, symbol: string, contents: DataFileContents, bars: { lastDate: string; count: number } | undefined): BacktestDataFileSummary["detectedSplits"] {
+function cachedDetectedSplits(dataDirectory: string, symbol: string, contents: DataFileContents, localDatabaseBars: { lastDate: string; count: number } | undefined): BacktestDataFileSummary["detectedSplits"] {
   const cache = readSplitScheduleCache(dataDirectory, symbol);
   if (!cache) return null;
+  const bars = splitCheckBars(symbol, localDatabaseBars);
   const current = splitScheduleFingerprint(contents.completeDays, contents.lastDate, bars?.count ?? 0, bars?.lastDate ?? null);
   return splitScheduleFingerprintsMatch(cache.fingerprint, current) ? cache.schedule.splits : null;
 }
@@ -142,8 +231,10 @@ export async function summarizeBacktestDataFiles(connection: Knex = db): Promise
   const barRanges = await loadDailyBarRanges(symbols, connection);
   return symbols.map((symbol) => {
     let contents = emptyContents;
+    let issues: ReturnType<typeof readBacktestDataFileIssues> = { issueDays: 0, issues: noIssues };
     try {
       contents = readBacktestDataFileContents(symbol) ?? emptyContents;
+      issues = readBacktestDataFileIssues(symbol);
     } catch (error) {
       // One unreadable file must not take the whole overview down; it shows as empty and the log says why.
       console.warn(`Backtest data file ${symbol}.sqlite could not be read: ${error instanceof Error ? error.message : error}`);
@@ -162,6 +253,8 @@ export async function summarizeBacktestDataFiles(connection: Knex = db): Promise
       sizeBytes: dataFileSizeBytes(symbol),
       barsFirstDate: bars?.firstDate ?? null,
       barsLastDate: bars?.lastDate ?? null,
+      barsCount: bars?.count ?? 0,
+      ...issues,
     };
   });
 }
