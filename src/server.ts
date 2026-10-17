@@ -16,6 +16,7 @@ import { validatePasskeyConfiguration } from "./config/passkeyLoginMode.js";
 import { resumeInterruptedBackfillRuns } from "./ibkr/tickerBackfillPipeline.js";
 import { marketDataPoolSnapshot } from "./ibkr/marketDataPool.js";
 import { startProcessMemoryMonitor } from "./lib/processMemoryMonitor.js";
+import { readBacktestDataDirectory } from "./backtest/backtestDataDirectory.js";
 
 installShutdownHandler("web");
 
@@ -80,4 +81,11 @@ app.listen(port, () => {
   startProcessMemoryMonitor({ processName: "web", label: "The API web dyno", counts: () => ({ poolContracts: marketDataPoolSnapshot().contractCount, liveListeners: sharedLiveConnection.listenerCount(), readListeners: sharedReadConnection.listenerCount() }) });
   if (daySignalsLoopFlag === "true") startDaySignalsLoop({ ladderBand: createDayLoopLadderBand() });
   else console.log("Day Signals loop disabled (DAY_SIGNALS_LOOP_ENABLED=false).");
+  // Backtests queued before a restart start again, as many as BACKTEST_MAX_PARALLEL_SESSIONS allows (local only).
+  if (readBacktestDataDirectory()) {
+    import("./backtest/jobs/backtestJobStore.js")
+      .then(({ kickBacktestQueue }) => kickBacktestQueue())
+      .then((started) => started.length > 0 && console.log(`Started ${started.length} queued backtest(s).`))
+      .catch((error) => console.error(`Could not start the queued backtests: ${error instanceof Error ? error.message : error}`));
+  }
 });

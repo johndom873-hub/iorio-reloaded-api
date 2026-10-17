@@ -224,6 +224,16 @@ Example: $1,000,000 over SMCI at 40.00 and HOOD at 25.00 → 12,500 SMCI and 20,
 
 Example: $1,000,000, SPY at 410.00 at 10:00 on the first day → 2,439 shares (999,990), 10 in cash; the next day SPY at 420.00 and one day of interest at 4%: 10 × (1 + 0.04 ÷ 365) + 2,439 × 420 = 1,024,390.00.
 
+## Batches (approved by Marcelo 2026-10-17)
+
+A batch is 1 to 9 runs on one period and the same settings, each run its own session and account. Every run is measured as a session and beside its own two buy-and-hold series.
+
+**CAGR vs buy and hold (F2)** = the run's CAGR − the CAGR of buy and hold of the run's own symbols and pots, in percentage points. Example: a run with a CAGR of +42.0% whose buy and hold of CRWV had +105.0% shows -63.0 pts.
+
+**Combined portfolio (F1)**: two or more finished runs added up as separate accounts in one portfolio, on the trading days they all have. Each day: value = Σ the runs' account values, exposure = Σ their exposure, interest = Σ their interest; start = Σ their starting values. Total return, CAGR, Sortino, Max drawdown, Worst month, End value and capital in use come from the session's formulas on that sum; options sold, wheel cycles, win rate, edge capture and return on capital in use from the runs' option sales and cycles pooled. Its buy and hold = Σ each run's buy-and-hold value, its SPY = Σ each run's SPY value, measured on their value lines alone. Each run counts at its own starting value; the runs share no cash, and the per-ticker and per-sector caps do not reach across runs.
+
+Example: runs A and B start with $100,000 each; A ends at $130,000 and B at $90,000 → $200,000 to $220,000, Total return +10.0%. The combined value peaks at $205,000 and its lowest later day has A at $95,000 and B at $70,000 = $165,000 → Max drawdown 165,000 ÷ 205,000 − 1 = −19.5%, from the summed line, not an average of A's and B's own drawdowns.
+
 ## Also decided (2026-10-12)
 
 1. Interest on the whole cash balance, including cash that secures puts (it is still cash at IBKR).

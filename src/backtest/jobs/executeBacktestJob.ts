@@ -14,7 +14,7 @@ import { refreshSplitScheduleForSymbol } from "../engine/splitFactors.js";
 import { runAnalysisJob } from "../analysis/runAnalysisJob.js";
 import { backfillDailyHistoryForBacktest, backtestHistoryStartDate, describeBacktestHistoryBackfill, isIbkrNoSuchContractError } from "../backfillDailyHistory.js";
 import { formatDownloadProgressLabel, jobHeartbeatIntervalMilliseconds, lastFinishedBacktestSessionDate } from "./backtestJobRules.js";
-import { finishSessionOfJob, kickDownloadQueue, loadBacktestJobRow, requeuePausedDownload, type BacktestJobRow } from "./backtestJobStore.js";
+import { finishSessionOfJob, kickBacktestQueue, kickDownloadQueue, loadBacktestJobRow, requeuePausedDownload, type BacktestJobRow } from "./backtestJobStore.js";
 import { thetaDataDownloaderScriptName } from "./spawnBacktestJobProcess.js";
 import { describeDownloadGaps, parseDownloaderLine } from "./thetaDataDownloaderProtocol.js";
 
@@ -304,7 +304,7 @@ async function runBacktestJob(job: BacktestJobRow, control: JobProcessControl): 
   }
 }
 
-/** The whole life of one job process. Resolves once the outcome is written (and, for a download, the queue kicked). */
+/** The whole life of one job process. Resolves once the outcome is written (and, for a download or a backtest, its queue kicked). */
 export async function executeBacktestJob(jobId: string): Promise<void> {
   const job = await loadBacktestJobRow(jobId);
   if (!job) throw new Error(`No backtest job ${jobId}.`);
@@ -338,4 +338,5 @@ export async function executeBacktestJob(jobId: string): Promise<void> {
   }
   console.log(`Backtest job ${jobId}: ${control.ownershipLost ? "stopped (no longer this process's job)" : outcome.status}${outcome.error ? ` — ${outcome.error}` : ""}.`);
   if (job.kind === "download") await kickDownloadQueue();
+  if (job.kind === "backtest") await kickBacktestQueue();
 }

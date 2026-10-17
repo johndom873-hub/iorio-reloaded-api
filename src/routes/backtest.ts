@@ -1,7 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtest/backtestDataDirectory.js";
-import type { BacktestLabSettingsView, BacktestOverview, BacktestSessionEstimateResponse, BacktestSettingsTemplate } from "../backtest/backtestTypes.js";
+import type { BacktestLabSettingsView, BacktestOverview, BacktestSessionEstimateResponse, BacktestSettingsTemplate, CreateBacktestBatchResponse } from "../backtest/backtestTypes.js";
 import { readBacktestDataFileContents, readBacktestDataFilePeriodContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
 import { deleteBacktestDataFile } from "../backtest/deleteBacktestDataFile.js";
 import { backtestHistoryStartDate } from "../backtest/backfillDailyHistory.js";
@@ -25,19 +25,33 @@ import {
   createDownloadJob,
   putDownloadFirst,
   findUnfinishedDownloadJob,
+  kickBacktestQueue,
   kickDownloadQueue,
+  readBacktestMaxParallelSessions,
   listOverviewJobViews,
   resumeBacktestJob,
 } from "../backtest/jobs/backtestJobStore.js";
 import { validateBacktestBookPageQuery, validateBacktestSessionsPageQuery } from "../backtest/jobs/backtestSessionRequest.js";
-import { checkSessionRequestAgainstLab, validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
+import { checkSessionRequestAgainstLab, validateBatchRequestAgainstLab, validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
 import { registerTickerAnalysisRoutes } from "./backtestAnalysisRoutes.js";
 import { listAnalysedSymbols, rerunAnalysesAfterSave } from "../backtest/analysis/analysisStore.js";
 import { readBacktestClaudeCliPath } from "../backtest/backtestClaudeCli.js";
 import { applyBacktestOverrides } from "../backtest/backtestSettingsOverrides.js";
 import { lookTimesInWindow, regularCloseMinutesEt } from "../backtest/engine/runBacktestSession.js";
 import { estimateLlmSession } from "../backtest/llm/estimateLlmSession.js";
-import { createBacktestSession, deleteBacktestSession, loadBacktestComparison, loadBacktestSessionActions, loadBacktestSessionDetail, loadBacktestSessionFills, loadBacktestSessionsPage } from "../backtest/jobs/backtestSessionStore.js";
+import {
+  createBacktestBatch,
+  createBacktestSession,
+  deleteBacktestBatch,
+  deleteBacktestSession,
+  loadBacktestBatchCombined,
+  loadBacktestBatchDetail,
+  loadBacktestComparison,
+  loadBacktestSessionActions,
+  loadBacktestSessionDetail,
+  loadBacktestSessionFills,
+  loadBacktestSessionsPage,
+} from "../backtest/jobs/backtestSessionStore.js";
 
 // Model backtesting (docs/backtesting/), local only: app.ts mounts this router only when BACKTEST_DATA_DIR is set.
 // Shapes are backtestTypes.ts, which the app mirrors.
@@ -60,10 +74,10 @@ function requireUuidParameter(value: string | undefined, what: string): string {
 }
 
 backtestRouter.get("/overview", async (_request, response) => {
-  // Reading the overview is one of the moments the download queue moves on (a stopped download no longer blocks it).
-  await kickDownloadQueue();
+  // Reading the overview is one of the moments the queues move on (a stopped download or backtest no longer blocks them).
+  await Promise.all([kickDownloadQueue(), kickBacktestQueue()]);
   const [files, jobs] = await Promise.all([summarizeBacktestDataFiles(), listOverviewJobViews()]);
-  const overview: BacktestOverview = { dataDirectory: requireBacktestDataDirectory(), files, jobs };
+  const overview: BacktestOverview = { dataDirectory: requireBacktestDataDirectory(), files, jobs, maxParallelSessions: readBacktestMaxParallelSessions() };
   response.json(overview);
 });
 
@@ -200,6 +214,38 @@ backtestRouter.put("/lab-ticker-overrides/:symbol", async (request, response) =>
 backtestRouter.post("/sessions", async (request, response) => {
   const { snapshot, value, warnings, llmEstimate } = await validateSessionRequestAgainstLab(request.body);
   response.status(201).json({ ...(await createBacktestSession(value, snapshot)), warnings, llmEstimate, resolvedBySymbol: value.symbolSettings });
+});
+
+// The New session form starts a batch: 1 to 9 runs on one period and the same settings (CreateBacktestBatchRequest).
+backtestRouter.post("/batches", async (request, response) => {
+  const { name, runs, warnings, llmEstimate } = await validateBatchRequestAgainstLab(request.body);
+  const created = await createBacktestBatch(name, runs);
+  const answer: CreateBacktestBatchResponse = { ...created, warnings, llmEstimate };
+  response.status(201).json(answer);
+});
+
+backtestRouter.get("/batches/:id", async (request, response) => {
+  // The batch page polls while its runs are queued or running: one of the moments the queue moves on.
+  await kickBacktestQueue();
+  response.json(await loadBacktestBatchDetail(requireUuidParameter(request.params.id, "batch")));
+});
+
+// ?runs=1,3: two or more finished runs of the batch, added up as one portfolio (formula F1).
+backtestRouter.get("/batches/:id/combined", async (request, response) => {
+  const batchId = requireUuidParameter(request.params.id, "batch");
+  const given = String(request.query.runs ?? "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  const runNumbers = [...new Set(given.map(Number))];
+  if (runNumbers.some((runNumber) => !Number.isInteger(runNumber) || runNumber < 1)) throw new BacktestRequestError("runs must be run numbers: ?runs=1,3", 400);
+  if (runNumbers.length < 2) throw new BacktestRequestError("Combine two or more runs: ?runs=1,3", 400);
+  response.json(await loadBacktestBatchCombined(batchId, runNumbers.sort((a, b) => a - b)));
+});
+
+backtestRouter.delete("/batches/:id", async (request, response) => {
+  await deleteBacktestBatch(requireUuidParameter(request.params.id, "batch"));
+  response.status(204).end();
 });
 
 // The New session screen's estimate before anything starts: the same request body, checked the same way (a name is not

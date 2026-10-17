@@ -1,9 +1,13 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
-import { countBacktestOverrides } from "../backtestSettingsOverrides.js";
+import { applyBacktestOverrides, countBacktestOverrides } from "../backtestSettingsOverrides.js";
+import { combineBatchRuns, type CombinedRunInput } from "../batchCombined.js";
 import type {
   BacktestAction,
   BacktestActionsPage,
+  BacktestBatchCombined,
+  BacktestBatchDetail,
+  BacktestBatchSummary,
   BacktestCompareResponse,
   BacktestCycle,
   BacktestFill,
@@ -31,7 +35,7 @@ import type {
 import { backtestCaptureLookTimeEt, backtestEngineVersion } from "../backtestTypes.js";
 import { computeCycleAccuracyBands, computeDrawdowns, computeMonthlyReturns, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
 import { computeAllSymbolsStatistics, computeTickerStatistics } from "../tickerStatistics.js";
-import { BacktestRequestError, insertClaimedBacktestJob, loadBacktestJobView, loadLatestJobViewForSession, loadLatestSessionRunStates, startClaimedBacktestJob, stopJobsOfSession } from "./backtestJobStore.js";
+import { BacktestRequestError, insertQueuedBacktestJob, kickBacktestQueue, loadBacktestJobView, loadLatestJobViewForSession, loadLatestSessionRunStates, stopJobsOfSession } from "./backtestJobStore.js";
 import type { BacktestBookPageFilters, BacktestSessionsPageFilters, ValidatedBacktestSessionRequest } from "./backtestSessionRequest.js";
 import { sqlContainsPattern } from "../../lib/sqlContainsPattern.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
@@ -76,6 +80,10 @@ interface SessionRow {
   run_statistics: BacktestRunStatistics | null;
   /** Aggregated from the session's backtest_cycles rows. */
   wheel_cycles: { cycleCount: number; closedCycleCount: number; openCycleCount: number; totalPnlDollars: number | string; openCyclePnlDollars: number | string };
+  batch_id: string | null;
+  run_number: number | null;
+  batch_name: string | null;
+  batch_run_count: number | string;
 }
 
 function selectSessionRows(connection: Knex = db): Knex.QueryBuilder {
@@ -115,6 +123,10 @@ function selectSessionRows(connection: Knex = db): Knex.QueryBuilder {
       )
       from backtest_cycles cycle where cycle.session_id = backtest_sessions.id
     ) as wheel_cycles`),
+    "batch_id",
+    "run_number",
+    connection.raw("(select batch.name from backtest_batches batch where batch.id = backtest_sessions.batch_id) as batch_name"),
+    connection.raw("(select count(*) from backtest_sessions run where run.batch_id = backtest_sessions.batch_id) as batch_run_count"),
   );
 }
 
@@ -155,6 +167,7 @@ function toSessionListItem(row: SessionRow, latestRun: BacktestSessionRunState |
         : null,
     createdAt: new Date(row.created_at).toISOString(),
     latestRun,
+    batch: row.batch_id === null ? null : { id: row.batch_id, name: row.batch_name ?? "", runNumber: Number(row.run_number), runCount: Number(row.batch_run_count) },
   };
 }
 
@@ -180,21 +193,46 @@ async function listSessionSymbols(): Promise<string[]> {
   return result.rows.map((row) => row.symbol);
 }
 
-/** One page of the Sessions list, newest first, each session with its latest job's run: the overview lists only the latest jobs. */
+/**
+ * The sessions the filters match, each with its Sessions list entry: a batch of two or more runs is one entry ("b:<id>"),
+ * any other session its own ("s:<id>").
+ */
+function matchedSessionEntries(filters: BacktestSessionsPageFilters): Knex.QueryBuilder {
+  return whereSessionsMatch(db("backtest_sessions"), filters).select(
+    "backtest_sessions.id",
+    "backtest_sessions.created_at",
+    db.raw(`CASE WHEN backtest_sessions.batch_id IS NOT NULL AND (SELECT count(*) FROM backtest_sessions run WHERE run.batch_id = backtest_sessions.batch_id) > 1
+      THEN 'b:' || backtest_sessions.batch_id ELSE 's:' || backtest_sessions.id END AS entry_key`),
+  );
+}
+
+/**
+ * One page of the Sessions list, newest entry first: a session, or a batch with its matching runs by run number. Each
+ * session carries its latest job's run: the overview lists only the latest jobs.
+ */
 export async function loadBacktestSessionsPage(filters: BacktestSessionsPageFilters): Promise<BacktestSessionsPage> {
-  const [rows, total, symbols]: [SessionRow[], number, string[]] = await Promise.all([
-    whereSessionsMatch(selectSessionRows(), filters)
+  const [entries, totalRows, symbols] = await Promise.all([
+    db
+      .from(matchedSessionEntries(filters).as("matched"))
+      .groupBy("entry_key")
+      .select("entry_key", db.raw("max(created_at) as latest"))
       .orderBy([
-        { column: "created_at", order: "desc" },
-        { column: "id", order: "desc" },
+        { column: "latest", order: "desc" },
+        { column: "entry_key", order: "desc" },
       ])
       .limit(filters.limit)
-      .offset(filters.offset),
-    countRows(whereSessionsMatch(db("backtest_sessions"), filters)),
+      .offset(filters.offset) as Promise<{ entry_key: string }[]>,
+    db.from(matchedSessionEntries(filters).as("matched")).countDistinct("entry_key as count") as Promise<{ count: string | number }[]>,
     listSessionSymbols(),
   ]);
-  const latestRuns = await loadLatestSessionRunStates(rows.map((row) => row.id));
-  return { sessions: rows.map((row) => toSessionListItem(row, latestRuns.get(row.id) ?? null)), total, limit: filters.limit, offset: filters.offset, symbols };
+  const entryKeys = entries.map((entry) => entry.entry_key);
+  const members: { id: string; entry_key: string }[] = entryKeys.length === 0 ? [] : await db.from(matchedSessionEntries(filters).as("matched")).whereIn("entry_key", entryKeys).select("id", "entry_key");
+  const rows: SessionRow[] = members.length === 0 ? [] : await selectSessionRows().whereIn("id", members.map((member) => member.id));
+  const entryOf = new Map(members.map((member) => [member.id, member.entry_key]));
+  const entryOrder = new Map(entryKeys.map((key, index) => [key, index]));
+  const ordered = [...rows].sort((a, b) => entryOrder.get(entryOf.get(a.id)!)! - entryOrder.get(entryOf.get(b.id)!)! || (a.run_number ?? 0) - (b.run_number ?? 0));
+  const latestRuns = await loadLatestSessionRunStates(ordered.map((row) => row.id));
+  return { sessions: ordered.map((row) => toSessionListItem(row, latestRuns.get(row.id) ?? null)), total: Number(totalRows[0]?.count ?? 0), limit: filters.limit, offset: filters.offset, symbols };
 }
 
 async function loadSessionRow(sessionId: string): Promise<SessionRow> {
@@ -450,6 +488,15 @@ async function countRows(query: Knex.QueryBuilder): Promise<number> {
   return Number(rows[0]?.count ?? 0);
 }
 
+/** A session's option sales, in the order sold. */
+async function loadSessionTradeRows(sessionId: string): Promise<Record<string, unknown>[]> {
+  return db("backtest_trades")
+    .where({ session_id: sessionId })
+    .orderBy([{ column: "backtest_trades.opened_on" }, { column: "backtest_trades.id" }])
+    // The date columns as text, listed after "*" so they replace the Date values.
+    .select("*", db.raw("opened_on::text as opened_on"), db.raw("expiry::text as expiry"), db.raw("settled_on::text as settled_on"));
+}
+
 /** One page of the actions a session took or was refused, oldest first. */
 export async function loadBacktestSessionActions(sessionId: string, filters: BacktestBookPageFilters): Promise<BacktestActionsPage> {
   await requireSessionExists(sessionId);
@@ -525,11 +572,7 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
   const ofSymbol = <Row extends { symbol: string }>(rows: Row[]): Row[] => (onlySymbol === null ? rows : rows.filter((entry) => entry.symbol === onlySymbol));
   const [dayRows, tradeRows, job, everyPositionRecord, everyCycle, bookCounts, cashBoundBySymbol] = await Promise.all([
     loadSessionDayRows([sessionId]),
-    db("backtest_trades")
-      .where({ session_id: sessionId })
-      .orderBy([{ column: "backtest_trades.opened_on" }, { column: "backtest_trades.id" }])
-      // The date columns as text, listed after "*" so they replace the Date values.
-      .select("*", db.raw("opened_on::text as opened_on"), db.raw("expiry::text as expiry"), db.raw("settled_on::text as settled_on")),
+    loadSessionTradeRows(sessionId),
     loadLatestJobViewForSession(sessionId),
     loadSessionPositions(sessionId),
     loadSessionCycles(sessionId),
@@ -629,38 +672,176 @@ export async function loadBacktestComparison(sessionIds: readonly string[]): Pro
   };
 }
 
-/** Stores the session (snapshot and changed values only), creates its backtest job and starts the job's process. */
+/** Stores a session (snapshot and changed values only) as a run of its batch, with its backtest job in the queue. */
+async function insertSessionWithQueuedJob(transaction: Knex.Transaction, request: ValidatedBacktestSessionRequest, snapshot: BacktestSettings, batchId: string, runNumber: number): Promise<{ sessionId: string; jobId: string }> {
+  const [session] = await transaction("backtest_sessions")
+    .insert({
+      name: request.name,
+      symbol: describeSessionSymbols(request.symbols),
+      symbols: JSON.stringify(request.symbols),
+      start_date: request.startDate,
+      end_date: request.endDate,
+      starting_value: request.startingValue,
+      tables_mode: request.tablesMode,
+      settings_snapshot: JSON.stringify(snapshot),
+      overrides: JSON.stringify(request.overrides),
+      book_mode: request.bookMode,
+      symbol_settings: request.symbolSettings === null ? null : JSON.stringify(request.symbolSettings),
+      settings_source: request.settingsSource,
+      pots_from_starting_value: request.potsFromStartingValue,
+      engine_version: backtestEngineVersion,
+      status: "queued",
+      batch_id: batchId,
+      run_number: runNumber,
+    })
+    .returning("id");
+  const jobId = await insertQueuedBacktestJob(session.id as string, describeSessionSymbols(request.symbols), transaction);
+  return { sessionId: session.id as string, jobId };
+}
+
+async function insertBatch(transaction: Knex.Transaction, name: string): Promise<string> {
+  const [batch] = await transaction("backtest_batches").insert({ name }).returning("id");
+  return batch.id as string;
+}
+
+/** Stores the session as a batch of one run, queues its backtest job and kicks the queue. */
 export async function createBacktestSession(request: ValidatedBacktestSessionRequest, snapshot: BacktestSettings): Promise<{ session: BacktestSessionListItem; job: BacktestJobView }> {
-  const { sessionId, jobId } = await db.transaction(async (transaction) => {
-    const [session] = await transaction("backtest_sessions")
-      .insert({
-        name: request.name,
-        symbol: describeSessionSymbols(request.symbols),
-        symbols: JSON.stringify(request.symbols),
-        start_date: request.startDate,
-        end_date: request.endDate,
-        starting_value: request.startingValue,
-        tables_mode: request.tablesMode,
-        settings_snapshot: JSON.stringify(snapshot),
-        overrides: JSON.stringify(request.overrides),
-        book_mode: request.bookMode,
-        symbol_settings: request.symbolSettings === null ? null : JSON.stringify(request.symbolSettings),
-        settings_source: request.settingsSource,
-        pots_from_starting_value: request.potsFromStartingValue,
-        engine_version: backtestEngineVersion,
-        status: "queued",
-      })
-      .returning("id");
-    const createdJobId = await insertClaimedBacktestJob(session.id as string, describeSessionSymbols(request.symbols), transaction);
-    return { sessionId: session.id as string, jobId: createdJobId };
-  });
-  await startClaimedBacktestJob(jobId);
+  const { sessionId, jobId } = await db.transaction(async (transaction) => insertSessionWithQueuedJob(transaction, request, snapshot, await insertBatch(transaction, request.name), 1));
+  await kickBacktestQueue();
   return { session: toSessionListItem(await loadSessionRow(sessionId)), job: await loadBacktestJobView(jobId) };
 }
 
-/** Deletes a session with its days, trades, simulated book and jobs; an unfinished job is stopped first. */
+/** Stores the batch and its runs (run numbers in the order given), each session's job in the queue, all or none; then kicks the queue. */
+export async function createBacktestBatch(name: string, runs: readonly { value: ValidatedBacktestSessionRequest; snapshot: BacktestSettings }[]): Promise<{ batch: BacktestBatchSummary; runs: { session: BacktestSessionListItem; job: BacktestJobView }[] }> {
+  const { batchId, created } = await db.transaction(async (transaction) => {
+    const insertedBatchId = await insertBatch(transaction, name);
+    const inserted: { sessionId: string; jobId: string }[] = [];
+    for (const [index, run] of runs.entries()) inserted.push(await insertSessionWithQueuedJob(transaction, run.value, run.snapshot, insertedBatchId, index + 1));
+    return { batchId: insertedBatchId, created: inserted };
+  });
+  await kickBacktestQueue();
+  const batchRow: { id: string; name: string; created_at: Date } = await db("backtest_batches").where({ id: batchId }).first("id", "name", "created_at");
+  return {
+    batch: { id: batchRow.id, name: batchRow.name, createdAt: new Date(batchRow.created_at).toISOString(), runCount: created.length },
+    runs: await Promise.all(created.map(async ({ sessionId, jobId }) => ({ session: toSessionListItem(await loadSessionRow(sessionId)), job: await loadBacktestJobView(jobId) }))),
+  };
+}
+
+/** Deletes a session with its days, trades, simulated book and jobs; an unfinished job is stopped first. A batch left without runs goes too. */
 export async function deleteBacktestSession(sessionId: string): Promise<void> {
-  await loadSessionRow(sessionId);
+  const row = await loadSessionRow(sessionId);
   await stopJobsOfSession(sessionId);
   await db("backtest_sessions").where({ id: sessionId }).del();
+  if (row.batch_id !== null && !(await db("backtest_sessions").where({ batch_id: row.batch_id }).first("id"))) await db("backtest_batches").where({ id: row.batch_id }).del();
+}
+
+/** Deletes a batch and every run's session, their unfinished jobs stopped first. */
+export async function deleteBacktestBatch(batchId: string): Promise<void> {
+  if (!(await db("backtest_batches").where({ id: batchId }).first("id"))) throw new BacktestRequestError("No such batch.", 404);
+  const sessions: { id: string }[] = await db("backtest_sessions").where({ batch_id: batchId }).select("id");
+  for (const session of sessions) await stopJobsOfSession(session.id);
+  await db("backtest_batches").where({ id: batchId }).del();
+}
+
+interface BatchRow {
+  id: string;
+  name: string;
+  created_at: Date;
+}
+
+async function loadBatchWithRuns(batchId: string): Promise<{ batch: BatchRow; rows: SessionRow[] }> {
+  const batch = (await db("backtest_batches").where({ id: batchId }).first("id", "name", "created_at")) as BatchRow | undefined;
+  if (!batch) throw new BacktestRequestError("No such batch.", 404);
+  const rows: SessionRow[] = await selectSessionRows().where({ batch_id: batchId }).orderBy("run_number");
+  if (rows.length === 0) throw new BacktestRequestError("This batch has no runs left.", 404);
+  return { batch, rows };
+}
+
+/** Each session's days, by session id. */
+async function loadDayRowsBySession(sessionIds: readonly string[]): Promise<Map<string, SessionDayRow[]>> {
+  const bySession = new Map<string, SessionDayRow[]>();
+  if (sessionIds.length === 0) return bySession;
+  for (const day of await loadSessionDayRows(sessionIds)) bySession.set(day.session_id, [...(bySession.get(day.session_id) ?? []), day]);
+  return bySession;
+}
+
+/** A batch's page: its runs in run order, each with its job, and once finished its account value points and per-symbol figures. */
+export async function loadBacktestBatchDetail(batchId: string): Promise<BacktestBatchDetail> {
+  const { batch, rows } = await loadBatchWithRuns(batchId);
+  const finishedIds = rows.filter((row) => row.status === "succeeded").map((row) => row.id);
+  const [daysBySession, latestRuns, jobs, statistics] = await Promise.all([
+    loadDayRowsBySession(finishedIds),
+    loadLatestSessionRunStates(rows.map((row) => row.id)),
+    Promise.all(rows.map((row) => loadLatestJobViewForSession(row.id))),
+    Promise.all(
+      rows.map(async (row) => {
+        if (row.status !== "succeeded") return [];
+        const [positionRecords, cycles] = await Promise.all([loadSessionPositions(row.id), loadSessionCycles(row.id)]);
+        return computeTickerStatistics(
+          positionRecords.map((position) => withPositionCycle(position, cycles)),
+          cycles,
+        );
+      }),
+    ),
+  ]);
+  const first = rows[0]!;
+  return {
+    batch: {
+      id: batch.id,
+      name: batch.name,
+      createdAt: new Date(batch.created_at).toISOString(),
+      runCount: rows.length,
+      startDate: first.start_date,
+      endDate: first.end_date,
+      tablesMode: first.tables_mode,
+      decisionMaker: applyBacktestOverrides(first.settings_snapshot, first.overrides).decisionMaker,
+    },
+    runs: rows.map((row, index) => ({
+      runNumber: Number(row.run_number),
+      session: toSessionListItem(row, latestRuns.get(row.id) ?? null),
+      overrides: row.overrides,
+      settingsSource: row.settings_source,
+      symbolSettings: row.symbol_settings,
+      baselineMetrics: row.baseline_metrics,
+      spyBaselineMetrics: row.spy_baseline_metrics,
+      job: jobs[index] ?? null,
+      points: (daysBySession.get(row.id) ?? []).map((day) => ({ tradingDate: day.trading_date, value: Number(day.account_value), baselineValue: Number(day.baseline_value), spyBaselineValue: nullableNumber(day.spy_baseline_value) })),
+      tickerStatistics: statistics[index]!,
+    })),
+  };
+}
+
+/** The batch's runs with these numbers added up (formula F1, batchCombined.ts); every one must have finished. */
+export async function loadBacktestBatchCombined(batchId: string, runNumbers: readonly number[]): Promise<BacktestBatchCombined> {
+  const { rows } = await loadBatchWithRuns(batchId);
+  const picked = runNumbers.map((runNumber) => {
+    const row = rows.find((candidate) => Number(candidate.run_number) === runNumber);
+    if (!row) throw new BacktestRequestError(`This batch has no Run ${runNumber}.`, 404);
+    if (row.status !== "succeeded") throw new BacktestRequestError(`Run ${runNumber} has not finished: only finished runs combine.`, 409);
+    return row;
+  });
+  const daysBySession = await loadDayRowsBySession(picked.map((row) => row.id));
+  const inputs = await Promise.all(
+    picked.map(async (row): Promise<CombinedRunInput> => {
+      const [tradeRows, cycles] = await Promise.all([
+        loadSessionTradeRows(row.id),
+        loadSessionCycles(row.id),
+      ]);
+      const trades = tradeRows.map((tradeRow: Record<string, unknown>) => toTrade({ ...tradeRow, symbol: tradeRow.symbol ?? row.symbol }));
+      return {
+        runNumber: Number(row.run_number),
+        startingValue: Number(row.starting_value),
+        days: (daysBySession.get(row.id) ?? []).map((day) => ({
+          tradingDate: day.trading_date,
+          value: Number(day.account_value),
+          exposureDollars: Number(day.exposure_dollars),
+          interestDollars: Number(day.interest_dollars),
+          baselineValue: Number(day.baseline_value),
+          spyBaselineValue: nullableNumber(day.spy_baseline_value),
+        })),
+        book: { optionSales: trades, cycles: cycleFiguresOf(cycles, trades) },
+      };
+    }),
+  );
+  return combineBatchRuns(inputs);
 }

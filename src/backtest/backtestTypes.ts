@@ -477,6 +477,16 @@ export interface BacktestSessionListItem {
   createdAt: string;
   /** Its latest job's run; null on the session list items that do not carry it (a comparison) or when the job is gone. */
   latestRun: BacktestSessionRunState | null;
+  /** The batch it was started in, with its run number and the batch's run count; null on a session made before batches. */
+  batch: BacktestSessionBatchRef | null;
+}
+
+/** A session's place in its batch. */
+export interface BacktestSessionBatchRef {
+  id: string;
+  name: string;
+  runNumber: number;
+  runCount: number;
 }
 
 /** A session's latest job as the Sessions list shows it: a running job whose heartbeat stopped shows as stopped. */
@@ -493,8 +503,11 @@ export type BacktestSessionStatusFilter = "succeeded" | "running" | "failed" | "
 export const backtestSessionsPageDefaultLimit = 50;
 export const backtestSessionsPageMaxLimit = 200;
 
-/** One page of the Sessions list, newest first. `total` counts every session the filters match; `symbols` lists every
- *  symbol any session has, for the Symbol filter. */
+/**
+ * One page of the Sessions list, newest first. An entry is a session, or a batch of two or more runs with its runs that the
+ * filters match (contiguous, by run number); `total` counts the entries; `symbols` lists every symbol any session has, for
+ * the Symbol filter.
+ */
 export interface BacktestSessionsPage {
   sessions: BacktestSessionListItem[];
   total: number;
@@ -512,6 +525,8 @@ export interface BacktestOverview {
    * every unfinished one is listed, the finished ones fill up to 50. The sessions are read page by page.
    */
   jobs: BacktestJobView[];
+  /** How many backtests run at once (BACKTEST_MAX_PARALLEL_SESSIONS); the rest wait in the queue. */
+  maxParallelSessions: number;
 }
 
 /** One value a "choice" row can take. */
@@ -633,6 +648,92 @@ export interface CreateBacktestSessionRequest {
   settingsSource?: BacktestSettingsSource;
   /** The baseline only: values for some of the session's tickers, over every other source. */
   symbolSettings?: Record<string, BacktestTickerValues>;
+}
+
+/** A batch takes 1 to this many runs (Marcelo 2026-10-17). */
+export const backtestMaxRunsPerBatch = 9;
+
+/**
+ * POST /backtest/batches: the New session form's request. Every run shares the name's batch, the period, the tables, the
+ * settings and where ticker values come from; each run has its own symbols and ticker values. Two or more runs need the
+ * baseline as decision maker and each run's pots (no starting value). A run's session is named "<name> · Run 2 · <label>"
+ * (one run: the name), cut to 120 characters.
+ */
+export interface CreateBacktestBatchRequest {
+  name: string;
+  startDate: string;
+  endDate: string;
+  tablesMode: BacktestTablesMode;
+  overrides: BacktestSettingsOverrides;
+  settingsSource?: BacktestSettingsSource;
+  /** One run only: as CreateBacktestSessionRequest's. */
+  startingValue?: number;
+  runs: { label?: string; symbols: string[]; symbolSettings?: Record<string, BacktestTickerValues> }[];
+}
+
+export interface BacktestBatchSummary {
+  id: string;
+  name: string;
+  createdAt: string;
+  runCount: number;
+}
+
+/** What POST /backtest/batches answers: the batch, each run's session and job, and the warnings ("Run 2: …" with two or more runs). */
+export interface CreateBacktestBatchResponse {
+  batch: BacktestBatchSummary;
+  runs: { session: BacktestSessionListItem; job: BacktestJobView }[];
+  warnings: string[];
+  /** One run with the AI model deciding: its estimate; null otherwise. */
+  llmEstimate: LlmSessionEstimate | null;
+}
+
+/** An account value series point: the run (or the combined portfolio), buy and hold of its tickers, buy and hold of SPY (null when not kept). */
+export interface BacktestValuePoint {
+  tradingDate: string;
+  value: number;
+  baselineValue: number;
+  spyBaselineValue: number | null;
+}
+
+export interface BacktestBatchRun {
+  runNumber: number;
+  session: BacktestSessionListItem;
+  overrides: BacktestSettingsOverrides;
+  settingsSource: BacktestSettingsSource | null;
+  symbolSettings: Record<string, BacktestSymbolSettings> | null;
+  baselineMetrics: BacktestMetrics | null;
+  spyBaselineMetrics: BacktestMetrics | null;
+  /** Its latest job: progress while it runs, run time once done. */
+  job: BacktestJobView | null;
+  /** Every trading day at 10:00 ET, once the run has finished; empty before. */
+  points: BacktestValuePoint[];
+  /** Per symbol, once the run has finished; empty before. */
+  tickerStatistics: BacktestTickerStatistics[];
+}
+
+/** GET /backtest/batches/:id. The runs share the period, the tables and the decision maker. */
+export interface BacktestBatchDetail {
+  batch: BacktestBatchSummary & { startDate: string; endDate: string; tablesMode: BacktestTablesMode; decisionMaker: BacktestDecisionMaker };
+  runs: BacktestBatchRun[];
+}
+
+/** The figures of an account value line alone: what buy and hold has (no trades, cycles, exposure or interest kept per day). */
+export type BacktestCurveFigures = Pick<BacktestMetrics, "startValue" | "endValue" | "totalReturn" | "cagr" | "sortino" | "maxDrawdown" | "worstMonth">;
+
+/**
+ * GET /backtest/batches/:id/combined?runs=1,3 (formula approved by Marcelo 2026-10-17): the runs added up day by day as
+ * separate accounts in one portfolio. Value, exposure and interest are summed; the session's formulas run on the sum, with
+ * the runs' trades and cycles pooled. Buy and hold and SPY are the sums of each run's own lines.
+ */
+export interface BacktestBatchCombined {
+  runNumbers: number[];
+  metrics: BacktestMetrics;
+  baselineFigures: BacktestCurveFigures;
+  /** Null when a run did not keep SPY's line. */
+  spyBaselineFigures: BacktestCurveFigures | null;
+  points: BacktestValuePoint[];
+  /** Trading days some of the runs have and others lack, left out of the sum (0 when the runs share every day). */
+  daysLeftOut: number;
 }
 
 export interface BacktestSessionDay {

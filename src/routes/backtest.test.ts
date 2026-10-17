@@ -10,6 +10,8 @@ import { kellyFraction } from "../pluto/postModelGates.js";
 import knexLibrary, { type Knex } from "knex";
 import type {
   BacktestActionsPage,
+  BacktestBatchCombined,
+  BacktestBatchDetail,
   BacktestCompareResponse,
   BacktestFillsPage,
   BacktestJobDisplayStatus,
@@ -19,6 +21,7 @@ import type {
   BacktestSessionListItem,
   BacktestSessionsPage,
   BacktestSettingsTemplate,
+  CreateBacktestBatchResponse,
   CreateBacktestSessionResponse,
 } from "../backtest/backtestTypes.js";
 
@@ -26,6 +29,9 @@ import type {
 // real symbol file. Only starting and stopping job processes is mocked.
 const dataDirectory = mkdtempSync(path.join(os.tmpdir(), "backtest-route-test-"));
 process.env.BACKTEST_DATA_DIR = dataDirectory;
+// The mocked job processes never finish, so every started backtest keeps its place: the queue's limit is high here, and
+// the batch test sets its own.
+process.env.BACKTEST_MAX_PARALLEL_SESSIONS = "1000";
 
 vi.mock("../db/connection.js", async () => {
   const { config } = await import("dotenv");
@@ -176,6 +182,7 @@ beforeEach(() => {
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await testDb("backtest_sessions").where("name", "like", `${sessionNamePrefix}%`).del();
+  await testDb("backtest_batches").where("name", "like", `${sessionNamePrefix}%`).del();
   await testDb("backtest_jobs").whereIn("symbol", [fileSymbol, downloadSymbolA, downloadSymbolB, downloadSymbolC, jobListingSymbol, deletedFileSymbol]).del();
   await testDb("daily_price_bars").where({ ticker_id: tickerId }).del();
   await testDb("tickers").where({ id: tickerId }).del();
@@ -1080,6 +1087,102 @@ describe("backtest routes", () => {
       expect(single.session).toMatchObject({ symbol: fileSymbol, symbols: [fileSymbol] });
       expect((await request("DELETE", `/backtest/sessions/${created.session.id}`)).status).toBe(204);
       expect((await request("DELETE", `/backtest/sessions/${single.session.id}`)).status).toBe(204);
+    });
+
+    it("start a batch of runs in the queue, list it as one entry, add finished runs up into one portfolio, and delete it", async () => {
+      const batchName = `${sessionNamePrefix} batch`;
+      const pots = (shares: number) => ({ potDollars: 100_000, baseline: { ladderSharesPct: shares } });
+      const batchRequest = (runs: unknown[], extra: Record<string, unknown> = {}) => ({ name: batchName, startDate: "2026-09-02", endDate: "2026-09-10", tablesMode: "walk_forward", overrides: { decisionMaker: "baseline" }, settingsSource: "global", runs, ...extra });
+      const runOf = (shares: number, label: string) => ({ label, symbols: [fileSymbol], symbolSettings: { [fileSymbol]: pots(shares) } });
+
+      // Shape and run checks: every problem named by its run.
+      expect(await request("POST", "/backtest/batches", batchRequest([]))).toEqual({ status: 400, body: { error: "Give the batch at least one run." } });
+      expect(await request("POST", "/backtest/batches", batchRequest(Array.from({ length: 10 }, () => runOf(50, "x"))))).toEqual({ status: 400, body: { error: "A batch takes at most 9 runs." } });
+      expect(await request("POST", "/backtest/batches", batchRequest([runOf(30, "a"), runOf(70, "b")], { startingValue: 200_000 }))).toEqual({ status: 400, body: { error: "Several runs take each run's pots: leave out the starting value." } });
+      expect(await request("POST", "/backtest/batches", batchRequest([runOf(30, "a"), { symbols: [downloadSymbolA] }]))).toEqual({ status: 400, body: { error: `Run 2: There is no data file for ${downloadSymbolA}: download it first.` } });
+      expect(await request("POST", "/backtest/batches", batchRequest([runOf(30, "a"), runOf(70, "b")], { overrides: {} }))).toEqual({
+        status: 400,
+        body: { error: "Run 1: symbolSettings apply to the baseline only. Run 2: symbolSettings apply to the baseline only." },
+      });
+
+      // Two places free: the third run waits in the queue.
+      const freshRunning = Number(
+        (await testDb("backtest_jobs").where({ kind: "backtest", status: "running" }).where("heartbeat_at", ">", testDb.raw("now() - interval '60 seconds'")).count("* as count").first())?.count,
+      );
+      process.env.BACKTEST_MAX_PARALLEL_SESSIONS = String(freshRunning + 2);
+      try {
+        const { status, body } = await request("POST", "/backtest/batches", batchRequest([runOf(30, "share level 30%"), runOf(70, "share level 70%"), { label: "two tickers", symbols: [fileSymbol, secondFileSymbol], symbolSettings: { [fileSymbol]: pots(50), [secondFileSymbol]: pots(50) } }]));
+        expect(status).toBe(201);
+        const created = body as CreateBacktestBatchResponse;
+        expect(created.batch).toMatchObject({ name: batchName, runCount: 3 });
+        expect(created.runs.map(({ session }) => [session.name, session.startingValue, session.batch?.runNumber, session.batch?.runCount])).toEqual([
+          [`${batchName} · Run 1 · share level 30%`, 100_000, 1, 3],
+          [`${batchName} · Run 2 · share level 70%`, 100_000, 2, 3],
+          [`${batchName} · Run 3 · two tickers`, 200_000, 3, 3],
+        ]);
+        expect(created.runs.map(({ job }) => job.displayStatus)).toEqual(["running", "running", "queued"]);
+        expect(spawnBacktestJobProcessMock.mock.calls.map(([jobId]) => jobId)).toEqual([created.runs[0]!.job.id, created.runs[1]!.job.id]);
+        expect(created.warnings.length).toBeGreaterThan(0);
+        expect(created.warnings.every((warning) => /^Run [123]: /.test(warning))).toBe(true);
+        expect(created.llmEstimate).toBeNull();
+        const batchId = created.batch.id;
+        const [runOne, runTwo, runThree] = created.runs.map(({ session }) => session);
+
+        // The Sessions list: the batch is one entry, its runs together in run order.
+        const listed = await listSessions();
+        expect(listed.sessions.filter((entry) => entry.batch?.id === batchId).map((entry) => entry.batch?.runNumber)).toEqual([1, 2, 3]);
+        expect(listed.sessions.slice(0, 3).map((entry) => entry.id)).toEqual([runOne!.id, runTwo!.id, runThree!.id]);
+        const plainSessions = listed.sessions.filter((entry) => entry.batch?.id !== batchId).length;
+        expect(listed.total).toBe(plainSessions + 1);
+
+        // Its page: the runs with their jobs; nothing to chart before a run finishes.
+        const detail = (await request("GET", `/backtest/batches/${batchId}`)).body as BacktestBatchDetail;
+        expect(detail.batch).toMatchObject({ id: batchId, name: batchName, runCount: 3, startDate: "2026-09-02", endDate: "2026-09-10", tablesMode: "walk_forward", decisionMaker: "baseline" });
+        expect(detail.runs.map((run) => [run.runNumber, run.job?.displayStatus, run.points.length, run.symbolSettings?.[fileSymbol]?.baseline.ladderSharesPct])).toEqual([
+          [1, "running", 0, 30],
+          [2, "running", 0, 70],
+          [3, "queued", 0, 50],
+        ]);
+        expect(await request("GET", `/backtest/batches/${batchId}/combined?runs=1,2`)).toEqual({ status: 409, body: { error: "Run 1 has not finished: only finished runs combine." } });
+
+        // Run 1 finishes: its place goes to run 3 the next time the queue moves (here, reading the batch).
+        await testDb("backtest_jobs").where({ id: created.runs[0]!.job.id }).update({ status: "succeeded", finished_at: testDb.fn.now() });
+        spawnBacktestJobProcessMock.mockClear();
+        expect(((await request("GET", `/backtest/batches/${batchId}`)).body as BacktestBatchDetail).runs[2]!.job?.displayStatus).toBe("running");
+        expect(spawnBacktestJobProcessMock).toHaveBeenCalledWith(created.runs[2]!.job.id);
+
+        // Runs 1 and 2 finished (the approved worked example): A 100,000 → 130,000, B 100,000 → 90,000; the sum peaks at
+        // 205,000 and falls to 165,000 (A 95,000 + B 70,000).
+        const finishedDays = (sessionId: string, values: number[], baselines: number[]) =>
+          ["2026-09-02", "2026-09-03", "2026-09-04", "2026-09-08"].map((tradingDate, index) => ({ session_id: sessionId, trading_date: tradingDate, account_value: values[index], cash: values[index], exposure_dollars: 1_000, interest_dollars: 2, baseline_value: baselines[index], spy_baseline_value: 100_000 + index * 1_000 }));
+        await testDb("backtest_session_days").insert([...finishedDays(runOne!.id, [100_000, 105_000, 95_000, 130_000], [100_000, 110_000, 90_000, 120_000]), ...finishedDays(runTwo!.id, [100_000, 100_000, 70_000, 90_000], [100_000, 110_000, 90_000, 120_000])]);
+        await testDb("backtest_sessions").whereIn("id", [runOne!.id, runTwo!.id]).update({ status: "succeeded" });
+        expect(await request("GET", `/backtest/batches/${batchId}/combined?runs=1`)).toEqual({ status: 400, body: { error: "Combine two or more runs: ?runs=1,3" } });
+        expect(await request("GET", `/backtest/batches/${batchId}/combined?runs=1,7`)).toEqual({ status: 404, body: { error: "This batch has no Run 7." } });
+        const combinedResponse = await request("GET", `/backtest/batches/${batchId}/combined?runs=2,1`);
+        expect(combinedResponse).toMatchObject({ status: 200 });
+        const combined = combinedResponse.body as BacktestBatchCombined;
+        expect(combined.runNumbers).toEqual([1, 2]);
+        expect(combined.points.map((point) => point.value)).toEqual([200_000, 205_000, 165_000, 220_000]);
+        expect(combined.metrics).toMatchObject({ startValue: 200_000, endValue: 220_000, tradeCount: 0, interestDollars: 16 });
+        expect(combined.metrics.totalReturn).toBeCloseTo(0.1, 10);
+        expect(combined.metrics.maxDrawdown).toBeCloseTo(165_000 / 205_000 - 1, 10);
+        expect(combined.baselineFigures).toMatchObject({ startValue: 200_000, endValue: 240_000 });
+        expect(combined.spyBaselineFigures).toMatchObject({ startValue: 200_000, endValue: 206_000 });
+        expect(combined.daysLeftOut).toBe(0);
+        expect(((await request("GET", `/backtest/batches/${batchId}`)).body as BacktestBatchDetail).runs[0]!.points.map((point) => point.value)).toEqual([100_000, 105_000, 95_000, 130_000]);
+
+        // Delete: every run's session and job go, the unfinished ones stopped first.
+        terminateLeftoverJobProcessesMock.mockClear();
+        expect((await request("DELETE", `/backtest/batches/${batchId}`)).status).toBe(204);
+        expect(terminateLeftoverJobProcessesMock).toHaveBeenCalledWith(424_242, created.runs[1]!.job.id);
+        expect(await testDb("backtest_sessions").where({ batch_id: batchId }).first()).toBeUndefined();
+        expect(await testDb("backtest_jobs").whereIn("id", created.runs.map(({ job }) => job.id)).first()).toBeUndefined();
+        expect((await request("GET", `/backtest/batches/${batchId}`)).status).toBe(404);
+        expect((await request("DELETE", `/backtest/batches/${batchId}`)).status).toBe(404);
+      } finally {
+        process.env.BACKTEST_MAX_PARALLEL_SESSIONS = "1000";
+      }
     });
 
     it("delete a session after stopping its running job", async () => {

@@ -342,12 +342,46 @@ async function putFirstInTransaction(transaction: Knex.Transaction, jobId: strin
     .update({ cancel_requested: true, pause_requested: true, put_first_at: transaction.raw("now() - interval '1 millisecond'") });
 }
 
-/** Inserts a session's backtest job already claimed (backtests do not queue); startClaimedBacktestJob then starts its process. */
-export async function insertClaimedBacktestJob(sessionId: string, symbol: string, connection: Knex = db): Promise<string> {
-  const [row] = await connection("backtest_jobs")
-    .insert({ kind: "backtest", symbol, session_id: sessionId, status: "running", heartbeat_at: connection.fn.now(), started_at: connection.fn.now() })
-    .returning("id");
+/** How many backtest jobs run at once (BACKTEST_MAX_PARALLEL_SESSIONS, required wherever backtests start): the rest wait in the queue. */
+export function readBacktestMaxParallelSessions(): number {
+  const configured = process.env.BACKTEST_MAX_PARALLEL_SESSIONS?.trim();
+  if (!configured) throw new Error("BACKTEST_MAX_PARALLEL_SESSIONS is not set: how many backtests run at once (docs/backtesting/DATA-FILES.md).");
+  const value = Number(configured);
+  if (!Number.isInteger(value) || value < 1) throw new Error(`BACKTEST_MAX_PARALLEL_SESSIONS must be a whole number of 1 or more, got "${configured}".`);
+  return value;
+}
+
+/**
+ * Inserts a session's backtest job in the queue; kickBacktestQueue starts it when a place is free. clock_timestamp(), not
+ * now(): a batch's jobs are inserted in one transaction, and now() would give them all the same time.
+ */
+export async function insertQueuedBacktestJob(sessionId: string, symbol: string, connection: Knex = db): Promise<string> {
+  const [row] = await connection("backtest_jobs").insert({ kind: "backtest", symbol, session_id: sessionId, status: "queued", queued_at: connection.raw("clock_timestamp()") }).returning("id");
   return row.id as string;
+}
+
+/**
+ * Starts the queued backtests, oldest first, while fewer than BACKTEST_MAX_PARALLEL_SESSIONS run (a stopped one does not
+ * count). Kicked when a session or batch is created, when a backtest ends, on a resume, by the overview and the batch page,
+ * and when the API starts, so the queue survives a restart. The advisory lock makes concurrent kicks take turns. Returns
+ * the started jobs' ids.
+ */
+export async function kickBacktestQueue(): Promise<string[]> {
+  const maxParallel = readBacktestMaxParallelSessions();
+  const startedJobIds = await db.transaction(async (transaction) => {
+    await transaction.raw("SELECT pg_advisory_xact_lock(hashtext('backtest_session_queue'))");
+    const runningRows: { count: string | number }[] = await transaction("backtest_jobs")
+      .where({ kind: "backtest", status: "running" })
+      .where("heartbeat_at", ">", transaction.raw("now() - (?::int * interval '1 millisecond')", [staleHeartbeatMilliseconds]))
+      .count("* as count");
+    const freePlaces = maxParallel - Number(runningRows[0]?.count ?? 0);
+    if (freePlaces <= 0) return [];
+    const next: { id: string }[] = await transaction("backtest_jobs").where({ kind: "backtest", status: "queued" }).orderBy(["queued_at", "created_at", "id"]).limit(freePlaces).select("id");
+    for (const job of next) await claimJob(transaction, job.id, { resetProgress: false });
+    return next.map((job) => job.id);
+  });
+  for (const jobId of startedJobIds) await spawnClaimedJob(jobId);
+  return startedJobIds;
 }
 
 /** Inserts a ticker analysis's job already claimed (analyses do not queue); startClaimedBacktestJob then starts its process. */
@@ -422,10 +456,22 @@ export async function resumeBacktestJob(jobId: string): Promise<BacktestJobView>
     await kickDownloadQueue();
   } else {
     await db("backtest_sessions").where({ id: job.session_id }).update({ status: "queued", error: null, finished_at: null });
-    // A backtest runs again from its first day, so its run time starts again too.
-    await db("backtest_jobs").where({ id: jobId }).update({ earlier_run_seconds: 0 });
-    await claimJob(db, jobId, { resetProgress: true });
-    await spawnClaimedJob(jobId);
+    // A backtest runs again from its first day, so its run time and progress start again too; it waits its turn in the queue.
+    await db("backtest_jobs").where({ id: jobId }).update({
+      status: "queued",
+      queued_at: db.fn.now(),
+      earlier_run_seconds: 0,
+      progress_done: 0,
+      progress_total: 0,
+      progress_label: null,
+      pid: null,
+      cancel_requested: false,
+      error: null,
+      started_at: null,
+      finished_at: null,
+      heartbeat_at: null,
+    });
+    await kickBacktestQueue();
   }
   return loadBacktestJobView(jobId);
 }
