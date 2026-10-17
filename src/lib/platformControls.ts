@@ -53,12 +53,18 @@ export interface SetTradingHaltInput {
   userId: string;
 }
 
-/** Upserts the halt row and returns the stored state (with the setter's display name). */
+/** Upserts the halt row and returns the stored state (with the setter's display name). A change of state or reason is also written to risk_limits_audit. */
 export async function setTradingHalt(input: SetTradingHaltInput): Promise<TradingHalt> {
-  await db("platform_controls")
-    .insert({ key: tradingHaltControlKey, enabled: input.enabled, reason: input.reason, set_by_user_id: input.userId, set_at: db.fn.now() })
-    .onConflict("key")
-    .merge({ enabled: input.enabled, reason: input.reason, set_by_user_id: input.userId, set_at: db.fn.now() });
+  await db.transaction(async (trx) => {
+    const before = await trx("platform_controls").where({ key: tradingHaltControlKey }).forUpdate().first("enabled", "reason");
+    await trx("platform_controls")
+      .insert({ key: tradingHaltControlKey, enabled: input.enabled, reason: input.reason, set_by_user_id: input.userId, set_at: trx.fn.now() })
+      .onConflict("key")
+      .merge({ enabled: input.enabled, reason: input.reason, set_by_user_id: input.userId, set_at: trx.fn.now() });
+    const wasEnabled = before ? Boolean(before.enabled) : null;
+    if (wasEnabled === input.enabled && (before?.reason ?? null) === input.reason) return;
+    await trx("risk_limits_audit").insert({ user_id: input.userId, field: "tradingHalt", old_value: wasEnabled === null ? null : wasEnabled ? "on" : "off", new_value: input.enabled ? "on" : "off", reason: input.reason });
+  });
   return fetchTradingHalt();
 }
 

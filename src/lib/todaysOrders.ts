@@ -26,6 +26,8 @@ export interface TodaysOrder {
   createdAt: string;
   updatedAt: string;
   requestedByDisplayName: string | null;
+  /** Who pressed Confirm; null before it was confirmed, and for orders confirmed before 2026-10-17 (not recorded then). */
+  confirmedByDisplayName: string | null;
   cancelledByDisplayName: string | null;
   /** Why it ended cancelled when no user cancelled it: expired_at_close, cancelled_by_ibkr or not_confirmed_in_time. */
   cancellationReason: string | null;
@@ -48,6 +50,7 @@ export interface TodaysOrderRow {
   created_at: Date;
   updated_at: Date;
   requested_by_display_name: string | null;
+  confirmed_by_display_name: string | null;
   cancelled_by_display_name: string | null;
   cancellation_reason: string | null;
   error_message: string | null;
@@ -88,6 +91,7 @@ export function buildTodaysOrders(orderRows: TodaysOrderRow[], fillRows: OrderLe
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),
       requestedByDisplayName: row.requested_by_display_name,
+      confirmedByDisplayName: row.confirmed_by_display_name,
       cancelledByDisplayName: row.cancelled_by_display_name,
       cancellationReason: row.cancellation_reason,
       errorMessage: row.error_message,
@@ -110,6 +114,7 @@ export async function fetchTodaysOrders(now: Date = new Date()): Promise<TodaysO
   const orderRows: TodaysOrderRow[] = await db("order_requests as orq")
     .leftJoin("users as ru", "ru.id", "orq.requested_by_user_id")
     .leftJoin("users as cu", "cu.id", "orq.cancelled_by_user_id")
+    .leftJoin("users as fu", "fu.id", "orq.confirmed_by_user_id")
     .where((builder) =>
       builder.whereRaw("(orq.updated_at AT TIME ZONE 'America/New_York')::date = ?::date", [easternIsoDate(now)]).orWhereIn("orq.status", [...activeOrderRequestStatuses]),
     )
@@ -127,6 +132,7 @@ export async function fetchTodaysOrders(now: Date = new Date()): Promise<TodaysO
       "orq.ibkr_perm_id",
       "ru.display_name as requested_by_display_name",
       "cu.display_name as cancelled_by_display_name",
+      "fu.display_name as confirmed_by_display_name",
     );
   if (orderRows.length === 0) return [];
 

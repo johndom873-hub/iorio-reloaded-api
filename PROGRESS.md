@@ -500,6 +500,19 @@ Plain language: IBKR keeps one average price for all the shares of a stock. When
 - Review fixes (2026-10-16): leg prices stored to 8 decimals (migration); share hand-overs record the shares received (migration); a partial sale of shared shares takes IBKR's oldest lots first; shares joining an existing leg blend its cost with theirs; a closing fill that lands after the close sets the exit; a missing commission report leaves the cost unknown rather than understated; the daily P&L snapshot counts open legs only; options are marked at the bid/ask mid everywhere (was the last trade).
 - After the prod promotion (Marcelo runs the scripts): repair old buy-write share fills booked to the wrong position (a stock fill belongs to the position holding the same order's option fill; COIN 29–30 Sep on staging), old blended sibling costs, and P&L snapshot rows that included closed legs.
 
+## Access levels: admin and trader (approved by Marcelo 2026-10-17; built, not pushed; mockup https://claude.ai/artifact/QN7mJ8kd8r9sgGwpphuShP)
+
+In plain words: Marce is the admin and can do everything. Everyone else is a trader: they can trade, halt trading and stop Pluto, but cannot change a limit or a Pluto setting, restart Pluto or lift a halt, and their new positions must fit in the part of the account not reserved for Pluto.
+
+- Level: `users.access_level` admin | trader, read on every request; `npm run manage-user -- set-access-level <user> <level>`. Pluto's service account must be admin (it trades its own tickers): create prod's with `create pluto Pluto <pw> admin`. Genosuke is a trader.
+- A trader cannot: save Risk & Limits; change any Pluto or per-ticker setting; switch Pluto on, resume it, reset a breaker or allow opens under stress; flip a ticker's Pluto switch; turn Signals off on a Pluto ticker; remove a Shortlist ticker; restart the Gateway from a health check. A trader can halt, switch Pluto off, pause it, remove the stress override, close and cancel.
+- A trader's orders: open/roll must fit in NLV × (100 − Pluto budget %) / 100, less EXP $ of everything outside Pluto's book (orders still working included; an order adding $0 passes). No opens/rolls on Pluto's tickers, no typed share count, no plutoActionId. The rules follow whoever confirms.
+- Risk & Limits: "Pluto" and "Everything else" blocks (`GET /risk-limits/capital-split`); settings printed for traders; change history of every setting and the halt for admins (`risk_limits_audit`). Orders record who confirmed (`confirmed_by_user_id`, "Confirmed by" in Today's orders).
+- `manage-user disable | enable <user>`: sign-in refused, sessions end.
+- Genosuke: its trading, risk-limit, halt and Shortlist-remove tools are gone.
+- "Max position size %" now reads "Max order size %" (it caps each order, not a ticker's total). The column/field rename waits for the backtest batches work.
+- At prod promotion Juan becomes a trader. Prod's EXP $ outside Pluto (~$140k) is above the ~$77k left after Pluto's 50% budget, so his new opens are blocked until exposure drops or the budget is lowered.
+
 ## Open decisions — Juan's Iorio Upgrades feedback (2026-08-24)
 Full IBKR trading-book/depth visibility, full option chain w/ all bid-ask, richer trade tab, and a new upcoming-events tab. Broken into independently-decidable pieces:
 - [x] **Order confirmation needs real-time prices and the live option chain (Juan) — built, corrected 2026-09-25.** This was stale: `OrderReviewPanel.tsx` has had a live-streaming "Live Quote" card (bid/ask/greeks/IV via genuine SSE) since app commit `e9e8d07` (2026-08-25) — a month before this checkbox's own "unblocked 2026-09-14" note was even added.

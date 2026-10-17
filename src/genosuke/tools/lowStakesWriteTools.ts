@@ -1,7 +1,7 @@
 // Low-stakes write tools — mutate state but have no direct financial
 // consequence (nothing here books a trade or changes a live position), so
 // they execute immediately without the Yes/Cancel confirm gate the
-// financial-write tier requires. Genosuke should still say what it did
+// infra-write tier requires. Genosuke should still say what it did
 // after the fact, just not ask permission first.
 import type { GenosukeTool } from "./types.js";
 
@@ -17,14 +17,6 @@ export const lowStakesWriteTools: GenosukeTool[] = [
       required: ["symbol"],
     },
     execute: (input, api) => api.post("/shortlist", input),
-  },
-  {
-    name: "remove_shortlist_ticker",
-    description:
-      "Remove a ticker from the shortlist (soft-delete). Use the shortlist entry id from list_shortlist, not the ticker id. Refused (409) while the ticker has an open position — it must be closed first.",
-    tier: "low-stakes-write",
-    parameters: { type: "object", properties: { entryId: { type: "string" } }, required: ["entryId"] },
-    execute: (input, api) => api.delete(`/shortlist/${encodeURIComponent(String(input.entryId))}`),
   },
   {
     name: "trigger_ibkr_health_check",

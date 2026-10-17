@@ -117,12 +117,47 @@ export async function loadTradingSettingsForEditing() {
   return { ...mapTradingSettingsRow(row), updatedAt: new Date(row.updated_at).toISOString(), updatedByDisplayName: (row.updated_by_display_name as string | null) ?? null };
 }
 
-/** Saves a validated payload. The caller validates first (validateTradingSettingsInput). */
+/** Saves a validated payload, writing one risk_limits_audit row per field that changed. The caller validates first (validateTradingSettingsInput). */
 export async function saveTradingSettings(input: TradingSettingsInput, userId: string): Promise<void> {
-  const update: Record<string, number> = {};
-  for (const [field, column] of Object.entries(tradingSettingsColumns)) update[column] = input[field as keyof TradingSettingsInput];
-  const updatedRows = await db("trading_settings").update({ ...update, updated_at: db.fn.now(), updated_by_user_id: userId });
-  if (updatedRows !== 1) throw new Error("No trading_settings row found.");
+  await db.transaction(async (trx) => {
+    const currentRow = await trx("trading_settings").forUpdate().first();
+    if (!currentRow) throw new Error("No trading_settings row found.");
+    const current = mapTradingSettingsRow(currentRow);
+    const update: Record<string, number> = {};
+    const audit: { user_id: string; field: string; old_value: string; new_value: string }[] = [];
+    for (const [field, column] of Object.entries(tradingSettingsColumns)) {
+      const key = field as keyof TradingSettingsInput;
+      update[column] = input[key];
+      if (current[key] !== input[key]) audit.push({ user_id: userId, field, old_value: String(current[key]), new_value: String(input[key]) });
+    }
+    await trx("trading_settings").update({ ...update, updated_at: trx.fn.now(), updated_by_user_id: userId });
+    if (audit.length > 0) await trx("risk_limits_audit").insert(audit);
+  });
+}
+
+export interface RiskLimitsAuditRow {
+  id: number;
+  changedAt: string;
+  userDisplayName: string | null;
+  /** A TradingSettings field name, or "tradingHalt" (values "on" / "off", with the reason given). */
+  field: string;
+  oldValue: string | null;
+  newValue: string | null;
+  reason: string | null;
+}
+
+/** Every change to the trading settings and the trading halt, newest first. */
+export async function loadRiskLimitsAudit(limit = 100): Promise<RiskLimitsAuditRow[]> {
+  const rows = await db("risk_limits_audit as a").leftJoin("users as u", "u.id", "a.user_id").select("a.*", "u.display_name as user_display_name").orderBy("a.changed_at", "desc").orderBy("a.id", "desc").limit(limit);
+  return rows.map((row) => ({
+    id: Number(row.id),
+    changedAt: new Date(row.changed_at).toISOString(),
+    userDisplayName: row.user_display_name ?? null,
+    field: row.field,
+    oldValue: row.old_value ?? null,
+    newValue: row.new_value ?? null,
+    reason: row.reason ?? null,
+  }));
 }
 
 /** Just the unfilled-order cancel limit, for the worker's sweep (which must not pay for the commission estimator). */

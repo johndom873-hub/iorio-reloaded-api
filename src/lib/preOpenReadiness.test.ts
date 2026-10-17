@@ -154,7 +154,7 @@ describe("evaluateOrderPath", () => {
 describe("evaluateAccount", () => {
   const healthy = { netLiquidationValue: 100_000, totalCashValue: 60_000, buyingPower: 200_000, excessLiquidity: 50_000 };
 
-  it("shows the figures and the largest put strike the position limit allows", () => {
+  it("shows the figures and the largest put strike the max order size allows", () => {
     const result = evaluateAccount(healthy, 15);
     expect(result.status).toBe("ok");
     expect(result.detail).toContain("net liquidation $100,000");
@@ -177,12 +177,12 @@ describe("evaluateAccount", () => {
 describe("evaluateSettings", () => {
   const settings = { maxPositionPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4 };
   it("lists the limits and the band", () => {
-    expect(evaluateSettings(settings)).toMatchObject({ status: "ok", detail: "max position 15%, per ticker 20%, cash reserve 5%, delta band 0.2-0.4" });
+    expect(evaluateSettings(settings)).toMatchObject({ status: "ok", detail: "max order size 15%, per ticker 20%, cash reserve 5%, delta band 0.2-0.4" });
   });
   it("fails when unreadable and when a 0% limit would block every order", () => {
     expect(evaluateSettings(null).status).toBe("fail");
-    expect(evaluateSettings({ ...settings, maxPositionPctOfPortfolio: 0 })).toMatchObject({ status: "fail", detail: expect.stringContaining("max position size is 0%") });
-    expect(evaluateSettings({ ...settings, maxPositionPctOfPortfolio: 0, maxConcentrationPerTickerPct: 0 }).detail).toContain("max position size and max exposure per ticker is 0%");
+    expect(evaluateSettings({ ...settings, maxPositionPctOfPortfolio: 0 })).toMatchObject({ status: "fail", detail: expect.stringContaining("max order size is 0%") });
+    expect(evaluateSettings({ ...settings, maxPositionPctOfPortfolio: 0, maxConcentrationPerTickerPct: 0 }).detail).toContain("max order size and max exposure per ticker is 0%");
   });
 });
 

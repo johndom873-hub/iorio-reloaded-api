@@ -1,4 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin: requireAuth reads the user's access level through sessionUser.
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: "admin" as const, disabledAt: null }),
+}));
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";

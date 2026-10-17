@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { isAdminRequest } from "../lib/sessionUser.js";
 import { runIbkrHealthCheckJob } from "../ibkr/checkIbkrHealthJob.js";
 import * as presenceTracker from "../lib/presenceTracker.js";
 import { getStreamMultiplexerStats } from "../streams/streamMultiplexer.js";
@@ -67,7 +68,8 @@ systemHealthRouter.post("/check-ibkr", async (request, response) => {
   await respondWithStreamedResult(response, async () => {
     try {
       const marketState = (await computeMarketSessionStatus()).state;
-      await runIbkrHealthCheckJob({ allowGatewayRestart: marketState !== "open", triggeredBy: "manual", triggeredByUserId: request.session.userId });
+      // Only an admin's check may restart the Gateway (Marcelo 2026-10-17); a trader's only reports.
+      await runIbkrHealthCheckJob({ allowGatewayRestart: marketState !== "open" && isAdminRequest(request), triggeredBy: "manual", triggeredByUserId: request.session.userId });
     } catch {
       // runIbkrHealthCheckJob (via runJob) already logged the failure to
       // job_runs and notified Telegram — swallow here so the response below

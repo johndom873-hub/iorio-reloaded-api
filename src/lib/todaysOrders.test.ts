@@ -34,6 +34,7 @@ function orderRow(id: string, payload: OrderRequestPayload, status = "filled") {
     created_at: new Date("2026-10-01T14:00:00Z"),
     updated_at: new Date("2026-10-01T14:05:00Z"),
     requested_by_display_name: "Marce",
+    confirmed_by_display_name: null,
     cancelled_by_display_name: null,
     cancellation_reason: null,
     error_message: null,

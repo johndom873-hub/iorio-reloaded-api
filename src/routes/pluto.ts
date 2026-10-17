@@ -4,7 +4,8 @@ import { db } from "../db/connection.js";
 import { loadRealizedPnlByActionId, type PlutoActionRealizedPnl } from "../pluto/actionRealizedPnl.js";
 import { loadPlutoBook } from "../pluto/book.js";
 import { resolvePlutoSession } from "../pluto/sessionSchedule.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
+import { isAdminRequest } from "../lib/sessionUser.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { loadPlutoSettings, loadPlutoSettingsAudit, PlutoSettingsValidationError, updatePlutoSettings, type PlutoSettingsInput } from "../pluto/settingsStore.js";
 import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlutoTickerSettings, loadPlutoTickerSettingsAudit, PlutoTickerNotFoundError, PlutoTickerSettingsValidationError, updatePlutoTickerSettings, type PlutoTickerSettingsField, type PlutoTickerSettingsInput } from "../pluto/tickerSettingsStore.js";
@@ -22,8 +23,9 @@ import { normalizeSystemConcerns } from "../pluto/decisionSchema.js";
 import { loadDaySignalsWatchStatuses } from "../lib/daySignalsWatchStatus.js";
 import { computeKellyCap, computeStressCap, stressCapInputFromFigures } from "../pluto/postModelGates.js";
 
-// The Pluto screen's API. Any signed-in user can operate every control (Marcelo, 2026-09-28:
-// both users share one access level); the UI puts confirm modals in front of the risky ones.
+// The Pluto screen's API. A trader can only stop Pluto (turn it off, pause it, drop today's stress override); starting it,
+// resuming it, resetting a breaker, allowing opens under stress and every setting are an admin's (Marcelo 2026-10-17).
+// The UI puts confirm modals in front of the risky ones.
 
 export const plutoRouter = Router();
 plutoRouter.use(requireAuth);
@@ -109,6 +111,10 @@ plutoRouter.put("/mode", async (request: Request, response: Response) => {
     response.status(400).json({ error: "mode must be off or on." });
     return;
   }
+  if (mode === "on" && !isAdminRequest(request)) {
+    response.status(403).json({ error: "Only an admin can switch Pluto on." });
+    return;
+  }
   const before = await loadPlutoState();
   if (before.mode === mode) {
     response.json(before);
@@ -143,7 +149,7 @@ plutoRouter.post("/pause", async (request: Request, response: Response) => {
   response.json({ ...state, cancelled });
 });
 
-plutoRouter.post("/resume", async (request: Request, response: Response) => {
+plutoRouter.post("/resume", requireAdmin, async (request: Request, response: Response) => {
   const who = await currentUserDisplayName(request);
   try {
     const state = await resumePluto(currentUserId(request));
@@ -159,7 +165,7 @@ plutoRouter.post("/resume", async (request: Request, response: Response) => {
   }
 });
 
-plutoRouter.post("/breakers/:name/reset", async (request: Request, response: Response) => {
+plutoRouter.post("/breakers/:name/reset", requireAdmin, async (request: Request, response: Response) => {
   const name = String(request.params.name);
   const before = await loadPlutoState();
   if (!before.breakers[name]) {
@@ -178,6 +184,10 @@ plutoRouter.put("/stress-override", async (request: Request, response: Response)
   const enabled = request.body?.enabled;
   if (typeof enabled !== "boolean") {
     response.status(400).json({ error: "enabled must be true or false." });
+    return;
+  }
+  if (enabled && !isAdminRequest(request)) {
+    response.status(403).json({ error: "Only an admin can allow opens under stress." });
     return;
   }
   const todayIso = easternIsoDate(new Date());
@@ -308,7 +318,7 @@ plutoRouter.get("/settings", async (_request: Request, response: Response) => {
   response.json(await loadPlutoSettings());
 });
 
-plutoRouter.put("/settings", async (request: Request, response: Response) => {
+plutoRouter.put("/settings", requireAdmin, async (request: Request, response: Response) => {
   const input = (request.body ?? {}) as PlutoSettingsInput;
   if (typeof input !== "object" || Array.isArray(input)) {
     response.status(400).json({ error: "Body must be an object of settings fields." });
@@ -359,7 +369,7 @@ plutoRouter.get("/ticker-settings/:symbol", async (request: Request, response: R
 });
 
 /** Body: any of allocationPct, ladderSharesPct, ladderShockOverridePct; null puts a field back to the default. */
-plutoRouter.put("/ticker-settings/:symbol", async (request: Request, response: Response) => {
+plutoRouter.put("/ticker-settings/:symbol", requireAdmin, async (request: Request, response: Response) => {
   const input = request.body;
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     response.status(400).json({ error: "Body must be an object of ticker settings fields." });

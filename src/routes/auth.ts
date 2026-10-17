@@ -6,6 +6,7 @@ import { clearLoginFailures, clientAddress, isLoginThrottled, recordLoginFailure
 import { userHasUsedPasskey } from "../lib/passkeys.js";
 import { isValidServiceLoginSecret, serviceLoginSecretHeader } from "../lib/serviceLoginSecret.js";
 import { isAuthenticatedSession, regenerateSession } from "../lib/sessionAuthentication.js";
+import { authenticatedUserResponse, disabledAccountRefusal } from "../lib/sessionUser.js";
 import { passkeyAuthRouter } from "./authPasskeys.js";
 
 export const authRouter = Router();
@@ -39,7 +40,12 @@ authRouter.post("/login", async (request, response) => {
     return;
   }
 
-  const authenticatedUser = { id: user.id, username: user.username, displayName: user.display_name };
+  if (user.disabled_at) {
+    response.status(401).json({ error: disabledAccountRefusal });
+    return;
+  }
+
+  const authenticatedUser = authenticatedUserResponse(user);
 
   if (readPasskeyLoginMode() === "off") {
     clearLoginFailures(address);
@@ -100,6 +106,11 @@ authRouter.get("/session", async (request, response) => {
     response.status(401).json({ error: "Not logged in." });
     return;
   }
+  if (user.disabled_at) {
+    request.session.destroy(() => {});
+    response.status(401).json({ error: disabledAccountRefusal });
+    return;
+  }
 
-  response.json({ id: user.id, username: user.username, displayName: user.display_name });
+  response.json(authenticatedUserResponse(user));
 });

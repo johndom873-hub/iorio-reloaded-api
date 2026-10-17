@@ -8,9 +8,9 @@ import { loadTradingSettings, type TradingSettings } from "./tradingSettingsStor
 import { orderFillsPendingSql } from "./orderFills.js";
 import { formatWholeDollars } from "./formatWholeDollars.js";
 
-// The three trading settings that block *placing* an order: max position %, max concentration per ticker %
+// The three trading settings that block *placing* an order: max order size %, max concentration per ticker %
 // and min cash reserve % (table trading_settings, edited on Risk & Limits). They apply to EVERY opening or
-// rolling order whatever its origin (Signals, the position form, Genosuke); a close only reduces exposure and is
+// rolling order whatever its origin (Signals, the position form, the chain, Pluto); a close only reduces exposure and is
 // not limit-checked (approved 2026-10-05). Formulas all reuse the platform's existing valuation conventions --
 // total portfolio value is netLiquidationValue (same as riskLimits.ts's /exposure), existing per-ticker
 // exposure is computePositionExposures (same as the concentration-by-ticker figure there), and free cash is
@@ -28,6 +28,9 @@ import { formatWholeDollars } from "./formatWholeDollars.js";
 // counted too (approved 2026-10-05): their notional is added to the ticker's exposure and subtracted from free
 // cash, so two orders confirmed seconds apart cannot both pass a limit only one fits under. A partly filled order
 // is counted in full, so its filled part is briefly counted twice: the check errs towards blocking.
+//
+// A trader's order also gets the traders' capital cap (capitalOutsidePluto.ts, Marcelo 2026-10-17) when the caller passes
+// loadTraderCapital.
 //
 // Fails closed: if account/portfolio data can't be verified, every check is reported as blocked rather than
 // silently skipped (Marcelo approved 2026-09-24) -- this function gates real order confirmations.
@@ -60,6 +63,16 @@ export interface OrderLimitsInput {
    * with uncovered ones held), not the shortfall against the uncovered shares.
    */
   ladder?: { potFraction: number; stockSharesBought: number };
+  /** A trader's order: loads the capital cap's figures (capitalOutsidePluto.ts's loadTraderCapitalFigures). */
+  loadTraderCapital?: () => Promise<TraderCapitalFigures>;
+}
+
+/** The traders' capital cap's inputs besides the net liquidation value and the order's own notional. */
+export interface TraderCapitalFigures {
+  /** EXP $ of open positions outside Pluto's book plus the orders still working outside it. */
+  capitalInUseOutsidePluto: number;
+  /** Pluto's capital budget, % of net liquidation value: reserved for Pluto whether it runs or not. */
+  plutoCapitalBudgetPct: number;
 }
 
 export interface OrderLimitsDetails {
@@ -72,6 +85,8 @@ export interface OrderLimitsDetails {
   limits: { maxPositionPctOfPortfolio: number; maxConcentrationPerTickerPct: number; minCashReservePct: number };
   /** A ladder order's pot in dollars (allocation × capital budget × net liquidation value); absent for every other order. */
   ladderPotDollars?: number;
+  /** A trader's order: what traders may use outside Pluto, what is in use before this order, and Pluto's budget %. */
+  traderCapital?: { availableDollars: number; inUseDollars: number; plutoCapitalBudgetPct: number };
 }
 
 export interface OrderLimitsResult {
@@ -177,14 +192,16 @@ export async function evaluateOrderLimits(input: OrderLimitsInput): Promise<Orde
   let settings: Awaited<ReturnType<typeof loadTradingSettings>>;
   let spotPrice: number | null;
   let inFlight: InFlightTotals;
+  let traderCapital: TraderCapitalFigures | undefined;
   try {
-    [account, cashLockedInCsps, existingTickerExposure, settings, spotPrice, inFlight] = await Promise.all([
+    [account, cashLockedInCsps, existingTickerExposure, settings, spotPrice, inFlight, traderCapital] = await Promise.all([
       fetchAccountSummary(),
       computeCashLockedInCsps(),
       computeTickerExposure(input.symbol),
       loadTradingSettings(),
       resolveSpotPrice(input),
       loadInFlightNotionals(input.symbol, input.excludeOrderRequestId),
+      input.loadTraderCapital ? input.loadTraderCapital() : Promise.resolve(undefined),
     ]);
   } catch (error) {
     return { blocked: true, reasons: [`Could not verify position limits: ${error instanceof Error ? error.message : String(error)}`] };
@@ -200,7 +217,7 @@ export async function evaluateOrderLimits(input: OrderLimitsInput): Promise<Orde
   }
 
   const orderNotional = await computeOrderNotionalForInput(input, spotPrice);
-  return evaluateOrderLimitFigures({ symbol: input.symbol, orderNotional, totalPortfolioValue, totalCashValue: account.totalCashValue, cashLockedInCsps, existingTickerExposure, inFlight, settings, ladderPotFraction: input.ladder?.potFraction });
+  return evaluateOrderLimitFigures({ symbol: input.symbol, orderNotional, totalPortfolioValue, totalCashValue: account.totalCashValue, cashLockedInCsps, existingTickerExposure, inFlight, settings, ladderPotFraction: input.ladder?.potFraction, traderCapital });
 }
 
 export interface OrderLimitFigures {
@@ -215,6 +232,8 @@ export interface OrderLimitFigures {
   settings: Pick<TradingSettings, "maxPositionPctOfPortfolio" | "maxConcentrationPerTickerPct" | "minCashReservePct">;
   /** A CC + Put Ladder order's pot as a share of the account: the pot cap replaces the max position and concentration limits. */
   ladderPotFraction?: number;
+  /** A trader's order: the traders' capital cap applies on top of the other limits. */
+  traderCapital?: TraderCapitalFigures;
 }
 
 /** Pure: the three limits on figures already read (the live gate reads them from IBKR and the book; a backtest from its simulated book). */
@@ -239,7 +258,7 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
     }
   } else {
     if (orderNotional > limitInDollars(settings.maxPositionPctOfPortfolio)) {
-      reasons.push(`This order is ${formatPct(positionSharePct)} of portfolio value, above the ${settings.maxPositionPctOfPortfolio}% max position size.`);
+      reasons.push(`This order is ${formatPct(positionSharePct)} of portfolio value, above the ${settings.maxPositionPctOfPortfolio}% max order size.`);
     }
     if (tickerExposureAfter > limitInDollars(settings.maxConcentrationPerTickerPct)) {
       reasons.push(`${figures.symbol} would be ${formatPct(concentrationAfterPct)} of portfolio value, above the ${settings.maxConcentrationPerTickerPct}% max concentration per ticker${workingOrdersNote}.`);
@@ -250,6 +269,18 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
   const cashReserveAfterPct = cashAfter / totalPortfolioValue;
   if (cashAfter < limitInDollars(settings.minCashReservePct)) {
     reasons.push(`Placing this order would leave only ${formatPct(cashReserveAfterPct)} of portfolio value as cash, below the ${settings.minCashReservePct}% min cash reserve${workingOrdersNote}.`);
+  }
+
+  let traderCapitalDetails: OrderLimitsDetails["traderCapital"];
+  if (figures.traderCapital) {
+    const { capitalInUseOutsidePluto, plutoCapitalBudgetPct } = figures.traderCapital;
+    const availableDollars = ((100 - plutoCapitalBudgetPct) * totalPortfolioValue) / 100;
+    const inUseAfter = capitalInUseOutsidePluto + orderNotional;
+    // An order that adds nothing (a covered call on shares already held, a call roll) passes even when the cap is already exceeded.
+    if (orderNotional > 0 && inUseAfter > availableDollars) {
+      reasons.push(`Traders may use ${formatWholeDollars(availableDollars)} outside Pluto (portfolio value less Pluto's ${plutoCapitalBudgetPct}% capital budget). ${formatWholeDollars(capitalInUseOutsidePluto)} is already in use, so this order's ${formatWholeDollars(orderNotional)} would take it to ${formatWholeDollars(inUseAfter)}.`);
+    }
+    traderCapitalDetails = { availableDollars, inUseDollars: capitalInUseOutsidePluto, plutoCapitalBudgetPct };
   }
 
   return {
@@ -264,6 +295,7 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
       inFlightNotional: inFlight.totalNotional,
       limits: { maxPositionPctOfPortfolio: settings.maxPositionPctOfPortfolio, maxConcentrationPerTickerPct: settings.maxConcentrationPerTickerPct, minCashReservePct: settings.minCashReservePct },
       ...(ladderPotDollars === undefined ? {} : { ladderPotDollars }),
+      ...(traderCapitalDetails === undefined ? {} : { traderCapital: traderCapitalDetails }),
     },
   };
 }

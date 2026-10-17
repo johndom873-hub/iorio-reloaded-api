@@ -1,4 +1,20 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin unless a test runs them asTrader: requireAuth reads the user's access level
+// through sessionUser.
+const sessionAccess = vi.hoisted(() => ({ level: "admin" as "admin" | "trader" }));
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: sessionAccess.level, disabledAt: null }),
+}));
+
+async function asTrader<T>(body: () => Promise<T>): Promise<T> {
+  sessionAccess.level = "trader";
+  try {
+    return await body();
+  } finally {
+    sessionAccess.level = "admin";
+  }
+}
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
@@ -149,7 +165,7 @@ describe("GET /order-checks/limits: a valid call", () => {
   it("returns the shared result shape of evaluateOrderLimits untouched", async () => {
     const result = {
       blocked: true,
-      reasons: ["This order is 12.0% of portfolio value, above the 10% max position size."],
+      reasons: ["This order is 12.0% of portfolio value, above the 10% max order size."],
       details: { orderNotional: 120_000, totalPortfolioValue: 1_000_000, positionSharePct: 0.12, concentrationAfterPct: 0.12, cashReserveAfterPct: 0.2, inFlightNotional: 0, limits: { maxPositionPctOfPortfolio: 10, maxConcentrationPerTickerPct: 20, minCashReservePct: 5 } },
     };
     evaluateOrderLimitsMock.mockResolvedValue(result);
@@ -172,6 +188,13 @@ describe("GET /order-checks/limits: a valid call", () => {
   it("does not carry an excludeOrderRequestId: a setup form's check is not an existing order", async () => {
     await call("GET", limitsQuery());
     expect(evaluateOrderLimitsMock.mock.calls[0]![0]).not.toHaveProperty("excludeOrderRequestId");
+  });
+
+  it("adds the traders' capital cap for a trader only", async () => {
+    await asTrader(() => call("GET", limitsQuery()));
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0].loadTraderCapital).toEqual(expect.any(Function));
+    await call("GET", limitsQuery());
+    expect(evaluateOrderLimitsMock.mock.calls[1]![0].loadTraderCapital).toBeUndefined();
   });
 
   it("a failure of the evaluator is a 500, never an empty pass", async () => {

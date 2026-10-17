@@ -1,4 +1,20 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin unless a test runs them asTrader: requireAuth reads the user's access level
+// through sessionUser.
+const sessionAccess = vi.hoisted(() => ({ level: "admin" as "admin" | "trader" }));
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: sessionAccess.level, disabledAt: null }),
+}));
+
+async function asTrader<T>(body: () => Promise<T>): Promise<T> {
+  sessionAccess.level = "trader";
+  try {
+    return await body();
+  } finally {
+    sessionAccess.level = "admin";
+  }
+}
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
@@ -651,6 +667,8 @@ describe("GET /positions/orders, /orders/today and /orders/:id", () => {
       cancelledByUserId: otherUserId,
       cancelledByDisplayName: otherUserDisplayName,
       cancellationReason: "expired_at_close",
+      confirmedByUserId: null,
+      confirmedByDisplayName: null,
       relatedPositionId: null,
       calendarWarning: null,
       calendarWarningEvents: null,
@@ -659,7 +677,7 @@ describe("GET /positions/orders, /orders/today and /orders/:id", () => {
     expect(response.json.payload.symbol).toBe(ticker.symbol);
     expect(Object.keys(response.json).sort()).toEqual(
       [
-        "calendarWarning", "calendarWarningEvents", "cancellationReason", "cancelledByDisplayName", "cancelledByUserId", "createdAt", "errorMessage", "ibkrOrderId", "id",
+        "calendarWarning", "calendarWarningEvents", "cancellationReason", "cancelledByDisplayName", "cancelledByUserId", "confirmedByDisplayName", "confirmedByUserId", "createdAt", "errorMessage", "ibkrOrderId", "id",
         "legFills", "payload", "plutoActionId", "relatedPositionId", "requestType", "requestedByDisplayName", "requestedByUserId", "riskFreeRate", "status", "updatedAt",
       ].sort(),
     );
@@ -1211,5 +1229,32 @@ describe("GET /positions/:id", () => {
     const missing = await call("GET", `/positions/${missingId}`);
     expect(missing.status).toBe(404);
     expect(missing.json).toEqual({ error: "Position not found." });
+  });
+});
+
+describe("access levels: a trader's roll", () => {
+  const rollBody = (closeLegId: string | undefined) => ({ closeLegId, closeLimitPrice: 0.5, newLeg: { strikePrice: 95, expiryDate: "2026-12-18", quantity: 2, limitPrice: 2.5 } });
+
+  it("refuses a trader's roll on a ticker Pluto trades and builds nothing, while an admin may roll it", async () => {
+    const { positionId, legIds, symbol, tickerId } = await createPosition("cash_secured_put", [shortPut(2)]);
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: tickerId, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    try {
+      const refused = await asTrader(() => call("POST", `/positions/${positionId}/roll`, rollBody(legIds[0])));
+      expect(refused).toMatchObject({ status: 403, json: { error: `Pluto trades ${symbol}, so only an admin can open or roll on it.` } });
+      expect(await testDb("order_requests").where({ related_position_id: positionId })).toEqual([]);
+      expect((await call("POST", `/positions/${positionId}/roll`, rollBody(legIds[0]))).status).toBe(201);
+    } finally {
+      await testDb("order_requests").where({ related_position_id: positionId }).del();
+      await testDb("shortlist_entries").where({ id: entry.id }).del();
+    }
+  });
+
+  it("lets a trader roll a position on a ticker Pluto does not trade", async () => {
+    const { positionId, legIds } = await createPosition("cash_secured_put", [shortPut(2)]);
+    try {
+      expect((await asTrader(() => call("POST", `/positions/${positionId}/roll`, rollBody(legIds[0])))).status).toBe(201);
+    } finally {
+      await testDb("order_requests").where({ related_position_id: positionId }).del();
+    }
   });
 });

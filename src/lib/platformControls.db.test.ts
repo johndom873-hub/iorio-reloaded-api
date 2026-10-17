@@ -29,6 +29,7 @@ beforeEach(async () => {
 
 afterAll(async () => {
   if (originalRow) await testDb("platform_controls").insert(originalRow).onConflict("key").merge();
+  await testDb("risk_limits_audit").where({ user_id: userId }).del();
   await testDb("users").where({ id: userId }).del();
   await testDb.destroy();
 });
@@ -73,5 +74,21 @@ describe("the real trading gate reads the halt from the database", () => {
     await setTradingHalt({ enabled: false, reason: null, userId });
     const reasonWhenLifted = await fetchTradingBlockedReason();
     expect(reasonWhenLifted === null || !reasonWhenLifted.startsWith("Trading is halted")).toBe(true);
+  });
+});
+
+describe("the trading halt in the Risk & Limits change history", () => {
+  it("records halting and lifting with their reasons, and nothing for a save that changes neither state nor reason", async () => {
+    await testDb("risk_limits_audit").where({ user_id: userId }).del();
+    await setTradingHalt({ enabled: true, reason: "history test", userId });
+    await setTradingHalt({ enabled: true, reason: "history test", userId });
+    await setTradingHalt({ enabled: true, reason: "a better reason", userId });
+    await setTradingHalt({ enabled: false, reason: null, userId });
+    const rows = await testDb("risk_limits_audit").where({ user_id: userId }).orderBy("id");
+    expect(rows.map((row) => [row.field, row.old_value, row.new_value, row.reason])).toEqual([
+      ["tradingHalt", "off", "on", "history test"],
+      ["tradingHalt", "on", "on", "a better reason"],
+      ["tradingHalt", "on", "off", null],
+    ]);
   });
 });

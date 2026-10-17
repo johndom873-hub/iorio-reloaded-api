@@ -109,7 +109,7 @@ export const readTools: GenosukeTool[] = [
   },
   {
     name: "get_risk_limits_settings",
-    description: "The trading limits and targets (one set for every strategy): max position %, max concentration per ticker %, min cash reserve %, the delta band, the Recovery Path DTE window, min annualized yield % and the commission warning %.",
+    description: "The trading limits and targets (one set for every strategy): max order size %, max concentration per ticker %, min cash reserve %, the delta band, the Recovery Path DTE window, min annualized yield % and the commission warning %.",
     tier: "read",
     parameters: { type: "object", properties: {} },
     execute: (_input, api) => api.get("/risk-limits/settings"),

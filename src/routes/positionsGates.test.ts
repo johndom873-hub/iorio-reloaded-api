@@ -1,4 +1,20 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin unless a test runs them asTrader: requireAuth reads the user's access level
+// through sessionUser.
+const sessionAccess = vi.hoisted(() => ({ level: "admin" as "admin" | "trader" }));
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: sessionAccess.level, disabledAt: null }),
+}));
+
+async function asTrader<T>(body: () => Promise<T>): Promise<T> {
+  sessionAccess.level = "trader";
+  try {
+    return await body();
+  } finally {
+    sessionAccess.level = "admin";
+  }
+}
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
@@ -510,12 +526,12 @@ describe("POST /positions/orders/:id/confirm", () => {
     const ticker = await createTicker();
     const orderId = await insertOrder(ticker.symbol);
     fetchTradingBlockedReasonMock.mockResolvedValue("Trading is blocked: worker offline.");
-    evaluateOrderLimitsMock.mockResolvedValue({ blocked: true, reasons: ["This order is 12.0% of portfolio value, above the 10% max position size.", "AAA would be 25.0% of portfolio value, above the 20% max concentration per ticker."] });
+    evaluateOrderLimitsMock.mockResolvedValue({ blocked: true, reasons: ["This order is 12.0% of portfolio value, above the 10% max order size.", "AAA would be 25.0% of portfolio value, above the 20% max concentration per ticker."] });
     evaluateDeltaBandMock.mockResolvedValue({ compliant: false, reason: "Delta has drifted to 0.50, above the 0.2–0.3 delta band." });
     const response = await call("POST", `/positions/orders/${orderId}/confirm`, {});
     expect(response.status).toBe(409);
     expect(response.json.error).toBe(
-      "Trading is blocked: worker offline. This order is 12.0% of portfolio value, above the 10% max position size. AAA would be 25.0% of portfolio value, above the 20% max concentration per ticker. Delta has drifted to 0.50, above the 0.2–0.3 delta band.",
+      "Trading is blocked: worker offline. This order is 12.0% of portfolio value, above the 10% max order size. AAA would be 25.0% of portfolio value, above the 20% max concentration per ticker. Delta has drifted to 0.50, above the 0.2–0.3 delta band.",
     );
     const row = await orderRow(orderId);
     expect(row.status).toBe("pending_confirmation");
@@ -843,5 +859,64 @@ describe("POST /positions/:id/roll quantity", () => {
       expect(response.status, String(quantity)).toBe(400);
       expect(response.json.error).toContain("positive whole-number quantity");
     }
+  });
+});
+
+describe("access levels: a trader's orders", () => {
+  const optionBody = { quantity: 2, limitPrice: 1.5, strikePrice: 90, expiryDate: "20261120" };
+
+  async function withPlutoTicker<T>(body: (ticker: { id: string; symbol: string }, plutoActionId: string) => Promise<T>): Promise<T> {
+    const ticker = await createTicker();
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates-access" }), model_called: false }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
+    try {
+      return await body(ticker, action.id);
+    } finally {
+      await testDb("order_requests").where({ pluto_action_id: action.id }).del();
+      await testDb("pluto_actions").where({ id: action.id }).del();
+      await testDb("pluto_passes").where({ id: pass.id }).del();
+      await testDb("shortlist_entries").where({ id: entry.id }).del();
+    }
+  }
+
+  it("judges a trader's confirm with the traders' capital cap, an admin's without, and records who confirmed", async () => {
+    const ticker = await createTicker();
+    const traderOrder = await insertOrder(ticker.symbol);
+    expect((await asTrader(() => call("POST", `/positions/orders/${traderOrder}/confirm`, {}))).status).toBe(200);
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0].loadTraderCapital).toEqual(expect.any(Function));
+    expect(await orderRow(traderOrder)).toMatchObject({ status: "confirmed", confirmed_by_user_id: userId });
+
+    evaluateOrderLimitsMock.mockClear();
+    const adminOrder = await insertOrder(ticker.symbol);
+    expect((await call("POST", `/positions/orders/${adminOrder}/confirm`, {})).status).toBe(200);
+    expect(evaluateOrderLimitsMock.mock.calls[0]![0].loadTraderCapital).toBeUndefined();
+    expect((await call("GET", `/positions/orders/${adminOrder}`)).json).toMatchObject({ confirmedByUserId: userId, confirmedByDisplayName: expect.any(String) });
+  });
+
+  it("refuses a trader's confirm of a Pluto order and of a person's open on a ticker Pluto trades, leaving both pending", async () => {
+    await withPlutoTicker(async (ticker, plutoActionId) => {
+      const plutoOrder = await insertOrder(ticker.symbol, { pluto_action_id: plutoActionId });
+      expect(await asTrader(() => call("POST", `/positions/orders/${plutoOrder}/confirm`, {}))).toMatchObject({ status: 403, json: { error: "Only Pluto confirms Pluto's orders." } });
+      const personOrder = await insertOrder(ticker.symbol);
+      expect(await asTrader(() => call("POST", `/positions/orders/${personOrder}/confirm`, {}))).toMatchObject({ status: 403, json: { error: `Pluto trades ${ticker.symbol}, so only an admin can open or roll on it.` } });
+      expect((await orderRow(plutoOrder)).status).toBe("pending_confirmation");
+      expect((await orderRow(personOrder)).status).toBe("pending_confirmation");
+      expect(evaluateOrderLimitsMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("refuses at build a trader's open on a ticker Pluto trades, a typed share count and a plutoActionId", async () => {
+    await withPlutoTicker(async (plutoTicker, plutoActionId) => {
+      expect(await asTrader(() => call("POST", "/positions/orders", { symbol: plutoTicker.symbol, strategyKey: "cash_secured_put", option: optionBody }))).toMatchObject({ status: 403, json: { error: `Pluto trades ${plutoTicker.symbol}, so only an admin can open or roll on it.` } });
+      const ticker = await createTicker();
+      const typedShares = await asTrader(() => call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "covered_call", option: { ...optionBody, strikePrice: 110 }, stock: { quantity: 200, limitPrice: 100 } }));
+      expect(typedShares).toMatchObject({ status: 403, json: { error: "Only an admin can set the share count: leave it out and the stock leg is filled automatically." } });
+      const tagged = await asTrader(() => call("POST", "/positions/orders", { symbol: ticker.symbol, strategyKey: "cash_secured_put", option: optionBody, plutoActionId }));
+      expect(tagged).toMatchObject({ status: 400, json: { error: "Only Pluto's own orders carry a plutoActionId." } });
+      expect(await testDb("order_requests").where({ requested_by_user_id: userId })).toEqual([]);
+      // The same orders are an admin's to build.
+      expect((await call("POST", "/positions/orders", { symbol: plutoTicker.symbol, strategyKey: "cash_secured_put", option: optionBody })).status).toBe(201);
+    });
   });
 });

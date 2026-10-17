@@ -93,7 +93,7 @@ describe.each(infraCases)("$tool through chatOnce", ({ tool, input, card, servic
     expect(confirmation).toMatchObject({ chatId: "chat-1", toolName: tool, input, description: card });
     expect(service()).not.toHaveBeenCalled();
 
-    await TOOLS_BY_NAME.get(confirmation.toolName)!.execute(confirmation.input, api, confirmation.prepared);
+    await TOOLS_BY_NAME.get(confirmation.toolName)!.execute(confirmation.input, api);
     expect(service()).toHaveBeenCalledTimes(1);
     expect(service().mock.calls[0]).toEqual(expectedArguments);
   });
@@ -134,8 +134,13 @@ describe("the registry", () => {
   });
 
   it("gives every confirmation-tier tool a way to build its card", () => {
-    for (const tool of ALL_TOOLS.filter((candidate) => candidate.tier === "financial-write" || candidate.tier === "infra-write")) {
-      expect(tool.prepareConfirmation !== undefined || tool.describeForConfirmation !== undefined, `${tool.name} has no card builder`).toBe(true);
+    for (const tool of ALL_TOOLS.filter((candidate) => candidate.tier === "infra-write")) {
+      expect(tool.describeForConfirmation !== undefined, `${tool.name} has no card builder`).toBe(true);
     }
+  });
+
+  it("offers no tool that trades, changes the trading limits or the halt switch, or removes a shortlist ticker", () => {
+    for (const name of ["create_position", "close_position", "update_risk_limits", "set_trading_halt", "remove_shortlist_ticker"]) expect(TOOLS_BY_NAME.has(name), name).toBe(false);
+    expect(new Set(ALL_TOOLS.map((tool) => tool.tier))).toEqual(new Set(["read", "low-stakes-write", "infra-write"]));
   });
 });

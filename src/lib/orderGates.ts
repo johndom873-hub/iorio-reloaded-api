@@ -6,17 +6,19 @@ import { evaluateDeltaBandForOrderRequest } from "./deltaBandGate.js";
 import { evaluateLadderDeltaForOrderRequest, type LadderOrderGateContext } from "./ladderOrderGates.js";
 import { evaluateLimitPriceCheckForOrderRequest } from "./limitPriceCheckGate.js";
 import type { PriceCheckResult } from "./limitPriceCheck.js";
+import { loadTraderCapitalFigures } from "./capitalOutsidePluto.js";
 import { evaluateOrderLimits, type OrderLimitsResult, type OrderLimitsStrategyKey } from "./orderLimits.js";
 import { fetchTradingBlockedReason } from "./tradingGate.js";
 
 // THE gate every order passes before it is transmitted, whatever its origin (Signals, the position form, the
-// chain, Genosuke): one evaluation, used by the confirm step (hard blocks), by the order preview that Genosuke
-// shows on its card, and (piecewise) by the Order Review panel's live stream. Approved 2026-10-05: the same gates
+// chain, Pluto): one evaluation, used by the confirm step (hard blocks), by GET /positions/orders/:id/gates, and
+// (piecewise) by the Order Review panel's live stream. Approved 2026-10-05: the same gates
 // for every order. A block refuses the order; a warning is shown but never refuses.
 //
 // What runs, by order type:
 //   every order        trading gate (worker bound to this environment's account)
-//   open_* and roll    the three limits (max position, per-ticker concentration, min cash reserve), counting orders still working
+//   open_* and roll    the three limits (max order size, per-ticker concentration, min cash reserve), counting orders still working,
+//                      and for a trader's order the traders' capital cap (capitalOutsidePluto.ts)
 //   open_* only        the delta band, from a live delta (fails closed when no live delta can be read)
 //   close_position     the close gate (session open, live two-sided quotes on every leg, consistent wheel cycle)
 //   every order        the limit-price check: each leg's limit against its own live mid (limitPriceCheck.ts)
@@ -61,17 +63,24 @@ export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGa
   return { strategyKey: strategyKey as OrderLimitsStrategyKey, symbol: payload.symbol, quantity: optionLeg.quantity, strike: optionLeg.strike, premium: optionLeg.unitPrice, rollFromStrike: closeLeg?.strike, rollFromPremium: closeLeg?.unitPrice, excludeOrderRequestId: orderRequest.id, ...(ladder ? { ladder: { potFraction: ladder.potFraction, stockSharesBought } } : {}) };
 }
 
+/** Who the order is judged for: a trader's order also gets the traders' capital cap. */
+export interface OrderGateOptions {
+  forTrader?: boolean;
+}
+
 /** Null when the order is not limit-checked; otherwise the shared limits verdict. A ticker unknown to the platform fails closed. */
 export async function evaluateOrderLimitsForOrderRequest(
   orderRequest: Pick<OrderRequestForGates, "id" | "request_type" | "payload">,
   live: { spotPrice?: number } = {},
   ladder: LadderOrderGateContext | null = null,
+  options: OrderGateOptions = {},
 ): Promise<OrderLimitsResult | null> {
   const input = limitsInputFromOrderRequest(orderRequest, ladder);
   if (!input) return null;
   const ticker = await db("tickers").where({ symbol: input.symbol.trim().toUpperCase() }).first("id", "symbol");
   if (!ticker) return { blocked: true, reasons: [`Could not verify position limits: ${input.symbol} is not a known ticker.`] };
-  return evaluateOrderLimits({ ...input, symbol: ticker.symbol, tickerId: ticker.id, spotPrice: live.spotPrice });
+  const loadTraderCapital = options.forTrader ? () => loadTraderCapitalFigures(orderRequest.id) : undefined;
+  return evaluateOrderLimits({ ...input, symbol: ticker.symbol, tickerId: ticker.id, spotPrice: live.spotPrice, loadTraderCapital });
 }
 
 /** Pure: the calendar warnings stored on the order, as the Order Review panel words them. */
@@ -103,11 +112,11 @@ export function combineOrderGateVerdicts(parts: {
 }
 
 /** `ladder`: the CC + Put Ladder's context for an order its Pluto action took under the ladder (null for every other order). */
-export async function evaluateOrderGates(orderRequest: OrderRequestForGates, ladder: LadderOrderGateContext | null = null): Promise<OrderGateResult> {
+export async function evaluateOrderGates(orderRequest: OrderRequestForGates, ladder: LadderOrderGateContext | null = null, options: OrderGateOptions = {}): Promise<OrderGateResult> {
   const closeGateWanted = orderRequest.request_type === "close_position" && Boolean(orderRequest.related_position_id);
   const [tradingBlockedReason, limits, deltaBand, closeGate, priceCheck] = await Promise.all([
     fetchTradingBlockedReason(),
-    evaluateOrderLimitsForOrderRequest(orderRequest, {}, ladder),
+    evaluateOrderLimitsForOrderRequest(orderRequest, {}, ladder, options),
     ladder ? evaluateLadderDeltaForOrderRequest(orderRequest, ladder) : evaluateDeltaBandForOrderRequest(orderRequest),
     closeGateWanted ? evaluateCloseGateForPosition(orderRequest.related_position_id!) : Promise.resolve(null),
     evaluateLimitPriceCheckForOrderRequest(orderRequest),

@@ -15,14 +15,11 @@ afterEach(() => {
 describe("createConfirmation", () => {
   it("stores everything the card needs and gives each confirmation a distinct id", () => {
     const input = { ip: "1.2.3.4" };
-    const prepared = { orderId: "order-1" };
-    const first = createConfirmation("chat-1", "unblock_ip", input, "Unblock IP 1.2.3.4", prepared);
+    const first = createConfirmation("chat-1", "unblock_ip", input, "Unblock IP 1.2.3.4");
     const second = createConfirmation("chat-1", "unblock_ip", input, "Unblock IP 1.2.3.4");
     expect(first.id).not.toBe(second.id);
     expect(first).toMatchObject({ chatId: "chat-1", toolName: "unblock_ip", description: "Unblock IP 1.2.3.4", createdAt: Date.now() });
     expect(first.input).toBe(input);
-    expect(first.prepared).toBe(prepared);
-    expect(second.prepared).toBeUndefined();
   });
 });
 

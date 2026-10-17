@@ -45,7 +45,7 @@ describe("the read tool set", () => {
   it("has no confirmation hooks, since nothing here may need a card", () => {
     for (const tool of readTools) {
       expect(tool.describeForConfirmation).toBeUndefined();
-      expect(tool.prepareConfirmation).toBeUndefined();
+      expect(tool.validateBeforeConfirmation).toBeUndefined();
     }
   });
 

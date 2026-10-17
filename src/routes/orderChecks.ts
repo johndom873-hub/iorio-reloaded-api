@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { isAdminRequest } from "../lib/sessionUser.js";
+import { loadTraderCapitalFigures } from "../lib/capitalOutsidePluto.js";
 import { evaluateOrderLimits } from "../lib/orderLimits.js";
 import { loadTickerBySymbol } from "../lib/signalsChainStore.js";
 import { OrderAction } from "@stoqey/ib";
@@ -14,8 +16,8 @@ import { loadTradingSettings } from "../lib/tradingSettingsStore.js";
 export const orderChecksRouter = Router();
 orderChecksRouter.use(requireAuth);
 
-// Single shared evaluation of the three blocking limits (max position %,
-// max concentration per ticker %, min cash reserve %) -- called by the
+// Single shared evaluation of the three blocking limits (max order size %,
+// max concentration per ticker %, min cash reserve %, plus the traders' capital cap for a trader) -- called by the
 // Order Setup card as the user edits contract quantity (debounced), and
 // reused as-is by the confirm-step hard gate and the order's live quote-
 // stream compliance check (positions.ts). Approved 2026-09-24.
@@ -84,6 +86,7 @@ orderChecksRouter.get("/limits", async (request, response) => {
     spotPrice: parsedSpotPrice,
     rollFromStrike: parsedRollFromStrike,
     rollFromPremium: parsedRollFromPremium,
+    loadTraderCapital: isAdminRequest(request) ? undefined : () => loadTraderCapitalFigures(),
   });
   response.json(result);
 });

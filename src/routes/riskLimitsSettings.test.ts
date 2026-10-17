@@ -1,4 +1,20 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin unless a test runs them asTrader: requireAuth reads the user's access level
+// through sessionUser.
+const sessionAccess = vi.hoisted(() => ({ level: "admin" as "admin" | "trader" }));
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: sessionAccess.level, disabledAt: null }),
+}));
+
+async function asTrader<T>(body: () => Promise<T>): Promise<T> {
+  sessionAccess.level = "trader";
+  try {
+    return await body();
+  } finally {
+    sessionAccess.level = "admin";
+  }
+}
 import express from "express";
 import { existsSync, readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -15,9 +31,14 @@ vi.mock("../db/connection.js", async () => {
 });
 vi.mock("../ibkr/fetchAccountSummary.js", () => ({ fetchAccountSummary: vi.fn() }));
 vi.mock("../lib/positionExposure.js", () => ({ computeCashLockedInCsps: vi.fn(), computePositionExposures: vi.fn(), streamPositionExposures: vi.fn() }));
+vi.mock("../pluto/book.js", () => ({ loadPlutoBook: vi.fn() }));
+vi.mock("../lib/capitalOutsidePluto.js", () => ({ loadTraderCapitalFigures: vi.fn() }));
 
 const { db } = await import("../db/connection.js");
 const { riskLimitsRouter } = await import("./riskLimits.js");
+const { fetchAccountSummary } = await import("../ibkr/fetchAccountSummary.js");
+const { loadPlutoBook } = await import("../pluto/book.js");
+const { loadTraderCapitalFigures } = await import("../lib/capitalOutsidePluto.js");
 
 const testDb: Knex = db;
 
@@ -89,6 +110,7 @@ beforeEach(async () => {
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await testDb("trading_settings").update(originalRow);
+  await testDb("risk_limits_audit").where({ user_id: userId }).del();
   await testDb("users").where({ id: userId }).del();
   await testDb.destroy();
 });
@@ -355,5 +377,51 @@ describe("the old settings routes are gone", () => {
     for (const removed of ["../routes/signalSettings.ts", "../lib/signalSettingsStore.ts", "../lib/strategySettings.ts", "../lib/signalOrderLimits.ts"]) {
       expect(existsSync(new URL(removed, import.meta.url)), removed).toBe(false);
     }
+  });
+});
+
+describe("access levels on /risk-limits/settings", () => {
+  it("refuses a trader's save with 403 and changes nothing, while a trader can still read the settings", async () => {
+    const before = await readRow();
+    const refused = await asTrader(() => call("PUT", "/risk-limits/settings", validPayload));
+    expect(refused).toEqual({ status: 403, json: { error: "Only an admin can do this." } });
+    expect(await readRow()).toEqual(before);
+    expect((await asTrader(() => call("GET", "/risk-limits/settings"))).status).toBe(200);
+  });
+
+  it("records an admin's save in the change history, which GET /risk-limits/audit returns newest first", async () => {
+    await testDb("risk_limits_audit").where({ user_id: userId }).del();
+    expect((await call("PUT", "/risk-limits/settings", { ...validPayloadFromRow(knownRow), minCashReservePct: 1 })).status).toBe(200);
+    const history = await call("GET", "/risk-limits/audit?limit=500");
+    expect(history.status).toBe(200);
+    const mine = (history.json as { field: string; oldValue: string; newValue: string; userDisplayName: string }[]).filter((row) => row.userDisplayName === "Risk Settings Tester");
+    expect(mine.map((row) => [row.field, row.oldValue, row.newValue])).toEqual([["minCashReservePct", "5", "1"]]);
+  });
+});
+
+describe("GET /risk-limits/capital-split", () => {
+  it("splits the account into Pluto's budget with what its book uses, and the rest with what people use, for anyone signed in", async () => {
+    vi.mocked(fetchAccountSummary).mockResolvedValue({ netLiquidationValue: 200_000 } as Awaited<ReturnType<typeof fetchAccountSummary>>);
+    vi.mocked(loadPlutoBook).mockResolvedValue({ committedDollars: 30_000, openPositions: [{}, {}] } as unknown as Awaited<ReturnType<typeof loadPlutoBook>>);
+    vi.mocked(loadTraderCapitalFigures).mockResolvedValue({ capitalInUseOutsidePluto: 120_000, plutoCapitalBudgetPct: 40 });
+    const response = await asTrader(() => call("GET", "/risk-limits/capital-split"));
+    expect(response).toEqual({
+      status: 200,
+      json: { netLiquidationValue: 200_000, accountDataError: null, plutoCapitalBudgetPct: 40, pluto: { budgetDollars: 80_000, inUseDollars: 30_000, openPositionCount: 2 }, outsidePluto: { availableDollars: 120_000, inUseDollars: 120_000 } },
+    });
+  });
+
+  it("answers the figures it has, with nulls and the reason, when IBKR's account value cannot be read", async () => {
+    vi.mocked(fetchAccountSummary).mockRejectedValue(new Error("worker offline"));
+    vi.mocked(loadPlutoBook).mockResolvedValue({ committedDollars: 30_000, openPositions: [] } as unknown as Awaited<ReturnType<typeof loadPlutoBook>>);
+    vi.mocked(loadTraderCapitalFigures).mockResolvedValue({ capitalInUseOutsidePluto: 5_000, plutoCapitalBudgetPct: 50 });
+    const response = await call("GET", "/risk-limits/capital-split");
+    expect(response.json).toMatchObject({ netLiquidationValue: null, accountDataError: "worker offline", pluto: { budgetDollars: null, inUseDollars: 30_000 }, outsidePluto: { availableDollars: null, inUseDollars: 5_000 } });
+  });
+});
+
+describe("GET /risk-limits/audit", () => {
+  it("is an admin's: a trader is refused", async () => {
+    expect(await asTrader(() => call("GET", "/risk-limits/audit"))).toEqual({ status: 403, json: { error: "Only an admin can do this." } });
   });
 });

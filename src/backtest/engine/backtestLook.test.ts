@@ -150,7 +150,7 @@ describe("an open", () => {
     const look = await runBacktestLook(context);
     expect(look.actions).toHaveLength(1);
     expect(look.actions[0]).toMatchObject({ outcome: "blocked" });
-    expect(look.actions[0]!.blockReason).toMatch(/^order_limits: This order is .* above the 0\.1% max position size/);
+    expect(look.actions[0]!.blockReason).toMatch(/^order_limits: This order is .* above the 0\.1% max order size/);
     expect(look.actions[0]!.quantity).toBeGreaterThanOrEqual(1);
     expect(context.ledger.positions).toEqual([]);
   });

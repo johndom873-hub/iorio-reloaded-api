@@ -22,7 +22,6 @@ import { OpenRouterAdapter } from "./openRouterAdapter.js";
 import { chatOnce } from "./chat.js";
 import { loadRecentHistory, appendHistory } from "./chatHistoryStore.js";
 import { takeConfirmation } from "./confirmations.js";
-import { startOrderFollowUp } from "./orderFollowUp.js";
 import { TOOLS_BY_NAME } from "./tools/index.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 
@@ -102,7 +101,7 @@ export async function handleMessage(
   const fromIndex = messages.length;
   try {
     const { text } = await chatOnce({ messages, userMessage, chatId, adapter, api, telegram });
-    // A financial-write tool call sends its own Yes/Cancel confirmation
+    // An infra-write tool call sends its own Yes/Cancel confirmation
     // card directly (see chat.ts) and the model is told to reply with
     // nothing further — text can legitimately be empty here, and Telegram
     // rejects an empty sendMessage outright.
@@ -165,7 +164,6 @@ async function handleCallbackQuery(
   }
 
   if (action === "cancel") {
-    await TOOLS_BY_NAME.get(confirmation.toolName)?.discardPrepared?.(confirmation.prepared, api).catch(() => {});
     await telegram.answerCallbackQuery(callbackQuery.id, "Cancelled.");
     await replyAndRecord(telegram, chatId, "Cancelled — no action taken.");
     return;
@@ -179,14 +177,11 @@ async function handleCallbackQuery(
   }
 
   try {
-    const result = await tool.execute(confirmation.input, api, confirmation.prepared);
-    const description = confirmation.description;
-    if (tool.tracksOrderStatus && typeof (result as { id?: unknown })?.id === "string") {
-      await replyAndRecord(telegram, chatId, `Sent to IBKR:\n${description}\nI'll tell you when it is placed, and again when it fills or ends.`);
-    } else if (tool.describeResult) {
+    const result = await tool.execute(confirmation.input, api);
+    if (tool.describeResult) {
       await replyAndRecord(telegram, chatId, tool.describeResult(result));
     } else {
-      await replyAndRecord(telegram, chatId, `Done:\n${description}`);
+      await replyAndRecord(telegram, chatId, `Done:\n${confirmation.description}`);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -219,7 +214,6 @@ export function startGenosuke(): void {
 
       await telegram.setWebhook(config.webhookUrl, config.webhookSecret);
       console.info(`Genosuke: webhook registered at ${config.webhookUrl}`);
-      startOrderFollowUp(telegram, config.telegramChatId, config.serviceUsername);
     } catch (error) {
       console.error("Genosuke: failed to start", error instanceof Error ? error.message : error);
     }

@@ -1,4 +1,4 @@
-// In-memory pending-confirmation store for financial-write tool calls.
+// In-memory pending-confirmation store for infra-write tool calls.
 // Deliberately not persisted — unlike chat history (see chatHistoryStore.ts,
 // DB-backed as of 2026-08-27), a confirmation that's still unanswered across
 // a dyno restart should just expire, not silently execute later against
@@ -12,8 +12,6 @@ export interface PendingConfirmation {
   input: Record<string, unknown>;
   /** The card text the human approved — reused in the follow-up so it always matches what they saw. */
   description: string;
-  /** What the tool's prepareConfirmation set up (e.g. the already-built order), handed back to execute() on Yes and to discardPrepared() on Cancel. */
-  prepared?: unknown;
   createdAt: number;
 }
 
@@ -27,9 +25,9 @@ function sweepExpired(): void {
   }
 }
 
-export function createConfirmation(chatId: string, toolName: string, input: Record<string, unknown>, description: string, prepared?: unknown): PendingConfirmation {
+export function createConfirmation(chatId: string, toolName: string, input: Record<string, unknown>, description: string): PendingConfirmation {
   sweepExpired();
-  const confirmation: PendingConfirmation = { id: randomUUID(), chatId, toolName, input, description, prepared, createdAt: Date.now() };
+  const confirmation: PendingConfirmation = { id: randomUUID(), chatId, toolName, input, description, createdAt: Date.now() };
   pending.set(confirmation.id, confirmation);
   return confirmation;
 }

@@ -4,22 +4,31 @@
 // created and how a forgotten password gets changed.
 //
 // Usage:
-//   npm run manage-user -- create <username> <displayName> <password>
+//   npm run manage-user -- create <username> <displayName> <password> <admin|trader>
 //   npm run manage-user -- set-password <username> <newPassword>
 //   npm run manage-user -- list
 //   npm run manage-user -- reset-passkeys <username>   (deletes their passkeys; their password then lets them enrol a new one)
 //   npm run manage-user -- set-service-account <username> <true|false>   (Genosuke: password sign-in from inside the dyno; Pluto: also through the router with SERVICE_LOGIN_SECRET)
+//   npm run manage-user -- set-access-level <username> <admin|trader>   (a trader cannot change risk limits or Pluto and trades only the capital outside Pluto's budget; applies on their next request)
+//   npm run manage-user -- disable <username>   (refuses sign-in and ends their sessions; enable undoes it)
+//   npm run manage-user -- enable <username>
 
 import { db } from "../src/db/connection.js";
 import { hashPassword } from "../src/lib/auth.js";
 import { deleteAllPasskeysForUser } from "../src/lib/passkeys.js";
+import { accessLevels, type AccessLevel } from "../src/lib/sessionUser.js";
 
-async function createUser(username: string, displayName: string, password: string): Promise<void> {
+function parseAccessLevel(value: string | undefined): AccessLevel {
+  if (!accessLevels.includes(value as AccessLevel)) throw new Error(`The access level must be one of: ${accessLevels.join(", ")}.`);
+  return value as AccessLevel;
+}
+
+async function createUser(username: string, displayName: string, password: string, accessLevel: AccessLevel): Promise<void> {
   const passwordHash = await hashPassword(password);
   const [user] = await db("users")
-    .insert({ username, display_name: displayName, password_hash: passwordHash })
-    .returning(["id", "username", "display_name"]);
-  console.log(`Created user ${user.username} (${user.id})`);
+    .insert({ username, display_name: displayName, password_hash: passwordHash, access_level: accessLevel })
+    .returning(["id", "username", "display_name", "access_level"]);
+  console.log(`Created user ${user.username} (${user.id}), ${user.access_level}`);
 }
 
 async function setPassword(username: string, newPassword: string): Promise<void> {
@@ -39,7 +48,7 @@ async function listUsers(): Promise<void> {
   const users = await db("users")
     .leftJoin("user_passkeys", "user_passkeys.user_id", "users.id")
     .groupBy("users.id")
-    .select("users.id", "users.username", "users.display_name", "users.is_service_account", "users.created_at")
+    .select("users.id", "users.username", "users.display_name", "users.access_level", "users.disabled_at", "users.is_service_account", "users.created_at")
     .count({ passkeys: "user_passkeys.id" })
     .orderBy("users.created_at");
   console.table(users);
@@ -70,16 +79,36 @@ async function setServiceAccount(username: string, flag: string): Promise<void> 
   console.log(`${user.username}: is_service_account = ${flag}`);
 }
 
+async function setAccessLevel(username: string, accessLevel: AccessLevel): Promise<void> {
+  const user = await findUserOrReport(username);
+  if (!user) return;
+  await db("users").where({ id: user.id }).update({ access_level: accessLevel });
+  console.log(`${user.username}: access level = ${accessLevel}`);
+}
+
+/** Disabling also deletes the user's stored sessions, so a signed-in browser is out at once rather than on its next request. */
+async function setDisabled(username: string, disabled: boolean): Promise<void> {
+  const user = await findUserOrReport(username);
+  if (!user) return;
+  await db("users").where({ id: user.id }).update({ disabled_at: disabled ? db.fn.now() : null });
+  if (!disabled) {
+    console.log(`${user.username}: enabled`);
+    return;
+  }
+  const deletedSessionCount = await db("session").whereRaw("sess->>'userId' = ?", [user.id]).del();
+  console.log(`${user.username}: disabled, ${deletedSessionCount} session(s) ended`);
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
 
   switch (command) {
     case "create": {
-      const [username, displayName, password] = args;
-      if (!username || !displayName || !password) {
-        throw new Error("Usage: manage-user create <username> <displayName> <password>");
+      const [username, displayName, password, accessLevel] = args;
+      if (!username || !displayName || !password || !accessLevel) {
+        throw new Error("Usage: manage-user create <username> <displayName> <password> <admin|trader>");
       }
-      await createUser(username, displayName, password);
+      await createUser(username, displayName, password, parseAccessLevel(accessLevel));
       break;
     }
     case "set-password": {
@@ -105,8 +134,21 @@ async function main(): Promise<void> {
       await setServiceAccount(username, flag);
       break;
     }
+    case "set-access-level": {
+      const [username, accessLevel] = args;
+      if (!username || !accessLevel) throw new Error("Usage: manage-user set-access-level <username> <admin|trader>");
+      await setAccessLevel(username, parseAccessLevel(accessLevel));
+      break;
+    }
+    case "disable":
+    case "enable": {
+      const [username] = args;
+      if (!username) throw new Error(`Usage: manage-user ${command} <username>`);
+      await setDisabled(username, command === "disable");
+      break;
+    }
     default:
-      throw new Error("Usage: manage-user <create|set-password|list|reset-passkeys|set-service-account> ...");
+      throw new Error("Usage: manage-user <create|set-password|list|reset-passkeys|set-service-account|set-access-level|disable|enable> ...");
   }
 }
 

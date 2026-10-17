@@ -14,6 +14,7 @@ import { readAppEnvironment } from "../lib/appEnvironment.js";
 import { clearLoginFailures, clientAddress, describeClientAddress, isLoginThrottled, recordLoginFailure } from "../lib/loginFailureThrottle.js";
 import { findPasskeyByCredentialId, recordPasskeyUse, storeNewPasskey } from "../lib/passkeys.js";
 import { regenerateSession } from "../lib/sessionAuthentication.js";
+import { authenticatedUserResponse, disabledAccountRefusal } from "../lib/sessionUser.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
 
 // The password step (POST /auth/login) opens a short enrolment window; registering a passkey is the only thing it
@@ -68,6 +69,10 @@ passkeyAuthRouter.post("/register/options", async (request, response) => {
     response.status(401).json({ error: "Enter your username and password first." });
     return;
   }
+  if (user.disabled_at) {
+    response.status(401).json({ error: disabledAccountRefusal });
+    return;
+  }
 
   const options = await generateRegistrationOptions({
     rpName: relyingPartyName,
@@ -94,6 +99,10 @@ passkeyAuthRouter.post("/register/verify", async (request, response) => {
   const user = await db("users").where({ id: userId }).first();
   if (!user) {
     response.status(401).json({ error: "Enter your username and password first." });
+    return;
+  }
+  if (user.disabled_at) {
+    response.status(401).json({ error: disabledAccountRefusal });
     return;
   }
 
@@ -199,11 +208,15 @@ passkeyAuthRouter.post("/login/verify", async (request, response) => {
     await refuseSignIn(request, response, "The passkey could not be verified.");
     return;
   }
+  if (user.disabled_at) {
+    response.status(401).json({ error: disabledAccountRefusal });
+    return;
+  }
   await recordPasskeyUse(passkey.credentialId, verification.authenticationInfo.newCounter);
   clearLoginFailures(address);
 
   await regenerateSession(request);
   request.session.userId = user.id;
   request.session.authMethod = "passkey";
-  response.json({ id: user.id, username: user.username, displayName: user.display_name });
+  response.json(authenticatedUserResponse(user));
 });

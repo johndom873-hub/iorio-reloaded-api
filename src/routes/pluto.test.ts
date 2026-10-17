@@ -1,4 +1,20 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin unless a test runs them asTrader: requireAuth reads the user's access level
+// through sessionUser.
+const sessionAccess = vi.hoisted(() => ({ level: "admin" as "admin" | "trader" }));
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: sessionAccess.level, disabledAt: null }),
+}));
+
+async function asTrader<T>(body: () => Promise<T>): Promise<T> {
+  sessionAccess.level = "trader";
+  try {
+    return await body();
+  } finally {
+    sessionAccess.level = "admin";
+  }
+}
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
@@ -341,5 +357,26 @@ describe("GET /pluto/tickers", () => {
       await testDb("shortlist_entries").whereIn("ticker_id", tickers.map((ticker) => ticker.id)).del();
       await testDb("tickers").whereIn("id", tickers.map((ticker) => ticker.id)).del();
     }
+  });
+});
+
+describe("access levels: a trader can only stop Pluto", () => {
+  // Only refusals are exercised: they answer before touching Pluto's shared state or sending a Telegram line.
+  it("refuses a trader switching Pluto on, resuming it, resetting a breaker and allowing opens under stress", async () => {
+    expect(await asTrader(() => put("/mode", { mode: "on" }))).toEqual({ status: 403, json: { error: "Only an admin can switch Pluto on." } });
+    expect(await asTrader(() => post("/resume", {}))).toEqual({ status: 403, json: { error: "Only an admin can do this." } });
+    expect(await asTrader(() => post("/breakers/daily_loss/reset", {}))).toEqual({ status: 403, json: { error: "Only an admin can do this." } });
+    expect(await asTrader(() => put("/stress-override", { enabled: true }))).toEqual({ status: 403, json: { error: "Only an admin can allow opens under stress." } });
+  });
+
+  it("refuses a trader's settings and ticker-settings saves, and changes nothing", async () => {
+    const before = (await get("/settings")).json;
+    expect(await asTrader(() => put("/settings", { maxEdgeMarginDriftPts: before.maxEdgeMarginDriftPts }))).toEqual({ status: 403, json: { error: "Only an admin can do this." } });
+    expect((await asTrader(() => put("/ticker-settings/ZZTA", { allocationWeight: 1 }))).status).toBe(403);
+    expect((await get("/settings")).json).toEqual(before);
+  });
+
+  it("checks the request before the mode, so a trader's malformed mode is still a 400", async () => {
+    expect((await asTrader(() => put("/mode", { mode: "sideways" }))).status).toBe(400);
   });
 });

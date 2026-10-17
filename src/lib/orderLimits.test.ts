@@ -77,3 +77,41 @@ describe("evaluateOrderLimitFigures for a CC + Put Ladder order", () => {
     expect(evaluateOrderLimitFigures({ ...figures, existingTickerExposure: 0, orderNotional: 52_000, ladderPotFraction: 0.3 }).reasons).toEqual([expect.stringMatching(/4.0% of portfolio value as cash, below the 5% min cash reserve/)]);
   });
 });
+
+describe("evaluateOrderLimitFigures: the traders' capital cap", () => {
+  // A $200,000 account with plenty of cash and loose platform limits, so only the cap can refuse. Pluto's budget is 50%: traders
+  // may use $100,000 outside Pluto.
+  const figures = { symbol: "TRDR", totalPortfolioValue: 200_000, totalCashValue: 200_000, cashLockedInCsps: 0, existingTickerExposure: 0, inFlight: { totalNotional: 0, tickerNotional: 0 }, settings: { maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 } };
+
+  it("does not apply to an order that is not a trader's", () => {
+    const result = evaluateOrderLimitFigures({ ...figures, orderNotional: 150_000 });
+    expect(result.blocked).toBe(false);
+    expect(result.details).not.toHaveProperty("traderCapital");
+  });
+
+  it("passes an order that takes the capital in use exactly to what traders may use", () => {
+    const result = evaluateOrderLimitFigures({ ...figures, orderNotional: 20_000, traderCapital: { capitalInUseOutsidePluto: 80_000, plutoCapitalBudgetPct: 50 } });
+    expect(result).toMatchObject({ blocked: false, reasons: [], details: { traderCapital: { availableDollars: 100_000, inUseDollars: 80_000, plutoCapitalBudgetPct: 50 } } });
+  });
+
+  it("refuses an order that takes it a dollar past, saying how much is available, in use and after", () => {
+    const result = evaluateOrderLimitFigures({ ...figures, orderNotional: 20_001, traderCapital: { capitalInUseOutsidePluto: 80_000, plutoCapitalBudgetPct: 50 } });
+    expect(result.blocked).toBe(true);
+    expect(result.reasons).toEqual(["Traders may use $100,000 outside Pluto (portfolio value less Pluto's 50% capital budget). $80,000 is already in use, so this order's $20,001 would take it to $100,001."]);
+  });
+
+  it("lets through an order that adds nothing even when the cap is already exceeded (a covered call on shares held, a call roll)", () => {
+    expect(evaluateOrderLimitFigures({ ...figures, orderNotional: 0, traderCapital: { capitalInUseOutsidePluto: 150_000, plutoCapitalBudgetPct: 50 } }).blocked).toBe(false);
+    expect(evaluateOrderLimitFigures({ ...figures, orderNotional: 1, traderCapital: { capitalInUseOutsidePluto: 150_000, plutoCapitalBudgetPct: 50 } }).blocked).toBe(true);
+  });
+
+  it("reserves Pluto's whole budget: at 100% traders may open nothing, at 0% the whole account is theirs", () => {
+    expect(evaluateOrderLimitFigures({ ...figures, orderNotional: 1, traderCapital: { capitalInUseOutsidePluto: 0, plutoCapitalBudgetPct: 100 } }).blocked).toBe(true);
+    expect(evaluateOrderLimitFigures({ ...figures, orderNotional: 200_000, traderCapital: { capitalInUseOutsidePluto: 0, plutoCapitalBudgetPct: 0 } }).blocked).toBe(false);
+  });
+
+  it("adds its refusal to the platform's own limits rather than replacing them", () => {
+    const result = evaluateOrderLimitFigures({ ...figures, settings: { ...figures.settings, maxPositionPctOfPortfolio: 10 }, orderNotional: 30_000, traderCapital: { capitalInUseOutsidePluto: 90_000, plutoCapitalBudgetPct: 50 } });
+    expect(result.reasons).toEqual([expect.stringMatching(/above the 10% max order size/), expect.stringMatching(/^Traders may use \$100,000 outside Pluto/)]);
+  });
+});

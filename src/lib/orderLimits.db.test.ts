@@ -119,7 +119,7 @@ const cashSecuredPut = (symbol: string, strike: number, quantity: number, extra:
   ...extra,
 });
 
-describe("max position size: exactly at the boundary", () => {
+describe("max order size: exactly at the boundary", () => {
   it("a cash-secured put at exactly the limit passes, one cent of strike over blocks, one cent under passes", async () => {
     await setLimits({ maxPosition: 10 });
     const at = await evaluateOrderLimits(cashSecuredPut("AAA", 100, 10));
@@ -131,14 +131,14 @@ describe("max position size: exactly at the boundary", () => {
 
     const over = await evaluateOrderLimits(cashSecuredPut("AAA", 100.01, 10));
     expect(over.blocked).toBe(true);
-    expect(over.reasons).toEqual(["This order is 10.0% of portfolio value, above the 10% max position size."]);
+    expect(over.reasons).toEqual(["This order is 10.0% of portfolio value, above the 10% max order size."]);
     expect(over.details?.orderNotional).toBeCloseTo(100_010, 6);
   });
 
   it("the reason carries the configured limit value, not a default", async () => {
     await setLimits({ maxPosition: 7.5 });
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 100, 10));
-    expect(result.reasons).toEqual(["This order is 10.0% of portfolio value, above the 7.5% max position size."]);
+    expect(result.reasons).toEqual(["This order is 10.0% of portfolio value, above the 7.5% max order size."]);
   });
 
   it("a Covered Call entry is measured as the share shortfall times the spot price", async () => {
@@ -150,7 +150,7 @@ describe("max position size: exactly at the boundary", () => {
     expect(at.details?.orderNotional).toBe(100_000);
     const over = await evaluateOrderLimits(callOrder(100.01));
     expect(over.blocked).toBe(true);
-    expect(over.reasons).toEqual(["This order is 10.0% of portfolio value, above the 10% max position size."]);
+    expect(over.reasons).toEqual(["This order is 10.0% of portfolio value, above the 10% max order size."]);
     expect((await evaluateOrderLimits(callOrder(99.99))).blocked).toBe(false);
   });
 
@@ -189,7 +189,7 @@ describe("exactly at the limit with values where fraction x 100 is not exact", (
     fetchAccountSummaryMock.mockResolvedValue({ netLiquidationValue: 100_000, totalCashValue: 400_000, buyingPower: null, grossPositionValue: null, excessLiquidity: null });
   });
 
-  it("an order of exactly 7% of portfolio value passes a 7% max position size", async () => {
+  it("an order of exactly 7% of portfolio value passes a 7% max order size", async () => {
     await setLimits({ maxPosition: 7 });
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 70, 1)); // 7,000 of 100,000
     expect(result.reasons).toEqual([]);
@@ -242,7 +242,7 @@ describe("net of the premium (Marcelo 2026-10-12: the exposure Positions shows)"
   });
 });
 
-describe("max position size for rolls", () => {
+describe("max order size for rolls", () => {
   it("a cash-secured put rolled UP adds only the strike difference: at the boundary passes, one cent more blocks", async () => {
     await setLimits({ maxPosition: 0.5 });
     const at = await evaluateOrderLimits(cashSecuredPut("AAA", 105, 10, { rollFromStrike: 100 }));
@@ -250,7 +250,7 @@ describe("max position size for rolls", () => {
     expect(at.details?.orderNotional).toBe(5_000);
     const over = await evaluateOrderLimits(cashSecuredPut("AAA", 105.01, 10, { rollFromStrike: 100 }));
     expect(over.blocked).toBe(true);
-    expect(over.reasons).toEqual(["This order is 0.5% of portfolio value, above the 0.5% max position size."]);
+    expect(over.reasons).toEqual(["This order is 0.5% of portfolio value, above the 0.5% max order size."]);
   });
 
   it("a cash-secured put rolled DOWN, or to the same strike, adds nothing and passes a 0% limit", async () => {
@@ -346,7 +346,7 @@ describe("several limits breached at once", () => {
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 100, 10));
     expect(result.blocked).toBe(true);
     expect(result.reasons).toEqual([
-      "This order is 10.0% of portfolio value, above the 5% max position size.",
+      "This order is 10.0% of portfolio value, above the 5% max order size.",
       "AAA would be 10.0% of portfolio value, above the 6% max concentration per ticker.",
       "Placing this order would leave only 30.0% of portfolio value as cash, below the 90% min cash reserve.",
     ]);
@@ -481,7 +481,7 @@ describe("orders still in flight", () => {
     await setLimits({ maxPosition: 1 });
     await insertOrder("open_cash_secured_put", "confirmed", putOpenPayload("INF", 100, 5));
     const result = await evaluateOrderLimits(cashSecuredPut("AAA", 100, 10));
-    expect(result.reasons[0]).toBe("This order is 10.0% of portfolio value, above the 1% max position size.");
+    expect(result.reasons[0]).toBe("This order is 10.0% of portfolio value, above the 1% max order size.");
   });
 
   it("two orders confirmed back to back where only one fits: the second blocks once the first is in flight", async () => {

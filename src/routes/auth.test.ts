@@ -169,15 +169,52 @@ describe("POST /auth/login: validation", () => {
 });
 
 describe("POST /auth/login: credentials", () => {
-  it("signs the user in: answers with id, username and display name only, and the session then works", async () => {
+  it("signs the user in: answers with id, username, display name and access level only, and the session then works", async () => {
     const client = browser();
     const login = await client.post("/auth/login", { username: mixedCaseUsername, password });
 
     expect(login.status).toBe(200);
-    expect(login.body).toEqual({ id: userId, username: mixedCaseUsername, displayName: "Auth Route Tester" });
+    expect(login.body).toEqual({ id: userId, username: mixedCaseUsername, displayName: "Auth Route Tester", accessLevel: "trader" });
     expect(login.setCookie.some((header) => header.startsWith("connect.sid=") && header.includes("HttpOnly"))).toBe(true);
     expect((await client.get("/protected")).status).toBe(200);
-    expect((await client.get("/auth/session")).body).toEqual({ id: userId, username: mixedCaseUsername, displayName: "Auth Route Tester" });
+    expect((await client.get("/auth/session")).body).toEqual({ id: userId, username: mixedCaseUsername, displayName: "Auth Route Tester", accessLevel: "trader" });
+  });
+
+  it("refuses a disabled user's password even when it is right, and lets them in again once enabled", async () => {
+    await testDb("users").where({ id: userId }).update({ disabled_at: testDb.fn.now() });
+    try {
+      expect(await browser().post("/auth/login", { username: mixedCaseUsername, password })).toMatchObject({ status: 401, body: { error: "This account is disabled." } });
+    } finally {
+      await testDb("users").where({ id: userId }).update({ disabled_at: null });
+    }
+    expect((await browser().post("/auth/login", { username: mixedCaseUsername, password })).status).toBe(200);
+  });
+
+  it("ends a signed-in session on its next request once the user is disabled", async () => {
+    const client = browser();
+    await client.post("/auth/login", { username: mixedCaseUsername, password });
+    expect((await client.get("/protected")).status).toBe(200);
+    await testDb("users").where({ id: userId }).update({ disabled_at: testDb.fn.now() });
+    try {
+      expect(await client.get("/protected")).toMatchObject({ status: 401, body: { error: "This account is disabled." } });
+      expect((await client.get("/auth/session")).status).toBe(401);
+    } finally {
+      await testDb("users").where({ id: userId }).update({ disabled_at: null });
+    }
+    // The session was destroyed: enabling the user again does not bring it back.
+    expect((await client.get("/protected")).status).toBe(401);
+  });
+
+  it("reports an access level changed in the database on the next request, without signing in again", async () => {
+    const client = browser();
+    await client.post("/auth/login", { username: mixedCaseUsername, password });
+    await testDb("users").where({ id: userId }).update({ access_level: "admin" });
+    try {
+      expect((await client.get("/auth/session")).body).toMatchObject({ accessLevel: "admin" });
+    } finally {
+      await testDb("users").where({ id: userId }).update({ access_level: "trader" });
+    }
+    expect((await client.get("/auth/session")).body).toMatchObject({ accessLevel: "trader" });
   });
 
   it("stores the user id and the password authentication method in the session", async () => {
@@ -387,7 +424,7 @@ describe("GET /auth/session", () => {
     expect((await client.get("/auth/session")).status).toBe(401);
   });
 
-  it("for a user deleted after signing in is a 401, while requireAuth still lets the session through", async () => {
+  it("for a user deleted after signing in is a 401, on /auth/session and on every protected route", async () => {
     const passwordHash = await hashPassword(password);
     await testDb("users").insert({ username: deletedUsername, display_name: "Soon Deleted", password_hash: passwordHash });
     const client = browser();
@@ -397,7 +434,7 @@ describe("GET /auth/session", () => {
     await testDb("users").where({ username: deletedUsername }).del();
 
     expect(await client.get("/auth/session")).toMatchObject({ status: 401, body: { error: "Not logged in." } });
-    expect((await client.get("/protected")).status).toBe(200);
+    expect(await client.get("/protected")).toMatchObject({ status: 401, body: { error: "Not logged in." } });
   });
 
   it("reads the display name and username as they are now", async () => {
@@ -405,7 +442,7 @@ describe("GET /auth/session", () => {
     await client.post("/auth/login", { username: mixedCaseUsername, password });
     await testDb("users").where({ id: userId }).update({ display_name: "Renamed Tester" });
     try {
-      expect((await client.get("/auth/session")).body).toEqual({ id: userId, username: mixedCaseUsername, displayName: "Renamed Tester" });
+      expect((await client.get("/auth/session")).body).toEqual({ id: userId, username: mixedCaseUsername, displayName: "Renamed Tester", accessLevel: "trader" });
     } finally {
       await testDb("users").where({ id: userId }).update({ display_name: "Auth Route Tester" });
     }

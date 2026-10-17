@@ -1,4 +1,20 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin unless a test runs them asTrader: requireAuth reads the user's access level
+// through sessionUser.
+const sessionAccess = vi.hoisted(() => ({ level: "admin" as "admin" | "trader" }));
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: sessionAccess.level, disabledAt: null }),
+}));
+
+async function asTrader<T>(body: () => Promise<T>): Promise<T> {
+  sessionAccess.level = "trader";
+  try {
+    return await body();
+  } finally {
+    sessionAccess.level = "admin";
+  }
+}
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
@@ -1002,5 +1018,31 @@ describe("backfill progress routes", () => {
 
     const frames = parseEventFrames((await call("GET", `/${ticker.id}/backfill/stream`)).text);
     expect(frames.map((frame) => [frame.status, frame.progressPercent])).toEqual([["running", 50], ["complete", 100]]);
+  });
+});
+
+describe("access levels: a trader cannot change Pluto or remove tickers", () => {
+  it("refuses a trader turning Signals off on a ticker Pluto trades, and changes nothing", async () => {
+    const ticker = await insertTicker();
+    const entryId = await insertEntry(ticker.id, { signals_enabled: true, bot_enabled: true });
+    expect(await asTrader(() => call("PATCH", `/${entryId}/signals-enabled`, { enabled: false }))).toMatchObject({ status: 403, json: { error: `Pluto trades ${ticker.symbol}, and turning Signals off would switch Pluto off for it. Only an admin can do that.` } });
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ signals_enabled: true, bot_enabled: true });
+    expect(recordPlutoEventMock).not.toHaveBeenCalled();
+  });
+
+  it("lets a trader turn Signals off on a ticker Pluto does not trade", async () => {
+    const ticker = await insertTicker();
+    const entryId = await insertEntry(ticker.id, { signals_enabled: true });
+    expect(await asTrader(() => call("PATCH", `/${entryId}/signals-enabled`, { enabled: false }))).toMatchObject({ status: 200, json: { signalsEnabled: false } });
+  });
+
+  it("refuses a trader's Pluto switch either way, and a trader's removal, leaving the entry as it was", async () => {
+    const ticker = await insertTicker();
+    const entryId = await insertEntry(ticker.id, { signals_enabled: true });
+    expect(await asTrader(() => call("PATCH", `/${entryId}/bot-enabled`, { enabled: true }))).toMatchObject({ status: 403, json: { error: "Only an admin can do this." } });
+    await testDb("shortlist_entries").where({ id: entryId }).update({ bot_enabled: true });
+    expect((await asTrader(() => call("PATCH", `/${entryId}/bot-enabled`, { enabled: false }))).status).toBe(403);
+    expect((await asTrader(() => call("DELETE", `/${entryId}`))).status).toBe(403);
+    expect((await readEntries(ticker.id))[0]).toMatchObject({ bot_enabled: true, removed_at: null });
   });
 });

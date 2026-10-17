@@ -1,19 +1,23 @@
 import { Router, type Request, type Response } from "express";
 import { db } from "../db/connection.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
+import { isAdminRequest } from "../lib/sessionUser.js";
+import { loadTraderCapitalFigures } from "../lib/capitalOutsidePluto.js";
+import { loadPlutoBook } from "../pluto/book.js";
 import { fetchAccountSummary } from "../ibkr/fetchAccountSummary.js";
 import { computeCashLockedInCsps, computePositionExposures, streamPositionExposures, type PositionExposureRow } from "../lib/positionExposure.js";
 import { serializeAsyncCalls } from "../lib/serializeAsyncCalls.js";
 import { fetchTradingHalt, setTradingHalt, type TradingHalt } from "../lib/platformControls.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 import { notifyTelegram } from "../lib/notifyTelegram.js";
-import { loadTradingSettingsForEditing, saveTradingSettings, validateTradingSettingsInput, type TradingSettingsInput } from "../lib/tradingSettingsStore.js";
+import { loadRiskLimitsAudit, loadTradingSettingsForEditing, saveTradingSettings, validateTradingSettingsInput, type TradingSettingsInput } from "../lib/tradingSettingsStore.js";
 
 export const riskLimitsRouter = Router();
 riskLimitsRouter.use(requireAuth);
 
 // The trading halt (kill switch): one switch that stops every order origin at confirm and in the worker. Any signed-in user may
-// flip it -- the UI puts a confirm modal in front, the API only requires a reason when halting so the audit trail says why.
+// halt; only an admin may lift it (Marcelo 2026-10-17). The UI puts a confirm modal in front, the API only requires a reason
+// when halting so the audit trail says why.
 const tradingHaltReasonMaxLength = 300;
 
 function serializeTradingHalt(halt: TradingHalt) {
@@ -41,6 +45,10 @@ riskLimitsRouter.put("/trading-halt", async (request: Request, response: Respons
     return;
   }
   const reason = typeof rawReason === "string" && rawReason.trim() !== "" ? rawReason.trim() : null;
+  if (!enabled && !isAdminRequest(request)) {
+    response.status(403).json({ error: "Only an admin can lift the trading halt." });
+    return;
+  }
   if (enabled && !reason) {
     response.status(400).json({ error: "A reason is required to halt trading." });
     return;
@@ -67,7 +75,7 @@ riskLimitsRouter.get("/settings", async (_request, response) => {
   response.json(await loadTradingSettingsForEditing());
 });
 
-riskLimitsRouter.put("/settings", async (request, response) => {
+riskLimitsRouter.put("/settings", requireAdmin, async (request, response) => {
   const body = (request.body ?? {}) as Record<string, unknown>;
   const validationError = validateTradingSettingsInput(body);
   if (validationError) {
@@ -76,6 +84,35 @@ riskLimitsRouter.put("/settings", async (request, response) => {
   }
   await saveTradingSettings(body as TradingSettingsInput, request.session.userId!);
   response.json(await loadTradingSettingsForEditing());
+});
+
+// Every change to the settings above and to the trading halt, newest first (Marcelo 2026-10-17). Admins only: a trader's
+// Risk & Limits page has no history.
+riskLimitsRouter.get("/audit", requireAdmin, async (request, response) => {
+  response.json(await loadRiskLimitsAudit(Math.min(500, Number(request.query.limit) || 100)));
+});
+
+// The account's two halves (Marcelo 2026-10-17): Pluto's capital budget with what its book uses (the Pluto screen's figure:
+// open positions on the tickers it trades), and the rest of the account with what people use of it (the traders' capital
+// cap's own figures, so orders still working count). Both against the live net liquidation value, as the cap is judged.
+riskLimitsRouter.get("/capital-split", async (_request, response) => {
+  const [accountResult, book, traderCapital] = await Promise.all([
+    fetchAccountSummary()
+      .then((account) => ({ netLiquidationValue: account.netLiquidationValue, accountDataError: null as string | null }))
+      .catch((error) => ({ netLiquidationValue: null, accountDataError: error instanceof Error ? error.message : "Failed to fetch live account data from IBKR." })),
+    loadPlutoBook(),
+    loadTraderCapitalFigures(),
+  ]);
+  const { netLiquidationValue, accountDataError } = accountResult;
+  const hasValue = netLiquidationValue !== null && netLiquidationValue > 0;
+  const plutoBudgetDollars = hasValue ? (traderCapital.plutoCapitalBudgetPct * netLiquidationValue) / 100 : null;
+  response.json({
+    netLiquidationValue: hasValue ? netLiquidationValue : null,
+    accountDataError,
+    plutoCapitalBudgetPct: traderCapital.plutoCapitalBudgetPct,
+    pluto: { budgetDollars: plutoBudgetDollars, inUseDollars: book.committedDollars, openPositionCount: book.openPositions.length },
+    outsidePluto: { availableDollars: hasValue ? netLiquidationValue - plutoBudgetDollars! : null, inUseDollars: traderCapital.capitalInUseOutsidePluto },
+  });
 });
 
 // Approved 2026-08-25: every concentration/allocation % on this page and

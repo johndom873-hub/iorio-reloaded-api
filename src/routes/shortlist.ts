@@ -2,7 +2,8 @@ import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { recordPlutoEvent } from "../pluto/ledger.js";
 import { Router } from "express";
 import { db } from "../db/connection.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
+import { isAdminRequest } from "../lib/sessionUser.js";
 import { searchTickers } from "../ibkr/searchTickers.js";
 import { findOrCreateTicker, addTickerToShortlist, UnknownSymbolError } from "../ibkr/findOrCreateTicker.js";
 import { fetchAndStoreFiveYearHistory, getLatestBackfillRun, startTickerBackfill, type TickerBackfillRun } from "../ibkr/tickerBackfillPipeline.js";
@@ -285,7 +286,8 @@ shortlistRouter.get("/:tickerId/backfill/stream", async (request, response) => {
 
 // Per-ticker Signals flag (Marcelo, 2026-10-07). Turning it on starts the option-chain setup (strikes) in the
 // background; turning it off also turns Pluto off for the ticker in the same update, since Pluto only trades
-// Signals tickers (the shortlist_entries_bot_requires_signals constraint holds the same rule).
+// Signals tickers (the shortlist_entries_bot_requires_signals constraint holds the same rule). That makes it a Pluto
+// setting change, so a trader may not turn Signals off on a ticker Pluto trades (Marcelo 2026-10-17).
 shortlistRouter.patch("/:id/signals-enabled", async (request, response) => {
   const enabled = request.body?.enabled;
   if (typeof enabled !== "boolean") {
@@ -293,6 +295,7 @@ shortlistRouter.patch("/:id/signals-enabled", async (request, response) => {
     return;
   }
   const userId = request.session.userId as string;
+  const mayTurnPlutoOff = isAdminRequest(request);
   const result = await db.transaction(async (trx) => {
     const entry = await trx("shortlist_entries as se")
       .join("tickers as t", "t.id", "se.ticker_id")
@@ -302,6 +305,7 @@ shortlistRouter.patch("/:id/signals-enabled", async (request, response) => {
       .first("se.id", "se.signals_enabled", "se.bot_enabled", "t.id as tickerId", "t.symbol");
     if (!entry) return null;
     const turnsPlutoOff = !enabled && Boolean(entry.bot_enabled);
+    if (turnsPlutoOff && !mayTurnPlutoOff) return { refusal: `Pluto trades ${entry.symbol}, and turning Signals off would switch Pluto off for it. Only an admin can do that.` };
     if (Boolean(entry.signals_enabled) !== enabled) {
       await trx("shortlist_entries")
         .where({ id: entry.id })
@@ -311,6 +315,10 @@ shortlistRouter.patch("/:id/signals-enabled", async (request, response) => {
   });
   if (!result) {
     response.status(404).json({ error: "Entry not found or already removed." });
+    return;
+  }
+  if ("refusal" in result) {
+    response.status(403).json({ error: result.refusal });
     return;
   }
   // Price Performance shows the Signals flag (and hides IV / Avg Vol for a Signals-off ticker).
@@ -331,10 +339,10 @@ shortlistRouter.patch("/:id/signals-enabled", async (request, response) => {
   response.json({ signalsEnabled: enabled, botEnabled: result.botEnabled, backfillRun });
 });
 
-// Pluto's per-ticker allow flag (design 2026-09-28): default off, any user may flip it, audited on
-// the row, capped by pluto_settings.max_enabled_tickers because every enabled ticker costs one
-// IBKR market-data line on Pluto's own connection.
-shortlistRouter.patch("/:id/bot-enabled", async (request, response) => {
+// Pluto's per-ticker allow flag (design 2026-09-28): default off, only an admin may flip it (Marcelo 2026-10-17), audited
+// on the row, capped by pluto_settings.max_enabled_tickers because every enabled ticker costs one IBKR market-data line on
+// Pluto's own connection.
+shortlistRouter.patch("/:id/bot-enabled", requireAdmin, async (request, response) => {
   const enabled = request.body?.enabled;
   if (typeof enabled !== "boolean") {
     response.status(400).json({ error: "enabled must be true or false." });
@@ -365,7 +373,7 @@ shortlistRouter.patch("/:id/bot-enabled", async (request, response) => {
   response.json({ botEnabled: enabled });
 });
 
-shortlistRouter.delete("/:id", async (request, response) => {
+shortlistRouter.delete("/:id", requireAdmin, async (request, response) => {
   // Refused while the ticker has an open position; the UI greys Remove out
   // for the same reason, this covers Genosuke and stale tabs. Checked in the
   // same transaction as the removal so a position opening in between can't slip past.

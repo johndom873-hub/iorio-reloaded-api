@@ -34,7 +34,7 @@ async function call(method: string, path: string, body?: unknown): Promise<{ sta
 }
 
 beforeAll(async () => {
-  const [user] = await testDb("users").insert({ username: `ticker-settings-${suffix}`, display_name: "Ticker Settings Tester", password_hash: "not-a-real-hash" }).returning("id");
+  const [user] = await testDb("users").insert({ username: `ticker-settings-${suffix}`, display_name: "Ticker Settings Tester", password_hash: "not-a-real-hash", access_level: "admin" }).returning("id");
   userId = user.id;
   for (const [symbol, botEnabled] of [[enabledSymbol, true], [otherSymbol, false]] as const) {
     const [ticker] = await testDb("tickers").insert({ symbol, company_name: "Ticker Settings Co" }).returning("id");

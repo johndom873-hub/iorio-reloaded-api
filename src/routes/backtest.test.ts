@@ -46,6 +46,11 @@ vi.mock("../backtest/jobs/spawnBacktestJobProcess.js", async (importOriginal) =>
   spawnBacktestJobProcess: (jobId: string) => spawnBacktestJobProcessMock(jobId),
   terminateLeftoverJobProcesses: (processGroupId: number | null, jobId: string) => terminateLeftoverJobProcessesMock(processGroupId, jobId),
 }));
+// requireAuth loads the session's user on every request: the test session's user is an enabled one.
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: "admin" as const, disabledAt: null }),
+}));
 
 const { db } = await import("../db/connection.js");
 const { backtestRouter } = await import("./backtest.js");

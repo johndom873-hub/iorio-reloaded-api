@@ -3,6 +3,7 @@ import { OptionType, OrderAction } from "@stoqey/ib";
 import { db } from "../db/connection.js";
 import type { Knex } from "knex";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { isAdminRequest } from "../lib/sessionUser.js";
 import { positionSelect, fetchAvailableUncoveredShares, type PositionLegRow } from "../lib/positionQueries.js";
 import { publishNotification } from "../lib/notificationChannel.js";
 import type { Greeks, GreeksContract } from "../ibkr/fetchLiveGreeks.js";
@@ -75,6 +76,8 @@ function serializeOrderRequest(row: Record<string, unknown>) {
     requestedByDisplayName: row.requested_by_display_name,
     cancelledByUserId: row.cancelled_by_user_id,
     cancelledByDisplayName: row.cancelled_by_display_name,
+    confirmedByUserId: row.confirmed_by_user_id ?? null,
+    confirmedByDisplayName: row.confirmed_by_display_name ?? null,
     cancellationReason: row.cancellation_reason ?? null,
     calendarWarning: row.calendar_warning,
     calendarWarningEvents: row.calendar_warning_events ?? null,
@@ -95,7 +98,8 @@ function orderRequestsWithNames() {
   return db("order_requests as orq")
     .leftJoin("users as ru", "ru.id", "orq.requested_by_user_id")
     .leftJoin("users as cu", "cu.id", "orq.cancelled_by_user_id")
-    .select("orq.*", "ru.display_name as requested_by_display_name", "cu.display_name as cancelled_by_display_name");
+    .leftJoin("users as fu", "fu.id", "orq.confirmed_by_user_id")
+    .select("orq.*", "ru.display_name as requested_by_display_name", "cu.display_name as cancelled_by_display_name", "fu.display_name as confirmed_by_display_name");
 }
 
 // position_legs.expiry_date is a Postgres date, which pg hands back as a JS Date -- JSON then makes it
@@ -967,9 +971,11 @@ const maximumSignalSnapshotBytes = 16_384;
 // Pluto's origin marker (2026-09-28): the agent builds orders through these routes like any other
 // client and tags them with the pluto_actions row they came from, so the ledger, the pause
 // button and the Pluto screen can find them. Validated to an existing action; never inferred.
-async function readPlutoActionId(body: { plutoActionId?: unknown }): Promise<{ ok: true; value: string | null } | { ok: false; error: string }> {
-  const raw = body.plutoActionId;
+/** A trader may not tag an order as Pluto's (Marcelo 2026-10-17): a Pluto order gets Pluto's rules, not the traders' capital cap. */
+async function readPlutoActionId(request: Request): Promise<{ ok: true; value: string | null } | { ok: false; error: string }> {
+  const raw = (request.body as { plutoActionId?: unknown } | undefined)?.plutoActionId;
   if (raw === undefined || raw === null || raw === "") return { ok: true, value: null };
+  if (!isAdminRequest(request)) return { ok: false, error: "Only Pluto's own orders carry a plutoActionId." };
   if (typeof raw !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) return { ok: false, error: "plutoActionId must be a uuid." };
   const action = await db("pluto_actions").where({ id: raw }).first("id");
   if (!action) return { ok: false, error: "plutoActionId does not match a Pluto action." };
@@ -997,6 +1003,15 @@ async function nonStandardContractRefusal(payload: OrderRequestPayload): Promise
   if (legIds.length === 0) return null;
   const leg = await db("position_legs").whereIn("id", legIds).where("leg_type", "option").whereNot("multiplier", 100).first("multiplier");
   return leg ? `This order includes an option contract that delivers ${leg.multiplier} shares instead of 100 (adjusted after a stock split). The platform leaves such contracts to IBKR: manage it there.` : null;
+}
+
+/**
+ * A trader may not open or roll on a ticker Pluto is enabled on (Marcelo 2026-10-17): positions there count toward Pluto's
+ * capital budget, so they would escape the traders' capital cap. The refusal, or null.
+ */
+async function traderPlutoTickerRefusal(request: Request, symbol: string): Promise<string | null> {
+  if (isAdminRequest(request) || !(await plutoMayTradeSymbol(symbol))) return null;
+  return `Pluto trades ${symbol}, so only an admin can open or roll on it.`;
 }
 
 /** Manual trades are locked on the tickers the CC + Put Ladder trades (Marcelo 2026-10-15): enabled in Pluto while it is the active strategy. */
@@ -1078,6 +1093,17 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(400).json({ error: "Unknown symbol — add it via the Shortlist first." });
     return;
   }
+  // A typed share count is not held to the limits at its own size (the limit check counts the shares the call needs), so a
+  // trader's covered call always gets the automatic stock leg (Marcelo 2026-10-17).
+  if (stock !== undefined && !isAdminRequest(request)) {
+    response.status(403).json({ error: "Only an admin can set the share count: leave it out and the stock leg is filled automatically." });
+    return;
+  }
+  const traderRefusal = await traderPlutoTickerRefusal(request, ticker.symbol);
+  if (traderRefusal) {
+    response.status(403).json({ error: traderRefusal });
+    return;
+  }
 
   // A covered call's stock leg is a standard 100-shares-per-contract
   // Covered Call entry unless the caller explicitly overrides it (e.g. deliberate
@@ -1157,7 +1183,7 @@ positionsRouter.post("/orders", async (request, response) => {
     response.status(400).json({ error: signalSnapshot.error });
     return;
   }
-  const plutoActionId = await readPlutoActionId(request.body as { plutoActionId?: unknown });
+  const plutoActionId = await readPlutoActionId(request);
   if (!plutoActionId.ok) {
     response.status(400).json({ error: plutoActionId.error });
     return;
@@ -1260,7 +1286,8 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
   // (2026-09-24): every open leg and the order's underlying are pooled for
   // this stream's lifetime below, so no re-evaluation opens IBKR snapshots.
   const signalLimitsRefreshIntervalMs = 10_000;
-  let latestSignalLimits = await evaluateOrderLimitsForOrderRequest(orderRequest);
+  const limitsOptions = { forTrader: !isAdminRequest(request) };
+  let latestSignalLimits = await evaluateOrderLimitsForOrderRequest(orderRequest, {}, null, limitsOptions);
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -1278,7 +1305,7 @@ positionsRouter.get("/orders/:id/quote/stream", async (request, response) => {
   let latestSpotPrice: number | undefined;
   const signalLimitsTimer = latestSignalLimits
     ? setInterval(() => {
-        evaluateOrderLimitsForOrderRequest(orderRequest, { spotPrice: latestSpotPrice })
+        evaluateOrderLimitsForOrderRequest(orderRequest, { spotPrice: latestSpotPrice }, null, limitsOptions)
           .then((result) => {
             latestSignalLimits = result;
           })
@@ -1385,9 +1412,8 @@ positionsRouter.get("/:id/close-live/stream", streamCloseLiveHandler);
 
 // The explicit confirmation gate (approved 2026-08-24) — building an order
 // above never transmits it; only this endpoint does, by NOTIFYing the
-// worker. Every order-placing UI flow (New Position, Roll, Close, and the
-// Genosuke financial-write tools) must call this as a separate step after
-// showing the user exactly what will be submitted.
+// worker. Every order-placing flow (New Position, Roll, Close, Pluto) must
+// call this as a separate step after showing what will be submitted.
 const adaptivePriorities = new Set(["Urgent", "Normal", "Patient"]);
 
 // Approved 2026-09-24: a built order must be confirmed within this long.
@@ -1454,7 +1480,7 @@ async function readLadderGateContext(orderRequest: { pluto_action_id?: string | 
 }
 
 // What the order gate says about a built order right now, without confirming it: the same evaluation the confirm
-// step runs (orderGates.ts), so a client -- Genosuke's card above all -- can show the blocks and warnings first.
+// step runs (orderGates.ts), judged for the requesting user (a trader's gets the traders' capital cap).
 positionsRouter.get("/orders/:id/gates", async (request, response) => {
   const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
   if (!orderRequest) {
@@ -1466,7 +1492,7 @@ positionsRouter.get("/orders/:id/gates", async (request, response) => {
     response.json({ blocks: [error], warnings: [], evaluatedAt: new Date().toISOString() });
     return;
   }
-  const { blocks, warnings, evaluatedAt } = await evaluateOrderGates(orderRequest, ladder);
+  const { blocks, warnings, evaluatedAt } = await evaluateOrderGates(orderRequest, ladder, { forTrader: !isAdminRequest(request) });
   response.json({ blocks, warnings, evaluatedAt });
 });
 
@@ -1522,6 +1548,19 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     response.status(409).json({ error: `Pluto is no longer allowed to trade ${orderRequest.payload.symbol} (its Pluto switch is off).` });
     return;
   }
+  // Who confirms decides the rules: a trader's confirm gets the traders' rules whoever built the order (Marcelo 2026-10-17).
+  const forTrader = !isAdminRequest(request);
+  if (forTrader && orderRequest.pluto_action_id) {
+    response.status(403).json({ error: "Only Pluto confirms Pluto's orders." });
+    return;
+  }
+  if (orderRequest.request_type.startsWith("open_") || orderRequest.request_type === "roll_leg") {
+    const traderRefusal = await traderPlutoTickerRefusal(request, orderRequest.payload.symbol);
+    if (traderRefusal) {
+      response.status(403).json({ error: traderRefusal });
+      return;
+    }
+  }
   if (!orderRequest.pluto_action_id && (await manualOrdersLockedOn(orderRequest.payload.symbol))) {
     response.status(409).json({ error: `${orderRequest.payload.symbol} is traded by Pluto's ${executionStrategyLabels.cc_put_ladder} strategy, so orders by hand are locked. Switch the ticker off in Pluto to trade it by hand.` });
     return;
@@ -1542,7 +1581,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   let wonRace = false;
   try {
     await withOrderConfirmationLock(async (transaction) => {
-      const gateEvaluation = await evaluateOrderGates(orderRequest, ladder);
+      const gateEvaluation = await evaluateOrderGates(orderRequest, ladder, { forTrader });
       if (gateEvaluation.blocks.length > 0) {
         blockedReasons = gateEvaluation.blocks;
         return;
@@ -1578,7 +1617,7 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
     // actually flips the row does.
     const updatedRows = await trx("order_requests")
       .where({ id: orderRequest.id, status: "pending_confirmation" })
-      .update({ status: "confirmed", payload, gate_evaluation: JSON.stringify(gateEvaluation), updated_at: trx.fn.now() })
+      .update({ status: "confirmed", payload, gate_evaluation: JSON.stringify(gateEvaluation), confirmed_by_user_id: request.session.userId, updated_at: trx.fn.now() })
       .returning(["id"]);
     if (updatedRows.length === 0) return false;
 
@@ -1785,9 +1824,14 @@ positionsRouter.post("/:id/roll", async (request, response) => {
   }
   const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey: position.strategy_key, legs };
 
-  const rollPlutoActionId = await readPlutoActionId(request.body as { plutoActionId?: unknown });
+  const rollPlutoActionId = await readPlutoActionId(request);
   if (!rollPlutoActionId.ok) {
     response.status(400).json({ error: rollPlutoActionId.error });
+    return;
+  }
+  const rollTraderRefusal = await traderPlutoTickerRefusal(request, ticker.symbol);
+  if (rollTraderRefusal) {
+    response.status(403).json({ error: rollTraderRefusal });
     return;
   }
   const [orderRequest] = await db("order_requests")
@@ -2018,13 +2062,13 @@ positionsRouter.post("/:id/close", async (request, response) => {
   }
   const payload: OrderRequestPayload = { symbol: ticker.symbol, strategyKey: position.strategy_key, legs: orderLegs };
 
-  const closePlutoActionId = await readPlutoActionId(request.body as { plutoActionId?: unknown });
+  const closePlutoActionId = await readPlutoActionId(request);
   if (!closePlutoActionId.ok) {
     response.status(400).json({ error: closePlutoActionId.error });
     return;
   }
   // The same verdict the Close form's live stream shows -- regular session open, live two-sided quotes on every leg, a
-  // consistent open wheel cycle -- refused here too, so no API caller (Genosuke included) can close what the form would not let a human close.
+  // consistent open wheel cycle -- refused here too, so no API caller (Pluto included) can close what the form would not let a human close.
   const closeGate = await evaluateCloseGateForPosition(position.id);
   if (closeGate.blocked) {
     response.status(409).json({ error: closeGate.reason });

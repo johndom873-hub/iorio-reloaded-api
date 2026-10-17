@@ -18,10 +18,9 @@ function toolNamed(name: string) {
 }
 
 describe("the low-stakes write tool set", () => {
-  it("lists the five tools, all in the low-stakes tier, with unique names", () => {
+  it("lists the four tools, all in the low-stakes tier, with unique names", () => {
     expect(lowStakesWriteTools.map((tool) => tool.name)).toEqual([
       "add_shortlist_ticker",
-      "remove_shortlist_ticker",
       "trigger_ibkr_health_check",
       "save_preference",
       "forget_preference",
@@ -29,11 +28,10 @@ describe("the low-stakes write tool set", () => {
     expect(lowStakesWriteTools.every((tool) => tool.tier === "low-stakes-write")).toBe(true);
   });
 
-  it("has no confirmation hooks and does not track order status (nothing here places an order)", () => {
+  it("has no confirmation hooks (nothing here needs a card)", () => {
     for (const tool of lowStakesWriteTools) {
       expect(tool.describeForConfirmation).toBeUndefined();
-      expect(tool.prepareConfirmation).toBeUndefined();
-      expect(tool.tracksOrderStatus).toBeUndefined();
+      expect(tool.validateBeforeConfirmation).toBeUndefined();
     }
   });
 
@@ -41,14 +39,13 @@ describe("the low-stakes write tool set", () => {
     const { api, post, patch, remove, put } = fakeApi();
     const inputs: Record<string, Record<string, unknown>> = {
       add_shortlist_ticker: { symbol: "AAPL" },
-      remove_shortlist_ticker: { entryId: "e1" },
       trigger_ibkr_health_check: {},
       save_preference: { content: "c" },
       forget_preference: { id: "p1" },
     };
     for (const tool of lowStakesWriteTools) await tool.execute(inputs[tool.name]!, api);
     const paths = [...post.mock.calls, ...patch.mock.calls, ...remove.mock.calls].map((call) => String((call as unknown[])[0]));
-    expect([...paths].sort()).toEqual(["/genosuke/preferences", "/genosuke/preferences/p1", "/shortlist", "/shortlist/e1", "/system-health/check-ibkr"]);
+    expect([...paths].sort()).toEqual(["/genosuke/preferences", "/genosuke/preferences/p1", "/shortlist", "/system-health/check-ibkr"]);
     expect(paths.every((path) => /^\/(shortlist|system-health|genosuke)/.test(path))).toBe(true);
     expect(put).not.toHaveBeenCalled();
   });
@@ -73,20 +70,6 @@ describe("add_shortlist_ticker", () => {
     const { api, post } = fakeApi();
     post.mockRejectedValueOnce(new Error("POST /shortlist → 409: already on the shortlist"));
     await expect(toolNamed("add_shortlist_ticker").execute({ symbol: "AAPL" }, api)).rejects.toThrow("409");
-  });
-});
-
-describe("remove_shortlist_ticker", () => {
-  it("deletes the shortlist entry by id", async () => {
-    const { api, remove } = fakeApi();
-    await toolNamed("remove_shortlist_ticker").execute({ entryId: "entry-7" }, api);
-    expect(remove).toHaveBeenCalledWith("/shortlist/entry-7");
-  });
-
-  it("surfaces the route's 409 for a ticker with an open position", async () => {
-    const { api, remove } = fakeApi();
-    remove.mockRejectedValueOnce(new Error("DELETE /shortlist/entry-7 → 409: open position"));
-    await expect(toolNamed("remove_shortlist_ticker").execute({ entryId: "entry-7" }, api)).rejects.toThrow("409");
   });
 });
 
@@ -115,10 +98,10 @@ describe("forget_preference", () => {
 });
 
 describe("ids in request paths", () => {
-  it("are encoded for the shortlist and preference routes", async () => {
+  it("are encoded for the preference route", async () => {
     const { api, remove } = fakeApi();
-    await toolNamed("remove_shortlist_ticker").execute({ entryId: "../positions/x" }, api);
+    await toolNamed("forget_preference").execute({ id: "../positions/x" }, api);
     await toolNamed("forget_preference").execute({ id: "p/1" }, api);
-    expect((remove.mock.calls as unknown as string[][]).map((call) => call[0])).toEqual(["/shortlist/..%2Fpositions%2Fx", "/genosuke/preferences/p%2F1"]);
+    expect((remove.mock.calls as unknown as string[][]).map((call) => call[0])).toEqual(["/genosuke/preferences/..%2Fpositions%2Fx", "/genosuke/preferences/p%2F1"]);
   });
 });

@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { Request, Response } from "express";
 
 // The Yes/Cancel button handling of bot.ts, driven through the exported webhook handler with every collaborator faked:
-// Telegram, the API client, the tools, the chat history and the order follow-up.
+// Telegram, the API client, the tools and the chat history.
 const hoisted = vi.hoisted(() => ({
   telegram: {
     getMe: vi.fn(),
@@ -13,7 +13,6 @@ const hoisted = vi.hoisted(() => ({
   },
   api: { name: "fake-api" },
   tools: new Map<string, unknown>(),
-  startOrderFollowUp: vi.fn(),
   appendHistory: vi.fn(),
 }));
 
@@ -48,7 +47,6 @@ vi.mock("./openRouterAdapter.js", () => ({ OpenRouterAdapter: class {} }));
 vi.mock("./chat.js", () => ({ chatOnce: vi.fn() }));
 vi.mock("./chatHistoryStore.js", () => ({ loadRecentHistory: vi.fn(async () => []), appendHistory: (...args: unknown[]) => hoisted.appendHistory(...args) }));
 vi.mock("./tools/index.js", () => ({ TOOLS_BY_NAME: hoisted.tools }));
-vi.mock("./orderFollowUp.js", () => ({ startOrderFollowUp: (...args: unknown[]) => hoisted.startOrderFollowUp(...args) }));
 vi.mock("../lib/notificationChannel.js", () => ({ publishNotification: vi.fn(async () => {}) }));
 
 const { startGenosuke, handleGenosukeWebhook, detectAddressing, handleMessage } = await import("./bot.js");
@@ -68,7 +66,7 @@ beforeAll(async () => {
   telegram.setWebhook.mockResolvedValue(undefined);
   vi.spyOn(console, "info").mockImplementation(() => {});
   startGenosuke();
-  await vi.waitFor(() => expect(hoisted.startOrderFollowUp).toHaveBeenCalled());
+  await vi.waitFor(() => expect(telegram.setWebhook).toHaveBeenCalled());
 });
 
 beforeEach(() => {
@@ -94,34 +92,33 @@ function tap(data: string, options: { chatId?: number; secret?: string } = {}) {
   return response;
 }
 
-function orderTool(overrides: Record<string, unknown> = {}) {
-  const tool = { name: "create_position", tier: "financial-write", tracksOrderStatus: true, execute: vi.fn(async () => ({ id: "order-1", status: "confirmed" })), discardPrepared: vi.fn(async () => {}), ...overrides };
+function infraTool(overrides: Record<string, unknown> = {}) {
+  const tool = { name: "unblock_ip", tier: "infra-write", execute: vi.fn(async () => ({ removed: true })), ...overrides };
   hoisted.tools.set(tool.name as string, tool);
-  return tool as typeof tool & { execute: ReturnType<typeof vi.fn>; discardPrepared: ReturnType<typeof vi.fn> };
+  return tool as typeof tool & { execute: ReturnType<typeof vi.fn> };
 }
 
 const lastReply = () => telegram.sendMessage.mock.calls.at(-1)![1] as string;
 
 describe("startup", () => {
-  it("starts the order follow-up once the webhook is registered, for the configured chat and service user", () => {
-    expect(hoisted.startOrderFollowUp).toHaveBeenCalledTimes(1);
-    expect(hoisted.startOrderFollowUp).toHaveBeenCalledWith(telegram, "123", "genosuke-svc");
-    expect(telegram.setWebhook.mock.invocationCallOrder[0]!).toBeLessThan(hoisted.startOrderFollowUp.mock.invocationCallOrder[0]!);
+  it("registers the webhook once, with the configured URL and secret", () => {
+    expect(telegram.setWebhook).toHaveBeenCalledTimes(1);
+    expect(telegram.setWebhook).toHaveBeenCalledWith("https://example.test/hook", "secret");
   });
 });
 
 describe("the webhook", () => {
   it("answers 401 to a wrong secret and does nothing", () => {
-    const tool = orderTool();
-    const confirmation = createConfirmation("123", "create_position", {}, "CARD", { orderId: "order-1" });
+    const tool = infraTool();
+    const confirmation = createConfirmation("123", "unblock_ip", {}, "CARD");
     const response = tap(`confirm:${confirmation.id}`, { secret: "wrong" });
     expect(response.sendStatus).toHaveBeenCalledWith(401);
     expect(tool.execute).not.toHaveBeenCalled();
   });
 
   it("ignores a tap from another chat without consuming the card", async () => {
-    const tool = orderTool();
-    const confirmation = createConfirmation("123", "create_position", {}, "CARD", { orderId: "order-1" });
+    const tool = infraTool();
+    const confirmation = createConfirmation("123", "unblock_ip", {}, "CARD");
     tap(`confirm:${confirmation.id}`, { chatId: 999 });
     await vi.waitFor(() => expect(telegram.answerCallbackQuery).toHaveBeenCalledWith("cb-1"));
     expect(tool.execute).not.toHaveBeenCalled();
@@ -131,27 +128,23 @@ describe("the webhook", () => {
 });
 
 describe("tapping Yes", () => {
-  it("executes the tool with the card's input AND the prepared order, then tells the human it was sent", async () => {
-    const tool = orderTool();
-    const prepared = { orderId: "order-1" };
-    const input = { symbol: "AAOI" };
-    const confirmation = createConfirmation("123", "create_position", input, "CARD", prepared);
+  it("executes the tool with the card's input, then says Done with the card text", async () => {
+    const tool = infraTool();
+    const input = { ip: "1.2.3.4" };
+    const confirmation = createConfirmation("123", "unblock_ip", input, "Unblock IP 1.2.3.4");
     tap(`confirm:${confirmation.id}`);
-    await vi.waitFor(() => expect(lastReply()).toContain("Sent to IBKR"));
+    await vi.waitFor(() => expect(lastReply()).toBe("Done:\nUnblock IP 1.2.3.4"));
     expect(tool.execute).toHaveBeenCalledTimes(1);
+    expect(tool.execute).toHaveBeenCalledWith(input, hoisted.api);
     expect(tool.execute.mock.calls[0]![0]).toBe(input);
-    expect(tool.execute.mock.calls[0]![1]).toBe(hoisted.api);
-    expect(tool.execute.mock.calls[0]![2]).toBe(prepared);
-    expect(lastReply()).toBe("Sent to IBKR:\nCARD\nI'll tell you when it is placed, and again when it fills or ends.");
     expect(telegram.answerCallbackQuery).toHaveBeenCalledWith("cb-1", "Confirmed.");
     expect(telegram.clearInlineKeyboard).toHaveBeenCalledWith("123", 9);
     expect(hoisted.appendHistory).toHaveBeenCalled();
-    expect(tool.discardPrepared).not.toHaveBeenCalled();
   });
 
   it("a second tap on the same card is told it was already resolved and executes nothing more", async () => {
-    const tool = orderTool();
-    const confirmation = createConfirmation("123", "create_position", {}, "CARD", { orderId: "order-1" });
+    const tool = infraTool();
+    const confirmation = createConfirmation("123", "unblock_ip", {}, "CARD");
     tap(`confirm:${confirmation.id}`);
     await vi.waitFor(() => expect(tool.execute).toHaveBeenCalledTimes(1));
     tap(`confirm:${confirmation.id}`);
@@ -160,76 +153,53 @@ describe("tapping Yes", () => {
   });
 
   it("reports a failed execute to the human", async () => {
-    orderTool({
+    infraTool({
       execute: vi.fn(async () => {
-        throw new Error("Trading is blocked: wrong account.");
+        throw new Error("Cloudflare API 403: forbidden");
       }),
     });
-    const confirmation = createConfirmation("123", "create_position", {}, "CARD", { orderId: "order-1" });
+    const confirmation = createConfirmation("123", "unblock_ip", {}, "CARD");
     tap(`confirm:${confirmation.id}`);
-    await vi.waitFor(() => expect(lastReply()).toBe("That failed: Trading is blocked: wrong account."));
+    await vi.waitFor(() => expect(lastReply()).toBe("That failed: Cloudflare API 403: forbidden"));
   });
 
-  it("a tool that does not track an order says Done with the card text, or its own result text when it has one", async () => {
-    orderTool({ name: "update_risk_limits", tracksOrderStatus: undefined, execute: vi.fn(async () => ({ saved: true })) });
-    const done = createConfirmation("123", "update_risk_limits", {}, "Update the trading limits", undefined);
-    tap(`confirm:${done.id}`);
-    await vi.waitFor(() => expect(lastReply()).toBe("Done:\nUpdate the trading limits"));
-
-    orderTool({ name: "update_risk_limits", tracksOrderStatus: undefined, execute: vi.fn(async () => ({ saved: true })), describeResult: () => "Limits updated." });
-    const described = createConfirmation("123", "update_risk_limits", {}, "Update the trading limits", undefined);
-    tap(`confirm:${described.id}`);
-    await vi.waitFor(() => expect(lastReply()).toBe("Limits updated."));
+  it("a tool with its own result text sends that instead of Done", async () => {
+    const describeResult = vi.fn((result: unknown) => (result as { message: string }).message);
+    infraTool({ name: "resend_gateway_2fa", execute: vi.fn(async () => ({ result: "started", message: "Watch your phone." })), describeResult });
+    const confirmation = createConfirmation("123", "resend_gateway_2fa", {}, "Restart the Gateway");
+    tap(`confirm:${confirmation.id}`);
+    await vi.waitFor(() => expect(lastReply()).toBe("Watch your phone."));
+    expect(describeResult).toHaveBeenCalledWith({ result: "started", message: "Watch your phone." });
   });
 
   it("says so when the tool no longer exists", async () => {
-    const confirmation = createConfirmation("123", "retired_tool", {}, "CARD", undefined);
+    const confirmation = createConfirmation("123", "retired_tool", {}, "CARD");
     tap(`confirm:${confirmation.id}`);
     await vi.waitFor(() => expect(lastReply()).toBe('Error: tool "retired_tool" no longer exists.'));
   });
 });
 
 describe("tapping Cancel", () => {
-  it("discards the prepared order (cancelling it) and executes nothing", async () => {
-    const tool = orderTool();
-    const prepared = { orderId: "order-1" };
-    const confirmation = createConfirmation("123", "create_position", {}, "CARD", prepared);
+  it("executes nothing and says so", async () => {
+    const tool = infraTool();
+    const confirmation = createConfirmation("123", "unblock_ip", {}, "CARD");
     tap(`cancel:${confirmation.id}`);
     await vi.waitFor(() => expect(lastReply()).toBe("Cancelled — no action taken."));
-    expect(tool.discardPrepared).toHaveBeenCalledTimes(1);
-    expect(tool.discardPrepared.mock.calls[0]![0]).toBe(prepared);
-    expect(tool.discardPrepared.mock.calls[0]![1]).toBe(hoisted.api);
     expect(tool.execute).not.toHaveBeenCalled();
     expect(telegram.answerCallbackQuery).toHaveBeenCalledWith("cb-1", "Cancelled.");
+    expect(telegram.clearInlineKeyboard).toHaveBeenCalledWith("123", 9);
+    expect(hoisted.appendHistory).toHaveBeenCalled();
   });
 
-  it("still cancels cleanly when discarding the prepared order fails", async () => {
-    const tool = orderTool({
-      discardPrepared: vi.fn(async () => {
-        throw new Error("already cancelled");
-      }),
-    });
-    const confirmation = createConfirmation("123", "create_position", {}, "CARD", { orderId: "order-1" });
-    tap(`cancel:${confirmation.id}`);
-    await vi.waitFor(() => expect(lastReply()).toBe("Cancelled — no action taken."));
-    expect(tool.execute).not.toHaveBeenCalled();
-  });
-
-  it("cancels a tool that has nothing to discard", async () => {
-    orderTool({ name: "update_risk_limits", discardPrepared: undefined });
-    const confirmation = createConfirmation("123", "update_risk_limits", {}, "CARD", undefined);
-    tap(`cancel:${confirmation.id}`);
-    await vi.waitFor(() => expect(lastReply()).toBe("Cancelled — no action taken."));
-  });
-
-  it("a Cancel after a Yes finds nothing to cancel, so a confirmed order is never discarded by a late tap", async () => {
-    const tool = orderTool();
-    const confirmation = createConfirmation("123", "create_position", {}, "CARD", { orderId: "order-1" });
+  it("a Cancel after a Yes finds nothing to cancel and sends no Cancelled reply", async () => {
+    const tool = infraTool();
+    const confirmation = createConfirmation("123", "unblock_ip", {}, "CARD");
     tap(`confirm:${confirmation.id}`);
-    await vi.waitFor(() => expect(tool.execute).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(lastReply()).toBe("Done:\nCARD"));
     tap(`cancel:${confirmation.id}`);
     await vi.waitFor(() => expect(telegram.answerCallbackQuery).toHaveBeenCalledWith("cb-1", "This confirmation expired or was already resolved."));
-    expect(tool.discardPrepared).not.toHaveBeenCalled();
+    expect(tool.execute).toHaveBeenCalledTimes(1);
+    expect(lastReply()).toBe("Done:\nCARD");
   });
 });
 
@@ -538,8 +508,8 @@ describe("a message update through the webhook", () => {
 
 describe("malformed button taps", () => {
   it.each([["garbage"], ["confirm:"], ["approve:abc"], [""]])("answers %j silently and executes nothing", async (data) => {
-    const tool = orderTool();
-    createConfirmation("123", "create_position", {}, "CARD", { orderId: "order-1" });
+    const tool = infraTool();
+    createConfirmation("123", "unblock_ip", {}, "CARD");
     tap(data);
     await vi.waitFor(() => expect(telegram.answerCallbackQuery).toHaveBeenCalledWith("cb-1"));
     expect(tool.execute).not.toHaveBeenCalled();
@@ -547,8 +517,8 @@ describe("malformed button taps", () => {
   });
 
   it("answers silently, and executes nothing, when the tap carries no message (so no chat can be verified)", async () => {
-    const tool = orderTool();
-    const confirmation = createConfirmation("123", "create_position", {}, "CARD", { orderId: "order-1" });
+    const tool = infraTool();
+    const confirmation = createConfirmation("123", "unblock_ip", {}, "CARD");
     const response = { sendStatus: vi.fn() };
     const request = {
       get: () => "secret",
@@ -564,8 +534,8 @@ describe("malformed button taps", () => {
   it("an expired card is refused with the expiry message and executes nothing", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
-      const tool = orderTool();
-      const confirmation = createConfirmation("123", "create_position", {}, "CARD", { orderId: "order-1" });
+      const tool = infraTool();
+      const confirmation = createConfirmation("123", "unblock_ip", {}, "CARD");
       vi.setSystemTime(Date.now() + 10 * 60 * 1000 + 1);
       tap(`confirm:${confirmation.id}`);
       await vi.waitFor(() => expect(telegram.answerCallbackQuery).toHaveBeenCalledWith("cb-1", "This confirmation expired or was already resolved."));

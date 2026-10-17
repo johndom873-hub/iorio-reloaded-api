@@ -436,7 +436,7 @@ describe("session cookie", () => {
     expect(secondCookie).not.toBe(firstCookie);
     const response = await send(productionApp, "/auth/session", { cookie: firstCookie, headers: httpsThroughProxy });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ id: smokeUserId, username: smokeUsername, displayName: "Smoke Tester" });
+    expect(await response.json()).toEqual({ id: smokeUserId, username: smokeUsername, displayName: "Smoke Tester", accessLevel: "trader" });
   });
 
   it("is not issued to a visitor who never signed in", async () => {

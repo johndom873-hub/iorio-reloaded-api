@@ -1,4 +1,20 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin unless a test runs them asTrader: requireAuth reads the user's access level
+// through sessionUser.
+const sessionAccess = vi.hoisted(() => ({ level: "admin" as "admin" | "trader" }));
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: sessionAccess.level, disabledAt: null }),
+}));
+
+async function asTrader<T>(body: () => Promise<T>): Promise<T> {
+  sessionAccess.level = "trader";
+  try {
+    return await body();
+  } finally {
+    sessionAccess.level = "admin";
+  }
+}
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
@@ -285,6 +301,13 @@ describe("POST /system-health/check-ibkr", () => {
     createdJobRunIds.push(id);
     return id;
   }
+
+  it("never lets a trader's check restart the Gateway, even outside market hours", async () => {
+    await insertLatestHealthCheckRun({ status: "success", details: { gateway: "up" } });
+    const frame = await asTrader(() => callStreamed("POST", "/check-ibkr"));
+    expect(frame.status).toBe(200);
+    expect(runIbkrHealthCheckJobMock).toHaveBeenCalledWith({ allowGatewayRestart: false, triggeredBy: "manual", triggeredByUserId: userId });
+  });
 
   it("runs the check as a manual run by the caller and answers with the newest ibkr_health_check row", async () => {
     const rowId = await insertLatestHealthCheckRun({ status: "success", details: { gateway: "up" } });

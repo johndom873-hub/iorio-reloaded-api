@@ -1,7 +1,12 @@
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import express from "express";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin: requireAuth reads the user's access level through sessionUser.
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: "admin" as const, disabledAt: null }),
+}));
 import { createStreamMultiplexerRouter } from "./streamMultiplexer.js";
 import type { StreamProducer, StreamProducerRegistry } from "../streams/streamProducers.js";
 import { streamKinds } from "../streams/streamProtocol.js";

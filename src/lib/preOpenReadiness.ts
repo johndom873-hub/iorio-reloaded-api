@@ -181,9 +181,9 @@ export function evaluateAccount(account: AccountFigures | null, maxPositionPctOf
   if (account.totalCashValue !== null) parts.push(`cash ${formatWholeDollars(account.totalCashValue)}`);
   if (account.buyingPower !== null) parts.push(`buying power ${formatWholeDollars(account.buyingPower)}`);
   if (maxPositionPctOfPortfolio !== null) {
-    // One contract of a cash-secured put ties up strike x 100, which may not exceed the max position share of the account.
+    // One contract of a cash-secured put ties up strike x 100, which may not exceed the max order size share of the account.
     const largestSingleContractStrike = (account.netLiquidationValue * maxPositionPctOfPortfolio) / 100 / 100;
-    parts.push(`largest cash-secured put the ${maxPositionPctOfPortfolio}% position limit allows: strike $${Math.floor(largestSingleContractStrike)} (1 contract)`);
+    parts.push(`largest cash-secured put the ${maxPositionPctOfPortfolio}% max order size allows: strike $${Math.floor(largestSingleContractStrike)} (1 contract)`);
   }
   return check("Account", account.buyingPower === null || account.totalCashValue === null ? "warn" : "ok", parts.join(", "));
 }
@@ -194,7 +194,7 @@ export function evaluateAccount(account: AccountFigures | null, maxPositionPctOf
 export function evaluateTradingHalt(halt: TradingHalt, now: Date): ReadinessCheck {
   const blockedReason = describeTradingHaltBlock(halt, now.getTime());
   if (!blockedReason) return check("Trading halt", "ok", "trading is not halted");
-  return check("Trading halt", "fail", `${blockedReason} Every order is refused until someone resumes trading (Risk & Limits, or ask Genosuke)`);
+  return check("Trading halt", "fail", `${blockedReason} Every order is refused until an admin lifts the halt (Risk & Limits)`);
 }
 
 // --- The limits and targets (the settings you edit) ---
@@ -210,10 +210,10 @@ export interface TradingSettingsFigures {
 export function evaluateSettings(settings: TradingSettingsFigures | null): ReadinessCheck {
   if (!settings) return check("Trading settings", "fail", "the trading settings could not be read, so every order would be blocked");
   const zeroLimits = [
-    settings.maxPositionPctOfPortfolio === 0 ? "max position size" : null,
+    settings.maxPositionPctOfPortfolio === 0 ? "max order size" : null,
     settings.maxConcentrationPerTickerPct === 0 ? "max exposure per ticker" : null,
   ].filter((name): name is string => name !== null);
-  const summary = `max position ${settings.maxPositionPctOfPortfolio}%, per ticker ${settings.maxConcentrationPerTickerPct}%, cash reserve ${settings.minCashReservePct}%, delta band ${settings.deltaTargetMin}-${settings.deltaTargetMax}`;
+  const summary = `max order size ${settings.maxPositionPctOfPortfolio}%, per ticker ${settings.maxConcentrationPerTickerPct}%, cash reserve ${settings.minCashReservePct}%, delta band ${settings.deltaTargetMin}-${settings.deltaTargetMax}`;
   if (zeroLimits.length > 0) return check("Trading settings", "fail", `${zeroLimits.join(" and ")} is 0%, which blocks every new order (${summary})`);
   return check("Trading settings", "ok", summary);
 }

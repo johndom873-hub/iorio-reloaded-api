@@ -10,7 +10,7 @@ vi.mock("../db/connection.js", async () => {
 });
 
 const { db } = await import("../db/connection.js");
-const { loadTradingSettings, loadTradingSettingsForEditing, saveTradingSettings } = await import("./tradingSettingsStore.js");
+const { loadRiskLimitsAudit, loadTradingSettings, loadTradingSettingsForEditing, saveTradingSettings } = await import("./tradingSettingsStore.js");
 const { loadRecoveryTargetWindow } = await import("./recoveryTargetWindow.js");
 
 const testDb: Knex = db;
@@ -61,6 +61,7 @@ afterAll(async () => {
   const count = Number((await testDb("trading_settings").count({ count: "*" }).first())!.count);
   if (count === 0) await testDb("trading_settings").insert(originalRow);
   else await testDb("trading_settings").update(originalRow);
+  await testDb("risk_limits_audit").whereIn("user_id", createdUserIds).del();
   await testDb("users").whereIn("id", createdUserIds).del();
   await testDb.destroy();
 });
@@ -304,5 +305,55 @@ describe("loadRecoveryTargetWindow", () => {
     await withoutSettingsRow(async () => {
       expect(await loadRecoveryTargetWindow()).toBeNull();
     });
+  });
+});
+
+/** knownValues (what beforeEach stores) as a save payload: saving it changes nothing. */
+function knownSettingsAsInput() {
+  return {
+    maxPositionPctOfPortfolio: knownValues.max_position_pct_of_portfolio,
+    maxConcentrationPerTickerPct: knownValues.max_concentration_per_ticker_pct,
+    minCashReservePct: knownValues.min_cash_reserve_pct,
+    deltaTargetMin: knownValues.delta_target_min,
+    deltaTargetMax: knownValues.delta_target_max,
+    recoveryDteMin: knownValues.recovery_dte_min,
+    recoveryDteMax: knownValues.recovery_dte_max,
+    minAnnualizedYieldPct: knownValues.min_annualized_yield_pct,
+    commissionWarnSharePctOfPremium: knownValues.commission_warn_share_of_premium_pct,
+    priceCheckMaxDeviationPct: knownValues.price_check_max_deviation_pct,
+    priceCheckMinToleranceDollars: knownValues.price_check_min_tolerance_dollars,
+    spreadCostChargedPct: knownValues.spread_cost_charged_pct,
+    orderUnfilledCancelMinutes: knownValues.order_unfilled_cancel_minutes,
+  };
+}
+
+describe("the Risk & Limits change history", () => {
+  it("writes one row per field that changed, from the old value to the new, under the saver", async () => {
+    const userId = await createUser("Auditor");
+    await saveTradingSettings({ ...knownSettingsAsInput(), maxConcentrationPerTickerPct: 55, minCashReservePct: 0.3 }, userId);
+    const rows = await testDb("risk_limits_audit").where({ user_id: userId }).orderBy("field");
+    expect(rows.map((row) => ({ field: row.field, old_value: row.old_value, new_value: row.new_value, reason: row.reason }))).toEqual([
+      { field: "maxConcentrationPerTickerPct", old_value: String(knownValues.max_concentration_per_ticker_pct), new_value: "55", reason: null },
+      { field: "minCashReservePct", old_value: String(knownValues.min_cash_reserve_pct), new_value: "0.3", reason: null },
+    ]);
+  });
+
+  it("writes nothing for a save that changes nothing, though the saver is still stamped", async () => {
+    const userId = await createUser("Idle Saver");
+    await saveTradingSettings(knownSettingsAsInput(), userId);
+    expect(await testDb("risk_limits_audit").where({ user_id: userId })).toEqual([]);
+    expect((await readRawRow()).updated_by_user_id).toBe(userId);
+  });
+
+  it("reads the history newest first with the saver's display name", async () => {
+    const userId = await createUser("History Reader");
+    await saveTradingSettings({ ...knownSettingsAsInput(), maxPositionPctOfPortfolio: 12 }, userId);
+    await saveTradingSettings({ ...knownSettingsAsInput(), maxPositionPctOfPortfolio: 14 }, userId);
+    const mine = (await loadRiskLimitsAudit(500)).filter((row) => row.userDisplayName === "History Reader");
+    expect(mine.map((row) => [row.field, row.oldValue, row.newValue])).toEqual([
+      ["maxPositionPctOfPortfolio", "12", "14"],
+      ["maxPositionPctOfPortfolio", String(knownValues.max_position_pct_of_portfolio), "12"],
+    ]);
+    expect(mine[0]!.changedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });

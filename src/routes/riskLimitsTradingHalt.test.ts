@@ -1,4 +1,20 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// Signed-in requests in this file act as an admin unless a test runs them asTrader: requireAuth reads the user's access level
+// through sessionUser.
+const sessionAccess = vi.hoisted(() => ({ level: "admin" as "admin" | "trader" }));
+vi.mock("../lib/sessionUser.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/sessionUser.js")>()),
+  loadSessionUser: async (userId: string) => ({ id: userId, displayName: "Test User", accessLevel: sessionAccess.level, disabledAt: null }),
+}));
+
+async function asTrader<T>(body: () => Promise<T>): Promise<T> {
+  sessionAccess.level = "trader";
+  try {
+    return await body();
+  } finally {
+    sessionAccess.level = "admin";
+  }
+}
 import express from "express";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
@@ -57,6 +73,7 @@ beforeEach(async () => {
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   if (originalRow) await testDb("platform_controls").insert(originalRow).onConflict("key").merge();
+  await testDb("risk_limits_audit").where({ user_id: userId }).del();
   await testDb("users").where({ id: userId }).del();
   await testDb.destroy();
 });
@@ -128,5 +145,16 @@ describe("PUT /risk-limits/trading-halt", () => {
   it("is refused without a session and changes nothing", async () => {
     expect((await call("PUT", "/risk-limits/trading-halt", { enabled: true, reason: "x" }, { asUser: null })).status).toBe(401);
     expect((await readRow())?.enabled).toBe(false);
+  });
+});
+
+describe("access levels on PUT /risk-limits/trading-halt", () => {
+  it("lets a trader halt trading but not lift the halt", async () => {
+    expect((await asTrader(() => call("PUT", "/risk-limits/trading-halt", { enabled: true, reason: "trader stop" }))).status).toBe(200);
+    expect(await readRow()).toMatchObject({ enabled: true, reason: "trader stop" });
+    expect(await asTrader(() => call("PUT", "/risk-limits/trading-halt", { enabled: false }))).toEqual({ status: 403, json: { error: "Only an admin can lift the trading halt." } });
+    expect(await readRow()).toMatchObject({ enabled: true, reason: "trader stop" });
+    expect((await call("PUT", "/risk-limits/trading-halt", { enabled: false })).status).toBe(200);
+    expect(await readRow()).toMatchObject({ enabled: false });
   });
 });

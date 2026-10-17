@@ -1,16 +1,15 @@
-// Infra-write tools — same Yes/Cancel Telegram confirm gate as
-// financial-write (see chat.ts), but for infrastructure/security actions
-// rather than trading. Currently just Cloudflare WAF custom-rule changes on
-// the ioriore.com zone (blocking/unblocking an attacker's IP or traffic
-// pattern) — added 2026-09-01, ported from menaris-admin-api's "Jack"
-// (analyst-agent-service.js's list_waf_rules/add_waf_rule/remove_waf_rule/
-// unblock_ip). Jack relies purely on a system-prompt instruction to ask
-// before calling add_waf_rule; here it's a real confirm button instead,
-// same reasoning as financial-write's departure from Jack (approved
-// 2026-08-21) — a rule change hits live production traffic immediately and
-// a mistaken expression could block real users, not just cost a bad
-// database record. Also resend_gateway_2fa, which restarts this
-// environment's IBKR Gateway so a fresh 2FA push reaches the phone.
+// Infra-write tools — infrastructure/security actions that never run on the
+// model's say-so alone: chat.ts intercepts every call in this tier and sends
+// a Telegram Yes/Cancel confirmation, and only a Yes runs execute(). Cloudflare
+// WAF custom-rule changes on the ioriore.com zone (blocking/unblocking an
+// attacker's IP or traffic pattern) — added 2026-09-01, ported from
+// menaris-admin-api's "Jack" (analyst-agent-service.js's list_waf_rules/
+// add_waf_rule/remove_waf_rule/unblock_ip). Jack relies purely on a
+// system-prompt instruction to ask before calling add_waf_rule; here it's a
+// real confirm button instead — a rule change hits live production traffic
+// immediately and a mistaken expression could block real users. Also
+// resend_gateway_2fa, which restarts this environment's IBKR Gateway so a
+// fresh 2FA push reaches the phone.
 import { environment } from "../../config/env.js";
 import { addWafRule, removeWafRule, unblockIp } from "../../lib/cloudflareService.js";
 import { describeFreshLoginResult } from "../../ibkr/gatewayControlResult.js";
