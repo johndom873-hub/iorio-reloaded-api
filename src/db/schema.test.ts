@@ -207,12 +207,11 @@ describe("database schema round-trips", () => {
       .insert({ requested_by_user_id: userId, request_type: "open_cash_secured_put", payload: JSON.stringify({ symbol: "SCHEMA", strategyKey: "cash_secured_put", legs: [] }) })
       .returning("*");
     expect(bare.gate_evaluation).toBeNull();
-    expect(bare.genosuke_notified_status).toBeNull();
 
     const verdict = {
       blocks: [],
       warnings: ["1 economic event before expiry: 2026-11-04 FOMC Rate Decision."],
-      limits: { blocked: false, reasons: [], details: { orderNotional: 18000, positionSharePct: 0.018, limits: { maxPositionPctOfPortfolio: 10 } } },
+      limits: { blocked: false, reasons: [], details: { orderNotional: 18000, orderSharePct: 0.018, limits: { maxOrderPctOfPortfolio: 10 } } },
       deltaBand: { compliant: true, reason: null },
       closeGate: null,
       tradingBlockedReason: null,
@@ -230,14 +229,9 @@ describe("database schema round-trips", () => {
     expect((await db("order_requests").where({ id: bare.id }).first()).gate_evaluation).toBeNull();
   });
 
-  it("order_requests: genosuke_notified_status is free text that stores and clears a status", async () => {
-    const [order] = await db("order_requests")
-      .insert({ requested_by_user_id: userId, request_type: "open_cash_secured_put", payload: JSON.stringify({ symbol: "SCHEMA", strategyKey: "cash_secured_put", legs: [] }), status: "submitted", genosuke_notified_status: "submitted" })
-      .returning("*");
-    expect(order.genosuke_notified_status).toBe("submitted");
+  it("order_requests: gate_evaluation is nullable jsonb, the Genosuke follow-up column is gone, and the status check holds", async () => {
     const columns = await db("information_schema.columns").where({ table_name: "order_requests" }).whereIn("column_name", ["gate_evaluation", "genosuke_notified_status"]).select("column_name", "data_type", "is_nullable");
-    expect(Object.fromEntries(columns.map((column) => [column.column_name, `${column.data_type}:${column.is_nullable}`]))).toEqual({ gate_evaluation: "jsonb:YES", genosuke_notified_status: "text:YES" });
-    // The existing status check still holds next to the new columns.
+    expect(Object.fromEntries(columns.map((column) => [column.column_name, `${column.data_type}:${column.is_nullable}`]))).toEqual({ gate_evaluation: "jsonb:YES" });
     await expect(db("order_requests").insert({ requested_by_user_id: userId, request_type: "open_cash_secured_put", payload: "{}", status: "not_a_status" })).rejects.toThrow(/order_requests_status_check/);
   });
 
@@ -246,7 +240,7 @@ describe("database schema round-trips", () => {
     expect(rows).toHaveLength(1);
     const [row] = rows;
     expect(row.id).toBe(true);
-    for (const column of ["max_position_pct_of_portfolio", "max_concentration_per_ticker_pct", "min_cash_reserve_pct", "min_annualized_yield_pct", "commission_warn_share_of_premium_pct"]) {
+    for (const column of ["max_order_pct_of_portfolio", "max_concentration_per_ticker_pct", "min_cash_reserve_pct", "min_annualized_yield_pct", "commission_warn_share_of_premium_pct"]) {
       expect(Number(row[column]), column).toBeGreaterThanOrEqual(0);
       expect(Number(row[column]), column).toBeLessThanOrEqual(100);
     }
@@ -261,9 +255,9 @@ describe("database schema round-trips", () => {
   it("trading_settings: stores and retrieves new values, rejects a second row, and the row is put back afterwards", async () => {
     const original = await db("trading_settings").first();
     try {
-      await db("trading_settings").update({ max_position_pct_of_portfolio: 12.5, delta_target_min: 0.125, delta_target_max: 0.375, recovery_dte_min: 3, recovery_dte_max: 9, updated_by_user_id: userId });
+      await db("trading_settings").update({ max_order_pct_of_portfolio: 12.5, delta_target_min: 0.125, delta_target_max: 0.375, recovery_dte_min: 3, recovery_dte_max: 9, updated_by_user_id: userId });
       const row = await db("trading_settings").first();
-      expect(Number(row.max_position_pct_of_portfolio)).toBe(12.5);
+      expect(Number(row.max_order_pct_of_portfolio)).toBe(12.5);
       expect(Number(row.delta_target_min)).toBe(0.125);
       expect(Number(row.delta_target_max)).toBe(0.375);
       expect(row.recovery_dte_min).toBe(3);
@@ -280,7 +274,7 @@ describe("database schema round-trips", () => {
     }
     const restored = await db("trading_settings").first();
     expect(restored.updated_by_user_id).toBe(original.updated_by_user_id);
-    expect(Number(restored.max_position_pct_of_portfolio)).toBe(Number(original.max_position_pct_of_portfolio));
+    expect(Number(restored.max_order_pct_of_portfolio)).toBe(Number(original.max_order_pct_of_portfolio));
   });
 
   it("the three trading-settings migrations are recorded as applied", async () => {

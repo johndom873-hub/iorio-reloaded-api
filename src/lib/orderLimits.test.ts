@@ -57,7 +57,7 @@ describe("computeInFlightOrderNotional", () => {
 
 describe("evaluateOrderLimitFigures for a CC + Put Ladder order", () => {
   // A $200,000 account, $60,000 cash, nothing locked; the platform's limits at 20% per position, 10% per ticker, 5% cash reserve.
-  const figures = { symbol: "LADR", totalPortfolioValue: 200_000, totalCashValue: 60_000, cashLockedInCsps: 0, inFlight: { totalNotional: 0, tickerNotional: 0 }, settings: { maxPositionPctOfPortfolio: 20, maxConcentrationPerTickerPct: 10, minCashReservePct: 5 } };
+  const figures = { symbol: "LADR", totalPortfolioValue: 200_000, totalCashValue: 60_000, cashLockedInCsps: 0, inFlight: { totalNotional: 0, tickerNotional: 0 }, settings: { maxOrderPctOfPortfolio: 20, maxConcentrationPerTickerPct: 10, minCashReservePct: 5 } };
 
   it("an order the platform's 10% per ticker would refuse passes inside a 25% pot", () => {
     // LADR already $30,000; the order adds $15,000 → $45,000: 22.5% of the account, under the $50,000 pot.
@@ -81,7 +81,7 @@ describe("evaluateOrderLimitFigures for a CC + Put Ladder order", () => {
 describe("evaluateOrderLimitFigures: the traders' capital cap", () => {
   // A $200,000 account with plenty of cash and loose platform limits, so only the cap can refuse. Pluto's budget is 50%: traders
   // may use $100,000 outside Pluto.
-  const figures = { symbol: "TRDR", totalPortfolioValue: 200_000, totalCashValue: 200_000, cashLockedInCsps: 0, existingTickerExposure: 0, inFlight: { totalNotional: 0, tickerNotional: 0 }, settings: { maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 } };
+  const figures = { symbol: "TRDR", totalPortfolioValue: 200_000, totalCashValue: 200_000, cashLockedInCsps: 0, existingTickerExposure: 0, inFlight: { totalNotional: 0, tickerNotional: 0 }, settings: { maxOrderPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 } };
 
   it("does not apply to an order that is not a trader's", () => {
     const result = evaluateOrderLimitFigures({ ...figures, orderNotional: 150_000 });
@@ -111,7 +111,7 @@ describe("evaluateOrderLimitFigures: the traders' capital cap", () => {
   });
 
   it("adds its refusal to the platform's own limits rather than replacing them", () => {
-    const result = evaluateOrderLimitFigures({ ...figures, settings: { ...figures.settings, maxPositionPctOfPortfolio: 10 }, orderNotional: 30_000, traderCapital: { capitalInUseOutsidePluto: 90_000, plutoCapitalBudgetPct: 50 } });
+    const result = evaluateOrderLimitFigures({ ...figures, settings: { ...figures.settings, maxOrderPctOfPortfolio: 10 }, orderNotional: 30_000, traderCapital: { capitalInUseOutsidePluto: 90_000, plutoCapitalBudgetPct: 50 } });
     expect(result.reasons).toEqual([expect.stringMatching(/above the 10% max order size/), expect.stringMatching(/^Traders may use \$100,000 outside Pluto/)]);
   });
 });

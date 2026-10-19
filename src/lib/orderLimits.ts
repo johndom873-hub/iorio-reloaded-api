@@ -18,9 +18,10 @@ import { formatWholeDollars } from "./formatWholeDollars.js";
 //
 // This order's own notional contribution, net of the premium it sells for (Marcelo 2026-10-12, the same exposure
 // as Positions' EXP $): a cash-secured put reserves (strike − premium) × 100 × quantity, since the premium lands in
-// cash as the strike is reserved; a covered call only adds notional for the shares it has to buy (the shortfall
-// beyond what's already held uncovered, the same shortfall math positions.ts's order-build auto-fill uses), less
-// the premium on those shares -- a fully-covered covered call therefore contributes 0. Free cash is IBKR's cash
+// cash as the strike is reserved; a covered call only adds notional for the shares it buys, less the premium on
+// those shares: a built order's own stock leg (a typed share count counts in full, Marcelo 2026-10-19), else, for a
+// setup form's check, the shortfall beyond what's already held uncovered (the same shortfall math positions.ts's
+// order-build auto-fill uses) -- a fully-covered covered call therefore contributes 0. Free cash is IBKR's cash
 // balance (which already holds every premium received) less the full strike of each open put, so cash after a
 // fill is exactly free cash less this net notional.
 //
@@ -58,11 +59,13 @@ export interface OrderLimitsInput {
   /** The order being evaluated, left out of the in-flight totals (it is not in flight against itself). */
   excludeOrderRequestId?: string;
   /**
-   * A CC + Put Ladder order (Marcelo 2026-10-15): the pot cap replaces the max position and max concentration limits (the
+   * A CC + Put Ladder order (Marcelo 2026-10-15): the pot cap replaces the max order size and max concentration limits (the
    * cash reserve stays), and a covered call's shares are those its stock leg buys (the ladder can buy every share even
    * with uncovered ones held), not the shortfall against the uncovered shares.
    */
   ladder?: { potFraction: number; stockSharesBought: number };
+  /** A built covered-call open with a stock leg: the shares that leg buys, counted in place of the shortfall against uncovered shares held. */
+  stockSharesBought?: number;
   /** A trader's order: loads the capital cap's figures (capitalOutsidePluto.ts's loadTraderCapitalFigures). */
   loadTraderCapital?: () => Promise<TraderCapitalFigures>;
 }
@@ -78,11 +81,11 @@ export interface TraderCapitalFigures {
 export interface OrderLimitsDetails {
   orderNotional: number;
   totalPortfolioValue: number;
-  positionSharePct: number;
+  orderSharePct: number;
   concentrationAfterPct: number;
   cashReserveAfterPct: number;
   inFlightNotional: number;
-  limits: { maxPositionPctOfPortfolio: number; maxConcentrationPerTickerPct: number; minCashReservePct: number };
+  limits: { maxOrderPctOfPortfolio: number; maxConcentrationPerTickerPct: number; minCashReservePct: number };
   /** A ladder order's pot in dollars (allocation × capital budget × net liquidation value); absent for every other order. */
   ladderPotDollars?: number;
   /** A trader's order: what traders may use outside Pluto, what is in use before this order, and Pluto's budget %. */
@@ -182,6 +185,7 @@ async function loadInFlightNotionals(symbol: string, excludeOrderRequestId: stri
 async function computeOrderNotionalForInput(input: OrderLimitsInput, spotPrice: number): Promise<number> {
   const needsShares = input.strategyKey === "covered_call" && input.rollFromStrike === undefined;
   if (needsShares && input.ladder) return input.ladder.stockSharesBought * Math.max(0, spotPrice - input.premium);
+  if (needsShares && input.stockSharesBought !== undefined) return input.stockSharesBought * Math.max(0, spotPrice - input.premium);
   return computeOrderNotional(input, spotPrice, needsShares ? await fetchAvailableUncoveredShares(input.tickerId) : 0);
 }
 
@@ -229,8 +233,8 @@ export interface OrderLimitFigures {
   cashLockedInCsps: number;
   existingTickerExposure: number;
   inFlight: InFlightTotals;
-  settings: Pick<TradingSettings, "maxPositionPctOfPortfolio" | "maxConcentrationPerTickerPct" | "minCashReservePct">;
-  /** A CC + Put Ladder order's pot as a share of the account: the pot cap replaces the max position and concentration limits. */
+  settings: Pick<TradingSettings, "maxOrderPctOfPortfolio" | "maxConcentrationPerTickerPct" | "minCashReservePct">;
+  /** A CC + Put Ladder order's pot as a share of the account: the pot cap replaces the max order size and concentration limits. */
   ladderPotFraction?: number;
   /** A trader's order: the traders' capital cap applies on top of the other limits. */
   traderCapital?: TraderCapitalFigures;
@@ -248,7 +252,7 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
   // sitting exactly at a 7% limit.
   const limitInDollars = (limitPct: number) => (limitPct * totalPortfolioValue) / 100;
 
-  const positionSharePct = orderNotional / totalPortfolioValue;
+  const orderSharePct = orderNotional / totalPortfolioValue;
   const tickerExposureAfter = existingTickerExposure + inFlight.tickerNotional + orderNotional;
   const concentrationAfterPct = tickerExposureAfter / totalPortfolioValue;
   const ladderPotDollars = figures.ladderPotFraction === undefined ? undefined : figures.ladderPotFraction * totalPortfolioValue;
@@ -257,8 +261,8 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
       reasons.push(`${figures.symbol} would be ${formatWholeDollars(tickerExposureAfter)}, above its CC + Put Ladder pot of ${formatWholeDollars(ladderPotDollars)} (${formatPct(figures.ladderPotFraction!)} of portfolio value)${workingOrdersNote}.`);
     }
   } else {
-    if (orderNotional > limitInDollars(settings.maxPositionPctOfPortfolio)) {
-      reasons.push(`This order is ${formatPct(positionSharePct)} of portfolio value, above the ${settings.maxPositionPctOfPortfolio}% max order size.`);
+    if (orderNotional > limitInDollars(settings.maxOrderPctOfPortfolio)) {
+      reasons.push(`This order is ${formatPct(orderSharePct)} of portfolio value, above the ${settings.maxOrderPctOfPortfolio}% max order size.`);
     }
     if (tickerExposureAfter > limitInDollars(settings.maxConcentrationPerTickerPct)) {
       reasons.push(`${figures.symbol} would be ${formatPct(concentrationAfterPct)} of portfolio value, above the ${settings.maxConcentrationPerTickerPct}% max concentration per ticker${workingOrdersNote}.`);
@@ -289,11 +293,11 @@ export function evaluateOrderLimitFigures(figures: OrderLimitFigures): OrderLimi
     details: {
       orderNotional,
       totalPortfolioValue,
-      positionSharePct,
+      orderSharePct,
       concentrationAfterPct,
       cashReserveAfterPct,
       inFlightNotional: inFlight.totalNotional,
-      limits: { maxPositionPctOfPortfolio: settings.maxPositionPctOfPortfolio, maxConcentrationPerTickerPct: settings.maxConcentrationPerTickerPct, minCashReservePct: settings.minCashReservePct },
+      limits: { maxOrderPctOfPortfolio: settings.maxOrderPctOfPortfolio, maxConcentrationPerTickerPct: settings.maxConcentrationPerTickerPct, minCashReservePct: settings.minCashReservePct },
       ...(ladderPotDollars === undefined ? {} : { ladderPotDollars }),
       ...(traderCapitalDetails === undefined ? {} : { traderCapital: traderCapitalDetails }),
     },

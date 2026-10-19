@@ -136,7 +136,7 @@ export function fixtureBacktestSettings(plutoOverrides: Partial<PlutoSettings> =
   return {
     pluto: fixturePlutoSettings({ minAnnualizedYieldPct: 10, minEdgeYieldPct: 5, ...plutoOverrides }),
     trading: {
-      maxPositionPctOfPortfolio: 10,
+      maxOrderPctOfPortfolio: 10,
       maxConcentrationPerTickerPct: 20,
       minCashReservePct: 5,
       deltaTargetMin: 0.1,

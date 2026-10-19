@@ -1479,23 +1479,6 @@ async function readLadderGateContext(orderRequest: { pluto_action_id?: string | 
   }
 }
 
-// What the order gate says about a built order right now, without confirming it: the same evaluation the confirm
-// step runs (orderGates.ts), judged for the requesting user (a trader's gets the traders' capital cap).
-positionsRouter.get("/orders/:id/gates", async (request, response) => {
-  const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
-  if (!orderRequest) {
-    response.status(404).json({ error: "Order not found." });
-    return;
-  }
-  const { ladder, error } = await readLadderGateContext(orderRequest);
-  if (error) {
-    response.json({ blocks: [error], warnings: [], evaluatedAt: new Date().toISOString() });
-    return;
-  }
-  const { blocks, warnings, evaluatedAt } = await evaluateOrderGates(orderRequest, ladder, { forTrader: !isAdminRequest(request) });
-  response.json({ blocks, warnings, evaluatedAt });
-});
-
 positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   const orderRequest = await db("order_requests").where({ id: request.params.id }).first();
   if (!orderRequest) {

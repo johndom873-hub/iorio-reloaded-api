@@ -173,17 +173,17 @@ export interface AccountFigures {
   excessLiquidity: number | null;
 }
 
-export function evaluateAccount(account: AccountFigures | null, maxPositionPctOfPortfolio: number | null): ReadinessCheck {
+export function evaluateAccount(account: AccountFigures | null, maxOrderPctOfPortfolio: number | null): ReadinessCheck {
   if (!account) return check("Account", "fail", "the IBKR account summary could not be read");
   if (account.netLiquidationValue === null || !(account.netLiquidationValue > 0)) return check("Account", "fail", "net liquidation value is missing or zero: the account is unfunded or not reporting");
   if (account.excessLiquidity !== null && account.excessLiquidity < 0) return check("Account", "fail", `excess liquidity is negative (${formatWholeDollars(account.excessLiquidity)}): the account is in a margin shortfall`);
   const parts = [`net liquidation ${formatWholeDollars(account.netLiquidationValue)}`];
   if (account.totalCashValue !== null) parts.push(`cash ${formatWholeDollars(account.totalCashValue)}`);
   if (account.buyingPower !== null) parts.push(`buying power ${formatWholeDollars(account.buyingPower)}`);
-  if (maxPositionPctOfPortfolio !== null) {
+  if (maxOrderPctOfPortfolio !== null) {
     // One contract of a cash-secured put ties up strike x 100, which may not exceed the max order size share of the account.
-    const largestSingleContractStrike = (account.netLiquidationValue * maxPositionPctOfPortfolio) / 100 / 100;
-    parts.push(`largest cash-secured put the ${maxPositionPctOfPortfolio}% max order size allows: strike $${Math.floor(largestSingleContractStrike)} (1 contract)`);
+    const largestSingleContractStrike = (account.netLiquidationValue * maxOrderPctOfPortfolio) / 100 / 100;
+    parts.push(`largest cash-secured put the ${maxOrderPctOfPortfolio}% max order size allows: strike $${Math.floor(largestSingleContractStrike)} (1 contract)`);
   }
   return check("Account", account.buyingPower === null || account.totalCashValue === null ? "warn" : "ok", parts.join(", "));
 }
@@ -200,7 +200,7 @@ export function evaluateTradingHalt(halt: TradingHalt, now: Date): ReadinessChec
 // --- The limits and targets (the settings you edit) ---
 
 export interface TradingSettingsFigures {
-  maxPositionPctOfPortfolio: number;
+  maxOrderPctOfPortfolio: number;
   maxConcentrationPerTickerPct: number;
   minCashReservePct: number;
   deltaTargetMin: number;
@@ -210,10 +210,10 @@ export interface TradingSettingsFigures {
 export function evaluateSettings(settings: TradingSettingsFigures | null): ReadinessCheck {
   if (!settings) return check("Trading settings", "fail", "the trading settings could not be read, so every order would be blocked");
   const zeroLimits = [
-    settings.maxPositionPctOfPortfolio === 0 ? "max order size" : null,
+    settings.maxOrderPctOfPortfolio === 0 ? "max order size" : null,
     settings.maxConcentrationPerTickerPct === 0 ? "max exposure per ticker" : null,
   ].filter((name): name is string => name !== null);
-  const summary = `max order size ${settings.maxPositionPctOfPortfolio}%, per ticker ${settings.maxConcentrationPerTickerPct}%, cash reserve ${settings.minCashReservePct}%, delta band ${settings.deltaTargetMin}-${settings.deltaTargetMax}`;
+  const summary = `max order size ${settings.maxOrderPctOfPortfolio}%, per ticker ${settings.maxConcentrationPerTickerPct}%, cash reserve ${settings.minCashReservePct}%, delta band ${settings.deltaTargetMin}-${settings.deltaTargetMax}`;
   if (zeroLimits.length > 0) return check("Trading settings", "fail", `${zeroLimits.join(" and ")} is 0%, which blocks every new order (${summary})`);
   return check("Trading settings", "ok", summary);
 }

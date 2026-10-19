@@ -11,8 +11,8 @@ import { evaluateOrderLimits, type OrderLimitsResult, type OrderLimitsStrategyKe
 import { fetchTradingBlockedReason } from "./tradingGate.js";
 
 // THE gate every order passes before it is transmitted, whatever its origin (Signals, the position form, the
-// chain, Pluto): one evaluation, used by the confirm step (hard blocks), by GET /positions/orders/:id/gates, and
-// (piecewise) by the Order Review panel's live stream. Approved 2026-10-05: the same gates
+// chain, Pluto): one evaluation, used by the confirm step (hard blocks) and (piecewise)
+// by the Order Review panel's live stream. Approved 2026-10-05: the same gates
 // for every order. A block refuses the order; a warning is shown but never refuses.
 //
 // What runs, by order type:
@@ -59,8 +59,19 @@ export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGa
   const optionLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && !leg.positionLegId) : payload.legs.find((leg) => leg.role === "option");
   const closeLeg = isRoll ? payload.legs.find((leg) => leg.role === "option" && leg.positionLegId) : undefined;
   if (!optionLeg || !optionLeg.strike || (isRoll && !closeLeg?.strike)) return null;
-  const stockSharesBought = payload.legs.find((leg) => leg.role === "stock")?.quantity ?? 0;
-  return { strategyKey: strategyKey as OrderLimitsStrategyKey, symbol: payload.symbol, quantity: optionLeg.quantity, strike: optionLeg.strike, premium: optionLeg.unitPrice, rollFromStrike: closeLeg?.strike, rollFromPremium: closeLeg?.unitPrice, excludeOrderRequestId: orderRequest.id, ...(ladder ? { ladder: { potFraction: ladder.potFraction, stockSharesBought } } : {}) };
+  const stockLegShares = payload.legs.find((leg) => leg.role === "stock")?.quantity;
+  return {
+    strategyKey: strategyKey as OrderLimitsStrategyKey,
+    symbol: payload.symbol,
+    quantity: optionLeg.quantity,
+    strike: optionLeg.strike,
+    premium: optionLeg.unitPrice,
+    rollFromStrike: closeLeg?.strike,
+    rollFromPremium: closeLeg?.unitPrice,
+    excludeOrderRequestId: orderRequest.id,
+    ...(stockLegShares !== undefined && !isRoll ? { stockSharesBought: stockLegShares } : {}),
+    ...(ladder ? { ladder: { potFraction: ladder.potFraction, stockSharesBought: stockLegShares ?? 0 } } : {}),
+  };
 }
 
 /** Who the order is judged for: a trader's order also gets the traders' capital cap. */

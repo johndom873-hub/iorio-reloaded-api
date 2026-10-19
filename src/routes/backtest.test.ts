@@ -228,14 +228,14 @@ describe("backtest routes", () => {
     expect(template.rows.find((row) => row.path === "pluto.maxSectorPctOfBudget")).toMatchObject({ group: "Capital and sizing", label: "Max per sector", unit: "percent", editable: true, now: Number(plutoRow.max_sector_pct_of_budget) });
     expect(template.rows.find((row) => row.path === "pluto.minGrade")?.now).toBe(plutoRow.min_grade);
     expect(template.rows.find((row) => row.path === "fixed.earningsDateKnownCalendarDaysAhead")).toMatchObject({ group: "Candidate quality", label: "Earnings dates known 30 days ahead", unit: "days", now: 30, editable: false });
-    const tradingRow = await testDb("trading_settings").first("max_position_pct_of_portfolio");
+    const tradingRow = await testDb("trading_settings").first("max_order_pct_of_portfolio");
     expect(template.rows.slice(5, 9).map((row) => [row.path, row.label])).toEqual([
       ["pluto.minCashReservePct", "Min cash reserve"],
-      ["trading.maxPositionPctOfPortfolio", "Max order size (order gate)"],
+      ["trading.maxOrderPctOfPortfolio", "Max order size (order gate)"],
       ["trading.maxConcentrationPerTickerPct", "Max per ticker (order gate)"],
       ["trading.minCashReservePct", "Min cash reserve (order gate)"],
     ]);
-    expect(template.rows[6]).toMatchObject({ now: Number(tradingRow.max_position_pct_of_portfolio), editable: true, note: "% of the account" });
+    expect(template.rows[6]).toMatchObject({ now: Number(tradingRow.max_order_pct_of_portfolio), editable: true, note: "% of the account" });
     // A look after 10:00 measures how far each expiry's quotes moved from the 10:00 surface: the limit binds again.
     expect(template.rows.find((row) => row.path === "pluto.maxIvShiftVp")).toMatchObject({ editable: true, now: Number(plutoRow.max_iv_shift_vp) });
     const forecastRowIndex = template.rows.findIndex((row) => row.path === "fixed.forecastWindowDays");

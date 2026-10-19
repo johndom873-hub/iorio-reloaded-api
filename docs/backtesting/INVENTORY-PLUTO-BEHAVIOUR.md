@@ -170,7 +170,7 @@ In order:
 
 **Platform order gate**, at build and confirm and again in the worker (`src/lib/orderGates.ts:11-22`, `:100-111`):
 - trading gate;
-- three limits for opens and rolls (max position %, per-ticker concentration %, min cash reserve %) (`src/lib/orderLimits.ts:96-105`, `:213-243`);
+- three limits for opens and rolls (max order size %, per-ticker concentration %, min cash reserve %) (`src/lib/orderLimits.ts:96-105`, `:213-243`);
 - delta band for opens, from a live IBKR delta, failing closed (`src/lib/deltaBandGate.ts:18-55`);
 - close gate for closes;
 - limit-price check per leg against its live mid (`src/lib/limitPriceCheck.ts:4-13`);

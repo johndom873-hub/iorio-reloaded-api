@@ -44,10 +44,10 @@ describe("what a refused open stops", () => {
   });
 
   it("reads an order-gate refusal from the limit it broke", () => {
-    const breaches = { maxPositionSize: false, tickerConcentration: false, cashReserve: false };
-    expect(refusal(["order_limits"], { orderLimitBreaches: { ...breaches, maxPositionSize: true } })).toEqual({ scope: "candidate", reason: null });
+    const breaches = { maxOrderSize: false, tickerConcentration: false, cashReserve: false };
+    expect(refusal(["order_limits"], { orderLimitBreaches: { ...breaches, maxOrderSize: true } })).toEqual({ scope: "candidate", reason: null });
     expect(refusal(["order_limits"], { orderLimitBreaches: { ...breaches, tickerConcentration: true } })).toEqual({ scope: "ticker", reason: "the order gate's ticker concentration limit" });
-    expect(refusal(["order_limits"], { orderLimitBreaches: { ...breaches, maxPositionSize: true, tickerConcentration: true, cashReserve: true } })).toEqual({ scope: "book", reason: "the order gate's cash reserve" });
+    expect(refusal(["order_limits"], { orderLimitBreaches: { ...breaches, maxOrderSize: true, tickerConcentration: true, cashReserve: true } })).toEqual({ scope: "book", reason: "the order gate's cash reserve" });
   });
 
   it("takes the widest reach when several gates refused", () => {
@@ -67,12 +67,12 @@ describe("the order gate's broken limits", () => {
   const figures = (orderNotional: number, existingTickerExposure: number, totalCashValue: number) => evaluateOrderLimitFigures({ symbol: "SYN", orderNotional, totalPortfolioValue: 1_000_000, totalCashValue, cashLockedInCsps: 0, existingTickerExposure, inFlight: { totalNotional: 0, tickerNotional: 0 }, settings });
 
   it("are read from the figures the gate reports", () => {
-    expect(orderLimitBreachesOf(figures(50_000, 0, 1_000_000))).toEqual({ maxPositionSize: false, tickerConcentration: false, cashReserve: false });
-    expect(orderLimitBreachesOf(figures(120_000, 0, 1_000_000))).toEqual({ maxPositionSize: true, tickerConcentration: false, cashReserve: false });
-    expect(orderLimitBreachesOf(figures(50_000, 180_000, 1_000_000))).toEqual({ maxPositionSize: false, tickerConcentration: true, cashReserve: false });
-    expect(orderLimitBreachesOf(figures(50_000, 0, 90_000))).toEqual({ maxPositionSize: false, tickerConcentration: false, cashReserve: true });
+    expect(orderLimitBreachesOf(figures(50_000, 0, 1_000_000))).toEqual({ maxOrderSize: false, tickerConcentration: false, cashReserve: false });
+    expect(orderLimitBreachesOf(figures(120_000, 0, 1_000_000))).toEqual({ maxOrderSize: true, tickerConcentration: false, cashReserve: false });
+    expect(orderLimitBreachesOf(figures(50_000, 180_000, 1_000_000))).toEqual({ maxOrderSize: false, tickerConcentration: true, cashReserve: false });
+    expect(orderLimitBreachesOf(figures(50_000, 0, 90_000))).toEqual({ maxOrderSize: false, tickerConcentration: false, cashReserve: true });
     const all = figures(150_000, 100_000, 160_000);
     expect(all.reasons).toHaveLength(3);
-    expect(orderLimitBreachesOf(all)).toEqual({ maxPositionSize: true, tickerConcentration: true, cashReserve: true });
+    expect(orderLimitBreachesOf(all)).toEqual({ maxOrderSize: true, tickerConcentration: true, cashReserve: true });
   });
 });

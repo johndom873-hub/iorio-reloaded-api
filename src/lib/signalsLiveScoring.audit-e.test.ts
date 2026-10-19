@@ -69,7 +69,7 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
   };
 }
 const account = { freeCash: 1_000_000 };
-const permissiveSettings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100, orderUnfilledCancelMinutes: 15 };
+const permissiveSettings = { minAnnualizedYieldPct: 0, deltaTargetMin: 0, deltaTargetMax: 1, recoveryDteMin: 1, recoveryDteMax: 14, maxOrderPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0, commissionWarnSharePctOfPremium: 5, priceCheckMaxDeviationPct: 10, priceCheckMinToleranceDollars: 0.05, spreadCostChargedPct: 100, orderUnfilledCancelMinutes: 15 };
 
 const flaggedExpiries = (scored: ReturnType<typeof scoreTicker>): string[] =>
   [...new Set(scored.candidates.filter((candidate) => candidate.flags.includes("macro_event_before_expiry")).map((candidate) => candidate.expiry))].sort();

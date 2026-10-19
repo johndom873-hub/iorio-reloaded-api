@@ -145,8 +145,8 @@ describe("an open", () => {
     expect(ledger.positions).toHaveLength(2);
   });
 
-  it("applies the order gate's max position size from the trading settings", async () => {
-    const context = lookContext({ tradingOverrides: { maxPositionPctOfPortfolio: 0.1 }, policy: { afterBlockedChoice: "stop" } });
+  it("applies the order gate's max order size from the trading settings", async () => {
+    const context = lookContext({ tradingOverrides: { maxOrderPctOfPortfolio: 0.1 }, policy: { afterBlockedChoice: "stop" } });
     const look = await runBacktestLook(context);
     expect(look.actions).toHaveLength(1);
     expect(look.actions[0]).toMatchObject({ outcome: "blocked" });
@@ -483,8 +483,8 @@ describe("an open larger than the order size", () => {
 
 describe("when every offer is refused", () => {
   it("tries each once under the choose-again rule, and the day's line counts them", async () => {
-    // The order gate's max position size is $1,000: no order fits.
-    const context = lookContext({ tradingOverrides: { maxPositionPctOfPortfolio: 0.1 }, policy: { afterBlockedChoice: "try_next" } });
+    // The order gate's max order size is $1,000: no order fits.
+    const context = lookContext({ tradingOverrides: { maxOrderPctOfPortfolio: 0.1 }, policy: { afterBlockedChoice: "try_next" } });
     const look = await runBacktestLook(context);
     expect(look.actions.length).toBeGreaterThan(5);
     expect(look.actions.every((action) => action.outcome === "blocked" && action.fillPrice === null)).toBe(true);
@@ -671,7 +671,7 @@ describe("several symbols on one book", () => {
     // $30,000 of cash, no per-order or per-ticker limit below it: the fills use it up. A symbol's scoring is kept across
     // a fill on the other one unless the smaller free cash changes a put's flag, so at the end every put of both symbols
     // must be flagged exactly when the free cash is below its risk.
-    const context = twoSymbolLook({ plutoOverrides: { capitalBudgetPct: 100, orderSizePctOfBudget: 100, maxTickerPctOfBudget: 100, minCashReservePct: 0 }, tradingOverrides: { maxPositionPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 } });
+    const context = twoSymbolLook({ plutoOverrides: { capitalBudgetPct: 100, orderSizePctOfBudget: 100, maxTickerPctOfBudget: 100, minCashReservePct: 0 }, tradingOverrides: { maxOrderPctOfPortfolio: 100, maxConcentrationPerTickerPct: 100, minCashReservePct: 0 } });
     context.ledger = createSimulatedLedger(30_000, tenAm("2026-02-02"));
     const look = await runBacktestLook(context);
 

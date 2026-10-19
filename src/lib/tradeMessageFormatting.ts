@@ -1,5 +1,5 @@
-// Plain-text pieces shared by every Telegram message that describes a trade: Genosuke's order follow-up, the trading-events
-// catch-all (orderTelegramNotices.ts, positionTelegramNotices.ts) and Genosuke's confirmation cards.
+// Plain-text pieces shared by every Telegram message that describes a trade: the trading-events catch-all
+// (orderTelegramNotices.ts, positionTelegramNotices.ts).
 
 import { easternIsoDate } from "./easternIsoDate.js";
 import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "./optionContractLabel.js";

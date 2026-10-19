@@ -223,10 +223,9 @@ async function createOpenPutPosition(): Promise<{ positionId: string; legId: str
 const missingId = "00000000-0000-4000-8000-000000000000";
 
 describe("authentication", () => {
-  it("refuses an unauthenticated gates read, confirm and close without evaluating anything", async () => {
+  it("refuses an unauthenticated confirm and close without evaluating anything", async () => {
     const ticker = await createTicker();
     const orderId = await insertOrder(ticker.symbol);
-    expect((await call("GET", `/positions/orders/${orderId}/gates`, undefined, { asUser: null })).status).toBe(401);
     expect((await call("POST", `/positions/orders/${orderId}/confirm`, {}, { asUser: null })).status).toBe(401);
     expect((await call("POST", `/positions/${missingId}/close`, { legs: [] }, { asUser: null })).status).toBe(401);
     expect(fetchTradingBlockedReasonMock).not.toHaveBeenCalled();
@@ -251,7 +250,6 @@ describe("POST /positions/orders", () => {
     expect(row.status).toBe("pending_confirmation");
     expect(row.signal_snapshot).toBeNull();
     expect(row.gate_evaluation).toBeNull();
-    expect(row.genosuke_notified_status).toBeNull();
     expect(row.requested_by_user_id).toBe(userId);
     // Building only prepares: no gate ran and nothing was sent to the worker.
     expect(evaluateOrderLimitsMock).not.toHaveBeenCalled();
@@ -329,62 +327,6 @@ describe("POST /positions/orders", () => {
     await bad({ symbol: ticker.symbol, strategyKey: "cash_secured_put", option: { ...optionBody, expiryDate: "2026-13" } }, 'option.expiryDate must be a YYYYMMDD date, got "2026-13".');
     await bad({ symbol: "NOSUCHSYMBOLZZ", strategyKey: "cash_secured_put", option: optionBody }, "Unknown symbol — add it via the Shortlist first.");
     expect(await testDb("order_requests").where({ requested_by_user_id: userId }).count({ count: "*" }).first()).toEqual({ count: "0" });
-  });
-});
-
-describe("GET /positions/orders/:id/gates", () => {
-  it("answers 404 for an unknown order", async () => {
-    const response = await call("GET", `/positions/orders/${missingId}/gates`);
-    expect(response.status).toBe(404);
-    expect(response.json).toEqual({ error: "Order not found." });
-    expect(fetchTradingBlockedReasonMock).not.toHaveBeenCalled();
-  });
-
-  it("returns exactly {blocks, warnings, evaluatedAt}, empty and ISO-stamped when everything passes", async () => {
-    const ticker = await createTicker();
-    const orderId = await insertOrder(ticker.symbol);
-    const response = await call("GET", `/positions/orders/${orderId}/gates`);
-    expect(response.status).toBe(200);
-    expect(Object.keys(response.json).sort()).toEqual(["blocks", "evaluatedAt", "warnings"]);
-    expect(response.json.blocks).toEqual([]);
-    expect(response.json.warnings).toEqual([]);
-    expect(new Date(response.json.evaluatedAt).toISOString()).toBe(response.json.evaluatedAt);
-  });
-
-  it("includes the calendar warning text from the order's stored events, and still returns no blocks", async () => {
-    const ticker = await createTicker();
-    const orderId = await insertOrder(ticker.symbol, { calendar_warning_events: JSON.stringify([{ title: "FOMC Rate Decision", eventDate: "2026-11-04" }]) });
-    const response = await call("GET", `/positions/orders/${orderId}/gates`);
-    expect(response.json.warnings).toEqual(["1 economic event before expiry: 2026-11-04 FOMC Rate Decision."]);
-    expect(response.json.blocks).toEqual([]);
-  });
-
-  it("lists every block in order (trading, limits, delta band) without changing the order", async () => {
-    const ticker = await createTicker();
-    const orderId = await insertOrder(ticker.symbol);
-    fetchTradingBlockedReasonMock.mockResolvedValue("Trading is blocked: worker offline.");
-    evaluateOrderLimitsMock.mockResolvedValue({ blocked: true, reasons: ["too big"] });
-    evaluateDeltaBandMock.mockResolvedValue({ compliant: false, reason: "Delta has drifted to 0.50, above the 0.2–0.3 delta band." });
-    const response = await call("GET", `/positions/orders/${orderId}/gates`);
-    expect(response.status).toBe(200);
-    expect(response.json.blocks).toEqual(["Trading is blocked: worker offline.", "too big", "Delta has drifted to 0.50, above the 0.2–0.3 delta band."]);
-    const row = await orderRow(orderId);
-    expect(row.status).toBe("pending_confirmation");
-    expect(row.gate_evaluation).toBeNull();
-    await settle();
-    expect(notifiedOrderIds).toEqual([]);
-  });
-
-  it("evaluates the order the same way for a Signals-built order as for a plain one", async () => {
-    const ticker = await createTicker();
-    const plainId = await insertOrder(ticker.symbol);
-    const signalsId = await insertOrder(ticker.symbol, { signal_snapshot: JSON.stringify({ candidate: { quoteSource: "live" } }) });
-    evaluateOrderLimitsMock.mockResolvedValue({ blocked: true, reasons: ["too big"] });
-    const [plain, fromSignals] = await Promise.all([call("GET", `/positions/orders/${plainId}/gates`), call("GET", `/positions/orders/${signalsId}/gates`)]);
-    expect(plain.json.blocks).toEqual(["too big"]);
-    expect(fromSignals.json.blocks).toEqual(["too big"]);
-    const limitInputs = evaluateOrderLimitsMock.mock.calls.map((callArguments) => ({ ...callArguments[0], excludeOrderRequestId: "x" }));
-    expect(limitInputs[0]).toEqual(limitInputs[1]);
   });
 });
 

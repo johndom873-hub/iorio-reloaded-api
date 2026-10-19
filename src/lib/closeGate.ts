@@ -11,7 +11,7 @@ import { daysToExpiry, describeOptionContract } from "./optionContractLabel.js";
 // Server-side close gate (gap fix 4 for Pluto, 2026-09-28). The Close form's live stream
 // (routes/positionCloseLive.ts) already derives "may this position be closed right now" —
 // regular session open, a live two-sided quote on every leg, a consistent open wheel cycle —
-// but until now only the browser honoured it: a direct API call, Genosuke, or a bot could
+// but until now only the browser honoured it: a direct API call or a bot could
 // build and confirm a close at 2 AM. This module runs the same derivation once, synchronously
 // enough for a route: subscribe the legs on the shared quote pool, wait at most the settle
 // grace for quotes, derive, unsubscribe. Fail closed: any failure to load or derive is a block.

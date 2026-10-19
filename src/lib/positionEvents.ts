@@ -91,7 +91,7 @@ export interface PositionEvent {
   // position's earliest opening fill that links to one
   // (trades.source_order_request_id) — an open order, or the roll whose fill
   // created the position. A position with no linked opening fill (e.g. one
-  // placed outside the app) is null — an honest gap, not a guess. Genosuke acts as a real
+  // placed outside the app) is null — an honest gap, not a guess. Pluto acts as a real
   // users row, so bot-initiated trades attribute through the same joins.
   attributedTo: string | null;
   /** The positions whose shares this one took over (an assigned put, an expired covered call's leftover stock…). */

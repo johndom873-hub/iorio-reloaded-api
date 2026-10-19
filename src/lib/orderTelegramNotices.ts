@@ -5,7 +5,7 @@ import { notifyTelegram } from "./notifyTelegram.js";
 import { describeTradeContract, formatTradePrice, tradeVerb } from "./tradeMessageFormatting.js";
 
 // Trading-events catch-all, order side (approved 2026-10-07): every status change of every app order, whoever placed it
-// (web, Genosuke or Pluto), is told once to the alerts chat. Pluto's and Genosuke's own messages about their orders stay
+// (web or Pluto; Genosuke on its past orders), is told once to the alerts chat. Pluto's own messages about its orders stay
 // as well, duplicates accepted. telegram_notified_status remembers the last status told, so a restart neither repeats nor
 // loses a message. Runs on the web dyno.
 

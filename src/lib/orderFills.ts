@@ -65,7 +65,7 @@ export function orderFillsPendingSql(alias: string): string {
 
 /**
  * SQL condition (on order_requests aliased `alias`) for an order cancelled before it was ever sent to IBKR: a review panel
- * closed without Confirm, or a gate-blocked Genosuke or Pluto order. Not news for a follow-up message. One left unconfirmed
+ * closed without Confirm, or a gate-blocked Pluto order. Not news for a follow-up message. One left unconfirmed
  * until the stale sweep cancelled it (not_confirmed_in_time) is not included: that one is still told.
  */
 export function orderCancelledBeforeSentSql(alias: string): string {

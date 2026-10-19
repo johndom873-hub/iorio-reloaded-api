@@ -40,7 +40,7 @@ const snapshot: BacktestSettings = {
     maxFillSlippagePct: 5,
   } as PlutoSettings,
   trading: {
-    maxPositionPctOfPortfolio: 10,
+    maxOrderPctOfPortfolio: 10,
     maxConcentrationPerTickerPct: 20,
     minCashReservePct: 5,
     deltaTargetMin: 0.15,
@@ -180,7 +180,7 @@ describe("validateBacktestSettingsOverrides", () => {
     expect(validateBacktestSettingsOverrides({ pluto: { minGrade: "best" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "minGrade must be one of strong, good, weak." });
     expect(validateBacktestSettingsOverrides({ trading: { deltaTargetMin: 0.4 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "deltaTargetMin cannot exceed deltaTargetMax." });
     expect(validateBacktestSettingsOverrides({ trading: { spreadCostChargedPct: 120 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "spreadCostChargedPct must be between 0 and 100." });
-    expect(validateBacktestSettingsOverrides({ trading: { maxPositionPctOfPortfolio: 101 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "maxPositionPctOfPortfolio must be between 0 and 100." });
+    expect(validateBacktestSettingsOverrides({ trading: { maxOrderPctOfPortfolio: 101 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "maxOrderPctOfPortfolio must be between 0 and 100." });
     expect(validateBacktestSettingsOverrides({ trading: { maxConcentrationPerTickerPct: 30, minCashReservePct: 5 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { trading: { maxConcentrationPerTickerPct: 30 } } });
   });
 

@@ -4,7 +4,7 @@ import { formatDurationHuman } from "./formatDurationHuman.js";
 import { describeTradingHaltBlock, fetchTradingHalt, type TradingHalt } from "./platformControls.js";
 
 // API-side half of the account-binding gate (Phase B work package 2): refuse to confirm an
-// order (409, instant feedback in the UI and Genosuke) unless the trading worker has recently
+// order (409, instant feedback in the UI and to Pluto) unless the trading worker has recently
 // reported, for THIS environment, that it is bound to the expected IBKR account. Fail closed:
 // no row, a stale heartbeat, or a worker that predates the binding columns all block.
 

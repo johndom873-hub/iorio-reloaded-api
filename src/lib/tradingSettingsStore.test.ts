@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mapTradingSettingsRow, validateTradingSettingsInput, type TradingSettingsInput } from "./tradingSettingsStore.js";
 
 const validInput: TradingSettingsInput = {
-  maxPositionPctOfPortfolio: 15,
+  maxOrderPctOfPortfolio: 15,
   maxConcentrationPerTickerPct: 20,
   minCashReservePct: 5,
   deltaTargetMin: 0.2,
@@ -26,7 +26,7 @@ describe("validateTradingSettingsInput", () => {
     const { minCashReservePct: _omitted, ...withoutField } = validInput;
     expect(validateTradingSettingsInput(withoutField)).toBe("minCashReservePct must be a number.");
     expect(validateTradingSettingsInput({ ...validInput, deltaTargetMax: "0.4" })).toBe("deltaTargetMax must be a number.");
-    expect(validateTradingSettingsInput({ ...validInput, maxPositionPctOfPortfolio: Number.NaN })).toBe("maxPositionPctOfPortfolio must be a number.");
+    expect(validateTradingSettingsInput({ ...validInput, maxOrderPctOfPortfolio: Number.NaN })).toBe("maxOrderPctOfPortfolio must be a number.");
   });
 
   it("rejects percentages outside 0-100", () => {
@@ -73,7 +73,7 @@ describe("validateTradingSettingsInput", () => {
 describe("mapTradingSettingsRow", () => {
   it("turns the stored numeric strings into numbers", () => {
     const mapped = mapTradingSettingsRow({
-      max_position_pct_of_portfolio: "15.00",
+      max_order_pct_of_portfolio: "15.00",
       max_concentration_per_ticker_pct: "20.00",
       min_cash_reserve_pct: "5.00",
       delta_target_min: "0.2000",

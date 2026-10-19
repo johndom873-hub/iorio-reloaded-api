@@ -20,7 +20,7 @@ let originalRow: StoredRow;
 const createdUserIds: string[] = [];
 
 const knownValues = {
-  max_position_pct_of_portfolio: 10,
+  max_order_pct_of_portfolio: 10,
   max_concentration_per_ticker_pct: 20,
   min_cash_reserve_pct: 5,
   delta_target_min: 0.2,
@@ -78,7 +78,7 @@ async function withoutSettingsRow(body: () => Promise<void>): Promise<void> {
 }
 
 const completeInput = {
-  maxPositionPctOfPortfolio: 11,
+  maxOrderPctOfPortfolio: 11,
   maxConcentrationPerTickerPct: 22,
   minCashReservePct: 3.5,
   deltaTargetMin: 0.15,
@@ -100,7 +100,7 @@ describe("the seeded trading_settings row", () => {
     const settings = await loadTradingSettings();
     const { commissionEstimator, ...numbers } = settings;
     expect(numbers).toEqual({
-      maxPositionPctOfPortfolio: 10,
+      maxOrderPctOfPortfolio: 10,
       maxConcentrationPerTickerPct: 20,
       minCashReservePct: 5,
       deltaTargetMin: 0.2,
@@ -131,7 +131,7 @@ describe("loadTradingSettingsForEditing", () => {
     expect(editing.updatedByDisplayName).toBeNull();
     expect(editing.updatedAt).toBe("2026-01-01T00:00:00.000Z");
     expect(editing.deltaTargetMin).toBe(0.2);
-    expect(typeof editing.maxPositionPctOfPortfolio).toBe("number");
+    expect(typeof editing.maxOrderPctOfPortfolio).toBe("number");
   });
 
   it("names the user who saved last, and updatedAt is the ISO form of the stored timestamp", async () => {
@@ -155,7 +155,7 @@ describe("loadTradingSettingsForEditing", () => {
         "deltaTargetMax",
         "deltaTargetMin",
         "maxConcentrationPerTickerPct",
-        "maxPositionPctOfPortfolio",
+        "maxOrderPctOfPortfolio",
         "minAnnualizedYieldPct",
         "minCashReservePct",
         "priceCheckMaxDeviationPct",
@@ -182,7 +182,7 @@ describe("saveTradingSettings", () => {
     const userId = await createUser("Saver");
     await saveTradingSettings(completeInput, userId);
     const row = await readRawRow();
-    expect(Number(row.max_position_pct_of_portfolio)).toBe(11);
+    expect(Number(row.max_order_pct_of_portfolio)).toBe(11);
     expect(Number(row.max_concentration_per_ticker_pct)).toBe(22);
     expect(Number(row.min_cash_reserve_pct)).toBe(3.5);
     expect(Number(row.delta_target_min)).toBe(0.15);
@@ -214,7 +214,7 @@ describe("saveTradingSettings", () => {
   it("refuses an unknown saver id through the foreign key and leaves the row unchanged", async () => {
     await expect(saveTradingSettings(completeInput, "00000000-0000-4000-8000-000000000000")).rejects.toMatchObject({ code: "23503" });
     const { commissionEstimator: _estimator, ...loaded } = await loadTradingSettings();
-    expect(loaded.maxPositionPctOfPortfolio).toBe(10);
+    expect(loaded.maxOrderPctOfPortfolio).toBe(10);
   });
 
   it("an invalid payload that skipped validation is stopped by the database and changes nothing", async () => {
@@ -222,7 +222,7 @@ describe("saveTradingSettings", () => {
     await expect(saveTradingSettings({ ...completeInput, deltaTargetMin: 0.5, deltaTargetMax: 0.4 }, userId)).rejects.toMatchObject({ code: "23514", constraint: "trading_settings_delta_band_valid" });
     const row = await readRawRow();
     expect(Number(row.delta_target_min)).toBe(0.2);
-    expect(Number(row.max_position_pct_of_portfolio)).toBe(10);
+    expect(Number(row.max_order_pct_of_portfolio)).toBe(10);
     expect(row.updated_by_user_id).toBeNull();
   });
 });
@@ -236,7 +236,7 @@ describe("database constraints on trading_settings", () => {
   });
 
   const percentageColumns = [
-    "max_position_pct_of_portfolio",
+    "max_order_pct_of_portfolio",
     "max_concentration_per_ticker_pct",
     "min_cash_reserve_pct",
     "min_annualized_yield_pct",
@@ -311,7 +311,7 @@ describe("loadRecoveryTargetWindow", () => {
 /** knownValues (what beforeEach stores) as a save payload: saving it changes nothing. */
 function knownSettingsAsInput() {
   return {
-    maxPositionPctOfPortfolio: knownValues.max_position_pct_of_portfolio,
+    maxOrderPctOfPortfolio: knownValues.max_order_pct_of_portfolio,
     maxConcentrationPerTickerPct: knownValues.max_concentration_per_ticker_pct,
     minCashReservePct: knownValues.min_cash_reserve_pct,
     deltaTargetMin: knownValues.delta_target_min,
@@ -347,12 +347,12 @@ describe("the Risk & Limits change history", () => {
 
   it("reads the history newest first with the saver's display name", async () => {
     const userId = await createUser("History Reader");
-    await saveTradingSettings({ ...knownSettingsAsInput(), maxPositionPctOfPortfolio: 12 }, userId);
-    await saveTradingSettings({ ...knownSettingsAsInput(), maxPositionPctOfPortfolio: 14 }, userId);
+    await saveTradingSettings({ ...knownSettingsAsInput(), maxOrderPctOfPortfolio: 12 }, userId);
+    await saveTradingSettings({ ...knownSettingsAsInput(), maxOrderPctOfPortfolio: 14 }, userId);
     const mine = (await loadRiskLimitsAudit(500)).filter((row) => row.userDisplayName === "History Reader");
     expect(mine.map((row) => [row.field, row.oldValue, row.newValue])).toEqual([
-      ["maxPositionPctOfPortfolio", "12", "14"],
-      ["maxPositionPctOfPortfolio", String(knownValues.max_position_pct_of_portfolio), "12"],
+      ["maxOrderPctOfPortfolio", "12", "14"],
+      ["maxOrderPctOfPortfolio", String(knownValues.max_order_pct_of_portfolio), "12"],
     ]);
     expect(mine[0]!.changedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });

@@ -87,7 +87,7 @@ export function handleOrderStatusEvent(event: OrderStatusEvent, dependencies: Or
     if (rows[0] && isCancel) await recordIbkrCancellationReason(rows[0].id, connection);
     return rows;
   };
-  // A cancel's status and reason commit together, so nothing reading the row (Genosuke's follow-up) sees one without the other.
+  // A cancel's status and reason commit together, so nothing reading the row (the Telegram order notices) sees one without the other.
   return (isCancel ? db.transaction(applyStatus) : applyStatus(db))
     .then(async (rows) => {
       if (!rows[0]) return;

@@ -6,7 +6,7 @@ import { loadCommissionEstimator, type CommissionEstimator } from "./commissionE
 
 export interface TradingSettings {
   /** Order gate: one order's notional may not exceed this share of net liquidation value. */
-  maxPositionPctOfPortfolio: number;
+  maxOrderPctOfPortfolio: number;
   /** Order gate: a ticker's exposure after the order may not exceed this share of net liquidation value. */
   maxConcentrationPerTickerPct: number;
   /** Order gate: free cash after the order may not fall below this share of net liquidation value. */
@@ -34,7 +34,7 @@ export interface TradingSettings {
 }
 
 export const tradingSettingsColumns = {
-  maxPositionPctOfPortfolio: "max_position_pct_of_portfolio",
+  maxOrderPctOfPortfolio: "max_order_pct_of_portfolio",
   maxConcentrationPerTickerPct: "max_concentration_per_ticker_pct",
   minCashReservePct: "min_cash_reserve_pct",
   deltaTargetMin: "delta_target_min",
@@ -54,7 +54,7 @@ export type TradingSettingsInput = Record<keyof typeof tradingSettingsColumns, n
 /** The column is a 32-bit integer; a window beyond this would be refused by the database as a server error instead of a clear message. */
 const maximumDteDays = 2_147_483_647;
 
-const percentageFields = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
+const percentageFields = ["maxOrderPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
 
 const maximumToleranceDollars = 1000;
 const maximumUnfilledCancelMinutes = 1440;
@@ -85,7 +85,7 @@ type TradingSettingsRow = Record<(typeof tradingSettingsColumns)[keyof typeof tr
 /** Pure: the stored row (numerics arrive as strings) as numbers. */
 export function mapTradingSettingsRow(row: TradingSettingsRow): Omit<TradingSettings, "commissionEstimator"> {
   return {
-    maxPositionPctOfPortfolio: Number(row.max_position_pct_of_portfolio),
+    maxOrderPctOfPortfolio: Number(row.max_order_pct_of_portfolio),
     maxConcentrationPerTickerPct: Number(row.max_concentration_per_ticker_pct),
     minCashReservePct: Number(row.min_cash_reserve_pct),
     deltaTargetMin: Number(row.delta_target_min),

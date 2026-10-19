@@ -24,7 +24,7 @@ notificationsRouter.get("/recent", async (_request, response) => {
 // forwarding whatever notificationBroadcaster receives from Postgres NOTIFY.
 // Replaces the old client-side 2s order-status poll (see
 // BackgroundJobsContext.tsx) and is also how a position close or an
-// order placed outside this browser (e.g. via Genosuke chat) reaches the
+// order placed outside this browser (e.g. by Pluto) reaches the
 // toast stack — the old polling only ever tracked orders this browser
 // itself started.
 notificationsRouter.get("/stream", (request, response) => {

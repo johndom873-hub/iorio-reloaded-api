@@ -18,7 +18,7 @@ export interface OpenRefusal {
 
 /** The limits of the order gate that an order broke. */
 export interface OrderLimitBreaches {
-  maxPositionSize: boolean;
+  maxOrderSize: boolean;
   tickerConcentration: boolean;
   cashReserve: boolean;
 }
@@ -26,10 +26,10 @@ export interface OrderLimitBreaches {
 /** Which of the order gate's three limits a refused order broke, from the figures it reports (the dollar comparisons of evaluateOrderLimitFigures). */
 export function orderLimitBreachesOf(limits: OrderLimitsResult): OrderLimitBreaches {
   const details = limits.details;
-  if (!limits.blocked || !details) return { maxPositionSize: false, tickerConcentration: false, cashReserve: false };
+  if (!limits.blocked || !details) return { maxOrderSize: false, tickerConcentration: false, cashReserve: false };
   const limitInDollars = (limitPercent: number) => (limitPercent * details.totalPortfolioValue) / 100;
   return {
-    maxPositionSize: details.orderNotional > limitInDollars(details.limits.maxPositionPctOfPortfolio),
+    maxOrderSize: details.orderNotional > limitInDollars(details.limits.maxOrderPctOfPortfolio),
     tickerConcentration: details.concentrationAfterPct * details.totalPortfolioValue > limitInDollars(details.limits.maxConcentrationPerTickerPct),
     cashReserve: details.cashReserveAfterPct * details.totalPortfolioValue < limitInDollars(details.limits.minCashReservePct),
   };

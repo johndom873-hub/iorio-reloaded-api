@@ -166,7 +166,7 @@ describe("GET /order-checks/limits: a valid call", () => {
     const result = {
       blocked: true,
       reasons: ["This order is 12.0% of portfolio value, above the 10% max order size."],
-      details: { orderNotional: 120_000, totalPortfolioValue: 1_000_000, positionSharePct: 0.12, concentrationAfterPct: 0.12, cashReserveAfterPct: 0.2, inFlightNotional: 0, limits: { maxPositionPctOfPortfolio: 10, maxConcentrationPerTickerPct: 20, minCashReservePct: 5 } },
+      details: { orderNotional: 120_000, totalPortfolioValue: 1_000_000, orderSharePct: 0.12, concentrationAfterPct: 0.12, cashReserveAfterPct: 0.2, inFlightNotional: 0, limits: { maxOrderPctOfPortfolio: 10, maxConcentrationPerTickerPct: 20, minCashReservePct: 5 } },
     };
     evaluateOrderLimitsMock.mockResolvedValue(result);
     const response = await call("GET", limitsQuery({ quantity: "10", strike: "120" }));

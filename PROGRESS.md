@@ -510,7 +510,10 @@ In plain words: Marce is the admin and can do everything. Everyone else is a tra
 - Risk & Limits: "Pluto" and "Everything else" blocks (`GET /risk-limits/capital-split`); settings printed for traders; change history of every setting and the halt for admins (`risk_limits_audit`). Orders record who confirmed (`confirmed_by_user_id`, "Confirmed by" in Today's orders).
 - `manage-user disable | enable <user>`: sign-in refused, sessions end.
 - Genosuke: its trading, risk-limit, halt and Shortlist-remove tools are gone.
-- "Max position size %" now reads "Max order size %" (it caps each order, not a ticker's total). The column/field rename waits for the backtest batches work.
+- "Max position size %" is now "Max order size %" everywhere (it caps each order, not a ticker's total): column `max_order_pct_of_portfolio`, fields `maxOrderPctOfPortfolio` / `orderSharePct`. Migration `20261019100001` also rewrites those keys in old orders' limit checks, backtest settings and the change history, so it applies by itself at promotion (2026-10-19).
+- A covered call's typed share count now counts in full in the limit check: shares the stock leg buys × (stock price − call premium), the ladder's rule (approved 2026-10-19). Auto-filled stock legs are unchanged.
+- Clean-up (2026-10-19): `GET /positions/orders/:id/gates` removed (no caller since Genosuke), `order_requests.genosuke_notified_status` dropped (`20261019100002`), stale Genosuke comments fixed.
+- Passkeys: staging `PASSKEY_LOGIN=off` (Marcelo 2026-10-19: password sign-in so tests can run there); prod is `off` today and should become `required`, after `genosuke_prod` is marked a service account.
 - At prod promotion Juan becomes a trader. Prod's EXP $ outside Pluto (~$140k) is above the ~$77k left after Pluto's 50% budget, so his new opens are blocked until exposure drops or the budget is lowered.
 
 ## Open decisions — Juan's Iorio Upgrades feedback (2026-08-24)

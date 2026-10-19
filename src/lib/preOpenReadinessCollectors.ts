@@ -131,7 +131,7 @@ export async function collectReadinessChecks(stage: ReadinessStage, now: Date, d
     guarded("Account", async () => {
       const account = await withTimeout(dependencies.loadAccount(), "the IBKR account summary").catch(() => null);
       const settings = await settingsPromise;
-      return evaluateAccount(account, settings?.maxPositionPctOfPortfolio ?? null);
+      return evaluateAccount(account, settings?.maxOrderPctOfPortfolio ?? null);
     }),
     guarded("Order path", async () => {
       const contract = await probeContractPromise;

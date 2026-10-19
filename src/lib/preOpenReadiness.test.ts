@@ -175,14 +175,14 @@ describe("evaluateAccount", () => {
 });
 
 describe("evaluateSettings", () => {
-  const settings = { maxPositionPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4 };
+  const settings = { maxOrderPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4 };
   it("lists the limits and the band", () => {
     expect(evaluateSettings(settings)).toMatchObject({ status: "ok", detail: "max order size 15%, per ticker 20%, cash reserve 5%, delta band 0.2-0.4" });
   });
   it("fails when unreadable and when a 0% limit would block every order", () => {
     expect(evaluateSettings(null).status).toBe("fail");
-    expect(evaluateSettings({ ...settings, maxPositionPctOfPortfolio: 0 })).toMatchObject({ status: "fail", detail: expect.stringContaining("max order size is 0%") });
-    expect(evaluateSettings({ ...settings, maxPositionPctOfPortfolio: 0, maxConcentrationPerTickerPct: 0 }).detail).toContain("max order size and max exposure per ticker is 0%");
+    expect(evaluateSettings({ ...settings, maxOrderPctOfPortfolio: 0 })).toMatchObject({ status: "fail", detail: expect.stringContaining("max order size is 0%") });
+    expect(evaluateSettings({ ...settings, maxOrderPctOfPortfolio: 0, maxConcentrationPerTickerPct: 0 }).detail).toContain("max order size and max exposure per ticker is 0%");
   });
 });
 

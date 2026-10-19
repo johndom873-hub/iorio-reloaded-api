@@ -32,7 +32,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   { path: "pluto.maxSectorPctOfBudget", group: "Capital and sizing", label: "Max per sector", unit: "percent", editable: true, note: "% of the capital budget; 100 = no cap; a symbol's sector is the one on its ticker" },
   { path: "pluto.maxOpenPositions", group: "Capital and sizing", label: "Max open positions", unit: "integer", editable: true, note: null },
   { path: "pluto.minCashReservePct", group: "Capital and sizing", label: "Min cash reserve", unit: "percent", editable: true, note: null },
-  { path: "trading.maxPositionPctOfPortfolio", group: "Capital and sizing", label: "Max order size (order gate)", unit: "percent", editable: true, note: percentOfAccount },
+  { path: "trading.maxOrderPctOfPortfolio", group: "Capital and sizing", label: "Max order size (order gate)", unit: "percent", editable: true, note: percentOfAccount },
   { path: "trading.maxConcentrationPerTickerPct", group: "Capital and sizing", label: "Max per ticker (order gate)", unit: "percent", editable: true, note: percentOfAccount },
   { path: "trading.minCashReservePct", group: "Capital and sizing", label: "Min cash reserve (order gate)", unit: "percent", editable: true, note: percentOfAccount },
   { path: "pluto.stressRiskBudgetPct", group: "Capital and sizing", label: "Stress cap per order", unit: "percent", editable: true, note: percentOfAccount },

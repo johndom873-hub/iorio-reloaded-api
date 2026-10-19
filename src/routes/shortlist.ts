@@ -375,7 +375,7 @@ shortlistRouter.patch("/:id/bot-enabled", requireAdmin, async (request, response
 
 shortlistRouter.delete("/:id", requireAdmin, async (request, response) => {
   // Refused while the ticker has an open position; the UI greys Remove out
-  // for the same reason, this covers Genosuke and stale tabs. Checked in the
+  // for the same reason, this covers direct API calls and stale tabs. Checked in the
   // same transaction as the removal so a position opening in between can't slip past.
   const outcome = await db.transaction(async (trx): Promise<"removed" | "not_found" | { openPositionCount: number }> => {
     const entry = await trx("shortlist_entries").where({ id: request.params.id }).whereNull("removed_at").first(["ticker_id"]);

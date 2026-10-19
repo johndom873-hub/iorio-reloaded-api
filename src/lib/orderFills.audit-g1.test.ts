@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrderFill } from "./orderFills.js";
 
-// Audit (G1, 2026-10-07): the shared fill-wait rule used by the trading-events catch-all and Genosuke's follow-up.
+// Audit (G1, 2026-10-07): the fill-wait rule used by the trading-events catch-all.
 vi.mock("../db/connection.js", () => ({ db: {} }));
 
 const { describeOrderFillLine, fillsAreComplete, shouldWaitForFills, fillBearingOrderStatuses } = await import("./orderFills.js");

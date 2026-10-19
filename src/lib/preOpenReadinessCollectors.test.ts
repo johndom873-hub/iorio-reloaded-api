@@ -84,7 +84,7 @@ function healthyDependencies(overrides: Partial<ReadinessDependencies> = {}): Re
     appEnvironment: "production",
     readEnvironment: () => ({ ...secrets, APP_ENVIRONMENT: "production", IBKR_TRADING_MODE: "live", IBKR_EXPECTED_ACCOUNT_ID: "U21518308", IBKR_MARKET_DATA_LINES_ENABLED: "true", DAY_SIGNALS_LOOP_ENABLED: "true", EXPIRY_SETTLEMENT_MODE: "apply", GENOSUKE_ENABLED: "true" }),
     loadWorkerRow: async () => ({ updatedAt: new Date(now.getTime() - 20_000), connected: true, appEnvironment: "production", accountBindingStatus: "ok", accountBindingReason: null, ibkrAccountIds: ["U21518308"], detectedTradingMode: "live", configuredTradingMode: "live", gitSha: "abc1234" }),
-    loadSettings: async () => ({ maxPositionPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4, recoveryDteMin: 1, recoveryDteMax: 14, minAnnualizedYieldPct: 50, commissionWarnSharePctOfPremium: 5 }),
+    loadSettings: async () => ({ maxOrderPctOfPortfolio: 15, maxConcentrationPerTickerPct: 20, minCashReservePct: 5, deltaTargetMin: 0.2, deltaTargetMax: 0.4, recoveryDteMin: 1, recoveryDteMax: 14, minAnnualizedYieldPct: 50, commissionWarnSharePctOfPremium: 5 }),
     loadTradingHalt: async () => ({ enabled: false, reason: null, setByUserId: null, setByDisplayName: null, setAt: null }),
     loadAccount: async () => ({ netLiquidationValue: 100_000, totalCashValue: 60_000, buyingPower: 200_000, excessLiquidity: 50_000 }),
     loadProbeContract: async () => probeContract,
@@ -333,7 +333,7 @@ describe("createDefaultReadinessDependencies", () => {
   });
 
   it("reads the trading settings and the trading halt from their stores", async () => {
-    const settings = { maxPositionPctOfPortfolio: 15 };
+    const settings = { maxOrderPctOfPortfolio: 15 };
     const halt = { enabled: false };
     mocks.loadTradingSettingsForEditing.mockResolvedValue(settings);
     mocks.fetchTradingHalt.mockResolvedValue(halt);

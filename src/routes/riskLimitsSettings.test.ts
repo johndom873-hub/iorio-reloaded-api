@@ -48,7 +48,7 @@ let userId: string;
 let originalRow: Record<string, unknown>;
 
 const knownRow = {
-  max_position_pct_of_portfolio: 10,
+  max_order_pct_of_portfolio: 10,
   max_concentration_per_ticker_pct: 20,
   min_cash_reserve_pct: 5,
   delta_target_min: 0.2,
@@ -66,7 +66,7 @@ const knownRow = {
 };
 
 const validPayload = {
-  maxPositionPctOfPortfolio: 12,
+  maxOrderPctOfPortfolio: 12,
   maxConcentrationPerTickerPct: 25,
   minCashReservePct: 8,
   deltaTargetMin: 0.1,
@@ -82,7 +82,7 @@ const validPayload = {
 };
 
 const fieldNames = Object.keys(validPayload) as (keyof typeof validPayload)[];
-const percentageFieldNames = ["maxPositionPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
+const percentageFieldNames = ["maxOrderPctOfPortfolio", "maxConcentrationPerTickerPct", "minCashReservePct", "minAnnualizedYieldPct", "commissionWarnSharePctOfPremium", "priceCheckMaxDeviationPct", "spreadCostChargedPct"] as const;
 
 beforeAll(async () => {
   originalRow = await testDb("trading_settings").first();
@@ -155,7 +155,7 @@ describe("GET /risk-limits/settings", () => {
 
 function validPayloadFromRow(row: typeof knownRow) {
   return {
-    maxPositionPctOfPortfolio: row.max_position_pct_of_portfolio,
+    maxOrderPctOfPortfolio: row.max_order_pct_of_portfolio,
     maxConcentrationPerTickerPct: row.max_concentration_per_ticker_pct,
     minCashReservePct: row.min_cash_reserve_pct,
     deltaTargetMin: row.delta_target_min,
@@ -180,7 +180,7 @@ describe("PUT /risk-limits/settings: a valid save", () => {
     expect(new Date(response.json.updatedAt).getTime()).toBeGreaterThan(Date.now() - 60_000);
 
     const row = await readRow();
-    expect(Number(row.max_position_pct_of_portfolio)).toBe(12);
+    expect(Number(row.max_order_pct_of_portfolio)).toBe(12);
     expect(Number(row.max_concentration_per_ticker_pct)).toBe(25);
     expect(Number(row.min_cash_reserve_pct)).toBe(8);
     expect(Number(row.delta_target_min)).toBe(0.1);
@@ -218,7 +218,7 @@ describe("PUT /risk-limits/settings: a valid save", () => {
 
   it("accepts every boundary: 0% and 100%, the full 0 to 1 delta band, min equal to max, a one-day window starting at 0", async () => {
     const boundary = {
-      maxPositionPctOfPortfolio: 0,
+      maxOrderPctOfPortfolio: 0,
       maxConcentrationPerTickerPct: 100,
       minCashReservePct: 0,
       deltaTargetMin: 0,
@@ -241,16 +241,16 @@ describe("PUT /risk-limits/settings: a valid save", () => {
   });
 
   it("two quick saves one after the other keep the last", async () => {
-    await call("PUT", "/risk-limits/settings", { ...validPayload, maxPositionPctOfPortfolio: 11 });
-    await call("PUT", "/risk-limits/settings", { ...validPayload, maxPositionPctOfPortfolio: 13, deltaTargetMax: 0.45 });
+    await call("PUT", "/risk-limits/settings", { ...validPayload, maxOrderPctOfPortfolio: 11 });
+    await call("PUT", "/risk-limits/settings", { ...validPayload, maxOrderPctOfPortfolio: 13, deltaTargetMax: 0.45 });
     const row = await readRow();
-    expect(Number(row.max_position_pct_of_portfolio)).toBe(13);
+    expect(Number(row.max_order_pct_of_portfolio)).toBe(13);
     expect(Number(row.delta_target_max)).toBe(0.45);
   });
 
   it("two saves at the same time leave one complete payload, never a mixture of the two", async () => {
-    const first = { ...validPayload, maxPositionPctOfPortfolio: 11, deltaTargetMin: 0.11, recoveryDteMax: 61, minAnnualizedYieldPct: 31 };
-    const second = { ...validPayload, maxPositionPctOfPortfolio: 14, deltaTargetMin: 0.14, recoveryDteMax: 64, minAnnualizedYieldPct: 34 };
+    const first = { ...validPayload, maxOrderPctOfPortfolio: 11, deltaTargetMin: 0.11, recoveryDteMax: 61, minAnnualizedYieldPct: 31 };
+    const second = { ...validPayload, maxOrderPctOfPortfolio: 14, deltaTargetMin: 0.14, recoveryDteMax: 64, minAnnualizedYieldPct: 34 };
     const [firstResponse, secondResponse] = await Promise.all([call("PUT", "/risk-limits/settings", first), call("PUT", "/risk-limits/settings", second)]);
     expect([firstResponse.status, secondResponse.status]).toEqual([200, 200]);
     const { updatedAt: _a, updatedByDisplayName: _b, ...stored } = (await call("GET", "/risk-limits/settings")).json;
@@ -289,12 +289,12 @@ describe("PUT /risk-limits/settings: every validation failure is a 400 with the 
   });
 
   it("an empty body, no body at all and an array are all reported as the first missing field", async () => {
-    await expectRejected({}, "maxPositionPctOfPortfolio must be a number.");
-    await expectRejected([], "maxPositionPctOfPortfolio must be a number.");
+    await expectRejected({}, "maxOrderPctOfPortfolio must be a number.");
+    await expectRejected([], "maxOrderPctOfPortfolio must be a number.");
     const before = await readRow();
     const noBody = await fetch(`${baseUrl}/risk-limits/settings`, { method: "PUT", headers: { "x-test-user-id": userId } });
     expect(noBody.status).toBe(400);
-    expect(await noBody.json()).toEqual({ error: "maxPositionPctOfPortfolio must be a number." });
+    expect(await noBody.json()).toEqual({ error: "maxOrderPctOfPortfolio must be a number." });
     expect(await readRow()).toEqual(before);
   });
 
@@ -313,9 +313,9 @@ describe("PUT /risk-limits/settings: every validation failure is a 400 with the 
   });
 
   it("rejects a number too large for a double (it parses to Infinity) as not a number", async () => {
-    const rawBody = JSON.stringify(validPayload).replace('"maxPositionPctOfPortfolio":12', '"maxPositionPctOfPortfolio":1e999');
+    const rawBody = JSON.stringify(validPayload).replace('"maxOrderPctOfPortfolio":12', '"maxOrderPctOfPortfolio":1e999');
     expect(rawBody).toContain("1e999");
-    await expectRejected(undefined, "maxPositionPctOfPortfolio must be a number.", { rawBody });
+    await expectRejected(undefined, "maxOrderPctOfPortfolio must be a number.", { rawBody });
   });
 
   it("rejects a delta min above the delta max", async () => {

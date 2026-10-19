@@ -124,7 +124,7 @@ Timing detail that matters for a replay: both cycle modules group events within 
   - Covered call: `max(0, quantity × 100 − freeShares) × max(0, spot − premium)`.
   - Put roll: `max(0, newStrike − oldStrike − (newPremium − buyback)) × 100 × quantity`.
   - Covered-call roll: 0.
-- `evaluateOrderLimitFigures` (`:213-254`): max position, ticker concentration after the order, cash reserve after the order.
+- `evaluateOrderLimitFigures` (`:213-254`): max order size, ticker concentration after the order, cash reserve after the order.
 
 ### 2.6 Pluto sizing
 `src/pluto/postModelGates.ts`:
