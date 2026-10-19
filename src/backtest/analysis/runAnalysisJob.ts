@@ -1,4 +1,5 @@
 import { db } from "../../db/connection.js";
+import type { BacktestBaselineSettings } from "../backtestTypes.js";
 import { readBacktestDataFileContents, readBacktestDataFilePeriodContents } from "../dataFileSummary.js";
 import { createBacktestSession } from "../jobs/backtestSessionStore.js";
 import { cancelBacktestJob } from "../jobs/backtestJobStore.js";
@@ -41,11 +42,37 @@ function waitOrCancel(milliseconds: number, control: AnalysisJobControl): Promis
   });
 }
 
-/** Creates the analysis's backtest session (the lab's values, the ticker's overrides, the file's whole period) and waits for it. */
+/**
+ * Creates the analysis's backtest session (the file's whole period) and waits for it: at the lab's values and the ticker's
+ * overrides, or for an Analyse Only run at its values (Marcelo 2026-10-19: both buttons run the same analysis), the ladder
+ * values as the ticker's and the global-only ones (days to expiry, spread limit) as the session's overrides.
+ */
 async function runAnalysisBacktest(symbol: string, labValues: AnalysisLabValues, analysisId: string, control: AnalysisJobControl): Promise<AnalysisBacktestFigures | { error: string }> {
   const contents = readBacktestDataFileContents(symbol);
   if (!contents?.firstDate || !contents.lastDate) return { error: "The data file has no complete days." };
   const { baseline, potDollars } = labValues.effective;
+  // The analysis is the CC + Put Ladder's: the baseline decides even when the lab's decision maker is another.
+  const overrides: Record<string, unknown> = labValues.settings.decisionMaker === "baseline" ? {} : { decisionMaker: "baseline" };
+  let trialValues: Record<string, unknown> = {};
+  if (labValues.trial) {
+    const globalBaseline: Partial<BacktestBaselineSettings> = labValues.settings.baseline ?? {};
+    const globalOnly = Object.fromEntries((["minDte", "maxDte", "maxSpreadPctOfMid"] as const).filter((key) => baseline[key] !== globalBaseline[key]).map((key) => [key, baseline[key]]));
+    if (Object.keys(globalOnly).length > 0) overrides.baseline = globalOnly;
+    trialValues = {
+      symbolSettings: {
+        [symbol]: {
+          potDollars,
+          baseline: {
+            ladderSharesPct: baseline.ladderSharesPct,
+            ladderRungs: baseline.ladderRungs,
+            minAbsDelta: baseline.minAbsDelta,
+            maxAbsDelta: baseline.maxAbsDelta,
+            ...(baseline.ladderShock === "fixed" ? { ladderShock: "fixed", ladderShockPct: baseline.ladderShockPct } : { ladderShock: baseline.ladderShock }),
+          },
+        },
+      },
+    };
+  }
   let request: Awaited<ReturnType<typeof validateSessionRequestAgainstLab>>;
   try {
     request = await validateSessionRequestAgainstLab({
@@ -55,8 +82,8 @@ async function runAnalysisBacktest(symbol: string, labValues: AnalysisLabValues,
       endDate: contents.lastDate,
       tablesMode: "walk_forward",
       settingsSource: "per_ticker",
-      // The analysis is the CC + Put Ladder's: the baseline decides even when the lab's decision maker is another.
-      overrides: labValues.settings.decisionMaker === "baseline" ? {} : { decisionMaker: "baseline" },
+      overrides,
+      ...trialValues,
     });
   } catch (error) {
     return { error: `The backtest could not start: ${error instanceof Error ? error.message : String(error)}` };
@@ -89,7 +116,6 @@ async function reusableAnalysisSession(analysisId: string, symbol: string, labVa
     .join("backtest_sessions as s", "s.id", "a.session_id")
     .where({ "a.symbol": symbol, "a.lab_values_hash": labValuesHash, "a.option_last_date": optionLastDate, "a.formulas_version": analysisFormulasVersion, "s.status": "succeeded" })
     .whereNot("a.id", analysisId)
-    .whereNot("a.reason", "trial")
     .where((inner) => (barsLastDate === null ? inner.whereNull("a.bars_last_date") : inner.where("a.bars_last_date", barsLastDate)))
     .orderBy("a.created_at", "desc")
     .first("a.session_id");
@@ -126,15 +152,13 @@ export async function runAnalysisJob(jobId: string, control: AnalysisJobControl)
         file_fingerprint: JSON.stringify({ completeDays: contents?.completeDays ?? null, lastOptionDate: figures.optionLastDate, barCount: figures.bars.length, lastBarDate: figures.barsLastDate }),
       });
 
-    if (analysis.reason !== "trial") {
-      await control.reportProgress(0, 0, "backtest" satisfies AnalysisStep);
-      const reusedSessionId = await reusableAnalysisSession(analysis.id, analysis.symbol, analysis.lab_values_hash, figures.optionLastDate, figures.barsLastDate);
-      if (reusedSessionId) await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ session_id: reusedSessionId });
-      stored.analysisBacktest = reusedSessionId
-        ? await computeAnalysisBacktestFigures(reusedSessionId, analysis.symbol)
-        : await runAnalysisBacktest(analysis.symbol, analysis.lab_values, analysis.id, control);
-      await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ figures: JSON.stringify(stored) });
-    }
+    await control.reportProgress(0, 0, "backtest" satisfies AnalysisStep);
+    const reusedSessionId = await reusableAnalysisSession(analysis.id, analysis.symbol, analysis.lab_values_hash, figures.optionLastDate, figures.barsLastDate);
+    if (reusedSessionId) await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ session_id: reusedSessionId });
+    stored.analysisBacktest = reusedSessionId
+      ? await computeAnalysisBacktestFigures(reusedSessionId, analysis.symbol)
+      : await runAnalysisBacktest(analysis.symbol, analysis.lab_values, analysis.id, control);
+    await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ figures: JSON.stringify(stored) });
     if (control.cancelRequested) throw new AnalysisCancelledError();
 
     await control.reportProgress(0, 0, "summary" satisfies AnalysisStep);

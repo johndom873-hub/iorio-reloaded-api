@@ -62,7 +62,8 @@ export interface ChainScanDayRow {
   /** The Call a new Covered Call entry would sell (the engine's choice); null when none passes. */
   bestEntryCall: { strike: number; expiry: string; dte: number; premiumYield: number; delta: number } | null;
   /** The contracts the day's largest pot is taken from, with their volume limits; null when none passes. */
-  largestPotPut: { strike: number; volumeCap: number } | null;
+  /** The ladder's Put and its volume limit; `previousVolume` is the previous session's volume the limit is 20% of. */
+  largestPotPut: { strike: number; volumeCap: number; previousVolume: number | null } | null;
   largestPotCall: { strike: number; volumeCap: number } | null;
   passingTotal: number;
   /** Passing contracts quoted at or under 25% of the mid. */
@@ -151,7 +152,7 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
     nearestExpiryFirst: settings.expiryChoice === "nearest_qualifying",
     ...earnings,
   })[0];
-  row.largestPotPut = put ? { strike: put.strike, volumeCap: put.volumeCap } : null;
+  row.largestPotPut = put ? { strike: put.strike, volumeCap: put.volumeCap, previousVolume: previousSessionVolumeByContract?.get(contractKey({ right: "P", expiry: put.expiry, strike: put.strike })) ?? null } : null;
   row.largestPotCall = call ? { strike: call.strike, volumeCap: call.volumeCap } : null;
   row.bestEntryCall = call ? { strike: call.strike, expiry: call.expiry, dte: call.dte, premiumYield: call.premiumYield, delta: call.delta } : null;
   return row;

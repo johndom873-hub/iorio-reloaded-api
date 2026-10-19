@@ -15,6 +15,7 @@ import { ladderShock } from "../engine/backtestBaselineLadder.js";
 import type { BacktestBaselineSettings } from "../backtestTypes.js";
 import { summarizeChainScan, type AnalysisChainSummary, type ChainMapContract, type ChainScanDayRow } from "./analysisChainScan.js";
 import { scanChainDaysInParallel } from "./analysisChainScanPool.js";
+import { computeOptionActivity, type AnalysisOptionActivity } from "./analysisOptionActivity.js";
 import { buildChainScanDayInputs, tenOclockPriceAsTraded } from "./analysisDayInputs.js";
 import { correlationRows, impliedReportMove, reportMove, reportSessionDates, summarizeEarnings, type AnalysisCorrelationRow, type AnalysisEarningsSummary, type AnalysisReport } from "./analysisEarningsAndCorrelation.js";
 import {
@@ -76,19 +77,22 @@ export interface AnalysisFigures {
   };
   /**
    * Each scanned day with a 10:00 price: [date, price as traded, shock, the best capped Put's volume limit, its strike, the
-   * best entry Call's volume limit] (the contract fields null when none passed). The window computes the fits and the
+   * best entry Call's volume limit, the best capped Put's previous-session volume] (the contract fields null when none
+   * passed; the last field absent on analyses computed before 2026-10-19). The window computes the fits and the
    * largest pots from them.
    */
   fitDays: AnalysisFitDayRow[];
   /** True when the lab's volatility-edge filter or Edge Yield ranking applies: the largest pot's contracts were chosen without them. */
   largestPotWithoutModel: boolean;
+  /** Options volume and open interest from the file (analysisOptionActivity.ts); null when the file can't be read. */
+  optionActivity: AnalysisOptionActivity | null;
   earnings: AnalysisEarningsSummary & { exDividendDates: string[]; hasTickerRow: boolean };
   correlation: { rows: AnalysisCorrelationRow[]; skipped: Record<string, string>; spySource: "file" | "database" | null };
   profile: { all: AnalysisProfile | null; twoYear: AnalysisProfile | null };
   dataQuality: AnalysisDataQuality;
 }
 
-export type AnalysisFitDayRow = [string, number, number, number | null, number | null, number | null];
+export type AnalysisFitDayRow = [string, number, number, number | null, number | null, number | null, (number | null)?];
 
 export interface AnalysisDataQuality {
   completeDays: number;
@@ -240,6 +244,14 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
     onChunkDone: (daysDone) => report("chains", daysDone, completeDays.length),
   });
   const scanSeconds = (Date.now() - scanStarted) / 1000;
+  const capByDate = new Map(rows.flatMap((row) => (row.cap === null ? [] : [[row.date, row.cap] as [string, number]])));
+  const activityDatabase = openBacktestDataFileReadOnly(symbol);
+  let optionActivity: AnalysisOptionActivity | null = null;
+  try {
+    if (activityDatabase) optionActivity = computeOptionActivity(activityDatabase, completeDays.at(-1)!, capByDate);
+  } finally {
+    activityDatabase?.close();
+  }
   const summary = summarizeChainScan(rows);
   const last = rows.at(-1) ?? null;
   const passing = (row: ChainScanDayRow, view: "C" | "P" | "Pcap") => Object.values(row.cells[view]).reduce((sum, cell) => sum + (cell?.count ?? 0), 0);
@@ -319,8 +331,9 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
       chainMap,
       scanSeconds,
     },
-    fitDays: rows.filter((row) => row.spot !== null).map((row): AnalysisFitDayRow => [row.date, row.spot!, row.shock, row.largestPotPut?.volumeCap ?? null, row.largestPotPut?.strike ?? null, row.largestPotCall?.volumeCap ?? null]),
+    fitDays: rows.filter((row) => row.spot !== null).map((row): AnalysisFitDayRow => [row.date, row.spot!, row.shock, row.largestPotPut?.volumeCap ?? null, row.largestPotPut?.strike ?? null, row.largestPotCall?.volumeCap ?? null, row.largestPotPut?.previousVolume ?? null]),
     largestPotWithoutModel: values.baseline.volatilityEdgeFilter !== "off" || values.baseline.ranking === "edge_yield",
+    optionActivity,
     earnings: { ...earnings, exDividendDates: calendar.exDividendDates, hasTickerRow: calendar.hasTickerRow },
     correlation: { rows: correlationRows(closes, others), skipped, spySource },
     profile: { all: stockProfile(ohlcv, null, reportSessions), twoYear: lastClose ? stockProfile(ohlcv, yearsBefore(lastClose, 2), reportSessions) : null },
