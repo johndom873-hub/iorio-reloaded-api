@@ -258,6 +258,38 @@ describe("DaySignalsLoop", () => {
     expect(harness.loop.getStatus()).toMatchObject({ state: "disabled", reason: "stopped" });
   });
 
+  it("outside session hours stays idle without asking whether the market is open", async () => {
+    const harness = createHarness();
+    harness.state.nowIso = "2026-10-19T00:43:00Z"; // Sunday 20:43 ET
+    let marketOpenChecks = 0;
+    harness.deps.isMarketOpen = async () => {
+      marketOpenChecks += 1;
+      return true;
+    };
+    await harness.loop.start();
+    expect(marketOpenChecks).toBe(0);
+    expect(harness.calls.reserve).toBe(0);
+    expect(harness.calls.heartbeats).toContain("idle");
+  });
+
+  it("alerts on a failed heartbeat during session hours only", async () => {
+    const reportsAt = async (nowIso: string) => {
+      const harness = createHarness();
+      harness.state.nowIso = nowIso;
+      harness.state.marketOpen = false;
+      const reports: string[] = [];
+      harness.deps.reportFailure = (source) => reports.push(source);
+      harness.deps.writeHeartbeat = async () => {
+        throw new Error("connect ECONNREFUSED");
+      };
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      await harness.loop.start();
+      return reports;
+    };
+    expect(await reportsAt("2026-10-19T00:43:00Z")).not.toContain("day-signals:heartbeat");
+    expect(await reportsAt("2026-09-24T15:00:00Z")).toContain("day-signals:heartbeat");
+  });
+
   describe("reports failures that were only logged before", () => {
     const stopAfterFirstWindow = (harness: Harness) => {
       const originalWindow = harness.deps.runQuoteWindow;

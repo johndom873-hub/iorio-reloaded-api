@@ -11,7 +11,7 @@ vi.mock("../db/connection.js", async () => {
 });
 
 const { db } = await import("../db/connection.js");
-const { computeMarketSessionStatus, easternDayStart, lastCompletedSessionDate } = await import("./marketSessionStatus.js");
+const { computeMarketSessionStatus, couldRegularSessionBeOpenByClock, easternDayStart, lastCompletedSessionDate } = await import("./marketSessionStatus.js");
 const testDb: Knex = db;
 
 afterAll(async () => {
@@ -85,3 +85,23 @@ describe("easternDayStart", () => {
   });
 });
 
+
+describe("couldRegularSessionBeOpenByClock", () => {
+  it("is true from 09:30 to before 16:00 ET on a weekday, in EDT and EST", () => {
+    // 2026-10-19 is a Monday in EDT (UTC-4); 2026-12-01 a Tuesday in EST (UTC-5).
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-10-19T13:29:00Z"))).toBe(false);
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-10-19T13:30:00Z"))).toBe(true);
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-10-19T19:59:00Z"))).toBe(true);
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-10-19T20:00:00Z"))).toBe(false);
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-12-01T14:29:00Z"))).toBe(false);
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-12-01T14:30:00Z"))).toBe(true);
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-12-01T20:59:00Z"))).toBe(true);
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-12-01T21:00:00Z"))).toBe(false);
+  });
+
+  it("is false all weekend, including Sunday evening ET (Monday morning in Singapore)", () => {
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-10-17T15:00:00Z"))).toBe(false);
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-10-18T15:00:00Z"))).toBe(false);
+    expect(couldRegularSessionBeOpenByClock(new Date("2026-10-19T00:43:00Z"))).toBe(false);
+  });
+});

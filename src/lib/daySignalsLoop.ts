@@ -36,7 +36,7 @@ import {
   type DaySignalExpirySeed,
   type DaySignalExpiryRow,
 } from "./daySignalsStore.js";
-import { computeMarketSessionStatus, loadTradingSessionsBetween } from "./marketSessionStatus.js";
+import { computeMarketSessionStatus, couldRegularSessionBeOpenByClock, loadTradingSessionsBetween } from "./marketSessionStatus.js";
 import { deltaFromQuoteMid, yearsToSessionClose } from "./quoteOwnDelta.js";
 import { formatIsoDateAsExpiry } from "./optionChainSnapshotStore.js";
 import { readGitSha } from "./readGitSha.js";
@@ -338,6 +338,8 @@ export class DaySignalsLoop {
       await this.deps.writeHeartbeat(this.getStatus());
     } catch (error) {
       console.warn(`day signals loop: heartbeat failed — ${error instanceof Error ? error.message : error}`);
+      // Outside session hours the loop has nothing to do: a database outage then is the ops monitor's to report.
+      if (!couldRegularSessionBeOpenByClock(this.deps.now())) return;
       this.deps.reportFailure?.("day-signals:heartbeat", `Day Signals loop could not write its heartbeat (${error instanceof Error ? error.message : error}). The health check will report the loop as down.`);
     }
   }
@@ -367,7 +369,8 @@ export class DaySignalsLoop {
   private async tick(signal: AbortSignal): Promise<boolean> {
     const now = this.deps.now();
     const tradingDateIso = easternIsoDate(now);
-    if (!(await this.deps.isMarketOpen(now))) {
+    // The clock rules out nights and weekends before isMarketOpen reads market_calendar.
+    if (!couldRegularSessionBeOpenByClock(now) || !(await this.deps.isMarketOpen(now))) {
       await this.releaseLines();
       this.setState("idle", "market closed");
       return false;

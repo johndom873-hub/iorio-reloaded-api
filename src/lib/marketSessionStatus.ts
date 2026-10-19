@@ -33,6 +33,16 @@ function isWeekday(dateIso: string): boolean {
   return day >= 1 && day <= 5;
 }
 
+/**
+ * Pure, no database: false when the regular session cannot be open at `now` (a weekend, or outside 09:30–16:00 ET).
+ * True does not mean open (holidays and early closes need market_calendar), so it only rules hours out.
+ */
+export function couldRegularSessionBeOpenByClock(now: Date): boolean {
+  const dateIso = easternIsoDate(now);
+  if (!isWeekday(dateIso)) return false;
+  return now >= easternInstant(dateIso, REGULAR_OPEN.hour, REGULAR_OPEN.minute) && now < easternInstant(dateIso, REGULAR_CLOSE.hour, REGULAR_CLOSE.minute);
+}
+
 // market_calendar (synced from MarketData.app, see scripts/sync-market-calendar.ts)
 // covers ~400 days forward as of its last sync — falls back to a plain
 // weekday check for any date outside that coverage rather than failing.
