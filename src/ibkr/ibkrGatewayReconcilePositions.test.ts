@@ -1314,3 +1314,61 @@ describe("stock split: detected in the holdings, frozen, rewritten, unfrozen", (
     await testDb("alert_state").where({ alert_key: `ticker_frozen:${ticker.id}` }).del();
   });
 });
+
+describe("reconcileHeldPositions — positions_changed tells screens to re-fetch once a pass has finished writing", () => {
+  // Every notification published while `run` executes, read off the real channel. Other test files share the test
+  // database and publish too, so each assertion looks only at this test's own ticker.
+  async function notificationsDuring(run: () => Promise<void>): Promise<{ type: string; symbols?: string[] }[]> {
+    const { Client: PgClient } = await import("pg");
+    const { appNotificationsChannel } = await import("../lib/notificationChannel.js");
+    const listener = new PgClient({ connectionString: process.env.TEST_DATABASE_URL });
+    const received: { type: string; symbols?: string[] }[] = [];
+    await listener.connect();
+    try {
+      listener.on("notification", (message) => received.push(JSON.parse(message.payload ?? "{}")));
+      await listener.query(`LISTEN ${appNotificationsChannel}`);
+      await run();
+      // NOTIFY is delivered on commit; one round trip on the listener's own connection lets it arrive.
+      await listener.query("SELECT 1");
+    } finally {
+      await listener.end();
+    }
+    return received;
+  }
+
+  it("leftover stock rolled into a covered call: one positions_changed for the ticker, published after the leftover position closed", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const leftoverId = await insertPosition(ticker.id, "unstructured", "csp_assigned_stock");
+    await insertStockLeg(leftoverId, stockConId, 100, 80.9113);
+    const held = [heldStock(ticker.symbol, stockConId, 100, 81.02), heldShortOption(ticker.symbol, callConId, OptionType.Call, 85, isoDateDaysFromToday(20), 150)];
+
+    let leftoverStatusWhenPublished: string | null = null;
+    const received = await notificationsDuring(async () => {
+      await runPass(held);
+      leftoverStatusWhenPublished = (await testDb("positions").where({ id: leftoverId }).first("status")).status;
+    });
+
+    const forTicker = received.filter((notification) => notification.type === "positions_changed" && notification.symbols!.includes(ticker.symbol));
+    expect(forTicker).toHaveLength(1);
+    // The opening notification still goes out (Pulse's Latest Events and Today's Orders use it), and it comes first.
+    const openedIndex = received.findIndex((notification) => notification.type === "position_opened" && (notification as { symbol?: string }).symbol === ticker.symbol);
+    expect(openedIndex).toBeGreaterThanOrEqual(0);
+    expect(received.indexOf(forTicker[0]!)).toBeGreaterThan(openedIndex);
+    expect(leftoverStatusWhenPublished).toBe("closed");
+    expect(await testDb("notification_events").whereRaw("payload::jsonb->>'type' = 'positions_changed'")).toHaveLength(0);
+  });
+
+  it("a pass that changes nothing for a ticker does not name it", async () => {
+    const ticker = await createTicker();
+    const stockConId = (nextConId += 1);
+    const callConId = (nextConId += 1);
+    const held = [heldStock(ticker.symbol, stockConId, 100, 81.02), heldShortOption(ticker.symbol, callConId, OptionType.Call, 85, isoDateDaysFromToday(20), 150)];
+    await runPass(held);
+
+    const received = await notificationsDuring(() => runPass(held));
+
+    expect(received.some((notification) => notification.type === "positions_changed" && notification.symbols!.includes(ticker.symbol))).toBe(false);
+  });
+});

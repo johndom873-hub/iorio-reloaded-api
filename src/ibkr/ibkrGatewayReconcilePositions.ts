@@ -401,6 +401,39 @@ async function handOffOpenStockLegs(positionId: string, symbol: string, toDescri
  * only on positive evidence that the change is real (judgeStructureChange).
  */
 export async function reconcileHeldPositions(allHeld: IbkrHeldPosition[], passId: number, deps: ReconciliationDependencies): Promise<void> {
+  const fingerprintsBeforePass = await fingerprintOpenPositionsBySymbol();
+  try {
+    await runReconciliationPass(allHeld, passId, deps);
+  } finally {
+    await publishPositionsChanged(fingerprintsBeforePass).catch((error) => console.error(`positions_changed notification failed (pass ${passId}): ${error}`));
+  }
+}
+
+// Per ticker: a hash of its open positions and their open legs (ids, quantities, entry prices). A pass writes one
+// structure change in several steps (a roll into a covered call creates the position, adds the call, hands the shares
+// over, closes the old position), so screens are told which tickers changed only once the pass has finished writing —
+// a re-fetch on position_opened alone could land mid-way and keep the half-written state.
+async function fingerprintOpenPositionsBySymbol(): Promise<Map<string, string>> {
+  const rows: { symbol: string; fingerprint: string }[] = await db("positions as p")
+    .join("tickers as t", "t.id", "p.ticker_id")
+    .leftJoin("position_legs as l", function () {
+      this.on("l.position_id", "p.id").andOnNull("l.exit_at");
+    })
+    .where("p.status", "open")
+    .groupBy("t.symbol")
+    .select("t.symbol", db.raw("md5(string_agg(concat_ws(':', p.id, l.id, l.quantity, l.entry_price), ',' ORDER BY p.id, l.id)) AS fingerprint"));
+  return new Map(rows.map((row) => [row.symbol, row.fingerprint]));
+}
+
+async function publishPositionsChanged(fingerprintsBeforePass: Map<string, string>): Promise<void> {
+  const fingerprintsAfterPass = await fingerprintOpenPositionsBySymbol();
+  const changedSymbols = [...new Set([...fingerprintsBeforePass.keys(), ...fingerprintsAfterPass.keys()])]
+    .filter((symbol) => fingerprintsBeforePass.get(symbol) !== fingerprintsAfterPass.get(symbol))
+    .sort();
+  if (changedSymbols.length > 0) await publishNotification({ type: "positions_changed", symbols: changedSymbols });
+}
+
+async function runReconciliationPass(allHeld: IbkrHeldPosition[], passId: number, deps: ReconciliationDependencies): Promise<void> {
   dependencies = deps;
   // A frozen ticker (a stock split until its records are rewritten, tickerFreeze.ts) is left out of the whole pass.
   const { held, frozenTickerIds } = await setAsideFrozenTickers(allHeld, passId, deps.notifyTelegram);

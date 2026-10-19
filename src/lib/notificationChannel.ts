@@ -14,6 +14,9 @@ export type AppNotification =
   | { type: "order_status"; orderId: string }
   | { type: "position_closed"; positionId: string; symbol: string; message: string }
   | { type: "position_opened"; positionId: string; symbol: string }
+  // A reconciliation pass changed these tickers' open positions or legs; sent once the pass has finished writing,
+  // for screens that keep a position list. Never persisted.
+  | { type: "positions_changed"; symbols: string[] }
   // Iorio Pulse's live System Events feed / topology pulses — see
   // presenceTracker.ts (presence) and the publish call sites in runJob.ts
   // and genosuke/bot.ts.
@@ -57,7 +60,8 @@ export async function publishNotification(notification: AppNotification): Promis
   // "presence" is online/offline state, not a loggable event — Latest Events
   // has nothing to show for it.
   // Pluto's timeline has its own table (pluto_events); storing it here too would push real history out of Latest Events.
-  if (notification.type === "presence" || notification.type === "pulse" || notification.type === "pluto_event") return;
+  // positions_changed only tells screens to re-fetch; the opens and closes behind it are logged as their own events.
+  if (notification.type === "presence" || notification.type === "pulse" || notification.type === "pluto_event" || notification.type === "positions_changed") return;
 
   // ibkr_health_check runs every ~10 minutes and is never shown in Latest
   // Events (fetchRecentNotificationEvents filters it out, and so does the
