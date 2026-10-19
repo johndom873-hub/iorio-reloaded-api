@@ -102,9 +102,10 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
 
 /**
  * In-flight order notional, the order gate's way: every origin's, one symbol's, and the book's — Pluto's own orders plus anyone's
- * on an enabled ticker (Marcelo, 2026-10-07: an order there joins Pluto's book the moment it fills).
+ * on an enabled ticker (Marcelo, 2026-10-07: an order there joins Pluto's book the moment it fills). Symbol null when no
+ * ticker's share is needed (tickerNotional is then 0).
  */
-export async function loadInFlightNotionals(symbol: string): Promise<{ totalNotional: number; tickerNotional: number; managedNotional: number }> {
+export async function loadInFlightNotionals(symbol: string | null): Promise<{ totalNotional: number; tickerNotional: number; managedNotional: number }> {
   const [rows, enabledRows]: [{ request_type: string; payload: OrderRequestPayload; pluto_action_id: string | null }[], { symbol: string }[]] = await Promise.all([
     inFlightOrderRequestsQuery().select("orq.request_type", "orq.payload", "orq.pluto_action_id"),
     db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").where("se.bot_enabled", true).select("t.symbol"),

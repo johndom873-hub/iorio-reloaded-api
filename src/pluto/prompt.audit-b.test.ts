@@ -27,7 +27,7 @@ function input(overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput {
     todayEasternIso: "2026-10-07",
     minutesToWindowEnd: 200,
     spyDayChangePct: 0.2,
-    account: { netLiquidationValue: 1_000_000, freeCash: 700_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 10, managedPositions: 4, maxOpenPositions: 15, actionsToday: 1, maxActionsPerSession: 10, openPositionsBySymbol: {} },
+    account: { netLiquidationValue: 1_000_000, freeCash: 700_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 10, plutoBudgetInFlightPct: 0, managedPositions: 4, maxOpenPositions: 15, actionsToday: 1, maxActionsPerSession: 10, openPositionsBySymbol: {} },
     settings: { minGrade: "good", maxAbsDelta: 0.4, minDte: 1, maxDte: 45, maxTickerPctOfBudget: 10, orderSizePctOfBudget: 10, confidenceFloor: 0.6 } as PlutoPromptInput["settings"],
     tickers: [{ scored, eligible: [{ id: "SMCI:cash_secured_put:2026-10-16:40", kind: "open_cash_secured_put", symbol: "SMCI", candidate: candidate() }], eligibleRolls: [], closeActions: [], heldPositions: [] }],
     spreadCostSharePct: 50,
@@ -42,8 +42,8 @@ function input(overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput {
 const tickerOf = (payload: Record<string, unknown>, index = 0) => (payload.tickers as Record<string, unknown>[])[index]!;
 
 describe("prompt version", () => {
-  it("is v4.4, matching the v4.4 migration", () => {
-    expect(plutoPromptVersion).toBe("v4.4");
+  it("is v4.5, matching the v4.5 migration", () => {
+    expect(plutoPromptVersion).toBe("v4.5");
   });
 });
 
@@ -109,7 +109,7 @@ describe("buildPlutoUserPayload — trigger, macro events, recent decisions", ()
     const { payload } = buildPlutoUserPayload(input({ recentDecisions }));
     expect(payload.recent_decisions).toEqual([
       { at: "2026-10-07T14:00:00.000Z", verdict: "trade", candidate_id: "SMCI:cash_secured_put:2026-10-16:40", outcome: "blocked", outcome_detail: "flagged_ticker: the model flagged SMCI's data in the same answer", reason: "edge" },
-      { at: "2026-10-07T13:00:00.000Z", verdict: "no_trade", reason: "weak" },
+      { at: "2026-10-07T13:00:00.000Z", verdict: "no_trade" },
       { at: "2026-10-07T12:00:00.000Z", verdict: "trade", candidate_id: "NOK:covered_call:2026-10-16:5", outcome: "filled", reason: "edge" },
     ]);
   });

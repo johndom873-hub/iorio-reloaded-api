@@ -549,7 +549,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   }
 
   // 5. Prompt.
-  const book = await loadPlutoBook();
+  const [book, workingOrderNotionals] = await Promise.all([loadPlutoBook(), loadInFlightNotionals(null)]);
   const recentDecisions: { pass_id: string; parsed_output: { decision?: string; candidate_id?: string | null; reasons?: string[] } | null; created_at: Date }[] = await db("pluto_decisions").whereNotNull("parsed_output").orderBy("created_at", "desc").limit(10).select("pass_id", "parsed_output", "created_at");
   const tradePassIds = recentDecisions.filter((row) => row.parsed_output?.decision === "trade").map((row) => row.pass_id);
   // The model's own action per pass: not an automatic order recorded in the same round (those carry the automatic_close or
@@ -583,6 +583,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       freeCash: account.freeCash,
       plutoBudgetPct: settings.capitalBudgetPct,
       plutoBudgetUsedPct: checks.context.netLiquidationValue ? (book.committedDollars / checks.context.netLiquidationValue) * 100 : 0,
+      plutoBudgetInFlightPct: checks.context.netLiquidationValue ? (workingOrderNotionals.managedNotional / checks.context.netLiquidationValue) * 100 : 0,
       managedPositions: book.openPositions.length,
       maxOpenPositions: settings.maxOpenPositions,
       actionsToday: checks.context.counters.actionsToday,

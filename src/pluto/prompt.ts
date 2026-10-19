@@ -12,7 +12,7 @@ import type { HeldPositionEntry } from "./heldPositionMetrics.js";
 // deterministic filter, the top few per ticker per strategy, short field names, no nulls.
 // Shortlist notes never enter the prompt (Marcelo, 2026-09-28).
 
-export const plutoPromptVersion = "v4.4";
+export const plutoPromptVersion = "v4.5";
 
 /** How many open candidates per ticker per strategy the model sees (best first, compareCandidatesByModel). */
 export const candidatesPerTickerPerStrategy = 3;
@@ -43,7 +43,8 @@ export function buildPlutoSystemPrompt(settings: PlutoSettings): string {
     "- close actions: selling unstructured shares at a positive cycle P&L; buying back a short put whose remaining edge is negative while locking a profit; and, in the five sessions before a macro release, closing a short put (a buyback) or a whole covered call (the call bought back and the shares sold together, kind close_position) while it is in profit. For these event closes weigh max_remaining_gain_dollars against event_stress_loss_dollars and close_cost_dollars, given captured_pct and strike_distance_days: when what is left to earn is small next to what one plausible move on the release could cost, close and bank the profit; that is a good outcome, not a missed one. A covered call whose strike is well above the stock mostly carries ordinary stock exposure, which the wheel holds on purpose: its gain and its stress loss are of similar size and holding is reasonable; one whose call is in the money has its upside capped and its downside open, like a put. Code never offers an event close at a loss and never sends one itself; it offers the close again as the profit grows or the release gets closer.",
     "- positions: Pluto manages every position on the tickers it is enabled on, whoever opened it. account.managed_positions counts all of them and they all use Pluto's capital budget; each held position, close action and roll says opened_by (pluto or a person). A close action on a position a person opened is normal, not an inconsistency.",
     "- open_covered_call candidates: Pluto writes the call against shares the account already holds free; when there are not enough, code buys the missing 100 shares per contract at the live price in the same order. dollar_risk counts those shares, less the premium. In reasons, call it a covered call, never a buy-write. Holding no shares is normal for a covered-call candidate. When the ticker already holds free shares (usually from an assigned put), code itself sells a call on them before you are asked, covering those shares and buying none: the highest premium yield, across every expiry, among the calls whose assignment would close the shares at or above the cycle break-even plus the minimum profit, counting the call's premium. You are never offered a covered call on such a ticker; its puts, rolls and closes are yours as usual, and the call shows in held_positions once it fills. A covered-call roll that lowers the strike must pass the same break-even rule.",
-    "- recent_decisions: your latest decisions, newest first. A trade carries its outcome: blocked (a code check refused it before any order was sent; outcome_detail says why), validated, order_built or confirmed (an order is on its way or working), filled, cancelled_partially_filled (part filled, the rest cancelled), cancelled, rejected or error (outcome_detail says why), not_executed (no order was attempted). Only a filled or cancelled_partially_filled trade changed the book; the account, positions and close actions in this message always show the book as it is now.",
+    "- account: pluto_budget_used_pct is the share of nlv that Pluto's open positions hold; pluto_budget_in_flight_pct the share its orders still working hold. Both count against pluto_budget_pct, so a new order's room is pluto_budget_pct minus the two; a blocked trade's \"budget left\" counts both.",
+    "- recent_decisions: your latest decisions, newest first. A trade carries its outcome: blocked (a code check refused it before any order was sent; outcome_detail says why), validated, order_built or confirmed (an order is on its way or working), filled, cancelled_partially_filled (part filled, the rest cancelled), cancelled, rejected or error (outcome_detail says why), not_executed (no order was attempted). Only a filled or cancelled_partially_filled trade changed the book; the account, positions and close actions in this message always show the book as it is now. Other decisions carry only their verdict. recent_decisions is history, not evidence: a system concern rests only on the data in this message, and an outcome_detail figure describes the book when that trade was blocked, not now.",
     "",
     "Hard rules you must obey:",
     "1. You may only name a candidate_id that appears in this message. Never invent contracts, strikes, expiries, quantities, sizes or prices: code sizes every order to the standard order size.",
@@ -168,6 +169,8 @@ export interface PlutoPromptAccountInput {
   freeCash: number;
   plutoBudgetPct: number;
   plutoBudgetUsedPct: number;
+  /** Pluto's orders still working (the sizing gate's in-flight managed notional), as % of NLV. */
+  plutoBudgetInFlightPct: number;
   /** Every open position in Pluto's book (all positions on enabled tickers, hedges aside). */
   managedPositions: number;
   maxOpenPositions: number;
@@ -206,7 +209,8 @@ export interface PlutoRecentDecision {
 
 /**
  * Pure: the recent_decisions block from the latest decision rows and the actions their passes produced. A trade
- * carries its outcome so a blocked or cancelled one never reads as done.
+ * carries its outcome so a blocked or cancelled one never reads as done. Only a trade keeps its reason: an abstention's
+ * reason fed back to the model becomes its own evidence, and one concern keeps it abstaining after the data has cleared.
  */
 export function recentDecisionsForPrompt(
   decisions: { passId: string; createdAt: Date; parsedOutput: { decision?: string; candidate_id?: string | null; reasons?: string[] } | null }[],
@@ -219,7 +223,7 @@ export function recentDecisionsForPrompt(
       at: row.createdAt.toISOString(),
       verdict,
       candidateId: row.parsedOutput?.candidate_id ?? null,
-      reason: row.parsedOutput?.reasons?.[0] ?? null,
+      reason: verdict === "trade" ? row.parsedOutput?.reasons?.[0] ?? null : null,
       outcome: verdict === "trade" ? action?.outcome ?? "not_executed" : null,
       outcomeDetail: action?.blockReason ?? null,
     };
@@ -319,6 +323,7 @@ export function buildPlutoUserPayload(input: PlutoPromptInput): PlutoPromptPaylo
       free_cash: round(input.account.freeCash, 0),
       pluto_budget_pct: input.account.plutoBudgetPct,
       pluto_budget_used_pct: round(input.account.plutoBudgetUsedPct, 1),
+      pluto_budget_in_flight_pct: round(input.account.plutoBudgetInFlightPct, 1),
       managed_positions: input.account.managedPositions,
       max_open_positions: input.account.maxOpenPositions,
       actions_today: input.account.actionsToday,

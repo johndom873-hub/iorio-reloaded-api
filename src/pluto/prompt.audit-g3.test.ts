@@ -27,7 +27,7 @@ describe("recentDecisionsForPrompt (audit)", () => {
 
   it("never carries a block reason onto a verdict other than trade", () => {
     const [entry] = recentDecisionsForPrompt([{ passId: "p", createdAt: at(0), parsedOutput: { decision: "abstain", reasons: ["quiet day"] } }], new Map([["p", { outcome: "blocked", blockReason: "should not show" }]]));
-    expect(entry).toMatchObject({ verdict: "abstain", outcome: null, outcomeDetail: null, reason: "quiet day" });
+    expect(entry).toMatchObject({ verdict: "abstain", outcome: null, outcomeDetail: null, reason: null });
   });
 
   it("reads a decision with no candidate or reasons as nulls, not undefined", () => {
@@ -43,7 +43,7 @@ describe("recent_decisions in the user payload (audit)", () => {
     todayEasternIso: "2026-10-07",
     minutesToWindowEnd: 46,
     spyDayChangePct: 0.6,
-    account: { netLiquidationValue: 1_000_000, freeCash: 700_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 10, managedPositions: 1, maxOpenPositions: 15, actionsToday: 0, maxActionsPerSession: 10, openPositionsBySymbol: {} },
+    account: { netLiquidationValue: 1_000_000, freeCash: 700_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 10, plutoBudgetInFlightPct: 0, managedPositions: 1, maxOpenPositions: 15, actionsToday: 0, maxActionsPerSession: 10, openPositionsBySymbol: {} },
     settings: { minGrade: "weak", maxAbsDelta: 0.4, minDte: 1, maxDte: 45, maxTickerPctOfBudget: 10, orderSizePctOfBudget: 10, confidenceFloor: 0.6 } as PlutoPromptInput["settings"],
     tickers: [{ scored, eligible: [], eligibleRolls: [], closeActions: [], heldPositions: [] }],
     spreadCostSharePct: 50,
@@ -64,7 +64,7 @@ describe("recent_decisions in the user payload (audit)", () => {
     const { payload } = buildPlutoUserPayload(input(recent));
     expect(payload.recent_decisions).toEqual([
       { at: at(2).toISOString(), verdict: "trade", candidate_id: "SMCI:close_leg:leg-1", outcome: "blocked", outcome_detail: "offer_fresh: no longer offered", reason: "Lock the profit." },
-      { at: at(1).toISOString(), verdict: "no_trade", reason: "Weak edge." },
+      { at: at(1).toISOString(), verdict: "no_trade" },
     ]);
   });
 

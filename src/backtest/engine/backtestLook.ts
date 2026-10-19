@@ -769,6 +769,8 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
           freeCash: ledgerFreeCash(ledger),
           plutoBudgetPct: pluto.capitalBudgetPct,
           plutoBudgetUsedPct: netLiquidationValue > 0 ? (ledgerCommittedDollars(ledger) / netLiquidationValue) * 100 : 0,
+          // Simulated orders fill at once: nothing is ever working.
+          plutoBudgetInFlightPct: 0,
           managedPositions: openPositions.length,
           maxOpenPositions: pluto.maxOpenPositions,
           actionsToday: filledActionCount,

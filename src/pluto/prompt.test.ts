@@ -40,6 +40,22 @@ describe("recentDecisionsForPrompt", () => {
       ["invalid", null, null],
     ]);
   });
+
+  it("v4.5: keeps a reason only for a trade, so an abstention's reason never comes back as evidence", () => {
+    const entries = recentDecisionsForPrompt(
+      [
+        { passId: "pass-5", createdAt: at, parsedOutput: { decision: "abstain_system_concern", reasons: ["Recent sizing checks repeatedly report only $844 of Pluto budget remaining."] } },
+        { passId: "pass-6", createdAt: at, parsedOutput: { decision: "no_trade", reasons: ["Weak edge."] } },
+        { passId: "pass-7", createdAt: at, parsedOutput: { decision: "trade", candidate_id: "X:open:1", reasons: ["Strong edge."] } },
+      ],
+      new Map(),
+    );
+    expect(entries.map((entry) => [entry.verdict, entry.reason])).toEqual([
+      ["abstain_system_concern", null],
+      ["no_trade", null],
+      ["trade", "Strong edge."],
+    ]);
+  });
 });
 
 describe("prompt v3.3 payload and wording (2026-10-07)", () => {
@@ -50,7 +66,7 @@ describe("prompt v3.3 payload and wording (2026-10-07)", () => {
     todayEasternIso: "2026-10-06",
     minutesToWindowEnd: 46,
     spyDayChangePct: 0.6,
-    account: { netLiquidationValue: 1_044_000, freeCash: 762_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 11.7, managedPositions: 3, maxOpenPositions: 15, actionsToday: 0, maxActionsPerSession: 10, openPositionsBySymbol: { SMCI: ["cash_secured_put"] } },
+    account: { netLiquidationValue: 1_044_000, freeCash: 762_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 11.7, plutoBudgetInFlightPct: 1.94, managedPositions: 3, maxOpenPositions: 15, actionsToday: 0, maxActionsPerSession: 10, openPositionsBySymbol: { SMCI: ["cash_secured_put"] } },
     settings: { minGrade: "weak", maxAbsDelta: 0.4, minDte: 1, maxDte: 45, maxTickerPctOfBudget: 10, orderSizePctOfBudget: 10, confidenceFloor: 0.6 } as PlutoPromptInput["settings"],
     tickers: [{ scored, eligible: [], eligibleRolls: [], closeActions: [closeOn("position-human", "SMCI:close_leg:leg-1"), closeOn("position-pluto", "SMCI:close_leg:leg-2")], heldPositions: [] }],
     spreadCostSharePct: 50,
@@ -69,6 +85,16 @@ describe("prompt v3.3 payload and wording (2026-10-07)", () => {
     const closes = (payload.tickers as { close_actions: { id: string; opened_by: string }[] }[])[0]!.close_actions;
     expect(closes.map((close) => [close.id, close.opened_by])).toEqual([["SMCI:close_leg:leg-1", "a person"], ["SMCI:close_leg:leg-2", "pluto"]]);
     expect(payload.trigger).toEqual({ kind: "grade_crossing" });
+  });
+
+  it("v4.5: the account block carries the budget working orders hold, and the prompt says both count and history is not evidence", () => {
+    const { payload } = buildPlutoUserPayload(input());
+    const account = payload.account as Record<string, unknown>;
+    expect(account.pluto_budget_used_pct).toBe(11.7);
+    expect(account.pluto_budget_in_flight_pct).toBe(1.9);
+    const prompt = buildPlutoSystemPrompt(input().settings);
+    expect(prompt).toContain("pluto_budget_in_flight_pct the share its orders still working hold. Both count against pluto_budget_pct");
+    expect(prompt).toContain("recent_decisions is history, not evidence: a system concern rests only on the data in this message");
   });
 
   it("states the grade floor actually in force and explains managed positions and covered calls that buy shares", () => {
@@ -115,7 +141,7 @@ describe("prompt v3.8: held positions and event timing (2026-10-08)", () => {
     todayEasternIso: "2026-10-08",
     minutesToWindowEnd: 200,
     spyDayChangePct: 0.2,
-    account: { netLiquidationValue: 1_000_000, freeCash: 700_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 10, managedPositions: 1, maxOpenPositions: 15, actionsToday: 0, maxActionsPerSession: 10, openPositionsBySymbol: { SMCI: ["cash_secured_put"] } },
+    account: { netLiquidationValue: 1_000_000, freeCash: 700_000, plutoBudgetPct: 50, plutoBudgetUsedPct: 10, plutoBudgetInFlightPct: 0, managedPositions: 1, maxOpenPositions: 15, actionsToday: 0, maxActionsPerSession: 10, openPositionsBySymbol: { SMCI: ["cash_secured_put"] } },
     settings: { minGrade: "good", maxAbsDelta: 0.4, minDte: 1, maxDte: 45, maxTickerPctOfBudget: 10, orderSizePctOfBudget: 10, confidenceFloor: 0.6 } as PlutoPromptInput["settings"],
     tickers,
     spreadCostSharePct: 50,
