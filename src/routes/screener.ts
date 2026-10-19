@@ -6,21 +6,12 @@ import { findOrCreateTicker, addTickerToShortlist, UnknownSymbolError } from "..
 export const screenerRouter = Router();
 screenerRouter.use(requireAuth);
 
-const unmatchedRankSentinel = 999;
-const bestRankBuckets: Record<string, { min: number; max: number }> = {
-  "1-10": { min: 1, max: 10 },
-  "11-20": { min: 11, max: 20 },
-  "21-30": { min: 21, max: 30 },
-  "31-40": { min: 31, max: 40 },
-  "41-50": { min: 41, max: 50 },
-};
-
 interface ScreenerFilters {
   search?: string;
   sector?: string[];
   minIv?: number;
   minOpenInterest?: number;
-  bestRankBucket?: string;
+  maxPrice?: number;
   matchedScanCodes?: string[];
 }
 
@@ -30,6 +21,8 @@ function parseFilters(query: Record<string, unknown>): ScreenerFilters {
   const minIv = minIvRaw !== undefined ? Number(minIvRaw) : undefined;
   const minOpenInterestRaw = str("minOpenInterest");
   const minOpenInterest = minOpenInterestRaw !== undefined ? Number(minOpenInterestRaw) : undefined;
+  const maxPriceRaw = str("maxPrice");
+  const maxPrice = maxPriceRaw !== undefined ? Number(maxPriceRaw) : undefined;
   const sectorRaw = str("sector");
   const matchedScanCodesRaw = str("matchedScanCodes");
   return {
@@ -37,7 +30,7 @@ function parseFilters(query: Record<string, unknown>): ScreenerFilters {
     sector: sectorRaw ? sectorRaw.split(",").filter(Boolean) : undefined,
     minIv: minIv !== undefined && Number.isFinite(minIv) ? minIv : undefined,
     minOpenInterest: minOpenInterest !== undefined && Number.isFinite(minOpenInterest) ? minOpenInterest : undefined,
-    bestRankBucket: str("bestRankBucket"),
+    maxPrice: maxPrice !== undefined && Number.isFinite(maxPrice) ? maxPrice : undefined,
     matchedScanCodes: matchedScanCodesRaw ? matchedScanCodesRaw.split(",").filter(Boolean) : undefined,
   };
 }
@@ -73,19 +66,11 @@ screenerRouter.get("/", async (request, response) => {
   if (filters.minOpenInterest !== undefined) {
     query.where("su.call_open_interest", ">=", filters.minOpenInterest).where("su.put_open_interest", ">=", filters.minOpenInterest);
   }
+  // A row with no price captured cannot show it is under the cap, so it does not pass.
+  if (filters.maxPrice !== undefined) query.where("su.last_price", "<=", filters.maxPrice);
   // Overlap, not containment: "matched any of the selected types", not "matched all of them".
   if (filters.matchedScanCodes !== undefined && filters.matchedScanCodes.length > 0) {
     query.whereRaw("su.matched_scan_codes && ?::text[]", [filters.matchedScanCodes]);
-  }
-  if (filters.bestRankBucket !== undefined) {
-    if (filters.bestRankBucket === "unmatched") {
-      query.where("su.best_rank", unmatchedRankSentinel);
-    } else {
-      const bucket = bestRankBuckets[filters.bestRankBucket];
-      // IBKR's 0-indexed rank stored as-is — a "1-10" bucket (1-indexed, as
-      // shown to the user) covers stored ranks 0-9.
-      if (bucket) query.whereBetween("su.best_rank", [bucket.min - 1, bucket.max - 1]);
-    }
   }
 
   const rows = await query.orderBy("su.best_rank", "asc");

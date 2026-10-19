@@ -48,26 +48,26 @@ interface UniverseSeed {
   companyName: string | null;
   sector: string | null;
   bestRank: number;
+  lastPrice: number | null;
   impliedVolatility: number | null;
   callOpenInterest: number | null;
   putOpenInterest: number | null;
   matchedScanCodes: string[];
 }
 
-// Ranks are the stored 0-indexed ones: A and B are in the "1-10" bucket (0 and 9), C is the first of "11-20" (10), D the last of
-// "41-50" (49), F is just past it (50), E is unmatched (999) and G to K sit in no bucket.
+// Ranks are the stored 0-indexed ones; E is unmatched (999). Only A, B, C and E have a price.
 const seeds: UniverseSeed[] = [
-  { letter: "A", companyName: `Alpha Corp ${runTag}`, sector: sectorTech, bestRank: 0, impliedVolatility: 0.5, callOpenInterest: 1000, putOpenInterest: 400, matchedScanCodes: [codeVolatility, codeOptionVolume] },
-  { letter: "B", companyName: `Beta Corp ${runTag}`, sector: sectorEnergy, bestRank: 9, impliedVolatility: 0.3, callOpenInterest: 200, putOpenInterest: 900, matchedScanCodes: [codeOptionVolume] },
-  { letter: "C", companyName: `Gamma Corp ${runTag}`, sector: sectorTech, bestRank: 10, impliedVolatility: 0.8, callOpenInterest: 5000, putOpenInterest: 5000, matchedScanCodes: [codeVolatility] },
-  { letter: "D", companyName: `Delta Corp ${runTag}`, sector: null, bestRank: 49, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
-  { letter: "E", companyName: `Epsilon Corp ${runTag}`, sector: sectorEnergy, bestRank: 999, impliedVolatility: 0.1, callOpenInterest: 10, putOpenInterest: 10, matchedScanCodes: [] },
-  { letter: "F", companyName: `Zeta Corp ${runTag}`, sector: sectorEnergy, bestRank: 50, impliedVolatility: 0.2, callOpenInterest: 20, putOpenInterest: 30, matchedScanCodes: [] },
-  { letter: "G", companyName: `100% real ${runTag}`, sector: null, bestRank: 500, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
-  { letter: "H", companyName: `100X real ${runTag}`, sector: null, bestRank: 500, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
-  { letter: "I", companyName: `a_b ${runTag}`, sector: null, bestRank: 500, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
-  { letter: "J", companyName: `aXb ${runTag}`, sector: null, bestRank: 500, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
-  { letter: "K", companyName: null, sector: null, bestRank: 500, impliedVolatility: null, callOpenInterest: null, putOpenInterest: 3000, matchedScanCodes: [] },
+  { letter: "A", companyName: `Alpha Corp ${runTag}`, sector: sectorTech, bestRank: 0, lastPrice: 12.5, impliedVolatility: 0.5, callOpenInterest: 1000, putOpenInterest: 400, matchedScanCodes: [codeVolatility, codeOptionVolume] },
+  { letter: "B", companyName: `Beta Corp ${runTag}`, sector: sectorEnergy, bestRank: 9, lastPrice: 50, impliedVolatility: 0.3, callOpenInterest: 200, putOpenInterest: 900, matchedScanCodes: [codeOptionVolume] },
+  { letter: "C", companyName: `Gamma Corp ${runTag}`, sector: sectorTech, bestRank: 10, lastPrice: 120, impliedVolatility: 0.8, callOpenInterest: 5000, putOpenInterest: 5000, matchedScanCodes: [codeVolatility] },
+  { letter: "D", companyName: `Delta Corp ${runTag}`, sector: null, bestRank: 49, lastPrice: null, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
+  { letter: "E", companyName: `Epsilon Corp ${runTag}`, sector: sectorEnergy, bestRank: 999, lastPrice: 3, impliedVolatility: 0.1, callOpenInterest: 10, putOpenInterest: 10, matchedScanCodes: [] },
+  { letter: "F", companyName: `Zeta Corp ${runTag}`, sector: sectorEnergy, bestRank: 50, lastPrice: null, impliedVolatility: 0.2, callOpenInterest: 20, putOpenInterest: 30, matchedScanCodes: [] },
+  { letter: "G", companyName: `100% real ${runTag}`, sector: null, bestRank: 500, lastPrice: null, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
+  { letter: "H", companyName: `100X real ${runTag}`, sector: null, bestRank: 500, lastPrice: null, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
+  { letter: "I", companyName: `a_b ${runTag}`, sector: null, bestRank: 500, lastPrice: null, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
+  { letter: "J", companyName: `aXb ${runTag}`, sector: null, bestRank: 500, lastPrice: null, impliedVolatility: null, callOpenInterest: null, putOpenInterest: null, matchedScanCodes: [] },
+  { letter: "K", companyName: null, sector: null, bestRank: 500, lastPrice: null, impliedVolatility: null, callOpenInterest: null, putOpenInterest: 3000, matchedScanCodes: [] },
 ];
 const symbolOf = (letter: string) => `${symbolPrefix}${letter}`;
 const letterOf = (symbol: string) => symbol.slice(symbolPrefix.length);
@@ -86,7 +86,7 @@ beforeAll(async () => {
       call_open_interest: seed.callOpenInterest,
       put_open_interest: seed.putOpenInterest,
       matched_scan_codes: seed.matchedScanCodes,
-      last_price: seed.letter === "A" ? 12.5 : null,
+      last_price: seed.lastPrice,
       avg_share_volume: seed.letter === "A" ? 1500000 : null,
       avg_option_volume: seed.letter === "A" ? 4200 : null,
       bid_ask_spread_pct: seed.letter === "A" ? 0.0125 : null,
@@ -343,31 +343,28 @@ describe("GET /screener: matched scan codes", () => {
   });
 });
 
-describe("GET /screener: best rank bucket", () => {
-  it.each([
-    ["1-10", ["A", "B"]],
-    ["11-20", ["C"]],
-    ["21-30", []],
-    ["31-40", []],
-    ["41-50", ["D"]],
-    ["unmatched", ["E"]],
-  ])("bucket %s covers the stored ranks that read as 1-indexed ones to the user", async (bucket, expectedLetters) => {
-    expect(sortedLetters(await listLetters(`bestRankBucket=${bucket}`))).toEqual(expectedLetters);
+describe("GET /screener: maximum price", () => {
+  it("is inclusive and drops rows with no price", async () => {
+    expect(sortedLetters(await listLetters("maxPrice=50"))).toEqual(["A", "B", "E"]);
   });
 
-  it("an unknown bucket name applies no filter", async () => {
-    expect(await listLetters("bestRankBucket=51-60")).toHaveLength(seeds.length);
+  it("takes a fractional price", async () => {
+    expect(sortedLetters(await listLetters("maxPrice=12.49"))).toEqual(["E"]);
+  });
+
+  it("a value that is not a number applies no filter", async () => {
+    expect(await listLetters("maxPrice=cheap")).toHaveLength(seeds.length);
   });
 });
 
 describe("GET /screener: combined filters", () => {
   it("applies every filter together", async () => {
-    const letters = await listLetters(`sector=${encodeURIComponent(sectorTech)}&minIv=0.6&minOpenInterest=1000&matchedScanCodes=${codeVolatility}&bestRankBucket=11-20`);
+    const letters = await listLetters(`sector=${encodeURIComponent(sectorTech)}&minIv=0.6&minOpenInterest=1000&matchedScanCodes=${codeVolatility}&maxPrice=120`);
     expect(letters).toEqual(["C"]);
   });
 
   it("filters that cannot all hold at once give an empty list", async () => {
-    expect(await listLetters(`sector=${encodeURIComponent(sectorEnergy)}&bestRankBucket=41-50`)).toEqual([]);
+    expect(await listLetters(`sector=${encodeURIComponent(sectorTech)}&maxPrice=10`)).toEqual([]);
   });
 });
 
