@@ -13,6 +13,7 @@ import { reportOpsMonitorLiveness } from "../lib/opsMonitorLiveness.js";
 import { reportWorkerHeartbeat } from "../lib/workerHeartbeatLiveness.js";
 import { liveDataProbeSymbol, probeCompetingLiveSession } from "./probeCompetingLiveSession.js";
 import { blockedAfterReloginMessage, blockedRestartDeferredMessage, competingLiveSessionSurvivedRestart, reportCompetingLiveSession } from "../lib/competingLiveSessionAlert.js";
+import { reportPositionReconciliation, type PositionReconciliationResult } from "../lib/positionReconciliationAlert.js";
 
 // Confirmed 2026-08-27: reqHistoricalData can silently hang (no data, no
 // error event — just a timeout) while the connection handshake itself and
@@ -165,10 +166,6 @@ function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-export function reconciliationNotifyMessage(problems: string[]): string {
-  return `⚠️ Position reconciliation: ${problems.length} discrepancy(ies) between IBKR and local data —\n${problems.map((p) => `• ${p}`).join("\n")}`;
-}
-
 /**
  * Detection only, never throws — a reconciliation problem is a data
  * finding, not a job execution failure, matching the watchdog's convention
@@ -185,6 +182,21 @@ export async function runReconciliationSafely(connection: IbkrConnection): Promi
   } catch (error) {
     return [`${reconciliationRunFailedPrefix}: ${error instanceof Error ? error.message : error}`];
   }
+}
+
+export async function previousHealthCheckCouldNotReconcile(): Promise<boolean> {
+  // Skips the current run's own "running" row, as previousHealthCheckProbeFailed does.
+  const row = await db("job_runs").where({ job_name: "ibkr_health_check" }).whereNot({ status: "running" }).orderBy("started_at", "desc").first("details", "error_message");
+  const problems = (row?.details as { reconciliationProblems?: unknown } | null | undefined)?.reconciliationProblems;
+  return Array.isArray(problems) && problems.some((problem) => String(problem).startsWith(reconciliationRunFailedPrefix));
+}
+
+export async function classifyReconciliationProblems(problems: string[]): Promise<PositionReconciliationResult> {
+  const runFailure = problems.find((problem) => problem.startsWith(reconciliationRunFailedPrefix));
+  if (runFailure) {
+    return { kind: "couldNotRun", reason: runFailure.slice(reconciliationRunFailedPrefix.length).replace(/^:\s*/, ""), previousRunAlsoCouldNotRun: await previousHealthCheckCouldNotReconcile() };
+  }
+  return problems.length > 0 ? { kind: "mismatches", mismatches: problems } : { kind: "clean" };
 }
 
 // Runs every ~10 min, so an IBKR outage (e.g. weekend maintenance) would
@@ -409,10 +421,9 @@ export async function runIbkrHealthCheckJob(options: IbkrHealthCheckOptions = {}
 
     const problems = await runReconciliationSafely(connection);
     closeConnection(connection);
-
-    if (problems.length > 0) {
-      notifications.push(reconciliationNotifyMessage(problems));
-    }
+    await classifyReconciliationProblems(problems)
+      .then(reportPositionReconciliation)
+      .catch((error) => console.warn(`position reconciliation alert failed: ${error instanceof Error ? error.message : error}`));
 
     await checkWorkerHeartbeat();
     return {

@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
     probeCompetingLiveSession: vi.fn(),
     competingLiveSessionSurvivedRestart: vi.fn(),
     reportCompetingLiveSession: vi.fn(),
+    reportPositionReconciliation: vi.fn(),
     reportDaySignalsLoopLiveness: vi.fn(),
     reportOpsMonitorLiveness: vi.fn(),
     reportWorkerHeartbeat: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock("../lib/competingLiveSessionAlert.js", async () => {
     reportCompetingLiveSession: mocks.reportCompetingLiveSession,
   };
 });
+vi.mock("../lib/positionReconciliationAlert.js", () => ({ reportPositionReconciliation: mocks.reportPositionReconciliation }));
 vi.mock("../lib/daySignalsLiveness.js", () => ({ reportDaySignalsLoopLiveness: mocks.reportDaySignalsLoopLiveness }));
 vi.mock("../lib/opsMonitorLiveness.js", () => ({ reportOpsMonitorLiveness: mocks.reportOpsMonitorLiveness }));
 vi.mock("../lib/workerHeartbeatLiveness.js", () => ({ reportWorkerHeartbeat: mocks.reportWorkerHeartbeat }));
@@ -75,11 +77,12 @@ vi.mock("../db/connection.js", () => ({
 const {
   captureFarmStatusMessages,
   checkHistoricalData,
+  classifyReconciliationProblems,
   findOtherRunningJobName,
   isCompetingSessionHistoricalDataError,
   postRestartConnectRetryDelayMs,
+  previousHealthCheckCouldNotReconcile,
   previousHealthCheckProbeFailed,
-  reconciliationNotifyMessage,
   runIbkrHealthCheckJob,
   runReconciliationSafely,
   tryConnect,
@@ -158,6 +161,7 @@ beforeEach(() => {
   mocks.probeCompetingLiveSession.mockResolvedValue("flowing");
   mocks.competingLiveSessionSurvivedRestart.mockResolvedValue(false);
   mocks.reportCompetingLiveSession.mockResolvedValue(false);
+  mocks.reportPositionReconciliation.mockResolvedValue(undefined);
   mocks.checkPositionReconciliation.mockResolvedValue([]);
   mocks.reportDaySignalsLoopLiveness.mockResolvedValue(null);
   mocks.reportOpsMonitorLiveness.mockResolvedValue(null);
@@ -272,10 +276,33 @@ describe("captureFarmStatusMessages and tryConnect", () => {
 });
 
 describe("reconciliation helpers", () => {
-  it("formats every discrepancy as a bullet under a counted headline", () => {
-    expect(reconciliationNotifyMessage(["AAPL missing leg", "MSFT extra leg"])).toBe(
-      "⚠️ Position reconciliation: 2 discrepancy(ies) between IBKR and local data —\n• AAPL missing leg\n• MSFT extra leg",
-    );
+  it("classifies no problems as clean and real problems as mismatches, without reading the previous run", async () => {
+    await expect(classifyReconciliationProblems([])).resolves.toEqual({ kind: "clean" });
+    await expect(classifyReconciliationProblems(["AAPL missing leg", "MSFT extra leg"])).resolves.toEqual({ kind: "mismatches", mismatches: ["AAPL missing leg", "MSFT extra leg"] });
+    expect(mocks.jobRunsDatabaseState.queriedTables).toEqual([]);
+  });
+
+  it("classifies a run failure as could-not-run with the bare reason, checking whether the previous run could not run either", async () => {
+    mocks.jobRunsDatabaseState.previousRunRow = { details: { reconciliationProblems: ["Reconciliation check itself failed: db is down"] }, error_message: null };
+    await expect(classifyReconciliationProblems(["Reconciliation check itself failed: reqPositions timed out waiting for positionEnd."])).resolves.toEqual({
+      kind: "couldNotRun",
+      reason: "reqPositions timed out waiting for positionEnd.",
+      previousRunAlsoCouldNotRun: true,
+    });
+    mocks.jobRunsDatabaseState.previousRunRow = { details: { reconciliationProblems: [] }, error_message: null };
+    await expect(classifyReconciliationProblems(["Reconciliation check itself failed: x"])).resolves.toMatchObject({ previousRunAlsoCouldNotRun: false });
+  });
+
+  it("counts only a previous run whose reconciliation could not run, skipping the current running row", async () => {
+    mocks.jobRunsDatabaseState.previousRunRow = undefined;
+    await expect(previousHealthCheckCouldNotReconcile()).resolves.toBe(false);
+    mocks.jobRunsDatabaseState.previousRunRow = { details: { reconciliationProblems: ["AAPL: leg missing"] }, error_message: null };
+    await expect(previousHealthCheckCouldNotReconcile()).resolves.toBe(false);
+    mocks.jobRunsDatabaseState.previousRunRow = { details: null, error_message: "Gateway unreachable" };
+    await expect(previousHealthCheckCouldNotReconcile()).resolves.toBe(false);
+    mocks.jobRunsDatabaseState.previousRunRow = { details: { reconciliationProblems: ["Reconciliation check itself failed: timeout"] }, error_message: null };
+    await expect(previousHealthCheckCouldNotReconcile()).resolves.toBe(true);
+    expect(mocks.jobRunsDatabaseState.whereNotCalls).toContainEqual([{ status: "running" }]);
   });
 
   it("passes the connection's ib to the check and returns its problems", async () => {
@@ -804,11 +831,23 @@ describe("runIbkrHealthCheckJob: reconciliation, liveness and notify assembly", 
     mocks.connectToIbkrGateway.mockResolvedValue(createFakeConnection());
   });
 
-  it("includes reconciliation problems in the notify text and the details", async () => {
+  it("reports reconciliation problems through the state-based alert, not the job's notify text, and keeps them in the details", async () => {
     mocks.checkPositionReconciliation.mockResolvedValue(["AAPL: leg missing", "MSFT: quantity differs"]);
     await runIbkrHealthCheckJob();
-    expect(lastJobOutput().notify).toBe("⚠️ Position reconciliation: 2 discrepancy(ies) between IBKR and local data —\n• AAPL: leg missing\n• MSFT: quantity differs");
+    expect(mocks.reportPositionReconciliation).toHaveBeenCalledWith({ kind: "mismatches", mismatches: ["AAPL: leg missing", "MSFT: quantity differs"] });
+    expect(lastJobOutput().notify).toBeUndefined();
     expect(lastJobOutput().details.reconciliationProblems).toEqual(["AAPL: leg missing", "MSFT: quantity differs"]);
+  });
+
+  it("reports a clean reconciliation too, so an alerted problem can clear", async () => {
+    await runIbkrHealthCheckJob();
+    expect(mocks.reportPositionReconciliation).toHaveBeenCalledWith({ kind: "clean" });
+  });
+
+  it("still succeeds when the reconciliation alert itself throws", async () => {
+    mocks.reportPositionReconciliation.mockRejectedValue(new Error("alert_state unreachable"));
+    await runIbkrHealthCheckJob();
+    expect(lastJobOutput().details.reconciliationProblems).toEqual([]);
   });
 
   it("contains a throwing reconciliation as a finding and still disconnects and succeeds", async () => {
@@ -818,19 +857,17 @@ describe("runIbkrHealthCheckJob: reconciliation, liveness and notify assembly", 
     await runIbkrHealthCheckJob();
     expect(connection.disconnect).toHaveBeenCalledTimes(1);
     expect(lastJobOutput().details.reconciliationProblems).toEqual(["Reconciliation check itself failed: db is down"]);
-    expect(lastJobOutput().notify).toContain("1 discrepancy(ies)");
+    expect(mocks.reportPositionReconciliation).toHaveBeenCalledWith({ kind: "couldNotRun", reason: "db is down", previousRunAlsoCouldNotRun: false });
   });
 
   it("joins several notifications with a blank line in the order they happened", async () => {
     mocks.connectToIbkrGateway.mockRejectedValueOnce(new Error("down")).mockRejectedValueOnce(new Error("down")).mockResolvedValueOnce(createFakeConnection());
     mocks.checkWorkerOnVps.mockResolvedValue({ active: true, restarted: true, output: "" });
-    mocks.checkPositionReconciliation.mockResolvedValue(["x"]);
     await runIbkrHealthCheckJobAdvancingTimers();
     const sections = lastJobOutput().notify!.split("\n\n");
-    expect(sections).toHaveLength(3);
+    expect(sections).toHaveLength(2);
     expect(sections[0]).toContain("was unreachable — restarted");
     expect(sections[1]).toBe("⚠️ iorio-worker.service was inactive — restarted successfully, now active.");
-    expect(sections[2]).toContain("Position reconciliation");
   });
 
   it("reports liveness problems in the details without failing, and a throwing liveness check as its own finding", async () => {

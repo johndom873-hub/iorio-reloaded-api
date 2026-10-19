@@ -20,3 +20,6 @@ coverage/
 backtest-data/
 .venv-backtest/
 __pycache__/
+
+# Editor settings (VS Code).
+.vscode/
