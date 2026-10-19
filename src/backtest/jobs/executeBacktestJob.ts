@@ -8,7 +8,7 @@ import { connectToIbkrGateway } from "../../ibkr/connectIbkr.js";
 import { findOrCreateTicker } from "../../ibkr/findOrCreateTicker.js";
 import { backtestRepoRoot, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { readFirstOptionDay } from "../backtestDataFile.js";
-import { describeFileStockBarsRefresh, FileStockBarsCancelledError, refreshFileStockBars } from "../refreshFileStockBars.js";
+import { describeFileStockBarsRefresh, FileOptionsPredateStockError, FileStockBarsCancelledError, refreshFileStockBars } from "../refreshFileStockBars.js";
 import { BacktestCancelledError, runBacktestSession } from "../engine/runBacktestSession.js";
 import { refreshSplitScheduleForSymbol } from "../engine/splitFactors.js";
 import { runAnalysisJob } from "../analysis/runAnalysisJob.js";
@@ -179,7 +179,7 @@ async function refreshStockBarsOfFile(job: BacktestJobRow, control: JobProcessCo
   try {
     let requestId = 1;
     const result = await refreshFileStockBars(connection, job.symbol, {
-      firstIntradayYear: Number(firstOptionDay.slice(0, 4)),
+      firstOptionDay,
       lastDateToStore: lastFinishedBacktestSessionDate(new Date()),
       nextRequestId: () => requestId++,
       pause: () => pauseUnlessCancelled(fileStockBarsRequestPauseMilliseconds, control),
@@ -259,17 +259,18 @@ async function runDownloadJob(job: BacktestJobRow, control: JobProcessControl): 
   await control.reportProgress(job.progress_done, job.progress_total, "Starting the ThetaData download");
   const download = await runThetaDataDownloader(job, control);
   if (download.status === "cancelled") return download;
+  // The stock bars also after a failed download (Marcelo 2026-10-19): the days it saved can then be analysed and backtested.
+  // Not after a cancel, which means stop now; refreshStockBarsOfFile skips a file with no complete day.
   let stockBarsError: string | null = null;
-  if (download.status === "succeeded") {
-    try {
-      await refreshStockBarsOfFile(job, control);
-    } catch (error) {
-      if (error instanceof FileStockBarsCancelledError || control.cancelRequested) return { status: "cancelled", error: null };
-      stockBarsError = errorMessage(error);
-      console.error(`${job.symbol}: the IBKR stock bars for the file failed: ${stockBarsError}`);
-    }
-    if (!stockBarsError) await refreshDetectedSplits(job);
+  try {
+    await refreshStockBarsOfFile(job, control);
+  } catch (error) {
+    if (error instanceof FileStockBarsCancelledError || control.cancelRequested) return { status: "cancelled", error: null };
+    if (error instanceof FileOptionsPredateStockError) return { status: "failed", error: download.status === "succeeded" ? `Option data downloaded. ${error.message}` : `${download.error} ${error.message}` };
+    stockBarsError = errorMessage(error);
+    console.error(`${job.symbol}: the IBKR stock bars for the file failed: ${stockBarsError}`);
   }
+  if (!stockBarsError) await refreshDetectedSplits(job);
   const problems = [ibkrError ? `The IBKR daily-bar top-up failed (${ibkrError}).` : null, stockBarsError ? `The IBKR stock bars for the file failed (${stockBarsError}).` : null].filter((problem): problem is string => problem !== null);
   if (problems.length === 0) return download;
   const note = `${problems.join(" ")} Resume retries.`;

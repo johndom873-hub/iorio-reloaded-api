@@ -35,9 +35,31 @@ export interface FileStockBarsRefresh {
   intradayLastDate: string;
 }
 
+/** How far the file's first option day may come before IBKR's first daily bar: options list days after a stock does, never before. */
+const optionsBeforeStockPricesToleranceDays = 14;
+
+/**
+ * Null, or why the file's options cannot be this stock's: they start more than 14 days before IBKR's first daily bar (a
+ * symbol that belonged to another security first, as SPCX did before SpaceX). IBKR's daily history reaches 20 years back,
+ * so an older stock's first bar is never after its options.
+ */
+/** The file's options start before IBKR's stock prices (optionsStartBeforeStockPrices): retrying cannot help. */
+export class FileOptionsPredateStockError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FileOptionsPredateStockError";
+  }
+}
+
+export function optionsStartBeforeStockPrices(symbol: string, firstOptionDay: string, firstDailyBarDate: string): string | null {
+  const gapDays = (Date.parse(`${firstDailyBarDate}T00:00:00Z`) - Date.parse(`${firstOptionDay}T00:00:00Z`)) / 86_400_000;
+  if (gapDays <= optionsBeforeStockPricesToleranceDays) return null;
+  return `The file's ${symbol} options start ${firstOptionDay} but IBKR's ${symbol} stock prices start ${firstDailyBarDate}: the symbol likely belonged to another security before then, so the file mixes two. Delete the file and download it from ${firstDailyBarDate}.`;
+}
+
 export interface FileStockBarsRefreshOptions {
-  /** The first year of 30-minute bars: the year of the file's first option day. */
-  firstIntradayYear: number;
+  /** The file's first option day: the 30-minute bars start in its year, and it must not come before IBKR's first daily bar. */
+  firstOptionDay: string;
   /** The last session stored (a running session's bars are not). */
   lastDateToStore: string;
   nextRequestId: () => number;
@@ -57,7 +79,8 @@ export interface FileStockBarsRefreshOptions {
 export async function refreshFileStockBars(connection: IbkrConnection, symbol: string, options: FileStockBarsRefreshOptions): Promise<FileStockBarsRefresh> {
   const now = options.now ?? new Date();
   const lastYear = Number(options.lastDateToStore.slice(0, 4));
-  const intradayYears = Array.from({ length: Math.max(0, lastYear - options.firstIntradayYear + 1) }, (_, index) => options.firstIntradayYear + index);
+  const firstIntradayYear = Number(options.firstOptionDay.slice(0, 4));
+  const intradayYears = Array.from({ length: Math.max(0, lastYear - firstIntradayYear + 1) }, (_, index) => firstIntradayYear + index);
   const totalRequests = 2 + intradayYears.length;
   let requestsDone = 0;
   const request = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
@@ -73,6 +96,8 @@ export async function refreshFileStockBars(connection: IbkrConnection, symbol: s
   const dailyDuration = `${fileDailyBarYears} Y`;
   const dailyBars = (await request(`IBKR daily bars, ${fileDailyBarYears} years`, () => fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, dailyDuration, options.nextRequestId(), WhatToShow.TRADES, { timeoutMs: requestTimeoutMilliseconds }))).filter((bar) => isStored(tradingDateOf(bar)));
   if (dailyBars.length === 0) throw new Error(`IBKR returned no daily bars for ${symbol}.`);
+  const mixedSecurities = optionsStartBeforeStockPrices(symbol, options.firstOptionDay, dailyBars.map(tradingDateOf).sort()[0]!);
+  if (mixedSecurities) throw new FileOptionsPredateStockError(mixedSecurities);
   let impliedVolatilityError: string | null = null;
   const impliedVolatilityBars = await request(`IBKR implied volatility, ${fileDailyBarYears} years`, () =>
     fetchHistoricalBarsRaw(connection, symbol, BarSizeSetting.DAYS_ONE, dailyDuration, options.nextRequestId(), WhatToShow.OPTION_IMPLIED_VOLATILITY, { timeoutMs: requestTimeoutMilliseconds }).catch((error: unknown) => {
@@ -101,7 +126,7 @@ export async function refreshFileStockBars(connection: IbkrConnection, symbol: s
       intraday.push({ barStart, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: normalizeBarVolume(bar.volume) });
     }
   }
-  if (intraday.length === 0) throw new Error(`IBKR returned no 30-minute bars for ${symbol} from ${options.firstIntradayYear}.`);
+  if (intraday.length === 0) throw new Error(`IBKR returned no 30-minute bars for ${symbol} from ${firstIntradayYear}.`);
   if (options.isCancelled?.()) throw new FileStockBarsCancelledError();
 
   const database = openBacktestDataFileForWriting(symbol);

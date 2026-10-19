@@ -42,7 +42,7 @@ async function main(): Promise<void> {
       requestsMade = true;
       try {
         const result = await refreshFileStockBars(connection, symbol, {
-          firstIntradayYear: Number(firstOptionDay.slice(0, 4)),
+          firstOptionDay,
           lastDateToStore,
           nextRequestId: () => requestId++,
           pause,
