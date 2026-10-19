@@ -209,15 +209,36 @@ describe("backtest routes", () => {
     expect(template.settings.pluto.minEdgeYieldPct).toBe(Number(plutoRow.min_edge_yield_pct));
     expect(template.settings.trading).not.toHaveProperty("commissionEstimator");
     expect(template.settings).toMatchObject({ decisionMaker: "rules", policy: { roll: "flagged_legs", buyback: "when_offered", sharesInProfit: "call_else_sell", eventClose: "stress_vs_remaining", afterBlockedChoice: "try_next" } });
-    expect(template.rows.map((row) => row.group)).toEqual([...Array(12).fill("Capital and sizing"), ...Array(15).fill("Candidate quality"), ...Array(7).fill("Model"), ...Array(6).fill("Trading window and system checks"), ...Array(6).fill("Decisions (stand-in for the AI)"), ...Array(41).fill("Baseline wheel")]);
+    expect(template.rows.map((row) => `${row.section} · ${row.group}`)).toEqual([
+      ...Array(9).fill("baseline_wheel · How the session runs"),
+      ...Array(15).fill("baseline_wheel · Put ladder"),
+      ...Array(10).fill("baseline_wheel · Calls and Covered Calls"),
+      ...Array(10).fill("baseline_wheel · Contract choice"),
+      ...Array(2).fill("baseline_wheel · Exits"),
+      ...Array(12).fill("pluto_rules · Capital and sizing"),
+      ...Array(14).fill("pluto_rules · Candidate quality"),
+      ...Array(6).fill("pluto_rules · Model"),
+      ...Array(4).fill("pluto_rules · System checks"),
+      ...Array(5).fill("pluto_rules · Rules' choices"),
+    ]);
+    // Every row once, and every condition on a row that is there.
+    const paths = template.rows.map((row) => row.path);
+    expect(new Set(paths).size).toBe(87);
+    expect(paths.length).toBe(87);
+    const conditionPaths = template.rows.flatMap((row) => [...(row.appliesWhen?.allOf ?? []), ...(row.appliesWhen?.anyOf ?? [])].map((condition) => condition.path));
+    expect(conditionPaths.filter((path) => !paths.includes(path))).toEqual([]);
     expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" });
     expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["rules", "llm", "baseline"]);
-    expect(template.rows.filter((row) => row.perTicker).map((row) => row.path)).toEqual(["baseline.minAbsDelta", "baseline.maxAbsDelta", "baseline.ladderSharesPct", "baseline.ladderRungs", "baseline.ladderShock", "baseline.ladderShockPct", "baseline.ladderShockMinPct", "baseline.ladderShockMaxPct"]);
-    expect(template.rows[0]).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
-    // The looks inside Pluto's window and the system checks replayed at each: the window is shown, the checks can be changed.
-    expect(template.rows.filter((row) => row.group === "Trading window and system checks").map((row) => [row.path, row.unit, row.now, row.editable])).toEqual([
-      ["pluto.windowStartEt", "time", plutoRow.window_start_et, false],
-      ["pluto.windowEndEt", "time", plutoRow.window_end_et, false],
+    expect(template.rows.filter((row) => row.perTicker).map((row) => row.path)).toEqual(["baseline.ladderSharesPct", "baseline.ladderRungs", "baseline.ladderShock", "baseline.ladderShockPct", "baseline.ladderShockMinPct", "baseline.ladderShockMaxPct", "baseline.minAbsDelta", "baseline.maxAbsDelta"]);
+    expect(template.rows.find((row) => row.path === "pluto.capitalBudgetPct")).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", section: "pluto_rules", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
+    // A row the CC + Put Ladder reads only under a condition says so.
+    expect(template.rows.find((row) => row.path === "baseline.ladderShockPct")?.appliesWhen).toEqual({ allOf: [{ path: "baseline.putsWhenNoCall", oneOf: ["reserve_ladder"] }, { path: "baseline.ladderShock", oneOf: ["fixed"] }], explanation: "Applies only with the ladder's Stock shock set to Fixed." });
+    // The looks inside Pluto's window are shown in How the session runs; the system checks replayed at each can be changed.
+    expect(template.rows.filter((row) => row.path === "pluto.windowStartEt" || row.path === "pluto.windowEndEt").map((row) => [row.path, row.group, row.unit, row.now, row.editable])).toEqual([
+      ["pluto.windowStartEt", "How the session runs", "time", plutoRow.window_start_et, false],
+      ["pluto.windowEndEt", "How the session runs", "time", plutoRow.window_end_et, false],
+    ]);
+    expect(template.rows.filter((row) => row.group === "System checks").map((row) => [row.path, row.unit, row.now, row.editable])).toEqual([
       ["pluto.maxActionsPerSession", "integer", Number(plutoRow.max_actions_per_session), true],
       ["pluto.tickerCooldownMinutes", "integer", Number(plutoRow.ticker_cooldown_minutes), true],
       ["pluto.dailyLossBreakerPct", "percent", Number(plutoRow.daily_loss_breaker_pct), true],
@@ -227,15 +248,16 @@ describe("backtest routes", () => {
     // The sector cap binds once a session runs several symbols on one book.
     expect(template.rows.find((row) => row.path === "pluto.maxSectorPctOfBudget")).toMatchObject({ group: "Capital and sizing", label: "Max per sector", unit: "percent", editable: true, now: Number(plutoRow.max_sector_pct_of_budget) });
     expect(template.rows.find((row) => row.path === "pluto.minGrade")?.now).toBe(plutoRow.min_grade);
-    expect(template.rows.find((row) => row.path === "fixed.earningsDateKnownCalendarDaysAhead")).toMatchObject({ group: "Candidate quality", label: "Earnings dates known 30 days ahead", unit: "days", now: 30, editable: false });
+    expect(template.rows.find((row) => row.path === "fixed.earningsDateKnownCalendarDaysAhead")).toMatchObject({ group: "How the session runs", label: "Earnings dates known 30 days ahead", unit: "days", now: 30, editable: false });
     const tradingRow = await testDb("trading_settings").first("max_order_pct_of_portfolio");
-    expect(template.rows.slice(5, 9).map((row) => [row.path, row.label])).toEqual([
+    const capitalRows = template.rows.filter((row) => row.group === "Capital and sizing");
+    expect(capitalRows.slice(5, 9).map((row) => [row.path, row.label])).toEqual([
       ["pluto.minCashReservePct", "Min cash reserve"],
       ["trading.maxOrderPctOfPortfolio", "Max order size (order gate)"],
       ["trading.maxConcentrationPerTickerPct", "Max per ticker (order gate)"],
       ["trading.minCashReservePct", "Min cash reserve (order gate)"],
     ]);
-    expect(template.rows[6]).toMatchObject({ now: Number(tradingRow.max_order_pct_of_portfolio), editable: true, note: "% of the account" });
+    expect(capitalRows[6]).toMatchObject({ now: Number(tradingRow.max_order_pct_of_portfolio), editable: true, note: "% of the account" });
     // A look after 10:00 measures how far each expiry's quotes moved from the 10:00 surface: the limit binds again.
     expect(template.rows.find((row) => row.path === "pluto.maxIvShiftVp")).toMatchObject({ editable: true, now: Number(plutoRow.max_iv_shift_vp) });
     const forecastRowIndex = template.rows.findIndex((row) => row.path === "fixed.forecastWindowDays");
@@ -244,28 +266,20 @@ describe("backtest routes", () => {
       ["fixed.gradeCutPoints", "20 / 10 / 0%", false],
     ]);
     // The decisions the AI model makes live, as choices: who decides, and the rules that stand in for it.
-    expect(template.rows.filter((row) => row.group === "Decisions (stand-in for the AI)").map((row) => [row.path, row.unit, row.now, row.editable, row.choices?.map((choice) => choice.value)])).toEqual([
-      ["decisionMaker", "choice", "rules", true, ["rules", "llm", "baseline"]],
+    expect(template.rows.find((row) => row.path === "decisionMaker")).toMatchObject({ group: "How the session runs", unit: "choice", now: "rules", editable: true });
+    expect(template.rows.filter((row) => row.group === "Rules' choices").map((row) => [row.path, row.unit, row.now, row.editable, row.choices?.map((choice) => choice.value)])).toEqual([
       ["policy.roll", "choice", "flagged_legs", true, ["flagged_legs", "any_eligible", "never"]],
       ["policy.buyback", "choice", "when_offered", true, ["when_offered", "never"]],
       ["policy.sharesInProfit", "choice", "call_else_sell", true, ["call_else_sell", "always_sell", "always_keep"]],
       ["policy.eventClose", "choice", "stress_vs_remaining", true, ["stress_vs_remaining", "never", "always"]],
       ["policy.afterBlockedChoice", "choice", "try_next", true, ["try_next", "stop"]],
     ]);
-    // The baseline wheel's own rows come last.
-    expect(template.rows.filter((row) => row.group === "Baseline wheel").map((row) => [row.path, row.now, row.editable])).toEqual([
+    // The baseline wheel's own rows, in their groups' order.
+    expect(template.rows.filter((row) => row.path.startsWith("baseline.")).map((row) => [row.path, row.now, row.editable])).toEqual([
+      ["baseline.looks", "every_look", true],
       ["baseline.entry", "put", true],
-      ["baseline.minAbsDelta", 0.05, true],
-      ["baseline.maxAbsDelta", 0.6, true],
-      ["baseline.minDte", 1, true],
-      ["baseline.maxDte", 45, true],
-      ["baseline.maxSpreadPctOfMid", 15, true],
-      ["baseline.callStrike", "delta_range", true],
-      ["baseline.entryCallStrike", "any", true],
-      ["baseline.entryWhenSharesUncovered", "wait", true],
-      ["baseline.maxSharesPctOfAccount", 100, true],
-      ["baseline.minCallYieldPct", 0, true],
-      ["baseline.minCallYieldAppliesTo", "every_call", true],
+      ["baseline.dayValueOptions", "marked", true],
+      ["baseline.earnings", "ignore", true],
       ["baseline.putsWhenNoCall", "off", true],
       ["baseline.putBudgetPctPerDte", 1, true],
       ["baseline.ladderSharesPct", 50, true],
@@ -274,27 +288,35 @@ describe("backtest routes", () => {
       ["baseline.ladderShockPct", 70, true],
       ["baseline.ladderShockMinPct", 60, true],
       ["baseline.ladderShockMaxPct", 80, true],
-      ["baseline.ladderShockNoHistoryPct", 90, true],
       ["baseline.ladderShockLookbackYears", 10, true],
+      ["baseline.ladderShockNoHistoryPct", 90, true],
       ["baseline.ladderTop", "break_even", true],
       ["baseline.ladderPace", "any_look", true],
       ["baseline.ladderPutVersusCall", "call_first", true],
       ["baseline.ladderPutYieldMarginPct", 0, true],
       ["baseline.ladderPutDeltaRange", "delta_range", true],
-      ["baseline.dayValueOptions", "marked", true],
+      ["baseline.callStrike", "delta_range", true],
+      ["baseline.entryCallStrike", "any", true],
+      ["baseline.entryWhenSharesUncovered", "wait", true],
       ["baseline.callDeltaRange", "entry_range", true],
       ["baseline.callMinAbsDelta", 0.05, true],
       ["baseline.callMaxAbsDelta", 0.6, true],
-      ["baseline.takeProfitPct", 0, true],
-      ["baseline.shareStopLossPct", 0, true],
-      ["baseline.earnings", "ignore", true],
+      ["baseline.minCallYieldPct", 0, true],
+      ["baseline.minCallYieldAppliesTo", "every_call", true],
       ["baseline.maxAccountPctPerStock", 100, true],
-      ["baseline.looks", "every_look", true],
-      ["baseline.volatilityEdgeFilter", "off", true],
-      ["baseline.minVolatilityEdgePoints", 0, true],
+      ["baseline.maxSharesPctOfAccount", 100, true],
+      ["baseline.minAbsDelta", 0.05, true],
+      ["baseline.maxAbsDelta", 0.6, true],
+      ["baseline.minDte", 1, true],
+      ["baseline.maxDte", 45, true],
+      ["baseline.maxSpreadPctOfMid", 15, true],
       ["baseline.ranking", "premium_yield", true],
       ["baseline.expiryChoice", "any_in_range", true],
       ["baseline.coverage", "best_contract", true],
+      ["baseline.volatilityEdgeFilter", "off", true],
+      ["baseline.minVolatilityEdgePoints", 0, true],
+      ["baseline.takeProfitPct", 0, true],
+      ["baseline.shareStopLossPct", 0, true],
     ]);
     expect(template.rows.find((row) => row.path === "policy.afterBlockedChoice")).toMatchObject({ label: "After a choice Pluto's checks refuse", choices: [{ value: "try_next", label: "Choose again, but no more opens where the account has no room" }, { value: "stop", label: "Stop for this look" }] });
     // The AI model can be picked once the Claude Code CLI is configured.

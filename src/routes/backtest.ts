@@ -9,6 +9,7 @@ import { backtestHistoryStartDate } from "../backtest/backfillDailyHistory.js";
 import { backtestNotReplayed, buildBacktestSettingRows, editableBacktestSettingPaths } from "../backtest/settingsTemplate.js";
 import {
   BacktestLabSettingsValidationError,
+  analysisReadsLabPath,
   globalChangeReachesTicker,
   loadBacktestLabAudit,
   loadBacktestLabSettings,
@@ -195,7 +196,7 @@ backtestRouter.post("/lab-settings/preview", async (request, response) => {
   response.json({
     changes: changes.map((change) => ({
       ...change,
-      reruns: analysed.filter((symbol) => !tickerOverridesGlobalPath(change.field, overridesBySymbol.get(symbol) ?? null)),
+      reruns: analysisReadsLabPath(change.field) ? analysed.filter((symbol) => !tickerOverridesGlobalPath(change.field, overridesBySymbol.get(symbol) ?? null)) : [],
       keptOverrides: overrides.filter((row) => tickerOverridesGlobalPath(change.field, row)).map((row) => row.symbol),
     })),
     reruns: changes.length === 0 ? [] : analysed.filter((symbol) => globalChangeReachesTicker(changes.map((change) => change.field), overridesBySymbol.get(symbol) ?? null)),

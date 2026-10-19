@@ -65,7 +65,13 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export const hashAnalysisLabValues = (values: Omit<AnalysisLabValues, "effective">) => createHash("sha256").update(stableJson(values)).digest("hex").slice(0, 32);
+/** The lab values an analysis reads (analysisReadsLabPath): a change to Pluto's own rows leaves the hash as it was. Stored runs
+ *  may hold partial settings (written by tests or older code), hence the optional reads. */
+function analysisReadValues({ settings, defaultPotDollars, tickerOverrides, trial }: Omit<AnalysisLabValues, "effective">) {
+  return { defaultPotDollars, tickerOverrides, trial, settings: { baseline: settings?.baseline, model: settings?.model, trading: { spreadCostChargedPct: settings?.trading?.spreadCostChargedPct }, pluto: { windowStartEt: settings?.pluto?.windowStartEt, windowEndEt: settings?.pluto?.windowEndEt } } };
+}
+
+export const hashAnalysisLabValues = (values: Omit<AnalysisLabValues, "effective">) => createHash("sha256").update(stableJson(analysisReadValues(values))).digest("hex").slice(0, 32);
 
 /** The ticker's lab values now (the lab's global values, its overrides on top), and a trial's on top of those. */
 export async function resolveAnalysisLabValues(symbol: string, trial: AnalysisTrialValues | null, connection: Knex = db): Promise<AnalysisLabValues & { hash: string }> {
@@ -248,7 +254,8 @@ function toRunView(row: AnalysisRow, now = new Date()): AnalysisRunView {
     sessionId: row.session_id,
     formulasVersion: row.formulas_version,
     labValues: row.lab_values,
-    labValuesHash: row.lab_values_hash,
+    // From the stored values, so a run saved before the hash covered only what an analysis reads compares alike.
+    labValuesHash: row.lab_values ? hashAnalysisLabValues(row.lab_values) : row.lab_values_hash,
     optionLastDate: row.option_last_date,
     barsLastDate: row.bars_last_date,
     figuresSeconds: row.figures_seconds === null ? null : Number(row.figures_seconds),

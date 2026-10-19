@@ -259,8 +259,12 @@ export function tickerOverridesGlobalPath(path: string, overrides: Pick<Backtest
   return overrides !== null && tickerFields.some((field) => overrides[field] !== null && globalPathsByTickerField[field].includes(path));
 }
 
-/** Whether a change to these global values reaches a ticker: some changed value is one its own values don't replace. */
+/** The global values a ticker's analysis reads: it runs the Baseline wheel whatever the lab's decision maker. */
+const analysisReadPaths: ReadonlySet<string> = new Set(["lab.defaultPotDollars", "trading.spreadCostChargedPct", "pluto.windowStartEt", "pluto.windowEndEt"]);
+export const analysisReadsLabPath = (path: string) => path.startsWith("baseline.") || path.startsWith("model.") || analysisReadPaths.has(path);
+
+/** Whether a change to these global values reaches a ticker's analysis: some changed value it reads and its own values don't replace. */
 export function globalChangeReachesTicker(changedFields: readonly string[], overrides: Pick<BacktestLabTickerOverrides, BacktestLabTickerField> | null): boolean {
   const covered = new Set(overrides ? tickerFields.filter((field) => overrides[field] !== null).flatMap((field) => globalPathsByTickerField[field]) : []);
-  return changedFields.some((field) => !covered.has(field));
+  return changedFields.some((field) => analysisReadsLabPath(field) && !covered.has(field));
 }

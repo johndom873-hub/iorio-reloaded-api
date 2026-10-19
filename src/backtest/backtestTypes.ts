@@ -565,9 +565,44 @@ export interface BacktestSettingChoice {
 }
 
 /** One row of the New session settings table. `path` addresses the value inside BacktestSettings, e.g. "pluto.minEdgeYieldPct" or "policy.roll". */
+export type BacktestSettingGroup =
+  | "How the session runs"
+  | "Put ladder"
+  | "Calls and Covered Calls"
+  | "Contract choice"
+  | "Exits"
+  | "Capital and sizing"
+  | "Candidate quality"
+  | "Model"
+  | "System checks"
+  | "Rules' choices";
+
+/** "baseline_wheel": rows a Baseline wheel session (the CC + Put Ladder) reads, some shared with the rules and the AI model;
+ *  "pluto_rules": rows only the rules and the AI model read. */
+export type BacktestSettingSection = "baseline_wheel" | "pluto_rules";
+
+/** A row's value against another row's: `oneOf` / `noneOf` its choice values, or a number `above`. */
+export interface BacktestSettingCondition {
+  path: string;
+  oneOf?: string[];
+  noneOf?: string[];
+  above?: number;
+}
+
+/** When a row's value is read at all: every condition in `allOf`, and one of `anyOf` when given. */
+export interface BacktestSettingApplicability {
+  allOf?: BacktestSettingCondition[];
+  anyOf?: BacktestSettingCondition[];
+  /** Says when it applies, for the row that doesn't apply now. */
+  explanation: string;
+}
+
 export interface BacktestSettingRow {
   path: string;
-  group: "Capital and sizing" | "Candidate quality" | "Model" | "Trading window and system checks" | "Decisions (stand-in for the AI)" | "Baseline wheel";
+  group: BacktestSettingGroup;
+  section: BacktestSettingSection;
+  /** Absent: always read (in its section's sessions). */
+  appliesWhen?: BacktestSettingApplicability;
   /** `path` addresses e.g. "pluto.minEdgeYieldPct", "policy.roll" or "model.forecastWindowDays". */
   label: string;
   /** "time" is a clock time, "HH:MM" Eastern. */

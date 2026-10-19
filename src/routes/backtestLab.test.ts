@@ -133,4 +133,23 @@ describe("lab settings routes", () => {
     expect(audit.body[0]).toMatchObject({ field: "baseline.ladderRungs", analysesRerun: saved.body.analyses.started.length });
     await call("PUT", `/lab-ticker-overrides/${symbol}`, { ladderRungs: null });
   });
+
+  it("stores Pluto's own rows in the lab, and a save of only those re-runs no analysis", async () => {
+    const before = await call<BacktestLabSettingsView>("GET", "/lab-settings");
+    const kelly = before.body.settings.kellyFraction === 0.25 ? 0.3 : 0.25;
+    const budget = before.body.settings.pluto.capitalBudgetPct === 40 ? 45 : 40;
+    const body = { overrides: { kellyFraction: kelly, pluto: { capitalBudgetPct: budget }, policy: { roll: "never" } } };
+
+    type Preview = { changes: (BacktestLabChange & { reruns: string[] })[]; reruns: string[] };
+    const preview = await call<Preview>("POST", "/lab-settings/preview", body);
+    expect(preview.body.changes.map((change) => change.field).sort()).toEqual(["kellyFraction", "pluto.capitalBudgetPct", "policy.roll"]);
+    expect(preview.body.changes.every((change) => change.reruns.length === 0)).toBe(true);
+    expect(preview.body.reruns).toEqual([]);
+
+    const saved = await call<{ analyses: { started: string[] } }>("PUT", "/lab-settings", body);
+    expect(saved.body.analyses.started).toEqual([]);
+    const after = await call<BacktestLabSettingsView>("GET", "/lab-settings");
+    expect([after.body.settings.kellyFraction, after.body.settings.pluto.capitalBudgetPct, after.body.settings.policy?.roll]).toEqual([kelly, budget, "never"]);
+    expect(after.body.rows.find((row) => row.path === "kellyFraction")?.now).toBe(kelly);
+  });
 });

@@ -41,12 +41,24 @@ describe("validateAnalysisTrialValues", () => {
 });
 
 describe("hashAnalysisLabValues", () => {
+  const pluto = { windowStartEt: "10:00", windowEndEt: "15:30", capitalBudgetPct: 50 };
+  const trading = { spreadCostChargedPct: 0, maxOrderPctOfPortfolio: 10 };
+  const base = { defaultPotDollars: 200_000, tickerOverrides: null, trial: null };
+
   it("does not depend on key order", () => {
-    const settings = { kellyFraction: 0.5, baseline: { ladderRungs: 5, ladderSharesPct: 50 } } as unknown as BacktestSettings;
-    const reordered = { baseline: { ladderSharesPct: 50, ladderRungs: 5 }, kellyFraction: 0.5 } as unknown as BacktestSettings;
-    const base = { defaultPotDollars: 200_000, tickerOverrides: null, trial: null };
+    const settings = { kellyFraction: 0.5, pluto, trading, baseline: { ladderRungs: 5, ladderSharesPct: 50 } } as unknown as BacktestSettings;
+    const reordered = { baseline: { ladderSharesPct: 50, ladderRungs: 5 }, trading, pluto, kellyFraction: 0.5 } as unknown as BacktestSettings;
     expect(hashAnalysisLabValues({ ...base, settings })).toBe(hashAnalysisLabValues({ ...base, settings: reordered }));
     expect(hashAnalysisLabValues({ ...base, settings })).not.toBe(hashAnalysisLabValues({ ...base, defaultPotDollars: 100_000, settings }));
+  });
+
+  it("covers only what an analysis reads: Pluto's own rows leave it as it was", () => {
+    const settings = { kellyFraction: 0.5, decisionMaker: "baseline", policy: { roll: "never" }, pluto, trading, baseline: { ladderRungs: 5 } } as unknown as BacktestSettings;
+    const hash = hashAnalysisLabValues({ ...base, settings });
+    const plutoOnly = { ...settings, kellyFraction: 0.25, decisionMaker: "rules", policy: { roll: "flagged_legs" }, pluto: { ...pluto, capitalBudgetPct: 80 }, trading: { ...trading, maxOrderPctOfPortfolio: 20 } } as unknown as BacktestSettings;
+    expect(hashAnalysisLabValues({ ...base, settings: plutoOnly })).toBe(hash);
+    expect(hashAnalysisLabValues({ ...base, settings: { ...settings, trading: { ...trading, spreadCostChargedPct: 50 } } as unknown as BacktestSettings })).not.toBe(hash);
+    expect(hashAnalysisLabValues({ ...base, settings: { ...settings, baseline: { ladderRungs: 4 } } as unknown as BacktestSettings })).not.toBe(hash);
   });
 });
 

@@ -120,4 +120,8 @@ describe("globalChangeReachesTicker", () => {
     expect(globalChangeReachesTicker(["baseline.ladderRungs", "baseline.maxSpreadPctOfMid"], { ...none, ladderRungs: 6 })).toBe(true);
     expect(globalChangeReachesTicker(["baseline.minAbsDelta"], { ...none, maxAbsDelta: 0.25 })).toBe(true);
   });
+  it("never reaches it with values an analysis doesn't read: Pluto's own rows and the decision maker", () => {
+    expect(globalChangeReachesTicker(["pluto.capitalBudgetPct", "kellyFraction", "policy.roll", "trading.maxOrderPctOfPortfolio", "decisionMaker"], null)).toBe(false);
+    expect(globalChangeReachesTicker(["kellyFraction", "trading.spreadCostChargedPct"], null)).toBe(true);
+  });
 });
