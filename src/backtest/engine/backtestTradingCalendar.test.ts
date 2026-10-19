@@ -30,6 +30,16 @@ describe("BacktestTradingCalendar", () => {
     expect(calendar.sessionsBetween("2024-12-24", "2024-12-24")).toEqual([{ dateIso: "2024-12-24", closeMinutesEt: 780 }]);
   });
 
+  it("tells a session from a closed day, and finds the session before a closed day (where its expiries settle)", () => {
+    expect(calendar.isSession("2024-11-27")).toBe(true);
+    expect(calendar.isSession("2024-11-28")).toBe(false);
+    expect(calendar.sessionBefore("2024-11-28")).toBe("2024-11-27");
+    // Over a weekend, and after the file: the market calendar's closed Christmas, then the Monday before it.
+    expect(calendar.sessionBefore("2024-12-02")).toBe("2024-11-29");
+    expect(calendar.isSession("2024-12-25")).toBe(false);
+    expect(calendar.sessionBefore("2024-12-25")).toBe("2024-12-24");
+  });
+
   it("puts the variance clock on those sessions: from Wednesday 10:00 to the Friday half day", () => {
     const tau = varianceSessionsToExpiry(easternInstant("2024-11-27", 10, 0).getTime(), "2024-11-29", calendar.sessionsBetween("2024-11-27", "2024-11-29"));
     // rest of Wednesday 0.309 + a half day 0.704 (Thursday is no session)

@@ -9,6 +9,7 @@ import { toOhlcvBars } from "./backtestBarHistory.js";
 import { makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineCommissions, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
 
 import { noteLadderLook } from "./backtestBaselineLadder.js";
+import { entryDropRiskBlock, extensionZ, ivRankBefore } from "./entryDropRiskFilters.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { BacktestLookContext, BacktestLookResult, BacktestOptionSale } from "./backtestLook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
@@ -52,14 +53,14 @@ function forwardAnchorsOfDay(ledger: SimulatedLedger, symbol: string, todayIso: 
 //      (maxAccountPctPerStock: its open positions' capital at risk, net of premium), the shares' cap
 //      (maxSharesPctOfAccount: the shares held at the 10:00 price, against the day's account value) and the volume limit
 //      allow. A Covered Call entry waits while held round lots have no call, unless entryWhenSharesUncovered is "buy": it then buys
-//      every share its call covers and the uncovered lots keep waiting for their own;
-//   3. with putsWhenNoCall "dte_budget" (a Covered Call entry), when step 1 left held lots without a call or step 2 had room
-//      for a lot and sold no Covered Call entry, and no put of the stock is open: one put, the highest premium yield, strike at
-//      most the average price of the shares held (any with none held), as many contracts as putBudgetPctPerDte% of the
-//      day's account value × days to expiry (its exposure, (strike − fill) × 100 a contract), the free cash and the volume
-//      limit allow (approved by Marcelo 2026-10-13). An assignment may take the shares past their cap.
-// With minCallYieldPct > 0, a call is sold only when its premium yield is above that: a Covered Call entry's always, step 1's
-// only with minCallYieldAppliesTo "every_call".
+//      every share its call covers and the uncovered lots keep waiting for their own. With the put ladder (putsWhenNoCall
+//      "reserve_ladder"), the entries stay within the ladder's shares' budget: a Covered Call entry's shares at cost, or a
+//      Cash-Secured Put entry's collateral (strike × 100 a contract; Marcelo 2026-10-19), less the shares held at cost and
+//      the open puts' collateral;
+//   3. with the put ladder, once shares are held (backtestBaselineLadder.ts): its puts on the reserve, when no call qualifies
+//      for the free lots or, with ladderPutVersusCall "higher_yield", when the put yields more than the call.
+// With minCallYieldPct > 0, an entry is sold only when its premium yield is above that (a Covered Call entry's call, a
+// Cash-Secured Put entry's put), step 1's calls only with minCallYieldAppliesTo "every_call", the ladder's puts at any yield.
 // The day's account value for sizing is the session's: open options at zero when dayValueOptions is "excluded".
 // With earnings "skip_spanning", no sale whose expiry spans a known earnings date (today ≤ report ≤ expiry); with looks
 // "first_look", the session asks only at 10:00. With volatilityEdgeFilter "entries" (or "all_sales"), a new entry (or any
@@ -67,6 +68,8 @@ function forwardAnchorsOfDay(ledger: SimulatedLedger, symbol: string, todayIso: 
 // ranking "edge_yield", "time_value" or "premium_dollars", the candidates are picked by that instead of their premium
 // yield; with expiryChoice "nearest_qualifying", from the nearest expiry that has any first. With coverage
 // "fill_down_ranking", what the best contract's volume limit leaves goes to the next candidates in that order.
+// With entryExtensionFilter or entryIvRankFilter "on", no new entry (step 2) while the stock's extension z or IV Rank is
+// at or above its limit (entryDropRiskFilters.ts); the calls on held shares and the ladder's puts are never filtered.
 // Everything is held to expiry; the session settles it (assignment, call-away) as for any session.
 //
 //   delta          = Black-76 delta at the quote's own implied volatility (from its mid), on the expiry's put-call parity
@@ -170,9 +173,9 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
         .filter((leg) => leg.legType === "stock" && leg.side === "long" && leg.exitAt === null)
         .reduce((sum, leg) => sum + leg.quantity * priceToCycleScale, 0);
     // The put ladder (backtestBaselineLadder.ts): the cycle's state, noted before anything is sold at this look.
-    const ladderOn = baseline.entry === "covered_call" && baseline.putsWhenNoCall === "reserve_ladder";
+    const ladderOn = baseline.putsWhenNoCall === "reserve_ladder";
     const ladderState = ladderOn
-      ? noteLadderLook(ledger, symbol, { cycleOpen: ledgerOpenCycleSummary(ledger, symbol) !== null, todayIso, accountValue: accountValueToday(), adjustedClosesBefore: lookSymbol.adjustedDailyClosesBeforeToday }, baseline)
+      ? noteLadderLook(ledger, symbol, { cycleOpen: ledgerOpenCycleSummary(ledger, symbol) !== null, sharesHeld: heldSharesToday() > 0, todayIso, accountValue: accountValueToday(), adjustedClosesBefore: lookSymbol.adjustedDailyClosesBeforeToday }, baseline)
       : null;
     const openPutCollateral = () =>
       positionsOfSymbol(ledger, symbol)
@@ -367,7 +370,15 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
       sell: record,
     };
     const noteShortfall = (shortfall: BaselineOrderShortfall) => shortfalls.push({ tradingDate: todayIso, at: at.toISOString(), lookTimeEt, symbol, ...shortfall, lookCount: 1 });
-    planBaselineSales({ symbol, commissions: backtestCommissions, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall });
+    // The drop-risk filters on new entries, worked out only when one is on.
+    const entryBlockedBecause =
+      baseline.entryExtensionFilter === "on" || baseline.entryIvRankFilter === "on"
+        ? entryDropRiskBlock(baseline, {
+            extensionZ: baseline.entryExtensionFilter === "on" ? extensionZ(lookSymbol.adjustedDailyClosesBeforeToday) : null,
+            ivRank: baseline.entryIvRankFilter === "on" ? ivRankBefore(lookSymbol.bars, todayIso) : null,
+          })
+        : null;
+    planBaselineSales({ symbol, commissions: backtestCommissions, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall, entryBlockedBecause });
   }
 
   const summary = summaries.length === 0 ? "No action: fully invested" : actions.length === 0 ? `No action: ${summaries.join(" | ")}` : summaries.join(" · ");

@@ -3,7 +3,7 @@ import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import { normalizeBacktestSymbol } from "../backtestDataDirectory.js";
 import { readBacktestDataFileContents } from "../dataFileSummary.js";
-import { loadBacktestLabSettings, loadBacktestLabTickerOverrides, tickerOverridesToValues } from "../labSettingsStore.js";
+import { loadBacktestLabSettings, loadBacktestLabTickerOverrides, tickerOverridesToValues, withCodeKeys } from "../labSettingsStore.js";
 import { defaultBacktestBaselineSettings, type BacktestBaselineSettings, type BacktestLabTickerOverrides, type BacktestSettings, type BacktestTickerProfile, type BacktestTickerSuitability } from "../backtestTypes.js";
 import { loadTickerProfile } from "../tickerProfileStore.js";
 import { loadTickerSuitability } from "../tickerSuitabilityStore.js";
@@ -66,9 +66,10 @@ function stableJson(value: unknown): string {
 }
 
 /** The lab values an analysis reads (analysisReadsLabPath): a change to Pluto's own rows leaves the hash as it was. Stored runs
- *  may hold partial settings (written by tests or older code), hence the optional reads. */
+ *  may hold partial settings (written by tests or older code), hence the optional reads. The baseline takes the code's shape
+ *  on both sides (withCodeKeys, as the lab loads it), so a setting added at its default, or one removed, leaves runs current. */
 function analysisReadValues({ settings, defaultPotDollars, tickerOverrides, trial }: Omit<AnalysisLabValues, "effective">) {
-  return { defaultPotDollars, tickerOverrides, trial, settings: { baseline: settings?.baseline, model: settings?.model, trading: { spreadCostChargedPct: settings?.trading?.spreadCostChargedPct }, pluto: { windowStartEt: settings?.pluto?.windowStartEt, windowEndEt: settings?.pluto?.windowEndEt } } };
+  return { defaultPotDollars, tickerOverrides, trial, settings: { baseline: settings?.baseline && withCodeKeys(defaultBacktestBaselineSettings, settings.baseline), model: settings?.model, trading: { spreadCostChargedPct: settings?.trading?.spreadCostChargedPct }, pluto: { windowStartEt: settings?.pluto?.windowStartEt, windowEndEt: settings?.pluto?.windowEndEt } } };
 }
 
 export const hashAnalysisLabValues = (values: Omit<AnalysisLabValues, "effective">) => createHash("sha256").update(stableJson(analysisReadValues(values))).digest("hex").slice(0, 32);

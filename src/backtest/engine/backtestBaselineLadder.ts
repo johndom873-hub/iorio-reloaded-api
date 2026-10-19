@@ -1,8 +1,9 @@
 import type { BacktestBaselineSettings } from "../backtestTypes.js";
 import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
 
-// The put ladder on a cash reserve (baseline putsWhenNoCall "reserve_ladder", Marcelo 2026-10-14). The Covered Call entries' shares
-// get ladderSharesPct% of the base (at cost) and the rest is the reserve R0; the base is the larger of the account value
+// The put ladder on a cash reserve (baseline putsWhenNoCall "reserve_ladder", Marcelo 2026-10-14). The entries (Covered Calls'
+// shares, or Cash-Secured Puts' collateral until they are assigned; Marcelo 2026-10-19) get ladderSharesPct% of the base (at
+// cost) and the rest is the reserve R0; the base is the larger of the account value
 // the cycle started with and today's, so a fall keeps the cycle's plan and a rally grows both with the account. In a
 // session of per-ticker pots each ticker's base is its share of that (w = its pot ÷ every pot, fixed for the session;
 // approved by Marcelo 2026-10-15), and every ticker shares the one account, its cash and its interest. When
@@ -28,9 +29,9 @@ import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
 // (F $29.46) and the break-even to $95.50: 95.50 − 66.04 × 0.35 = $72.39. The last rung's cap is the floor itself.
 
 export interface LadderCycleState {
-  /** Null while the symbol is flat. */
+  /** Null until shares are held: while the symbol is flat, or its cycle holds only puts. */
   startedOn: string | null;
-  /** The account value at the last look the symbol was flat: the cycle's starting value. */
+  /** The account value at the last look before shares were held: the cycle's starting value. */
   accountValueAtStart: number;
   shock: number;
 }
@@ -66,13 +67,14 @@ export function ladderShock(settings: Pick<BacktestBaselineSettings, "ladderShoc
 }
 
 /**
- * The symbol's ladder state at a look, updated: flat, it records the account value (the next cycle's start); in a cycle,
- * it starts one at the first look that finds shares (S fixed then).
+ * The symbol's ladder state at a look, updated: until shares are held (flat, or a cycle of puts only) it records the
+ * account value (the next start's); the ladder starts at the first look that finds shares (S fixed then; Marcelo
+ * 2026-10-19: a Cash-Secured Put entry starts it once assigned) and keeps it until the cycle closes.
  */
 export function noteLadderLook(
   ledger: SimulatedLedger,
   symbol: string,
-  look: { cycleOpen: boolean; todayIso: string; accountValue: number; adjustedClosesBefore: readonly { date: string; close: number }[] },
+  look: { cycleOpen: boolean; sharesHeld: boolean; todayIso: string; accountValue: number; adjustedClosesBefore: readonly { date: string; close: number }[] },
   settings: Pick<BacktestBaselineSettings, "ladderShock" | "ladderShockPct" | "ladderShockMinPct" | "ladderShockMaxPct" | "ladderShockNoHistoryPct" | "ladderShockLookbackYears">,
 ): LadderCycleState {
   let bySymbol = stateByLedger.get(ledger);
@@ -80,8 +82,9 @@ export function noteLadderLook(
   const kept = bySymbol.get(symbol);
   let state: LadderCycleState;
   if (!look.cycleOpen) state = { startedOn: null, accountValueAtStart: look.accountValue, shock: 0 };
-  else if (!kept || kept.startedOn === null) state = { startedOn: look.todayIso, accountValueAtStart: kept?.accountValueAtStart ?? look.accountValue, shock: ladderShock(settings, look.adjustedClosesBefore, look.todayIso) };
-  else state = kept;
+  else if (kept && kept.startedOn !== null) state = kept;
+  else if (!look.sharesHeld) state = { startedOn: null, accountValueAtStart: look.accountValue, shock: 0 };
+  else state = { startedOn: look.todayIso, accountValueAtStart: kept?.accountValueAtStart ?? look.accountValue, shock: ladderShock(settings, look.adjustedClosesBefore, look.todayIso) };
   bySymbol.set(symbol, state);
   return state;
 }

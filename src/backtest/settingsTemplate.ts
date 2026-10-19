@@ -144,7 +144,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Entry with free cash",
     unit: "choice",
     editable: true,
-    note: "only with the baseline wheel as decision maker. At every look free round lots get the call with the highest premium yield, free cash the entry with the highest premium yield; everything is held to expiry",
+    note: "only with the baseline wheel as decision maker. At every look free round lots get the call with the highest premium yield, free cash the entry with the highest premium yield; everything is held to expiry. With the ladder, a Cash-Secured Put entry's collateral stays within the ladder's Shares at most, and the ladder starts once it is assigned",
     choices: [
       { value: "put", label: "Cash-Secured Put" },
       { value: "covered_call", label: "Covered Call (100 shares bought and one call sold on them)" },
@@ -195,16 +195,16 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     ],
   },
   { path: "baseline.maxSharesPctOfAccount", label: "Shares at most", unit: "percent", editable: true, note: "of the account value, the shares held at the 10:00 price: new Covered Calls stop there; 100 = no cap" },
-  { path: "baseline.minCallYieldPct", label: "Calls only above a premium yield of", unit: "percent", editable: true, note: "annualized; 0 = any" },
+  { path: "baseline.minCallYieldPct", label: "Sell only above a premium yield of", unit: "percent", editable: true, note: "annualized; 0 = any. Every entry (a new Covered Call's Call, a Cash-Secured Put entry's Put) and, as set below, the Calls on held shares; the ladder's Puts at any yield" },
   {
     path: "baseline.minCallYieldAppliesTo",
     label: "That premium yield applies to",
     unit: "choice",
     editable: true,
-    note: "a new Covered Call below it is not opened: no shares bought, the cash waits",
+    note: "an entry below it is not opened: no shares bought or Put sold, the cash waits",
     choices: [
-      { value: "every_call", label: "Every Call (held shares and new Covered Calls)" },
-      { value: "new_covered_calls", label: "New Covered Calls only (Calls on held shares at any premium)" },
+      { value: "every_call", label: "Every entry and every Call (held shares included)" },
+      { value: "new_covered_calls", label: "Entries only (new Covered Calls and Cash-Secured Put entries; Calls on held shares at any premium)" },
     ],
   },
   {
@@ -212,15 +212,13 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Puts when no call is sold",
     unit: "choice",
     editable: true,
-    note: "one put at a time: the highest premium yield, strike at most the average price held",
+    note: "the ladder sells Puts on a cash reserve once shares are held, with either entry: the more of the reserve committed, the lower the strike",
     choices: [
       { value: "off", label: "None" },
-      { value: "dte_budget", label: "One put, its exposure a % of the account per day to expiry" },
       { value: "reserve_ladder", label: "A ladder on a cash reserve: the more of it committed, the lower the strike" },
     ],
   },
-  { path: "baseline.putBudgetPctPerDte", label: "Put exposure per day to expiry", unit: "percent", editable: true, note: "of the account value: 1% on $200,000 lets a 4-day put take $8,000" },
-  { path: "baseline.ladderSharesPct", label: "Ladder: shares at most", unit: "percent", editable: true, note: "of the account value the cycle started with, at cost; the rest is the puts' reserve" },
+  { path: "baseline.ladderSharesPct", label: "Ladder: shares at most", unit: "percent", editable: true, note: "of the account value the cycle started with: the shares at cost, or a Cash-Secured Put entry's collateral until it is assigned; the rest is the puts' reserve" },
   { path: "baseline.ladderRungs", label: "Ladder: rungs", unit: "integer", editable: true, note: "each put's collateral at most the reserve ÷ rungs" },
   {
     path: "baseline.ladderShock",
@@ -347,6 +345,30 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
   },
   { path: "baseline.minVolatilityEdgePoints", label: "IV above the forecast by", unit: "number", editable: true, note: "volatility points (5: 55% against a 50% forecast); may be negative" },
   {
+    path: "baseline.entryExtensionFilter",
+    label: "Skip entries on a stretched stock",
+    unit: "choice",
+    editable: true,
+    note: "extension z = (previous close ÷ 200-day average − 1) ÷ 63-session volatility. MRNA on 2021-09-20: 100% above its average with 81% volatility, z 1.24. Cash-Secured Put and Covered Call entries only: Calls on held shares and ladder Puts are never skipped",
+    choices: [
+      { value: "off", label: "Off" },
+      { value: "on", label: "On" },
+    ],
+  },
+  { path: "baseline.entryMaxExtensionZ", label: "Extension z limit", unit: "number", editable: true, note: "no new entry while z is at or above this; 1: the stock is more than a year's typical move above its 200-day average" },
+  {
+    path: "baseline.entryIvRankFilter",
+    label: "Skip entries at a high IV Rank",
+    unit: "choice",
+    editable: true,
+    note: "IV Rank = (IV − the year's lowest) ÷ (the year's highest − lowest) × 100, over the last 252 days with an IV, as on Price Performance. Entries only, like the filter above",
+    choices: [
+      { value: "off", label: "Off" },
+      { value: "on", label: "On" },
+    ],
+  },
+  { path: "baseline.entryMaxIvRank", label: "IV Rank limit", unit: "number", editable: true, note: "no new entry while IV Rank is at or above this, 0–100; 80: IV in the top fifth of its year's range" },
+  {
     path: "baseline.ranking",
     label: "Pick by",
     unit: "choice",
@@ -413,7 +435,6 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
     section: "baseline_wheel",
     rows: [
       { path: "baseline.putsWhenNoCall" },
-      { path: "baseline.putBudgetPctPerDte", appliesWhen: { allOf: [{ path: "baseline.putsWhenNoCall", oneOf: ["dte_budget"] }], explanation: "Applies only with Puts when no call is sold set to one put." } },
       { path: "baseline.ladderSharesPct", appliesWhen: onlyWithLadder },
       { path: "baseline.ladderRungs", appliesWhen: onlyWithLadder },
       { path: "baseline.ladderShock", appliesWhen: onlyWithLadder },
@@ -451,7 +472,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
     rows: [
       ...["baseline.minAbsDelta", "baseline.maxAbsDelta"].map((path) => ({
         path,
-        appliesWhen: { anyOf: [{ path: "baseline.callDeltaRange", oneOf: ["entry_range"] }, { path: "baseline.entry", oneOf: ["put"] }, { path: "baseline.putsWhenNoCall", oneOf: ["dte_budget"] }, { path: "baseline.ladderPutDeltaRange", oneOf: ["delta_range"] }], explanation: "Applies only when Calls or Puts use this range: Calls with the same range as the Puts, Puts outside the ladder, or ladder Puts with the |delta| range." },
+        appliesWhen: { anyOf: [{ path: "baseline.callDeltaRange", oneOf: ["entry_range"] }, { path: "baseline.entry", oneOf: ["put"] }, { path: "baseline.ladderPutDeltaRange", oneOf: ["delta_range"] }], explanation: "Applies only when Calls or Puts use this range: Calls with the same range as the Puts, Cash-Secured Put entries, or ladder Puts with the |delta| range." },
       })),
       { path: "baseline.minDte" },
       { path: "baseline.maxDte" },
@@ -461,6 +482,16 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
       { path: "baseline.coverage" },
       { path: "baseline.volatilityEdgeFilter" },
       { path: "baseline.minVolatilityEdgePoints", appliesWhen: { allOf: [{ path: "baseline.volatilityEdgeFilter", noneOf: ["off"] }], explanation: "Applies only with Sell only above the forecast on." } },
+    ],
+  },
+  {
+    group: "Entry filters",
+    section: "baseline_wheel",
+    rows: [
+      { path: "baseline.entryExtensionFilter" },
+      { path: "baseline.entryMaxExtensionZ", appliesWhen: { allOf: [{ path: "baseline.entryExtensionFilter", oneOf: ["on"] }], explanation: "Applies only with Skip entries on a stretched stock on." } },
+      { path: "baseline.entryIvRankFilter" },
+      { path: "baseline.entryMaxIvRank", appliesWhen: { allOf: [{ path: "baseline.entryIvRankFilter", oneOf: ["on"] }], explanation: "Applies only with Skip entries at a high IV Rank on." } },
     ],
   },
   { group: "Exits", section: "baseline_wheel", rows: [{ path: "baseline.takeProfitPct" }, { path: "baseline.shareStopLossPct" }] },

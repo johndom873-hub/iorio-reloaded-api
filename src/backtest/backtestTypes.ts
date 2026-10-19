@@ -59,25 +59,22 @@ export interface BacktestBaselineSettings {
    * day's account value; 100 = no cap. An assigned put may take them past it.
    */
   maxSharesPctOfAccount: number;
-  /** A call is sold only when its premium yield (annualized) is above this %; 0 = any. Which calls: minCallYieldAppliesTo. */
+  /**
+   * An entry (a Covered Call entry's call, a Cash-Secured Put entry's put) is sold only when its premium yield (annualized)
+   * is above this %, and the calls on held shares too with minCallYieldAppliesTo "every_call"; 0 = any. The ladder's puts
+   * at any yield.
+   */
   minCallYieldPct: number;
   /**
-   * "every_call": the Covered Call entries' calls and the calls on held shares (assigned ones included); "new_covered_calls":
-   * the Covered Call entries' calls only, held shares' calls at any yield (Marcelo 2026-10-16).
+   * "every_call": the entries and the calls on held shares (assigned ones included); "new_covered_calls": the entries only
+   * (Covered Call entries' calls, Cash-Secured Put entries' puts), held shares' calls at any yield (Marcelo 2026-10-16).
    */
   minCallYieldAppliesTo: "every_call" | "new_covered_calls";
+  /** "reserve_ladder": the put ladder on a cash reserve (backtestBaselineLadder.ts), with either entry; "off": no ladder. */
+  putsWhenNoCall: "off" | "reserve_ladder";
   /**
-   * With a Covered Call entry, "dte_budget": on a look where held shares are left without a call, or a Covered Call entry with room
-   * finds none (minCallYieldPct included), and no put of the stock is open, one put is sold: the highest premium yield,
-   * strike at most the average price of the shares held (any strike with none held), as many contracts as
-   * putBudgetPctPerDte% of the account value per day to expiry, the free cash and the volume limit allow.
-   */
-  putsWhenNoCall: "off" | "dte_budget" | "reserve_ladder";
-  /** That put's exposure, (strike − fill) × 100 a contract, per day to expiry: % of the day's account value. */
-  putBudgetPctPerDte: number;
-  /**
-   * With putsWhenNoCall "reserve_ladder" (backtestBaselineLadder.ts): the Covered Call entries' shares, at cost, at most this % of
-   * the account value the cycle started with; the rest is the puts' reserve. maxSharesPctOfAccount does not apply.
+   * With putsWhenNoCall "reserve_ladder" (backtestBaselineLadder.ts): the entries (Covered Calls' shares at cost, or Cash-Secured
+   * Puts' collateral until assigned) at most this % of the account value the cycle started with; the rest is the puts' reserve. maxSharesPctOfAccount does not apply.
    */
   ladderSharesPct: number;
   /** The rungs the reserve is spent in: each put's collateral at most reserve ÷ rungs. */
@@ -131,6 +128,22 @@ export interface BacktestBaselineSettings {
   /** Volatility points (5 = 5 points, e.g. 55% against a 50% forecast); may be negative. */
   minVolatilityEdgePoints: number;
   /**
+   * The drop-risk filters on new entries (approved by Marcelo 2026-10-19; research: Ladder Drop-Risk Filters): no Cash-Secured
+   * Put entry and no Covered Call entry (within the ladder's shares budget too) while the stock is stretched or its implied
+   * volatility is near the top of its year; Calls on held shares and ladder Puts are never filtered. Each is on or off with
+   * its own limit, and with both on either one blocks (entryDropRiskFilters.ts):
+   *   extension z = (C ÷ A200 − 1) ÷ σ63: C the previous session's close, A200 the average of the last 200 daily closes, σ63
+   *                 the standard deviation of the last 63 daily log returns × √252 (IBKR's split-adjusted closes before the day)
+   *   IV Rank     = (IV − IV_min) ÷ (IV_max − IV_min) × 100 over the last 252 days with an implied volatility, IV the latest
+   *                 of them (IBKR's daily IV before the day; Price Performance's IV Rank, ivMetrics.ts)
+   */
+  entryExtensionFilter: "off" | "on";
+  /** Block a new entry while extension z is at or above this. */
+  entryMaxExtensionZ: number;
+  entryIvRankFilter: "off" | "on";
+  /** Block a new entry while IV Rank is at or above this (0–100). */
+  entryMaxIvRank: number;
+  /**
    * The order the candidates are picked in: premium yield; the Signals model's Edge Yield; time value (the fill less its
    * intrinsic value, per contract after commission); the premium in dollars (the fill, intrinsic value included); or the
    * premium in dollars per calendar day to expiry (the fill ÷ days, at least 1).
@@ -153,7 +166,7 @@ export interface BacktestBaselineSettings {
  */
 export const backtestEngineVersion = 2;
 
-export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", putBudgetPctPerDte: 1, ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
+export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
@@ -570,6 +583,7 @@ export type BacktestSettingGroup =
   | "Put ladder"
   | "Calls and Covered Calls"
   | "Contract choice"
+  | "Entry filters"
   | "Exits"
   | "Capital and sizing"
   | "Candidate quality"

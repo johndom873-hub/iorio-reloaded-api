@@ -198,14 +198,12 @@ export function validateBaselineSettings(values: Record<string, unknown>): strin
   if (values.entryCallStrike !== "any" && values.entryCallStrike !== "above_purchase_price" && values.entryCallStrike !== "above_average_after_purchase") return "baseline.entryCallStrike must be any, above_purchase_price or above_average_after_purchase.";
   if (values.entryWhenSharesUncovered !== "wait" && values.entryWhenSharesUncovered !== "buy") return "baseline.entryWhenSharesUncovered must be wait or buy.";
   if (typeof values.maxSharesPctOfAccount !== "number" || !Number.isFinite(values.maxSharesPctOfAccount) || values.maxSharesPctOfAccount <= 0 || values.maxSharesPctOfAccount > 100) return "baseline.maxSharesPctOfAccount must be a number above 0 and at most 100.";
-  if (values.maxSharesPctOfAccount < 100 && values.entry !== "covered_call") return "baseline.maxSharesPctOfAccount needs a Covered Call entry: it caps the new Covered Calls' shares.";
+  if (values.maxSharesPctOfAccount < 100 && values.entry !== "covered_call") return "baseline.maxSharesPctOfAccount needs baseline.entry set to Covered Call: it caps the new Covered Calls' shares. Set baseline.maxSharesPctOfAccount to 100 to use Cash-Secured Put entries.";
   if (typeof values.minCallYieldPct !== "number" || !Number.isFinite(values.minCallYieldPct) || values.minCallYieldPct < 0 || values.minCallYieldPct > 1000) return "baseline.minCallYieldPct must be a number from 0 (any) to 1000.";
   if (values.minCallYieldAppliesTo !== "every_call" && values.minCallYieldAppliesTo !== "new_covered_calls") return "baseline.minCallYieldAppliesTo must be every_call or new_covered_calls.";
-  if (values.putsWhenNoCall !== "off" && values.putsWhenNoCall !== "dte_budget" && values.putsWhenNoCall !== "reserve_ladder") return "baseline.putsWhenNoCall must be off, dte_budget or reserve_ladder.";
-  if (values.putsWhenNoCall !== "off" && values.entry !== "covered_call") return "baseline.putsWhenNoCall needs a Covered Call entry: its puts stand in for the calls.";
+  if (values.putsWhenNoCall !== "off" && values.putsWhenNoCall !== "reserve_ladder") return "baseline.putsWhenNoCall must be off or reserve_ladder.";
   const ladderError = values.putsWhenNoCall === "reserve_ladder" ? validateLadderSettings(values) : null;
   if (ladderError) return ladderError;
-  if (typeof values.putBudgetPctPerDte !== "number" || !Number.isFinite(values.putBudgetPctPerDte) || values.putBudgetPctPerDte <= 0 || values.putBudgetPctPerDte > 100) return "baseline.putBudgetPctPerDte must be a number above 0 and at most 100.";
   if (values.dayValueOptions !== "marked" && values.dayValueOptions !== "excluded") return "baseline.dayValueOptions must be marked or excluded.";
   if (values.callDeltaRange !== "entry_range" && values.callDeltaRange !== "own_range") return "baseline.callDeltaRange must be entry_range or own_range.";
   if (typeof values.takeProfitPct !== "number" || !Number.isFinite(values.takeProfitPct) || values.takeProfitPct < 0 || values.takeProfitPct >= 100) return "baseline.takeProfitPct must be a number from 0 (off) to below 100.";
@@ -215,6 +213,10 @@ export function validateBaselineSettings(values: Record<string, unknown>): strin
   if (values.looks !== "every_look" && values.looks !== "first_look") return "baseline.looks must be every_look or first_look.";
   if (values.volatilityEdgeFilter !== "off" && values.volatilityEdgeFilter !== "entries" && values.volatilityEdgeFilter !== "all_sales") return "baseline.volatilityEdgeFilter must be off, entries or all_sales.";
   if (typeof values.minVolatilityEdgePoints !== "number" || !Number.isFinite(values.minVolatilityEdgePoints) || Math.abs(values.minVolatilityEdgePoints) > 100) return "baseline.minVolatilityEdgePoints must be a number of volatility points from −100 to 100.";
+  if (values.entryExtensionFilter !== "off" && values.entryExtensionFilter !== "on") return "baseline.entryExtensionFilter must be off or on.";
+  if (typeof values.entryMaxExtensionZ !== "number" || !Number.isFinite(values.entryMaxExtensionZ) || values.entryMaxExtensionZ <= 0 || values.entryMaxExtensionZ > 10) return "baseline.entryMaxExtensionZ must be a number above 0 and at most 10.";
+  if (values.entryIvRankFilter !== "off" && values.entryIvRankFilter !== "on") return "baseline.entryIvRankFilter must be off or on.";
+  if (typeof values.entryMaxIvRank !== "number" || !Number.isFinite(values.entryMaxIvRank) || values.entryMaxIvRank <= 0 || values.entryMaxIvRank > 100) return "baseline.entryMaxIvRank must be a number above 0 and at most 100.";
   if (values.ranking !== "premium_yield" && values.ranking !== "edge_yield" && values.ranking !== "time_value" && values.ranking !== "premium_dollars" && values.ranking !== "premium_per_day") return "baseline.ranking must be premium_yield, edge_yield, time_value, premium_dollars or premium_per_day.";
   if (values.expiryChoice !== "any_in_range" && values.expiryChoice !== "nearest_qualifying") return "baseline.expiryChoice must be any_in_range or nearest_qualifying.";
   if (values.coverage !== "best_contract" && values.coverage !== "fill_down_ranking") return "baseline.coverage must be best_contract or fill_down_ranking.";

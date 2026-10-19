@@ -632,15 +632,25 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         return factor;
       };
 
-      // a. Settlement at 16:00 of the expiry day, on that day's close.
+      // a. Settlement at 16:00 of the expiry day, on that day's close. An expiry on a day the market was closed settles on the
+      // close of the session before it, OCC's rule (the options of 2025-01-09, a national day of mourning, settled on the
+      // 2025-01-08 close); a session without a bar is missing data.
       for (const leg of ledgerLegsDueForSettlement(ledger, addCalendarDays(todayIso, -1))) {
         const owner = symbolOfLeg(leg);
         const expiryDate = leg.expiryDate!;
         const cycleSplitFactor = cycleSplitFactorFor(ledger, owner.symbol, splitFactorToday(owner));
         const splitFactorAtExpiry = splitFactorOn(owner.schedule, expiryDate);
         const contractLabel = describeOptionContract({ symbol: owner.symbol, strike: roundedStrike((leg.strikePrice! * (splitFactorAtExpiry ?? cycleSplitFactor)) / cycleSplitFactor), right: leg.optionType === "call" ? "C" : "P", expiry: expiryDate, dte: null });
-        const settlementClose = settlementCloseOnCycleScale(expiryDate, cycleSplitFactor, owner.bars, owner.intradayPrices);
-        if (!settlementClose) throw new Error(`Cannot settle ${contractLabel}: the ${owner.symbol} data file has no IBKR daily or 30-minute bar for ${expiryDate}. Press Update on its row in Data files and run the session again.`);
+        let settlementDate = expiryDate;
+        let settlementClose = settlementCloseOnCycleScale(expiryDate, cycleSplitFactor, owner.bars, owner.intradayPrices);
+        const marketClosedOnExpiry = !settlementClose && !calendar.isSession(expiryDate) && !owner.unavailableDaysInPeriod.includes(expiryDate);
+        const sessionBeforeExpiry = marketClosedOnExpiry ? calendar.sessionBefore(expiryDate) : null;
+        if (sessionBeforeExpiry !== null) {
+          settlementDate = sessionBeforeExpiry;
+          settlementClose = settlementCloseOnCycleScale(sessionBeforeExpiry, cycleSplitFactor, owner.bars, owner.intradayPrices);
+        }
+        if (!settlementClose) throw new Error(`Cannot settle ${contractLabel}: the ${owner.symbol} data file has no IBKR daily or 30-minute bar for ${settlementDate}. Press Update on its row in Data files and run the session again.`);
+        if (settlementDate !== expiryDate) notes.push(noteFor(owner, `${contractLabel}: the market was closed on ${expiryDate}; settled on the ${settlementDate} close`));
         const sharesOnCycleScale = leg.quantity * leg.multiplier;
         const tradedScale = cycleSplitFactor / (splitFactorAtExpiry ?? cycleSplitFactor);
         const outcome = settleExpiry(ledger, { legId: leg.id, expiryClose: settlementClose.close });
@@ -653,7 +663,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
               ? `${contractLabel} assigned at the ${closeAsTraded} close: ${sharesAsTraded} shares called away at the strike`
               : `${contractLabel} expired worthless at the ${closeAsTraded} close${outcome === "call_worthless" ? `, ${sharesAsTraded} shares kept` : ""}`,
         );
-        if (settlementClose.source === "intraday_bar") notes.push(noteFor(owner, `settled ${expiryDate} at the close of IBKR's last 30-minute bar (no daily bar)`));
+        if (settlementClose.source === "intraday_bar") notes.push(noteFor(owner, `settled ${settlementDate} at the close of IBKR's last 30-minute bar (no daily bar)`));
         if (tradedScale !== 1) notes.push(`${contractLabel} was held across a split (×${Number(tradedScale.toFixed(4))}): settled on its cycle's scale at ${settlementClose.close.toFixed(2)}`);
       }
 

@@ -73,6 +73,16 @@ export class BacktestTradingCalendar {
     if (toIso < fromIso) return [];
     return openDaysFromCalendarRows(fromIso, toIso, this.rowsBetween(fromIso, toIso));
   }
+
+  /** Whether `dateIso` is a session. */
+  isSession(dateIso: string): boolean {
+    return this.openDaysBetween(dateIso, dateIso).length === 1;
+  }
+
+  /** The last session before `dateIso`, within two weeks; null when none. */
+  sessionBefore(dateIso: string): string | null {
+    return this.openDaysBetween(addCalendarDays(dateIso, -14), addCalendarDays(dateIso, -1)).at(-1) ?? null;
+  }
 }
 
 /** The local market_calendar rows from `fromIso` on (the sessions after the data file ends). */

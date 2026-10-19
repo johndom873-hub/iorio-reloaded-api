@@ -89,15 +89,28 @@ describe("the stock shock", () => {
 });
 
 describe("the ladder's cycle state", () => {
-  const look = (overrides: Partial<Parameters<typeof noteLadderLook>[2]>) => ({ cycleOpen: false, todayIso: "2024-03-12", accountValue: 200_000, adjustedClosesBefore: [], ...overrides });
+  const look = (overrides: Partial<Parameters<typeof noteLadderLook>[2]>) => ({ cycleOpen: false, sharesHeld: false, todayIso: "2024-03-12", accountValue: 200_000, adjustedClosesBefore: [], ...overrides });
 
   it("starts a cycle with the value of the last flat look and fixes S for the cycle", () => {
     const ledger = {} as SimulatedLedger;
     expect(noteLadderLook(ledger, "SMCI", look({}), settings).startedOn).toBeNull();
-    const started = noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-13", accountValue: 199_000 }), settings);
+    const started = noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, sharesHeld: true, todayIso: "2024-03-13", accountValue: 199_000 }), settings);
     expect(started).toEqual({ startedOn: "2024-03-13", accountValueAtStart: 200_000, shock: 0.9 });
-    expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-14", accountValue: 150_000 }), settings)).toEqual(started);
+    expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, sharesHeld: true, todayIso: "2024-03-14", accountValue: 150_000 }), settings)).toEqual(started);
     expect(noteLadderLook(ledger, "SMCI", look({ todayIso: "2024-09-01", accountValue: 150_000 }), settings)).toMatchObject({ startedOn: null, accountValueAtStart: 150_000 });
+  });
+
+  it("waits for shares through a cycle of puts only (a Cash-Secured Put entry), then starts at the assignment, and keeps the start when the shares go", () => {
+    const ledger = {} as SimulatedLedger;
+    noteLadderLook(ledger, "SMCI", look({}), settings);
+    // The entry put is open: the cycle is, the ladder is not; the starting value follows the looks.
+    expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-13", accountValue: 201_000 }), settings)).toEqual({ startedOn: null, accountValueAtStart: 201_000, shock: 0 });
+    expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-03-14", accountValue: 202_000 }), settings)).toEqual({ startedOn: null, accountValueAtStart: 202_000, shock: 0 });
+    // Assigned: the first look with shares starts it, from the last look before them.
+    const started = noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, sharesHeld: true, todayIso: "2024-03-18", accountValue: 195_000 }), settings);
+    expect(started).toEqual({ startedOn: "2024-03-18", accountValueAtStart: 202_000, shock: 0.9 });
+    // Shares called away while a ladder put is still open: the cycle and its start stay.
+    expect(noteLadderLook(ledger, "SMCI", look({ cycleOpen: true, todayIso: "2024-04-19", accountValue: 210_000 }), settings)).toEqual(started);
   });
 
   it("reports today's rung from the state, its floor from the shares' average cost", () => {

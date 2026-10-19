@@ -50,7 +50,8 @@ export class BacktestLabSettingsValidationError extends Error {}
 const numberOrNull = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
 
 /** The section with the code's keys only: a stored value where there is one, else `base`'s; a key the code no longer has is dropped. */
-function withCodeKeys<Section extends object>(base: Section, stored: Partial<Section> | undefined): Section {
+/** A stored section in the code's current shape: the code's keys, each from the stored copy when it has it, else `base`. */
+export function withCodeKeys<Section extends object>(base: Section, stored: Partial<Section> | undefined): Section {
   return Object.fromEntries(Object.keys(base).map((key) => [key, stored !== undefined && key in stored ? (stored as Record<string, unknown>)[key] : (base as Record<string, unknown>)[key]])) as Section;
 }
 
