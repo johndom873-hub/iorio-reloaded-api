@@ -23,6 +23,14 @@ export const analysisDteRanges = [
 export type AnalysisDteRange = (typeof analysisDteRanges)[number]["key"];
 /** Calls, Puts, and Puts under the first rung's cap. */
 export type AnalysisChainView = "C" | "P" | "Pcap";
+/** The liquidity card's |delta| toggle (Marcelo 2026-10-19): every contract, or only those inside the shared |delta| range, Calls and Puts alike. */
+export type AnalysisDeltaFilter = "any" | "band";
+export const analysisDeltaFilters: readonly AnalysisDeltaFilter[] = ["any", "band"];
+
+type ChainScanCells = Record<AnalysisChainView, Partial<Record<AnalysisDteRange, ChainScanCell>>>;
+const emptyCells = (): ChainScanCells => ({ C: {}, P: {}, Pcap: {} });
+/** The selector's own test: a contract is outside the range when |delta| < min or > max. */
+const insideDeltaRange = (delta: number, range: { minAbsDelta: number; maxAbsDelta: number }) => Math.abs(delta) >= range.minAbsDelta && Math.abs(delta) <= range.maxAbsDelta;
 
 export const dteRangeOf = (dte: number): AnalysisDteRange | null => analysisDteRanges.find((range) => dte >= range.low && dte <= range.high)?.key ?? null;
 
@@ -56,7 +64,11 @@ export interface ChainScanDayRow {
   spot: number | null;
   shock: number;
   cap: number | null;
-  cells: Record<AnalysisChainView, Partial<Record<AnalysisDteRange, ChainScanCell>>>;
+  /** At the lab's |delta| rules (Calls on callDeltaRange, ladder Puts on ladderPutDeltaRange). */
+  cells: ChainScanCells;
+  /** The same counts at any |delta| and inside the shared range, with their passing and tight-spread totals. */
+  cellsByDelta: Record<AnalysisDeltaFilter, ChainScanCells>;
+  passingByDelta: Record<AnalysisDeltaFilter, { passingTotal: number; spreadsUnder25: number }>;
   /** The best passing Put under the cap: the first rung's actual best. */
   bestCappedPut: { strike: number; expiry: string; dte: number; premiumYield: number; delta: number } | null;
   /** The Call a new Covered Call entry would sell (the engine's choice); null when none passes. */
@@ -93,12 +105,12 @@ export function volumeByContract(rows: readonly SymbolFileEndOfDayRow[] | null):
 /** One day's counts. Pure apart from reading the file. */
 export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, settings: ChainScanSettings): ChainScanDayRow {
   const cap = day.spot === null ? null : day.spot * (1 - day.shock / settings.ladderRungs);
-  const row: ChainScanDayRow = { date: day.date, spot: day.spot, shock: day.shock, cap, cells: { C: {}, P: {}, Pcap: {} }, bestCappedPut: null, bestEntryCall: null, largestPotPut: null, largestPotCall: null, passingTotal: 0, spreadsUnder25: 0 };
+  const row: ChainScanDayRow = { date: day.date, spot: day.spot, shock: day.shock, cap, cells: emptyCells(), cellsByDelta: { any: emptyCells(), band: emptyCells() }, passingByDelta: { any: { passingTotal: 0, spreadsUnder25: 0 }, band: { passingTotal: 0, spreadsUnder25: 0 } }, bestCappedPut: null, bestEntryCall: null, largestPotPut: null, largestPotCall: null, passingTotal: 0, spreadsUnder25: 0 };
   if (day.spot === null || cap === null) return row;
   const quotes = file.loadQuotes(day.date);
   const previousSessionVolumeByContract = volumeByContract(day.previousDate === null ? null : file.loadEndOfDay(day.previousDate));
-  const add = (view: AnalysisChainView, range: AnalysisDteRange, premiumYield: number) => {
-    const cell = (row.cells[view][range] ??= { count: 0, best: Number.NEGATIVE_INFINITY, yields: [] });
+  const add = (cells: ChainScanCells, view: AnalysisChainView, range: AnalysisDteRange, premiumYield: number) => {
+    const cell = (cells[view][range] ??= { count: 0, best: Number.NEGATIVE_INFINITY, yields: [] });
     cell.count++;
     cell.best = Math.max(cell.best, premiumYield);
     cell.yields.push(premiumYield);
@@ -109,7 +121,7 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
   // As the engine's selector: Calls on their range (callDeltaRange), the ladder's Puts at any |delta| with ladderPutDeltaRange "none".
   const callSettings = settings.callDeltaRange === "own_range" ? { ...settings, minAbsDelta: settings.callMinAbsDelta, maxAbsDelta: settings.callMaxAbsDelta } : settings;
   const putSettings = settings.ladderPutDeltaRange === "none" ? { ...settings, minAbsDelta: 0, maxAbsDelta: 1 } : settings;
-  const select = (right: "C" | "P", rules: Pick<BaselineCandidateInput, "minimumStrike" | "maximumStrike" | "minimumPremiumYield" | "earningsDatesIso" | "ranking" | "nearestExpiryFirst"> = {}) =>
+  const select = (right: "C" | "P", rules: Pick<BaselineCandidateInput, "minimumStrike" | "maximumStrike" | "minimumPremiumYield" | "earningsDatesIso" | "ranking" | "nearestExpiryFirst"> = {}, anyDelta = false) =>
     selectBaselineCandidates({
       quotes,
       forwardAnchors,
@@ -121,23 +133,31 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
       stockPrice: day.spot!,
       riskFreeRate: day.riskFreeRate,
       previousSessionVolumeByContract,
-      settings: right === "C" ? callSettings : putSettings,
+      settings: anyDelta ? { ...settings, minAbsDelta: 0, maxAbsDelta: 1 } : right === "C" ? callSettings : putSettings,
       spreadShareCharged: settings.spreadShareCharged,
       isHeld: () => false,
       ...rules,
     }).candidates;
+  // One selection a right at any |delta|: the selector tests each contract on its own and keeps them all, so each range is a filter on its result.
   for (const right of ["C", "P"] as const) {
-    for (const candidate of select(right)) {
+    const labRange = right === "C" ? callSettings : putSettings;
+    for (const candidate of select(right, {}, true)) {
       const range = dteRangeOf(candidate.dte);
       if (range === null) continue;
-      row.passingTotal++;
-      if ((candidate.ask - candidate.bid) / ((candidate.ask + candidate.bid) / 2) <= 0.25) row.spreadsUnder25++;
-      add(right, range, candidate.premiumYield);
-      if (right === "P" && candidate.strike <= cap + 1e-9) {
-        add("Pcap", range, candidate.premiumYield);
-        if (row.bestCappedPut === null || candidate.premiumYield > row.bestCappedPut.premiumYield) {
-          row.bestCappedPut = { strike: candidate.strike, expiry: candidate.expiry, dte: candidate.dte, premiumYield: candidate.premiumYield, delta: candidate.delta };
-        }
+      const tightSpread = (candidate.ask - candidate.bid) / ((candidate.ask + candidate.bid) / 2) <= 0.25;
+      const underCap = right === "P" && candidate.strike <= cap + 1e-9;
+      const count = (cells: ChainScanCells, totals: { passingTotal: number; spreadsUnder25: number }) => {
+        totals.passingTotal++;
+        if (tightSpread) totals.spreadsUnder25++;
+        add(cells, right, range, candidate.premiumYield);
+        if (underCap) add(cells, "Pcap", range, candidate.premiumYield);
+      };
+      count(row.cellsByDelta.any, row.passingByDelta.any);
+      if (insideDeltaRange(candidate.delta, settings)) count(row.cellsByDelta.band, row.passingByDelta.band);
+      if (!insideDeltaRange(candidate.delta, labRange)) continue;
+      count(row.cells, row);
+      if (underCap && (row.bestCappedPut === null || candidate.premiumYield > row.bestCappedPut.premiumYield)) {
+        row.bestCappedPut = { strike: candidate.strike, expiry: candidate.expiry, dte: candidate.dte, premiumYield: candidate.premiumYield, delta: candidate.delta };
       }
     }
   }
@@ -206,9 +226,13 @@ export interface AnalysisGridCell {
   pooledMedianYield: number | null;
 }
 
+type AnalysisGrid = Record<AnalysisChainView, Record<string, Record<AnalysisDteRange, AnalysisGridCell>>>;
+
 export interface AnalysisChainSummary {
-  /** grid[view][year][range]. */
-  grid: Record<AnalysisChainView, Record<string, Record<AnalysisDteRange, AnalysisGridCell>>>;
+  /** grid[view][year][range], at the lab's |delta| rules. */
+  grid: AnalysisGrid;
+  /** The same grid at any |delta| and inside the shared range (the liquidity card's toggle). */
+  gridByDelta: Record<AnalysisDeltaFilter, AnalysisGrid>;
   /** First and last scanned day of each calendar year (partial years are labelled). */
   years: Record<string, { from: string; to: string }>;
   /** One row per month: the median a day of Calls, Puts and capped Puts passing, and of the daily totals (F6). */
@@ -219,12 +243,12 @@ export interface AnalysisChainSummary {
   daysWithNothingPassing: string[];
   /** Share of passing contract-days quoted at or under 25% of the mid. */
   spreadShareUnder25: number | null;
+  spreadShareUnder25ByDelta: Record<AnalysisDeltaFilter, number | null>;
 }
 
 /** Aggregates the day rows into the grid, the months and the counts. Pure. */
 export function summarizeChainScan(rows: readonly ChainScanDayRow[]): AnalysisChainSummary {
   const priced = rows.filter((row) => row.spot !== null);
-  const grid = { C: {}, P: {}, Pcap: {} } as AnalysisChainSummary["grid"];
   const years: AnalysisChainSummary["years"] = {};
   const byYear = new Map<string, ChainScanDayRow[]>();
   for (const row of priced) {
@@ -234,23 +258,27 @@ export function summarizeChainScan(rows: readonly ChainScanDayRow[]): AnalysisCh
     if (row.date < span.from) span.from = row.date;
     if (row.date > span.to) span.to = row.date;
   }
-  for (const view of ["C", "P", "Pcap"] as const) {
-    for (const [year, yearRows] of byYear) {
-      const cells = {} as Record<AnalysisDteRange, AnalysisGridCell>;
-      for (const { key } of analysisDteRanges) {
-        const perDay = yearRows.map((row) => row.cells[view][key]);
-        const counts = perDay.map((cell) => cell?.count ?? 0);
-        cells[key] = {
-          days: yearRows.length,
-          daysWithPassing: counts.filter((count) => count > 0).length,
-          medianPassingPerDay: median(counts) ?? 0,
-          medianBestYield: median(perDay.filter((cell): cell is ChainScanCell => cell !== undefined).map((cell) => cell.best)),
-          pooledMedianYield: median(perDay.flatMap((cell) => cell?.yields ?? [])),
-        };
+  const buildGrid = (cellsOf: (row: ChainScanDayRow) => ChainScanCells): AnalysisGrid => {
+    const grid = { C: {}, P: {}, Pcap: {} } as AnalysisGrid;
+    for (const view of ["C", "P", "Pcap"] as const) {
+      for (const [year, yearRows] of byYear) {
+        const cells = {} as Record<AnalysisDteRange, AnalysisGridCell>;
+        for (const { key } of analysisDteRanges) {
+          const perDay = yearRows.map((row) => cellsOf(row)[view][key]);
+          const counts = perDay.map((cell) => cell?.count ?? 0);
+          cells[key] = {
+            days: yearRows.length,
+            daysWithPassing: counts.filter((count) => count > 0).length,
+            medianPassingPerDay: median(counts) ?? 0,
+            medianBestYield: median(perDay.filter((cell): cell is ChainScanCell => cell !== undefined).map((cell) => cell.best)),
+            pooledMedianYield: median(perDay.flatMap((cell) => cell?.yields ?? [])),
+          };
+        }
+        grid[view][year] = cells;
       }
-      grid[view][year] = cells;
     }
-  }
+    return grid;
+  };
   const total = (row: ChainScanDayRow, view: AnalysisChainView) => Object.values(row.cells[view]).reduce((sum, cell) => sum + (cell?.count ?? 0), 0);
   const byMonth = new Map<string, ChainScanDayRow[]>();
   for (const row of priced) (byMonth.get(row.date.slice(0, 7)) ?? byMonth.set(row.date.slice(0, 7), []).get(row.date.slice(0, 7))!).push(row);
@@ -263,13 +291,18 @@ export function summarizeChainScan(rows: readonly ChainScanDayRow[]): AnalysisCh
     totalMedian: median(monthRows.map((row) => total(row, "C") + total(row, "P")))!,
     cappedTotalMedian: median(monthRows.map((row) => total(row, "C") + total(row, "Pcap")))!,
   }));
-  const passingTotal = priced.reduce((sum, row) => sum + row.passingTotal, 0);
+  const spreadShare = (totalsOf: (row: ChainScanDayRow) => { passingTotal: number; spreadsUnder25: number }) => {
+    const passingTotal = priced.reduce((sum, row) => sum + totalsOf(row).passingTotal, 0);
+    return passingTotal === 0 ? null : priced.reduce((sum, row) => sum + totalsOf(row).spreadsUnder25, 0) / passingTotal;
+  };
   return {
-    grid,
+    grid: buildGrid((row) => row.cells),
+    gridByDelta: { any: buildGrid((row) => row.cellsByDelta.any), band: buildGrid((row) => row.cellsByDelta.band) },
     years,
     monthly,
     daysWithoutPrice: rows.length - priced.length,
     daysWithNothingPassing: priced.filter((row) => row.passingTotal === 0).map((row) => row.date),
-    spreadShareUnder25: passingTotal === 0 ? null : priced.reduce((sum, row) => sum + row.spreadsUnder25, 0) / passingTotal,
+    spreadShareUnder25: spreadShare((row) => row),
+    spreadShareUnder25ByDelta: { any: spreadShare((row) => row.passingByDelta.any), band: spreadShare((row) => row.passingByDelta.band) },
   };
 }
