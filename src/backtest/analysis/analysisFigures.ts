@@ -69,7 +69,7 @@ export interface AnalysisFigures {
   /** The shock the rule gives a cycle starting the next weekday, with what it read. */
   shock: { startDate: string; windowFrom: string; closes: number; maxDrawdown: number | null; shock: number; rule: BacktestBaselineSettings["ladderShock"] };
   chains: AnalysisChainSummary & {
-    lastDay: { date: string; spot: number | null; shock: number; cap: number | null; bestCappedPut: ChainScanDayRow["bestCappedPut"]; passingCalls: number; passingPuts: number; passingCappedPuts: number } | null;
+    lastDay: { date: string; spot: number | null; shock: number; cap: number | null; bestCappedPut: ChainScanDayRow["bestCappedPut"]; bestEntryCall: ChainScanDayRow["bestEntryCall"]; passingCalls: number; passingPuts: number; passingCappedPuts: number } | null;
     /** The last day's chain, priced at the mid: the chain yield map. */
     chainMap: ChainMapContract[];
     scanSeconds: number;
@@ -315,7 +315,7 @@ export async function computeAnalysisFigures(input: { symbol: string; values: An
     },
     chains: {
       ...summary,
-      lastDay: last && { date: last.date, spot: last.spot, shock: last.shock, cap: last.cap, bestCappedPut: last.bestCappedPut, passingCalls: passing(last, "C"), passingPuts: passing(last, "P"), passingCappedPuts: passing(last, "Pcap") },
+      lastDay: last && { date: last.date, spot: last.spot, shock: last.shock, cap: last.cap, bestCappedPut: last.bestCappedPut, bestEntryCall: last.bestEntryCall, passingCalls: passing(last, "C"), passingPuts: passing(last, "P"), passingCappedPuts: passing(last, "Pcap") },
       chainMap,
       scanSeconds,
     },

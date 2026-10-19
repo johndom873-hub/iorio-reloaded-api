@@ -59,6 +59,8 @@ export interface ChainScanDayRow {
   cells: Record<AnalysisChainView, Partial<Record<AnalysisDteRange, ChainScanCell>>>;
   /** The best passing Put under the cap: the first rung's actual best. */
   bestCappedPut: { strike: number; expiry: string; dte: number; premiumYield: number; delta: number } | null;
+  /** The Call a new Covered Call entry would sell (the engine's choice); null when none passes. */
+  bestEntryCall: { strike: number; expiry: string; dte: number; premiumYield: number; delta: number } | null;
   /** The contracts the day's largest pot is taken from, with their volume limits; null when none passes. */
   largestPotPut: { strike: number; volumeCap: number } | null;
   largestPotCall: { strike: number; volumeCap: number } | null;
@@ -90,7 +92,7 @@ export function volumeByContract(rows: readonly SymbolFileEndOfDayRow[] | null):
 /** One day's counts. Pure apart from reading the file. */
 export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, settings: ChainScanSettings): ChainScanDayRow {
   const cap = day.spot === null ? null : day.spot * (1 - day.shock / settings.ladderRungs);
-  const row: ChainScanDayRow = { date: day.date, spot: day.spot, shock: day.shock, cap, cells: { C: {}, P: {}, Pcap: {} }, bestCappedPut: null, largestPotPut: null, largestPotCall: null, passingTotal: 0, spreadsUnder25: 0 };
+  const row: ChainScanDayRow = { date: day.date, spot: day.spot, shock: day.shock, cap, cells: { C: {}, P: {}, Pcap: {} }, bestCappedPut: null, bestEntryCall: null, largestPotPut: null, largestPotCall: null, passingTotal: 0, spreadsUnder25: 0 };
   if (day.spot === null || cap === null) return row;
   const quotes = file.loadQuotes(day.date);
   const previousSessionVolumeByContract = volumeByContract(day.previousDate === null ? null : file.loadEndOfDay(day.previousDate));
@@ -151,6 +153,7 @@ export function scanChainDay(file: BacktestSymbolFile, day: ChainScanDayInput, s
   })[0];
   row.largestPotPut = put ? { strike: put.strike, volumeCap: put.volumeCap } : null;
   row.largestPotCall = call ? { strike: call.strike, volumeCap: call.volumeCap } : null;
+  row.bestEntryCall = call ? { strike: call.strike, expiry: call.expiry, dte: call.dte, premiumYield: call.premiumYield, delta: call.delta } : null;
   return row;
 }
 

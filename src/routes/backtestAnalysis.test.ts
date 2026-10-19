@@ -77,6 +77,8 @@ afterAll(async () => {
   await testDb("backtest_ticker_analyses").whereIn("symbol", [symbol, symbolWithoutFile]).delete();
   await testDb("backtest_jobs").whereIn("symbol", [symbol, symbolWithoutFile]).delete();
   await testDb("backtest_lab_ticker_overrides").where({ symbol }).delete();
+  await testDb("backtest_ticker_profiles").where({ symbol }).delete();
+  await testDb("backtest_ticker_suitability").where({ symbol }).delete();
   await testDb("backtest_lab_settings_audit").where({ user_id: userId }).delete();
   await testDb("users").where({ id: userId }).delete();
   await testDb.destroy();
@@ -92,6 +94,17 @@ describe("analysis routes", () => {
     expect(view.status).toBe(200);
     expect(view.body).toMatchObject({ symbol, stored: null, trial: null, active: [], latestProblem: null, fileLastDate: "2026-03-04" });
     expect(view.body.currentHash).toMatch(/^[0-9a-f]{32}$/);
+    expect(view.body).toMatchObject({ profile: null, suitability: null });
+  });
+
+  it("gives the header the ticker's stored TradingView profile and its suitability", async () => {
+    await testDb("backtest_ticker_profiles").insert({ symbol, tradingview_ticker: `NASDAQ:${symbol}`, company_name: "Analysis Test, Inc.", sector: "Finance", industry: "Investment Banks/Brokers", kind: "stock" });
+    await testDb("backtest_ticker_suitability").insert({ symbol, status: "suitable", note: "Fits.", updated_by_user_id: userId });
+    const view = await call<TickerAnalysisView>("GET", `/analyses/${symbol}`);
+    expect(view.body.profile).toEqual({ source: "tradingview", companyName: "Analysis Test, Inc.", exchange: "NASDAQ", sector: "Finance", industry: "Investment Banks/Brokers", kind: "stock" });
+    expect(view.body.suitability).toMatchObject({ status: "suitable", note: "Fits." });
+    await testDb("backtest_ticker_profiles").where({ symbol }).delete();
+    await testDb("backtest_ticker_suitability").where({ symbol }).delete();
   });
 
   it("Update Analysis stores the analysis with the ticker's lab values and claims an analysis job", async () => {

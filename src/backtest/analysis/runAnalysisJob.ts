@@ -5,6 +5,7 @@ import { cancelBacktestJob } from "../jobs/backtestJobStore.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
 import { validateSessionRequestAgainstLab } from "../jobs/labSessionRequest.js";
 import { analysisSessionName, computeAnalysisBacktestFigures, type AnalysisBacktestFigures } from "./analysisBacktest.js";
+import { refreshTickerProfiles } from "../tickerProfileStore.js";
 import { analysisFormulasVersion, computeAnalysisFigures, type AnalysisFigures, type AnalysisStep } from "./analysisFigures.js";
 import { listAnalysisSessions } from "./analysisSessions.js";
 import type { AnalysisLabValues, AnalysisReason } from "./analysisStore.js";
@@ -102,6 +103,8 @@ export async function runAnalysisJob(jobId: string, control: AnalysisJobControl)
     if (!control.ownershipLost) await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ ...columns, finished_at: db.fn.now() });
   };
   await db("backtest_ticker_analyses").where({ id: analysis.id }).update({ status: "running" });
+  // The header's name and classification: kept from the last time when TradingView doesn't answer, never failing the analysis.
+  void refreshTickerProfiles([analysis.symbol]).catch((error: unknown) => console.warn(`Analysis ${analysis.symbol}: TradingView profile not refreshed:`, error instanceof Error ? error.message : error));
   try {
     const started = Date.now();
     const figures = await computeAnalysisFigures({

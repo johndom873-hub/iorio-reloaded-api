@@ -265,3 +265,47 @@ export async function captureTickerCalendarEvents(tickerId: string, symbol: stri
 
   return { resolved: true, tvTicker, earningsWritten, dividendsWritten };
 }
+
+/** A US listing's name and classification as TradingView describes it. */
+export interface TradingViewSymbolProfile {
+  /** "NASDAQ:HOOD". */
+  tvTicker: string;
+  /** Full, proper-case name: "Robinhood Markets, Inc.". */
+  companyName: string | null;
+  sector: string | null;
+  industry: string | null;
+  kind: "stock" | "adr" | "etf" | "other";
+}
+
+/** The exchanges a US symbol is looked up on when no TradingView ticker is stored (ETFs never get one: symbol-search looks for stocks). */
+const profileExchanges = ["NASDAQ", "NYSE", "AMEX", "CBOE"];
+
+/**
+ * Name, sector, industry and kind of each symbol, from one scanner request over every listed exchange (or the stored
+ * TradingView ticker when known). Symbols TradingView doesn't list are absent from the result; a failed request throws.
+ */
+export async function fetchTradingViewSymbolProfiles(symbols: readonly string[]): Promise<Map<string, TradingViewSymbolProfile>> {
+  const profiles = new Map<string, TradingViewSymbolProfile>();
+  if (symbols.length === 0) return profiles;
+  const stored: { symbol: string; tradingview_ticker: string }[] = await db("tickers").whereIn("symbol", symbols).whereNotNull("tradingview_ticker").select("symbol", "tradingview_ticker");
+  const storedTicker = new Map(stored.map((row) => [row.symbol, row.tradingview_ticker]));
+  const candidates = symbols.flatMap((symbol) => (storedTicker.has(symbol) ? [storedTicker.get(symbol)!] : profileExchanges.map((exchange) => `${exchange}:${symbol}`)));
+  const response = await fetch("https://scanner.tradingview.com/global/scan?label-product=popup-watchlists", {
+    method: "POST",
+    headers: tradingViewHeaders,
+    body: JSON.stringify({ columns: ["description", "sector", "industry", "type", "typespecs"], options: { lang: "en" }, symbols: { tickers: candidates } }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`scanner.tradingview.com HTTP ${response.status}`);
+  const data = (await response.json()) as { data?: { s: string; d: [string | null, string | null, string | null, string | null, string[] | null] }[] };
+  // A symbol listed on several exchanges: the first in profileExchanges' order.
+  const rank = (tvTicker: string) => profileExchanges.indexOf(tvTicker.split(":")[0]!);
+  for (const row of [...(data.data ?? [])].sort((a, b) => rank(a.s) - rank(b.s))) {
+    const symbol = row.s.split(":")[1]!;
+    if (profiles.has(symbol)) continue;
+    const [description, sector, industry, type, typespecs] = row.d;
+    const kind = type === "fund" && typespecs?.includes("etf") ? "etf" : type === "stock" ? "stock" : type === "dr" ? "adr" : "other";
+    profiles.set(symbol, { tvTicker: row.s, companyName: description || null, sector: sector || null, industry: industry || null, kind });
+  }
+  return profiles;
+}

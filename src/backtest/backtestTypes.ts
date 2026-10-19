@@ -516,9 +516,36 @@ export interface BacktestSessionsPage {
   symbols: string[];
 }
 
+/**
+ * Whether a ticker suits the CC + Put Ladder, as an admin marked it on the Data files table. A ticker without one is Pending;
+ * "pending" is a Pending ticker with a note (the window only marks Suitable or Unsuitable).
+ */
+export interface BacktestTickerSuitability {
+  status: "pending" | "suitable" | "unsuitable";
+  note: string;
+  updatedAt: string;
+  /** Null when the user who marked it was deleted. */
+  updatedByName: string | null;
+}
+
+/** A ticker's name and classification for the Analyse window's header. */
+export interface BacktestTickerProfile {
+  /** "tradingview": full name, sector, industry and kind; "ibkr": IBKR's stored name (upper case, cut short) and sector, until TradingView answers. */
+  source: "tradingview" | "ibkr";
+  companyName: string | null;
+  /** "NASDAQ", "NYSE", "AMEX" (TradingView's name for NYSE Arca), "CBOE"; IBKR's primary exchange in the fallback. */
+  exchange: string | null;
+  sector: string | null;
+  industry: string | null;
+  /** Null when not known (IBKR's sector only says "ETF"). */
+  kind: "stock" | "adr" | "etf" | "other" | null;
+}
+
 export interface BacktestOverview {
   dataDirectory: string;
   files: BacktestDataFileSummary[];
+  /** By symbol: the tickers marked so far (the rest are Pending). */
+  suitabilityBySymbol: Record<string, BacktestTickerSuitability>;
   /**
    * The backtests, then the downloads. Backtests: the 50 latest, finished or not, latest activity first. Downloads: the
    * running one, the stopped ones, the queue in the order it starts them, then the finished ones, the last to end first;

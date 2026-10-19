@@ -4,7 +4,9 @@ import { db } from "../../db/connection.js";
 import { normalizeBacktestSymbol } from "../backtestDataDirectory.js";
 import { readBacktestDataFileContents } from "../dataFileSummary.js";
 import { loadBacktestLabSettings, loadBacktestLabTickerOverrides, tickerOverridesToValues } from "../labSettingsStore.js";
-import { defaultBacktestBaselineSettings, type BacktestBaselineSettings, type BacktestLabTickerOverrides, type BacktestSettings } from "../backtestTypes.js";
+import { defaultBacktestBaselineSettings, type BacktestBaselineSettings, type BacktestLabTickerOverrides, type BacktestSettings, type BacktestTickerProfile, type BacktestTickerSuitability } from "../backtestTypes.js";
+import { loadTickerProfile } from "../tickerProfileStore.js";
+import { loadTickerSuitability } from "../tickerSuitabilityStore.js";
 import { validateBaselineSettings } from "../jobs/backtestSessionRequest.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
 import { BacktestRequestError, cancelBacktestJob, findUnfinishedDownloadJob, insertClaimedAnalysisJob, startClaimedBacktestJob } from "../jobs/backtestJobStore.js";
@@ -274,6 +276,10 @@ export interface TickerAnalysisView {
   /** The file now runs past the stored analysis's last day. */
   fileLastDate: string | null;
   currentFormulasVersion: number;
+  /** The header's name and classification; null when nothing is stored for the ticker. */
+  profile: BacktestTickerProfile | null;
+  /** As on the Data files table; null: Pending. */
+  suitability: BacktestTickerSuitability | null;
 }
 
 export async function loadTickerAnalysisView(givenSymbol: string, connection: Knex = db): Promise<TickerAnalysisView> {
@@ -298,6 +304,8 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
     currentHash: current.hash,
     fileLastDate: readBacktestDataFileContents(symbol)?.lastDate ?? null,
     currentFormulasVersion: analysisFormulasVersion,
+    profile: await loadTickerProfile(symbol, connection),
+    suitability: await loadTickerSuitability(symbol, connection),
   };
 }
 

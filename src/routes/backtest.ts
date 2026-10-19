@@ -1,8 +1,9 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAdmin, requireAuth } from "../middleware/requireAuth.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtest/backtestDataDirectory.js";
 import type { BacktestLabSettingsView, BacktestOverview, BacktestSessionEstimateResponse, BacktestSettingsTemplate, CreateBacktestBatchResponse } from "../backtest/backtestTypes.js";
-import { readBacktestDataFileContents, readBacktestDataFilePeriodContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
+import { listBacktestDataFileSymbols, readBacktestDataFileContents, readBacktestDataFilePeriodContents, summarizeBacktestDataFiles } from "../backtest/dataFileSummary.js";
+import { loadTickerSuitabilityBySymbol, saveTickerSuitability, tickerSuitabilityNoteMaxLength, tickerSuitabilityMarks } from "../backtest/tickerSuitabilityStore.js";
 import { deleteBacktestDataFile } from "../backtest/deleteBacktestDataFile.js";
 import { backtestHistoryStartDate } from "../backtest/backfillDailyHistory.js";
 import { backtestNotReplayed, buildBacktestSettingRows, editableBacktestSettingPaths } from "../backtest/settingsTemplate.js";
@@ -76,9 +77,26 @@ function requireUuidParameter(value: string | undefined, what: string): string {
 backtestRouter.get("/overview", async (_request, response) => {
   // Reading the overview is one of the moments the queues move on (a stopped download or backtest no longer blocks them).
   await Promise.all([kickDownloadQueue(), kickBacktestQueue()]);
-  const [files, jobs] = await Promise.all([summarizeBacktestDataFiles(), listOverviewJobViews()]);
-  const overview: BacktestOverview = { dataDirectory: requireBacktestDataDirectory(), files, jobs, maxParallelSessions: readBacktestMaxParallelSessions() };
+  const [files, jobs, suitabilityBySymbol] = await Promise.all([summarizeBacktestDataFiles(), listOverviewJobViews(), loadTickerSuitabilityBySymbol()]);
+  const overview: BacktestOverview = { dataDirectory: requireBacktestDataDirectory(), files, suitabilityBySymbol, jobs, maxParallelSessions: readBacktestMaxParallelSessions() };
   response.json(overview);
+});
+
+// Body: { status: "suitable" | "unsuitable", note }. Admin only; the ticker must have a data file.
+backtestRouter.put("/ticker-suitability/:symbol", requireAdmin, async (request: Request<{ symbol: string }>, response: Response) => {
+  let symbol: string;
+  try {
+    symbol = normalizeBacktestSymbol(request.params.symbol ?? "");
+  } catch (error) {
+    throw new BacktestRequestError(error instanceof Error ? error.message : String(error), 400);
+  }
+  const body = (request.body ?? {}) as { status?: unknown; note?: unknown };
+  const status = tickerSuitabilityMarks.find((candidate) => candidate === body.status);
+  if (!status) throw new BacktestRequestError(`status must be one of ${tickerSuitabilityMarks.join(", ")}.`, 400);
+  if (typeof body.note !== "string") throw new BacktestRequestError("note must be text.", 400);
+  if (body.note.trim().length > tickerSuitabilityNoteMaxLength) throw new BacktestRequestError(`The note must be at most ${tickerSuitabilityNoteMaxLength} characters.`, 400);
+  if (!listBacktestDataFileSymbols().includes(symbol)) throw new BacktestRequestError(`${symbol} has no data file.`, 404);
+  response.json(await saveTickerSuitability({ symbol, status, note: body.note, userId: request.session.userId ?? null }));
 });
 
 backtestRouter.post("/downloads", async (request, response) => {
