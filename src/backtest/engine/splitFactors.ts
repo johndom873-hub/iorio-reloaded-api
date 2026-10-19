@@ -28,6 +28,12 @@ import { loadTreasuryBillRates, type TreasuryBillRates } from "./treasuryBillRat
 //   days at the file's edge) stays unresolved: a session touching it fails, naming the dates and the raw ratios.
 //
 // A detected split is a change point: { last day on the old scale, first day on the new, ratio = F(before) ÷ F(after) }.
+//
+// A change point whose ratio is no single standard split (one of the ratios above or its reverse, within ±3%) means the
+// options before it are another security's, or wrong (Marcelo 2026-10-20): META's options of 2021-07 to 2022-01 are a
+// $10–30 ETF's (Facebook's traded as FB until 2022-06-09), and their ratio to IBKR's Meta closes drifts, reading as
+// 9-for-10, 14-for-15, 20-for-21 and so on. The schedule then starts at the first day after the last such change: a
+// session over the days before it fails, and a download that finds one fails, naming the date to download from.
 
 export const standardSplitRatios: readonly number[] = [2, 3, 4, 5, 6, 7, 8, 10, 15, 20, 25, 30, 40, 50, 1.5, 1.25];
 export const splitSnapTolerance = 0.03;
@@ -36,7 +42,7 @@ export const maximumSplitsPerFactor = 3;
 /** The longest gap (file days) between two runs of the same factor that takes that factor when its median is nearest it. */
 export const maximumSameFactorGapDays = 30;
 /** Raise when the rule or the cache format changes, so cached schedules are rebuilt. */
-const splitScheduleVersion = 2;
+const splitScheduleVersion = 3;
 
 export interface NiceSplitFactor {
   factor: number;
@@ -101,11 +107,19 @@ export interface UnresolvedSplitStretch {
   ratios: DailySplitRatio[];
 }
 
+/** The file days before `firstDayIso` match no standard split: the changes of scale that showed it, oldest first. */
+export interface UnmatchedOptions {
+  firstDayIso: string;
+  changes: BacktestDetectedSplit[];
+}
+
 export interface SplitSchedule {
-  /** Ascending, covering every resolved file day. */
+  /** Ascending, covering every resolved file day (from unmatchedOptionsBefore's first day when it is set). */
   segments: SplitFactorSegment[];
   splits: BacktestDetectedSplit[];
   unresolved: UnresolvedSplitStretch[];
+  /** Set when a change of scale is no standard split: the schedule starts after the last one. Absent in caches before version 3. */
+  unmatchedOptionsBefore?: UnmatchedOptions | null;
 }
 
 function median(values: readonly number[]): number {
@@ -222,7 +236,50 @@ export function inferSplitSchedule(days: readonly DailySplitRatio[]): SplitSched
     const after = segments[index]!;
     if (before.factor !== after.factor) splits.push({ lastDayBefore: before.toDateIso, firstDayAfter: after.fromDateIso, ratio: roundRatio(before.factor / after.factor) });
   }
-  return { segments, splits, unresolved };
+  return startAfterNonStandardChanges({ segments, splits, unresolved });
+}
+
+/** Whether a change of scale is one standard split, forward or reverse (within ±3%). */
+export function isStandardSplitRatio(ratio: number): boolean {
+  return ratio > 0 && standardSplitRatios.some((standard) => Math.abs(ratio / standard - 1) <= splitSnapTolerance || Math.abs(ratio * standard - 1) <= splitSnapTolerance);
+}
+
+/** The schedule from the first day after its last change of scale that is no standard split; as it was when every change is one. */
+export function startAfterNonStandardChanges(schedule: Pick<SplitSchedule, "segments" | "splits" | "unresolved">): SplitSchedule {
+  const changes = schedule.splits.filter((split) => !isStandardSplitRatio(split.ratio));
+  const lastChange = changes.at(-1);
+  if (!lastChange) return { segments: schedule.segments, splits: schedule.splits, unresolved: schedule.unresolved, unmatchedOptionsBefore: null };
+  const firstDayIso = lastChange.firstDayAfter;
+  return {
+    segments: schedule.segments.filter((segment) => segment.fromDateIso >= firstDayIso),
+    splits: schedule.splits.filter((split) => split.lastDayBefore >= firstDayIso),
+    unresolved: schedule.unresolved.filter((stretch) => stretch.fromDateIso >= firstDayIso),
+    unmatchedOptionsBefore: { firstDayIso, changes },
+  };
+}
+
+/** New shares per old share in words, as the app writes them: 10 → "10-for-1", 1.5 → "3-for-2", 0.9 → "9-for-10", 0.1 → "1-for-10". */
+export function describeSplitRatio(ratio: number): string {
+  const flipped = ratio < 1 ? 1 / ratio : ratio;
+  for (let denominator = 1; denominator <= 20; denominator++) {
+    const numerator = Math.round(flipped * denominator);
+    if (Math.abs(numerator / denominator - flipped) < 0.001) return ratio < 1 ? `${denominator}-for-${numerator}` : `${numerator}-for-${denominator}`;
+  }
+  return ratio < 1 ? `1-for-${Number(flipped.toFixed(3))}` : `${Number(ratio.toFixed(3))}-for-1`;
+}
+
+/** Why a file's options before a date can't be used: "The META options before 2022-06-09 match IBKR's META prices by no standard split (…)". */
+export function describeUnmatchedOptions(symbol: string, unmatched: UnmatchedOptions): string {
+  const changes = unmatched.changes.map((change) => `${describeSplitRatio(change.ratio)} on ${change.firstDayAfter}`);
+  const listed = changes.length > 4 ? [...changes.slice(0, 3), `${changes.length - 3} more`] : changes;
+  return `The ${symbol} options before ${unmatched.firstDayIso} match IBKR's ${symbol} prices by no standard split (their scale changes by ${listed.join(", ")}): the symbol belonged to another security then, or the data is wrong.`;
+}
+
+export class UnmatchedOptionsError extends Error {
+  constructor(symbol: string, unmatched: UnmatchedOptions) {
+    super(`${describeUnmatchedOptions(symbol, unmatched)} Start the session on or after ${unmatched.firstDayIso}, or delete the ${symbol} file and download it again from ${unmatched.firstDayIso}.`);
+    this.name = "UnmatchedOptionsError";
+  }
 }
 
 /** F on a date: the segment holding it, else the last segment before it (a date that is not a file day); null when unresolved or before the schedule. */
@@ -246,10 +303,12 @@ export class UnresolvedSplitScaleError extends Error {
   }
 }
 
-/** F for every date in `datesIso`; throws on the first date in an unresolved stretch. */
+/** F for every date in `datesIso`; throws on the first date before the options match IBKR's prices, or in an unresolved stretch. */
 export function requireSplitFactors(symbol: string, schedule: SplitSchedule, datesIso: readonly string[]): Map<string, number> {
   const factors = new Map<string, number>();
+  const unmatched = schedule.unmatchedOptionsBefore;
   for (const dateIso of datesIso) {
+    if (unmatched && dateIso < unmatched.firstDayIso) throw new UnmatchedOptionsError(symbol, unmatched);
     const factor = splitFactorOn(schedule, dateIso);
     if (factor === null) {
       const stretch = schedule.unresolved.find((entry) => dateIso >= entry.fromDateIso && dateIso <= entry.toDateIso) ?? { fromDateIso: dateIso, toDateIso: dateIso, ratios: [{ dateIso, ratio: null }] };
