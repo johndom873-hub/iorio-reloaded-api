@@ -1153,6 +1153,12 @@ export interface BacktestCycleTimelineRow {
   stockDollars: number;
   /** A hedge option still held: its cost is the open mark's, not a realized loss. */
   unrealized: boolean;
+  /**
+   * A sold option's annualised yield as the engine recorded it at the sale (premiumYield: time value net of commission ÷
+   * the capital ÷ the years to expiry), contract-weighted over the row's fills; added when the cycle is read, null when
+   * the sale kept none (a session not run by the baseline). Absent on other rows.
+   */
+  premiumYield?: number | null;
 }
 
 /**

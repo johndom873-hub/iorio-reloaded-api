@@ -10,6 +10,7 @@ import type {
   BacktestBatchSummary,
   BacktestCompareResponse,
   BacktestCycle,
+  BacktestCycleTimelineRow,
   BacktestCycleDetail,
   BacktestCycleGap,
   BacktestFill,
@@ -585,8 +586,41 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
     .first("timeline", "uncovered_stretches");
   if (!row) throw new BacktestRequestError(`The session has no cycle ${symbol} #${cycleNumber}.`, 404);
   if (row.timeline === null) return null;
-  // Stretches stored before their no-candidate detail was kept have none.
-  return { timeline: row.timeline, uncoveredStretches: (row.uncovered_stretches ?? []).map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null })) };
+  const yieldOf = await loadSaleYields(sessionId, symbol, row.timeline);
+  return {
+    timeline: row.timeline.map((entry) => {
+      const sold = /^Sold (put|call) @/.exec(entry.label);
+      return sold && entry.instrument === "option" ? { ...entry, premiumYield: yieldOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate) } : entry;
+    }),
+    // Stretches stored before their no-candidate detail was kept have none.
+    uncoveredStretches: (row.uncovered_stretches ?? []).map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null })),
+  };
+}
+
+/** The annualised yields the engine recorded at a symbol's option sales over a cycle's days, contract-weighted per day and contract. */
+async function loadSaleYields(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<(date: string, right: "C" | "P", strike: number | null, expiry: string | null) => number | null> {
+  const dates = timeline.map((entry) => entry.tradingDate).sort();
+  if (dates.length === 0) return () => null;
+  const sales: { date: string; kind: string; contract: { strike: number; expiry: string }; quantity: string; premium_yield: string }[] = await db("backtest_actions")
+    .where({ session_id: sessionId, symbol, outcome: "filled" })
+    .whereIn("kind", ["open_cash_secured_put", "open_covered_call"])
+    .whereBetween("trading_date", [dates[0]!, dates.at(-1)!])
+    .whereRaw("jsonb_exists(candidate_scores, 'premiumYield')")
+    .select(db.raw("trading_date::text as date"), "kind", "contract", "quantity", db.raw("candidate_scores->>'premiumYield' as premium_yield"));
+  const keyOf = (date: string, right: "C" | "P", strike: number, expiry: string) => `${date}|${right}|${Math.round(strike * 10_000)}|${expiry}`;
+  const totals = new Map<string, { weighted: number; contracts: number }>();
+  for (const sale of sales) {
+    const key = keyOf(sale.date, sale.kind === "open_covered_call" ? "C" : "P", Number(sale.contract.strike), sale.contract.expiry);
+    const total = totals.get(key) ?? { weighted: 0, contracts: 0 };
+    total.weighted += Number(sale.premium_yield) * Number(sale.quantity);
+    total.contracts += Number(sale.quantity);
+    totals.set(key, total);
+  }
+  return (date, right, strike, expiry) => {
+    if (strike === null || expiry === null) return null;
+    const total = totals.get(keyOf(date, right, strike, expiry));
+    return total && total.contracts > 0 ? total.weighted / total.contracts : null;
+  };
 }
 
 /** Per ticker in its turn order (alphabetical), the looks and days at which the cash cut one of its orders (backtest_look_shortfalls). */
