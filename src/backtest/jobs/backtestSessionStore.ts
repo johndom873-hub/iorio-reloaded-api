@@ -45,7 +45,7 @@ import { sqlContainsPattern } from "../../lib/sqlContainsPattern.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { readSplitScheduleCache } from "../engine/splitFactors.js";
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
-import { cycleCashBreakEven } from "../cycleCashBreakEven.js";
+import { cashBreakEvenBeforeEachRow, cycleCashBreakEven } from "../cycleCashBreakEven.js";
 
 const spyBaselineLabel = "Buy and hold · SPY";
 /** "HOOD #12": a symbol's cycle as the screens name it (backtestSessionRecords.ts describeCycle). */
@@ -589,13 +589,13 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
   if (!row) throw new BacktestRequestError(`The session has no cycle ${symbol} #${cycleNumber}.`, 404);
   if (row.timeline === null) return null;
   const sales = await loadSaleRecords(sessionId, symbol, row.timeline);
+  const breakEvens = cashBreakEvenBeforeEachRow(row.timeline);
   return {
-    timeline: row.timeline.map((entry) => {
+    timeline: row.timeline.map((entry, index) => {
       const sold = /^Sold (put|call) @/.exec(entry.label);
       if (!sold || entry.instrument !== "option") return entry;
-      const right = sold[1] === "put" ? "P" : "C";
-      const { premiumYield, delta } = sales.recordedOf(entry.tradingDate, right, entry.strike, entry.expiryDate);
-      return right === "C" ? { ...entry, premiumYield, delta, breakEvenFloor: sales.breakEvenFloorOf(entry.tradingDate, entry.strike, entry.expiryDate) } : { ...entry, premiumYield, delta };
+      const { premiumYield, delta } = sales.recordedOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate);
+      return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]! };
     }),
     // Stretches stored before their no-candidate detail was kept have none.
     uncoveredStretches: (row.uncovered_stretches ?? []).map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null })),
@@ -604,23 +604,19 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
 
 /**
  * What the engine recorded at a symbol's option sales over a cycle's days, per day and contract: the annualised yield and
- * the delta (contract-weighted), and for a call on held shares sold under a break-even rule, the cash break-even it was held to (the
- * highest of the day's, from engine version 3).
+ * the delta (contract-weighted).
  */
-async function loadSaleRecords(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<{ recordedOf: (date: string, right: "C" | "P", strike: number | null, expiry: string | null) => { premiumYield: number | null; delta: number | null }; breakEvenFloorOf: (date: string, strike: number | null, expiry: string | null) => number | null }> {
+async function loadSaleRecords(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<{ recordedOf: (date: string, right: "C" | "P", strike: number | null, expiry: string | null) => { premiumYield: number | null; delta: number | null } }> {
   const dates = timeline.map((entry) => entry.tradingDate).sort();
-  if (dates.length === 0) return { recordedOf: () => ({ premiumYield: null, delta: null }), breakEvenFloorOf: () => null };
-  const session: { engine_version: number | null; call_strike: string | null } | undefined = await db("backtest_sessions").where({ id: sessionId }).first("engine_version", db.raw("settings_snapshot->'baseline'->>'callStrike' as call_strike"));
-  const floorsRecorded = (session?.engine_version ?? 0) >= 3;
-  const sales: { date: string; kind: string; contract: { strike: number; expiry: string }; quantity: string; premium_yield: string | null; delta: string | null; cost_floor: string | null; chosen_because: string | null }[] = await db("backtest_actions")
+  if (dates.length === 0) return { recordedOf: () => ({ premiumYield: null, delta: null }) };
+  const sales: { date: string; kind: string; contract: { strike: number; expiry: string }; quantity: string; premium_yield: string | null; delta: string | null }[] = await db("backtest_actions")
     .where({ session_id: sessionId, symbol, outcome: "filled" })
     .whereIn("kind", ["open_cash_secured_put", "open_covered_call"])
     .whereBetween("trading_date", [dates[0]!, dates.at(-1)!])
     .whereNotNull("candidate_scores")
-    .select(db.raw("trading_date::text as date"), "kind", "contract", "quantity", db.raw("candidate_scores->>'premiumYield' as premium_yield"), db.raw("candidate_scores->>'delta' as delta"), db.raw("candidate_scores->>'costFloor' as cost_floor"), "chosen_because");
+    .select(db.raw("trading_date::text as date"), "kind", "contract", "quantity", db.raw("candidate_scores->>'premiumYield' as premium_yield"), db.raw("candidate_scores->>'delta' as delta"));
   const keyOf = (date: string, right: "C" | "P", strike: number, expiry: string) => `${date}|${right}|${Math.round(strike * 10_000)}|${expiry}`;
   const totals = new Map<string, { weightedYield: number; yieldContracts: number; weightedDelta: number; deltaContracts: number }>();
-  const floors = new Map<string, number>();
   for (const sale of sales) {
     const right = sale.kind === "open_covered_call" ? "C" : "P";
     const key = keyOf(sale.date, right, Number(sale.contract.strike), sale.contract.expiry);
@@ -634,10 +630,6 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
       total.deltaContracts += Number(sale.quantity);
     }
     totals.set(key, total);
-    // Calls on held shares ("on the free shares"), their floor a break-even: the whole rule, or its second step.
-    const onHeldShares = right === "C" && (sale.chosen_because ?? "").includes("on the free shares");
-    const breakEvenRule = session?.call_strike === "above_break_even" || (sale.chosen_because ?? "").includes("at or above the break-even");
-    if (floorsRecorded && onHeldShares && breakEvenRule && sale.cost_floor !== null) floors.set(key, Math.max(floors.get(key) ?? Number.NEGATIVE_INFINITY, Number(sale.cost_floor)));
   }
   return {
     recordedOf: (date, right, strike, expiry) => {
@@ -647,7 +639,6 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
         delta: total && total.deltaContracts > 0 ? total.weightedDelta / total.deltaContracts : null,
       };
     },
-    breakEvenFloorOf: (date, strike, expiry) => (strike === null || expiry === null ? null : (floors.get(keyOf(date, "C", strike, expiry)) ?? null)),
   };
 }
 

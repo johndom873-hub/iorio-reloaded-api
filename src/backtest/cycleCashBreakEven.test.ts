@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BacktestCycleTimelineRow } from "./backtestTypes.js";
-import { cycleCashBreakEven } from "./cycleCashBreakEven.js";
+import { cashBreakEvenBeforeEachRow, cycleCashBreakEven } from "./cycleCashBreakEven.js";
 
 const row = (overrides: Partial<BacktestCycleTimelineRow>): BacktestCycleTimelineRow => ({
   at: "2026-09-01T14:00:00.000Z",
@@ -49,5 +49,19 @@ describe("cycleCashBreakEven", () => {
 
   it("has none without shares held", () => {
     expect(cycleCashBreakEven(timeline.slice(0, 1))).toBeNull();
+  });
+
+  it("gives each sale the break-even from before its moment, a look's sales one value", () => {
+    // Shares held from the assignment; two calls sold in one look share the value from before it; a put sold later sees both premiums.
+    const at = "2026-09-08T14:00:00.000Z";
+    const rows = [
+      timeline[0]!,
+      { ...timeline[1]!, at: "2026-09-04T20:00:00.000Z" },
+      row({ at, label: "Sold call @ 0.40", bucket: "cc", strike: 42, premiumDollars: 39.32 }),
+      row({ at, label: "Sold call @ 0.20", bucket: "cc", strike: 43, premiumDollars: 19.32 }),
+      row({ at: "2026-09-09T14:00:00.000Z", label: "Sold put @ 0.50", strike: 38, premiumDollars: 49.32 }),
+    ];
+    // Before the put sale: none held. Then (4,000 − 49.32) ÷ 100 = 39.5068, for both calls; the put: (4,000 − 49.32 − 58.64) ÷ 100.
+    expect(cashBreakEvenBeforeEachRow(rows).map((value) => (value === null ? null : Number(value.toFixed(4))))).toEqual([null, null, 39.5068, 39.5068, 38.9204]);
   });
 });

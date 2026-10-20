@@ -1169,10 +1169,11 @@ export interface BacktestCycleTimelineRow {
   /** A sold option's delta as the engine recorded it at the sale (a put's negative), contract-weighted over the row's fills; null when none was kept. */
   delta?: number | null;
   /**
-   * A call sold on held shares under a break-even rule: the cash break-even the engine held its strike to, as recorded at the
-   * sale (sessions from engine version 3; null before, when the floor was the pro-rata one). Absent on other rows.
+   * An option sold while the cycle held shares: the cycle's cash break-even just before the sale (cycleCashBreakEven.ts),
+   * added when the cycle is read; for a call on held shares under a break-even rule, the floor its strike was held to
+   * (engine version 3 on). Null while no shares were held; absent on other rows.
    */
-  breakEvenFloor?: number | null;
+  breakEvenAtSale?: number | null;
 }
 
 /**
