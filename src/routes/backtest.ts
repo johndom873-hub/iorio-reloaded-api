@@ -38,6 +38,7 @@ import { checkSessionRequestAgainstLab, validateBatchRequestAgainstLab, validate
 import { registerTickerAnalysisRoutes } from "./backtestAnalysisRoutes.js";
 import { listAnalysedSymbols, rerunAnalysesAfterSave } from "../backtest/analysis/analysisStore.js";
 import { loadBacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
+import { loadBacktestSessionStockPrices } from "../backtest/analysis/sessionStockPrices.js";
 import { readBacktestClaudeCliPath } from "../backtest/backtestClaudeCli.js";
 import { applyBacktestOverrides } from "../backtest/backtestSettingsOverrides.js";
 import { lookTimesInWindow, regularCloseMinutesEt } from "../backtest/engine/runBacktestSession.js";
@@ -338,6 +339,16 @@ backtestRouter.get("/sessions/:id/price-chart", async (request, response) => {
     throw new BacktestRequestError(error instanceof Error ? error.message : String(error), 400);
   }
   response.json(await loadBacktestSessionPriceChart(requireUuidParameter(request.params.id, "session"), symbol));
+});
+
+backtestRouter.get("/sessions/:id/stock-prices", async (request, response) => {
+  let symbol: string;
+  try {
+    symbol = normalizeBacktestSymbol(typeof request.query.symbol === "string" ? request.query.symbol : "");
+  } catch (error) {
+    throw new BacktestRequestError(error instanceof Error ? error.message : String(error), 400);
+  }
+  response.json(await loadBacktestSessionStockPrices(requireUuidParameter(request.params.id, "session"), symbol));
 });
 
 backtestRouter.get("/compare", async (request, response) => {

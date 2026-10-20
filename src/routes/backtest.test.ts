@@ -28,6 +28,7 @@ import type {
   CreateBacktestSessionResponse,
 } from "../backtest/backtestTypes.js";
 import type { BacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
+import type { BacktestSessionStockPrices } from "../backtest/analysis/sessionStockPrices.js";
 
 // The real backtest router on a small express app against the test database, with a temporary data folder holding a
 // real symbol file. Only starting and stopping job processes is mocked.
@@ -1061,6 +1062,13 @@ describe("backtest routes", () => {
       expect((await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=zzzz`)).status).toBe(400);
       expect((await request("GET", `/backtest/sessions/${session.id}/price-chart`)).status).toBe(400);
       expect((await request("GET", `/backtest/sessions/00000000-0000-4000-8000-000000000000/price-chart?symbol=${fileSymbol}`)).status).toBe(404);
+
+      // The stock prices day by day: the bar before the session's first day, then its days. No 30-minute bars in this file
+      // (no 10:00 price), and its cached split schedule has no segment for these days (no price as traded).
+      const prices = (await request("GET", `/backtest/sessions/${session.id}/stock-prices?symbol=${fileSymbol.toLowerCase()}`)).body as BacktestSessionStockPrices;
+      expect(prices).toEqual({ symbol: fileSymbol, days: [["2016-01-04", null, null, 10.5], ["2026-09-11", null, null, 20.5]] });
+      expect((await request("GET", `/backtest/sessions/${session.id}/stock-prices?symbol=zzzz`)).status).toBe(400);
+      expect((await request("GET", `/backtest/sessions/00000000-0000-4000-8000-000000000000/stock-prices?symbol=${fileSymbol}`)).status).toBe(404);
     });
 
     it("compare sessions with one buy-and-hold curve per symbol, period and starting value", async () => {
