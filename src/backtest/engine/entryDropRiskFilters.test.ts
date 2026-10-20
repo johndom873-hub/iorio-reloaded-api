@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { BacktestBarHistory, type StoredDailyBar } from "./backtestBarHistory.js";
-import { entryDropRiskBlock, extensionZ, ivRankBefore } from "./entryDropRiskFilters.js";
+import { entryDropRiskBlock, entryDropRiskBlockingLimits, extensionZ, ivRankBefore } from "./entryDropRiskFilters.js";
 
 const closesOf = (values: number[]) => values.map((close) => ({ close }));
 
@@ -70,5 +70,16 @@ describe("entryDropRiskBlock", () => {
   it("blocks nothing when a measure cannot be worked out (a short history)", () => {
     const both = { ...off, entryExtensionFilter: "on", entryIvRankFilter: "on" } as const;
     expect(entryDropRiskBlock(both, { extensionZ: null, ivRank: null })).toBeNull();
+  });
+});
+
+describe("entryDropRiskBlockingLimits", () => {
+  it("gives the limit of each filter that blocks, null for one that is off, below its limit or cannot be measured", () => {
+    const off = { entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80 } as const;
+    const both = { ...off, entryExtensionFilter: "on", entryIvRankFilter: "on" } as const;
+    expect(entryDropRiskBlockingLimits(both, { extensionZ: 1.24, ivRank: 85 })).toEqual({ extensionZ: 1, ivRank: 80 });
+    expect(entryDropRiskBlockingLimits(both, { extensionZ: 0.5, ivRank: 85 })).toEqual({ extensionZ: null, ivRank: 80 });
+    expect(entryDropRiskBlockingLimits(both, { extensionZ: null, ivRank: null })).toEqual({ extensionZ: null, ivRank: null });
+    expect(entryDropRiskBlockingLimits(off, { extensionZ: 3, ivRank: 100 })).toEqual({ extensionZ: null, ivRank: null });
   });
 });

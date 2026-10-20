@@ -37,7 +37,7 @@ import {
 // files (for correlation), at the values given. Everything but the analysis backtest's figures (analysisBacktestFigures.ts).
 
 /** Bumped when a formula or the figures' shape changes: a stored analysis with an older version shows as such. */
-export const analysisFormulasVersion = 5;
+export const analysisFormulasVersion = 7;
 
 export type AnalysisStep = "bars" | "chains" | "earnings_correlation" | "saving" | "backtest" | "summary";
 export const analysisSteps: readonly AnalysisStep[] = ["bars", "chains", "earnings_correlation", "saving", "backtest", "summary"];
@@ -136,7 +136,7 @@ function nextWeekday(dateIso: string): string {
 }
 
 /** The symbol's IBKR daily bars as a session reads them: the file's, else the local DB's. */
-async function loadDailyBarsOf(symbol: string, connection: Knex): Promise<{ bars: StoredDailyBar[]; source: "file" | "database" | null }> {
+export async function loadDailyBarsOf(symbol: string, connection: Knex): Promise<{ bars: StoredDailyBar[]; source: "file" | "database" | null }> {
   const database = openBacktestDataFileReadOnly(symbol);
   if (database) {
     try {

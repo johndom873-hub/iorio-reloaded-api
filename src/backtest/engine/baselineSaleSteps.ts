@@ -293,6 +293,32 @@ export function describeRejections(rejections: BaselineRejections): string {
     .join(", ");
 }
 
+const formatRuleNumber = (value: number) => String(+value.toFixed(4));
+
+/**
+ * Each check's rule as one selection applied it, in the order the checks run: a contract drops out at the first it fails
+ * (the Wheel cycles' explanation of a look that found no candidate).
+ */
+export function describeBaselineRules(input: Pick<BaselineCandidateInput, "settings" | "minimumStrike" | "maximumStrike" | "minimumPremiumYield" | "previousSessionVolumeByContract" | "model">): Record<keyof BaselineRejections, string> {
+  const { settings } = input;
+  return {
+    outsideExpiryRange: `expiry outside ${settings.minDte}–${settings.maxDte} days`,
+    spansEarnings: "expiry on or after an earnings report",
+    belowCost: `strike below the floor${input.minimumStrike != null ? ` of $${input.minimumStrike.toFixed(2)}` : ""}`,
+    aboveCeiling: `strike above the cap${input.maximumStrike != null ? ` of $${input.maximumStrike.toFixed(2)}` : ""}`,
+    noUsableQuote: `no usable quote (a bid under $${baselineMinimumBid.toFixed(2)}, or no ask above the bid)`,
+    spreadTooWide: `spread wider than ${formatRuleNumber(settings.maxSpreadPctOfMid)}% of the mid`,
+    tooLittleVolume: input.previousSessionVolumeByContract === null ? "no volume known for the previous session" : `under 1 contract at ${formatRuleNumber(baselineMaxVolumeShare * 100)}% of the previous session's volume`,
+    noImpliedVolatility: "no implied volatility at the mid",
+    outsideDeltaRange: `|delta| outside ${formatRuleNumber(settings.minAbsDelta)}–${formatRuleNumber(settings.maxAbsDelta)}`,
+    alreadyHeld: "already held",
+    noTimeValue: "no time value left after the commission",
+    belowMinimumYield: `premium yield not above ${input.minimumPremiumYield != null ? formatRuleNumber(input.minimumPremiumYield * 100) : "0"}% a year`,
+    noForecast: "no volatility forecast",
+    belowVolatilityEdge: `volatility edge under ${input.model?.minVolatilityEdge != null ? formatRuleNumber(input.model.minVolatilityEdge * 100) : "0"} points`,
+  };
+}
+
 /** Contracts the free cash pays for: a put reserves its strike and brings its fill in; a Covered Call entry pays the shares less the fill. */
 export function baselineContractsForCash(freeCash: number, candidate: Pick<BaselineCandidate, "strike" | "fillPrice">, entry: "put" | "covered_call", stockFillPrice: number, commissions: BaselineCommissions): number {
   const optionCommission = optionCommissionPerContract(commissions);
@@ -300,7 +326,15 @@ export function baselineContractsForCash(freeCash: number, candidate: Pick<Basel
   return perContract > 0 ? Math.max(0, Math.floor(freeCash / perContract)) : 0;
 }
 
-export type BaselineSelect = (right: "C" | "P", minimumStrike?: number | null, forEntry?: boolean, maximumStrike?: number | null, byPremiumYield?: boolean, options?: { ladderPut?: boolean }) => { candidates: BaselineCandidate[]; rejections: BaselineRejections };
+export type BaselineSelect = (right: "C" | "P", minimumStrike?: number | null, forEntry?: boolean, maximumStrike?: number | null, byPremiumYield?: boolean, options?: { ladderPut?: boolean }) => { candidates: BaselineCandidate[]; rejections: BaselineRejections; describeRules?: () => Record<keyof BaselineRejections, string> };
+
+/** A look's order that found no contract within the rules: how many each check left out, and each check's rule then. */
+export interface BaselineNoCandidate {
+  order: "entry" | "calls";
+  right: "C" | "P";
+  rejections: BaselineRejections;
+  rules: Record<keyof BaselineRejections, string> | null;
+}
 
 /**
  * A symbol's candidate selection at a look: Puts on the baseline's |delta| range (the ladder's at any |delta| with
@@ -333,8 +367,10 @@ export function makeBaselineSelector(input: {
   // Any |delta| passes 0–1: the ladder's Puts without a range still need a usable implied volatility, as every contract does.
   const ladderPutsSettings = baseline.ladderPutDeltaRange === "none" ? { ...baseline, minAbsDelta: 0, maxAbsDelta: 1 } : baseline;
   const settingsFor = (right: "C" | "P", ladderPut: boolean) => (right === "C" ? callsSettings : ladderPut ? ladderPutsSettings : baseline);
-  return (right: "C" | "P", minimumStrike: number | null = null, forEntry = true, maximumStrike: number | null = null, byPremiumYield = false, options = {}) =>
-    selectBaselineCandidates({ quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: settingsFor(right, options.ladderPut === true), spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: minimumYieldFor(right, forEntry, options.ladderPut === true), ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" });
+  return (right: "C" | "P", minimumStrike: number | null = null, forEntry = true, maximumStrike: number | null = null, byPremiumYield = false, options = {}) => {
+    const selectionInput: BaselineCandidateInput = { quotes, forwardAnchors, commissions, right, todayIso, yearsToTodaysClose, stockPrice, riskFreeRate, previousSessionVolumeByContract: previousSessionVolumeByContract, settings: settingsFor(right, options.ladderPut === true), spreadShareCharged, isHeld, minimumStrike, maximumStrike, minimumPremiumYield: minimumYieldFor(right, forEntry, options.ladderPut === true), ...(earningsDatesIso ? { earningsDatesIso } : {}), model: byPremiumYield && model ? { ...model, rankByEdgeYield: false } : forEntry ? model : callsModel, ...(byPremiumYield ? { ranking: "premium_yield" as const } : baseline.ranking !== "edge_yield" ? { ranking: baseline.ranking } : {}), nearestExpiryFirst: !byPremiumYield && baseline.expiryChoice === "nearest_qualifying" };
+    return { ...selectBaselineCandidates(selectionInput), describeRules: () => describeBaselineRules(selectionInput) };
+  };
 }
 
 /** What the sale steps read from the symbol's book and how they sell; prices on the cycle's scale unless the name says "Today". */
@@ -385,7 +421,14 @@ export interface BaselineSalesInput {
   noteShortfall?: (shortfall: BaselineOrderShortfall) => void;
   /** Why the drop-risk filters block new entries today (entryDropRiskFilters.ts); null or absent when they don't. */
   entryBlockedBecause?: string | null;
+  /** Records a sale that was due and not made for a reason the shortfalls do not hold (recorded only). */
+  noteNoSale?: (reason: BaselineNoSaleReason) => void;
+  /** Records an order that found no contract within the rules: what each check left out (recorded only). */
+  noteNoCandidate?: (note: BaselineNoCandidate) => void;
 }
+
+/** The Entry filters blocked the entry; or a ladder put was sold instead of the calls on the free shares, a call qualifying or none. */
+export type BaselineNoSaleReason = "entry_filter" | "ladder_put_instead_of_calls" | "no_call_candidate";
 
 /** An order that left contracts unsold, without the look's own facts (its time and symbol). */
 export type BaselineOrderShortfall = Omit<BacktestOrderShortfall, "tradingDate" | "at" | "lookTimeEt" | "symbol" | "lookCount">;
@@ -502,19 +545,25 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     const bestPut = plan && plan.blocked === null ? (plan.candidates.find((candidate) => !book.isHeld(candidate) && ladderPutContracts(candidate, plan.rung.collateral) >= 1) ?? null) : null;
     if (plan && bestPut) {
       let bestCall: BaselineCandidate | null = null;
+      let lastCallSelection: ReturnType<BaselineSelect> | null = null;
       for (const { floor } of callFloors) {
-        bestCall = select("C", floor, false).candidates.find((candidate) => !book.isHeld(candidate)) ?? null;
+        lastCallSelection = select("C", floor, false);
+        bestCall = lastCallSelection.candidates.find((candidate) => !book.isHeld(candidate)) ?? null;
         if (bestCall) break;
       }
       const marginFactor = 1 + baseline.ladderPutYieldMarginPct / 100;
       if (bestCall === null || bestPut.premiumYield > bestCall.premiumYield * marginFactor) {
         ladderPutChosen = true;
+        // The calls' order is skipped and records no shortfall: say why the shares wait.
+        input.noteNoSale?.(bestCall === null ? "no_call_candidate" : "ladder_put_instead_of_calls");
+        if (bestCall === null && lastCallSelection) input.noteNoCandidate?.({ order: "calls", right: "C", rejections: lastCallSelection.rejections, rules: lastCallSelection.describeRules?.() ?? null });
         sellLadderPuts(plan, bestCall === null ? "no call qualifies" : `its yield ${(bestPut.premiumYield * 100).toFixed(1)}% beats the best call's ${(bestCall.premiumYield * 100).toFixed(1)}% by more than ${baseline.ladderPutYieldMarginPct}%`);
       }
     }
   }
 
   let lastCallRejections: BaselineRejections | null = null;
+  let lastCallRules: (() => Record<keyof BaselineRejections, string>) | undefined;
   let anyCallCandidate = false;
   // The order wants a call on every free lot; its best candidate is the first floor's. A Call order also records the
   // shares' average cost before it and the look's stock price (the Analyse window's largest pot).
@@ -522,8 +571,9 @@ export function planBaselineSales(input: BaselineSalesInput): void {
   const heldCallsSharesAverageCost = book.heldSharesAverageCostToday();
   for (const { floor, label } of ladderPutChosen ? [] : callFloors) {
     if (uncoveredLots < 1) break;
-    const { candidates, rejections } = select("C", floor, false);
+    const { candidates, rejections, describeRules } = select("C", floor, false);
     lastCallRejections = rejections;
+    lastCallRules = describeRules;
     anyCallCandidate ||= candidates.length > 0;
     heldCallsBest ??= bestOf(candidates);
     let soldAtThisFloor = 0;
@@ -538,7 +588,10 @@ export function planBaselineSales(input: BaselineSalesInput): void {
   }
   if (!ladderPutChosen && callFloors.length > 0) noteOrderShortfall({ step: "held_calls", right: "C", wanted: freeLots, filled: freeLots - uncoveredLots, unsold: uncoveredLots, cashCut: false, anyCandidate: anyCallCandidate, best: heldCallsBest });
   // When the ladder put was chosen over the calls, they were quoted and lost: the put's own line says why.
-  if (callFloors.length > 0 && !anyCallCandidate && !ladderPutChosen) notes.push(`${symbol}: no call for ${freeLots * sharesPerContract} free shares (${(lastCallRejections && describeRejections(lastCallRejections)) || "no quotes"})`);
+  if (callFloors.length > 0 && !anyCallCandidate && !ladderPutChosen) {
+    notes.push(`${symbol}: no call for ${freeLots * sharesPerContract} free shares (${(lastCallRejections && describeRejections(lastCallRejections)) || "no quotes"})`);
+    if (lastCallRejections) input.noteNoCandidate?.({ order: "calls", right: "C", rejections: lastCallRejections, rules: lastCallRules?.() ?? null });
+  }
 
   // 2. The entry with the free cash. A Covered Call entry waits while free round lots are still uncovered, unless it buys every share.
   const coveredCallEntry = baseline.entry === "covered_call";
@@ -559,6 +612,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     // The drop-risk filters: no new entry while the stock is stretched or its IV Rank is high (the cash waits).
     if (input.entryBlockedBecause) {
       notes.push(`${symbol}: no new entry (${input.entryBlockedBecause})`);
+      input.noteNoSale?.("entry_filter");
       return;
     }
     const entryRight = baseline.entry === "put" ? "P" : "C";
@@ -572,9 +626,10 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     // Selection takes the lowest the average after the purchase can be (today's fill or the average now); each candidate is then held to its own.
     const heldAverageNow = floorAfterPurchase ? book.heldSharesAverageCostToday() : null;
     const entryMinimumStrike = !coveredCallEntry ? null : baseline.entryCallStrike === "above_purchase_price" ? stockFillToday : floorAfterPurchase ? Math.min(stockFillToday, heldAverageNow ?? stockFillToday) : null;
-    const { candidates, rejections } = select(entryRight, entryMinimumStrike);
+    const { candidates, rejections, describeRules } = select(entryRight, entryMinimumStrike);
     if (candidates.length === 0) {
       notes.push(`${symbol}: no ${baseline.entry === "put" ? "put" : "new Covered Call"} (${describeRejections(rejections) || "no quotes"})`);
+      input.noteNoCandidate?.({ order: "entry", right: entryRight, rejections, rules: describeRules?.() ?? null });
       // Lots the Covered Call entries had cash and room for (a put entry's depend on a strike: unknown).
       const wanted = coveredCallEntry ? Math.min(Math.floor(book.freeCash() / (stockFillToday * sharesPerContract)), shareCapLots()) : null;
       if (wanted === null || wanted >= 1) noteOrderShortfall({ step: "entry", right: entryRight, wanted, filled: 0, unsold: wanted, cashCut: false, anyCandidate: false, best: null });

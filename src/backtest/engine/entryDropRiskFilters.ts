@@ -46,10 +46,21 @@ export function ivRankBefore(bars: BacktestBarHistory, dateIso: string): number 
   return ivRankFromHistory(newestFirst.reverse());
 }
 
-/** Why a new entry is blocked today ("extension z 1.24 ≥ 1"), or null; a measure that cannot be worked out blocks nothing. */
-export function entryDropRiskBlock(baseline: Pick<BacktestBaselineSettings, "entryExtensionFilter" | "entryMaxExtensionZ" | "entryIvRankFilter" | "entryMaxIvRank">, measures: { extensionZ: number | null; ivRank: number | null }): string | null {
+type EntryFilterSettings = Pick<BacktestBaselineSettings, "entryExtensionFilter" | "entryMaxExtensionZ" | "entryIvRankFilter" | "entryMaxIvRank">;
+type EntryFilterMeasures = { extensionZ: number | null; ivRank: number | null };
+
+/** The limit of each filter that blocks a new entry today, null for one that does not; a measure that cannot be worked out blocks nothing. */
+export function entryDropRiskBlockingLimits(baseline: EntryFilterSettings, measures: EntryFilterMeasures): { extensionZ: number | null; ivRank: number | null } {
+  const extensionZBlocks = baseline.entryExtensionFilter === "on" && measures.extensionZ !== null && measures.extensionZ >= baseline.entryMaxExtensionZ;
+  const ivRankBlocks = baseline.entryIvRankFilter === "on" && measures.ivRank !== null && measures.ivRank >= baseline.entryMaxIvRank;
+  return { extensionZ: extensionZBlocks ? baseline.entryMaxExtensionZ : null, ivRank: ivRankBlocks ? baseline.entryMaxIvRank : null };
+}
+
+/** Why a new entry is blocked today ("extension z 1.24 ≥ 1"), or null. */
+export function entryDropRiskBlock(baseline: EntryFilterSettings, measures: EntryFilterMeasures): string | null {
+  const limits = entryDropRiskBlockingLimits(baseline, measures);
   const reasons: string[] = [];
-  if (baseline.entryExtensionFilter === "on" && measures.extensionZ !== null && measures.extensionZ >= baseline.entryMaxExtensionZ) reasons.push(`extension z ${measures.extensionZ.toFixed(2)} ≥ ${baseline.entryMaxExtensionZ}`);
-  if (baseline.entryIvRankFilter === "on" && measures.ivRank !== null && measures.ivRank >= baseline.entryMaxIvRank) reasons.push(`IV Rank ${measures.ivRank.toFixed(0)} ≥ ${baseline.entryMaxIvRank}`);
+  if (limits.extensionZ !== null) reasons.push(`extension z ${measures.extensionZ!.toFixed(2)} ≥ ${limits.extensionZ}`);
+  if (limits.ivRank !== null) reasons.push(`IV Rank ${measures.ivRank!.toFixed(0)} ≥ ${limits.ivRank}`);
   return reasons.length === 0 ? null : reasons.join(", ");
 }

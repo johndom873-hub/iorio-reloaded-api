@@ -25,7 +25,8 @@ import { heldShareCallGate, type CycleBreakEven } from "../../pluto/heldShareCal
 import type { PlutoGateResult } from "../../pluto/ledger.js";
 import { computeKellyCap, computeSizingRoom, computeStressCap, midLimitPrice, runHeldShareCallGates, runPostModelGates, stressCapInputFor, tickerCooldownStatus } from "../../pluto/postModelGates.js";
 import { countPlutoRejections } from "../../pluto/rejectionSummary.js";
-import type { BacktestAction, BacktestActionKind, BacktestBaselineSettings, BacktestOrderShortfall, EffectiveBacktestSettings } from "../backtestTypes.js";
+import type { BacktestAction, BacktestActionKind, BacktestBaselineSettings, BacktestLadderLevel, BacktestOrderShortfall, EffectiveBacktestSettings } from "../backtestTypes.js";
+import type { BaselineNoCandidate, BaselineNoSaleReason } from "./baselineSaleSteps.js";
 import { toOhlcvBars, type BacktestBarHistory } from "./backtestBarHistory.js";
 import { computeSaleFillPrice, sharesPerContract } from "./backtestBook.js";
 import { classifyOpenRefusal, orderLimitBreachesOf, type OpenRefusalInput } from "./backtestOpenRefusal.js";
@@ -232,6 +233,24 @@ export interface BacktestLookResult {
   llmCalls: { asked: number; fromCache: number };
   /** The baseline: its orders that left contracts unsold. */
   shortfalls?: BacktestOrderShortfall[];
+  /** The baseline: the put ladder's levels at this look, per symbol whose cycle holds shares. */
+  ladderLevels?: BacktestLadderLevel[];
+  /** The baseline: sales that were due and not made for a reason the shortfalls do not hold. */
+  noSaleNotes?: BacktestNoSaleNote[];
+  /** The baseline: orders that found no contract within the rules, with what each check left out. */
+  noCandidateNotes?: BacktestNoCandidateNote[];
+}
+
+/** An order of a look that found no contract within the rules (BaselineNoCandidate), recorded only: the Wheel cycles' explanation. */
+export type BacktestNoCandidateNote = BaselineNoCandidate & { tradingDate: string; lookTimeEt: string; symbol: string };
+
+/** A look that sold nothing where a sale was due (BaselineNoSaleReason), recorded only: the Wheel cycles' gaps and uncovered stretches read it. */
+export interface BacktestNoSaleNote {
+  tradingDate: string;
+  symbol: string;
+  reason: BaselineNoSaleReason;
+  /** "entry_filter": each filter's limit when it blocked, null for one that did not. */
+  entryFilterLimits: { extensionZ: number | null; ivRank: number | null } | null;
 }
 
 const roundedStrike = (strike: number) => Math.round(strike * 10_000) / 10_000;

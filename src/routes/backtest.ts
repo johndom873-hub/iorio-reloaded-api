@@ -37,6 +37,7 @@ import { validateBacktestBookPageQuery, validateBacktestSessionsPageQuery } from
 import { checkSessionRequestAgainstLab, validateBatchRequestAgainstLab, validateSessionRequestAgainstLab } from "../backtest/jobs/labSessionRequest.js";
 import { registerTickerAnalysisRoutes } from "./backtestAnalysisRoutes.js";
 import { listAnalysedSymbols, rerunAnalysesAfterSave } from "../backtest/analysis/analysisStore.js";
+import { loadBacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
 import { readBacktestClaudeCliPath } from "../backtest/backtestClaudeCli.js";
 import { applyBacktestOverrides } from "../backtest/backtestSettingsOverrides.js";
 import { lookTimesInWindow, regularCloseMinutesEt } from "../backtest/engine/runBacktestSession.js";
@@ -52,6 +53,7 @@ import {
   loadBacktestSessionActions,
   loadBacktestSessionDetail,
   loadBacktestSessionFills,
+  loadBacktestCycleDetail,
   loadBacktestSessionsPage,
 } from "../backtest/jobs/backtestSessionStore.js";
 
@@ -313,6 +315,29 @@ backtestRouter.get("/sessions/:id/fills", async (request, response) => {
   const validation = validateBacktestBookPageQuery(request.query as Record<string, unknown>, { outcomeAllowed: false });
   if (!validation.ok) throw new BacktestRequestError(validation.error, 400);
   response.json(await loadBacktestSessionFills(requireUuidParameter(request.params.id, "session"), validation.filters));
+});
+
+// A cycle's timeline and uncovered stretches, read when its row in the Wheel cycles table is opened.
+backtestRouter.get("/sessions/:id/cycles/:symbol/:cycleNumber", async (request, response) => {
+  let symbol: string;
+  try {
+    symbol = normalizeBacktestSymbol(request.params.symbol);
+  } catch (error) {
+    throw new BacktestRequestError(error instanceof Error ? error.message : String(error), 400);
+  }
+  const cycleNumber = Number(request.params.cycleNumber);
+  if (!Number.isInteger(cycleNumber) || cycleNumber < 1) throw new BacktestRequestError(`Not a cycle number: "${request.params.cycleNumber}"`, 400);
+  response.json({ detail: await loadBacktestCycleDetail(requireUuidParameter(request.params.id, "session"), symbol, cycleNumber) });
+});
+
+backtestRouter.get("/sessions/:id/price-chart", async (request, response) => {
+  let symbol: string;
+  try {
+    symbol = normalizeBacktestSymbol(typeof request.query.symbol === "string" ? request.query.symbol : "");
+  } catch (error) {
+    throw new BacktestRequestError(error instanceof Error ? error.message : String(error), 400);
+  }
+  response.json(await loadBacktestSessionPriceChart(requireUuidParameter(request.params.id, "session"), symbol));
 });
 
 backtestRouter.get("/compare", async (request, response) => {

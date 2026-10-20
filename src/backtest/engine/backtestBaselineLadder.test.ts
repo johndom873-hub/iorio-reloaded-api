@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultBacktestBaselineSettings } from "../backtestTypes.js";
-import { deepestFallFromPeak, ladderBase, ladderBudget, ladderCommitted, ladderRungCollateral, ladderRungToday, ladderShareLots, ladderShock, ladderStrikeCap, noteLadderLook } from "./backtestBaselineLadder.js";
+import { deepestFallFromPeak, ladderBase, ladderBudget, ladderCommitted, ladderLevelsToday, ladderRungCollateral, ladderRungToday, ladderShareLots, ladderShock, ladderStrikeCap, noteLadderLook } from "./backtestBaselineLadder.js";
 import type { SimulatedLedger } from "./ledger/simulatedLedger.js";
 
 const settings = { ...defaultBacktestBaselineSettings, putsWhenNoCall: "reserve_ladder" as const };
@@ -128,5 +128,34 @@ describe("the ladder's cycle state", () => {
     const noShares = ladderRungToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: null, stockPrice: 80, heldSharesCost: 0, openPutCollateral: 0, sharesAverageCost: null });
     expect(noShares.cap).toBeNull();
     expect(noShares.note).toMatch(/no shares held, no floor/);
+  });
+});
+
+describe("the ladder's levels at a look", () => {
+  // The header's example: break-even $100, average cost $104, S 70% (F $31.20), R0 $100,000 in 5 rungs.
+  const state = { startedOn: "2024-01-02", accountValueAtStart: 200_000, shock: 0.7 };
+  const levelsAt = (overrides: Partial<Parameters<typeof ladderLevelsToday>[0]> = {}) =>
+    ladderLevelsToday({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even", ladderPace: "any_look" }, state, accountValueToday: 180_000, tickerWeight: 1, breakEven: 100, stockPrice: 80, heldSharesCost: 100_000, openPutCollateral: 0, sharesAverageCost: 104, freeLots: 2, ...overrides });
+
+  it("gives the next put's cap, which is the first rung's while nothing is committed and lower once a rung is", () => {
+    const free = levelsAt();
+    expect(free).toMatchObject({ top: 100, shock: 0.7, committed: 0, reserve: 100_000, blockedBecause: null });
+    expect(free.floor).toBeCloseTo(31.2, 9);
+    expect(free.firstRungCap).toBeCloseTo(86.24, 6);
+    expect(free.nextPutCap).toBeCloseTo(86.24, 6);
+    // $15,000 of puts open: 100 − 68.80 × (15,000 + 20,000) ÷ 100,000 = 75.92; the first rung's cap stays.
+    const committed = levelsAt({ openPutCollateral: 15_000 });
+    expect(committed.committed).toBe(15_000);
+    expect(committed.nextPutCap).toBeCloseTo(75.92, 6);
+    expect(committed.firstRungCap).toBeCloseTo(86.24, 6);
+  });
+
+  it("says why no ladder put can be sold, in the sale steps' order", () => {
+    expect(levelsAt({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even", ladderPace: "no_puts" }, freeLots: 0 }).blockedBecause).toBe("ladder_puts_off");
+    expect(levelsAt({ freeLots: 0 }).blockedBecause).toBe("every_lot_has_a_call");
+    expect(levelsAt({ settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even", ladderPace: "one_open" }, openPutCollateral: 9_000 }).blockedBecause).toBe("a_put_is_open");
+    // The break-even at or below the floor: no put fits.
+    const noCap = levelsAt({ breakEven: 30 });
+    expect(noCap).toMatchObject({ nextPutCap: null, firstRungCap: null, blockedBecause: "no_cap" });
   });
 });

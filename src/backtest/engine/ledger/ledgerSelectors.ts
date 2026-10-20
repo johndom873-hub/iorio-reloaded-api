@@ -115,6 +115,11 @@ export function ledgerExposureRows(ledger: SimulatedLedger, priceByLegId: Readon
   return computeExposureRows(positionRows, legRows, Object.fromEntries(legs.map(({ leg }, index) => [String(index), priceByLegId.get(leg.id) ?? null])));
 }
 
+/** The shares held, long less short, at the marks given (each leg's entry price where none). */
+export function ledgerSharesValue(ledger: SimulatedLedger, priceByLegId: ReadonlyMap<string, number>): number {
+  return openLegs(ledger).reduce((value, { leg }) => (leg.legType === "stock" ? value + (priceByLegId.get(leg.id) ?? leg.entryPrice) * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1) : value), 0);
+}
+
 /** Cash plus every open leg at the given prices, a short option as a liability; a leg with no price counts at its entry price. */
 export function ledgerNetLiquidationValue(ledger: SimulatedLedger, priceByLegId: ReadonlyMap<string, number>): number {
   return openLegs(ledger).reduce((value, { leg }) => value + (priceByLegId.get(leg.id) ?? leg.entryPrice) * leg.quantity * leg.multiplier * (leg.side === "short" ? -1 : 1), ledger.cash);

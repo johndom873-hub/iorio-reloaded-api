@@ -13,17 +13,21 @@ import type {
   BacktestBatchCombined,
   BacktestBatchDetail,
   BacktestCompareResponse,
+  BacktestCycleTimelineRow,
   BacktestFillsPage,
   BacktestJobDisplayStatus,
+  BacktestNoCandidateDetail,
   BacktestJobView,
   BacktestOverview,
   BacktestSessionDetail,
   BacktestSessionListItem,
   BacktestSessionsPage,
   BacktestSettingsTemplate,
+  BacktestUncoveredStretch,
   CreateBacktestBatchResponse,
   CreateBacktestSessionResponse,
 } from "../backtest/backtestTypes.js";
+import type { BacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
 
 // The real backtest router on a small express app against the test database, with a temporary data folder holding a
 // real symbol file. Only starting and stopping job processes is mocked.
@@ -1014,6 +1018,49 @@ describe("backtest routes", () => {
       expect(sameSymbol.positions).toHaveLength(2);
       expect(sameSymbol.trades).toHaveLength(1);
       expect((await request("GET", `/backtest/sessions/${session.id}?symbol=1abc`)).status).toBe(400);
+
+      // A cycle's detail is read when its row is opened: none for a session run before cycles kept it, then as stored.
+      const cycleUrl = `/backtest/sessions/${session.id}/cycles/${fileSymbol.toLowerCase()}/1`;
+      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: null } });
+      const timeline: BacktestCycleTimelineRow[] = [
+        { at, tradingDate: "2026-09-01", label: "Sold put @ 0.50", bucket: "csp", instrument: "option", quantity: 100, strike: 40, expiryDate: "2026-09-04", stockPrice: null, stockPriceSource: null, commissionDollars: 0.68, premiumDollars: 49.32, stockDollars: 0, unrealized: false },
+        { at: settledAt, tradingDate: "2026-09-04", label: "Put assigned: shares bought at the strike", bucket: "csp", instrument: "option", quantity: 100, strike: 40, expiryDate: "2026-09-04", stockPrice: 40, stockPriceSource: "execution", commissionDollars: null, premiumDollars: 0, stockDollars: -150, unrealized: false },
+      ];
+      const uncoveredStretches: BacktestUncoveredStretch[] = [
+        { firstIdleDay: "2026-09-08", lastIdleDay: "2026-09-09", idleSessions: 2, stockMove: -0.0125, noSaleDays: { extensionZ: 0, ivRank: 0, ladderPutInstead: 0, cash: 0, volume: 0, noCandidate: 2, unrecorded: 0 }, noCandidate: null, sharesUncovered: 100, sharesHeld: 100 },
+      ];
+      await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify(timeline), uncovered_stretches: JSON.stringify(uncoveredStretches) });
+      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline, uncoveredStretches } } });
+      // The summary rows the session carries leave the detail out.
+      expect(((await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail).cycles[0]).not.toHaveProperty("timeline");
+      expect((await request("GET", `/backtest/sessions/${session.id}/cycles/${fileSymbol}/2`)).status).toBe(404);
+      expect((await request("GET", `/backtest/sessions/${session.id}/cycles/${fileSymbol}/0`)).status).toBe(400);
+      expect((await request("GET", "/backtest/sessions/00000000-0000-4000-8000-000000000000/cycles/ABC/1")).status).toBe(404);
+
+      // The gaps between cycles come with the session, symbol by symbol and oldest first, narrowed with it.
+      const noSaleDays = { extensionZ: 1, ivRank: 0, ladderPutInstead: 0, cash: 0, volume: 0, noCandidate: 0, unrecorded: 1 };
+      const noCandidateDetail: BacktestNoCandidateDetail = { right: "P", days: 1, daysByCheck: { spreadTooWide: 1 }, firstDay: { date: "2026-09-11", lookTimeEt: "10:00", checks: [{ check: "spreadTooWide", rule: "spread wider than 15% of the mid", contracts: 12 }] } };
+      await testDb("backtest_cycle_gaps").insert([
+        { session_id: session.id, symbol: fileSymbol, after_cycle_number: 1, before_cycle_number: null, first_idle_day: "2026-09-10", last_idle_day: "2026-09-11", idle_sessions: 2, stock_move: 0.031, no_sale_days: JSON.stringify(noSaleDays), entry_filter_limits: JSON.stringify({ extensionZ: 1, ivRank: null }), no_candidate: JSON.stringify(noCandidateDetail) },
+        { session_id: session.id, symbol: fileSymbol, after_cycle_number: null, before_cycle_number: 1, first_idle_day: "2026-08-31", last_idle_day: "2026-08-31", idle_sessions: 1, stock_move: null, no_sale_days: JSON.stringify({ ...noSaleDays, extensionZ: 0 }), entry_filter_limits: JSON.stringify({ extensionZ: null, ivRank: null }) },
+      ]);
+      const withGaps = (await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail;
+      expect(withGaps.cycleGaps).toEqual([
+        { symbol: fileSymbol, afterCycleNumber: null, beforeCycleNumber: 1, firstIdleDay: "2026-08-31", lastIdleDay: "2026-08-31", idleSessions: 1, stockMove: null, noSaleDays: { ...noSaleDays, extensionZ: 0 }, noCandidate: null, entryFilterLimits: { extensionZ: null, ivRank: null } },
+        { symbol: fileSymbol, afterCycleNumber: 1, beforeCycleNumber: null, firstIdleDay: "2026-09-10", lastIdleDay: "2026-09-11", idleSessions: 2, stockMove: 0.031, noSaleDays, noCandidate: noCandidateDetail, entryFilterLimits: { extensionZ: 1, ivRank: null } },
+      ]);
+      expect(((await request("GET", `/backtest/sessions/${session.id}?symbol=zzzz`)).body as BacktestSessionDetail).cycleGaps).toEqual([]);
+
+      // The price chart: the symbol's daily bars within the session's period, with its ladder levels split-adjusted and,
+      // in a one-symbol session, the account in shares.
+      await testDb("backtest_ladder_levels").insert({ session_id: session.id, symbol: fileSymbol, trading_date: "2026-09-08", at: "2026-09-08T14:00:00.000Z", look_time: "10:00", split_factor: 2, ladder_top: 80, floor: 70, shock: 0.2, reserve_committed: 0, reserve: 4000, first_rung_cap: 76, next_put_cap: 76, blocked_because: null });
+      const chart = (await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=${fileSymbol.toLowerCase()}`)).body as BacktestSessionPriceChart;
+      expect(chart).toMatchObject({ symbol: fileSymbol, bars: [["2026-09-11", 20, 21, 19, 20.5, null]], ladderLevels: [["2026-09-08", 38, 35, null]], ladderRungsSold: [], tooLargeDays: [] });
+      expect(chart.maxDrawdown.All).toBeNull();
+      expect(chart.accountInShares).toHaveLength(3);
+      expect((await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=zzzz`)).status).toBe(400);
+      expect((await request("GET", `/backtest/sessions/${session.id}/price-chart`)).status).toBe(400);
+      expect((await request("GET", `/backtest/sessions/00000000-0000-4000-8000-000000000000/price-chart?symbol=${fileSymbol}`)).status).toBe(404);
     });
 
     it("compare sessions with one buy-and-hold curve per symbol, period and starting value", async () => {
@@ -1222,7 +1269,7 @@ describe("backtest routes", () => {
       expect(await testDb("backtest_sessions").where({ id: session.id }).first()).toBeUndefined();
       expect(await testDb("backtest_jobs").where({ id: sessionJob.id }).first()).toBeUndefined();
       expect(await testDb("backtest_session_days").where({ session_id: session.id }).first()).toBeUndefined();
-      for (const table of ["backtest_positions", "backtest_position_legs", "backtest_fills", "backtest_actions", "backtest_cycles"]) expect(await testDb(table).where({ session_id: session.id }).first()).toBeUndefined();
+      for (const table of ["backtest_positions", "backtest_position_legs", "backtest_fills", "backtest_actions", "backtest_cycles", "backtest_cycle_gaps"]) expect(await testDb(table).where({ session_id: session.id }).first()).toBeUndefined();
       expect((await request("GET", `/backtest/sessions/${session.id}`)).status).toBe(404);
       expect((await request("DELETE", `/backtest/sessions/${session.id}`)).status).toBe(404);
     });

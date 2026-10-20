@@ -10,11 +10,14 @@ import type {
   BacktestBatchSummary,
   BacktestCompareResponse,
   BacktestCycle,
+  BacktestCycleDetail,
+  BacktestCycleGap,
   BacktestFill,
   BacktestFillsPage,
   BacktestJobStatus,
   BacktestJobView,
   BacktestMetrics,
+  BacktestNoSaleDays,
   BacktestPnlBasis,
   BacktestPosition,
   BacktestPositionLeg,
@@ -526,11 +529,14 @@ async function loadSessionBookCounts(sessionId: string): Promise<BacktestSession
   return { filledActions, blockedActions, fills };
 }
 
+// A cycle's timeline and uncovered stretches are read only when its row is opened (loadBacktestCycleDetail).
+const cycleSummaryColumns = ["symbol", "cycle_number", "status", "opened_at", "closed_at", "recovery_sessions", "age_sessions", "total_dollars", "net_premium_dollars", "shares_held", "break_even_per_share", "buckets", "data_flags"];
+
 async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
   const rows: Record<string, unknown>[] = await db("backtest_cycles")
     .where({ session_id: sessionId })
     .orderBy([{ column: "symbol" }, { column: "cycle_number" }])
-    .select("*", db.raw("opened_on::text as opened_on"), db.raw("closed_on::text as closed_on"), db.raw("assigned_on::text as assigned_on"));
+    .select(...cycleSummaryColumns, db.raw("opened_on::text as opened_on"), db.raw("closed_on::text as closed_on"), db.raw("assigned_on::text as assigned_on"));
   return rows.map((row) => ({
     symbol: row.symbol as string,
     cycleNumber: Number(row.cycle_number),
@@ -549,6 +555,38 @@ async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
     buckets: row.buckets as BacktestCycle["buckets"],
     dataFlags: row.data_flags as string[],
   }));
+}
+
+/** Each symbol's stretches with no cycle open, symbol by symbol, oldest first. */
+async function loadSessionCycleGaps(sessionId: string): Promise<BacktestCycleGap[]> {
+  const rows: Record<string, unknown>[] = await db("backtest_cycle_gaps")
+    .where({ session_id: sessionId })
+    .orderBy([{ column: "symbol" }, { column: "backtest_cycle_gaps.first_idle_day" }])
+    .select("symbol", "after_cycle_number", "before_cycle_number", "idle_sessions", "stock_move", "no_sale_days", "entry_filter_limits", "no_candidate", db.raw("first_idle_day::text as first_idle_day"), db.raw("last_idle_day::text as last_idle_day"));
+  return rows.map((row) => ({
+    symbol: row.symbol as string,
+    afterCycleNumber: nullableNumber(row.after_cycle_number as number | null),
+    beforeCycleNumber: nullableNumber(row.before_cycle_number as number | null),
+    firstIdleDay: row.first_idle_day as string,
+    lastIdleDay: row.last_idle_day as string,
+    idleSessions: Number(row.idle_sessions),
+    stockMove: nullableNumber(row.stock_move as string | null),
+    noSaleDays: row.no_sale_days as BacktestNoSaleDays,
+    entryFilterLimits: row.entry_filter_limits as BacktestCycleGap["entryFilterLimits"],
+    noCandidate: (row.no_candidate as BacktestCycleGap["noCandidate"] | null) ?? null,
+  }));
+}
+
+/** A cycle's timeline and uncovered stretches; null for a session run before cycles kept them. Throws 404 for a cycle the session does not have. */
+export async function loadBacktestCycleDetail(sessionId: string, symbol: string, cycleNumber: number): Promise<BacktestCycleDetail | null> {
+  await requireSessionExists(sessionId);
+  const row: { timeline: BacktestCycleDetail["timeline"] | null; uncovered_stretches: BacktestCycleDetail["uncoveredStretches"] | null } | undefined = await db("backtest_cycles")
+    .where({ session_id: sessionId, symbol, cycle_number: cycleNumber })
+    .first("timeline", "uncovered_stretches");
+  if (!row) throw new BacktestRequestError(`The session has no cycle ${symbol} #${cycleNumber}.`, 404);
+  if (row.timeline === null) return null;
+  // Stretches stored before their no-candidate detail was kept have none.
+  return { timeline: row.timeline, uncoveredStretches: (row.uncovered_stretches ?? []).map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null })) };
 }
 
 /** Per ticker in its turn order (alphabetical), the looks and days at which the cash cut one of its orders (backtest_look_shortfalls). */
@@ -570,12 +608,13 @@ async function loadCashBoundBySymbol(sessionId: string, symbols: readonly string
 export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: string | null = null): Promise<BacktestSessionDetail> {
   const row = await loadSessionRow(sessionId);
   const ofSymbol = <Row extends { symbol: string }>(rows: Row[]): Row[] => (onlySymbol === null ? rows : rows.filter((entry) => entry.symbol === onlySymbol));
-  const [dayRows, tradeRows, job, everyPositionRecord, everyCycle, bookCounts, cashBoundBySymbol] = await Promise.all([
+  const [dayRows, tradeRows, job, everyPositionRecord, everyCycle, everyCycleGap, bookCounts, cashBoundBySymbol] = await Promise.all([
     loadSessionDayRows([sessionId]),
     loadSessionTradeRows(sessionId),
     loadLatestJobViewForSession(sessionId),
     loadSessionPositions(sessionId),
     loadSessionCycles(sessionId),
+    loadSessionCycleGaps(sessionId),
     loadSessionBookCounts(sessionId),
     row.book_mode === "pots" ? loadCashBoundBySymbol(sessionId, symbolsOf(row)) : null,
   ]);
@@ -614,6 +653,7 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
     accuracyByMarginBand: row.pnl_basis === "wheel_cycle" ? computeCycleAccuracyBands(cycleFiguresOf(cycles, trades)) : computeTradeAccuracyBands(trades.map(toClosedTradeFigures)),
     positions,
     cycles,
+    cycleGaps: ofSymbol(everyCycleGap),
     tickerStatistics: computeTickerStatistics(positions, cycles),
     allSymbolsStatistics: computeAllSymbolsStatistics(positions, cycles),
     bookCounts,

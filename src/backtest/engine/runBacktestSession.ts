@@ -6,15 +6,16 @@ import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { isEtfSector, tickerCalendarProfile } from "../../lib/tickerCalendarRelevance.js";
 import { dailyLossPercent } from "../../pluto/systemChecks.js";
 import { effectiveWindowEndEt } from "../../pluto/sessionSchedule.js";
-import type { BacktestAction, BacktestBookMode, BacktestCycle, BacktestFill, BacktestOrderShortfall, BacktestPosition, BacktestRunStatistics, BacktestSettings, BacktestSettingsOverrides, BacktestSymbolSettings, BacktestTablesMode } from "../backtestTypes.js";
+import type { BacktestAction, BacktestBookMode, BacktestCycle, BacktestCycleGap, BacktestFill, BacktestLadderLevel, BacktestOrderShortfall, BacktestPosition, BacktestRunStatistics, BacktestSettings, BacktestSettingsOverrides, BacktestSymbolSettings, BacktestTablesMode } from "../backtestTypes.js";
 import { normalizeBacktestSymbol, requireBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { calendarDaysBetween, computeBacktestMetrics, computeDailyReturns, cycleFiguresOf, type AccountDay } from "../sessionAnalytics.js";
 import type { FileIntradayPrices } from "../backtestFileStockBars.js";
 import { BacktestBarHistory, loadBacktestBarHistory } from "./backtestBarHistory.js";
 import { computeInterestDollars } from "./backtestBook.js";
-import { runBacktestLook, type BacktestLookSymbol, type BacktestOptionSale, type BacktestPreparedSymbolDay, type BacktestTickerSetup } from "./backtestLook.js";
-import { buildCycleRecords, buildFillRecords, buildOptionTrades, buildPositionRecords, withPositionCycle, type SimulatedTrade } from "./backtestSessionRecords.js";
+import { runBacktestLook, type BacktestLookSymbol, type BacktestNoCandidateNote, type BacktestNoSaleNote, type BacktestOptionSale, type BacktestPreparedSymbolDay, type BacktestTickerSetup } from "./backtestLook.js";
+import { buildCycleGapRecords, buildCycleRecords, buildFillRecords, buildOptionTrades, buildPositionRecords, withPositionCycle, type BacktestCycleRecord, type SimulatedTrade } from "./backtestSessionRecords.js";
+import type { NoSaleRecords } from "./backtestIdleStretches.js";
 import { captureLookTimeEt, decisionInstantMs, lookInstantMs, selectLookDayQuotes, type BacktestTickerProfile } from "./backtestTickerInputs.js";
 import type { LiveOptionQuote } from "../../lib/signalsLiveScoring.js";
 import { firstTwoSidedMids, markKey, markMidByContract, roundedStrike } from "./backtestOptionMarks.js";
@@ -30,7 +31,7 @@ import { backtestClaudeModel, backtestClaudeReasoningEffort } from "../llm/claud
 import { BacktestLlmSession, type BacktestLlmRound } from "./backtestLlmDecider.js";
 
 import { alignOpenOptionLegsToSplitFactor, creditInterest, settleExpiry } from "./ledger/ledgerEvents.js";
-import { ledgerCommittedDollars, ledgerLastFilledActionAt, ledgerLegsDueForSettlement, ledgerNetLiquidationValue } from "./ledger/ledgerSelectors.js";
+import { ledgerCommittedDollars, ledgerLastFilledActionAt, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
 import { createSimulatedLedger, cycleSplitFactorFor, rememberedForRevision, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
 import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestTradingCalendar.js";
@@ -129,6 +130,8 @@ export interface SimulatedDay {
   accountValue: number;
   cash: number;
   exposureDollars: number;
+  /** The shares held at the same marks as the account value (recorded only). */
+  sharesValueDollars: number;
   interestDollars: number;
   baselineValue: number;
   baselineExposureDollars: number;
@@ -297,9 +300,14 @@ export interface SimulatedSessionResult {
   positions: BacktestPosition[];
   fills: BacktestFill[];
   actions: BacktestAction[];
-  cycles: BacktestCycle[];
+  /** Each with its timeline and uncovered stretches. */
+  cycles: BacktestCycleRecord[];
+  /** Each symbol's stretches with no cycle open. */
+  cycleGaps: BacktestCycleGap[];
   /** The baseline's orders that left contracts unsold. */
   shortfalls: BacktestOrderShortfall[];
+  /** The put ladder's levels, per symbol and day: the day's first look while the cycle held shares. */
+  ladderLevels: BacktestLadderLevel[];
   /** What the run tells about the session as a whole. */
   notes: string[];
   runStatistics: BacktestRunStatistics;
@@ -506,6 +514,18 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     const priceByLegId = new Map<string, number>();
     const actions: BacktestAction[] = [];
     const shortfalls: BacktestOrderShortfall[] = [];
+    const noSaleNotes: BacktestNoSaleNote[] = [];
+    // The first look of a day, symbol and order that found no candidate: what the Wheel cycles explain the day with.
+    const noCandidateNotes: BacktestNoCandidateNote[] = [];
+    const noCandidateKeys = new Set<string>();
+    const keepNoCandidateNotes = (found: readonly BacktestNoCandidateNote[]) => {
+      for (const note of found) {
+        const key = `${note.tradingDate}|${note.symbol}|${note.order}`;
+        if (noCandidateKeys.has(key)) continue;
+        noCandidateKeys.add(key);
+        noCandidateNotes.push(note);
+      }
+    };
     // Looks that found nothing within the rules are kept one row per day, symbol and order, with their count (approved by
     // Marcelo 2026-10-15: per-look rows were ~16,000 a five-year session, 99% of them these).
     const noCandidateRowByKey = new Map<string, BacktestOrderShortfall>();
@@ -523,6 +543,16 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           noCandidateRowByKey.set(key, row);
           shortfalls.push(row);
         }
+      }
+    };
+    const ladderLevels: BacktestLadderLevel[] = [];
+    const ladderLevelKeys = new Set<string>();
+    const keepLadderLevels = (found: readonly BacktestLadderLevel[]) => {
+      for (const level of found) {
+        const key = `${level.tradingDate}|${level.symbol}`;
+        if (ladderLevelKeys.has(key)) continue;
+        ladderLevelKeys.add(key);
+        ladderLevels.push(level);
       }
     };
     const optionSales: BacktestOptionSale[] = [];
@@ -796,6 +826,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         });
       }
       const accountValueForDecisions = ledgerNetLiquidationValue(ledger, priceByLegId);
+      const sharesValueDollars = ledgerSharesValue(ledger, priceByLegId);
       // A baseline session may leave open options out of the day's value (dayValueOptions "excluded"): cash, premiums
       // included, and shares at the 10:00 price; the options held at the end are valued apart from the account.
       const optionsLeftOut = settings.decisionMaker === "baseline" && settings.baseline.dayValueOptions === "excluded";
@@ -899,6 +930,9 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           actions.push(...look.actions);
           optionSales.push(...look.optionSales);
           if (look.shortfalls) keepShortfalls(look.shortfalls);
+          if (look.ladderLevels) keepLadderLevels(look.ladderLevels);
+          if (look.noSaleNotes) for (const note of look.noSaleNotes) noSaleNotes.push(note);
+          if (look.noCandidateNotes) keepNoCandidateNotes(look.noCandidateNotes);
           const filledAtLook = look.actions.filter((action) => action.outcome === "filled").length;
           filledActionsToday += filledAtLook;
           looksOfDay.push({ lookTimeEt, summary: look.summaryOfActions, filledCount: filledAtLook, refusedCount: look.actions.length - filledAtLook, opensStopped: look.opensStopped });
@@ -982,7 +1016,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       runStatistics.looksRun += looksOfDay.length;
       const summaryParts = looksOfDay.length > 0 ? summarizeDayLooks(looksOfDay) : checkNotes.length > 0 ? [] : [`No action: ${daySymbols.length > 0 ? `no look inside the trading window ${pluto.windowStartEt}–${pluto.windowEndEt} ET has quotes` : nothingScoredReason}`];
       // The day is recorded as marked at 10:00, before its looks: an action's cash and exposure show from the next day.
-      days.push({ tradingDate: todayIso, accountValue, cash: cashAtMark, exposureDollars, interestDollars, baselineValue, baselineExposureDollars: baselineSharesValue, baselineInterestDollars, spyBaselineValue: spyBaselineDay?.value ?? null, spyBaselineExposureDollars: spyBaselineDay?.exposureDollars ?? null, spyBaselineInterestDollars: spyBaselineDay?.interestDollars ?? null, decisionSummary: [...summaryParts, ...checkNotes, ...notes].join(" · "), looksRun: looksOfDay.length, actionsTaken: filledActionsToday });
+      days.push({ tradingDate: todayIso, accountValue, cash: cashAtMark, exposureDollars, sharesValueDollars, interestDollars, baselineValue, baselineExposureDollars: baselineSharesValue, baselineInterestDollars, spyBaselineValue: spyBaselineDay?.value ?? null, spyBaselineExposureDollars: spyBaselineDay?.exposureDollars ?? null, spyBaselineInterestDollars: spyBaselineDay?.interestDollars ?? null, decisionSummary: [...summaryParts, ...checkNotes, ...notes].join(" · "), looksRun: looksOfDay.length, actionsTaken: filledActionsToday });
 
       // e. The account at the close: what tomorrow's daily-loss breaker measures against.
       // The later marks of the day replace the ones the 10:00 decisions kept, unless a later look marked the option since.
@@ -1046,7 +1080,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       sessionNotes.push(`Decisions by Claude (${backtestClaudeModel}, ${backtestClaudeReasoningEffort} effort) through the subscription, as live Pluto asks its model: ${formatCount(runStatistics.llmCalls.asked)} decision(s) asked, ${formatCount(runStatistics.llmCalls.fromCache)} answered from the cache. The model saw ${aliases}, every date ${llmSession.options.masking.dateShiftWeeks} weeks later. The decision rules (roll, buyback, shares in profit, closes before macro events, after a refused choice) do not apply.`);
     }
     if (skippedUnavailableDays.length > 0) sessionNotes.push(`${formatCount(skippedUnavailableDays.length)} day(s) inside the period could not be downloaded for any symbol and were skipped: ${skippedUnavailableDays.join(", ")}.`);
-    const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar });
+    const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls, notes: noSaleNotes, noCandidates: noCandidateNotes } });
     // The book holds every share it sells (the ledger refuses anything else); the platform's cycle derivation reading it
     // must agree. A cycle whose shares do not reconcile is named in the notes, its figures not to be trusted.
     const unreconciledCycles = bookRecords.cycles.filter((cycle) => cycle.dataFlags.some(isShareReconciliationFlag));
@@ -1057,6 +1091,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       ...bookRecords,
       actions,
       shortfalls,
+      ladderLevels,
       notes: sessionNotes,
       runStatistics,
     };
@@ -1073,8 +1108,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
 /** A cycle flag saying its shares do not add up (src/lib/cycles.ts trust checks). */
 export const isShareReconciliationFlag = (flag: string): boolean => / sh sold\/called away that the ledger never acquired$|^cycle closed with \d+ sh unaccounted|^ledger says \d+ sh held but/.test(flag);
 
-/** The positions, fills and cycles of the finished ledger, marked at the session's last look. */
-function buildBookRecords(input: { ledger: SimulatedLedger; symbols: readonly SessionSymbol[]; optionSales: readonly BacktestOptionSale[]; actions: readonly BacktestAction[]; priceByLegId: ReadonlyMap<string, number>; lastSessionDateIso: string; calendar: BacktestTradingCalendar }): Pick<SimulatedSessionResult, "positions" | "fills" | "cycles"> {
+/** The positions, fills, cycles and gaps of the finished ledger, marked at the session's last look. */
+function buildBookRecords(input: { ledger: SimulatedLedger; symbols: readonly SessionSymbol[]; optionSales: readonly BacktestOptionSale[]; actions: readonly BacktestAction[]; priceByLegId: ReadonlyMap<string, number>; lastSessionDateIso: string; calendar: BacktestTradingCalendar; noSaleRecords: NoSaleRecords }): Pick<SimulatedSessionResult, "positions" | "fills" | "cycles" | "cycleGaps"> {
   const scheduleBySymbol = new Map(input.symbols.map((entry) => [entry.symbol, entry.schedule]));
   // Cycles are valued like the account: the shares still held at the symbol's last mark, not a later close.
   const closesThroughLastLook = (entry: SessionSymbol) => [...entry.adjustedDailyCloses.filter((bar) => bar.date < input.lastSessionDateIso), ...(entry.lastAdjustedStockPrice === null ? [] : [{ date: input.lastSessionDateIso, close: entry.lastAdjustedStockPrice }])];
@@ -1088,9 +1123,12 @@ function buildBookRecords(input: { ledger: SimulatedLedger; symbols: readonly Se
     splitFactorOn: (symbol: string, dateIso: string) => splitFactorOn(scheduleBySymbol.get(symbol)!, dateIso),
     calendar: input.calendar,
     lastSessionDateIso: input.lastSessionDateIso,
+    sessionDaysBySymbol: new Map(input.symbols.flatMap((entry) => (entry.ownSessionDays.length === 0 ? [] : [[entry.symbol, { firstDay: entry.ownSessionDays[0]!, lastDay: entry.ownSessionDays.at(-1)! }] as const]))),
+    allAdjustedDailyClosesBySymbol: new Map(input.symbols.map((entry) => [entry.symbol, entry.adjustedDailyCloses])),
+    noSaleRecords: input.noSaleRecords,
   };
   const cycles = buildCycleRecords(recordInputs);
-  return { positions: buildPositionRecords(recordInputs).map((position) => withPositionCycle(position, cycles)), fills: buildFillRecords(recordInputs), cycles };
+  return { positions: buildPositionRecords(recordInputs).map((position) => withPositionCycle(position, cycles)), fills: buildFillRecords(recordInputs), cycles, cycleGaps: buildCycleGapRecords(recordInputs, cycles) };
 }
 
 /**
@@ -1111,7 +1149,7 @@ export function computeSessionMetrics(startingValue: number, days: readonly Simu
 }
 
 // A session run again asks its model calls again, from the cache: its call log starts over with it.
-const sessionResultTables = ["backtest_session_days", "backtest_trades", "backtest_positions", "backtest_position_legs", "backtest_fills", "backtest_actions", "backtest_cycles", "backtest_session_llm_calls", "backtest_look_shortfalls"] as const;
+const sessionResultTables = ["backtest_session_days", "backtest_trades", "backtest_positions", "backtest_position_legs", "backtest_fills", "backtest_actions", "backtest_cycles", "backtest_cycle_gaps", "backtest_session_llm_calls", "backtest_look_shortfalls", "backtest_ladder_levels"] as const;
 
 async function clearSessionResult(sessionId: string, connection: Knex): Promise<void> {
   for (const table of sessionResultTables) await connection(table).where({ session_id: sessionId }).delete();
@@ -1129,6 +1167,7 @@ async function persistSessionResult(sessionId: string, startingValue: number, re
     account_value: day.accountValue,
     cash: day.cash,
     exposure_dollars: day.exposureDollars,
+    shares_value_dollars: day.sharesValueDollars,
     interest_dollars: day.interestDollars,
     daily_return: dailyReturns[index],
     baseline_value: day.baselineValue,
@@ -1283,6 +1322,21 @@ async function persistSessionResult(sessionId: string, startingValue: number, re
     break_even_per_share: cycle.breakEvenPerShare,
     buckets: JSON.stringify(cycle.buckets),
     data_flags: JSON.stringify(cycle.dataFlags),
+    timeline: JSON.stringify(cycle.timeline),
+    uncovered_stretches: JSON.stringify(cycle.uncoveredStretches),
+  }));
+  const cycleGapRows = result.cycleGaps.map((gap) => ({
+    session_id: sessionId,
+    symbol: gap.symbol,
+    after_cycle_number: gap.afterCycleNumber,
+    before_cycle_number: gap.beforeCycleNumber,
+    first_idle_day: gap.firstIdleDay,
+    last_idle_day: gap.lastIdleDay,
+    idle_sessions: gap.idleSessions,
+    stock_move: gap.stockMove,
+    no_sale_days: JSON.stringify(gap.noSaleDays),
+    entry_filter_limits: JSON.stringify(gap.entryFilterLimits),
+    no_candidate: gap.noCandidate === null ? null : JSON.stringify(gap.noCandidate),
   }));
   const shortfallRows = result.shortfalls.map((shortfall) => ({
     session_id: sessionId,
@@ -1299,6 +1353,22 @@ async function persistSessionResult(sessionId: string, startingValue: number, re
     look_count: shortfall.lookCount,
     best_candidate: shortfall.bestCandidate === null ? null : JSON.stringify(shortfall.bestCandidate),
   }));
+  const ladderLevelRows = result.ladderLevels.map(({ tradingDate, at, lookTimeEt, symbol, splitFactor, levels }) => ({
+    session_id: sessionId,
+    trading_date: tradingDate,
+    at,
+    look_time: lookTimeEt,
+    symbol,
+    split_factor: splitFactor,
+    ladder_top: levels.top,
+    floor: levels.floor,
+    shock: levels.shock,
+    reserve_committed: levels.committed,
+    reserve: levels.reserve,
+    first_rung_cap: levels.firstRungCap,
+    next_put_cap: levels.nextPutCap,
+    blocked_because: levels.blockedBecause,
+  }));
   const rowsByTable: [string, Record<string, unknown>[]][] = [
     ["backtest_session_days", dayRows],
     ["backtest_trades", tradeRows],
@@ -1307,7 +1377,9 @@ async function persistSessionResult(sessionId: string, startingValue: number, re
     ["backtest_fills", fillRows],
     ["backtest_actions", actionRows],
     ["backtest_cycles", cycleRows],
+    ["backtest_cycle_gaps", cycleGapRows],
     ["backtest_look_shortfalls", shortfallRows],
+    ["backtest_ladder_levels", ladderLevelRows],
   ];
   await connection.transaction(async (transaction) => {
     for (const [table, rows] of rowsByTable) for (let index = 0; index < rows.length; index += insertBatchSize) await transaction(table).insert(rows.slice(index, index + insertBatchSize));

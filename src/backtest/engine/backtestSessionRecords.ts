@@ -3,14 +3,16 @@ import { easternIsoDate } from "../../lib/easternIsoDate.js";
 import { daysToExpiry } from "../../lib/optionContractLabel.js";
 import { legRealizedPnl } from "../../lib/positionSelectors.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
-import type { BacktestAction, BacktestCycle, BacktestFill, BacktestPosition, BacktestPositionLeg, BacktestTrade } from "../backtestTypes.js";
+import type { BacktestAction, BacktestCycle, BacktestCycleDetail, BacktestCycleGap, BacktestCycleTimelineRow, BacktestFill, BacktestPosition, BacktestPositionLeg, BacktestTrade } from "../backtestTypes.js";
+import { buildCycleGaps, buildUncoveredStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
 import type { BacktestOptionSale } from "./backtestLook.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import { ledgerCapitalAtRisk, ledgerCapitalDeployed, ledgerCycles, ledgerRealizedPnl, ledgerUnrealizedPnl } from "./ledger/ledgerSelectors.js";
 import { legsOfPosition, positionsOfSymbol, requireLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 
 // What a finished session stores, built from its simulated ledger: the positions with their legs, the fills, the wheel
-// cycles (the platform's own derivation, deriveCycles) and one row per option sold.
+// cycles (the platform's own derivation, deriveCycles) with their timelines and uncovered stretches, the gaps between
+// cycles (backtestIdleStretches.ts) and one row per option sold.
 //
 //   an option sold     = its facts as traded, how it ended, its position's P&L as the platform counts a position's
 //                        (realized premium and stock parts after commissions, plus what an open position still holds at
@@ -36,7 +38,16 @@ export interface SessionRecordInputs {
   splitFactorOn(symbol: string, dateIso: string): number | null;
   calendar: BacktestTradingCalendar;
   lastSessionDateIso: string;
+  /** Per symbol: its first and last session days (the days its file holds), for its gaps and uncovered stretches. */
+  sessionDaysBySymbol: ReadonlyMap<string, { firstDay: string; lastDay: string }>;
+  /** Per symbol: every IBKR split-adjusted daily close in its file, ascending (the stock moves). */
+  allAdjustedDailyClosesBySymbol: ReadonlyMap<string, readonly { date: string; close: number }[]>;
+  /** What the looks recorded about sales not made. */
+  noSaleRecords: NoSaleRecords;
 }
+
+/** A cycle with its detail, as a finished session stores it. */
+export type BacktestCycleRecord = BacktestCycle & BacktestCycleDetail;
 
 function closingCommissionByLegId(ledger: SimulatedLedger): Map<string, number> {
   const commissionByLegId = new Map<string, number>();
@@ -63,12 +74,40 @@ export function deriveCyclesOnTheirOwnScales(inputs: Pick<SessionRecordInputs, "
   });
 }
 
-export function buildCycleRecords(inputs: SessionRecordInputs): BacktestCycle[] {
-  const records: BacktestCycle[] = [];
+/** The cycle's timeline rows with prices and shares as traded on each row's day (a stored price ÷ the cycle's factor × the day's). */
+function timelineAsTraded(cycle: Cycle, cycleSplitFactor: number, splitFactorOnDay: (dateIso: string) => number | null, lastSessionDateIso: string): BacktestCycleTimelineRow[] {
+  return cycle.timeline.map((row) => {
+    const tradingDate = row.at === null ? (row.markDate ?? lastSessionDateIso) : easternIsoDate(row.at);
+    const priceScale = cycleSplitFactor / (splitFactorOnDay(tradingDate) ?? cycleSplitFactor);
+    return {
+      at: row.at?.toISOString() ?? null,
+      tradingDate,
+      label: row.label,
+      bucket: row.bucket,
+      instrument: row.instrument,
+      quantity: row.quantity * priceScale,
+      strike: row.strike === null ? null : row.strike / priceScale,
+      expiryDate: row.expiryDate,
+      stockPrice: row.stockPrice === null ? null : row.stockPrice / priceScale,
+      stockPriceSource: row.stockPriceSource,
+      commissionDollars: row.commission,
+      premiumDollars: row.premium,
+      stockDollars: row.stock,
+      unrealized: row.unrealized === true,
+    };
+  });
+}
+
+export function buildCycleRecords(inputs: SessionRecordInputs): BacktestCycleRecord[] {
+  const records: BacktestCycleRecord[] = [];
   for (const symbol of inputs.symbols) {
     const symbolPositionIds = new Set(positionsOfSymbol(inputs.ledger, symbol).map((position) => position.id));
-    const assignedPutLegs = inputs.ledger.legs.filter((leg) => symbolPositionIds.has(leg.positionId) && leg.optionType === "put" && leg.settledAs === "assigned" && leg.exitAt !== null);
-    deriveCyclesOnTheirOwnScales(inputs, symbol).forEach(({ cycle }, index) => {
+    const symbolLegs = inputs.ledger.legs.filter((leg) => symbolPositionIds.has(leg.positionId));
+    const assignedPutLegs = symbolLegs.filter((leg) => leg.optionType === "put" && leg.settledAs === "assigned" && leg.exitAt !== null);
+    const closes = closeLookupOf(inputs.allAdjustedDailyClosesBySymbol.get(symbol) ?? []);
+    const splitFactorOnDay = (dateIso: string) => inputs.splitFactorOn(symbol, dateIso);
+    const lastDay = inputs.sessionDaysBySymbol.get(symbol)?.lastDay ?? inputs.lastSessionDateIso;
+    deriveCyclesOnTheirOwnScales(inputs, symbol).forEach(({ cycle, splitFactor }, index) => {
       const openedOn = easternIsoDate(cycle.startAt);
       const closedOn = cycle.endAt === null ? null : easternIsoDate(cycle.endAt);
       const assignmentInstants = assignedPutLegs.map((leg) => leg.exitAt!.getTime()).filter((at) => at >= cycle.startAt.getTime() && (cycle.endAt === null || at <= cycle.endAt.getTime()));
@@ -91,10 +130,38 @@ export function buildCycleRecords(inputs: SessionRecordInputs): BacktestCycle[] 
         breakEvenPerShare: cycle.breakEvenPerShare,
         buckets: cycle.buckets,
         dataFlags: cycle.dataFlags,
+        timeline: timelineAsTraded(cycle, splitFactor, splitFactorOnDay, inputs.lastSessionDateIso),
+        uncoveredStretches: buildUncoveredStretches({
+          symbol,
+          cycle: { openedOn, closedOn },
+          lastDay,
+          legs: symbolLegs,
+          calendar: inputs.calendar,
+          closes,
+          records: inputs.noSaleRecords,
+          sharesAsTradedOn: (dateIso) => splitFactor / (splitFactorOnDay(dateIso) ?? splitFactor),
+        }),
       });
     });
   }
   return records;
+}
+
+/** Each symbol's stretches with no cycle open, symbol by symbol, oldest first. */
+export function buildCycleGapRecords(inputs: Pick<SessionRecordInputs, "symbols" | "calendar" | "sessionDaysBySymbol" | "allAdjustedDailyClosesBySymbol" | "noSaleRecords">, cycles: readonly BacktestCycle[]): BacktestCycleGap[] {
+  return inputs.symbols.flatMap((symbol) => {
+    const days = inputs.sessionDaysBySymbol.get(symbol);
+    if (!days) return [];
+    return buildCycleGaps({
+      symbol,
+      cycles: cycles.filter((cycle) => cycle.symbol === symbol).sort((a, b) => a.cycleNumber - b.cycleNumber),
+      firstDay: days.firstDay,
+      lastDay: days.lastDay,
+      calendar: inputs.calendar,
+      closes: closeLookupOf(inputs.allAdjustedDailyClosesBySymbol.get(symbol) ?? []),
+      records: inputs.noSaleRecords,
+    });
+  });
 }
 
 /**

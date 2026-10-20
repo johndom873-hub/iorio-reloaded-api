@@ -499,6 +499,11 @@ describe("runBaselineLook with a Cash-Secured Put entry and the ladder", () => {
     const waiting = await look(createSimulatedLedger(100_000, easternInstant("2026-02-27", 9, 30)), { minCallYieldPct: 1000, minCallYieldAppliesTo: "new_covered_calls" });
     expect(waiting.actions).toEqual([]);
     expect(waiting.summary).toMatch(/no put \(.*yield/);
+    // Recorded for the Wheel cycles: what each check left out, with its rule as the look applied it.
+    expect(waiting.noCandidateNotes).toEqual([expect.objectContaining({ tradingDate: todayIso, symbol: "WHL", order: "entry", right: "P", rejections: expect.objectContaining({ belowMinimumYield: expect.any(Number) }) })]);
+    const [note] = waiting.noCandidateNotes!;
+    expect(note!.rejections.belowMinimumYield).toBeGreaterThan(0);
+    expect(note!.rules?.belowMinimumYield).toBe("premium yield not above 1000% a year");
     // With shares held and every Call held to 1,000% (none qualifies), the ladder still sells its rung at any yield.
     const ladder = await look(assignedLedger(), { minCallYieldPct: 1000, minCallYieldAppliesTo: "every_call" });
     expect(ladder.actions.length).toBeGreaterThan(0);
@@ -512,8 +517,11 @@ describe("runBaselineLook with a Cash-Secured Put entry and the ladder", () => {
     const blocked = await look(flatLedger(), { entryExtensionFilter: "on", entryMaxExtensionZ: 0.5 }, stretched);
     expect(blocked.actions).toEqual([]);
     expect(blocked.summary).toContain("WHL: no new entry (extension z 0.55 ≥ 0.5)");
+    // Recorded for the Wheel cycles' gaps, with the limit that blocked it.
+    expect(blocked.noSaleNotes).toEqual([{ tradingDate: todayIso, symbol: "WHL", reason: "entry_filter", entryFilterLimits: { extensionZ: 0.5, ivRank: null } }]);
     const allowed = await look(flatLedger(), { entryExtensionFilter: "on", entryMaxExtensionZ: 0.6 }, stretched);
     expect(allowed.actions.length).toBeGreaterThan(0);
+    expect(allowed.noSaleNotes).toEqual([]);
     // Off, the limit is not read.
     expect((await look(flatLedger(), { entryExtensionFilter: "off", entryMaxExtensionZ: 0.5 }, stretched)).actions.length).toBe(allowed.actions.length);
     // Shares held while blocked: the Calls on them are sold, and with no Call above a 1,000% yield the ladder sells its rung.
@@ -533,7 +541,17 @@ describe("runBaselineLook with a Cash-Secured Put entry and the ladder", () => {
     const blocked = await look(flatLedger(), { entryIvRankFilter: "on", entryMaxIvRank: 80 }, highIv);
     expect(blocked.actions).toEqual([]);
     expect(blocked.summary).toContain("WHL: no new entry (IV Rank 80 ≥ 80)");
+    expect(blocked.noSaleNotes).toEqual([{ tradingDate: todayIso, symbol: "WHL", reason: "entry_filter", entryFilterLimits: { extensionZ: null, ivRank: 80 } }]);
     expect((await look(flatLedger(), { entryIvRankFilter: "on", entryMaxIvRank: 81 }, highIv)).actions.length).toBeGreaterThan(0);
+  });
+
+  it("records why the free shares got no call when a ladder Put is sold instead of them", async () => {
+    // No Call qualifies (all held to a 1,000% yield): the ladder's Put is sold, the shares wait for want of a Call.
+    const noCall = await look(assignedLedger(), { ladderPutVersusCall: "higher_yield", minCallYieldPct: 1000 });
+    expect(noCall.actions.every((action) => action.kind === "open_cash_secured_put")).toBe(true);
+    expect(noCall.noSaleNotes).toEqual([{ tradingDate: todayIso, symbol: "WHL", reason: "no_call_candidate", entryFilterLimits: null }]);
+    // Calls qualify and sell first by default: nothing to record.
+    expect((await look(assignedLedger())).noSaleNotes).toEqual([]);
   });
 
   it("once assigned: no entry Put with the budget used, Calls on the shares, and the ladder's Puts on the reserve when no Call qualifies", async () => {
@@ -550,6 +568,14 @@ describe("runBaselineLook with a Cash-Secured Put entry and the ladder", () => {
     expect(scores.ladderReserve as number).toBeGreaterThan(50_000);
     expect(scores.ladderRungCollateral as number).toBeCloseTo((scores.ladderReserve as number) / 5, 6);
     expect(withoutCalls.actions[0]!.contract!.strike).toBeLessThanOrEqual(scores.ladderCap as number);
+    // The look records the ladder's levels before its orders: the cap the rung sold under, nothing committed yet.
+    expect(withoutCalls.ladderLevels).toEqual([
+      expect.objectContaining({ symbol: "WHL", tradingDate: todayIso, splitFactor: 1, levels: expect.objectContaining({ nextPutCap: scores.ladderCap, firstRungCap: scores.ladderCap, floor: scores.ladderFloor, committed: 0, blockedBecause: null }) }),
+    ]);
+  });
+
+  it("records no ladder levels while no shares are held", async () => {
+    expect((await look(createSimulatedLedger(100_000, easternInstant("2026-02-27", 9, 30)))).ladderLevels).toEqual([]);
   });
 });
 

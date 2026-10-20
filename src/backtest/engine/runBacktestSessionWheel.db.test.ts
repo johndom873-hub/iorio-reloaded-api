@@ -7,6 +7,7 @@ import { easternInstant } from "../../lib/easternIsoDate.js";
 import { maximumSpreadFractionOfMid } from "../../lib/impliedVolatilitySurface.js";
 import type { PlutoSettings } from "../../pluto/settingsStore.js";
 import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, type BacktestAction, type BacktestBaselineSettings, type BacktestFill, type BacktestSessionDetail, type BacktestSettingsOverrides, type BacktestSymbolSettings } from "../backtestTypes.js";
+import { loadAnalysisLadder } from "../analysis/analysisBacktest.js";
 import { computeParityStockPrice } from "./backtestBook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { fixtureBacktestSettings, syntheticDailyBars, syntheticOptionQuotes, weekdaysBetween, writeSyntheticIbkrBarsFromQuotes, writeSyntheticSymbolFile, writeSyntheticMacroEventHistory } from "./testSupport/syntheticBacktestData.js";
@@ -23,7 +24,7 @@ vi.mock("../../db/connection.js", async () => {
 const { db } = await import("../../db/connection.js");
 const { dropIsolatedTestDatabase } = await import("../../lib/testSupport/isolatedTestSchema.js");
 const { runBacktestSession } = await import("./runBacktestSession.js");
-const { loadBacktestSessionActions, loadBacktestSessionDetail, loadBacktestSessionFills } = await import("../jobs/backtestSessionStore.js");
+const { loadBacktestCycleDetail, loadBacktestSessionActions, loadBacktestSessionDetail, loadBacktestSessionFills } = await import("../jobs/backtestSessionStore.js");
 const testDb: Knex = db;
 
 const ratePercent = 4;
@@ -312,6 +313,40 @@ describe("a session through the wheel", () => {
     expect(cycle.buckets.csp.stock).toBeCloseTo((95.4 - 97) * 500, 2);
     expect(cycle.buckets.unstructured.stock + cycle.buckets.cc.stock).toBeCloseTo((97 - 95.4) * 500, 2);
     expect(nextCycle).toMatchObject({ cycleNumber: 2, status: "open", openedOn: "2026-05-04", assignedOn: null, recoverySessions: null, ageSessions: 0, sharesHeld: 500 });
+
+    // Each cycle's timeline adds up to its figures, in all and per strategy (the open one with its marks).
+    for (const shown of [cycle, nextCycle]) {
+      const cycleDetail = (await loadBacktestCycleDetail(session.sessionId, "WHLA", shown.cycleNumber))!;
+      const sum = (rows: typeof cycleDetail.timeline, part: "premiumDollars" | "stockDollars") => rows.reduce((total, row) => total + row[part], 0);
+      expect(sum(cycleDetail.timeline, "premiumDollars")).toBeCloseTo(shown.netPremiumDollars, 6);
+      expect(sum(cycleDetail.timeline, "stockDollars")).toBeCloseTo(shown.totalDollars - shown.netPremiumDollars, 6);
+      for (const bucket of ["csp", "unstructured", "cc", "hedge"] as const) {
+        const rows = cycleDetail.timeline.filter((row) => row.bucket === bucket);
+        expect(sum(rows, "premiumDollars")).toBeCloseTo(shown.buckets[bucket].premium, 6);
+        expect(sum(rows, "stockDollars")).toBeCloseTo(shown.buckets[bucket].stock, 6);
+      }
+    }
+    const firstCycleDetail = (await loadBacktestCycleDetail(session.sessionId, "WHLA", 1))!;
+    expect(firstCycleDetail.timeline.find((row) => row.label.startsWith("Put assigned"))).toMatchObject({ tradingDate: "2026-04-24", bucket: "csp", quantity: 500, strike: 97, stockPrice: 97, stockPriceSource: "execution" });
+    // The shares assigned on Friday 24 April were covered on Monday: a weekend is no uncovered stretch.
+    expect(firstCycleDetail.uncoveredStretches).toEqual([]);
+    // Nothing was sold on the first day (no previous session's volume): a gap of one session before the first cycle, its
+    // reason unrecorded (Pluto's decisions record no shortfalls); the second cycle opened the session after the first closed.
+    expect(detail.cycleGaps).toEqual([
+      {
+        symbol: "WHLA",
+        afterCycleNumber: null,
+        beforeCycleNumber: 1,
+        firstIdleDay: "2026-04-06",
+        lastIdleDay: "2026-04-06",
+        idleSessions: 1,
+        // The history's last close (3 April, $100) to 6 April's $100.10.
+        stockMove: expect.closeTo(0.001, 10),
+        noSaleDays: { extensionZ: 0, ivRank: 0, ladderPutInstead: 0, cash: 0, volume: 0, noCandidate: 0, unrecorded: 1 },
+        noCandidate: null,
+        entryFilterLimits: { extensionZ: null, ivRank: null },
+      },
+    ]);
 
     // The book behind it.
     const [putPosition, rolledPosition, sharesPosition, coveredCall, nextPosition] = detail.positions as [(typeof detail.positions)[number], (typeof detail.positions)[number], (typeof detail.positions)[number], (typeof detail.positions)[number], (typeof detail.positions)[number]];
@@ -655,6 +690,19 @@ describe("a session of several symbols on one book", () => {
     // Each look's actions: every WTA one before any WTB one.
     const filled = filledActionsOf(session);
     expect(filled.length).toBeGreaterThan(0);
+    // The ladder's levels: one row per ticker and day its cycle held shares, which the analysis reads with the rungs sold.
+    const storedLevels: { symbol: string; trading_date: string }[] = await testDb("backtest_ladder_levels").where({ session_id: session.sessionId }).select("symbol", testDb.raw("trading_date::text as trading_date"));
+    expect(storedLevels.length).toBeGreaterThan(0);
+    expect(new Set(storedLevels.map((row) => `${row.symbol}|${row.trading_date}`)).size).toBe(storedLevels.length);
+    const ladderOfB = await loadAnalysisLadder(session.sessionId, "WTB", testDb);
+    expect(ladderOfB.ladderLevels.map(([date]) => date)).toEqual(storedLevels.filter((row) => row.symbol === "WTB").map((row) => row.trading_date).sort());
+    const ladderPutsOfB = filled.filter((action) => action.symbol === "WTB" && action.kind === "open_cash_secured_put" && "ladderCap" in (action.candidateScores ?? {}));
+    expect(ladderOfB.ladderRungsSold.flatMap(([, , fills]) => fills).length).toBe(ladderPutsOfB.length);
+    // The shares held each day at the account value's marks: none before the first purchase, then part of the account.
+    const storedDays: { shares_value_dollars: string | null; account_value: string }[] = await testDb("backtest_session_days").where({ session_id: session.sessionId }).orderBy("trading_date").select("shares_value_dollars", "account_value");
+    expect(storedDays.every((day) => day.shares_value_dollars !== null && Number(day.shares_value_dollars) >= 0 && Number(day.shares_value_dollars) <= Number(day.account_value))).toBe(true);
+    expect(Number(storedDays[0]!.shares_value_dollars)).toBe(0);
+    expect(storedDays.some((day) => Number(day.shares_value_dollars) > 0)).toBe(true);
     for (const at of new Set(filled.map((action) => action.at))) {
       const symbolsAtLook = filled.filter((action) => action.at === at).map((action) => action.symbol);
       expect(symbolsAtLook).toEqual([...symbolsAtLook].sort());

@@ -4,14 +4,14 @@ import { contractKey } from "../../lib/signalsLiveScoring.js";
 import { regularCloseMinutesEt, varianceSessionsToExpiry } from "../../lib/varianceClock.js";
 import { selectModelVolatilityForecast } from "../../lib/volatilityEdge.js";
 import { openCandidateId } from "../../pluto/candidateFilters.js";
-import type { BacktestAction, BacktestOrderShortfall } from "../backtestTypes.js";
+import type { BacktestAction, BacktestLadderLevel, BacktestOrderShortfall } from "../backtestTypes.js";
 import { toOhlcvBars } from "./backtestBarHistory.js";
-import { makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineCommissions, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
+import { makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineCommissions, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineNoCandidate, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
 
-import { noteLadderLook } from "./backtestBaselineLadder.js";
-import { entryDropRiskBlock, extensionZ, ivRankBefore } from "./entryDropRiskFilters.js";
+import { ladderLevelsToday, noteLadderLook } from "./backtestBaselineLadder.js";
+import { entryDropRiskBlock, entryDropRiskBlockingLimits, extensionZ, ivRankBefore } from "./entryDropRiskFilters.js";
 import { sharesPerContract } from "./backtestBook.js";
-import type { BacktestLookContext, BacktestLookResult, BacktestOptionSale } from "./backtestLook.js";
+import type { BacktestLookContext, BacktestLookResult, BacktestNoCandidateNote, BacktestNoSaleNote, BacktestOptionSale } from "./backtestLook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
 import { captureLookTimeEt, earningsNotYetReported, forecastBarRowCount, lookInstantMs } from "./backtestTickerInputs.js";
 import { buyBackCoveredCallKeepingShares, buyBackPut, closeCoveredCall, openCashSecuredPut, openCoveredCall, sellShares } from "./ledger/ledgerEvents.js";
@@ -106,6 +106,9 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
   const optionSales: BacktestOptionSale[] = [];
   const summaries: string[] = [];
   const shortfalls: BacktestOrderShortfall[] = [];
+  const ladderLevels: BacktestLadderLevel[] = [];
+  const noSaleNotes: BacktestNoSaleNote[] = [];
+  const noCandidateNotes: BacktestNoCandidateNote[] = [];
 
   for (const lookSymbol of context.symbols) {
     const symbol = lookSymbol.profile.symbol;
@@ -371,16 +374,37 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
     };
     const noteShortfall = (shortfall: BaselineOrderShortfall) => shortfalls.push({ tradingDate: todayIso, at: at.toISOString(), lookTimeEt, symbol, ...shortfall, lookCount: 1 });
     // The drop-risk filters on new entries, worked out only when one is on.
-    const entryBlockedBecause =
+    const entryFilterMeasures =
       baseline.entryExtensionFilter === "on" || baseline.entryIvRankFilter === "on"
-        ? entryDropRiskBlock(baseline, {
+        ? {
             extensionZ: baseline.entryExtensionFilter === "on" ? extensionZ(lookSymbol.adjustedDailyClosesBeforeToday) : null,
             ivRank: baseline.entryIvRankFilter === "on" ? ivRankBefore(lookSymbol.bars, todayIso) : null,
-          })
+          }
         : null;
-    planBaselineSales({ symbol, commissions: backtestCommissions, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall, entryBlockedBecause });
+    const entryBlockedBecause = entryFilterMeasures === null ? null : entryDropRiskBlock(baseline, entryFilterMeasures);
+    const noteNoSale = (reason: BacktestNoSaleNote["reason"]) =>
+      noSaleNotes.push({ tradingDate: todayIso, symbol, reason, entryFilterLimits: reason === "entry_filter" && entryFilterMeasures !== null ? entryDropRiskBlockingLimits(baseline, entryFilterMeasures) : null });
+    // The ladder's levels before the sale steps, from the same book they read (recorded only).
+    if (ladderState && ladderState.startedOn !== null) {
+      const cycle = book.openCycleSummary();
+      const levels = ladderLevelsToday({
+        settings: baseline,
+        state: ladderState,
+        accountValueToday: book.accountValueToday(),
+        tickerWeight,
+        breakEven: cycle?.breakEvenPerShare == null ? null : cycle.breakEvenPerShare / priceToCycleScale,
+        stockPrice,
+        heldSharesCost: (book.heldSharesAverageCostToday() ?? 0) * book.heldSharesToday(),
+        openPutCollateral: book.openPutCollateral(),
+        sharesAverageCost: book.heldSharesAverageCostToday(),
+        freeLots: Math.floor((book.freeShares() * priceToCycleScale) / sharesPerContract + 1e-9),
+      });
+      ladderLevels.push({ tradingDate: todayIso, at: at.toISOString(), lookTimeEt, symbol, splitFactor: lookSymbol.splitFactorToday, levels });
+    }
+    const noteNoCandidate = (note: BaselineNoCandidate) => noCandidateNotes.push({ tradingDate: todayIso, lookTimeEt, symbol, ...note });
+    planBaselineSales({ symbol, commissions: backtestCommissions, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall, entryBlockedBecause, noteNoSale, noteNoCandidate });
   }
 
   const summary = summaries.length === 0 ? "No action: fully invested" : actions.length === 0 ? `No action: ${summaries.join(" | ")}` : summaries.join(" · ");
-  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], fitIssueBySymbol: new Map(), scoredBySymbol: new Map(), llmCalls: { asked: 0, fromCache: 0 }, shortfalls };
+  return { actions, optionSales, summary, summaryOfActions: summary, opensStopped: [], fitIssueBySymbol: new Map(), scoredBySymbol: new Map(), llmCalls: { asked: 0, fromCache: 0 }, shortfalls, ladderLevels, noSaleNotes, noCandidateNotes };
 }

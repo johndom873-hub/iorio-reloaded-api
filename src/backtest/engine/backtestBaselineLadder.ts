@@ -142,3 +142,34 @@ export function ladderStrikeCap(input: { breakEven: number | null; floor: number
   if (breakEven === null || !(reserve > 0) || !(rungCollateral > 0) || breakEven <= floor) return null;
   return breakEven - ((breakEven - floor) * (committed + rungCollateral)) / reserve;
 }
+
+/** Why no ladder put can be sold at a look, before its orders: the ladder's puts off, no free lot (every lot has a call), a put open with ladderPace "one_open", or no cap. */
+export type LadderPutBlock = "ladder_puts_off" | "every_lot_has_a_call" | "a_put_is_open" | "no_cap";
+
+export interface LadderLevels {
+  /** A, F and S; F null with no shares held. */
+  top: number | null;
+  floor: number | null;
+  shock: number;
+  /** U and R0. */
+  committed: number;
+  reserve: number;
+  /** K_max with nothing committed (U = 0, Q = R0 ÷ rungs): where the ladder starts. */
+  firstRungCap: number | null;
+  /** K_max at the look: the highest strike the next ladder put may have; null when none fits. */
+  nextPutCap: number | null;
+  blockedBecause: LadderPutBlock | null;
+}
+
+/**
+ * The ladder's levels at a look, on today's scale, from today's rung (recorded only, Marcelo 2026-10-20: the Analyse
+ * window's price chart draws the next put's cap, the floor and the rungs sold); the blocks in the sale steps' order.
+ */
+export function ladderLevelsToday(input: Parameters<typeof ladderRungToday>[0] & { settings: Pick<BacktestBaselineSettings, "ladderPace">; freeLots: number }): LadderLevels {
+  const rung = ladderRungToday(input);
+  const { ladderTop: top, ladderFloor: floor, ladderCommitted: committed, ladderReserve: reserve } = rung.scores as { ladderTop: number | null; ladderFloor: number | null; ladderCommitted: number; ladderReserve: number };
+  const firstRungCap = floor === null ? null : ladderStrikeCap({ breakEven: top, floor, committed: 0, rungCollateral: ladderRungCollateral(reserve, 0, input.settings.ladderRungs), reserve });
+  const blockedBecause: LadderPutBlock | null =
+    input.settings.ladderPace === "no_puts" ? "ladder_puts_off" : input.freeLots < 1 ? "every_lot_has_a_call" : input.settings.ladderPace === "one_open" && input.openPutCollateral > 0 ? "a_put_is_open" : rung.cap === null ? "no_cap" : null;
+  return { top, floor, shock: input.state.shock, committed, reserve, firstRungCap, nextPutCap: rung.cap, blockedBecause };
+}
