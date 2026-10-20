@@ -1060,8 +1060,10 @@ describe("backtest routes", () => {
       // The price chart: the symbol's daily bars within the session's period, with its ladder levels split-adjusted and,
       // in a one-symbol session, the account in shares.
       await testDb("backtest_ladder_levels").insert({ session_id: session.id, symbol: fileSymbol, trading_date: "2026-09-08", at: "2026-09-08T14:00:00.000Z", look_time: "10:00", split_factor: 2, ladder_top: 80, floor: 70, shock: 0.2, reserve_committed: 0, reserve: 4000, first_rung_cap: 76, next_put_cap: 76, blocked_because: null });
+      // A ladder put sold that day, the session's 5 rungs: (1,000 committed + 800) ÷ (4,000 ÷ 5) = 2.25 slices, rung 3.
+      await testDb("backtest_actions").insert({ session_id: session.id, action_id: "action-ladder", sequence: 2, trading_date: "2026-09-08", at: "2026-09-08T14:00:00.000Z", pass_number: 1, symbol: fileSymbol, kind: "open_cash_secured_put", candidate_id: `${fileSymbol}:open:3`, description: `${fileSymbol} Sell $74 Put`, automatic: false, chosen_because: "ladder rung", outcome: "filled", gate_results: JSON.stringify([]), contract: JSON.stringify({ strategyKey: "cash_secured_put", expiry: "2026-09-18", strike: 74, right: "P" }), candidate_scores: JSON.stringify({ ladderCap: 76, ladderCommitted: 1000, ladderRungCollateral: 800, ladderReserve: 4000 }), quantity: 1, limit_price: 0.5, fill_price: 0.5, position_ids: JSON.stringify([]) });
       const chart = (await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=${fileSymbol.toLowerCase()}`)).body as BacktestSessionPriceChart;
-      expect(chart).toMatchObject({ symbol: fileSymbol, bars: [["2026-09-11", 20, 21, 19, 20.5, null]], ladderLevels: [["2026-09-08", 38, 35, null]], ladderRungsSold: [], tooLargeDays: [] });
+      expect(chart).toMatchObject({ symbol: fileSymbol, bars: [["2026-09-11", 20, 21, 19, 20.5, null]], ladderLevels: [["2026-09-08", 38, 35, null]], ladderRungsSold: [["2026-09-08", 37, [[37, "2026-09-18", 1]], [3, 5, 2.25, 1000]]], tooLargeDays: [] });
       expect(chart.maxDrawdown.All).toBeNull();
       expect(chart.accountInShares).toHaveLength(3);
       expect((await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=zzzz`)).status).toBe(400);

@@ -1,7 +1,8 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import type { BacktestBaselineSettings, BacktestMetrics } from "../backtestTypes.js";
-import type { LadderPutBlock } from "../engine/backtestBaselineLadder.js";
+import { ladderRungReached, type LadderPutBlock } from "../engine/backtestBaselineLadder.js";
+import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
 import { ladderBasePath, loadAnalysisOrders, tooLargeByYear, yieldGivenUp, type AnalysisOrder, type AnalysisTooLargeYear } from "./analysisPotSizing.js";
 
 // The analysis's own backtest (Marcelo 2026-10-15): each saved analysis runs the ticker at its lab values over its whole
@@ -41,8 +42,12 @@ export interface AnalysisBacktestFigures {
    * session run before the levels were recorded.
    */
   ladderLevels: [string, number | null, number | null, LadderPutBlock | null][];
-  /** Each rung sold, split-adjusted: [date, its highest strike, its fills [strike, expiry, contracts]]. */
-  ladderRungsSold: [string, number, [number, string, number][]][];
+  /**
+   * Each rung sold, split-adjusted: [date, its highest strike, its fills [strike, expiry, contracts], the rung it reaches
+   * [its number, the ticker's rungs, the reserve's slices it fills up to, the reserve committed before it in dollars] (null
+   * when its sale recorded no reserve; absent in analysis figures stored before it)].
+   */
+  ladderRungsSold: [string, number, [number, string, number][], [number, number, number, number] | null][];
   /**
    * Each backtest day, at the 10:00 marks before its orders: [date, the shares held at those marks (null: a session run
    * before they were recorded), the account value]. The price chart's account in shares = the one ÷ the other.
@@ -70,6 +75,14 @@ export async function loadAccountInShares(sessionId: string, connection: Knex = 
   return accountInSharesOf(await loadSessionDayShares(sessionId, connection));
 }
 
+/** The ladder's rung count a session ran a symbol with: its own pot's value in a session of pots, else the session's. */
+async function loadLadderRungs(sessionId: string, symbol: string, connection: Knex): Promise<number | null> {
+  const session = await connection("backtest_sessions").where({ id: sessionId }).first("settings_snapshot", "overrides", "book_mode", "symbol_settings");
+  if (!session) return null;
+  const tickerRungs = session.book_mode === "pots" ? session.symbol_settings?.[symbol]?.baseline?.ladderRungs : undefined;
+  return tickerRungs ?? applyBacktestOverrides(session.settings_snapshot, session.overrides ?? {}).baseline.ladderRungs;
+}
+
 /** The ladder's levels and rungs sold of a symbol in a session, split-adjusted by each day's recorded factor. */
 export async function loadAnalysisLadder(sessionId: string, symbol: string, connection: Knex = db): Promise<Pick<AnalysisBacktestFigures, "ladderLevels" | "ladderRungsSold">> {
   const levels: { date: string; split_factor: string; next_put_cap: string | null; floor: string | null; blocked_because: LadderPutBlock | null }[] = await connection("backtest_ladder_levels")
@@ -79,22 +92,37 @@ export async function loadAnalysisLadder(sessionId: string, symbol: string, conn
   const factorByDate = new Map(levels.map((level) => [level.date, Number(level.split_factor)]));
   const adjusted = (value: string | number | null, date: string) => (value === null ? null : cents(Number(value) / (factorByDate.get(date) ?? 1)));
   // A rung's order: the fills of one look under one cap (the next in order after the volume limit shares it).
-  const sales: { date: string; at: Date; contract: { strike: number; expiry: string }; quantity: string; cap: string }[] = await connection("backtest_actions")
+  const sales: { date: string; at: Date; contract: { strike: number; expiry: string }; quantity: string; cap: string; committed: string | null; rung_collateral: string | null; reserve: string | null }[] = await connection("backtest_actions")
     .where({ session_id: sessionId, symbol, kind: "open_cash_secured_put", outcome: "filled" })
     .whereRaw("jsonb_exists(candidate_scores, 'ladderCap')")
     .orderBy("sequence")
-    .select(connection.raw("trading_date::text as date"), "at", "contract", "quantity", connection.raw("candidate_scores->>'ladderCap' as cap"));
-  const rungs = new Map<string, AnalysisBacktestFigures["ladderRungsSold"][number]>();
+    .select(
+      connection.raw("trading_date::text as date"),
+      "at",
+      "contract",
+      "quantity",
+      connection.raw("candidate_scores->>'ladderCap' as cap"),
+      connection.raw("candidate_scores->>'ladderCommitted' as committed"),
+      connection.raw("candidate_scores->>'ladderRungCollateral' as rung_collateral"),
+      connection.raw("candidate_scores->>'ladderReserve' as reserve"),
+    );
+  const rungs = sales.length > 0 ? await loadLadderRungs(sessionId, symbol, connection) : null;
+  const rungsSold = new Map<string, AnalysisBacktestFigures["ladderRungsSold"][number]>();
   for (const sale of sales) {
     const key = `${new Date(sale.at).toISOString()}|${sale.cap}`;
     const strike = adjusted(sale.contract.strike, sale.date)!;
-    const rung = rungs.get(key) ?? rungs.set(key, [sale.date, strike, []]).get(key)!;
+    let rung = rungsSold.get(key);
+    if (!rung) {
+      const reached = rungs === null || sale.committed === null || sale.rung_collateral === null || sale.reserve === null ? null : ladderRungReached({ committed: Number(sale.committed), rungCollateral: Number(sale.rung_collateral), reserve: Number(sale.reserve), rungs });
+      rung = [sale.date, strike, [], reached === null ? null : [reached.rungNumber, rungs!, reached.slices, Number(sale.committed)]];
+      rungsSold.set(key, rung);
+    }
     rung[1] = Math.max(rung[1], strike);
     rung[2].push([strike, sale.contract.expiry, Number(sale.quantity)]);
   }
   return {
     ladderLevels: levels.map((level) => [level.date, adjusted(level.next_put_cap, level.date), adjusted(level.floor, level.date), level.blocked_because]),
-    ladderRungsSold: [...rungs.values()],
+    ladderRungsSold: [...rungsSold.values()],
   };
 }
 

@@ -143,6 +143,19 @@ export function ladderStrikeCap(input: { breakEven: number | null; floor: number
   return breakEven - ((breakEven - floor) * (committed + rungCollateral)) / reserve;
 }
 
+/**
+ * The rung a ladder put reaches (Marcelo 2026-10-20, the price chart's numbered rungs): slices = (U + Q) ÷ (R0 ÷ rungs), the
+ * reserve's slices it fills up to; its number is that rounded up, 1 to rungs (a hair over a whole slice, from rounding,
+ * stays on it). Example: R0 $51,298 in 2 rungs ($25,649 each), $11,305 already committed: (11,305 + 25,649) ÷ 25,649 =
+ * 1.44 slices, rung 2. Null without a reserve or a rung count.
+ */
+export function ladderRungReached(input: { committed: number; rungCollateral: number; reserve: number; rungs: number }): { rungNumber: number; slices: number } | null {
+  const { committed, rungCollateral, reserve, rungs } = input;
+  if (!(reserve > 0) || !(rungs >= 1)) return null;
+  const slices = (committed + rungCollateral) / (reserve / rungs);
+  return { rungNumber: Math.min(rungs, Math.max(1, Math.ceil(slices - 0.005))), slices };
+}
+
 /** Why no ladder put can be sold at a look, before its orders: the ladder's puts off, no free lot (every lot has a call), a put open with ladderPace "one_open", or no cap. */
 export type LadderPutBlock = "ladder_puts_off" | "every_lot_has_a_call" | "a_put_is_open" | "no_cap";
 
