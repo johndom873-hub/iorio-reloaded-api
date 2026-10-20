@@ -39,7 +39,8 @@ export interface BacktestBaselineSettings {
   maxSpreadPctOfMid: number;
   /**
    * Calls on held shares: any strike in the delta range; only at or above what the cycle's shares cost (acquisition cost
-   * per share acquired); only at or above the cycle's break-even after its premium (Pluto's measure); only at or above
+   * per share acquired); only at or above the cycle's cash break-even (cashBreakEvenPerShare: what the shares held must
+   * bring for the cycle to end flat); only at or above
    * the price of the latest share acquisition (a purchase, or a put assigned at its strike); only at or above the average
    * price paid for the shares held (ledgerHeldSharesAverageCost); at or above that average first and, for the lots still
    * uncovered, at or above the cycle's break-even; or none (the shares are held uncovered).
@@ -163,9 +164,10 @@ export interface BacktestBaselineSettings {
  * The engine's version, stored on each session it runs (backtest_sessions.engine_version): raised whenever a stored
  * session's settings would give different results, so the ticker analysis compares only same-engine runs. A new setting
  * whose default keeps the results does not raise it. 1: the engine as of 3020323 (2026-10-15). 2: max per ticker and max
- * per sector are shares of the capital budget, not of the account (2026-10-16).
+ * per sector are shares of the capital budget, not of the account (2026-10-16). 3: a call's break-even floor is the
+ * cycle's cash break-even, counting what shares that left the cycle brought in (2026-10-20).
  */
-export const backtestEngineVersion = 2;
+export const backtestEngineVersion = 3;
 
 export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
 

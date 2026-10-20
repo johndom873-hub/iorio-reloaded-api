@@ -148,6 +148,27 @@ describe("summarizeOpenCycle — call assignment fills", () => {
     expect(summary.breakEvenPerShare).toBeCloseTo(49.51, 8);
     const byPosition = breakEvenByPositionFromHistory(summary, [{ positionId: "cc-b", sharesHeld: 100 }], []);
     expect(byPosition.get("cc-b")!.breakEven!).toBeCloseTo(49.51, 8);
+    // The cash break-even counts what the called-away shares brought in, the recorded sale's (100 × 52 − 0.60):
+    // (5,001 + 5,101 − 5,199.40 − 200) / 100 shares held.
+    expect(summary.disposalProceeds).toBeCloseTo(5199.4, 8);
+    expect(summary.cashBreakEvenPerShare).toBeCloseTo(47.026, 8);
+  });
+
+  it("shares called away below their cost, then dearer shares bought: the cash break-even is what the shares held must bring", () => {
+    // 200 shares at 50.00, the $49 call on 100 of them sold at 0.30 and called away with no recorded sale (at the strike),
+    // then 100 more bought at 60.00 and a $55 call sold at 0.50 on them, still open.
+    const firstAt = new Date("2026-10-05T14:00:00Z");
+    const shortCall = assignedPutLeg({ id: "call-low", positionId: "cc-a", optionType: "call", strike: 49, entryPrice: 0.3, entryAt: firstAt, exitAt: new Date("2026-10-10T01:45:00Z"), expiryDate: "2026-10-09", expiryClose: 49.8, positionCloseReason: null });
+    const openCall: CycleOptionLeg = { ...shortCall, id: "call-open", positionId: "cc-b", strike: 55, entryPrice: 0.5, entryAt: new Date("2026-10-12T14:00:00Z"), exitPrice: null, exitAt: null, expiryDate: "2026-10-23", expiryClose: null };
+    const firstBuy = assignmentStockTrade({ at: firstAt, quantity: 200, price: 50, positionId: "cc-a" });
+    const dearerBuy = assignmentStockTrade({ at: new Date("2026-10-12T14:00:00Z"), quantity: 100, price: 60, positionId: "cc-b" });
+    const summary = summarizeOpenCycle([shortCall, openCall], [firstBuy, dearerBuy], 200)!;
+    expect(summary.unavailableReason).toBeNull();
+    // Pro-rata: (10,000 + 6,000 − 30 − 50) / 300 acquired = 53.07, though the shares held cost 55.00 on average and the
+    // cycle already lost 100 on the shares that left. Cash: (16,000 − 4,900 − 80) / 200 held = 55.10.
+    expect(summary.breakEvenPerShare).toBeCloseTo(53.0667, 4);
+    expect(summary.disposalProceeds).toBeCloseTo(4900, 8);
+    expect(summary.cashBreakEvenPerShare).toBeCloseTo(55.1, 8);
   });
 });
 

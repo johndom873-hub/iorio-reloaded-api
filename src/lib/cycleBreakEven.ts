@@ -84,6 +84,14 @@ export interface OpenCycleSummary {
   netPremium: number;
   /** Per share held; null when it cannot be computed (see unavailableReason). */
   breakEvenPerShare: number | null;
+  /** What the cycle received for shares that left it (sold, or called away at the strike), net of commission. */
+  disposalProceeds: number;
+  /**
+   * The cash break-even per share held (approved 2026-10-20 for the backtest's call floor): (the cost of every share
+   * acquired − what the shares that left brought in − net premium) ÷ shares held. Shares leaving at or above it leave the
+   * cycle flat or better, whatever earlier shares left at. Null without shares held or when the ledger cannot be trusted.
+   */
+  cashBreakEvenPerShare: number | null;
   unavailableReason: string | null;
   /** Open short puts in the cycle, for the put-only (no shares yet) break-even of each position. */
   openShortPuts: { positionId: string; strike: number; shares: number }[];
@@ -100,6 +108,8 @@ interface LedgerEvent {
   openOptionsDelta: number;
   acquiredShares: number;
   acquiredCost: number;
+  /** Cash from shares that left: a sale's proceeds, or a call assignment's at the strike (its fill when recorded), net of commission. */
+  disposalProceeds: number;
   positionId: string;
 }
 
@@ -138,15 +148,16 @@ export function summarizeOpenCycle(
     if (absorbedFillIndices.has(tradeIndex)) return;
     const signedShares = trade.side === "buy" ? trade.quantity : -trade.quantity;
     const isBuy = trade.side === "buy";
-    events.push({ at: trade.at.getTime(), sharesDelta: signedShares, openOptionsDelta: 0, acquiredShares: isBuy ? trade.quantity : 0, acquiredCost: isBuy ? trade.quantity * trade.price + trade.commission : 0, positionId: trade.positionId ?? "" });
+    events.push({ at: trade.at.getTime(), sharesDelta: signedShares, openOptionsDelta: 0, acquiredShares: isBuy ? trade.quantity : 0, acquiredCost: isBuy ? trade.quantity * trade.price + trade.commission : 0, disposalProceeds: isBuy ? 0 : trade.quantity * trade.price - trade.commission, positionId: trade.positionId ?? "" });
   });
 
   for (const leg of optionLegs) {
-    events.push({ at: leg.entryAt.getTime(), sharesDelta: 0, openOptionsDelta: 1, acquiredShares: 0, acquiredCost: 0, positionId: leg.positionId });
+    events.push({ at: leg.entryAt.getTime(), sharesDelta: 0, openOptionsDelta: 1, acquiredShares: 0, acquiredCost: 0, disposalProceeds: 0, positionId: leg.positionId });
     if (leg.exitAt === null) continue;
     let sharesDelta = 0;
     let acquiredShares = 0;
     let acquiredCost = 0;
+    let disposalProceeds = 0;
     let acquiredByPositionId = leg.positionId;
     // An explicit settlement (a simulated book) needs no bar and no threshold; an inferred one refuses what it cannot tell.
     if (isSettledWithoutTrade(leg) && leg.settledAs === undefined) {
@@ -169,9 +180,13 @@ export function summarizeOpenCycle(
         // put's hand-over link (position_share_sources) is missing. With no fill, or a fill with no position, it stays
         // with the put.
         if (fill?.positionId !== undefined) acquiredByPositionId = fill.positionId;
+      } else {
+        const fillIndex = fillIndexByAssignedLegId.get(leg.id);
+        const fill = fillIndex === undefined ? undefined : stockTrades[fillIndex]!;
+        disposalProceeds = fill === undefined ? shares * leg.strike : fill.quantity * fill.price - fill.commission;
       }
     }
-    events.push({ at: leg.exitAt.getTime(), sharesDelta, openOptionsDelta: -1, acquiredShares, acquiredCost, positionId: acquiredByPositionId });
+    events.push({ at: leg.exitAt.getTime(), sharesDelta, openOptionsDelta: -1, acquiredShares, acquiredCost, disposalProceeds, positionId: acquiredByPositionId });
   }
 
   events.sort((a, b) => a.at - b.at);
@@ -199,6 +214,7 @@ export function summarizeOpenCycle(
   const sharesHeld = cycleEvents.reduce((sum, event) => sum + event.sharesDelta, 0);
   const sharesAcquired = cycleEvents.reduce((sum, event) => sum + event.acquiredShares, 0);
   const acquisitionCost = cycleEvents.reduce((sum, event) => sum + event.acquiredCost, 0);
+  const disposalProceeds = cycleEvents.reduce((sum, event) => sum + event.disposalProceeds, 0);
 
   const contributionsByPositionId = new Map<string, PositionCycleContribution>();
   const contributionOf = (positionId: string) => {
@@ -238,12 +254,15 @@ export function summarizeOpenCycle(
   }
 
   let breakEvenPerShare: number | null = null;
+  let cashBreakEvenPerShare: number | null = null;
   if (unavailableReason === null) {
-    if (sharesHeld > 0 && sharesAcquired > 0) breakEvenPerShare = (acquisitionCost - netPremium) / sharesAcquired;
-    else if (openShortPutShares === 0) unavailableReason = "no shares or open short put in the cycle";
+    if (sharesHeld > 0 && sharesAcquired > 0) {
+      breakEvenPerShare = (acquisitionCost - netPremium) / sharesAcquired;
+      cashBreakEvenPerShare = (acquisitionCost - disposalProceeds - netPremium) / sharesHeld;
+    } else if (openShortPutShares === 0) unavailableReason = "no shares or open short put in the cycle";
   }
 
-  return { sharesHeld, sharesAcquired, acquisitionCost, netPremium, breakEvenPerShare, unavailableReason, openShortPuts, contributionsByPositionId };
+  return { sharesHeld, sharesAcquired, acquisitionCost, netPremium, breakEvenPerShare, disposalProceeds, cashBreakEvenPerShare, unavailableReason, openShortPuts, contributionsByPositionId };
 }
 
 /** Break-even for one open position: the cycle's per-share figure, or (put-only cycle) that position's own put strike - premium per put share. */

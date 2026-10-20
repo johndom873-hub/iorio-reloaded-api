@@ -473,7 +473,9 @@ export function planBaselineSales(input: BaselineSalesInput): void {
   const freeLots = Math.floor((book.freeShares() * priceToCycleScale) / sharesPerContract + 1e-9);
   let uncoveredLots = freeLots;
   // The floors tried in turn, lowest strike allowed on today's scale (null: any strike): with
-  // "above_average_cost_else_break_even", the average price held first, then the cycle's break-even for the lots left.
+  // "above_average_cost_else_break_even", the average price held first, then the cycle's break-even for the lots left. A
+  // call's break-even is the cycle's cash one (Marcelo 2026-10-20): what the shares held must bring back for the cycle to
+  // end flat, counting what earlier shares left at (the pro-rata one let a cycle that rebought dearer shares end negative).
   const callFloors: { floor: number | null; label: string }[] = [];
   if (freeLots >= 1 && baseline.callStrike !== "none") {
     const onTodaysScale = (perShareOnCycleScale: number | null) => (perShareOnCycleScale === null ? Number.POSITIVE_INFINITY : perShareOnCycleScale / priceToCycleScale);
@@ -482,10 +484,10 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     else if (baseline.callStrike === "above_latest_entry") callFloors.push({ floor: onTodaysScale(book.latestShareAcquisitionPrice()), label: "" });
     else if (baseline.callStrike === "above_average_cost") callFloors.push({ floor: onTodaysScale(book.heldSharesAverageCost()), label: "" });
     else if (baseline.callStrike === "above_share_cost") callFloors.push({ floor: onTodaysScale(cycle && cycle.sharesAcquired > 0 ? cycle.acquisitionCost / cycle.sharesAcquired : null), label: "" });
-    else if (baseline.callStrike === "above_break_even") callFloors.push({ floor: onTodaysScale(cycle?.breakEvenPerShare ?? null), label: "" });
+    else if (baseline.callStrike === "above_break_even") callFloors.push({ floor: onTodaysScale(cycle?.cashBreakEvenPerShare ?? null), label: "" });
     else {
       callFloors.push({ floor: onTodaysScale(book.heldSharesAverageCost()), label: " at or above the average price held" });
-      if (cycle?.breakEvenPerShare != null) callFloors.push({ floor: onTodaysScale(cycle.breakEvenPerShare), label: " at or above the break-even (none at or above the average)" });
+      if (cycle?.cashBreakEvenPerShare != null) callFloors.push({ floor: onTodaysScale(cycle.cashBreakEvenPerShare), label: " at or above the break-even (none at or above the average)" });
     }
   }
   // The ladder put, planned for today's rung (null when the ladder cannot sell one now: no cycle, no rung, one open).

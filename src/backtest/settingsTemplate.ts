@@ -160,7 +160,7 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Calls on held shares",
     unit: "choice",
     editable: true,
-    note: "cost: what the cycle's shares cost per share; break-even: that cost less the cycle's premium (Pluto's measure)",
+    note: "cost: what the cycle's shares cost per share; break-even: what each share held must bring for the cycle to end flat, (the cycle's share purchases − what shares that left it brought in − its premium) ÷ shares held",
     choices: [
       { value: "delta_range", label: "Any strike in the delta range" },
       { value: "above_share_cost", label: "Strike at or above the shares' cost" },
