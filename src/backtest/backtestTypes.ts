@@ -1128,6 +1128,8 @@ export interface BacktestCycle {
   netPremiumDollars: number;
   sharesHeld: number;
   breakEvenPerShare: number | null;
+  /** An open cycle's cash break-even, as traded on the session's last day (cycleCashBreakEven.ts), read with the session; null otherwise. */
+  cashBreakEvenPerShare?: number | null;
   buckets: { csp: BacktestCycleBucket; unstructured: BacktestCycleBucket; cc: BacktestCycleBucket; hedge: BacktestCycleBucket };
   dataFlags: string[];
 }
@@ -1164,6 +1166,13 @@ export interface BacktestCycleTimelineRow {
    * the sale kept none (a session not run by the baseline). Absent on other rows.
    */
   premiumYield?: number | null;
+  /** A sold option's delta as the engine recorded it at the sale (a put's negative), contract-weighted over the row's fills; null when none was kept. */
+  delta?: number | null;
+  /**
+   * A call sold on held shares under a break-even rule: the cash break-even the engine held its strike to, as recorded at the
+   * sale (sessions from engine version 3; null before, when the floor was the pro-rata one). Absent on other rows.
+   */
+  breakEvenFloor?: number | null;
 }
 
 /**

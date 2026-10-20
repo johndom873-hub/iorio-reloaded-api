@@ -1032,10 +1032,10 @@ describe("backtest routes", () => {
         { firstIdleDay: "2026-09-08", lastIdleDay: "2026-09-09", idleSessions: 2, stockMove: -0.0125, noSaleDays: { extensionZ: 0, ivRank: 0, ladderPutInstead: 0, cash: 0, volume: 0, noCandidate: 2, unrecorded: 0 }, noCandidate: null, sharesUncovered: 100, sharesHeld: 100 },
       ];
       await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify(timeline), uncovered_stretches: JSON.stringify(uncoveredStretches) });
-      // A sale's row carries the yield the engine recorded for it (none here), contract-weighted over its fills.
-      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null }, timeline[1]!], uncoveredStretches } } });
-      await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3, premiumYield: 0.42 }) });
-      expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.timeline.map((entry) => entry.premiumYield)).toEqual([0.42, undefined]);
+      // A sale's row carries the yield and delta the engine recorded for it (none here), contract-weighted over its fills.
+      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null }, timeline[1]!], uncoveredStretches } } });
+      await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3, premiumYield: 0.42, delta: -0.21 }) });
+      expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.timeline.map((entry) => [entry.premiumYield, entry.delta])).toEqual([[0.42, -0.21], [undefined, undefined]]);
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3 }) });
       // The summary rows the session carries leave the detail out.
       expect(((await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail).cycles[0]).not.toHaveProperty("timeline");

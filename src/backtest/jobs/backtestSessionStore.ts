@@ -45,6 +45,7 @@ import { sqlContainsPattern } from "../../lib/sqlContainsPattern.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { readSplitScheduleCache } from "../engine/splitFactors.js";
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
+import { cycleCashBreakEven } from "../cycleCashBreakEven.js";
 
 const spyBaselineLabel = "Buy and hold · SPY";
 /** "HOOD #12": a symbol's cycle as the screens name it (backtestSessionRecords.ts describeCycle). */
@@ -537,7 +538,7 @@ async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
   const rows: Record<string, unknown>[] = await db("backtest_cycles")
     .where({ session_id: sessionId })
     .orderBy([{ column: "symbol" }, { column: "cycle_number" }])
-    .select(...cycleSummaryColumns, db.raw("opened_on::text as opened_on"), db.raw("closed_on::text as closed_on"), db.raw("assigned_on::text as assigned_on"));
+    .select(...cycleSummaryColumns, db.raw("opened_on::text as opened_on"), db.raw("closed_on::text as closed_on"), db.raw("assigned_on::text as assigned_on"), db.raw("case when status = 'open' then timeline end as open_timeline"));
   return rows.map((row) => ({
     symbol: row.symbol as string,
     cycleNumber: Number(row.cycle_number),
@@ -553,6 +554,7 @@ async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
     netPremiumDollars: Number(row.net_premium_dollars),
     sharesHeld: Number(row.shares_held),
     breakEvenPerShare: nullableNumber(row.break_even_per_share as string | null),
+    cashBreakEvenPerShare: row.open_timeline ? cycleCashBreakEven(row.open_timeline as BacktestCycleTimelineRow[]) : null,
     buckets: row.buckets as BacktestCycle["buckets"],
     dataFlags: row.data_flags as string[],
   }));
@@ -586,40 +588,66 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
     .first("timeline", "uncovered_stretches");
   if (!row) throw new BacktestRequestError(`The session has no cycle ${symbol} #${cycleNumber}.`, 404);
   if (row.timeline === null) return null;
-  const yieldOf = await loadSaleYields(sessionId, symbol, row.timeline);
+  const sales = await loadSaleRecords(sessionId, symbol, row.timeline);
   return {
     timeline: row.timeline.map((entry) => {
       const sold = /^Sold (put|call) @/.exec(entry.label);
-      return sold && entry.instrument === "option" ? { ...entry, premiumYield: yieldOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate) } : entry;
+      if (!sold || entry.instrument !== "option") return entry;
+      const right = sold[1] === "put" ? "P" : "C";
+      const { premiumYield, delta } = sales.recordedOf(entry.tradingDate, right, entry.strike, entry.expiryDate);
+      return right === "C" ? { ...entry, premiumYield, delta, breakEvenFloor: sales.breakEvenFloorOf(entry.tradingDate, entry.strike, entry.expiryDate) } : { ...entry, premiumYield, delta };
     }),
     // Stretches stored before their no-candidate detail was kept have none.
     uncoveredStretches: (row.uncovered_stretches ?? []).map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null })),
   };
 }
 
-/** The annualised yields the engine recorded at a symbol's option sales over a cycle's days, contract-weighted per day and contract. */
-async function loadSaleYields(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<(date: string, right: "C" | "P", strike: number | null, expiry: string | null) => number | null> {
+/**
+ * What the engine recorded at a symbol's option sales over a cycle's days, per day and contract: the annualised yield and
+ * the delta (contract-weighted), and for a call on held shares sold under a break-even rule, the cash break-even it was held to (the
+ * highest of the day's, from engine version 3).
+ */
+async function loadSaleRecords(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<{ recordedOf: (date: string, right: "C" | "P", strike: number | null, expiry: string | null) => { premiumYield: number | null; delta: number | null }; breakEvenFloorOf: (date: string, strike: number | null, expiry: string | null) => number | null }> {
   const dates = timeline.map((entry) => entry.tradingDate).sort();
-  if (dates.length === 0) return () => null;
-  const sales: { date: string; kind: string; contract: { strike: number; expiry: string }; quantity: string; premium_yield: string }[] = await db("backtest_actions")
+  if (dates.length === 0) return { recordedOf: () => ({ premiumYield: null, delta: null }), breakEvenFloorOf: () => null };
+  const session: { engine_version: number | null; call_strike: string | null } | undefined = await db("backtest_sessions").where({ id: sessionId }).first("engine_version", db.raw("settings_snapshot->'baseline'->>'callStrike' as call_strike"));
+  const floorsRecorded = (session?.engine_version ?? 0) >= 3;
+  const sales: { date: string; kind: string; contract: { strike: number; expiry: string }; quantity: string; premium_yield: string | null; delta: string | null; cost_floor: string | null; chosen_because: string | null }[] = await db("backtest_actions")
     .where({ session_id: sessionId, symbol, outcome: "filled" })
     .whereIn("kind", ["open_cash_secured_put", "open_covered_call"])
     .whereBetween("trading_date", [dates[0]!, dates.at(-1)!])
-    .whereRaw("jsonb_exists(candidate_scores, 'premiumYield')")
-    .select(db.raw("trading_date::text as date"), "kind", "contract", "quantity", db.raw("candidate_scores->>'premiumYield' as premium_yield"));
+    .whereNotNull("candidate_scores")
+    .select(db.raw("trading_date::text as date"), "kind", "contract", "quantity", db.raw("candidate_scores->>'premiumYield' as premium_yield"), db.raw("candidate_scores->>'delta' as delta"), db.raw("candidate_scores->>'costFloor' as cost_floor"), "chosen_because");
   const keyOf = (date: string, right: "C" | "P", strike: number, expiry: string) => `${date}|${right}|${Math.round(strike * 10_000)}|${expiry}`;
-  const totals = new Map<string, { weighted: number; contracts: number }>();
+  const totals = new Map<string, { weightedYield: number; yieldContracts: number; weightedDelta: number; deltaContracts: number }>();
+  const floors = new Map<string, number>();
   for (const sale of sales) {
-    const key = keyOf(sale.date, sale.kind === "open_covered_call" ? "C" : "P", Number(sale.contract.strike), sale.contract.expiry);
-    const total = totals.get(key) ?? { weighted: 0, contracts: 0 };
-    total.weighted += Number(sale.premium_yield) * Number(sale.quantity);
-    total.contracts += Number(sale.quantity);
+    const right = sale.kind === "open_covered_call" ? "C" : "P";
+    const key = keyOf(sale.date, right, Number(sale.contract.strike), sale.contract.expiry);
+    const total = totals.get(key) ?? { weightedYield: 0, yieldContracts: 0, weightedDelta: 0, deltaContracts: 0 };
+    if (sale.premium_yield !== null) {
+      total.weightedYield += Number(sale.premium_yield) * Number(sale.quantity);
+      total.yieldContracts += Number(sale.quantity);
+    }
+    if (sale.delta !== null) {
+      total.weightedDelta += Number(sale.delta) * Number(sale.quantity);
+      total.deltaContracts += Number(sale.quantity);
+    }
     totals.set(key, total);
+    // Calls on held shares ("on the free shares"), their floor a break-even: the whole rule, or its second step.
+    const onHeldShares = right === "C" && (sale.chosen_because ?? "").includes("on the free shares");
+    const breakEvenRule = session?.call_strike === "above_break_even" || (sale.chosen_because ?? "").includes("at or above the break-even");
+    if (floorsRecorded && onHeldShares && breakEvenRule && sale.cost_floor !== null) floors.set(key, Math.max(floors.get(key) ?? Number.NEGATIVE_INFINITY, Number(sale.cost_floor)));
   }
-  return (date, right, strike, expiry) => {
-    if (strike === null || expiry === null) return null;
-    const total = totals.get(keyOf(date, right, strike, expiry));
-    return total && total.contracts > 0 ? total.weighted / total.contracts : null;
+  return {
+    recordedOf: (date, right, strike, expiry) => {
+      const total = strike === null || expiry === null ? undefined : totals.get(keyOf(date, right, strike, expiry));
+      return {
+        premiumYield: total && total.yieldContracts > 0 ? total.weightedYield / total.yieldContracts : null,
+        delta: total && total.deltaContracts > 0 ? total.weightedDelta / total.deltaContracts : null,
+      };
+    },
+    breakEvenFloorOf: (date, strike, expiry) => (strike === null || expiry === null ? null : (floors.get(keyOf(date, "C", strike, expiry)) ?? null)),
   };
 }
 
