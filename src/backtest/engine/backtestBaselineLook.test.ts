@@ -252,6 +252,59 @@ describe("selectBaselineCandidates", () => {
   });
 });
 
+describe("runBaselineLook with the entry whichever ranks higher", () => {
+  // A flat WHL with $100,000 free: the best put (entry range) and the best Covered Call (the Calls' range) are compared by
+  // the Ranking (premium yield here); the look's entry is the winner's kind only.
+  const expiry = "2026-03-27";
+  const strikes = [90, 95, 100, 105, 110];
+  function look(quotes: SymbolFileQuote[], ledger: SimulatedLedger = createSimulatedLedger(100_000, easternInstant("2026-02-23", 9, 30)), baseline: Partial<BacktestBaselineSettings> = {}) {
+    let actionNumber = 0;
+    const lookSymbol = {
+      profile: { symbol: "WHL", calendarChecksApply: false, earnings: [] },
+      market: { todayIso, quotes, openInterestByContract: new Map(), previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), stockPrice, riskFreeRatePercent: riskFreeRate * 100 },
+      splitFactorToday: 1,
+      optionContractsRepresentable: true,
+    } as unknown as BacktestLookSymbol;
+    const settings = { trading: { spreadCostChargedPct: 50 }, baseline: { ...defaultBacktestBaselineSettings, entry: "higher_yield", minAbsDelta: 0.05, maxAbsDelta: 0.5, looks: "first_look", callStrike: "delta_range", ...baseline } } as unknown as EffectiveBacktestSettings;
+    const heldShareLegs = positionsOfSymbol(ledger, "WHL").flatMap((position) => legsOfPosition(ledger, position.id)).filter((leg) => leg.legType === "stock" && leg.exitAt === null);
+    const context = { todayIso, calendar: oneDayCalendar, symbols: [lookSymbol], settings, ledger, priceByLegId: new Map(heldShareLegs.map((leg) => [leg.id, stockPrice])), nextActionId: () => `action-${++actionNumber}` } as unknown as BacktestLookContext;
+    return runBaselineLook(context);
+  }
+
+  it("sells only the kind whose best contract ranks higher, saying what it beat", async () => {
+    const result = await look(strikes.flatMap((strike) => [quote(expiry, strike, "C"), quote(expiry, strike, "P")]));
+    expect(result.actions.length).toBeGreaterThan(0);
+    expect(new Set(result.actions.map((action) => action.kind)).size).toBe(1);
+    const [, winner, loser] = /over (?:puts|Covered Calls): the best (?:put|Covered Call)'s ([\d.]+)% against the best (?:put|Covered Call)'s ([\d.]+)%\)/.exec(result.actions[0]!.chosenBecause!) ?? [];
+    expect(Number(winner)).toBeGreaterThanOrEqual(Number(loser));
+    expect(result.actions[0]!.candidateScores!.premiumYield as number).toBeCloseTo(Number(winner) / 100, 3);
+  });
+
+  it("takes the only kind quoted", async () => {
+    const callsOnly = await look(strikes.map((strike) => quote(expiry, strike, "C")));
+    expect(callsOnly.actions.map((action) => action.kind)).toEqual(["open_covered_call"]);
+    expect(callsOnly.actions[0]!.chosenBecause).not.toMatch(/against/);
+    const putsOnly = await look(strikes.map((strike) => quote(expiry, strike, "P")));
+    expect(putsOnly.actions.map((action) => action.kind)).toEqual(["open_cash_secured_put"]);
+  });
+
+  it("weighs puts only while free lots wait for a call, as a Covered Call entry waits", async () => {
+    // 100 shares assigned at $150 with the stock at $100: no call at or above their average, so they stay uncovered.
+    const ledger = createSimulatedLedger(100_000, easternInstant("2026-02-23", 9, 30));
+    const put = openCashSecuredPut(ledger, { symbol: "WHL", expiryDate: "2026-02-27", strike: 150, contracts: 1, fillPrice: 1, at: easternInstant("2026-02-23", 10, 0), actionId: "put", splitFactorToday: 1 });
+    settleExpiry(ledger, { legId: put.legId, expiryClose: 140 });
+    const result = await look(strikes.flatMap((strike) => [quote(expiry, strike, "C"), quote(expiry, strike, "P")]), ledger, { callStrike: "above_average_cost", entryWhenSharesUncovered: "wait" });
+    expect(result.actions.length).toBeGreaterThan(0);
+    expect(new Set(result.actions.map((action) => action.kind))).toEqual(new Set(["open_cash_secured_put"]));
+  });
+
+  it("is a valid entry, and keeps the Covered Call entry's checks", () => {
+    expect(validateBaselineSettings({ ...defaultBacktestBaselineSettings, entry: "higher_yield" })).toBeNull();
+    expect(validateBaselineSettings({ ...defaultBacktestBaselineSettings, entry: "higher_yield", callStrike: "none" })).toMatch(/callStrike none/);
+    expect(validateBaselineSettings({ ...defaultBacktestBaselineSettings, entry: "higher_yield", maxSharesPctOfAccount: 50 })).toBeNull();
+  });
+});
+
 describe("runBaselineLook with the average-cost floor", () => {
   // 100 WHL shares assigned at $150 the week before; today the stock is at $100 and calls run out to $150 over 25 days.
   const expiry = "2026-03-27";

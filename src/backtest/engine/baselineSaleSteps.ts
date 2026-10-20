@@ -272,15 +272,18 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
       edgeYield,
     });
   }
-  const rankOf = (candidate: BaselineCandidate) => {
-    if (input.model?.rankByEdgeYield) return candidate.edgeYield!;
-    if (input.ranking === "time_value") return candidate.timeValue;
-    if (input.ranking === "premium_dollars") return candidate.fillPrice;
-    if (input.ranking === "premium_per_day") return candidate.fillPrice / Math.max(candidate.dte, 1);
-    return candidate.premiumYield;
-  };
+  const rankOf = (candidate: BaselineCandidate) => baselineCandidateRank(candidate, input.ranking, input.model?.rankByEdgeYield ?? false);
   candidates.sort((a, b) => (input.nearestExpiryFirst ? a.expiry.localeCompare(b.expiry) : 0) || rankOf(b) - rankOf(a) || a.expiry.localeCompare(b.expiry) || a.strike - b.strike);
   return { candidates, rejections };
+}
+
+/** A candidate's measure in the ranking: Edge Yield when the model ranks by it, else the ranking's own (premium yield when none). */
+export function baselineCandidateRank(candidate: BaselineCandidate, ranking: BaselineCandidateInput["ranking"], rankByEdgeYield: boolean): number {
+  if (rankByEdgeYield) return candidate.edgeYield!;
+  if (ranking === "time_value") return candidate.timeValue;
+  if (ranking === "premium_dollars") return candidate.fillPrice;
+  if (ranking === "premium_per_day") return candidate.fillPrice / Math.max(candidate.dte, 1);
+  return candidate.premiumYield;
 }
 
 /** "spread 40, volume 12": the rules that left contracts out, most first. */
@@ -595,60 +598,83 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     if (lastCallRejections) input.noteNoCandidate?.({ order: "calls", right: "C", rejections: lastCallRejections, rules: lastCallRules?.() ?? null });
   }
 
-  // 2. The entry with the free cash. A Covered Call entry waits while free round lots are still uncovered, unless it buys every share.
-  const coveredCallEntry = baseline.entry === "covered_call";
+  // 2. The entry with the free cash: a Cash-Secured Put, a Covered Call, or (higher_yield, Marcelo 2026-10-20) whichever of
+  // the two ranks higher at the look by the session's Ranking, each held to its own rules and filled down within its own
+  // type. A Covered Call entry waits while free round lots are still uncovered, unless it buys every share.
+  type EntryKind = "put" | "covered_call";
+  const entryKindLabel: Record<EntryKind, string> = { put: "put", covered_call: "Covered Call" };
+  const entryKindPlural: Record<EntryKind, string> = { put: "puts", covered_call: "Covered Calls" };
   // With the ladder, the entries' room: the shares' budget less the shares held at cost and the open puts' collateral.
   const ladderEntryRoomDollars = () => (ladderState === null ? Number.POSITIVE_INFINITY : ladderBudget(ladderBase(ladderState, book.accountValueToday(), book.tickerWeight()), baseline.ladderSharesPct).sharesBudget - heldSharesCostToday() - book.openPutCollateral());
   // Room for the Covered Call entries' shares under maxSharesPctOfAccount, in round lots at today's fill (unbounded at 100).
-  const shareCapLots = () => {
-    if (coveredCallEntry && ladderState !== null) return ladderShareLots(ladderEntryRoomDollars(), stockFillToday);
-    if (!coveredCallEntry || baseline.maxSharesPctOfAccount >= 100) return Number.POSITIVE_INFINITY;
+  const shareCapLots = (kind: EntryKind) => {
+    if (kind === "covered_call" && ladderState !== null) return ladderShareLots(ladderEntryRoomDollars(), stockFillToday);
+    if (kind !== "covered_call" || baseline.maxSharesPctOfAccount >= 100) return Number.POSITIVE_INFINITY;
     const room = (book.accountValueToday() * baseline.maxSharesPctOfAccount) / 100 - book.heldSharesToday() * stockPrice;
     return room > 0 ? Math.floor(room / (stockFillToday * sharesPerContract)) : 0;
   };
+  const buyEveryShare = baseline.entryWhenSharesUncovered === "buy";
+  const floorAfterPurchase = baseline.entryCallStrike === "above_average_after_purchase";
+  // The average once `contracts` more lots are bought at today's fill (the fill itself when none are held).
+  const averageCostAfterBuying = (contracts: number) => {
+    const averageCost = book.heldSharesAverageCostToday();
+    const sharesHeld = book.heldSharesToday();
+    return averageCost === null || !(sharesHeld > 0) ? stockFillToday : (sharesHeld * averageCost + contracts * sharesPerContract * stockFillToday) / (sharesHeld + contracts * sharesPerContract);
+  };
+  /** Whether an entry of the kind may be made at this look: a Covered Call not while free lots wait for a call (unless it buys every share), a put not once the ladder's shares budget is used. */
+  const entryAllowed = (kind: EntryKind) => (kind === "covered_call" ? uncoveredLots < 1 || buyEveryShare : ladderEntryRoomDollars() > 0);
+  /** An entry kind's candidates under its rules: a Covered Call's lowest strike from the Entry call strike setting. */
+  const entryCandidatesOf = (kind: EntryKind) => {
+    // Selection takes the lowest the average after the purchase can be (today's fill or the average now); each candidate is then held to its own.
+    const heldAverageNow = kind === "covered_call" && floorAfterPurchase ? book.heldSharesAverageCostToday() : null;
+    const minimumStrike = kind === "put" ? null : baseline.entryCallStrike === "above_purchase_price" ? stockFillToday : floorAfterPurchase ? Math.min(stockFillToday, heldAverageNow ?? stockFillToday) : null;
+    const right: "C" | "P" = kind === "put" ? "P" : "C";
+    return { kind, right, minimumStrike, ...select(right, minimumStrike) };
+  };
+  const rankOf = (candidate: BaselineCandidate) => baselineCandidateRank(candidate, baseline.ranking === "edge_yield" ? undefined : baseline.ranking, baseline.ranking === "edge_yield");
+  const formatRank = (value: number) => (baseline.ranking === "premium_yield" || baseline.ranking === "edge_yield" ? `${(value * 100).toFixed(1)}%` : value.toFixed(2));
   const enterWithFreeCash = () => {
-    const buyEveryShare = coveredCallEntry && baseline.entryWhenSharesUncovered === "buy";
-    if (coveredCallEntry && uncoveredLots >= 1 && !buyEveryShare) return;
-    // A Cash-Secured Put entry with the ladder stands in for the shares' purchase: nothing once the shares' budget is used.
-    if (!coveredCallEntry && ladderEntryRoomDollars() <= 0) return;
+    const kinds = (baseline.entry === "higher_yield" ? (["put", "covered_call"] as const) : [baseline.entry]).filter(entryAllowed);
+    if (kinds.length === 0) return;
     // The drop-risk filters: no new entry while the stock is stretched or its IV Rank is high (the cash waits).
     if (input.entryBlockedBecause) {
       notes.push(`${symbol}: no new entry (${input.entryBlockedBecause})`);
       input.noteNoSale?.("entry_filter");
       return;
     }
-    const entryRight = baseline.entry === "put" ? "P" : "C";
-    const floorAfterPurchase = coveredCallEntry && baseline.entryCallStrike === "above_average_after_purchase";
-    // The average once `contracts` more lots are bought at today's fill (the fill itself when none are held).
-    const averageCostAfterBuying = (contracts: number) => {
-      const averageCost = book.heldSharesAverageCostToday();
-      const sharesHeld = book.heldSharesToday();
-      return averageCost === null || !(sharesHeld > 0) ? stockFillToday : (sharesHeld * averageCost + contracts * sharesPerContract * stockFillToday) / (sharesHeld + contracts * sharesPerContract);
-    };
-    // Selection takes the lowest the average after the purchase can be (today's fill or the average now); each candidate is then held to its own.
-    const heldAverageNow = floorAfterPurchase ? book.heldSharesAverageCostToday() : null;
-    const entryMinimumStrike = !coveredCallEntry ? null : baseline.entryCallStrike === "above_purchase_price" ? stockFillToday : floorAfterPurchase ? Math.min(stockFillToday, heldAverageNow ?? stockFillToday) : null;
-    const { candidates, rejections, describeRules } = select(entryRight, entryMinimumStrike);
-    if (candidates.length === 0) {
-      notes.push(`${symbol}: no ${baseline.entry === "put" ? "put" : "new Covered Call"} (${describeRejections(rejections) || "no quotes"})`);
-      input.noteNoCandidate?.({ order: "entry", right: entryRight, rejections, rules: describeRules?.() ?? null });
-      // Lots the Covered Call entries had cash and room for (a put entry's depend on a strike: unknown).
-      const wanted = coveredCallEntry ? Math.min(Math.floor(book.freeCash() / (stockFillToday * sharesPerContract)), shareCapLots()) : null;
-      if (wanted === null || wanted >= 1) noteOrderShortfall({ step: "entry", right: entryRight, wanted, filled: 0, unsold: wanted, cashCut: false, anyCandidate: false, best: null });
+    const options = kinds.map(entryCandidatesOf);
+    const withCandidates = options.filter((option) => option.candidates.length > 0);
+    if (withCandidates.length === 0) {
+      for (const option of options) {
+        notes.push(`${symbol}: no ${option.kind === "put" ? "put" : "new Covered Call"} (${describeRejections(option.rejections) || "no quotes"})`);
+        input.noteNoCandidate?.({ order: "entry", right: option.right, rejections: option.rejections, rules: option.describeRules?.() ?? null });
+        // Lots the Covered Call entries had cash and room for (a put entry's depend on a strike: unknown).
+        const wanted = option.kind === "covered_call" ? Math.min(Math.floor(book.freeCash() / (stockFillToday * sharesPerContract)), shareCapLots("covered_call")) : null;
+        if (wanted === null || wanted >= 1) noteOrderShortfall({ step: "entry", right: option.right, wanted, filled: 0, unsold: wanted, cashCut: false, anyCandidate: false, best: null });
+      }
       return;
     }
+    // With both kinds open, the one whose best contract ranks higher (a tie: the put); its order then runs as that entry's.
+    const ranked = withCandidates.map((option) => ({ option, best: bestOf(option.candidates) })).filter((entry) => entry.best !== null);
+    if (ranked.length === 0) return;
+    ranked.sort((a, b) => rankOf(b.best!) - rankOf(a.best!));
+    const { kind, right: entryRight, minimumStrike: entryMinimumStrike, candidates } = ranked[0]!.option;
+    const coveredCallEntry = kind === "covered_call";
+    const runnerUp = ranked[1] ?? null;
+    // The kinds' contest is between their best contracts: the one sold can be a later one (the best did not fit).
+    const comparedWith = runnerUp ? ` (${entryKindPlural[kind]} over ${entryKindPlural[runnerUp.option.kind]}: the best ${entryKindLabel[kind]}'s ${formatRank(rankOf(ranked[0]!.best!))} against the best ${entryKindLabel[runnerUp.option.kind]}'s ${formatRank(rankOf(runnerUp.best!))})` : "";
     const entryLimitsFor = (candidate: BaselineCandidate) => {
-      const byCash = baselineContractsForCash(book.freeCash(), candidate, baseline.entry, stockFillToday, commissions);
+      const byCash = baselineContractsForCash(book.freeCash(), candidate, kind, stockFillToday, commissions);
       let byRoom = Number.POSITIVE_INFINITY;
       if (baseline.maxAccountPctPerStock < 100) {
         const exposure = book.openPositionsCapitalAtRisk();
         const room = (book.netLiquidationValue() * baseline.maxAccountPctPerStock) / 100 - exposure;
-        const perContract = ((baseline.entry === "put" ? candidate.strike : stockFillToday) - candidate.fillPrice) * sharesPerContract;
+        const perContract = ((kind === "put" ? candidate.strike : stockFillToday) - candidate.fillPrice) * sharesPerContract;
         byRoom = room > 0 && perContract > 0 ? Math.floor(room / perContract) : 0;
       }
       // With the ladder, a Cash-Secured Put entry's collateral (strike × 100 a contract) fits the entries' room.
       const byLadderRoom = !coveredCallEntry && ladderState !== null ? ladderShareLots(ladderEntryRoomDollars(), candidate.strike) : Number.POSITIVE_INFINITY;
-      return { byCash, byRoom: Math.min(byRoom, shareCapLots(), byLadderRoom), byVolume: candidate.volumeCap };
+      return { byCash, byRoom: Math.min(byRoom, shareCapLots(kind), byLadderRoom), byVolume: candidate.volumeCap };
     };
     // The order wants what the room holds (the shares' cap, maxAccountPctPerStock); with neither, what the cash pays for.
     const best = bestOf(candidates);
@@ -666,12 +692,12 @@ export function planBaselineSales(input: BaselineSalesInput): void {
       const contracts = Math.min(limits.byCash, limits.byRoom, limits.byVolume);
       cashCut ||= Number.isFinite(limits.byRoom) && limits.byCash < Math.min(limits.byRoom, limits.byVolume);
       if (contracts < 1) continue;
-      const costFloor = floorAfterPurchase ? averageCostAfterBuying(contracts) : entryMinimumStrike;
-      if (floorAfterPurchase && candidate.strike < costFloor! - 1e-9) {
+      const costFloor = coveredCallEntry && floorAfterPurchase ? averageCostAfterBuying(contracts) : entryMinimumStrike;
+      if (coveredCallEntry && floorAfterPurchase && candidate.strike < costFloor! - 1e-9) {
         belowAverageAfterPurchase++;
         continue;
       }
-      book.sell(baseline.entry === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${baseline.entry === "put" ? "put" : "Covered Call"} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, buyEveryShare, { ...orderScores(wanted, candidates, candidate, best), ...entrySharesAverageCost });
+      book.sell(kind === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${entryKindLabel[kind]} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : comparedWith}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, coveredCallEntry && buyEveryShare, { ...orderScores(wanted, candidates, candidate, best), ...entrySharesAverageCost });
       entriesMade++;
       contractsSold += contracts;
     }

@@ -27,8 +27,11 @@ export type BacktestDecisionMaker = "rules" | "llm" | "baseline";
  * Everything is held to expiry: no buybacks, rolls, closes, stops, breakers or Signals.
  */
 export interface BacktestBaselineSettings {
-  /** How free cash enters a stock: a cash-secured put, or a Covered Call entry. */
-  entry: "put" | "covered_call";
+  /**
+   * How free cash enters a stock: a cash-secured put, a Covered Call entry, or (higher_yield, Marcelo 2026-10-20) at each
+   * look whichever of the two ranks higher by the Ranking, each held to its own rules.
+   */
+  entry: "put" | "covered_call" | "higher_yield";
   /** The |delta| range, from each quote's own implied volatility. */
   minAbsDelta: number;
   maxAbsDelta: number;

@@ -130,7 +130,7 @@ export async function listAnalysisSessions(symbol: string, connection: Knex = db
       const period = `${row.start_date}|${row.end_date}`;
       const cashCagr = cashCagrByPeriod.get(period) ?? cashCagrByPeriod.set(period, treasuryBillCagr(rates, row.start_date, row.end_date)).get(period)!;
       const maxDrawdown = Number(row.metrics.maxDrawdown);
-      const ladder = baseline !== null && baseline.entry === "covered_call" && baseline.putsWhenNoCall === "reserve_ladder";
+      const ladder = baseline !== null && baseline.entry !== "put" && baseline.putsWhenNoCall === "reserve_ladder";
       const symbols = row.symbols ?? [row.symbol];
       const potDollars = symbols.length === 1 ? Number(row.starting_value) : (row.symbol_settings?.[symbol]?.potDollars ?? null);
       const buyAndHoldMaxDrawdown = row.baseline_metrics ? Number(row.baseline_metrics.maxDrawdown) : null;

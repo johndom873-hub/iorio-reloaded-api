@@ -183,7 +183,7 @@ export function validateBacktestSettingsOverrides(
 
 /** The baseline wheel's values (BacktestBaselineSettings): null when they are valid. */
 export function validateBaselineSettings(values: Record<string, unknown>): string | null {
-  if (values.entry !== "put" && values.entry !== "covered_call") return "baseline.entry must be put or covered_call.";
+  if (values.entry !== "put" && values.entry !== "covered_call" && values.entry !== "higher_yield") return "baseline.entry must be put, covered_call or higher_yield.";
   for (const field of ["minAbsDelta", "maxAbsDelta", "callMinAbsDelta", "callMaxAbsDelta"] as const) {
     const value = values[field];
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1) return `baseline.${field} must be a number above 0 and at most 1.`;
@@ -194,11 +194,11 @@ export function validateBaselineSettings(values: Record<string, unknown>): strin
   }
   if (typeof values.maxSpreadPctOfMid !== "number" || !Number.isFinite(values.maxSpreadPctOfMid) || values.maxSpreadPctOfMid <= 0 || values.maxSpreadPctOfMid > 200) return "baseline.maxSpreadPctOfMid must be a number above 0 and at most 200.";
   if (values.callStrike !== "delta_range" && values.callStrike !== "above_share_cost" && values.callStrike !== "above_break_even" && values.callStrike !== "above_latest_entry" && values.callStrike !== "above_average_cost" && values.callStrike !== "above_average_cost_else_break_even" && values.callStrike !== "none") return "baseline.callStrike must be delta_range, above_share_cost, above_break_even, above_latest_entry, above_average_cost, above_average_cost_else_break_even or none.";
-  if (values.callStrike === "none" && values.entry === "covered_call") return "baseline.callStrike none cannot go with a Covered Call entry, which sells a call on its shares.";
+  if (values.callStrike === "none" && values.entry !== "put") return "baseline.callStrike none cannot go with a Covered Call entry, which sells a call on its shares.";
   if (values.entryCallStrike !== "any" && values.entryCallStrike !== "above_purchase_price" && values.entryCallStrike !== "above_average_after_purchase") return "baseline.entryCallStrike must be any, above_purchase_price or above_average_after_purchase.";
   if (values.entryWhenSharesUncovered !== "wait" && values.entryWhenSharesUncovered !== "buy") return "baseline.entryWhenSharesUncovered must be wait or buy.";
   if (typeof values.maxSharesPctOfAccount !== "number" || !Number.isFinite(values.maxSharesPctOfAccount) || values.maxSharesPctOfAccount <= 0 || values.maxSharesPctOfAccount > 100) return "baseline.maxSharesPctOfAccount must be a number above 0 and at most 100.";
-  if (values.maxSharesPctOfAccount < 100 && values.entry !== "covered_call") return "baseline.maxSharesPctOfAccount needs baseline.entry set to Covered Call: it caps the new Covered Calls' shares. Set baseline.maxSharesPctOfAccount to 100 to use Cash-Secured Put entries.";
+  if (values.maxSharesPctOfAccount < 100 && values.entry === "put") return "baseline.maxSharesPctOfAccount needs baseline.entry set to Covered Call: it caps the new Covered Calls' shares. Set baseline.maxSharesPctOfAccount to 100 to use Cash-Secured Put entries.";
   if (typeof values.minCallYieldPct !== "number" || !Number.isFinite(values.minCallYieldPct) || values.minCallYieldPct < 0 || values.minCallYieldPct > 1000) return "baseline.minCallYieldPct must be a number from 0 (any) to 1000.";
   if (values.minCallYieldAppliesTo !== "every_call" && values.minCallYieldAppliesTo !== "new_covered_calls") return "baseline.minCallYieldAppliesTo must be every_call or new_covered_calls.";
   if (values.putsWhenNoCall !== "off" && values.putsWhenNoCall !== "reserve_ladder") return "baseline.putsWhenNoCall must be off or reserve_ladder.";

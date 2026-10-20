@@ -144,10 +144,11 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Entry with free cash",
     unit: "choice",
     editable: true,
-    note: "only with the baseline wheel as decision maker. At every look free round lots get the call with the highest premium yield, free cash the entry with the highest premium yield; everything is held to expiry. With the ladder, a Cash-Secured Put entry's collateral stays within the ladder's Shares at most, and the ladder starts once it is assigned",
+    note: "only with the baseline wheel as decision maker. At every look free round lots get the call with the highest premium yield, free cash the entry with the highest premium yield; everything is held to expiry. With the ladder, a Cash-Secured Put entry's collateral stays within the ladder's Shares at most, and the ladder starts once it is assigned. Whichever ranks higher: at each look the best put (in the entry |delta| range) and the best Covered Call (in the Calls' range, under the Entry call strike rule) are compared by the Ranking, and the look's entry is the winner's kind only",
     choices: [
       { value: "put", label: "Cash-Secured Put" },
       { value: "covered_call", label: "Covered Call (100 shares bought and one call sold on them)" },
+      { value: "higher_yield", label: "Put or Covered Call, whichever ranks higher" },
     ],
   },
   { path: "baseline.minAbsDelta", label: "|delta| from", unit: "number", editable: true, note: "from each quote's own implied volatility" },
@@ -472,7 +473,7 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
     rows: [
       ...["baseline.minAbsDelta", "baseline.maxAbsDelta"].map((path) => ({
         path,
-        appliesWhen: { anyOf: [{ path: "baseline.callDeltaRange", oneOf: ["entry_range"] }, { path: "baseline.entry", oneOf: ["put"] }, { path: "baseline.ladderPutDeltaRange", oneOf: ["delta_range"] }], explanation: "Applies only when Calls or Puts use this range: Calls with the same range as the Puts, Cash-Secured Put entries, or ladder Puts with the |delta| range." },
+        appliesWhen: { anyOf: [{ path: "baseline.callDeltaRange", oneOf: ["entry_range"] }, { path: "baseline.entry", oneOf: ["put", "higher_yield"] }, { path: "baseline.ladderPutDeltaRange", oneOf: ["delta_range"] }], explanation: "Applies only when Calls or Puts use this range: Calls with the same range as the Puts, Cash-Secured Put entries, or ladder Puts with the |delta| range." },
       })),
       { path: "baseline.minDte" },
       { path: "baseline.maxDte" },
