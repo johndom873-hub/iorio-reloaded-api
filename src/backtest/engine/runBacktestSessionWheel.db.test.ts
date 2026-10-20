@@ -328,8 +328,8 @@ describe("a session through the wheel", () => {
     }
     const firstCycleDetail = (await loadBacktestCycleDetail(session.sessionId, "WHLA", 1))!;
     expect(firstCycleDetail.timeline.find((row) => row.label.startsWith("Put assigned"))).toMatchObject({ tradingDate: "2026-04-24", bucket: "csp", quantity: 500, strike: 97, stockPrice: 97, stockPriceSource: "execution" });
-    // The shares assigned on Friday 24 April were covered on Monday: a weekend is no uncovered stretch.
-    expect(firstCycleDetail.uncoveredStretches).toEqual([]);
+    // The shares assigned on Friday 24 April were covered on Monday: a weekend is no stock-only stretch.
+    expect(firstCycleDetail.stockOnlyStretches).toEqual([]);
     // Nothing was sold on the first day (no previous session's volume): a gap of one session before the first cycle, its
     // reason unrecorded (Pluto's decisions record no shortfalls); the second cycle opened the session after the first closed.
     expect(detail.cycleGaps).toEqual([

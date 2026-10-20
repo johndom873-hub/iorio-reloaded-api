@@ -531,7 +531,7 @@ async function loadSessionBookCounts(sessionId: string): Promise<BacktestSession
   return { filledActions, blockedActions, fills };
 }
 
-// A cycle's timeline and uncovered stretches are read only when its row is opened (loadBacktestCycleDetail).
+// A cycle's timeline and stock-only stretches are read only when its row is opened (loadBacktestCycleDetail).
 const cycleSummaryColumns = ["symbol", "cycle_number", "status", "opened_at", "closed_at", "recovery_sessions", "age_sessions", "total_dollars", "net_premium_dollars", "shares_held", "break_even_per_share", "buckets", "data_flags"];
 
 async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
@@ -580,12 +580,12 @@ async function loadSessionCycleGaps(sessionId: string): Promise<BacktestCycleGap
   }));
 }
 
-/** A cycle's timeline and uncovered stretches; null for a session run before cycles kept them. Throws 404 for a cycle the session does not have. */
+/** A cycle's timeline and stock-only stretches; null for a session run before cycles kept them. Throws 404 for a cycle the session does not have. */
 export async function loadBacktestCycleDetail(sessionId: string, symbol: string, cycleNumber: number): Promise<BacktestCycleDetail | null> {
   await requireSessionExists(sessionId);
-  const row: { timeline: BacktestCycleDetail["timeline"] | null; uncovered_stretches: BacktestCycleDetail["uncoveredStretches"] | null } | undefined = await db("backtest_cycles")
+  const row: { timeline: BacktestCycleDetail["timeline"] | null; stock_only_stretches: BacktestCycleDetail["stockOnlyStretches"] | null } | undefined = await db("backtest_cycles")
     .where({ session_id: sessionId, symbol, cycle_number: cycleNumber })
-    .first("timeline", "uncovered_stretches");
+    .first("timeline", "stock_only_stretches");
   if (!row) throw new BacktestRequestError(`The session has no cycle ${symbol} #${cycleNumber}.`, 404);
   if (row.timeline === null) return null;
   const sales = await loadSaleRecords(sessionId, symbol, row.timeline);
@@ -598,7 +598,7 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
       return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]! };
     }),
     // Stretches stored before their no-candidate detail was kept have none.
-    uncoveredStretches: (row.uncovered_stretches ?? []).map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null })),
+    stockOnlyStretches: (row.stock_only_stretches ?? []).map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null })),
   };
 }
 

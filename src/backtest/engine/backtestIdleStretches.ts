@@ -1,6 +1,6 @@
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
-import { backtestCandidateChecks, type BacktestCycle, type BacktestCycleGap, type BacktestIdleStretch, type BacktestNoCandidateDetail, type BacktestNoSaleDays, type BacktestOrderShortfall, type BacktestUncoveredStretch } from "../backtestTypes.js";
+import { backtestCandidateChecks, type BacktestCycle, type BacktestCycleGap, type BacktestIdleStretch, type BacktestNoCandidateDetail, type BacktestNoSaleDays, type BacktestOrderShortfall, type BacktestStockOnlyStretch } from "../backtestTypes.js";
 import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLook.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import type { LedgerLeg } from "./ledger/simulatedLedger.js";
@@ -10,15 +10,16 @@ import type { LedgerLeg } from "./ledger/simulatedLedger.js";
 //   gap               = the sessions of a symbol with no cycle open: before its first cycle (from its first session day),
 //                       strictly between a cycle's closing day and the next one's opening day, and after its last closed
 //                       cycle (to its last session day). A cycle that opens the session after the previous closed makes none.
-//   uncovered stretch = sessions of a cycle with shares held and no call on some of them from the session's start (its
-//                       Eastern midnight) to its end (the next midnight): shares handed over at a Friday expiry and
-//                       covered again on Monday make none. Consecutive sessions with the same shares uncovered and held
-//                       make one stretch.
+//   stock only        = sessions of a cycle with shares held at the session's start (its Eastern midnight) and end (the
+//                       next midnight) and no option open at any moment between, a put or a call (Marcelo 2026-10-20):
+//                       shares handed over at a Friday expiry and covered again on Monday make none, and neither do
+//                       shares with a call on some of them or a put sold under them. Consecutive sessions with the same
+//                       shares held make one stretch.
 //   stock move        = C(last idle day) ÷ C(the session before the first idle day) − 1, on IBKR's split-adjusted closes
 //                       (a split inside the stretch is no fall); null when either close is missing.
 //   no-sale days      = per reason, the idle days on which any look recorded it (a day counts under every reason seen);
 //                       unrecorded = the idle days with none. Gaps read the entry order: the Entry filters (extension z,
-//                       IV Rank) and its shortfalls (cash, volume, no candidate). Uncovered stretches read the calls on the
+//                       IV Rank) and its shortfalls (cash, volume, no candidate). Stock-only stretches read the calls on the
 //                       free shares: their shortfalls (volume, no candidate) and a ladder put sold instead of them.
 //
 // Example: a cycle closes Fri 9 Apr at expiry (close $63.00); the IV Rank filter blocks Mon 12 to Wed 14 Apr; the next
@@ -172,23 +173,18 @@ export function buildCycleGaps(input: {
 
 const isActiveAt = (leg: Pick<LedgerLeg, "entryAt" | "exitAt">, atMs: number) => leg.entryAt.getTime() <= atMs && (leg.exitAt === null || leg.exitAt.getTime() > atMs);
 
-/** Shares held and shares with no call on them at an instant, on the ledger's (cycle) scale. */
-function shareCoverageAt(legs: readonly LedgerLeg[], atMs: number): { held: number; uncovered: number } {
+/** Shares held at an instant, on the ledger's (cycle) scale. */
+function sharesHeldAt(legs: readonly LedgerLeg[], atMs: number): number {
   let held = 0;
-  let callShares = 0;
-  for (const leg of legs) {
-    if (!isActiveAt(leg, atMs)) continue;
-    if (leg.legType === "stock" && leg.side === "long") held += leg.quantity * leg.multiplier;
-    else if (leg.legType === "option" && leg.side === "short" && leg.optionType === "call") callShares += leg.quantity * leg.multiplier;
-  }
-  return { held, uncovered: Math.max(0, held - callShares) };
+  for (const leg of legs) if (leg.legType === "stock" && leg.side === "long" && isActiveAt(leg, atMs)) held += leg.quantity * leg.multiplier;
+  return held;
 }
 
 /**
- * A cycle's uncovered stretches, oldest first. `legs` are its symbol's (on the cycle's scale); `sharesAsTradedOn` turns
+ * A cycle's stock-only stretches, oldest first. `legs` are its symbol's (on the cycle's scale); `sharesAsTradedOn` turns
  * its shares into those traded on a day (× the cycle's split factor ÷ the day's).
  */
-export function buildUncoveredStretches(input: {
+export function buildStockOnlyStretches(input: {
   symbol: string;
   cycle: Pick<BacktestCycle, "openedOn" | "closedOn">;
   lastDay: string;
@@ -197,33 +193,34 @@ export function buildUncoveredStretches(input: {
   closes: CloseLookup;
   records: NoSaleRecords;
   sharesAsTradedOn(dateIso: string): number;
-}): BacktestUncoveredStretch[] {
+}): BacktestStockOnlyStretch[] {
   const cycleDays = input.calendar.openDaysBetween(input.cycle.openedOn, input.cycle.closedOn ?? input.lastDay);
   if (cycleDays.length === 0) return [];
   const windowStartMs = easternInstant(cycleDays[0]!, 0, 0).getTime();
   const windowEndMs = easternInstant(addCalendarDays(cycleDays.at(-1)!, 1), 0, 0).getTime();
   const legs = input.legs.filter((leg) => leg.entryAt.getTime() < windowEndMs && (leg.exitAt === null || leg.exitAt.getTime() > windowStartMs));
+  const optionLegs = legs.filter((leg) => leg.legType === "option");
   const reasons = reasonsByDay(input.records, input.symbol, "calls");
-  const stretches: BacktestUncoveredStretch[] = [];
-  let run: { days: string[]; uncovered: number; held: number } | null = null;
+  const stretches: BacktestStockOnlyStretch[] = [];
+  let run: { days: string[]; held: number } | null = null;
   const closeRun = () => {
     if (run === null) return;
-    const scale = input.sharesAsTradedOn(run.days[0]!);
-    stretches.push({ ...idleStretch(run.days, input.closes, reasons, noCandidateDetailOf(run.days, input.records, input.symbol, "calls")), sharesUncovered: run.uncovered * scale, sharesHeld: run.held * scale });
+    stretches.push({ ...idleStretch(run.days, input.closes, reasons, noCandidateDetailOf(run.days, input.records, input.symbol, "calls")), sharesHeld: run.held * input.sharesAsTradedOn(run.days[0]!) });
     run = null;
   };
   for (const dateIso of cycleDays) {
-    const atStart = shareCoverageAt(legs, easternInstant(dateIso, 0, 0).getTime());
-    const atEnd = shareCoverageAt(legs, easternInstant(addCalendarDays(dateIso, 1), 0, 0).getTime() - 1);
-    const uncovered = Math.min(atStart.uncovered, atEnd.uncovered);
-    if (!(uncovered > 0)) {
+    const dayStartMs = easternInstant(dateIso, 0, 0).getTime();
+    const dayEndMs = easternInstant(addCalendarDays(dateIso, 1), 0, 0).getTime();
+    const held = Math.min(sharesHeldAt(legs, dayStartMs), sharesHeldAt(legs, dayEndMs - 1));
+    const optionOpen = optionLegs.some((leg) => leg.entryAt.getTime() < dayEndMs && (leg.exitAt === null || leg.exitAt.getTime() > dayStartMs));
+    if (!(held > 0) || optionOpen) {
       closeRun();
       continue;
     }
-    if (run !== null && run.uncovered === uncovered && run.held === atEnd.held) run.days.push(dateIso);
+    if (run !== null && run.held === held) run.days.push(dateIso);
     else {
       closeRun();
-      run = { days: [dateIso], uncovered, held: atEnd.held };
+      run = { days: [dateIso], held };
     }
   }
   closeRun();

@@ -24,7 +24,7 @@ import type {
   BacktestSessionListItem,
   BacktestSessionsPage,
   BacktestSettingsTemplate,
-  BacktestUncoveredStretch,
+  BacktestStockOnlyStretch,
   CreateBacktestBatchResponse,
   CreateBacktestSessionResponse,
 } from "../backtest/backtestTypes.js";
@@ -1028,12 +1028,12 @@ describe("backtest routes", () => {
         { at, tradingDate: "2026-09-01", label: "Sold put @ 0.50", bucket: "csp", instrument: "option", quantity: 100, strike: 40, expiryDate: "2026-09-04", stockPrice: null, stockPriceSource: null, commissionDollars: 0.68, premiumDollars: 49.32, stockDollars: 0, unrealized: false },
         { at: settledAt, tradingDate: "2026-09-04", label: "Put assigned: shares bought at the strike", bucket: "csp", instrument: "option", quantity: 100, strike: 40, expiryDate: "2026-09-04", stockPrice: 40, stockPriceSource: "execution", commissionDollars: null, premiumDollars: 0, stockDollars: -150, unrealized: false },
       ];
-      const uncoveredStretches: BacktestUncoveredStretch[] = [
-        { firstIdleDay: "2026-09-08", lastIdleDay: "2026-09-09", idleSessions: 2, stockMove: -0.0125, noSaleDays: { extensionZ: 0, ivRank: 0, ladderPutInstead: 0, cash: 0, volume: 0, noCandidate: 2, unrecorded: 0 }, noCandidate: null, sharesUncovered: 100, sharesHeld: 100 },
+      const stockOnlyStretches: BacktestStockOnlyStretch[] = [
+        { firstIdleDay: "2026-09-08", lastIdleDay: "2026-09-09", idleSessions: 2, stockMove: -0.0125, noSaleDays: { extensionZ: 0, ivRank: 0, ladderPutInstead: 0, cash: 0, volume: 0, noCandidate: 2, unrecorded: 0 }, noCandidate: null, sharesHeld: 100 },
       ];
-      await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify(timeline), uncovered_stretches: JSON.stringify(uncoveredStretches) });
+      await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify(timeline), stock_only_stretches: JSON.stringify(stockOnlyStretches) });
       // A sale's row carries the yield and delta the engine recorded for it (none here), contract-weighted over its fills.
-      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null }, timeline[1]!], uncoveredStretches } } });
+      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null }, timeline[1]!], stockOnlyStretches } } });
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3, premiumYield: 0.42, delta: -0.21 }) });
       expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.timeline.map((entry) => [entry.premiumYield, entry.delta])).toEqual([[0.42, -0.21], [undefined, undefined]]);
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3 }) });

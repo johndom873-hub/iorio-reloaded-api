@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { backtestCandidateChecks, type BacktestOrderShortfall } from "../backtestTypes.js";
-import { buildCycleGaps, buildUncoveredStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
+import { buildCycleGaps, buildStockOnlyStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
 import type { BacktestNoCandidateNote, BacktestNoSaleNote } from "./backtestLook.js";
 import { describeBaselineRules, type BaselineRejections } from "./baselineSaleSteps.js";
 import type { LedgerLeg } from "./ledger/simulatedLedger.js";
@@ -138,7 +138,7 @@ describe("buildCycleGaps", () => {
   });
 });
 
-describe("buildUncoveredStretches", () => {
+describe("buildStockOnlyStretches", () => {
   let legNumber = 0;
   const leg = (fields: Partial<LedgerLeg> & Pick<LedgerLeg, "legType" | "side" | "quantity" | "entryAt">): LedgerLeg => ({
     id: `leg-${++legNumber}`,
@@ -156,18 +156,19 @@ describe("buildUncoveredStretches", () => {
     ...fields,
   });
   const at = (dateIso: string, hour: number) => easternInstant(dateIso, hour, 0);
-  // A put sold Mon 5 April, assigned Fri 9 April (500 shares); no call Mon 12 and Tue 13; a call on every share Wed 14
-  // to its expiry Fri 16; then, from Mon 19, a call on 300 of them.
+  // A put sold Mon 5 April, assigned Fri 9 April (500 shares); no option Mon 12 and Tue 13; a ladder put alone Wed 14 to
+  // its expiry Fri 16, a call on every share from Thu 15; a call on 300 of them Mon 19 to Tue 20; none Wed 21.
   const legs = [
     leg({ legType: "option", side: "short", optionType: "put", quantity: 5, entryAt: at("2021-04-05", 10), exitAt: at("2021-04-09", 16), settledAs: "assigned" }),
     leg({ legType: "stock", side: "long", quantity: 500, entryAt: at("2021-04-09", 16) }),
-    leg({ legType: "option", side: "short", optionType: "call", quantity: 5, entryAt: at("2021-04-14", 10), exitAt: at("2021-04-16", 16), settledAs: "worthless" }),
-    leg({ legType: "option", side: "short", optionType: "call", quantity: 3, entryAt: at("2021-04-19", 10) }),
+    leg({ legType: "option", side: "short", optionType: "put", quantity: 2, entryAt: at("2021-04-14", 10), exitAt: at("2021-04-16", 16), settledAs: "worthless" }),
+    leg({ legType: "option", side: "short", optionType: "call", quantity: 5, entryAt: at("2021-04-15", 10), exitAt: at("2021-04-16", 16), settledAs: "worthless" }),
+    leg({ legType: "option", side: "short", optionType: "call", quantity: 3, entryAt: at("2021-04-19", 10), exitAt: at("2021-04-20", 16), settledAs: "worthless" }),
   ];
   const closes = closeLookupOf([
     { date: "2021-04-09", close: 95 },
     { date: "2021-04-13", close: 93.1 },
-    { date: "2021-04-16", close: 97 },
+    { date: "2021-04-20", close: 97 },
     { date: "2021-04-21", close: 98.94 },
   ]);
   const records: NoSaleRecords = {
@@ -177,10 +178,10 @@ describe("buildUncoveredStretches", () => {
     noCandidates: [noCandidate("2021-04-12", "calls", { belowCost: 193, noUsableQuote: 34 }), noCandidate("2021-04-12", "entry", { spreadTooWide: 9 }), noCandidate("2021-04-13", "calls", { outsideExpiryRange: 5, belowCost: 190, noUsableQuote: 30 })],
   };
 
-  it("counts the whole sessions with shares and no call on them, one stretch per count, a weekend roll none", () => {
-    const stretches = buildUncoveredStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: null }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesAsTradedOn: () => 1 });
+  it("counts the whole sessions with shares and no option open: a put alone or a call on some of them makes none, nor a weekend roll", () => {
+    const stretches = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: null }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesAsTradedOn: () => 1 });
     expect(stretches).toEqual([
-      // Assigned Friday, uncovered Monday and Tuesday, covered Wednesday: 95 → 93.10, −2%.
+      // Assigned Friday, no option Monday and Tuesday, a put Wednesday: 95 → 93.10, −2%.
       {
         firstIdleDay: "2021-04-12",
         lastIdleDay: "2021-04-13",
@@ -200,21 +201,17 @@ describe("buildUncoveredStretches", () => {
             ],
           },
         },
-        sharesUncovered: 500,
         sharesHeld: 500,
       },
-      // The call expired Friday and a call on 300 was sold Monday: 200 uncovered from Monday on (97 → 98.94, +2%).
-      { firstIdleDay: "2021-04-19", lastIdleDay: "2021-04-21", idleSessions: 3, stockMove: expect.closeTo(0.02, 10), noSaleDays: { ...noReasons, volume: 1, unrecorded: 2 }, noCandidate: null, sharesUncovered: 200, sharesHeld: 500 },
+      // The call on 300 shares expired Tuesday: none open Wednesday (97 → 98.94, +2%).
+      { firstIdleDay: "2021-04-21", lastIdleDay: "2021-04-21", idleSessions: 1, stockMove: expect.closeTo(0.02, 10), noSaleDays: { ...noReasons, unrecorded: 1 }, noCandidate: null, sharesHeld: 500 },
     ]);
   });
 
   it("gives the shares as traded on the stretch's first day, and stops at the cycle's close", () => {
-    const split = buildUncoveredStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: null }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesAsTradedOn: (dateIso) => (dateIso >= "2021-04-19" ? 2 : 1) });
-    expect(split.map((stretch) => [stretch.sharesUncovered, stretch.sharesHeld])).toEqual([
-      [500, 500],
-      [400, 1000],
-    ]);
-    const closedEarly = buildUncoveredStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: "2021-04-12" }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesAsTradedOn: () => 1 });
+    const split = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: null }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesAsTradedOn: (dateIso) => (dateIso >= "2021-04-19" ? 2 : 1) });
+    expect(split.map((stretch) => stretch.sharesHeld)).toEqual([500, 1000]);
+    const closedEarly = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: "2021-04-12" }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesAsTradedOn: () => 1 });
     expect(closedEarly.map((stretch) => [stretch.firstIdleDay, stretch.lastIdleDay])).toEqual([["2021-04-12", "2021-04-12"]]);
   });
 });

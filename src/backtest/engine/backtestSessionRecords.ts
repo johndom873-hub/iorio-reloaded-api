@@ -4,14 +4,14 @@ import { daysToExpiry } from "../../lib/optionContractLabel.js";
 import { legRealizedPnl } from "../../lib/positionSelectors.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import type { BacktestAction, BacktestCycle, BacktestCycleDetail, BacktestCycleGap, BacktestCycleTimelineRow, BacktestFill, BacktestPosition, BacktestPositionLeg, BacktestTrade } from "../backtestTypes.js";
-import { buildCycleGaps, buildUncoveredStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
+import { buildCycleGaps, buildStockOnlyStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
 import type { BacktestOptionSale } from "./backtestLook.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import { ledgerCapitalAtRisk, ledgerCapitalDeployed, ledgerCycles, ledgerRealizedPnl, ledgerUnrealizedPnl } from "./ledger/ledgerSelectors.js";
 import { legsOfPosition, positionsOfSymbol, requireLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 
 // What a finished session stores, built from its simulated ledger: the positions with their legs, the fills, the wheel
-// cycles (the platform's own derivation, deriveCycles) with their timelines and uncovered stretches, the gaps between
+// cycles (the platform's own derivation, deriveCycles) with their timelines and stock-only stretches, the gaps between
 // cycles (backtestIdleStretches.ts) and one row per option sold.
 //
 //   an option sold     = its facts as traded, how it ended, its position's P&L as the platform counts a position's
@@ -38,7 +38,7 @@ export interface SessionRecordInputs {
   splitFactorOn(symbol: string, dateIso: string): number | null;
   calendar: BacktestTradingCalendar;
   lastSessionDateIso: string;
-  /** Per symbol: its first and last session days (the days its file holds), for its gaps and uncovered stretches. */
+  /** Per symbol: its first and last session days (the days its file holds), for its gaps and stock-only stretches. */
   sessionDaysBySymbol: ReadonlyMap<string, { firstDay: string; lastDay: string }>;
   /** Per symbol: every IBKR split-adjusted daily close in its file, ascending (the stock moves). */
   allAdjustedDailyClosesBySymbol: ReadonlyMap<string, readonly { date: string; close: number }[]>;
@@ -131,7 +131,7 @@ export function buildCycleRecords(inputs: SessionRecordInputs): BacktestCycleRec
         buckets: cycle.buckets,
         dataFlags: cycle.dataFlags,
         timeline: timelineAsTraded(cycle, splitFactor, splitFactorOnDay, inputs.lastSessionDateIso),
-        uncoveredStretches: buildUncoveredStretches({
+        stockOnlyStretches: buildStockOnlyStretches({
           symbol,
           cycle: { openedOn, closedOn },
           lastDay,

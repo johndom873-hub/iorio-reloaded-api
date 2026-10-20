@@ -300,7 +300,7 @@ export interface SimulatedSessionResult {
   positions: BacktestPosition[];
   fills: BacktestFill[];
   actions: BacktestAction[];
-  /** Each with its timeline and uncovered stretches. */
+  /** Each with its timeline and stock-only stretches. */
   cycles: BacktestCycleRecord[];
   /** Each symbol's stretches with no cycle open. */
   cycleGaps: BacktestCycleGap[];
@@ -1323,7 +1323,7 @@ async function persistSessionResult(sessionId: string, startingValue: number, re
     buckets: JSON.stringify(cycle.buckets),
     data_flags: JSON.stringify(cycle.dataFlags),
     timeline: JSON.stringify(cycle.timeline),
-    uncovered_stretches: JSON.stringify(cycle.uncoveredStretches),
+    stock_only_stretches: JSON.stringify(cycle.stockOnlyStretches),
   }));
   const cycleGapRows = result.cycleGaps.map((gap) => ({
     session_id: sessionId,
