@@ -1130,6 +1130,8 @@ export interface BacktestCycle {
   breakEvenPerShare: number | null;
   /** An open cycle's cash break-even, as traded on the session's last day (cycleCashBreakEven.ts), read with the session; null otherwise. */
   cashBreakEvenPerShare?: number | null;
+  /** An open cycle's shares at the last marks, as traded on the session's last day (sharesHeld is on the cycle's opening scale), read with the session; null otherwise. */
+  sharesHeldNow?: number | null;
   buckets: { csp: BacktestCycleBucket; unstructured: BacktestCycleBucket; cc: BacktestCycleBucket; hedge: BacktestCycleBucket };
   dataFlags: string[];
 }
@@ -1174,6 +1176,8 @@ export interface BacktestCycleTimelineRow {
    * (engine version 3 on). Null while no shares were held; absent on other rows.
    */
   breakEvenAtSale?: number | null;
+  /** The shares the cycle held once the row's moment (its look's orders, or the end's marks) was done, as traded on the row's day; added when the cycle is read. */
+  sharesHeld?: number;
 }
 
 /**

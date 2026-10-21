@@ -43,9 +43,9 @@ import { BacktestRequestError, insertQueuedBacktestJob, kickBacktestQueue, loadB
 import type { BacktestBookPageFilters, BacktestSessionsPageFilters, ValidatedBacktestSessionRequest } from "./backtestSessionRequest.js";
 import { sqlContainsPattern } from "../../lib/sqlContainsPattern.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
-import { readSplitScheduleCache } from "../engine/splitFactors.js";
+import { readSplitScheduleCache, splitFactorOn } from "../engine/splitFactors.js";
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
-import { cashBreakEvenBeforeEachRow, cycleCashBreakEven } from "../cycleCashBreakEven.js";
+import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtMarks, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
 
 const spyBaselineLabel = "Buy and hold · SPY";
 /** "HOOD #12": a symbol's cycle as the screens name it (backtestSessionRecords.ts describeCycle). */
@@ -555,6 +555,7 @@ async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
     sharesHeld: Number(row.shares_held),
     breakEvenPerShare: nullableNumber(row.break_even_per_share as string | null),
     cashBreakEvenPerShare: row.open_timeline ? cycleCashBreakEven(row.open_timeline as BacktestCycleTimelineRow[]) : null,
+    sharesHeldNow: row.open_timeline ? sharesHeldAtMarks(row.open_timeline as BacktestCycleTimelineRow[]) : null,
     buckets: row.buckets as BacktestCycle["buckets"],
     dataFlags: row.data_flags as string[],
   }));
@@ -580,6 +581,17 @@ async function loadSessionCycleGaps(sessionId: string): Promise<BacktestCycleGap
   }));
 }
 
+/**
+ * A symbol's split factor by day from the engine's cached schedule, to put a timeline's shares on one scale: a day the
+ * schedule leaves unresolved takes its segment's factor, and without a schedule every day is 1 (no split known).
+ */
+function splitFactorOfDayFor(symbol: string): SplitFactorOfDay {
+  const dataDirectory = readBacktestDataDirectory();
+  const schedule = dataDirectory ? (readSplitScheduleCache(dataDirectory, symbol)?.schedule ?? null) : null;
+  if (!schedule || schedule.segments.length === 0) return () => 1;
+  return (tradingDate) => splitFactorOn(schedule, tradingDate) ?? schedule.segments.findLast((segment) => segment.fromDateIso <= tradingDate)?.factor ?? schedule.segments[0]!.factor;
+}
+
 /** A cycle's timeline and stock-only stretches; null for a session run before cycles kept them. Throws 404 for a cycle the session does not have. */
 export async function loadBacktestCycleDetail(sessionId: string, symbol: string, cycleNumber: number): Promise<BacktestCycleDetail | null> {
   await requireSessionExists(sessionId);
@@ -589,13 +601,15 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
   if (!row) throw new BacktestRequestError(`The session has no cycle ${symbol} #${cycleNumber}.`, 404);
   if (row.timeline === null) return null;
   const sales = await loadSaleRecords(sessionId, symbol, row.timeline);
-  const breakEvens = cashBreakEvenBeforeEachRow(row.timeline);
+  const splitFactorOf = splitFactorOfDayFor(symbol);
+  const breakEvens = cashBreakEvenBeforeEachRow(row.timeline, splitFactorOf);
+  const sharesHeld = sharesHeldAfterEachMoment(row.timeline, splitFactorOf);
   return {
     timeline: row.timeline.map((entry, index) => {
       const sold = /^Sold (put|call) @/.exec(entry.label);
-      if (!sold || entry.instrument !== "option") return entry;
+      if (!sold || entry.instrument !== "option") return { ...entry, sharesHeld: sharesHeld[index]! };
       const { premiumYield, delta } = sales.recordedOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate);
-      return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]! };
+      return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]!, sharesHeld: sharesHeld[index]! };
     }),
     // Stretches stored before their no-candidate detail was kept have none.
     stockOnlyStretches: (row.stock_only_stretches ?? []).map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null })),

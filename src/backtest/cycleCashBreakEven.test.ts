@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BacktestCycleTimelineRow } from "./backtestTypes.js";
-import { cashBreakEvenBeforeEachRow, cycleCashBreakEven } from "./cycleCashBreakEven.js";
+import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment } from "./cycleCashBreakEven.js";
 
 const row = (overrides: Partial<BacktestCycleTimelineRow>): BacktestCycleTimelineRow => ({
   at: "2026-09-01T14:00:00.000Z",
@@ -63,5 +63,36 @@ describe("cycleCashBreakEven", () => {
     ];
     // Before the put sale: none held. Then (4,000 − 49.32) ÷ 100 = 39.5068, for both calls; the put: (4,000 − 49.32 − 58.64) ÷ 100.
     expect(cashBreakEvenBeforeEachRow(rows).map((value) => (value === null ? null : Number(value.toFixed(4))))).toEqual([null, null, 39.5068, 39.5068, 38.9204]);
+  });
+
+  it("counts shares across a split on one scale, each row's on its own day", () => {
+    // 100 shares bought at $1,000 before a 10-for-1 split (factor 10, 1 after it from 15 Sep), a $110 call sold on 1,000 after it.
+    const splitFactorOf = (tradingDate: string) => (tradingDate < "2026-09-15" ? 10 : 1);
+    const rows = [
+      row({ at: "2026-09-01T14:00:00.000Z", label: "Bought shares", bucket: "unstructured", instrument: "stock", stockPrice: 1000 }),
+      row({ at: "2026-09-16T14:00:00.000Z", tradingDate: "2026-09-16", label: "Sold call @ 2.00", bucket: "cc", quantity: 1000, strike: 110, premiumDollars: 2000 }),
+      row({ at: null, tradingDate: "2026-09-30", label: "Marked to the 2026-09-30 close", bucket: "cc", instrument: "stock", quantity: 1000 }),
+    ];
+    // Before the call: $100,000 over 1,000 shares as traded on the 16th = $100.00 (not $1,000 over 100).
+    expect(cashBreakEvenBeforeEachRow(rows, splitFactorOf).map((value) => (value === null ? null : Number(value.toFixed(4))))).toEqual([null, 100, 98]);
+    expect(sharesHeldAfterEachMoment(rows, splitFactorOf)).toEqual([100, 1000, 1000]);
+    expect(cycleCashBreakEven(rows)).toBeCloseTo(98, 6);
+  });
+});
+
+describe("sharesHeldAfterEachMoment", () => {
+  it("gives every row of a look the shares once the look is done, and each change after it", () => {
+    // A buy-write lists the call before the shares: both show 100. The put is assigned, then 100 called away.
+    const at = "2026-09-01T14:00:00.000Z";
+    const rows = [
+      row({ at, label: "Sold call @ 0.40", bucket: "cc", strike: 42, premiumDollars: 39.32 }),
+      row({ at, label: "Bought shares", bucket: "cc", instrument: "stock", stockPrice: 40 }),
+      row({ at, label: "Sold put @ 0.50", strike: 38, premiumDollars: 49.32 }),
+      row({ at: "2026-09-04T20:00:00.000Z", label: "Put assigned: shares bought at the strike", strike: 38, stockPrice: 38 }),
+      row({ at: "2026-09-04T20:00:00.000Z", label: "Call assigned: shares called away at the strike", bucket: "cc", strike: 42, stockPrice: 42 }),
+      row({ at: null, label: "Marked to the 2026-09-30 close", bucket: "unstructured", instrument: "stock", quantity: 100 }),
+    ];
+    expect(sharesHeldAfterEachMoment(rows)).toEqual([100, 100, 100, 100, 100, 100]);
+    expect(sharesHeldAfterEachMoment(rows.slice(0, 4))).toEqual([100, 100, 100, 200]);
   });
 });

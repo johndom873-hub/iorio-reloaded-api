@@ -1034,7 +1034,7 @@ describe("backtest routes", () => {
       ];
       await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify(timeline), stock_only_stretches: JSON.stringify(stockOnlyStretches) });
       // A sale's row carries the yield and delta the engine recorded for it (none here), contract-weighted over its fills.
-      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null }, timeline[1]!], stockOnlyStretches } } });
+      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null, sharesHeld: 0 }, { ...timeline[1]!, sharesHeld: 100 }], stockOnlyStretches } } });
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3, premiumYield: 0.42, delta: -0.21 }) });
       expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.timeline.map((entry) => [entry.premiumYield, entry.delta])).toEqual([[0.42, -0.21], [undefined, undefined]]);
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3 }) });
