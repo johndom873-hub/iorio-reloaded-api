@@ -1,18 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, type SignalCandidatesInput, type SignalContractExclusion, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { buildSignalCandidates, type SignalCandidatesInput, type SignalContractExclusion, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { assembleSignalsChain, describeContractExclusion, scoreSignalContract, scoreTickerWithExclusions } from "./signalsChain.js";
 import { candidateContractKey, computeUncompensatedByContract, contractKey, scoreTicker } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
-import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
-import { fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
-
-// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
-const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
-
-// These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
-const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
-const buildSignalCandidates = (input: Omit<SignalCandidatesInput, "tradingSessionsByExpiry"> & { tradingSessionsByExpiry?: ReadonlyMap<string, number> }) => buildSignalCandidatesOnAnyClock({ ...input, tradingSessionsByExpiry: input.tradingSessionsByExpiry ?? sameClockSessions(input.slices) });
+import { fixtureCandidateModelContext, fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
 
 const forward = 100;
 const rate = 0.04;
@@ -66,7 +58,6 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     slices: [slice(near, years30), slice(far, years60)],
     quotes: [...nearQuotes, quoteAt(85, "P", far, years60), quoteAt(115, "C", far, years60)],
     dayQuotes: [],
-    forecast: { volatility: 0.15, windowDays: 63 },
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],
@@ -80,8 +71,9 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     dailyBarCount: 1253,
     dividendCadenceUnknown: false,
     todayEasternIso: "2026-09-21",
-    openSessionDatesIso: fixtureWeekdaySessions,
     modelForecast: fixtureModelForecast(0.15),
+    yangZhang63Forecast: null,
+    ivMetrics: null,
     tradingSessions: fixtureTradingSessions,
     valuationGroup: "stock",
     ...overrides,
@@ -95,9 +87,7 @@ describe("buildSignalCandidates exclusion reporting", () => {
   const builderInput: SignalCandidatesInput = {
     spotPrice: forward,
     riskFreeRate: rate,
-    forecast: { volatility: 0.15, windowDays: 63 as const },
     slices: [slice(near, years30), slice(far, years60, { status: "poor_fit", parameters: null })],
-    tradingSessionsByExpiry: sameClockSessions([slice(near, years30), slice(far, years60)]),
     quotes: [...nearQuotes, quoteAt(85, "P", far, years60), quoteAt(95, "P", "2026-12-18", 88 / 365)],
     earningsDatesIso: [],
     earningsCalendarResolved: true,
@@ -110,6 +100,8 @@ describe("buildSignalCandidates exclusion reporting", () => {
     deltaTargetMax: 0.3,
     minAnnualizedYieldPct: 0,
     spreadShareCharged: 1,
+    // Valued at the 10:00 ET capture with a 15% YZ21 forecast.
+    model: fixtureCandidateModelContext({ annualizedVolatility: 0.15, valuedAtMs: Date.parse("2026-09-21T14:00:00Z"), forward }),
   };
 
   it("never changes the candidates, and reports every other quote exactly once", () => {
@@ -162,6 +154,8 @@ describe("describeContractExclusion", () => {
     expect(describeContractExclusion({ kind: "spans_earnings", earningsDateIso: "2026-10-15" })).toBe("Expiry spans earnings on Oct 15");
     expect(describeContractExclusion({ kind: "in_the_money" })).toBe("In the money — Signals only sells out-of-the-money contracts");
     expect(describeContractExclusion({ kind: "surface_fit_rejected", sliceStatus: "butterfly_arbitrage" })).toBe("This expiry's volatility surface fit was rejected (butterfly arbitrage)");
+    expect(describeContractExclusion({ kind: "no_vega", delta: 0 })).toBe("No sensitivity to volatility left at this strike: it cannot be valued");
+    expect(describeContractExclusion({ kind: "not_valued", delta: -0.2 })).toBe("The valuation model could not value this contract");
   });
 });
 
@@ -227,9 +221,9 @@ describe("the delta band in the chain view", () => {
     expect(result.scored).toBe(true);
     expect(result.isCandidate).toBe(false);
     expect(result.notCandidateReason).toBe(`Δ ${Math.abs(lowest.delta).toFixed(2)} is under your min Δ ${strict.deltaTargetMin.toFixed(2)}`);
-    // The score is the one the contract gets with the band lifted: same net edge, grade and delta as in the unrestricted scoring.
-    expect(result.scored && result.netEdge).toBe(lowest.netEdge);
-    expect(result.scored && result.grade).toBe(lowest.grade);
+    // The score is the one the contract gets with the band lifted: same model figures, grade and delta as in the unrestricted scoring.
+    expect(result.scored && result.model).toEqual(lowest.model);
+    expect(result.scored && result.model.grade).toBe(lowest.model.grade);
     expect(result.scored && result.delta).toBe(lowest.delta);
   });
 
@@ -244,7 +238,7 @@ describe("the delta band in the chain view", () => {
     const result = scoreSignalContract({ inputs: inputs(), account, settings: strict, contract: { expiry: highest.expiry, strike: highest.strike, right: rightOf(highest) }, liveQuote: null, liveSpot: null, capturedDelta: null, uncompensatedSharePathCount: pathCount });
     expect(result.isCandidate).toBe(false);
     expect(result.notCandidateReason).toBe(`Δ ${Math.abs(highest.delta).toFixed(2)} is over your max Δ ${strict.deltaTargetMax.toFixed(2)}`);
-    expect(result.scored && result.netEdge).toBe(highest.netEdge);
+    expect(result.scored && result.model).toEqual(highest.model);
   });
 
   it("a minimum above every delta leaves no candidates but the chain view still scores every contract with the filters lifted", () => {
@@ -304,7 +298,7 @@ describe("assembleSignalsChain", () => {
 
     expect(row(90).put.state).toBe("candidate");
     expect(row(90).put.grade).not.toBeNull();
-    expect(row(90).put.netEdge).not.toBeNull();
+    expect(row(90).put.grade).toBe(scoreTicker(inputs(), account, settings).candidates.find((candidate) => candidate.strike === 90 && candidate.expiry === near)!.model.grade);
     expect(row(110).call.state).toBe("candidate");
 
     // ITM put at the ATM strike: quoted, excluded, IBKR delta from the capture since scoring never computed one.
@@ -328,7 +322,7 @@ describe("assembleSignalsChain", () => {
   });
 
   it("marks quoted contracts of an unscored ticker as unscored (not filtered) with the ticker's reason", () => {
-    const chain = chainFor(inputs({ forecast: null }), near);
+    const chain = chainFor(inputs({ modelForecast: null }), near);
     expect(chain.unscoredReason).toBe("no_forecast");
     expect(chain.expiries.every((entry) => !entry.hasCandidate)).toBe(true);
     const put90 = chain.strikes.find((entry) => entry.strike === 90)!.put;
@@ -390,7 +384,7 @@ describe("scoreSignalContract", () => {
     const scored = scoreTicker(inputs(), account, settings, { ...liveSpot, liveQuotes: [] });
     const candidate = scored.candidates.find((entry) => entry.strike === 90)!;
     const result = score({ expiry: near, strike: 90, right: "P" }, { liveSpot });
-    expect(result.scored && result.netEdge).toBe(candidate.netEdge);
+    expect(result.scored && result.model).toEqual(candidate.model);
     expect(result.scored && result.delta).toBe(candidate.delta);
   });
 
@@ -400,8 +394,8 @@ describe("scoreSignalContract", () => {
     expect(result.isCandidate).toBe(false);
     expect(result.notCandidateReason).toMatch(/is over your max Δ 0\.35$/);
     const lifted = scoreTicker(inputs(), account, { ...settings, deltaTargetMax: 1 }).candidates.find((candidate) => candidate.strike === 100 && candidate.expiry === near)!;
-    expect(result.scored && result.netEdge).toBe(lifted.netEdge);
-    expect(result.scored && result.grade).toBe(lifted.grade);
+    expect(result.scored && result.model).toEqual(lifted.model);
+    expect(result.scored && result.model.grade).toBe(lifted.model.grade);
   });
 
   it("returns an ITM contract the capture never quoted unscored, with the live quote and IBKR delta", () => {

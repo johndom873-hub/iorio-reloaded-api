@@ -30,9 +30,9 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
   return {
     strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, dte: 18, delta: -0.22, bid: 2.0, ask: 2.1, spreadPercent: 4.9,
     openInterest: 1200, volume: 300, bidSize: 40, askSize: 35,
-    surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, forecastVolatility: 0.5, edge: 0.12, frictionVolatility: 0.02, netEdge: 0.1, edgeDollars: 80, vega: 0.08,
-    dollarRisk: 9795, riskAdjustedRatio: 0.008, annualizedYield: 0.83, uncompensatedSharePercent: null,
-    quoteSource: "day", quotedAt: new Date(now - 2 * 60_000).toISOString(), flags: [], executable: true, grade: "strong",
+    surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, vega: 0.08,
+    dollarRisk: 9795, annualizedYield: 0.83, uncompensatedSharePercent: null,
+    quoteSource: "day", quotedAt: new Date(now - 2 * 60_000).toISOString(), flags: [], executable: true,
     model: model(),
     ...overrides,
   };
@@ -51,9 +51,9 @@ function slice(overrides: Partial<SignalSurfaceSlice> = {}): SignalSurfaceSlice 
 function scored(overrides: Partial<TickerSignals> = {}): TickerSignals {
   return {
     tickerId: "t1", symbol: "HOOD", companyName: "Robinhood", sector: "Financial", snapshotDateIso: today, snapshotCapturedAt: "2026-09-28T14:05:00Z", spotPrice: 110, priceSource: "live",
-    previousClose: { close: 108, dateIso: "2026-09-25" }, dayChangePercent: 1.85, candidates: [candidate()], best: null, gradeCounts: { strong: 1, good: 0, weak: 0, avoid: 0 },
+    previousClose: { close: 108, dateIso: "2026-09-25" }, dayChangePercent: 1.85, candidates: [candidate()], best: null,
     heldLegs: [], rolls: [], bestRoll: null, rollCount: 0, fittedSliceCount: 3, totalSliceCount: 3, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: "2026-11-04", macroEvents: [],
-    atmImpliedVolatility: 0.6, atmImpliedVolatilityPerSession: 0.66, forecast: { volatility: 0.5, windowDays: 63 }, modelForecast: fixtureModelForecast(0.5), dailyBarCount: 1250, dividendCadenceUnknown: false, caveats: [], freeShares: 0, freeCash: 500_000,
+    atmImpliedVolatility: 0.6, atmImpliedVolatilityPerSession: 0.66, modelForecast: fixtureModelForecast(0.5), dailyBarCount: 1250, dividendCadenceUnknown: false, caveats: [], freeShares: 0, freeCash: 500_000,
     dayQuotesAsOf: null, ivShiftByExpiry: { "2026-10-16": { shiftVolatilityPoints: 1.2, quoteCount: 9 } }, quoteSourceCounts: { live: 0, day: 1, snapshot: 0 }, unscoredReason: null,
     ...overrides,
   } as TickerSignals;
@@ -74,8 +74,6 @@ describe("filterTickerForPluto — ticker level", () => {
     expect(filterTickerForPluto(input({ botEnabled: false })).tickerBlocks).toEqual(["ticker not enabled for Pluto"]);
     expect(filterTickerForPluto(input({ scored: scored({ snapshotDateIso: "2026-09-25" }) })).tickerBlocks[0]).toMatch(/requires today's fit/);
     expect(filterTickerForPluto(input({ scored: scored({ modelForecast: null }) })).tickerBlocks).toEqual(["no 21-day volatility forecast for the valuation model (fewer than 22 daily bars before today)", "no volatility forecast to judge today's move against"]);
-    // The old Edge's forecast window no longer matters to Pluto.
-    expect(filterTickerForPluto(input({ scored: scored({ forecast: { volatility: 0.5, windowDays: 21 } }) })).tickerBlocks).toEqual([]);
     // 50% YZ21 volatility: a normal day is 50 / √252 = 3.15%, so 3× is 9.45%.
     expect(filterTickerForPluto(input({ scored: scored({ dayChangePercent: -9.6 }) })).tickerBlocks[0]).toBe("day change -9.6% is 3.05× its normal 3.15% day, beyond 3×");
     expect(filterTickerForPluto(input({ scored: scored({ dayChangePercent: -9.3 }) })).tickerBlocks).toEqual([]);
@@ -112,9 +110,8 @@ describe("filterTickerForPluto — candidate level", () => {
     expect(rejectionsFor({ model: model({ expectedPnlDollars: 5, capitalAtRiskDollars: 4_000, expectedAnnualizedReturn: (5 / 4_000) * (365 / 2) }) })).toEqual([]);
     expect(rejectionsFor({ model: model({ expectedPnlDollars: 40, capitalAtRiskDollars: 4_000, expectedAnnualizedReturn: (40 / 4_000) * (365 / 45) }) })).toEqual(["Edge Yield 8% below 15%"]);
   });
-  it("judges value on the model only: the old Edge's grade, Edge $ and yield are ignored, and an unvalued contract is out", () => {
-    expect(rejectionsFor({ grade: "avoid", edgeDollars: -50, netEdge: -0.1, annualizedYield: 0.01 })).toEqual([]);
-    expect(rejectionsFor({ model: null })).toEqual(["not valued by the model (no YZ21 forecast or no variance time left)"]);
+  it("judges value on the model only: the plain mid-price yield is ignored (the model's premium yield is the yield rule)", () => {
+    expect(rejectionsFor({ annualizedYield: 0.01 })).toEqual([]);
   });
   it("applies the quote-freshness rule per source", () => {
     expect(rejectionsFor({ quoteSource: "day", quotedAt: new Date(now - 25 * 60_000).toISOString() })).toEqual(["quote 25 min old (day), max 10"]);
@@ -141,7 +138,6 @@ describe("filterTickerForPluto — candidate level", () => {
   it("records the rule behind each reason, in the same order", () => {
     const codesFor = (overrides: Partial<SignalCandidate>, extra: Partial<PlutoTickerFilterInput> = {}) => filterTickerForPluto(input({ scored: scored({ candidates: [candidate(overrides)] }), ...extra })).rejected[0]?.codes ?? [];
     expect(codesFor({ model: model({ edgeMargin: 0.05, grade: "weak", expectedAnnualizedReturn: 0.12, premiumYield: 0.3 }), delta: -0.35, dte: 1, spreadPercent: 22, openInterest: null, volume: 3 })).toEqual(["grade", "edge_yield", "yield", "delta", "dte", "spread", "open_interest", "volume"]);
-    expect(codesFor({ model: null })).toEqual(["no_model"]);
     expect(codesFor({ quoteSource: "snapshot", quotedAt: null })).toEqual(["quote_age"]);
     expect(codesFor({}, { slices: [] })).toEqual(["no_slice"]);
     expect(codesFor({}, { slices: [slice({ rmseVolatility: 0.031, pointCount: 6, calendarViolations: 1 })] })).toEqual(["slice_rmse", "slice_points", "calendar_arbitrage"]);
@@ -162,7 +158,7 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
     legId: "leg1", positionId: "pos1", strategyKey: "cash_secured_put", quantity: 2,
     // The replacement alone would fail the grade and Edge Yield rules: a roll is judged on the roll's own model figures.
     replacement: candidate({ expiry: "2026-10-16", strike: 95, model: model({ edgeMargin: 0.05, grade: "weak", expectedPnlDollars: 10, expectedAnnualizedReturn: 10 / 9000 / (7 / 365) }) }),
-    netRollEdge: 0.07, netRollEdgeDollarsPerContract: 45, netRollEdgeDollars: 90, netCreditPerShare: 0.4, deltaChange: -0.03, dollarRiskChange: -500, flags: [], warnings: [], grade: "good",
+    netCreditPerShare: 0.4, deltaChange: -0.03, dollarRiskChange: -500, flags: [], warnings: [],
     model: fixtureRollModel({ netExpectedPnlPerContract: 45, netExpectedPnl: 90, edgeMargin: 0.25 }),
   };
   it("judges a roll on its own model grade and Edge Yield, and the replacement on every other dial", () => {
@@ -192,30 +188,25 @@ describe("rolls, the deterministic pick and the fingerprint", () => {
     expect(result.rejectedRolls[0]!.reasons).toEqual(["net roll Edge Yield 12% below 15%"]);
     expect(result.rejectedRolls[0]!.codes).toEqual(["edge_yield"]);
   });
-  it("rejects a roll the model could not value, whatever its old-Edge grade", () => {
-    const result = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, grade: "strong", model: null }] }) }));
-    expect(result.rejectedRolls[0]!.codes).toEqual(["no_model"]);
-  });
   it("a roll's replacement keeps the rule codes of an open, under the replacement's reason text", () => {
     const bad = filterTickerForPluto(input({ scored: scored({ rolls: [{ ...roll, model: fixtureRollModel({ netExpectedPnlPerContract: 45, edgeMargin: 0.05 }), replacement: candidate({ strike: 95, spreadPercent: 30 }) }] }) }));
     expect(bad.rejectedRolls[0]!.codes).toEqual(["grade", "spread"]);
   });
-  it("the deterministic pick is Edge Yield first, the model's Edge $ second, unvalued last", () => {
+  it("the deterministic pick is Edge Yield first, the model's Edge $ second", () => {
     const a = { id: "a", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ expectedAnnualizedReturn: 0.3, calibratedAnnualizedReturn: 0.1, expectedPnlDollars: 50 }) }) };
     const b = { id: "b", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ expectedAnnualizedReturn: 0.3, calibratedAnnualizedReturn: 0.1, expectedPnlDollars: 70 }) }) };
-    const c = { id: "c", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: 0.9, expectedPnlDollars: 200 }), edgeDollars: 500 }) };
-    const unvalued = { id: "d", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: null, edgeDollars: 900 }) };
-    expect(deterministicTopPick([unvalued, a, b, c])!.id).toBe("b");
-    expect(deterministicTopPick([unvalued, c])!.id).toBe("c");
+    const c = { id: "c", kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: 0.9, expectedPnlDollars: 200 }) }) };
+    expect(deterministicTopPick([a, b, c])!.id).toBe("b");
+    expect(deterministicTopPick([c])!.id).toBe("c");
     expect(deterministicTopPick([])).toBeNull();
     // The ledger keeps the top pick's model figures and the one after it.
-    expect(summarizeTopPick([unvalued, a, b, c])).toEqual({ id: "b", edgeDollars: 70, edgeMargin: b.candidate.model!.edgeMargin, grade: b.candidate.model!.grade, calibratedAnnualizedReturn: 0.1, expectedAnnualizedReturn: 0.3, capitalAtRiskDollars: 9000, rankedBy: "edge_yield", runnerUp: { id: "a", calibratedAnnualizedReturn: 0.1, expectedAnnualizedReturn: 0.3 } });
-    expect(summarizeTopPick([unvalued, c])!.runnerUp).toBeNull();
-    expect(summarizeTopPick([unvalued])).toBeNull();
+    expect(summarizeTopPick([a, b, c])).toEqual({ id: "b", edgeDollars: 70, edgeMargin: b.candidate.model.edgeMargin, grade: b.candidate.model.grade, calibratedAnnualizedReturn: 0.1, expectedAnnualizedReturn: 0.3, capitalAtRiskDollars: 9000, rankedBy: "edge_yield", runnerUp: { id: "a", calibratedAnnualizedReturn: 0.1, expectedAnnualizedReturn: 0.3 } });
+    expect(summarizeTopPick([c])!.runnerUp).toBeNull();
+    expect(summarizeTopPick([])).toBeNull();
   });
   it("the fingerprint ignores sub-step noise but sees grade and membership changes", () => {
     const base = { id: openCandidateId("HOOD", candidate()), kind: "open_cash_secured_put" as const, symbol: "HOOD", candidate: candidate({ model: model({ expectedPnlDollars: 80, edgeMargin: 0.35 }) }) };
-    const noisy = { ...base, candidate: candidate({ model: model({ expectedPnlDollars: 81.5, edgeMargin: 0.3504 }), edgeDollars: 10, netEdge: 0.5 }) };
+    const noisy = { ...base, candidate: candidate({ model: model({ expectedPnlDollars: 81.5, edgeMargin: 0.3504 }) }) };
     expect(candidateSetFingerprint([base], [])).toBe(candidateSetFingerprint([noisy], []));
     expect(candidateSetFingerprint([base], [])).not.toBe(candidateSetFingerprint([{ ...base, candidate: candidate({ model: model({ expectedPnlDollars: 80, edgeMargin: 0.35, grade: "good" }) }) }], []));
     expect(candidateSetFingerprint([base], [])).not.toBe(candidateSetFingerprint([{ ...base, candidate: candidate({ model: model({ expectedPnlDollars: 90, edgeMargin: 0.35 }) }) }], []));
@@ -282,7 +273,6 @@ describe("covered calls on held shares (Marcelo, 2026-10-12): code sells them, r
   it("keeps the execution rules: a premium after costs, the spread limit, a free contract and no bar on opens", () => {
     expect(held([call({}, { premiumAfterCostsDollars: 0 })]).heldShareCall!.rejected[0]!.codes).toEqual(["no_premium"]);
     expect(held([call({}, { premiumAfterCostsDollars: 0 })]).heldShareCall!.rejected[0]!.reasons).toEqual(["premium after costs $0/contract not above 0"]);
-    expect(held([call({ model: null })]).heldShareCall!.rejected[0]!.codes).toEqual(["no_model"]);
     expect(held([call({ spreadPercent: 16 })]).heldShareCall!.rejected[0]!.codes).toEqual(["spread"]);
     expect(held([call()], {}, { occupiedContracts: [{ expiry: "2026-10-16", strike: 112, detail: "open position" }] }).heldShareCall!.rejected[0]!.codes).toEqual(["same_contract"]);
     expect(held([call()], {}, { opensBlockedReason: "ticker cooldown: 10 min ago" }).heldShareCall!.rejected[0]!.codes).toEqual(["opens_blocked"]);
@@ -310,7 +300,7 @@ describe("covered calls on held shares (Marcelo, 2026-10-12): code sells them, r
     const callRoll = (strike: number, netCreditPerShare: number): RollSignalCandidate => ({
       legId: "leg-call", positionId: "pos-cc", strategyKey: "covered_call", quantity: 1,
       replacement: candidate({ strategyKey: "covered_call", strike, delta: 0.25 }),
-      netRollEdge: 0.07, netRollEdgeDollarsPerContract: 45, netRollEdgeDollars: 45, netCreditPerShare, deltaChange: -0.03, dollarRiskChange: 0, flags: [], warnings: [], grade: "good",
+      netCreditPerShare, deltaChange: -0.03, dollarRiskChange: 0, flags: [], warnings: [],
       model: fixtureRollModel({ netExpectedPnlPerContract: 45, netExpectedPnl: 45, edgeMargin: 0.25 }),
     });
     const rolls = (roll: RollSignalCandidate, cycleBreakEven: PlutoTickerFilterInput["cycleBreakEven"] = cycle) =>

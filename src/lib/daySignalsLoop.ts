@@ -811,7 +811,7 @@ export class DaySignalsLoop {
       const [inputs, lastGrades, lastRollGrades] = await Promise.all([this.deps.loadTickerSignalsInputs(ticker), this.deps.loadLastGrades(ticker.tickerId, tradingDateIso), this.deps.loadLastRollGrades(ticker.tickerId, tradingDateIso)]);
       if (!inputs.header || inputs.header.tradingDateIso !== tradingDateIso) return;
       const scored = scoreTicker(inputs, account, settings, spot !== null ? { spotPrice: spot, priceSource: "live" } : undefined);
-      // Roll Signals: same upward-only rule per (held leg, replacement); the first score after a seed or restart is a baseline.
+      // Roll Signals: same upward-only rule per (held leg, replacement); the first score after a seed or restart is a baseline. Grades are the model's.
       const heldByLegId = new Map(scored.heldLegs.map((leg) => [leg.legId, leg]));
       const rollGrades: { legId: string; expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[] = [];
       for (const roll of scored.rolls) {
@@ -821,11 +821,11 @@ export class DaySignalsLoop {
         const previousGrade = storedRollGrade === null && newContractKeys.has(`${roll.replacement.expiry}|${roll.replacement.strike}|${roll.strategyKey === "covered_call" ? "C" : "P"}`) ? "avoid" : storedRollGrade;
         const held = heldByLegId.get(roll.legId);
         const notificationKey = `roll:${key}`;
-        if (held && isGradeUpgrade(previousGrade, roll.grade) && clearsNotificationHysteresis(roll.grade, roll.netRollEdge) && this.canNotify(notificationKey)) {
+        if (held && isGradeUpgrade(previousGrade, roll.model.grade) && clearsNotificationHysteresis(roll.model.grade, roll.model.edgeMargin) && this.canNotify(notificationKey)) {
           await this.deps.notifyRollUpgrade({ symbol: ticker.symbol, roll, held: { strike: held.strike, expiry: held.expiry, dte: held.dte }, previousGrade: previousGrade!, spotPrice: scored.spotPrice ?? spot ?? 0, quotedAt: roll.replacement.quotedAt });
           this.markNotified(notificationKey);
         }
-        rollGrades.push({ legId: roll.legId, expiry: roll.replacement.expiry, strike: roll.replacement.strike, right: roll.strategyKey === "covered_call" ? "C" : "P", grade: roll.grade });
+        rollGrades.push({ legId: roll.legId, expiry: roll.replacement.expiry, strike: roll.replacement.strike, right: roll.strategyKey === "covered_call" ? "C" : "P", grade: roll.model.grade });
       }
       await this.deps.upsertRollGrades(ticker.tickerId, tradingDateIso, rollGrades);
       const grades: { expiry: string; strike: number; right: "C" | "P"; grade: SignalGrade }[] = [];
@@ -836,11 +836,11 @@ export class DaySignalsLoop {
         const storedGrade = lastGrades.get(key) ?? null;
         const previousGrade = storedGrade === null && newContractKeys.has(key) ? "avoid" : storedGrade;
         const notificationKey = `signal:${ticker.tickerId}|${key}`;
-        if (isGradeUpgrade(previousGrade, candidate.grade) && clearsNotificationHysteresis(candidate.grade, candidate.netEdge) && this.canNotify(notificationKey)) {
+        if (isGradeUpgrade(previousGrade, candidate.model.grade) && clearsNotificationHysteresis(candidate.model.grade, candidate.model.edgeMargin) && this.canNotify(notificationKey)) {
           await this.deps.notifyUpgrade({ symbol: ticker.symbol, candidate, previousGrade: previousGrade!, spotPrice: scored.spotPrice ?? spot ?? 0, quotedAt: candidate.quotedAt });
           this.markNotified(notificationKey);
         }
-        grades.push({ expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", grade: candidate.grade });
+        grades.push({ expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", grade: candidate.model.grade });
       }
       await this.deps.updateDayQuoteGrades(ticker.tickerId, grades);
       this.deps.emitUpdated(ticker.tickerId);

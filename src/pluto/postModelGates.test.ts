@@ -25,9 +25,9 @@ const settings: PlutoSettings = {
 function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
   return {
     strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, dte: 18, delta: -0.22, bid: 2.0, ask: 2.1, spreadPercent: 4.9, openInterest: 1200, volume: 300, bidSize: 40, askSize: 35,
-    surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, forecastVolatility: 0.5, edge: 0.12, frictionVolatility: 0.02, netEdge: 0.1, edgeDollars: 80, vega: 0.08,
-    dollarRisk: 9795, riskAdjustedRatio: 0.008, annualizedYield: 0.83, uncompensatedSharePercent: null,
-    quoteSource: "live", quotedAt: null, flags: [], executable: true, grade: "strong", model: model(), ...overrides,
+    surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, vega: 0.08,
+    dollarRisk: 9795, annualizedYield: 0.83, uncompensatedSharePercent: null,
+    quoteSource: "live", quotedAt: null, flags: [], executable: true, model: model(), ...overrides,
   };
 }
 
@@ -108,13 +108,8 @@ describe("runPostModelGates — the gates", () => {
     for (const marginAtDecision of [0.44, 0.26]) expect(failed(runPostModelGates(input({ marginAtDecision })))).toEqual([]);
     expect(runPostModelGates(input({ marginAtDecision: 0.24 })).gates.find((gate) => gate.gate === "edge_drift")?.detail).toBe("edge margin moved 11.0 points since the decision, max 10");
     expect(failed(runPostModelGates(input({ marginAtDecision: 0.3, settings: { ...settings, maxEdgeMarginDriftPts: 4 } })))).toEqual(["edge_drift"]);
-    // The old Edge moving does not matter.
-    expect(failed(runPostModelGates(input({ candidate: candidate({ netEdge: -0.5, edgeDollars: -100 }) })))).toEqual([]);
-  });
-  it("refuses a fresh re-score the model could not value", () => {
-    const output = runPostModelGates(input({ candidate: candidate({ model: null }) }));
-    expect(failed(output)).toEqual(["edge_drift", "sizing"]);
-    expect(output.gates.find((gate) => gate.gate === "edge_drift")?.detail).toBe("the fresh re-score has no model valuation");
+    // The plain mid-price yield moving does not matter: drift is the model's margin only.
+    expect(failed(runPostModelGates(input({ candidate: candidate({ annualizedYield: 0.01 }) })))).toEqual([]);
   });
   it("refuses a symbol with a working order, one filled inside the cooldown, and a full book", () => {
     const filledMinutesAgo = (minutes: number) => new Date(book.nowMs - minutes * 60_000);
@@ -169,7 +164,7 @@ describe("runPostModelGates — covered calls and rolls", () => {
     expect(failed(runPostModelGates(input({ book: atCap })))).toEqual(["open_positions_cap"]);
   });
   it("a roll keeps the held quantity and only counts a rise in exposure (strike increase less net credit) as notional", () => {
-    const roll: RollSignalCandidate = { legId: "leg1", positionId: "p1", strategyKey: "cash_secured_put", quantity: 3, replacement: candidate({ strike: 95 }), netRollEdge: 0.07, netRollEdgeDollarsPerContract: 40, netRollEdgeDollars: 120, netCreditPerShare: 0.4, deltaChange: -0.02, dollarRiskChange: -500, flags: [], warnings: [], grade: "good", model: fixtureRollModel({ edgeMargin: 0.25, netExpectedPnlPerContract: 40, netExpectedPnl: 120 }) };
+    const roll: RollSignalCandidate = { legId: "leg1", positionId: "p1", strategyKey: "cash_secured_put", quantity: 3, replacement: candidate({ strike: 95 }), netCreditPerShare: 0.4, deltaChange: -0.02, dollarRiskChange: -500, flags: [], warnings: [], model: fixtureRollModel({ edgeMargin: 0.25, netExpectedPnlPerContract: 40, netExpectedPnl: 120 }) };
     const decision: PlutoDecision = { ...trade, actionKind: "roll", candidateId: "HOOD:roll:leg1:2026-10-16:95" };
     const output = runPostModelGates(input({ decision, candidate: null, roll, marginAtDecision: 0.25 }));
     expect(failed(output)).toEqual([]);
@@ -178,7 +173,6 @@ describe("runPostModelGates — covered calls and rolls", () => {
     expect(up.plan?.notional).toBe(1500);
     // A roll's drift is the roll's own margin, not the replacement's (35%).
     expect(failed(runPostModelGates(input({ decision, candidate: null, roll, marginAtDecision: 0.36 })))).toEqual(["edge_drift"]);
-    expect(failed(runPostModelGates(input({ decision, candidate: null, roll: { ...roll, model: null }, marginAtDecision: 0.25 })))).toEqual(["edge_drift"]);
   });
 });
 

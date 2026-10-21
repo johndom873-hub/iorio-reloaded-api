@@ -4,19 +4,16 @@ import { formatEasternTime } from "./easternIsoDate.js";
 import { formatShortDate } from "./formatShortDate.js";
 import { publishNotification } from "./notificationChannel.js";
 import { notifyTelegram } from "./notifyTelegram.js";
-import { goodCutVolatilityPoints, strongCutVolatilityPoints, type SignalCandidate, type SignalGrade } from "./signalCandidates.js";
+import { gradeMarginCutPoints } from "./contractValuation.js";
+import type { SignalCandidate, SignalGrade } from "./signalCandidates.js";
 import { assignmentRiskDeltaThreshold, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 
-// Upward grade transitions only, from any tier including Avoid, one message per
-// contract per transition. Two guards against alert flooding, both approved
-// 2026-09-24 after a contract sitting right on a grade boundary re-notified 8
-// times in 11 minutes on staging (net Edge oscillating 5.0-7.5vp across the
-// weak/good line on quote noise, each upward wobble notified since the old
-// "no cooldown" design assumed a refresh cycle took minutes to move a grade,
-// not seconds): clearsNotificationHysteresis requires the new grade be cleared
-// by a margin, not just barely crossed, and the loop (daySignalsLoop.ts) also
-// holds a per-contract cooldown so the same contract can't re-notify within
-// notificationCooldownMs regardless of further grade movement. Delivered via
+// Upward transitions of the valuation model's grade only, from any tier including Avoid, one message per contract per
+// transition. Two guards against alert flooding (approved 2026-09-24; on the model's Edge margin since 2026-10-20):
+// clearsNotificationHysteresis requires the new grade's cut be cleared by a margin, not just barely crossed (quote noise
+// moves a contract sitting on a cut back and forth within seconds), and the loop (daySignalsLoop.ts) also holds a
+// per-contract cooldown so the same contract can't re-notify within notificationCooldownMs regardless of further grade
+// movement. Delivered via
 // the persisted notification event (Pulse's Latest Events) and — through the
 // same event — the in-app toast. Telegram delivery is suspended;
 // formatSignalUpgradeMessage/formatRollSignalUpgradeMessage are unused but
@@ -30,16 +27,19 @@ export function isGradeUpgrade(previousGrade: SignalGrade | null, grade: SignalG
   return previousGrade !== null && gradeRank[grade] > gradeRank[previousGrade];
 }
 
-/** Margin (in volatility points) a net Edge must clear above the grade's own cut point (Formula 3j) before an
- * upward transition into it is convincing enough to notify. The grade shown on screen is unaffected by this —
- * gradeForNetEdge still grades at the bare cut points; this only gates the notification trigger. */
-export const notificationHysteresisVolatilityPoints = 2;
+/**
+ * Margin (a fraction of the price: 0.02 = 2 points) an Edge margin must clear above its grade's cut before an upward
+ * transition into it notifies (Marcelo 2026-10-20): Strong alerts from 22%, Good from 12%, Weak from 2%. The grade shown
+ * on screen is unaffected: gradeForEdgeMargin still grades at the bare cuts; this only gates the notification.
+ */
+export const notificationHysteresisEdgeMargin = 0.02;
 
-/** True when `grade`'s net Edge clears its own cut point by notificationHysteresisVolatilityPoints. Never true for "avoid" (nothing notifies into it). */
-export function clearsNotificationHysteresis(grade: SignalGrade, netEdge: number): boolean {
+/** True when `grade`'s Edge margin clears its own cut by notificationHysteresisEdgeMargin. Never true for "avoid" (nothing notifies into it). */
+export function clearsNotificationHysteresis(grade: SignalGrade, edgeMargin: number): boolean {
   if (grade === "avoid") return false;
-  const entryCutVolatilityPoints = grade === "strong" ? strongCutVolatilityPoints : grade === "good" ? goodCutVolatilityPoints : 0;
-  return netEdge * 100 >= entryCutVolatilityPoints + notificationHysteresisVolatilityPoints;
+  // Rounded to a basis point: 0.1 + 0.02 is 0.12000000000000001 in floating point, which a 12% margin would miss.
+  const alertThreshold = Math.round((gradeMarginCutPoints[grade] + notificationHysteresisEdgeMargin) * 10_000) / 10_000;
+  return edgeMargin >= alertThreshold;
 }
 
 export interface SignalUpgrade {
@@ -57,8 +57,8 @@ export function formatSignalUpgradeMessage(upgrade: SignalUpgrade): string {
   return [
     `▲ Signal upgraded — ${upgrade.symbol}`,
     contract,
-    `${gradeLabel[upgrade.previousGrade]} → ${gradeLabel[candidate.grade]}`,
-    `Net Edge ${(candidate.netEdge * 100).toFixed(1)}vp · Edge $ ${candidate.edgeDollars.toFixed(0)} · yield ${(candidate.annualizedYield * 100).toFixed(0)}% ann.`,
+    `${gradeLabel[upgrade.previousGrade]} → ${gradeLabel[candidate.model.grade]}`,
+    `Edge margin ${(candidate.model.edgeMargin * 100).toFixed(0)}% · Edge Yield ${(candidate.model.expectedAnnualizedReturn * 100).toFixed(0)}% ann. · Edge $ ${candidate.model.expectedPnlDollars.toFixed(0)}`,
     `Spot $${upgrade.spotPrice.toFixed(2)} · quote ${quoteTime} (day quotes)`,
     `Open: Signals → ${upgrade.symbol}`,
   ].join("\n");
@@ -76,10 +76,11 @@ export async function notifySignalUpgrade(upgrade: SignalUpgrade): Promise<void>
       expiry: candidate.expiry,
       dte: candidate.dte,
       previousGrade: upgrade.previousGrade,
-      grade: candidate.grade,
-      netEdge: candidate.netEdge,
-      edgeDollars: candidate.edgeDollars,
-      annualizedYield: candidate.annualizedYield,
+      grade: candidate.model.grade,
+      edgeMargin: candidate.model.edgeMargin,
+      edgeYield: candidate.model.expectedAnnualizedReturn,
+      expectedPnlDollars: candidate.model.expectedPnlDollars,
+      exposureDollars: candidate.model.capitalAtRiskDollars,
     });
   } catch (error) {
     console.error(`day signals: could not notify the ${upgrade.symbol} upgrade: ${error instanceof Error ? error.message : error}`);
@@ -102,8 +103,8 @@ export function formatRollSignalUpgradeMessage(upgrade: RollSignalUpgrade): stri
   return [
     `▲ Roll signal upgraded — ${upgrade.symbol}`,
     `${right} $${upgrade.held.strike}${upgrade.held.dte === null ? "" : ` (${upgrade.held.dte} DTE)`} → ${right} $${roll.replacement.strike} · ${formatShortDate(roll.replacement.expiry)} (${roll.replacement.dte} DTE)`,
-    `${gradeLabel[upgrade.previousGrade]} → ${gradeLabel[roll.grade]}`,
-    `Net roll Edge ${(roll.netRollEdge * 100).toFixed(1)}vp · ${formatSignedDollars(roll.netRollEdgeDollars, 0, true)} for ${roll.quantity} contract${roll.quantity === 1 ? "" : "s"} · net credit ${formatSignedDollars(roll.netCreditPerShare, 2)}/sh`,
+    `${gradeLabel[upgrade.previousGrade]} → ${gradeLabel[roll.model.grade]}`,
+    `Edge margin ${(roll.model.edgeMargin * 100).toFixed(0)}% · ${formatSignedDollars(roll.model.netExpectedPnl, 0, true)} for ${roll.quantity} contract${roll.quantity === 1 ? "" : "s"} · net credit ${formatSignedDollars(roll.netCreditPerShare, 2)}/sh`,
     `Spot $${upgrade.spotPrice.toFixed(2)} · quote ${quoteTime} (day quotes)`,
     `Open: Signals → ${upgrade.symbol} → Your positions`,
   ].join("\n");
@@ -125,9 +126,9 @@ export async function notifyRollSignalUpgrade(upgrade: RollSignalUpgrade): Promi
       expiry: roll.replacement.expiry,
       dte: roll.replacement.dte,
       previousGrade: upgrade.previousGrade,
-      grade: roll.grade,
-      netRollEdge: roll.netRollEdge,
-      netRollEdgeDollars: roll.netRollEdgeDollars,
+      grade: roll.model.grade,
+      edgeMargin: roll.model.edgeMargin,
+      netExpectedPnl: roll.model.netExpectedPnl,
       netCreditPerShare: roll.netCreditPerShare,
     });
   } catch (error) {

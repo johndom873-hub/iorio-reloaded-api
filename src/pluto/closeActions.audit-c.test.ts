@@ -47,8 +47,8 @@ const noEventInputs = { spotPrice: null, forecastVolatility: null, macroEvents: 
 function heldLeg(overrides: Partial<HeldLegScore> = {}): HeldLegScore {
   return {
     legId: "leg1", positionId: "pos1", strategyKey: "cash_secured_put", expiry: "2031-03-21", strike: 50, right: "P", quantity: 2, entryPrice: 2.4, entryAtIso: "2031-02-20T15:00:00Z",
-    dte: 11, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42, edge: 0.05, frictionVolatility: 0.01, vega: 0.05,
-    holdEdgeDollars: 25, closeCostDollars: 5, dollarRisk: 9948, quoteSource: "day", quotedAt: "2031-03-10T15:00:00Z", flags: [], unscoredReason: null,
+    dte: 11, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42,
+     dollarRisk: 9948, quoteSource: "day", quotedAt: "2031-03-10T15:00:00Z", flags: [], unscoredReason: null,
     // Positive hold value: P2 would never offer this leg, so any offer below is P3's.
     model: fixtureHeldLegModel(25, 5),
     ...overrides,

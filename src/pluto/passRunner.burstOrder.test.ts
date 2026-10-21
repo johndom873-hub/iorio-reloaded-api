@@ -51,7 +51,7 @@ vi.mock("../lib/signalsLiveScoring.js", () => ({
   scoreHeldShareCalls: () => [],
   scoreTicker: (_inputs: unknown, _account: unknown, _settings: unknown, live?: { liveQuotes: unknown[] }) => ({
     symbol: "AAA",
-    candidates: [...harness.eligibleIds, ...harness.requotableIds].map((id) => ({ id, expiry: "2026-10-16", strike: Number(id.split(":")[3]), strategyKey: "covered_call", edgeDollars: 10, netEdge: 0.05, grade: "good" })),
+    candidates: [...harness.eligibleIds, ...harness.requotableIds].map((id) => ({ id, expiry: "2026-10-16", strike: Number(id.split(":")[3]), strategyKey: "covered_call" })),
     heldLegs: [],
     rolls: [],
     live: live?.liveQuotes.length ?? 0,

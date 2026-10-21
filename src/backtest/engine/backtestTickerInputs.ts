@@ -11,7 +11,7 @@ import type { SnapshotHeader, TickerSignalsInputs } from "../../lib/signalsTypes
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew, volatilityRatio, volatilityRatioBarsRead, type ElevatedVolatilityFlag } from "../../lib/tiltMeasures.js";
 import type { DailyOhlcvBar } from "../../lib/realizedVolatility.js";
-import { primaryForecastWindowDays, selectModelVolatilityForecast, selectRealizedVolatilityForecast } from "../../lib/volatilityEdge.js";
+import { longForecastWindowDays, selectModelVolatilityForecast } from "../../lib/volatilityEdge.js";
 import type { ValuationGroup } from "../../lib/volatilityModelTables.js";
 import { backtestCaptureLookTimeEt } from "../backtestTypes.js";
 import { toOhlcvBars, type BacktestBarHistory } from "./backtestBarHistory.js";
@@ -32,7 +32,7 @@ const referenceVolatilityBarCount = 40;
 /** Bars loadBarsForTilt reads. */
 const tiltBarCount = 1500;
 /** Rows loadVolatilityForecasts reads. */
-export const forecastBarRowCount = primaryForecastWindowDays + 1 + 20;
+export const forecastBarRowCount = longForecastWindowDays + 1 + 20;
 const decisionTimeEt = { hour: 10, minute: 0 };
 
 export interface BacktestTickerProfile {
@@ -284,9 +284,10 @@ export function buildHistoricalTickerInputs(context: HistoricalTickerDay): { inp
     slices,
     quotes,
     dayQuotes: [],
-    forecast: selectRealizedVolatilityForecast(forecastBars),
     modelForecast: selectModelVolatilityForecast(forecastBars),
-    openSessionDatesIso: furthestExpiry && furthestExpiry > todayIso ? context.calendar.openDaysBetween(addCalendarDays(todayIso, 1), furthestExpiry) : [],
+    // The screen's display-only figures: not needed by a backtest.
+    yangZhang63Forecast: null,
+    ivMetrics: null,
     tradingSessions: furthestExpiry ? context.calendar.sessionsBetween(todayIso, furthestExpiry) : [],
     valuationGroup: profile.valuationGroup,
     earningsDatesIso,

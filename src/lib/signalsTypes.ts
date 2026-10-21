@@ -3,8 +3,9 @@ import type { MacroEvent } from "./macroEventCalendar.js";
 import type { LiveOptionQuote } from "./signalsLiveScoring.js";
 import type { TickerCaveat } from "./signalsRoadmap.js";
 import type { ElevatedVolatilityFlag, SkewMeasure } from "./tiltMeasures.js";
-import type { ModelVolatilityForecast, RealizedVolatilityForecast } from "./volatilityEdge.js";
+import type { ModelVolatilityForecast } from "./volatilityEdge.js";
 import type { TradingSession } from "./marketSessionStatus.js";
+import type { IvMetrics } from "./ivMetrics.js";
 import type { ValuationGroup } from "./volatilityModelTables.js";
 import type { HeldLegScore, OpenShortLeg, RollSignalCandidate } from "./rollSignalCandidates.js";
 
@@ -53,11 +54,12 @@ export interface TickerSignalsInputs {
   quotes: SignalQuote[];
   /** The Day Signals loop's latest bid/ask for this ticker's pooled contracts, from the same snapshot date as `header`; empty when none. */
   dayQuotes: LiveOptionQuote[];
-  forecast: RealizedVolatilityForecast | null;
   /** The valuation model's forecast (YZ21 per session, model review P3); null without 22 bars before today. */
   modelForecast: ModelVolatilityForecast | null;
-  /** The open sessions after todayEasternIso through the furthest slice expiry (market calendar, weekdays past its end): each contract's trading sessions to expiry. */
-  openSessionDatesIso: string[];
+  /** YZ63 with no fallback, for the screen's FV 63d (display only); null without 64 bars before today, and in a backtest. */
+  yangZhang63Forecast: ModelVolatilityForecast | null;
+  /** IV Rank and IV Percentile over 252 days of IBKR's daily implied volatility (ivMetrics.ts, display only); null in a backtest. */
+  ivMetrics: IvMetrics | null;
   /** Every open session, with its close, from the earlier of the snapshot date and today through the furthest slice expiry: the variance clock's input. */
   tradingSessions: TradingSession[];
   /** Which fat-tail table the ticker is valued with (ETFs incl. TLT, or single stocks). */
@@ -88,7 +90,6 @@ export interface AccountContext {
   freeCash: number;
 }
 
-export type GradeCounts = Record<SignalGrade, number>;
 export type QuoteSourceCounts = Record<SignalQuoteSource, number>;
 
 /** Age range of the day quotes merged into this ticker's scoring (ISO times). */
@@ -117,7 +118,6 @@ export interface TickerSignals {
   dayChangePercent: number | null;
   candidates: SignalCandidate[];
   best: SignalCandidate | null;
-  gradeCounts: GradeCounts;
   /** Every open short leg scored as a contract to keep (Roll Signals); unscored ones carry a reason. */
   heldLegs: HeldLegScore[];
   /** Every (held leg, replacement) pair passing the roll filters, best first. */
@@ -137,9 +137,13 @@ export interface TickerSignals {
   atmImpliedVolatility: number | null;
   /** The same at-the-money total variance on the forecast's clock: √(252 × w ÷ τ), comparable with modelForecast. */
   atmImpliedVolatilityPerSession: number | null;
-  forecast: RealizedVolatilityForecast | null;
   /** The valuation model's forecast (YZ21 per session) every candidate's model block was computed with. */
   modelForecast: ModelVolatilityForecast | null;
+  /** FV 63d: YZ63 with no fallback (display only). */
+  yangZhang63Forecast: ModelVolatilityForecast | null;
+  /** IV Rank and IV Percentile (0-100) over 252 days of IBKR's daily implied volatility (display only). */
+  ivRank: number | null;
+  ivPercentile: number | null;
   dailyBarCount: number;
   dividendCadenceUnknown: boolean;
   /** Ticker-specific "not accounted for" caveats (no snapshot, short history, dividend payer). */

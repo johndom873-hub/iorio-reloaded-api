@@ -14,11 +14,7 @@ import type { SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
 import type { DayRerankState } from "./daySignalsStore.js";
 import type { DayTickerContractContext, DayTrackedTicker } from "./daySignalsContractContextStore.js";
-import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
 import { fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
-
-// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
-const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 const forward = 100;
 const rate = 0.04;
@@ -48,7 +44,6 @@ function inputsFor(tickerId: string, symbol: string): TickerSignalsInputs {
     slices: [slice],
     quotes: strikes.map(([strike, right]) => quoteAt(strike, right)),
     dayQuotes: [],
-    forecast: { volatility: surfaceIvAt(100) - 0.02, windowDays: 63 },
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],
@@ -62,8 +57,9 @@ function inputsFor(tickerId: string, symbol: string): TickerSignalsInputs {
     dailyBarCount: 1000,
     dividendCadenceUnknown: false,
     todayEasternIso: tradingDateIso,
-    openSessionDatesIso: fixtureWeekdaySessions,
     modelForecast: fixtureModelForecast(surfaceIvAt(100) - 0.02),
+    yangZhang63Forecast: null,
+    ivMetrics: null,
     tradingSessions: fixtureTradingSessions,
     valuationGroup: "stock",
   };

@@ -30,9 +30,9 @@ function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
   return {
     strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, dte: 18, delta: -0.22, bid: 2.0, ask: 2.1, spreadPercent: 4.9,
     openInterest: 1200, volume: 300, bidSize: 40, askSize: 35,
-    surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, forecastVolatility: 0.5, edge: 0.12, frictionVolatility: 0.02, netEdge: 0.1, edgeDollars: 80, vega: 0.08,
-    dollarRisk: 9795, riskAdjustedRatio: 0.008, annualizedYield: 0.83, uncompensatedSharePercent: null,
-    quoteSource: "day", quotedAt: new Date(now - 2 * 60_000).toISOString(), flags: [], executable: true, grade: "strong",
+    surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, vega: 0.08,
+    dollarRisk: 9795, annualizedYield: 0.83, uncompensatedSharePercent: null,
+    quoteSource: "day", quotedAt: new Date(now - 2 * 60_000).toISOString(), flags: [], executable: true,
     model: fixtureCandidateModel({ edgeMargin: 0.35, expectedPnlDollars: 80, premiumYield: 0.83 }),
     ...overrides,
   };
@@ -45,9 +45,9 @@ function slice(overrides: Partial<SignalSurfaceSlice> = {}): SignalSurfaceSlice 
 function scored(overrides: Partial<TickerSignals> = {}): TickerSignals {
   return {
     tickerId: "t1", symbol: "HOOD", companyName: "Robinhood", sector: "Financial", snapshotDateIso: today, snapshotCapturedAt: "2026-09-28T14:05:00Z", spotPrice: 110, priceSource: "live",
-    previousClose: { close: 108, dateIso: "2026-09-25" }, dayChangePercent: 1.85, candidates: [candidate()], best: null, gradeCounts: { strong: 1, good: 0, weak: 0, avoid: 0 },
+    previousClose: { close: 108, dateIso: "2026-09-25" }, dayChangePercent: 1.85, candidates: [candidate()], best: null,
     heldLegs: [], rolls: [], bestRoll: null, rollCount: 0, fittedSliceCount: 3, totalSliceCount: 3, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: "2026-11-04", macroEvents: [],
-    atmImpliedVolatility: 0.6, atmImpliedVolatilityPerSession: 0.66, forecast: { volatility: 0.5, windowDays: 63 }, modelForecast: fixtureModelForecast(0.5), dailyBarCount: 1250, dividendCadenceUnknown: false, caveats: [], freeShares: 0, freeCash: 500_000,
+    atmImpliedVolatility: 0.6, atmImpliedVolatilityPerSession: 0.66, modelForecast: fixtureModelForecast(0.5), dailyBarCount: 1250, dividendCadenceUnknown: false, caveats: [], freeShares: 0, freeCash: 500_000,
     dayQuotesAsOf: null, ivShiftByExpiry: { "2026-10-16": { shiftVolatilityPoints: 1.2, quoteCount: 9 } }, quoteSourceCounts: { live: 0, day: 1, snapshot: 0 }, unscoredReason: null,
     ...overrides,
   } as TickerSignals;
@@ -72,8 +72,8 @@ describe("rejectTicker — maxDayMoveMultiple", () => {
     // 30%: normal day 1.89%, 3× = 5.67%. 80%: normal day 5.04%, 3× = 15.1%.
     expect(rejectTicker(input({ scored: scored({ dayChangePercent: 7, modelForecast: fixtureModelForecast(0.3) }) }))).toHaveLength(1);
     expect(rejectTicker(input({ scored: scored({ dayChangePercent: 7, modelForecast: fixtureModelForecast(0.8) }) }))).toEqual([]);
-    // The old Edge's YZ63 plays no part.
-    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 7, modelForecast: fixtureModelForecast(0.8), forecast: { volatility: 0.3, windowDays: 63 } }) }))).toEqual([]);
+    // The screen's FV 63d plays no part.
+    expect(rejectTicker(input({ scored: scored({ dayChangePercent: 7, modelForecast: fixtureModelForecast(0.8), yangZhang63Forecast: fixtureModelForecast(0.3) }) }))).toEqual([]);
   });
 
   it("follows the setting: 2× blocks what 3× allows, and 0× blocks any move at all", () => {

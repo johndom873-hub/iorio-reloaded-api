@@ -9,6 +9,7 @@ import {
   assignmentRiskRearmAbsoluteDelta,
   clearsNotificationHysteresis,
   decideAssignmentRiskAlert,
+  notificationHysteresisEdgeMargin,
   formatAssignmentRiskMessage,
   isGradeUpgrade,
   notifyAssignmentRisk,
@@ -25,25 +26,25 @@ describe("isGradeUpgrade", () => {
 });
 
 describe("clearsNotificationHysteresis", () => {
-  it("never clears into avoid", () => {
+  it("never clears into avoid, whatever the Edge margin", () => {
     expect(clearsNotificationHysteresis("avoid", 0)).toBe(false);
     expect(clearsNotificationHysteresis("avoid", -0.5)).toBe(false);
+    expect(clearsNotificationHysteresis("avoid", 0.5)).toBe(false);
   });
 
-  it("requires a margin above each grade's own cut point (2vp, approved 2026-09-24)", () => {
-    // weak: cut point 0vp, so >= 2vp required.
-    expect(clearsNotificationHysteresis("weak", 0.015)).toBe(false);
+  it("requires 2 points of Edge margin above each grade's own cut (Marcelo 2026-10-20)", () => {
+    expect(notificationHysteresisEdgeMargin).toBe(0.02);
+    // weak: cut 0%, so an Edge margin of 2% or more.
+    expect(clearsNotificationHysteresis("weak", 0.019)).toBe(false);
     expect(clearsNotificationHysteresis("weak", 0.02)).toBe(true);
-    // good: cut point 5vp, so >= 7vp required -- this is the HOOD $116 put case from staging
-    // (2026-09-24), which oscillated 5.0-7.5vp and re-notified 8 times in 11 minutes.
-    expect(clearsNotificationHysteresis("good", 0.05)).toBe(false);
-    expect(clearsNotificationHysteresis("good", 0.06)).toBe(false);
-    expect(clearsNotificationHysteresis("good", 0.07)).toBe(true);
-    expect(clearsNotificationHysteresis("good", 0.075)).toBe(true);
-    // strong: cut point 10vp, so >= 12vp required.
-    expect(clearsNotificationHysteresis("strong", 0.10)).toBe(false);
-    expect(clearsNotificationHysteresis("strong", 0.11)).toBe(false);
-    expect(clearsNotificationHysteresis("strong", 0.12)).toBe(true);
+    // good: cut 10%, so 12% or more -- a contract wobbling on the 10% cut on quote noise does not re-notify.
+    expect(clearsNotificationHysteresis("good", 0.1)).toBe(false);
+    expect(clearsNotificationHysteresis("good", 0.119)).toBe(false);
+    expect(clearsNotificationHysteresis("good", 0.12)).toBe(true);
+    // strong: cut 20%, so 22% or more.
+    expect(clearsNotificationHysteresis("strong", 0.2)).toBe(false);
+    expect(clearsNotificationHysteresis("strong", 0.219)).toBe(false);
+    expect(clearsNotificationHysteresis("strong", 0.22)).toBe(true);
   });
 });
 
@@ -81,7 +82,7 @@ describe("assignment-risk notification", () => {
     spotPrice: 113.42,
     leg: {
       legId: "leg-1", positionId: "pos-1", strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 116, right: "P", quantity: 1, entryPrice: 2.1, entryAtIso: "2026-09-10T14:00:00Z",
-      dte: 17, delta: -0.5234, bid: 3.9, ask: 4.1, mid: 4, surfaceImpliedVolatility: 0.6, midImpliedVolatility: 0.61, edge: 0.05, frictionVolatility: 0.01, vega: 0.12, holdEdgeDollars: 60, closeCostDollars: 12, dollarRisk: 11_200, quoteSource: "day", quotedAt: null, flags: ["assignment_risk"], unscoredReason: null, model: null,
+      dte: 17, delta: -0.5234, bid: 3.9, ask: 4.1, mid: 4, surfaceImpliedVolatility: 0.6, midImpliedVolatility: 0.61, dollarRisk: 11_200, quoteSource: "day", quotedAt: null, flags: ["assignment_risk"], unscoredReason: null, model: null,
     },
   };
 

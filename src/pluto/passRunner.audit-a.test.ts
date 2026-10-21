@@ -90,7 +90,7 @@ vi.mock("../lib/signalsLiveScoring.js", () => ({
     const ticker = harness.tickers.find((entry) => entry.symbol === inputs.symbol)!;
     return {
       symbol: inputs.symbol,
-      candidates: [...ticker.eligibleIds, ...ticker.requotableIds].map((id) => ({ id, expiry: "2026-10-16", strike: Number(id.split(":")[3]), strategyKey: "covered_call", edgeDollars: 10, netEdge: 0.05, grade: "good" })),
+      candidates: [...ticker.eligibleIds, ...ticker.requotableIds].map((id) => ({ id, expiry: "2026-10-16", strike: Number(id.split(":")[3]), strategyKey: "covered_call" })),
       heldLegs: [],
       rolls: [],
       live: live?.liveQuotes.length ?? 0,

@@ -23,9 +23,10 @@ export type AppNotification =
   | { type: "job_started"; jobName: string }
   | { type: "job_completed"; jobName: string; status: Exclude<JobRunStatus, "running"> }
   // Day Signals: a pooled contract's grade went up between two refresh cycles (daySignalsNotifications.ts).
-  | { type: "signal_upgraded"; symbol: string; strategyKey: string; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netEdge: number; edgeDollars: number; annualizedYield: number }
+  /** Grades are the valuation model's (events stored before 2026-10-20 carry the old net Edge fields instead). */
+  | { type: "signal_upgraded"; symbol: string; strategyKey: string; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; edgeMargin: number; edgeYield: number; expectedPnlDollars: number; exposureDollars: number }
   // Roll Signals: a (held leg, replacement) roll's grade went up between two refresh cycles.
-  | { type: "roll_signal_upgraded"; symbol: string; strategyKey: string; legId: string; heldStrike: number; heldExpiry: string; heldDte: number | null; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; netRollEdge: number; netRollEdgeDollars: number; netCreditPerShare: number }
+  | { type: "roll_signal_upgraded"; symbol: string; strategyKey: string; legId: string; heldStrike: number; heldExpiry: string; heldDte: number | null; strike: number; expiry: string; dte: number; previousGrade: string; grade: string; edgeMargin: number; netExpectedPnl: number; netCreditPerShare: number }
   // Day Signals: a held short leg's |delta| reached the assignment-risk threshold (daySignalsNotifications.ts).
   | { type: "assignment_risk"; symbol: string; strategyKey: string; positionId: string; legId: string; right: "C" | "P"; strike: number; expiry: string; dte: number | null; delta: number; spotPrice: number | null }
   | { type: "genosuke_reply"; preview: string }

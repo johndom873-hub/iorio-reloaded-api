@@ -1,17 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { blackScholesVega } from "./optionFriction.js";
-import { attachUncompensatedShare, buildSignalCandidates as buildSignalCandidatesOnAnyClock, compareCandidatesByModel, emptyCandidateExclusionTally, frictionDollarsPerContract, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, scoreContractWithModel, wideSpreadThreshold, type CandidateModelContext, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { attachUncompensatedShare, buildSignalCandidates, compareCandidatesByModel, emptyCandidateExclusionTally, frictionDollarsPerContract, liveUncompensatedSharePathCount, pickBestCandidate, scoreContractWithModel, wideSpreadThreshold, type CandidateModelContext, type SignalCandidate, type SignalCandidatesInput, type SignalContractExclusion, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { impliedVolatilityFromPrice } from "./impliedVolatilitySurface.js";
 import { valueContract } from "./contractValuation.js";
 import { varianceSessionsToExpiry } from "./varianceClock.js";
 import { volatilityModelTables } from "./volatilityModelTables.generated.js";
 import { fixtureCandidateModel, fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
 import { computeUncompensatedShare } from "./uncompensatedShare.js";
-
-// These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
-const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
-const buildSignalCandidates = (input: Omit<SignalCandidatesInput, "tradingSessionsByExpiry"> & { tradingSessionsByExpiry?: ReadonlyMap<string, number> }) => buildSignalCandidatesOnAnyClock({ ...input, tradingSessionsByExpiry: input.tradingSessionsByExpiry ?? sameClockSessions(input.slices) });
 
 const forward = 100;
 const rate = 0.04;
@@ -43,11 +39,24 @@ function quoteAt(strike: number, right: "C" | "P", spreadFraction = 0.04, expiry
   return { expiry, strike, right, bid: mid * (1 - spreadFraction / 2), ask: mid * (1 + spreadFraction / 2) };
 }
 
-function baseInput(overrides: Partial<SignalCandidatesInput> = {}): Parameters<typeof buildSignalCandidates>[0] {
+// Valued Monday 2026-09-21 at 10:30 ET with a 40% YZ21 forecast; the forward and spot of the quote's instant are 101 and 100.5.
+const valuedAtMs = Date.parse("2026-09-21T14:30:00Z");
+const modelContext = (overrides: Partial<CandidateModelContext> = {}): CandidateModelContext => ({
+  tables: volatilityModelTables,
+  forecast: fixtureModelForecast(0.4),
+  group: "stock",
+  varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, fixtureTradingSessions),
+  quoteInstantMs: () => valuedAtMs,
+  forwardForQuote: () => 101,
+  spotForQuote: () => 100.5,
+  ...overrides,
+});
+
+function baseInput(overrides: Partial<SignalCandidatesInput> = {}): SignalCandidatesInput {
   return {
     spotPrice: forward,
     riskFreeRate: rate,
-    forecast: { volatility: 0.2, windowDays: 63 },
+    model: modelContext(),
     slices: [slice30()],
     quotes: [quoteAt(90, "P"), quoteAt(110, "C")],
     earningsDatesIso: [],
@@ -84,8 +93,31 @@ describe("buildSignalCandidates: structural filters", () => {
     expect(buildSignalCandidates(baseInput({ slices: [slice30({ parameters: null })] }))).toHaveLength(0);
   });
 
-  it("is unscored (excluded) with no volatility forecast", () => {
-    expect(buildSignalCandidates(baseInput({ forecast: null }))).toHaveLength(0);
+  it("excludes every contract as not_valued without a model forecast, keeping the delta it measured", () => {
+    const exclusions: SignalContractExclusion[] = [];
+    expect(buildSignalCandidates(baseInput({ model: null, quotes: [quoteAt(90, "P")], onContractExcluded: (_quote, exclusion) => void exclusions.push(exclusion) }))).toHaveLength(0);
+    expect(buildSignalCandidates(baseInput({ model: undefined }))).toHaveLength(0);
+    const delta = blackScholesDelta(forward, 90, 30 / 365, rate, ivAt(Math.log(90 / forward), 30 / 365), false);
+    expect(exclusions).toHaveLength(1);
+    expect(exclusions[0]!.kind).toBe("not_valued");
+    expect((exclusions[0] as { delta: number }).delta).toBeCloseTo(delta, 12);
+  });
+
+  it("excludes a contract the model cannot value as not_valued: a quote valued after the expiry's close has no variance time left", () => {
+    const exclusions: SignalContractExclusion[] = [];
+    const afterClose = modelContext({ quoteInstantMs: () => Date.parse("2026-10-21T20:30:00Z") });
+    expect(buildSignalCandidates(baseInput({ model: afterClose, quotes: [quoteAt(90, "P")], onContractExcluded: (_quote, exclusion) => void exclusions.push(exclusion) }))).toHaveLength(0);
+    expect(exclusions.map((exclusion) => exclusion.kind)).toEqual(["not_valued"]);
+  });
+
+  it("excludes a contract with no vega left as no_vega: a 0.01% total-volatility slice puts the 90 put 1,053 standard deviations out, vega 0", () => {
+    // σ√T = √1e-8 = 0.0001; d1 = ln(100 / 90) ÷ 0.0001 ≈ 1,053, so φ(d1) underflows to 0.
+    const flatSlice = slice30({ parameters: { a: 1e-8, b: 0, rho: 0, m: 0, sigma: 0.1 } });
+    const exclusions: SignalContractExclusion[] = [];
+    expect(buildSignalCandidates(baseInput({ slices: [flatSlice], quotes: [quoteAt(90, "P")], onContractExcluded: (_quote, exclusion) => void exclusions.push(exclusion) }))).toHaveLength(0);
+    expect(exclusions).toHaveLength(1);
+    expect(exclusions[0]!.kind).toBe("no_vega");
+    expect((exclusions[0] as { delta: number }).delta).toBeCloseTo(0, 12);
   });
 
   it("applies no delta, DTE, spread or open-interest cut -- a very wide spread and a deep OTM strike still produce a candidate", () => {
@@ -101,34 +133,6 @@ describe("buildSignalCandidates: computed fields", () => {
     const candidates = buildSignalCandidates(baseInput({ quotes: [quoteAt(105, "C")] }));
     const iv = ivAt(Math.log(105 / forward), 30 / 365);
     expect(candidates[0]!.delta).toBeCloseTo(blackScholesDelta(forward, 105, 30 / 365, rate, iv, true), 10);
-  });
-
-  it("edge is surface IV minus the forecast, and net Edge is edge minus friction", () => {
-    const candidates = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }));
-    const c = candidates[0]!;
-    expect(c.edge).toBeCloseTo(c.surfaceImpliedVolatility - 0.2, 10);
-    expect(c.netEdge).toBeLessThan(c.edge); // friction is always subtracted
-    expect(c.netEdge).toBeCloseTo(c.edge - c.frictionVolatility, 6);
-  });
-
-  it("puts the forecast on the contract's calendar-day basis: 21 sessions in 30 calendar days raise it by √((21/252) ÷ (30/365))", () => {
-    const expiry = slice30().expiry;
-    const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], tradingSessionsByExpiry: new Map([[expiry, 21]]) }))[0]!;
-    const contractForecast = 0.2 * Math.sqrt(21 / 252 / (30 / 365));
-    expect(c.forecastVolatility).toBeCloseTo(contractForecast, 12);
-    expect(c.edge).toBeCloseTo(c.surfaceImpliedVolatility - contractForecast, 12);
-    expect(c.netEdge).toBeCloseTo(c.edge - c.frictionVolatility, 6);
-  });
-
-  it("a contract with no session count is left out, not scored against the plain forecast", () => {
-    expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], tradingSessionsByExpiry: new Map() }))).toHaveLength(0);
-  });
-
-  it("edge dollars scales with net Edge and is not simply proportional to the option's own price", () => {
-    const candidates = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }));
-    const c = candidates[0]!;
-    expect(Math.sign(c.edgeDollars)).toBe(Math.sign(c.netEdge));
-    expect(c.edgeDollars).not.toBe(0);
   });
 
   it("spread percent is (ask - bid) / mid, as a percentage", () => {
@@ -149,23 +153,24 @@ describe("buildSignalCandidates: computed fields", () => {
     const atBid = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spreadShareCharged: 1 }))[0]!;
     const halfway = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spreadShareCharged: 0.5 }))[0]!;
     const atMid = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spreadShareCharged: 0 }))[0]!;
-    const commissionOnly = 0.68 / 100 / atMid.vega; // commissionPerContractDollars / sharesPerContract / vega
-    const halfSpreadVolatility = (atMid.ask - atMid.bid) / 2 / atMid.vega;
-    expect(atMid.netEdge).toBeCloseTo(atMid.edge - commissionOnly, 12);
-    expect(atBid.netEdge).toBeCloseTo(atBid.edge - halfSpreadVolatility - commissionOnly, 12);
-    expect(halfway.netEdge).toBeCloseTo(halfway.edge - 0.5 * halfSpreadVolatility - commissionOnly, 12);
-    expect(halfway.edgeDollars).toBeCloseTo(halfway.netEdge * halfway.vega * 100, 10);
+    // Premium after costs = mid × 100 − (λ × half-spread × 100 + $0.68 commission).
+    const midDollars = ((atMid.bid + atMid.ask) / 2) * 100;
+    const halfSpreadDollars = ((atMid.ask - atMid.bid) / 2) * 100;
+    expect(atMid.model.premiumAfterCostsDollars).toBeCloseTo(midDollars - 0.68, 9);
+    expect(atBid.model.premiumAfterCostsDollars).toBeCloseTo(midDollars - halfSpreadDollars - 0.68, 9);
+    expect(halfway.model.premiumAfterCostsDollars).toBeCloseTo(midDollars - 0.5 * halfSpreadDollars - 0.68, 9);
+    expect(atBid.model.expectedPnlDollars).toBeLessThan(halfway.model.expectedPnlDollars);
+    expect(halfway.model.expectedPnlDollars).toBeLessThan(atMid.model.expectedPnlDollars);
     expect(atMid.vega).toBeCloseTo(blackScholesVega(forward, 90, 30 / 365, rate, atMid.surfaceImpliedVolatility), 12);
   });
 
-  it("dollar risk is the exposure net of the premium ((strike or spot − mid) × 100), and the risk-adjusted ratio follows from it", () => {
+  it("dollar risk is the exposure net of the premium ((strike or spot − mid) × 100)", () => {
     const call = buildSignalCandidates(baseInput({ quotes: [quoteAt(110, "C")], spotPrice: 100 }))[0]!;
     const put = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], spotPrice: 100 }))[0]!;
     const premiumCall = (call.bid + call.ask) / 2;
     const premiumPut = (put.bid + put.ask) / 2;
     expect(call.dollarRisk).toBeCloseTo((100 - premiumCall) * 100, 10);
     expect(put.dollarRisk).toBeCloseTo((90 - premiumPut) * 100, 10);
-    expect(put.riskAdjustedRatio).toBeCloseTo(put.edgeDollars / put.dollarRisk, 10);
   });
 
   it("does not run the Monte Carlo: uncompensated share is null until attached", () => {
@@ -292,9 +297,10 @@ describe("buildSignalCandidates: flags and executability", () => {
     expect(buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], freeCash: funded.dollarRisk - 1 }))[0]!.flags).toContain("insufficient_cash");
   });
 
-  it("a put can be flagged AND executable is false, while its net Edge/grade are still computed (shown, not hidden)", () => {
+  it("a put can be flagged AND executable is false, while its model figures and grade are still computed (shown, not hidden)", () => {
     const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")], freeCash: 1000 }))[0]!;
-    expect(Number.isFinite(c.netEdge)).toBe(true);
+    expect(Number.isFinite(c.model.expectedPnlDollars)).toBe(true);
+    expect(["strong", "good", "weak", "avoid"]).toContain(c.model.grade);
     expect(c.executable).toBe(false);
   });
 });
@@ -491,80 +497,25 @@ describe("buildSignalCandidates: boundary conditions", () => {
     const c = buildSignalCandidates(baseInput({ slices: [tight], quotes: [quoteAt(90, "P")] }))[0]!;
     expect(c.flags).not.toContain("outside_fitted_range");
   });
-
-  it("edge dollars equals net Edge x an independently computed vega x 100", () => {
-    const c = buildSignalCandidates(baseInput({ quotes: [quoteAt(90, "P")] }))[0]!;
-    const vega = blackScholesVega(forward, 90, 30 / 365, rate, c.surfaceImpliedVolatility);
-    expect(c.edgeDollars).toBeCloseTo(c.netEdge * vega * 100, 6);
-  });
-});
-
-describe("gradeSignalCandidates", () => {
-  // Fixed net Edge cut points (approved 2026-09-24): <=0 avoid, 0-5vp weak, 5-10vp good, 10vp+ strong.
-  // netEdgeVolatilityPoints is netEdge * 100, so fakeCandidates takes vp directly for readability.
-  function fakeCandidates(netEdgesVolatilityPoints: number[]) {
-    return netEdgesVolatilityPoints.map((vp, index) => {
-      const netEdge = vp / 100;
-      return { netEdge, strategyKey: "cash_secured_put" as const, expiry: "2026-10-21", strike: 90 - index, dte: 30, delta: -0.2, bid: 1, ask: 1.1, spreadPercent: 5, openInterest: null, volume: null, bidSize: null, askSize: null, surfaceImpliedVolatility: 0.2, midImpliedVolatility: 0.2, forecastVolatility: 0.15, edge: netEdge, frictionVolatility: 0, edgeDollars: netEdge * 10, vega: 0.1, netEdgeAtMid: netEdge, edgeDollarsAtMid: netEdge * 10, dollarRisk: 8999, riskAdjustedRatio: (netEdge * 10) / 8999, riskAdjustedRatioAtMid: (netEdge * 10) / 8999, annualizedYield: 0.2, uncompensatedSharePercent: 30, quoteSource: "snapshot" as const, quotedAt: null, flags: [], executable: true, grade: "avoid" as const, model: null };
-    });
-  }
-
-  it("cuts at 10vp+ strong, 5-10vp good, 0-5vp weak, <=0 avoid", () => {
-    const graded = gradeSignalCandidates(fakeCandidates([-1, 0, 2, 4.99, 5, 8, 9.99, 10, 15]));
-    const byNetEdgeVp = new Map(graded.map((c) => [Math.round(c.netEdge * 10000) / 100, c.grade]));
-    expect(byNetEdgeVp.get(15)).toBe("strong");
-    expect(byNetEdgeVp.get(10)).toBe("strong");
-    expect(byNetEdgeVp.get(9.99)).toBe("good");
-    expect(byNetEdgeVp.get(8)).toBe("good");
-    expect(byNetEdgeVp.get(5)).toBe("good");
-    expect(byNetEdgeVp.get(4.99)).toBe("weak");
-    expect(byNetEdgeVp.get(2)).toBe("weak");
-    expect(byNetEdgeVp.get(0)).toBe("avoid");
-    expect(byNetEdgeVp.get(-1)).toBe("avoid");
-  });
-
-  it("handles a single candidate and an empty list without throwing", () => {
-    expect(gradeSignalCandidates(fakeCandidates([15]))[0]!.grade).toBe("strong");
-    expect(gradeSignalCandidates([])).toEqual([]);
-  });
-
-  it("does not mutate the input array's objects", () => {
-    const input = fakeCandidates([5]);
-    gradeSignalCandidates(input);
-    expect(input[0]!.grade).toBe("avoid");
-  });
 });
 
 describe("pickBestCandidate", () => {
-  type Candidate = ReturnType<typeof gradeSignalCandidates>[number];
-  const c = (edgeDollars: number, netEdge: number, model: Candidate["model"] = null) => ({ edgeDollars, netEdge, model }) as Candidate;
-  it("picks Pluto's order: the highest Edge Yield, then the model's Edge $, whatever Hist Yield or the old Edge says", () => {
-    const edgeYield10 = c(5, 0.01, fixtureCandidateModel({ expectedAnnualizedReturn: 0.1, calibratedAnnualizedReturn: 0.9, expectedPnlDollars: 20 }));
-    const edgeYield20 = c(1, 0.01, fixtureCandidateModel({ expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.1, expectedPnlDollars: 8 }));
-    const edgeYield20MoreEdge = c(1, 0.01, fixtureCandidateModel({ expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.1, expectedPnlDollars: 9 }));
-    expect(pickBestCandidate([edgeYield10, edgeYield20, edgeYield20MoreEdge, c(90, 0.2)])).toBe(edgeYield20MoreEdge);
+  const c = (model: SignalCandidate["model"]) => ({ model }) as SignalCandidate;
+  it("picks Pluto's order: the highest Edge Yield, then the model's Edge $, whatever Hist Yield says", () => {
+    const edgeYield10 = c(fixtureCandidateModel({ expectedAnnualizedReturn: 0.1, calibratedAnnualizedReturn: 0.9, expectedPnlDollars: 20 }));
+    const edgeYield20 = c(fixtureCandidateModel({ expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.1, expectedPnlDollars: 8 }));
+    const edgeYield20MoreEdge = c(fixtureCandidateModel({ expectedAnnualizedReturn: 0.2, calibratedAnnualizedReturn: -0.1, expectedPnlDollars: 9 }));
+    expect(pickBestCandidate([edgeYield10, edgeYield20, edgeYield20MoreEdge])).toBe(edgeYield20MoreEdge);
   });
-  it("puts candidates the model could not value last, ordered by the old Edge $ then net Edge; null for an empty list", () => {
-    expect(pickBestCandidate([c(10, 0.01), c(50, 0.02), c(30, 0.05)])!.edgeDollars).toBe(50);
-    expect(pickBestCandidate([c(10, 0.01), c(10, 0.05)])!.netEdge).toBe(0.05);
-    expect(pickBestCandidate([c(90, 0.2), c(1, 0.01, fixtureCandidateModel({ expectedAnnualizedReturn: -0.5 }))])!.model).not.toBeNull();
+  it("picks a negative Edge Yield when it is the only candidate; null for an empty list", () => {
+    const onlyCandidate = c(fixtureCandidateModel({ expectedAnnualizedReturn: -0.5 }));
+    expect(pickBestCandidate([onlyCandidate])).toBe(onlyCandidate);
     expect(pickBestCandidate([])).toBeNull();
   });
 });
 
 describe("valuation model on candidates (model review, 2026-10-10)", () => {
-  // Valued Monday 2026-09-21 at 10:30 ET with a 40% YZ21 forecast; the forward and spot of the quote's instant are 101 and 100.5.
-  const valuedAtMs = Date.parse("2026-09-21T14:30:00Z");
-  const context = (overrides: Partial<CandidateModelContext> = {}): CandidateModelContext => ({
-    tables: volatilityModelTables,
-    forecast: fixtureModelForecast(0.4),
-    group: "stock",
-    varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, fixtureTradingSessions),
-    quoteInstantMs: () => valuedAtMs,
-    forwardForQuote: () => 101,
-    spotForQuote: () => 100.5,
-    ...overrides,
-  });
+  const context = modelContext;
 
   it("friction in dollars per contract is λ × half-spread × 100 + commission", () => {
     expect(frictionDollarsPerContract(1.0, 1.1, 0.5, 0.65)).toBeCloseTo(0.5 * 0.05 * 100 + 0.65, 12);
@@ -588,19 +539,17 @@ describe("valuation model on candidates (model review, 2026-10-10)", () => {
     expect(scoreContractWithModel(afterClose, slice30(), { ...quoteAt(90, "P"), bid: 0.9, ask: 1.0 }, rate, 3)).toBeNull();
   });
 
-  it("buildSignalCandidates attaches the model block with the sale's friction, and leaves it null without a model", () => {
-    const withoutModel = buildSignalCandidates(baseInput());
-    expect(withoutModel.every((candidate) => candidate.model === null)).toBe(true);
+  it("buildSignalCandidates attaches the model block with the sale's friction", () => {
     const withModel = buildSignalCandidates(baseInput({ model: context(), spreadShareCharged: 0.5 }));
     const put = withModel.find((candidate) => candidate.strategyKey === "cash_secured_put")!;
     const friction = frictionDollarsPerContract(put.bid, put.ask, 0.5, put.commissionPerContractDollars!);
     expect(put.model).toEqual(scoreContractWithModel(context(), slice30(), { ...quoteAt(90, "P"), bid: put.bid, ask: put.ask }, rate, friction));
-    expect(put.model!.premiumAfterCostsDollars).toBeCloseTo(((put.bid + put.ask) / 2) * 100 - friction, 9);
+    expect(put.model.premiumAfterCostsDollars).toBeCloseTo(((put.bid + put.ask) / 2) * 100 - friction, 9);
   });
 
-  it("compareCandidatesByModel ranks by Edge Yield, then expected P&L, unvalued last (Marcelo, 2026-10-12: not Hist Yield)", () => {
+  it("compareCandidatesByModel ranks by Edge Yield, then expected P&L (Marcelo, 2026-10-12: not Hist Yield)", () => {
     const valued = (expectedAnnualizedReturn: number, expectedPnlDollars: number, calibratedAnnualizedReturn = 0) => ({ model: fixtureCandidateModel({ expectedAnnualizedReturn, expectedPnlDollars, calibratedAnnualizedReturn }) });
-    const ranked = [valued(0.1, 90, 0.9), { model: null }, valued(0.3, 10), valued(0.3, 40)].sort(compareCandidatesByModel);
-    expect(ranked.map((entry) => (entry.model ? [entry.model.expectedAnnualizedReturn, entry.model.expectedPnlDollars] : null))).toEqual([[0.3, 40], [0.3, 10], [0.1, 90], null]);
+    const ranked = [valued(0.1, 90, 0.9), valued(0.3, 10), valued(0.3, 40)].sort(compareCandidatesByModel);
+    expect(ranked.map((entry) => [entry.model.expectedAnnualizedReturn, entry.model.expectedPnlDollars])).toEqual([[0.3, 40], [0.3, 10], [0.1, 90]]);
   });
 });

@@ -26,7 +26,6 @@ export interface SignalsChainCell {
   quotedAt: string | null;
   /** Candidates only. */
   grade: SignalGrade | null;
-  netEdge: number | null;
   /** Filtered only: why Signals left it out, in plain words. */
   reason: string | null;
 }
@@ -93,12 +92,12 @@ export function describeContractExclusion(exclusion: SignalContractExclusion): s
       return `Δ ${Math.abs(exclusion.delta).toFixed(2)} is under your min Δ ${exclusion.deltaTargetMin.toFixed(2)}`;
     case "above_max_delta":
       return `Δ ${Math.abs(exclusion.delta).toFixed(2)} is over your max Δ ${exclusion.deltaTargetMax.toFixed(2)}`;
-    case "no_friction":
-      return "Friction cost could not be computed for this quote";
-    case "no_forecast":
-      return "No volatility forecast for this ticker";
+    case "no_vega":
+      return "No sensitivity to volatility left at this strike: it cannot be valued";
     case "below_min_yield":
       return `Yield ${exclusion.annualizedYieldPct.toFixed(1)}%/yr is under your min ${exclusion.minAnnualizedYieldPct}%/yr`;
+    case "not_valued":
+      return "The valuation model could not value this contract";
   }
 }
 
@@ -145,7 +144,7 @@ export interface AssembleSignalsChainInput {
   spreadShareCharged: number;
 }
 
-const notCapturedCell: SignalsChainCell = { state: "not_captured", bid: null, ask: null, delta: null, quoteSource: null, quotedAt: null, grade: null, netEdge: null, reason: null };
+const notCapturedCell: SignalsChainCell = { state: "not_captured", bid: null, ask: null, delta: null, quoteSource: null, quotedAt: null, grade: null, reason: null };
 
 export interface ChainCellScoring {
   scored: TickerSignals;
@@ -162,8 +161,8 @@ export function createChainCellResolver(scoring: ChainCellScoring | null, captur
     const key = contractKey(ref);
     const candidate = candidatesByKey.get(key);
     if (candidate) {
-      // The valuation model's grade, as the opportunity list shows it (mockup approved 2026-10-10); none when it could not value the contract.
-      return { state: "candidate", bid: candidate.bid, ask: candidate.ask, delta: candidate.delta, quoteSource: candidate.quoteSource, quotedAt: candidate.quotedAt, grade: candidate.model?.grade ?? null, netEdge: candidate.netEdge, reason: null };
+      // The valuation model's grade, as the opportunity list shows it (mockup approved 2026-10-10).
+      return { state: "candidate", bid: candidate.bid, ask: candidate.ask, delta: candidate.delta, quoteSource: candidate.quoteSource, quotedAt: candidate.quotedAt, grade: candidate.model.grade, reason: null };
     }
     const quote = quotesByKey.get(key);
     if (!quote) return notCapturedCell;
@@ -178,7 +177,6 @@ export function createChainCellResolver(scoring: ChainCellScoring | null, captur
       quoteSource: quote.source ?? "snapshot",
       quotedAt: quote.quotedAt ?? null,
       grade: null,
-      netEdge: null,
       reason,
     };
   };

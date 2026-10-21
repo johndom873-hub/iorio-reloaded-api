@@ -1,15 +1,15 @@
 import { db } from "../db/connection.js";
-import { selectModelVolatilityForecast, selectRealizedVolatilityForecast, primaryForecastWindowDays, type ModelVolatilityForecast, type RealizedVolatilityForecast } from "./volatilityEdge.js";
+import { longForecastWindowDays, selectModelVolatilityForecast, type ModelVolatilityForecast } from "./volatilityEdge.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
 
 /** Bars needed for the longest window: 63 returns plus the prior close. */
-const barsNeeded = primaryForecastWindowDays + 1;
+const barsNeeded = longForecastWindowDays + 1;
 
 export interface VolatilityForecasts {
-  /** The old Edge's forecast (YZ63, else YZ21), kept for the Signals screen. */
-  edge: RealizedVolatilityForecast | null;
   /** The valuation model's forecast (YZ21 per session), what Pluto acts on. */
   model: ModelVolatilityForecast | null;
+  /** YZ63, no fallback: the Signals screen's FV 63d (display only). */
+  yangZhang63: ModelVolatilityForecast | null;
 }
 
 /**
@@ -30,5 +30,5 @@ export async function loadVolatilityForecasts(tickerId: string, asOfDateIso: str
     .filter((row) => row.open !== null && row.high !== null && row.low !== null && row.close !== null)
     .reverse()
     .map((row) => ({ tradingDate: row.tradingDate, open: Number(row.open), high: Number(row.high), low: Number(row.low), close: Number(row.close), volume: Number(row.volume ?? 0) }));
-  return { edge: selectRealizedVolatilityForecast(bars), model: selectModelVolatilityForecast(bars) };
+  return { model: selectModelVolatilityForecast(bars), yangZhang63: selectModelVolatilityForecast(bars, longForecastWindowDays) };
 }

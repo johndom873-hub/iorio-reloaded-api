@@ -11,11 +11,7 @@ import { assignmentRiskAlertAbsoluteDelta, assignmentRiskRearmAbsoluteDelta, cle
 import type { AssignmentRiskAlertState, DayRerankState } from "./daySignalsStore.js";
 import type { DayContractRef } from "./daySignalsContractSet.js";
 import type { DayTickerContractContext, DayTrackedTicker } from "./daySignalsContractContextStore.js";
-import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
 import { fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
-
-// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
-const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 const forward = 100;
 const rate = 0.04;
@@ -42,8 +38,6 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
     slices: [slice],
     quotes: strikes.map(([strike, right]) => quoteAt(strike, right)),
     dayQuotes,
-    // Forecast just under the surface: every candidate starts Weak at snapshot quotes.
-    forecast: { volatility: surfaceIvAt(100) - 0.02, windowDays: 63 },
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],
@@ -57,8 +51,11 @@ function inputsFor(dayQuotes: TickerSignalsInputs["dayQuotes"]): TickerSignalsIn
     dailyBarCount: 1000,
     dividendCadenceUnknown: false,
     todayEasternIso: tradingDateIso,
-    openSessionDatesIso: fixtureWeekdaySessions,
+    // A YZ21 forecast 2 points under the 30-day ATM IV: at snapshot quotes the model grades the puts Strong (Edge margin
+    // 29% to 86%: the forecast is flat, the surface skewed) and the calls Good (12% and 14%).
     modelForecast: fixtureModelForecast(surfaceIvAt(100) - 0.02),
+    yangZhang63Forecast: null,
+    ivMetrics: null,
     tradingSessions: fixtureTradingSessions,
     valuationGroup: "stock",
   };
@@ -142,7 +139,7 @@ function createHarness(impliedVolatilityShift = 0): Harness {
       for (const entry of grades) state.lastRollGrades.set(`${entry.legId}|${entry.expiry}|${entry.strike}|${entry.right}`, entry.grade);
     },
     notifyRollUpgrade: async (upgrade) => {
-      calls.rollNotified.push(`${upgrade.roll.legId}:${upgrade.roll.replacement.strike}:${upgrade.previousGrade}->${upgrade.roll.grade}`);
+      calls.rollNotified.push(`${upgrade.roll.legId}:${upgrade.roll.replacement.strike}:${upgrade.previousGrade}->${upgrade.roll.model.grade}`);
     },
     loadLastGrades: async () => new Map(state.lastGrades),
     updateDayQuoteGrades: async (_tickerId, grades) => {
@@ -150,7 +147,7 @@ function createHarness(impliedVolatilityShift = 0): Harness {
       for (const grade of grades) state.lastGrades.set(`${grade.expiry}|${grade.strike}|${grade.right}`, grade.grade);
     },
     notifyUpgrade: async (upgrade) => {
-      calls.notified.push(`${upgrade.candidate.strike}${upgrade.candidate.strategyKey === "covered_call" ? "C" : "P"}:${upgrade.previousGrade}->${upgrade.candidate.grade}`);
+      calls.notified.push(`${upgrade.candidate.strike}${upgrade.candidate.strategyKey === "covered_call" ? "C" : "P"}:${upgrade.previousGrade}->${upgrade.candidate.model.grade}`);
     },
     loadAssignmentRiskAlertStates: async (legIds) => new Map(legIds.flatMap((legId) => (state.assignmentRiskStates.has(legId) ? [[legId, { ...state.assignmentRiskStates.get(legId)! }] as const] : []))),
     recordAssignmentRiskAlert: async (legId, alertTradingDateIso) => {
@@ -612,7 +609,7 @@ describe("DaySignalsLoop", () => {
   });
 
   it("notifies upward transitions only, against the last recorded grade", async () => {
-    // Quotes come back 8 vol points richer than the surface: shift +8vp lifts every candidate from Weak to Good/Strong.
+    // Quotes come back 8 vol points richer than the surface: every candidate grades Strong (Edge margin 37% or more), an upgrade from Weak.
     const harness = createHarness(0.08);
     for (const [strike, right] of strikes) harness.state.lastGrades.set(`${expiry}|${strike}|${right}`, "weak");
     harness.state.lastGrades.set(`${expiry}|80|P`, "strong"); // already above: must not notify
@@ -666,20 +663,19 @@ describe("DaySignalsLoop", () => {
   });
 
   it("withholds a notification that reaches Weak without clearing the hysteresis margin, while still recording the grade", async () => {
-    // At shift 0 every candidate scores Weak (per inputsFor's comment); pick a real one whose net Edge
-    // doesn't clear Weak's notification margin (2vp) and give it an Avoid baseline, so isGradeUpgrade
-    // alone would fire but the margin should withhold it -- this reproduces the HOOD $116 put boundary
-    // flap from staging (2026-09-24): a contract barely crossing a grade line should not notify on the
-    // crossing alone.
+    // With the forecast at the 30-day ATM IV, the 110 call's Edge margin is 1.2%: Weak (cut 0%) but short of the 2%
+    // Weak needs to notify. Give it an Avoid baseline, so isGradeUpgrade alone would fire but the margin withholds it:
+    // a contract barely crossing a grade line on quote noise should not notify on the crossing alone.
     const harness = createHarness(0);
+    const forecastAtTheMoney = (): TickerSignalsInputs => ({ ...inputsFor([]), modelForecast: fixtureModelForecast(surfaceIvAt(100)) });
     // Freeze the ticker's inputs (empty day quotes) so the pre-loop check below matches exactly what
     // the loop's own re-score sees on cycle 1 -- the default harness wiring merges the cycle's just-settled
-    // day quotes into loadTickerSignalsInputs, which shifts net Edge by a fraction of a vp and would make
+    // day quotes into loadTickerSignalsInputs, which moves the Edge margin a little and would make
     // a margin-sensitive assertion like this one nondeterministic.
-    harness.deps.loadTickerSignalsInputs = async () => inputsFor([]);
-    const expected = scoreTicker(inputsFor([]), { freeCash: 1_000_000 }, settings, { spotPrice: 100, priceSource: "live" });
-    const weakBelowMargin = expected.candidates.find((candidate) => candidate.grade === "weak" && !clearsNotificationHysteresis("weak", candidate.netEdge));
-    expect(weakBelowMargin).toBeDefined();
+    harness.deps.loadTickerSignalsInputs = async () => forecastAtTheMoney();
+    const expected = scoreTicker(forecastAtTheMoney(), { freeCash: 1_000_000 }, settings, { spotPrice: 100, priceSource: "live" });
+    const weakBelowMargin = expected.candidates.find((candidate) => candidate.model.grade === "weak" && !clearsNotificationHysteresis("weak", candidate.model.edgeMargin));
+    expect(weakBelowMargin).toMatchObject({ strike: 110, strategyKey: "covered_call" });
     const key = `${weakBelowMargin!.expiry}|${weakBelowMargin!.strike}|${weakBelowMargin!.strategyKey === "covered_call" ? "C" : "P"}`;
     for (const [strike, right] of strikes) harness.state.lastGrades.set(`${expiry}|${strike}|${right}`, "weak");
     harness.state.lastGrades.set(key, "avoid");
@@ -742,7 +738,7 @@ describe("DaySignalsLoop", () => {
     const heldLeg = { legId: "leg-1", positionId: "pos-1", strategyKey: "cash_secured_put" as const, expiry, strike: 95, right: "P" as const, quantity: 1, entryPrice: 2, entryAtIso: "2026-09-10T14:00:00Z" };
     // Empty day quotes (not harness.state.dayQuotes): keeps this test's pre-loop `expected` computation
     // identical to what the loop's own cycle-1 re-score sees, so the hysteresis-margin check below isn't
-    // thrown off by the day-quote merge shifting net roll Edge by a fraction of a vp between the two.
+    // thrown off by the day-quote merge moving the roll's Edge margin a little between the two.
     const withRoll = (): TickerSignalsInputs => ({ ...inputsFor([]), slices: [slice, slice60], quotes: [...inputsFor([]).quotes, ...quotes60], openShortLegs: [heldLeg] });
     harness.deps.loadTickerSignalsInputs = async () => withRoll();
     const expected = scoreTicker(withRoll(), { freeCash: 1_000_000 }, settings, { spotPrice: 100, priceSource: "live" });
@@ -758,16 +754,16 @@ describe("DaySignalsLoop", () => {
       return originalWindow(contracts, options);
     };
     await harness.loop.start();
-    const upgraded = expected.rolls.filter((roll) => roll.grade !== "avoid");
+    const upgraded = expected.rolls.filter((roll) => roll.model.grade !== "avoid");
     expect(upgraded.length).toBeGreaterThan(0);
     // First cycle notifies the rolls above Avoid that also clear the notification hysteresis margin
     // (a roll graded just barely above Avoid does not); the second cycle sees the recorded grade and stays quiet.
-    const notifiable = upgraded.filter((roll) => clearsNotificationHysteresis(roll.grade, roll.netRollEdge));
+    const notifiable = upgraded.filter((roll) => clearsNotificationHysteresis(roll.model.grade, roll.model.edgeMargin));
     expect(notifiable.length).toBeGreaterThan(0);
-    expect(harness.calls.rollNotified.sort()).toEqual(notifiable.map((roll) => `leg-1:${roll.replacement.strike}:avoid->${roll.grade}`).sort());
+    expect(harness.calls.rollNotified.sort()).toEqual(notifiable.map((roll) => `leg-1:${roll.replacement.strike}:avoid->${roll.model.grade}`).sort());
     expect(harness.calls.rollGrades).toHaveLength(2);
-    expect(harness.calls.rollGrades[0]).toEqual(expected.rolls.map((roll) => roll.grade));
-    expect(harness.state.lastRollGrades.get(rollCandidateKey(upgraded[0]!))).toBe(upgraded[0]!.grade);
+    expect(harness.calls.rollGrades[0]).toEqual(expected.rolls.map((roll) => roll.model.grade));
+    expect(harness.state.lastRollGrades.get(rollCandidateKey(upgraded[0]!))).toBe(upgraded[0]!.model.grade);
   });
 
   it("backs off and keeps going after the connection drops mid-cycle", async () => {

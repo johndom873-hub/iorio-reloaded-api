@@ -1,12 +1,9 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, gradeSignalCandidates, type SignalQuote, type SignalSurfaceSlice , type SignalCandidatesInput } from "./signalCandidates.js";
+import { buildSignalCandidates, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { candidateContractKey, computeUncompensatedByContract } from "./signalsLiveScoring.js";
 import { computeUncompensatedSharesInWorker, shutdownUncompensatedShareWorker } from "./uncompensatedShareWorkerPool.js";
-
-// These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
-const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
-const buildSignalCandidates = (input: Omit<SignalCandidatesInput, "tradingSessionsByExpiry"> & { tradingSessionsByExpiry?: ReadonlyMap<string, number> }) => buildSignalCandidatesOnAnyClock({ ...input, tradingSessionsByExpiry: input.tradingSessionsByExpiry ?? sameClockSessions(input.slices) });
+import { fixtureCandidateModelContext } from "./testSupport/valuationModelFixtures.js";
 
 const forward = 100;
 const rate = 0.04;
@@ -34,7 +31,7 @@ function quoteAt(strike: number, right: "C" | "P"): SignalQuote {
   const mid = blackScholesPriceOnForward(forward, strike, years, rate, iv, right === "C");
   return { expiry: "2026-10-21", strike, right, bid: mid * 0.98, ask: mid * 1.02 };
 }
-const candidates = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: { volatility: 0.15, windowDays: 63 }, slices, quotes: [quoteAt(90, "P"), quoteAt(95, "P"), quoteAt(105, "C"), quoteAt(110, "C")], earningsDatesIso: [], earningsCalendarResolved: true, macroEvents: [], todayEasternIso: "2026-09-21", scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), freeShares: 0, freeCash: 1e6, deltaTargetMin: 0, deltaTargetMax: 1, minAnnualizedYieldPct: 0, spreadShareCharged: 1 }));
+const candidates = buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, model: fixtureCandidateModelContext({ annualizedVolatility: 0.15, valuedAtMs: Date.parse("2026-09-21T14:00:00Z"), forward }), slices, quotes: [quoteAt(90, "P"), quoteAt(95, "P"), quoteAt(105, "C"), quoteAt(110, "C")], earningsDatesIso: [], earningsCalendarResolved: true, macroEvents: [], todayEasternIso: "2026-09-21", scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), freeShares: 0, freeCash: 1e6, deltaTargetMin: 0, deltaTargetMax: 1, minAnnualizedYieldPct: 0, spreadShareCharged: 1 });
 
 afterAll(() => shutdownUncompensatedShareWorker());
 

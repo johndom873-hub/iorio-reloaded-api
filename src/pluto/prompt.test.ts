@@ -59,7 +59,7 @@ describe("recentDecisionsForPrompt", () => {
 });
 
 describe("prompt v3.3 payload and wording (2026-10-07)", () => {
-  const scored = { symbol: "SMCI", sector: "Technology", spotPrice: 43.46, dayChangePercent: 0.6, atmImpliedVolatility: 0.8, forecast: { volatility: 0.7 }, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: null, macroEvents: [], snapshotCapturedAt: null } as unknown as PlutoPromptTickerInput["scored"];
+  const scored = { symbol: "SMCI", sector: "Technology", spotPrice: 43.46, dayChangePercent: 0.6, atmImpliedVolatility: 0.8, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: null, macroEvents: [], snapshotCapturedAt: null } as unknown as PlutoPromptTickerInput["scored"];
   const closeOn = (positionId: string, id: string) => ({ id, kind: "close_leg" as const, symbol: "SMCI", positionId, description: "Buy back 10× SMCI $42.5P", cycle_pnl: 218, detail: {} });
   const input = (overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput => ({
     now: new Date("2026-10-06T18:43:46Z"),
@@ -129,8 +129,8 @@ describe("prompt v3.8: held positions and event timing (2026-10-08)", () => {
   const eventAt = (dateIso: string, hourUtc: number) => `${dateIso}T${String(hourUtc).padStart(2, "0")}:00:00.000Z`;
   // Thu 2026-10-08 14:30 UTC; CPI Wed 10-14 08:30 ET (12:30 UTC).
   const macroEvents = [{ dateIso: "2026-10-14", eventAtIso: "2026-10-14T12:30:00.000Z", title: "CPI" }];
-  const scored = { symbol: "SMCI", sector: "Technology", spotPrice: 43.46, dayChangePercent: 0.6, atmImpliedVolatility: 0.8, forecast: { volatility: 0.7 }, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: null, macroEvents, snapshotCapturedAt: null } as unknown as PlutoPromptTickerInput["scored"];
-  const candidate = { strategyKey: "cash_secured_put", expiry: "2026-10-16", dte: 8, strike: 40, delta: -0.2, bid: 0.5, ask: 0.55, spreadPercent: 9, surfaceImpliedVolatility: 0.8, midImpliedVolatility: 0.8, edge: 0.1, netEdge: 0.09, edgeDollars: 20, annualizedYield: 0.5, dollarRisk: 3950, riskAdjustedRatio: 0.005, openInterest: 500, volume: 300, grade: "good", quoteSource: "day", quotedAt: eventAt("2026-10-08", 14), flags: ["macro_event_before_expiry"] };
+  const scored = { symbol: "SMCI", sector: "Technology", spotPrice: 43.46, dayChangePercent: 0.6, atmImpliedVolatility: 0.8, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: null, macroEvents, snapshotCapturedAt: null } as unknown as PlutoPromptTickerInput["scored"];
+  const candidate = { strategyKey: "cash_secured_put", expiry: "2026-10-16", dte: 8, strike: 40, delta: -0.2, bid: 0.5, ask: 0.55, spreadPercent: 9, surfaceImpliedVolatility: 0.8, midImpliedVolatility: 0.8, annualizedYield: 0.5, dollarRisk: 3950, openInterest: 500, volume: 300, quoteSource: "day", quotedAt: eventAt("2026-10-08", 14), flags: ["macro_event_before_expiry"] };
   const heldPut = {
     legId: "leg-1", positionId: "position-pluto", strategy: "cash_secured_put" as const, strike: 40, expiry: "2026-10-16", dte: 8, delta: -0.1, quantity: 2, entryCredit: 1, bid: 0.12, ask: 0.16,
     capturedPct: 84, maxRemainingGainDollars: 28, closeCostDollars: 5.36, strikeDistanceDays: 1.83, eventStressLossDollars: 61.4,
@@ -168,8 +168,8 @@ describe("prompt v3.8: held positions and event timing (2026-10-08)", () => {
     expect((payload.tickers as { candidates: Record<string, unknown>[] }[])[0]!.candidates[0]).not.toHaveProperty("on_held_shares");
   });
 
-  it("v4.0: a candidate carries the valuation model's figures, not the old Edge's; the ticker its session-clock IV and YZ21", () => {
-    const valued = { ...candidate, edgeDollars: 999, netEdge: 0.5, grade: "weak", model: fixtureCandidateModel({ varianceSessions: 6.193, impliedVolatility: 0.8123, edgeMargin: 0.3456, expectedPnlDollars: 21.4, calibratedExpectedPnlDollars: 9.6, calibratedAnnualizedReturn: 0.2149, expectedAnnualizedReturn: 0.4321, probabilityOfProfit: 0.873, averageWinDollars: 44.2, averageLossDollars: -150.6, expectedShortfallDollars: -612.3, stressPnlDollars: -301.7, premiumAfterCostsDollars: 50.3, premiumYield: 0.5234 }) };
+  it("v4.0: a candidate carries the valuation model's figures; the ticker its session-clock IV and YZ21", () => {
+    const valued = { ...candidate, model: fixtureCandidateModel({ varianceSessions: 6.193, impliedVolatility: 0.8123, edgeMargin: 0.3456, expectedPnlDollars: 21.4, calibratedExpectedPnlDollars: 9.6, calibratedAnnualizedReturn: 0.2149, expectedAnnualizedReturn: 0.4321, probabilityOfProfit: 0.873, averageWinDollars: 44.2, averageLossDollars: -150.6, expectedShortfallDollars: -612.3, stressPnlDollars: -301.7, premiumAfterCostsDollars: 50.3, premiumYield: 0.5234 }) };
     const withModel = { ...scored, atmImpliedVolatilityPerSession: 0.8771, modelForecast: fixtureModelForecast(0.6543) } as PlutoPromptTickerInput["scored"];
     const { payload } = buildPlutoUserPayload(input([{ scored: withModel, eligible: [{ id: "SMCI:cash_secured_put:2026-10-16:40", kind: "open_cash_secured_put", symbol: "SMCI", candidate: valued as never }], eligibleRolls: [], closeActions: [], heldPositions: [] }]));
     const ticker = (payload.tickers as Record<string, unknown>[])[0]!;

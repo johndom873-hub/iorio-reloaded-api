@@ -17,7 +17,7 @@ function openOffer(symbol: string, strategyKey: "cash_secured_put" | "covered_ca
   return { id: `${symbol}:${strategyKey}:2026-03-20:${strike}`, kind: strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol, candidate: candidate(strategyKey, strike, edgeYield) };
 }
 function rollOffer(symbol: string, legId: string, netRollDollars: number, flags: RollSignalFlag[]): PlutoRollCandidate {
-  const roll = { legId, positionId: `position-of-${legId}`, strategyKey: "cash_secured_put", quantity: 1, replacement: candidate("cash_secured_put", 45, 0.3), flags, warnings: [], netRollEdgeDollars: netRollDollars, netRollEdge: 0.01, model: fixtureRollModel({ netExpectedPnl: netRollDollars, netExpectedPnlPerContract: netRollDollars }) } as unknown as RollSignalCandidate;
+  const roll = { legId, positionId: `position-of-${legId}`, strategyKey: "cash_secured_put", quantity: 1, replacement: candidate("cash_secured_put", 45, 0.3), flags, warnings: [], model: fixtureRollModel({ netExpectedPnl: netRollDollars, netExpectedPnlPerContract: netRollDollars }) } as unknown as RollSignalCandidate;
   return { id: `${symbol}:roll:${legId}:2026-03-27:45`, kind: "roll", symbol, roll };
 }
 function closeOffer(overrides: Partial<CloseOffer> & Pick<CloseOffer, "kind" | "symbol">): CloseOffer {

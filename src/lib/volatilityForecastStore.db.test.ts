@@ -48,12 +48,13 @@ describe("loadVolatilityForecasts", () => {
     expect(lastFullDate).toBe("2026-10-09");
   });
 
-  it("leaves out today's partial bar: Monday's forecasts are Friday's, YZ63 for the old Edge and YZ21 for the model", async () => {
+  it("leaves out today's partial bar: Monday's forecasts are Friday's, YZ21 for the model and YZ63 for the screen's FV 63d", async () => {
     const forecasts = await loadVolatilityForecasts(tickerId, "2026-10-12", "2026-10-12");
     const yz63 = computeYangZhangVolatility(bars, 63);
     const yz21 = computeYangZhangVolatility(bars, 21);
     if (!yz63.available || !yz21.available) throw new Error("fixture must be fittable");
-    expect(forecasts.edge).toEqual({ volatility: yz63.annualizedVolatility, windowDays: 63 });
+    expect(forecasts.yangZhang63!.annualizedVolatility).toBeCloseTo(yz63.annualizedVolatility, 12);
+    expect(forecasts.yangZhang63!.windowDays).toBe(63);
     expect(forecasts.model!.annualizedVolatility).toBeCloseTo(yz21.annualizedVolatility, 12);
     expect(forecasts.model!.perSessionVariance).toBeCloseTo(yz21.annualizedVolatility ** 2 / 252, 15);
   });

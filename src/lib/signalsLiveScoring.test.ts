@@ -1,21 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
-import { buildSignalCandidates as buildSignalCandidatesOnAnyClock, emptyCandidateExclusionTally, gradeSignalCandidates, pickBestCandidate, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice , type SignalCandidatesInput, type CandidateModelContext } from "./signalCandidates.js";
-import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeAtmImpliedVolatilityPerSession, computeDayChangePercent, countRollableLegs, sameTimeToday, computeUncompensatedByContract, countGrades, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
+import { buildSignalCandidates, emptyCandidateExclusionTally, pickBestCandidate, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice, type CandidateModelContext } from "./signalCandidates.js";
+import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeAtmImpliedVolatilityPerSession, computeDayChangePercent, countRollableLegs, sameTimeToday, computeUncompensatedByContract, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
-import { tradingSessionsByExpiry } from "./volatilityEdge.js";
-import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
 import { varianceSessionsToExpiry } from "./varianceClock.js";
 import { volatilityModelTables } from "./volatilityModelTables.generated.js";
 import { fixtureModelForecast, fixtureRollModel, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
 import type { RollSignalCandidate } from "./rollSignalCandidates.js";
-
-// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
-const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
-
-// These cases test scoring, not the clock: sessions that put the forecast on each slice's own clock (factor 1).
-const sameClockSessions = (slices: SignalSurfaceSlice[]) => new Map(slices.map((slice) => [slice.expiry, slice.yearsToExpiry * 252]));
-const buildSignalCandidates = (input: Omit<SignalCandidatesInput, "tradingSessionsByExpiry"> & { tradingSessionsByExpiry?: ReadonlyMap<string, number> }) => buildSignalCandidatesOnAnyClock({ ...input, tradingSessionsByExpiry: input.tradingSessionsByExpiry ?? sameClockSessions(input.slices) });
 
 const forward = 100;
 const rate = 0.04;
@@ -55,7 +46,6 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     slices: [slice("2026-10-21", years30), slice("2026-11-20", years60)],
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)],
     dayQuotes: [],
-    forecast: { volatility: 0.15, windowDays: 63 },
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],
@@ -70,8 +60,9 @@ function inputs(overrides: Partial<TickerSignalsInputs> = {}): TickerSignalsInpu
     dividendCadenceUnknown: false,
     // Same day as the snapshot: the surface is scored as fitted. See the rebaseSlicesToToday tests for a stale snapshot.
     todayEasternIso: "2026-09-21",
-    openSessionDatesIso: fixtureWeekdaySessions,
     modelForecast: fixtureModelForecast(0.15),
+    yangZhang63Forecast: null,
+    ivMetrics: null,
     tradingSessions: fixtureTradingSessions,
     valuationGroup: "stock",
     ...overrides,
@@ -109,6 +100,16 @@ describe("computeAtmImpliedVolatility", () => {
     const atLiveSpot = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: 108, priceSource: "live" }).atmImpliedVolatility;
     expect(atSnapshot).toBeCloseTo(Math.sqrt(sviTotalVariance(params, 0) / years30), 12);
     expect(atLiveSpot).toBe(atSnapshot);
+  });
+});
+
+describe("the screen's display-only volatility figures", () => {
+  it("carries FV 63d, IV Rank and IV Percentile onto the row, and leaves them empty when the inputs have none", () => {
+    const yangZhang63Forecast = fixtureModelForecast(0.31);
+    const scored = scoreTicker(inputs({ yangZhang63Forecast, ivMetrics: { ivRank: 42, ivPercentile: 57, ivWindowDays: 252 } }), account, permissiveSettings);
+    expect(scored).toMatchObject({ yangZhang63Forecast, ivRank: 42, ivPercentile: 57 });
+    expect(toScreenRow(scored)).toMatchObject({ yangZhang63Forecast, ivRank: 42, ivPercentile: 57 });
+    expect(scoreTicker(inputs(), account, permissiveSettings)).toMatchObject({ yangZhang63Forecast: null, ivRank: null, ivPercentile: null });
   });
 });
 
@@ -208,12 +209,12 @@ describe("scoreTicker", () => {
   it("reports the unscored reasons in order: no snapshot, no fit, no forecast", () => {
     expect(scoreTicker(inputs({ header: null }), account, permissiveSettings).unscoredReason).toBe("no_snapshot");
     expect(scoreTicker(inputs({ slices: [slice("2026-10-21", years30, { status: "insufficient_points" as never })] }), account, permissiveSettings).unscoredReason).toBe("no_surface_fit");
-    expect(scoreTicker(inputs({ forecast: null }), account, permissiveSettings).unscoredReason).toBe("no_forecast");
+    expect(scoreTicker(inputs({ modelForecast: null }), account, permissiveSettings).unscoredReason).toBe("no_forecast");
   });
 
   it("a snapshot whose fit has not finished is Analysing (pending, with no problem implied), ahead of every fit and forecast check", () => {
     const base = inputs();
-    const pending = scoreTicker(inputs({ header: { ...base.header!, fitCompletedAt: null }, slices: [], forecast: null }), account, permissiveSettings);
+    const pending = scoreTicker(inputs({ header: { ...base.header!, fitCompletedAt: null }, slices: [], modelForecast: null }), account, permissiveSettings);
     expect(pending.unscoredReason).toBe("analysing");
     expect(pending.unscoredDetail).toEqual({ kind: "analysing", snapshotCapturedAt: "2026-09-21T14:00:00Z" });
     expect(pending.best).toBeNull();
@@ -233,22 +234,22 @@ describe("scoreTicker", () => {
     const noRate = scoreTicker(inputs({ header: { ...base.header!, riskFreeRatePercent: null } }), account, permissiveSettings);
     expect(noRate.unscoredReason).toBe("no_surface_fit");
     expect(noRate.unscoredDetail).toMatchObject({ kind: "fit", fitIssue: "no_risk_free_rate" });
-    expect(scoreTicker(inputs({ forecast: null, dailyBarCount: 18 }), account, permissiveSettings).unscoredDetail).toEqual({ kind: "forecast", dailyBarCount: 18, barsNeeded: 22 });
+    expect(scoreTicker(inputs({ modelForecast: null, dailyBarCount: 18 }), account, permissiveSettings).unscoredDetail).toEqual({ kind: "forecast", dailyBarCount: 18, barsNeeded: 22 });
     expect(scoreTicker(inputs(), account, permissiveSettings).unscoredDetail).toBeNull();
   });
 
-  it("at snapshot prices matches buildSignalCandidates + gradeSignalCandidates directly, with counts and day change", () => {
+  it("at snapshot prices matches buildSignalCandidates directly, with the day change", () => {
     const in1 = inputs();
     const scored = scoreTicker(in1, account, permissiveSettings);
-    const direct = gradeSignalCandidates(buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, forecast: in1.forecast, tradingSessionsByExpiry: tradingSessionsByExpiry(in1.slices.map((slice) => slice.expiry), in1.openSessionDatesIso, in1.todayEasternIso), slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEvents: [], todayEasternIso: "2026-09-21", scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct, spreadShareCharged: permissiveSettings.spreadCostChargedPct / 100, model: snapshotModelContext(in1) }));
+    const direct = buildSignalCandidates({ spotPrice: forward, riskFreeRate: rate, slices: in1.slices, quotes: in1.quotes, earningsDatesIso: [], earningsCalendarResolved: true, macroEvents: [], todayEasternIso: "2026-09-21", scoredAtMs: Date.parse("2026-09-21T14:30:00Z"), freeShares: 200, freeCash: account.freeCash, deltaTargetMin: 0, deltaTargetMax: permissiveSettings.deltaTargetMax, minAnnualizedYieldPct: permissiveSettings.minAnnualizedYieldPct, spreadShareCharged: permissiveSettings.spreadCostChargedPct / 100, model: snapshotModelContext(in1) });
     expect(scored.candidates).toEqual(direct);
     // Valued at the capture (Mon 10:00 ET): τ = 0.309 left of Monday + 22 sessions to the 2026-10-21 close.
-    expect(scored.candidates.find((c) => c.expiry === "2026-10-21")!.model!.varianceSessions).toBeCloseTo(0.309 + 22, 12);
+    expect(scored.candidates.find((c) => c.expiry === "2026-10-21")!.model.varianceSessions).toBeCloseTo(0.309 + 22, 12);
     expect(scored.unscoredReason).toBeNull();
     expect(scored.priceSource).toBe("snapshot");
     expect(scored.spotPrice).toBe(forward);
     expect(scored.dayChangePercent).toBeNull(); // snapshot spot vs the same day's close is not a day change
-    expect(Object.values(scored.gradeCounts).reduce((a, b) => a + b, 0)).toBe(4);
+    expect(scored.candidates).toHaveLength(4);
     expect(scored.best).toEqual(pickBestCandidate(direct));
   });
 
@@ -273,7 +274,7 @@ describe("scoreTicker", () => {
     expect(scored.candidates.some((c) => c.strike === 110 && c.strategyKey === "covered_call")).toBe(false);
   });
 
-  it("live quotes change friction and net Edge for their contracts only, and mark the source", () => {
+  it("live quotes change the friction and the model's figures for their contracts only, and mark the source", () => {
     const snapshot = scoreTicker(inputs(), account, permissiveSettings, { spotPrice: forward, priceSource: "live" });
     const put90Snapshot = snapshot.candidates.find((c) => c.strike === 90 && c.expiry === "2026-10-21")!;
     const wider = { bid: put90Snapshot.bid * 0.9, ask: put90Snapshot.ask * 1.1 };
@@ -281,8 +282,10 @@ describe("scoreTicker", () => {
     const put90Live = live.candidates.find((c) => c.strike === 90 && c.expiry === "2026-10-21")!;
     expect(put90Live.quoteSource).toBe("live");
     expect(put90Live.bid).toBe(wider.bid);
-    expect(put90Live.frictionVolatility).toBeGreaterThan(put90Snapshot.frictionVolatility);
-    expect(put90Live.netEdge).toBeLessThan(put90Snapshot.netEdge);
+    // The friction charged is mid × 100 less the premium after costs: a 20%-of-mid spread costs more than a 4% one.
+    const frictionCharged = (candidate: SignalCandidate) => ((candidate.bid + candidate.ask) / 2) * 100 - candidate.model.premiumAfterCostsDollars;
+    expect(frictionCharged(put90Live)).toBeGreaterThan(frictionCharged(put90Snapshot));
+    expect(put90Live.model.edgeMargin).not.toBe(put90Snapshot.model.edgeMargin);
     const call110Live = live.candidates.find((c) => c.strike === 110 && c.expiry === "2026-10-21")!;
     const call110Snapshot = snapshot.candidates.find((c) => c.strike === 110 && c.expiry === "2026-10-21")!;
     expect(call110Live).toEqual(call110Snapshot);
@@ -320,7 +323,7 @@ describe("noCandidatesReason", () => {
 
   it("is null when the ticker has candidates, or is unscored", () => {
     expect(scoreTicker(inputs(), account, permissiveSettings).noCandidatesReason).toBeNull();
-    expect(scoreTicker(inputs({ forecast: null }), account, permissiveSettings).noCandidatesReason).toBeNull();
+    expect(scoreTicker(inputs({ modelForecast: null }), account, permissiveSettings).noCandidatesReason).toBeNull();
   });
 
   it("is 'filtered' with the best yield when every contract is under the min yield (the TLT case)", () => {
@@ -445,7 +448,7 @@ describe("shouldRefreshUncompensatedShare", () => {
   });
 });
 
-describe("toScreenRow / countGrades", () => {
+describe("toScreenRow", () => {
   it("strips the candidate and roll lists and nothing else (held legs, best roll and roll count stay for the badge)", () => {
     const scored = scoreTicker(inputs(), account, permissiveSettings);
     const row = toScreenRow(scored);
@@ -453,10 +456,6 @@ describe("toScreenRow / countGrades", () => {
     expect("rolls" in row).toBe(false);
     expect("heldLegs" in row && "bestRoll" in row && "rollCount" in row).toBe(true);
     expect({ ...row, candidates: scored.candidates, rolls: scored.rolls }).toEqual(scored);
-  });
-  it("counts every grade", () => {
-    const counts = countGrades([{ grade: "strong" }, { grade: "avoid" }, { grade: "avoid" }] as SignalCandidate[]);
-    expect(counts).toEqual({ strong: 1, good: 0, weak: 0, avoid: 2 });
   });
 });
 
@@ -488,7 +487,7 @@ describe("day quotes and the intraday IV shift (formula 3h)", () => {
     expect(withLive.quoteSourceCounts).toEqual({ live: 1, day: 2, snapshot: 5 });
   });
 
-  it("shifts the whole expiry's surface IV by the median fresh mid-IV difference once five quotes qualify, and every candidate's edge moves with it", () => {
+  it("shifts the whole expiry's surface IV by the median fresh mid-IV difference once five quotes qualify, and every candidate's surface IV moves with it", () => {
     const unshifted = scoreTicker(richInputs(4), account, permissiveSettings);
     expect(unshifted.ivShiftByExpiry[expiry]).toEqual({ shiftVolatilityPoints: 0, quoteCount: 4 });
 
@@ -499,7 +498,6 @@ describe("day quotes and the intraday IV shift (formula 3h)", () => {
     for (const candidate of shifted.candidates) {
       const before = snapshotOnly.get(candidateContractKey(candidate))!;
       expect(candidate.surfaceImpliedVolatility - before.surfaceImpliedVolatility).toBeCloseTo(0.02, 3);
-      expect(candidate.edge - before.edge).toBeCloseTo(0.02, 3);
     }
     // A snapshot-quoted contract in the same expiry is shifted too: the shift is per expiry, not per quote.
     expect(shifted.candidates.find((candidate) => candidate.strike === 120)!.quoteSource).toBe("snapshot");
@@ -630,11 +628,12 @@ describe("scoreTicker: the valuation model's clock and prices (model review, 202
     expect(snapshot).toMatchObject({ valuedAtIso: "2026-09-21T14:00:00.000Z", forward: 100, spot: 100 });
   });
 
-  it("without a YZ21 forecast no candidate is valued, and the old Edge still is", () => {
+  it("without a YZ21 forecast nothing can be valued: the ticker is unscored (no_forecast) with no candidates and no rolls", () => {
     const scored = scoreTicker(inputs({ modelForecast: null }), account, permissiveSettings);
-    expect(scored.candidates.length).toBeGreaterThan(0);
-    expect(scored.candidates.every((c) => c.model === null)).toBe(true);
-    expect(scored.candidates.every((c) => Number.isFinite(c.netEdge))).toBe(true);
+    expect(scored.unscoredReason).toBe("no_forecast");
+    expect(scored.candidates).toEqual([]);
+    expect(scored.rolls).toEqual([]);
+    expect(scored.best).toBeNull();
   });
 
   it("an ETF is valued on the ETF tail table, a stock on the stock one", () => {
@@ -646,8 +645,8 @@ describe("scoreTicker: the valuation model's clock and prices (model review, 202
 });
 
 describe("countRollableLegs", () => {
-  const roll = (legId: string, modelGrade: "strong" | "avoid" | null, oldGrade: "strong" | "avoid") => ({ legId, grade: oldGrade, model: modelGrade === null ? null : fixtureRollModel({ grade: modelGrade }) }) as unknown as RollSignalCandidate;
-  it("counts held legs with a roll the model grades above Avoid, whatever the old grade", () => {
-    expect(countRollableLegs([roll("a", "strong", "avoid"), roll("a", "strong", "strong"), roll("b", "avoid", "strong"), roll("c", null, "strong")])).toBe(1);
+  const roll = (legId: string, grade: "strong" | "weak" | "avoid") => ({ legId, model: fixtureRollModel({ grade }) }) as unknown as RollSignalCandidate;
+  it("counts held legs with a roll the model grades above Avoid, once per leg", () => {
+    expect(countRollableLegs([roll("a", "strong"), roll("a", "strong"), roll("b", "avoid"), roll("c", "weak")])).toBe(2);
   });
 });

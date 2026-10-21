@@ -9,7 +9,7 @@ import { checkCalledAway, checkHeldShareCallStrike, commissionPerShare, describe
 
 // Pluto's deterministic candidate filters (design round 3, item 20, approved 2026-09-28). Since the model review
 // (approved by Marcelo 2026-10-10) every value rule reads the valuation model's block (grade, Edge Yield, premium
-// yield, both on calendar days); the old Edge fields stay for the Signals screen only. Pure:
+// yield, both on calendar days). Pure:
 // the agent feeds it a scored ticker (every existing Signals filter already applied), the fit
 // slices and the settings, and gets back exactly what the model may see, with a reason for
 // everything it may not. Nothing here is a judgement call — every rule is a dial on the Pluto

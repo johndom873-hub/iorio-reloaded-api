@@ -9,16 +9,16 @@ const now = new Date("2026-10-07T15:00:00Z"); // 11:00 ET
 function candidate(overrides: Partial<SignalCandidate> = {}): SignalCandidate {
   return {
     strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 40, dte: 9, delta: -0.22, bid: 1.0, ask: 1.1, spreadPercent: 4.9, openInterest: 1200, volume: 300, bidSize: 40, askSize: 35,
-    surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, forecastVolatility: 0.5, edge: 0.12, frictionVolatility: 0.02, netEdge: 0.1, edgeDollars: 80, vega: 0.08,
-    dollarRisk: 3900, riskAdjustedRatio: 0.008, annualizedYield: 0.83, uncompensatedSharePercent: null,
-    quoteSource: "live", quotedAt: "2026-10-07T14:59:00Z", flags: [], executable: true, grade: "strong", ...overrides,
+    surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, vega: 0.08,
+    dollarRisk: 3900, annualizedYield: 0.83, uncompensatedSharePercent: null,
+    quoteSource: "live", quotedAt: "2026-10-07T14:59:00Z", flags: [], executable: true, ...overrides,
   } as SignalCandidate;
 }
 
-const scored = { symbol: "SMCI", sector: "Technology", spotPrice: 43.46, dayChangePercent: 0.6, atmImpliedVolatility: 0.8, forecast: { volatility: 0.7 }, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: null, macroEvents: [], snapshotCapturedAt: null } as unknown as PlutoPromptTickerInput["scored"];
+const scored = { symbol: "SMCI", sector: "Technology", spotPrice: 43.46, dayChangePercent: 0.6, atmImpliedVolatility: 0.8, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: null, macroEvents: [], snapshotCapturedAt: null } as unknown as PlutoPromptTickerInput["scored"];
 
 function roll(positionId: string, legId: string): RollSignalCandidate {
-  return { legId, positionId, strategyKey: "cash_secured_put", quantity: 2, replacement: candidate({ expiry: "2026-10-23", strike: 38 }), netRollEdge: 0.05, netRollEdgeDollars: 40, netCreditPerShare: 0.2, deltaChange: -0.05, grade: "good", flags: [] } as unknown as RollSignalCandidate;
+  return { legId, positionId, strategyKey: "cash_secured_put", quantity: 2, replacement: candidate({ expiry: "2026-10-23", strike: 38 }), netCreditPerShare: 0.2, deltaChange: -0.05, flags: [] } as unknown as RollSignalCandidate;
 }
 
 function input(overrides: Partial<PlutoPromptInput> = {}): PlutoPromptInput {

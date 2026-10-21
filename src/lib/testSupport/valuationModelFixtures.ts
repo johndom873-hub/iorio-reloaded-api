@@ -1,5 +1,8 @@
 import { tradingSessionsFromCalendarRows, type TradingSession } from "../marketSessionStatus.js";
-import type { CandidateModelScore } from "../signalCandidates.js";
+import type { CandidateModelContext, CandidateModelScore } from "../signalCandidates.js";
+import type { ValuationGroup } from "../volatilityModelTables.js";
+import { volatilityModelTables } from "../volatilityModelTables.generated.js";
+import { varianceSessionsToExpiry } from "../varianceClock.js";
 import type { ModelVolatilityForecast } from "../volatilityEdge.js";
 import { modelForecastWindowDays, tradingSessionsPerYear } from "../volatilityEdge.js";
 import type { HeldLegModelScore, RollModelScore } from "../rollSignalCandidates.js";
@@ -59,4 +62,20 @@ export function fixtureHeldLegModel(holdValueDollars: number, closeCostDollars =
 export function fixtureRollModel(overrides: Partial<RollModelScore> = {}): RollModelScore {
   const edgeMargin = overrides.edgeMargin ?? 0.25;
   return { netExpectedPnlPerContract: 20, netExpectedPnl: 20, edgeMargin, grade: gradeForEdgeMargin(edgeMargin), ...overrides };
+}
+
+/**
+ * A model context for building candidates in tests: every quote valued at `valuedAtMs` on the fixture sessions, against
+ * the slice's fitted forward (unless `forward` is given) and `spot` (else `forward`, else 100), on the stock tables unless `group` says otherwise.
+ */
+export function fixtureCandidateModelContext(options: { annualizedVolatility: number; valuedAtMs: number; forward?: number; spot?: number; group?: ValuationGroup }): CandidateModelContext {
+  return {
+    tables: volatilityModelTables,
+    forecast: fixtureModelForecast(options.annualizedVolatility),
+    group: options.group ?? "stock",
+    varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, fixtureTradingSessions),
+    quoteInstantMs: () => options.valuedAtMs,
+    forwardForQuote: (slice) => options.forward ?? slice.forwardPrice,
+    spotForQuote: () => options.spot ?? options.forward ?? 100,
+  };
 }

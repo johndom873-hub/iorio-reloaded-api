@@ -43,10 +43,10 @@ describe("Formula P1 — unstructured share close", () => {
 describe("Formula P2 — short-leg buyback", () => {
   const leg: HeldLegScore = {
     legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, right: "P", quantity: 2, entryPrice: 2.4, entryAtIso: "2026-09-10T14:00:00Z",
-    dte: 18, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42, edge: -0.05, frictionVolatility: 0.01, vega: 0.05, holdEdgeDollars: -25, closeCostDollars: 5, dollarRisk: 9948, quoteSource: "day", quotedAt: "2026-09-28T15:00:00Z", flags: [], unscoredReason: null,
+    dte: 18, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42,  dollarRisk: 9948, quoteSource: "day", quotedAt: "2026-09-28T15:00:00Z", flags: [], unscoredReason: null,
     model: fixtureHeldLegModel(-25, 5),
   };
-  const roll = (grade: RollSignalCandidate["grade"]): RollSignalCandidate => ({ legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", quantity: 2, replacement: {} as never, netRollEdge: 0.01, netRollEdgeDollarsPerContract: 5, netRollEdgeDollars: 10, netCreditPerShare: 0.1, deltaChange: -0.01, dollarRiskChange: 0, flags: [], warnings: [], grade, model: fixtureRollModel({ grade }) });
+  const roll = (grade: RollSignalCandidate["model"]["grade"]): RollSignalCandidate => ({ legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", quantity: 2, replacement: {} as never, netCreditPerShare: 0.1, deltaChange: -0.01, dollarRiskChange: 0, flags: [], warnings: [], model: fixtureRollModel({ grade }) });
   const base = { symbol: "HOOD", leg, rolls: [], settings, singleLegPosition: true, todayIso: "2026-09-28" };
 
   it("offers the buyback at the mid when holding has negative net value and the ask locks a profit", () => {
@@ -55,8 +55,7 @@ describe("Formula P2 — short-leg buyback", () => {
     expect(offer).toMatchObject({ id: "HOOD:close_leg:leg9", kind: "close_leg", side: "buy", multiplier: 100, quantity: 2, limitPrice: 0.53, automatic: false });
     expect(offer!.cycle_pnl).toBeCloseTo((2.4 - 0.55) * 200, 6);
   });
-  it("judges holding on the model's hold value, never the old Edge's, and needs a valuation", () => {
-    expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, holdEdgeDollars: 500 } }).offer).not.toBeNull();
+  it("judges holding on the model's hold value, and needs a valuation", () => {
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, model: null } }).reason).toBe("the held leg has no model valuation");
     expect(evaluateShortLegBuyback(base).offer!.detail).toMatchObject({ hold_value_dollars: -25, close_cost_dollars: 5 });
   });
@@ -66,9 +65,8 @@ describe("Formula P2 — short-leg buyback", () => {
     // A roll graded Weak (margin 0% to 10%) no longer withholds the buyback: the margin decides, not the grade.
     expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("weak"), model: fixtureRollModel({ edgeMargin: 0.0999 }) }] }).offer).not.toBeNull();
     expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("avoid"), model: fixtureRollModel({ edgeMargin: -0.05 }) }] }).offer).not.toBeNull();
-    // The roll's model margin decides, not its old-Edge grade.
-    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("strong"), model: fixtureRollModel({ edgeMargin: 0.02 }) }] }).offer).not.toBeNull();
-    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("avoid"), model: null }] }).offer).not.toBeNull();
+    // The roll's margin decides, not the grade it carries.
+    expect(evaluateShortLegBuyback({ ...base, rolls: [{ ...roll("strong"), model: fixtureRollModel({ edgeMargin: 0.02, grade: "strong" }) }] }).offer).not.toBeNull();
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, dte: 1 } }).reason).toMatch(/DTE 1 below 2/);
     expect(evaluateShortLegBuyback({ ...base, leg: { ...leg, ask: 2.6, bid: 2.5 } }).reason).toMatch(/^buying back at the ask would lose \$\d+$/);
     // Recorded 2.40, but we set 2.00 on the leg in a combo: an ask of 2.20 is a loss on what we really received.
@@ -82,7 +80,7 @@ describe("Formula P2 — short-leg buyback", () => {
   });
   it("on a leg the surface cannot score, offers the buyback only when the ask keeps at least 75% of the premium", () => {
     // No usable slice: no delta, DTE or model valuation; the quote stays. Sold at 2.40, 18 days to 16 Oct.
-    const unscoredLeg: HeldLegScore = { ...leg, unscoredReason: "no_slice", dte: null, delta: null, model: null, surfaceImpliedVolatility: null, edge: null, vega: null };
+    const unscoredLeg: HeldLegScore = { ...leg, unscoredReason: "no_slice", dte: null, delta: null, model: null, surfaceImpliedVolatility: null };
     // Ask 0.60 keeps (2.40 − 0.60) ÷ 2.40 = 75%: offered, the DTE from the calendar.
     const kept75 = evaluateShortLegBuyback({ ...base, leg: { ...unscoredLeg, bid: 0.56, ask: 0.6 } });
     expect(kept75.reason).toBeNull();
@@ -118,7 +116,7 @@ describe("orderedEntryPremium", () => {
 describe("Formula P3 — earnings buyback", () => {
   const leg: HeldLegScore = {
     legId: "leg9", positionId: "pos9", strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, right: "P", quantity: 2, entryPrice: 2.4, entryAtIso: "2026-09-10T14:00:00Z",
-    dte: 18, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42, edge: -0.05, frictionVolatility: 0.01, vega: 0.05, holdEdgeDollars: -25, closeCostDollars: 5, dollarRisk: 9948, quoteSource: "day", quotedAt: "2026-09-28T15:00:00Z", flags: [], unscoredReason: null,
+    dte: 18, delta: -0.1, bid: 0.5, ask: 0.55, mid: 0.525, surfaceImpliedVolatility: 0.4, midImpliedVolatility: 0.42,  dollarRisk: 9948, quoteSource: "day", quotedAt: "2026-09-28T15:00:00Z", flags: [], unscoredReason: null,
     model: fixtureHeldLegModel(-25, 5),
   };
   // HOOD reports 2026-10-27 after the close; the put expires 2026-10-30.
@@ -166,7 +164,7 @@ describe("Formula F3 — event closes", () => {
   const fed = (sessionsUntil: number): MacroEventBeforeExpiry => ({ title: "Fed rate decision", weight: "heavy", dateIso: "2026-10-27", sessionIso: "2026-10-27", sessionsUntil, sessionsAfter: 4 });
   const put: HeldLegScore = {
     legId: "leg7", positionId: "pos7", strategyKey: "cash_secured_put", expiry: "2026-10-30", strike: 95, right: "P", quantity: 1, entryPrice: 1, entryAtIso: "2026-10-09T14:00:00Z",
-    dte: 6, delta: -0.08, bid: 0.12, ask: 0.16, mid: 0.14, surfaceImpliedVolatility: 0.45, midImpliedVolatility: 0.45, edge: 0.1, frictionVolatility: 0.01, vega: 0.03, holdEdgeDollars: 30, closeCostDollars: 3, dollarRisk: 9486, quoteSource: "day", quotedAt: "2026-10-24T15:00:00Z", flags: [], unscoredReason: null,
+    dte: 6, delta: -0.08, bid: 0.12, ask: 0.16, mid: 0.14, surfaceImpliedVolatility: 0.45, midImpliedVolatility: 0.45,  dollarRisk: 9486, quoteSource: "day", quotedAt: "2026-10-24T15:00:00Z", flags: [], unscoredReason: null,
     model: fixtureHeldLegModel(30, 3),
   };
   const putEntry = (sessionsUntil: number, overrides: Partial<HeldLegScore> = {}, entryCredit = 1) => heldPutEntry({ leg: { ...put, ...overrides }, entryCredit, spot: 101, forecastVolatility, event: fed(sessionsUntil), commissionPerContract: 0.68 });

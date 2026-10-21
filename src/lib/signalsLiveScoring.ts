@@ -4,13 +4,13 @@ import type { TradingSession } from "./marketSessionStatus.js";
 import { varianceSessionsToExpiry } from "./varianceClock.js";
 import { volatilityModelTables } from "./volatilityModelTables.generated.js";
 import type { VolatilityModelTables } from "./volatilityModelTables.js";
-import { attachUncompensatedShare, buildSignalCandidates, type CandidateModelContext, computeExpiryIvShifts, emptyCandidateExclusionTally, gradeSignalCandidates, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { attachUncompensatedShare, buildSignalCandidates, type CandidateModelContext, computeExpiryIvShifts, emptyCandidateExclusionTally, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { buildRollCandidates, pickBestRoll, scoreHeldLegs, type HeldLegScore, type RollSignalCandidate } from "./rollSignalCandidates.js";
 import { buildTickerCaveats } from "./signalsRoadmap.js";
 import type { TradingSettings } from "./tradingSettingsStore.js";
 import { skewMinimumDaysToExpiry, skewTargetDaysToExpiry } from "./tiltMeasures.js";
-import { minimumBarsForAnyForecast, tradingSessionsByExpiry } from "./volatilityEdge.js";
-import type { AccountContext, DayQuotesAsOf, GradeCounts, PreviousClose, QuoteSourceCounts, SignalsNoCandidatesReason, SignalsPriceSource, SignalsScreenRow, SignalsUnscoredDetail, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
+import { modelForecastWindowDays } from "./volatilityEdge.js";
+import type { AccountContext, DayQuotesAsOf, PreviousClose, QuoteSourceCounts, SignalsNoCandidatesReason, SignalsPriceSource, SignalsScreenRow, SignalsUnscoredDetail, TickerSignals, TickerSignalsInputs } from "./signalsTypes.js";
 
 // Pure re-scoring for the Signals live layer (stage 2, decisions with Marcelo 2026-09-22):
 // the fitted surface stays the 10:00 snapshot and follows the live spot by sticky
@@ -137,16 +137,10 @@ export function computeAtmImpliedVolatility(slices: SignalSurfaceSlice[]): numbe
   return totalVariance > 0 ? Math.sqrt(totalVariance / nearest.yearsToExpiry) : null;
 }
 
-export function countGrades(candidates: SignalCandidate[]): GradeCounts {
-  const counts: GradeCounts = { strong: 0, good: 0, weak: 0, avoid: 0 };
-  for (const candidate of candidates) counts[candidate.grade] += 1;
-  return counts;
-}
-
 /**
  * Re-times a surface fitted on an earlier day to today (2026-09-24; on the variance clock since 2026-10-10, model review
  * P2): after a missed capture the screen scored yesterday's slices with yesterday's time to expiry. Expiries already past
- * are dropped; yearsToExpiry is recomputed from today's Eastern date (calendar days, for discounting and the old Edge);
+ * are dropped; yearsToExpiry is recomputed from today's Eastern date (calendar days, for discounting);
  * the SVI total variance (a and b are linear in it) is scaled by the variance the market will still price today at the
  * capture's time of day over what it priced at the capture: τ(today, same time → expiry) ÷ τ(capture → expiry). The
  * weekend therefore removes about one session of variance, as the market does, not three calendar days. A surface
@@ -221,8 +215,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     dayChangePercent: live && live.priceSource !== "snapshot" ? computeDayChangePercent(spotPrice, inputs.previousClose) : null,
     candidates: [],
     best: null,
-    gradeCounts: { strong: 0, good: 0, weak: 0, avoid: 0 },
-    heldLegs: scoreHeldLegs(inputs.openShortLegs, { spotPrice: spotPrice ?? 0, riskFreeRate: 0, forecast: null, tradingSessionsByExpiry: new Map(), slices: [], quotes: [], spreadShareCharged }),
+    heldLegs: scoreHeldLegs(inputs.openShortLegs, { spotPrice: spotPrice ?? 0, riskFreeRate: 0, slices: [], quotes: [], spreadShareCharged }),
     rolls: [],
     bestRoll: null,
     rollCount: 0,
@@ -235,8 +228,10 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     macroEvents: inputs.macroEvents,
     atmImpliedVolatility: header ? computeAtmImpliedVolatility(rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso, Date.parse(header.capturedAt), inputs.tradingSessions)) : null,
     atmImpliedVolatilityPerSession: header ? computeAtmImpliedVolatilityPerSession(rebaseSlicesToToday(inputs.slices, inputs.todayEasternIso, Date.parse(header.capturedAt), inputs.tradingSessions), sameTimeToday(Date.parse(header.capturedAt), inputs.todayEasternIso), inputs.tradingSessions) : null,
-    forecast: inputs.forecast,
     modelForecast: inputs.modelForecast,
+    yangZhang63Forecast: inputs.yangZhang63Forecast,
+    ivRank: inputs.ivMetrics?.ivRank ?? null,
+    ivPercentile: inputs.ivMetrics?.ivPercentile ?? null,
     dailyBarCount: inputs.dailyBarCount,
     dividendCadenceUnknown: inputs.dividendCadenceUnknown,
     caveats: [],
@@ -259,7 +254,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   // Saved but not yet analysed: pending, not a problem (the fit finishes within seconds of the capture).
   if (header.fitCompletedAt === null) return withCaveats("analysing", { kind: "analysing", snapshotCapturedAt: header.capturedAt });
   if (base.fittedSliceCount === 0 || header.underlyingPrice === null || header.riskFreeRatePercent === null) return withCaveats("no_surface_fit", describeFitIssue(inputs));
-  if (!inputs.forecast) return withCaveats("no_forecast", { kind: "forecast", dailyBarCount: inputs.dailyBarCount, barsNeeded: minimumBarsForAnyForecast });
+  if (!inputs.modelForecast) return withCaveats("no_forecast", { kind: "forecast", dailyBarCount: inputs.dailyBarCount, barsNeeded: modelForecastWindowDays + 1 });
   if (spotPrice === null) return withCaveats("no_snapshot");
 
   const capturedAtMs = Date.parse(header.capturedAt);
@@ -289,17 +284,13 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const quotes = appendMissingContractQuotes(mergedQuotes, [...heldLegRefs, ...inputs.dayQuotes, ...(live?.liveQuotes ?? [])], inputs.dayQuotes, live?.liveQuotes ?? []);
   const riskFreeRate = header.riskFreeRatePercent / 100;
   const ivShifts = computeExpiryIvShifts(slices, quotes, riskFreeRate);
-  const sessionsByExpiry = tradingSessionsByExpiry(slices.map((slice) => slice.expiry), inputs.openSessionDatesIso, inputs.todayEasternIso);
   observer?.onScoringQuotes?.(quotes);
 
   const exclusionTally = emptyCandidateExclusionTally();
-  let candidates = gradeSignalCandidates(
-    buildSignalCandidates({
+  let candidates = buildSignalCandidates({
       exclusionTally,
       spotPrice,
       riskFreeRate,
-      forecast: inputs.forecast,
-      tradingSessionsByExpiry: sessionsByExpiry,
       slices,
       quotes,
       earningsDatesIso: inputs.earningsDatesIso,
@@ -319,8 +310,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
       spreadShareCharged,
       onContractExcluded: observer?.onContractExcluded,
       model,
-    }),
-  );
+    });
   // settings.maxDeltaDriftPct is deliberately not applied: the drift share is only known for the open
   // modal's ticker (Monte Carlo), so filtering on it would make the screen and modal disagree.
   if (live?.uncompensatedByContract) {
@@ -331,8 +321,6 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
   const heldLegs: HeldLegScore[] = scoreHeldLegs(inputs.openShortLegs, {
     spotPrice,
     riskFreeRate,
-    forecast: inputs.forecast,
-    tradingSessionsByExpiry: sessionsByExpiry,
     slices,
     quotes,
     ivShiftByExpiry: new Map([...ivShifts].map(([expiry, entry]) => [expiry, entry.shift])),
@@ -346,7 +334,6 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
     ...withCaveats(null),
     candidates,
     best: pickBestCandidate(candidates),
-    gradeCounts: countGrades(candidates),
     heldLegs,
     rolls,
     bestRoll: pickBestRoll(rolls),

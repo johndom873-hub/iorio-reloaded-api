@@ -745,7 +745,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   // 9. Execute through the real routes, then watch the order without holding the pass.
   const freshHeldLeg = chosenRoll ? fresh.scored.heldLegs.find((leg) => leg.legId === chosenRoll.roll.legId) ?? null : null;
   const signalsSnapshotShape = chosenOpen ? signalsSnapshotForOpen(freshCandidate) : signalsSnapshotForRoll(freshHeldLeg, freshRoll?.replacement ?? null);
-  const scoresSnapshot = { ...signalsSnapshotShape, version: `pluto-${plutoPromptVersion}`, candidateId: chosenId, contract: freshCandidate ?? freshRoll, ticker: { spreadShareCharged: fresh.scored.spreadShareCharged, spotPrice: fresh.scored.spotPrice, snapshotDateIso: fresh.scored.snapshotDateIso, atmImpliedVolatility: fresh.scored.atmImpliedVolatility, atmImpliedVolatilityPerSession: fresh.scored.atmImpliedVolatilityPerSession, forecast: fresh.scored.forecast, modelForecast: fresh.scored.modelForecast, dayChangePercent: fresh.scored.dayChangePercent }, decision, plan: gates.plan, deterministicTopPick: topPickSummary };
+  const scoresSnapshot = { ...signalsSnapshotShape, version: `pluto-${plutoPromptVersion}`, candidateId: chosenId, contract: freshCandidate ?? freshRoll, ticker: { spreadShareCharged: fresh.scored.spreadShareCharged, spotPrice: fresh.scored.spotPrice, snapshotDateIso: fresh.scored.snapshotDateIso, atmImpliedVolatility: fresh.scored.atmImpliedVolatility, atmImpliedVolatilityPerSession: fresh.scored.atmImpliedVolatilityPerSession, modelForecast: fresh.scored.modelForecast, dayChangePercent: fresh.scored.dayChangePercent }, decision, plan: gates.plan, deterministicTopPick: topPickSummary };
   const result = await executePlutoOrder(
     context.api,
     settings,

@@ -1,27 +1,14 @@
 import { blackScholesDelta, sviTotalVariance } from "./impliedVolatilitySurface.js";
-import { blackScholesVega, commissionPerContractDollars as flatCommissionPerContractDollars, computeFrictionCost } from "./optionFriction.js";
+import { blackScholesVega, commissionPerContractDollars as flatCommissionPerContractDollars } from "./optionFriction.js";
 import { flatCommissionEstimator, type CommissionEstimator } from "./commissionEstimate.js";
-import { frictionDollarsPerContract, gradeForNetEdge, impliedVolatilityFromMid, scoreContractWithModel, type CandidateModelContext, type CandidateModelScore, type SignalCandidate, type SignalGrade, type SignalQuote, type SignalQuoteSource, type SignalStrategyKey, type SignalSurfaceSlice } from "./signalCandidates.js";
+import { frictionDollarsPerContract, impliedVolatilityFromMid, scoreContractWithModel, type CandidateModelContext, type CandidateModelScore, type SignalCandidate, type SignalGrade, type SignalQuote, type SignalQuoteSource, type SignalStrategyKey, type SignalSurfaceSlice } from "./signalCandidates.js";
 import { gradeForEdgeMargin, yieldOnExposure } from "./contractValuation.js";
-import { forecastOnCalendarDayBasis, type RealizedVolatilityForecast } from "./volatilityEdge.js";
 
-// Roll Signals (Formula 3j, approved 2026-09-24): an open short option leg
-// is scored as a contract to KEEP, every new-trade candidate on the same
-// ticker and right is scored as its replacement, and the roll is the
-// difference:
-//
-//   netRollEdge  = netEdge(B) − edge(A) − friction(A)
-//                = netEdge(B) − netEdge(A) − 2·friction(A)
-//   netRollEdge$ = netEdge(B)·vega(B)·100 − (edge(A) + friction(A))·vega(A)·100   (per contract)
-//
-// The held leg is bought back with a limit at its mid, charged the same share of
-// the half-spread as a sale (optionFriction.ts), so its friction is a cost again,
-// never a credit. The commission sits inside every friction term already
-// (optionFriction.ts), so there is no separate commission line. Each dollar
-// component is weighted by its own leg's vega. Grades reuse the Net Edge cut
-// points. Hard filters (Marcelo): |delta(B)| ≤ |delta(A)| -- never roll into
-// a riskier contract -- and a positive net credit at the mid. The old Trade
-// Alerts triggers (50 % decay, 21 DTE, |delta| ≥ 0.5) survive as flags only.
+// Roll Signals: an open short option leg is valued as a contract to KEEP, every new-trade candidate on the same ticker
+// and right as its replacement, and the roll is the difference, all on the valuation model (the 63-day net Edge's
+// Formula 3j was retired 2026-10-20). Hard filters (Marcelo): |delta(B)| ≤ |delta(A)| -- never roll into a riskier
+// contract -- and a positive net credit at the mid. The old Trade Alerts triggers (50 % decay, 21 DTE, |delta| ≥ 0.5)
+// survive as flags only. A pair the model cannot value is not a roll.
 //
 // The valuation model's roll (model review P5, approved by Marcelo 2026-10-10; what Pluto acts on), per contract:
 //   hold value A        = (mid(A) − fair(A)) × 100        what staying short still earns versus buying back at the mid
@@ -53,7 +40,7 @@ export interface OpenShortLeg {
   entryAtIso: string;
 }
 
-/** One open short leg scored as a contract to keep (Formula 3j's A side). */
+/** One open short leg scored as a contract to keep: the roll's close side. */
 export interface HeldLegScore extends OpenShortLeg {
   dte: number | null;
   delta: number | null;
@@ -62,22 +49,13 @@ export interface HeldLegScore extends OpenShortLeg {
   mid: number | null;
   surfaceImpliedVolatility: number | null;
   midImpliedVolatility: number | null;
-  /** Surface IV minus the forecast: what holding the leg still offers, in annualised volatility. */
-  edge: number | null;
-  /** Cost of buying the leg back (half-spread + commission over vega), in annualised volatility. */
-  frictionVolatility: number | null;
-  vega: number | null;
-  /** edge × vega × 100: the per-contract dollar value of holding. */
-  holdEdgeDollars: number | null;
-  /** frictionVolatility × vega × 100: the per-contract dollar cost of closing. */
-  closeCostDollars: number | null;
   /** Exposure per contract at the mid: (strike − mid) × 100 for a put, (spot − mid) × 100 for a covered call. */
   dollarRisk: number | null;
   quoteSource: SignalQuoteSource | null;
   quotedAt: string | null;
   flags: RollSignalFlag[];
   unscoredReason: HeldLegUnscoredReason | null;
-  /** The valuation model's view of the held leg; null without a model forecast or when it cannot be valued. */
+  /** The valuation model's view of the held leg; null when it is unscored or the model cannot value it. */
   model: HeldLegModelScore | null;
 }
 
@@ -102,12 +80,6 @@ export interface RollSignalCandidate {
   strategyKey: SignalStrategyKey;
   quantity: number;
   replacement: SignalCandidate;
-  /** Formula 3j, a fraction of annualised volatility (0.056 = 5.6 vp). */
-  netRollEdge: number;
-  /** Per contract: netEdge(B)·vega(B)·100 − (edge(A)+friction(A))·vega(A)·100. */
-  netRollEdgeDollarsPerContract: number;
-  /** netRollEdgeDollarsPerContract × quantity. */
-  netRollEdgeDollars: number;
   /** mid(B) − mid(A), per share; positive unless the warnings say "debit". */
   netCreditPerShare: number;
   /** |delta(B)| − |delta(A)|; positive only with the "higher_delta" warning. */
@@ -117,17 +89,13 @@ export interface RollSignalCandidate {
   flags: RollSignalFlag[];
   /** Always empty for the list (those are hard filters); set only for a roll to a contract the user picked on the chain. */
   warnings: RollSignalWarning[];
-  grade: SignalGrade;
-  /** The valuation model's roll (Pluto acts on it); null unless both legs carry a model score. */
-  model: RollModelScore | null;
+  /** The valuation model's roll: what is shown, ranked and acted on (a pair it cannot value is not a roll). */
+  model: RollModelScore;
 }
 
 export interface HeldLegScoringInput {
   spotPrice: number;
   riskFreeRate: number;
-  forecast: RealizedVolatilityForecast | null;
-  /** Trading sessions from the scoring date to each slice's expiry (forecastOnCalendarDayBasis). */
-  tradingSessionsByExpiry: ReadonlyMap<string, number>;
   slices: SignalSurfaceSlice[];
   /** Merged quotes (live > day > snapshot), including contracts the new-trade candidate build ignores (the ITM side). */
   quotes: SignalQuote[];
@@ -136,7 +104,7 @@ export interface HeldLegScoringInput {
   commissionEstimator?: CommissionEstimator;
   /** λ (0..1): the share of the half-spread friction charges, from the Risk & Limits spread cost. */
   spreadShareCharged: number;
-  /** The valuation model; absent or null leaves every held leg's `model` null. */
+  /** The valuation model; absent or null leaves every held leg unscored ("no_forecast": no model forecast). */
   model?: CandidateModelContext | null;
 }
 
@@ -154,11 +122,6 @@ function unscored(leg: OpenShortLeg, reason: HeldLegUnscoredReason, partial: Par
     mid: null,
     surfaceImpliedVolatility: null,
     midImpliedVolatility: null,
-    edge: null,
-    frictionVolatility: null,
-    vega: null,
-    holdEdgeDollars: null,
-    closeCostDollars: null,
     dollarRisk: null,
     quoteSource: null,
     quotedAt: null,
@@ -189,26 +152,23 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
     const dte = Math.round(slice.yearsToExpiry * annualDays);
     const flagsWithoutQuote: RollSignalFlag[] = dte <= nearExpiryDaysThreshold ? ["near_expiry"] : [];
     if (!twoSidedQuote || !quoteFields) return unscored(leg, "no_quote", { dte, flags: flagsWithoutQuote });
-    if (!input.forecast) return unscored(leg, "no_forecast", { ...quoteFields, dte, flags: flagsWithoutQuote });
+    if (!input.model) return unscored(leg, "no_forecast", { ...quoteFields, dte, flags: flagsWithoutQuote });
 
     const isCall = leg.right === "C";
     const buyCommission = (input.commissionEstimator ?? flatCommissionEstimator).perContractDollars("buy", leg.quantity);
     const closeCostDollars = frictionDollarsPerContract(twoSidedQuote.bid, twoSidedQuote.ask, input.spreadShareCharged, buyCommission);
-    const modelValuation = input.model ? scoreContractWithModel(input.model, slice, twoSidedQuote, input.riskFreeRate, closeCostDollars) : null;
+    const modelValuation = scoreContractWithModel(input.model, slice, twoSidedQuote, input.riskFreeRate, closeCostDollars);
     const model: HeldLegModelScore | null = modelValuation ? { valuation: modelValuation, holdValueDollars: (quoteFields.mid - modelValuation.fairPrice) * 100, closeCostDollars } : null;
     const logMoneyness = Math.log(leg.strike / slice.forwardPrice);
     const totalVariance = sviTotalVariance(slice.parameters, logMoneyness);
     if (!(totalVariance > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
     const surfaceIv = Math.sqrt(totalVariance / slice.yearsToExpiry) + (input.ivShiftByExpiry?.get(leg.expiry) ?? 0);
     if (!(surfaceIv > 0)) return unscored(leg, "no_slice", { ...quoteFields, dte, flags: flagsWithoutQuote });
-    const friction = computeFrictionCost({ bid: twoSidedQuote.bid, ask: twoSidedQuote.ask, forward: slice.forwardPrice, strike: leg.strike, yearsToExpiry: slice.yearsToExpiry, riskFreeRate: input.riskFreeRate, impliedVolatility: surfaceIv, commissionPerContractDollars: buyCommission, spreadShareCharged: input.spreadShareCharged });
-    if (!friction) return unscored(leg, "no_quote", { dte, flags: flagsWithoutQuote });
+    // A leg with no sensitivity left to its volatility (vega 0) cannot be weighed: left unscored, as a new contract is excluded.
+    const vega = blackScholesVega(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv);
+    if (!(vega > 0) || !Number.isFinite(vega)) return unscored(leg, "no_quote", { dte, flags: flagsWithoutQuote });
 
     const delta = blackScholesDelta(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv, isCall);
-    const vega = blackScholesVega(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, surfaceIv);
-    const contractForecast = forecastOnCalendarDayBasis(input.forecast.volatility, input.tradingSessionsByExpiry.get(leg.expiry), slice.yearsToExpiry);
-    if (contractForecast === null) return { ...unscored(leg, "no_forecast", { ...quoteFields, dte, flags: flagsWithoutQuote }), model };
-    const edge = surfaceIv - contractForecast;
     const flags: RollSignalFlag[] = [...flagsWithoutQuote];
     if (Math.abs(delta) >= assignmentRiskDeltaThreshold) flags.push("assignment_risk");
     if (leg.entryPrice > 0 && quoteFields.mid <= leg.entryPrice * decayedFractionOfEntryCredit) flags.push("decayed");
@@ -219,11 +179,6 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
       delta,
       surfaceImpliedVolatility: surfaceIv,
       midImpliedVolatility: impliedVolatilityFromMid(slice.forwardPrice, leg.strike, slice.yearsToExpiry, input.riskFreeRate, twoSidedQuote.bid, twoSidedQuote.ask, isCall),
-      edge,
-      frictionVolatility: friction.frictionVolatility,
-      vega,
-      holdEdgeDollars: edge * vega * 100,
-      closeCostDollars: friction.frictionVolatility * vega * 100,
       flags,
       unscoredReason: null,
       model,
@@ -232,25 +187,16 @@ export function scoreHeldLegs(legs: OpenShortLeg[], input: HeldLegScoringInput):
 }
 
 /**
- * Formula 3j for one (held leg, replacement) pair, with no hard filters: the two the list applies come back as warnings
- * instead. Null when the pair cannot be scored (held leg unscored, other strategy, or the same contract).
- */
-/**
  * The replacement as the roll will trade it (approved 2026-10-02): a candidate is scored at the size the setup form
- * defaults to, but a roll sells the held leg's whole quantity, so its commission term is re-estimated at that size.
- *   net Edge' = net Edge - (c_leg - c_scored) / 100 / vega     (c = estimated commission per contract)
- * Every field derived from the commission moves with it; a same-size roll comes back unchanged.
+ * defaults to, but a roll sells the held leg's whole quantity, so its commission is re-estimated at that size. Every model
+ * figure derived from the commission moves with it; a same-size roll comes back unchanged.
  */
 export function recostReplacementCommission(replacement: SignalCandidate, contracts: number, estimator: CommissionEstimator): SignalCandidate {
   const scoredCommission = replacement.commissionPerContractDollars ?? flatCommissionPerContractDollars;
   const legCommission = estimator.perContractDollars("sell", contracts);
   const extraCommissionDollars = legCommission - scoredCommission; // per contract
   if (extraCommissionDollars === 0) return replacement;
-  const extraCommissionVolatility = extraCommissionDollars / 100 / replacement.vega;
-  const netEdge = replacement.netEdge - extraCommissionVolatility;
-  const edgeDollars = replacement.edgeDollars - extraCommissionDollars;
-  const model = replacement.model
-    ? {
+  const model = {
         ...replacement.model,
         expectedPnlDollars: replacement.model.expectedPnlDollars - extraCommissionDollars,
         calibratedExpectedPnlDollars: replacement.model.calibratedExpectedPnlDollars - extraCommissionDollars,
@@ -262,18 +208,8 @@ export function recostReplacementCommission(replacement: SignalCandidate, contra
         averageLossDollars: replacement.model.averageLossDollars - extraCommissionDollars,
         expectedShortfallDollars: replacement.model.expectedShortfallDollars - extraCommissionDollars,
         stressPnlDollars: replacement.model.stressPnlDollars - extraCommissionDollars,
-      }
-    : null;
-  return {
-    ...replacement,
-    commissionPerContractDollars: legCommission,
-    frictionVolatility: replacement.frictionVolatility + extraCommissionVolatility,
-    netEdge,
-    edgeDollars,
-    riskAdjustedRatio: edgeDollars / replacement.dollarRisk,
-    grade: gradeForNetEdge(netEdge),
-    model,
-  };
+      };
+  return { ...replacement, commissionPerContractDollars: legCommission, model };
 }
 
 /** A per-contract dollar amount as a yearly rate on the contract's capital over its calendar time to expiry. */
@@ -290,16 +226,18 @@ export function scoreRollModel(leg: Pick<HeldLegScore, "model" | "quantity">, re
   return { netExpectedPnlPerContract, netExpectedPnl: netExpectedPnlPerContract * leg.quantity, edgeMargin, grade: gradeForEdgeMargin(edgeMargin) };
 }
 
+/**
+ * One (held leg, replacement) pair valued by the model, with no hard filters: the two the list applies come back as
+ * warnings instead. Null when the pair cannot be scored (held leg unscored or unvalued, other strategy, or the same contract).
+ */
 export function scoreRollPair(leg: HeldLegScore, scoredReplacement: SignalCandidate, commissionEstimator: CommissionEstimator = flatCommissionEstimator): RollSignalCandidate | null {
-  if (leg.unscoredReason !== null || leg.edge === null || leg.frictionVolatility === null || leg.vega === null || leg.delta === null || leg.mid === null || leg.dollarRisk === null) return null;
+  if (leg.unscoredReason !== null || leg.model === null || leg.delta === null || leg.mid === null || leg.dollarRisk === null) return null;
   if (scoredReplacement.strategyKey !== leg.strategyKey) return null;
   if (scoredReplacement.expiry === leg.expiry && scoredReplacement.strike === leg.strike) return null;
   const replacement = recostReplacementCommission(scoredReplacement, leg.quantity, commissionEstimator);
-  const holdAndCloseVolatility = leg.edge + leg.frictionVolatility;
-  const holdAndCloseDollars = holdAndCloseVolatility * leg.vega * 100;
+  const model = scoreRollModel(leg, replacement);
+  if (!model) return null;
   const netCreditPerShare = (replacement.bid + replacement.ask) / 2 - leg.mid;
-  const netRollEdge = replacement.netEdge - holdAndCloseVolatility;
-  const netRollEdgeDollarsPerContract = replacement.edgeDollars - holdAndCloseDollars;
   const warnings: RollSignalWarning[] = [];
   if (!(netCreditPerShare > 0)) warnings.push("debit"); // debit "rescue" rolls are not listed, only pickable on the chain
   if (Math.abs(replacement.delta) > Math.abs(leg.delta)) warnings.push("higher_delta");
@@ -309,27 +247,18 @@ export function scoreRollPair(leg: HeldLegScore, scoredReplacement: SignalCandid
     strategyKey: leg.strategyKey,
     quantity: leg.quantity,
     replacement,
-    netRollEdge,
-    netRollEdgeDollarsPerContract,
-    netRollEdgeDollars: netRollEdgeDollarsPerContract * leg.quantity,
     netCreditPerShare,
     deltaChange: Math.abs(replacement.delta) - Math.abs(leg.delta),
     dollarRiskChange: replacement.dollarRisk - leg.dollarRisk,
     flags: leg.flags,
     warnings,
-    grade: gradeForNetEdge(netRollEdge),
-    model: scoreRollModel(leg, replacement),
+    model,
   };
 }
 
-/**
- * Rolls in the order Pluto acts on them (mockup approved 2026-10-10): the valuation model's net roll $ across the held quantity,
- * highest first; rolls the model could not value come last, by the old net roll Edge $ (then vol points).
- */
-export function compareRollsByModel(a: Pick<RollSignalCandidate, "model" | "netRollEdgeDollars" | "netRollEdge">, b: Pick<RollSignalCandidate, "model" | "netRollEdgeDollars" | "netRollEdge">): number {
-  if (a.model && b.model && b.model.netExpectedPnl !== a.model.netExpectedPnl) return b.model.netExpectedPnl - a.model.netExpectedPnl;
-  if (Boolean(a.model) !== Boolean(b.model)) return a.model ? -1 : 1;
-  return b.netRollEdgeDollars - a.netRollEdgeDollars || b.netRollEdge - a.netRollEdge;
+/** Rolls in the order Pluto acts on them (mockup approved 2026-10-10): the valuation model's net roll $ across the held quantity, highest first. */
+export function compareRollsByModel(a: Pick<RollSignalCandidate, "model">, b: Pick<RollSignalCandidate, "model">): number {
+  return b.model.netExpectedPnl - a.model.netExpectedPnl;
 }
 
 /** Every (held leg, replacement) pair passing the hard filters, graded and sorted by compareRollsByModel. */

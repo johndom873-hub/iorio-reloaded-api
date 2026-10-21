@@ -37,7 +37,7 @@ describe("recentDecisionsForPrompt (audit)", () => {
 });
 
 describe("recent_decisions in the user payload (audit)", () => {
-  const scored = { symbol: "SMCI", sector: "Technology", spotPrice: 43.46, dayChangePercent: 0.6, atmImpliedVolatility: 0.8, forecast: { volatility: 0.7 }, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: null, macroEvents: [], snapshotCapturedAt: null } as unknown as PlutoPromptTickerInput["scored"];
+  const scored = { symbol: "SMCI", sector: "Technology", spotPrice: 43.46, dayChangePercent: 0.6, atmImpliedVolatility: 0.8, momentum: 0.1, skew: null, elevatedVolatility: null, nextEarningsDateIso: null, macroEvents: [], snapshotCapturedAt: null } as unknown as PlutoPromptTickerInput["scored"];
   const input = (recentDecisions: PlutoPromptInput["recentDecisions"]): PlutoPromptInput => ({
     now: new Date("2026-10-07T18:43:46Z"),
     todayEasternIso: "2026-10-07",

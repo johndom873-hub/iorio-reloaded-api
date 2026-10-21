@@ -56,11 +56,10 @@ async function storedRows() {
 }
 
 describe("signal model prediction log", () => {
-  it("logs every valued candidate with the model's figures and the tables' build, and skips unvalued ones", async () => {
+  it("logs every candidate with the model's figures and the tables' build", async () => {
     const predictions = modelPredictionsFromCandidates(tickerId, "2026-10-12", [
       candidate(90, "cash_secured_put", fixtureCandidateModel({ edgeMargin: 0.3456, expectedPnlDollars: 21.37, calibratedExpectedPnlDollars: 7.5, probabilityOfProfit: 0.873, varianceSessions: 4.309, forward: 100.2 })),
       candidate(110, "covered_call", fixtureCandidateModel({ edgeMargin: -1.25, expectedPnlDollars: -40, grade: "avoid" })),
-      candidate(85, "cash_secured_put", null),
     ]);
     expect(predictions).toHaveLength(2);
     await recordSignalModelPredictions(predictions);

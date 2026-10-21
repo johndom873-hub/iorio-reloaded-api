@@ -8,11 +8,7 @@ import type { SignalsTickerRow } from "../lib/signalsStore.js";
 import type { TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { createSignalsProducers, firstFramePriceGraceMs, snapshotChangePollIntervalMs, type SignalsQuotesFrame, type SignalsProducerDependencies, type SignalsScreenFrame, type SignalsTickerFrame } from "./signalsProducers.js";
 import { StreamRequestError } from "./streamProtocol.js";
-import { openDaysFromCalendarRows } from "../lib/marketSessionStatus.js";
 import { fixtureModelForecast, fixtureTradingSessions } from "../lib/testSupport/valuationModelFixtures.js";
-
-// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
-const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 const forward = 100;
 const rate = 0.04;
@@ -49,7 +45,6 @@ function inputsFor(ticker: SignalsTickerRow, withSnapshot: boolean, freeShares =
     slices: withSnapshot ? [slice("2026-10-21", years30), slice("2026-11-20", years60)] : [],
     quotes: withSnapshot ? [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30), quoteAt(85, "P", "2026-11-20", years60), quoteAt(115, "C", "2026-11-20", years60)] : [],
     dayQuotes: [],
-    forecast: withSnapshot ? { volatility: 0.15, windowDays: 63 } : null,
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],
@@ -63,8 +58,9 @@ function inputsFor(ticker: SignalsTickerRow, withSnapshot: boolean, freeShares =
     dailyBarCount: 1253,
     dividendCadenceUnknown: false,
     todayEasternIso: easternIsoDate(new Date()),
-    openSessionDatesIso: fixtureWeekdaySessions,
     modelForecast: withSnapshot ? fixtureModelForecast(0.15) : null,
+    yangZhang63Forecast: null,
+    ivMetrics: null,
     tradingSessions: fixtureTradingSessions,
     valuationGroup: "stock",
   };
@@ -489,7 +485,9 @@ describe("signalsQuotes producer (what the modal has on screen)", () => {
     await vi.advanceTimersByTimeAsync(1000);
     const last = frames.at(-1)!;
     expect(last.candidates["2026-10-21|90|P"]!.quoteSource).toBe("live");
-    expect(last.candidates["2026-10-21|90|P"]!.netEdge).toBeLessThan(before.netEdge);
+    // A 40%-of-mid spread charges more friction (mid × 100 less the premium after costs) than the snapshot's 4%.
+    const frictionCharged = (candidate: typeof before) => ((candidate.bid + candidate.ask) / 2) * 100 - candidate.model.premiumAfterCostsDollars;
+    expect(frictionCharged(last.candidates["2026-10-21|90|P"]!)).toBeGreaterThan(frictionCharged(before));
     expect(last.cells["2026-10-21|95|P"]).toMatchObject({ quoteSource: "live", bid: fresh95.bid });
     expect(Object.keys(last.candidates).every((key) => key.startsWith("2026-10-21|9"))).toBe(true); // only what was asked for
     abort.abort();

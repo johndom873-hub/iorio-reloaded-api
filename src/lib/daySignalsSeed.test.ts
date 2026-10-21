@@ -3,12 +3,8 @@ import { blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } f
 import { buildSeedEmptyPoolWarning, buildSeedJobOutcome, seedDaySignals, selectDaySignalExpiries, type DaySignalsSeedDependencies } from "./daySignalsSeed.js";
 import type { SignalCandidate, SignalQuote, SignalSurfaceSlice } from "./signalCandidates.js";
 import type { TickerSignalsInputs } from "./signalsTypes.js";
-import { openDaysFromCalendarRows } from "./marketSessionStatus.js";
 import { fixtureCandidateModel, fixtureModelForecast, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
 import type { SignalModelPrediction } from "./signalModelPredictionsStore.js";
-
-// Every weekday of 2026-27: the sessions the fixtures' contracts live through (scoring counts only those after its date).
-const fixtureWeekdaySessions = openDaysFromCalendarRows("2026-01-01", "2027-12-31", []);
 
 // A candidate ranked by the model: calibrated annualized return first, then expected P&L per contract.
 const candidate = (expiry: string, expectedAnnualizedReturn: number, expectedPnlDollars: number, edgeMargin = 0.25): SignalCandidate =>
@@ -31,9 +27,8 @@ describe("selectDaySignalExpiries", () => {
     expect(seeds[0]).toMatchObject({ seedBestExpectedPnlDollars: 140, seedBestEdgeMargin: 0.35 });
   });
 
-  it("ignores candidates the model expects to lose on, and unvalued ones, however they would rank", () => {
-    const unvalued = { expiry: "2026-10-23", strike: 100, strategyKey: "cash_secured_put", model: null } as SignalCandidate;
-    const seeds = selectDaySignalExpiries([candidate("2026-10-16", 2, -1), candidate("2026-11-20", 1, 0), unvalued, candidate("2026-12-18", 0.01, 5)]);
+  it("ignores candidates the model expects to lose on (or break even on), however they would rank", () => {
+    const seeds = selectDaySignalExpiries([candidate("2026-10-16", 2, -1), candidate("2026-11-20", 1, 0), candidate("2026-12-18", 0.01, 5)]);
     expect(seeds.map((seed) => seed.expiry)).toEqual(["2026-12-18"]);
   });
 
@@ -100,7 +95,6 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     slices: [slice("2026-10-21", years30)],
     quotes: [quoteAt(90, "P", "2026-10-21", years30), quoteAt(110, "C", "2026-10-21", years30)],
     dayQuotes: [],
-    forecast: { volatility: forecastVolatility, windowDays: 63 },
     earningsDatesIso: [],
     earningsCalendarResolved: true,
     macroEvents: [],
@@ -114,8 +108,9 @@ function inputsFor(symbol: string, tradingDateIso: string, forecastVolatility: n
     dailyBarCount: 1000,
     dividendCadenceUnknown: false,
     todayEasternIso: tradingDateIso,
-    openSessionDatesIso: fixtureWeekdaySessions,
     modelForecast: fixtureModelForecast(forecastVolatility),
+    yangZhang63Forecast: null,
+    ivMetrics: null,
     tradingSessions: fixtureTradingSessions,
     valuationGroup: "stock",
   };
@@ -131,7 +126,7 @@ function seedDependencies(overrides: Partial<DaySignalsSeedDependencies> = {}) {
       { tickerId: "id-CHEAP", symbol: "CHEAP", companyName: null, sector: null },
       { tickerId: "id-OLD", symbol: "OLD", companyName: null, sector: null },
     ],
-    // RICH: surface IV (~20%) well above a 10% forecast -> positive edge; CHEAP: forecast 80% -> all Avoid; OLD: yesterday's snapshot.
+    // RICH: surface IV (~20%) well above a 10% YZ21 forecast -> the model expects a profit; CHEAP: forecast 80% -> all Avoid; OLD: yesterday's snapshot.
     loadTickerSignalsInputs: async (ticker) => (ticker.symbol === "RICH" ? inputsFor("RICH", "2026-09-24", 0.1) : ticker.symbol === "CHEAP" ? inputsFor("CHEAP", "2026-09-24", 0.8) : inputsFor("OLD", "2026-09-23", 0.1)),
     loadAccountContext: async () => ({ freeCash: 50_000 }),
     loadTradingSettings: async () => settings,

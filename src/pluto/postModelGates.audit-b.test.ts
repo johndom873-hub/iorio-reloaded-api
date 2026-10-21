@@ -23,8 +23,8 @@ const book: PostModelBookInput = {
 
 const candidate = {
   strategyKey: "cash_secured_put", expiry: "2026-10-16", strike: 100, dte: 9, delta: -0.22, bid: 2.0, ask: 2.1, spreadPercent: 4.9, openInterest: 1200, volume: 300, bidSize: 40, askSize: 35,
-  surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, forecastVolatility: 0.5, edge: 0.12, frictionVolatility: 0.02, netEdge: 0.1, edgeDollars: 80, vega: 0.08,
-  dollarRisk: 9795, riskAdjustedRatio: 0.008, annualizedYield: 0.83, uncompensatedSharePercent: null, quoteSource: "live", quotedAt: null, flags: [], executable: true, grade: "strong",
+  surfaceImpliedVolatility: 0.62, midImpliedVolatility: 0.61, vega: 0.08,
+  dollarRisk: 9795, annualizedYield: 0.83, uncompensatedSharePercent: null, quoteSource: "live", quotedAt: null, flags: [], executable: true,
   model: fixtureCandidateModel({ edgeMargin: 0.35, calibratedExpectedPnlDollars: 30, pnlVarianceDollars: 150 ** 2, varianceSessions: 7 }),
 } as SignalCandidate;
 

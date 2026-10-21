@@ -51,7 +51,7 @@ vi.mock("../lib/signalsLiveScoring.js", () => ({
   scoreHeldShareCalls: () => [],
   scoreTicker: (_inputs: unknown, _account: unknown, _settings: unknown, live?: { liveQuotes: unknown[] }) => ({
     symbol: "AAA",
-    candidates: [{ id: "AAA:covered_call:2026-10-16:30", expiry: "2026-10-16", strike: 30, strategyKey: "covered_call", edgeDollars: 10, netEdge: 0.05, grade: "good" }],
+    candidates: [{ id: "AAA:covered_call:2026-10-16:30", expiry: "2026-10-16", strike: 30, strategyKey: "covered_call" }],
     heldLegs: [],
     rolls: [],
     live: live?.liveQuotes.length ?? 0,

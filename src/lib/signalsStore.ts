@@ -14,6 +14,7 @@ import type { AccountContext, PreviousClose, SignalsScreenRow, SnapshotHeader, T
 import { loadVolatilityForecasts } from "./volatilityForecastStore.js";
 import type { OpenShortLeg } from "./rollSignalCandidates.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew } from "./tiltMeasures.js";
+import { computeIvMetrics } from "./ivMetrics.js";
 import type { DailyOhlcvBar } from "./realizedVolatility.js";
 import { signalsEnabledShortlistTickerIdsQuery } from "./shortlistQueries.js";
 import { easternIsoDate } from "./easternIsoDate.js";
@@ -291,17 +292,17 @@ export async function loadTickerSignalsInputs(ticker: SignalsTickerRow, now: Dat
   const momentum = computeMomentum(bars.map((bar) => bar.close));
   const elevatedVolatility = computeElevatedVolatilityFlag(bars);
 
-  const [slices, quotes, forecasts, dayQuotes] = header
-    ? await Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecasts(ticker.tickerId, header.tradingDateIso, todayEastern), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
-    : [[], [], { edge: null, model: null }, []];
-  const furthestExpiry = slices.map((slice) => slice.expiry).sort().at(-1);
-  const [openSessionDatesIso, tradingSessions] = await Promise.all([
-    furthestExpiry && furthestExpiry > todayEastern ? loadOpenDaysBetween(addCalendarDays(todayEastern, 1), furthestExpiry) : [],
-    // From the snapshot's own date: a surface fitted on an earlier day is rolled to today on the variance clock.
-    header && furthestExpiry ? loadTradingSessionsBetween(header.tradingDateIso < todayEastern ? header.tradingDateIso : todayEastern, furthestExpiry) : [],
+  const [[slices, quotes, forecasts, dayQuotes], ivMetrics] = await Promise.all([
+    header
+      ? Promise.all([loadSlices(header.snapshotId), loadQuotes(header.snapshotId), loadVolatilityForecasts(ticker.tickerId, header.tradingDateIso, todayEastern), loadDayQuotesAsLiveQuotes(ticker.tickerId, header.tradingDateIso)])
+      : ([[] as SignalSurfaceSlice[], [] as SignalQuote[], { model: null, yangZhang63: null }, [] as LiveOptionQuote[]] as const),
+    computeIvMetrics(ticker.tickerId),
   ]);
+  const furthestExpiry = slices.map((slice) => slice.expiry).sort().at(-1);
+  // From the snapshot's own date: a surface fitted on an earlier day is rolled to today on the variance clock.
+  const tradingSessions = header && furthestExpiry ? await loadTradingSessionsBetween(header.tradingDateIso < todayEastern ? header.tradingDateIso : todayEastern, furthestExpiry) : [];
 
-  return { ...ticker, header, slices, quotes, dayQuotes, forecast: forecasts.edge, modelForecast: forecasts.model, openSessionDatesIso, tradingSessions, valuationGroup: isEtfSector(tickerRow?.sector) ? "etf" : "stock", earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
+  return { ...ticker, header, slices, quotes, dayQuotes, modelForecast: forecasts.model, yangZhang63Forecast: forecasts.yangZhang63, ivMetrics, tradingSessions, valuationGroup: isEtfSector(tickerRow?.sector) ? "etf" : "stock", earningsDatesIso, earningsCalendarResolved, macroEvents, momentum, elevatedVolatility, skew: computeSkew(slices), nextEarningsDateIso, previousClose, freeShares, openShortLegs, dailyBarCount, dividendCadenceUnknown, todayEasternIso: todayEastern };
 }
 
 /**

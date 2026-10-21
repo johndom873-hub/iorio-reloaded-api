@@ -1,22 +1,11 @@
-import type { VolatilityEdge } from "./volatilityEdge.js";
-
-// Friction cost for the IORIO Signal Engine (approved 2026-09-22):
+// Option trading costs for the Signal Engine. The valuation model charges a sale λ × the half-spread × 100 plus the
+// commission per contract (frictionDollarsPerContract in signalCandidates.ts).
 //
-//   FrictionCost(K,T) = [ λ · (ask − bid)/2 + c/100 ] / Vega(K,T)
-//   Vega = e^(−rT) · F · φ(d1) · √T          (price per share per 1.00 of volatility)
-//   NetEdge = Edge − FrictionCost
-//
-// Expressed in the same annualized-volatility units as Edge, so 0.05 = 5 volatility
-// points of edge given up to trade this contract. Entry cost only (sold and held to
-// expiry); closing early and rolling carry their own costs, handled in the roll logic.
-//
-// λ = the Risk & Limits spread cost, default 0.5 (Marcelo 2026-10-05). Orders go out as limits at the
-// mid, which never fill worse than the mid, but a fill tends to come once the price has moved toward the
-// limit, up to half a spread below the fair price at that moment: λ is the expected share of that half-spread. c = the estimated commission per contract (commissionEstimate.ts,
-// trailing fills by side and size); the flat $0.68 below, the mean of the first 94 option trades
-// stored in `trades` (0.07 volatility points in the typical alert region), is the fallback.
-// Measured on the real AAOI chain, 21 Sep 2026, the half-spread alone is ~5 volatility
-// points for |delta| 0.15–0.30 at 20–60 days.
+// λ = the Risk & Limits spread cost, default 0.5 (Marcelo 2026-10-05). Orders go out as limits at the mid, which never
+// fill worse than the mid, but a fill tends to come once the price has moved toward the limit, up to half a spread below
+// the fair price at that moment: λ is the expected share of that half-spread. c = the estimated commission per contract
+// (commissionEstimate.ts, trailing fills by side and size); the flat $0.68 below, the mean of the first 94 option trades
+// stored in `trades`, is the fallback.
 
 export const commissionPerContractDollars = 0.68;
 export const sharesPerContract = 100;
@@ -28,43 +17,4 @@ export function blackScholesVega(forward: number, strike: number, yearsToExpiry:
   const totalStandardDeviation = volatility * Math.sqrt(yearsToExpiry);
   const d1 = (Math.log(forward / strike) + 0.5 * totalStandardDeviation * totalStandardDeviation) / totalStandardDeviation;
   return Math.exp(-riskFreeRate * yearsToExpiry) * forward * standardNormalDensity(d1) * Math.sqrt(yearsToExpiry);
-}
-
-export interface FrictionInput {
-  bid: number | null;
-  ask: number | null;
-  forward: number;
-  strike: number;
-  yearsToExpiry: number;
-  riskFreeRate: number;
-  /** Fitted implied volatility at the strike (annualized decimal). */
-  impliedVolatility: number;
-  /** Estimated commission in dollars per contract; the flat commissionPerContractDollars when omitted. */
-  commissionPerContractDollars?: number;
-  /** λ: the share of the half-spread charged (0..1), from the Risk & Limits spread cost. */
-  spreadShareCharged: number;
-}
-
-export interface FrictionCost {
-  /** Total friction in annualized volatility (0.05 = 5 volatility points). */
-  frictionVolatility: number;
-  spreadVolatility: number;
-  commissionVolatility: number;
-}
-
-/** Null when the contract has no two-sided quote (bid > 0, ask > bid) or the inputs are not usable: it cannot be traded at a known cost. */
-export function computeFrictionCost(input: FrictionInput): FrictionCost | null {
-  const { bid, ask } = input;
-  if (bid === null || ask === null || !(bid > 0) || !(ask > bid)) return null;
-  if (!(input.forward > 0) || !(input.strike > 0) || !(input.yearsToExpiry > 0) || !(input.impliedVolatility > 0)) return null;
-  const vega = blackScholesVega(input.forward, input.strike, input.yearsToExpiry, input.riskFreeRate, input.impliedVolatility);
-  if (!(vega > 0) || !Number.isFinite(vega)) return null;
-  const spreadVolatility = (input.spreadShareCharged * (ask - bid)) / 2 / vega;
-  const commissionVolatility = (input.commissionPerContractDollars ?? commissionPerContractDollars) / sharesPerContract / vega;
-  return { frictionVolatility: spreadVolatility + commissionVolatility, spreadVolatility, commissionVolatility };
-}
-
-/** NetEdge = Edge − FrictionCost, in annualized volatility. */
-export function computeNetEdge(edge: VolatilityEdge, friction: FrictionCost): number {
-  return edge.edge - friction.frictionVolatility;
 }

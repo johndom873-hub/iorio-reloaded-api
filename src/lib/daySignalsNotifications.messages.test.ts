@@ -22,6 +22,7 @@ import {
 } from "./daySignalsNotifications.js";
 import type { SignalCandidate } from "./signalCandidates.js";
 import type { RollSignalCandidate } from "./rollSignalCandidates.js";
+import { fixtureCandidateModel, fixtureRollModel } from "./testSupport/valuationModelFixtures.js";
 
 const candidate: SignalCandidate = {
   strategyKey: "cash_secured_put",
@@ -38,22 +39,16 @@ const candidate: SignalCandidate = {
   askSize: null,
   surfaceImpliedVolatility: 0.6,
   midImpliedVolatility: 0.61,
-  forecastVolatility: 0.5,
-  edge: 0.07,
-  frictionVolatility: 0.01,
-  netEdge: 0.0634,
-  edgeDollars: 83.6,
   vega: 0.132,
   dollarRisk: 11_200,
-  riskAdjustedRatio: 0.0075,
   annualizedYield: 0.4567,
   uncompensatedSharePercent: null,
   quoteSource: "day",
   quotedAt: "2026-10-06T14:06:00Z",
   flags: [],
   executable: true,
-  grade: "good",
-  model: null,
+  // Edge margin 15.4% grades Good; Edge Yield 39.8% a year on $11,200 of exposure, Edge $ 83.6.
+  model: fixtureCandidateModel({ edgeMargin: 0.154, expectedAnnualizedReturn: 0.398, expectedPnlDollars: 83.6, capitalAtRiskDollars: 11_200 }),
 };
 
 const signalUpgrade: SignalUpgrade = { symbol: "HOOD", candidate, previousGrade: "weak", spotPrice: 113.4, quotedAt: "2026-10-06T14:06:00Z" };
@@ -64,16 +59,13 @@ const roll: RollSignalCandidate = {
   strategyKey: "covered_call",
   quantity: 2,
   replacement: { ...candidate, strategyKey: "covered_call", strike: 120, expiry: "2026-11-20", dte: 45 },
-  netRollEdge: 0.0561,
-  netRollEdgeDollarsPerContract: 41.7,
-  netRollEdgeDollars: 83.4,
   netCreditPerShare: 0.4,
   deltaChange: 0.05,
   dollarRiskChange: 100,
   flags: [],
   warnings: [],
-  grade: "strong",
-  model: null,
+  // Edge margin 25.6% grades Strong; $41.70 a contract net, $83.40 for the two.
+  model: fixtureRollModel({ edgeMargin: 0.256, netExpectedPnlPerContract: 41.7, netExpectedPnl: 83.4 }),
 };
 const rollUpgrade: RollSignalUpgrade = { symbol: "AAPL", roll, held: { strike: 115, expiry: "2026-10-16", dte: 10 }, previousGrade: "avoid", spotPrice: 118, quotedAt: "2026-12-07T15:30:00Z" };
 
@@ -91,7 +83,7 @@ describe("formatSignalUpgradeMessage", () => {
         "▲ Signal upgraded — HOOD",
         "Put $116 · Oct 16 (10 DTE)",
         "Weak → Good",
-        "Net Edge 6.3vp · Edge $ 84 · yield 46% ann.",
+        "Edge margin 15% · Edge Yield 40% ann. · Edge $ 84",
         "Spot $113.40 · quote 10:06 ET (day quotes)",
         "Open: Signals → HOOD",
       ].join("\n"),
@@ -99,12 +91,12 @@ describe("formatSignalUpgradeMessage", () => {
   });
 
   it("labels a covered call as Call and shows n/a without a quote time", () => {
-    const message = formatSignalUpgradeMessage({ ...signalUpgrade, candidate: { ...candidate, strategyKey: "covered_call", grade: "strong" }, previousGrade: "avoid", quotedAt: null });
+    const message = formatSignalUpgradeMessage({ ...signalUpgrade, candidate: { ...candidate, strategyKey: "covered_call", model: { ...candidate.model, edgeMargin: 0.254, grade: "strong" } }, previousGrade: "avoid", quotedAt: null });
     expect(message.split("\n")).toEqual([
       "▲ Signal upgraded — HOOD",
       "Call $116 · Oct 16 (10 DTE)",
       "Avoid → Strong",
-      "Net Edge 6.3vp · Edge $ 84 · yield 46% ann.",
+      "Edge margin 25% · Edge Yield 40% ann. · Edge $ 84",
       "Spot $113.40 · quote n/a (day quotes)",
       "Open: Signals → HOOD",
     ]);
@@ -120,23 +112,23 @@ describe("formatSignalUpgradeMessage", () => {
 });
 
 describe("formatRollSignalUpgradeMessage", () => {
-  it("renders the full roll upgrade message with a positive dollar edge and plural contracts", () => {
+  it("renders the full roll upgrade message with the model's net roll $ and plural contracts", () => {
     expect(formatRollSignalUpgradeMessage(rollUpgrade)).toBe(
       [
         "▲ Roll signal upgraded — AAPL",
         "Call $115 (10 DTE) → Call $120 · Nov 20 (45 DTE)",
         "Avoid → Strong",
-        "Net roll Edge 5.6vp · +$83 for 2 contracts · net credit $0.40/sh",
+        "Edge margin 26% · +$83 for 2 contracts · net credit $0.40/sh",
         "Spot $118.00 · quote 10:30 ET (day quotes)",
         "Open: Signals → AAPL → Your positions",
       ].join("\n"),
     );
   });
 
-  it("omits the held DTE when unknown, uses a minus sign for a negative edge, singular contract and Put", () => {
+  it("omits the held DTE when unknown, uses a minus sign for a negative net roll $, singular contract and Put", () => {
     const message = formatRollSignalUpgradeMessage({
       ...rollUpgrade,
-      roll: { ...roll, strategyKey: "cash_secured_put", quantity: 1, netRollEdgeDollars: -12.6, netCreditPerShare: -0.05 },
+      roll: { ...roll, strategyKey: "cash_secured_put", quantity: 1, model: { ...roll.model, netExpectedPnlPerContract: -12.6, netExpectedPnl: -12.6 }, netCreditPerShare: -0.05 },
       held: { strike: 115, expiry: "2026-10-16", dte: null },
       quotedAt: null,
     });
@@ -144,19 +136,19 @@ describe("formatRollSignalUpgradeMessage", () => {
       "▲ Roll signal upgraded — AAPL",
       "Put $115 → Put $120 · Nov 20 (45 DTE)",
       "Avoid → Strong",
-      "Net roll Edge 5.6vp · −$13 for 1 contract · net credit −$0.05/sh",
+      "Edge margin 26% · −$13 for 1 contract · net credit −$0.05/sh",
       "Spot $118.00 · quote n/a (day quotes)",
       "Open: Signals → AAPL → Your positions",
     ]);
   });
 
-  it("shows a zero dollar edge with a plus sign", () => {
-    expect(formatRollSignalUpgradeMessage({ ...rollUpgrade, roll: { ...roll, netRollEdgeDollars: 0 } })).toContain("+$0 for 2 contracts");
+  it("shows a zero net roll $ with a plus sign", () => {
+    expect(formatRollSignalUpgradeMessage({ ...rollUpgrade, roll: { ...roll, model: { ...roll.model, netExpectedPnlPerContract: 0, netExpectedPnl: 0 } } })).toContain("+$0 for 2 contracts");
   });
 });
 
 describe("notifySignalUpgrade / notifyRollSignalUpgrade", () => {
-  it("publishes a signal_upgraded event with the candidate's numbers and sends no Telegram message", async () => {
+  it("publishes a signal_upgraded event with the model's grade and figures and sends no Telegram message", async () => {
     await notifySignalUpgrade(signalUpgrade);
     expect(sent.published).toEqual([
       {
@@ -168,9 +160,10 @@ describe("notifySignalUpgrade / notifyRollSignalUpgrade", () => {
         dte: 10,
         previousGrade: "weak",
         grade: "good",
-        netEdge: 0.0634,
-        edgeDollars: 83.6,
-        annualizedYield: 0.4567,
+        edgeMargin: 0.154,
+        edgeYield: 0.398,
+        expectedPnlDollars: 83.6,
+        exposureDollars: 11_200,
       },
     ]);
     expect(sent.telegram).toEqual([]);
@@ -188,7 +181,7 @@ describe("notifySignalUpgrade / notifyRollSignalUpgrade", () => {
     expect(console.error).toHaveBeenCalledWith("day signals: could not notify the HOOD upgrade: plain string");
   });
 
-  it("publishes a roll_signal_upgraded event carrying the held leg and the replacement", async () => {
+  it("publishes a roll_signal_upgraded event carrying the held leg, the replacement and the model's roll", async () => {
     await notifyRollSignalUpgrade(rollUpgrade);
     expect(sent.published).toEqual([
       {
@@ -204,8 +197,8 @@ describe("notifySignalUpgrade / notifyRollSignalUpgrade", () => {
         dte: 45,
         previousGrade: "avoid",
         grade: "strong",
-        netRollEdge: 0.0561,
-        netRollEdgeDollars: 83.4,
+        edgeMargin: 0.256,
+        netExpectedPnl: 83.4,
         netCreditPerShare: 0.4,
       },
     ]);
@@ -224,7 +217,7 @@ describe("assignment-risk message variants and failure handling", () => {
     spotPrice: 120.5,
     leg: {
       legId: "leg-1", positionId: "pos-1", strategyKey: "covered_call", expiry: "2026-10-16", strike: 118, right: "C", quantity: 1, entryPrice: 2.1, entryAtIso: "2026-09-10T14:00:00Z",
-      dte: null, delta: 0.6, bid: 3.9, ask: 4.1, mid: 4, surfaceImpliedVolatility: 0.6, midImpliedVolatility: 0.61, edge: 0.05, frictionVolatility: 0.01, vega: 0.12, holdEdgeDollars: 60, closeCostDollars: 12, dollarRisk: 11_200, quoteSource: "day", quotedAt: null, flags: ["assignment_risk"], unscoredReason: null, model: null,
+      dte: null, delta: 0.6, bid: 3.9, ask: 4.1, mid: 4, surfaceImpliedVolatility: 0.6, midImpliedVolatility: 0.61, dollarRisk: 11_200, quoteSource: "day", quotedAt: null, flags: ["assignment_risk"], unscoredReason: null, model: null,
     },
   };
 
