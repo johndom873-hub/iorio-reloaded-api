@@ -107,6 +107,8 @@ export interface PostModelGateOutput {
   ok: boolean;
   gates: PlutoGateResult[];
   plan: PlutoOrderPlan | null;
+  /** An open's: the limit that set its size (sizeOpenOrder), for the screen; kept out of `gates`, which the backtest stores. */
+  sizingLimit?: SizingLimit | null;
 }
 
 /**
@@ -127,7 +129,7 @@ export interface SizingRoom {
   cashRoom: number;
 }
 
-export function computeSizingRoom(settings: PlutoSettings, book: PostModelBookInput, sectorKnown: boolean): SizingRoom {
+export function computeSizingRoom(settings: PlutoSettings, book: OpenSizingBook, sectorKnown: boolean): SizingRoom {
   const nlv = book.netLiquidationValue;
   const budget = (nlv * settings.capitalBudgetPct) / 100;
   return {
@@ -242,6 +244,127 @@ export function computeKellyCap(
   };
 }
 
+/** What sizing an open reads of the book. */
+export type OpenSizingBook = Pick<PostModelBookInput, "netLiquidationValue" | "freeCash" | "committedDollars" | "inFlight" | "existingTickerExposure" | "existingSectorExposure" | "freeShares" | "spotPrice">;
+
+export interface OpenSizingInput {
+  candidate: SignalCandidate;
+  settings: PlutoSettings;
+  book: OpenSizingBook;
+  sectorKnown: boolean;
+  /** Live: the ticker, and the limit is rounded up to the cent (optionLimitPrice.ts); absent (the backtest): to the nearest cent. */
+  symbol?: string;
+  stress: StressCapInput;
+  kellyFraction?: number;
+  kellyBasis?: KellyEdgeBasis;
+}
+
+export interface OpenSizing {
+  quantity: number;
+  /** Cash each contract of the order commits, on average: a covered call's contracts on free shares commit none. */
+  notionalPerContract: number;
+  /** The sizing gate's detail: every limit and cap with its figures. */
+  detail: string;
+  /** For an open that sizes to no contract, the limit or cap that allows none, in words; null otherwise. */
+  zeroSizeReason: string | null;
+  /** For an open that sizes to a contract or more, the limit that set how many; null otherwise. */
+  limit: SizingLimit | null;
+}
+
+/** The tightest dollar limit against what one contract commits, for an open the room allows no contract of. */
+function roomShortfall(room: SizingRoom, dollarsPerContract: number): string {
+  const tightest = tightestRoomLimit(room);
+  return `${tightest.label} ${formatWholeDollars(tightest.dollars)} is less than one contract's ${formatWholeDollars(dollarsPerContract)}`;
+}
+
+/** The limit that set an open's size: one of the dollar limits, or a cap on the number of contracts. */
+export type SizingLimit = "order_size" | "budget_left" | "ticker_room" | "cash_room" | "sector_room" | "volume" | "stress" | "kelly";
+
+/** The smallest of the dollar limits (the order size first on a tie: then nothing tighter applies). */
+function tightestRoomLimit(room: SizingRoom): { limit: SizingLimit; label: string; dollars: number } {
+  const limits: { limit: SizingLimit; label: string; dollars: number }[] = [
+    { limit: "order_size", label: "order size", dollars: room.orderCap },
+    { limit: "budget_left", label: "budget left", dollars: room.budgetRoom },
+    { limit: "ticker_room", label: "ticker room", dollars: room.tickerRoom },
+    { limit: "cash_room", label: "cash room", dollars: room.cashRoom },
+    { limit: "sector_room", label: "sector room", dollars: room.sectorRoom },
+  ];
+  return limits.reduce((tightest, limit) => (limit.dollars < tightest.dollars ? limit : tightest));
+}
+
+/** The first of the limits whose contracts are the quantity sized (each with the contracts it allows), in the order they are listed. */
+function limitSettingQuantity(quantity: number, limits: [number, SizingLimit][]): SizingLimit | null {
+  return limits.find(([contracts]) => contracts === quantity)?.[1] ?? null;
+}
+
+/** The first of the limits that allows no contract (each with the contracts it allows and its words). */
+function firstLimitAllowingNone(limits: [number, string][]): string {
+  return limits.find(([contracts]) => !(contracts >= 1))?.[1] ?? "no contract allowed";
+}
+
+/**
+ * The size of an open: the standard order size, less only where a tighter limit binds; contracts follow from it. A contract's
+ * notional is its exposure net of the premium at the order's limit price (Marcelo 2026-10-12), as the order gate counts it.
+ * The sizing gate runs it on fresh quotes once the model chose; the round's filters run it before, so an open that sizes to
+ * no contract is not offered (filterTickerForPluto).
+ */
+export function sizeOpenOrder(input: OpenSizingInput): OpenSizing {
+  const { candidate, settings, book } = input;
+  const room = computeSizingRoom(settings, book, input.sectorKnown);
+  const limitPrice = midLimitPrice(candidate.bid, candidate.ask, input.symbol);
+  const liquidityCap = volumeCap(candidate.volume, settings);
+  const volumeShortfall = `volume share allows no contract (${candidate.volume ?? "unknown"} traded today, at most ${settings.maxContractsVolumeSharePct}% of it)`;
+  if (candidate.strategyKey === "cash_secured_put") {
+    const unitNotional = (candidate.strike - limitPrice) * 100;
+    const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
+    const byRoom = Math.floor(Math.max(0, roomDollars) / unitNotional);
+    const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
+    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction, input.kellyBasis);
+    const quantity = Math.min(byRoom, liquidityCap, stressCap.contracts, kellyCap.contracts);
+    return {
+      quantity,
+      notionalPerContract: unitNotional,
+      detail: `${describeRoom(room)} → ${byRoom} contract(s) at ${formatWholeDollars(unitNotional)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → ${formatWholeDollars(quantity * unitNotional)}`,
+      zeroSizeReason: quantity >= 1 ? null : firstLimitAllowingNone([[byRoom, roomShortfall(room, unitNotional)], [liquidityCap, volumeShortfall], [stressCap.contracts, stressCap.detail], [kellyCap.contracts, kellyCap.detail]]),
+      limit: quantity >= 1 ? limitSettingQuantity(quantity, [[byRoom, tightestRoomLimit(room).limit], [liquidityCap, "volume"], [stressCap.contracts, "stress"], [kellyCap.contracts, "kelly"]]) : null,
+    };
+  }
+  // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
+  // contract is a Covered Call entry that buys 100 shares at the live spot, sized from the same room as a put.
+  const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction, input.kellyBasis);
+  // One Kelly cap for all the call's contracts, on shares + call: free-share contracts first, Covered Call entries within what is left.
+  const coveredByShares = Math.min(Math.floor(book.freeShares / 100), kellyCap.contracts);
+  if (book.spotPrice === null || !(book.spotPrice > 0)) {
+    const quantity = Math.min(coveredByShares, liquidityCap);
+    return {
+      quantity,
+      notionalPerContract: 0,
+      detail: `no live spot to price the shares to buy; ${book.freeShares} free shares cover ${coveredByShares} contract(s) within the Kelly cap (${kellyCap.detail}), volume share allows ${liquidityCap}`,
+      zeroSizeReason: quantity >= 1 ? null : firstLimitAllowingNone([[coveredByShares, `no live spot to price the shares to buy, and ${book.freeShares} free shares cover no contract`], [liquidityCap, volumeShortfall]]),
+      // Sized by the free shares alone (no shares bought) unless the volume share cut it.
+      limit: quantity >= 1 && quantity < coveredByShares ? "volume" : null,
+    };
+  }
+  const unitNotional = (book.spotPrice - limitPrice) * 100;
+  const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
+  const byRoom = Math.floor(Math.max(0, roomDollars) / unitNotional);
+  // Only the contracts that buy shares add risk, so only they are stress-capped.
+  const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
+  const kellyContractsLeft = Math.max(0, kellyCap.contracts - coveredByShares);
+  const coveredCallEntryContracts = Math.min(byRoom, stressCap.contracts, kellyContractsLeft);
+  const quantity = Math.min(coveredByShares + coveredCallEntryContracts, liquidityCap);
+  return {
+    quantity,
+    // Only the shares actually bought count as notional: the free-share contracts commit no new cash.
+    notionalPerContract: quantity > 0 ? (Math.max(0, quantity - coveredByShares) * unitNotional) / quantity : 0,
+    detail: `${book.freeShares} free shares cover ${coveredByShares} contract(s) within the Kelly cap, room allows ${coveredCallEntryContracts} more contract(s) buying 100 shares each at ${book.spotPrice.toFixed(2)} less the ${limitPrice.toFixed(2)} premium (${describeRoom(room)}; ${stressCap.detail}; ${kellyCap.detail}), volume share allows ${liquidityCap}`,
+    // With free shares covering a contract, only the volume share can leave none.
+    zeroSizeReason: quantity >= 1 ? null : coveredByShares >= 1 ? volumeShortfall : firstLimitAllowingNone([[byRoom, roomShortfall(room, unitNotional)], [liquidityCap, volumeShortfall], [stressCap.contracts, stressCap.detail], [kellyContractsLeft, kellyCap.detail]]),
+    // The volume share caps the whole order; otherwise whichever cap set how many Covered Call entries were added.
+    limit: quantity < 1 ? null : quantity === liquidityCap && liquidityCap < coveredByShares + coveredCallEntryContracts ? "volume" : limitSettingQuantity(coveredCallEntryContracts, [[byRoom, tightestRoomLimit(room).limit], [stressCap.contracts, "stress"], [kellyContractsLeft, "kelly"]]),
+  };
+}
+
 export function runPostModelGates(input: PostModelGateInput): PostModelGateOutput {
   const { decision, settings, book } = input;
   const gates: PlutoGateResult[] = [];
@@ -266,55 +389,30 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
   if (!isRoll) gate("open_positions_cap", book.openPositionCount < settings.maxOpenPositions, `${book.openPositionCount} of ${settings.maxOpenPositions} managed positions`);
   gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${describeOptionContract({ strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P", expiry: candidate.expiry, dte: candidate.dte })}`);
 
-  // Sizing in dollars: the standard order size, less only where a tighter limit binds; contracts follow from it. A contract's
-  // notional is its exposure net of the premium at the order's limit price (Marcelo 2026-10-12), as the order gate counts it.
-  const room = computeSizingRoom(settings, book, input.sector !== null);
   const limitPrice = midLimitPrice(candidate.bid, candidate.ask, input.symbol);
-  const liquidityCap = volumeCap(candidate.volume, settings);
   let fullSizeQuantity: number;
   let unitNotional: number;
+  let sizingLimit: SizingLimit | null = null;
   if (isRoll) {
     const roll = input.roll!;
     fullSizeQuantity = roll.quantity; // rolls keep the held leg's quantity (design item 64)
     // A roll re-uses the closed leg's collateral; only a cash-secured put whose strike rise beats its net credit adds cash (per contract).
     unitNotional = roll.strategyKey === "cash_secured_put" ? Math.max(0, roll.dollarRiskChange) : 0;
     gate("sizing", fullSizeQuantity >= 1, `roll keeps the held quantity of ${fullSizeQuantity}`);
-  } else if (candidate.strategyKey === "cash_secured_put") {
-    unitNotional = (candidate.strike - limitPrice) * 100;
-    const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
-    const byRoom = Math.floor(Math.max(0, roomDollars) / unitNotional);
-    const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
-    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction, input.kellyBasis);
-    fullSizeQuantity = Math.min(byRoom, liquidityCap, stressCap.contracts, kellyCap.contracts);
-    gate("sizing", fullSizeQuantity >= 1, `${describeRoom(room)} → ${byRoom} contract(s) at ${formatWholeDollars(unitNotional)} each; volume share allows ${liquidityCap}; ${stressCap.detail}; ${kellyCap.detail} → ${formatWholeDollars(fullSizeQuantity * unitNotional)}`);
   } else {
-    // Covered calls (Marcelo, 2026-09-28): contracts already covered by free shares cost nothing; every further
-    // contract is a Covered Call entry that buys 100 shares at the live spot, sized from the same room as a put.
-    const kellyCap = computeKellyCap(settings, candidate, book.netLiquidationValue, input.kellyFraction, input.kellyBasis);
-    // One Kelly cap for all the call's contracts, on shares + call: free-share contracts first, Covered Call entries within what is left.
-    const coveredByShares = Math.min(Math.floor(book.freeShares / 100), kellyCap.contracts);
-    if (book.spotPrice === null || !(book.spotPrice > 0)) {
-      unitNotional = 0;
-      fullSizeQuantity = Math.min(coveredByShares, liquidityCap);
-      gate("sizing", fullSizeQuantity >= 1, `no live spot to price the shares to buy; ${book.freeShares} free shares cover ${coveredByShares} contract(s) within the Kelly cap (${kellyCap.detail}), volume share allows ${liquidityCap}`);
-    } else {
-      unitNotional = (book.spotPrice - limitPrice) * 100;
-      const roomDollars = Math.min(room.budgetRoom, room.orderCap, room.tickerRoom, room.sectorRoom, room.cashRoom);
-      // Only the contracts that buy shares add risk, so only they are stress-capped.
-      const stressCap = computeStressCap(settings, input.stress, candidate, book.spotPrice, book.netLiquidationValue);
-      const coveredCallEntryContracts = Math.min(Math.floor(Math.max(0, roomDollars) / unitNotional), stressCap.contracts, Math.max(0, kellyCap.contracts - coveredByShares));
-      fullSizeQuantity = Math.min(coveredByShares + coveredCallEntryContracts, liquidityCap);
-      gate("sizing", fullSizeQuantity >= 1, `${book.freeShares} free shares cover ${coveredByShares} contract(s) within the Kelly cap, room allows ${coveredCallEntryContracts} more contract(s) buying 100 shares each at ${book.spotPrice.toFixed(2)} less the ${limitPrice.toFixed(2)} premium (${describeRoom(room)}; ${stressCap.detail}; ${kellyCap.detail}), volume share allows ${liquidityCap}`);
-    }
-    // Only the shares actually bought count as notional: the free-share contracts commit no new cash.
-    unitNotional = fullSizeQuantity > 0 ? (Math.max(0, fullSizeQuantity - coveredByShares) * unitNotional) / fullSizeQuantity : 0;
+    const sizing = sizeOpenOrder({ candidate, settings, book, sectorKnown: input.sector !== null, symbol: input.symbol, stress: input.stress, kellyFraction: input.kellyFraction, kellyBasis: input.kellyBasis });
+    fullSizeQuantity = sizing.quantity;
+    unitNotional = sizing.notionalPerContract;
+    sizingLimit = sizing.limit;
+    // A refusal leads with the one limit that allows no contract; every figure follows.
+    gate("sizing", fullSizeQuantity >= 1, sizing.zeroSizeReason === null ? sizing.detail : `${sizing.zeroSizeReason}. Details: ${sizing.detail}`);
   }
   const quantity = fullSizeQuantity;
 
   gate("limit_price", limitPrice >= candidate.bid && limitPrice <= candidate.ask && limitPrice > 0, `mid ${limitPrice.toFixed(2)} inside ${candidate.bid.toFixed(2)}–${candidate.ask.toFixed(2)}`);
 
   const ok = gates.every((entry) => entry.ok);
-  return { ok, gates, plan: ok ? { quantity, limitPrice, notional: unitNotional * quantity, fullSizeQuantity } : null };
+  return { ok, gates, plan: ok ? { quantity, limitPrice, notional: unitNotional * quantity, fullSizeQuantity } : null, sizingLimit };
 }
 
 export interface HeldShareCallGateInput {

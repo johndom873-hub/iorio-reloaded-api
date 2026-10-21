@@ -1,7 +1,7 @@
 import { db } from "../db/connection.js";
 import type { InternalApiClient } from "../lib/internalApiClient.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
-import { computePositionExposures } from "../lib/positionExposure.js";
+import { computePositionExposures, type PositionExposureRow } from "../lib/positionExposure.js";
 import { loadTradingSettings, type TradingSettings } from "../lib/tradingSettingsStore.js";
 import { scoreHeldShareCalls, scoreTicker, type LiveOptionQuote } from "../lib/signalsLiveScoring.js";
 import { accountContextFromTotalCash, loadBarsForTilt, loadSignalsUniverseTickers, loadTickerSignalsInputs, type SignalsTickerRow } from "../lib/signalsStore.js";
@@ -11,8 +11,8 @@ import { computeMoveContext, type MoveContext } from "./moveContext.js";
 import type { TickerSignals, TickerSignalsInputs } from "../lib/signalsTypes.js";
 import { compareCandidatesByModel, type SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore } from "../lib/rollSignalCandidates.js";
-import { anyOpenPositionOn, loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol, loadOccupiedContracts, loadPlutoBook, type PlutoBook } from "./book.js";
-import { describeCandidateId, filterTickerForPluto, findSameContractConflict, summarizeTopPick, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateFailures, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterResult } from "./candidateFilters.js";
+import { anyOpenPositionOn, loadInFlightNotionals, loadInFlightNotionalsBySymbol, loadLastFilledPlutoActionAtBySymbol, loadOccupiedContracts, loadPlutoBook, type PlutoBook } from "./book.js";
+import { describeCandidateId, filterTickerForPluto, findSameContractConflict, summarizeTopPick, openCandidateId, rejectOpenCandidate, rejectTicker, rollCandidateFailures, rollCandidateId, type OccupiedContract, type PlutoOpenCandidate, type PlutoRollCandidate, type PlutoTickerFilterInput, type PlutoTickerFilterResult, type TickerSizingBook } from "./candidateFilters.js";
 import { summarizeTickerRejections } from "./rejectionSummary.js";
 import { flaggedSymbols, noTrade, parsePlutoDecision, type PlutoDecision } from "./decisionSchema.js";
 import { updatePlutoConcernAlerts } from "./concernAlerts.js";
@@ -168,7 +168,31 @@ function burstContractsFor(scored: TickerSignals, filtered: PlutoTickerFilterRes
   return ranked.slice(0, settings.burstLines).map((candidate) => ({ expiry: candidate.expiry, strike: candidate.strike, right: candidate.strategyKey === "covered_call" ? "C" : "P" }));
 }
 
-async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, context: PassRunnerContext, account: { freeCash: number }, tradingSettings: TradingSettings, botEnabled: boolean, nowMs: number, extraLiveQuotes: LiveOptionQuote[] = [], opensBlockedReason: string | null = null): Promise<EvaluatedTicker> {
+/** What a round reads once to size its opens: the account, the capital Pluto's book commits, every open position's exposure. */
+interface RoundSizingFigures {
+  netLiquidationValue: number;
+  freeCash: number;
+  committedDollars: number;
+  exposures: PositionExposureRow[];
+}
+
+/** The sizing gate's book for one ticker: built the same way for the round's filters (before the model) and the gate (after). */
+function tickerSizingBook(row: SignalsTickerRow, figures: RoundSizingFigures, inFlight: { totalNotional: number; tickerNotional: number; managedNotional: number }): TickerSizingBook {
+  const sector = row.sector ?? null;
+  return {
+    sectorKnown: sector !== null,
+    book: {
+      netLiquidationValue: figures.netLiquidationValue,
+      freeCash: figures.freeCash,
+      committedDollars: figures.committedDollars,
+      inFlight,
+      existingTickerExposure: figures.exposures.filter((exposure) => exposure.symbol === row.symbol).reduce((sum, exposure) => sum + exposure.exposure, 0),
+      existingSectorExposure: sector === null ? 0 : figures.exposures.filter((exposure) => exposure.sector === sector).reduce((sum, exposure) => sum + exposure.exposure, 0),
+    },
+  };
+}
+
+async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, context: PassRunnerContext, account: { freeCash: number }, tradingSettings: TradingSettings, botEnabled: boolean, nowMs: number, extraLiveQuotes: LiveOptionQuote[] = [], opensBlockedReason: string | null = null, roundFilters: Pick<PlutoTickerFilterInput, "sizingBook" | "newPositionsBlockedReason"> = {}): Promise<EvaluatedTicker> {
   const inputs = await loadTickerSignalsInputs(row);
   const watched = context.marketWatch.snapshot(row.symbol);
   const spot = watched?.last ?? null;
@@ -179,7 +203,7 @@ async function evaluateTicker(row: SignalsTickerRow, settings: PlutoSettings, co
   const [occupiedContracts, cycleSummaries] = await Promise.all([loadOccupiedContracts(row.symbol), needsCycle ? fetchOpenCycleSummaryByTickerId([row.tickerId]) : null]);
   const cycleBreakEven = cycleSummaries?.get(row.tickerId) ?? null;
   // The ticker cooldown keeps rolls from the model too: the post-model gate would refuse one it chose.
-  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason, rollsBlockedReason: opensBlockedReason, cycleBreakEven, heldShareCallCandidates });
+  const filtered = filterTickerForPluto({ scored, slices: inputs.slices, settings, todayEasternIso: inputs.todayEasternIso, nowMs, botEnabled, occupiedContracts, opensBlockedReason, rollsBlockedReason: opensBlockedReason, cycleBreakEven, heldShareCallCandidates, ...roundFilters });
   return { row, inputs, scored, filtered, occupiedContracts, cycleBreakEven, fingerprint: tickerFingerprint(filtered.eligible, filtered.eligibleRolls), closeOffers: [], heldPositions: [] };
 }
 
@@ -470,9 +494,24 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     const cooldown = tickerCooldownStatus(lastFilledActionAtBySymbol.get(symbol) ?? null, nowMs, settings.tickerCooldownMinutes);
     return cooldown.cooledDown ? null : `ticker cooldown: ${cooldown.detail}`;
   };
+  // The book the post-model gates read, read once for the round: what they would refuse is not offered to the model. An
+  // open the sizing gate would size to no contract, an open past the open-positions cap, and anything on a ticker with a
+  // Pluto order working (opens, rolls and closes alike).
+  const [roundBook, roundExposures, roundInFlight] = await Promise.all([loadPlutoBook(), computePositionExposures(), loadInFlightNotionalsBySymbol()]);
+  const roundSizingFigures: RoundSizingFigures = { netLiquidationValue: checks.context.netLiquidationValue ?? 0, freeCash: account.freeCash, committedDollars: roundBook.committedDollars, exposures: roundExposures };
+  const newPositionsBlockedReason = roundBook.openPositions.length >= settings.maxOpenPositions ? `${roundBook.openPositions.length} of ${settings.maxOpenPositions} managed positions: no new position` : null;
+  const roundFiltersFor = (row: SignalsTickerRow) => ({
+    sizingBook: tickerSizingBook(row, roundSizingFigures, { totalNotional: roundInFlight.totalNotional, tickerNotional: roundInFlight.tickerNotionalBySymbol.get(row.symbol) ?? 0, managedNotional: roundInFlight.managedNotional }),
+    newPositionsBlockedReason,
+  });
+  const workingOrderOn = (symbol: string) => roundBook.workingOrderSymbols.has(symbol);
+  const tickerOpensBlockedReason = (symbol: string) => tickerCooldownReason(symbol) ?? (workingOrderOn(symbol) ? "a Pluto order on this symbol is already working" : null);
+  const dropClosesWhileOrderWorking = (ticker: EvaluatedTicker) => {
+    if (workingOrderOn(ticker.row.symbol)) ticker.closeOffers = [];
+  };
   let evaluated: EvaluatedTicker[] = [];
   for (const row of rows) {
-    const ticker = await evaluateTicker(row, settings, context, account, tradingSettings, true, nowMs, [], tickerCooldownReason(row.symbol));
+    const ticker = await evaluateTicker(row, settings, context, account, tradingSettings, true, nowMs, [], tickerOpensBlockedReason(row.symbol), roundFiltersFor(row));
     blockOpensWhenBarred(ticker);
     evaluated.push(ticker);
   }
@@ -494,6 +533,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   for (const ticker of evaluated) {
     if (await attachCloseOffers(ticker, settings, context, roundClose, passId, checks.context.session.cancelByMs, true, automaticBudget)) automaticOrderWorkingSymbols.add(ticker.row.symbol);
     else if (await sendHeldShareCall(ticker, heldShareCallRound)) automaticOrderWorkingSymbols.add(ticker.row.symbol);
+    dropClosesWhileOrderWorking(ticker);
     const requotable = opensBlockedBecause ? [] : candidatesEligibleOnceRequoted(ticker.scored, ticker.filtered);
     lookedAtFingerprintBySymbol.set(ticker.row.symbol, tickerFingerprint([...ticker.filtered.eligible, ...requotable], ticker.filtered.eligibleRolls, ticker.closeOffers.map(closeOfferFingerprintKey)));
     offeredCount += ticker.filtered.eligible.length + requotable.length + ticker.filtered.eligibleRolls.length + ticker.closeOffers.length;
@@ -529,9 +569,10 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
       refreshed.push(ticker);
       continue;
     }
-    const requoted = await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now(), liveQuotes, tickerCooldownReason(ticker.row.symbol));
+    const requoted = await evaluateTicker(ticker.row, settings, context, account, tradingSettings, true, Date.now(), liveQuotes, tickerOpensBlockedReason(ticker.row.symbol), roundFiltersFor(ticker.row));
     blockOpensWhenBarred(requoted);
     await attachCloseOffers(requoted, settings, context, roundClose, passId, checks.context.session.cancelByMs, false);
+    dropClosesWhileOrderWorking(requoted);
     refreshed.push(requoted);
   }
   evaluated = refreshed;
@@ -691,6 +732,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
   const [exposures, inFlight] = await Promise.all([computePositionExposures(), loadInFlightNotionals(owner.row.symbol)]);
   const freshContractForGate = freshCandidate ?? freshRoll?.replacement ?? null;
   const sector = owner.row.sector ?? null;
+  const sizingBook = tickerSizingBook(owner.row, { netLiquidationValue: checks.context.netLiquidationValue ?? 0, freeCash: account.freeCash, committedDollars: book.committedDollars, exposures }, inFlight);
   const gates = runPostModelGates({
     decision,
     candidate: freshCandidate,
@@ -701,13 +743,8 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     sector,
     symbol: owner.row.symbol,
     book: {
-      netLiquidationValue: checks.context.netLiquidationValue ?? 0,
-      freeCash: account.freeCash,
-      committedDollars: book.committedDollars,
-      inFlight,
+      ...sizingBook.book,
       openPositionCount: book.openPositions.length,
-      existingTickerExposure: exposures.filter((row) => row.symbol === owner.row.symbol).reduce((sum, row) => sum + row.exposure, 0),
-      existingSectorExposure: sector === null ? 0 : exposures.filter((row) => row.sector === sector).reduce((sum, row) => sum + row.exposure, 0),
       freeShares: fresh.scored.freeShares,
       spotPrice: fresh.scored.spotPrice,
       workingOrderOnSymbol: book.workingOrderSymbols.has(owner.row.symbol),
@@ -718,7 +755,9 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     stress: stressCapInputFor(fresh.scored),
   });
   const contract = freshCandidate ?? freshRoll?.replacement ?? null;
-  const gateResults: PlutoGateResult[] = gates.gates;
+  // The screen says which limit set an open's size from the sizing gate's `limit` (the backtest's stored gates carry none).
+  const sizingLimit = gates.sizingLimit;
+  const gateResults: PlutoGateResult[] = sizingLimit ? gates.gates.map((gate) => (gate.gate === "sizing" ? { ...gate, limit: sizingLimit } : gate)) : gates.gates;
   const actionId = await recordPlutoAction({
     passId,
     kind: chosenOpen ? chosenOpen.kind : "roll",

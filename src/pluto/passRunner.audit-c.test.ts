@@ -73,7 +73,7 @@ vi.mock("./candidateFilters.js", () => ({
   rejectTicker: () => [],
   rollCandidateId: () => "",
 }));
-vi.mock("./book.js", () => ({ loadPlutoBook: async () => ({ openPositions: [], committedDollars: 0, plutoOpenedPositionIds: new Set(), workingOrderSymbols: new Set(), lastFilledActionAtBySymbol: new Map() }), loadOccupiedContracts: async () => [], loadLastFilledPlutoActionAtBySymbol: async () => new Map(), loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), anyOpenPositionOn: async () => false }));
+vi.mock("./book.js", () => ({ loadPlutoBook: async () => ({ openPositions: [], committedDollars: 0, plutoOpenedPositionIds: new Set(), workingOrderSymbols: new Set(), lastFilledActionAtBySymbol: new Map() }), loadOccupiedContracts: async () => [], loadLastFilledPlutoActionAtBySymbol: async () => new Map(), loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), loadInFlightNotionalsBySymbol: async () => ({ totalNotional: 0, managedNotional: 0, tickerNotionalBySymbol: new Map() }), anyOpenPositionOn: async () => false }));
 vi.mock("./closeActions.js", () => ({
   buildCloseOffersForTicker: async (input: { todayIso: string }) => {
     harness.closeBuilds.push({ todayIso: input.todayIso });
@@ -101,7 +101,7 @@ vi.mock("./modelClient.js", () => ({
 }));
 vi.mock("./executor.js", () => ({ executePlutoClose: vi.fn(async () => ({ outcome: "confirmed", orderId: "order-1", detail: "" })), executePlutoOrder: vi.fn(), watchPlutoOrder: vi.fn(async () => ({ outcome: "filled", detail: "" })) }));
 vi.mock("./postModelGates.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./postModelGates.js")>()), runPostModelGates: vi.fn() }));
-vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn() }));
+vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn(async () => []) }));
 
 const { runPlutoPass } = await import("./passRunner.js");
 const executor = await import("./executor.js");

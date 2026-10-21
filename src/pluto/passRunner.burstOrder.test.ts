@@ -11,6 +11,14 @@ const harness = vi.hoisted(() => ({
   modelAnswer: null as Record<string, unknown> | null,
   blockedGates: [] as string[],
   bookError: null as string | null,
+  sizingBooks: [] as unknown[],
+  recordedGates: [] as { gate: string; ok: boolean; limit?: string }[],
+  filterBlocks: [] as { opens: string | null; newPositions: string | null }[],
+  workingOrderSymbols: new Set<string>(),
+  openPositionCount: 0,
+  closeOffers: [] as Record<string, unknown>[],
+  exposures: [] as { positionId: string; strategyKey: string; symbol: string; sector: string; exposure: number }[],
+  inFlight: { totalNotional: 0, managedNotional: 0, tickerNotionalBySymbol: new Map<string, number>() },
 }));
 
 vi.mock("../db/connection.js", () => {
@@ -31,7 +39,8 @@ vi.mock("./ledger.js", () => ({
   finishPlutoPass: vi.fn(),
   recordPlutoEvent: vi.fn(),
   relabelPlutoPass: vi.fn(),
-  recordPlutoAction: async (input: { gateResults: { gate: string; ok: boolean }[] }) => {
+  recordPlutoAction: async (input: { gateResults: { gate: string; ok: boolean; limit?: string }[] }) => {
+    harness.recordedGates.push(...input.gateResults);
     harness.blockedGates.push(...input.gateResults.filter((gate) => !gate.ok).map((gate) => gate.gate));
     return "action-1";
   },
@@ -51,7 +60,7 @@ vi.mock("../lib/signalsLiveScoring.js", () => ({
   scoreHeldShareCalls: () => [],
   scoreTicker: (_inputs: unknown, _account: unknown, _settings: unknown, live?: { liveQuotes: unknown[] }) => ({
     symbol: "AAA",
-    candidates: [...harness.eligibleIds, ...harness.requotableIds].map((id) => ({ id, expiry: "2026-10-16", strike: Number(id.split(":")[3]), strategyKey: "covered_call" })),
+    candidates: [...harness.eligibleIds, ...harness.requotableIds].map((id) => ({ id, expiry: "2026-10-16", strike: Number(id.split(":")[3]), strategyKey: "covered_call", model: { edgeMargin: 0.2, expectedAnnualizedReturn: 0.5, expectedPnlDollars: 20 } })),
     heldLegs: [],
     rolls: [],
     live: live?.liveQuotes.length ?? 0,
@@ -59,7 +68,7 @@ vi.mock("../lib/signalsLiveScoring.js", () => ({
 }));
 vi.mock("./candidateFilters.js", () => ({
   openCandidateId: (_symbol: string, candidate: { id: string }) => candidate.id,
-  filterTickerForPluto: ({ scored }: { scored: { candidates: { id: string }[]; live: number } }) => ({
+  filterTickerForPluto: ({ scored, sizingBook, opensBlockedReason, newPositionsBlockedReason }: { scored: { candidates: { id: string }[]; live: number }; sizingBook?: unknown; opensBlockedReason?: string | null; newPositionsBlockedReason?: string | null }) => (harness.sizingBooks.push(sizingBook), harness.filterBlocks.push({ opens: opensBlockedReason ?? null, newPositions: newPositionsBlockedReason ?? null }), {
     symbol: "AAA",
     tickerBlocks: [],
     // A re-quoted candidate becomes eligible once the burst brought live quotes.
@@ -77,14 +86,14 @@ vi.mock("./candidateFilters.js", () => ({
 vi.mock("./book.js", () => ({
   loadPlutoBook: async () => {
     if (harness.bookError) throw new Error(harness.bookError);
-    return { openPositions: [], committedDollars: 0 };
-  }, loadOccupiedContracts: async () => [], loadLastFilledPlutoActionAtBySymbol: async () => new Map(), loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), anyOpenPositionOn: async () => false }));
-vi.mock("./closeActions.js", () => ({ buildCloseOffersForTicker: async () => ({ offers: [], skipped: [], heldPositions: [] }) }));
+    return { openPositions: Array.from({ length: harness.openPositionCount }, (_, index) => ({ positionId: `p${index}`, symbol: "ZZZ" })), committedDollars: 0, workingOrderSymbols: harness.workingOrderSymbols, lastFilledActionAtBySymbol: new Map(), plutoOpenedPositionIds: new Set() };
+  }, loadOccupiedContracts: async () => [], loadLastFilledPlutoActionAtBySymbol: async () => new Map(), loadInFlightNotionals: async (symbol: string) => ({ totalNotional: harness.inFlight.totalNotional, tickerNotional: harness.inFlight.tickerNotionalBySymbol.get(symbol) ?? 0, managedNotional: harness.inFlight.managedNotional }), loadInFlightNotionalsBySymbol: async () => harness.inFlight, anyOpenPositionOn: async () => false }));
+vi.mock("./closeActions.js", () => ({ buildCloseOffersForTicker: async () => ({ offers: harness.closeOffers, skipped: [], heldPositions: [] }) }));
 vi.mock("../lib/marketSessionStatus.js", () => ({ previousOpenSessionDate: async () => "2026-10-06", loadOpenDaysBetween: async () => [] }));
 vi.mock("../lib/tradingSettingsStore.js", () => ({ loadTradingSettings: async () => ({ spreadCostChargedPct: 50 }) }));
 vi.mock("./accountSummaryCache.js", () => ({ fetchPlutoAccountSummary: async () => ({}) }));
 vi.mock("../lib/ivMetrics.js", () => ({ computeIvMetrics: async () => ({ ivRank: null }) }));
-vi.mock("./moveContext.js", () => ({ computeMoveContext: () => null }));
+vi.mock("./moveContext.js", () => ({ computeMoveContext: () => null, expectedDailyMovePct: () => null }));
 vi.mock("../lib/notifyTelegram.js", () => ({ notifyPlutoTelegram: vi.fn() }));
 vi.mock("./prompts.js", () => ({ ensurePlutoPrompt: async () => "prompt-1" }));
 vi.mock("./prompt.js", () => ({ buildPlutoSystemPrompt: () => "system", buildPlutoUserPayload: () => ({ payload: {}, offeredIds: new Set<string>(["AAA:covered_call:2026-10-16:30"]) }), plutoPromptVersion: "test", recentDecisionsForPrompt: () => [] }));
@@ -96,9 +105,10 @@ vi.mock("./modelClient.js", () => ({
 }));
 vi.mock("./executor.js", () => ({ executePlutoClose: vi.fn(), executePlutoOrder: vi.fn(), watchPlutoOrder: vi.fn() }));
 vi.mock("./postModelGates.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./postModelGates.js")>()), runPostModelGates: vi.fn() }));
-vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn() }));
+vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn(async () => harness.exposures) }));
 
 const { runPlutoPass } = await import("./passRunner.js");
+const { runPostModelGates } = await import("./postModelGates.js");
 
 function makeContext() {
   return {
@@ -129,6 +139,14 @@ beforeEach(() => {
   harness.modelAnswer = null;
   harness.blockedGates.length = 0;
   harness.bookError = null;
+  harness.sizingBooks.length = 0;
+  harness.recordedGates.length = 0;
+  harness.filterBlocks.length = 0;
+  harness.workingOrderSymbols = new Set();
+  harness.openPositionCount = 0;
+  harness.closeOffers = [];
+  harness.exposures = [];
+  harness.inFlight = { totalNotional: 0, managedNotional: 0, tickerNotionalBySymbol: new Map() };
 });
 
 describe("runPlutoPass round order", () => {
@@ -181,6 +199,43 @@ describe("runPlutoPass round order", () => {
     harness.bookError = "book unavailable";
     await expect(runPlutoPass(dayRound, makeContext())).rejects.toThrow("book unavailable");
     expect(vi.mocked(finishPlutoPass).mock.calls).toEqual([["pass-1", { skippedReason: "round failed: book unavailable" }]]);
+  });
+
+  it("sizes the round's opens on the sizing gate's own book: the ticker's exposure and working orders, the account", async () => {
+    harness.exposures = [{ positionId: "p1", strategyKey: "cash_secured_put", symbol: "AAA", sector: "Technology", exposure: 12_000 }, { positionId: "p2", strategyKey: "cash_secured_put", symbol: "BBB", sector: "Technology", exposure: 30_000 }];
+    harness.inFlight = { totalNotional: 9_000, managedNotional: 6_000, tickerNotionalBySymbol: new Map([["AAA", 2_000], ["BBB", 7_000]]) };
+    harness.modelAnswer = { decision: "trade", action_kind: "open_covered_call", candidate_id: "AAA:covered_call:2026-10-16:30", confidence: 0.9, reasons: ["r"], risks_acknowledged: [], system_concerns: [] };
+    vi.mocked(runPostModelGates).mockReturnValueOnce({ ok: false, gates: [{ gate: "sizing", ok: true, detail: "2 contracts" }, { gate: "limit_price", ok: false, detail: "outside the market" }], plan: null, sizingLimit: "ticker_room" });
+    await runPlutoPass(dayRound, makeContext());
+    // AAA has no sector, so no sector room; the fresh re-score after the model's choice is filtered without a book.
+    const sizingBook = { sectorKnown: false, book: { netLiquidationValue: 1_000_000, freeCash: 500_000, committedDollars: 0, inFlight: { totalNotional: 9_000, tickerNotional: 2_000, managedNotional: 6_000 }, existingTickerExposure: 12_000, existingSectorExposure: 0 } };
+    expect(harness.sizingBooks).toEqual([sizingBook, sizingBook, undefined]);
+    // The gate after the model reads the same figures.
+    expect(vi.mocked(runPostModelGates).mock.calls.at(-1)![0].book).toMatchObject(sizingBook.book);
+    // The action row's sizing gate carries the limit that set the size, for the screen.
+    expect(harness.recordedGates).toEqual([{ gate: "sizing", ok: true, detail: "2 contracts", limit: "ticker_room" }, { gate: "limit_price", ok: false, detail: "outside the market" }]);
+  });
+
+  it("offers nothing on a ticker with a Pluto order working, closes included: the post-model gates would refuse it", async () => {
+    harness.eligibleIds = [];
+    harness.closeOffers = [{ id: "AAA:close_leg:leg-1", kind: "close_leg", automatic: false }];
+    expect((await runPlutoPass(dayRound, makeContext())).modelCalled).toBe(true);
+    expect(harness.filterBlocks[0]).toEqual({ opens: null, newPositions: null });
+
+    harness.modelCalls = 0;
+    harness.filterBlocks.length = 0;
+    harness.workingOrderSymbols = new Set(["AAA"]);
+    const summary = await runPlutoPass(dayRound, makeContext());
+    expect(summary.skippedReason).toBe("nothing eligible");
+    expect(harness.modelCalls).toBe(0);
+    // The filters get the reason for the ticker's opens and rolls.
+    expect(harness.filterBlocks[0]).toEqual({ opens: "a Pluto order on this symbol is already working", newPositions: null });
+  });
+
+  it("past the open-positions cap the model is offered no open", async () => {
+    harness.openPositionCount = 15;
+    await runPlutoPass(dayRound, makeContext());
+    expect(harness.filterBlocks[0]).toEqual({ opens: null, newPositions: "15 of 15 managed positions: no new position" });
   });
 
   it("never trades a ticker the model flagged in the same answer", async () => {

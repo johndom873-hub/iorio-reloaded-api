@@ -124,7 +124,7 @@ vi.mock("./book.js", () => ({
   },
   loadOccupiedContracts: async () => [],
   loadLastFilledPlutoActionAtBySymbol: async () => harness.lastFilledActionAtBySymbol,
-  loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }),
+  loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), loadInFlightNotionalsBySymbol: async () => ({ totalNotional: 0, managedNotional: 0, tickerNotionalBySymbol: new Map() }),
   // A ticker holding something to close stands for one with an open position.
   anyOpenPositionOn: async (symbols: string[]) => harness.tickers.some((entry) => symbols.includes(entry.symbol) && entry.closeOffers.length > 0),
 }));
@@ -155,7 +155,7 @@ vi.mock("./executor.js", () => ({
   watchPlutoOrder: vi.fn(),
 }));
 vi.mock("./postModelGates.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("./postModelGates.js")>()), runPostModelGates: vi.fn() }));
-vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn() }));
+vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn(async () => []) }));
 
 const { runPlutoPass } = await import("./passRunner.js");
 const ledger = await import("./ledger.js");

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { PlutoDecision } from "./decisionSchema.js";
-import { computeKellyCap, computeSizingRoom, computeStressCap, kellyFraction, midLimitPrice, runHeldShareCallGates, runPostModelGates, tickerCooldownStatus, type HeldShareCallGateInput, type PostModelBookInput, type PostModelGateInput } from "./postModelGates.js";
+import { computeKellyCap, computeSizingRoom, computeStressCap, kellyFraction, midLimitPrice, runHeldShareCallGates, runPostModelGates, sizeOpenOrder, tickerCooldownStatus, type HeldShareCallGateInput, type PostModelBookInput, type PostModelGateInput } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
 import type { CandidateModelScore } from "../lib/signalCandidates.js";
@@ -173,6 +173,62 @@ describe("runPostModelGates — covered calls and rolls", () => {
     expect(up.plan?.notional).toBe(1500);
     // A roll's drift is the roll's own margin, not the replacement's (35%).
     expect(failed(runPostModelGates(input({ decision, candidate: null, roll, marginAtDecision: 0.36 })))).toEqual(["edge_drift"]);
+  });
+});
+
+describe("sizeOpenOrder (the sizing gate's open sizing, also run by the round's filters before the model)", () => {
+  const size = (overrides: Partial<Parameters<typeof sizeOpenOrder>[0]> = {}) => sizeOpenOrder({ candidate: candidate(), settings, book, sectorKnown: true, stress, ...overrides });
+  const call = (overrides: Partial<SignalCandidate> = {}) => candidate({ strategyKey: "covered_call", strike: 130, delta: 0.22, model: model({ coveredPositionPnlVarianceDollars: coveredCallEntryVariance }), ...overrides });
+
+  it("gives the sizing gate's own quantity and detail, and no zero-size reason when a contract fits", () => {
+    const sizing = size();
+    expect(sizing).toMatchObject({ quantity: 5, notionalPerContract: 9_795, zeroSizeReason: null });
+    expect(sizing.detail).toBe(runPostModelGates(input()).gates.find((gate) => gate.gate === "sizing")?.detail);
+  });
+  it("names the tightest dollar limit against one contract when the room allows none", () => {
+    // ticker 20% of the 500k budget = 100k − 95k held = 5k, below the (100 − 2.05) × 100 = $9,795 one contract commits
+    expect(size({ book: { ...book, existingTickerExposure: 95_000 } }).zeroSizeReason).toBe("ticker room $5,000 is less than one contract's $9,795");
+    // a $600 strike commits $59,795 a contract, more than the $50,000 order size
+    expect(size({ candidate: candidate({ strike: 600 }) }).zeroSizeReason).toBe("order size $50,000 is less than one contract's $59,795");
+    // a Covered Call entry buys 100 shares at 110 less the premium: $10,795; 60k − 50k reserve leaves 10k of cash room
+    expect(size({ candidate: call(), book: { ...book, freeCash: 60_000 } }).zeroSizeReason).toBe("cash room $10,000 is less than one contract's $10,795");
+  });
+  it("the NVDA $212.5 Put · 23 Oct (2DTE) blocked on staging 2026-10-21: ticker room, not the stress or Kelly cap", () => {
+    // Its gate's figures: a $517,369 budget, order size $51,737, budget left $70,069, ticker room $8,286, cash room $400,828,
+    // $21,162 a contract (the mid 0.88). Rebuilt at a 50% budget with 10% caps and a 5% reserve.
+    const nvdaBook = { ...book, netLiquidationValue: 1_034_738, committedDollars: 447_300, existingTickerExposure: 43_450.9, freeCash: 452_564.9 };
+    const nvda = size({ settings: { ...settings, maxTickerPctOfBudget: 10 }, book: nvdaBook, candidate: candidate({ strike: 212.5, bid: 0.86, ask: 0.9 }) });
+    expect(nvda.quantity).toBe(0);
+    expect(nvda.detail).toMatch(/^order size \$51,737, budget left \$70,069, ticker room \$8,286, cash room \$400,828 → 0 contract\(s\) at \$21,162 each/);
+    expect(nvda.zeroSizeReason).toBe("ticker room $8,286 is less than one contract's $21,162");
+  });
+  it("a refused sizing gate leads with that limit, every figure after; a passing one is unchanged", () => {
+    const tightBook = { ...book, existingTickerExposure: 95_000 };
+    const refused = runPostModelGates(input({ book: tightBook })).gates.find((gate) => gate.gate === "sizing")!;
+    expect(refused.detail).toBe(`ticker room $5,000 is less than one contract's $9,795. Details: ${size({ book: tightBook }).detail}`);
+    expect(runPostModelGates(input()).gates.find((gate) => gate.gate === "sizing")!.detail).toBe(size().detail);
+  });
+  it("says which limit set the size of an open that fits, and none for one that doesn't", () => {
+    // The default put: 5 contracts within the $50,000 order size; the volume share allows 60, Kelly 888.
+    expect(size().limit).toBe("order_size");
+    expect(size({ candidate: candidate({ volume: 20 }) }).limit).toBe("volume");
+    // $100,000 ticker cap − $75,000 held = $25,000: 2 contracts of $9,795
+    expect(size({ book: { ...book, existingTickerExposure: 75_000 } }).limit).toBe("ticker_room");
+    expect(size({ candidate: candidate({ model: model({ expectedPnlDollars: 0.25 }) }) }).limit).toBe("kelly");
+    expect(size({ book: { ...book, existingTickerExposure: 95_000 } }).limit).toBeNull();
+    // A Covered Call entry: 4 within the order size; the volume share cutting a free-share call to 1
+    expect(size({ candidate: call() }).limit).toBe("order_size");
+    expect(size({ candidate: call({ volume: 5 }), book: { ...book, freeShares: 200 } })).toMatchObject({ quantity: 1, limit: "volume" });
+    expect(runPostModelGates(input({ candidate: candidate({ volume: 20 }) })).sizingLimit).toBe("volume");
+  });
+  it("otherwise names the cap that allows none: the volume share, the stress cap, the Kelly cap", () => {
+    expect(size({ candidate: candidate({ volume: 3 }) }).zeroSizeReason).toBe("volume share allows no contract (3 traded today, at most 20% of it)");
+    expect(size({ settings: { ...settings, stressRiskBudgetPct: 1 }, stress: { ...stress, forecastVolatility: null } }).zeroSizeReason).toBe("stress cap: no volatility forecast, model valuation or live spot to size it");
+    expect(size({ candidate: candidate({ model: model({ expectedPnlDollars: -2 }) }) }).zeroSizeReason).toBe("Kelly cap: Edge −$2/contract ≤ 0, so no contracts");
+  });
+  it("a covered call on a round lot of free shares sizes to none only on the volume share", () => {
+    expect(size({ candidate: call(), book: { ...book, freeShares: 200, freeCash: 40_000 } })).toMatchObject({ quantity: 2, notionalPerContract: 0, zeroSizeReason: null });
+    expect(size({ candidate: call({ volume: 4 }), book: { ...book, freeShares: 200 } }).zeroSizeReason).toBe("volume share allows no contract (4 traded today, at most 20% of it)");
   });
 });
 

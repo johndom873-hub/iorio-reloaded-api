@@ -139,6 +139,8 @@ export interface PlutoGateResult {
   gate: string;
   ok: boolean;
   detail: string;
+  /** The sizing gate of a live open: the limit that set its size (SizingLimit); absent on rows before 2026-10-21. */
+  limit?: string;
 }
 
 export interface RecordPlutoActionInput {

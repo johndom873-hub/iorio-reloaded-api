@@ -88,7 +88,7 @@ vi.mock("./book.js", () => ({
   loadPlutoBook: async () => ({ openPositions: [], committedDollars: 0, workingOrderSymbols: harness.workingOrderSymbols, lastFilledActionAtBySymbol: new Map() }),
   loadOccupiedContracts: async () => [],
   loadLastFilledPlutoActionAtBySymbol: async () => new Map(),
-  loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }),
+  loadInFlightNotionals: async () => ({ totalNotional: 0, tickerNotional: 0, managedNotional: 0 }), loadInFlightNotionalsBySymbol: async () => ({ totalNotional: 0, managedNotional: 0, tickerNotionalBySymbol: new Map() }),
   anyOpenPositionOn: async () => true,
 }));
 vi.mock("./closeActions.js", () => ({ buildCloseOffersForTicker: async () => ({ offers: [], skipped: [], heldPositions: [] }) }));
@@ -114,7 +114,7 @@ vi.mock("./executor.js", () => ({
   },
   watchPlutoOrder: async () => undefined,
 }));
-vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn() }));
+vi.mock("../lib/positionExposure.js", () => ({ computePositionExposures: vi.fn(async () => []) }));
 
 const { runPlutoPass } = await import("./passRunner.js");
 

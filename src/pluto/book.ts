@@ -106,16 +106,22 @@ export async function loadPlutoBook(): Promise<PlutoBook> {
  * ticker's share is needed (tickerNotional is then 0).
  */
 export async function loadInFlightNotionals(symbol: string | null): Promise<{ totalNotional: number; tickerNotional: number; managedNotional: number }> {
+  const all = await loadInFlightNotionalsBySymbol();
+  return { totalNotional: all.totalNotional, tickerNotional: symbol === null ? 0 : all.tickerNotionalBySymbol.get(symbol) ?? 0, managedNotional: all.managedNotional };
+}
+
+/** The same with every symbol's share at once: one read for a round that sizes each of its tickers. */
+export async function loadInFlightNotionalsBySymbol(): Promise<{ totalNotional: number; managedNotional: number; tickerNotionalBySymbol: Map<string, number> }> {
   const [rows, enabledRows]: [{ request_type: string; payload: OrderRequestPayload; pluto_action_id: string | null }[], { symbol: string }[]] = await Promise.all([
     inFlightOrderRequestsQuery().select("orq.request_type", "orq.payload", "orq.pluto_action_id"),
     db("shortlist_entries as se").join("tickers as t", "t.id", "se.ticker_id").whereNull("se.removed_at").where("se.bot_enabled", true).select("t.symbol"),
   ]);
   const enabledSymbols = new Set(enabledRows.map((row) => row.symbol));
-  const totals = { totalNotional: 0, tickerNotional: 0, managedNotional: 0 };
+  const totals = { totalNotional: 0, managedNotional: 0, tickerNotionalBySymbol: new Map<string, number>() };
   for (const row of rows) {
     const notional = computeInFlightOrderNotional(row.request_type, row.payload);
     totals.totalNotional += notional;
-    if (row.payload.symbol === symbol) totals.tickerNotional += notional;
+    totals.tickerNotionalBySymbol.set(row.payload.symbol, (totals.tickerNotionalBySymbol.get(row.payload.symbol) ?? 0) + notional);
     if (row.pluto_action_id !== null || enabledSymbols.has(row.payload.symbol)) totals.managedNotional += notional;
   }
   return totals;

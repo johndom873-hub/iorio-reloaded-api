@@ -3,7 +3,7 @@ import type { SignalCandidate, SignalSurfaceSlice } from "../lib/signalCandidate
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import type { TickerSignals } from "../lib/signalsTypes.js";
 import { candidateSetFingerprint } from "./inputHash.js";
-import { describeCandidateId, deterministicTopPick, filterTickerForPluto, openCandidateId, rollCandidateFailures, summarizeTopPick, type PlutoTickerFilterInput } from "./candidateFilters.js";
+import { describeCandidateId, deterministicTopPick, filterTickerForPluto, openCandidateId, rollCandidateFailures, summarizeTopPick, type PlutoTickerFilterInput, type TickerSizingBook } from "./candidateFilters.js";
 import type { PlutoSettings } from "./settingsStore.js";
 import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
 import { fixtureCandidateModel, fixtureModelForecast, fixtureRollModel } from "../lib/testSupport/valuationModelFixtures.js";
@@ -153,6 +153,34 @@ describe("filterTickerForPluto — candidate level", () => {
   });
 });
 
+describe("filterTickerForPluto — sizing before the model", () => {
+  // NLV 1M at a 30% budget: order size and ticker cap $30,000 each; one $100 Put commits (100 − 2.05) × 100 = $9,795.
+  const sizingBook = (overrides: Partial<TickerSizingBook["book"]> = {}): TickerSizingBook => ({
+    sectorKnown: true,
+    book: { netLiquidationValue: 1_000_000, freeCash: 500_000, committedDollars: 0, inFlight: { totalNotional: 0, tickerNotional: 0, managedNotional: 0 }, existingTickerExposure: 0, existingSectorExposure: 0, ...overrides },
+  });
+
+  it("offers an open the sizing gate would size to at least one contract", () => {
+    expect(filterTickerForPluto(input({ sizingBook: sizingBook() })).eligible.map((entry) => entry.id)).toEqual(["HOOD:cash_secured_put:2026-10-16:100"]);
+  });
+  it("does not offer one it would size to none, and names the limit that allows none", () => {
+    // $30,000 ticker cap − $25,000 already on HOOD = $5,000 of room, less than one contract's $9,795
+    const result = filterTickerForPluto(input({ sizingBook: sizingBook({ existingTickerExposure: 25_000 }) }));
+    expect(result.eligible).toEqual([]);
+    expect(result.rejected).toEqual([{ id: "HOOD:cash_secured_put:2026-10-16:100", codes: ["sizing"], reasons: ["sizes to no contract: ticker room $5,000 is less than one contract's $9,795"] }]);
+  });
+  it("counts the ticker's orders still working against its room", () => {
+    expect(filterTickerForPluto(input({ sizingBook: sizingBook({ inFlight: { totalNotional: 25_000, tickerNotional: 25_000, managedNotional: 25_000 } }) })).rejected[0]?.codes).toEqual(["sizing"]);
+  });
+  it("sizes only a contract that nothing but its quote's age keeps out, and nothing without a book (the backtest)", () => {
+    const full = sizingBook({ existingTickerExposure: 25_000 });
+    expect(filterTickerForPluto(input({ sizingBook: full, scored: scored({ candidates: [candidate({ delta: -0.4 })] }) })).rejected[0]?.codes).toEqual(["delta"]);
+    const stale = candidate({ quotedAt: new Date(now - 30 * 60_000).toISOString() });
+    expect(filterTickerForPluto(input({ sizingBook: full, scored: scored({ candidates: [stale] }) })).rejected[0]?.codes).toEqual(["quote_age", "sizing"]);
+    expect(filterTickerForPluto(input()).eligible).toHaveLength(1);
+  });
+});
+
 describe("rolls, the deterministic pick and the fingerprint", () => {
   const roll: RollSignalCandidate = {
     legId: "leg1", positionId: "pos1", strategyKey: "cash_secured_put", quantity: 2,
@@ -234,6 +262,12 @@ describe("covered calls on held shares (Marcelo, 2026-10-12): code sells them, r
   const held = (heldShareCallCandidates: SignalCandidate[], scoredOverrides: Partial<TickerSignals> = {}, extra: Partial<PlutoTickerFilterInput> = {}) =>
     filterTickerForPluto(input({ scored: scored({ freeShares: 100, candidates: [call(), candidate()], ...scoredOverrides }), cycleBreakEven: cycle, heldShareCallCandidates, ...extra }));
 
+  it("past the open-positions cap the model is offered no open, but code still sells the call on held shares", () => {
+    const result = held([call()], {}, { newPositionsBlockedReason: "8 of 8 managed positions: no new position" });
+    expect(result.eligible).toEqual([]);
+    expect(result.rejected.find((entry) => entry.id === "HOOD:cash_secured_put:2026-10-16:100")).toEqual({ id: "HOOD:cash_secured_put:2026-10-16:100", codes: ["opens_blocked"], reasons: ["8 of 8 managed positions: no new position"] });
+    expect(result.heldShareCall!.chosen!.id).toBe("HOOD:covered_call:2026-10-16:112");
+  });
   it("offers the model no call on a ticker with free shares; its puts are unaffected", () => {
     const result = held([call()]);
     expect(result.eligible.map((entry) => entry.id)).toEqual(["HOOD:cash_secured_put:2026-10-16:100"]);

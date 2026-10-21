@@ -6,6 +6,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 import { daysToExpiry, describeOptionContract, formatDayMonth, formatStrike } from "../lib/optionContractLabel.js";
 import { yieldOnExposure } from "../lib/contractValuation.js";
 import { checkCalledAway, checkHeldShareCallStrike, commissionPerShare, describeCalledAwayShortfall, type CycleBreakEven } from "./heldShareCalls.js";
+import { sizeOpenOrder, stressCapInputFor, type OpenSizingBook } from "./postModelGates.js";
 
 // Pluto's deterministic candidate filters (design round 3, item 20, approved 2026-09-28). Since the model review
 // (approved by Marcelo 2026-10-10) every value rule reads the valuation model's block (grade, Edge Yield, premium
@@ -83,7 +84,8 @@ export type PlutoRejectionCode =
   | "below_break_even"
   | "no_break_even"
   | "no_premium"
-  | "held_shares_sold_by_code";
+  | "held_shares_sold_by_code"
+  | "sizing";
 
 export interface PlutoRejectionReason {
   code: PlutoRejectionCode;
@@ -139,6 +141,23 @@ export interface PlutoTickerFilterInput {
    * the call code sells on free shares. Absent or empty: no such call this round.
    */
   heldShareCallCandidates?: SignalCandidate[];
+  /**
+   * The round's book as the sizing gate reads it, the ticker's free shares and spot aside (taken from `scored`): an open the
+   * gate would size to no contract (sizeOpenOrder) is not offered. Absent (the backtest, which tries its next choice after a
+   * refusal): no sizing rule.
+   */
+  sizingBook?: TickerSizingBook;
+  /**
+   * Why the model may open no new position this round (the open-positions cap, whose post-model gate would refuse it): its
+   * opens are not offered. Rolls, closes and the calls code sells on held shares are unaffected.
+   */
+  newPositionsBlockedReason?: string | null;
+}
+
+/** The book an open of the ticker is sized on before the model, as the sizing gate sizes it after. */
+export interface TickerSizingBook {
+  book: Omit<OpenSizingBook, "freeShares" | "spotPrice">;
+  sectorKnown: boolean;
 }
 
 /** A contract on the ticker that is already taken: an open option leg (anyone's) or a leg of a working order. */
@@ -306,6 +325,13 @@ export function filterTickerForPluto(input: PlutoTickerFilterInput): PlutoTicker
     const conflict = findSameContractConflict(occupied, candidate.expiry, candidate.strike);
     if (conflict) failures.push({ code: "same_contract", reason: `same contract: ${conflict}` });
     if (input.opensBlockedReason) failures.push({ code: "opens_blocked", reason: input.opensBlockedReason });
+    if (input.newPositionsBlockedReason) failures.push({ code: "opens_blocked", reason: input.newPositionsBlockedReason });
+    // Sized only when nothing but the quote's age keeps it out: the rule's count says what it alone stopped, and no burst
+    // line is spent re-quoting a contract the gate would size to nothing.
+    if (input.sizingBook && failures.every((failure) => failure.code === "quote_age")) {
+      const sizing = sizeOpenOrder({ candidate, settings: input.settings, book: { ...input.sizingBook.book, freeShares: scored.freeShares, spotPrice: scored.spotPrice }, sectorKnown: input.sizingBook.sectorKnown, symbol: scored.symbol, stress: stressCapInputFor(scored) });
+      if (sizing.zeroSizeReason !== null) failures.push({ code: "sizing", reason: `sizes to no contract: ${sizing.zeroSizeReason}` });
+    }
     if (failures.length === 0) result.eligible.push({ id, kind: candidate.strategyKey === "covered_call" ? "open_covered_call" : "open_cash_secured_put", symbol: scored.symbol, candidate });
     else result.rejected.push(plutoRejection(id, failures));
   }
