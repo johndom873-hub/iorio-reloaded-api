@@ -638,7 +638,16 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
  */
 type RecordedSale = { premiumYield: number | null; delta: number | null; ladderRung: BacktestLadderRungRecord | null };
 
-const ladderScoreKeys = ["ladderCap", "ladderTop", "ladderBreakEven", "ladderFloor", "ladderAverageCost", "ladderShock", "ladderCommitted", "ladderRungCollateral", "ladderReserve", "ladderBase"] as const;
+const ladderScoreKeys = ["ladderCap", "ladderTop", "ladderBreakEven", "ladderFloor", "ladderAverageCost", "ladderShock", "ladderCommitted", "ladderRungCollateral", "ladderReserve", "ladderBase", "premiumYield", "rank", "eligibleCount", "bestCandidateStrike", "bestCandidatePremiumYield"] as const;
+
+/** A rung sale's reason (baselineSaleSteps.ts sellLadderPuts): the call it was preferred to, and whether the volume limit of the puts before it led to it. */
+function ladderSaleReasonOf(chosenBecause: string | null): Pick<BacktestLadderRungRecord, "callComparison" | "afterVolumeLimit"> {
+  const beat = chosenBecause ? /its yield ([\d.]+)% beats the best call's ([\d.]+)% by more than ([\d.]+)%/.exec(chosenBecause) : null;
+  return {
+    callComparison: beat ? { putYield: Number(beat[1]) / 100, callYield: Number(beat[2]) / 100, marginPct: Number(beat[3]) } : null,
+    afterVolumeLimit: chosenBecause?.includes("next in order: the volume limit") ?? false,
+  };
+}
 
 /** A ladder put's rung from its sale's scores; null for a put that was not a rung (or recorded no reserve). */
 function ladderRungOf(scores: Partial<Record<(typeof ladderScoreKeys)[number], number | null>>, rungs: number | null): BacktestLadderRungRecord | null {
@@ -660,6 +669,11 @@ function ladderRungOf(scores: Partial<Record<(typeof ladderScoreKeys)[number], n
     rungCollateral,
     reserve,
     base,
+    saleYield: scores.premiumYield ?? null,
+    rank: scores.rank ?? null,
+    eligibleCount: scores.eligibleCount ?? null,
+    bestStrike: scores.bestCandidateStrike ?? null,
+    bestYield: scores.bestCandidatePremiumYield ?? null,
   };
 }
 
@@ -667,7 +681,7 @@ function ladderRungOf(scores: Partial<Record<(typeof ladderScoreKeys)[number], n
 async function loadSaleRecords(sessionId: string, symbol: string, timeline: readonly BacktestCycleTimelineRow[]): Promise<{ recordedOf: (date: string, right: "C" | "P", strike: number | null, expiry: string | null, at: string | null) => RecordedSale }> {
   const dates = timeline.map((entry) => entry.tradingDate).sort();
   if (dates.length === 0) return { recordedOf: () => ({ premiumYield: null, delta: null, ladderRung: null }) };
-  const sales: { date: string; at: Date; kind: string; contract: { strike: number; expiry: string }; quantity: string; premium_yield: string | null; delta: string | null; ladder: Partial<Record<(typeof ladderScoreKeys)[number], number | null>> | null }[] = await db("backtest_actions")
+  const sales: { date: string; at: Date; kind: string; contract: { strike: number; expiry: string }; quantity: string; premium_yield: string | null; delta: string | null; chosen_because: string | null; ladder: Partial<Record<(typeof ladderScoreKeys)[number], number | null>> | null }[] = await db("backtest_actions")
     .where({ session_id: sessionId, symbol, outcome: "filled" })
     .whereIn("kind", ["open_cash_secured_put", "open_covered_call"])
     .whereBetween("trading_date", [dates[0]!, dates.at(-1)!])
@@ -679,6 +693,7 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
       "kind",
       "contract",
       "quantity",
+      "chosen_because",
       db.raw("candidate_scores->>'premiumYield' as premium_yield"),
       db.raw("candidate_scores->>'delta' as delta"),
       db.raw(`case when jsonb_exists(candidate_scores, 'ladderCap') then jsonb_build_object(${ladderScoreKeys.map((key) => `'${key}', candidate_scores->'${key}'`).join(", ")}) end as ladder`),
@@ -688,6 +703,7 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
   const totals = new Map<string, { weightedYield: number; yieldContracts: number; weightedDelta: number; deltaContracts: number }>();
   // A rung is one look's order: read by the sale's instant, as the timeline's row is (a contract sold again at a later look is another rung).
   const rungByMoment = new Map<string, BacktestLadderRungRecord | null>();
+  const collateralUsedByRung = new Map<string, number>();
   for (const sale of sales) {
     const right = sale.kind === "open_covered_call" ? "C" : "P";
     const key = keyOf(sale.date, right, Number(sale.contract.strike), sale.contract.expiry);
@@ -701,7 +717,17 @@ async function loadSaleRecords(sessionId: string, symbol: string, timeline: read
       total.deltaContracts += Number(sale.quantity);
     }
     const momentKey = `${new Date(sale.at).toISOString()}|${key}`;
-    if (sale.ladder !== null && !rungByMoment.has(momentKey)) rungByMoment.set(momentKey, ladderRungOf(sale.ladder, rungs));
+    if (sale.ladder !== null && !rungByMoment.has(momentKey)) {
+      // The rung's collateral left before this put: its order's earlier fills (one look, one cap) used the rest.
+      const rungKey = `${new Date(sale.at).toISOString()}|${sale.ladder.ladderCap}`;
+      const usedBefore = collateralUsedByRung.get(rungKey) ?? 0;
+      const rung = ladderRungOf(sale.ladder, rungs);
+      rungByMoment.set(momentKey, rung && { ...rung, ...ladderSaleReasonOf(sale.chosen_because), collateralLeft: rung.rungCollateral - usedBefore });
+    }
+    if (sale.ladder !== null) {
+      const rungKey = `${new Date(sale.at).toISOString()}|${sale.ladder.ladderCap}`;
+      collateralUsedByRung.set(rungKey, (collateralUsedByRung.get(rungKey) ?? 0) + Number(sale.contract.strike) * 100 * Number(sale.quantity));
+    }
     totals.set(key, total);
   }
   return {

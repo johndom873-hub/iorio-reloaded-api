@@ -1213,6 +1213,20 @@ export interface BacktestLadderRungRecord {
   rungCollateral: number;
   reserve: number;
   base: number;
+  /**
+   * Why the decision went as it did (Marcelo 2026-10-21, the tooltip's top): the call this rung was preferred to (null:
+   * no call qualified), whether it came after the volume limit of the rung's puts before it, the rung's collateral left
+   * before it (one contract fits a strike up to a hundredth of it), and its rank of the puts within the rules with the
+   * best one's strike and yield.
+   */
+  callComparison?: { putYield: number; callYield: number; marginPct: number } | null;
+  afterVolumeLimit?: boolean;
+  collateralLeft?: number;
+  saleYield?: number | null;
+  rank?: number | null;
+  eligibleCount?: number | null;
+  bestStrike?: number | null;
+  bestYield?: number | null;
 }
 
 /**

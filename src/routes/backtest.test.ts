@@ -1072,7 +1072,7 @@ describe("backtest routes", () => {
       // in a one-symbol session, the account in shares.
       await testDb("backtest_ladder_levels").insert({ session_id: session.id, symbol: fileSymbol, trading_date: "2026-09-08", at: "2026-09-08T14:00:00.000Z", look_time: "10:00", split_factor: 2, ladder_top: 80, floor: 70, shock: 0.2, reserve_committed: 0, reserve: 4000, first_rung_cap: 76, next_put_cap: 76, blocked_because: null });
       // A ladder put sold that day, the session's 5 rungs: (1,000 committed + 800) ÷ (4,000 ÷ 5) = 2.25 slices, rung 3.
-      await testDb("backtest_actions").insert({ session_id: session.id, action_id: "action-ladder", sequence: 2, trading_date: "2026-09-08", at: "2026-09-08T14:00:00.000Z", pass_number: 1, symbol: fileSymbol, kind: "open_cash_secured_put", candidate_id: `${fileSymbol}:open:3`, description: `${fileSymbol} Sell $74 Put`, automatic: false, chosen_because: "ladder rung", outcome: "filled", gate_results: JSON.stringify([]), contract: JSON.stringify({ strategyKey: "cash_secured_put", expiry: "2026-09-18", strike: 74, right: "P" }), candidate_scores: JSON.stringify({ ladderCap: 76, ladderTop: 80, ladderBreakEven: 80, ladderFloor: 70, ladderAverageCost: 87.5, ladderShock: 0.2, ladderCommitted: 1000, ladderRungCollateral: 800, ladderReserve: 4000, ladderBase: 10_000 }), quantity: 1, limit_price: 0.5, fill_price: 0.5, position_ids: JSON.stringify([]) });
+      await testDb("backtest_actions").insert({ session_id: session.id, action_id: "action-ladder", sequence: 2, trading_date: "2026-09-08", at: "2026-09-08T14:00:00.000Z", pass_number: 1, symbol: fileSymbol, kind: "open_cash_secured_put", candidate_id: `${fileSymbol}:open:3`, description: `${fileSymbol} Sell $74 Put`, automatic: false, chosen_because: "baseline: the ladder put with the highest premium yield (its yield 12.7% beats the best call's 8.1% by more than 0%), strike at most 76.00 (next in order: the volume limit of the ones before)", outcome: "filled", gate_results: JSON.stringify([]), contract: JSON.stringify({ strategyKey: "cash_secured_put", expiry: "2026-09-18", strike: 74, right: "P" }), candidate_scores: JSON.stringify({ ladderCap: 76, ladderTop: 80, ladderBreakEven: 80, ladderFloor: 70, ladderAverageCost: 87.5, ladderShock: 0.2, ladderCommitted: 1000, ladderRungCollateral: 800, ladderReserve: 4000, ladderBase: 10_000 }), quantity: 1, limit_price: 0.5, fill_price: 0.5, position_ids: JSON.stringify([]) });
       const chart = (await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=${fileSymbol.toLowerCase()}`)).body as BacktestSessionPriceChart;
       expect(chart).toMatchObject({ symbol: fileSymbol, bars: [["2026-09-11", 20, 21, 19, 20.5, null]], ladderLevels: [["2026-09-08", 38, 35, null]], ladderRungsSold: [["2026-09-08", 37, [[37, "2026-09-18", 1]], [3, 5, 2.25, 1000]]], tooLargeDays: [] });
       expect(chart.maxDrawdown.All).toBeNull();
@@ -1089,7 +1089,30 @@ describe("backtest routes", () => {
       const rungRow: BacktestCycleTimelineRow = { ...timeline[0]!, at: "2026-09-08T14:00:00.000Z", tradingDate: "2026-09-08", strike: 74, expiryDate: "2026-09-18" };
       await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify([...timeline, rungRow]) });
       const withRung = (await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail };
-      expect(withRung.detail.timeline[2]!.ladderRung).toEqual({ rungNumber: 3, rungs: 5, slices: 2.25, cap: 76, top: 80, breakEven: 80, floor: 70, averageCost: 87.5, shock: 0.2, committed: 1000, rungCollateral: 800, reserve: 4000, base: 10_000 });
+      expect(withRung.detail.timeline[2]!.ladderRung).toEqual({
+        rungNumber: 3,
+        rungs: 5,
+        slices: 2.25,
+        cap: 76,
+        top: 80,
+        breakEven: 80,
+        floor: 70,
+        averageCost: 87.5,
+        shock: 0.2,
+        committed: 1000,
+        rungCollateral: 800,
+        reserve: 4000,
+        base: 10_000,
+        // Its reason: preferred to a call on yield, after the volume limit of the rung's puts before it; the rung's first fill here, and no rank recorded.
+        callComparison: { putYield: 0.127, callYield: 0.081, marginPct: 0 },
+        afterVolumeLimit: true,
+        collateralLeft: 800,
+        saleYield: null,
+        rank: null,
+        eligibleCount: null,
+        bestStrike: null,
+        bestYield: null,
+      });
       expect(withRung.detail.timeline[0]!.ladderRung).toBeNull();
       // Cash available at each day's marks: the put sold at 14:00 on 1 Sep is open from 2 Sep ($4,000 locked).
       expect(chart.cashAvailable).toEqual([
