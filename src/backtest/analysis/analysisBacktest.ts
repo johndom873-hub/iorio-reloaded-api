@@ -3,6 +3,7 @@ import { db } from "../../db/connection.js";
 import type { BacktestBaselineSettings, BacktestMetrics } from "../backtestTypes.js";
 import { ladderRungReached, type LadderPutBlock } from "../engine/backtestBaselineLadder.js";
 import { applyBacktestOverrides } from "../backtestSettingsOverrides.js";
+import { loadCashAvailableByDay, type CashAvailableByDay } from "./sessionFreeCash.js";
 import { ladderBasePath, loadAnalysisOrders, tooLargeByYear, yieldGivenUp, type AnalysisOrder, type AnalysisTooLargeYear } from "./analysisPotSizing.js";
 
 // The analysis's own backtest (Marcelo 2026-10-15): each saved analysis runs the ticker at its lab values over its whole
@@ -48,11 +49,8 @@ export interface AnalysisBacktestFigures {
    * when its sale recorded no reserve; absent in analysis figures stored before it)].
    */
   ladderRungsSold: [string, number, [number, string, number][], [number, number, number, number] | null][];
-  /**
-   * Each backtest day, at the 10:00 marks before its orders: [date, the shares held at those marks (null: a session run
-   * before they were recorded), the account value]. The price chart's account in shares = the one ÷ the other.
-   */
-  accountInShares: [string, number | null, number][];
+  /** The whole account's free cash each day at its 10:00 marks, read from the session when the analysis is opened (not stored). */
+  cashAvailable?: CashAvailableByDay;
 }
 
 const cents = (value: number) => Math.round(value * 100) / 100;
@@ -62,17 +60,8 @@ export function tooLargeDaysOf(orders: readonly AnalysisOrder[]): AnalysisBackte
   return orders.filter((order) => order.fills.length > 1 || order.unsold > 0).map((order) => [order.date, order.right, order.fills.length > 1 ? yieldGivenUp(order) : null, order.unsold]);
 }
 
-type SessionDayShares = { date: string; account_value: string; shares_value_dollars: string | null };
-
-async function loadSessionDayShares(sessionId: string, connection: Knex): Promise<SessionDayShares[]> {
-  return connection("backtest_session_days").where({ session_id: sessionId }).orderBy("trading_date").select(connection.raw("trading_date::text as date"), "account_value", "shares_value_dollars");
-}
-
-const accountInSharesOf = (days: readonly SessionDayShares[]): AnalysisBacktestFigures["accountInShares"] => days.map((day) => [day.date, day.shares_value_dollars === null ? null : Number(day.shares_value_dollars), Number(day.account_value)]);
-
-/** The account in shares of every session day (the whole book's shares: one symbol's only in a one-symbol session). */
-export async function loadAccountInShares(sessionId: string, connection: Knex = db): Promise<AnalysisBacktestFigures["accountInShares"]> {
-  return accountInSharesOf(await loadSessionDayShares(sessionId, connection));
+async function loadSessionDayAccountValues(sessionId: string, connection: Knex): Promise<{ date: string; account_value: string }[]> {
+  return connection("backtest_session_days").where({ session_id: sessionId }).orderBy("trading_date").select(connection.raw("trading_date::text as date"), "account_value");
 }
 
 /** The ladder's rung count a session ran a symbol with: its own pot's value in a session of pots, else the session's. */
@@ -127,23 +116,25 @@ export async function loadAnalysisLadder(sessionId: string, symbol: string, conn
 }
 
 /**
- * Stored figures with the rungs sold read again from their session (Marcelo 2026-10-21): each rung's number came after
- * many analyses were stored, and the sale records hold it. Figures without a session or without rungs (stored before
- * formulas version 6) are returned as they are, and so are the stored rungs when the session has none left (deleted).
+ * Stored figures with what the price chart reads from their session added when the analysis is opened (Marcelo
+ * 2026-10-21): the rungs sold again, each with its number (which came after many analyses were stored), and the Cash
+ * available. Figures without a session are returned as they are; stored rungs stay when the session has none left
+ * (deleted), and figures stored before formulas version 6 keep having none.
  */
-export async function withFreshLadderRungs(figures: unknown, symbol: string, connection: Knex = db): Promise<unknown> {
+export async function withFreshSessionFigures(figures: unknown, symbol: string, connection: Knex = db): Promise<unknown> {
   const backtest = (figures as { analysisBacktest?: Partial<AnalysisBacktestFigures> | { error: string } | null } | null)?.analysisBacktest;
-  if (!backtest || !("sessionId" in backtest) || typeof backtest.sessionId !== "string" || !Array.isArray(backtest.ladderRungsSold) || backtest.ladderRungsSold.length === 0) return figures;
-  const { ladderRungsSold } = await loadAnalysisLadder(backtest.sessionId, symbol, connection);
-  if (ladderRungsSold.length === 0) return figures;
-  return { ...(figures as object), analysisBacktest: { ...backtest, ladderRungsSold } };
+  if (!backtest || !("sessionId" in backtest) || typeof backtest.sessionId !== "string") return figures;
+  const storedRungs = Array.isArray(backtest.ladderRungsSold) && backtest.ladderRungsSold.length > 0;
+  const [ladder, cashAvailable] = await Promise.all([storedRungs ? loadAnalysisLadder(backtest.sessionId, symbol, connection) : null, loadCashAvailableByDay(backtest.sessionId, connection)]);
+  const ladderRungsSold = ladder && ladder.ladderRungsSold.length > 0 ? ladder.ladderRungsSold : backtest.ladderRungsSold;
+  return { ...(figures as object), analysisBacktest: { ...backtest, ...(ladderRungsSold ? { ladderRungsSold } : {}), cashAvailable } };
 }
 
 export async function computeAnalysisBacktestFigures(sessionId: string, symbol: string, connection: Knex = db): Promise<AnalysisBacktestFigures> {
   const session = await connection("backtest_sessions").where({ id: sessionId }).first("name", "status", connection.raw("start_date::text as start_date"), connection.raw("end_date::text as end_date"), "metrics", "baseline_metrics", "starting_value");
   if (!session) throw new Error(`The analysis backtest session ${sessionId} is gone.`);
   const orders = await loadAnalysisOrders(sessionId, symbol, connection);
-  const days = await loadSessionDayShares(sessionId, connection);
+  const days = await loadSessionDayAccountValues(sessionId, connection);
   const cycles: { opened_on: string; closed_on: string | null }[] = await connection("backtest_cycles").where({ session_id: sessionId, symbol }).orderBy("opened_on").select(connection.raw("opened_on::text as opened_on"), connection.raw("closed_on::text as closed_on"));
   const potPath = ladderBasePath(
     days.map((day) => ({ date: day.date, accountValue: Number(day.account_value) })),
@@ -167,6 +158,5 @@ export async function computeAnalysisBacktestFigures(sessionId: string, symbol: 
     tooLargeDays: tooLargeDaysOf(orders),
     potPath: potPath.map(([date, pot]) => [date, Math.round(pot * 100) / 100]),
     ...ladder,
-    accountInShares: accountInSharesOf(days),
   };
 }

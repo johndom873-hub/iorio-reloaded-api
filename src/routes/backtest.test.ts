@@ -28,7 +28,7 @@ import type {
   CreateBacktestBatchResponse,
   CreateBacktestSessionResponse,
 } from "../backtest/backtestTypes.js";
-import { withFreshLadderRungs } from "../backtest/analysis/analysisBacktest.js";
+import { withFreshSessionFigures } from "../backtest/analysis/analysisBacktest.js";
 import { loadSessionFreeCash } from "../backtest/analysis/sessionFreeCash.js";
 import type { BacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
 import type { BacktestSessionStockPrices } from "../backtest/analysis/sessionStockPrices.js";
@@ -1077,11 +1077,12 @@ describe("backtest routes", () => {
       expect(chart.maxDrawdown.All).toBeNull();
       // An analysis stored before the rung numbers reads its rungs again from its session; one without a session left keeps its own.
       const storedRung: [string, number, [number, string, number][]] = ["2026-09-08", 37, [[37, "2026-09-18", 1]]];
-      expect(await withFreshLadderRungs({ marker: "saved", analysisBacktest: { sessionId: session.id, ladderRungsSold: [storedRung] } }, fileSymbol, testDb)).toEqual({ marker: "saved", analysisBacktest: { sessionId: session.id, ladderRungsSold: [[...storedRung, [3, 5, 2.25, 1000]]] } });
+      // Its Cash available is read from the session too.
+      expect(await withFreshSessionFigures({ marker: "saved", analysisBacktest: { sessionId: session.id, ladderRungsSold: [storedRung] } }, fileSymbol, testDb)).toEqual({ marker: "saved", analysisBacktest: { sessionId: session.id, ladderRungsSold: [[...storedRung, [3, 5, 2.25, 1000]]], cashAvailable: chart.cashAvailable } });
       const gone = { analysisBacktest: { sessionId: "00000000-0000-4000-8000-000000000000", ladderRungsSold: [storedRung] } };
-      expect(await withFreshLadderRungs(gone, fileSymbol, testDb)).toBe(gone);
+      expect(await withFreshSessionFigures(gone, fileSymbol, testDb)).toEqual({ analysisBacktest: { ...gone.analysisBacktest, cashAvailable: [] } });
       const failed = { analysisBacktest: { error: "The backtest failed." } };
-      expect(await withFreshLadderRungs(failed, fileSymbol, testDb)).toBe(failed);
+      expect(await withFreshSessionFigures(failed, fileSymbol, testDb)).toBe(failed);
 
       // A put the ladder sold shows its rung on the cycle's row, read by the sale's instant: the figures its sale recorded.
       const rungRow: BacktestCycleTimelineRow = { ...timeline[0]!, at: "2026-09-08T14:00:00.000Z", tradingDate: "2026-09-08", strike: 74, expiryDate: "2026-09-18" };
@@ -1089,7 +1090,12 @@ describe("backtest routes", () => {
       const withRung = (await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail };
       expect(withRung.detail.timeline[2]!.ladderRung).toEqual({ rungNumber: 3, rungs: 5, slices: 2.25, cap: 76, top: 80, breakEven: 80, floor: 70, averageCost: 87.5, shock: 0.2, committed: 1000, rungCollateral: 800, reserve: 4000, base: 10_000 });
       expect(withRung.detail.timeline[0]!.ladderRung).toBeNull();
-      expect(chart.accountInShares).toHaveLength(3);
+      // Cash available at each day's marks: the put sold at 14:00 on 1 Sep is open from 2 Sep ($4,000 locked).
+      expect(chart.cashAvailable).toEqual([
+        ["2026-09-01", 1_000_000, 0, 1_000_000],
+        ["2026-09-02", 996_100, 4000, 1_010_000],
+        ["2026-09-03", 996_200, 4000, 999_900],
+      ]);
       expect((await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=zzzz`)).status).toBe(400);
       expect((await request("GET", `/backtest/sessions/${session.id}/price-chart`)).status).toBe(400);
       expect((await request("GET", `/backtest/sessions/00000000-0000-4000-8000-000000000000/price-chart?symbol=${fileSymbol}`)).status).toBe(404);

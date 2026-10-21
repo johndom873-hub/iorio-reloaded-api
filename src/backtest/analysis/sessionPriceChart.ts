@@ -1,13 +1,14 @@
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
 import { BacktestRequestError } from "../jobs/backtestJobStore.js";
-import { loadAccountInShares, loadAnalysisLadder, tooLargeDaysOf, type AnalysisBacktestFigures } from "./analysisBacktest.js";
+import { loadAnalysisLadder, tooLargeDaysOf, type AnalysisBacktestFigures } from "./analysisBacktest.js";
 import { loadDailyBarsOf, type AnalysisFigures } from "./analysisFigures.js";
 import { loadAnalysisOrders } from "./analysisPotSizing.js";
 import { maxDrawdownByRange, toOhlcvBars } from "./analysisPriceFigures.js";
+import { loadCashAvailableByDay, type CashAvailableByDay } from "./sessionFreeCash.js";
 
 // A session's "Price and Max drawdown" chart (Marcelo 2026-10-20): the Analyse window's price chart over the session's
-// period, with that session's ladder levels, rungs sold and orders over one strike.
+// period, with that session's ladder levels, rungs sold and orders over one strike, and its Cash available under the candles.
 
 export interface BacktestSessionPriceChart {
   symbol: string;
@@ -18,8 +19,8 @@ export interface BacktestSessionPriceChart {
   ladderLevels: AnalysisBacktestFigures["ladderLevels"];
   ladderRungsSold: AnalysisBacktestFigures["ladderRungsSold"];
   tooLargeDays: AnalysisBacktestFigures["tooLargeDays"];
-  /** Null in a session of more than one symbol: the account's shares are every symbol's. */
-  accountInShares: AnalysisBacktestFigures["accountInShares"] | null;
+  /** The whole account's free cash each day at its 10:00 marks (sessionFreeCash.ts), every symbol's in a session of several. */
+  cashAvailable: CashAvailableByDay;
 }
 
 export async function loadBacktestSessionPriceChart(sessionId: string, symbol: string, connection: Knex = db): Promise<BacktestSessionPriceChart> {
@@ -29,11 +30,11 @@ export async function loadBacktestSessionPriceChart(sessionId: string, symbol: s
   if (!session) throw new BacktestRequestError("No such session.", 404);
   const symbols = Array.isArray(session.symbols) && session.symbols.length > 0 ? session.symbols : [session.symbol];
   if (!symbols.includes(symbol)) throw new BacktestRequestError(`The session does not trade ${symbol}.`, 400);
-  const [{ bars: dailyBars }, orders, ladder, accountInShares] = await Promise.all([
+  const [{ bars: dailyBars }, orders, ladder, cashAvailable] = await Promise.all([
     loadDailyBarsOf(symbol, connection),
     loadAnalysisOrders(sessionId, symbol, connection),
     loadAnalysisLadder(sessionId, symbol, connection),
-    symbols.length === 1 ? loadAccountInShares(sessionId, connection) : null,
+    loadCashAvailableByDay(sessionId, connection),
   ]);
   const bars = toOhlcvBars(dailyBars).filter((bar) => bar.tradingDate >= session.start_date && bar.tradingDate <= session.end_date);
   return {
@@ -42,6 +43,6 @@ export async function loadBacktestSessionPriceChart(sessionId: string, symbol: s
     maxDrawdown: maxDrawdownByRange(bars),
     ...ladder,
     tooLargeDays: tooLargeDaysOf(orders),
-    accountInShares,
+    cashAvailable,
   };
 }
