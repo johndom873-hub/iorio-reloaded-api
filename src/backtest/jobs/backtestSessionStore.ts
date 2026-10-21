@@ -39,6 +39,7 @@ import type {
 } from "../backtestTypes.js";
 import { ladderRungReached } from "../engine/backtestBaselineLadder.js";
 import { loadLadderRungs } from "../analysis/analysisBacktest.js";
+import { loadSessionFreeCash } from "../analysis/sessionFreeCash.js";
 import { backtestCaptureLookTimeEt, backtestEngineVersion } from "../backtestTypes.js";
 import { computeCycleAccuracyBands, computeDrawdowns, computeMonthlyReturns, computeTradeAccuracyBands, cycleFiguresOf, type ClosedTradeFigures } from "../sessionAnalytics.js";
 import { computeAllSymbolsStatistics, computeTickerStatistics } from "../tickerStatistics.js";
@@ -607,15 +608,19 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
   const splitFactorOf = splitFactorOfDayFor(symbol);
   const breakEvens = cashBreakEvenBeforeEachRow(row.timeline, splitFactorOf);
   const sharesHeld = sharesHeldAfterEachMoment(row.timeline, splitFactorOf);
+  const stretches = row.stock_only_stretches ?? [];
+  const dates = [...row.timeline.map((entry) => entry.tradingDate), ...stretches.map((stretch) => stretch.firstIdleDay)].sort();
+  const freeCash = dates.length > 0 ? await loadSessionFreeCash(sessionId, dates[0]!, dates.at(-1)!) : null;
   return {
     timeline: row.timeline.map((entry, index) => {
       const sold = /^Sold (put|call) @/.exec(entry.label);
-      if (!sold || entry.instrument !== "option") return { ...entry, sharesHeld: sharesHeld[index]! };
+      const freeCashShare = freeCash?.shareAfter(entry.tradingDate, entry.at) ?? null;
+      if (!sold || entry.instrument !== "option") return { ...entry, sharesHeld: sharesHeld[index]!, freeCashShare };
       const { premiumYield, delta, ladderRung } = sales.recordedOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate, entry.at);
-      return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]!, sharesHeld: sharesHeld[index]!, ...(sold[1] === "put" ? { ladderRung } : {}) };
+      return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]!, sharesHeld: sharesHeld[index]!, ...(sold[1] === "put" ? { ladderRung } : {}), freeCashShare };
     }),
     // Stretches stored before their no-candidate detail was kept have none.
-    stockOnlyStretches: (row.stock_only_stretches ?? []).map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null })),
+    stockOnlyStretches: stretches.map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null, freeCashShareAtStart: freeCash?.shareAtMark(stretch.firstIdleDay) ?? null })),
   };
 }
 
@@ -737,7 +742,14 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
   // A row stored before trades named their symbol belongs to the session's one symbol.
   const trades = ofSymbol(tradeRows.map((tradeRow: Record<string, unknown>) => toTrade({ ...tradeRow, symbol: tradeRow.symbol ?? row.symbol })));
   const positions = ofSymbol(everyPositionRecord.map((position) => withPositionCycle(position, everyCycle)));
-  const cycles = ofSymbol(everyCycle);
+  // The Wheel cycles' Cash: a cycle at its end, a gap at its first day's marks (the whole account's free cash).
+  const lastDay = days.at(-1)?.tradingDate ?? null;
+  const freeCash = days.length > 0 ? await loadSessionFreeCash(sessionId, days[0]!.tradingDate, lastDay!) : null;
+  const cycles = ofSymbol(everyCycle).map((cycle) => ({
+    ...cycle,
+    freeCashShareAtEnd: freeCash === null ? null : cycle.closedOn !== null && cycle.closedAt !== null ? freeCash.shareAfter(cycle.closedOn, cycle.closedAt) : lastDay === null ? null : freeCash.shareAfter(lastDay, null),
+  }));
+  const cycleGaps = ofSymbol(everyCycleGap).map((gap) => ({ ...gap, freeCashShareAtStart: freeCash?.shareAtMark(gap.firstIdleDay) ?? null }));
   return {
     session: {
       ...toSessionListItem(row),
@@ -768,7 +780,7 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
     accuracyByMarginBand: row.pnl_basis === "wheel_cycle" ? computeCycleAccuracyBands(cycleFiguresOf(cycles, trades)) : computeTradeAccuracyBands(trades.map(toClosedTradeFigures)),
     positions,
     cycles,
-    cycleGaps: ofSymbol(everyCycleGap),
+    cycleGaps,
     tickerStatistics: computeTickerStatistics(positions, cycles),
     allSymbolsStatistics: computeAllSymbolsStatistics(positions, cycles),
     bookCounts,

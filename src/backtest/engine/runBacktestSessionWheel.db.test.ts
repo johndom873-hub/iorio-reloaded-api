@@ -345,6 +345,8 @@ describe("a session through the wheel", () => {
         noSaleDays: { extensionZ: 0, ivRank: 0, ladderPutInstead: 0, cash: 0, volume: 0, noCandidate: 0, unrecorded: 1 },
         noCandidate: null,
         entryFilterLimits: { extensionZ: null, ivRank: null },
+        // Its first day's marks: nothing open yet, the whole account is free cash.
+        freeCashShareAtStart: 1,
       },
     ]);
 

@@ -29,6 +29,7 @@ import type {
   CreateBacktestSessionResponse,
 } from "../backtest/backtestTypes.js";
 import { withFreshLadderRungs } from "../backtest/analysis/analysisBacktest.js";
+import { loadSessionFreeCash } from "../backtest/analysis/sessionFreeCash.js";
 import type { BacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
 import type { BacktestSessionStockPrices } from "../backtest/analysis/sessionStockPrices.js";
 
@@ -1034,7 +1035,8 @@ describe("backtest routes", () => {
       ];
       await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify(timeline), stock_only_stretches: JSON.stringify(stockOnlyStretches) });
       // A sale's row carries the yield and delta the engine recorded for it (none here), contract-weighted over its fills.
-      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null, sharesHeld: 0, ladderRung: null }, { ...timeline[1]!, sharesHeld: 100 }], stockOnlyStretches } } });
+      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null, sharesHeld: 0, ladderRung: null, freeCashShare: expect.closeTo(0.99604932, 8) }, { ...timeline[1]!, sharesHeld: 100, freeCashShare: null }], stockOnlyStretches: stockOnlyStretches.map((stretch) => ({ ...stretch, freeCashShareAtStart: null })) } } });
+      // The Cash at the put's sale: the 1 Sep marks' $1,000,000 cash + the sale's $49.32 − the put's $4,000 locked, ÷ the $1,000,000 account; the 4 Sep assignment and 8 Sep stretch fall on days the session did not record.
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3, premiumYield: 0.42, delta: -0.21 }) });
       expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.timeline.map((entry) => [entry.premiumYield, entry.delta])).toEqual([[0.42, -0.21], [undefined, undefined]]);
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3 }) });
@@ -1053,9 +1055,16 @@ describe("backtest routes", () => {
       ]);
       const withGaps = (await request("GET", `/backtest/sessions/${session.id}`)).body as BacktestSessionDetail;
       expect(withGaps.cycleGaps).toEqual([
-        { symbol: fileSymbol, afterCycleNumber: null, beforeCycleNumber: 1, firstIdleDay: "2026-08-31", lastIdleDay: "2026-08-31", idleSessions: 1, stockMove: null, noSaleDays: { ...noSaleDays, extensionZ: 0 }, noCandidate: null, entryFilterLimits: { extensionZ: null, ivRank: null } },
-        { symbol: fileSymbol, afterCycleNumber: 1, beforeCycleNumber: null, firstIdleDay: "2026-09-10", lastIdleDay: "2026-09-11", idleSessions: 2, stockMove: 0.031, noSaleDays, noCandidate: noCandidateDetail, entryFilterLimits: { extensionZ: 1, ivRank: null } },
+        { symbol: fileSymbol, afterCycleNumber: null, beforeCycleNumber: 1, firstIdleDay: "2026-08-31", lastIdleDay: "2026-08-31", idleSessions: 1, stockMove: null, noSaleDays: { ...noSaleDays, extensionZ: 0 }, noCandidate: null, entryFilterLimits: { extensionZ: null, ivRank: null }, freeCashShareAtStart: null },
+        { symbol: fileSymbol, afterCycleNumber: 1, beforeCycleNumber: null, firstIdleDay: "2026-09-10", lastIdleDay: "2026-09-11", idleSessions: 2, stockMove: 0.031, noSaleDays, noCandidate: noCandidateDetail, entryFilterLimits: { extensionZ: 1, ivRank: null }, freeCashShareAtStart: null },
       ]);
+      // The open cycle's Cash at its end, the session's last recorded day (3 Sep): $1,000,200 cash − the put's $4,000 locked, ÷ $999,900.
+      expect(withGaps.cycles[0]!.freeCashShareAtEnd).toBeCloseTo(0.99629963, 8);
+      // At a day's marks the put sold on 1 Sep is open: ($1,000,100 − $4,000) ÷ $1,010,000 on 2 Sep; a day not recorded has none.
+      const freeCash = await loadSessionFreeCash(session.id, "2026-09-01", "2026-09-03", testDb);
+      expect(freeCash.shareAtMark("2026-09-02")).toBeCloseTo(0.98623762, 8);
+      expect(freeCash.shareAtMark("2026-09-01")).toBe(1);
+      expect(freeCash.shareAfter("2026-09-04", null)).toBeNull();
       expect(((await request("GET", `/backtest/sessions/${session.id}?symbol=zzzz`)).body as BacktestSessionDetail).cycleGaps).toEqual([]);
 
       // The price chart: the symbol's daily bars within the session's period, with its ladder levels split-adjusted and,
