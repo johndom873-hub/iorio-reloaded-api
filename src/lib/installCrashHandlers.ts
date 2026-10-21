@@ -19,7 +19,23 @@ function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
   return Promise.race([promise, new Promise<void>((resolve) => setTimeout(resolve, ms))]);
 }
 
+// Heroku can close a dyno's log pipe while the process is still running (it
+// did when it moved a dyno to a new server). A console write after that fails
+// with EPIPE, and a stream error with no listener is an uncaughtException: a
+// false crash alert, and the process dies before its own SIGTERM shutdown
+// runs. Nothing can be logged there any more, so the write is dropped; any
+// other stream error still crashes as before.
+export function ignoreClosedLogPipe(stream: NodeJS.WritableStream): void {
+  stream.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EPIPE") return;
+    throw error;
+  });
+}
+
 export function installCrashHandlers(processName: string): void {
+  ignoreClosedLogPipe(process.stdout);
+  ignoreClosedLogPipe(process.stderr);
+
   function handleFatal(kind: "uncaughtException" | "unhandledRejection", error: unknown): void {
     const err = error instanceof Error ? error : new Error(String(error));
     const timestamp = new Date().toISOString();

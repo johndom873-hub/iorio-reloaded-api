@@ -19,6 +19,8 @@ export interface InternalApiClientConfig {
   serviceLoginSecret?: string;
   /** Name used in log lines and error messages, e.g. "Genosuke" or "Pluto". */
   label: string;
+  /** Sent on every request after sign-in, e.g. Pluto's agent lease holder (pluto/agentLease.ts). */
+  headers?: Record<string, string>;
 }
 
 export class InternalApiError extends Error {
@@ -75,7 +77,7 @@ export class InternalApiClient {
 
   private async requestOnce(path: string, init: RequestInit): Promise<Response> {
     const cookie = this.sessionCookie ?? (await this.login());
-    return fetch(`${this.config.apiBaseUrl}${path}`, { ...init, headers: { ...init.headers, Cookie: cookie } });
+    return fetch(`${this.config.apiBaseUrl}${path}`, { ...init, headers: { ...this.config.headers, ...init.headers, Cookie: cookie } });
   }
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {

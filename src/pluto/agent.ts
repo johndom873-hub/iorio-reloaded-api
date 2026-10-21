@@ -8,6 +8,7 @@ import { startNotificationBroadcaster, subscribeToNotifications } from "../lib/n
 import { computeMarketSessionStatus, resolveIsOpenDay } from "../lib/marketSessionStatus.js";
 import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { readGitSha } from "../lib/readGitSha.js";
+import { plutoAgentHolderHeader, type PlutoAgentLease } from "./agentLease.js";
 import type { PlutoConfig } from "./config.js";
 import { labelExpiredCandidateOutcomes } from "./candidateOutcomes.js";
 import { loadWorkingPlutoOrders, watchPlutoOrder } from "./executor.js";
@@ -89,8 +90,19 @@ export class PlutoAgent {
   private readonly startedAtMs = Date.now();
   private readonly context: PassRunnerContext;
 
-  constructor(private readonly config: PlutoConfig) {
-    this.api = new InternalApiClient({ apiBaseUrl: config.apiBaseUrl, serviceUsername: config.serviceUsername, serviceUserPassword: config.serviceUserPassword, serviceLoginSecret: config.serviceLoginSecret, label: "Pluto" });
+  /** The process's agent lease (agentLease.ts): its holder id goes on every API request, and every round checks it is still held. */
+  constructor(
+    private readonly config: PlutoConfig,
+    private readonly lease: Pick<PlutoAgentLease, "holderId" | "confirmHeld"> | null = null,
+  ) {
+    this.api = new InternalApiClient({
+      apiBaseUrl: config.apiBaseUrl,
+      serviceUsername: config.serviceUsername,
+      serviceUserPassword: config.serviceUserPassword,
+      serviceLoginSecret: config.serviceLoginSecret,
+      label: "Pluto",
+      ...(lease ? { headers: { [plutoAgentHolderHeader]: lease.holderId } } : {}),
+    });
     this.marketWatch = new PlutoMarketWatch({} as PlutoSettings);
     this.context = {
       api: this.api,
@@ -527,6 +539,8 @@ export class PlutoAgent {
    */
   private async runRoundSafely(request: PassRequest): Promise<"completed" | "skipped_on_system_checks" | "failed_before_model_call" | "failed_after_model_call"> {
     if (this.stopped) return "completed";
+    // Not while another agent holds the lease (this process stops when it learns that), nor while the renewal cannot reach the database.
+    if (this.lease && !(await this.lease.confirmHeld())) return "failed_before_model_call";
     let result: "completed" | "skipped_on_system_checks" | "failed_before_model_call" | "failed_after_model_call" = "completed";
     try {
       const summary = await runPlutoPass(request, this.context);
@@ -570,6 +584,6 @@ interface TradingWindowClock {
   windowEndEt: string;
 }
 
-function currentRelease(): string | null {
+export function currentRelease(): string | null {
   return process.env.HEROKU_RELEASE_VERSION ?? readGitSha();
 }

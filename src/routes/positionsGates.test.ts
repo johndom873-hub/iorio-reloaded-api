@@ -89,12 +89,17 @@ const createdPositionIds: string[] = [];
 let listener: pg.Client;
 const notifiedOrderIds: string[] = [];
 let symbolCounter = Date.now() % 100_000;
+// The Pluto agent holding the lease while this file runs (pluto/agentLease.ts); the lease row is put back afterwards.
+const runningAgentHolder = "agent.1:positions-gates-test";
+let leaseBeforeTests: { holder: string | null; lease_until: Date | null; taken_at: Date | null };
 
 const clearLimits = { blocked: false, reasons: [] as string[] };
 
 beforeAll(async () => {
   const [user] = await testDb("users").insert({ username: `pos-gates-${Date.now()}`, display_name: "Positions Gates Test", password_hash: "not-a-real-hash" }).returning("id");
   userId = user.id;
+  leaseBeforeTests = await testDb("pluto_agent_lease").where({ id: 1 }).first("holder", "lease_until", "taken_at");
+  await testDb("pluto_agent_lease").where({ id: 1 }).update({ holder: runningAgentHolder, lease_until: testDb.raw("now() + interval '1 hour'"), taken_at: testDb.fn.now() });
 
   const app = express();
   app.use(express.json());
@@ -123,6 +128,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await cleanRows();
   await testDb("users").where({ id: userId }).del();
+  await testDb("pluto_agent_lease").where({ id: 1 }).update(leaseBeforeTests);
   await testDb.destroy();
 });
 
@@ -150,11 +156,13 @@ beforeEach(() => {
   fetchPricesPoolFirstMock.mockReset().mockResolvedValue({ stock: 100 });
 });
 
-async function call(method: "GET" | "POST", path: string, body?: unknown, options: { asUser?: string | null } = {}) {
+/** Every request carries the running agent's lease id unless a test says otherwise (null: none, as from a person). */
+async function call(method: "GET" | "POST", path: string, body?: unknown, options: { asUser?: string | null; agentHolder?: string | null } = {}) {
   const asUser = options.asUser === undefined ? userId : options.asUser;
+  const agentHolder = options.agentHolder === undefined ? runningAgentHolder : options.agentHolder;
   const response = await fetch(`${baseUrl}${path}`, {
     method,
-    headers: { "content-type": "application/json", ...(asUser ? { "x-test-user-id": asUser } : {}) },
+    headers: { "content-type": "application/json", ...(asUser ? { "x-test-user-id": asUser } : {}), ...(agentHolder ? { "x-pluto-agent-holder": agentHolder } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await response.text();
@@ -394,6 +402,36 @@ describe("POST /positions/orders/:id/confirm", () => {
       // A person's order is not subject to the Pluto switch.
       await testDb("shortlist_entries").where({ id: entry.id }).update({ bot_enabled: false });
       expect((await call("POST", `/positions/orders/${await insertOrder(ticker.symbol)}/confirm`, {})).status).toBe(200);
+    } finally {
+      await testDb("order_requests").where({ pluto_action_id: action.id }).del();
+      await testDb("pluto_actions").where({ id: action.id }).del();
+      await testDb("pluto_passes").where({ id: pass.id }).del();
+      await testDb("shortlist_entries").where({ id: entry.id }).del();
+    }
+  });
+
+  it("confirms a Pluto order only for the agent holding Pluto's lease: another agent or a person gets a 409 before any gate, the order stays pending", async () => {
+    const ticker = await createTicker();
+    const [entry] = await testDb("shortlist_entries").insert({ ticker_id: ticker.id, added_by_user_id: userId, signals_enabled: true, bot_enabled: true }).returning("id");
+    const [pass] = await testDb("pluto_passes").insert({ trigger: "manual", trigger_detail: JSON.stringify({ test: "positions-gates" }), model_called: false }).returning("id");
+    const [action] = await testDb("pluto_actions").insert({ pass_id: pass.id, kind: "open_cash_secured_put", symbol: ticker.symbol, outcome: "order_built" }).returning("id");
+    try {
+      const orderId = await insertOrder(ticker.symbol, { pluto_action_id: action.id });
+      const fromOldAgent = await call("POST", `/positions/orders/${orderId}/confirm`, {}, { agentHolder: "agent.1:old-process" });
+      expect(fromOldAgent.status).toBe(409);
+      expect(fromOldAgent.json.error).toBe("This Pluto agent no longer holds Pluto's lease (another agent took over), so it cannot confirm orders.");
+      const fromPerson = await call("POST", `/positions/orders/${orderId}/confirm`, {}, { agentHolder: null });
+      expect(fromPerson.status).toBe(409);
+      expect(fromPerson.json.error).toBe("Only the running Pluto agent confirms Pluto's orders.");
+      expect((await orderRow(orderId)).status).toBe("pending_confirmation");
+      expect(evaluateOrderLimitsMock).not.toHaveBeenCalled();
+      await settle();
+      expect(notifiedOrderIds).toEqual([]);
+
+      expect((await call("POST", `/positions/orders/${orderId}/confirm`, {})).status).toBe(200);
+      expect((await orderRow(orderId)).status).toBe("confirmed");
+      // A person's own order needs no lease.
+      expect((await call("POST", `/positions/orders/${await insertOrder(ticker.symbol)}/confirm`, {}, { agentHolder: null })).status).toBe(200);
     } finally {
       await testDb("order_requests").where({ pluto_action_id: action.id }).del();
       await testDb("pluto_actions").where({ id: action.id }).del();

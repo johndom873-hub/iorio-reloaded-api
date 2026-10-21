@@ -349,3 +349,19 @@ describe("PlutoAgent window, analysis and connection events", () => {
     expect(eventTypes().filter((type) => type === "connection_lost")).toHaveLength(1);
   });
 });
+
+describe("PlutoAgent agent lease", () => {
+  it("runs a round only once the agent lease is renewed: a refused check never reaches the pass runner", async () => {
+    let leaseHeld = false;
+    const lease = { holderId: "agent.1:audit-a", confirmHeld: vi.fn(async () => leaseHeld) };
+    const agent: AgentInternals = new PlutoAgent({ apiBaseUrl: "http://x", serviceUsername: "u", serviceUserPassword: "p", serviceLoginSecret: "s", openRouterApiKey: "k", telegramBotToken: "t" }, lease);
+    agent.settings = { daySignalsPollSeconds: 1, tickerCooldownMinutes: 0 };
+    const request = { trigger: "day_signals_update", triggerDetail: {}, symbols: ["AAA"], force: false };
+    expect(await agent.runRoundSafely(request)).toBe("failed_before_model_call");
+    expect(harness.passRequests).toHaveLength(0);
+    leaseHeld = true;
+    expect(await agent.runRoundSafely(request)).toBe("completed");
+    expect(harness.passRequests).toHaveLength(1);
+    expect(lease.confirmHeld).toHaveBeenCalledTimes(2);
+  });
+});

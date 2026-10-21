@@ -37,6 +37,7 @@ import { fetchTodaysOrders } from "../lib/todaysOrders.js";
 import { fetchOrderLegFillsByOrderId } from "../lib/orderFills.js";
 import { streamCloseLiveHandler } from "./positionCloseLive.js";
 import { getCycleMarksHandler } from "./positionCycleMarks.js";
+import { agentLeaseRefusal, plutoAgentHolderHeader } from "../pluto/agentLease.js";
 import { executionStrategyLabels } from "../pluto/executionStrategies.js";
 import { loadLadderOrderGateContext } from "../pluto/ladderOrderGateContext.js";
 import type { LadderOrderGateContext } from "../lib/ladderOrderGates.js";
@@ -1564,6 +1565,15 @@ positionsRouter.post("/orders/:id/confirm", async (request, response) => {
   let wonRace = false;
   try {
     await withOrderConfirmationLock(async (transaction) => {
+      // Only the agent process holding Pluto's lease confirms a Pluto order (agentLease.ts): an agent that lost it, or a
+      // person, is refused with a 409, which Pluto's executor treats as a blocked order and cancels.
+      if (orderRequest.pluto_action_id) {
+        const leaseRefusal = await agentLeaseRefusal(transaction, request.get(plutoAgentHolderHeader));
+        if (leaseRefusal) {
+          blockedReasons = [leaseRefusal];
+          return;
+        }
+      }
       const gateEvaluation = await evaluateOrderGates(orderRequest, ladder, { forTrader });
       if (gateEvaluation.blocks.length > 0) {
         blockedReasons = gateEvaluation.blocks;
