@@ -269,6 +269,16 @@ async function main(): Promise<void> {
       );
       const { pricesByLegId, filledLegIds: worthlessExpiredLegIds } = await fillWorthlessExpiredOptionPrices(expiredOptionCandidateLegs, pricesByLegIdResult.value);
       if (worthlessExpiredLegIds.length > 0) console.log(`Priced ${worthlessExpiredLegIds.length} option leg(s) at 0: expired out of the money, so IBKR reports no mark.`);
+      // Every priced leg, even one whose position is skipped below for a sibling's missing price: exposure falls back to
+      // this for a leg with no live price (positionExposure.ts).
+      const legPriceRows = legRows.flatMap((leg) => {
+        const price = pricesByLegId[leg.legId];
+        return price === null || price === undefined ? [] : [{ position_leg_id: leg.legId, snapshot_date: snapshotDate, price }];
+      });
+      if (legPriceRows.length > 0) {
+        await db("position_leg_price_snapshots").insert(legPriceRows).onConflict(["position_leg_id", "snapshot_date"]).merge(["price", "captured_at"]);
+      }
+      console.log(`Snapshotted closing prices for ${legPriceRows.length}/${legRows.length} open leg(s) for ${snapshotDate}.`);
       for (const [positionId, legs] of legsByPositionId) {
         let unrealizedPnl = 0;
         let premiumPnl = 0;

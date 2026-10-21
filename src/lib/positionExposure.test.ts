@@ -148,6 +148,20 @@ describe("computeExposureRows", () => {
     expect(computeExposureRows([position()], [stockLeg()], {})[0]!.exposure).toBe(5000);
   });
 
+  it("falls back to the leg's last nightly closing price before its entry price (130 contracts x 100 x $4.5659 = $59,356.70, not $3.8568 entry = $50,138.40)", () => {
+    const hedgeLeg = optionLeg({ strategyKey: "hedge", side: "long", quantity: 130, entryPrice: "3.85680000", strikePrice: "83", expiryDate: "20280616", lastClosingPrice: "4.56590000" });
+    expect(computeExposureRows([position({ strategyKey: "hedge" })], [hedgeLeg], { "0": null })[0]!.exposure).toBeCloseTo(59356.7, 6);
+    expect(computeExposureRows([position({ strategyKey: "hedge" })], [{ ...hedgeLeg, lastClosingPrice: null }], {})[0]!.exposure).toBeCloseTo(50138.4, 6);
+  });
+
+  it("prefers a live price over the last nightly closing price (100 x $52 = $5,200, not the $51 close)", () => {
+    expect(computeExposureRows([position()], [stockLeg({ lastClosingPrice: "51" })], { "0": 52 })[0]!.exposure).toBe(5200);
+  });
+
+  it("uses a last nightly closing price of 0 (an option that expired worthless) rather than the entry price", () => {
+    expect(computeExposureRows([position()], [optionLeg({ lastClosingPrice: "0.00000000" })], {})[0]!.exposure).toBe(0);
+  });
+
   it("uses a live price of 0 as a price rather than falling back to the entry price", () => {
     expect(computeExposureRows([position()], [stockLeg()], { "0": 0 })[0]!.exposure).toBe(0);
   });
@@ -294,6 +308,22 @@ describe("computePositionExposures", () => {
       { positionId: "p1", strategyKey: "covered_call", symbol: "AAA", sector: "Technology", exposure: 5200 },
       { positionId: "p2", strategyKey: "covered_call", symbol: "BBB", sector: "Unknown", exposure: 300 },
     ]);
+  });
+
+  it("reads each leg's latest nightly closing price alongside the leg", async () => {
+    mocks.state.positions = [position()];
+    mocks.state.legs = [stockLeg()];
+    await computePositionExposures();
+    const selectArgs = operationArgs(queriesOn("position_legs as pl")[0]!, "select").flat();
+    const closingPriceColumn = selectArgs.find((arg) => typeof arg === "object" && arg !== null && String((arg as { sql?: string }).sql).includes("lastClosingPrice")) as { sql: string };
+    expect(closingPriceColumn.sql).toContain("FROM position_leg_price_snapshots lps WHERE lps.position_leg_id = pl.id ORDER BY lps.snapshot_date DESC LIMIT 1");
+  });
+
+  it("values a leg at its last nightly closing price when the price fetch throws (100 x $51 = $5,100)", async () => {
+    mocks.state.positions = [position()];
+    mocks.state.legs = [stockLeg({ lastClosingPrice: "51" })];
+    mocks.fetchPricesPoolFirst.mockRejectedValue(new Error("pool unavailable"));
+    expect((await computePositionExposures())[0]!.exposure).toBe(5100);
   });
 
   it("values every leg at its entry price when the price fetch throws", async () => {

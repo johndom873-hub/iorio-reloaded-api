@@ -11,9 +11,11 @@ import { sleepUnlessAborted } from "./sleepUnlessAborted.js";
 // platform-wide valuation standard (decided 2026-08-28, see
 // project_position_valuation_full_market_value memory). Single source of
 // truth shared by riskLimits.ts (concentration/allocation limits) and
-// dashboard.ts (Portfolio section, Allocation card). Falls back to
-// entry_price per leg when a live quote isn't available (e.g. outside
-// market hours) rather than dropping the position from every view.
+// dashboard.ts (Portfolio section, Allocation card). A leg with no live
+// quote (e.g. an option that has not traded, outside market hours) is
+// valued at its latest nightly closing price (position_leg_price_snapshots),
+// else at its entry_price (opened since the last nightly run), rather than
+// dropping the position from every view.
 interface OpenLegRow {
   positionId: string;
   strategyKey: string;
@@ -26,6 +28,8 @@ interface OpenLegRow {
   strikePrice: string | null;
   expiryDate: string | null;
   symbol: string;
+  /** The leg's latest nightly closing price (position_leg_price_snapshots); null/absent when it has none yet. */
+  lastClosingPrice?: string | null;
 }
 
 export interface PositionExposureRow {
@@ -99,6 +103,9 @@ async function resolveOpenPositionsAndLegs(symbol?: string): Promise<{ positions
       "pl.strike_price as strikePrice",
       db.raw("to_char(pl.expiry_date, 'YYYYMMDD') as \"expiryDate\""),
       "t.symbol",
+      db.raw(
+        `(SELECT lps.price FROM position_leg_price_snapshots lps WHERE lps.position_leg_id = pl.id ORDER BY lps.snapshot_date DESC LIMIT 1) AS "lastClosingPrice"`,
+      ),
     );
 
   return { positions, legs };
@@ -116,17 +123,18 @@ export function legsToPriceContracts(legs: OpenLegRow[]): PriceContract[] {
 }
 
 // Pure function of whatever prices are currently known — a leg with no
-// price yet falls back to its entry_price, so this always produces a full
-// result. Used both by the one-shot computePositionExposures below and by
+// price yet falls back to its last nightly closing price, else its
+// entry_price, so this always produces a full result. Used both by the one-shot computePositionExposures below and by
 // streamPositionExposures, called again on every price update; since a
-// missing price already defaults to entry_price rather than showing
+// missing price already defaults to a stored price rather than showing
 // nothing, there's no "regress to null" risk the way greeks/pnl have to
 // guard against — every update only ever gets more accurate as more real
 // prices arrive.
 export function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegRow[], pricesByKey: Record<string, number | null>): PositionExposureRow[] {
   const exposureByPositionId = new Map<string, number>();
   legs.forEach((leg, index) => {
-    const price = pricesByKey[String(index)] ?? Number(leg.entryPrice);
+    const fallbackPrice = leg.lastClosingPrice !== null && leg.lastClosingPrice !== undefined ? Number(leg.lastClosingPrice) : Number(leg.entryPrice);
+    const price = pricesByKey[String(index)] ?? fallbackPrice;
     const sign = leg.side === "short" ? -1 : 1;
     let legValue = price * leg.quantity * leg.multiplier * sign;
 
@@ -151,7 +159,7 @@ export function computeExposureRows(positions: OpenPositionRow[], legs: OpenLegR
 }
 
 // The one-shot exposures (Dashboard, Risk & Limits) stop waiting this long after the last leg price arrived: a leg that
-// never gets a price (no last trade, nor an option's two-sided quote) is valued at its entry price either way, and used to hold them to the 6 s ceiling.
+// never gets a price (no last trade, nor an option's two-sided quote) is valued at its closing or entry price either way, and used to hold them to the 6 s ceiling.
 // A grace after the latest arrival, not a flat cap, so a slow leg that is still pricing is not cut off.
 const exposurePriceSettleGraceMs = 1_000;
 
@@ -169,13 +177,13 @@ async function computePositionExposuresUncached(): Promise<PositionExposureRow[]
   try {
     pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { settleGraceMs: exposurePriceSettleGraceMs });
   } catch {
-    // Leave pricesByKey empty — every leg falls back to entry_price below.
+    // Leave pricesByKey empty — every leg falls back to its closing or entry price below.
   }
 
   return computeExposureRows(positions, legs, pricesByKey);
 }
 
-// How long the order-limits check waits for a leg's price before valuing that leg at its entry price. A leg that never
+// How long the order-limits check waits for a leg's price before valuing that leg at its closing or entry price. A leg that never
 // ticks (a thin LEAP) otherwise holds the whole snapshot to its 6 s ceiling, and the check runs on every form edit,
 // every 10 s of an open Order Review and on confirm.
 const tickerExposurePriceTimeoutMs = 1_500;
@@ -192,7 +200,7 @@ export async function computeTickerExposure(symbol: string): Promise<number> {
   try {
     pricesByKey = await fetchPricesPoolFirst(legsToPriceContracts(legs), { snapshotTimeoutMs: tickerExposurePriceTimeoutMs });
   } catch {
-    // Leave pricesByKey empty — every leg falls back to entry_price in computeExposureRows.
+    // Leave pricesByKey empty — every leg falls back to its closing or entry price in computeExposureRows.
   }
   return computeExposureRows(positions, legs, pricesByKey).reduce((sum, row) => sum + row.exposure, 0);
 }
@@ -235,7 +243,7 @@ export async function streamPositionExposures(onUpdate: (rows: PositionExposureR
 
   // Hold the first reading until every leg has a price or the frozen phase
   // has ended (approved 2026-09-19). Without this, legs not yet priced fall
-  // back to entry_price and the first ~0.5s shows wrong totals that then
+  // back to a stored price and the first ~0.5s shows wrong totals that then
   // jump (Dashboard covered calls read 29,443 -> 29,725). After the first
   // reading every update goes out as before.
   let hasEmitted = false;
