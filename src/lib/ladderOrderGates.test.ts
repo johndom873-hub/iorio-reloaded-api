@@ -3,7 +3,7 @@ import type { OrderRequestPayload } from "../ibkr/ibkrGatewayOrderPayload.js";
 import { blackScholesDelta, blackScholesPriceOnForward, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
 import { evaluateLadderDeltaForOrderRequest, ladderDeltaVerdict, type LadderOrderGateContext } from "./ladderOrderGates.js";
 
-const context: LadderOrderGateContext = { potFraction: 0.25, minAbsDelta: 0.05, maxAbsDelta: 0.3, forwardAnchor: { forward: 100.3, spotPrice: 100 }, riskFreeRate: 0.04, todayIso: "2026-10-20", closeMinutesEt: 16 * 60 };
+const context: LadderOrderGateContext = { potFraction: 0.25, book: { symbols: ["AAA"], budgetFraction: 0.5 }, isEntryPut: false, minAbsDelta: 0.05, maxAbsDelta: 0.3, forwardAnchor: { forward: 100.3, spotPrice: 100 }, riskFreeRate: 0.04, todayIso: "2026-10-20", closeMinutesEt: 16 * 60 };
 const now = new Date("2026-10-20T15:00:00Z");
 const expiryIso = "2026-11-20";
 const years = yearsBetweenIsoDates(context.todayIso, expiryIso);
@@ -56,6 +56,16 @@ describe("ladderDeltaVerdict", () => {
     expect(ladderDeltaVerdict({ bid: 1, ask: 1.1, stockPrice: null, strike: 90, expiryIso, isCall: false, now, context })).toEqual({ compliant: true, delta: null, reason: null });
   });
 
+  it("holds a Cash-Secured Put entry to the range like a Call", () => {
+    const atTheMoney = putQuote(100);
+    const inRange = putQuote(90);
+    expect(inRange.delta).toBeGreaterThan(0.05);
+    expect(inRange.delta).toBeLessThan(0.3);
+    expect(ladderDeltaVerdict({ bid: atTheMoney.bid, ask: atTheMoney.ask, stockPrice: 102, strike: 100, expiryIso, isCall: false, putHeldToRange: true, now, context }).reason).toMatch(/above the ladder's 0.05–0.3 delta range/);
+    expect(ladderDeltaVerdict({ bid: inRange.bid, ask: inRange.ask, stockPrice: 102, strike: 90, expiryIso, isCall: false, putHeldToRange: true, now, context }).compliant).toBe(true);
+    expect(ladderDeltaVerdict({ bid: 1, ask: 1.1, stockPrice: null, strike: 90, expiryIso, isCall: false, putHeldToRange: true, now, context })).toMatchObject({ compliant: false, reason: expect.stringMatching(/No live stock price/) });
+  });
+
   it("fails closed for a Call without a two-sided quote or a stock price", () => {
     expect(ladderDeltaVerdict({ bid: null, ask: 1, stockPrice: 102, strike: 115, expiryIso, isCall: true, now, context })).toMatchObject({ compliant: false, reason: expect.stringMatching(/can't be worked out from its live quote/) });
     expect(ladderDeltaVerdict({ bid: 1, ask: 1.1, stockPrice: null, strike: 115, expiryIso, isCall: true, now, context })).toMatchObject({ compliant: false, reason: expect.stringMatching(/No live stock price/) });
@@ -76,6 +86,14 @@ describe("evaluateLadderDeltaForOrderRequest", () => {
 
   it("passes an opening Put without reading a quote: the ladder's Puts have no |delta| range", async () => {
     expect(await evaluateLadderDeltaForOrderRequest(putOrder, context, failing)).toEqual({ compliant: true, reason: null });
+  });
+
+  it("reads the live quote of an entry Put and holds it to the range", async () => {
+    const atTheMoney = putQuote(100);
+    const entryPut = { ...putOrder, payload: { ...putOrder.payload, legs: [{ ...putOrder.payload.legs[0]!, strike: 100 }] } as OrderRequestPayload };
+    const putReader = { ...reader, optionQuote: async () => ({ bid: atTheMoney.bid, ask: atTheMoney.ask }) };
+    expect(await evaluateLadderDeltaForOrderRequest(entryPut, { ...context, isEntryPut: true }, putReader)).toMatchObject({ compliant: false, reason: expect.stringMatching(/above the ladder's 0.05–0.3 delta range/) });
+    expect(await evaluateLadderDeltaForOrderRequest(entryPut, { ...context, isEntryPut: true }, failing)).toMatchObject({ compliant: false });
   });
 
   it("fails closed when a Call's live quote cannot be read", async () => {

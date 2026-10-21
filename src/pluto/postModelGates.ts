@@ -8,6 +8,7 @@ import type { PlutoSettings } from "./settingsStore.js";
 import { describeOptionContract } from "../lib/optionContractLabel.js";
 import { formatSignedDollars } from "../lib/formatSignedDollars.js";
 import { formatWholeDollars } from "../lib/formatWholeDollars.js";
+import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
 import { checkHeldShareCallStrike, commissionPerShare, describeCalledAwayShortfall, type CycleBreakEven } from "./heldShareCalls.js";
 
 // Post-model validation (design round 3, item 21, approved 2026-09-28). Nothing the model said
@@ -61,6 +62,8 @@ export interface PostModelGateInput {
   settings: PlutoSettings;
   book: PostModelBookInput;
   sector: string | null;
+  /** Live: the ticker, and the limit is rounded up to the cent (optionLimitPrice.ts); absent (the backtest): to the nearest cent. */
+  symbol?: string;
   /** What the stress cap needs about the ticker today (fresh re-score). */
   stress: StressCapInput;
   /** Share of full Kelly to size with; Pluto's fixed kellyFraction when omitted (a backtest session passes its own). */
@@ -106,13 +109,13 @@ export interface PostModelGateOutput {
   plan: PlutoOrderPlan | null;
 }
 
-export function roundToCents(value: number): number {
-  return Math.round(value * 100) / 100;
-}
-
-/** Sell at the mid, rounded to cents, clamped inside the current market (design item 22: mid, no concession). */
-export function midLimitPrice(bid: number, ask: number): number {
-  return Math.min(ask, Math.max(bid, roundToCents((bid + ask) / 2)));
+/**
+ * Sell at the mid, clamped inside the current market (design item 22: mid, no concession): live (a symbol given) rounded up
+ * to the cent (optionLimitPrice.ts); without one to the nearest cent, as the backtest's replay of Pluto prices it.
+ */
+export function midLimitPrice(bid: number, ask: number, symbol?: string): number {
+  if (symbol !== undefined) return optionMidLimitPrice(bid, ask, "sell");
+  return Math.min(ask, Math.max(bid, Math.round(((bid + ask) / 2) * 100) / 100));
 }
 
 export interface SizingRoom {
@@ -266,7 +269,7 @@ export function runPostModelGates(input: PostModelGateInput): PostModelGateOutpu
   // Sizing in dollars: the standard order size, less only where a tighter limit binds; contracts follow from it. A contract's
   // notional is its exposure net of the premium at the order's limit price (Marcelo 2026-10-12), as the order gate counts it.
   const room = computeSizingRoom(settings, book, input.sector !== null);
-  const limitPrice = midLimitPrice(candidate.bid, candidate.ask);
+  const limitPrice = midLimitPrice(candidate.bid, candidate.ask, input.symbol);
   const liquidityCap = volumeCap(candidate.volume, settings);
   let fullSizeQuantity: number;
   let unitNotional: number;
@@ -323,6 +326,8 @@ export interface HeldShareCallGateInput {
   cycleBreakEven: CycleBreakEven | null;
   /** False in a backtest, whose quotes are taken at the look's own instant: no live-quote gate. True when omitted. */
   requireLiveQuote?: boolean;
+  /** Live: the ticker, and the limit is rounded up to the cent (optionLimitPrice.ts); absent (the backtest): to the nearest cent. */
+  symbol?: string;
 }
 
 /**
@@ -346,7 +351,7 @@ export function runHeldShareCallGates(input: HeldShareCallGateInput): PostModelG
   gate("same_contract", book.sameContractConflict === null, book.sameContractConflict ?? `no open position or working order on ${describeOptionContract({ strike: candidate.strike, right: "C", expiry: candidate.expiry, dte: candidate.dte })}`);
   const contracts = Math.floor(book.freeShares / 100);
   gate("sizing", contracts >= 1, `${book.freeShares} free shares cover ${contracts} contract(s), no shares bought`);
-  const limitPrice = midLimitPrice(candidate.bid, candidate.ask);
+  const limitPrice = midLimitPrice(candidate.bid, candidate.ask, input.symbol);
   const calledAway = checkHeldShareCallStrike({ cycle: input.cycleBreakEven, strike: candidate.strike, contracts: Math.max(1, contracts), cashPerShareCovered: limitPrice - commissionPerShare(candidate.commissionPerContractDollars), settings });
   gate(
     "break_even",

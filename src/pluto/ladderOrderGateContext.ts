@@ -9,11 +9,12 @@ import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings } from "
 
 // The CC + Put Ladder's order-gate context for an order request (ladderOrderGates.ts): null unless the order's Pluto
 // action was taken under the ladder (pluto_actions.execution_strategy). A ticker no longer enabled in Pluto has no
-// allocation, so its pot is 0 and every opening order on it is refused.
+// allocation, so its pot is 0 and every opening order on it is refused. The book is every ticker enabled in Pluto; the
+// action's sale step (contract.saleStep, ladderOrders.ts) tells a Cash-Secured Put entry from a ladder Put.
 
 export async function loadLadderOrderGateContext(orderRequest: { pluto_action_id?: string | null; payload: OrderRequestPayload }, connection: Knex = db, now: Date = new Date()): Promise<LadderOrderGateContext | null> {
   if (!orderRequest.pluto_action_id) return null;
-  const action: { execution_strategy: string } | undefined = await connection("pluto_actions").where({ id: orderRequest.pluto_action_id }).first("execution_strategy");
+  const action: { execution_strategy: string; contract: { saleStep?: string } | null } | undefined = await connection("pluto_actions").where({ id: orderRequest.pluto_action_id }).first("execution_strategy", "contract");
   if (action?.execution_strategy !== "cc_put_ladder") return null;
   const symbol = orderRequest.payload.symbol.trim().toUpperCase();
   const todayIso = easternIsoDate(now);
@@ -25,6 +26,8 @@ export async function loadLadderOrderGateContext(orderRequest: { pluto_action_id
   const anchors = ticker && expiryIso ? await defaultLadderBandPlannerDependencies.loadForwardAnchors(ticker.tickerId, todayIso) : new Map();
   return {
     potFraction: ((allocationPct / 100) * settings.capitalBudgetPct) / 100,
+    book: { symbols: enabledTickers.map((entry) => entry.symbol), budgetFraction: settings.capitalBudgetPct / 100 },
+    isEntryPut: optionLeg?.right === "P" && action.contract?.saleStep === "entry",
     minAbsDelta: ticker?.ladderMinAbsDelta ?? settings.ladderMinAbsDelta,
     maxAbsDelta: ticker?.ladderMaxAbsDelta ?? settings.ladderMaxAbsDelta,
     forwardAnchor: (expiryIso && anchors.get(expiryIso)) || null,

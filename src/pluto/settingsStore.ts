@@ -106,6 +106,10 @@ export interface PlutoSettings {
   ladderMaxOpenPositionsPerTicker: number;
   /** Every ladder order sent on a ticker in a day counts, re-prices included. */
   ladderMaxOrdersPerTickerPerDay: number;
+  /** Across every ladder ticker: open positions plus the ladder's working orders. */
+  ladderMaxOpenPositions: number;
+  /** Across every ladder ticker: ladder orders sent in a day, counted as the per-ticker daily cap counts them. */
+  ladderMaxOrdersPerDay: number;
   updatedAt: string;
   updatedByUserId: string | null;
 }
@@ -183,6 +187,8 @@ export const plutoSettingsColumns: Record<Exclude<keyof PlutoSettings, "updatedA
   ladderTickerCooldownMinutes: { column: "ladder_ticker_cooldown_minutes", kind: "integer", min: 0 },
   ladderMaxOpenPositionsPerTicker: { column: "ladder_max_open_positions_per_ticker", kind: "integer", min: 1, max: 1000 },
   ladderMaxOrdersPerTickerPerDay: { column: "ladder_max_orders_per_ticker_per_day", kind: "integer", min: 1, max: 1000 },
+  ladderMaxOpenPositions: { column: "ladder_max_open_positions", kind: "integer", min: 1, max: 10000 },
+  ladderMaxOrdersPerDay: { column: "ladder_max_orders_per_day", kind: "integer", min: 1, max: 10000 },
 };
 
 /** Settings only the CC + Put Ladder reads: changing them changes no Edge Margin decision, and the reverse. */

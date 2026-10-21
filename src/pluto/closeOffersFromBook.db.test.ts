@@ -140,7 +140,8 @@ describe("the close offers' loader and builder", () => {
 
   it("builds from the hand-written book what buildCloseOffersForTicker builds from the database", async () => {
     const fromDatabase = await buildCloseOffersForTicker(input);
-    const fromBook = await buildCloseOffersFromBook(input, handWrittenBook, { forPosition: () => gateVerdict, fromQuotes: () => gateVerdict });
+    // Live rounds option limits to the cent on the order's side of the mid (buildCloseOffersForTicker turns it on).
+    const fromBook = await buildCloseOffersFromBook({ ...input, liveLimitRounding: true }, handWrittenBook, { forPosition: () => gateVerdict, fromQuotes: () => gateVerdict });
     expect(fromBook).toEqual(fromDatabase);
 
     // 150 shares at 48 with the cycle up 1,000 against a floor of max(1% × 7,200, 50): offered to the model, not an odd lot.

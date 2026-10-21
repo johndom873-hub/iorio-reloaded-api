@@ -1,6 +1,5 @@
 import { loadCommissionEstimator, loadStockCommissionEstimator } from "../lib/commissionEstimate.js";
 import type { InternalApiClient } from "../lib/internalApiClient.js";
-import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { accountContextFromTotalCash } from "../lib/signalsStore.js";
 import { frozenSymbolSet } from "../lib/tickerFreeze.js";
 import { loadInFlightNotionals, loadLastFilledPlutoActionAtBySymbol } from "./book.js";
@@ -9,7 +8,9 @@ import { defaultLadderBandPlannerDependencies } from "./ladderBandPlanLoader.js"
 import { saveLadderCycleMemory } from "./ladderCycleMemory.js";
 import { runLadderLook } from "./ladderLook.js";
 import { loadLadderLookInput } from "./ladderLookLoader.js";
-import { admitLadderSales, loadLadderTickerOrderCounts, sendLadderSales, type LadderSaleOutcome } from "./ladderOrders.js";
+import { loadCommittedCapitalOnSymbols } from "../lib/orderLimits.js";
+import { noticeLadderBook, noticeLadderTicker, type LadderBookNoticeReason } from "./ladderNotices.js";
+import { admitLadderSales, ladderSaleNotional, loadLadderBookOrderCounts, loadLadderTickerOrderCounts, sendLadderSales, type LadderBookRoom, type LadderSaleOutcome } from "./ladderOrders.js";
 import { recordPlutoAction, recordPlutoEvent } from "./ledger.js";
 import type { PlutoMarketWatch } from "./marketWatch.js";
 import { tickerCooldownStatus } from "./postModelGates.js";
@@ -18,8 +19,10 @@ import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings } from "
 
 // One Pluto round under the CC + Put Ladder (Marcelo 2026-10-14/15): rules only, no model. Every enabled ticker gets a
 // look (ladderLook.ts) on its live book and the Day Signals loop's band quotes, and the sales it plans go out within the
-// ladder's caps (ladderOrders.ts). Pluto's own checks (breakers, window, worker, reconciliation, readiness) ran before
-// this; the ladder's SPY stress level is checked by the caller. A frozen ticker (a split pending) is never looked at.
+// ladder's caps (ladderOrders.ts), the ticker's and the book's: the book's counts and the capital its tickers commit are
+// read once per round and moved on as the round sends. Pluto's own checks (breakers, window, worker, reconciliation,
+// readiness) ran before this; the ladder's SPY stress level is checked by the caller. A frozen ticker (a split pending)
+// is never looked at. What stops a ticker or holds its sales goes to Telegram once a day (ladderNotices.ts).
 
 export interface LadderRoundInput {
   passId: string;
@@ -57,6 +60,10 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
   ]);
   const allocationBySymbol = effectiveAllocationPctBySymbol(enabled);
   const summary: LadderRoundSummary = { looked: [], planned: 0, outcomes: [], notes: [] };
+  // The book: every ticker enabled in Pluto, frozen ones included (their positions still commit capital).
+  const [bookCounts, bookCommitted] = await Promise.all([loadLadderBookOrderCounts(enabled, input.now), loadCommittedCapitalOnSymbols(enabled.map((ticker) => ticker.symbol))]);
+  const book: LadderBookRoom = { counts: bookCounts, committedCapitalDollars: bookCommitted, budgetFraction: settings.capitalBudgetPct / 100, netLiquidationValue: input.netLiquidationValue };
+  const bookNotices = new Set<LadderBookNoticeReason>();
   // What this round's earlier tickers just sent: the cash they commit is gone for the next ones.
   let committedThisRound = 0;
   for (const ticker of enabled) {
@@ -74,9 +81,11 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
     const inFlight = await loadInFlightNotionals(ticker.symbol);
     const freeCash = Math.max(0, account.freeCash - (inFlight.totalNotional - inFlight.tickerNotional) - committedThisRound);
     const tickerWeight = ((allocationBySymbol.get(ticker.symbol) ?? 0) / 100) * (settings.capitalBudgetPct / 100);
-    const lookInput = await loadLadderLookInput({ tickerId: ticker.tickerId, symbol: ticker.symbol, tickerWeight }, { now: input.now, clock, freeCash, accountValue: input.netLiquidationValue, commissions: { option: optionCommissions, stock: stockCommissions } });
+    const commissions = { option: optionCommissions, stock: stockCommissions };
+    const lookInput = await loadLadderLookInput({ tickerId: ticker.tickerId, symbol: ticker.symbol, tickerWeight }, { now: input.now, clock, freeCash, accountValue: input.netLiquidationValue, commissions, maxQuoteAgeMinutes: settings.maxQuoteAgeMinutes });
     if ("unavailable" in lookInput) {
       summary.notes.push(lookInput.unavailable);
+      if (lookInput.noShock) await noticeLadderTicker(ticker.symbol, "no_shock", settings, input.now);
       continue;
     }
     const look = runLadderLook(lookInput);
@@ -84,26 +93,37 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
     if (look.stoppedBecause) {
       summary.notes.push(look.stoppedBecause);
       await recordPlutoEvent("warning", { passId: input.passId, symbol: ticker.symbol, message: look.stoppedBecause });
-      if (settings.telegramVerbosity !== "off") await notifyPlutoTelegram(`⚠️ Pluto (CC + Put Ladder): ${look.stoppedBecause}.`);
+      await noticeLadderTicker(ticker.symbol, "split_guard", settings, input.now);
       continue;
     }
     await saveLadderCycleMemory(ticker.tickerId, look.memory!);
     summary.planned += look.planned.length;
     summary.notes.push(...look.notes);
+    if (look.cannotTradeBecause) await noticeLadderTicker(ticker.symbol, look.cannotTradeBecause, settings, input.now);
     if (look.planned.length === 0) continue;
     const counts = await loadLadderTickerOrderCounts({ tickerId: ticker.tickerId, symbol: ticker.symbol }, input.now);
-    const { send, waiting } = admitLadderSales(look.planned, counts, settings);
-    if (waiting.length > 0) summary.notes.push(`${ticker.symbol}: ${waiting.length} sale(s) wait for a later look (${waiting[0]!.reason})`);
+    const { send, waiting } = admitLadderSales(look.planned, counts, book, settings);
+    if (waiting.length > 0) {
+      summary.notes.push(`${ticker.symbol}: ${waiting.length} sale(s) wait for a later look (${waiting[0]!.reason})`);
+      const bookCap = waiting.find((entry) => entry.cap.startsWith("book_"))?.cap as LadderBookNoticeReason | undefined;
+      if (bookCap && !bookNotices.has(bookCap)) {
+        bookNotices.add(bookCap);
+        await noticeLadderBook(bookCap, settings, input.now);
+      }
+      if (waiting.some((entry) => entry.cap.startsWith("ticker_"))) await noticeLadderTicker(ticker.symbol, "held_by_ticker_cap", settings, input.now);
+    }
     const outcomes = await sendLadderSales(
       {
         passId: input.passId,
         symbol: ticker.symbol,
         tickerId: ticker.tickerId,
         sales: send,
-        gateContext: { potFraction: tickerWeight, minAbsDelta: lookInput.baseline.minAbsDelta, maxAbsDelta: lookInput.baseline.maxAbsDelta, riskFreeRate: clock.riskFreeRate, todayIso: clock.todayIso, closeMinutesEt: clock.closeMinutesEt },
+        deltaContext: { minAbsDelta: lookInput.baseline.minAbsDelta, maxAbsDelta: lookInput.baseline.maxAbsDelta, riskFreeRate: clock.riskFreeRate, todayIso: clock.todayIso, closeMinutesEt: clock.closeMinutesEt },
         forwardAnchors: lookInput.forwardAnchors,
         stockPrice: lookInput.stockPrice,
         todayIso: clock.todayIso,
+        baseline: lookInput.baseline,
+        commissions,
       },
       {
         burst: (symbol, contracts) => input.marketWatch.burst(symbol, contracts),
@@ -120,8 +140,13 @@ export async function runLadderRound(input: LadderRoundInput): Promise<LadderRou
       },
     );
     for (const outcome of outcomes) {
-      if (outcome.outcome === "confirmed") committedThisRound += outcome.sale.strategyKey === "cash_secured_put" ? outcome.sale.strike * 100 * outcome.sale.contracts : outcome.sale.sharesBought * outcome.sale.stockPrice;
+      if (outcome.orderId !== null) book.counts.ordersToday += 1;
+      if (outcome.outcome !== "confirmed") continue;
+      committedThisRound += outcome.sale.strategyKey === "cash_secured_put" ? outcome.sale.strike * 100 * outcome.sale.contracts : outcome.sale.sharesBought * outcome.sale.stockPrice;
+      book.counts.workingOrders += 1;
+      book.committedCapitalDollars += ladderSaleNotional(outcome.sale, outcome.limitPrice ?? outcome.sale.optionPrice);
     }
+    if (outcomes.some((outcome) => outcome.blockedOnLiveCheck)) await noticeLadderTicker(ticker.symbol, "blocked_on_live_check", settings, input.now);
     summary.outcomes.push(...outcomes);
   }
   return summary;

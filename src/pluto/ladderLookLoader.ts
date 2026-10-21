@@ -25,6 +25,14 @@ export interface LadderPassContext {
   /** The whole account's net liquidation value. */
   accountValue: number;
   commissions: BaselineCommissions;
+  /** Pluto's maxQuoteAgeMinutes: an older band quote is left out of the look. */
+  maxQuoteAgeMinutes: number;
+}
+
+/** A ticker the look could not be run on, and why; `noShock` when it lacked a shock (Telegram once a day: ladderNotices.ts). */
+export interface LadderLookUnavailable {
+  unavailable: string;
+  noShock: boolean;
 }
 
 /** The ladder's own orders on the ticker still working (or built and not yet confirmed), as sales the look counts as filled. */
@@ -55,7 +63,7 @@ export async function loadWorkingLadderSales(symbol: string, connection: Knex = 
   return sales;
 }
 
-export async function loadLadderLookInput(ticker: { tickerId: string; symbol: string; tickerWeight: number }, pass: LadderPassContext, connection: Knex = db): Promise<LadderLookInput | { unavailable: string }> {
+export async function loadLadderLookInput(ticker: { tickerId: string; symbol: string; tickerWeight: number }, pass: LadderPassContext, connection: Knex = db): Promise<LadderLookInput | LadderLookUnavailable> {
   const [prices, previousClose, memory, settings, positions, cycleRowsByTicker, workingSales, bandQuotes, forwardAnchors, previousSessionVolumeByContract] = await Promise.all([
     fetchPricesPoolFirst([{ key: "stock", legType: "stock", symbol: ticker.symbol }]),
     loadPreviousClose(ticker.tickerId, pass.clock.todayIso),
@@ -69,9 +77,9 @@ export async function loadLadderLookInput(ticker: { tickerId: string; symbol: st
     defaultLadderBandPlannerDependencies.loadPreviousSessionVolume(ticker.tickerId, pass.clock.todayIso),
   ]);
   const stockPrice = prices["stock"] ?? null;
-  if (stockPrice === null || !(stockPrice > 0)) return { unavailable: `${ticker.symbol}: no live stock price` };
+  if (stockPrice === null || !(stockPrice > 0)) return { unavailable: `${ticker.symbol}: no live stock price`, noShock: false };
   const shockPct = settings.overrideShockPct ?? settings.recommendedShockPct;
-  if (shockPct === null) return { unavailable: `${ticker.symbol}: no shock (no override, and no recommended one without daily closes)` };
+  if (shockPct === null) return { unavailable: `${ticker.symbol}: no shock (no override, and no recommended one without daily closes)`, noShock: true };
   return {
     symbol: ticker.symbol,
     now: pass.now,
@@ -85,5 +93,6 @@ export async function loadLadderLookInput(ticker: { tickerId: string; symbol: st
     bandQuotes,
     forwardAnchors,
     previousSessionVolumeByContract,
+    maxQuoteAgeMinutes: pass.maxQuoteAgeMinutes,
   };
 }

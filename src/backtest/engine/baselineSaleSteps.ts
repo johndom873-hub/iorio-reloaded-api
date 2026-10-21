@@ -146,6 +146,44 @@ export interface BaselineCandidateInput {
   nearestExpiryFirst?: boolean;
 }
 
+/** The expiry rule: DTE within minDte–maxDte. */
+export function baselineExpiryInRange(dte: number, settings: Pick<BacktestBaselineSettings, "minDte" | "maxDte">): boolean {
+  return !(dte < settings.minDte || dte > settings.maxDte);
+}
+
+/** The quote rules: a bid of at least baselineMinimumBid with an ask above it, then a spread within maxSpreadPctOfMid of the mid. Null when both pass. */
+export function baselineQuoteRejection(quote: { bid: number | null; ask: number | null }, maxSpreadPctOfMid: number): "noUsableQuote" | "spreadTooWide" | null {
+  if (quote.bid === null || quote.ask === null || quote.bid < baselineMinimumBid || !(quote.ask > quote.bid)) return "noUsableQuote";
+  const mid = (quote.bid + quote.ask) / 2;
+  if ((quote.ask - quote.bid) / mid > maxSpreadPctOfMid / 100) return "spreadTooWide";
+  return null;
+}
+
+/**
+ * A sale's time value and premium yield at a fill: the fill less its intrinsic value, and what that earns after one
+ * contract's commission on the capital it ties up (strike, or the stock, less the fill), annualized. A null yield: no
+ * time value left after the commission, or no capital.
+ */
+export function baselineSaleYield(input: { isCall: boolean; fillPrice: number; strike: number; stockPrice: number; yearsToExpiry: number; commissions: BaselineCommissions }): { timeValue: number; premiumYield: number | null } {
+  const intrinsicValue = input.isCall ? Math.max(input.stockPrice - input.strike, 0) : Math.max(input.strike - input.stockPrice, 0);
+  const timeValue = input.fillPrice - intrinsicValue;
+  const capitalPerShare = (input.isCall ? input.stockPrice : input.strike) - input.fillPrice;
+  const earnedDollars = timeValue * sharesPerContract - optionCommissionPerContract(input.commissions);
+  if (!(earnedDollars > 0) || !(capitalPerShare > 0)) return { timeValue, premiumYield: null };
+  return { timeValue, premiumYield: yieldOnExposure(earnedDollars, capitalPerShare * sharesPerContract, Math.max(input.yearsToExpiry, minimumAnnualizationYears)) };
+}
+
+/**
+ * The lowest premium yield a sale needs (a fraction, annualized), or null for any: minCallYieldPct for the entries always
+ * (a Covered Call's call, or a Cash-Secured Put entry's put: Marcelo 2026-10-19), for the calls on held shares with
+ * "every_call"; the ladder's puts at any yield.
+ */
+export function baselineMinimumSaleYield(baseline: Pick<BacktestBaselineSettings, "minCallYieldPct" | "minCallYieldAppliesTo">, right: "C" | "P", forEntry: boolean, ladderPut: boolean): number | null {
+  const minimumCallYield = baseline.minCallYieldPct > 0 ? baseline.minCallYieldPct / 100 : null;
+  if (right === "P") return ladderPut ? null : minimumCallYield;
+  return forEntry || baseline.minCallYieldAppliesTo === "every_call" ? minimumCallYield : null;
+}
+
 /** Pure: the contracts of one right that pass the baseline's rules, best premium yield (or Edge Yield) first (ties: nearer expiry, then lower strike). */
 export function selectBaselineCandidates(input: BaselineCandidateInput): { candidates: BaselineCandidate[]; rejections: BaselineRejections } {
   const rejections: BaselineRejections = { outsideExpiryRange: 0, noUsableQuote: 0, spreadTooWide: 0, tooLittleVolume: 0, noImpliedVolatility: 0, outsideDeltaRange: 0, noTimeValue: 0, alreadyHeld: 0, belowCost: 0, aboveCeiling: 0, belowMinimumYield: 0, spansEarnings: 0, noForecast: 0, belowVolatilityEdge: 0 };
@@ -159,7 +197,7 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
   for (const quote of input.quotes) {
     if (quote.right !== input.right) continue;
     const dte = daysToExpiry(quote.expiry, input.todayIso);
-    if (dte < input.settings.minDte || dte > input.settings.maxDte) {
+    if (!baselineExpiryInRange(dte, input.settings)) {
       rejections.outsideExpiryRange++;
       continue;
     }
@@ -176,15 +214,14 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
       rejections.aboveCeiling++;
       continue;
     }
-    if (quote.bid === null || quote.ask === null || quote.bid < baselineMinimumBid || !(quote.ask > quote.bid)) {
-      rejections.noUsableQuote++;
+    const quoteRejection = baselineQuoteRejection(quote, input.settings.maxSpreadPctOfMid);
+    if (quoteRejection !== null) {
+      rejections[quoteRejection]++;
       continue;
     }
-    const mid = (quote.bid + quote.ask) / 2;
-    if ((quote.ask - quote.bid) / mid > input.settings.maxSpreadPctOfMid / 100) {
-      rejections.spreadTooWide++;
-      continue;
-    }
+    const bid = quote.bid!;
+    const ask = quote.ask!;
+    const mid = (bid + ask) / 2;
     const volume = input.previousSessionVolumeByContract?.get(contractKey(quote)) ?? null;
     const volumeCap = volume === null ? 0 : Math.floor(volume * baselineMaxVolumeShare);
     if (volumeCap < 1) {
@@ -206,16 +243,12 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
       rejections.alreadyHeld++;
       continue;
     }
-    const fillPrice = computeSaleFillPrice(quote.bid, quote.ask, input.spreadShareCharged);
-    const intrinsicValue = isCall ? Math.max(input.stockPrice - quote.strike, 0) : Math.max(quote.strike - input.stockPrice, 0);
-    const timeValue = fillPrice - intrinsicValue;
-    const capitalPerShare = (isCall ? input.stockPrice : quote.strike) - fillPrice;
-    const earnedDollars = timeValue * sharesPerContract - optionCommissionPerContract(input.commissions);
-    if (!(earnedDollars > 0) || !(capitalPerShare > 0)) {
+    const fillPrice = computeSaleFillPrice(bid, ask, input.spreadShareCharged);
+    const { timeValue, premiumYield } = baselineSaleYield({ isCall, fillPrice, strike: quote.strike, stockPrice: input.stockPrice, yearsToExpiry, commissions: input.commissions });
+    if (premiumYield === null) {
       rejections.noTimeValue++;
       continue;
     }
-    const premiumYield = yieldOnExposure(earnedDollars, capitalPerShare * sharesPerContract, Math.max(yearsToExpiry, minimumAnnualizationYears));
     if (input.minimumPremiumYield !== undefined && input.minimumPremiumYield !== null && !(premiumYield > input.minimumPremiumYield)) {
       rejections.belowMinimumYield++;
       continue;
@@ -240,7 +273,7 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
           strike: quote.strike,
           forward,
           mid,
-          frictionDollars: frictionDollarsPerContract(quote.bid, quote.ask, input.spreadShareCharged, optionCommissionPerContract(input.commissions)),
+          frictionDollars: frictionDollarsPerContract(bid, ask, input.spreadShareCharged, optionCommissionPerContract(input.commissions)),
           perSessionVariance: forecast.perSessionVariance,
           varianceSessions,
           calendarYears: yearsToExpiry,
@@ -259,8 +292,8 @@ export function selectBaselineCandidates(input: BaselineCandidateInput): { candi
       expiry: quote.expiry,
       strike: quote.strike,
       right: input.right,
-      bid: quote.bid,
-      ask: quote.ask,
+      bid,
+      ask,
       fillPrice,
       dte,
       delta,
@@ -363,10 +396,8 @@ export function makeBaselineSelector(input: {
   const callsModel = model && baseline.volatilityEdgeFilter === "entries" ? { ...model, minVolatilityEdge: null } : model;
   // With their own range every Call uses it, the Covered Call entry's included (Marcelo 2026-10-15).
   const callsSettings = baseline.callDeltaRange === "own_range" ? { ...baseline, minAbsDelta: baseline.callMinAbsDelta, maxAbsDelta: baseline.callMaxAbsDelta } : baseline;
-  // Sales only above minCallYieldPct: the entries always (a Covered Call's call, or a Cash-Secured Put entry's put: Marcelo
-  // 2026-10-19), the calls on held shares with "every_call"; the ladder's puts at any yield. A put ranked by premium yield alone when asked.
-  const minimumCallYield = baseline.minCallYieldPct > 0 ? baseline.minCallYieldPct / 100 : null;
-  const minimumYieldFor = (right: "C" | "P", forEntry: boolean, ladderPut: boolean) => (right === "P" ? (ladderPut ? null : minimumCallYield) : forEntry || baseline.minCallYieldAppliesTo === "every_call" ? minimumCallYield : null);
+  // Sales only above minCallYieldPct (baselineMinimumSaleYield). A put ranked by premium yield alone when asked.
+  const minimumYieldFor = (right: "C" | "P", forEntry: boolean, ladderPut: boolean) => baselineMinimumSaleYield(baseline, right, forEntry, ladderPut);
   // Any |delta| passes 0–1: the ladder's Puts without a range still need a usable implied volatility, as every contract does.
   const ladderPutsSettings = baseline.ladderPutDeltaRange === "none" ? { ...baseline, minAbsDelta: 0, maxAbsDelta: 1 } : baseline;
   const settingsFor = (right: "C" | "P", ladderPut: boolean) => (right === "C" ? callsSettings : ladderPut ? ladderPutsSettings : baseline);
@@ -401,8 +432,8 @@ export interface BaselineLookBook {
   hasOpenCashSecuredPut(): boolean;
   /** One position per contract (either right): held, or sold earlier at this look. */
   isHeld(contract: { expiry: string; strike: number }): boolean;
-  /** One sale: the backtest fills it at once, live places it as an order. */
-  sell(strategyKey: "cash_secured_put" | "covered_call", candidate: BaselineCandidate, contracts: number, eligibleCount: number, chosenBecause: string, strikeLimit?: { name: "costFloor" | "costCeiling"; value: number | null } | null, buyEveryShare?: boolean, extraScores?: Record<string, number | null>): void;
+  /** One sale: the backtest fills it at once, live places it as an order. `step`: the order it belongs to (held calls, entry, ladder put). */
+  sell(strategyKey: "cash_secured_put" | "covered_call", candidate: BaselineCandidate, contracts: number, eligibleCount: number, chosenBecause: string, strikeLimit?: { name: "costFloor" | "costCeiling"; value: number | null } | null, buyEveryShare?: boolean, extraScores?: Record<string, number | null>, step?: BaselineSaleStep): void;
 }
 
 export interface BaselineSalesInput {
@@ -435,6 +466,9 @@ export type BaselineNoSaleReason = "entry_filter" | "ladder_put_instead_of_calls
 
 /** An order that left contracts unsold, without the look's own facts (its time and symbol). */
 export type BaselineOrderShortfall = Omit<BacktestOrderShortfall, "tradingDate" | "at" | "lookTimeEt" | "symbol" | "lookCount">;
+
+/** The look's order a sale belongs to: the calls on held shares, the entry with the free cash, or a ladder put. */
+export type BaselineSaleStep = BaselineOrderShortfall["step"];
 
 /** The pre-step and steps 1–4 of the baseline's look, in order: each step sees the book after the earlier steps' sales. */
 export function planBaselineSales(input: BaselineSalesInput): void {
@@ -534,7 +568,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
       const contracts = Math.min(limits.byCollateral, limits.byCash, limits.byVolume);
       cashCut ||= limits.byCash < Math.min(limits.byCollateral, limits.byVolume);
       if (contracts < 1) continue;
-      book.sell("cash_secured_put", candidate, contracts, plan.candidates.length, `baseline: the ladder put with the highest premium yield (${why}), strike at most ${cap.toFixed(2)}${putsSold > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, { name: "costCeiling", value: cap }, false, { ...plan.rung.scores, ...orderScores(wanted, plan.candidates, candidate, best) });
+      book.sell("cash_secured_put", candidate, contracts, plan.candidates.length, `baseline: the ladder put with the highest premium yield (${why}), strike at most ${cap.toFixed(2)}${putsSold > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, { name: "costCeiling", value: cap }, false, { ...plan.rung.scores, ...orderScores(wanted, plan.candidates, candidate, best) }, "ladder_put");
       collateralLeft -= contracts * candidate.strike * sharesPerContract;
       putsSold++;
       contractsSold += contracts;
@@ -586,7 +620,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
       if (uncoveredLots < 1) break;
       if (book.isHeld(candidate)) continue;
       const contracts = Math.min(uncoveredLots, candidate.volumeCap);
-      book.sell("covered_call", candidate, contracts, candidates.length, `baseline: the call with the highest ${rankingLabel}${label} on the free shares${fillDown && soldAtThisFloor > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, floor === null ? null : { name: "costFloor", value: floor }, false, { ...orderScores(freeLots, candidates, candidate, heldCallsBest), sharesAverageCostBefore: heldCallsSharesAverageCost, stockPriceAtLook: stockPrice });
+      book.sell("covered_call", candidate, contracts, candidates.length, `baseline: the call with the highest ${rankingLabel}${label} on the free shares${fillDown && soldAtThisFloor > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, floor === null ? null : { name: "costFloor", value: floor }, false, { ...orderScores(freeLots, candidates, candidate, heldCallsBest), sharesAverageCostBefore: heldCallsSharesAverageCost, stockPriceAtLook: stockPrice }, "held_calls");
       uncoveredLots -= contracts;
       soldAtThisFloor += 1;
     }
@@ -697,7 +731,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
         belowAverageAfterPurchase++;
         continue;
       }
-      book.sell(kind === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${entryKindLabel[kind]} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : comparedWith}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, coveredCallEntry && buyEveryShare, { ...orderScores(wanted, candidates, candidate, best), ...entrySharesAverageCost });
+      book.sell(kind === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${entryKindLabel[kind]} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : comparedWith}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, coveredCallEntry && buyEveryShare, { ...orderScores(wanted, candidates, candidate, best), ...entrySharesAverageCost }, "entry");
       entriesMade++;
       contractsSold += contracts;
     }

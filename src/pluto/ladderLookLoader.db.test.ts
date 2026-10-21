@@ -60,10 +60,11 @@ describe("the ladder look's reads", () => {
   });
 
   it("reads a ticker's whole look: the live price, the previous close, the ticker's shock override and its ladder settings", async () => {
-    const input = await loadLadderLookInput({ tickerId, symbol: "LOOK", tickerWeight: 0.25 }, { now, clock: { todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }, freeCash: 80_000, accountValue: 200_000, commissions: { option: flatCommissionEstimator, stock: flatStockCommissionEstimator } });
+    const input = await loadLadderLookInput({ tickerId, symbol: "LOOK", tickerWeight: 0.25 }, { now, clock: { todayIso, closeMinutesEt: 960, riskFreeRate: 0.04 }, freeCash: 80_000, accountValue: 200_000, commissions: { option: flatCommissionEstimator, stock: flatStockCommissionEstimator }, maxQuoteAgeMinutes: 10 });
     if ("unavailable" in input) throw new Error(input.unavailable);
     expect(input).toMatchObject({ symbol: "LOOK", stockPrice: 51, previousClose: 50, memory: null, shockPctIfStartingToday: 65, bandQuotes: [], previousSessionVolumeByContract: null });
-    expect(input.baseline).toMatchObject({ entry: "covered_call", ladderRungs: 5, minAbsDelta: 0.05, maxAbsDelta: 0.3 });
+    expect(input).toMatchObject({ maxQuoteAgeMinutes: 10 });
+    expect(input.baseline).toMatchObject({ entry: "higher_yield", minCallYieldPct: 20, minCallYieldAppliesTo: "new_covered_calls", ladderRungs: 5, minAbsDelta: 0.05, maxAbsDelta: 0.3 });
     expect(input.book).toMatchObject({ tickerId, freeCash: 80_000, accountValue: 200_000, tickerWeight: 0.25, positions: [], cycleRows: { optionRows: [], stockTradeRows: [], openStockShares: 0 } });
     expect(input.book.workingSales).toHaveLength(2);
   });

@@ -14,10 +14,12 @@ import { effectiveAllocationPctBySymbol, loadEnabledPlutoTickerSettings, loadPlu
 /**
  * The choices the strategy's design fixes (adopted 2026-10-14/15, PROGRESS.md "Pluto execution strategies" and
  * "Ladder: a Put when its yield beats the Call's"): code, not settings, so no one turns the ladder into an untested
- * variant from a screen. The tunable values come from pluto_settings and pluto_ticker_settings.
+ * variant from a screen. The tunable values come from pluto_settings and pluto_ticker_settings. The entry and the
+ * minimum yield are the backtest lab's (Marcelo 2026-10-21): a Cash-Secured Put or a Covered Call entry, whichever ranks
+ * higher, each only above a 20% premium yield a year (the Calls on held shares at any yield).
  */
 export const ladderFixedBaselineChoices = {
-  entry: "covered_call",
+  entry: "higher_yield",
   callStrike: "above_break_even",
   entryCallStrike: "any",
   entryWhenSharesUncovered: "buy",
@@ -39,7 +41,8 @@ export const ladderFixedBaselineChoices = {
   shareStopLossPct: 0,
   maxSharesPctOfAccount: 100,
   maxAccountPctPerStock: 100,
-  minCallYieldPct: 0,
+  minCallYieldPct: 20,
+  minCallYieldAppliesTo: "new_covered_calls",
   volatilityEdgeFilter: "off",
   looks: "every_look",
 } as const satisfies Partial<BacktestBaselineSettings>;

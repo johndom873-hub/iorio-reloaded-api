@@ -34,6 +34,7 @@ function input(overrides: Partial<LadderLookInput> = {}): LadderLookInput {
     bandQuotes,
     forwardAnchors: new Map(),
     previousSessionVolumeByContract: new Map(bandQuotes.map((quote) => [contractKey(quote), 1_000])),
+    maxQuoteAgeMinutes: 10,
     ...overrides,
   };
 }
@@ -48,6 +49,21 @@ describe("runLadderLook", () => {
     expect(result.planned.every((sale) => sale.strategyKey === "covered_call" && Math.abs(sale.candidate.delta) >= 0.05 && Math.abs(sale.candidate.delta) <= 0.3)).toBe(true);
     // Priced at the mid: the ladder orders at the mid.
     expect(result.planned.every((sale) => Math.abs(sale.optionPrice - (sale.candidate.bid + sale.candidate.ask) / 2) < 1e-9)).toBe(true);
+    expect(result.planned.every((sale) => sale.step === "entry")).toBe(true);
+  });
+
+  it("enters with a Cash-Secured Put when it ranks higher (the lab's higher_yield entry), inside the |delta| range and above the 20% yield", () => {
+    const putsOnly = bandQuotes.filter((quote) => quote.right === "P");
+    const result = runLadderLook(input({ bandQuotes: putsOnly }));
+    expect(result.planned.length).toBeGreaterThan(0);
+    for (const sale of result.planned) {
+      expect(sale).toMatchObject({ strategyKey: "cash_secured_put", step: "entry", sharesBought: 0 });
+      expect(Math.abs(sale.candidate.delta)).toBeGreaterThanOrEqual(0.05);
+      expect(Math.abs(sale.candidate.delta)).toBeLessThanOrEqual(0.3);
+      expect(sale.candidate.premiumYield).toBeGreaterThan(0.2);
+    }
+    // A cycle of an entry Put alone does not start the ladder: the memory keeps recording the account value.
+    expect(result.memory).toEqual({ startedOn: null, accountValueAtStart: 200_000, shock: null });
   });
 
   it("stops on a price about a split's factor from the previous close, with nothing planned and the memory untouched", () => {
@@ -60,12 +76,31 @@ describe("runLadderLook", () => {
     const result = runLadderLook(input({ previousSessionVolumeByContract: null }));
     expect(result.planned).toEqual([]);
     expect(result.notes[0]).toBe("LADR: no previous-session option volume was captured, so nothing can be sold (the 20% rule)");
+    expect(result.cannotTradeBecause).toBe("no_previous_session_volume");
+    expect(runLadderLook(input()).cannotTradeBecause).toBeNull();
+  });
+
+  it("plans nothing when the band's latest quotes are older than Pluto's quote-age limit (B2), and says why", () => {
+    const elevenMinutesLater = new Date(now.getTime() + 11 * 60_000);
+    const result = runLadderLook(input({ now: elevenMinutesLater }));
+    expect(result).toMatchObject({ stoppedBecause: null, planned: [], cannotTradeBecause: "stale_band_quotes", notes: ["LADR: the band's latest quotes are older than 10 minutes, so nothing is planned"] });
+    expect(result.memory).toEqual({ startedOn: null, accountValueAtStart: 200_000, shock: null });
+    // Within the limit the same quotes are sold on.
+    expect(runLadderLook(input({ now: new Date(now.getTime() + 10 * 60_000) })).planned.length).toBeGreaterThan(0);
   });
 });
 
 describe("latestCycleQuotes", () => {
   it("keeps only the loop's latest cycle on the ticker (an older quote may have left the band) and drops errored quotes", () => {
-    const quotes = latestCycleQuotes([bandQuote(55, "C", 6), bandQuote(57.5, "C", 7), { ...bandQuote(60, "C", 7), errorCode: 200 }]);
+    const { quotes, stale } = latestCycleQuotes([bandQuote(55, "C", 6), bandQuote(57.5, "C", 7), { ...bandQuote(60, "C", 7), errorCode: 200 }], now, 10);
     expect(quotes.map((quote) => quote.strike)).toEqual([57.5]);
+    expect(stale).toBe(false);
+  });
+
+  it("leaves out quotes older than the limit; stale only when the latest cycle has none fresher", () => {
+    const old = { ...bandQuote(55, "C", 7), quotedAt: new Date(now.getTime() - 15 * 60_000) };
+    expect(latestCycleQuotes([old, bandQuote(57.5, "C", 7)], now, 10)).toMatchObject({ quotes: [{ strike: 57.5 }], stale: false });
+    expect(latestCycleQuotes([old], now, 10)).toEqual({ quotes: [], stale: true });
+    expect(latestCycleQuotes([], now, 10)).toEqual({ quotes: [], stale: false });
   });
 });

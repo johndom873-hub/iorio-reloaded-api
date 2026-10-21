@@ -305,7 +305,8 @@ describe("buildCloseOffersForTicker with Formula P3 (test DB)", () => {
     // With quotes and a profitable cycle (1000 at mids; half spreads 0.025 × 200 + 0.05 × 200 = 15): one combo close.
     const { offers } = await buildCloseOffersForTicker({ symbol: ticker.symbol, heldLegs: [callLeg], rolls: [], settings, stockBid: 51.9, stockAsk: 52.0, previousSessionDateIso: "2031-03-07", todayIso, ...noEventInputs });
     expect(offers).toHaveLength(1);
-    expect(offers[0]).toMatchObject({ kind: "close_position", automatic: true, positionId, legIds: [legIds[1], legIds[0]], side: "sell", multiplier: 1, quantity: 200, limitPrice: 51.95, legLimitPrices: { [legIds[1]!]: 0.53, [legIds[0]!]: 51.95 }, otherReferenceLegs: [{ side: "buy", price: 0.53, multiplier: 100 }] });
+    // Bought back at the 0.525 mid rounded down to the cent: never above the mid.
+    expect(offers[0]).toMatchObject({ kind: "close_position", automatic: true, positionId, legIds: [legIds[1], legIds[0]], side: "sell", multiplier: 1, quantity: 200, limitPrice: 51.95, legLimitPrices: { [legIds[1]!]: 0.52, [legIds[0]!]: 51.95 }, otherReferenceLegs: [{ side: "buy", price: 0.52, multiplier: 100 }] });
     expect(offers[0]!.cycle_pnl).toBeCloseTo(1000 - (0.55 - 0.525) * 200 - (51.95 - 51.9) * 200, 6);
     expect(offers[0]!.automaticReason).toMatch(/Formula P3b/);
     // Not in profit after half the spreads: stays open.
@@ -425,7 +426,7 @@ describe("buildCloseOffersForTicker with Formula F3 (test DB)", () => {
     const { offers, heldPositions } = await build(ticker.symbol, [leg]);
     expect(offers).toHaveLength(1);
     // (2.40 − 0.55) / 2.40 = 77% captured → step 70; 2 sessions away.
-    expect(offers[0]).toMatchObject({ id: `${ticker.symbol}:close_leg:${legIds[0]}`, kind: "close_leg", automatic: false, reviewKey: "c70s2", limitPrice: 0.53 });
+    expect(offers[0]).toMatchObject({ id: `${ticker.symbol}:close_leg:${legIds[0]}`, kind: "close_leg", automatic: false, reviewKey: "c70s2", limitPrice: 0.52 });
     expect(heldPositions).toEqual([expect.objectContaining({ legId: legIds[0], strategy: "cash_secured_put", event: expect.objectContaining({ title: "Fed rate decision", sessionsUntil: 2, sessionsAfter: 8, stressNormalDays: 2 }) })]);
     expect(heldPositions[0]!.eventStressLossDollars).toBeGreaterThan(0);
   });
@@ -467,7 +468,7 @@ describe("buildCloseOffersForTicker with Formula F3 (test DB)", () => {
     const callLeg = heldLeg({ legId: legIds[1]!, positionId, right: "C", strategyKey: "covered_call", strike: 55 });
     const { offers, heldPositions } = await build(ticker.symbol, [callLeg]);
     expect(offers).toHaveLength(1);
-    expect(offers[0]).toMatchObject({ kind: "close_position", automatic: false, legIds: [legIds[1], legIds[0]], legLimitPrices: { [legIds[1]!]: 0.53, [legIds[0]!]: 51.95 }, otherReferenceLegs: [{ side: "buy", price: 0.53, multiplier: 100 }] });
+    expect(offers[0]).toMatchObject({ kind: "close_position", automatic: false, legIds: [legIds[1], legIds[0]], legLimitPrices: { [legIds[1]!]: 0.52, [legIds[0]!]: 51.95 }, otherReferenceLegs: [{ side: "buy", price: 0.52, multiplier: 100 }] });
     // Close cost: call (0.55 − 0.525) × 100 + 0.68 commission, × 2 contracts, + shares (51.95 − 51.90) × 200.
     const closeCost = (0.025 * 100 + flatCommissionEstimator.perContractDollars("buy", 2)) * 2 + 0.05 * 200;
     expect(heldPositions[0]).toMatchObject({ strategy: "covered_call", shares: 200 });

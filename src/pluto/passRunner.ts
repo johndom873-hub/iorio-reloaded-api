@@ -284,6 +284,7 @@ async function sendHeldShareCall(ticker: EvaluatedTicker, round: HeldShareCallRo
   const candidate = choice?.candidate ?? null;
   const gates = runHeldShareCallGates({
     candidate,
+    symbol,
     settings,
     book: {
       freeShares: fresh.scored.freeShares,
@@ -698,6 +699,7 @@ async function runStartedPass(request: PassRequest, context: PassRunnerContext, 
     marginAtDecision,
     settings,
     sector,
+    symbol: owner.row.symbol,
     book: {
       netLiquidationValue: checks.context.netLiquidationValue ?? 0,
       freeCash: account.freeCash,

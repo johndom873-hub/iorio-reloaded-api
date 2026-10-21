@@ -1,7 +1,7 @@
 import type { PlutoSettings } from "./settingsStore.js";
 
 // Test support: the strategy switch and the CC + Put Ladder's settings at their approved defaults (Marcelo 2026-10-15,
-// the 20261015300001 and 20261015300002 migrations), for the tests that spell out a whole PlutoSettings.
+// the 20261015300001, 20261015300002 and 20261021400001 migrations), for the tests that spell out a whole PlutoSettings.
 export const plutoLadderSettingsFixture = {
   executionStrategy: "edge_margin",
   ladderMinAbsDelta: 0.05,
@@ -15,9 +15,11 @@ export const plutoLadderSettingsFixture = {
   ladderShockMaxPct: 80,
   ladderShockNoHistoryPct: 90,
   ladderShockLookbackYears: 10,
-  ladderMaxWorkingOrdersPerTicker: 5,
+  ladderMaxWorkingOrdersPerTicker: 10,
   ladderSpyStressBreakerPct: 5,
   ladderTickerCooldownMinutes: 0,
-  ladderMaxOpenPositionsPerTicker: 5,
+  ladderMaxOpenPositionsPerTicker: 30,
   ladderMaxOrdersPerTickerPerDay: 30,
+  ladderMaxOpenPositions: 120,
+  ladderMaxOrdersPerDay: 100,
 } as const satisfies Partial<PlutoSettings>;

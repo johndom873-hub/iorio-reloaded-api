@@ -5,11 +5,13 @@ import { notifyPlutoTelegram } from "../lib/notifyTelegram.js";
 import { fillsAreComplete, shouldWaitForFills } from "../lib/orderFills.js";
 import { daysToExpiry, describeOptionContract, describeOrderSize, formatStrike } from "../lib/optionContractLabel.js";
 import { easternIsoDate } from "../lib/easternIsoDate.js";
+import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
 import type { SignalCandidate } from "../lib/signalCandidates.js";
 import type { HeldLegScore, RollSignalCandidate } from "../lib/rollSignalCandidates.js";
 import { recordPlutoEvent, updatePlutoAction, type PlutoActionOutcome } from "./ledger.js";
 import type { PlutoOrderPlan } from "./postModelGates.js";
 import type { PlutoSettings } from "./settingsStore.js";
+import { classifyRoutineOrderProblem, routineOrderProblemLabels } from "./routineOrderProblems.js";
 import { tripPlutoBreaker } from "./stateStore.js";
 
 // Execution (design round 3, items 6 and 22): the agent never writes an order row itself. It builds
@@ -19,8 +21,10 @@ import { tripPlutoBreaker } from "./stateStore.js";
 // (the platform's unfilled-order sweep cancels it sooner when it sits unfilled). The order gate every order
 // passes (halt, account binding, limits including working orders, delta band, close gate, limit-price check,
 // active-order conflict, 15-minute staleness) runs on the way and again in the worker before placement; a
-// refusal at the routes is a blocked action, never a retry. An order error or rejection (the worker's
-// refusals included) trips the order_error breaker: a human looks before Pluto acts again.
+// refusal at the routes is a blocked action, never a retry. A routine problem once the order reached the worker (drifted
+// price, missing quote, tick size, margin: routineOrderProblems.ts) is blocked too, and planned afresh at the next look;
+// any other order error or rejection (the worker's other refusals included) trips the order_error breaker: a human looks
+// before Pluto acts again.
 
 interface OrderRequestResponse {
   id: string;
@@ -138,7 +142,7 @@ export async function executePlutoOrder(api: InternalApiClient, settings: PlutoS
       });
     } else {
       const held = input.heldLeg;
-      const closeLimitPrice = held.bid !== null && held.ask !== null ? Math.round(((held.bid + held.ask) / 2) * 100) / 100 : null;
+      const closeLimitPrice = held.bid !== null && held.ask !== null ? optionMidLimitPrice(held.bid, held.ask, "buy") : null;
       if (closeLimitPrice === null) return await blocked(input, "the held leg has no live two-sided quote to price the buyback");
       built = await api.post<OrderRequestResponse>(`/positions/${input.roll.positionId}/roll`, {
         closeLegId: input.roll.legId,
@@ -425,8 +429,15 @@ export async function watchPlutoOrder(
       if (filledStatus && comparison === null) await recordPlutoEvent("warning", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, message: "the order's fills were not all recorded in time, so its fill price and slippage are not checked" });
       const fillPrice = comparison?.chosenLegFillPrice ?? null;
       const impliedFillPrice = comparison ? impliedChosenLegPrice(input.reference, otherLegOrderPrices(input.reference, order.payload?.legs ?? []), fills) : null;
-      await updatePlutoAction(input.actionId, { outcome, fillPrice, impliedFillPrice, blockReason: order.errorMessage ?? null });
+      // A routine problem (routineOrderProblems.ts) is a blocked action, planned afresh at the next look: no breaker.
+      const routineProblem = outcome === "rejected" || outcome === "error" ? classifyRoutineOrderProblem(order.errorMessage) : null;
+      const routineReason = routineProblem === null ? null : `${routineOrderProblemLabels[routineProblem]}: ${order.errorMessage}`;
+      await updatePlutoAction(input.actionId, { outcome: routineProblem === null ? outcome : "blocked", fillPrice, impliedFillPrice, blockReason: routineReason ?? order.errorMessage ?? null });
       await recordPlutoEvent("order_outcome", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, outcome, fillPrice, error: order.errorMessage ?? undefined });
+      if (routineReason !== null) {
+        await recordPlutoEvent("action_blocked", { actionId: input.actionId, orderId: input.orderId, symbol: input.symbol, stage: "order", reason: routineReason });
+        return { outcome: "blocked", detail: routineReason };
+      }
       if (outcome === "rejected" || outcome === "error") {
         const detail = `${input.description}: ${order.errorMessage ?? outcome}`;
         await tripPlutoBreaker("order_error", detail);

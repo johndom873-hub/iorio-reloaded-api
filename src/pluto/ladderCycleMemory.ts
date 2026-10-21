@@ -4,9 +4,11 @@ import { db } from "../db/connection.js";
 // The CC + Put Ladder's memory of a ticker's cycle between looks (pluto_ladder_cycles), the live counterpart of the
 // backtest's LadderCycleState (backtestBaselineLadder.ts), with the live rules decided by Marcelo 2026-10-15:
 //   - flat (no shares, no options): the account value is recorded at every look, the next cycle's starting value;
-//   - a cycle starts at the first look that finds it open, its shock S fixed then (the ticker's override, else the
-//     recommended one); a cycle already open when Pluto switches to the ladder starts at the switch (the rows are cleared
-//     by the switch, so the first look finds no memory).
+//   - a cycle starts at the first look that finds it open with shares held, its shock S fixed then (the ticker's
+//     override, else the recommended one); a cycle already open when Pluto switches to the ladder starts at the switch
+//     (the rows are cleared by the switch, so the first look finds no memory);
+//   - a cycle of Puts only (a Cash-Secured Put entry not yet assigned) keeps recording the account value, as flat: it
+//     starts once the Put is assigned, as the backtest's noteLadderLook has it (Marcelo 2026-10-19).
 // The ladder's peak is not remembered: it is the average cost of the shares held (Marcelo 2026-10-15; selling Puts is
 // meant to lower the break-even, so the floor follows what the shares cost, never the market's high), read from the
 // holdings at each look (runningAverageShareCost, through the look book).
@@ -23,6 +25,8 @@ export interface LadderCycleMemory {
 export interface LadderCycleLook {
   /** The ticker holds shares or options. */
   cycleOpen: boolean;
+  /** The ticker holds shares. */
+  sharesHeld: boolean;
   accountValue: number;
   todayIso: string;
   /** The shock a cycle starting today gets, percent: the ticker's override, else the recommended one. */
@@ -33,6 +37,7 @@ export interface LadderCycleLook {
 export function nextLadderCycleMemory(kept: LadderCycleMemory | null, look: LadderCycleLook): LadderCycleMemory {
   if (!look.cycleOpen) return { startedOn: null, accountValueAtStart: look.accountValue, shock: null };
   if (kept?.startedOn) return kept;
+  if (!look.sharesHeld) return { startedOn: null, accountValueAtStart: look.accountValue, shock: null };
   return { startedOn: look.todayIso, accountValueAtStart: kept?.accountValueAtStart ?? look.accountValue, shock: look.shockPctIfStartingToday / 100 };
 }
 

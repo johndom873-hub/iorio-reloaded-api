@@ -23,8 +23,8 @@ import { fetchTradingBlockedReason } from "./tradingGate.js";
 //   close_position     the close gate (session open, live two-sided quotes on every leg, consistent wheel cycle)
 //   every order        the limit-price check: each leg's limit against its own live mid (limitPriceCheck.ts)
 // A close is not limit-checked: it only reduces exposure. A CC + Put Ladder order (its Pluto action taken under the ladder)
-// gets the ladder's delta range on its own delta and its pot cap instead of the delta band and the first two limits
-// (ladderOrderGates.ts; Marcelo 2026-10-15).
+// gets the ladder's delta range on its own delta and its pot cap instead of the delta band and the first two limits, and
+// the ladder's book-wide cap on Pluto's capital budget (ladderOrderGates.ts; Marcelo 2026-10-15 and 2026-10-21).
 
 export interface OrderRequestForGates {
   id: string;
@@ -48,7 +48,7 @@ export interface OrderGateResult {
 }
 
 /** The limit-check input of an opening or rolling order, or null when the order is not limit-checked (closes, no option leg, no strategy). */
-export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGates, "id" | "request_type" | "payload">, ladder: Pick<LadderOrderGateContext, "potFraction"> | null = null) {
+export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGates, "id" | "request_type" | "payload">, ladder: Pick<LadderOrderGateContext, "potFraction" | "book"> | null = null) {
   const requestType = orderRequest.request_type;
   const isRoll = requestType === "roll_leg";
   if (!requestType.startsWith("open_") && !isRoll) return null;
@@ -70,7 +70,7 @@ export function limitsInputFromOrderRequest(orderRequest: Pick<OrderRequestForGa
     rollFromPremium: closeLeg?.unitPrice,
     excludeOrderRequestId: orderRequest.id,
     ...(stockLegShares !== undefined && !isRoll ? { stockSharesBought: stockLegShares } : {}),
-    ...(ladder ? { ladder: { potFraction: ladder.potFraction, stockSharesBought: stockLegShares ?? 0 } } : {}),
+    ...(ladder ? { ladder: { potFraction: ladder.potFraction, stockSharesBought: stockLegShares ?? 0, book: ladder.book } } : {}),
   };
 }
 

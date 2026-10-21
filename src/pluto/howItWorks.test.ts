@@ -30,8 +30,8 @@ describe("buildPlutoHowItWorks", () => {
     const { example: ladderExample, ...ladderValues } = ladder;
     expect(ladderValues).toEqual({
       minAbsDelta: 0.05, maxAbsDelta: 0.3, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 50, minimumBid: 0.05, maxVolumeSharePct: 20,
-      rungs: 5, sharesPct: 50, shockMinPct: 60, shockMaxPct: 80, shockNoHistoryPct: 90, shockLookbackYears: 10, putOverCallYieldMarginPct: 0,
-      maxWorkingOrdersPerTicker: 5, maxOrdersPerTickerPerDay: 30, maxOpenPositionsPerTicker: 5, spyStressBreakerPct: 5, tickerCooldownMinutes: 0,
+      rungs: 5, sharesPct: 50, shockMinPct: 60, shockMaxPct: 80, shockNoHistoryPct: 90, shockLookbackYears: 10, putOverCallYieldMarginPct: 0, minEntryYieldPct: 20, maxQuoteAgeMinutes: 10,
+      maxWorkingOrdersPerTicker: 10, maxOrdersPerTickerPerDay: 30, maxOpenPositionsPerTicker: 30, maxOpenPositions: 120, maxOrdersPerDay: 100, spyStressBreakerPct: 5, tickerCooldownMinutes: 0,
     });
     const { example: edgeExample, ...edgeValues } = edgeMargin;
     expect(edgeValues).toEqual({

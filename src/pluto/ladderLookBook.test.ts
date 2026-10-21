@@ -111,7 +111,7 @@ describe("the shared sale steps on the live book", () => {
   it("on a flat ticker, buys its share budget under Calls, as the backtest's look does", () => {
     const baseline = { ...defaultBacktestBaselineSettings, ...ladderBaselineFromPlutoSettings(plutoLadderSettingsFixture as unknown as PlutoSettings) };
     const { book, planned } = createLadderLookBook(snapshot());
-    const memory = nextLadderCycleMemory(null, { cycleOpen: false, accountValue: 200_000, todayIso, shockPctIfStartingToday: 70 });
+    const memory = nextLadderCycleMemory(null, { cycleOpen: false, sharesHeld: false, accountValue: 200_000, todayIso, shockPctIfStartingToday: 70 });
     const forwardAnchors = new Map<string, BaselineForwardAnchor>();
     noteBaselineForwardAnchors(forwardAnchors, { quotes, todayIso, yearsToTodaysClose: 1 / 8760, stockPrice: 50, riskFreeRate });
     const select = makeBaselineSelector({ quotes, forwardAnchors, commissions, todayIso, yearsToTodaysClose: 1 / 8760, stockPrice: 50, riskFreeRate, previousSessionVolumeByContract: new Map(quotes.map((entry) => [contractKey(entry), 1_000])), baseline, spreadShareCharged: 0.5, isHeld: book.isHeld, earningsDatesIso: undefined, model: null });

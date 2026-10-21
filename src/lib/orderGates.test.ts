@@ -40,8 +40,8 @@ describe("limitsInputFromOrderRequest", () => {
 describe("limitsInputFromOrderRequest for a CC + Put Ladder order", () => {
   it("carries the pot and the shares the Covered Call entry buys (every share, uncovered ones held or not)", () => {
     const coveredCallEntry = { symbol: "AAA", strategyKey: "covered_call", legs: [{ role: "stock", action: "BUY", symbol: "AAA", quantity: 200, unitPrice: 50 }, { role: "option", action: "SELL", symbol: "AAA", quantity: 2, unitPrice: 1.1, strike: 55, expiry: "20261120", right: "C" }] } as OrderRequestPayload;
-    expect(limitsInputFromOrderRequest({ id: "o6", request_type: "open_covered_call", payload: coveredCallEntry }, { potFraction: 0.25 })).toMatchObject({ strategyKey: "covered_call", quantity: 2, strike: 55, ladder: { potFraction: 0.25, stockSharesBought: 200 } });
-    expect(limitsInputFromOrderRequest({ id: "o7", request_type: "open_cash_secured_put", payload: putOpen }, { potFraction: 0.1 })).toMatchObject({ ladder: { potFraction: 0.1, stockSharesBought: 0 } });
+    expect(limitsInputFromOrderRequest({ id: "o6", request_type: "open_covered_call", payload: coveredCallEntry }, { potFraction: 0.25, book: { symbols: ["AAA", "BBB"], budgetFraction: 0.5 } })).toMatchObject({ strategyKey: "covered_call", quantity: 2, strike: 55, ladder: { potFraction: 0.25, stockSharesBought: 200, book: { symbols: ["AAA", "BBB"], budgetFraction: 0.5 } } });
+    expect(limitsInputFromOrderRequest({ id: "o7", request_type: "open_cash_secured_put", payload: putOpen }, { potFraction: 0.1, book: { symbols: ["AAA"], budgetFraction: 0.5 } })).toMatchObject({ ladder: { potFraction: 0.1, stockSharesBought: 0 } });
     // Outside the ladder too, a covered call's stock leg is counted as bought; with no stock leg the shortfall is worked out at check time.
     expect(limitsInputFromOrderRequest({ id: "o8", request_type: "open_covered_call", payload: coveredCallEntry })).toMatchObject({ stockSharesBought: 200 });
     const callOnHeldShares = { ...coveredCallEntry, legs: coveredCallEntry.legs.filter((leg) => leg.role === "option") } as OrderRequestPayload;

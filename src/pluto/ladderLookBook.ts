@@ -1,4 +1,4 @@
-import type { BaselineCandidate, BaselineCommissions, BaselineLookBook } from "../backtest/engine/baselineSaleSteps.js";
+import type { BaselineCandidate, BaselineCommissions, BaselineLookBook, BaselineSaleStep } from "../backtest/engine/baselineSaleSteps.js";
 import { availableUncoveredShares, cashLockedInCashSecuredPuts, positionCapitalAtRisk, type PositionFigures, type PositionLegFigures } from "../lib/positionSelectors.js";
 import { summarizeOpenCycleFromRows, type CycleOptionLegRow, type CycleStockTradeRow, type OpenCycleSummaryRows } from "../lib/cycleInputRows.js";
 import type { OpenCycleSummary } from "../lib/cycleBreakEven.js";
@@ -27,6 +27,8 @@ export interface LadderSale {
 }
 
 export interface PlannedLadderSale extends LadderSale {
+  /** The look's order it belongs to: a Call on held shares, the entry with the free cash, or a ladder Put. */
+  step: BaselineSaleStep;
   candidate: BaselineCandidate;
   eligibleCount: number;
   chosenBecause: string;
@@ -128,12 +130,12 @@ export function createLadderLookBook(snapshot: LadderLookSnapshot): { book: Base
     openPositionsCapitalAtRisk: () => positions.filter((position) => position.status === "open").reduce((sum, position) => sum + (positionCapitalAtRisk(position) ?? 0), 0),
     hasOpenCashSecuredPut: () => positions.some((position) => position.status === "open" && position.strategyKey === "cash_secured_put"),
     isHeld: (contract) => heldContracts.has(contractKey(contract)),
-    sell(strategyKey, candidate, contracts, eligibleCount, chosenBecause, _strikeLimit, buyEveryShare = false, extraScores = {}) {
+    sell(strategyKey, candidate, contracts, eligibleCount, chosenBecause, _strikeLimit, buyEveryShare = false, extraScores = {}, step = strategyKey === "covered_call" ? "held_calls" : "ladder_put") {
       const sharesNeeded = contracts * sharesPerContract;
       const sharesBought = strategyKey === "covered_call" ? sharesNeeded - (buyEveryShare ? 0 : Math.min(availableUncoveredShares(positions), sharesNeeded)) : 0;
       const sale: LadderSale = { strategyKey, expiry: candidate.expiry, strike: candidate.strike, right: candidate.right, contracts, optionPrice: candidate.fillPrice, sharesBought, stockPrice: snapshot.stockPrice };
       apply(sale);
-      planned.push({ ...sale, candidate, eligibleCount, chosenBecause, scores: extraScores });
+      planned.push({ ...sale, step, candidate, eligibleCount, chosenBecause, scores: extraScores });
     },
   };
   return { book, planned };

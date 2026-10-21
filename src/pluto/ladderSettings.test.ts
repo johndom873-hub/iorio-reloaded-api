@@ -6,9 +6,9 @@ import { plutoLadderSettingsFixture } from "./plutoSettingsFixture.js";
 import type { PlutoSettings } from "./settingsStore.js";
 
 // The values the all-tickers run of 2026-10-15 used (tmp/ladder-research/specs_current_all.json, the 50% variant):
-// what Marcelo adopted for the CC + Put Ladder.
+// what Marcelo adopted for the CC + Put Ladder; the entry and the minimum yield since 2026-10-21 the backtest lab's.
 const adoptedBaselineOverrides = {
-  entry: "covered_call", minAbsDelta: 0.05, maxAbsDelta: 0.3, minDte: 1, maxDte: 45, callStrike: "above_break_even", entryCallStrike: "any", callDeltaRange: "entry_range",
+  entry: "higher_yield", minCallYieldPct: 20, minCallYieldAppliesTo: "new_covered_calls", minAbsDelta: 0.05, maxAbsDelta: 0.3, minDte: 1, maxDte: 45, callStrike: "above_break_even", entryCallStrike: "any", callDeltaRange: "entry_range",
   ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "fill_down_ranking", earnings: "ignore", maxAccountPctPerStock: 100, maxSharesPctOfAccount: 100,
   takeProfitPct: 0, shareStopLossPct: 0, looks: "every_look", putsWhenNoCall: "reserve_ladder", ladderSharesPct: 50, ladderTop: "price", ladderPace: "any_look",
   ladderShock: "history", ladderRungs: 5, entryWhenSharesUncovered: "buy", ladderShockMinPct: 60, ladderShockMaxPct: 80, maxSpreadPctOfMid: 50,

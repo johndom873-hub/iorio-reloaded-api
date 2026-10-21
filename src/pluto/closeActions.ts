@@ -13,6 +13,7 @@ import { eventReviewKey, heldCoveredCallEntry, heldPutEntry, type HeldPositionEn
 import { daysToExpiry, describeOptionContract, describeOrderSize, formatDayMonth } from "../lib/optionContractLabel.js";
 import { resolveIsOpenDay } from "../lib/marketSessionStatus.js";
 import { activeOrderRequestStatuses } from "../lib/orderRequestStatuses.js";
+import { optionMidLimitPrice } from "../lib/optionLimitPrice.js";
 
 // Formulas P1 and P2 (approved 2026-09-28) as deterministic offers. The model never invents a
 // close: code decides which closes are even on the table, the model chooses among them (or the
@@ -205,6 +206,8 @@ export interface P2Input {
   orderedEntryPremium?: number | null;
   /** Today, Eastern: the DTE of a leg the surface could not score (it carries none). */
   todayIso: string;
+  /** Live: option limits rounded to the cent on the order's side of the mid; absent (the backtest's replay of Pluto): to the nearest cent. */
+  liveLimitRounding?: boolean;
 }
 
 /** P2: a credit roll with at least this edge margin withholds the buyback. A margin of its own, not a grade's cut point. */
@@ -234,7 +237,7 @@ export function evaluateShortLegBuyback(input: P2Input): { offer: CloseOffer | n
   const keptPremiumShare = (entryPremium - leg.ask) / entryPremium;
   if (surfaceUnusable && keptPremiumShare < buybackUnscoredMinKeptPremiumShare)
     return { offer: null, reason: `the surface cannot value the leg (no usable slice), and buying back at the ask would keep ${(keptPremiumShare * 100).toFixed(1)}% of the premium, below ${(buybackUnscoredMinKeptPremiumShare * 100).toFixed(0)}%` };
-  const limitPrice = Math.round(((leg.bid + leg.ask) / 2) * 100) / 100;
+  const limitPrice = optionBuyBackLimit(leg.bid, leg.ask, input.liveLimitRounding);
   return {
     offer: {
       id: `${input.symbol}:close_leg:${leg.legId}`,
@@ -302,6 +305,8 @@ export interface P3Input {
   earnings: UpcomingEarnings | null;
   /** countSessionsLeftBeforeEarnings, or null when the announcement is too far off to count. */
   sessionsLeft: number | null;
+  /** Live: option limits rounded to the cent on the order's side of the mid; absent (the backtest's replay of Pluto): to the nearest cent. */
+  liveLimitRounding?: boolean;
 }
 
 /** Pure P3: the automatic buyback, the reason there is none, or neither when the leg does not span an announcement. */
@@ -323,7 +328,7 @@ export function evaluateEarningsBuyback(input: P3Input): { offer: CloseOffer | n
   const entryPremium = input.orderedEntryPremium ?? leg.entryPrice;
   const pnlAtAsk = (entryPremium - leg.ask) * leg.quantity * 100;
   if (pnlAtAsk <= 0) return { offer: null, reason: `${spans}; buying back at the ask would ${pnlAtAsk < 0 ? `lose ${formatSignedDollars(-pnlAtAsk, 0)}` : "only break even"}, so it stays open` };
-  const limitPrice = Math.round(((leg.bid + leg.ask) / 2) * 100) / 100;
+  const limitPrice = optionBuyBackLimit(leg.bid, leg.ask, input.liveLimitRounding);
   return {
     offer: {
       id: `${input.symbol}:close_leg:${leg.legId}`,
@@ -358,9 +363,16 @@ export interface P3bInput {
   /** The close gate's live cycle P&L at mids (null when the gate blocked), and why it blocked. */
   cycleTotal: number | null;
   gateBlockReason: string | null;
+  /** Live: option limits rounded to the cent on the order's side of the mid; absent (the backtest's replay of Pluto): to the nearest cent. */
+  liveLimitRounding?: boolean;
 }
 
 const centsUp = (value: number) => Math.round(value * 100) / 100;
+
+/** An option leg's buy-back limit at the mid: live, rounded down to the cent (optionLimitPrice.ts); in the backtest's replay of Pluto, to the nearest cent. */
+function optionBuyBackLimit(bid: number, ask: number, liveLimitRounding: boolean | undefined): number {
+  return liveLimitRounding ? optionMidLimitPrice(bid, ask, "buy") : centsUp((bid + ask) / 2);
+}
 
 /** Whether a covered call is due its earnings close at all (spans the report and inside the window); the gate is only read then. */
 export function coveredCallEarningsCloseDue(callLeg: HeldLegScore, earnings: UpcomingEarnings | null, sessionsLeft: number | null): boolean {
@@ -382,7 +394,7 @@ export function evaluateEarningsCoveredCallClose(input: P3bInput): { offer: Clos
   const halfSpreadCost = (callAsk - callMid) * 100 * callLeg.quantity + (stockMid - input.stockBid) * input.stockLeg.shares;
   const profit = input.cycleTotal - halfSpreadCost;
   if (profit <= 0) return { offer: null, reason: `${spans}; closing now would ${profit < 0 ? `lose ${formatSignedDollars(-profit, 0)}` : "only break even"} after half the spreads, so it stays open` };
-  const callLimit = centsUp(callMid);
+  const callLimit = optionBuyBackLimit(callBid, callAsk, input.liveLimitRounding);
   const stockLimit = centsUp(stockMid);
   return {
     offer: {
@@ -444,6 +456,8 @@ export interface EventPutCloseInput {
   singleLegPosition: boolean;
   /** The close gate's verdict from the round's quotes; null when the gate passed. */
   gateBlockReason: string | null;
+  /** Live: option limits rounded to the cent on the order's side of the mid; absent (the backtest's replay of Pluto): to the nearest cent. */
+  liveLimitRounding?: boolean;
 }
 
 /**
@@ -461,7 +475,7 @@ export function evaluateEventPutClose(input: EventPutCloseInput): { offer: Close
   const pnlAtAsk = (entry.entryCredit - leg.ask) * leg.quantity * 100;
   if (pnlAtAsk <= 0) return { offer: null, reason: `${before}: buying back at the ask would ${pnlAtAsk < 0 ? `lose ${formatSignedDollars(-pnlAtAsk, 0)}` : "only break even"}, so it is held through it` };
   if (input.gateBlockReason) return { offer: null, reason: `${before}: ${input.gateBlockReason}` };
-  const limitPrice = Math.round(((leg.bid + leg.ask) / 2) * 100) / 100;
+  const limitPrice = optionBuyBackLimit(leg.bid, leg.ask, input.liveLimitRounding);
   return {
     offer: {
       id: `${input.symbol}:close_leg:${leg.legId}`,
@@ -500,6 +514,8 @@ export interface EventCoveredCallCloseInput {
   stockBid: number | null;
   stockAsk: number | null;
   gateBlockReason: string | null;
+  /** Live: option limits rounded to the cent on the order's side of the mid; absent (the backtest's replay of Pluto): to the nearest cent. */
+  liveLimitRounding?: boolean;
 }
 
 /**
@@ -517,7 +533,7 @@ export function evaluateEventCoveredCallClose(input: EventCoveredCallCloseInput)
   const profit = entry.cyclePnlAfterCostsDollars;
   if (profit === null || profit === undefined) return { offer: null, reason: `${before}: no live cycle P&L` };
   if (profit <= 0) return { offer: null, reason: `${before}: closing now would ${profit < 0 ? `lose ${formatSignedDollars(-profit, 0)}` : "only break even"} after the close cost, so it is held through it` };
-  const callLimit = centsUp((callBid + callAsk) / 2);
+  const callLimit = optionBuyBackLimit(callBid, callAsk, input.liveLimitRounding);
   const stockLimit = centsUp((input.stockBid + input.stockAsk) / 2);
   return {
     offer: {
@@ -587,6 +603,8 @@ export interface CloseOffersForTickerInput {
   /** Open days from today, sorted, reaching every held leg's expiry (loadOpenDaysBetween). */
   openDaysIso: string[];
   commissionEstimator: CommissionEstimator;
+  /** Live: option limits rounded to the cent on the order's side of the mid; absent (the backtest's replay of Pluto): to the nearest cent. */
+  liveLimitRounding?: boolean;
 }
 
 export interface CloseOffersOpenLeg {
@@ -660,7 +678,7 @@ export async function loadCloseOffersBook(input: Pick<CloseOffersForTickerInput,
  * skipped, and every held short leg as the model sees it (held_positions, whatever the offers).
  */
 export async function buildCloseOffersForTicker(input: CloseOffersForTickerInput): Promise<{ offers: CloseOffer[]; skipped: { id: string; reason: string }[]; heldPositions: HeldPositionEntry[] }> {
-  return buildCloseOffersFromBook(input, await loadCloseOffersBook(input), liveCloseGates);
+  return buildCloseOffersFromBook({ ...input, liveLimitRounding: true }, await loadCloseOffersBook(input), liveCloseGates);
 }
 
 /** buildCloseOffersForTicker on a book already read: no database, the close gate through `gates`. */
@@ -712,7 +730,7 @@ export async function buildCloseOffersFromBook(input: CloseOffersForTickerInput,
             continue;
           }
           const gate = await gates.forPosition(leg.positionId);
-          const result = evaluateEarningsCoveredCallClose({ symbol: input.symbol, positionId: leg.positionId, callLeg: leg, stockLeg: coveredCallStockLeg, earnings, sessionsLeft, stockBid: input.stockBid, stockAsk: input.stockAsk, cycleTotal: gate.cycleTotal, gateBlockReason: gate.blocked ? gate.reason : null });
+          const result = evaluateEarningsCoveredCallClose({ symbol: input.symbol, liveLimitRounding: input.liveLimitRounding, positionId: leg.positionId, callLeg: leg, stockLeg: coveredCallStockLeg, earnings, sessionsLeft, stockBid: input.stockBid, stockAsk: input.stockAsk, cycleTotal: gate.cycleTotal, gateBlockReason: gate.blocked ? gate.reason : null });
           if (result.offer) offers.push(result.offer);
           else if (result.reason) skipped.push({ id: closeId, reason: result.reason });
           continue;
@@ -721,12 +739,12 @@ export async function buildCloseOffersFromBook(input: CloseOffersForTickerInput,
         const gate = await gates.fromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote);
         const reviewed = heldCoveredCallEntry({ callLeg: leg, shares: coveredCallStockLeg.shares, stockBid: input.stockBid, stockAsk: input.stockAsk, ...metricsInput, cycleTotal: gate.cycleTotal });
         heldPositions[heldPositions.indexOf(entry)] = reviewed;
-        const result = evaluateEventCoveredCallClose({ symbol: input.symbol, positionId: leg.positionId, callLeg: leg, stockLeg: coveredCallStockLeg, entry: reviewed, stockBid: input.stockBid, stockAsk: input.stockAsk, gateBlockReason: gate.blocked ? gate.reason : null });
+        const result = evaluateEventCoveredCallClose({ symbol: input.symbol, liveLimitRounding: input.liveLimitRounding, positionId: leg.positionId, callLeg: leg, stockLeg: coveredCallStockLeg, entry: reviewed, stockBid: input.stockBid, stockAsk: input.stockAsk, gateBlockReason: gate.blocked ? gate.reason : null });
         if (result.offer) offers.push(result.offer);
         else if (result.reason) skipped.push({ id: closeId, reason: result.reason });
         continue;
       }
-      const earningsResult = evaluateEarningsBuyback({ symbol: input.symbol, leg, singleLegPosition, orderedEntryPremium: orderedPremium, earnings, sessionsLeft });
+      const earningsResult = evaluateEarningsBuyback({ symbol: input.symbol, liveLimitRounding: input.liveLimitRounding, leg, singleLegPosition, orderedEntryPremium: orderedPremium, earnings, sessionsLeft });
       if (earningsResult.offer) {
         if (book.recentUnfilledAutomaticAttemptPositionIds.has(leg.positionId)) skipped.push({ id: `${input.symbol}:earnings_close:${leg.legId}`, reason: "an automatic buyback of this leg did not fill within the last hour" });
         else {
@@ -740,6 +758,7 @@ export async function buildCloseOffersFromBook(input: CloseOffersForTickerInput,
       } else if (earningsResult.reason) skipped.push({ id: `${input.symbol}:earnings_close:${leg.legId}`, reason: earningsResult.reason });
       const result = evaluateShortLegBuyback({
         symbol: input.symbol,
+        liveLimitRounding: input.liveLimitRounding,
         leg,
         rolls: input.rolls,
         settings: input.settings,
@@ -749,7 +768,7 @@ export async function buildCloseOffersFromBook(input: CloseOffersForTickerInput,
       });
       // F3 before a macro event: the close gate is only read inside the window, for a buyback the ask would not lose on.
       const eventGate = entry && eventCloseDue(entry.event) && leg.ask !== null && leg.ask < entry.entryCredit ? await gates.fromQuotes(leg.positionId, { [leg.legId]: { bid: leg.bid, ask: leg.ask, last: null } }, stockQuote) : null;
-      const eventResult = entry ? evaluateEventPutClose({ symbol: input.symbol, leg, entry, singleLegPosition, gateBlockReason: eventGate?.blocked ? eventGate.reason ?? "the close gate blocked the buyback" : null }) : { offer: null, reason: null };
+      const eventResult = entry ? evaluateEventPutClose({ symbol: input.symbol, liveLimitRounding: input.liveLimitRounding, leg, entry, singleLegPosition, gateBlockReason: eventGate?.blocked ? eventGate.reason ?? "the close gate blocked the buyback" : null }) : { offer: null, reason: null };
       if (eventResult.offer) offers.push(mergeEventAndHoldValueBuybacks(eventResult.offer, result.offer));
       else if (result.offer) offers.push(result.offer);
       else skipped.push({ id: `${input.symbol}:close_leg:${leg.legId}`, reason: [result.reason ?? "not offered", eventResult.reason].filter(Boolean).join("; ") });
