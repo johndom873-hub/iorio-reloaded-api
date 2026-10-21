@@ -84,6 +84,18 @@ describe("Pluto's decision through the Claude subscription CLI", () => {
     expect(JSON.parse(result.rawText!)).toEqual(successEnvelope.structured_output);
   });
 
+  it("names the model asked for as the one that answered, even when the CLI's side helper wrote more than a short answer", async () => {
+    const shortAnswer = { ...successEnvelope, modelUsage: { "claude-haiku-5-5": { outputTokens: 400 }, "claude-sonnet-5-5": { outputTokens: 287 } } };
+    expect((await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(shortAnswer) }))).servedModelId).toBe("claude-sonnet-5-5");
+    const opusAnswer = { ...successEnvelope, modelUsage: { "claude-haiku-5-5": { outputTokens: 50 }, "claude-opus-5-5": { outputTokens: 30 } } };
+    expect((await callClaudeSubscriptionModel({ ...input, model: "claude-opus-5-5", effort: "xhigh" }, fakeSpawn({ stdout: JSON.stringify(opusAnswer) }))).servedModelId).toBe("claude-opus-5-5");
+  });
+
+  it("falls back to the model that wrote the most when none matches the one asked for", async () => {
+    const otherModels = { ...successEnvelope, modelUsage: { "claude-haiku-5-5": { outputTokens: 12 }, "claude-sonnet-5-5": { outputTokens: 368 } } };
+    expect((await callClaudeSubscriptionModel({ ...input, model: "opus" }, fakeSpawn({ stdout: JSON.stringify(otherModels) }))).servedModelId).toBe("claude-sonnet-5-5");
+  });
+
   it("an error envelope saying the plan's limit was hit is a usage-limit stop, not a failure of the call's content", async () => {
     const envelope = { type: "result", subtype: "success", is_error: true, result: "Claude AI usage limit reached|1760300000", usage: {} };
     const result = await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(envelope), exitCode: 1 }));
@@ -93,7 +105,7 @@ describe("Pluto's decision through the Claude subscription CLI", () => {
   });
 
   it("every way the CLI words the plan's limit is a usage-limit stop", async () => {
-    for (const text of ["usage limit reached", "usage credit limit reached", "you have reached your weekly usage limit", "You've used 100% of your 5-hour usage limit.", "You've hit your limit · resets 5pm"]) {
+    for (const text of ["usage limit reached", "usage credit limit reached", "you have reached your weekly usage limit", "You've used 100% of your 5-hour usage limit.", "You've hit your limit · resets 5pm", "You've hit your session limit · resets 11:40am (Asia/Singapore)"]) {
       const envelope = { type: "result", subtype: "success", is_error: true, result: text, usage: {} };
       expect((await callClaudeSubscriptionModel(input, fakeSpawn({ stdout: JSON.stringify(envelope), exitCode: 1 }))).failureKind).toBe("usage_limit");
     }

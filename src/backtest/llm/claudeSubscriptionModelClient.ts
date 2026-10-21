@@ -66,8 +66,9 @@ interface CliEnvelope {
 }
 
 // The plan's limits in the CLI's own words (2.1.296: "usage limit reached", "usage credit limit reached", "you have
-// reached your weekly usage limit", "… of your 5-hour usage limit"; older builds "Claude AI usage limit reached|<time>").
-const usageLimitPattern = /usage limit reached|usage credit limit reached|weekly usage limit|5-hour usage limit|hit your limit/i;
+// reached your weekly usage limit", "… of your 5-hour usage limit", "You've hit your limit · resets …", "You've hit your
+// session limit · resets …"; older builds "Claude AI usage limit reached|<time>").
+const usageLimitPattern = /usage limit reached|usage credit limit reached|weekly usage limit|5-hour usage limit|hit your (?:session |weekly )?limit/i;
 // A CLI that cannot run at all: every later call would fail the same way.
 const fatalFailurePattern = /could not start|please run \/login|invalid api key|not logged in|authentication|unauthorized|credit balance too low/i;
 
@@ -98,14 +99,19 @@ export function claudeCliArguments(systemPrompt: string, jsonSchema: object = pl
   ];
 }
 
-/** The model that answered: the CLI also runs a small helper model on the side, so the one that wrote the most. */
-function answeringModel(modelUsage: CliEnvelope["modelUsage"]): string | null {
+/**
+ * The model that answered: the one asked for ("sonnet" finds claude-sonnet-5-5, a full id finds itself). The CLI also
+ * runs a small helper model on the side over the whole prompt, which can write more than a short answer, so the most
+ * output decides only when no model matches the request.
+ */
+function answeringModel(modelUsage: CliEnvelope["modelUsage"], requestedModel: string): string | null {
   const entries = Object.entries(modelUsage ?? {});
   if (entries.length === 0) return null;
-  return entries.reduce((best, entry) => ((entry[1].outputTokens ?? 0) > (best[1].outputTokens ?? 0) ? entry : best))[0];
+  const matching = entries.filter(([name]) => name.toLowerCase().includes(requestedModel.toLowerCase()));
+  return (matching.length > 0 ? matching : entries).reduce((best, entry) => ((entry[1].outputTokens ?? 0) > (best[1].outputTokens ?? 0) ? entry : best))[0];
 }
 
-export function readClaudeCliOutput(stdout: string, stderr: string, exitCode: number | null, latencyMs: number): ClaudeSubscriptionCallResult {
+export function readClaudeCliOutput(stdout: string, stderr: string, exitCode: number | null, latencyMs: number, requestedModel: string): ClaudeSubscriptionCallResult {
   const empty = { servedModelId: null, latencyMs, tokensIn: null, tokensOut: null, costUsd: null, serviceTier: null, httpStatus: null };
   let envelope: CliEnvelope;
   try {
@@ -117,7 +123,7 @@ export function readClaudeCliOutput(stdout: string, stderr: string, exitCode: nu
   }
   const usage = envelope.usage ?? {};
   const figures = {
-    servedModelId: answeringModel(envelope.modelUsage),
+    servedModelId: answeringModel(envelope.modelUsage, requestedModel),
     latencyMs,
     tokensIn: usage.input_tokens === undefined ? null : usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
     tokensOut: usage.output_tokens ?? null,
@@ -158,7 +164,7 @@ export function callClaudeSubscriptionModel(input: ClaudeSubscriptionCallInput, 
     child.on("error", (error) =>
       finish({ ok: false, rawText: null, servedModelId: null, latencyMs: Date.now() - startedAt, tokensIn: null, tokensOut: null, costUsd: null, serviceTier: "subscription", httpStatus: null, error: `Claude CLI could not start: ${error.message}`, ...failed("fatal") }),
     );
-    child.on("close", (exitCode) => finish(readClaudeCliOutput(stdout, stderr, exitCode, Date.now() - startedAt)));
+    child.on("close", (exitCode) => finish(readClaudeCliOutput(stdout, stderr, exitCode, Date.now() - startedAt, input.model ?? backtestClaudeModel)));
     child.stdin.write(input.userPayload);
     child.stdin.end();
   });
