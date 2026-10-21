@@ -200,7 +200,7 @@ export interface BacktestSteadyStakeSettings {
   maxSpreadPctOfMid: number;
 }
 
-export const defaultBacktestSteadyStakeSettings: BacktestSteadyStakeSettings = { stakePct: 70, rebalanceBandPct: 5, callCoveragePct: 100, callAbsDelta: 0.2, putCashPct: 100, putAbsDelta: 0.2, deltaTolerance: 0.05, maxSpreadPctOfMid: 50 };
+export const defaultBacktestSteadyStakeSettings: BacktestSteadyStakeSettings = { stakePct: 80, rebalanceBandPct: 5, callCoveragePct: 100, callAbsDelta: 0.2, putCashPct: 100, putAbsDelta: 0.2, deltaTolerance: 0.05, maxSpreadPctOfMid: 50 };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is

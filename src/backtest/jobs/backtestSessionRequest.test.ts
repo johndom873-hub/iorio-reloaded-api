@@ -219,7 +219,7 @@ describe("validateBacktestSettingsOverrides", () => {
   });
 
   it("takes the Steady Stake as decision maker with its own values, each checked, on a starting value", () => {
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "steady_stake", steadyStake: { stakePct: 80, putCashPct: 0, callAbsDelta: 0.2 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { decisionMaker: "steady_stake", steadyStake: { stakePct: 80, putCashPct: 0 } } });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "steady_stake", steadyStake: { stakePct: 70, putCashPct: 0, callAbsDelta: 0.2 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { decisionMaker: "steady_stake", steadyStake: { stakePct: 70, putCashPct: 0 } } });
     expect(validateBacktestSettingsOverrides({ steadyStake: { stakePct: 0 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "steadyStake.stakePct must be a number from 1 to 100." });
     expect(validateBacktestSettingsOverrides({ steadyStake: { ladderRungs: 3 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "steadyStake.ladderRungs is not a Steady Stake setting." });
     expect(validateBacktestSettingsOverrides({ steadyStake: 70 }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "overrides.steadyStake must be an object." });

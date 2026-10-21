@@ -42,7 +42,8 @@ function lookSymbolOf(symbol: string, todayIso: string, quotes: SymbolFileQuote[
 
 function look(input: { ledger: SimulatedLedger; todayIso: string; symbols: BacktestLookSymbol[]; steadyStake?: Partial<BacktestSteadyStakeSettings>; priceByLegId?: Map<string, number> }) {
   let actionNumber = 0;
-  const settings = { trading: { spreadCostChargedPct: 0 }, steadyStake: { ...defaultBacktestSteadyStakeSettings, ...input.steadyStake } } as unknown as EffectiveBacktestSettings;
+  // The examples below are worked for a 70% stake, whatever the default.
+  const settings = { trading: { spreadCostChargedPct: 0 }, steadyStake: { ...defaultBacktestSteadyStakeSettings, stakePct: 70, ...input.steadyStake } } as unknown as EffectiveBacktestSettings;
   return runSteadyStakeLook({
     todayIso: input.todayIso,
     calendar: calendarOf(input.todayIso),
