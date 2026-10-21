@@ -156,15 +156,18 @@ describe("buildStockOnlyStretches", () => {
     ...fields,
   });
   const at = (dateIso: string, hour: number) => easternInstant(dateIso, hour, 0);
-  // A put sold Mon 5 April, assigned Fri 9 April (500 shares); no option Mon 12 and Tue 13; a ladder put alone Wed 14 to
-  // its expiry Fri 16, a call on every share from Thu 15; a call on 300 of them Mon 19 to Tue 20; none Wed 21.
+  // A put sold Mon 5 April, assigned Fri 9 April (500 shares); no option Mon 12 and Tue 13; a ladder put alone Wed 14,
+  // assigned at its expiry Fri 16 (200 more), a call on 500 from Thu 15; a call on 300 of them Mon 19 to Tue 20; none Wed 21.
   const legs = [
     leg({ legType: "option", side: "short", optionType: "put", quantity: 5, entryAt: at("2021-04-05", 10), exitAt: at("2021-04-09", 16), settledAs: "assigned" }),
-    leg({ legType: "stock", side: "long", quantity: 500, entryAt: at("2021-04-09", 16) }),
-    leg({ legType: "option", side: "short", optionType: "put", quantity: 2, entryAt: at("2021-04-14", 10), exitAt: at("2021-04-16", 16), settledAs: "worthless" }),
+    // The ledger keeps one stock leg at its last quantity: the 200 shares the put assigned on Fri 16 are on it from the 9th.
+    leg({ legType: "stock", side: "long", quantity: 700, entryAt: at("2021-04-09", 16) }),
+    leg({ legType: "option", side: "short", optionType: "put", quantity: 2, entryAt: at("2021-04-14", 10), exitAt: at("2021-04-16", 16), settledAs: "assigned" }),
     leg({ legType: "option", side: "short", optionType: "call", quantity: 5, entryAt: at("2021-04-15", 10), exitAt: at("2021-04-16", 16), settledAs: "worthless" }),
     leg({ legType: "option", side: "short", optionType: "call", quantity: 3, entryAt: at("2021-04-19", 10), exitAt: at("2021-04-20", 16), settledAs: "worthless" }),
   ];
+  // The cycle's own trades: 500 shares from the first assignment, 200 more from the second.
+  const sharesHeldAt = (atMs: number) => (atMs >= at("2021-04-09", 16).getTime() ? 500 : 0) + (atMs >= at("2021-04-16", 16).getTime() ? 200 : 0);
   const closes = closeLookupOf([
     { date: "2021-04-09", close: 95 },
     { date: "2021-04-13", close: 93.1 },
@@ -178,8 +181,8 @@ describe("buildStockOnlyStretches", () => {
     noCandidates: [noCandidate("2021-04-12", "calls", { belowCost: 193, noUsableQuote: 34 }), noCandidate("2021-04-12", "entry", { spreadTooWide: 9 }), noCandidate("2021-04-13", "calls", { outsideExpiryRange: 5, belowCost: 190, noUsableQuote: 30 })],
   };
 
-  it("counts the whole sessions with shares and no option open: a put alone or a call on some of them makes none, nor a weekend roll", () => {
-    const stretches = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: null }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesAsTradedOn: () => 1 });
+  it("counts the whole sessions with shares and no option open: a put alone or a call on some of them makes none, nor a weekend roll; the shares from the cycle's trades", () => {
+    const stretches = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: null }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesHeldAt, sharesAsTradedOn: () => 1 });
     expect(stretches).toEqual([
       // Assigned Friday, no option Monday and Tuesday, a put Wednesday: 95 → 93.10, −2%.
       {
@@ -203,15 +206,15 @@ describe("buildStockOnlyStretches", () => {
         },
         sharesHeld: 500,
       },
-      // The call on 300 shares expired Tuesday: none open Wednesday (97 → 98.94, +2%).
-      { firstIdleDay: "2021-04-21", lastIdleDay: "2021-04-21", idleSessions: 1, stockMove: expect.closeTo(0.02, 10), noSaleDays: { ...noReasons, unrecorded: 1 }, noCandidate: null, sharesHeld: 500 },
+      // The call on 300 shares expired Tuesday: none open Wednesday (97 → 98.94, +2%), 700 shares since Friday's assignment.
+      { firstIdleDay: "2021-04-21", lastIdleDay: "2021-04-21", idleSessions: 1, stockMove: expect.closeTo(0.02, 10), noSaleDays: { ...noReasons, unrecorded: 1 }, noCandidate: null, sharesHeld: 700 },
     ]);
   });
 
   it("gives the shares as traded on the stretch's first day, and stops at the cycle's close", () => {
-    const split = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: null }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesAsTradedOn: (dateIso) => (dateIso >= "2021-04-19" ? 2 : 1) });
-    expect(split.map((stretch) => stretch.sharesHeld)).toEqual([500, 1000]);
-    const closedEarly = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: "2021-04-12" }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesAsTradedOn: () => 1 });
+    const split = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: null }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesHeldAt, sharesAsTradedOn: (dateIso) => (dateIso >= "2021-04-19" ? 2 : 1) });
+    expect(split.map((stretch) => stretch.sharesHeld)).toEqual([500, 1400]);
+    const closedEarly = buildStockOnlyStretches({ symbol: "INTC", cycle: { openedOn: "2021-04-05", closedOn: "2021-04-12" }, lastDay: "2021-04-21", legs, calendar, closes, records, sharesHeldAt, sharesAsTradedOn: () => 1 });
     expect(closedEarly.map((stretch) => [stretch.firstIdleDay, stretch.lastIdleDay])).toEqual([["2021-04-12", "2021-04-12"]]);
   });
 });

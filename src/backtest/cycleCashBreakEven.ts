@@ -10,12 +10,19 @@ import type { BacktestCycleTimelineRow } from "./backtestTypes.js";
 // a price). Example: 100 NFLX shares bought before its 10-for-1 split (factor 10) are 1,000 split-adjusted shares, and
 // 1,000 as traded after it (factor 1).
 
+/** Whether a timeline row brings shares into the cycle (+1), takes them out of it (−1) or neither (0), by its label. */
+export function shareDirectionOf(label: string): 1 | -1 | 0 {
+  if (label === "Bought shares" || label.startsWith("Put assigned")) return 1;
+  if (label === "Sold shares" || label.startsWith("Call assigned")) return -1;
+  return 0;
+}
+
 /** A row's part in the cash break-even: dollars into and out of shares, premium, and shares in or out (as traded on its day). */
 function rowAmounts(row: BacktestCycleTimelineRow): { acquired: number; disposed: number; premium: number; shares: number } {
   const dollars = row.quantity * (row.label.startsWith("Put assigned") || row.label.startsWith("Call assigned") ? (row.strike ?? 0) : (row.stockPrice ?? 0));
   const commission = row.commissionDollars ?? 0;
-  const bought = row.label === "Bought shares" || row.label.startsWith("Put assigned");
-  const left = row.label === "Sold shares" || row.label.startsWith("Call assigned");
+  const bought = shareDirectionOf(row.label) === 1;
+  const left = shareDirectionOf(row.label) === -1;
   // A hedge's cost is not premium earned on the shares; an open option's mark is not premium received.
   const premium = row.bucket !== "hedge" && !(row.at === null && row.label.startsWith("Open ")) ? row.premiumDollars : 0;
   return { acquired: bought ? dollars + commission : 0, disposed: left ? dollars - commission : 0, premium, shares: bought ? row.quantity : left ? -row.quantity : 0 };
@@ -82,4 +89,15 @@ export function sharesHeldAfterEachMoment(timeline: readonly BacktestCycleTimeli
     adjustedAfterMoment[moments[position]!] = adjustedShares;
   });
   return timeline.map((row, position) => Math.round((adjustedAfterMoment[moments[position]!]! / splitFactorOf(row.tradingDate)) * 1e6) / 1e6);
+}
+
+/**
+ * The shares the cycle held at an instant (a row at it counted), as traded on `tradingDate`: Marcelo 2026-10-21, a
+ * stock-only stretch's shares read from the cycle's own trades. The ledger's stock legs could not give them: shares a later
+ * assignment added to a lot already held were recorded on that lot's leg from its start.
+ */
+export function sharesHeldAtInstant(timeline: readonly BacktestCycleTimelineRow[], atMs: number, tradingDate: string, splitFactorOf: SplitFactorOfDay = noSplits): number {
+  let adjustedShares = 0;
+  for (const row of timeline) if (row.at !== null && new Date(row.at).getTime() <= atMs) adjustedShares += shareDirectionOf(row.label) * row.quantity * splitFactorOf(row.tradingDate);
+  return Math.round((adjustedShares / splitFactorOf(tradingDate)) * 1e6) / 1e6;
 }

@@ -5,6 +5,7 @@ import { legRealizedPnl } from "../../lib/positionSelectors.js";
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import type { BacktestAction, BacktestCycle, BacktestCycleDetail, BacktestCycleGap, BacktestCycleTimelineRow, BacktestFill, BacktestPosition, BacktestPositionLeg, BacktestTrade } from "../backtestTypes.js";
 import { buildCycleGaps, buildStockOnlyStretches, closeLookupOf, type NoSaleRecords } from "./backtestIdleStretches.js";
+import { shareDirectionOf } from "../cycleCashBreakEven.js";
 import type { BacktestOptionSale } from "./backtestLook.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import { ledgerCapitalAtRisk, ledgerCapitalDeployed, ledgerCycles, ledgerRealizedPnl, ledgerUnrealizedPnl } from "./ledger/ledgerSelectors.js";
@@ -139,6 +140,7 @@ export function buildCycleRecords(inputs: SessionRecordInputs): BacktestCycleRec
           calendar: inputs.calendar,
           closes,
           records: inputs.noSaleRecords,
+          sharesHeldAt: (atMs) => cycle.timeline.reduce((held, row) => held + (row.at !== null && row.at.getTime() <= atMs ? shareDirectionOf(row.label) * row.quantity : 0), 0),
           sharesAsTradedOn: (dateIso) => splitFactor / (splitFactorOnDay(dateIso) ?? splitFactor),
         }),
       });

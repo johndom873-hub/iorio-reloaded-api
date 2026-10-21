@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BacktestCycleTimelineRow } from "./backtestTypes.js";
-import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment } from "./cycleCashBreakEven.js";
+import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtInstant } from "./cycleCashBreakEven.js";
 
 const row = (overrides: Partial<BacktestCycleTimelineRow>): BacktestCycleTimelineRow => ({
   at: "2026-09-01T14:00:00.000Z",
@@ -76,6 +76,10 @@ describe("cycleCashBreakEven", () => {
     // Before the call: $100,000 over 1,000 shares as traded on the 16th = $100.00 (not $1,000 over 100).
     expect(cashBreakEvenBeforeEachRow(rows, splitFactorOf).map((value) => (value === null ? null : Number(value.toFixed(4))))).toEqual([null, 100, 98]);
     expect(sharesHeldAfterEachMoment(rows, splitFactorOf)).toEqual([100, 1000, 1000]);
+    // At an instant, as traded on a day: 100 just after the purchase, 1,000 on the 16th; nothing before it.
+    expect(sharesHeldAtInstant(rows, Date.parse("2026-09-01T14:00:00.000Z"), "2026-09-01", splitFactorOf)).toBe(100);
+    expect(sharesHeldAtInstant(rows, Date.parse("2026-09-16T00:00:00.000Z"), "2026-09-16", splitFactorOf)).toBe(1000);
+    expect(sharesHeldAtInstant(rows, Date.parse("2026-09-01T13:59:00.000Z"), "2026-09-01", splitFactorOf)).toBe(0);
     expect(cycleCashBreakEven(rows)).toBeCloseTo(98, 6);
   });
 });

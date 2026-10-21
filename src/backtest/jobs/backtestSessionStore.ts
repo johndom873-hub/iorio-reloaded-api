@@ -45,11 +45,12 @@ import { computeCycleAccuracyBands, computeDrawdowns, computeMonthlyReturns, com
 import { computeAllSymbolsStatistics, computeTickerStatistics } from "../tickerStatistics.js";
 import { BacktestRequestError, insertQueuedBacktestJob, kickBacktestQueue, loadBacktestJobView, loadLatestJobViewForSession, loadLatestSessionRunStates, stopJobsOfSession } from "./backtestJobStore.js";
 import type { BacktestBookPageFilters, BacktestSessionsPageFilters, ValidatedBacktestSessionRequest } from "./backtestSessionRequest.js";
+import { easternInstant } from "../../lib/easternIsoDate.js";
 import { sqlContainsPattern } from "../../lib/sqlContainsPattern.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
 import { readSplitScheduleCache, splitFactorOn } from "../engine/splitFactors.js";
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
-import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtMarks, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
+import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtInstant, sharesHeldAtMarks, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
 
 const spyBaselineLabel = "Buy and hold · SPY";
 /** "HOOD #12": a symbol's cycle as the screens name it (backtestSessionRecords.ts describeCycle). */
@@ -620,7 +621,14 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
       return { ...entry, premiumYield, delta, breakEvenAtSale: breakEvens[index]!, sharesHeld: sharesHeld[index]!, ...(sold[1] === "put" ? { ladderRung } : {}), freeCashShare };
     }),
     // Stretches stored before their no-candidate detail was kept have none.
-    stockOnlyStretches: stretches.map((stretch) => ({ ...stretch, noCandidate: stretch.noCandidate ?? null, freeCashShareAtStart: freeCash?.shareAtMark(stretch.firstIdleDay) ?? null })),
+    // A stretch's shares from the cycle's own trades: stored before 2026-10-21 they came from the ledger's stock legs, which
+    // count shares a later assignment added to a lot from the lot's start (NFLX #33: 200 shown from January, 100 held).
+    stockOnlyStretches: stretches.map((stretch) => ({
+      ...stretch,
+      sharesHeld: sharesHeldAtInstant(row.timeline!, easternInstant(stretch.firstIdleDay, 0, 0).getTime(), stretch.firstIdleDay, splitFactorOf),
+      noCandidate: stretch.noCandidate ?? null,
+      freeCashShareAtStart: freeCash?.shareAtMark(stretch.firstIdleDay) ?? null,
+    })),
   };
 }
 

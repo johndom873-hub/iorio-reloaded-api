@@ -171,18 +171,11 @@ export function buildCycleGaps(input: {
   return gaps;
 }
 
-const isActiveAt = (leg: Pick<LedgerLeg, "entryAt" | "exitAt">, atMs: number) => leg.entryAt.getTime() <= atMs && (leg.exitAt === null || leg.exitAt.getTime() > atMs);
-
-/** Shares held at an instant, on the ledger's (cycle) scale. */
-function sharesHeldAt(legs: readonly LedgerLeg[], atMs: number): number {
-  let held = 0;
-  for (const leg of legs) if (leg.legType === "stock" && leg.side === "long" && isActiveAt(leg, atMs)) held += leg.quantity * leg.multiplier;
-  return held;
-}
-
 /**
- * A cycle's stock-only stretches, oldest first. `legs` are its symbol's (on the cycle's scale); `sharesAsTradedOn` turns
- * its shares into those traded on a day (× the cycle's split factor ÷ the day's).
+ * A cycle's stock-only stretches, oldest first. `legs` are its symbol's (their options tell the days with one open);
+ * `sharesHeldAt` gives the cycle's shares at an instant from its own trades, on the cycle's scale (a stock leg's quantity
+ * is its last: shares an assignment added to a lot held are on that lot's leg from its start); `sharesAsTradedOn` turns
+ * them into those traded on a day (× the cycle's split factor ÷ the day's).
  */
 export function buildStockOnlyStretches(input: {
   symbol: string;
@@ -192,6 +185,7 @@ export function buildStockOnlyStretches(input: {
   calendar: Pick<BacktestTradingCalendar, "openDaysBetween">;
   closes: CloseLookup;
   records: NoSaleRecords;
+  sharesHeldAt(atMs: number): number;
   sharesAsTradedOn(dateIso: string): number;
 }): BacktestStockOnlyStretch[] {
   const cycleDays = input.calendar.openDaysBetween(input.cycle.openedOn, input.cycle.closedOn ?? input.lastDay);
@@ -211,7 +205,7 @@ export function buildStockOnlyStretches(input: {
   for (const dateIso of cycleDays) {
     const dayStartMs = easternInstant(dateIso, 0, 0).getTime();
     const dayEndMs = easternInstant(addCalendarDays(dateIso, 1), 0, 0).getTime();
-    const held = Math.min(sharesHeldAt(legs, dayStartMs), sharesHeldAt(legs, dayEndMs - 1));
+    const held = Math.min(input.sharesHeldAt(dayStartMs), input.sharesHeldAt(dayEndMs - 1));
     const optionOpen = optionLegs.some((leg) => leg.entryAt.getTime() < dayEndMs && (leg.exitAt === null || leg.exitAt.getTime() > dayStartMs));
     if (!(held > 0) || optionOpen) {
       closeRun();
