@@ -1132,8 +1132,12 @@ export interface BacktestCycle {
   cashBreakEvenPerShare?: number | null;
   /** An open cycle's shares at the last marks, as traded on the session's last day (sharesHeld is on the cycle's opening scale), read with the session; null otherwise. */
   sharesHeldNow?: number | null;
-  /** Free cash ÷ the account value at the cycle's end (a closed cycle: once its closing moment was done; an open one: the session's last day's end), read with the session's detail. */
-  freeCashShareAtEnd?: number | null;
+  /** An open cycle's free cash ÷ the account value at the session's last day's end, read with the session's detail; null otherwise. */
+  freeCashShareNow?: number | null;
+  /** A closed cycle's most shares held, as traded on the day it reached them (compared split-adjusted), read with the session's detail; null otherwise. */
+  sharesHeldMost?: { shares: number; on: string } | null;
+  /** A closed cycle's lowest free cash ÷ the account value, at each day's marks and after each of its looks (sessionFreeCash.ts), read with the session's detail; null otherwise. */
+  freeCashShareLowest?: { share: number; on: string } | null;
   buckets: { csp: BacktestCycleBucket; unstructured: BacktestCycleBucket; cc: BacktestCycleBucket; hedge: BacktestCycleBucket };
   dataFlags: string[];
 }

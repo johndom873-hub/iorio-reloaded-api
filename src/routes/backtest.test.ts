@@ -1059,7 +1059,8 @@ describe("backtest routes", () => {
         { symbol: fileSymbol, afterCycleNumber: 1, beforeCycleNumber: null, firstIdleDay: "2026-09-10", lastIdleDay: "2026-09-11", idleSessions: 2, stockMove: 0.031, noSaleDays, noCandidate: noCandidateDetail, entryFilterLimits: { extensionZ: 1, ivRank: null }, freeCashShareAtStart: null },
       ]);
       // The open cycle's Cash at its end, the session's last recorded day (3 Sep): $1,000,200 cash − the put's $4,000 locked, ÷ $999,900.
-      expect(withGaps.cycles[0]!.freeCashShareAtEnd).toBeCloseTo(0.99629963, 8);
+      expect(withGaps.cycles[0]!.freeCashShareNow).toBeCloseTo(0.99629963, 8);
+      expect(withGaps.cycles[0]).toMatchObject({ sharesHeldMost: null, freeCashShareLowest: null });
       // At a day's marks the put sold on 1 Sep is open: ($1,000,100 − $4,000) ÷ $1,010,000 on 2 Sep; a day not recorded has none.
       const freeCash = await loadSessionFreeCash(session.id, "2026-09-01", "2026-09-03", testDb);
       expect(freeCash.shareAtMark("2026-09-02")).toBeCloseTo(0.98623762, 8);

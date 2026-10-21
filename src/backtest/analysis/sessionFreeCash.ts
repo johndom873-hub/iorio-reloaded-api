@@ -28,6 +28,11 @@ export interface SessionFreeCash {
   shareAtMark(tradingDate: string): number | null;
   /** The dollars behind it at the day's 10:00 marks; null for a day not recorded. */
   atMark(tradingDate: string): { freeCash: number; locked: number; accountValue: number } | null;
+  /**
+   * The lowest Cash % from `fromDate` to `toDate`: at each recorded day's marks and after each of `moments` (Marcelo
+   * 2026-10-21, a closed cycle's Cash); null when none was recorded. Ties keep the first.
+   */
+  lowestShareBetween(fromDate: string, toDate: string, moments: readonly { tradingDate: string; at: string }[]): { share: number; on: string } | null;
 }
 
 /** Each recorded day of a session at its 10:00 marks: [date, free cash, cash locked in open puts, account value] (the price chart's Cash available). */
@@ -88,18 +93,29 @@ export async function loadSessionFreeCash(sessionId: string, fromDate: string, t
     return puts.reduce((sum, put) => sum + (put.entryMs < markMs && put.exitMs >= markMs ? put.locked : 0), 0);
   };
   const share = (mark: DayMark, cash: number, locked: number) => (mark.accountValue > 0 ? Math.max(0, cash - locked) / mark.accountValue : null);
+  const shareAfter: SessionFreeCash["shareAfter"] = (tradingDate, atIso) => {
+    const mark = markByDate.get(tradingDate);
+    if (!mark) return null;
+    const atMs = atIso === null ? easternInstant(addCalendarDays(tradingDate, 1), 0, 0).getTime() - 1 : new Date(atIso).getTime();
+    const cash = mark.cash + (flowsByDate.get(tradingDate) ?? []).reduce((sum, flow) => sum + (flow.atMs <= atMs ? flow.dollars : 0), 0);
+    const locked = puts.reduce((sum, put) => sum + (put.entryMs <= atMs && put.exitMs > atMs ? put.locked : 0), 0);
+    return share(mark, cash, locked);
+  };
+  const shareAtMark: SessionFreeCash["shareAtMark"] = (tradingDate) => {
+    const mark = markByDate.get(tradingDate);
+    return mark ? share(mark, mark.cash, lockedAtMark(tradingDate)) : null;
+  };
   return {
-    shareAfter(tradingDate, atIso) {
-      const mark = markByDate.get(tradingDate);
-      if (!mark) return null;
-      const atMs = atIso === null ? easternInstant(addCalendarDays(tradingDate, 1), 0, 0).getTime() - 1 : new Date(atIso).getTime();
-      const cash = mark.cash + (flowsByDate.get(tradingDate) ?? []).reduce((sum, flow) => sum + (flow.atMs <= atMs ? flow.dollars : 0), 0);
-      const locked = puts.reduce((sum, put) => sum + (put.entryMs <= atMs && put.exitMs > atMs ? put.locked : 0), 0);
-      return share(mark, cash, locked);
-    },
-    shareAtMark(tradingDate) {
-      const mark = markByDate.get(tradingDate);
-      return mark ? share(mark, mark.cash, lockedAtMark(tradingDate)) : null;
+    shareAfter,
+    shareAtMark,
+    lowestShareBetween(fromDate, toDate, moments) {
+      let lowest: { share: number; on: string } | null = null;
+      const consider = (value: number | null, on: string) => {
+        if (value !== null && (lowest === null || value < lowest.share || (value === lowest.share && on < lowest.on))) lowest = { share: value, on };
+      };
+      for (const date of markByDate.keys()) if (date >= fromDate && date <= toDate) consider(shareAtMark(date), date);
+      for (const moment of moments) if (moment.tradingDate >= fromDate && moment.tradingDate <= toDate) consider(shareAfter(moment.tradingDate, moment.at), moment.tradingDate);
+      return lowest;
     },
     atMark(tradingDate) {
       const mark = markByDate.get(tradingDate);

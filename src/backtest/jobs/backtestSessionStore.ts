@@ -753,10 +753,34 @@ export async function loadBacktestSessionDetail(sessionId: string, onlySymbol: s
   // The Wheel cycles' Cash: a cycle at its end, a gap at its first day's marks (the whole account's free cash).
   const lastDay = days.at(-1)?.tradingDate ?? null;
   const freeCash = days.length > 0 ? await loadSessionFreeCash(sessionId, days[0]!.tradingDate, lastDay!) : null;
-  const cycles = ofSymbol(everyCycle).map((cycle) => ({
-    ...cycle,
-    freeCashShareAtEnd: freeCash === null ? null : cycle.closedOn !== null && cycle.closedAt !== null ? freeCash.shareAfter(cycle.closedOn, cycle.closedAt) : lastDay === null ? null : freeCash.shareAfter(lastDay, null),
-  }));
+  // A closed cycle's row shows the most shares it held and its lowest Cash (Marcelo 2026-10-21), read from its trades; an
+  // open one the latest of each.
+  const closedTimelines: { symbol: string; cycle_number: number; timeline: BacktestCycleTimelineRow[] | null }[] = await db("backtest_cycles")
+    .where({ session_id: sessionId, status: "closed" })
+    .whereNotNull("timeline")
+    .modify((query) => (onlySymbol === null ? query : query.where({ symbol: onlySymbol })))
+    .select("symbol", "cycle_number", "timeline");
+  const timelineOf = new Map(closedTimelines.map((entry) => [`${entry.symbol}#${entry.cycle_number}`, entry.timeline ?? []]));
+  const splitFactorBySymbol = new Map<string, SplitFactorOfDay>();
+  const cycles = ofSymbol(everyCycle).map((cycle) => {
+    if (cycle.status === "open") return { ...cycle, freeCashShareNow: freeCash === null || lastDay === null ? null : freeCash.shareAfter(lastDay, null), sharesHeldMost: null, freeCashShareLowest: null };
+    const timeline = timelineOf.get(`${cycle.symbol}#${cycle.cycleNumber}`) ?? [];
+    if (!splitFactorBySymbol.has(cycle.symbol)) splitFactorBySymbol.set(cycle.symbol, splitFactorOfDayFor(cycle.symbol));
+    const splitFactorOf = splitFactorBySymbol.get(cycle.symbol)!;
+    const shares = sharesHeldAfterEachMoment(timeline, splitFactorOf);
+    let most: { shares: number; on: string; adjusted: number } | null = null;
+    shares.forEach((held, index) => {
+      const adjusted = held * splitFactorOf(timeline[index]!.tradingDate);
+      if (held > 0 && (most === null || adjusted > most.adjusted + 1e-9)) most = { shares: held, on: timeline[index]!.tradingDate, adjusted };
+    });
+    const moments = timeline.flatMap((row) => (row.at === null ? [] : [{ tradingDate: row.tradingDate, at: row.at }]));
+    return {
+      ...cycle,
+      freeCashShareNow: null,
+      sharesHeldMost: most === null ? null : { shares: (most as { shares: number }).shares, on: (most as { on: string }).on },
+      freeCashShareLowest: freeCash === null || cycle.closedOn === null ? null : freeCash.lowestShareBetween(cycle.openedOn, cycle.closedOn, moments),
+    };
+  });
   const cycleGaps = ofSymbol(everyCycleGap).map((gap) => ({ ...gap, freeCashShareAtStart: freeCash?.shareAtMark(gap.firstIdleDay) ?? null }));
   return {
     session: {
