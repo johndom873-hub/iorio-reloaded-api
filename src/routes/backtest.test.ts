@@ -28,6 +28,7 @@ import type {
   CreateBacktestBatchResponse,
   CreateBacktestSessionResponse,
 } from "../backtest/backtestTypes.js";
+import { withFreshLadderRungs } from "../backtest/analysis/analysisBacktest.js";
 import type { BacktestSessionPriceChart } from "../backtest/analysis/sessionPriceChart.js";
 import type { BacktestSessionStockPrices } from "../backtest/analysis/sessionStockPrices.js";
 
@@ -1065,6 +1066,13 @@ describe("backtest routes", () => {
       const chart = (await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=${fileSymbol.toLowerCase()}`)).body as BacktestSessionPriceChart;
       expect(chart).toMatchObject({ symbol: fileSymbol, bars: [["2026-09-11", 20, 21, 19, 20.5, null]], ladderLevels: [["2026-09-08", 38, 35, null]], ladderRungsSold: [["2026-09-08", 37, [[37, "2026-09-18", 1]], [3, 5, 2.25, 1000]]], tooLargeDays: [] });
       expect(chart.maxDrawdown.All).toBeNull();
+      // An analysis stored before the rung numbers reads its rungs again from its session; one without a session left keeps its own.
+      const storedRung: [string, number, [number, string, number][]] = ["2026-09-08", 37, [[37, "2026-09-18", 1]]];
+      expect(await withFreshLadderRungs({ marker: "saved", analysisBacktest: { sessionId: session.id, ladderRungsSold: [storedRung] } }, fileSymbol, testDb)).toEqual({ marker: "saved", analysisBacktest: { sessionId: session.id, ladderRungsSold: [[...storedRung, [3, 5, 2.25, 1000]]] } });
+      const gone = { analysisBacktest: { sessionId: "00000000-0000-4000-8000-000000000000", ladderRungsSold: [storedRung] } };
+      expect(await withFreshLadderRungs(gone, fileSymbol, testDb)).toBe(gone);
+      const failed = { analysisBacktest: { error: "The backtest failed." } };
+      expect(await withFreshLadderRungs(failed, fileSymbol, testDb)).toBe(failed);
       expect(chart.accountInShares).toHaveLength(3);
       expect((await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=zzzz`)).status).toBe(400);
       expect((await request("GET", `/backtest/sessions/${session.id}/price-chart`)).status).toBe(400);

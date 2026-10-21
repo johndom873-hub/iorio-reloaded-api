@@ -126,6 +126,19 @@ export async function loadAnalysisLadder(sessionId: string, symbol: string, conn
   };
 }
 
+/**
+ * Stored figures with the rungs sold read again from their session (Marcelo 2026-10-21): each rung's number came after
+ * many analyses were stored, and the sale records hold it. Figures without a session or without rungs (stored before
+ * formulas version 6) are returned as they are, and so are the stored rungs when the session has none left (deleted).
+ */
+export async function withFreshLadderRungs(figures: unknown, symbol: string, connection: Knex = db): Promise<unknown> {
+  const backtest = (figures as { analysisBacktest?: Partial<AnalysisBacktestFigures> | { error: string } | null } | null)?.analysisBacktest;
+  if (!backtest || !("sessionId" in backtest) || typeof backtest.sessionId !== "string" || !Array.isArray(backtest.ladderRungsSold) || backtest.ladderRungsSold.length === 0) return figures;
+  const { ladderRungsSold } = await loadAnalysisLadder(backtest.sessionId, symbol, connection);
+  if (ladderRungsSold.length === 0) return figures;
+  return { ...(figures as object), analysisBacktest: { ...backtest, ladderRungsSold } };
+}
+
 export async function computeAnalysisBacktestFigures(sessionId: string, symbol: string, connection: Knex = db): Promise<AnalysisBacktestFigures> {
   const session = await connection("backtest_sessions").where({ id: sessionId }).first("name", "status", connection.raw("start_date::text as start_date"), connection.raw("end_date::text as end_date"), "metrics", "baseline_metrics", "starting_value");
   if (!session) throw new Error(`The analysis backtest session ${sessionId} is gone.`);

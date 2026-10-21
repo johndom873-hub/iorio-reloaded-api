@@ -6,6 +6,7 @@ import { readBacktestDataFileContents } from "../dataFileSummary.js";
 import { loadBacktestLabSettings, loadBacktestLabTickerOverrides, tickerOverridesToValues, withCodeKeys } from "../labSettingsStore.js";
 import { defaultBacktestBaselineSettings, type BacktestBaselineSettings, type BacktestLabTickerOverrides, type BacktestSettings, type BacktestTickerProfile, type BacktestTickerSuitability } from "../backtestTypes.js";
 import { loadTickerProfile } from "../tickerProfileStore.js";
+import { withFreshLadderRungs } from "./analysisBacktest.js";
 import { loadTickerSuitability } from "../tickerSuitabilityStore.js";
 import { validateBaselineSettings } from "../jobs/backtestSessionRequest.js";
 import { deriveJobDisplayStatus } from "../jobs/backtestJobRules.js";
@@ -300,7 +301,7 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
   const withBody = async (view: AnalysisRunView | null) => {
     if (!view) return null;
     const body = await connection("backtest_ticker_analyses").where({ id: view.id }).first("figures", "summary");
-    return { ...view, figures: body?.figures ?? null, summary: body?.summary ?? null };
+    return { ...view, figures: body?.figures == null ? null : await withFreshLadderRungs(body.figures, symbol, connection), summary: body?.summary ?? null };
   };
   const current = await resolveAnalysisLabValues(symbol, null, connection);
   return {
