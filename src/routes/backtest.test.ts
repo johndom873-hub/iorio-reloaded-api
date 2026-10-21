@@ -223,8 +223,6 @@ describe("backtest routes", () => {
       ...Array(10).fill("baseline_wheel · Calls and Covered Calls"),
       ...Array(10).fill("baseline_wheel · Contract choice"),
       ...Array(4).fill("baseline_wheel · Entry filters"),
-      ...Array(2).fill("baseline_wheel · Falling-knife guard"),
-      ...Array(8).fill("baseline_wheel · Kelly sizing"),
       ...Array(2).fill("baseline_wheel · Exits"),
       ...Array(12).fill("pluto_rules · Capital and sizing"),
       ...Array(14).fill("pluto_rules · Candidate quality"),
@@ -234,11 +232,11 @@ describe("backtest routes", () => {
     ]);
     // Every row once, and every condition on a row that is there.
     const paths = template.rows.map((row) => row.path);
-    expect(new Set(paths).size).toBe(100);
-    expect(paths.length).toBe(100);
+    expect(new Set(paths).size).toBe(90);
+    expect(paths.length).toBe(90);
     const conditionPaths = template.rows.flatMap((row) => [...(row.appliesWhen?.allOf ?? []), ...(row.appliesWhen?.anyOf ?? [])].map((condition) => condition.path));
     expect(conditionPaths.filter((path) => !paths.includes(path))).toEqual([]);
-    expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", knifeGuard: "off", knifeGuardMinScale: 0, kellySizing: "disabled", kellyMultiplierRule: "extension", kellyTopFromZ: 0.5, kellyTopToZ: 1.5, kellyMaxMultiplier: 2, kellySpyMove: "off", kellyAtTops: "wait_in_cash", kellyConstantMultiplier: 1 });
+    expect(template.settings.baseline).toEqual({ entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" });
     expect(template.rows.find((row) => row.path === "decisionMaker")?.choices?.map((choice) => choice.value)).toEqual(["rules", "llm", "baseline"]);
     expect(template.rows.filter((row) => row.perTicker).map((row) => row.path)).toEqual(["baseline.ladderSharesPct", "baseline.ladderRungs", "baseline.ladderShock", "baseline.ladderShockPct", "baseline.ladderShockMinPct", "baseline.ladderShockMaxPct", "baseline.minAbsDelta", "baseline.maxAbsDelta"]);
     expect(template.rows.find((row) => row.path === "pluto.capitalBudgetPct")).toEqual({ path: "pluto.capitalBudgetPct", group: "Capital and sizing", section: "pluto_rules", label: "Capital budget", unit: "percent", now: Number(plutoRow.capital_budget_pct), editable: true, note: "% of the account" });
@@ -329,16 +327,6 @@ describe("backtest routes", () => {
       ["baseline.entryMaxExtensionZ", 1, true],
       ["baseline.entryIvRankFilter", "off", true],
       ["baseline.entryMaxIvRank", 80, true],
-      ["baseline.knifeGuard", "off", true],
-      ["baseline.knifeGuardMinScale", 0, true],
-      ["baseline.kellySizing", "disabled", true],
-      ["baseline.kellyMultiplierRule", "extension", true],
-      ["baseline.kellyTopFromZ", 0.5, true],
-      ["baseline.kellyTopToZ", 1.5, true],
-      ["baseline.kellyMaxMultiplier", 2, true],
-      ["baseline.kellySpyMove", "off", true],
-      ["baseline.kellyAtTops", "wait_in_cash", true],
-      ["baseline.kellyConstantMultiplier", 1, true],
       ["baseline.takeProfitPct", 0, true],
       ["baseline.shareStopLossPct", 0, true],
     ]);

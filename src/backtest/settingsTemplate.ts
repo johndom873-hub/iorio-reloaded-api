@@ -405,74 +405,11 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "fill_down_ranking", label: "The rest goes to the next candidates in order" },
     ],
   },
-  {
-    path: "baseline.knifeGuard",
-    label: "Falling-knife guard",
-    unit: "choice",
-    editable: true,
-    note: "while the stock is at least 25% below its 252-session closing high, new buying (Cash-Secured Put and Covered Call entries, ladder Puts) is scaled by K = minimum + (1 − minimum) × min(1, q ÷ 0.5), q = beta × SPY's fall from its own high ÷ the stock's fall: the market's share of the fall. PTON on 2021-11-08: 67% below its high with SPY at its high, q 0.00, so no new buying at minimum 0; it fell another 53%. Market's share + IV: halved again while implied volatility is at its 21-session peak. Calls on held shares are never scaled",
-    choices: [
-      { value: "off", label: "Off" },
-      { value: "market_share", label: "Market's share" },
-      { value: "market_share_and_iv", label: "Market's share + IV" },
-    ],
-  },
-  { path: "baseline.knifeGuardMinScale", label: "Guard: scale when the stock falls alone", unit: "number", editable: true, note: "K when the market explains none of the fall (q = 0): 0 stops new buying, 0.5 halves it; K reaches 1 once the market explains half the fall" },
-  {
-    path: "baseline.kellySizing",
-    label: "Kelly sizing",
-    unit: "choice",
-    editable: true,
-    note: "dynamic: a multiplier m at each look scales the entries' room in the shares' budget and each ladder Put's collateral (a rung's strike cap stays where today's rung puts it); what the entries leave unspent joins the ladder's reserve. Calls on held shares are never scaled",
-    choices: [
-      { value: "disabled", label: "Disabled (today's sizes)" },
-      { value: "dynamic", label: "Dynamic" },
-    ],
-  },
-  {
-    path: "baseline.kellyMultiplierRule",
-    label: "Kelly: multiplier from",
-    unit: "choice",
-    editable: true,
-    note: "extension z: less near tops, more near bottoms; z = (previous close ÷ 200-day average − 1) ÷ 63-session volatility, as in the Entry filters (fewer than 200 closes: m = 1). Constant: the same m at every look, a control",
-    choices: [
-      { value: "extension", label: "Extension z" },
-      { value: "constant", label: "Constant (a control)" },
-    ],
-  },
-  { path: "baseline.kellyTopFromZ", label: "Kelly: cut from extension z", unit: "number", editable: true, note: "m = 1 up to this z, falling linearly to 0 at the next row's z. MRNA on 2021-09-20, z 1.24: m 0.26 with 0.5 → 1.5, 0.76 with 1.0 → 2.0" },
-  { path: "baseline.kellyTopToZ", label: "Kelly: zero at extension z", unit: "number", editable: true, note: "no new buying from this z up" },
-  { path: "baseline.kellyMaxMultiplier", label: "Kelly: most at bottoms", unit: "number", editable: true, note: "m rises linearly from 1 at z 0 to this at z −1 or below; 1 = no boost. SPY on 2020-03-23, z −0.49: m 1.49 with 2; always within the cash and what is left of the reserve" },
-  {
-    path: "baseline.kellySpyMove",
-    label: "Kelly: SPY's 21-session move",
-    unit: "choice",
-    editable: true,
-    note: "on: m × (1 − 0.5 × clamp((move − 2%) ÷ 4%, 0, 1)), full up to +2%, half from +6%",
-    choices: [
-      { value: "off", label: "Off" },
-      { value: "on", label: "On" },
-    ],
-  },
-  {
-    path: "baseline.kellyAtTops",
-    label: "Kelly: the entry room held back at a top",
-    unit: "choice",
-    editable: true,
-    note: "at z at or above the cut: price $100, shares' budget $50,000 and m 0.4 buy $20,000 of shares; the other $30,000 waits, or secures Puts at a strike ≤ 100 × (1 − 0.30 × 0.6) = $82 (any |delta|, by premium yield, as ladder Puts)",
-    choices: [
-      { value: "wait_in_cash", label: "Waits in cash" },
-      { value: "deeper_puts", label: "Deeper Puts" },
-    ],
-  },
-  { path: "baseline.kellyConstantMultiplier", label: "Kelly: constant multiplier", unit: "number", editable: true, note: "m at every look with the constant rule" },
 ];
 
 const ladderOn: BacktestSettingCondition = { path: "baseline.putsWhenNoCall", oneOf: ["reserve_ladder"] };
 const onlyWithLadder: BacktestSettingApplicability = { allOf: [ladderOn], explanation: "Applies only with Puts when no call is sold set to the ladder." };
-const kellyDynamic: BacktestSettingApplicability = { allOf: [ladderOn, { path: "baseline.kellySizing", oneOf: ["dynamic"] }], explanation: "Applies only with Kelly sizing dynamic." };
-const kellyFromExtension: BacktestSettingApplicability = { allOf: [ladderOn, { path: "baseline.kellySizing", oneOf: ["dynamic"] }, { path: "baseline.kellyMultiplierRule", oneOf: ["extension"] }], explanation: "Applies only with Kelly sizing dynamic from extension z." };
-const onlyWithHistoryShock: BacktestSettingApplicability ={ allOf: [ladderOn, { path: "baseline.ladderShock", oneOf: ["history"] }], explanation: "Applies only with the ladder's Stock shock set to the stock's Max drawdown." };
+const onlyWithHistoryShock: BacktestSettingApplicability = { allOf: [ladderOn, { path: "baseline.ladderShock", oneOf: ["history"] }], explanation: "Applies only with the ladder's Stock shock set to the stock's Max drawdown." };
 
 /**
  * The groups in order, each row's place in them, and when a Baseline wheel row is read at all (as the engine reads them:
@@ -556,28 +493,6 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
       { path: "baseline.entryMaxExtensionZ", appliesWhen: { allOf: [{ path: "baseline.entryExtensionFilter", oneOf: ["on"] }], explanation: "Applies only with Skip entries on a stretched stock on." } },
       { path: "baseline.entryIvRankFilter" },
       { path: "baseline.entryMaxIvRank", appliesWhen: { allOf: [{ path: "baseline.entryIvRankFilter", oneOf: ["on"] }], explanation: "Applies only with Skip entries at a high IV Rank on." } },
-    ],
-  },
-  {
-    group: "Falling-knife guard",
-    section: "baseline_wheel",
-    rows: [
-      { path: "baseline.knifeGuard", appliesWhen: onlyWithLadder },
-      { path: "baseline.knifeGuardMinScale", appliesWhen: { allOf: [ladderOn, { path: "baseline.knifeGuard", noneOf: ["off"] }], explanation: "Applies only with the Falling-knife guard on." } },
-    ],
-  },
-  {
-    group: "Kelly sizing",
-    section: "baseline_wheel",
-    rows: [
-      { path: "baseline.kellySizing", appliesWhen: onlyWithLadder },
-      { path: "baseline.kellyMultiplierRule", appliesWhen: kellyDynamic },
-      { path: "baseline.kellyTopFromZ", appliesWhen: kellyFromExtension },
-      { path: "baseline.kellyTopToZ", appliesWhen: kellyFromExtension },
-      { path: "baseline.kellyMaxMultiplier", appliesWhen: kellyFromExtension },
-      { path: "baseline.kellySpyMove", appliesWhen: kellyFromExtension },
-      { path: "baseline.kellyAtTops", appliesWhen: kellyFromExtension },
-      { path: "baseline.kellyConstantMultiplier", appliesWhen: { allOf: [ladderOn, { path: "baseline.kellySizing", oneOf: ["dynamic"] }, { path: "baseline.kellyMultiplierRule", oneOf: ["constant"] }], explanation: "Applies only with Kelly sizing dynamic on a constant." } },
     ],
   },
   { group: "Exits", section: "baseline_wheel", rows: [{ path: "baseline.takeProfitPct" }, { path: "baseline.shareStopLossPct" }] },

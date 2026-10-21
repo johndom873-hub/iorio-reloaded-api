@@ -9,9 +9,6 @@ import { toOhlcvBars } from "./backtestBarHistory.js";
 import { makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineCommissions, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineNoCandidate, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
 
 import { ladderLevelsToday, noteLadderLook } from "./backtestBaselineLadder.js";
-import { openBacktestDataFileReadOnly } from "../backtestDataFile.js";
-import { readFileDailyBars } from "../backtestFileStockBars.js";
-import { ladderBuyingSizing, ladderSizingMeasures, sizingHighWindowSessions, type DailyClose, type LadderSizingMeasures } from "./ladderSizing.js";
 import { entryDropRiskBlock, entryDropRiskBlockingLimits, extensionZ, ivRankBefore } from "./entryDropRiskFilters.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { BacktestLookContext, BacktestLookResult, BacktestNoCandidateNote, BacktestNoSaleNote, BacktestOptionSale } from "./backtestLook.js";
@@ -35,31 +32,6 @@ function forwardAnchorsOfDay(ledger: SimulatedLedger, symbol: string, todayIso: 
   const anchors = new Map<string, BaselineForwardAnchor>();
   bySymbol.set(symbol, { dateIso: todayIso, anchors });
   return anchors;
-}
-
-// SPY's IBKR daily closes for the falling-knife guard and Kelly sizing (ladderSizing.ts), read from its data file once
-// per process (a session job runs in its own process); null without the file.
-let spyDailyCloses: { closes: DailyClose[]; byDate: Map<string, number> } | null | undefined;
-function spyDailyClosesOnce(): { closes: DailyClose[]; byDate: Map<string, number> } | null {
-  if (spyDailyCloses !== undefined) return spyDailyCloses;
-  const database = openBacktestDataFileReadOnly("SPY");
-  const bars = database ? readFileDailyBars(database) : null;
-  database?.close();
-  const closes = (bars ?? []).flatMap((bar) => (bar.close !== null && bar.close > 0 ? [{ date: bar.tradingDate, close: bar.close }] : []));
-  spyDailyCloses = closes.length > 0 ? { closes, byDate: new Map(closes.map((bar) => [bar.date, bar.close])) } : null;
-  return spyDailyCloses;
-}
-
-/** Each ticker's guard and Kelly measures of the day, by ledger: they read only bars before the day. */
-const sizingMeasuresByLedger = new WeakMap<SimulatedLedger, Map<string, { dateIso: string; measures: LadderSizingMeasures }>>();
-function sizingMeasuresOfDay(ledger: SimulatedLedger, symbol: string, todayIso: string, compute: () => LadderSizingMeasures): LadderSizingMeasures {
-  let bySymbol = sizingMeasuresByLedger.get(ledger);
-  if (!bySymbol) sizingMeasuresByLedger.set(ledger, (bySymbol = new Map()));
-  const kept = bySymbol.get(symbol);
-  if (kept?.dateIso === todayIso) return kept.measures;
-  const measures = compute();
-  bySymbol.set(symbol, { dateIso: todayIso, measures });
-  return measures;
 }
 
 // The baseline wheel's look (decision maker "baseline", approved by Marcelo 2026-10-13): none of Pluto's rules and none
@@ -203,38 +175,17 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
         .flatMap((position) => legsOfPosition(ledger, position.id))
         .filter((leg) => leg.legType === "stock" && leg.side === "long" && leg.exitAt === null)
         .reduce((sum, leg) => sum + leg.quantity * priceToCycleScale, 0);
+    // The put ladder (backtestBaselineLadder.ts): the cycle's state, noted before anything is sold at this look.
+    const ladderOn = baseline.putsWhenNoCall === "reserve_ladder";
+    const ladderState = ladderOn
+      ? noteLadderLook(ledger, symbol, { cycleOpen: ledgerOpenCycleSummary(ledger, symbol) !== null, sharesHeld: heldSharesToday() > 0, todayIso, accountValue: accountValueToday(), adjustedClosesBefore: lookSymbol.adjustedDailyClosesBeforeToday }, baseline)
+      : null;
     const openPutCollateral = () =>
       positionsOfSymbol(ledger, symbol)
         .filter((position) => position.status === "open" && position.strategyKey === "cash_secured_put")
         .flatMap((position) => legsOfPosition(ledger, position.id))
         .filter((leg) => leg.legType === "option" && leg.side === "short" && leg.exitAt === null)
         .reduce((sum, leg) => sum + leg.strikePrice! * leg.quantity * leg.multiplier, 0);
-    // The put ladder (backtestBaselineLadder.ts): the cycle's state, noted before anything is sold at this look.
-    const ladderOn = baseline.putsWhenNoCall === "reserve_ladder";
-    // The falling-knife guard and Kelly sizing (ladderSizing.ts), from the bars before the day; null with both off.
-    const sizing =
-      ladderOn && (baseline.knifeGuard !== "off" || baseline.kellySizing !== "disabled")
-        ? ladderBuyingSizing(
-            baseline,
-            sizingMeasuresOfDay(ledger, symbol, todayIso, () => {
-              const spy = spyDailyClosesOnce();
-              const spyCount = spy === null ? 0 : spy.closes.findIndex((bar) => bar.date >= todayIso);
-              const spyBefore = spy === null ? null : spy.closes.slice(Math.max(0, (spyCount < 0 ? spy.closes.length : spyCount) - sizingHighWindowSessions - 1), spyCount < 0 ? spy.closes.length : spyCount);
-              const barCount = lookSymbol.bars.countBefore(todayIso);
-              const impliedVolatilities = lookSymbol.bars.rows.slice(Math.max(0, barCount - 21), barCount).map((row) => row.impliedVolatility ?? null);
-              return ladderSizingMeasures({ closesBeforeToday: lookSymbol.adjustedDailyClosesBeforeToday, impliedVolatilitiesBeforeToday: impliedVolatilities, spyClosesBeforeToday: spyBefore, spyCloseByDate: spy?.byDate ?? null });
-            }),
-          )
-        : null;
-    const ladderState = ladderOn
-      ? noteLadderLook(
-          ledger,
-          symbol,
-          { cycleOpen: ledgerOpenCycleSummary(ledger, symbol) !== null, sharesHeld: heldSharesToday() > 0, todayIso, accountValue: accountValueToday(), adjustedClosesBefore: lookSymbol.adjustedDailyClosesBeforeToday },
-          baseline,
-          sizing?.pool ? { committedDollars: () => (heldSharesAverageCostToday() ?? 0) * heldSharesToday() + openPutCollateral(), sharesPct: baseline.ladderSharesPct, tickerWeight } : null,
-        )
-      : null;
 
     // strikeLimit: the cost rule's lowest strike for a call (costFloor, before the relief) or highest for a put (costCeiling,
     // the average held; null with none), when one applied; its scores then carry it with the averages around the order.
@@ -447,12 +398,11 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
         openPutCollateral: book.openPutCollateral(),
         sharesAverageCost: book.heldSharesAverageCostToday(),
         freeLots: Math.floor((book.freeShares() * priceToCycleScale) / sharesPerContract + 1e-9),
-        ...(sizing === null ? {} : { pool: sizing.pool ? { shareOfBudgetHeldAtStart: ladderState.shareOfBudgetHeldAtStart ?? 1 } : null, buyingScale: sizing.buyingScale }),
       });
       ladderLevels.push({ tradingDate: todayIso, at: at.toISOString(), lookTimeEt, symbol, splitFactor: lookSymbol.splitFactorToday, levels });
     }
     const noteNoCandidate = (note: BaselineNoCandidate) => noCandidateNotes.push({ tradingDate: todayIso, lookTimeEt, symbol, ...note });
-    planBaselineSales({ symbol, commissions: backtestCommissions, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall, entryBlockedBecause, noteNoSale, noteNoCandidate, sizing });
+    planBaselineSales({ symbol, commissions: backtestCommissions, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall, entryBlockedBecause, noteNoSale, noteNoCandidate });
   }
 
   const summary = summaries.length === 0 ? "No action: fully invested" : actions.length === 0 ? `No action: ${summaries.join(" | ")}` : summaries.join(" · ");

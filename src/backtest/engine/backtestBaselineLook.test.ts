@@ -701,15 +701,8 @@ describe("baselineContractsForCash", () => {
 
 describe("validateBaselineSettings", () => {
   it("accepts the defaults and refuses ranges that are out of order or out of bounds", () => {
-    const valid = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", dayValueOptions: "marked", knifeGuard: "off", knifeGuardMinScale: 0, kellySizing: "disabled", kellyMultiplierRule: "extension", kellyTopFromZ: 0.5, kellyTopToZ: 1.5, kellyMaxMultiplier: 2, kellySpyMove: "off", kellyAtTops: "wait_in_cash", kellyConstantMultiplier: 1 };
+    const valid = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", dayValueOptions: "marked" };
     expect(validateBaselineSettings(valid)).toBeNull();
-    expect(validateBaselineSettings({ ...valid, knifeGuard: "market_share_and_iv", knifeGuardMinScale: 0.5, kellySizing: "dynamic", kellyAtTops: "deeper_puts", kellySpyMove: "on" })).toBeNull();
-    expect(validateBaselineSettings({ ...valid, knifeGuard: "on" })).toMatch(/knifeGuard must be/);
-    expect(validateBaselineSettings({ ...valid, knifeGuardMinScale: 1.5 })).toMatch(/knifeGuardMinScale/);
-    expect(validateBaselineSettings({ ...valid, kellySizing: "fixed" })).toMatch(/kellySizing must be disabled or dynamic/);
-    expect(validateBaselineSettings({ ...valid, kellyTopFromZ: 1.5, kellyTopToZ: 1.5 })).toMatch(/kellyTopToZ must be a number above/);
-    expect(validateBaselineSettings({ ...valid, kellyMaxMultiplier: 0.5 })).toMatch(/kellyMaxMultiplier/);
-    expect(validateBaselineSettings({ ...valid, kellyConstantMultiplier: -1 })).toMatch(/kellyConstantMultiplier/);
     expect(validateBaselineSettings({ ...valid, entryExtensionFilter: "on", entryMaxExtensionZ: 1.5, entryIvRankFilter: "on", entryMaxIvRank: 90 })).toBeNull();
     expect(validateBaselineSettings({ ...valid, entryExtensionFilter: "entries" })).toMatch(/entryExtensionFilter must be off or on/);
     expect(validateBaselineSettings({ ...valid, entryMaxExtensionZ: 0 })).toMatch(/entryMaxExtensionZ/);

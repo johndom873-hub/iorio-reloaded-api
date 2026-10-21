@@ -34,17 +34,6 @@ export interface LadderCycleState {
   /** The account value at the last look before shares were held: the cycle's starting value. */
   accountValueAtStart: number;
   shock: number;
-  /**
-   * With Kelly sizing dynamic (ladderSizing.ts): h₀, the share of the shares' budget that the shares at cost and the open
-   * Puts' collateral took when the ladder started, at most 1. The reserve is then the base less h₀ × the budget, so what
-   * the entries left unspent joins it. Absent otherwise.
-   */
-  shareOfBudgetHeldAtStart?: number;
-}
-
-/** Kelly sizing's pool for today's rung: h₀ (LadderCycleState.shareOfBudgetHeldAtStart). */
-export interface LadderPool {
-  shareOfBudgetHeldAtStart: number;
 }
 
 export interface LadderBudget {
@@ -87,7 +76,6 @@ export function noteLadderLook(
   symbol: string,
   look: { cycleOpen: boolean; sharesHeld: boolean; todayIso: string; accountValue: number; adjustedClosesBefore: readonly { date: string; close: number }[] },
   settings: Pick<BacktestBaselineSettings, "ladderShock" | "ladderShockPct" | "ladderShockMinPct" | "ladderShockMaxPct" | "ladderShockNoHistoryPct" | "ladderShockLookbackYears">,
-  pool: { committedDollars: () => number; sharesPct: number; tickerWeight: number } | null = null,
 ): LadderCycleState {
   let bySymbol = stateByLedger.get(ledger);
   if (!bySymbol) stateByLedger.set(ledger, (bySymbol = new Map()));
@@ -96,17 +84,9 @@ export function noteLadderLook(
   if (!look.cycleOpen) state = { startedOn: null, accountValueAtStart: look.accountValue, shock: 0 };
   else if (kept && kept.startedOn !== null) state = kept;
   else if (!look.sharesHeld) state = { startedOn: null, accountValueAtStart: look.accountValue, shock: 0 };
-  else {
-    state = { startedOn: look.todayIso, accountValueAtStart: kept?.accountValueAtStart ?? look.accountValue, shock: ladderShock(settings, look.adjustedClosesBefore, look.todayIso) };
-    if (pool) state.shareOfBudgetHeldAtStart = shareOfBudgetHeld(pool.committedDollars(), ladderBudget(ladderBase(state, look.accountValue, pool.tickerWeight), pool.sharesPct).sharesBudget);
-  }
+  else state = { startedOn: look.todayIso, accountValueAtStart: kept?.accountValueAtStart ?? look.accountValue, shock: ladderShock(settings, look.adjustedClosesBefore, look.todayIso) };
   bySymbol.set(symbol, state);
   return state;
-}
-
-/** h₀ = min(1, committed ÷ the shares' budget); 1 without a budget. */
-export function shareOfBudgetHeld(committedDollars: number, sharesBudget: number): number {
-  return sharesBudget > 0 ? Math.min(1, Math.max(0, committedDollars / sharesBudget)) : 1;
 }
 
 /** The base the budget and the reserve are taken from: the ticker's weight × the larger of the account value at the cycle's start and today's (weight 1 when the session's tickers share one account). */
@@ -141,31 +121,19 @@ export interface LadderRung {
   scores: Record<string, number | null>;
 }
 
-/**
- * Today's rung: the cap, its collateral and what the action records about it. With Kelly sizing's pool the reserve is the
- * base less h₀ × the shares' budget and everything held beyond h₀ × the budget is committed; with a buying scale m (the
- * guard's and Kelly's, ladderSizing.ts) the collateral is m × the rung's, within what is left of the reserve, while the
- * strike cap stays the unscaled rung's.
- */
-export function ladderRungToday(input: { settings: Pick<BacktestBaselineSettings, "ladderSharesPct" | "ladderRungs" | "ladderTop">; state: LadderCycleState; accountValueToday: number; tickerWeight: number; breakEven: number | null; stockPrice: number; heldSharesCost: number; openPutCollateral: number; sharesAverageCost: number | null; pool?: LadderPool | null; buyingScale?: number | null }): LadderRung {
+/** Today's rung: the cap, its collateral and what the action records about it. */
+export function ladderRungToday(input: { settings: Pick<BacktestBaselineSettings, "ladderSharesPct" | "ladderRungs" | "ladderTop">; state: LadderCycleState; accountValueToday: number; tickerWeight: number; breakEven: number | null; stockPrice: number; heldSharesCost: number; openPutCollateral: number; sharesAverageCost: number | null }): LadderRung {
   const { settings, state, accountValueToday, tickerWeight, breakEven, stockPrice, heldSharesCost, openPutCollateral, sharesAverageCost } = input;
-  const pool = input.pool ?? null;
-  const buyingScale = input.buyingScale ?? null;
   const top = breakEven === null ? null : settings.ladderTop === "price" ? Math.min(breakEven, stockPrice) : breakEven;
   const base = ladderBase(state, accountValueToday, tickerWeight);
-  const budget = ladderBudget(base, settings.ladderSharesPct);
-  const heldAtStart = pool === null ? budget.sharesBudget : pool.shareOfBudgetHeldAtStart * budget.sharesBudget;
-  const reserve = pool === null ? budget.reserve : base - heldAtStart;
-  const committed = ladderCommitted(heldSharesCost, openPutCollateral, heldAtStart);
-  const rungCollateral = ladderRungCollateral(reserve, committed, settings.ladderRungs);
-  const collateral = buyingScale === null ? rungCollateral : Math.max(0, Math.min(buyingScale * rungCollateral, reserve - committed));
+  const { sharesBudget, reserve } = ladderBudget(base, settings.ladderSharesPct);
+  const committed = ladderCommitted(heldSharesCost, openPutCollateral, sharesBudget);
+  const collateral = ladderRungCollateral(reserve, committed, settings.ladderRungs);
   const floor = sharesAverageCost === null ? null : sharesAverageCost * (1 - state.shock);
-  const cap = floor === null ? null : ladderStrikeCap({ breakEven: top, floor, committed, rungCollateral, reserve });
+  const cap = floor === null ? null : ladderStrikeCap({ breakEven: top, floor, committed, rungCollateral: collateral, reserve });
   const money = (value: number) => `$${Math.round(value).toLocaleString("en-US")}`;
-  const scaleNote = buyingScale === null ? "" : `; the rung's ${money(rungCollateral)} × ${buyingScale.toFixed(2)} = ${money(collateral)}`;
-  const note = `break-even ${breakEven === null ? "unknown" : breakEven.toFixed(2)}${settings.ladderTop === "price" && top !== null ? `, top ${top.toFixed(2)}` : ""}, ${floor === null ? "no shares held, no floor" : `floor ${floor.toFixed(2)} (average cost ${sharesAverageCost!.toFixed(2)}, shock ${(state.shock * 100).toFixed(0)}%)`}, ${money(committed)} of the ${money(reserve)} reserve committed${scaleNote}`;
-  const sizingScores: Record<string, number | null> = buyingScale === null && pool === null ? {} : { ladderBuyingScale: buyingScale, ladderUnscaledRungCollateral: rungCollateral, ladderShareOfBudgetHeldAtStart: pool?.shareOfBudgetHeldAtStart ?? null };
-  return { cap, collateral, note, scores: { ladderCap: cap, ladderTop: top, ladderBase: base, ladderFloor: floor, ladderAverageCost: sharesAverageCost, ladderShock: state.shock, ladderBreakEven: breakEven, ladderCommitted: committed, ladderReserve: reserve, ladderRungCollateral: collateral, ...sizingScores } };
+  const note = `break-even ${breakEven === null ? "unknown" : breakEven.toFixed(2)}${settings.ladderTop === "price" && top !== null ? `, top ${top.toFixed(2)}` : ""}, ${floor === null ? "no shares held, no floor" : `floor ${floor.toFixed(2)} (average cost ${sharesAverageCost!.toFixed(2)}, shock ${(state.shock * 100).toFixed(0)}%)`}, ${money(committed)} of the ${money(reserve)} reserve committed`;
+  return { cap, collateral, note, scores: { ladderCap: cap, ladderTop: top, ladderBase: base, ladderFloor: floor, ladderAverageCost: sharesAverageCost, ladderShock: state.shock, ladderBreakEven: breakEven, ladderCommitted: committed, ladderReserve: reserve, ladderRungCollateral: collateral } };
 }
 
 /** K_max = A − (A − F) × (U + Q) ÷ R0; null when no put fits (no break-even, nothing left, or the break-even at or below the floor). */
