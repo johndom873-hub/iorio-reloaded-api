@@ -11,6 +11,7 @@ import {
   backtestTickerBaselineKeys,
   defaultBacktestBaselineSettings,
   defaultBacktestPolicySettings,
+  defaultBacktestSteadyStakeSettings,
   type BacktestBaselineSettings,
   type BacktestBookMode,
   type BacktestPolicySettings,
@@ -18,6 +19,7 @@ import {
   type BacktestSettings,
   type BacktestSettingsOverrides,
   type BacktestSettingsSource,
+  type BacktestSteadyStakeSettings,
   type BacktestSymbolResolution,
   type BacktestSymbolSettingSource,
   type BacktestSymbolSettings,
@@ -125,7 +127,7 @@ export function validateBacktestSettingsOverrides(
 ): { ok: true; overrides: BacktestSettingsOverrides } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, overrides: {} };
   if (!isPlainObject(raw)) return { ok: false, error: "overrides must be an object." };
-  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "kellyFraction" && key !== "policy" && key !== "decisionMaker" && key !== "baseline");
+  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "kellyFraction" && key !== "policy" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake");
   if (unknownSection) return { ok: false, error: `overrides.${unknownSection} is not a setting a session can change.` };
 
   const overrides: BacktestSettingsOverrides = {};
@@ -173,8 +175,20 @@ export function validateBacktestSettingsOverrides(
     if (Object.keys(changed).length > 0) overrides.baseline = changed as Partial<BacktestBaselineSettings>;
   }
 
+  // Every Steady Stake value can change for a session.
+  if (raw.steadyStake !== undefined) {
+    if (!isPlainObject(raw.steadyStake)) return { ok: false, error: "overrides.steadyStake must be an object." };
+    const snapshotSteadyStake = { ...defaultBacktestSteadyStakeSettings, ...snapshot.steadyStake };
+    const unknownField = Object.keys(raw.steadyStake).find((field) => !(field in defaultBacktestSteadyStakeSettings));
+    if (unknownField) return { ok: false, error: `steadyStake.${unknownField} is not a Steady Stake setting.` };
+    const problem = validateSteadyStakeSettings({ ...snapshotSteadyStake, ...raw.steadyStake });
+    if (problem) return { ok: false, error: problem };
+    const changed = changedEntries(snapshotSteadyStake, raw.steadyStake);
+    if (Object.keys(changed).length > 0) overrides.steadyStake = changed as Partial<BacktestSteadyStakeSettings>;
+  }
+
   if (raw.decisionMaker !== undefined) {
-    if (raw.decisionMaker !== "rules" && raw.decisionMaker !== "llm" && raw.decisionMaker !== "baseline") return { ok: false, error: "decisionMaker must be rules, llm or baseline." };
+    if (raw.decisionMaker !== "rules" && raw.decisionMaker !== "llm" && raw.decisionMaker !== "baseline" && raw.decisionMaker !== "steady_stake") return { ok: false, error: "decisionMaker must be rules, llm, baseline or steady_stake." };
     if (raw.decisionMaker === "llm" && !decisionMakers.claudeCliAvailable) return { ok: false, error: backtestClaudeCliPathMissingMessage };
     if (raw.decisionMaker !== (snapshot.decisionMaker ?? "rules")) overrides.decisionMaker = raw.decisionMaker;
   }
@@ -223,6 +237,19 @@ export function validateBaselineSettings(values: Record<string, unknown>): strin
   if ((values.minAbsDelta as number) > (values.maxAbsDelta as number)) return "baseline.minAbsDelta must not be above baseline.maxAbsDelta.";
   if ((values.callMinAbsDelta as number) > (values.callMaxAbsDelta as number)) return "baseline.callMinAbsDelta must not be above baseline.callMaxAbsDelta.";
   if ((values.minDte as number) > (values.maxDte as number)) return "baseline.minDte must not be above baseline.maxDte.";
+  return null;
+}
+
+/** The Steady Stake's values (BacktestSteadyStakeSettings): null when they are valid. */
+export function validateSteadyStakeSettings(values: Record<string, unknown>): string | null {
+  const isNumberIn = (value: unknown, min: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+  if (!isNumberIn(values.stakePct, 1, 100)) return "steadyStake.stakePct must be a number from 1 to 100.";
+  if (!isNumberIn(values.rebalanceBandPct, 0, 50)) return "steadyStake.rebalanceBandPct must be a number from 0 to 50.";
+  if (!isNumberIn(values.callCoveragePct, 0, 100)) return "steadyStake.callCoveragePct must be a number from 0 (no Calls) to 100.";
+  if (!isNumberIn(values.putCashPct, 0, 100)) return "steadyStake.putCashPct must be a number from 0 (no Puts) to 100.";
+  for (const field of ["callAbsDelta", "putAbsDelta"] as const) if (!isNumberIn(values[field], 0.01, 0.99)) return `steadyStake.${field} must be a number from 0.01 to 0.99.`;
+  if (!isNumberIn(values.deltaTolerance, 0.005, 0.5)) return "steadyStake.deltaTolerance must be a number from 0.005 to 0.5.";
+  if (!isNumberIn(values.maxSpreadPctOfMid, 1, 200)) return "steadyStake.maxSpreadPctOfMid must be a number from 1 to 200.";
   return null;
 }
 

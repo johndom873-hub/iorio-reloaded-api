@@ -210,12 +210,20 @@ describe("validateBacktestSettingsOverrides", () => {
     });
     // Without the CLI the rules can still be chosen.
     expect(validateBacktestSettingsOverrides({ decisionMaker: "rules" }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({ ok: true, overrides: {} });
-    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "decisionMaker must be rules, llm or baseline." });
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "coin" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "decisionMaker must be rules, llm, baseline or steady_stake." });
     expect(validateBacktestSettingsOverrides({ decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } }, snapshot, editableBacktestSettingPaths, { claudeCliAvailable: false })).toEqual({ ok: true, overrides: { decisionMaker: "baseline", baseline: { entry: "covered_call", maxAbsDelta: 0.4 } } });
     expect(validateBacktestSettingsOverrides({ baseline: { minAbsDelta: 0.7 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "baseline.minAbsDelta must not be above baseline.maxAbsDelta." });
     expect(validateBacktestSettingsOverrides({ baseline: { strangle: true } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "baseline.strangle cannot be changed for a session." });
     expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "llm" } }, { ...context, claudeCliAvailable: false })).toMatchObject({ ok: false, error: expect.stringContaining("BACKTEST_CLAUDE_CLI_PATH") });
     expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "llm" } }, context)).toMatchObject({ ok: true, value: { overrides: { decisionMaker: "llm" } } });
+  });
+
+  it("takes the Steady Stake as decision maker with its own values, each checked, on a starting value", () => {
+    expect(validateBacktestSettingsOverrides({ decisionMaker: "steady_stake", steadyStake: { stakePct: 80, putCashPct: 0, callAbsDelta: 0.2 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { decisionMaker: "steady_stake", steadyStake: { stakePct: 80, putCashPct: 0 } } });
+    expect(validateBacktestSettingsOverrides({ steadyStake: { stakePct: 0 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "steadyStake.stakePct must be a number from 1 to 100." });
+    expect(validateBacktestSettingsOverrides({ steadyStake: { ladderRungs: 3 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "steadyStake.ladderRungs is not a Steady Stake setting." });
+    expect(validateBacktestSettingsOverrides({ steadyStake: 70 }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "overrides.steadyStake must be an object." });
+    expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "steady_stake" } }, context)).toMatchObject({ ok: true, value: { bookMode: "shared_account", overrides: { decisionMaker: "steady_stake" } } });
   });
 
   it("keeps the Kelly fraction above 0 and at most 1", () => {

@@ -459,6 +459,34 @@ function applySellShares(ledger: SimulatedLedger, event: SellSharesEvent): { sol
   return { soldLegId: soldLeg.id, positionClosed };
 }
 
+export interface BuySharesEvent {
+  symbol: string;
+  shares: number;
+  /** Purchase fill per share. */
+  fillPrice: number;
+  at: Date;
+  actionId: string | null;
+  /** Today's cumulative split factor: the cycle's, when this purchase opens one. */
+  splitFactorToday: number;
+  /** Shares as traded today per share on the cycle's scale (the stock commission is charged on shares as traded); 1 when omitted. */
+  tradedSharesPerLedgerShare?: number;
+}
+
+/**
+ * Shares bought outright, with no call on them (the Steady Stake's rebalancing): added to the symbol's unstructured
+ * position at the weighted average (a new one when it holds none), the purchase trade, its cash and its commission.
+ */
+function applyBuyShares(ledger: SimulatedLedger, event: BuySharesEvent): { positionId: string; legId: string } {
+  requirePositiveWholeNumber(event.shares, "Shares");
+  startCycleIfFlat(ledger, event.symbol, event.splitFactorToday, event.at);
+  const commission = stockCommissionDollars(event.shares * (event.tradedSharesPerLedgerShare ?? 1));
+  const holder = receiveUncoveredShares(ledger, event.symbol, event.shares, event.fillPrice + commission / event.shares, event.at, "shares_bought", []);
+  recordTrade(ledger, holder.leg, { side: "buy", quantity: event.shares, price: event.fillPrice, commission, at: event.at, isClosingTrade: false, actionId: event.actionId });
+  recordLegCash(ledger, holder.position, holder.leg, event.at, "share_purchase", -event.shares * event.fillPrice);
+  recordLegCash(ledger, holder.position, holder.leg, event.at, "commission", -commission);
+  return { positionId: holder.position.id, legId: holder.leg.id };
+}
+
 export interface SettleExpiryEvent {
   /** The open short option leg whose expiry date has closed. */
   legId: string;
@@ -580,6 +608,9 @@ export function closeCoveredCall(...args: Parameters<typeof applyCloseCoveredCal
   return changingLedger(args[0], () => applyCloseCoveredCall(...args));
 }
 
+export function buyShares(...args: Parameters<typeof applyBuyShares>): ReturnType<typeof applyBuyShares> {
+  return changingLedger(args[0], () => applyBuyShares(...args));
+}
 export function sellShares(...args: Parameters<typeof applySellShares>): ReturnType<typeof applySellShares> {
   return changingLedger(args[0], () => applySellShares(...args));
 }

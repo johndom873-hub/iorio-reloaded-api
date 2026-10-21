@@ -1,4 +1,4 @@
-import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, type BacktestModelSettings, type BacktestSettings, type BacktestSettingsOverrides, type EffectiveBacktestSettings } from "./backtestTypes.js";
+import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, type BacktestModelSettings, type BacktestSettings, type BacktestSettingsOverrides, type EffectiveBacktestSettings } from "./backtestTypes.js";
 import { liveSurfaceFitLimits, type SurfaceFitLimits } from "../lib/impliedVolatilitySurface.js";
 import { gradeMarginCutPoints, type GradeMarginCutPoints } from "../lib/contractValuation.js";
 import type { TradingSettings } from "../lib/tradingSettingsStore.js";
@@ -15,6 +15,7 @@ export function applyBacktestOverrides(snapshot: BacktestSettings, overrides: Ba
     decisionMaker: overrides.decisionMaker ?? snapshot.decisionMaker ?? "rules",
     model: { ...defaultBacktestModelSettings, ...snapshot.model, ...overrides.model },
     baseline: { ...defaultBacktestBaselineSettings, ...snapshot.baseline, ...overrides.baseline },
+    steadyStake: { ...defaultBacktestSteadyStakeSettings, ...snapshot.steadyStake, ...overrides.steadyStake },
   };
 }
 
@@ -55,6 +56,7 @@ export function countBacktestOverrides(snapshot: BacktestSettings, overrides: Ba
     (overrides.kellyFraction !== undefined && overrides.kellyFraction !== snapshot.kellyFraction ? 1 : 0) +
     (overrides.decisionMaker !== undefined && overrides.decisionMaker !== snapshotDecisionMaker ? 1 : 0) +
     changedIn({ ...defaultBacktestModelSettings, ...snapshot.model }, overrides.model) +
-    changedIn({ ...defaultBacktestBaselineSettings, ...snapshot.baseline }, overrides.baseline)
+    changedIn({ ...defaultBacktestBaselineSettings, ...snapshot.baseline }, overrides.baseline) +
+    changedIn({ ...defaultBacktestSteadyStakeSettings, ...snapshot.steadyStake }, overrides.steadyStake)
   );
 }

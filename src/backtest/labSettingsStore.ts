@@ -9,6 +9,7 @@ import {
   defaultBacktestBaselineSettings,
   defaultBacktestModelSettings,
   defaultBacktestPolicySettings,
+  defaultBacktestSteadyStakeSettings,
   type BacktestLabAuditRow,
   type BacktestLabChange,
   type BacktestLabTickerOverrides,
@@ -71,6 +72,7 @@ async function completeSettings(stored: BacktestSettings, connection: Knex): Pro
     decisionMaker: stored.decisionMaker ?? "rules",
     model: withCodeKeys(defaultBacktestModelSettings, stored.model),
     baseline: withCodeKeys(defaultBacktestBaselineSettings, stored.baseline),
+    steadyStake: withCodeKeys(defaultBacktestSteadyStakeSettings, stored.steadyStake),
   };
 }
 

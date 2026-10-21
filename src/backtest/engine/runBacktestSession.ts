@@ -40,6 +40,7 @@ import { BacktestDayDataReader, type PrefetchedSymbolDay } from "./backtestDayDa
 import { loadTreasuryBillRates } from "./treasuryBillRates.js";
 import { prepareModelTablesForSession } from "./walkForwardModelTables.js";
 import { runBaselineLook } from "./backtestBaselineLook.js";
+import { runSteadyStakeLook } from "./backtestSteadyStakeLook.js";
 
 // The backtest engine's entry point (docs/backtesting/FORMULAS.md, FULL-FIDELITY-DESIGN.md, DATA-FILES.md). Called by the
 // job process (scripts/run-backtest-job.ts) for a backtest job. One session = one or several symbols from its start to
@@ -923,10 +924,11 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         }
         if (lookSymbols.length === 0) continue;
 
-        // The baseline wheel has none of Pluto's checks.
-        if (settings.decisionMaker === "baseline") {
-          if (settings.baseline.looks === "first_look" && !isCaptureLook) continue;
-          const look = await runBaselineLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
+        // The baseline wheel and the Steady Stake have none of Pluto's checks; the Steady Stake decides at 10:00 only.
+        if (settings.decisionMaker === "baseline" || settings.decisionMaker === "steady_stake") {
+          if (settings.decisionMaker === "baseline" ? settings.baseline.looks === "first_look" && !isCaptureLook : !isCaptureLook) continue;
+          const runLook = settings.decisionMaker === "baseline" ? runBaselineLook : runSteadyStakeLook;
+          const look = await runLook({ todayIso, lookTimeEt, symbols: lookSymbols, sectorBySymbol, calendar, settings, modelTables, ledger, previousSessionDateIso: previousSessionDay, priceByLegId, nextActionId, ...(tickerSetupBySymbol ? { tickerSetupBySymbol } : {}) });
           actions.push(...look.actions);
           optionSales.push(...look.optionSales);
           if (look.shortfalls) keepShortfalls(look.shortfalls);

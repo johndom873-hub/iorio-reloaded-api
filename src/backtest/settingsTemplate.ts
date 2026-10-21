@@ -3,7 +3,7 @@ import { db } from "../db/connection.js";
 import { loadPlutoSettings } from "../pluto/settingsStore.js";
 import { kellyFraction } from "../pluto/postModelGates.js";
 import { mapTradingSettingsRow } from "../lib/tradingSettingsStore.js";
-import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
+import { backtestTickerBaselineKeys, defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, type BacktestSettingApplicability, type BacktestSettingCondition, type BacktestSettingGroup, type BacktestSettingRow, type BacktestSettingSection, type BacktestSettings, type BacktestSettingsTemplate } from "./backtestTypes.js";
 import { earningsDateKnownCalendarDaysAhead } from "./engine/backtestTickerInputs.js";
 import { readBacktestClaudeCliPath } from "./backtestClaudeCli.js";
 
@@ -15,7 +15,7 @@ export async function loadCurrentBacktestSettings(connection: Knex = db): Promis
   const [pluto, tradingRow] = await Promise.all([loadPlutoSettings(connection), connection("trading_settings").first()]);
   if (!tradingRow) throw new Error("No trading_settings row found.");
   const trading = mapTradingSettingsRow(tradingRow);
-  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "rules", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings } };
+  return { pluto, trading, kellyFraction, policy: { ...defaultBacktestPolicySettings }, decisionMaker: "rules", model: { ...defaultBacktestModelSettings, spreadCostChargedPct: trading.spreadCostChargedPct }, baseline: { ...defaultBacktestBaselineSettings }, steadyStake: { ...defaultBacktestSteadyStakeSettings } };
 }
 
 type RowDefinition = Omit<BacktestSettingRow, "now" | "group" | "section" | "appliesWhen"> & { fixedValue?: number | string };

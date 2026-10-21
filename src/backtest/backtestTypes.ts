@@ -16,9 +16,10 @@ export type BacktestTablesMode = "walk_forward" | "current";
 /**
  * Who makes the choices the AI model makes live: the stand-in rules (BacktestPolicySettings), or the model itself (Claude
  * through the subscription, src/backtest/llm/). "baseline": none of Pluto or Signals, the naive wheel of
- * BacktestBaselineSettings (Marcelo 2026-10-13), to measure what each rule adds.
+ * BacktestBaselineSettings (Marcelo 2026-10-13), to measure what each rule adds. "steady_stake": the Steady Stake of
+ * BacktestSteadyStakeSettings, also without Pluto or Signals.
  */
-export type BacktestDecisionMaker = "rules" | "llm" | "baseline";
+export type BacktestDecisionMaker = "rules" | "llm" | "baseline" | "steady_stake";
 
 /**
  * The naive wheel (approved by Marcelo 2026-10-13; the research log has the full rules). At every look: free round lots of
@@ -175,6 +176,33 @@ export const backtestEngineVersion = 3;
 export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
 
 /**
+ * The Steady Stake (decision maker "steady_stake"): each ticker keeps a steady share of its pot in its shares, bought or
+ * sold back to it whenever it drifts out of the band, and sells Calls on those shares and Puts on the pot's free cash
+ * only on an expiry day, at the 10:00 look, each expiring at that day's close. It decides at the 10:00 look only; no
+ * Pluto rules and no Signals.
+ */
+export interface BacktestSteadyStakeSettings {
+  /** The stake: the shares' value as a percent of the ticker's pot (in a shared account, its equal share of the account). */
+  stakePct: number;
+  /** Shares are bought or sold back to the stake once their value is off it by more than this percent of the pot. */
+  rebalanceBandPct: number;
+  /** On an expiry day: the percent of the free round lots that get a Call expiring that day; 0 = none. */
+  callCoveragePct: number;
+  /** The Calls' |delta|: the contract nearest it, no further than deltaTolerance away. */
+  callAbsDelta: number;
+  /** On an expiry day: the percent of the pot's free cash put up as collateral for Puts expiring that day; 0 = none. */
+  putCashPct: number;
+  /** The Puts' |delta|: the contract nearest it, no further than deltaTolerance away. */
+  putAbsDelta: number;
+  /** How far a contract's |delta| may be from its target. */
+  deltaTolerance: number;
+  /** Widest spread sold into, as a percent of the mid: (ask − bid) ÷ mid. */
+  maxSpreadPctOfMid: number;
+}
+
+export const defaultBacktestSteadyStakeSettings: BacktestSteadyStakeSettings = { stakePct: 70, rebalanceBandPct: 5, callCoveragePct: 100, callAbsDelta: 0.2, putCashPct: 100, putAbsDelta: 0.2, deltaTolerance: 0.05, maxSpreadPctOfMid: 50 };
+
+/**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
  * Pluto's own code. A pass considers closes first, then rolls, then opens, and takes at most one action; an open is
  * always Pluto's own top pick (Edge Yield, then Edge $).
@@ -252,6 +280,8 @@ export interface BacktestSettings {
   model?: BacktestModelSettings;
   /** Absent on sessions created before the baseline wheel existed: the defaults apply. */
   baseline?: BacktestBaselineSettings;
+  /** Absent on sessions created before the Steady Stake existed: the defaults apply. */
+  steadyStake?: BacktestSteadyStakeSettings;
 }
 
 export interface BacktestSettingsOverrides {
@@ -262,6 +292,7 @@ export interface BacktestSettingsOverrides {
   decisionMaker?: BacktestDecisionMaker;
   model?: Partial<BacktestModelSettings>;
   baseline?: Partial<BacktestBaselineSettings>;
+  steadyStake?: Partial<BacktestSteadyStakeSettings>;
 }
 
 /**
@@ -361,6 +392,7 @@ export interface EffectiveBacktestSettings extends BacktestSettings {
   decisionMaker: BacktestDecisionMaker;
   model: BacktestModelSettings;
   baseline: BacktestBaselineSettings;
+  steadyStake: BacktestSteadyStakeSettings;
 }
 
 export interface BacktestJobView {
@@ -1065,7 +1097,7 @@ export interface BacktestFillsPage {
 /** The time of the capture's own look, "HH:MM" Eastern: the day's account mark and surface fit are taken then. */
 export const backtestCaptureLookTimeEt = "10:00";
 
-export type BacktestActionKind = "open_cash_secured_put" | "open_covered_call" | "roll" | "close_shares" | "close_leg" | "close_position";
+export type BacktestActionKind = "open_cash_secured_put" | "open_covered_call" | "roll" | "buy_shares" | "close_shares" | "close_leg" | "close_position";
 
 /** One thing Pluto did or tried in a pass: filled, or blocked with the gate that refused it. */
 export interface BacktestAction {
