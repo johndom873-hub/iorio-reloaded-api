@@ -48,7 +48,7 @@ import type { BacktestBookPageFilters, BacktestSessionsPageFilters, ValidatedBac
 import { easternInstant } from "../../lib/easternIsoDate.js";
 import { sqlContainsPattern } from "../../lib/sqlContainsPattern.js";
 import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
-import { readSplitScheduleCache, splitFactorOn } from "../engine/splitFactors.js";
+import { cachedSplitsBetween, readSplitScheduleCache, splitFactorOn } from "../engine/splitFactors.js";
 import { withPositionCycle, type BacktestPositionRecord } from "../engine/backtestSessionRecords.js";
 import { cashBreakEvenBeforeEachRow, cycleCashBreakEven, sharesHeldAfterEachMoment, sharesHeldAtInstant, sharesHeldAtMarks, type SplitFactorOfDay } from "../cycleCashBreakEven.js";
 
@@ -372,12 +372,12 @@ function toClosedTradeFigures(trade: BacktestTrade): ClosedTradeFigures {
 /** The splits the engine found for the session's symbols inside its period (its cached schedule per symbol); null before any run analysed one of the files. */
 function detectedSplitsInPeriod(symbols: readonly string[], startDateIso: string, endDateIso: string): BacktestSessionDetail["session"]["detectedSplits"] {
   const dataDirectory = readBacktestDataDirectory();
-  const caches = symbols.flatMap((symbol) => {
-    const cache = dataDirectory ? readSplitScheduleCache(dataDirectory, symbol) : null;
-    return cache ? [{ symbol, cache }] : [];
+  const found = symbols.flatMap((symbol) => {
+    const splits = cachedSplitsBetween(dataDirectory, symbol, startDateIso, endDateIso);
+    return splits ? [{ symbol, splits }] : [];
   });
-  if (caches.length === 0) return null;
-  return caches.flatMap(({ symbol, cache }) => cache.schedule.splits.filter((split) => split.lastDayBefore >= startDateIso && split.firstDayAfter <= endDateIso).map((split) => ({ symbol, ...split })));
+  if (found.length === 0) return null;
+  return found.flatMap(({ symbol, splits }) => splits.map((split) => ({ symbol, ...split })));
 }
 
 const isoTime = (value: Date | string | null): string | null => (value === null ? null : new Date(value).toISOString());

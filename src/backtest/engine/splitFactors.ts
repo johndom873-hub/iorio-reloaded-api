@@ -258,6 +258,12 @@ export function startAfterNonStandardChanges(schedule: Pick<SplitSchedule, "segm
   };
 }
 
+/** The splits the engine found for a symbol (its cached schedule) between two days; null before any run analysed its file. */
+export function cachedSplitsBetween(dataDirectory: string | null, symbol: string, fromDateIso: string, toDateIso: string): BacktestDetectedSplit[] | null {
+  const cache = dataDirectory ? readSplitScheduleCache(dataDirectory, symbol) : null;
+  return cache ? cache.schedule.splits.filter((split) => split.lastDayBefore >= fromDateIso && split.firstDayAfter <= toDateIso) : null;
+}
+
 /** New shares per old share in words, as the app writes them: 10 → "10-for-1", 1.5 → "3-for-2", 0.9 → "9-for-10", 0.1 → "1-for-10". */
 export function describeSplitRatio(ratio: number): string {
   const flipped = ratio < 1 ? 1 / ratio : ratio;

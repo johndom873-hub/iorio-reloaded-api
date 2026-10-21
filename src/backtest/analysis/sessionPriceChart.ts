@@ -6,6 +6,9 @@ import { loadDailyBarsOf, type AnalysisFigures } from "./analysisFigures.js";
 import { loadAnalysisOrders } from "./analysisPotSizing.js";
 import { maxDrawdownByRange, toOhlcvBars } from "./analysisPriceFigures.js";
 import { loadCashAvailableByDay, type CashAvailableByDay } from "./sessionFreeCash.js";
+import { readBacktestDataDirectory } from "../backtestDataDirectory.js";
+import { cachedSplitsBetween } from "../engine/splitFactors.js";
+import type { BacktestDetectedSplit } from "../backtestTypes.js";
 
 // A session's "Price and Max drawdown" chart (Marcelo 2026-10-20): the Analyse window's price chart over the session's
 // period, with that session's ladder levels, rungs sold and orders over one strike, and its Cash available under the candles.
@@ -21,6 +24,8 @@ export interface BacktestSessionPriceChart {
   tooLargeDays: AnalysisBacktestFigures["tooLargeDays"];
   /** The whole account's free cash each day at its 10:00 marks (sessionFreeCash.ts), every symbol's in a session of several. */
   cashAvailable: CashAvailableByDay;
+  /** The symbol's splits in the session's period (the bars before one are its traded prices ÷ the ratio); empty when none or not yet analysed. */
+  splits: BacktestDetectedSplit[];
 }
 
 export async function loadBacktestSessionPriceChart(sessionId: string, symbol: string, connection: Knex = db): Promise<BacktestSessionPriceChart> {
@@ -44,5 +49,6 @@ export async function loadBacktestSessionPriceChart(sessionId: string, symbol: s
     ...ladder,
     tooLargeDays: tooLargeDaysOf(orders),
     cashAvailable,
+    splits: cachedSplitsBetween(readBacktestDataDirectory(), symbol, session.start_date, session.end_date) ?? [],
   };
 }

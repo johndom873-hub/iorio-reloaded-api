@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Knex } from "knex";
 import { db } from "../../db/connection.js";
-import { normalizeBacktestSymbol } from "../backtestDataDirectory.js";
+import { normalizeBacktestSymbol, readBacktestDataDirectory } from "../backtestDataDirectory.js";
+import { cachedSplitsBetween } from "../engine/splitFactors.js";
 import { readBacktestDataFileContents } from "../dataFileSummary.js";
 import { loadBacktestLabSettings, loadBacktestLabTickerOverrides, tickerOverridesToValues, withCodeKeys } from "../labSettingsStore.js";
-import { defaultBacktestBaselineSettings, type BacktestBaselineSettings, type BacktestLabTickerOverrides, type BacktestSettings, type BacktestTickerProfile, type BacktestTickerSuitability } from "../backtestTypes.js";
+import { defaultBacktestBaselineSettings, type BacktestBaselineSettings, type BacktestDetectedSplit, type BacktestLabTickerOverrides, type BacktestSettings, type BacktestTickerProfile, type BacktestTickerSuitability } from "../backtestTypes.js";
 import { loadTickerProfile } from "../tickerProfileStore.js";
 import { withFreshSessionFigures } from "./analysisBacktest.js";
 import { loadTickerSuitability } from "../tickerSuitabilityStore.js";
@@ -289,6 +290,8 @@ export interface TickerAnalysisView {
   profile: BacktestTickerProfile | null;
   /** As on the Data files table; null: Pending. */
   suitability: BacktestTickerSuitability | null;
+  /** The symbol's splits over its daily bars, for the price chart's split lines; null before its file was analysed. */
+  detectedSplits: BacktestDetectedSplit[] | null;
 }
 
 export async function loadTickerAnalysisView(givenSymbol: string, connection: Knex = db): Promise<TickerAnalysisView> {
@@ -315,6 +318,7 @@ export async function loadTickerAnalysisView(givenSymbol: string, connection: Kn
     currentFormulasVersion: analysisFormulasVersion,
     profile: await loadTickerProfile(symbol, connection),
     suitability: await loadTickerSuitability(symbol, connection),
+    detectedSplits: cachedSplitsBetween(readBacktestDataDirectory(), symbol, "0000-01-01", "9999-12-31"),
   };
 }
 
