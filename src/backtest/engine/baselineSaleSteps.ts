@@ -428,6 +428,25 @@ export interface BaselineSalesInput {
   noteNoSale?: (reason: BaselineNoSaleReason) => void;
   /** Records an order that found no contract within the rules: what each check left out (recorded only). */
   noteNoCandidate?: (note: BaselineNoCandidate) => void;
+  /** The guard's and Kelly's multiplier on new buying at this look; absent or null: today's sizes. */
+  sizing?: BaselineSizing | null;
+}
+
+/**
+ * The falling-knife guard's and Kelly sizing's say at a look (the backtest's ladderSizing.ts works it out; live Pluto
+ * passes none, so its sizes are today's).
+ */
+export interface BaselineSizing {
+  /** m: the scale on new buying, the entries' room in the shares' budget (m × budget) and each ladder Put's collateral. */
+  buyingScale: number;
+  /** Kelly sizing dynamic: the ladder's reserve is the base less what the entries held of their budget at its start. */
+  pool: boolean;
+  /** At a top with kellyAtTops "deeper_puts": the entry room m holds back secures Puts at a strike ≤ price × (1 − depth); null: it waits. */
+  deeperPutsDepth: number | null;
+  /** "Kelly ×0.26 (extension z 1.24) · guard ×1.00 (…)": the look's line when m is not 1. */
+  detail: string;
+  /** Recorded on each entry and ladder Put sold at the look. */
+  scores: Record<string, number | null>;
 }
 
 /** The Entry filters blocked the entry; or a ladder put was sold instead of the calls on the free shares, a call qualifying or none. */
@@ -442,6 +461,10 @@ export function planBaselineSales(input: BaselineSalesInput): void {
   const rankingLabel = { premium_yield: "premium yield", edge_yield: "Edge Yield", time_value: "time value", premium_dollars: "premium", premium_per_day: "premium per day" }[baseline.ranking];
   const fillDown = baseline.coverage === "fill_down_ranking";
   const heldSharesCostToday = () => (book.heldSharesAverageCostToday() ?? 0) * book.heldSharesToday();
+  // The guard's and Kelly's multiplier (ladderSizing.ts): recorded on every entry and ladder Put of the look.
+  const sizing = input.sizing ?? null;
+  const sizingScores = sizing === null ? {} : sizing.scores;
+  if (sizing !== null && sizing.buyingScale !== 1) notes.push(`${symbol}: new buying ×${sizing.buyingScale.toFixed(2)} (${sizing.detail})`);
 
   // Shares are bought at the look's price itself.
   const stockFillToday = stockPrice;
@@ -499,7 +522,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
     if (!ladderState) return null;
     const cycle = book.openCycleSummary();
     const breakEven = cycle?.breakEvenPerShare == null ? null : cycle.breakEvenPerShare / priceToCycleScale;
-    const rung = ladderRungToday({ settings: baseline, state: ladderState, accountValueToday: book.accountValueToday(), tickerWeight: book.tickerWeight(), breakEven, stockPrice, heldSharesCost: heldSharesCostToday(), openPutCollateral: book.openPutCollateral(), sharesAverageCost: book.heldSharesAverageCostToday() });
+    const rung = ladderRungToday({ settings: baseline, state: ladderState, accountValueToday: book.accountValueToday(), tickerWeight: book.tickerWeight(), breakEven, stockPrice, heldSharesCost: heldSharesCostToday(), openPutCollateral: book.openPutCollateral(), sharesAverageCost: book.heldSharesAverageCostToday(), ...(sizing === null ? {} : { pool: sizing.pool ? { shareOfBudgetHeldAtStart: ladderState.shareOfBudgetHeldAtStart ?? 1 } : null, buyingScale: sizing.buyingScale }) });
     if (baseline.ladderPace === "one_open" && book.openPutCollateral() > 0) return { rung, blocked: `${symbol}: no new ladder put while one is open`, candidates: [] as BaselineCandidate[], rejections: null };
     if (rung.cap === null) return { rung, blocked: `${symbol}: no ladder put (${rung.note})`, candidates: [] as BaselineCandidate[], rejections: null };
     const { candidates, rejections } = select("P", null, true, rung.cap, true, { ladderPut: true });
@@ -534,7 +557,7 @@ export function planBaselineSales(input: BaselineSalesInput): void {
       const contracts = Math.min(limits.byCollateral, limits.byCash, limits.byVolume);
       cashCut ||= limits.byCash < Math.min(limits.byCollateral, limits.byVolume);
       if (contracts < 1) continue;
-      book.sell("cash_secured_put", candidate, contracts, plan.candidates.length, `baseline: the ladder put with the highest premium yield (${why}), strike at most ${cap.toFixed(2)}${putsSold > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, { name: "costCeiling", value: cap }, false, { ...plan.rung.scores, ...orderScores(wanted, plan.candidates, candidate, best) });
+      book.sell("cash_secured_put", candidate, contracts, plan.candidates.length, `baseline: the ladder put with the highest premium yield (${why}), strike at most ${cap.toFixed(2)}${putsSold > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, { name: "costCeiling", value: cap }, false, { ...plan.rung.scores, ...orderScores(wanted, plan.candidates, candidate, best), ...sizingScores });
       collateralLeft -= contracts * candidate.strike * sharesPerContract;
       putsSold++;
       contractsSold += contracts;
@@ -605,7 +628,9 @@ export function planBaselineSales(input: BaselineSalesInput): void {
   const entryKindLabel: Record<EntryKind, string> = { put: "put", covered_call: "Covered Call" };
   const entryKindPlural: Record<EntryKind, string> = { put: "puts", covered_call: "Covered Calls" };
   // With the ladder, the entries' room: the shares' budget less the shares held at cost and the open puts' collateral.
-  const ladderEntryRoomDollars = () => (ladderState === null ? Number.POSITIVE_INFINITY : ladderBudget(ladderBase(ladderState, book.accountValueToday(), book.tickerWeight()), baseline.ladderSharesPct).sharesBudget - heldSharesCostToday() - book.openPutCollateral());
+  // With the guard or Kelly sizing, m × the budget (the rest held back: it waits, or secures deeper Puts at a top).
+  const ladderSharesBudgetToday = () => (ladderState === null ? Number.POSITIVE_INFINITY : ladderBudget(ladderBase(ladderState, book.accountValueToday(), book.tickerWeight()), baseline.ladderSharesPct).sharesBudget);
+  const ladderEntryRoomDollars = () => (ladderState === null ? Number.POSITIVE_INFINITY : (sizing === null ? ladderSharesBudgetToday() : sizing.buyingScale * ladderSharesBudgetToday()) - heldSharesCostToday() - book.openPutCollateral());
   // Room for the Covered Call entries' shares under maxSharesPctOfAccount, in round lots at today's fill (unbounded at 100).
   const shareCapLots = (kind: EntryKind) => {
     if (kind === "covered_call" && ladderState !== null) return ladderShareLots(ladderEntryRoomDollars(), stockFillToday);
@@ -697,14 +722,36 @@ export function planBaselineSales(input: BaselineSalesInput): void {
         belowAverageAfterPurchase++;
         continue;
       }
-      book.sell(kind === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${entryKindLabel[kind]} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : comparedWith}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, coveredCallEntry && buyEveryShare, { ...orderScores(wanted, candidates, candidate, best), ...entrySharesAverageCost });
+      book.sell(kind === "put" ? "cash_secured_put" : "covered_call", candidate, contracts, candidates.length, `baseline: the ${entryKindLabel[kind]} with the highest ${rankingLabel}${entriesMade > 0 ? " (next in order: the volume limit of the ones before)" : comparedWith}`, costFloor === null ? null : { name: "costFloor", value: costFloor }, coveredCallEntry && buyEveryShare, { ...orderScores(wanted, candidates, candidate, best), ...entrySharesAverageCost, ...sizingScores });
       entriesMade++;
       contractsSold += contracts;
     }
     if (wanted !== null && wanted >= 1) noteOrderShortfall({ step: "entry", right: entryRight, wanted, filled: contractsSold, unsold: Math.max(0, wanted - contractsSold), cashCut, anyCandidate: true, best });
     if (entriesMade === 0 && belowAverageAfterPurchase > 0) notes.push(`${symbol}: no new Covered Call at or above the average after the purchase (${belowAverageAfterPurchase} below it)`);
   };
+  // Kelly sizing at a top with kellyAtTops "deeper_puts": the entry room m holds back, measured before the entries.
+  const fullEntryRoom = () => ladderSharesBudgetToday() - heldSharesCostToday() - book.openPutCollateral();
+  const heldBackRoom = sizing !== null && sizing.deeperPutsDepth !== null && ladderState !== null && !input.entryBlockedBecause ? Math.max(0, fullEntryRoom()) - Math.max(0, ladderEntryRoomDollars()) : 0;
   enterWithFreeCash();
+
+  // 2b. The room held back secures Cash-Secured Puts at or below price × (1 − depth), by premium yield, at any |delta| as
+  // ladder Puts (an assignment buys the shares that much lower).
+  if (heldBackRoom > 0) {
+    const cap = stockPrice * (1 - sizing!.deeperPutsDepth!);
+    let roomLeft = Math.min(heldBackRoom, Math.max(0, fullEntryRoom()));
+    const { candidates, rejections } = select("P", null, true, cap, true, { ladderPut: true });
+    let sold = 0;
+    for (const candidate of fillDown ? candidates : candidates.slice(0, 1)) {
+      if (roomLeft <= 0) break;
+      if (book.isHeld(candidate)) continue;
+      const contracts = Math.min(Math.floor(roomLeft / (candidate.strike * sharesPerContract)), baselineContractsForCash(book.freeCash(), candidate, "put", stockFillToday, commissions), candidate.volumeCap);
+      if (contracts < 1) continue;
+      book.sell("cash_secured_put", candidate, contracts, candidates.length, `baseline: Kelly sizing at a top (×${sizing!.buyingScale.toFixed(2)}): the entry room it holds back secures a Put at or below ${cap.toFixed(2)}${sold > 0 ? " (next in order: the volume limit of the ones before)" : ""}`, null, false, { deeperPutCap: cap, deeperPutsRoom: heldBackRoom, ...sizingScores });
+      roomLeft -= contracts * candidate.strike * sharesPerContract;
+      sold++;
+    }
+    if (sold === 0) notes.push(`${symbol}: no deeper Put at or below ${cap.toFixed(2)} for the $${Math.round(heldBackRoom).toLocaleString("en-US")} held back (${candidates.length > 0 ? `${candidates.length} within the rules, none fits the room or the cash` : describeRejections(rejections) || "no quotes"})`);
+  }
 
   // 3. The put ladder: held lots without a call and no call qualifying, in a cycle (unless its put was sold before the calls).
   if (ladderReady && !anyCallCandidate && !ladderPutChosen) {

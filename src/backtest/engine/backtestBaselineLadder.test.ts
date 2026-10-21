@@ -149,6 +149,41 @@ describe("the ladder's cycle state", () => {
   });
 });
 
+describe("Kelly sizing's pool and the buying scale on today's rung", () => {
+  // Pot $100,000, 50% in shares, 5 rungs (approved 2026-10-21): at a top m = 0.2 bought $10,000 of shares, so h₀ = 0.2 and
+  // the reserve is $90,000, 5 rungs of $18,000; near a bottom m = 1.5 makes a rung $27,000.
+  const state = { startedOn: "2024-01-02", accountValueAtStart: 100_000, shock: 0.7, shareOfBudgetHeldAtStart: 0.2 };
+  const rungInput = { settings: { ladderSharesPct: 50, ladderRungs: 5, ladderTop: "break_even" as const }, state, accountValueToday: 100_000, tickerWeight: 1, breakEven: 100, stockPrice: 100, heldSharesCost: 10_000, openPutCollateral: 0, sharesAverageCost: 100 };
+
+  it("takes the reserve as the base less what the entries held, and scales the rung's collateral but not its strike cap", () => {
+    const rung = ladderRungToday({ ...rungInput, pool: { shareOfBudgetHeldAtStart: 0.2 }, buyingScale: 1.5 });
+    expect(rung.scores.ladderReserve).toBe(90_000);
+    expect(rung.scores.ladderCommitted).toBe(0);
+    expect(rung.scores.ladderUnscaledRungCollateral).toBe(18_000);
+    expect(rung.collateral).toBe(27_000);
+    // The cap from the unscaled rung: 100 − (100 − 30) × 18,000 ÷ 90,000 = 86.
+    expect(rung.cap).toBeCloseTo(86, 9);
+    expect(rung.note).toMatch(/the rung's \$18,000 × 1\.50 = \$27,000/);
+  });
+
+  it("never scales a rung past what is left of the reserve, and leaves today's rung alone without a pool or a scale", () => {
+    const nearlySpent = ladderRungToday({ ...rungInput, heldSharesCost: 90_000, pool: { shareOfBudgetHeldAtStart: 0.2 }, buyingScale: 2 });
+    // Committed 90,000 − 10,000 = 80,000 of 90,000: the rung is min(18,000, 10,000) = 10,000, ×2 capped at the 10,000 left.
+    expect(nearlySpent.collateral).toBe(10_000);
+    const today = ladderRungToday(rungInput);
+    expect(today.scores.ladderReserve).toBe(50_000);
+    expect(today.collateral).toBe(10_000);
+    expect(today.scores).not.toHaveProperty("ladderBuyingScale");
+  });
+
+  it("records h₀ when the ladder starts with a pool: $10,000 held of a $50,000 budget is 0.2", () => {
+    const ledger = {} as SimulatedLedger;
+    const look = { cycleOpen: true, sharesHeld: true, todayIso: "2024-03-13", accountValue: 100_000, adjustedClosesBefore: [] };
+    expect(noteLadderLook(ledger, "SMCI", look, settings, { committedDollars: () => 10_000, sharesPct: 50, tickerWeight: 1 }).shareOfBudgetHeldAtStart).toBeCloseTo(0.2, 12);
+    expect(noteLadderLook({} as SimulatedLedger, "SMCI", look, settings)).not.toHaveProperty("shareOfBudgetHeldAtStart");
+  });
+});
+
 describe("the ladder's levels at a look", () => {
   // The header's example: break-even $100, average cost $104, S 70% (F $31.20), R0 $100,000 in 5 rungs.
   const state = { startedOn: "2024-01-02", accountValueAtStart: 200_000, shock: 0.7 };

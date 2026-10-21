@@ -161,6 +161,34 @@ export interface BacktestBaselineSettings {
    * goes to the next candidates in order until every lot is covered (the entry: until the cash or the stock's share runs out).
    */
   coverage: "best_contract" | "fill_down_ranking";
+  /**
+   * The falling-knife guard on the ladder (approved by Marcelo 2026-10-21; engine/ladderSizing.ts): while the stock is at
+   * least 25% below its 252-session closing high, new buying (Cash-Secured Put and Covered Call entries, ladder Puts) is
+   * scaled by how much of the fall the market explains; "market_share_and_iv" halves it again while implied volatility
+   * is at its 21-session peak.
+   */
+  knifeGuard: "off" | "market_share" | "market_share_and_iv";
+  /** The guard's scale when the market explains none of the fall (0 stops new buying, 0.5 halves it). */
+  knifeGuardMinScale: number;
+  /**
+   * Kelly sizing on the ladder (approved by Marcelo 2026-10-21; engine/ladderSizing.ts): "disabled" keeps today's sizes;
+   * "dynamic" scales new buying at each look by a multiplier m (less near tops, more near bottoms), and what the entries
+   * leave unspent joins the ladder's reserve.
+   */
+  kellySizing: "disabled" | "dynamic";
+  /** Where m comes from: extension z (kellyTopFromZ, kellyTopToZ, kellyMaxMultiplier), or a constant (a control). */
+  kellyMultiplierRule: "extension" | "constant";
+  /** m = 1 up to this extension z, falling linearly to 0 at kellyTopToZ. */
+  kellyTopFromZ: number;
+  kellyTopToZ: number;
+  /** m rises linearly from 1 at z 0 to this at z −1 or below; 1 = no boost at bottoms. */
+  kellyMaxMultiplier: number;
+  /** "on": m × (1 − 0.5 × clamp((SPY's 21-session move − 2%) ÷ 4%, 0, 1)). */
+  kellySpyMove: "off" | "on";
+  /** The entry room m holds back at a top: waits in cash, or secures Puts at a strike ≤ price × (1 − 0.30 × (1 − m)). */
+  kellyAtTops: "wait_in_cash" | "deeper_puts";
+  /** m with kellyMultiplierRule "constant". */
+  kellyConstantMultiplier: number;
 }
 
 /**
@@ -172,7 +200,7 @@ export interface BacktestBaselineSettings {
  */
 export const backtestEngineVersion = 3;
 
-export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
+export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", knifeGuard: "off", knifeGuardMinScale: 0, kellySizing: "disabled", kellyMultiplierRule: "extension", kellyTopFromZ: 0.5, kellyTopToZ: 1.5, kellyMaxMultiplier: 2, kellySpyMove: "off", kellyAtTops: "wait_in_cash", kellyConstantMultiplier: 1 };
 
 /**
  * The stand-in for the AI model's choices (docs/backtesting/FULL-FIDELITY-DESIGN.md §5). Everything else in a pass is
@@ -601,6 +629,8 @@ export type BacktestSettingGroup =
   | "Calls and Covered Calls"
   | "Contract choice"
   | "Entry filters"
+  | "Falling-knife guard"
+  | "Kelly sizing"
   | "Exits"
   | "Capital and sizing"
   | "Candidate quality"

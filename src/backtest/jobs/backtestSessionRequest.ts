@@ -220,9 +220,27 @@ export function validateBaselineSettings(values: Record<string, unknown>): strin
   if (values.ranking !== "premium_yield" && values.ranking !== "edge_yield" && values.ranking !== "time_value" && values.ranking !== "premium_dollars" && values.ranking !== "premium_per_day") return "baseline.ranking must be premium_yield, edge_yield, time_value, premium_dollars or premium_per_day.";
   if (values.expiryChoice !== "any_in_range" && values.expiryChoice !== "nearest_qualifying") return "baseline.expiryChoice must be any_in_range or nearest_qualifying.";
   if (values.coverage !== "best_contract" && values.coverage !== "fill_down_ranking") return "baseline.coverage must be best_contract or fill_down_ranking.";
+  const sizingError = validateLadderSizingSettings(values);
+  if (sizingError) return sizingError;
   if ((values.minAbsDelta as number) > (values.maxAbsDelta as number)) return "baseline.minAbsDelta must not be above baseline.maxAbsDelta.";
   if ((values.callMinAbsDelta as number) > (values.callMaxAbsDelta as number)) return "baseline.callMinAbsDelta must not be above baseline.callMaxAbsDelta.";
   if ((values.minDte as number) > (values.maxDte as number)) return "baseline.minDte must not be above baseline.maxDte.";
+  return null;
+}
+
+/** The falling-knife guard's and Kelly sizing's values (engine/ladderSizing.ts): null when they are valid. */
+function validateLadderSizingSettings(values: Record<string, unknown>): string | null {
+  const isNumberIn = (value: unknown, min: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+  if (values.knifeGuard !== "off" && values.knifeGuard !== "market_share" && values.knifeGuard !== "market_share_and_iv") return "baseline.knifeGuard must be off, market_share or market_share_and_iv.";
+  if (!isNumberIn(values.knifeGuardMinScale, 0, 1)) return "baseline.knifeGuardMinScale must be a number from 0 to 1.";
+  if (values.kellySizing !== "disabled" && values.kellySizing !== "dynamic") return "baseline.kellySizing must be disabled or dynamic.";
+  if (values.kellyMultiplierRule !== "extension" && values.kellyMultiplierRule !== "constant") return "baseline.kellyMultiplierRule must be extension or constant.";
+  if (!isNumberIn(values.kellyTopFromZ, 0, 10)) return "baseline.kellyTopFromZ must be a number from 0 to 10.";
+  if (!isNumberIn(values.kellyTopToZ, 0, 10) || (values.kellyTopToZ as number) <= (values.kellyTopFromZ as number)) return "baseline.kellyTopToZ must be a number above baseline.kellyTopFromZ and at most 10.";
+  if (!isNumberIn(values.kellyMaxMultiplier, 1, 5)) return "baseline.kellyMaxMultiplier must be a number from 1 to 5.";
+  if (values.kellySpyMove !== "off" && values.kellySpyMove !== "on") return "baseline.kellySpyMove must be off or on.";
+  if (values.kellyAtTops !== "wait_in_cash" && values.kellyAtTops !== "deeper_puts") return "baseline.kellyAtTops must be wait_in_cash or deeper_puts.";
+  if (!isNumberIn(values.kellyConstantMultiplier, 0, 5)) return "baseline.kellyConstantMultiplier must be a number from 0 to 5.";
   return null;
 }
 
