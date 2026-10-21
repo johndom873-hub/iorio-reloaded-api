@@ -76,7 +76,7 @@ export async function loadAccountInShares(sessionId: string, connection: Knex = 
 }
 
 /** The ladder's rung count a session ran a symbol with: its own pot's value in a session of pots, else the session's. */
-async function loadLadderRungs(sessionId: string, symbol: string, connection: Knex): Promise<number | null> {
+export async function loadLadderRungs(sessionId: string, symbol: string, connection: Knex = db): Promise<number | null> {
   const session = await connection("backtest_sessions").where({ id: sessionId }).first("settings_snapshot", "overrides", "book_mode", "symbol_settings");
   if (!session) return null;
   const tickerRungs = session.book_mode === "pots" ? session.symbol_settings?.[symbol]?.baseline?.ladderRungs : undefined;

@@ -1034,7 +1034,7 @@ describe("backtest routes", () => {
       ];
       await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify(timeline), stock_only_stretches: JSON.stringify(stockOnlyStretches) });
       // A sale's row carries the yield and delta the engine recorded for it (none here), contract-weighted over its fills.
-      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null, sharesHeld: 0 }, { ...timeline[1]!, sharesHeld: 100 }], stockOnlyStretches } } });
+      expect(await request("GET", cycleUrl)).toEqual({ status: 200, body: { detail: { timeline: [{ ...timeline[0]!, premiumYield: null, delta: null, breakEvenAtSale: null, sharesHeld: 0, ladderRung: null }, { ...timeline[1]!, sharesHeld: 100 }], stockOnlyStretches } } });
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3, premiumYield: 0.42, delta: -0.21 }) });
       expect(((await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail }).detail.timeline.map((entry) => [entry.premiumYield, entry.delta])).toEqual([[0.42, -0.21], [undefined, undefined]]);
       await testDb("backtest_actions").where({ session_id: session.id, action_id: "action-1" }).update({ candidate_scores: JSON.stringify({ dte: 3 }) });
@@ -1062,7 +1062,7 @@ describe("backtest routes", () => {
       // in a one-symbol session, the account in shares.
       await testDb("backtest_ladder_levels").insert({ session_id: session.id, symbol: fileSymbol, trading_date: "2026-09-08", at: "2026-09-08T14:00:00.000Z", look_time: "10:00", split_factor: 2, ladder_top: 80, floor: 70, shock: 0.2, reserve_committed: 0, reserve: 4000, first_rung_cap: 76, next_put_cap: 76, blocked_because: null });
       // A ladder put sold that day, the session's 5 rungs: (1,000 committed + 800) ÷ (4,000 ÷ 5) = 2.25 slices, rung 3.
-      await testDb("backtest_actions").insert({ session_id: session.id, action_id: "action-ladder", sequence: 2, trading_date: "2026-09-08", at: "2026-09-08T14:00:00.000Z", pass_number: 1, symbol: fileSymbol, kind: "open_cash_secured_put", candidate_id: `${fileSymbol}:open:3`, description: `${fileSymbol} Sell $74 Put`, automatic: false, chosen_because: "ladder rung", outcome: "filled", gate_results: JSON.stringify([]), contract: JSON.stringify({ strategyKey: "cash_secured_put", expiry: "2026-09-18", strike: 74, right: "P" }), candidate_scores: JSON.stringify({ ladderCap: 76, ladderCommitted: 1000, ladderRungCollateral: 800, ladderReserve: 4000 }), quantity: 1, limit_price: 0.5, fill_price: 0.5, position_ids: JSON.stringify([]) });
+      await testDb("backtest_actions").insert({ session_id: session.id, action_id: "action-ladder", sequence: 2, trading_date: "2026-09-08", at: "2026-09-08T14:00:00.000Z", pass_number: 1, symbol: fileSymbol, kind: "open_cash_secured_put", candidate_id: `${fileSymbol}:open:3`, description: `${fileSymbol} Sell $74 Put`, automatic: false, chosen_because: "ladder rung", outcome: "filled", gate_results: JSON.stringify([]), contract: JSON.stringify({ strategyKey: "cash_secured_put", expiry: "2026-09-18", strike: 74, right: "P" }), candidate_scores: JSON.stringify({ ladderCap: 76, ladderTop: 80, ladderBreakEven: 80, ladderFloor: 70, ladderAverageCost: 87.5, ladderShock: 0.2, ladderCommitted: 1000, ladderRungCollateral: 800, ladderReserve: 4000, ladderBase: 10_000 }), quantity: 1, limit_price: 0.5, fill_price: 0.5, position_ids: JSON.stringify([]) });
       const chart = (await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=${fileSymbol.toLowerCase()}`)).body as BacktestSessionPriceChart;
       expect(chart).toMatchObject({ symbol: fileSymbol, bars: [["2026-09-11", 20, 21, 19, 20.5, null]], ladderLevels: [["2026-09-08", 38, 35, null]], ladderRungsSold: [["2026-09-08", 37, [[37, "2026-09-18", 1]], [3, 5, 2.25, 1000]]], tooLargeDays: [] });
       expect(chart.maxDrawdown.All).toBeNull();
@@ -1073,6 +1073,13 @@ describe("backtest routes", () => {
       expect(await withFreshLadderRungs(gone, fileSymbol, testDb)).toBe(gone);
       const failed = { analysisBacktest: { error: "The backtest failed." } };
       expect(await withFreshLadderRungs(failed, fileSymbol, testDb)).toBe(failed);
+
+      // A put the ladder sold shows its rung on the cycle's row, read by the sale's instant: the figures its sale recorded.
+      const rungRow: BacktestCycleTimelineRow = { ...timeline[0]!, at: "2026-09-08T14:00:00.000Z", tradingDate: "2026-09-08", strike: 74, expiryDate: "2026-09-18" };
+      await testDb("backtest_cycles").where({ session_id: session.id, symbol: fileSymbol, cycle_number: 1 }).update({ timeline: JSON.stringify([...timeline, rungRow]) });
+      const withRung = (await request("GET", cycleUrl)).body as { detail: BacktestCycleDetail };
+      expect(withRung.detail.timeline[2]!.ladderRung).toEqual({ rungNumber: 3, rungs: 5, slices: 2.25, cap: 76, top: 80, breakEven: 80, floor: 70, averageCost: 87.5, shock: 0.2, committed: 1000, rungCollateral: 800, reserve: 4000, base: 10_000 });
+      expect(withRung.detail.timeline[0]!.ladderRung).toBeNull();
       expect(chart.accountInShares).toHaveLength(3);
       expect((await request("GET", `/backtest/sessions/${session.id}/price-chart?symbol=zzzz`)).status).toBe(400);
       expect((await request("GET", `/backtest/sessions/${session.id}/price-chart`)).status).toBe(400);

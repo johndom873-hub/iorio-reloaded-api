@@ -1178,6 +1178,33 @@ export interface BacktestCycleTimelineRow {
   breakEvenAtSale?: number | null;
   /** The shares the cycle held once the row's moment (its look's orders, or the end's marks) was done, as traded on the row's day; added when the cycle is read. */
   sharesHeld?: number;
+  /** A put sold as a rung of the ladder: the figures its sale recorded (null for any other put); absent on other rows. */
+  ladderRung?: BacktestLadderRungRecord | null;
+}
+
+/**
+ * A ladder put's rung as its sale recorded it, prices as traded that day (Marcelo 2026-10-21, the Wheel cycles' tooltip):
+ * K_max = A − (A − F) × (U + Q) ÷ R0 (backtestBaselineLadder.ts), and the rung it reaches (ladderRungReached).
+ */
+export interface BacktestLadderRungRecord {
+  rungNumber: number;
+  rungs: number;
+  /** (U + Q) ÷ (R0 ÷ rungs). */
+  slices: number;
+  /** K_max. */
+  cap: number | null;
+  /** A: the break-even, or with ladderTop "price" the lower of it and the price. */
+  top: number | null;
+  breakEven: number | null;
+  /** F = the shares' average cost × (1 − S). */
+  floor: number | null;
+  averageCost: number | null;
+  shock: number;
+  /** U, Q, R0 and the base R0 is taken from, in dollars. */
+  committed: number;
+  rungCollateral: number;
+  reserve: number;
+  base: number;
 }
 
 /**
