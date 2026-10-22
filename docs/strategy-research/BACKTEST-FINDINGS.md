@@ -1,6 +1,6 @@
 # CC + Put Ladder: what our backtests found
 
-Research log of the backtests on the CC + Put Ladder, on the plain wheel before it, on the Steady Stake against it (Round 8), and on Pluto's Edge Margin against it (Round 9), from 2026-10-13 to 2026-10-21.
+Research log of the backtests on the CC + Put Ladder, on the plain wheel before it, on the Steady Stake against it (Round 8), on Pluto's Edge Margin against it (Round 9), and on Edge Margin's own model and a premium-first strategy (Round 10), from 2026-10-13 to 2026-10-22.
 
 Related files:
 - [LITERATURE-REVIEW.md](LITERATURE-REVIEW.md): what published research says.
@@ -16,6 +16,10 @@ All backtests ran locally on Marcelo's Mac, using ThetaData option prices and IB
   - Excess Calmar measures return above T-bills per point of Max drawdown. On it, the strategy beat buy and hold in 17 of 44 runs.
 - **A different strategy beats it: the Steady Stake (Round 8).** Hold 80% of each ticker's pot in shares, traded back when off by 5 points, and sell Calls and Puts only on the day they expire. On 37 tickers: median CAGR 17.8% against the ladder's 10.7% (higher on 31), median Excess Calmar 0.46 against 0.31, above buy and hold's on 33. Its Max drawdown is deeper (median −55% against −33%). Most of the gain comes from the steady stake itself.
 - **Against Pluto's Edge Margin, the ladder earns the same with far smaller falls (Round 9).** As one book each on 21 tickers, with the same $3.27M from August 2021: CAGR 10.0% against 10.3%, Max drawdown −14.9% against −38.6%, Excess Calmar 0.42 against 0.17. Edge Margin lost 31% in 2022 and did better from 2023.
+- **Edge Margin's ranking doesn't pick better contracts, and selling premium on single stocks showed no alpha (Round 10).**
+  - Its edge didn't sort about 890,000 contracts by how they turned out, before or after two fixes to its volatility model.
+  - The only premium found was in Puts with 4–7 days left. One weekly Put per ticker, never holding stock, made 6.6% a year with a −5.2% Max drawdown on 11 tickers in our cash account. T-bills were 3.0 points of that, and most of the rest was the stocks' rise.
+  - Marcelo closed the research.
 - **No rule tested so far improves it on most tickers.** Each of these split the tickers about evenly between better and worse:
   - skipping contracts that span earnings;
   - the volatility edge filter;
@@ -104,6 +108,126 @@ These are the lab as saved, with no filters. CAGR / Max drawdown / Excess Calmar
 | **Median** | | 17.8% / −66.8% | 8.2% / −22.3% / 0.22 / 51% | 11.5% / −31.4% / 0.25 / 55% |
 
 Buy and hold's median Excess Calmar is 0.28. The strategy beat it in 17 of the 44 runs.
+
+## Round 10: Edge Margin's model audited, then a premium-first strategy (2026-10-22)
+
+No report published. Scripts and results are in `tmp/edge-margin-audit/`:
+- base and variant sessions: `make_specs.py`, `runner.py`, `compare.py`;
+- contract studies: `dump_candidates.ts`, `outcomes.py`, `report_signal.py`, `delta_neutral_study.py`, `universe_study.py`, `universe_beyond_drift.py`, `predictors_beyond_drift.py`, `weekend_check.py`;
+- strategy simulations: `sim_weekly_puts.py`, `sim_book.py`, `trades_check.py`, `cash_account_check.py`, `selective_check.py`;
+- the ticker scan: `scan_tradable.py`.
+
+**The questions (Marcelo 2026-10-22).**
+- Before judging Edge Margin, check how it measures volatility: the forecast, the ranges it is compared with, and the days-to-expiry range.
+- Then find a strategy that earns most of its CAGR from option premium.
+  - It had to use tickers a pot can trade.
+  - It was built on one half of them and checked on the other.
+  - Simple tests came first.
+
+**Edge Margin's model.**
+- **Base.** Edge Margin on Pluto's rules ran on 43 tickers, $1M each, with the whole pot available: median CAGR 9.7%, Max drawdown −32.3%, Excess Calmar 0.19. Buy and hold made 19.1%, with Excess Calmar 0.31. Edge Margin had the higher Excess Calmar on 16 of 43.
+- **Two flaws.**
+  - The 21-day Yang-Zhang forecast includes the sessions that react to earnings.
+  - The live curve says 0.309 of a session's variance is still ahead at 10:00, from June–October 2026. Measured over 2020–2026 the share is 0.438 (0.635 at 09:30).
+- **Both fixed, on 29 tickers** (the batch was stopped there): Excess Calmar better on 19 and worse on 9 (p 0.087). Median CAGR rose 0.3 points.
+- **Does the edge sort contracts?** Each session's 10:00 candidates, about 890,000 contracts, were held to expiry and delta-hedged at each close.
+  - Edge Margin's edge margin doesn't sort them by outcome, with or without the fixes.
+  - An edge built on IBKR's 30-day implied volatility does at 1–5 days. Its top fifth beat the bottom fifth by 29.0 points of premium at 1 day (95% range 10.1 to 49.6) and by 18.3 at 3–5 days (2.8 to 32.6). But the top fifth still lost after costs.
+  - Hedged 1-day options lost 17–19% of their premium on single stocks; on ETFs they didn't.
+- **Built.** API commit `ec5e4ff` (local, not pushed) adds two backtest session settings. Live is unchanged. Marcelo decided on 2026-10-22 to revert it, keeping `ec5e4ff` in history so the settings can be restored. The revert waits until a concurrent session's uncommitted backtest work, which touches four of the same files, is committed.
+  - `model.forecastMethod`: `yang_zhang_21`, `yang_zhang_21_without_earnings` or `implied_volatility_30_day`.
+  - `model.restOfDayCurve`: `measured_2026_june_to_october` or `measured_2020_to_2026`.
+
+**Other structures, dropped.**
+- Calendars (7 and 30 days), and Straddles and Strangles on single stocks, delta-hedged every 30 minutes, lost money.
+- SPY + QQQ Strangles at \|delta\| 0.25 on their expiry day, hedged every 30 minutes at $0.68 a contract, made 9.9% with a −3.7% Max drawdown at 1×. They were set aside for three reasons:
+  - SPY and QQQ were outside the tradable set;
+  - they need a margin account;
+  - the edge shrank in 2025–26.
+
+**Tickers.** With option liquidity and a price under $150 (a $100k pot) there were 11 tickers, split in two halves:
+- Development: SOFI, IREN, ASTS, BAC, TLT, INTC.
+- Validation: SMCI, RKLB, HOOD, ORCL, NOK.
+
+**Where the premium is.** The study took every out-of-the-money Put and Call at 10:00 with 1–45 days left (bid ≥ $0.05, spread ≤ 50% of the mid), held to the expiry close, with the same dollars in each contract.
+- **How each contract was scored.** Its P&L after half the spread and $0.68 a contract, less \|delta\| × the stock's move to expiry. That last part removes the stock's drift: a 0.15-delta Put on a $20 stock that ends $1 higher made about $0.15 a share from the rise alone.
+- **Puts with 4–7 days left at \|delta\| 0.05–0.25 carry the clearest premium.**
+  - Development: +11% to +17.5% a year per dollar of capital, positive on 6 of 6 tickers.
+  - Validation: +7% to +10%, positive on 3 of 4 and 4 of 5.
+  - Shorter Puts were positive only far out of the money. Puts with 15+ days were near zero or negative.
+- **These are yields per dollar per day, which flatters short contracts.** Per trade on a weekly cycle (\|delta\| 0.10–0.20, beyond drift):
+  - Development: +0.30% selling Friday for the next Friday, +0.20% selling Monday for Friday.
+  - Validation: +0.08% and +0.11%.
+- **Calls.**
+  - Validation: negative beyond drift in 23 of 24 expiry and delta groups.
+  - Development: +5% to +8% at 4–7 days, near zero or negative elsewhere.
+- **Within 7-day Puts, the expensive ones carry the premium.**
+  - Entry yield: the top third made +29% (development) and +27% (validation) a year beyond drift. The bottom third made 0% and −8%. The top beat the bottom on 6 of 6 and 4 of 4 tickers.
+  - IV rank over the previous 252 sessions: the top third made +34% and +20%, against 0% and +3% (6 of 6, 3 of 4).
+  - Trend and the last 21 sessions' return showed no pattern.
+- **Two traps in the first readout, corrected above.**
+  - Its yields included the stock's drift, the trap noted in Round 2's Wheel Research Log.
+  - It weighted contracts by their strike as traded. High-price periods dominated, and SMCI before its 10:1 split counted ten times.
+  - The 4–7 day result survived the correction. "Implied volatility doesn't predict" reversed, per contract.
+
+**The strategy: one weekly Put per ticker, never holding stock.**
+- **Rule.**
+  - At 10:00, sell the Put with 4–7 days left nearest the target \|delta\|, at the mid less half the spread, $0.68 a contract.
+  - Settle it in cash at the expiry close, and mark it at the end-of-day mid every day.
+  - Cash earns T-bills (DTB3), 3.0% a year over these windows.
+- **Book.** The 11 tickers in equal parts of $100k each, about the $1M Marcelo set for 11 tickers. Each month the money goes to the tickers that sold a Put the month before.
+
+| \|delta\| 0.15, 11 tickers | CAGR | Max drawdown | Excess Calmar |
+|---|---|---|---|
+| Cash account: Puts on half of each ticker's cash, the next one sold on the old one's expiry morning | 6.6% | −5.2% | 0.71 |
+| Cash account: full size, the next one sold the day after expiry | 4.4% | −8.1% | 0.18 |
+| Margin account: full size, the next one sold on the expiry morning | 10.2% | −10.4% | 0.70 |
+| Margin account at 2× | 17.4% | −20.7% | 0.69 |
+| Buy and hold, same 11, rebalanced monthly | 36.2% | −39.5% | 0.84 |
+
+- **\|delta\| 0.15 was best or tied on both halves.** Excess Calmar was 0.62 (development) and 0.67 (validation) in the cash account, and 0.62 and 0.63 at full size.
+- **The IBKR account is a cash account** (Marcelo 2026-10-22).
+  - A Put's cash stays held until it expires, so the next full-size Put can't be sold on the expiry morning. Leverage is out too.
+  - Buying the old Put back at 10:00 to free its cash made about 0.6% a year. The ask plus $0.68 on 20–200 contracts of a cheap stock cost more than the edge.
+- **Where the return comes from.** Per trade at full size, as a share of the capital at the strike:
+
+  | Per trade | Development | Validation |
+  |---|---|---|
+  | Premium at mid | 73.6 bp | 82.5 bp |
+  | − half the spread | −6.9 | −7.6 |
+  | − fee | −2.3 | −1.8 |
+  | − payoff | −40.4 | −52.3 |
+  | = net | 24.0 bp | 20.8 bp |
+  | of which the stock's move × \|delta\| | 7.2 | 21.8 |
+  | **Beyond drift** | **16.8 bp (7.3% a year)** | **−1.0 bp (−0.3% a year)** |
+
+  - Beyond drift per ticker, % a year: ASTS +14.2, IREN +12.2, SOFI +9.2, ORCL +4.1, NOK +3.0, TLT +2.6, BAC +0.5, RKLB +0.5, HOOD −0.8, INTC −2.9, SMCI −12.4.
+  - Of the cash book's 6.6%, 3.0 points were T-bills and about 3.6 came from options. About 1.4 of those 3.6 was premium beyond drift.
+- **Selling only when IV rank is high doesn't help the cash book.**
+  - At 0.33 or more, Excess Calmar went to 0.88 on development but 0.45 on validation, from 0.62 and 0.67.
+  - At 0.50 it was 0.44 and 0.21.
+  - Premium beyond drift per trade rose (8.0 → 13.7 → 27.4 bp), but sales fell (36.5 → 17.6 → 10.3 a year per ticker). The expensive weeks are also when the crashes come (SMCI).
+- **Daily marks.** Each ticker's Max drawdown was a median 2 points deeper than marking only at expiry, 6 at most (ASTS).
+- **Idle weeks.**
+  - Friday-only weeklies allow one sale a week.
+  - ASTS, RKLB, IREN and SMCI had no weeklies before 2023–24.
+  - SOFI, HOOD and NOK premiums fell below the $0.05 bid in their low-price years. NOK sold about 4 times a year.
+- **Still optimistic.** An in-the-money Put settles at the close's intrinsic value for free, and IBKR pays less than T-bills on cash.
+- **Not tested.**
+  - **ETFs with Monday, Wednesday and Friday expiries:** SPY through 2020–26, and IWM, GLD, XLE and QQQ since September 2020. They would let a cash account sell full size every week and keep the weekend. Single stocks got these expiries only in 2026: AAPL, MSFT and GOOGL from January, MU from July.
+  - **LEAPS instead of shares:** the tickers were picked because they are liquid today, so a backtest would flatter them (see N-06 in IDEAS-TO-TRY.md).
+
+**Conclusion.** No alpha in selling premium on these single stocks.
+- Edge Margin's ranking doesn't predict outcomes.
+- The only premium found, in Puts with 4–7 days left, is small after costs. Most of what the Put book earns above T-bills is the stocks' rise.
+- A cash account halves what can be sold.
+
+Marcelo closed the research on 2026-10-22: "I don't think there's alpha here."
+
+Confidence:
+- high that Edge Margin's edge doesn't sort outcomes, and that a weekly Put book has small drawdowns;
+- moderate that 4–7 day Puts carry premium beyond drift;
+- low on how big that premium is.
 
 ## Round 9: Pluto's two execution strategies side by side, Edge Margin against the ladder (2026-10-21)
 
@@ -579,3 +703,8 @@ Short summaries. The links hold the details.
   - META's file was re-downloaded from 2022-06-09.
   - Code: `src/backtest/engine/splitFactors.ts`.
 - **Reading cycles in session results.** Cycles and position legs are on the price scale of the day the cycle opened. Convert them with the session's `detectedSplits` before comparing across a split (the TECH open cycle in Round 6 needed this).
+- **Earnings history before late 2025, from SEC filings.** Round 9 left MSFT, MSTR, NFLX and ORCL out for lack of earnings history.
+  - Their history now comes from SEC EDGAR, together with BAC, CVNA, GOOG, GOOGL, IONQ, NOW, RKLB, SOFI, WMT, AMZN, AVGO and META.
+  - Each report date is the acceptance time of the 8-K with item 2.02, converted from UTC to New York time. Where no such 8-K was filed, the 10-Q or 10-K is used (MSTR 2019–2023).
+  - Next dates come from TradingView.
+  - Loaded into the local database only (2026-10-22), with `tmp/edge-margin-audit/fetch_sec_earnings.py`, `backfill_earnings.ts` and `capture_next_earnings.ts`.
