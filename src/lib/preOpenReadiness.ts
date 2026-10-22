@@ -132,16 +132,23 @@ export function evaluateWorker(row: WorkerHealthRow | null, now: Date, expected:
   if (!row) return check("Trading worker", "fail", "the worker has never reported in");
   const heartbeatAgeSeconds = Math.round((now.getTime() - row.updatedAt.getTime()) / 1000);
   const problems: string[] = [];
-  if (heartbeatAgeSeconds > workerHeartbeatStaleAfterSeconds) problems.push("its heartbeat is stale, so it is offline or hung");
-  if (row.connected !== true) problems.push("it is not connected to the IBKR Gateway");
+  const heartbeatStale = heartbeatAgeSeconds > workerHeartbeatStaleAfterSeconds;
+  if (heartbeatStale) problems.push("its heartbeat is stale, so it is offline or hung");
   if (row.appEnvironment !== expected.appEnvironment) problems.push(`it reports environment "${row.appEnvironment ?? "unknown"}", this one is "${expected.appEnvironment}"`);
-  if (row.accountBindingStatus !== "ok") problems.push(`its account binding is ${row.accountBindingStatus ?? "unreported"}${row.accountBindingReason ? ` (${row.accountBindingReason})` : ""}`);
-  if (row.detectedTradingMode && row.configuredTradingMode && row.detectedTradingMode !== row.configuredTradingMode) {
-    problems.push(`it is configured for ${row.configuredTradingMode} but the Gateway account looks ${row.detectedTradingMode}`);
-  }
   const reportedAccounts = row.ibkrAccountIds ?? [];
-  if (expected.accountId && (reportedAccounts.length !== 1 || reportedAccounts[0] !== expected.accountId)) {
-    problems.push(`it is bound to ${reportedAccounts.join(",") || "no account"}, expected ${expected.accountId}`);
+  if (row.connected !== true) {
+    // Without a session the account list is empty, so the binding is "pending" and the mode "unknown": saying so reads like a
+    // wrong account. Only a "mismatch" (a configuration problem) is still worth naming.
+    problems.push(`it is not connected to the IBKR Gateway, so its account can't be checked until it reconnects${heartbeatStale ? "" : ` (heartbeat ${heartbeatAgeSeconds} s old: the worker is running and retrying)`}`);
+    if (row.accountBindingStatus === "mismatch") problems.push(`its account binding is mismatch${row.accountBindingReason ? ` (${row.accountBindingReason})` : ""}`);
+  } else {
+    if (row.accountBindingStatus !== "ok") problems.push(`its account binding is ${row.accountBindingStatus ?? "unreported"}${row.accountBindingReason ? ` (${row.accountBindingReason})` : ""}`);
+    if (row.detectedTradingMode && row.configuredTradingMode && row.detectedTradingMode !== row.configuredTradingMode) {
+      problems.push(`it is configured for ${row.configuredTradingMode} but the Gateway account looks ${row.detectedTradingMode}`);
+    }
+    if (expected.accountId && (reportedAccounts.length !== 1 || reportedAccounts[0] !== expected.accountId)) {
+      problems.push(`it is bound to ${reportedAccounts.join(",") || "no account"}, expected ${expected.accountId}`);
+    }
   }
   return problems.length === 0
     ? check("Trading worker", "ok", `connected and bound to ${reportedAccounts[0]} (code ${row.gitSha ?? "unknown"})`)

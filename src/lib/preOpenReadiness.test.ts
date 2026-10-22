@@ -109,10 +109,29 @@ describe("evaluateWorker", () => {
     expect(evaluateWorker(null, now, expectedWorker)).toMatchObject({ status: "fail", detail: "the worker has never reported in" });
   });
 
-  it("fails on a stale heartbeat, a dropped Gateway link, the wrong environment and a pending or mismatched binding", () => {
+  it("fails on a stale heartbeat, a dropped Gateway link and the wrong environment", () => {
     const result = evaluateWorker({ ...goodWorker, updatedAt: minutesAgo(10), connected: false, appEnvironment: "staging", accountBindingStatus: "pending", accountBindingReason: "Not connected to the IBKR Gateway." }, now, expectedWorker);
     expect(result.status).toBe("fail");
-    for (const fragment of ["heartbeat is stale", "not connected to the IBKR Gateway", 'reports environment "staging"', "account binding is pending (Not connected to the IBKR Gateway.)"]) expect(result.detail).toContain(fragment);
+    for (const fragment of ["heartbeat is stale", "not connected to the IBKR Gateway", 'reports environment "staging"']) expect(result.detail).toContain(fragment);
+    expect(result.detail).not.toContain("running and retrying");
+  });
+
+  it("reports a disconnected worker as not connected only, not as a wrong account", () => {
+    const disconnected = { ...goodWorker, updatedAt: new Date(now.getTime() - 12_000), connected: false, accountBindingStatus: "pending", accountBindingReason: "Not connected to the IBKR Gateway.", ibkrAccountIds: [], detectedTradingMode: "unknown" };
+    expect(evaluateWorker(disconnected, now, expectedWorker)).toMatchObject({
+      status: "fail",
+      detail: "The trading worker: it is not connected to the IBKR Gateway, so its account can't be checked until it reconnects (heartbeat 12 s old: the worker is running and retrying)",
+    });
+  });
+
+  it("still names a binding mismatch while disconnected", () => {
+    const result = evaluateWorker({ ...goodWorker, connected: false, accountBindingStatus: "mismatch", accountBindingReason: "live mode with a paper account id" }, now, expectedWorker);
+    expect(result.detail).toContain("account binding is mismatch (live mode with a paper account id)");
+  });
+
+  it("fails on a pending binding while connected", () => {
+    const result = evaluateWorker({ ...goodWorker, accountBindingStatus: "pending", accountBindingReason: "Connected; waiting for the Gateway to report its accounts." }, now, expectedWorker);
+    expect(result.detail).toContain("account binding is pending (Connected; waiting for the Gateway to report its accounts.)");
   });
 
   it("fails on a paper/live mix-up and on the wrong or multiple accounts", () => {
