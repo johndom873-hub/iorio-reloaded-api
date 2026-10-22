@@ -78,6 +78,18 @@ export async function reserveMarketDataLines(holder: string, lines: number, ttlS
   });
 }
 
+/** Lines a non-priority holder could reserve right now, without reserving any (0 when lines are disabled here). */
+export async function loadAvailableMarketDataLines(): Promise<number> {
+  if (!ibkrMarketDataLinesEnabled()) return 0;
+  const { rows } = await db.raw(
+    `SELECT COALESCE(SUM(lines) FILTER (WHERE priority), 0)::int AS priority_in_use,
+            COALESCE(SUM(lines) FILTER (WHERE NOT priority), 0)::int AS other_in_use
+       FROM ibkr_market_data_line_reservations
+      WHERE expires_at > now()`,
+  );
+  return computeAvailableLines({ priorityInUse: rows[0].priority_in_use, otherInUse: rows[0].other_in_use }, false);
+}
+
 /** Extends an existing reservation's expiry — for a long-lived holder kept alive by a heartbeat. No-op if the reservation already expired; the next reserve() call will re-establish it. */
 export async function renewMarketDataLineReservation(holder: string, ttlSeconds: number): Promise<void> {
   await db("ibkr_market_data_line_reservations")

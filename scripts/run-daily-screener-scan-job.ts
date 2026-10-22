@@ -34,6 +34,8 @@ import { buildScreenerJobOutcome, describeFailedEnrichment, isEmptyEnrichment } 
 import { classifyRejectedSymbol } from "../src/lib/screenerDelistings.js";
 import { findTickerRenames } from "../src/lib/screenerTickerRenames.js";
 import { runJob } from "../src/lib/runJob.js";
+import { runWithConcurrency } from "../src/lib/runWithConcurrency.js";
+import { loadAvailableMarketDataLines } from "../src/ibkr/marketDataLineBudget.js";
 
 const scanCodes = [
   ScanCode.HIGH_OPT_IMP_VOLAT,
@@ -46,6 +48,8 @@ const scanCodes = [
 const rowsPerScan = 50;
 const marketCapAboveUsd = 10_000_000_000;
 const unmatchedRankSentinel = 999;
+// Symbols enriched at once after the close (Marcelo 2026-10-22): ~2.5 min for 767 symbols instead of ~30.
+const maxEnrichmentWorkers = 20;
 
 let nextReqId = 1;
 
@@ -90,10 +94,8 @@ interface EnrichedRow {
   primary_exchange: string | null;
   last_price: number | null;
   avg_share_volume: number | null;
-  avg_option_volume: number | null;
   call_open_interest: number | null;
   put_open_interest: number | null;
-  bid_ask_spread_pct: number | null;
   implied_volatility: number | null;
 }
 
@@ -162,12 +164,15 @@ async function main(): Promise<void> {
       // already-known) UNION every symbol already accumulated, whether or
       // not it matched tonight — the "keep it, re-enrich anyway" decision.
       const fullSymbolSet = new Set<string>([...matches.keys(), ...[...existingBySymbol.keys()].filter((symbol) => !renamedOldSymbols.has(symbol))]);
-      console.log(`Enriching ${fullSymbolSet.size} symbol(s) (${fullSymbolSet.size - matches.size} carried over from the existing universe, not matched tonight).`);
+      // One line per symbol in flight, so as many workers as there are free lines (at least one, so a full budget
+      // still fails each symbol with the shortage reason rather than skipping the run).
+      const enrichmentWorkerCount = Math.max(1, Math.min(maxEnrichmentWorkers, await loadAvailableMarketDataLines()));
+      console.log(`Enriching ${fullSymbolSet.size} symbol(s) (${fullSymbolSet.size - matches.size} carried over from the existing universe, not matched tonight), ${enrichmentWorkerCount} at a time.`);
 
       const matchedRows: (EnrichedRow & { best_rank: number; matched_scan_codes: string[] })[] = [];
       const carriedOverRows: EnrichedRow[] = [];
 
-      for (const symbol of fullSymbolSet) {
+      await runWithConcurrency([...fullSymbolSet], enrichmentWorkerCount, async (symbol) => {
         try {
           const existing = existingBySymbol.get(symbol) ?? renamedFromBySymbol.get(symbol);
           const match = matches.get(symbol);
@@ -199,7 +204,7 @@ async function main(): Promise<void> {
               if (outcome.kind === "delisted") {
                 delistedSymbols.push(symbol);
                 console.log(`${symbol}: delisted (IBKR files contract ${identity.conId} on the VALUE exchange), removing it from the universe.`);
-                continue;
+                return;
               }
               if (outcome.kind === "renamed") newSymbol = outcome.newSymbol;
             }
@@ -210,7 +215,7 @@ async function main(): Promise<void> {
             // and once a row exists the lookup never runs again, freezing null name/sector for good. It is retried tomorrow.
             if (match && existing) matchOnlyRows.push({ symbol, ibkr_contract_id: identity.conId, company_name: identity.companyName, sector: identity.sector, primary_exchange: identity.primaryExchange, best_rank: match.bestRank, matched_scan_codes: [...match.scanCodes] });
             else if (existing) unmatchedWithoutEnrichment.push(symbol);
-            continue;
+            return;
           }
 
           const enrichedRow: EnrichedRow = {
@@ -221,10 +226,8 @@ async function main(): Promise<void> {
             primary_exchange: identity.primaryExchange,
             last_price: quote.lastPrice,
             avg_share_volume: quote.avgShareVolume,
-            avg_option_volume: quote.avgOptionVolume,
             call_open_interest: quote.callOpenInterest,
             put_open_interest: quote.putOpenInterest,
-            bid_ask_spread_pct: quote.bidAskSpreadPct,
             implied_volatility: quote.impliedVolatility,
           };
 
@@ -239,7 +242,7 @@ async function main(): Promise<void> {
           failedSymbols.push(symbol);
           console.warn(`${symbol}: enrichment failed — ${error instanceof Error ? error.message : error}`);
         }
-      }
+      });
 
       // Renamed first, so the upserts below merge into the existing row under its new ticker.
       for (const rename of tickerRenames) {
@@ -274,10 +277,8 @@ async function main(): Promise<void> {
             "primary_exchange",
             "last_price",
             "avg_share_volume",
-            "avg_option_volume",
             "call_open_interest",
             "put_open_interest",
-            "bid_ask_spread_pct",
             "implied_volatility",
             "best_rank",
             "matched_scan_codes",
@@ -304,10 +305,8 @@ async function main(): Promise<void> {
             "primary_exchange",
             "last_price",
             "avg_share_volume",
-            "avg_option_volume",
             "call_open_interest",
             "put_open_interest",
-            "bid_ask_spread_pct",
             "implied_volatility",
             "best_rank",
             "matched_scan_codes",

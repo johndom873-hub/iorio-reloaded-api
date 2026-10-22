@@ -7,16 +7,14 @@ import type { JobResult } from "./runJob.js";
 export interface EnrichmentQuote {
   lastPrice: number | null;
   avgShareVolume: number | null;
-  avgOptionVolume: number | null;
   callOpenInterest: number | null;
   putOpenInterest: number | null;
-  bidAskSpreadPct: number | null;
   impliedVolatility: number | null;
 }
 
 /** True when the enrichment timed out or errored and came back with nothing at all: it must not overwrite stored data. */
 export function isEmptyEnrichment(quote: EnrichmentQuote): boolean {
-  return [quote.lastPrice, quote.avgShareVolume, quote.avgOptionVolume, quote.callOpenInterest, quote.putOpenInterest, quote.bidAskSpreadPct, quote.impliedVolatility].every((value) => value === null);
+  return [quote.lastPrice, quote.avgShareVolume, quote.callOpenInterest, quote.putOpenInterest, quote.impliedVolatility].every((value) => value === null);
 }
 
 /**

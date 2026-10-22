@@ -4,10 +4,8 @@ import { buildScreenerJobOutcome, describeFailedEnrichment, isEmptyEnrichment, t
 const quote = (overrides: Partial<EnrichmentQuote> = {}): EnrichmentQuote => ({
   lastPrice: null,
   avgShareVolume: null,
-  avgOptionVolume: null,
   callOpenInterest: null,
   putOpenInterest: null,
-  bidAskSpreadPct: null,
   impliedVolatility: null,
   ...overrides,
 });
