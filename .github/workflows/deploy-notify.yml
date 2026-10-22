@@ -83,28 +83,27 @@ jobs:
         if: always()
         run: |
           npm audit --json 2>/dev/null > /tmp/audit.json || true
-
-          VULN_COUNT=$(jq '(.metadata.vulnerabilities.critical // 0) + (.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.moderate // 0)' /tmp/audit.json 2>/dev/null || echo 0)
-          echo "vuln_count=$VULN_COUNT" >> $GITHUB_OUTPUT
+          npm audit --omit=dev --json 2>/dev/null > /tmp/audit-app.json || true
 
           # Same check as the Heroku build gate (heroku-postbuild): high/critical in runtime dependencies
-          npm audit --omit=dev --json 2>/dev/null > /tmp/audit-gate.json || true
-          GATE_COUNT=$(jq '(.metadata.vulnerabilities.critical // 0) + (.metadata.vulnerabilities.high // 0)' /tmp/audit-gate.json 2>/dev/null || echo 0)
+          GATE_COUNT=$(jq '(.metadata.vulnerabilities.critical // 0) + (.metadata.vulnerabilities.high // 0)' /tmp/audit-app.json 2>/dev/null || echo 0)
           echo "gate_count=$GATE_COUNT" >> $GITHUB_OUTPUT
 
-          if [ "${VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
-            DETAILS=$(jq -r '
-              .vulnerabilities
-              | to_entries[]
-              | select(.value.severity == "critical" or .value.severity == "high" or .value.severity == "moderate")
-              | "• \(.key) (\(.value.severity))"
-            ' /tmp/audit.json | head -10)
-            {
-              echo "details<<EOF_DELIM"
-              echo "$DETAILS"
-              echo "EOF_DELIM"
-            } >> $GITHUB_OUTPUT
-          fi
+          # Deployed app = runtime dependencies; dev tools = everything else in the full audit
+          SEVERITY_FILTER='[(.vulnerabilities // {}) | to_entries[] | select(.value.severity | IN("critical", "high", "moderate")) | {name: .key, severity: .value.severity}]'
+          jq "$SEVERITY_FILTER" /tmp/audit-app.json > /tmp/app-vulns.json 2>/dev/null || echo '[]' > /tmp/app-vulns.json
+          jq --slurpfile app /tmp/app-vulns.json "$SEVERITY_FILTER | map(select(.name as \$name | \$app[0] | map(.name) | index(\$name) | not))" /tmp/audit.json > /tmp/dev-vulns.json 2>/dev/null || echo '[]' > /tmp/dev-vulns.json
+
+          echo "app_vuln_count=$(jq length /tmp/app-vulns.json)" >> $GITHUB_OUTPUT
+          echo "dev_vuln_count=$(jq length /tmp/dev-vulns.json)" >> $GITHUB_OUTPUT
+          {
+            echo "app_details<<EOF_DELIM"
+            jq -r '.[:10][] | "• \(.name) (\(.severity))"' /tmp/app-vulns.json
+            echo "EOF_DELIM"
+            echo "dev_details<<EOF_DELIM"
+            jq -r '.[:10][] | "• \(.name) (\(.severity))"' /tmp/dev-vulns.json
+            echo "EOF_DELIM"
+          } >> $GITHUB_OUTPUT
 
       - name: Send Telegram notification
         if: always()
@@ -116,24 +115,35 @@ jobs:
           SHORT_SHA: ${{ steps.heroku.outputs.short_sha }}
           COMMIT_MSG: ${{ steps.heroku.outputs.commit_msg }}
           APP: ${{ steps.heroku.outputs.heroku_app }}
-          VULN_COUNT: ${{ steps.audit.outputs.vuln_count }}
           GATE_COUNT: ${{ steps.audit.outputs.gate_count }}
-          DETAILS: ${{ steps.audit.outputs.details }}
+          APP_VULN_COUNT: ${{ steps.audit.outputs.app_vuln_count }}
+          DEV_VULN_COUNT: ${{ steps.audit.outputs.dev_vuln_count }}
+          APP_DETAILS: ${{ steps.audit.outputs.app_details }}
+          DEV_DETAILS: ${{ steps.audit.outputs.dev_details }}
         run: |
           NL=$'\n'
 
           if [ "$STATUS" = "succeeded" ]; then
             TEXT="✅ ${APP} deployed${NL}${NL}v${RELEASE} (${SHORT_SHA}) - ${COMMIT_MSG}"
+            APP_LABEL="in the deployed app"
           elif [ "$STATUS" = "failed" ]; then
             TEXT="❌ ${APP} build failed — not deployed${NL}${NL}(${SHORT_SHA}) - ${COMMIT_MSG}${NL}${NL}Check Heroku build logs for details."
+            APP_LABEL="in the app"
           elif [ "${GATE_COUNT:-0}" -gt 0 ] 2>/dev/null; then
             TEXT="🛑 ${APP} deploy blocked by the vulnerability audit — not deployed${NL}${NL}(${SHORT_SHA}) - ${COMMIT_MSG}${NL}${NL}${GATE_COUNT} high/critical in runtime dependencies. Old release still running. Run npm audit fix and push again."
+            APP_LABEL="in the app (blocked this release)"
           else
             TEXT="⏱️ ${APP} deploy timed out${NL}${NL}(${SHORT_SHA}) - ${COMMIT_MSG}"
+            APP_LABEL="in the app"
           fi
 
-          if [ "${VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
-            TEXT="${TEXT}${NL}${NL}⚠️ ${VULN_COUNT} known vulnerabilities${NL}${DETAILS}"
+          vulnerability_noun() { if [ "$1" = "1" ]; then echo "vulnerability"; else echo "vulnerabilities"; fi; }
+
+          if [ "${APP_VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            TEXT="${TEXT}${NL}${NL}⚠️ ${APP_VULN_COUNT} known $(vulnerability_noun "$APP_VULN_COUNT") ${APP_LABEL}${NL}${APP_DETAILS}"
+          fi
+          if [ "${DEV_VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            TEXT="${TEXT}${NL}${NL}ℹ️ ${DEV_VULN_COUNT} known $(vulnerability_noun "$DEV_VULN_COUNT") in dev tools (not deployed)${NL}${DEV_DETAILS}"
           fi
 
           PAYLOAD=$(jq -n --arg chat_id "$CHAT_ID" --arg text "$TEXT" \

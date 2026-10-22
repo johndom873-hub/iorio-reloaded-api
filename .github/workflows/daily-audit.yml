@@ -26,17 +26,21 @@ jobs:
           EXIT=$?
           set -e
           echo "exit_code=$EXIT" >> $GITHUB_OUTPUT
-          echo "critical=$(jq '.metadata.vulnerabilities.critical // 0' /tmp/audit.json)" >> $GITHUB_OUTPUT
-          echo "high=$(jq '.metadata.vulnerabilities.high // 0' /tmp/audit.json)" >> $GITHUB_OUTPUT
-          DETAILS=$(jq -r '
-            (.vulnerabilities // {})
-            | to_entries[]
-            | select(.value.severity == "critical" or .value.severity == "high")
-            | "• \(.key) (\(.value.severity))"
-          ' /tmp/audit.json | head -10)
+          npm audit --omit=dev --json 2>/dev/null > /tmp/audit-app.json || true
+
+          # Deployed app = runtime dependencies; dev tools = everything else in the full audit
+          SEVERITY_FILTER='[(.vulnerabilities // {}) | to_entries[] | select(.value.severity | IN("critical", "high")) | {name: .key, severity: .value.severity}]'
+          jq "$SEVERITY_FILTER" /tmp/audit-app.json > /tmp/app-vulns.json 2>/dev/null || echo '[]' > /tmp/app-vulns.json
+          jq --slurpfile app /tmp/app-vulns.json "$SEVERITY_FILTER | map(select(.name as \$name | \$app[0] | map(.name) | index(\$name) | not))" /tmp/audit.json > /tmp/dev-vulns.json 2>/dev/null || echo '[]' > /tmp/dev-vulns.json
+
+          echo "app_vuln_count=$(jq length /tmp/app-vulns.json)" >> $GITHUB_OUTPUT
+          echo "dev_vuln_count=$(jq length /tmp/dev-vulns.json)" >> $GITHUB_OUTPUT
           {
-            echo "details<<EOF_DELIM"
-            echo "$DETAILS"
+            echo "app_details<<EOF_DELIM"
+            jq -r '.[:10][] | "• \(.name) (\(.severity))"' /tmp/app-vulns.json
+            echo "EOF_DELIM"
+            echo "dev_details<<EOF_DELIM"
+            jq -r '.[:10][] | "• \(.name) (\(.severity))"' /tmp/dev-vulns.json
             echo "EOF_DELIM"
           } >> $GITHUB_OUTPUT
 
@@ -45,12 +49,22 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CRITICAL: ${{ steps.audit.outputs.critical }}
-          HIGH: ${{ steps.audit.outputs.high }}
-          DETAILS: ${{ steps.audit.outputs.details }}
+          APP_VULN_COUNT: ${{ steps.audit.outputs.app_vuln_count }}
+          DEV_VULN_COUNT: ${{ steps.audit.outputs.dev_vuln_count }}
+          APP_DETAILS: ${{ steps.audit.outputs.app_details }}
+          DEV_DETAILS: ${{ steps.audit.outputs.dev_details }}
         run: |
           NL=$'\n'
-          TEXT="⚠️ iorio-reloaded-api${NL}${NL}${CRITICAL} critical, ${HIGH} high vulnerabilities found.${NL}${DETAILS}${NL}${NL}Run npm audit fix locally and push to deploy the fix."
+          vulnerability_noun() { if [ "$1" = "1" ]; then echo "vulnerability"; else echo "vulnerabilities"; fi; }
+
+          if [ "${APP_VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            TEXT="⚠️ iorio-reloaded-api${NL}${NL}${APP_VULN_COUNT} high/critical $(vulnerability_noun "$APP_VULN_COUNT") in the deployed app${NL}${APP_DETAILS}${NL}${NL}Run npm audit fix locally and push to deploy the fix."
+            if [ "${DEV_VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+              TEXT="${TEXT}${NL}${NL}ℹ️ ${DEV_VULN_COUNT} high/critical $(vulnerability_noun "$DEV_VULN_COUNT") in dev tools (not deployed)${NL}${DEV_DETAILS}"
+            fi
+          else
+            TEXT="ℹ️ iorio-reloaded-api${NL}${NL}${DEV_VULN_COUNT:-0} high/critical $(vulnerability_noun "${DEV_VULN_COUNT:-0}") in dev tools (not deployed)${NL}${DEV_DETAILS}${NL}${NL}Run npm audit fix locally and push."
+          fi
           PAYLOAD=$(jq -n --arg chat_id "$CHAT_ID" --arg text "$TEXT" \
             '{chat_id: $chat_id, text: $text}')
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
