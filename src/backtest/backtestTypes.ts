@@ -634,6 +634,7 @@ export type BacktestSettingGroup =
   | "Contract choice"
   | "Entry filters"
   | "Exits"
+  | "Steady Stake"
   | "Capital and sizing"
   | "Candidate quality"
   | "Model"
@@ -641,8 +642,8 @@ export type BacktestSettingGroup =
   | "Rules' choices";
 
 /** "baseline_wheel": rows a Baseline wheel session (the CC + Put Ladder) reads, some shared with the rules and the AI model;
- *  "pluto_rules": rows only the rules and the AI model read. */
-export type BacktestSettingSection = "baseline_wheel" | "pluto_rules";
+ *  "steady_stake": rows only the Steady Stake reads; "pluto_rules": rows only the rules and the AI model read. */
+export type BacktestSettingSection = "baseline_wheel" | "steady_stake" | "pluto_rules";
 
 /** A row's value against another row's: `oneOf` / `noneOf` its choice values, or a number `above`. */
 export interface BacktestSettingCondition {

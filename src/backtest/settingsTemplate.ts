@@ -73,13 +73,22 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
     label: "Decision maker",
     unit: "choice",
     editable: true,
-    note: "who makes the choices the AI model makes live. The rules: each pass looks at closes, then rolls, then opens, and an open is Pluto's own top pick. The AI model: Claude through the subscription, asked as live Pluto asks it, with the symbols and dates masked; the rules below do not apply",
+    note: "who makes the choices the AI model makes live. The rules: each pass looks at closes, then rolls, then opens, and an open is Pluto's own top pick. The AI model: Claude through the subscription, asked as live Pluto asks it, with the symbols and dates masked; the rules below do not apply. The Steady Stake: only its own group's values, at the 10:00 look",
     choices: [
       { value: "rules", label: "Rules (below)" },
       { value: "llm", label: "The AI model" },
       { value: "baseline", label: "Baseline wheel (no Pluto rules, no Signals)" },
+      { value: "steady_stake", label: "Steady Stake (a steady share stake, Calls and Puts on expiry days)" },
     ],
   },
+  { path: "steadyStake.stakePct", label: "Stake", unit: "percent", editable: true, note: "% of the pot: the share of each ticker's pot held in its shares. At the 10:00 look, whole shares are bought or sold back to it when their value drifts out of the band" },
+  { path: "steadyStake.rebalanceBandPct", label: "Rebalancing band", unit: "percent", editable: true, note: "% of the pot: shares are traded back to the stake once their value is off it by more than this. A $100,000 pot at 80% ± 5 holds shares worth $75,000 to $85,000" },
+  { path: "steadyStake.callCoveragePct", label: "Calls on expiry days", unit: "percent", editable: true, note: "% of the free round lots: at 10:00 on a day the ticker has an expiry, Calls expiring at that day's close, the contract nearest the Calls' |delta| first, then the next nearest while the volume limit leaves lots uncovered. 0 = no Calls" },
+  { path: "steadyStake.callAbsDelta", label: "Calls' |delta|", unit: "number", editable: true, note: "the target; from each quote's own implied volatility" },
+  { path: "steadyStake.putCashPct", label: "Puts on expiry days", unit: "percent", editable: true, note: "% of the pot's free cash (the pot less the shares and any open Puts): Puts expiring at that day's close, nearest the Puts' |delta| first. 0 = no Puts" },
+  { path: "steadyStake.putAbsDelta", label: "Puts' |delta|", unit: "number", editable: true, note: "the target; from each quote's own implied volatility" },
+  { path: "steadyStake.deltaTolerance", label: "|delta| tolerance", unit: "number", editable: true, note: "how far a contract's |delta| may be from its target; when no contract is that close, nothing is sold that day" },
+  { path: "steadyStake.maxSpreadPctOfMid", label: "Spread at most", unit: "percent", editable: true, note: "(ask − bid) ÷ mid; a bid of at least $0.05 and at most 20% of the contract's previous-session volume, as for the ladder" },
   {
     path: "policy.roll",
     label: "Roll or hold",
@@ -497,6 +506,14 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
   },
   { group: "Exits", section: "baseline_wheel", rows: [{ path: "baseline.takeProfitPct" }, { path: "baseline.shareStopLossPct" }] },
   {
+    group: "Steady Stake",
+    section: "steady_stake",
+    rows: ["steadyStake.stakePct", "steadyStake.rebalanceBandPct", "steadyStake.callCoveragePct", "steadyStake.callAbsDelta", "steadyStake.putCashPct", "steadyStake.putAbsDelta", "steadyStake.deltaTolerance", "steadyStake.maxSpreadPctOfMid"].map((path) => ({
+      path,
+      appliesWhen: { allOf: [{ path: "decisionMaker", oneOf: ["steady_stake"] }], explanation: "Applies only with the Steady Stake as decision maker." },
+    })),
+  },
+  {
     group: "Capital and sizing",
     section: "pluto_rules",
     rows: ["pluto.capitalBudgetPct", "pluto.orderSizePctOfBudget", "pluto.maxTickerPctOfBudget", "pluto.maxSectorPctOfBudget", "pluto.maxOpenPositions", "pluto.minCashReservePct", "trading.maxOrderPctOfPortfolio", "trading.maxConcentrationPerTickerPct", "trading.minCashReservePct", "pluto.stressRiskBudgetPct", "pluto.stressSigmas", "kellyFraction"].map((path) => ({ path })),
@@ -532,6 +549,7 @@ export function readBacktestSettingValue(settings: BacktestSettings, settingPath
   const [section, field] = settingPath.split(".") as [string, string];
   if (section === "policy") return ({ ...defaultBacktestPolicySettings, ...settings.policy } as unknown as Record<string, string>)[field]!;
   if (section === "baseline") return ({ ...defaultBacktestBaselineSettings, ...settings.baseline } as unknown as Record<string, number | string>)[field]!;
+  if (section === "steadyStake") return ({ ...defaultBacktestSteadyStakeSettings, ...settings.steadyStake } as unknown as Record<string, number | string>)[field]!;
   if (section === "model") {
     const model = { ...defaultBacktestModelSettings, ...settings.model };
     return field === "spreadCostChargedPct" ? (model.spreadCostChargedPct ?? settings.trading.spreadCostChargedPct) : (model as unknown as Record<string, number | string>)[field]!;
