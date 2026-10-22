@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { blackScholesDelta, blackScholesPriceOnForward, sviTotalVariance, type RawSviParameters } from "./impliedVolatilitySurface.js";
 import { buildSignalCandidates, emptyCandidateExclusionTally, pickBestCandidate, type SignalCandidate, type SignalQuote, type SignalSurfaceSlice, type CandidateModelContext } from "./signalCandidates.js";
 import { appendMissingContractQuotes, candidateContractKey, computeAtmImpliedVolatility, computeAtmImpliedVolatilityPerSession, computeDayChangePercent, countRollableLegs, sameTimeToday, computeUncompensatedByContract, describeNoCandidates, mergeLiveQuotes, rebaseSlicesToToday, scaleSlicesToLiveSpot, scoreTicker, shouldRefreshUncompensatedShare, toScreenRow } from "./signalsLiveScoring.js";
@@ -7,6 +7,15 @@ import { varianceSessionsToExpiry } from "./varianceClock.js";
 import { volatilityModelTables } from "./volatilityModelTables.generated.js";
 import { fixtureModelForecast, fixtureRollModel, fixtureTradingSessions } from "./testSupport/valuationModelFixtures.js";
 import type { RollSignalCandidate } from "./rollSignalCandidates.js";
+
+// scoreTicker values live quotes at Date.now() unless told otherwise: pin it to the fixture's trading day so its expiries stay in the future.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"], now: Date.parse("2026-09-21T14:30:00Z") });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const forward = 100;
 const rate = 0.04;
