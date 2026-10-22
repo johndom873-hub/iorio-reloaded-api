@@ -226,6 +226,15 @@ describe("validateBacktestSettingsOverrides", () => {
     expect(validateCreateBacktestSessionRequest({ ...validRequest, endDate: "2026-06-30", overrides: { decisionMaker: "steady_stake" } }, context)).toMatchObject({ ok: true, value: { bookMode: "shared_account", overrides: { decisionMaker: "steady_stake" } } });
   });
 
+  it("takes the model's forecast and rest-of-day curve as choices, and no other model value", () => {
+    expect(validateBacktestSettingsOverrides({ model: { forecastMethod: "implied_volatility_30_day", restOfDayCurve: "measured_2020_to_2026" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: { model: { forecastMethod: "implied_volatility_30_day", restOfDayCurve: "measured_2020_to_2026" } } });
+    expect(validateBacktestSettingsOverrides({ model: { forecastMethod: "yang_zhang_21", restOfDayCurve: "measured_2026_june_to_october" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: true, overrides: {} });
+    expect(validateBacktestSettingsOverrides({ model: { forecastMethod: "yang_zhang_63" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "model.forecastMethod must be one of yang_zhang_21, yang_zhang_21_without_earnings, implied_volatility_30_day." });
+    expect(validateBacktestSettingsOverrides({ model: { restOfDayCurve: "flat" } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "model.restOfDayCurve must be one of measured_2026_june_to_october, measured_2020_to_2026." });
+    expect(validateBacktestSettingsOverrides({ model: { forecastWindowDays: 30 } }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "model.forecastWindowDays cannot be changed for a session." });
+    expect(validateBacktestSettingsOverrides({ model: "iv" }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "overrides.model must be an object." });
+  });
+
   it("keeps the Kelly fraction above 0 and at most 1", () => {
     expect(validateBacktestSettingsOverrides({ kellyFraction: 0 }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "kellyFraction must be a number above 0 and at most 1." });
     expect(validateBacktestSettingsOverrides({ kellyFraction: 1.2 }, snapshot, editableBacktestSettingPaths, withClaudeCli)).toEqual({ ok: false, error: "kellyFraction must be a number above 0 and at most 1." });

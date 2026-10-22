@@ -7,6 +7,9 @@ import { BacktestBarHistory } from "./backtestBarHistory.js";
 import type { BacktestScoredTicker, BacktestScoringWorkerReply, BacktestScoringWorkerRequest } from "./backtestScoringPool.js";
 import { buildHistoricalTickerInputs } from "./backtestTickerInputs.js";
 import { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
+import { remainingSessionVarianceCurveOf } from "../backtestSettingsOverrides.js";
+import { defaultBacktestModelSettings } from "../backtestTypes.js";
+import type { BacktestScoringModelSettings } from "./backtestScoringPool.js";
 
 // One scoring worker of a session (backtestScoringPool.ts): it keeps the session's calendar, the bars and profile of the
 // symbols given to it, and each one's Signals inputs of the day, and runs the two heavy steps of a symbol's look on them:
@@ -18,6 +21,7 @@ const port = parentPort;
 enableExactInputCaches();
 
 let calendar: BacktestTradingCalendar | null = null;
+let sessionModel: BacktestScoringModelSettings = { forecastMethod: defaultBacktestModelSettings.forecastMethod, restOfDayCurve: defaultBacktestModelSettings.restOfDayCurve };
 const symbolState = new Map<string, { profile: Extract<BacktestScoringWorkerRequest, { type: "init" }>["symbols"][number]["profile"]; bars: BacktestBarHistory; barsByFactor: Map<number, BacktestBarHistory>; inputsByDay: Map<string, TickerSignalsInputs> }>();
 /** A symbol's inputs are kept for its two latest days: the next day's can be built while today's looks are still scored. */
 const daysKeptPerSymbol = 2;
@@ -56,6 +60,7 @@ function handle(request: BacktestScoringWorkerRequest): unknown {
   switch (request.type) {
     case "init": {
       calendar = new BacktestTradingCalendar(request.calendar.fileDays, request.calendar.marketCalendarRows);
+      sessionModel = request.model;
       for (const { symbol, profile, barRows } of request.symbols) {
         const bars = new BacktestBarHistory(barRows);
         symbolState.set(symbol, { profile, bars, barsByFactor: new Map([[1, bars]]), inputsByDay: new Map() });
@@ -70,7 +75,7 @@ function handle(request: BacktestScoringWorkerRequest): unknown {
         bars = state.bars.scaled(request.splitFactor);
         state.barsByFactor.set(request.splitFactor, bars);
       }
-      const built = buildHistoricalTickerInputs({ profile: state.profile, bars, market: request.market, calendar, elevatedVolatility: request.elevatedVolatility, macroEvents: request.macroEvents });
+      const built = buildHistoricalTickerInputs({ profile: state.profile, bars, market: request.market, calendar, elevatedVolatility: request.elevatedVolatility, macroEvents: request.macroEvents, forecastMethod: sessionModel.forecastMethod });
       state.inputsByDay.set(request.market.todayIso, built.inputs);
       for (const dayIso of [...state.inputsByDay.keys()].sort().slice(0, -daysKeptPerSymbol)) state.inputsByDay.delete(dayIso);
       return built;
@@ -102,7 +107,7 @@ function handle(request: BacktestScoringWorkerRequest): unknown {
       if (!dayQuotes) throw new Error(`The scoring worker has no warmed day quotes for ${request.symbol}.`);
       const inputs: TickerSignalsInputs = { ...dayInputs, freeShares: request.freeShares, openShortLegs: request.openShortLegs, dayQuotes };
       const account = { freeCash: request.freeCash };
-      const history = { modelTables, scoredAtMs: request.scoredAtMs };
+      const history = { modelTables, scoredAtMs: request.scoredAtMs, remainingSessionVarianceCurve: remainingSessionVarianceCurveOf(sessionModel.restOfDayCurve) };
       const result: BacktestScoredTicker = { scored: scoreTicker(inputs, account, trading, request.live, undefined, history), heldShareCallCandidates: scoreHeldShareCalls(inputs, account, trading, request.live, history) };
       return result;
     }

@@ -1,7 +1,7 @@
 import { forwardAtSpot, sviTotalVariance, yearsBetweenIsoDates } from "./impliedVolatilitySurface.js";
 import { easternInstant, easternIsoDate, easternMinutesOfDay } from "./easternIsoDate.js";
 import type { TradingSession } from "./marketSessionStatus.js";
-import { varianceSessionsToExpiry } from "./varianceClock.js";
+import { varianceSessionsToExpiry, type RemainingSessionVarianceCurve } from "./varianceClock.js";
 import { volatilityModelTables } from "./volatilityModelTables.generated.js";
 import type { VolatilityModelTables } from "./volatilityModelTables.js";
 import { attachUncompensatedShare, buildSignalCandidates, type CandidateModelContext, computeExpiryIvShifts, emptyCandidateExclusionTally, liveUncompensatedSharePathCount, pickBestCandidate, uncompensatedShareRefreshSpotMoveFraction, type CandidateExclusionTally, type SignalCandidate, type SignalCandidatesInput, type SignalQuote, type SignalSurfaceSlice } from "./signalCandidates.js";
@@ -194,6 +194,8 @@ export interface ScoreTickerHistoryOptions {
   scoredAtMs?: number;
   /** Keep contracts whose expiry spans a known earnings date (Pluto's calls on held shares only). */
   includeContractsSpanningEarnings?: boolean;
+  /** The variance clock's rest-of-day curve; live's when omitted (a backtest session may choose another). */
+  remainingSessionVarianceCurve?: RemainingSessionVarianceCurve;
 }
 
 /** Scores one ticker from its loaded inputs; `live` re-reads the snapshot at the live spot and merges live quotes. */
@@ -269,7 +271,7 @@ export function scoreTicker(inputs: TickerSignalsInputs, account: AccountContext
         tables: history.modelTables ?? volatilityModelTables,
         forecast: inputs.modelForecast,
         group: inputs.valuationGroup,
-        varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, inputs.tradingSessions),
+        varianceSessionsAt: (atMs, expiryIso) => varianceSessionsToExpiry(atMs, expiryIso, inputs.tradingSessions, history.remainingSessionVarianceCurve),
         // A snapshot quote's instant is the capture, on any later day too: its price is valued over the variance left then.
         quoteInstantMs: (quote) => (quote.quotedAt ? Date.parse(quote.quotedAt) : quote.source === "live" ? scoredAtMs : capturedAtMs),
         forwardForQuote: (slice, quote) => (quote.source === "live" || quote.source === "day" ? slice.forwardPrice : fittedForwardByExpiry.get(slice.expiry) ?? slice.forwardPrice),

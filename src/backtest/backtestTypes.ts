@@ -3,6 +3,7 @@ import type { TradingSettings } from "../lib/tradingSettingsStore.js";
 import type { LlmSessionEstimate } from "./llm/estimateLlmSession.js";
 import type { OpenCandidateRanking } from "../lib/signalCandidates.js";
 import type { KellyEdgeBasis } from "../pluto/postModelGates.js";
+import type { ModelForecastMethod } from "../lib/volatilityEdge.js";
 import type { LadderLevels } from "./engine/backtestBaselineLadder.js";
 
 // The backtesting API contract (docs/backtesting/). The app mirrors these types in src/api/backtest.ts.
@@ -250,7 +251,14 @@ export interface BacktestModelSettings {
   surfaceMaxRmseVp: number;
   /** The share of the half-spread the model charges as friction; null: the fills' share (sessions created before the split). */
   spreadCostChargedPct: number | null;
+  /** The valuation forecast (volatilityEdge.ts ModelForecastMethod); the walk-forward tables stay standardized by Yang-Zhang 21. */
+  forecastMethod: ModelForecastMethod;
+  /** The variance clock's rest-of-day curve: live's, measured on 2026-06..10, or the 2020–2026 measure (varianceClock.ts). */
+  restOfDayCurve: BacktestRestOfDayCurve;
 }
+
+export type BacktestRestOfDayCurve = "measured_2026_june_to_october" | "measured_2020_to_2026";
+export const backtestRestOfDayCurves: readonly BacktestRestOfDayCurve[] = ["measured_2026_june_to_october", "measured_2020_to_2026"];
 
 /** Live's values (volatilityEdge.ts, contractValuation.ts, signalCandidates.ts, postModelGates.ts, impliedVolatilitySurface.ts). */
 export const defaultBacktestModelSettings: BacktestModelSettings = {
@@ -264,6 +272,8 @@ export const defaultBacktestModelSettings: BacktestModelSettings = {
   surfaceMinPointsPerSlice: 8,
   surfaceMaxRmseVp: 3,
   spreadCostChargedPct: null,
+  forecastMethod: "yang_zhang_21",
+  restOfDayCurve: "measured_2026_june_to_october",
 };
 
 /** Settings frozen with a session. `trading` leaves out the commission estimator (the flat commission applies). */

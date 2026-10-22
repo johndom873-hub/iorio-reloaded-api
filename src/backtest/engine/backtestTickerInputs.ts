@@ -11,7 +11,7 @@ import type { SnapshotHeader, TickerSignalsInputs } from "../../lib/signalsTypes
 import { addCalendarDays } from "../../lib/signalsRoadmap.js";
 import { computeElevatedVolatilityFlag, computeMomentum, computeSkew, volatilityRatio, volatilityRatioBarsRead, type ElevatedVolatilityFlag } from "../../lib/tiltMeasures.js";
 import type { DailyOhlcvBar } from "../../lib/realizedVolatility.js";
-import { longForecastWindowDays, selectModelVolatilityForecast } from "../../lib/volatilityEdge.js";
+import { longForecastWindowDays, selectEarningsFreeVolatilityForecast, selectImpliedVolatilityForecast, selectModelVolatilityForecast, type ModelForecastMethod, type ModelVolatilityForecast } from "../../lib/volatilityEdge.js";
 import type { ValuationGroup } from "../../lib/volatilityModelTables.js";
 import { backtestCaptureLookTimeEt } from "../backtestTypes.js";
 import { toOhlcvBars, type BacktestBarHistory } from "./backtestBarHistory.js";
@@ -75,6 +75,8 @@ export interface HistoricalTickerDay {
   elevatedVolatility?: ElevatedVolatilityFlag | null;
   /** The major macro events from today on, as the calendar held them that day (loadUpcomingMajorMacroEvents); none when absent. */
   macroEvents?: readonly MacroEvent[];
+  /** The session's valuation forecast (its model settings); live's Yang-Zhang 21 when absent. */
+  forecastMethod?: ModelForecastMethod;
 }
 
 /** The 10:00 look: the capture's own time. */
@@ -233,6 +235,18 @@ function rememberedVolatilityRatio(history: BacktestBarHistory): (bars: DailyOhl
   };
 }
 
+/** The day's valuation forecast by the session's method, from the bars before today. */
+function selectDayForecast(method: ModelForecastMethod, forecastBars: DailyOhlcvBar[], bars: BacktestBarHistory, profile: BacktestTickerProfile, todayIso: string): ModelVolatilityForecast | null {
+  switch (method) {
+    case "yang_zhang_21":
+      return selectModelVolatilityForecast(forecastBars);
+    case "yang_zhang_21_without_earnings":
+      return selectEarningsFreeVolatilityForecast(forecastBars, profile.earnings.map((event) => event.dateIso));
+    case "implied_volatility_30_day":
+      return selectImpliedVolatilityForecast(bars.rowsBefore(todayIso, 1)[0]?.impliedVolatility ?? null);
+  }
+}
+
 /**
  * Builds the day's TickerSignalsInputs the way loadTickerSignalsInputs does, from history, with an empty book (no free
  * shares, no open short legs): the look sets those from the simulated ledger at each pass.
@@ -284,7 +298,7 @@ export function buildHistoricalTickerInputs(context: HistoricalTickerDay): { inp
     slices,
     quotes,
     dayQuotes: [],
-    modelForecast: selectModelVolatilityForecast(forecastBars),
+    modelForecast: selectDayForecast(context.forecastMethod ?? "yang_zhang_21", forecastBars, bars, profile, todayIso),
     // The screen's display-only figures: not needed by a backtest.
     yangZhang63Forecast: null,
     ivMetrics: null,

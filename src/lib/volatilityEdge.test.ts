@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { computeYangZhangVolatility, type DailyOhlcvBar } from "./realizedVolatility.js";
-import { expirySpansEarnings, expirySpansMacroEvent, longForecastWindowDays, selectModelVolatilityForecast } from "./volatilityEdge.js";
+import { expirySpansEarnings, expirySpansMacroEvent, longForecastWindowDays, selectEarningsFreeVolatilityForecast, selectImpliedVolatilityForecast, selectModelVolatilityForecast } from "./volatilityEdge.js";
 
 // Deterministic synthetic bars: a slow random walk with a fixed seed.
 function makeBars(count: number, dailyMove = 0.02, seed = 42): DailyOhlcvBar[] {
@@ -47,6 +47,58 @@ describe("selectModelVolatilityForecast on the 63-day window (FV 63d, display on
   it("needs 64 bars (63 returns and the prior close), with no fallback to a shorter window", () => {
     expect(selectModelVolatilityForecast(makeBars(64), longForecastWindowDays)!.windowDays).toBe(63);
     expect(selectModelVolatilityForecast(makeBars(63), longForecastWindowDays)).toBeNull();
+  });
+});
+
+describe("selectEarningsFreeVolatilityForecast (backtest model setting, Edge Margin audit 2026-10-22)", () => {
+  it("is the 21-session Yang-Zhang forecast when no earnings reaction falls in the window", () => {
+    const bars = makeBars(120);
+    const plain = selectModelVolatilityForecast(bars)!;
+    for (const earnings of [[], ["2020-01-01"], [bars[10]!.tradingDate], ["2030-01-01"]]) {
+      expect(selectEarningsFreeVolatilityForecast(bars, earnings)).toEqual(plain);
+    }
+  });
+
+  it("leaves out the reaction session and the one after it, each kept session's overnight return from its own previous close", () => {
+    const bars = makeBars(120);
+    const earningsIndex = bars.length - 6;
+    // A 15% gap on the reaction session (its close kept, so the next sessions' overnight returns do not change).
+    const gapped = bars.map((bar, index) => (index === earningsIndex ? { ...bar, open: bars[index - 1]!.close * 1.15, high: Math.max(bar.high, bars[index - 1]!.close * 1.16), low: Math.min(bar.low, bar.close * 0.99) } : bar));
+    const earnings = [bars[earningsIndex]!.tradingDate];
+    expect(selectModelVolatilityForecast(gapped)!.annualizedVolatility).toBeGreaterThan(selectModelVolatilityForecast(bars)!.annualizedVolatility * 1.5);
+    const earningsFree = selectEarningsFreeVolatilityForecast(gapped, earnings)!;
+    expect(earningsFree.annualizedVolatility).toBe(selectEarningsFreeVolatilityForecast(bars, earnings)!.annualizedVolatility);
+    // The same 21 sessions by hand: the last 23 bars but the reaction session and the next.
+    const keptIndexes = Array.from({ length: 23 }, (_, offset) => bars.length - 23 + offset).filter((index) => index !== earningsIndex && index !== earningsIndex + 1);
+    const byHand = keptIndexes.map((index) => ({ overnight: Math.log(bars[index]!.open / bars[index - 1]!.close), intraday: Math.log(bars[index]!.close / bars[index]!.open) }));
+    expect(byHand).toHaveLength(21);
+    const variance = (values: number[]) => {
+      const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+      return values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+    };
+    const rogersSatchell = keptIndexes.reduce((sum, index) => {
+      const { open, high, low, close } = bars[index]!;
+      return sum + Math.log(high / close) * Math.log(high / open) + Math.log(low / close) * Math.log(low / open);
+    }, 0) / 21;
+    const k = 0.34 / (1.34 + 22 / 20);
+    const expected = variance(byHand.map((day) => day.overnight)) + k * variance(byHand.map((day) => day.intraday)) + (1 - k) * rogersSatchell;
+    expect(earningsFree.perSessionVariance).toBeCloseTo(expected, 15);
+  });
+
+  it("is null when the bars hold fewer than 21 sessions outside earnings reactions", () => {
+    const bars = makeBars(23);
+    expect(selectEarningsFreeVolatilityForecast(bars, [])).not.toBeNull();
+    expect(selectEarningsFreeVolatilityForecast(bars, [bars[15]!.tradingDate])).toBeNull();
+  });
+});
+
+describe("selectImpliedVolatilityForecast (backtest model setting, Edge Margin audit 2026-10-22)", () => {
+  it("is IBKR's 30-day implied volatility as variance per session = volatility² ÷ 252", () => {
+    expect(selectImpliedVolatilityForecast(0.32)).toEqual({ perSessionVariance: (0.32 * 0.32) / 252, annualizedVolatility: 0.32, windowDays: 30 });
+  });
+
+  it("is null without a usable implied volatility", () => {
+    for (const value of [null, 0, -0.1, Number.NaN]) expect(selectImpliedVolatilityForecast(value)).toBeNull();
   });
 });
 

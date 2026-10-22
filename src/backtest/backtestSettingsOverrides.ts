@@ -1,7 +1,8 @@
-import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, type BacktestModelSettings, type BacktestSettings, type BacktestSettingsOverrides, type EffectiveBacktestSettings } from "./backtestTypes.js";
+import { defaultBacktestBaselineSettings, defaultBacktestModelSettings, defaultBacktestPolicySettings, defaultBacktestSteadyStakeSettings, type BacktestModelSettings, type BacktestRestOfDayCurve, type BacktestSettings, type BacktestSettingsOverrides, type EffectiveBacktestSettings } from "./backtestTypes.js";
 import { liveSurfaceFitLimits, type SurfaceFitLimits } from "../lib/impliedVolatilitySurface.js";
 import { gradeMarginCutPoints, type GradeMarginCutPoints } from "../lib/contractValuation.js";
 import type { TradingSettings } from "../lib/tradingSettingsStore.js";
+import { remainingSessionVarianceCurve, remainingSessionVarianceCurveMeasured2020To2026, type RemainingSessionVarianceCurve } from "../lib/varianceClock.js";
 
 // A session's effective settings: its snapshot with the session-only overrides on top. Pure.
 
@@ -36,6 +37,11 @@ export function surfaceFitLimitsOf(model: BacktestModelSettings): SurfaceFitLimi
   const limits = { maximumSpreadFractionOfMid: model.surfaceMaxSpreadPctOfMid / 100, minimumPointsPerSlice: model.surfaceMinPointsPerSlice, maximumSliceRmseVolatility: model.surfaceMaxRmseVp / 100 };
   const same = (Object.keys(limits) as (keyof SurfaceFitLimits)[]).every((key) => limits[key] === liveSurfaceFitLimits[key]);
   return same ? liveSurfaceFitLimits : limits;
+}
+
+/** The variance clock curve of a session's model settings (live's unless it chose the 2020–2026 measure). */
+export function remainingSessionVarianceCurveOf(restOfDayCurve: BacktestRestOfDayCurve): RemainingSessionVarianceCurve {
+  return restOfDayCurve === "measured_2020_to_2026" ? remainingSessionVarianceCurveMeasured2020To2026 : remainingSessionVarianceCurve;
 }
 
 /** The grade cut points of a session, as fractions; null when they are live's (nothing to re-grade). */

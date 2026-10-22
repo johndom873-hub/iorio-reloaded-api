@@ -12,6 +12,7 @@ import type { StoredDailyBar } from "./backtestBarHistory.js";
 import type { SymbolFileDay } from "./backtestSymbolFile.js";
 import type { BacktestDayMarket, BacktestTickerProfile } from "./backtestTickerInputs.js";
 import type { MarketCalendarRow } from "./backtestTradingCalendar.js";
+import type { BacktestModelSettings } from "../backtestTypes.js";
 
 // Scoring a look's symbols in parallel (Marcelo 2026-10-12): the two heavy steps of a symbol's look, building the day's
 // Signals inputs (the surface fit among them) and scoring the ticker, run in worker threads, one symbol always on the
@@ -62,6 +63,7 @@ export type BacktestScoringWorkerRequest =
       type: "init";
       calendar: { fileDays: readonly SymbolFileDay[]; marketCalendarRows: readonly MarketCalendarRow[] };
       symbols: { symbol: string; profile: BacktestTickerProfile; barRows: readonly StoredDailyBar[] }[];
+      model: BacktestScoringModelSettings;
     }
   | { type: "prepareDay"; symbol: string; splitFactor: number; market: BacktestDayMarket; elevatedVolatility?: ElevatedVolatilityFlag | null; macroEvents?: readonly MacroEvent[] }
   | (BacktestScoringRequestBody & { type: "score" })
@@ -72,9 +74,13 @@ export type BacktestScoringWorkerReply = { id: number; ok: true; result: unknown
 type PrepareDayRequest = Omit<Extract<BacktestScoringWorkerRequest, { type: "prepareDay" }>, "type">;
 type PreparedDay = { inputs: TickerSignalsInputs; fitIssue: string | null; referenceVolatility: number | null };
 
+/** The session's model settings a worker builds and scores with (the same on every worker). */
+export type BacktestScoringModelSettings = Pick<BacktestModelSettings, "forecastMethod" | "restOfDayCurve">;
+
 export interface BacktestScoringPoolSetup {
   calendar: { fileDays: readonly SymbolFileDay[]; marketCalendarRows: readonly MarketCalendarRow[] };
   symbols: { symbol: string; profile: BacktestTickerProfile; barRows: readonly StoredDailyBar[] }[];
+  model: BacktestScoringModelSettings;
   workerCount: number;
 }
 
@@ -138,7 +144,7 @@ export class BacktestScoringPool {
     setup.symbols.forEach((entry, index) => this.lanesBySymbol.set(entry.symbol, lanesPerSymbol === 2 ? [this.workers[2 * index]!, this.workers[2 * index + 1]!] : [this.workers[index % this.workers.length]!]));
     for (const poolWorker of this.workers) {
       const symbols = setup.symbols.filter((entry) => this.lanesBySymbol.get(entry.symbol)!.includes(poolWorker));
-      void this.send(poolWorker, { type: "init", calendar: setup.calendar, symbols }).catch(() => {});
+      void this.send(poolWorker, { type: "init", calendar: setup.calendar, symbols, model: setup.model }).catch(() => {});
     }
   }
 

@@ -26,6 +26,8 @@ import type { PlutoGateResult } from "../../pluto/ledger.js";
 import { computeKellyCap, computeSizingRoom, computeStressCap, midLimitPrice, runHeldShareCallGates, runPostModelGates, stressCapInputFor, tickerCooldownStatus } from "../../pluto/postModelGates.js";
 import { countPlutoRejections } from "../../pluto/rejectionSummary.js";
 import type { BacktestAction, BacktestActionKind, BacktestBaselineSettings, BacktestLadderLevel, BacktestOrderShortfall, EffectiveBacktestSettings } from "../backtestTypes.js";
+import { remainingSessionVarianceCurveOf } from "../backtestSettingsOverrides.js";
+import type { ModelForecastMethod } from "../../lib/volatilityEdge.js";
 import type { BaselineNoCandidate, BaselineNoSaleReason } from "./baselineSaleSteps.js";
 import { toOhlcvBars, type BacktestBarHistory } from "./backtestBarHistory.js";
 import { computeSaleFillPrice, sharesPerContract } from "./backtestBook.js";
@@ -311,9 +313,9 @@ function upcomingEarnings(profile: BacktestTickerProfile, todayIso: string): Upc
   return event ? { dateIso: event.dateIso, time: event.eventTime } : null;
 }
 
-/** What the looks of a day share for one symbol, from its 10:00 capture. */
-export function prepareBacktestSymbolDay(lookSymbol: BacktestLookSymbol, calendar: BacktestTradingCalendar): BacktestPreparedSymbolDay {
-  const built = buildHistoricalTickerInputs({ profile: lookSymbol.profile, bars: lookSymbol.bars, market: lookSymbol.market, calendar, elevatedVolatility: lookSymbol.elevatedVolatility, macroEvents: lookSymbol.macroEvents });
+/** What the looks of a day share for one symbol, from its 10:00 capture; `forecastMethod`: the session's model setting. */
+export function prepareBacktestSymbolDay(lookSymbol: BacktestLookSymbol, calendar: BacktestTradingCalendar, forecastMethod?: ModelForecastMethod): BacktestPreparedSymbolDay {
+  const built = buildHistoricalTickerInputs({ profile: lookSymbol.profile, bars: lookSymbol.bars, market: lookSymbol.market, calendar, elevatedVolatility: lookSymbol.elevatedVolatility, macroEvents: lookSymbol.macroEvents, forecastMethod });
   return completePreparedSymbolDay(built, lookSymbol, calendar);
 }
 
@@ -379,7 +381,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
     const symbol = profile.symbol;
     let day = preparedDayBySymbol.get(symbol);
     if (!day) {
-      day = prepareBacktestSymbolDay(lookSymbol, calendar);
+      day = prepareBacktestSymbolDay(lookSymbol, calendar, context.settings.model.forecastMethod);
       preparedDayBySymbol.set(symbol, day);
     }
     const { inputs: baseInputs, fitIssue, earnings, sessionsLeftBeforeEarnings, dailyClosesOnCycleScale } = day;
@@ -464,7 +466,7 @@ export async function runBacktestLook(context: BacktestLookContext): Promise<Bac
       const freeCash = ledgerFreeCash(ledger);
       const inputs = { ...baseInputs, freeShares: freeSharesToday, openShortLegs, dayQuotes: lookDayQuotes };
       const live = { spotPrice: stockPrice, priceSource: "live" as const, liveQuotes: heldLegQuotesNotYetRead };
-      const scoringHistory = { modelTables: context.modelTables, scoredAtMs: nowMs };
+      const scoringHistory = { modelTables: context.modelTables, scoredAtMs: nowMs, remainingSessionVarianceCurve: remainingSessionVarianceCurveOf(context.settings.model.restOfDayCurve) };
       const { scored, heldShareCallCandidates } = scoringPool
         ? await scoringPool.score({ symbol, todayIso, freeShares: freeSharesToday, openShortLegs, dayQuotes: lookDayQuotes, freeCash, trading, live, modelTables: context.modelTables, scoredAtMs: nowMs })
         : { scored: scoreTicker(inputs, { freeCash }, trading, live, undefined, scoringHistory), heldShareCallCandidates: scoreHeldShareCalls(inputs, { freeCash }, trading, live, scoringHistory) };

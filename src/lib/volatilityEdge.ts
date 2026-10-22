@@ -1,5 +1,5 @@
 import { easternInstant } from "./easternIsoDate.js";
-import { computeYangZhangVolatility, type DailyOhlcvBar } from "./realizedVolatility.js";
+import { computeYangZhangVolatility, computeYangZhangVolatilityOfSessions, type DailyOhlcvBar, type YangZhangSession } from "./realizedVolatility.js";
 
 // Realized-volatility forecasts and the calendar checks the Signal Engine scores with.
 
@@ -16,15 +16,56 @@ export interface ModelVolatilityForecast {
   perSessionVariance: number;
   /** √(252 × per-session variance): the same forecast annualized on sessions. */
   annualizedVolatility: number;
-  /** modelForecastWindowDays live; a backtest session may use another window. */
+  /** modelForecastWindowDays live; a backtest session may use another window (30 for IBKR's 30-day implied volatility). */
   windowDays: number;
 }
+
+/**
+ * What a backtest session forecasts with (Edge Margin audit 2026-10-22); live always uses Yang-Zhang over 21 sessions.
+ *   yang_zhang_21                   the last 21 sessions (live)
+ *   yang_zhang_21_without_earnings  the last 21 sessions that are neither an earnings date's session nor the one after it:
+ *                                   contracts never span earnings, so a past reaction is not part of their risk
+ *   implied_volatility_30_day       IBKR's 30-day implied volatility at the previous close
+ */
+export type ModelForecastMethod = "yang_zhang_21" | "yang_zhang_21_without_earnings" | "implied_volatility_30_day";
+export const modelForecastMethods: readonly ModelForecastMethod[] = ["yang_zhang_21", "yang_zhang_21_without_earnings", "implied_volatility_30_day"];
 
 /** `bars` in date order, ending before the scoring day (never a partial session). Null without windowDays + 1 valid bars. */
 export function selectModelVolatilityForecast(bars: DailyOhlcvBar[], windowDays: number = modelForecastWindowDays): ModelVolatilityForecast | null {
   const result = computeYangZhangVolatility(bars, windowDays);
   if (!result.available || !Number.isFinite(result.annualizedVolatility) || !(result.annualizedVolatility > 0)) return null;
   return { perSessionVariance: result.annualizedVolatility ** 2 / tradingSessionsPerYear, annualizedVolatility: result.annualizedVolatility, windowDays };
+}
+
+/**
+ * Yang-Zhang over the last `windowDays` sessions of `bars` that are not an earnings reaction: the first session on or after
+ * an earnings date (its time of day is mostly unknown) and the one after it. Each kept session's overnight return runs
+ * from its own previous close. Null without enough sessions.
+ */
+export function selectEarningsFreeVolatilityForecast(bars: DailyOhlcvBar[], earningsDatesIso: readonly string[], windowDays: number = modelForecastWindowDays): ModelVolatilityForecast | null {
+  const firstDateIso = bars[0]?.tradingDate;
+  const reactionIndexes = new Set<number>();
+  for (const dateIso of earningsDatesIso) {
+    if (firstDateIso === undefined || dateIso < firstDateIso) continue;
+    const index = bars.findIndex((bar) => bar.tradingDate >= dateIso);
+    if (index < 0) continue;
+    reactionIndexes.add(index);
+    reactionIndexes.add(index + 1);
+  }
+  const sessions: YangZhangSession[] = [];
+  for (let index = bars.length - 1; index >= 1 && sessions.length < windowDays; index--) {
+    if (!reactionIndexes.has(index)) sessions.push({ bar: bars[index]!, previousClose: bars[index - 1]!.close });
+  }
+  if (sessions.length < windowDays) return null;
+  const result = computeYangZhangVolatilityOfSessions(sessions.reverse());
+  if (!result.available || !Number.isFinite(result.annualizedVolatility) || !(result.annualizedVolatility > 0)) return null;
+  return { perSessionVariance: result.annualizedVolatility ** 2 / tradingSessionsPerYear, annualizedVolatility: result.annualizedVolatility, windowDays };
+}
+
+/** IBKR's 30-day implied volatility (annualized, the previous close's) as the forecast, per session ÷ 252; null without one. */
+export function selectImpliedVolatilityForecast(impliedVolatility: number | null): ModelVolatilityForecast | null {
+  if (impliedVolatility === null || !Number.isFinite(impliedVolatility) || !(impliedVolatility > 0)) return null;
+  return { perSessionVariance: impliedVolatility ** 2 / tradingSessionsPerYear, annualizedVolatility: impliedVolatility, windowDays: 30 };
 }
 
 /**

@@ -8,13 +8,17 @@ import {
   backtestMaxSymbolsPerSession,
   backtestSessionsPageDefaultLimit,
   backtestSessionsPageMaxLimit,
+  backtestRestOfDayCurves,
   backtestTickerBaselineKeys,
   defaultBacktestBaselineSettings,
+  defaultBacktestModelSettings,
   defaultBacktestPolicySettings,
   defaultBacktestSteadyStakeSettings,
   type BacktestBaselineSettings,
   type BacktestBookMode,
+  type BacktestModelSettings,
   type BacktestPolicySettings,
+  type BacktestRestOfDayCurve,
   type BacktestSessionStatusFilter,
   type BacktestSettings,
   type BacktestSettingsOverrides,
@@ -30,6 +34,7 @@ import {
   type BacktestTickerValues,
 } from "../backtestTypes.js";
 import { backtestClaudeCliPathMissingMessage } from "../backtestClaudeCli.js";
+import { modelForecastMethods, type ModelForecastMethod } from "../../lib/volatilityEdge.js";
 import { isIsoCalendarDate } from "./backtestJobRules.js";
 
 // Validation of a New session request (CreateBacktestSessionRequest). Pure: the data files' coverage and the current
@@ -127,7 +132,7 @@ export function validateBacktestSettingsOverrides(
 ): { ok: true; overrides: BacktestSettingsOverrides } | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, overrides: {} };
   if (!isPlainObject(raw)) return { ok: false, error: "overrides must be an object." };
-  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "kellyFraction" && key !== "policy" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake");
+  const unknownSection = Object.keys(raw).find((key) => key !== "pluto" && key !== "trading" && key !== "kellyFraction" && key !== "policy" && key !== "decisionMaker" && key !== "baseline" && key !== "steadyStake" && key !== "model");
   if (unknownSection) return { ok: false, error: `overrides.${unknownSection} is not a setting a session can change.` };
 
   const overrides: BacktestSettingsOverrides = {};
@@ -185,6 +190,23 @@ export function validateBacktestSettingsOverrides(
     if (problem) return { ok: false, error: problem };
     const changed = changedEntries(snapshotSteadyStake, raw.steadyStake);
     if (Object.keys(changed).length > 0) overrides.steadyStake = changed as Partial<BacktestSteadyStakeSettings>;
+  }
+
+  // Two of the model's values can change for a session (Edge Margin audit 2026-10-22); the others stay live's.
+  if (raw.model !== undefined) {
+    if (!isPlainObject(raw.model)) return { ok: false, error: "overrides.model must be an object." };
+    const snapshotModel = { ...defaultBacktestModelSettings, ...snapshot.model };
+    const changedModel: Partial<BacktestModelSettings> = {};
+    for (const [field, value] of Object.entries(raw.model)) {
+      if (field === "forecastMethod") {
+        if (typeof value !== "string" || !modelForecastMethods.includes(value as ModelForecastMethod)) return { ok: false, error: `model.forecastMethod must be one of ${modelForecastMethods.join(", ")}.` };
+        if (value !== snapshotModel.forecastMethod) changedModel.forecastMethod = value as ModelForecastMethod;
+      } else if (field === "restOfDayCurve") {
+        if (typeof value !== "string" || !backtestRestOfDayCurves.includes(value as BacktestRestOfDayCurve)) return { ok: false, error: `model.restOfDayCurve must be one of ${backtestRestOfDayCurves.join(", ")}.` };
+        if (value !== snapshotModel.restOfDayCurve) changedModel.restOfDayCurve = value as BacktestRestOfDayCurve;
+      } else return { ok: false, error: `model.${field} cannot be changed for a session.` };
+    }
+    if (Object.keys(changedModel).length > 0) overrides.model = changedModel;
   }
 
   if (raw.decisionMaker !== undefined) {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   computeYangZhangVolatility,
   computeYangZhangVolatilityAllWindows,
+  computeYangZhangVolatilityOfSessions,
   yangZhangWindowDays,
   type DailyOhlcvBar,
 } from "./realizedVolatility.js";
@@ -203,5 +204,22 @@ describe("computeYangZhangVolatility endIndex (2026-10-07)", () => {
     for (let end = 0; end <= bars.length; end++) {
       expect(computeYangZhangVolatility(bars, 21, end)).toEqual(computeYangZhangVolatility(bars.slice(0, end), 21));
     }
+  });
+});
+
+describe("computeYangZhangVolatilityOfSessions (sessions that need not follow each other, 2026-10-22)", () => {
+  it("equals computeYangZhangVolatility over consecutive sessions", () => {
+    const bars = buildSteadyBars(40);
+    for (const windowDays of [10, 21]) {
+      const sessions = bars.slice(-windowDays).map((bar, offset) => ({ bar, previousClose: bars[bars.length - windowDays + offset - 1]!.close }));
+      expect(computeYangZhangVolatilityOfSessions(sessions)).toEqual(computeYangZhangVolatility(bars, windowDays));
+    }
+  });
+
+  it("is unavailable with fewer than 2 sessions or an invalid bar or previous close", () => {
+    const bars = buildSteadyBars(5);
+    expect(computeYangZhangVolatilityOfSessions([{ bar: bars[1]!, previousClose: bars[0]!.close }])).toMatchObject({ available: false, reason: "insufficient_history" });
+    expect(computeYangZhangVolatilityOfSessions([{ bar: bars[1]!, previousClose: 0 }, { bar: bars[2]!, previousClose: bars[1]!.close }])).toMatchObject({ available: false, reason: "invalid_bar" });
+    expect(computeYangZhangVolatilityOfSessions([{ bar: { ...bars[1]!, high: bars[1]!.low * 0.5 }, previousClose: bars[0]!.close }, { bar: bars[2]!, previousClose: bars[1]!.close }])).toMatchObject({ available: false, reason: "invalid_bar" });
   });
 });

@@ -492,7 +492,7 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
     // The symbols of a look are scored in parallel on worker threads; the AI model's sessions stay on one thread.
     const scoringWorkers = hooks.scoringWorkers ?? (settings.decisionMaker === "rules" && severalSymbols ? scoringWorkerCount(symbols.length) : 0);
     if (scoringWorkers > 0) {
-      scoringPool = new BacktestScoringPool({ calendar: { fileDays: unionFileDays, marketCalendarRows }, symbols: symbols.map((entry) => ({ symbol: entry.symbol, profile: entry.profile, barRows: entry.bars.rows })), workerCount: scoringWorkers });
+      scoringPool = new BacktestScoringPool({ calendar: { fileDays: unionFileDays, marketCalendarRows }, symbols: symbols.map((entry) => ({ symbol: entry.symbol, profile: entry.profile, barRows: entry.bars.rows })), model: { forecastMethod: settings.model.forecastMethod, restOfDayCurve: settings.model.restOfDayCurve }, workerCount: scoringWorkers });
       console.log(`backtest ${sessionId}: scoring on ${scoringPool.workerCount} worker thread(s)`);
     }
     // A day no file holds is skipped; those the downloader could not retrieve for any symbol are named on the next day.
