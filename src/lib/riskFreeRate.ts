@@ -50,6 +50,15 @@ export async function runWithRetries<T>(operation: () => Promise<T>, attempts: n
   throw lastError;
 }
 
+/** Parses a FRED API response body as JSON. FRED serves its maintenance page as HTTP 200 text/html, so an HTML body is reported by name rather than as a JSON parse error. */
+export async function readFredJson<T>(response: Response): Promise<T> {
+  if (response.headers.get("content-type")?.startsWith("text/html")) {
+    const body = await response.text();
+    throw new Error(/maintenance/i.test(body) ? "FRED is down for maintenance (it served its maintenance page instead of JSON)" : "FRED answered with an HTML page instead of JSON");
+  }
+  return (await response.json()) as T;
+}
+
 async function fetchAndStoreFromFred(attempts: number): Promise<number> {
   const apiKey = requireEnvironmentVariable("FRED_API_KEY");
   const url = new URL("https://api.stlouisfed.org/fred/series/observations");
@@ -63,7 +72,7 @@ async function fetchAndStoreFromFred(attempts: number): Promise<number> {
     async () => {
       const response = await fetch(url, { signal: AbortSignal.timeout(fredRequestTimeoutMs) });
       if (!response.ok) throw new Error(`FRED responded ${response.status}`);
-      return (await response.json()) as { observations?: { date: string; value: string }[] };
+      return readFredJson<{ observations?: { date: string; value: string }[] }>(response);
     },
     attempts,
     fredRetryBackoffMs,

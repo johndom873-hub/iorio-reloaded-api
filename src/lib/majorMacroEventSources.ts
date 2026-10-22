@@ -1,5 +1,5 @@
 import { requireEnvironmentVariable } from "../config/env.js";
-import { runWithRetries } from "./riskFreeRate.js";
+import { readFredJson, runWithRetries } from "./riskFreeRate.js";
 
 // Where the major US macro events come from (stored by macroEventCalendar.ts):
 //  - CPI, GDP and the jobs report (BLS Employment Situation, added 2026-10-10 by the model review): FRED's release calendar. FRED returns dates only; the releases are at 08:30 ET by convention.
@@ -49,7 +49,7 @@ export async function fetchFredReleaseDates(releaseId: number, fromDateIso: stri
     async () => {
       const response = await fetch(url, { signal: AbortSignal.timeout(sourceRequestTimeoutMs) });
       if (!response.ok) throw new Error(`FRED release ${releaseId} responded ${response.status}`);
-      return (await response.json()) as { release_dates?: { date: string }[] };
+      return readFredJson<{ release_dates?: { date: string }[] }>(response);
     },
     sourceAttempts,
     sourceRetryBackoffMs,

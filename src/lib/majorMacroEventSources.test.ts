@@ -104,6 +104,16 @@ describe("fetchFredReleaseDates", () => {
     });
   });
 
+  it("names FRED's maintenance page (HTTP 200 text/html) instead of failing to parse it", async () => {
+    fetchMock.mockImplementation(async () => new Response("<!doctype html><html><head><title>Site Maintenance | St. Louis Fed</title></head></html>", { headers: { "content-type": "text/html; charset=utf-8" } }));
+    await expect(fetchFredReleaseDates(10, "2026-10-07")).rejects.toThrow("FRED is down for maintenance (it served its maintenance page instead of JSON)");
+  }, 15_000);
+
+  it("reports any other HTML page as HTML, not a parse error", async () => {
+    fetchMock.mockImplementation(async () => new Response("<!doctype html><html><head><title>Error</title></head></html>", { headers: { "content-type": "text/html" } }));
+    await expect(fetchFredReleaseDates(10, "2026-10-07")).rejects.toThrow("FRED answered with an HTML page instead of JSON");
+  }, 15_000);
+
   it("throws when the body has no release_dates", async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ error_message: "Bad Request" })));
     await expect(fetchFredReleaseDates(10, "2026-10-07")).rejects.toThrow("FRED release 10 returned no release_dates");
