@@ -63,6 +63,9 @@ export interface CycleOptionLeg {
   openingCommission?: number | null;
   /** Average price of the leg's closing fills. Absent: exitPrice. */
   closingFillPrice?: number | null;
+  /** The opening or closing row's label in place of the fill's (a simulated book's bookkeeping moves); live leaves them unset. */
+  openingRowLabel?: string;
+  closingRowLabel?: string;
 }
 
 export type OptionSettlementOutcome = "assigned" | "worthless";
@@ -474,7 +477,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
         const credit = sign * leg.entryPrice * contractShares;
         netPremium += credit;
         const fillCountNote = (leg.openingFillCount ?? 0) > 1 ? ` · ${leg.openingFillCount} fills` : "";
-        addRow(event.at, `${sign === 1 ? "Sold" : "Bought"} ${leg.optionType} @ ${leg.openingFillPrice != null ? formatTradePrice(leg.openingFillPrice) : leg.entryPrice.toFixed(2)}${fillCountNote}`, bucket, credit, 0, { ...optionMeta, commission: leg.openingCommission ?? null });
+        addRow(event.at, leg.openingRowLabel ?? `${sign === 1 ? "Sold" : "Bought"} ${leg.optionType} @ ${leg.openingFillPrice != null ? formatTradePrice(leg.openingFillPrice) : leg.entryPrice.toFixed(2)}${fillCountNote}`, bucket, credit, 0, { ...optionMeta, commission: leg.openingCommission ?? null });
         if (leg.side === "long") buckets.hedge.capital += leg.entryPrice * contractShares; // a hedge risks the premium it cost
         else if (leg.optionType === "put") buckets.csp.capital += leg.strike * contractShares;
         if (leg.optionType === "call" && leg.side === "short") openCallShares += contractShares;
@@ -482,7 +485,7 @@ function deriveOneCycle(window: { start: number; end: number | null }, input: Cy
         const debit = leg.exitPrice === null ? 0 : -sign * leg.exitPrice * contractShares - leg.closingCommission;
         netPremium += debit;
         if (leg.exitPrice !== null && (debit !== 0 || leg.closingCommission !== 0)) {
-          addRow(event.at, `${sign === 1 ? "Bought back" : "Sold"} ${leg.optionType} @ ${leg.closingFillPrice != null ? formatTradePrice(leg.closingFillPrice) : leg.exitPrice.toFixed(2)}`, bucket, debit, 0, { ...optionMeta, commission: leg.closingCommission });
+          addRow(event.at, leg.closingRowLabel ?? `${sign === 1 ? "Bought back" : "Sold"} ${leg.optionType} @ ${leg.closingFillPrice != null ? formatTradePrice(leg.closingFillPrice) : leg.exitPrice.toFixed(2)}`, bucket, debit, 0, { ...optionMeta, commission: leg.closingCommission });
         }
         if (leg.optionType === "call" && leg.side === "short") openCallShares -= contractShares;
       }

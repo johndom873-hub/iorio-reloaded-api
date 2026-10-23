@@ -1,6 +1,6 @@
 # CC + Put Ladder: what our backtests found
 
-Research log of the backtests on the CC + Put Ladder, on the plain wheel before it, on the Steady Stake against it (Round 8), on Pluto's Edge Margin against it (Round 9), and on Edge Margin's own model and a premium-first strategy (Round 10), from 2026-10-13 to 2026-10-22.
+Research log of the backtests on the CC + Put Ladder, on the plain wheel before it, on the Steady Stake against it (Round 8), on Pluto's Edge Margin against it (Round 9), on Edge Margin's own model and a premium-first strategy (Round 10), on long-dated Put hedges (Round 11), and on cutting the Steady Stake's drawdown (Round 12), from 2026-10-13 to 2026-10-23.
 
 Related files:
 - [LITERATURE-REVIEW.md](LITERATURE-REVIEW.md): what published research says.
@@ -20,6 +20,10 @@ All backtests ran locally on Marcelo's Mac, using ThetaData option prices and IB
   - Its edge didn't sort about 890,000 contracts by how they turned out, before or after two fixes to its volatility model.
   - The only premium found was in Puts with 4–7 days left. One weekly Put per ticker, never holding stock, made 6.6% a year with a −5.2% Max drawdown on 11 tickers in our cash account. T-bills were 3.0 points of that, and most of the rest was the stocks' rise.
   - Marcelo closed the research.
+- **Long-dated Puts can take most of the depth out of slow collapses, but not cheaply (Round 11).**
+  - Puts on the shares each entry brought in made drawdowns shallower everywhere but beat the ladder on only 11 of 29 tickers. They missed the shares the ladder buys on the way down, which caused most of the deep losses.
+  - Puts covering the whole position (shares plus short Puts) cut PTON's Max drawdown from −86% to −16% and MRNA's from −70% to −23%, but cost the steady riser MU 10–14 points of CAGR.
+  - Skipping Puts while they were expensive didn't fix that. Marcelo stopped the research before a test on all 29 tickers.
 - **The Steady Stake's drawdowns come from single stocks collapsing; only holding many tickers cuts them (Round 12).**
   - Put insurance made drawdowns shallower but cost 2–4 points of CAGR, and timing it by IV, trend or run-ups didn't help out of sample.
   - No per-ticker rule improved Excess Calmar: no buying back in a downtrend, a volatility-sized stake and an earnings collar all failed or simply took risk off.
@@ -155,6 +159,55 @@ Report for the hedge part: [Steady Stake Put Hedge](https://claude.ai/artifact/B
 **Not decided** (Marcelo stopped testing on 2026-10-23): letting the tickers share the cash for Puts (a pass handing the account's free cash out one contract at a time, least-exposed ticker first, within a per-ticker cap) and a wider delta tolerance (a setting already). Both would mainly add 0DTE Puts on SPY, QQQ and IWM.
 
 **Engine facts found along the way.** Steady Stake runs only as one shared account with equal weights (symbol settings are the baseline's); a session's dates must lie inside every ticker's file; the 13-ticker book took 46 minutes against seconds to minutes per single ticker; the local backtest queue runs strictly oldest first.
+
+## Round 11: long-dated Put hedges on the ladder (2026-10-22 to 2026-10-23)
+
+Results dashboard for the first hedge (stages 4 and 5): https://claude.ai/artifact/99M6CvvC1RtTeTcrGzW98r. Scripts, run specs and notes on every stage are in `tmp/hedge-research/` (NOTES.md). The settings are the lab's Hedge group, off by default (FORMULAS.md, "The hedge").
+
+**The question (Marcelo).** Buy long-dated Puts to neutralise the ladder's deep drawdowns without losing much return. Then: which Puts, when to buy them, how long to keep them, when to replace them.
+
+**Settings.** The ladder at NFLX's baseline values (60% of the pot in shares, a fixed 70% shock, 2 rungs), each ticker on its lab pot and window, fills at the mid. Deciding tickers (29): AAOI, AAPL, ALAB, ASTS, BE, BMNR, COIN, CRWV, CSCO, DOCN, DRAM, GSAT, HOOD, INTC, IREN, IWM, MRNA, MU, NBIS, NOK, PLTR, PTON, QQQ, SMCI, SMH, SPY, TECH, TLT, WDC. NFLX was reported apart, since the first hedge's settings were picked on it. The hold-out (GOOGL, MSFT, MSTR, ORCL, SOFI, GLD, XLE) was not run.
+
+**1. Puts on the shares each entry brings in.** About 1-year Puts, one per 100 shares an entry brings in, sold when a ladder rung is assigned or the shares leave.
+- NFLX: better on all 100 ladder settings tried. At-the-money Puts added a median 3.0 points of CAGR and cut the Max drawdown by 31 points.
+- 29 deciding tickers: Max drawdown shallower on every ticker, CAGR lower on most. The best setting (wait 30 days between purchases, Puts 10% below, 80% shares, 70% shock, 1 rung) had a median Excess Calmar of 0.32 against the baseline's 0.31, better on 11 of 29 (p 0.27).
+- Three rules to buy fewer Puts: keep them 30 days for the next entry, keep them unless struck 10% below the new price, or wait 30 days between purchases. Keeping halved the purchases (a median 14–15 against 27–29) without changing the result.
+
+**2. Why it failed (no backtest; 5 tickers and the baselines).**
+- The deep falls were slow. On the 11 deciding tickers whose baseline fell 40% or more, the fall took a median 479 sessions from peak to trough, with 62% of it in the worst 60 sessions. 9 of the 11 began in 2021.
+- Most of the loss came from shares the ladder added on the way down. PTON −85.6 points: −54.5 on shares added, −41.7 on shares held at the peak, +10.7 from options. MRNA −70.4: no shares at the peak, −68.9 on shares added. SPY −18.5: all on shares assigned during the fall. The entry hedge never covered those shares, and it sold Puts as rungs were assigned.
+- On the stock alone, fully funded, with Puts in 3 staggered expiries: 1-year Puts rolled with 3 months left beat holding less stock at the same Max drawdown on 4–5 of PTON, MRNA, SMCI, MU and SPY. 60- and 90-day Puts did so on 1–3. Even the best cut the single stocks' Max drawdown by only 12–32% (SPY 59%): each roll re-strikes lower, so slow falls get through.
+
+**3. Puts on the whole position.** The shares held plus the shares the open short Puts would bring. 1-year Puts over 3 staggered expiries, kept until 90 days are left, whatever the shares do. CAGR / Max drawdown / Excess Calmar:
+
+| Ticker | Baseline | At the money | 20% below |
+|---|---|---|---|
+| PTON | −15.2% / −85.6% / −0.21 | 3.7% / −15.7% / 0.05 | 3.6% / −25.0% / 0.03 |
+| MRNA | 18.9% / −70.4% / 0.23 | 18.0% / −23.4% / 0.64 | 15.3% / −35.1% / 0.35 |
+| SMCI | 21.7% / −40.5% / 0.46 | 10.8% / −29.6% / 0.26 | 13.3% / −23.4% / 0.44 |
+| MU | 28.0% / −23.4% / 1.07 | 13.8% / −14.5% / 0.75 | 17.9% / −20.5% / 0.73 |
+| SPY | 8.6% / −18.5% / 0.31 | 5.5% / −7.0% / 0.37 | 7.4% / −12.8% / 0.35 |
+
+The Max drawdown was shallower on all five, and Excess Calmar better on three. On MU and SMCI the Puts lost 6–16% of the pot a year.
+
+**4. Cutting the cost, same 5 tickers.** Each row against the baseline:
+
+| Whole position, 1-year Puts | Excess Calmar better | Median change | Median CAGR change | Max drawdown shallower |
+|---|---|---|---|---|
+| At the money | 3 of 5 | +0.06 | −3.1 | 5 |
+| \|delta\| 0.25 | 3 of 5 | +0.05 | −2.8 | 5 |
+| Half the Puts, 20% below | 3 of 5 | +0.03 | −2.7 | 5 (by much less) |
+| \|delta\| 0.25, none while IV > 1.3 × its 252-session median | 2 of 5 | −0.01 | −2.8 | 4 |
+| \|delta\| 0.25, none while IV > 1.3 × the 21-session realized volatility | 3 of 5 | +0.04 | −5.2 | 5 |
+| \|delta\| 0.25, none while the yearly cost > 0.2 × the typical yearly fall | 2 of 5 | −0.05 | −0.9 | 3 |
+| the same, 0.3 × | 3 of 5 | +0.09 | +0.7 | 4 |
+| the same, 0.4 × | 3 of 5 | +0.10 | −2.3 | 4 |
+
+- MU was worse than its baseline under every variant.
+- Skipping Puts while IV was high against its history left SPY's 2020 fall unhedged: 21 Puts bought, Max drawdown unchanged at −18.5%.
+- The cost cap tied to the stock's typical yearly fall (Marcelo's idea) had the best medians, but its results don't move steadily with the cap. SMCI scored 0.36, 0.55 and 0.34 at 0.2, 0.3 and 0.4, which is path noise on 5 tickers.
+
+**Where it stands.** Marcelo stopped the research on 2026-10-23, before a test on the 29 deciding tickers. If it is picked up again, the candidates are: the whole position at the money, and |delta| 0.25 with the cost cap at 0.3 and 0.4. Judge them by median Excess Calmar, with 21 of 29 tickers better for a pass.
 
 ## Round 10: Edge Margin's model audited, then a premium-first strategy (2026-10-22)
 

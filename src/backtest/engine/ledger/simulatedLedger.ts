@@ -7,8 +7,10 @@ import type { PositionLegFigures } from "../../../lib/positionSelectors.js";
 // (docs/backtesting/INVENTORY-WHEEL-ACCOUNTING.md §1.5), so the live selectors and the cycle engine read it unchanged
 // (ledgerSelectors.ts).
 
-export type LedgerStrategyKey = "cash_secured_put" | "covered_call" | "unstructured";
-export type LedgerCloseReason = "assigned" | "expired_worthless" | "closed_via_app" | "stock_rolled_into_covered_call";
+/** "hedge": long Puts the baseline wheel's hedge buys (backtestBaselineHedge.ts), as live keeps a held long option. */
+export type LedgerStrategyKey = "cash_secured_put" | "covered_call" | "unstructured" | "hedge";
+/** moved_between_cycles: a hedge position whose Puts were all moved out of its cycle or into one (bookkeeping, no trade). */
+export type LedgerCloseReason = "assigned" | "expired_worthless" | "closed_via_app" | "stock_rolled_into_covered_call" | "moved_between_cycles";
 /** cc_call_bought_back_stock: a covered call's call bought back alone (the baseline wheel's profit-taking); Pluto never does it. */
 export type LedgerUnstructuredReason = "csp_assigned_stock" | "cc_expired_leftover_stock" | "cc_call_bought_back_stock" | "shares_bought" | "unknown";
 
@@ -22,6 +24,11 @@ export interface LedgerPosition {
   closedAt: Date | null;
   closeReason: LedgerCloseReason | null;
   unstructuredReason: LedgerUnstructuredReason | null;
+  /**
+   * Set on a hedge position holding Puts kept between cycles (hedgePutTurnover's keep rules), from the moment they were
+   * kept: it belongs to no cycle, so it neither keeps one open nor starts one, and the cycles leave it out.
+   */
+  keptSince?: Date;
 }
 
 /**
@@ -37,6 +44,10 @@ export interface LedgerLeg extends PositionLegFigures {
   settledAs: OptionSettlementOutcome | null;
   /** The underlying's close the settlement was decided on (the cycle engine's expiry-date close). */
   expiryClose: number | null;
+  /** A hedge leg that arrived by a bookkeeping move (no trade): kept out of a cycle, or taken from the kept ones into one. */
+  enteredBy?: "kept_between_cycles" | "taken_from_kept";
+  /** A hedge leg that left by a bookkeeping move (no trade), at its mark: kept out of its cycle, or taken into a cycle. */
+  exitedBy?: "kept_between_cycles" | "taken_into_cycle";
 }
 
 /** trades. A closing trade carries its commission; an opening one too, though the leg's entry already includes it. */
@@ -62,9 +73,10 @@ export interface LedgerShareSource {
 /**
  * What moved the cash: `premium` an option sold, `buyback` an option bought back, `commission` on either or on shares,
  * `share_purchase` and `share_sale` stock fills, `assignment` shares put to the book at the strike, `call_away` shares
- * called away at the strike, `interest` on the cash balance, `deposit` the starting cash.
+ * called away at the strike, `hedge_purchase` and `hedge_sale` a hedge's long Puts bought and sold, `interest` on the
+ * cash balance, `deposit` the starting cash.
  */
-export type CashJournalKind = "deposit" | "interest" | "premium" | "buyback" | "commission" | "share_purchase" | "share_sale" | "assignment" | "call_away";
+export type CashJournalKind = "deposit" | "interest" | "premium" | "buyback" | "commission" | "share_purchase" | "share_sale" | "assignment" | "call_away" | "hedge_purchase" | "hedge_sale";
 
 /** One movement of cash; `amount` is signed (money in is positive). The journal always sums to `cash`. */
 export interface CashJournalEntry {
@@ -238,9 +250,9 @@ export function positionsOfSymbol(ledger: SimulatedLedger, symbol: string): Ledg
   return [...(rowIndexOf(ledger).positionsBySymbol.get(symbol) ?? [])];
 }
 
-/** Flat: no open position on the symbol (no shares, no open option leg), which is when a wheel cycle ends. */
+/** Flat: no open position on the symbol (no shares, no open option leg), which is when a wheel cycle ends. Puts kept between cycles don't count. */
 export function isSymbolFlat(ledger: SimulatedLedger, symbol: string): boolean {
-  return !ledger.positions.some((position) => position.symbol === symbol && position.status === "open");
+  return !ledger.positions.some((position) => position.symbol === symbol && position.status === "open" && position.keptSince === undefined);
 }
 
 /**

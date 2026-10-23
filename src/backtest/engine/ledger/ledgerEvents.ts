@@ -551,6 +551,214 @@ function applySettleExpiry(ledger: SimulatedLedger, event: SettleExpiryEvent): S
   return outcome;
 }
 
+export interface BuyHedgePutEvent {
+  symbol: string;
+  /** YYYY-MM-DD. */
+  expiryDate: string;
+  strike: number;
+  contracts: number;
+  /** Purchase fill per share. */
+  fillPrice: number;
+  at: Date;
+  actionId: string | null;
+  /** Shares one contract covers on the cycle's scale: 100 unless a split since the cycle began changed it. */
+  sharesPerContract?: number;
+}
+
+/**
+ * Long Puts bought for the hedge (backtestBaselineHedge.ts), only while the symbol's cycle is open (a hedge never starts
+ * one): the leg at the fill plus the commission per share (the cost live's average cost carries), the opening trade, the
+ * cost out and the commission out. One position per contract: a short option on it refuses the purchase, and the hedge
+ * position already holding it takes the new leg (each purchase keeps its own time and price).
+ */
+function applyBuyHedgePut(ledger: SimulatedLedger, event: BuyHedgePutEvent): { positionId: string; legId: string } {
+  requirePositiveWholeNumber(event.contracts, "Contracts");
+  if (isSymbolFlat(ledger, event.symbol)) throw new Error(`${event.symbol}: a hedge is bought only while the cycle is open.`);
+  const holdsContract = (leg: LedgerLeg) => leg.exitAt === null && leg.legType === "option" && leg.expiryDate === event.expiryDate && leg.strikePrice !== null && Math.abs(leg.strikePrice - event.strike) < 0.0001;
+  const holder = positionsOfSymbol(ledger, event.symbol).find((position) => position.status === "open" && position.strategyKey === "hedge" && position.keptSince === undefined && legsOfPosition(ledger, position.id).some(holdsContract));
+  if (!holder) requireContractNotHeld(ledger, event.symbol, event.expiryDate, event.strike);
+  const position = holder ?? createPosition(ledger, event.symbol, "hedge", event.at);
+  const sharesPerContract = event.sharesPerContract ?? standardSharesPerContract;
+  const commission = optionCommissionDollars(event.contracts);
+  const leg: LedgerLeg = {
+    id: nextLedgerId(ledger, "leg"),
+    positionId: position.id,
+    parentLegId: null,
+    legType: "option",
+    side: "long",
+    quantity: event.contracts,
+    optionType: "put",
+    strikePrice: event.strike,
+    expiryDate: event.expiryDate,
+    multiplier: sharesPerContract,
+    entryPrice: event.fillPrice + commission / (event.contracts * sharesPerContract),
+    entryAt: event.at,
+    exitPrice: null,
+    exitAt: null,
+    settledAs: null,
+    expiryClose: null,
+  };
+  ledger.legs.push(leg);
+  recordTrade(ledger, leg, { side: "buy", quantity: event.contracts, price: event.fillPrice, commission, at: event.at, isClosingTrade: false, actionId: event.actionId });
+  recordLegCash(ledger, position, leg, event.at, "hedge_purchase", -event.fillPrice * sharesPerContract * event.contracts);
+  recordLegCash(ledger, position, leg, event.at, "commission", -commission);
+  return { positionId: position.id, legId: leg.id };
+}
+
+export interface SellHedgePutEvent {
+  /** The open hedge Put leg sold from. */
+  legId: string;
+  contracts: number;
+  /** Sale fill per share. */
+  fillPrice: number;
+  at: Date;
+  actionId: string | null;
+}
+
+/**
+ * Hedge Puts sold. All of a leg's contracts: the leg exits at the fill. Fewer: they are carved into their own closed leg
+ * (parentLegId), which takes the closing trade, and the rest stay open. The position closes (closed via app) once none of
+ * its legs is open. `commission` is the closing trade's: none for a Put settled at expiry.
+ */
+function sellHedgePutContracts(ledger: SimulatedLedger, event: SellHedgePutEvent, commission: number): { soldLegId: string; positionClosed: boolean } {
+  requirePositiveWholeNumber(event.contracts, "Contracts");
+  const leg = requireLeg(ledger, event.legId);
+  const position = requirePosition(ledger, leg.positionId);
+  if (position.status !== "open" || position.strategyKey !== "hedge" || leg.legType !== "option" || leg.side !== "long" || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open hedge Put.`);
+  if (event.contracts > leg.quantity) throw new Error(`Hedge leg ${leg.id} holds ${leg.quantity} contracts; cannot sell ${event.contracts}.`);
+  let soldLeg = leg;
+  if (event.contracts < leg.quantity) {
+    soldLeg = { ...leg, id: nextLedgerId(ledger, "leg"), parentLegId: leg.id, quantity: event.contracts };
+    ledger.legs.push(soldLeg);
+    leg.quantity -= event.contracts;
+  }
+  soldLeg.exitPrice = event.fillPrice;
+  soldLeg.exitAt = event.at;
+  recordTrade(ledger, soldLeg, { side: "sell", quantity: event.contracts, price: event.fillPrice, commission, at: event.at, isClosingTrade: true, actionId: event.actionId });
+  recordLegCash(ledger, position, soldLeg, event.at, "hedge_sale", event.fillPrice * soldLeg.multiplier * event.contracts);
+  recordLegCash(ledger, position, soldLeg, event.at, "commission", -commission);
+  const positionClosed = legsOfPosition(ledger, position.id).every((positionLeg) => positionLeg.exitAt !== null);
+  if (positionClosed) closePosition(position, event.at, "closed_via_app");
+  endCycleIfFlat(ledger, position.symbol, event.at);
+  return { soldLegId: soldLeg.id, positionClosed };
+}
+
+function applySellHedgePut(ledger: SimulatedLedger, event: SellHedgePutEvent): { soldLegId: string; positionClosed: boolean } {
+  return sellHedgePutContracts(ledger, event, optionCommissionDollars(event.contracts));
+}
+
+/** Carves `contracts` off an open hedge leg into a closed slice at `exitPrice` with no trade and no cash (the whole leg exits when it is all of them). */
+function exitHedgeContractsByMove(ledger: SimulatedLedger, leg: LedgerLeg, contracts: number, exitPrice: number, at: Date, exitedBy: NonNullable<LedgerLeg["exitedBy"]>): LedgerLeg {
+  if (contracts > leg.quantity) throw new Error(`Hedge leg ${leg.id} holds ${leg.quantity} contracts; cannot move ${contracts}.`);
+  let movedLeg = leg;
+  if (contracts < leg.quantity) {
+    movedLeg = { ...leg, id: nextLedgerId(ledger, "leg"), parentLegId: leg.id, quantity: contracts };
+    ledger.legs.push(movedLeg);
+    leg.quantity -= contracts;
+  }
+  movedLeg.exitPrice = exitPrice;
+  movedLeg.exitAt = at;
+  movedLeg.exitedBy = exitedBy;
+  const position = requirePosition(ledger, leg.positionId);
+  if (legsOfPosition(ledger, position.id).every((positionLeg) => positionLeg.exitAt !== null)) closePosition(position, at, "moved_between_cycles");
+  return movedLeg;
+}
+
+/** A new hedge leg arriving by a bookkeeping move (no trade, no cash), at `entryPrice` (per share, commission included). */
+function addMovedHedgeLeg(ledger: SimulatedLedger, position: LedgerPosition, from: LedgerLeg, contracts: number, entryPrice: number, at: Date, enteredBy: NonNullable<LedgerLeg["enteredBy"]>): LedgerLeg {
+  const leg: LedgerLeg = { ...from, id: nextLedgerId(ledger, "leg"), positionId: position.id, parentLegId: null, quantity: contracts, entryPrice, entryAt: at, exitPrice: null, exitAt: null, settledAs: null, expiryClose: null, enteredBy };
+  delete leg.exitedBy;
+  ledger.legs.push(leg);
+  return leg;
+}
+
+export interface KeepHedgePutsEvent {
+  /** The open hedge Put leg of the cycle the contracts leave. */
+  legId: string;
+  contracts: number;
+  /** The leg's mark per share, on the cycle's scale: the price they leave the cycle at and are kept at. */
+  markPrice: number;
+  at: Date;
+}
+
+/**
+ * Hedge Puts kept between cycles (hedgePutTurnover's keep rules) when the shares they covered leave: a bookkeeping move,
+ * no trade and no cash. The contracts exit their cycle's leg at the mark, realizing their P&L there, and enter a kept
+ * position (keptSince) at that price, which belongs to no cycle: the cycle ends when nothing else is held.
+ */
+function applyKeepHedgePuts(ledger: SimulatedLedger, event: KeepHedgePutsEvent): { keptPositionId: string; keptLegId: string } {
+  requirePositiveWholeNumber(event.contracts, "Contracts");
+  const leg = requireLeg(ledger, event.legId);
+  const position = requirePosition(ledger, leg.positionId);
+  if (position.status !== "open" || position.strategyKey !== "hedge" || position.keptSince !== undefined || leg.legType !== "option" || leg.side !== "long" || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open hedge Put of a cycle.`);
+  exitHedgeContractsByMove(ledger, leg, event.contracts, event.markPrice, event.at, "kept_between_cycles");
+  const kept = createPosition(ledger, position.symbol, "hedge", event.at);
+  kept.keptSince = event.at;
+  const keptLeg = addMovedHedgeLeg(ledger, kept, leg, event.contracts, event.markPrice, event.at, "kept_between_cycles");
+  endCycleIfFlat(ledger, position.symbol, event.at);
+  return { keptPositionId: kept.id, keptLegId: keptLeg.id };
+}
+
+export interface TakeKeptHedgePutsEvent {
+  /** The open leg of a kept position. */
+  keptLegId: string;
+  contracts: number;
+  at: Date;
+}
+
+/**
+ * Kept Puts an entry takes into its cycle: a bookkeeping move, no trade and no cash. The contracts leave the kept position
+ * at the price they were kept at (no P&L between cycles) and join the cycle's hedge at that price, with the position that
+ * holds the contract or a new one. Only while the cycle is open.
+ */
+function applyTakeKeptHedgePuts(ledger: SimulatedLedger, event: TakeKeptHedgePutsEvent): { positionId: string; legId: string } {
+  requirePositiveWholeNumber(event.contracts, "Contracts");
+  const keptLeg = requireLeg(ledger, event.keptLegId);
+  const kept = requirePosition(ledger, keptLeg.positionId);
+  if (kept.status !== "open" || kept.keptSince === undefined || keptLeg.exitAt !== null) throw new Error(`Leg ${keptLeg.id} is not an open kept hedge Put.`);
+  if (isSymbolFlat(ledger, kept.symbol)) throw new Error(`${kept.symbol}: kept Puts are taken only into an open cycle.`);
+  const holdsContract = (leg: LedgerLeg) => leg.exitAt === null && leg.legType === "option" && leg.expiryDate === keptLeg.expiryDate && leg.strikePrice !== null && keptLeg.strikePrice !== null && Math.abs(leg.strikePrice - keptLeg.strikePrice) < 0.0001;
+  const holder = positionsOfSymbol(ledger, kept.symbol).find((position) => position.status === "open" && position.strategyKey === "hedge" && position.keptSince === undefined && legsOfPosition(ledger, position.id).some(holdsContract));
+  const position = holder ?? createPosition(ledger, kept.symbol, "hedge", event.at);
+  const entryPrice = keptLeg.entryPrice;
+  exitHedgeContractsByMove(ledger, keptLeg, event.contracts, entryPrice, event.at, "taken_into_cycle");
+  const leg = addMovedHedgeLeg(ledger, position, keptLeg, event.contracts, entryPrice, event.at, "taken_from_kept");
+  return { positionId: position.id, legId: leg.id };
+}
+
+export interface SettleHedgePutEvent {
+  /** The open hedge Put leg whose expiry date has closed. */
+  legId: string;
+  /** The underlying's close on the expiry date, on the scale of the leg's cycle. */
+  expiryClose: number;
+}
+
+export type HedgeSettlementOutcome = "hedge_worthless" | "hedge_sold_at_intrinsic";
+
+/**
+ * A hedge Put still held at its expiry close (the hedge sells one before that; this settles one no quote let it sell),
+ * stamped 16:00 Eastern of its expiry date. In the money by the assignment threshold or more, it is sold at its intrinsic
+ * value (strike − close) without commission: live would exercise it, selling shares at the strike for the same dollars,
+ * where this keeps the shares. Otherwise it expires worthless: the leg exits at 0 with no trade.
+ */
+function applySettleHedgePut(ledger: SimulatedLedger, event: SettleHedgePutEvent): HedgeSettlementOutcome {
+  const leg = requireLeg(ledger, event.legId);
+  const position = requirePosition(ledger, leg.positionId);
+  if (position.strategyKey !== "hedge" || leg.legType !== "option" || leg.side !== "long" || leg.optionType !== "put" || leg.strikePrice === null || leg.expiryDate === null || leg.exitAt !== null) throw new Error(`Leg ${leg.id} is not an open hedge Put: nothing to settle.`);
+  const at = expirySettlementInstant(leg.expiryDate);
+  leg.expiryClose = event.expiryClose;
+  if (isAssignedAtExpiry("put", leg.strikePrice, event.expiryClose)) {
+    sellHedgePutContracts(ledger, { legId: leg.id, contracts: leg.quantity, fillPrice: leg.strikePrice - event.expiryClose, at, actionId: null }, 0);
+    return "hedge_sold_at_intrinsic";
+  }
+  leg.exitPrice = 0;
+  leg.exitAt = at;
+  leg.settledAs = "worthless";
+  if (legsOfPosition(ledger, position.id).every((positionLeg) => positionLeg.exitAt !== null)) closePosition(position, at, "expired_worthless");
+  endCycleIfFlat(ledger, position.symbol, at);
+  return "hedge_worthless";
+}
+
 /**
  * A split while a cycle is open. The cycle keeps its scale, so nothing is repriced; an open option is now that many more
  * contracts (or fewer), each covering fewer (or more) of the cycle's shares: quantity × N and multiplier ÷ N for an
@@ -617,6 +825,26 @@ export function sellShares(...args: Parameters<typeof applySellShares>): ReturnT
 
 export function settleExpiry(...args: Parameters<typeof applySettleExpiry>): ReturnType<typeof applySettleExpiry> {
   return changingLedger(args[0], () => applySettleExpiry(...args));
+}
+
+export function buyHedgePut(...args: Parameters<typeof applyBuyHedgePut>): ReturnType<typeof applyBuyHedgePut> {
+  return changingLedger(args[0], () => applyBuyHedgePut(...args));
+}
+
+export function sellHedgePut(...args: Parameters<typeof applySellHedgePut>): ReturnType<typeof applySellHedgePut> {
+  return changingLedger(args[0], () => applySellHedgePut(...args));
+}
+
+export function settleHedgePut(...args: Parameters<typeof applySettleHedgePut>): ReturnType<typeof applySettleHedgePut> {
+  return changingLedger(args[0], () => applySettleHedgePut(...args));
+}
+
+export function keepHedgePuts(...args: Parameters<typeof applyKeepHedgePuts>): ReturnType<typeof applyKeepHedgePuts> {
+  return changingLedger(args[0], () => applyKeepHedgePuts(...args));
+}
+
+export function takeKeptHedgePuts(...args: Parameters<typeof applyTakeKeptHedgePuts>): ReturnType<typeof applyTakeKeptHedgePuts> {
+  return changingLedger(args[0], () => applyTakeKeptHedgePuts(...args));
 }
 
 export function alignOpenOptionLegsToSplitFactor(...args: Parameters<typeof applyAlignOpenOptionLegsToSplitFactor>): ReturnType<typeof applyAlignOpenOptionLegsToSplitFactor> {

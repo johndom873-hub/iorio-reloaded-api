@@ -701,8 +701,33 @@ describe("baselineContractsForCash", () => {
 
 describe("validateBaselineSettings", () => {
   it("accepts the defaults and refuses ranges that are out of order or out of bounds", () => {
-    const valid = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", dayValueOptions: "marked" };
+    const valid = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", dayValueOptions: "marked", hedgePutTenorDays: 0, hedgePutExpiry: "nearest", hedgePutStrikeFrom: "stock_price", hedgePutBelowPricePct: 0, hedgePutSize: "share_level", hedgePutCoveragePct: 100, hedgePutRollDaysLeft: 7, hedgePutCovers: "entries", hedgePutStaggeredExpiries: 3, hedgePutStrikeBy: "price", hedgePutAbsDelta: 0.25, hedgePutPriceGate: "off", hedgePutCostFallShare: 0.3, hedgePutIvMultiple: 1.3, hedgeInBreakEven: "excluded", hedgePutTurnover: "sell_when_shares_leave", hedgePutTurnoverDays: 30, hedgePutFarBelowPct: 10 };
     expect(validateBaselineSettings(valid)).toBeNull();
+    expect(validateBaselineSettings({ ...valid, hedgePutStrikeBy: "delta", hedgePutAbsDelta: 0.2, hedgePutPriceGate: "iv_vs_realized", hedgePutIvMultiple: 1.5, hedgePutCostFallShare: 0.4 })).toBeNull();
+    expect(validateBaselineSettings({ ...valid, hedgePutStrikeBy: "strike" })).toMatch(/hedgePutStrikeBy must be price or delta/);
+    expect(validateBaselineSettings({ ...valid, hedgePutAbsDelta: 1 })).toMatch(/hedgePutAbsDelta must be a number above 0 and below 1/);
+    expect(validateBaselineSettings({ ...valid, hedgePutPriceGate: "iv" })).toMatch(/hedgePutPriceGate must be off/);
+    expect(validateBaselineSettings({ ...valid, hedgePutCostFallShare: 0 })).toMatch(/hedgePutCostFallShare must be a number above 0/);
+    expect(validateBaselineSettings({ ...valid, hedgePutIvMultiple: 11 })).toMatch(/hedgePutIvMultiple must be a number above 0 and at most 10/);
+    expect(validateBaselineSettings({ ...valid, hedgePutTenorDays: 360, hedgePutCovers: "position", hedgePutStaggeredExpiries: 3, hedgePutRollDaysLeft: 90 })).toBeNull();
+    expect(validateBaselineSettings({ ...valid, hedgePutCovers: "shares" })).toMatch(/hedgePutCovers must be entries or position/);
+    expect(validateBaselineSettings({ ...valid, hedgePutStaggeredExpiries: 0 })).toMatch(/hedgePutStaggeredExpiries must be a whole number from 1 to 6/);
+    expect(validateBaselineSettings({ ...valid, hedgePutStaggeredExpiries: 2.5 })).toMatch(/hedgePutStaggeredExpiries must be a whole number/);
+    expect(validateBaselineSettings({ ...valid, hedgePutRollDaysLeft: 121 })).toMatch(/hedgePutRollDaysLeft must be a whole number of days from 0 to 120/);
+    // 92 days rolled at 90 left leave 2 days: room for 2 expiries, not 3.
+    expect(validateBaselineSettings({ ...valid, hedgePutTenorDays: 92, hedgePutRollDaysLeft: 90, hedgePutCovers: "position", hedgePutStaggeredExpiries: 3 })).toMatch(/each expiry needs a day of its own/);
+    expect(validateBaselineSettings({ ...valid, hedgePutTenorDays: 92, hedgePutRollDaysLeft: 90, hedgePutCovers: "position", hedgePutStaggeredExpiries: 2 })).toBeNull();
+    expect(validateBaselineSettings({ ...valid, hedgePutTenorDays: 360, hedgePutExpiry: "first_at_or_after", hedgePutStrikeFrom: "price_paid", hedgePutBelowPricePct: 10, hedgePutSize: "rung_level", hedgePutCoveragePct: 50, hedgeInBreakEven: "included" })).toBeNull();
+    expect(validateBaselineSettings({ ...valid, hedgePutTenorDays: 90.5 })).toMatch(/hedgePutTenorDays must be a whole number/);
+    expect(validateBaselineSettings({ ...valid, hedgePutTenorDays: 7 })).toMatch(/hedgePutTenorDays must be above baseline.hedgePutRollDaysLeft/);
+    expect(validateBaselineSettings({ ...valid, hedgePutTurnover: "keep_unless_far_below", hedgePutTurnoverDays: 1, hedgePutFarBelowPct: 99.5 })).toBeNull();
+    expect(validateBaselineSettings({ ...valid, hedgePutTurnover: "keep" })).toMatch(/hedgePutTurnover must be sell_when_shares_leave/);
+    expect(validateBaselineSettings({ ...valid, hedgePutTurnoverDays: 0 })).toMatch(/hedgePutTurnoverDays must be a whole number of days from 1 to 365/);
+    expect(validateBaselineSettings({ ...valid, hedgePutTurnoverDays: 30.5 })).toMatch(/hedgePutTurnoverDays must be a whole number/);
+    expect(validateBaselineSettings({ ...valid, hedgePutFarBelowPct: 0 })).toMatch(/hedgePutFarBelowPct must be a number above 0 and below 100/);
+    expect(validateBaselineSettings({ ...valid, hedgePutCoveragePct: 0 })).toMatch(/hedgePutCoveragePct/);
+    expect(validateBaselineSettings({ ...valid, hedgePutBelowPricePct: 100 })).toMatch(/hedgePutBelowPricePct/);
+    expect(validateBaselineSettings({ ...valid, hedgePutSize: "rungs" })).toMatch(/hedgePutSize must be share_level or rung_level/);
     expect(validateBaselineSettings({ ...valid, entryExtensionFilter: "on", entryMaxExtensionZ: 1.5, entryIvRankFilter: "on", entryMaxIvRank: 90 })).toBeNull();
     expect(validateBaselineSettings({ ...valid, entryExtensionFilter: "entries" })).toMatch(/entryExtensionFilter must be off or on/);
     expect(validateBaselineSettings({ ...valid, entryMaxExtensionZ: 0 })).toMatch(/entryMaxExtensionZ/);

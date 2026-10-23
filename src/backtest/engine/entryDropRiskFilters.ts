@@ -46,7 +46,17 @@ export function ivRankBefore(bars: BacktestBarHistory, dateIso: string): number 
   return ivRankFromHistory(newestFirst.reverse());
 }
 
-type EntryFilterSettings = Pick<BacktestBaselineSettings, "entryExtensionFilter" | "entryMaxExtensionZ" | "entryIvRankFilter" | "entryMaxIvRank">;
+/** The daily IVs of the last `count` bars with one before `dateIso`, oldest first. */
+export function impliedVolatilitiesBefore(bars: BacktestBarHistory, dateIso: string, count: number): number[] {
+  const newestFirst: number[] = [];
+  for (let index = bars.countBefore(dateIso) - 1; index >= 0 && newestFirst.length < count; index--) {
+    const impliedVolatility = bars.rows[index]!.impliedVolatility;
+    if (impliedVolatility !== null && impliedVolatility !== undefined) newestFirst.push(impliedVolatility);
+  }
+  return newestFirst.reverse();
+}
+
+type EntryFilterSettings =Pick<BacktestBaselineSettings, "entryExtensionFilter" | "entryMaxExtensionZ" | "entryIvRankFilter" | "entryMaxIvRank">;
 type EntryFilterMeasures = { extensionZ: number | null; ivRank: number | null };
 
 /** The limit of each filter that blocks a new entry today, null for one that does not; a measure that cannot be worked out blocks nothing. */

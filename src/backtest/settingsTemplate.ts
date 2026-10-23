@@ -414,9 +414,120 @@ export const backtestSettingRowDefinitions: readonly RowDefinition[] = [
       { value: "fill_down_ranking", label: "The rest goes to the next candidates in order" },
     ],
   },
+  { path: "baseline.hedgePutTenorDays", label: "Hedge: Puts' days to expiry", unit: "days", editable: true, note: "long Puts bought on the shares an entry brings in (a Covered Call entry's, a Cash-Secured Put entry's once assigned), or on the whole position; 0 = no hedge" },
+  {
+    path: "baseline.hedgePutCovers",
+    label: "Hedge: covers",
+    unit: "choice",
+    editable: true,
+    note: "the whole position: the shares held plus the shares the open short Puts (the entry's and the ladder's rungs) would bring, bought as soon as it grows and kept until the roll whatever the shares do",
+    choices: [
+      { value: "entries", label: "The shares each entry brings in" },
+      { value: "position", label: "The whole position: shares and short Puts" },
+    ],
+  },
+  {
+    path: "baseline.hedgePutExpiry",
+    label: "Hedge: expiry",
+    unit: "choice",
+    editable: true,
+    note: "listed expiries thin out beyond two months: on 2021-11-01 NFLX listed 81, 109, 137, 228, 319 and 445 days out",
+    choices: [
+      { value: "nearest", label: "The listed expiry nearest the days" },
+      { value: "first_at_or_after", label: "The first listed expiry at or after the days" },
+    ],
+  },
+  {
+    path: "baseline.hedgePutStrikeFrom",
+    label: "Hedge: strike from",
+    unit: "choice",
+    editable: true,
+    note: "the two differ only after a Cash-Secured Put is assigned below its strike; a replacement near expiry is always set from the stock price",
+    choices: [
+      { value: "stock_price", label: "The stock price at the purchase" },
+      { value: "price_paid", label: "The price paid for the shares" },
+    ],
+  },
+  {
+    path: "baseline.hedgePutStrikeBy",
+    label: "Hedge: strike chosen by",
+    unit: "choice",
+    editable: true,
+    note: "by delta, a volatile stock's Put is struck further below the price: the Put's own |delta|, from the IV of its mid on the forward",
+    choices: [
+      { value: "price", label: "A share below a price" },
+      { value: "delta", label: "The Put's |delta|" },
+    ],
+  },
+  { path: "baseline.hedgePutBelowPricePct", label: "Hedge: strike below that price by", unit: "percent", editable: true, note: "0 = at the money; the listed strike nearest it" },
+  { path: "baseline.hedgePutAbsDelta", label: "Hedge: Put |delta|", unit: "number", editable: true, note: "the listed Put whose |delta| is nearest it; 0.25 is about 10% below SPY's price over a year, about 30% below SMCI's" },
+  {
+    path: "baseline.hedgePutPriceGate",
+    label: "Hedge: no purchase while too dear",
+    unit: "choice",
+    editable: true,
+    note: "a Put held is kept; a skipped purchase is tried again at the next look",
+    choices: [
+      { value: "off", label: "Off" },
+      { value: "cost_vs_typical_fall", label: "Yearly cost above a share of the typical yearly fall" },
+      { value: "iv_vs_history", label: "IV above a multiple of the stock's median IV over 252 sessions" },
+      { value: "iv_vs_realized", label: "IV above a multiple of the last 21 sessions' realized volatility" },
+    ],
+  },
+  { path: "baseline.hedgePutCostFallShare", label: "Hedge: yearly cost at most this share of the typical fall", unit: "number", editable: true, note: "yearly cost = mid ÷ stock price × 365 ÷ days to expiry; typical yearly fall = the median, over 5 years, of the deepest fall in each year of closes. 0.3 × a 40% fall = 12% a year" },
+  { path: "baseline.hedgePutIvMultiple", label: "Hedge: IV at most this multiple", unit: "number", editable: true, note: "of the stock's median IV over 252 sessions, or of the realized volatility of the last 21" },
+  {
+    path: "baseline.hedgePutSize",
+    label: "Hedge: size",
+    unit: "choice",
+    editable: true,
+    note: "rung level = (1 − share level) ÷ (share level × (rungs − shock)), at most one Put per 100 shares: 60% shares, 2 rungs and a 70% shock give 0.51",
+    choices: [
+      { value: "share_level", label: "Share level: one Put per 100 shares bought" },
+      { value: "rung_level", label: "Rung level: the Puts one rung buys if assigned at its cap" },
+    ],
+  },
+  { path: "baseline.hedgePutCoveragePct", label: "Hedge: share of that size", unit: "percent", editable: true, note: "50 = half the Puts; whole contracts, rounded down over the cycle's entries" },
+  {
+    path: "baseline.hedgePutStaggeredExpiries",
+    label: "Hedge: expiries the Puts are spread over",
+    unit: "integer",
+    editable: true,
+    note: "3 with 360 days rolled at 90 left: Puts of about 360, 270 and 180 days, so a third of them rolls each quarter",
+  },
+  { path: "baseline.hedgePutRollDaysLeft", label: "Hedge: roll with days left", unit: "days", editable: true, note: "a Put this close to expiry is sold, and replaced (same count, same rules) while shares are held; with the whole position, up to its size" },
+  {
+    path: "baseline.hedgeInBreakEven",
+    label: "Hedge: realized P&L in the break-even",
+    unit: "choice",
+    editable: true,
+    note: "the Calls' floor and the ladder's top: a Put sold at a gain lowers them",
+    choices: [
+      { value: "excluded", label: "Left out, as live does" },
+      { value: "included", label: "Included once the Puts are sold" },
+    ],
+  },
+  {
+    path: "baseline.hedgePutTurnover",
+    label: "Hedge: fewer purchases",
+    unit: "choice",
+    editable: true,
+    note: "kept Puts leave the cycle at their mark (no trade), so the cycle ends as without them; the next entry takes them back in and buys only what's missing",
+    choices: [
+      { value: "sell_when_shares_leave", label: "Off: sell the Puts when the shares leave" },
+      { value: "keep_for_next_entry", label: "Keep the Puts for the next entry" },
+      { value: "keep_unless_far_below", label: "Keep them, unless struck far below the new price" },
+      { value: "wait_between_purchases", label: "Wait between purchases" },
+    ],
+  },
+  { path: "baseline.hedgePutTurnoverDays", label: "Hedge: days to keep or wait", unit: "days", editable: true, note: "kept Puts no entry has taken by then are sold; with the wait, an entry's Puts are bought once this long after the last purchase, if its shares are still held" },
+  { path: "baseline.hedgePutFarBelowPct", label: "Hedge: far below the new price by", unit: "percent", editable: true, note: "kept Puts struck this much below the new entry's price are sold, and at-the-money ones bought" },
 ];
 
 const ladderOn: BacktestSettingCondition = { path: "baseline.putsWhenNoCall", oneOf: ["reserve_ladder"] };
+const hedgeOn: BacktestSettingCondition = { path: "baseline.hedgePutTenorDays", above: 0 };
+const hedgeOnEntries: BacktestSettingCondition = { path: "baseline.hedgePutCovers", oneOf: ["entries"] };
+const strikeByPrice: BacktestSettingCondition = { path: "baseline.hedgePutStrikeBy", oneOf: ["price"] };
 const onlyWithLadder: BacktestSettingApplicability = { allOf: [ladderOn], explanation: "Applies only with Puts when no call is sold set to the ladder." };
 const onlyWithHistoryShock: BacktestSettingApplicability = { allOf: [ladderOn, { path: "baseline.ladderShock", oneOf: ["history"] }], explanation: "Applies only with the ladder's Stock shock set to the stock's Max drawdown." };
 
@@ -505,6 +616,37 @@ export const backtestSettingLayout: readonly { group: BacktestSettingGroup; sect
     ],
   },
   { group: "Exits", section: "baseline_wheel", rows: [{ path: "baseline.takeProfitPct" }, { path: "baseline.shareStopLossPct" }] },
+  {
+    group: "Hedge",
+    section: "baseline_wheel",
+    rows: [
+      { path: "baseline.hedgePutTenorDays" },
+      { path: "baseline.hedgePutCovers", appliesWhen: { allOf: [hedgeOn], explanation: "Applies only with the hedge on (Puts' days to expiry above 0)." } },
+      { path: "baseline.hedgePutExpiry", appliesWhen: { allOf: [hedgeOn], explanation: "Applies only with the hedge on (Puts' days to expiry above 0)." } },
+      { path: "baseline.hedgePutStrikeBy", appliesWhen: { allOf: [hedgeOn], explanation: "Applies only with the hedge on (Puts' days to expiry above 0)." } },
+      { path: "baseline.hedgePutStrikeFrom", appliesWhen: { allOf: [hedgeOn, hedgeOnEntries, strikeByPrice], explanation: "Applies only with the hedge on, covering the shares each entry brings in, and the strike chosen by price." } },
+      { path: "baseline.hedgePutBelowPricePct", appliesWhen: { allOf: [hedgeOn, strikeByPrice], explanation: "Applies only with the hedge on and the strike chosen by price." } },
+      { path: "baseline.hedgePutAbsDelta", appliesWhen: { allOf: [hedgeOn, { path: "baseline.hedgePutStrikeBy", oneOf: ["delta"] }], explanation: "Applies only with the hedge on and the strike chosen by delta." } },
+      { path: "baseline.hedgePutSize", appliesWhen: { allOf: [hedgeOn, hedgeOnEntries], explanation: "Applies only with the hedge on and covering the shares each entry brings in." } },
+      { path: "baseline.hedgePutCoveragePct", appliesWhen: { allOf: [hedgeOn], explanation: "Applies only with the hedge on (Puts' days to expiry above 0)." } },
+      { path: "baseline.hedgePutStaggeredExpiries", appliesWhen: { allOf: [hedgeOn, { path: "baseline.hedgePutCovers", oneOf: ["position"] }], explanation: "Applies only with the hedge on and covering the whole position." } },
+      ...["baseline.hedgePutRollDaysLeft", "baseline.hedgeInBreakEven", "baseline.hedgePutPriceGate"].map((path) => ({
+        path,
+        appliesWhen: { allOf: [hedgeOn], explanation: "Applies only with the hedge on (Puts' days to expiry above 0)." },
+      })),
+      { path: "baseline.hedgePutCostFallShare", appliesWhen: { allOf: [hedgeOn, { path: "baseline.hedgePutPriceGate", oneOf: ["cost_vs_typical_fall"] }], explanation: "Applies only with the hedge on and No purchase while too dear set to the yearly cost." } },
+      { path: "baseline.hedgePutIvMultiple", appliesWhen: { allOf: [hedgeOn, { path: "baseline.hedgePutPriceGate", oneOf: ["iv_vs_history", "iv_vs_realized"] }], explanation: "Applies only with the hedge on and No purchase while too dear set to an IV rule." } },
+      { path: "baseline.hedgePutTurnover", appliesWhen: { allOf: [hedgeOn, hedgeOnEntries], explanation: "Applies only with the hedge on and covering the shares each entry brings in." } },
+      {
+        path: "baseline.hedgePutTurnoverDays",
+        appliesWhen: { allOf: [hedgeOn, hedgeOnEntries, { path: "baseline.hedgePutTurnover", oneOf: ["keep_for_next_entry", "keep_unless_far_below", "wait_between_purchases"] }], explanation: "Applies only with the hedge on, covering the shares each entry brings in, and Fewer purchases set to keep or wait." },
+      },
+      {
+        path: "baseline.hedgePutFarBelowPct",
+        appliesWhen: { allOf: [hedgeOn, hedgeOnEntries, { path: "baseline.hedgePutTurnover", oneOf: ["keep_unless_far_below"] }], explanation: "Applies only with the hedge on, covering the shares each entry brings in, and Fewer purchases set to keep them unless struck far below." },
+      },
+    ],
+  },
   {
     group: "Steady Stake",
     section: "steady_stake",

@@ -30,8 +30,9 @@ import type { ClaudeCall } from "../llm/askPlutoThroughSubscription.js";
 import { backtestClaudeModel, backtestClaudeReasoningEffort } from "../llm/claudeSubscriptionModelClient.js";
 import { BacktestLlmSession, type BacktestLlmRound } from "./backtestLlmDecider.js";
 
-import { alignOpenOptionLegsToSplitFactor, creditInterest, settleExpiry } from "./ledger/ledgerEvents.js";
-import { ledgerCommittedDollars, ledgerLastFilledActionAt, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
+import { alignOpenOptionLegsToSplitFactor, creditInterest, settleExpiry, settleHedgePut } from "./ledger/ledgerEvents.js";
+import { ledgerCommittedDollars, ledgerHedgeLegsDueForSettlement, ledgerLastFilledActionAt, ledgerLegsDueForSettlement, ledgerNetLiquidationValue, ledgerSharesValue } from "./ledger/ledgerSelectors.js";
+import { describeHedgeTotals, hedgeIsOn, summarizeHedge, type HedgePutQuoteSource } from "./backtestBaselineHedge.js";
 import { createSimulatedLedger, cycleSplitFactorFor, rememberedForRevision, requirePosition, type LedgerLeg, type SimulatedLedger } from "./ledger/simulatedLedger.js";
 import { loadOrInferSplitSchedule, requireSplitFactors, splitFactorOn, type SplitSchedule } from "./splitFactors.js";
 import { BacktestTradingCalendar, loadMarketCalendarRowsFrom } from "./backtestTradingCalendar.js";
@@ -386,6 +387,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
   // Each ticker's own baseline values and weight (backtestLook.ts).
   const tickerSetupBySymbol: ReadonlyMap<string, BacktestTickerSetup> | undefined =
     session.bookMode === "pots" && session.symbolSettings ? new Map(Object.entries(session.symbolSettings).map(([symbol, ticker]) => [symbol, { baseline: { ...settings.baseline, ...ticker.baseline }, weight: ticker.weight }])) : undefined;
+  // The baseline wheel's hedge (backtestBaselineHedge.ts) reads long-dated Puts from the files of the tickers it is on for.
+  const hedgeOnFor = (symbol: string) => settings.decisionMaker === "baseline" && hedgeIsOn(tickerSetupBySymbol?.get(symbol)?.baseline ?? settings.baseline);
   const severalSymbols = symbolNames.length > 1;
   const startingValue = Number(session.startingValue);
   const dataDirectory = requireBacktestDataDirectory();
@@ -697,6 +700,20 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (settlementClose.source === "intraday_bar") notes.push(noteFor(owner, `settled ${settlementDate} at the close of IBKR's last 30-minute bar (no daily bar)`));
         if (tradedScale !== 1) notes.push(`${contractLabel} was held across a split (×${Number(tradedScale.toFixed(4))}): settled on its cycle's scale at ${settlementClose.close.toFixed(2)}`);
       }
+      // A hedge Put still held at its expiry (no quote let the hedge sell it before): settled on the same close.
+      for (const leg of ledgerHedgeLegsDueForSettlement(ledger, addCalendarDays(todayIso, -1))) {
+        const owner = symbolOfLeg(leg);
+        const expiryDate = leg.expiryDate!;
+        const cycleSplitFactor = cycleSplitFactorFor(ledger, owner.symbol, splitFactorToday(owner));
+        const closeOnExpiry = settlementCloseOnCycleScale(expiryDate, cycleSplitFactor, owner.bars, owner.intradayPrices);
+        const settlementDate = closeOnExpiry || calendar.isSession(expiryDate) ? expiryDate : (calendar.sessionBefore(expiryDate) ?? expiryDate);
+        const settlementClose = settlementDate === expiryDate ? closeOnExpiry : settlementCloseOnCycleScale(settlementDate, cycleSplitFactor, owner.bars, owner.intradayPrices);
+        const tradedScale = cycleSplitFactor / (splitFactorOn(owner.schedule, expiryDate) ?? cycleSplitFactor);
+        const contractLabel = describeOptionContract({ symbol: owner.symbol, strike: roundedStrike(leg.strikePrice! / tradedScale), right: "P", expiry: expiryDate, dte: null });
+        if (!settlementClose) throw new Error(`Cannot settle the hedge's ${contractLabel}: the ${owner.symbol} data file has no IBKR daily or 30-minute bar for ${settlementDate}. Press Update on its row in Data files and run the session again.`);
+        const outcome = settleHedgePut(ledger, { legId: leg.id, expiryClose: settlementClose.close });
+        notes.push(`hedge ${contractLabel} still held at its expiry (no quote to sell it at): ${outcome === "hedge_worthless" ? "expired worthless" : `sold at its intrinsic value, ${((leg.strikePrice! - settlementClose.close) / tradedScale).toFixed(2)}`} at the ${(settlementClose.close / tradedScale).toFixed(2)} close`);
+      }
 
       // b. Interest since the previous session day.
       let interestDollars = 0;
@@ -709,6 +726,38 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         baselineCash += baselineInterestDollars;
       }
       const spyBaselineDay = spyBuyAndHold?.markDay(todayIso, spyPriceAtTen(todayIso), interestPeriod) ?? null;
+
+      const hedgePutQuotesByKey = new Map<string, HedgePutQuoteSource>();
+      const listedPutExpiriesBySymbol = new Map<string, string[]>();
+      /** A symbol's long-dated Puts at a look, for the hedge (each read once a day, look and expiry); undefined when the hedge is off for it. */
+      const hedgePutQuotesAt = (entry: SessionSymbol, lookTimeEt: string): HedgePutQuoteSource | undefined => {
+        if (!hedgeOnFor(entry.symbol)) return undefined;
+        const key = `${entry.symbol}|${lookTimeEt}`;
+        let source = hedgePutQuotesByKey.get(key);
+        if (!source) {
+          const quotesByExpiry = new Map<string, SymbolFileQuote[]>();
+          source = {
+            listedExpiries: () => listedPutExpiriesBySymbol.get(entry.symbol) ?? listedPutExpiriesBySymbol.set(entry.symbol, entry.file.loadPutExpiries(todayIso)).get(entry.symbol)!,
+            quotesOf: (expiry) => quotesByExpiry.get(expiry) ?? quotesByExpiry.set(expiry, lookTimeEt === captureLookTimeEt ? entry.file.loadPutQuotesOfExpiry(todayIso, expiry) : entry.file.loadIntradayPutQuotesOfExpiry(todayIso, lookTimeEt, expiry)).get(expiry)!,
+          };
+          hedgePutQuotesByKey.set(key, source);
+        }
+        return source;
+      };
+      /** The hedge's Puts the 10:00 quotes left unmarked (past the 45-day window): marked from their own expiry's 10:00 quotes. Returns the legs still unmarked. */
+      const markLongDatedHedgeLegs = (entry: SessionSymbol, legs: readonly LedgerLeg[], splitFactor: number): LedgerLeg[] => {
+        const source = hedgePutQuotesAt(entry, captureLookTimeEt);
+        if (!source) return [...legs];
+        const priceToCycleScale = cycleSplitFactorFor(ledger, entry.symbol, splitFactor) / splitFactor;
+        return legs.filter((leg) => {
+          if (leg.side !== "long" || leg.legType !== "option") return true;
+          const strikeAsTraded = leg.strikePrice! / priceToCycleScale;
+          const mid = markMidByContract(source.quotesOf(leg.expiryDate!), new Set([roundedStrike(strikeAsTraded)])).get(markKey(leg.expiryDate!, strikeAsTraded, "P"));
+          if (mid === undefined) return true;
+          priceByLegId.set(leg.id, mid * priceToCycleScale);
+          return false;
+        });
+      };
 
       // c. The 10:00 marks, symbol by symbol, and what the day's looks score.
       const macroEvents = macroEventsOn(todayIso);
@@ -782,7 +831,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
           notes.push(noteFor(entry, "not scored: no data for the day and no earlier close"));
           continue;
         }
-        const unmarkedAtCapture = markLegs(entry, legsOfSymbol, stockPrice, quotes, splitFactor);
+        const unmarkedByTheDayQuotes = markLegs(entry, legsOfSymbol, stockPrice, quotes, splitFactor);
+        const unmarkedAtCapture = unmarkedByTheDayQuotes.length > 0 && hasFileDay && hedgeOnFor(entry.symbol) ? markLongDatedHedgeLegs(entry, unmarkedByTheDayQuotes, splitFactor) : unmarkedByTheDayQuotes;
         if (unmarkedAtCapture.length > 0 && hasFileDay) {
           for (const [legId, mark] of laterMarksOfDay(entry, unmarkedAtCapture, splitFactor)) {
             laterMarkByLegId.set(legId, mark);
@@ -812,6 +862,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
         if (previousFileDay !== null && previousBarDate !== null && previousBarDate < previousFileDay) notes.push(noteFor(entry, `IBKR bars end ${previousBarDate}: the forecast and the day's move use that close`));
         const previousSessionVolumeByContract = capture!.previousSessionVolumeByContract;
         notes.push(...describeDataGaps(entry.file, todayIso, previousFileDay, previousSessionVolumeByContract).map((note) => noteFor(entry, note)));
+        const hedgePutQuotes = hedgePutQuotesAt(entry, captureLookTimeEt);
+        const nextSessionIso = sessionDays[dayIndex + 1];
         daySymbols.push({
           entry,
           splitFactor,
@@ -821,8 +873,10 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
             market: capture!.market!,
             macroEvents,
             splitFactorToday: splitFactor,
+            splitFactorNextSession: nextSessionIso === undefined ? splitFactor : (splitFactorOnDay(entry, nextSessionIso) ?? splitFactor),
             optionContractsRepresentable: aligned.representable,
             adjustedDailyClosesBeforeToday: entry.adjustedDailyCloses.slice(0, entry.closesBeforeTodayCount),
+            ...(hedgePutQuotes ? { hedgePutQuotes } : {}),
           },
         });
       }
@@ -919,7 +973,8 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
             if (!quotes || lookPrice === null) continue;
             markLegs(entry, openLegsAtLook.filter((leg) => symbolOfLeg(leg) === entry), lookPrice, quotes, splitFactor);
             entry.lastAdjustedStockPrice = lookPrice / splitFactor;
-            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice, ...(dayQuotes ? { dayQuotes } : {}) } });
+            const hedgePutQuotes = hedgePutQuotesAt(entry, lookTimeEt);
+            lookSymbols.push({ ...lookSymbol, intraday: { quotes, stockPrice: lookPrice, ...(dayQuotes ? { dayQuotes } : {}) }, ...(hedgePutQuotes ? { hedgePutQuotes } : {}) });
           }
         }
         if (lookSymbols.length === 0) continue;
@@ -1082,6 +1137,10 @@ export async function runBacktestSession(sessionId: string, hooks: BacktestRunHo
       sessionNotes.push(`Decisions by Claude (${backtestClaudeModel}, ${backtestClaudeReasoningEffort} effort) through the subscription, as live Pluto asks its model: ${formatCount(runStatistics.llmCalls.asked)} decision(s) asked, ${formatCount(runStatistics.llmCalls.fromCache)} answered from the cache. The model saw ${aliases}, every date ${llmSession.options.masking.dateShiftWeeks} weeks later. The decision rules (roll, buyback, shares in profit, closes before macro events, after a refused choice) do not apply.`);
     }
     if (skippedUnavailableDays.length > 0) sessionNotes.push(`${formatCount(skippedUnavailableDays.length)} day(s) inside the period could not be downloaded for any symbol and were skipped: ${skippedUnavailableDays.join(", ")}.`);
+    if (symbols.some((entry) => hedgeOnFor(entry.symbol))) {
+      runStatistics.hedge = summarizeHedge(ledger, actions, priceByLegId);
+      sessionNotes.push(describeHedgeTotals(runStatistics.hedge));
+    }
     const bookRecords = buildBookRecords({ ledger, symbols, optionSales, actions, priceByLegId, lastSessionDateIso, calendar, noSaleRecords: { shortfalls, notes: noSaleNotes, noCandidates: noCandidateNotes } });
     // The book holds every share it sells (the ledger refuses anything else); the platform's cycle derivation reading it
     // must agree. A cycle whose shares do not reconcile is named in the notes, its figures not to be trusted.

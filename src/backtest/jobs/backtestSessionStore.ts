@@ -539,7 +539,14 @@ async function loadSessionBookCounts(sessionId: string): Promise<BacktestSession
 // A cycle's timeline and stock-only stretches are read only when its row is opened (loadBacktestCycleDetail).
 const cycleSummaryColumns = ["symbol", "cycle_number", "status", "opened_at", "closed_at", "recovery_sessions", "age_sessions", "total_dollars", "net_premium_dollars", "shares_held", "break_even_per_share", "buckets", "data_flags"];
 
+/** Whether a session counts its hedge's realized P&L in its cycles' break-even (baseline hedgeInBreakEven "included"). */
+async function hedgeRealizedPnlInBreakEven(sessionId: string): Promise<boolean> {
+  const row: { settings_snapshot: BacktestSettings; overrides: BacktestSettingsOverrides | null } | undefined = await db("backtest_sessions").where({ id: sessionId }).first("settings_snapshot", "overrides");
+  return row !== undefined && applyBacktestOverrides(row.settings_snapshot, row.overrides ?? {}).baseline.hedgeInBreakEven === "included";
+}
+
 async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
+  const hedgeIncluded = await hedgeRealizedPnlInBreakEven(sessionId);
   const rows: Record<string, unknown>[] = await db("backtest_cycles")
     .where({ session_id: sessionId })
     .orderBy([{ column: "symbol" }, { column: "cycle_number" }])
@@ -559,7 +566,7 @@ async function loadSessionCycles(sessionId: string): Promise<BacktestCycle[]> {
     netPremiumDollars: Number(row.net_premium_dollars),
     sharesHeld: Number(row.shares_held),
     breakEvenPerShare: nullableNumber(row.break_even_per_share as string | null),
-    cashBreakEvenPerShare: row.open_timeline ? cycleCashBreakEven(row.open_timeline as BacktestCycleTimelineRow[]) : null,
+    cashBreakEvenPerShare: row.open_timeline ? (hedgeIncluded ? cycleCashBreakEven(row.open_timeline as BacktestCycleTimelineRow[], splitFactorOfDayFor(row.symbol as string), { hedgeRealizedPnlIncluded: true }) : cycleCashBreakEven(row.open_timeline as BacktestCycleTimelineRow[])) : null,
     sharesHeldNow: row.open_timeline ? sharesHeldAtMarks(row.open_timeline as BacktestCycleTimelineRow[]) : null,
     buckets: row.buckets as BacktestCycle["buckets"],
     dataFlags: row.data_flags as string[],
@@ -607,14 +614,15 @@ export async function loadBacktestCycleDetail(sessionId: string, symbol: string,
   if (row.timeline === null) return null;
   const sales = await loadSaleRecords(sessionId, symbol, row.timeline);
   const splitFactorOf = splitFactorOfDayFor(symbol);
-  const breakEvens = cashBreakEvenBeforeEachRow(row.timeline, splitFactorOf);
+  const breakEvens = cashBreakEvenBeforeEachRow(row.timeline, splitFactorOf, { hedgeRealizedPnlIncluded: await hedgeRealizedPnlInBreakEven(sessionId) });
   const sharesHeld = sharesHeldAfterEachMoment(row.timeline, splitFactorOf);
   const stretches = row.stock_only_stretches ?? [];
   const dates = [...row.timeline.map((entry) => entry.tradingDate), ...stretches.map((stretch) => stretch.firstIdleDay)].sort();
   const freeCash = dates.length > 0 ? await loadSessionFreeCash(sessionId, dates[0]!, dates.at(-1)!) : null;
   return {
     timeline: row.timeline.map((entry, index) => {
-      const sold = /^Sold (put|call) @/.exec(entry.label);
+      // A hedge's "Sold put" closes a long Put: not a sale held to the break-even, with no yield or delta recorded.
+      const sold = entry.bucket === "hedge" ? null : /^Sold (put|call) @/.exec(entry.label);
       const freeCashShare = freeCash?.shareAfter(entry.tradingDate, entry.at) ?? null;
       if (!sold || entry.instrument !== "option") return { ...entry, sharesHeld: sharesHeld[index]!, freeCashShare };
       const { premiumYield, delta, ladderRung } = sales.recordedOf(entry.tradingDate, sold[1] === "put" ? "P" : "C", entry.strike, entry.expiryDate, entry.at);

@@ -6,10 +6,11 @@ import { selectModelVolatilityForecast } from "../../lib/volatilityEdge.js";
 import { openCandidateId } from "../../pluto/candidateFilters.js";
 import type { BacktestAction, BacktestLadderLevel, BacktestOrderShortfall } from "../backtestTypes.js";
 import { toOhlcvBars } from "./backtestBarHistory.js";
-import { makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineCommissions, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineNoCandidate, type BaselineOrderShortfall } from "./baselineSaleSteps.js";
+import { makeBaselineSelector, noteBaselineForwardAnchors, planBaselineSales, roundedStrike, type BaselineCandidate, type BaselineCommissions, type BaselineLookBook, type BaselineForwardAnchor, type BaselineModelInput, type BaselineNoCandidate, type BaselineOrderShortfall, type BaselineSaleStep } from "./baselineSaleSteps.js";
 
-import { ladderLevelsToday, noteLadderLook } from "./backtestBaselineLadder.js";
-import { entryDropRiskBlock, entryDropRiskBlockingLimits, extensionZ, ivRankBefore } from "./entryDropRiskFilters.js";
+import { ladderLevelsToday, ladderShock, noteLadderLook } from "./backtestBaselineLadder.js";
+import { BaselineHedgeSteps, hedgeIsOn } from "./backtestBaselineHedge.js";
+import { entryDropRiskBlock, entryDropRiskBlockingLimits, extensionZ, impliedVolatilitiesBefore, ivRankBefore, ivRankWindowDays } from "./entryDropRiskFilters.js";
 import { sharesPerContract } from "./backtestBook.js";
 import type { BacktestLookContext, BacktestLookResult, BacktestNoCandidateNote, BacktestNoSaleNote, BacktestOptionSale } from "./backtestLook.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
@@ -186,10 +187,38 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
         .flatMap((position) => legsOfPosition(ledger, position.id))
         .filter((leg) => leg.legType === "option" && leg.side === "short" && leg.exitAt === null)
         .reduce((sum, leg) => sum + leg.strikePrice! * leg.quantity * leg.multiplier, 0);
+    // The hedge's long Puts (backtestBaselineHedge.ts), only when it is on.
+    const hedge = hedgeIsOn(baseline)
+      ? new BaselineHedgeSteps({
+          ledger,
+          symbol,
+          baseline,
+          todayIso,
+          lookTimeEt,
+          at,
+          stockPrice,
+          priceToCycleScale,
+          sharesPerContractOnCycleScale,
+          spreadShareCharged,
+          quotes: lookSymbol.hedgePutQuotes ?? null,
+          heldSharesToday,
+          ladderShock: () => (!ladderOn ? null : ladderState?.startedOn != null ? ladderState.shock : ladderShock(baseline, lookSymbol.adjustedDailyClosesBeforeToday, todayIso)),
+          noteHeldContract: (contract) => heldContracts.add(heldKey(contract)),
+          splitBeforeNextSession: lookSymbol.splitFactorNextSession !== undefined && lookSymbol.splitFactorNextSession !== lookSymbol.splitFactorToday,
+          riskFreeRate,
+          pastDailyCloses: lookSymbol.adjustedDailyClosesBeforeToday,
+          pastImpliedVolatilities: () => impliedVolatilitiesBefore(lookSymbol.bars, todayIso, ivRankWindowDays),
+          priceByLegId: context.priceByLegId,
+          nextActionId: context.nextActionId,
+          actions,
+          summaries,
+        })
+      : null;
 
     // strikeLimit: the cost rule's lowest strike for a call (costFloor, before the relief) or highest for a put (costCeiling,
     // the average held; null with none), when one applied; its scores then carry it with the averages around the order.
-    const record = (strategyKey: "cash_secured_put" | "covered_call", candidate: BaselineCandidate, contracts: number, eligibleCount: number, chosenBecause: string, strikeLimit: { name: "costFloor" | "costCeiling"; value: number | null } | null = null, buyEveryShare = false, extraScores: Record<string, number | null> = {}) => {
+    // The hedge notes the ladder's Puts (their assignment sells hedge Puts) and a Covered Call entry's shares (bought for).
+    const record = (strategyKey: "cash_secured_put" | "covered_call", candidate: BaselineCandidate, contracts: number, eligibleCount: number, chosenBecause: string, strikeLimit: { name: "costFloor" | "costCeiling"; value: number | null } | null = null, buyEveryShare = false, extraScores: Record<string, number | null> = {}, step?: BaselineSaleStep) => {
       const actionId = context.nextActionId();
       const averageCostBefore = strikeLimit === null ? null : heldSharesAverageCostToday();
       const sharesHeldBefore = strikeLimit === null ? null : Math.round(heldSharesToday());
@@ -204,12 +233,14 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
         legIds = [opened.legId];
         positionIds = [opened.positionId];
         newLegId = opened.legId;
+        if (step === "ladder_put") hedge?.noteLadderPut(opened.legId);
       } else {
         const opened = openCoveredCall(ledger, { symbol, expiryDate: candidate.expiry, strike: toCyclePrice(candidate.strike), contracts, callFillPrice: toCyclePrice(candidate.fillPrice), stockFillPrice: toCyclePrice(stockFillToday), at, actionId, splitFactorToday: lookSymbol.splitFactorToday, sharesPerContract: sharesPerContractOnCycleScale, tradedSharesPerLedgerShare: priceToCycleScale, buyEveryShare });
         const leftoverLegIds = opened.leftoverPositionId === null ? [] : legsOfPosition(ledger, opened.leftoverPositionId).filter((leg) => leg.exitAt === null).map((leg) => leg.id);
         legIds = [opened.callLegId, opened.stockLegId, ...leftoverLegIds];
         positionIds = [opened.positionId, ...(opened.leftoverPositionId === null ? [] : [opened.leftoverPositionId])];
         newLegId = opened.callLegId;
+        if (step === "entry") hedge?.noteCoveredCallEntry(opened.sharesBought, toCyclePrice(stockFillToday));
         const sharesBoughtToday = Math.round(opened.sharesBought * priceToCycleScale);
         const sharesHeldToday = Math.round(opened.sharesFromHeld * priceToCycleScale);
         sharesNote = [sharesHeldToday > 0 ? ` on ${sharesHeldToday} held shares` : "", sharesBoughtToday > 0 ? ` with ${sharesBoughtToday} shares bought @ ${stockFillToday.toFixed(2)}` : ""].join("");
@@ -354,6 +385,13 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
       }
     }
 
+    // The hedge's sales and the Puts of the entries assigned since the last look. A sale that leaves the symbol flat ends
+    // its cycle: nothing new is opened on it at this look.
+    if (hedge?.beforeSales()) {
+      summaries.push(`${symbol}: the hedge's last Puts were sold, closing the cycle; the next one starts at a later look`);
+      continue;
+    }
+
     // The sale steps (baselineSaleSteps.ts, shared with live Pluto's ladder): each sale filled at once through record().
     const book: BaselineLookBook = {
       freeShares: () => ledgerFreeShares(ledger, symbol),
@@ -362,7 +400,7 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
       heldSharesAverageCostToday,
       heldSharesToday,
       latestShareAcquisitionPrice: () => ledgerLatestShareAcquisitionPrice(ledger, symbol),
-      openCycleSummary: () => ledgerOpenCycleSummary(ledger, symbol),
+      openCycleSummary: () => (hedge ? hedge.breakEvenSummary(ledgerOpenCycleSummary(ledger, symbol)) : ledgerOpenCycleSummary(ledger, symbol)),
       openPutCollateral,
       accountValueToday,
       tickerWeight: () => tickerWeight,
@@ -403,6 +441,8 @@ export async function runBaselineLook(context: BacktestLookContext): Promise<Bac
     }
     const noteNoCandidate = (note: BaselineNoCandidate) => noCandidateNotes.push({ tradingDate: todayIso, lookTimeEt, symbol, ...note });
     planBaselineSales({ symbol, commissions: backtestCommissions, todayIso, atMs: at.getTime(), stockPrice, priceToCycleScale, baseline, select, book, ladderState, notes: summaries, noteShortfall, entryBlockedBecause, noteNoSale, noteNoCandidate });
+    // The Puts of the Covered Call entries just made, at their shares' instant.
+    hedge?.afterSales();
   }
 
   const summary = summaries.length === 0 ? "No action: fully invested" : actions.length === 0 ? `No action: ${summaries.join(" | ")}` : summaries.join(" · ");

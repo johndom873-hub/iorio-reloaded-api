@@ -36,6 +36,9 @@ export interface CycleOptionLegRow {
   openingFillCount?: number;
   openingCommission?: number | null;
   closingFillPrice?: number | null;
+  /** The timeline's label for the leg's opening or closing row in place of the fill's: a simulated book's bookkeeping moves name themselves. Never selected. */
+  openingRowLabel?: string;
+  closingRowLabel?: string;
 }
 
 // An early assignment settles the cycle on the assignment date (Marcelo 2026-10-15): a short leg that left before its

@@ -163,6 +163,62 @@ export interface BacktestBaselineSettings {
    * goes to the next candidates in order until every lot is covered (the entry: until the cash or the stock's share runs out).
    */
   coverage: "best_contract" | "fill_down_ranking";
+  /**
+   * The hedge (Marcelo 2026-10-22, backtestBaselineHedge.ts): long Puts bought on the shares an entry brings in (a Covered
+   * Call entry's, a Cash-Secured Put entry's once assigned), sold as the ladder's rungs are assigned (as many contracts as
+   * the rung's), when shares leave, and near expiry (then replaced while shares are held). The Puts' target days to
+   * expiry; 0 = no hedge.
+   */
+  hedgePutTenorDays: number;
+  /** The listed expiry nearest the target days, or the first at or after them. */
+  hedgePutExpiry: "nearest" | "first_at_or_after";
+  /** What the strike is set from: the stock price at the purchase, or the price paid for the shares (an assigned Put's strike). Replacements near expiry: the stock price. */
+  hedgePutStrikeFrom: "stock_price" | "price_paid";
+  /** The strike this % below that price (0 = at the money): the listed strike nearest it. */
+  hedgePutBelowPricePct: number;
+  /**
+   * How many Puts per 100 shares an entry brings in: one ("share_level"), or as many as one rung buys if assigned at its cap
+   * ÷ the lots of the shares' budget (rung_level, at most one) = (1 − s) ÷ (s × (rungs − S)), s the share level and S the
+   * shock; either × hedgePutCoveragePct.
+   */
+  hedgePutSize: "share_level" | "rung_level";
+  hedgePutCoveragePct: number;
+  /** A Put with this many calendar days or fewer to expiry is sold, and replaced while shares are held (with the whole position covered: up to its size). */
+  hedgePutRollDaysLeft: number;
+  /**
+   * What the Puts cover (Marcelo 2026-10-23): the shares each entry brings in ("entries", the rules above and below), or
+   * the whole position ("position"): the shares held plus the shares the open short Puts (the entry's and the ladder's
+   * rungs) would bring, × hedgePutCoveragePct, bought as soon as it grows and kept until hedgePutRollDaysLeft whatever
+   * the shares do (no sale when a rung is assigned or shares leave).
+   */
+  hedgePutCovers: "entries" | "position";
+  /** With the whole position covered: the Puts are spread over this many expiries, so that their rolls come at different times. */
+  hedgePutStaggeredExpiries: number;
+  /** How the strike is chosen (Marcelo 2026-10-23): hedgePutBelowPricePct below a price ("price"), or the Put whose own |delta| is nearest hedgePutAbsDelta ("delta"). */
+  hedgePutStrikeBy: "price" | "delta";
+  hedgePutAbsDelta: number;
+  /**
+   * No Put is bought while it is too dear (Marcelo 2026-10-23; a Put held is kept, a skipped purchase is tried again at the
+   * next look): its yearly cost above hedgePutCostFallShare × the stock's typical yearly fall ("cost_vs_typical_fall"), its
+   * IV above hedgePutIvMultiple × the median of the stock's IV over 252 sessions ("iv_vs_history") or × the realized
+   * volatility of the last 21 sessions ("iv_vs_realized").
+   */
+  hedgePutPriceGate: "off" | "cost_vs_typical_fall" | "iv_vs_history" | "iv_vs_realized";
+  hedgePutCostFallShare: number;
+  hedgePutIvMultiple: number;
+  /** The Puts' realized P&L in the cycle's break-even (the Calls' floor and the ladder's top), or left out as live does. */
+  hedgeInBreakEven: "excluded" | "included";
+  /**
+   * How the hedge holds down its purchases (Marcelo 2026-10-22): sell the Puts when the shares leave (the rule as built);
+   * keep them for up to hedgePutTurnoverDays outside the cycle for the next entry to take ("keep_for_next_entry"), or
+   * the same but sold instead when struck more than hedgePutFarBelowPct below the new entry's price
+   * ("keep_unless_far_below"); or buy an entry's Puts only hedgePutTurnoverDays after the last purchase
+   * ("wait_between_purchases").
+   */
+  hedgePutTurnover: "sell_when_shares_leave" | "keep_for_next_entry" | "keep_unless_far_below" | "wait_between_purchases";
+  /** Calendar days: how long Puts are kept after the shares leave, or the wait after a purchase. */
+  hedgePutTurnoverDays: number;
+  hedgePutFarBelowPct: number;
 }
 
 /**
@@ -174,7 +230,7 @@ export interface BacktestBaselineSettings {
  */
 export const backtestEngineVersion = 3;
 
-export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract" };
+export const defaultBacktestBaselineSettings: BacktestBaselineSettings = { entry: "put", minAbsDelta: 0.05, maxAbsDelta: 0.6, minDte: 1, maxDte: 45, maxSpreadPctOfMid: 15, callStrike: "delta_range", entryCallStrike: "any", entryWhenSharesUncovered: "wait", maxSharesPctOfAccount: 100, minCallYieldPct: 0, minCallYieldAppliesTo: "every_call", putsWhenNoCall: "off", ladderSharesPct: 50, ladderRungs: 5, ladderShock: "history", ladderShockPct: 70, ladderShockMinPct: 60, ladderShockMaxPct: 80, ladderShockNoHistoryPct: 90, ladderShockLookbackYears: 10, ladderTop: "break_even", ladderPace: "any_look", ladderPutVersusCall: "call_first", ladderPutYieldMarginPct: 0, ladderPutDeltaRange: "delta_range", dayValueOptions: "marked", callDeltaRange: "entry_range", callMinAbsDelta: 0.05, callMaxAbsDelta: 0.6, takeProfitPct: 0, shareStopLossPct: 0, earnings: "ignore", maxAccountPctPerStock: 100, looks: "every_look", volatilityEdgeFilter: "off", minVolatilityEdgePoints: 0, entryExtensionFilter: "off", entryMaxExtensionZ: 1, entryIvRankFilter: "off", entryMaxIvRank: 80, ranking: "premium_yield", expiryChoice: "any_in_range", coverage: "best_contract", hedgePutTenorDays: 0, hedgePutExpiry: "nearest", hedgePutStrikeFrom: "stock_price", hedgePutBelowPricePct: 0, hedgePutSize: "share_level", hedgePutCoveragePct: 100, hedgePutRollDaysLeft: 7, hedgePutCovers: "entries", hedgePutStaggeredExpiries: 3, hedgePutStrikeBy: "price", hedgePutAbsDelta: 0.25, hedgePutPriceGate: "off", hedgePutCostFallShare: 0.3, hedgePutIvMultiple: 1.3, hedgeInBreakEven: "excluded", hedgePutTurnover: "sell_when_shares_leave", hedgePutTurnoverDays: 30, hedgePutFarBelowPct: 10 };
 
 /**
  * The Steady Stake (decision maker "steady_stake"): each ticker keeps a steady share of its pot in its shares, bought or
@@ -644,6 +700,7 @@ export type BacktestSettingGroup =
   | "Contract choice"
   | "Entry filters"
   | "Exits"
+  | "Hedge"
   | "Steady Stake"
   | "Capital and sizing"
   | "Candidate quality"
@@ -908,6 +965,36 @@ export interface BacktestRunStatistics {
   daysWithoutMarketStressBars: number;
   /** LLM mode only: the decisions asked of the model, and how many the cache answered. */
   llmCalls?: { asked: number; fromCache: number };
+  /** The baseline wheel's hedge, when it is on: its long Puts over the session. */
+  hedge?: BacktestHedgeTotals;
+}
+
+/** The hedge's long Puts over a session (backtestBaselineHedge.ts summarizeHedge). */
+export interface BacktestHedgeTotals {
+  purchases: number;
+  contractsBought: number;
+  /** What the Puts bought cost: fills × shares + commissions. */
+  costDollars: number;
+  sales: number;
+  contractsSold: number;
+  /** What the sales brought: fills × shares − commissions (one settled at expiry: its intrinsic value, no commission). */
+  proceedsDollars: number;
+  /** The Puts sold or expired: what they brought less what they cost. */
+  realizedPnlDollars: number;
+  /** Puts still held at the end: contracts, their cost and their mark at the last look. */
+  openContracts: number;
+  openCostDollars: number;
+  openMarkDollars: number;
+  /** Half the quoted spread of every purchase and sale: what the full spread would have added to the mid fills. */
+  halfSpreadDollars: number;
+  /**
+   * The keep rules' Puts kept between cycles (moved out of a cycle at their mark, no trade): contracts kept, contracts an
+   * entry took into its cycle, contracts sold unkept or unused, and the realized P&L of those sales, which is in no cycle.
+   */
+  keptContracts?: number;
+  keptContractsTaken?: number;
+  keptContractsSold?: number;
+  keptRealizedPnlDollars?: number;
 }
 
 /**
@@ -1026,7 +1113,7 @@ export interface BacktestPositionLeg {
 export interface BacktestPosition {
   positionId: string;
   symbol: string;
-  strategyKey: "cash_secured_put" | "covered_call" | "unstructured";
+  strategyKey: "cash_secured_put" | "covered_call" | "unstructured" | "hedge";
   status: "open" | "closed";
   openedAt: string;
   closedAt: string | null;
@@ -1108,7 +1195,7 @@ export interface BacktestFillsPage {
 /** The time of the capture's own look, "HH:MM" Eastern: the day's account mark and surface fit are taken then. */
 export const backtestCaptureLookTimeEt = "10:00";
 
-export type BacktestActionKind = "open_cash_secured_put" | "open_covered_call" | "roll" | "buy_shares" | "close_shares" | "close_leg" | "close_position";
+export type BacktestActionKind = "open_cash_secured_put" | "open_covered_call" | "roll" | "buy_shares" | "close_shares" | "close_leg" | "close_position" | "buy_hedge" | "sell_hedge";
 
 /** One thing Pluto did or tried in a pass: filled, or blocked with the gate that refused it. */
 export interface BacktestAction {

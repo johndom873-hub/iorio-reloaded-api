@@ -100,3 +100,42 @@ describe("sharesHeldAfterEachMoment", () => {
     expect(sharesHeldAfterEachMoment(rows.slice(0, 4))).toEqual([100, 100, 100, 200]);
   });
 });
+
+describe("the hedge's realized P&L in the break-even", () => {
+  // 600 shares bought at 687 (3.00 commission); 6 hedge Puts $690 bought for 49,984.08; a rung's 300 shares assigned at
+  // 240; 3 Puts sold for 140,241.96 (they cost 24,992.04): realized 115,249.92. 900 shares held at the end.
+  const purchase = row({ at: "2021-11-01T14:00:00.000Z", tradingDate: "2021-11-01", label: "Bought put @ 83.30", bucket: "hedge", strike: 690, expiryDate: "2022-09-16", quantity: 600, premiumDollars: -49_984.08 });
+  const timeline = [
+    row({ at: "2021-11-01T14:00:00.000Z", tradingDate: "2021-11-01", label: "Bought shares", bucket: "cc", instrument: "stock", quantity: 600, stockPrice: 687, commissionDollars: 3 }),
+    purchase,
+    row({ at: "2022-04-22T20:00:00.000Z", tradingDate: "2022-04-22", label: "Put assigned: shares bought at the strike", bucket: "csp", strike: 240, stockPrice: 240, quantity: 300 }),
+    row({ at: "2022-04-25T14:00:00.000Z", tradingDate: "2022-04-25", label: "Sold put @ 467.48", bucket: "hedge", strike: 690, expiryDate: "2022-09-16", quantity: 300, premiumDollars: 140_241.96 }),
+    row({ at: null, tradingDate: "2022-04-25", label: "Marked to the 2022-04-25 close", bucket: "unstructured", instrument: "stock", quantity: 900 }),
+  ];
+  const withoutHedge = (600 * 687 + 3 + 300 * 240) / 900;
+
+  it("leaves the hedge out unless it is included", () => {
+    expect(cycleCashBreakEven(timeline)).toBeCloseTo(withoutHedge, 6);
+    expect(cycleCashBreakEven(timeline, undefined, { hedgeRealizedPnlIncluded: true })).toBeCloseTo(withoutHedge - 115_249.92 / 900, 6);
+  });
+
+  it("counts a sale's gain from its moment on, never a purchase", () => {
+    const breakEvens = cashBreakEvenBeforeEachRow([...timeline.slice(0, 4), row({ at: "2022-05-02T14:00:00.000Z", tradingDate: "2022-05-02", label: "Sold call @ 1.00", bucket: "cc", strike: 450, premiumDollars: 0 })], undefined, { hedgeRealizedPnlIncluded: true });
+    expect(breakEvens[2]).toBeCloseTo((600 * 687 + 3) / 600, 6);
+    expect(breakEvens[4]).toBeCloseTo(withoutHedge - 115_249.92 / 900, 6);
+  });
+
+  it("gives a Call sold at the look of a hedge sale the floor with that sale's gain in it, as the engine sells the hedge first", () => {
+    const callAtTheSameLook = row({ at: "2022-04-25T14:00:00.000Z", tradingDate: "2022-04-25", label: "Sold call @ 1.00", bucket: "cc", strike: 450, premiumDollars: 0 });
+    const breakEvens = cashBreakEvenBeforeEachRow([...timeline.slice(0, 4), callAtTheSameLook], undefined, { hedgeRealizedPnlIncluded: true });
+    expect(breakEvens[4]).toBeCloseTo(withoutHedge - 115_249.92 / 900, 6);
+    expect(cashBreakEvenBeforeEachRow([...timeline.slice(0, 4), callAtTheSameLook])[4]).toBeCloseTo(withoutHedge, 6);
+  });
+
+  it("matches a sale after a split to its purchase before it by split-adjusted shares", () => {
+    // NFLX's 10-for-1 split between the purchase (factor 10) and the sale (factor 1): 300 shares as traded at $690 are 3,000 at $69.
+    const splitFactorOf = (tradingDate: string) => (tradingDate < "2022-04-23" ? 10 : 1);
+    const afterSplit = timeline.map((entry) => (entry.label.startsWith("Sold put") ? { ...entry, strike: 69, quantity: 3000 } : entry.label.startsWith("Marked") ? { ...entry, quantity: 9000 } : entry));
+    expect(cycleCashBreakEven(afterSplit, splitFactorOf, { hedgeRealizedPnlIncluded: true })! * 10).toBeCloseTo(withoutHedge - 115_249.92 / 900, 6);
+  });
+});

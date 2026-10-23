@@ -35,6 +35,7 @@ import { classifyOpenRefusal, orderLimitBreachesOf, type OpenRefusalInput } from
 import { decideWithLlm, findOfferedChoice, ivRankFromHistory, type BacktestLlmRound, type BacktestLlmSession, type BacktestLlmTicker } from "./backtestLlmDecider.js";
 import { chooseBacktestAction, openClosedAtOnceByEventRule, type BacktestPolicyChoice } from "./backtestPolicy.js";
 import type { SymbolFileQuote } from "./backtestSymbolFile.js";
+import type { HedgePutQuoteSource } from "./backtestBaselineHedge.js";
 import { buildHistoricalTickerInputs, captureLookTimeEt, ContractSet, earningsKnownOn, lookInstantMs, selectLookDayQuotes, type BacktestDayMarket, type BacktestTickerProfile } from "./backtestTickerInputs.js";
 import type { BacktestTradingCalendar } from "./backtestTradingCalendar.js";
 import type { BacktestScoringPool } from "./backtestScoringPool.js";
@@ -121,10 +122,14 @@ export interface BacktestLookSymbol {
   };
   /** Today's cumulative split factor. */
   splitFactorToday: number;
+  /** The session's next trading day's (today's on its last day): a split takes effect at that session when it differs. */
+  splitFactorNextSession?: number;
   /** False when the open cycle spans a split whose contracts do not fit its share scale: no option order is simulated on the ticker until it ends. */
   optionContractsRepresentable: boolean;
   /** IBKR's split-adjusted daily closes before today, ascending. */
   adjustedDailyClosesBeforeToday: readonly { date: string; close: number }[];
+  /** The look's long-dated Puts, for the baseline wheel's hedge; absent when the hedge is off. */
+  hedgePutQuotes?: HedgePutQuoteSource;
 }
 
 /** What a symbol's looks of one day share: the Signals inputs built from the 10:00 capture (the surface fit among them) and its calendar figures. */
