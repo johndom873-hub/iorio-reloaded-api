@@ -20,6 +20,10 @@ All backtests ran locally on Marcelo's Mac, using ThetaData option prices and IB
   - Its edge didn't sort about 890,000 contracts by how they turned out, before or after two fixes to its volatility model.
   - The only premium found was in Puts with 4–7 days left. One weekly Put per ticker, never holding stock, made 6.6% a year with a −5.2% Max drawdown on 11 tickers in our cash account. T-bills were 3.0 points of that, and most of the rest was the stocks' rise.
   - Marcelo closed the research.
+- **The Steady Stake's drawdowns come from single stocks collapsing; only holding many tickers cuts them (Round 12).**
+  - Put insurance made drawdowns shallower but cost 2–4 points of CAGR, and timing it by IV, trend or run-ups didn't help out of sample.
+  - No per-ticker rule improved Excess Calmar: no buying back in a downtrend, a volatility-sized stake and an earnings collar all failed or simply took risk off.
+  - As one book of 13 tickers in the engine: CAGR 24.1%, Max drawdown −36%, against single-ticker medians of 13.5% and −43%. About 81% of the account is in use at the median; the 0DTE Puts rarely find a contract they can sell, so most of the other 19% sits in T-bills.
 - **No rule tested so far improves it on most tickers.** Each of these split the tickers about evenly between better and worse:
   - skipping contracts that span earnings;
   - the volatility edge filter;
@@ -108,6 +112,49 @@ These are the lab as saved, with no filters. CAGR / Max drawdown / Excess Calmar
 | **Median** | | 17.8% / −66.8% | 8.2% / −22.3% / 0.22 / 51% | 11.5% / −31.4% / 0.25 / 55% |
 
 Buy and hold's median Excess Calmar is 0.28. The strategy beat it in 17 of the 44 runs.
+
+## Round 12: cutting the Steady Stake's drawdown, and the Steady Stake as a book (2026-10-22 to 2026-10-23)
+
+Report for the hedge part: [Steady Stake Put Hedge](https://claude.ai/artifact/BazD3iCsEDsXvmp5vEbS2T) (without the ladder and hold-out results below). Scripts and results: `tmp/steady-stake-drawdown-research/` (`NOTES.md` lists them). All option fills at the mid, $0.68 a contract; Max drawdown and Excess Calmar as in Round 8.
+
+**The questions (Marcelo 2026-10-22).** First, what Put insurance costs the Steady Stake (80%) and whether timing it helps. Then: reduce its drawdown while keeping its CAGR, or at least improve Excess Calmar, with anything not tried yet. Settings were chosen on the 22 development tickers and checked once on 7 others (DRAM, WDC, NBIS, BE, PLTR, COIN, CSCO); the hold-out was used only where stated.
+
+**Put hedges on the s80 sessions** (the pot pays for the Puts; no borrowing).
+- **Mechanical** (120 days, 10% below the price, rolled every 90 days): Max drawdown shallower on 34 of 37 tickers, CAGR lower on 30 (median −3.8 points), Excess Calmar higher on only 17.
+- **Timed by IV** (buy when IV ≤ 1.1 × its 252-session median; sell when IV ≥ 1.6 × it, the Put is in the money and the fall is ≥ 0.9 × the ladder's stock shock; 60-day cooldown): best of 96 settings on 8 tickers 0.61 against 0.40 mechanical, but on 21 fresh tickers 0.58 against 0.57 (better on 13 of 21).
+- **Dropped on the same 8 tickers:** an IV-percentile gate, 50- and 200-day trend gates, a "price already beaten" filter, a 15% roll-down. Each helped the losers and hurt the crash names.
+- **Parabolic run-ups** (5 signal definitions, entry on the signal or at the first momentum break): corrections were bigger, but the stock first rose another 45–89% and the Puts were priced for the fall; 1 of 90 tests beat buying on any day.
+- **Ladders:** staggered rolls cut the luck of the roll dates (CAGR spread across shifted calendars 4.8 → 2.2 → 0.8 points with 1, 2, 3 rungs). A strike ladder (10% + 20%) was worse; a two-step exit changed almost nothing.
+- **Hold-out** (pass mark 7 of 8, set before): 3-rung mechanical and 2-rung IV-timed both beat no hedge on 5 of 8; drawdown shallower on all 8.
+- **Why:** the Puts were priced at about realised volatility (IV ÷ realised 0.82–1.06 on every ticker), so there was no mispricing for timing to harvest. A hedge here trades about 2–4 points of CAGR for a shallower drawdown.
+
+**What the drawdowns are.** Mostly long collapses of one stock: median Max drawdown −55% while SPY fell 8% over the same windows (15 of 37 coincide with SPY down 15% or more). Earnings reactions are a median 11% of the deepest drawdown (INTC 66%, NFLX 50%). The Steady Stake keeps buying back to 80% on the way down.
+
+**Per-ticker rules** (a replay of each s80 session under another stake rule, keeping the session's own option results; against the real s70 sessions the replayed 70% is off by a median 0.31 points of CAGR and 0.16 of Max drawdown, with the right direction on 24 of 29):
+
+| Rule | Development, 22: Excess Calmar better / worse | Development: CAGR, Max drawdown (median change) | Check, 7 |
+|---|---|---|---|
+| No buying back up in a downtrend (12-month momentum / 200-day average) | 7 / 12 · 6 / 15 | −0.5 / −0.9 points; drawdown +0.3 / +0.9 | 2 / 3 · 3 / 3 |
+| Volatility stake, min(80%, budget ÷ 3-year volatility), budget 30% / 40% | 7 / 10 · 9 / 6 | drawdown +9.3 / +5.7 shallower; CAGR lost on the volatile names (IREN 81% → 30%) | CAGR −14.4 / −3.1 |
+| 70% stake (reference) | 19 / 3 | −0.8; drawdown +4.9, shallower on all 22 | 3 / 4, CAGR −5.7 |
+| Earnings collar (Put ≈ 95%, Call above the price at zero cost, 10:00 before to 10:00 after each report) | 9 / 6 (16 with reports) | +2.1; drawdown +1.4 | 3 / 2, CAGR mean −9.2 (NBIS −46) |
+
+- The volatility stake and 70% lower drawdown and CAGR together: risk dials, not improvements.
+- The collar has no edge: −0.18% of the shares covered per collar (90% range −0.96% to +0.49%); each ticker's result is the direction of its reports. 46 of 380 collars had to be skipped because Steady Stake sells its own Calls on every share on expiry days (Monday reporters such as PLTR and ASTS open on a Friday). Limited to downtrends it failed on the development tickers (6 / 8 and 10 / 5 with a median drawdown change of 0.0) and was not checked.
+
+**The Steady Stake as a book.**
+- **Replay** (equal weights rebalanced monthly among the tickers trading): 22 development tickers CAGR 34.3%, Max drawdown −36.0%, Excess Calmar 0.87, against single-ticker medians of 18.4%, −57%, 0.34. Inside the book every dial lowered drawdown and CAGR together (70%: 0.85; volatility stake 40%: 0.86; weights ∝ 1 ÷ volatility: 0.78). The 7-ticker check book drew down −59% (until 2024 it held only BE, CSCO, PLTR, COIN): a book needs breadth. The book's CAGR above the median ticker comes from holding the high-CAGR names and from rebalancing, and the tickers were picked in 2026: read the drawdown cut, not the CAGR, as the result.
+- **Engine** (session `0ff733bd`, local): the 13 development tickers with data for all of 2020–2026 (AAOI, AAPL, INTC, IWM, MRNA, MU, NOK, PTON, QQQ, SMH, SPY, TECH, TLT), one shared account of $1.3M ($100k a ticker; each ticker's pot is the account ÷ 13 every morning), 2020-01-02 to 2026-10-15: CAGR 24.1%, Max drawdown −36.0% (Sep 2021 → Oct 2022), Excess Calmar 0.59, against 25.6%, −36.0%, 0.63 for the replay of the same 13 and single-ticker medians of 13.5% (mean 18.4%), −43.4%, 0.39. SPY and AAPL trade much less than in their own sessions ($800k and $290k pots there).
+
+**Cash in use** ((shares + Put collateral) ÷ account, right after the 10:00 orders, the day's peak; overnight it is the shares alone):
+- Min 77.8%, median 80.9%, max 91.2%. Sessions in 90–95%: 0.4%; 85–90%: 12.8%; 80–85%: 62.4%; 75–80%: 24.4%; never 95% or more. Within 1, 2 and 5 points of the max: 0.2%, 1.1%, 8.6% of sessions. Friday median 85.2%, other days about 80.5%.
+- The Puts held a median 0.9% of the account (mean 1.9%): 4.4% of the cash outside the shares at the median, 9.5% on average, 26.9% on Fridays.
+- **Why so little.** On Fridays, of 13 tickers × 340 Fridays: a Put sold 34%; no strike with |delta| 0.15–0.25 at 10:00 27% (with 6 hours left that window is about 0.4% of the price wide, single-stock strikes are 1–1.4% apart); Puts in the window but bid under $0.05 or spread over 50% 17% (MRNA, AAOI, PTON, NOK, TECH); one contract dearer than the ticker's spare cash 14% (SPY on 92% of its Fridays, QQQ 63%); no expiry 7% (TECH: monthly only). Monday to Thursday 81% of ticker-days have no expiry. When a Put sold it used most of the ticker's spare cash (median 62–99%). Widening the tolerance to ±0.10 would have found a Put on 27% of the blocked Fridays, ±0.15 on 37%; beyond that thin quotes limit it.
+- **What the Puts earn.** 2,679 sales: premium mean 0.177% of the strike (the 49% "premium yield" shown on a sale is that × 365), expiry losses 0.120% (15.5% end in the money, 0.78% each), net 0.049% after commissions: $48k on $167k of premium over 6.8 years, 29% kept. By ticker the share kept ranges from 42–46% (MRNA, QQQ, TLT) to 19–28% (SMH, AAPL, IWM, SPY) and nothing on INTC.
+
+**Not decided** (Marcelo stopped testing on 2026-10-23): letting the tickers share the cash for Puts (a pass handing the account's free cash out one contract at a time, least-exposed ticker first, within a per-ticker cap) and a wider delta tolerance (a setting already). Both would mainly add 0DTE Puts on SPY, QQQ and IWM.
+
+**Engine facts found along the way.** Steady Stake runs only as one shared account with equal weights (symbol settings are the baseline's); a session's dates must lie inside every ticker's file; the 13-ticker book took 46 minutes against seconds to minutes per single ticker; the local backtest queue runs strictly oldest first.
 
 ## Round 10: Edge Margin's model audited, then a premium-first strategy (2026-10-22)
 
